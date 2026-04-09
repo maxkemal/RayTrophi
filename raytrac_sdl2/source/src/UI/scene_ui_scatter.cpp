@@ -22,39 +22,108 @@
 #include <atomic>
 #include "HittableInstance.h"
 #include "EmbreeBVH.h"
+#include "Backend/IViewportBackend.h"
+#include "Backend/VulkanBackend.h"
+
+extern std::unique_ptr<Backend::IBackend> g_backend;
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+extern bool g_viewport_raster_rebuild_pending;
+extern bool g_optix_rebuild_pending;
+extern bool g_vulkan_rebuild_pending;
+extern bool g_geometry_dirty;
+extern std::atomic<uint64_t> g_scene_geometry_generation;
 
 // Forward declaration
 // Deprecated separate scatter module - functionality moved to Terrain Tab
+
+namespace {
+Backend::IBackend* getScatterRenderBackend(UIContext& ctx) {
+    if (g_backend) {
+        return g_backend.get();
+    }
+    if (ctx.backend_ptr && dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) == nullptr) {
+        return ctx.backend_ptr;
+    }
+    return nullptr;
+}
+
+bool scatterRenderBackendIsVulkan(UIContext& ctx) {
+    return dynamic_cast<Backend::VulkanBackendAdapter*>(getScatterRenderBackend(ctx)) != nullptr;
+}
+
+void rebuildScatterSceneMutation(UIContext& ctx) {
+    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    ctx.renderer.resetCPUAccumulation();
+
+    if (Backend::IBackend* renderBackend = getScatterRenderBackend(ctx)) {
+        ctx.renderer.rebuildBackendGeometry(ctx.scene);
+        renderBackend->resetAccumulation();
+    }
+
+    if (g_viewport_backend) {
+        g_viewport_raster_rebuild_pending = true;
+        g_viewport_backend->resetAccumulation();
+    }
+    // Increment geometry generation so raster viewport rebuilds mesh list
+    g_geometry_dirty = true;
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+    if (scatterRenderBackendIsVulkan(ctx)) {
+        g_vulkan_rebuild_pending = true;
+    } else if (getScatterRenderBackend(ctx)) {
+        g_optix_rebuild_pending = true;
+    }
+}
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCATTER BRUSH PANEL UI
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
-    ImGui::Text("Foliage tools moved to Terrain Tab"); return;
+    // Foliage tools moved to Terrain Tab, but keep legacy Scatter panel active
+    UIWidgets::PushControlSurfaceStyle(ImVec4(0.66f, 0.90f, 0.52f, 1.0f));
+    ImGui::Text("Foliage tools available here and in Terrain Tab");
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 10));
 
     InstanceManager& im = InstanceManager::getInstance();
+
+    // All groups (layer list) used by UI; declare here so it's always in scope
+    auto& groups = im.getGroups();
 
     // ═══════════════════════════════════════════════════════════════════════════
     // FOLIAGE LAYER MANAGEMENT
     // ═══════════════════════════════════════════════════════════════════════════
 
-    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "FOLIAGE LAYERS");
-    ImGui::Separator();
-    
-    // Group Selector (Layer Selector)
-    auto& groups = im.getGroups();
+    // Show foliage layers only when a Terrain object is selected
+    bool terrain_selected = false;
+    if (ctx.selection.hasSelection()) {
+        auto t = TerrainManager::getInstance().getTerrainByName(ctx.selection.selected.name);
+        terrain_selected = (t != nullptr);
+    }
+
+    if (terrain_selected) {
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "FOLIAGE LAYERS");
+        ImGui::Separator();
+
+        // Ensure at least one group exists to avoid ImGui Push/Pop mismatches
+        if (groups.empty()) {
+            int new_id = im.createGroup("Foliage_Default", "", {});
+            scatter_brush.active_group_id = new_id;
+        }
+    } else {
+        ImGui::TextDisabled("(Select a Terrain object to edit foliage layers)");
+        ImGui::Separator();
+    }
     
     // Layer Actions
-    if (ImGui::Button("New Layer")) {
+    if (UIWidgets::PrimaryButton("New Layer")) {
         std::string name = "Foliage_Layer_" + std::to_string(groups.size() + 1);
         int new_id = im.createGroup(name, "", {}); // Empty group
         scatter_brush.active_group_id = new_id;
     }
     
     ImGui::SameLine();
-    if (ImGui::Button("Delete Layer") && scatter_brush.active_group_id >= 0) {
+    if (UIWidgets::DangerButton("Delete Layer") && scatter_brush.active_group_id >= 0) {
         im.deleteGroup(scatter_brush.active_group_id);
         scatter_brush.active_group_id = -1;
     }
@@ -83,6 +152,37 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
             active_group->name = name_buf;
         }
 
+        // Popup: Object Picker (reused from Terrain UI)
+        if (ImGui::BeginPopup("ObjPicker")) {
+            static char filter[64] = "";
+            ImGui::SetNextItemWidth(160.0f);
+            ImGui::InputText("Filter", filter, 64);
+            ImGui::Separator();
+
+            ImGui::BeginChild("ObjList", ImVec2(300, 250));
+            std::set<std::string> listed_names;
+
+            if (mesh_cache.empty()) rebuildMeshCache(ctx.scene.world.objects);
+
+            for (const auto& [name, tris_list] : mesh_cache) {
+                if (name.empty() || name.find("_inst_") == 0) continue;
+                if (filter[0] != '\0' && name.find(filter) == std::string::npos) continue;
+
+                if (ImGui::Selectable(name.c_str())) {
+                    std::vector<std::shared_ptr<Triangle>> source_tris;
+                    source_tris.reserve(tris_list.size());
+                    for (const auto& pair : tris_list) source_tris.push_back(pair.second);
+                    if (!source_tris.empty()) {
+                        active_group->sources.emplace_back(name, source_tris);
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+
+            ImGui::EndChild();
+            ImGui::EndPopup();
+        }
+
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "PLACEMENT RULES");
         ImGui::Checkbox("Use Global Settings Override", &active_group->brush_settings.use_global_settings);
@@ -99,6 +199,21 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
             }
             ImGui::EndCombo();
         }
+
+        // Exclusion Channel & Threshold (only relevant for terrain painting)
+        if (active_group->target_type == InstanceGroup::TargetType::TERRAIN) {
+            int excl = active_group->brush_settings.exclusion_channel;
+            const char* excl_preview = (excl >= 0 && excl < 4) ? channels[excl] : "None";
+            if (ImGui::BeginCombo("Exclusion Channel", excl_preview)) {
+                if (ImGui::Selectable("None", excl == -1)) active_group->brush_settings.exclusion_channel = -1;
+                for (int i = 0; i < 4; ++i) {
+                    if (ImGui::Selectable(channels[i], excl == i)) active_group->brush_settings.exclusion_channel = i;
+                }
+                ImGui::EndCombo();
+            }
+
+            ImGui::SliderFloat("Exclusion Threshold", &active_group->brush_settings.exclusion_threshold, 0.0f, 1.0f, "%.2f");
+        }
         
         ImGui::SliderFloat("Max Slope", &active_group->brush_settings.slope_max, 0.0f, 90.0f, "%.1f deg");
         
@@ -110,9 +225,9 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
         // ═══════════════════════════════════════════════════════════════════════════
         ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "SOURCE MESHES (%zu)", active_group->sources.size());
         
-        // "Add Selected" Button
+        // "Add Selected" Button (half-width, with Pick-from-List beside it)
         bool has_selection = ctx.selection.hasSelection();
-        if (ImGui::Button("Add Selected Object", ImVec2(-1, 0))) {
+        if (UIWidgets::SecondaryButton("Add Selected Object", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
             if (has_selection) {
                 std::string node_name = ctx.selection.selected.name;
                 // Find triangles
@@ -127,6 +242,10 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
                     SCENE_LOG_INFO("[Scatter] Added " + node_name + " to layer " + active_group->name);
                 }
             }
+        }
+        ImGui::SameLine();
+        if (UIWidgets::SecondaryButton("Pick from List", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
+            ImGui::OpenPopup("ObjPicker");
         }
         if (!has_selection) ImGui::TextDisabled("(Select an object to add)");
 
@@ -161,7 +280,7 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
                 
                 // Column 4: Remove
                 ImGui::TableSetColumnIndex(3);
-                if (ImGui::Button("X")) remove_idx = (int)i;
+                if (UIWidgets::DangerButton("X")) remove_idx = (int)i;
 
                 // Details Row
                 if (open) {
@@ -194,12 +313,8 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
                 // Clear and rebuild
                 active_group->clearInstances();
                 syncInstancesToScene(ctx, *active_group, true);
-                
-                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                     ctx.renderer.rebuildBackendGeometry(ctx.scene);
-                }
+
+                rebuildScatterSceneMutation(ctx);
             }
         }
     }
@@ -244,26 +359,38 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
 
         // TARGET SURFACE SELECTION
         ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Target Surface:");
-        if (scatter_brush.target_surface_name.empty()) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "(Any surface)");
-        }
-        else {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s", scatter_brush.target_surface_name.c_str());
-        }
+        // Target Type for this layer (Terrain = paint on active terrain; Mesh = paint on specific mesh)
+        int tgt = (active_group->target_type == InstanceGroup::TargetType::TERRAIN) ? 0 : 1;
+        ImGui::Text("Target:"); ImGui::SameLine();
+        ImGui::RadioButton("Terrain", &tgt, 0); ImGui::SameLine();
+        ImGui::RadioButton("Mesh", &tgt, 1);
+        active_group->target_type = (tgt == 0) ? InstanceGroup::TargetType::TERRAIN : InstanceGroup::TargetType::MESH;
 
-        if (ctx.selection.hasSelection() && ctx.selection.selected.name != active_group->source_node_name) {
-            if (ImGui::Button("Set Target from Selection")) {
-                scatter_brush.target_surface_name = ctx.selection.selected.name;
-                SCENE_LOG_INFO("[Scatter] Target surface set to: " + scatter_brush.target_surface_name);
+        // Show current target node (if mesh)
+        if (active_group->target_type == InstanceGroup::TargetType::MESH) {
+            if (active_group->target_node_name.empty()) {
+                ImGui::SameLine(); ImGui::TextColored(ImVec4(0.7f,0.7f,0.7f,1.0f), "(No mesh target)");
+            } else {
+                ImGui::SameLine(); ImGui::TextColored(ImVec4(0.4f,1.0f,0.4f,1.0f), "%s", active_group->target_node_name.c_str());
             }
-        }
-        ImGui::SameLine();
-        if (!scatter_brush.target_surface_name.empty()) {
-            if (ImGui::Button("Clear Target")) {
-                scatter_brush.target_surface_name.clear();
+
+            if (ctx.selection.hasSelection() && ctx.selection.selected.name != active_group->source_node_name) {
+                if (UIWidgets::SecondaryButton("Set Target from Selection")) {
+                    active_group->target_node_name = ctx.selection.selected.name;
+                    SCENE_LOG_INFO("[Scatter] Group '" + active_group->name + "' target set to: " + active_group->target_node_name);
+                }
             }
+            ImGui::SameLine();
+            if (!active_group->target_node_name.empty()) {
+                if (UIWidgets::DangerButton("Clear Target")) {
+                    SCENE_LOG_INFO("[Scatter] Cleared target for group: " + active_group->name + " (was: " + active_group->target_node_name + ")");
+                    active_group->target_node_name.clear();
+                    // Clear should also revert target type to TERRAIN (no mesh restriction)
+                    active_group->target_type = InstanceGroup::TargetType::TERRAIN;
+                }
+            }
+        } else {
+            ImGui::SameLine(); ImGui::TextDisabled("(Painting on active terrain)");
         }
 
         ImGui::Spacing();
@@ -302,7 +429,7 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
         ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Offset Tools:");
         static float global_y_offset = 0.0f;
         ImGui::DragFloat("Y Offset", &global_y_offset, 0.05f, -10.0f, 10.0f);
-        if (ImGui::Button("Apply Offset to All")) {
+        if (UIWidgets::SecondaryButton("Apply Offset to All")) {
             if (active_group && !active_group->instances.empty()) {
                 for (auto& inst : active_group->instances) {
                     inst.position.y += global_y_offset;
@@ -311,12 +438,7 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
                 // Sync group to scene
                 syncInstancesToScene(ctx, *active_group, false);
 
-                // Rebuild BVH and OptiX
-                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.rebuildBackendGeometry(ctx.scene);
-                }
+                rebuildScatterSceneMutation(ctx);
                 SCENE_LOG_INFO("[Scatter] Applied Y-Offset of " + std::to_string(global_y_offset) + " to " + std::to_string(active_group->instances.size()) + " instances.");
             }
         }
@@ -331,42 +453,37 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
             active_group->getTriangleCount());
 
         // Actions
-        if (ImGui::Button("Clear All Instances")) {
+        if (UIWidgets::DangerButton("Clear All Instances")) {
             active_group->clearInstances();
             // Remove from scene
             syncInstancesToScene(ctx, *active_group, true);
 
-            // Rebuild BVH and OptiX
-            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-            ctx.renderer.resetCPUAccumulation();
-            if (ctx.backend_ptr) {
-                ctx.renderer.rebuildBackendGeometry(ctx.scene);
-            }
+            rebuildScatterSceneMutation(ctx);
         }
 
         ImGui::SameLine();
 
-        if (ImGui::Button("Delete Group")) {
+        if (UIWidgets::DangerButton("Delete Group")) {
             // Remove instances from scene first
             syncInstancesToScene(ctx, *active_group, true);
             im.deleteGroup(scatter_brush.active_group_id);
             scatter_brush.active_group_id = -1;
 
-            // Rebuild BVH and OptiX
-            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-            ctx.renderer.resetCPUAccumulation();
-            if (ctx.backend_ptr) {
-                ctx.renderer.rebuildBackendGeometry(ctx.scene);
-            }
+            rebuildScatterSceneMutation(ctx);
         }
 
 
-        ImGui::PopStyleVar();
+        // UI for active group ends here. We'll PopStyleVar once at function end.
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // SYNC INSTANCES TO SCENE (Make them renderable)
     // ═══════════════════════════════════════════════════════════════════════════════
+
+    // Balance ImGui PushStyleVar call from top of function.
+    ImGui::PopStyleVar();
+    UIWidgets::PopControlSurfaceStyle();
+
 }
 void SceneUI::syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only) {
     // 1. Compute Prefix for identification
@@ -652,7 +769,28 @@ void SceneUI::appendInstancesToScene(UIContext& ctx, InstanceGroup& group, size_
 #include <random>
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// FOLIAGE BRUSH INTERACTION (Terrain Specific)
+// ─── Möller-Trumbore ray-triangle intersection (returns t > 0 on hit, else -1) ─
+static float foliageBrush_RayTriangle(const Ray& ray,
+                                      const Vec3& v0, const Vec3& v1, const Vec3& v2)
+{
+    const float EPS = 1e-8f;
+    Vec3 edge1 = v1 - v0;
+    Vec3 edge2 = v2 - v0;
+    Vec3 h = Vec3::cross(ray.direction, edge2);
+    float a = Vec3::dot(edge1, h);
+    if (fabsf(a) < EPS) return -1.f;
+    float f = 1.f / a;
+    Vec3 s = ray.origin - v0;
+    float u = f * Vec3::dot(s, h);
+    if (u < 0.f || u > 1.f) return -1.f;
+    Vec3 q = Vec3::cross(s, edge1);
+    float v = f * Vec3::dot(ray.direction, q);
+    if (v < 0.f || u + v > 1.f) return -1.f;
+    float t = f * Vec3::dot(edge2, q);
+    return (t > EPS) ? t : -1.f;
+}
+
+// FOLIAGE BRUSH INTERACTION (Terrain + Mesh Surface)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void SceneUI::handleTerrainFoliageBrush(UIContext& ctx) {
@@ -677,12 +815,7 @@ void SceneUI::handleTerrainFoliageBrush(UIContext& ctx) {
                  syncInstancesToScene(ctx, *group, false);
              }
 
-             // Rebuild BVH and OptiX (Once per stroke)
-             ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-             ctx.renderer.resetCPUAccumulation();
-             if (ctx.backend_ptr) {
-                 ctx.renderer.rebuildBackendGeometry(ctx.scene);
-             }
+             rebuildScatterSceneMutation(ctx);
              SCENE_LOG_INFO("[Foliage] Committed stroke.");
         }
         foliage_brush.pending_group_id = -1;
@@ -698,38 +831,56 @@ void SceneUI::handleTerrainFoliageBrush(UIContext& ctx) {
     float u = (float)mx / io.DisplaySize.x;
     float v = 1.0f - ((float)my / io.DisplaySize.y);
 
-    // Raycast
-    // Raycast (Terrain Only)
+    // Raycast — terrain OR mesh surface depending on group target_type
     Ray ray = ctx.scene.camera->get_ray(u, v);
-    
-    // Find closest terrain hit
+
     float closest_t = 1e20f;
     Vec3 hit_point;
     Vec3 hit_normal;
-    bool found_terrain = false;
-    
-    auto& terrains = TerrainManager::getInstance().getTerrains();
-    for (auto& terrain : terrains) {
-        float t_out;
-        Vec3 n_out;
-        if (TerrainManager::getInstance().intersectRay(&terrain, ray, t_out, n_out)) {
-            if (t_out < closest_t) {
-                closest_t = t_out;
-                hit_point = ray.origin + ray.direction * t_out;
-                hit_normal = n_out;
-                found_terrain = true;
+    bool did_hit = false;
+
+    if (group->target_type == InstanceGroup::TargetType::MESH && !group->target_node_name.empty()) {
+        // ─── MESH SURFACE RAYCAST ───────────────────────────────────────────────
+        if (mesh_cache.empty()) rebuildMeshCache(ctx.scene.world.objects);
+        auto surf_it = mesh_cache.find(group->target_node_name);
+        if (surf_it != mesh_cache.end()) {
+            for (const auto& p : surf_it->second) {
+                const auto& tri = p.second;
+                if (!tri) continue;
+                Vec3 v0 = tri->getV0(), v1 = tri->getV1(), v2 = tri->getV2();
+                float t_hit = foliageBrush_RayTriangle(ray, v0, v1, v2);
+                if (t_hit > 0.f && t_hit < closest_t) {
+                    closest_t = t_hit;
+                    hit_point = ray.origin + ray.direction * t_hit;
+                    Vec3 fn = (v1 - v0).cross(v2 - v0);
+                    float fn_len = fn.length();
+                    hit_normal = (fn_len > 1e-6f) ? fn / fn_len : Vec3(0, 1, 0);
+                    if (hit_normal.y < 0.f) hit_normal = -hit_normal; // face upward
+                    did_hit = true;
+                }
+            }
+        }
+    } else {
+        // ─── TERRAIN RAYCAST ────────────────────────────────────────────────────
+        auto& terrains = TerrainManager::getInstance().getTerrains();
+        for (auto& terrain : terrains) {
+            float t_out; Vec3 n_out;
+            if (TerrainManager::getInstance().intersectRay(&terrain, ray, t_out, n_out)) {
+                if (t_out < closest_t) {
+                    closest_t = t_out;
+                    hit_point = ray.origin + ray.direction * t_out;
+                    hit_normal = n_out;
+                    did_hit = true;
+                }
             }
         }
     }
-    
+
     HitRecord hit;
-    bool did_hit = found_terrain;
-    
     if (did_hit) {
         hit.t = closest_t;
         hit.point = hit_point;
         hit.normal = hit_normal;
-        // hit.triangle is null, but we don't need it for basic painting
     }
 
     if (did_hit && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -757,9 +908,13 @@ void SceneUI::handleTerrainFoliageBrush(UIContext& ctx) {
                 
                 Vec3 offset = tangent * (r * cos(theta)) + bitangent * (r * sin(theta));
                 Vec3 targetPos = hit.point + offset;
-                
-                // CRITICAL: Re-sample height for each instance to follow terrain curves
-                targetPos.y = TerrainManager::getInstance().sampleHeight(targetPos.x, targetPos.z);
+
+                // Snap back to surface:
+                //   Terrain → re-sample heightmap so instances follow terrain curvature
+                //   Mesh    → keep tangent-plane offset (acceptable for small brush radii)
+                if (group->target_type != InstanceGroup::TargetType::MESH) {
+                    targetPos.y = TerrainManager::getInstance().sampleHeight(targetPos.x, targetPos.z);
+                }
                 
                 // Use InstanceGroup's setting-aware generator
                 // Note: generateRandomTransform applies scale/rotation/slope rules.
@@ -800,12 +955,7 @@ void SceneUI::handleTerrainFoliageBrush(UIContext& ctx) {
 
         // Trigger Rebuild if modified (Real-time mode)
         if (modified && !foliage_brush.lazy_update) {
-             ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-             ctx.renderer.resetCPUAccumulation();
-             
-             if (ctx.backend_ptr) {
-                 ctx.renderer.rebuildBackendGeometry(ctx.scene);
-             }
+             rebuildScatterSceneMutation(ctx);
         }
         
         hud_captured_mouse = true;
@@ -850,9 +1000,9 @@ void SceneUI::handleScatterBrush(UIContext& ctx) {
             did_hit = false; 
         }
         
-        // Check target surface filter
-        if (did_hit && !scatter_brush.target_surface_name.empty() && hit.triangle) {
-            if (hit.triangle->getNodeName() != scatter_brush.target_surface_name) {
+        // Check target surface filter (use group's target settings)
+        if (did_hit && group->target_type == InstanceGroup::TargetType::MESH && !group->target_node_name.empty() && hit.triangle) {
+            if (hit.triangle->getNodeName() != group->target_node_name) {
                 did_hit = false;  // Not on target surface
             }
         }
@@ -889,12 +1039,7 @@ void SceneUI::handleScatterBrush(UIContext& ctx) {
                  syncInstancesToScene(ctx, *group, false);
             }
             
-            // Rebuild BVH & OptiX (Only once per stroke!)
-            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-            ctx.renderer.resetCPUAccumulation();
-            if (ctx.backend_ptr) {
-                ctx.renderer.rebuildBackendGeometry(ctx.scene);
-            }
+            rebuildScatterSceneMutation(ctx);
             
             SCENE_LOG_INFO("[Scatter] Committed stroke: " + std::to_string(added_count) + " instances.");
         }
@@ -926,7 +1071,8 @@ void SceneUI::handleScatterBrush(UIContext& ctx) {
                 hit.point,
                 hit.normal,
                 scatter_brush.brush_radius,
-                1.0f
+                1.0f,
+                &ctx.scene
             );
             
             if (added > 0) {
@@ -964,8 +1110,15 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
     // Check if any brush is active
     bool is_scatter = scatter_brush.enabled && scatter_brush.show_brush_preview;
     bool is_foliage = foliage_brush.enabled && foliage_brush.show_preview;
+    bool is_sculpt =
+        sculpt_mode_state.enabled &&
+        mesh_workspace_mode == MeshWorkspaceMode::Sculpt &&
+        mesh_overlay_settings.edit_mode &&
+        sculpt_mode_state.brush.show_preview &&
+        !terrain_sculpt_proxy_active &&
+        !sculpt_mode_state.active_target_name.empty();
     
-    if (!is_scatter && !is_foliage) return;
+    if (!is_scatter && !is_foliage && !is_sculpt) return;
     
     if (!ctx.scene.camera || !ctx.scene.bvh) return;
     
@@ -977,7 +1130,7 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
     SDL_GetMouseState(&mx, &my);
     
     // Use active brush parameters
-    float radius = is_scatter ? scatter_brush.brush_radius : foliage_brush.radius;
+    float radius = is_scatter ? scatter_brush.brush_radius : (is_foliage ? foliage_brush.radius : sculpt_mode_state.brush.radius);
     int mode = is_scatter ? scatter_brush.brush_mode : foliage_brush.mode;
     
     float u = (float)mx / io.DisplaySize.x;
@@ -988,7 +1141,30 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
     HitRecord hit;
     bool did_hit = false;
 
-    if (is_foliage) {
+    if (is_sculpt) {
+        HitRecord sculptHit;
+        if (ctx.scene.bvh->hit(ray, 0.001f, 1e10f, sculptHit) &&
+            sculptHit.triangle &&
+            sculptHit.triangle->getNodeName() == sculpt_mode_state.active_target_name) {
+            hit = sculptHit;
+            did_hit = true;
+        } else if (sculpt_stroke_state.active &&
+                   sculpt_stroke_state.object_name == sculpt_mode_state.active_target_name &&
+                   sculpt_mode_state.tool == SculptBrushTool::Grab) {
+            const Vec3 planeNormal = sculpt_stroke_state.stroke_normal.length_squared() > 1e-8f
+                ? sculpt_stroke_state.stroke_normal.normalize()
+                : Vec3(0.0f, 1.0f, 0.0f);
+            const float denom = ray.direction.dot(planeNormal);
+            if (std::fabs(denom) > 1e-6f) {
+                const float t = (sculpt_stroke_state.start_world_hit - ray.origin).dot(planeNormal) / denom;
+                if (std::isfinite(t) && t > 0.0f) {
+                    hit.point = ray.origin + ray.direction * t;
+                    hit.normal = planeNormal;
+                    did_hit = std::isfinite(hit.point.x) && std::isfinite(hit.point.y) && std::isfinite(hit.point.z);
+                }
+            }
+        }
+    } else if (is_foliage) {
         // Terrain-only raycast for foliage brush preview
         float closest_t = 1e20f;
         auto& terrains = TerrainManager::getInstance().getTerrains();
@@ -1011,44 +1187,86 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
     }
     
     if (!did_hit) return;
-    
+
+    // Sculpt: delegate to the full alpha-grid + dual-ring preview
+    if (is_sculpt) {
+        drawSculptBrushViewportPreview(ctx, hit);
+        // Also draw mirror ghost passes
+        if (sculpt_mode_state.mirror_x || sculpt_mode_state.mirror_y || sculpt_mode_state.mirror_z) {
+            const Matrix4x4 transform = [&]() -> Matrix4x4 {
+                for (auto& obj : ctx.scene.world.objects) {
+                    if (auto* t = dynamic_cast<Triangle*>(obj.get())) {
+                        if (t->getNodeName() == sculpt_mode_state.active_target_name) {
+                            return t->getTransformMatrix();
+                        }
+                    }
+                }
+                return Matrix4x4{};
+            }();
+            const Matrix4x4 inv = transform.inverse();
+            const Vec3 localHit = inv.transform_point(hit.point);
+            for (int mirrorBits = 1; mirrorBits < 8; ++mirrorBits) {
+                const bool do_mx = (mirrorBits & 1) && sculpt_mode_state.mirror_x;
+                const bool do_my = (mirrorBits & 2) && sculpt_mode_state.mirror_y;
+                const bool do_mz = (mirrorBits & 4) && sculpt_mode_state.mirror_z;
+                if ((mirrorBits & 1) && !sculpt_mode_state.mirror_x) continue;
+                if ((mirrorBits & 2) && !sculpt_mode_state.mirror_y) continue;
+                if ((mirrorBits & 4) && !sculpt_mode_state.mirror_z) continue;
+                Vec3 mirLocal = localHit;
+                if (do_mx) mirLocal.x = -mirLocal.x;
+                if (do_my) mirLocal.y = -mirLocal.y;
+                if (do_mz) mirLocal.z = -mirLocal.z;
+                HitRecord mirHit = hit;
+                mirHit.point = transform.transform_point(mirLocal);
+                Vec3 localN = inv.transform_vector(hit.normal);
+                if (do_mx) localN.x = -localN.x;
+                if (do_my) localN.y = -localN.y;
+                if (do_mz) localN.z = -localN.z;
+                const Matrix4x4 normalMtx = inv.transpose();
+                mirHit.normal = normalMtx.transform_vector(localN).normalize();
+                drawSculptBrushViewportPreview(ctx, mirHit, true);
+            }
+        }
+        return;
+    }
+
     // Draw circle at hit point
     ImDrawList* draw_list = ImGui::GetForegroundDrawList();
     Camera& cam = *ctx.scene.camera;
-    
+
     // Project to screen
     auto projectToScreen = [&](const Vec3& world_pos) -> ImVec2 {
         Vec3 dir = world_pos - cam.lookfrom;
         float dist = dir.length();
         dir = dir.normalize();
-        
+
         Vec3 forward = (cam.lookat - cam.lookfrom).normalize();
         Vec3 right = cam.u;
         Vec3 up = cam.v;
-        
+
         float z = Vec3::dot(dir, forward) * dist;
         if (z <= 0.01f) return ImVec2(-1, -1);
-        
+
         float x = Vec3::dot(world_pos - cam.lookfrom, right);
         float y = Vec3::dot(world_pos - cam.lookfrom, up);
-        
+
         float fov_scale = tanf(cam.vfov * 0.5f * 3.14159f / 180.0f);
         float aspect = io.DisplaySize.x / io.DisplaySize.y;
-        
+
         float sx = (x / (z * fov_scale * aspect)) * 0.5f + 0.5f;
         float sy = (y / (z * fov_scale)) * 0.5f + 0.5f;
-        
+
         return ImVec2(sx * io.DisplaySize.x, (1.0f - sy) * io.DisplaySize.y);
     };
-    
+
     ImVec2 center = projectToScreen(hit.point);
     if (center.x < 0) return;
-    
+
     // Project edge point
     Vec3 tangent = hit.normal.cross(Vec3(0, 1, 0));
     if (tangent.length() < 0.01f) tangent = hit.normal.cross(Vec3(1, 0, 0));
     tangent = tangent.normalize();
-    
+
     Vec3 edge_point = hit.point + tangent * radius;
     ImVec2 edge = projectToScreen(edge_point);
     // Draw pending instances (feedback for lazy update)
@@ -1069,34 +1287,34 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
             }
         }
     }
-    
-    float screen_radius = sqrtf((edge.x - center.x) * (edge.x - center.x) + 
+
+    float screen_radius = sqrtf((edge.x - center.x) * (edge.x - center.x) +
                                  (edge.y - center.y) * (edge.y - center.y));
     screen_radius = std::max(10.0f, std::min(screen_radius, 500.0f));
-    
+
     // Color based on mode
     ImU32 color;
     if (is_foliage) {
          // Cyan for foliage add, orange for remove
-         color = (mode == 0) 
-            ? IM_COL32(0, 255, 255, 180) 
+         color = (mode == 0)
+            ? IM_COL32(0, 255, 255, 180)
             : IM_COL32(255, 128, 0, 180);
     } else {
         // Green for scatter add, red for remove
-        color = (mode == 0) 
+        color = (mode == 0)
             ? IM_COL32(100, 255, 100, 180)
             : IM_COL32(255, 100, 100, 180);
     }
-    
+
     // Draw visual
     draw_list->AddCircle(center, screen_radius, color, 32, 3.0f);
     draw_list->AddCircleFilled(center, 4.0f, color);
-    
+
     // Mode text
     const char* mode_text = (mode == 0) ? "ADD" : "REMOVE";
     ImVec2 text_size = ImGui::CalcTextSize(mode_text);
     draw_list->AddText(ImVec2(center.x - text_size.x * 0.5f, center.y + screen_radius + 5), color, mode_text);
-    
+
     // Extra info for foliage (density)
     if (is_foliage) {
         std::string info = "Density: " + std::to_string(foliage_brush.density);

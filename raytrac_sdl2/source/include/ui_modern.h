@@ -193,14 +193,35 @@ namespace UIWidgets {
     // High-stability geometric icons drawn via DrawList
 
     enum class IconType {
-        Scene, Render, Terrain, Water, Volumetric, Force, World, System, Sculpt,
+        Scene, Render, Terrain, Water, Volumetric, Force, World, System, Sculpt, Hair,
+        Brush,
+        Move, Rotate, ScaleAxis, Gizmo,
+        ViewSolid, ViewMatcap, ViewPreview, ViewRendered,
+        CameraHud, ViewOverlays, PivotEdit, PivotCenter, Sensitivity, Settings,
+        Play, Pause, Stop, Duplicate, Help, AddKey, RemoveKey,
+        PaintTool, EraseTool, SoftenTool, StampTool, FillTool, CloneTool, SprayTool,
+        GrabTool, InflateTool, SmoothTool, FlattenTool, DrawTool, LayerTool,
+        PinchTool, ClayTool, ClayStripsTool, CreaseTool, ScrapeTool,
+        VertexMode, EdgeMode, FaceMode,
+        AddFace, MergeVertices, WeldVertices, DissolveTopology,
+        LoopCutTool, ExtrudeFaceTool, DeleteFaceTool, ShadeFlatTool, ShadeSmoothTool,
         Wind, Gravity, Physics, Vortex, Noise, Magnet,
         Camera, Light, Mesh,
-        Timeline, Console, Graph, AnimGraph,
+        Timeline, Console, Graph, AnimGraph, Assets,
         LightPoint, LightDir, LightSpot, LightArea
     };
 
     void DrawIcon(IconType type, ImVec2 pos, float size, ImU32 color, float thickness = 1.5f);
+    bool IconActionButton(const char* id,
+        IconType icon,
+        const char* label,
+        bool active = false,
+        const ImVec4& accent = ImVec4(0.38f, 0.82f, 1.0f, 1.0f),
+        const ImVec2& size = ImVec2(0, 0),
+        const char* tooltip = nullptr,
+        bool enabled = true);
+    void PushControlSurfaceStyle(const ImVec4& accent = ImVec4(0.38f, 0.82f, 1.0f, 1.0f));
+    void PopControlSurfaceStyle();
     bool HorizontalTab(const char* label, IconType icon, bool active, float width = 0);
 
 } // namespace UIWidgets

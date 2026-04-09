@@ -340,9 +340,11 @@ inline WaterResultCPU evaluateWaterCPU(
         params.wave_strength,
         params.wave_frequency
     );
+    float foam_signal = res.foam;
 
-    // Apply Micro Details if strength > 0 (multi-layer animated with wind)
+    // Apply Micro Details if strength > 0 (hybrid drift + morph, matching GPU/Vulkan)
     if (params.micro_detail_strength > 0.001f) {
+        float domain_coord_scale = 20.0f / std::fmax(params.fft_ocean_size, 0.001f);
         // Wind direction vectors (main and cross-wind)
         float wind_dx = cosf(params.wind_direction);
         float wind_dz = sinf(params.wind_direction);
@@ -352,7 +354,7 @@ inline WaterResultCPU evaluateWaterCPU(
         // Base speed scales with wind and user-controlled anim speed
         float base_speed = sqrtf(std::fmax(1.0f, params.wind_speed)) * params.micro_anim_speed;
         float t = params.time;
-        float scale = params.micro_detail_scale;
+        float scale = params.micro_detail_scale * domain_coord_scale;
         float morph = params.micro_morph_speed;
         
         // === LAYER 1: Primary ripples (wind direction) ===
@@ -397,27 +399,47 @@ inline WaterResultCPU evaluateWaterCPU(
         
         float dsdx = (h_x - h_c) / dx;
         float dsdz = (h_z - h_c) / dx;
+        float micro_slope = std::fmax(0.0f, std::fmin(1.0f, h_c * 0.5f + 0.5f));
         
         Vec3 micro_n = Vec3(-dsdx * params.micro_detail_strength, 1.0f, -dsdz * params.micro_detail_strength).normalize();
         res.normal = (res.normal + micro_n).normalize();
+
+        float foam_noise_scale = params.foam_noise_scale * domain_coord_scale;
+        float foam_noise = fbm_cpu(position.x * foam_noise_scale + off1_x * 0.5f,
+                                   position.z * foam_noise_scale + off1_z * 0.5f);
+        float foam_breakup = foam_noise * 0.5f + 0.5f;
+        float micro_foam = std::fmax(0.0f,
+            (micro_slope + (foam_breakup - 0.5f) * 0.35f - params.foam_threshold) * 5.0f);
+        foam_signal = std::fmax(foam_signal, micro_foam);
     }
 
-    // Shore Factor and Foam
-    // Note: On CPU, we don't have easy access to scene depth, so we assume deep water (depth=10)
-    // to avoid shore foam appearing everywhere on the surface.
-    float shore_depth_proxy = 10.0f; 
-    res.shore_factor = 0.0f; // Assume deep water
-    
+    float max_depth = params.depth_max > 0.1f ? params.depth_max : 10.0f;
+    float depth_ratio = std::fmax(0.0f, std::fmin(1.0f, 0.55f + res.height / std::fmax(params.wave_strength * 4.0f, 0.001f)));
+    float depth_proxy = lerp_cpu(std::fmin(params.shore_foam_distance * 0.5f, max_depth), max_depth, depth_ratio);
+    depth_proxy = std::fmax(0.05f, std::fmin(depth_proxy, max_depth));
+    res.depth = depth_proxy;
+
+    float shore_depth_proxy = depth_proxy;
+    res.shore_factor = 1.0f - std::fmax(0.0f, std::fmin(1.0f, shore_depth_proxy / std::fmax(params.shore_foam_distance, 0.001f)));
+
     if (params.shore_foam_intensity > 0.01f) {
         float shore_foam = calculateShoreFoamCPU(shore_depth_proxy, params.shore_foam_distance, params.shore_foam_intensity, position, time);
-        res.foam = std::fmin(res.foam + shore_foam, 1.0f);
+        res.foam = std::fmin(foam_signal * params.foam_level + shore_foam, 1.0f);
+    } else {
+        res.foam = std::fmin(foam_signal * params.foam_level, 1.0f);
     }
 
-    // Appearance Calculation
-    // For surface hit, we use shallow_color as the base tint.
-    // Darkening happens inside the medium via Beer's Law.
-    res.water_color = params.shallow_color;
-    res.absorption = calculateWaterAbsorptionCPU(0.0f, params.absorption_color, params.absorption_density);
+    res.water_color = calculateDepthColorCPU(depth_proxy, params.depth_max, params.shallow_color, params.deep_color);
+    res.caustic_intensity = 0.0f;
+    if (params.caustic_intensity_scale > 0.01f) {
+        Vec3 floor_proxy(position.x, position.y - depth_proxy, position.z);
+        float caustic = calculateWaterCausticsCPU(floor_proxy, time, params.caustic_scale, params.caustic_speed);
+        float caustic_fade = std::exp(-depth_proxy * params.absorption_density * 0.5f);
+        res.caustic_intensity = caustic * params.caustic_intensity_scale * caustic_fade;
+        res.water_color = res.water_color + params.shallow_color * res.caustic_intensity;
+    }
+
+    res.absorption = calculateWaterAbsorptionCPU(depth_proxy, params.absorption_color, params.absorption_density);
 
     return res;
 }

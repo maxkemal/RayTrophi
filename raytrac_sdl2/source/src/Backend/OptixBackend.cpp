@@ -131,6 +131,15 @@ void OptixBackend::uploadMaterials(const std::vector<MaterialData>& materials) {
         gpuMat.emission = make_float3(mat.emission.x * mat.emissionStrength, mat.emission.y * mat.emissionStrength, mat.emission.z * mat.emissionStrength);
         gpuMat.ior = mat.ior;
         gpuMat.transmission = mat.transmission;
+        gpuMat.opacity = mat.opacity;
+        gpuMat.uv_scale_x = static_cast<float>(mat.uvScale.x);
+        gpuMat.uv_scale_y = static_cast<float>(mat.uvScale.y);
+        gpuMat.uv_offset_x = static_cast<float>(mat.uvOffset.x);
+        gpuMat.uv_offset_y = static_cast<float>(mat.uvOffset.y);
+        gpuMat.uv_rotation_degrees = mat.uvRotationDegrees;
+        gpuMat.uv_tiling_x = static_cast<float>(mat.uvTiling.x);
+        gpuMat.uv_tiling_y = static_cast<float>(mat.uvTiling.y);
+        gpuMat.uv_wrap_mode = static_cast<int>(mat.uvWrapMode);
         
         gpuMat.albedo_tex = (cudaTextureObject_t)mat.albedoTexture;
         
@@ -242,7 +251,11 @@ void OptixBackend::setCamera(const CameraParams& params) {
 }
 
 void OptixBackend::setTime(float time, float deltaTime) {
-    m_optix->setTime(time, deltaTime);
+    (void)deltaTime;
+    // OptiX launch params expect absolute water time here, not frame delta.
+    // The generic IBackend signature is (time, deltaTime), so translate it to
+    // OptiX's (time, water_time) convention explicitly.
+    m_optix->setTime(time, time);
 }
 
 void OptixBackend::updateInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects) {
@@ -277,9 +290,30 @@ void OptixBackend::renderProgressive(void* outSurface, void* outWindow, void* ou
         static_cast<SDL_Window*>(outWindow),
         static_cast<SDL_Renderer*>(outRenderer),
         width, height,
-        *static_cast<std::vector<uchar4>*>(outFramebuffer),
+        outFramebuffer,
         static_cast<SDL_Texture*>(outTexture)
     );
+}
+
+void OptixBackend::setViewportMode(ViewportMode mode) {
+    m_viewportMode = mode;
+}
+
+ViewportMode OptixBackend::getViewportMode() const {
+    return m_viewportMode;
+}
+
+bool OptixBackend::supportsViewportMode(ViewportMode mode) const {
+    // Foundation only for now: non-rendered interactive modes still fall back
+    // to the existing OptiX rendered viewport path.
+    return mode == ViewportMode::Rendered;
+}
+
+bool OptixBackend::updateInteractiveMesh(const std::string& nodeName,
+                                         const std::vector<std::shared_ptr<Triangle>>& triangles) {
+    (void)nodeName;
+    (void)triangles;
+    return false;
 }
 
 void OptixBackend::downloadImage(void* outPixels) {

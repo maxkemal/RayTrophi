@@ -82,6 +82,7 @@ struct AnimationSet {
     std::string sourceImportName;
     ozz::unique_ptr<ozz::animation::Skeleton> runtimeSkeleton;
     std::vector<ozz::unique_ptr<ozz::animation::Animation>> runtimeAnimations;
+    std::vector<ozz::unique_ptr<ozz::animation::Animation>> additiveRuntimeAnimations;
     mutable ozz::animation::SamplingJob::Context samplingContext;
     mutable std::vector<ozz::math::SoaTransform> localSoaPose;
     mutable std::vector<ozz::math::Float4x4> modelMatrices;
@@ -103,6 +104,7 @@ struct BlendLayerInput {
     float blendWeight = 0.0f;
     float layerWeight = 1.0f;
     BlendMode blendMode = BlendMode::Replace;
+    std::vector<std::string> affectedBones;
 };
 
 bool isCompiledIn();

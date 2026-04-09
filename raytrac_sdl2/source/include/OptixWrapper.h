@@ -75,10 +75,10 @@ public:
     void launch_tile_based_progressive(SDL_Surface* surface, SDL_Window* window, int width, int height, std::vector<uchar4>& framebuffer, SDL_Texture* raytrace_texture);
     void launch_random_pixel_mode_progressive(SDL_Surface* surface,
         SDL_Window* window,
-        SDL_Renderer* renderer, // YENİ PARAMETRE
+        SDL_Renderer* renderer,
         int width,
         int height,
-        std::vector<uchar4>& framebuffer,
+        void* framebuffer,
         SDL_Texture* raytrace_texture);
    
     // Removed: applyOIDNDenoising - use Renderer::applyOIDNDenoising instead
@@ -161,8 +161,8 @@ public:
     void showAllInstances();
 
     // Targeted BLAS Update for Terrain Sculpting (Avoids full scene rebuild)
-    void updateMeshBLASFromTriangles(const std::string& node_name, const std::vector<std::shared_ptr<Triangle>>& triangles);
-    void updateTerrainBLASPartial(const std::string& node_name, class TerrainObject* terrain);
+    bool updateMeshBLASFromTriangles(const std::string& node_name, const std::vector<std::shared_ptr<Triangle>>& triangles);
+    bool updateTerrainBLASPartial(const std::string& node_name, class TerrainObject* terrain);
 
     // ═══════════════════════════════════════════════════════════════════════
     // INCREMENTAL UPDATES (Fast delete/duplicate without BLAS rebuild)

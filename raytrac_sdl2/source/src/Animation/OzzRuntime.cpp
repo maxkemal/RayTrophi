@@ -4,6 +4,7 @@
 #include "Matrix4x4.h"
 
 #include "ozz/animation/offline/animation_builder.h"
+#include "ozz/animation/offline/additive_animation_builder.h"
 #include "ozz/animation/offline/raw_animation.h"
 #include "ozz/animation/offline/raw_skeleton.h"
 #include "ozz/animation/offline/skeleton_builder.h"
@@ -16,6 +17,7 @@
 #include "ozz/base/maths/vec_float.h"
 
 #include <algorithm>
+#include <cmath>
 #include <set>
 #include <unordered_map>
 
@@ -299,12 +301,20 @@ bool sampleAnimationToLocalPose(
     const AnimationSet& animationSet,
     size_t clipIndex,
     float timeSeconds,
+    bool sampleAdditive,
     ozz::span<ozz::math::SoaTransform> outLocalPose) {
-    if (!animationSet.runtimeSkeleton || clipIndex >= animationSet.runtimeAnimations.size()) {
+    if (!animationSet.runtimeSkeleton) {
         return false;
     }
 
-    const auto& animation = animationSet.runtimeAnimations[clipIndex];
+    const auto& animationList = sampleAdditive
+        ? animationSet.additiveRuntimeAnimations
+        : animationSet.runtimeAnimations;
+    if (clipIndex >= animationList.size()) {
+        return false;
+    }
+
+    const auto& animation = animationList[clipIndex];
     if (!animation) {
         return false;
     }
@@ -346,6 +356,26 @@ bool localPoseToModelMatrices(
         (*outModelMatrices)[i] = toMatrix4x4(mutableSet.modelMatrices[i]);
     }
     return true;
+}
+
+bool matchesAffectedBoneMask(const std::string& runtimeJointName,
+    const std::vector<std::string>& affectedBones) {
+    if (affectedBones.empty()) {
+        return true;
+    }
+
+    for (const std::string& affectedBone : affectedBones) {
+        if (affectedBone.empty()) {
+            continue;
+        }
+        if (runtimeJointName == affectedBone ||
+            endsWithNodeName(runtimeJointName, affectedBone) ||
+            runtimeJointName.find(affectedBone) != std::string::npos) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 } // namespace
@@ -436,6 +466,7 @@ std::shared_ptr<AnimationSet> buildStubAnimationSet(
     runtime->clips.reserve(clips.size());
     runtime->clipRuntimes.reserve(clips.size());
     runtime->runtimeAnimations.reserve(clips.size());
+    runtime->additiveRuntimeAnimations.reserve(clips.size());
     for (const auto& clip : clips) {
         if (!clip) {
             continue;
@@ -502,8 +533,19 @@ std::shared_ptr<AnimationSet> buildStubAnimationSet(
                 ozz::animation::offline::AnimationBuilder animationBuilder;
                 animationBuilder.iframe_interval = 0.1f;
                 runtime->runtimeAnimations.push_back(animationBuilder(rawAnimation));
+
+                ozz::animation::offline::AdditiveAnimationBuilder additiveBuilder;
+                ozz::animation::offline::RawAnimation additiveRawAnimation;
+                if (additiveBuilder(rawAnimation, &additiveRawAnimation) && additiveRawAnimation.Validate()) {
+                    ozz::animation::offline::AnimationBuilder additiveAnimationBuilder;
+                    additiveAnimationBuilder.iframe_interval = 0.1f;
+                    runtime->additiveRuntimeAnimations.push_back(additiveAnimationBuilder(additiveRawAnimation));
+                } else {
+                    runtime->additiveRuntimeAnimations.push_back(nullptr);
+                }
             } else {
                 runtime->runtimeAnimations.push_back(nullptr);
+                runtime->additiveRuntimeAnimations.push_back(nullptr);
             }
         }
     }
@@ -538,7 +580,7 @@ bool sampleAnimationToModelMatrices(
     if (mutableSet.localSoaPose.size() < static_cast<size_t>(animationSet.runtimeSkeleton->num_soa_joints())) {
         mutableSet.localSoaPose.resize(animationSet.runtimeSkeleton->num_soa_joints(), ozz::math::SoaTransform::identity());
     }
-    if (!sampleAnimationToLocalPose(animationSet, clipIndex, timeSeconds,
+    if (!sampleAnimationToLocalPose(animationSet, clipIndex, timeSeconds, false,
         ozz::span<ozz::math::SoaTransform>(mutableSet.localSoaPose.data(), mutableSet.localSoaPose.size()))) {
         return false;
     }
@@ -567,14 +609,18 @@ bool sampleBlendedAnimationToModelMatrices(
 
     std::vector<std::vector<ozz::math::SoaTransform>> sampledLayerPoses;
     sampledLayerPoses.reserve(layers.size());
+    std::vector<std::vector<ozz::math::SimdFloat4>> sampledLayerJointWeights;
+    sampledLayerJointWeights.reserve(layers.size());
     std::vector<ozz::animation::BlendingJob::Layer> blendLayers;
     blendLayers.reserve(layers.size());
+    std::vector<ozz::animation::BlendingJob::Layer> additiveLayers;
+    additiveLayers.reserve(layers.size());
 
     for (const BlendLayerInput& layerInput : layers) {
         if (layerInput.layerWeight <= 0.0f || layerInput.clipIndexA < 0) {
             continue;
         }
-        if (layerInput.blendMode != BlendMode::Replace) {
+        if (layerInput.blendMode == BlendMode::Override) {
             return false;
         }
 
@@ -586,10 +632,12 @@ bool sampleBlendedAnimationToModelMatrices(
             std::vector<ozz::math::SoaTransform> poseA(numSoaJoints, ozz::math::SoaTransform::identity());
             std::vector<ozz::math::SoaTransform> poseB(numSoaJoints, ozz::math::SoaTransform::identity());
             if (!sampleAnimationToLocalPose(animationSet, static_cast<size_t>(layerInput.clipIndexA), layerInput.timeA,
+                layerInput.blendMode == BlendMode::Additive,
                 ozz::span<ozz::math::SoaTransform>(poseA.data(), poseA.size()))) {
                 return false;
             }
             if (!sampleAnimationToLocalPose(animationSet, static_cast<size_t>(layerInput.clipIndexB), layerInput.timeB,
+                layerInput.blendMode == BlendMode::Additive,
                 ozz::span<ozz::math::SoaTransform>(poseB.data(), poseB.size()))) {
                 return false;
             }
@@ -610,6 +658,7 @@ bool sampleBlendedAnimationToModelMatrices(
             }
         } else {
             if (!sampleAnimationToLocalPose(animationSet, static_cast<size_t>(layerInput.clipIndexA), layerInput.timeA,
+                layerInput.blendMode == BlendMode::Additive,
                 ozz::span<ozz::math::SoaTransform>(finalLayerPose.data(), finalLayerPose.size()))) {
                 return false;
             }
@@ -618,10 +667,33 @@ bool sampleBlendedAnimationToModelMatrices(
         ozz::animation::BlendingJob::Layer layer;
         layer.weight = layerInput.layerWeight;
         layer.transform = ozz::span<const ozz::math::SoaTransform>(finalLayerPose.data(), finalLayerPose.size());
-        blendLayers.push_back(layer);
+        if (!layerInput.affectedBones.empty()) {
+            sampledLayerJointWeights.emplace_back(numSoaJoints, ozz::math::simd_float4::zero());
+            std::vector<ozz::math::SimdFloat4>& jointWeights = sampledLayerJointWeights.back();
+
+            for (size_t soaIndex = 0; soaIndex < numSoaJoints; ++soaIndex) {
+                const size_t jointBaseIndex = soaIndex * 4;
+                const float x = (jointBaseIndex + 0 < animationSet.skeleton.jointNames.size() &&
+                    matchesAffectedBoneMask(animationSet.skeleton.jointNames[jointBaseIndex + 0], layerInput.affectedBones)) ? 1.0f : 0.0f;
+                const float y = (jointBaseIndex + 1 < animationSet.skeleton.jointNames.size() &&
+                    matchesAffectedBoneMask(animationSet.skeleton.jointNames[jointBaseIndex + 1], layerInput.affectedBones)) ? 1.0f : 0.0f;
+                const float z = (jointBaseIndex + 2 < animationSet.skeleton.jointNames.size() &&
+                    matchesAffectedBoneMask(animationSet.skeleton.jointNames[jointBaseIndex + 2], layerInput.affectedBones)) ? 1.0f : 0.0f;
+                const float w = (jointBaseIndex + 3 < animationSet.skeleton.jointNames.size() &&
+                    matchesAffectedBoneMask(animationSet.skeleton.jointNames[jointBaseIndex + 3], layerInput.affectedBones)) ? 1.0f : 0.0f;
+                jointWeights[soaIndex] = ozz::math::simd_float4::Load(x, y, z, w);
+            }
+
+            layer.joint_weights = ozz::span<const ozz::math::SimdFloat4>(jointWeights.data(), jointWeights.size());
+        }
+        if (layerInput.blendMode == BlendMode::Additive) {
+            additiveLayers.push_back(layer);
+        } else {
+            blendLayers.push_back(layer);
+        }
     }
 
-    if (blendLayers.empty()) {
+    if (blendLayers.empty() && additiveLayers.empty()) {
         return false;
     }
 
@@ -633,6 +705,7 @@ bool sampleBlendedAnimationToModelMatrices(
     ozz::animation::BlendingJob blendJob;
     blendJob.threshold = 0.1f;
     blendJob.layers = ozz::span<const ozz::animation::BlendingJob::Layer>(blendLayers.data(), blendLayers.size());
+    blendJob.additive_layers = ozz::span<const ozz::animation::BlendingJob::Layer>(additiveLayers.data(), additiveLayers.size());
     blendJob.rest_pose = animationSet.runtimeSkeleton->joint_rest_poses();
     blendJob.output = ozz::span<ozz::math::SoaTransform>(mutableSet.localSoaPose.data(), mutableSet.localSoaPose.size());
     if (!blendJob.Run()) {

@@ -17,9 +17,13 @@
 #include "GasVolume.h"
 #include "ForceField.h"
 #include "MeshModifiers.h"
+#include "Paint/PaintTextureSet.h"
+#include "Paint/PaintLayerStack.h"
 
 #include <functional>
 #include <string>
+#include <algorithm>
+#include <unordered_set>
 
 namespace AnimationGraph {
     class AnimationNodeGraph;
@@ -54,6 +58,8 @@ struct SceneData {
     // Non-destructive Modeling Cache
     std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>> base_mesh_cache; // nodeName -> list of Triangles
     std::unordered_map<std::string, MeshModifiers::ModifierStack> mesh_modifiers;          // nodeName -> Modifier Stack
+    std::unordered_map<std::string, Paint::PaintTextureSet> mesh_paint_texture_sets;       // nodeName#materialID -> texture set
+    std::unordered_map<std::string, Paint::PaintLayerStack> mesh_paint_layer_stacks;      // nodeName#materialID -> layer stack
 
     // =========================================================================
     // Animation Data
@@ -72,6 +78,7 @@ struct SceneData {
     Vec3 background_color = Vec3(0.2f, 0.2f, 0.2f);
     bool initialized = false;
     ColorProcessor color_processor;
+    std::unordered_set<std::string> editor_pending_delete_object_names;
     
     // =========================================================================
     // Object Grouping System
@@ -90,6 +97,94 @@ struct SceneData {
     
     // Keyframe animation system
     TimelineManager timeline;
+
+    bool isEditorPendingDeleteObjectName(const std::string& nodeName) const {
+        return !nodeName.empty() &&
+               editor_pending_delete_object_names.find(nodeName) != editor_pending_delete_object_names.end();
+    }
+
+    void markObjectPendingDelete(const std::string& nodeName) {
+        if (!nodeName.empty()) {
+            editor_pending_delete_object_names.insert(nodeName);
+        }
+    }
+
+    void restoreObjectPendingDelete(const std::string& nodeName) {
+        if (!nodeName.empty()) {
+            editor_pending_delete_object_names.erase(nodeName);
+        }
+    }
+
+    size_t compactPendingDeletedObjects() {
+        if (editor_pending_delete_object_names.empty()) {
+            return 0;
+        }
+
+        auto matchesPendingDelete = [&](const std::shared_ptr<Hittable>& obj) -> bool {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            return tri && isEditorPendingDeleteObjectName(tri->nodeName);
+        };
+
+        const size_t beforeCount = world.objects.size();
+        world.objects.erase(
+            std::remove_if(world.objects.begin(), world.objects.end(), matchesPendingDelete),
+            world.objects.end());
+
+        for (auto& group : object_groups) {
+            group.member_names.erase(
+                std::remove_if(group.member_names.begin(), group.member_names.end(),
+                    [&](const std::string& name) { return isEditorPendingDeleteObjectName(name); }),
+                group.member_names.end());
+        }
+
+        for (auto& [nodeName, stack] : mesh_modifiers) {
+            (void)stack;
+            if (isEditorPendingDeleteObjectName(nodeName)) {
+                base_mesh_cache.erase(nodeName);
+            }
+        }
+        for (auto it = mesh_modifiers.begin(); it != mesh_modifiers.end();) {
+            if (isEditorPendingDeleteObjectName(it->first)) {
+                it = mesh_modifiers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = mesh_paint_texture_sets.begin(); it != mesh_paint_texture_sets.end();) {
+            const std::string& key = it->first;
+            const size_t sep = key.find('#');
+            const std::string nodeName = (sep == std::string::npos) ? key : key.substr(0, sep);
+            if (isEditorPendingDeleteObjectName(nodeName)) {
+                it = mesh_paint_texture_sets.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = mesh_paint_layer_stacks.begin(); it != mesh_paint_layer_stacks.end();) {
+            const std::string& key = it->first;
+            const size_t sep = key.find('#');
+            const std::string nodeName = (sep == std::string::npos) ? key : key.substr(0, sep);
+            if (isEditorPendingDeleteObjectName(nodeName)) {
+                it = mesh_paint_layer_stacks.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        for (auto& model : importedModelContexts) {
+            model.members.erase(
+                std::remove_if(model.members.begin(), model.members.end(), matchesPendingDelete),
+                model.members.end());
+        }
+
+        for (const auto& nodeName : editor_pending_delete_object_names) {
+            timeline.tracks.erase(nodeName);
+        }
+
+        const size_t removedCount = beforeCount - world.objects.size();
+        editor_pending_delete_object_names.clear();
+        return removedCount;
+    }
     
     // Get active camera (safely)
     std::shared_ptr<Camera> getActiveCamera() const {
@@ -175,6 +270,7 @@ struct SceneData {
         bool useAnimGraph = false;                  // Toggle between Controller and Node Graph
         bool preferOzzRuntime = true;              // Future opt-in path for Ozz sampling
         bool loggedOzzRuntimeUsage = false;        // Avoid per-frame runtime path logs
+        bool restPoseApplied = false;              // True after rest pose written once; prevents per-frame reset when no clip is active
         bool animGraphFollowTimeline = false;       // Timeline-driven when true, autonomous when false
         bool useRootMotion = false;                 // Move object transform with character
         std::string rootMotionBone;                 // Optional override. Empty = auto detect.
@@ -463,9 +559,13 @@ struct SceneData {
         active_camera_index = 0;
         bvh = nullptr;
         
+        // Clear paint data
+        mesh_paint_texture_sets.clear();
+        mesh_paint_layer_stacks.clear();
+
         // Reset Post-Processing to defaults
         color_processor = ColorProcessor();
-        
+
         initialized = false;
     }
 };

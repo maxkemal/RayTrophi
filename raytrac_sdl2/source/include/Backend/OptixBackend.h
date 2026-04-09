@@ -56,6 +56,11 @@ public:
     void renderPass(bool accumulate = true) override;
     void renderProgressive(void* outSurface, void* outWindow, void* outRenderer, 
                            int width, int height, void* outFramebuffer, void* outTexture) override;
+    void setViewportMode(ViewportMode mode) override;
+    ViewportMode getViewportMode() const override;
+    bool supportsViewportMode(ViewportMode mode) const override;
+    bool updateInteractiveMesh(const std::string& nodeName,
+                               const std::vector<std::shared_ptr<Triangle>>& triangles) override;
     void downloadImage(void* outPixels) override;
     bool getDenoiserFrame(DenoiserFrameData& frame) override;
     int getCurrentSampleCount() const override;
@@ -88,6 +93,7 @@ public:
 private:
     std::unique_ptr<OptixWrapper> m_optix_owned;  // Owning pointer (when we create our own)
     OptixWrapper* m_optix = nullptr;               // Always valid, may point to owned or external
+    ViewportMode m_viewportMode = ViewportMode::Rendered;
 };
 
 } // namespace Backend

@@ -54,19 +54,28 @@ struct Material {
     float fft_amplitude, fft_time_scale, micro_detail_strength, micro_detail_scale;
     // Block 9: Extra water params
     float foam_threshold, fft_ocean_size, fft_choppiness, fft_wind_speed;
-    // Block 10: Standard Textures (first 4)
+    // Block 10: Extra water animation params
+    float micro_anim_speed, micro_morph_speed, foam_noise_scale, fft_wind_direction;
+    // Block 11: UV transform core
+    float uv_scale_x, uv_scale_y, uv_offset_x, uv_offset_y;
+    // Block 12: UV transform extra
+    float uv_rotation_degrees, uv_tiling_x, uv_tiling_y;
+    uint uv_wrap_mode;
+    // Block 13: Standard Textures (first 4)
     uint albedo_tex;
     uint normal_tex;
     uint roughness_tex;
     uint metallic_tex;
-    // Block 11: Standard Textures (second 4)
+    // Block 14: Standard Textures (second 4)
     uint emission_tex;
     uint height_tex;
     uint opacity_tex;
     uint transmission_tex;
-    // Block 12: Reserved
+    // Block 15: Reserved
     float subsurface_ior;
-    uint _reserved_1, _reserved_2, _reserved_3;
+    uint _terrain_layer_idx;
+    float normal_strength;
+    uint _reserved_3;
 };
 
 struct LightData {
@@ -107,7 +116,7 @@ struct VkWorldDataExtended {
     float humidity;
     float temperature;
     float ozoneAbsorptionScale;
-    float _pad0;
+    float atmosphereIntensity;
     
     // ════════════════════════════ ATMOSPHERE DENSITY (32 bytes)
     float airDensity;
@@ -297,6 +306,8 @@ struct RayPayload {
     vec3  primaryAlbedo;
     vec3  primaryNormal;
     uint  primaryHit;
+    float primaryTransmission;
+    float primaryMetallic;
 };
 
 layout(location = 0) rayPayloadEXT RayPayload payload;
@@ -614,6 +625,8 @@ void main() {
     vec3 primaryAlbedo    = vec3(0.0);
     vec3 primaryNormal    = vec3(0.0);
     bool primaryHitValid  = false;
+    float firstHitTransmission = 0.0;
+    float firstHitMetallic = 0.0;
 
     // PRIMARY HIT POSITION — saved at bounce 0 for aerial perspective & fog
     // (payload.scatterOrigin is overwritten each bounce, so we capture it once)
@@ -640,6 +653,8 @@ void main() {
         payload.primaryAlbedo = vec3(0.0);
         payload.primaryNormal = vec3(0.0);
         payload.primaryHit    = 0u;
+        payload.primaryTransmission = 0.0;
+        payload.primaryMetallic = 0.0;
 
         // When the previous bounce was a volume that detected a solid surface inside,
         // skip AABB (procedural) geometry so the solid triangle is hit directly.
@@ -664,6 +679,8 @@ void main() {
         if (bounce == 0 && !primaryHitValid && payload.primaryHit != 0u) {
             primaryAlbedo = payload.primaryAlbedo;
             primaryNormal = payload.primaryNormal;
+            firstHitTransmission = payload.primaryTransmission;
+            firstHitMetallic = payload.primaryMetallic;
             primaryHitValid = true;
         }
 
@@ -792,14 +809,23 @@ void main() {
 
             // Sky radiance at view direction (clamped above horizon, same as OptiX)
             vec3 lookupDir = rayDir;
-            if (lookupDir.y < 0.0) lookupDir = normalize(vec3(lookupDir.x, 0.0, lookupDir.z));
+            if (lookupDir.y < 0.0) {
+                vec3 horizonDir = vec3(lookupDir.x, 0.0, lookupDir.z);
+                float horizonLen2 = dot(horizonDir, horizonDir);
+                if (horizonLen2 > 1e-10) {
+                    lookupDir = horizonDir * inversesqrt(horizonLen2);
+                } else {
+                    // Avoid a NaN direction at the image center when the ray points almost
+                    // straight up/down and the horizon projection collapses to zero.
+                    lookupDir = vec3(0.0, 0.0, 1.0);
+                }
+            }
             float az       = atan(lookupDir.z, lookupDir.x);
             if (az < 0.0) az += 6.2831853;
             float uS       = az / 6.2831853;
             float vS       = (1.0 - lookupDir.y) * 0.5;
             vec3  skyRad   = texture(atmosphereLUTs[1], vec2(uS, vS)).rgb;
 
-            // Blend scene with atmospheric haze (same formula as OptiX)
             radiance = radiance * finalTrans + skyRad * (vec3(1.0) - finalTrans);
         }
     }

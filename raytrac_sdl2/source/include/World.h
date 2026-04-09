@@ -41,7 +41,8 @@ struct NishitaSkyParams {
     float3 sun_direction;
     float sun_elevation;     // Blender: Sun Elevation (degrees)
     float sun_azimuth;       // Blender: Sun Rotation (degrees)
-    float sun_intensity;     // Sun brightness
+    float sun_intensity;     // Sun brightness (direct sun disk + direct lighting)
+    float atmosphere_intensity; // Atmospheric scattering brightness (sky, halo, ambient)
     float sun_size;          // Blender: Sun Disc size (degrees, default 0.545)
     
     // Atmosphere parameters (Blender-style, multipliers default 1.0)
@@ -217,6 +218,7 @@ public:
     // Nishita Mode
     void setSunDirection(const Vec3& direction);
     void setSunIntensity(float intensity);
+    void setAtmosphereIntensity(float intensity);
     void setPlanetRadius(float radius);
     void setAtmosphereHeight(float height);
     void setRayleighScattering(const Vec3& scattering);

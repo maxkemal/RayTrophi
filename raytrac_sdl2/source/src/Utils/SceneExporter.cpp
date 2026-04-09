@@ -6,6 +6,7 @@
 #include "Texture.h"
 #include "InstanceManager.h" 
 #include "globals.h"
+#include "TerrainManager.h"
 #include "imgui.h"
 #include <unordered_map>
 #include <iostream>
@@ -17,11 +18,15 @@
 #include "PointLight.h"
 #include "DirectionalLight.h"
 #include "SpotLight.h"
+#include "json.hpp"
 
 // STB Image Write for embedded textures
 // #define STB_IMAGE_WRITE_IMPLEMENTATION // Already defined in Main.cpp
 #include "stb_image_write.h"
 #include <ui_modern.h>
+#include <fstream>
+#include <cstdint>
+#include <cmath>
 
 // Define MeshBatch structure at file scope
 struct MeshBatch {
@@ -29,6 +34,508 @@ struct MeshBatch {
     uint16_t material_id;
     std::vector<std::shared_ptr<Triangle>> triangles;
 };
+
+struct TerrainBakeResult {
+    std::shared_ptr<Material> material;
+    std::shared_ptr<Texture> baseColor;
+    std::shared_ptr<Texture> normal;
+    std::shared_ptr<Texture> roughness;
+    std::shared_ptr<Texture> metallic;
+};
+
+using json = nlohmann::json;
+
+namespace {
+constexpr uint32_t kGlbMagic = 0x46546C67u;
+constexpr uint32_t kGlbVersion = 2u;
+constexpr uint32_t kGlbJsonChunkType = 0x4E4F534Au;
+constexpr uint32_t kGlbBinChunkType = 0x004E4942u;
+
+float degToRad(float degrees) {
+    return degrees * (3.14159265359f / 180.0f);
+}
+
+float clamp01(float value) {
+    return (std::max)(0.0f, (std::min)(1.0f, value));
+}
+
+uint8_t toByte(float value) {
+    return static_cast<uint8_t>(std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
+}
+
+uint8_t linearToSrgbByte(float value) {
+    value = std::clamp(value, 0.0f, 1.0f);
+    const float srgb = (value <= 0.0031308f)
+        ? (value * 12.92f)
+        : (1.055f * std::pow(value, 1.0f / 2.4f) - 0.055f);
+    return static_cast<uint8_t>(std::clamp(srgb, 0.0f, 1.0f) * 255.0f + 0.5f);
+}
+
+Vec3 sampleTerrainMaskRGBA(const TerrainObject& terrain, float u, float v, float& outA) {
+    if (!terrain.splatMap) {
+        outA = 0.0f;
+        return Vec3(1.0f, 0.0f, 0.0f);
+    }
+    Vec3 rgb = terrain.splatMap->get_color_bilinear(u, v);
+    outA = terrain.splatMap->get_alpha_bilinear(u, v);
+    return rgb;
+}
+
+std::shared_ptr<Texture> makeBakedTexture(const std::string& name,
+                                          int width,
+                                          int height,
+                                          TextureType type,
+                                          const std::vector<unsigned char>& rgba) {
+    return std::make_shared<Texture>(width, height, 4, rgba, type, name);
+}
+
+TerrainBakeResult bakeTerrainMaterialForExport(const TerrainObject& terrain,
+                                               uint16_t materialId,
+                                               int resolution) {
+    TerrainBakeResult result;
+    if (!terrain.splatMap || terrain.layers.empty()) {
+        return result;
+    }
+
+    // Keep splat resolution aligned with the terrain grid before sampling so
+    // height-derived layer masks land on the same texel space during export.
+    TerrainManager::getInstance().resizeSplatMap(const_cast<TerrainObject*>(&terrain));
+
+    const int bakeResolution = (std::max)(128, resolution);
+    std::vector<unsigned char> baseColorPixels;
+    std::vector<unsigned char> normalPixels;
+    std::vector<unsigned char> roughnessPixels;
+    std::vector<unsigned char> metallicPixels;
+    baseColorPixels.resize(static_cast<size_t>(bakeResolution) * bakeResolution * 4);
+    normalPixels.resize(static_cast<size_t>(bakeResolution) * bakeResolution * 4);
+    roughnessPixels.resize(static_cast<size_t>(bakeResolution) * bakeResolution * 4);
+    metallicPixels.resize(static_cast<size_t>(bakeResolution) * bakeResolution * 4);
+
+    for (int y = 0; y < bakeResolution; ++y) {
+        for (int x = 0; x < bakeResolution; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(bakeResolution);
+            const float v = 1.0f - (static_cast<float>(y) + 0.5f) / static_cast<float>(bakeResolution);
+
+            float maskA = 0.0f;
+            Vec3 maskRgb = sampleTerrainMaskRGBA(terrain, u, v, maskA);
+            float weights[4] = {
+                static_cast<float>(maskRgb.x),
+                static_cast<float>(maskRgb.y),
+                static_cast<float>(maskRgb.z),
+                maskA
+            };
+
+            Vec3 blendedAlbedo(0.0f);
+            Vec3 blendedNormal(0.0f, 0.0f, 1.0f);
+            float blendedRoughness = 0.5f;
+            float blendedMetallic = 0.0f;
+            float totalWeight = 0.0f;
+            bool hasNormal = false;
+
+            for (int i = 0; i < 4 && i < static_cast<int>(terrain.layers.size()); ++i) {
+                const float weight = weights[i];
+                if (weight < 0.001f || !terrain.layers[i]) {
+                    continue;
+                }
+
+                auto* layer = dynamic_cast<PrincipledBSDF*>(terrain.layers[i].get());
+                if (!layer) {
+                    continue;
+                }
+
+                const float scale = (i < static_cast<int>(terrain.layer_uv_scales.size()))
+                    ? terrain.layer_uv_scales[i]
+                    : 1.0f;
+                Vec2 layerUv(u * scale, v * scale);
+
+                blendedAlbedo = blendedAlbedo + layer->getPropertyValue(layer->albedoProperty, layerUv) * weight;
+                blendedRoughness += layer->getPropertyValue(layer->roughnessProperty, layerUv).y * weight;
+                blendedMetallic += layer->getPropertyValue(layer->metallicProperty, layerUv).z * weight;
+
+                if (layer->has_normal_map()) {
+                    Vec3 ns = layer->get_normal_from_map(layerUv.u, layerUv.v) * 2.0 - Vec3(1.0);
+                    ns.x = -ns.x;
+                    ns.y = -ns.y;
+                    blendedNormal = blendedNormal + ns * weight;
+                    hasNormal = true;
+                }
+
+                totalWeight += weight;
+            }
+
+            if (totalWeight > 0.0f) {
+                const float invWeight = 1.0f / totalWeight;
+                blendedAlbedo = blendedAlbedo * invWeight;
+                blendedRoughness *= invWeight;
+                blendedMetallic *= invWeight;
+                if (hasNormal) {
+                    blendedNormal = blendedNormal * invWeight;
+                }
+            } else {
+                blendedAlbedo = Vec3(0.5f, 0.5f, 0.5f);
+                blendedRoughness = 0.5f;
+                blendedMetallic = 0.0f;
+                blendedNormal = Vec3(0.0f, 0.0f, 1.0f);
+            }
+
+            if (hasNormal) {
+                blendedNormal = blendedNormal.normalize();
+            }
+
+            const size_t idx = (static_cast<size_t>(y) * bakeResolution + x) * 4;
+            // Albedo textures are stored as sRGB bytes for export. The sampled
+            // layer colors above are already in linear space.
+            baseColorPixels[idx + 0] = linearToSrgbByte(static_cast<float>(blendedAlbedo.x));
+            baseColorPixels[idx + 1] = linearToSrgbByte(static_cast<float>(blendedAlbedo.y));
+            baseColorPixels[idx + 2] = linearToSrgbByte(static_cast<float>(blendedAlbedo.z));
+            baseColorPixels[idx + 3] = 255;
+
+            normalPixels[idx + 0] = toByte(static_cast<float>(blendedNormal.x * 0.5 + 0.5));
+            normalPixels[idx + 1] = toByte(static_cast<float>(blendedNormal.y * 0.5 + 0.5));
+            normalPixels[idx + 2] = toByte(static_cast<float>(blendedNormal.z * 0.5 + 0.5));
+            normalPixels[idx + 3] = 255;
+
+            const uint8_t roughByte = toByte(blendedRoughness);
+            roughnessPixels[idx + 0] = roughByte;
+            roughnessPixels[idx + 1] = roughByte;
+            roughnessPixels[idx + 2] = roughByte;
+            roughnessPixels[idx + 3] = 255;
+
+            const uint8_t metalByte = toByte(blendedMetallic);
+            metallicPixels[idx + 0] = metalByte;
+            metallicPixels[idx + 1] = metalByte;
+            metallicPixels[idx + 2] = metalByte;
+            metallicPixels[idx + 3] = 255;
+        }
+    }
+
+    const std::string baseName = "TerrainBake_" + terrain.name + "_" + std::to_string(materialId);
+    result.baseColor = makeBakedTexture(baseName + "_BaseColor", bakeResolution, bakeResolution, TextureType::Albedo, baseColorPixels);
+    result.normal = makeBakedTexture(baseName + "_Normal", bakeResolution, bakeResolution, TextureType::Normal, normalPixels);
+    result.roughness = makeBakedTexture(baseName + "_Roughness", bakeResolution, bakeResolution, TextureType::Roughness, roughnessPixels);
+    result.metallic = makeBakedTexture(baseName + "_Metallic", bakeResolution, bakeResolution, TextureType::Metallic, metallicPixels);
+
+    auto bakedMaterial = std::make_shared<PrincipledBSDF>();
+    bakedMaterial->materialName = baseName + "_Material";
+    bakedMaterial->albedoProperty.texture = result.baseColor;
+    bakedMaterial->albedoProperty.intensity = 1.0f;
+    bakedMaterial->normalProperty.texture = result.normal;
+    bakedMaterial->normalProperty.intensity = 1.0f;
+    bakedMaterial->roughnessProperty.texture = result.roughness;
+    bakedMaterial->roughnessProperty.intensity = 1.0f;
+    bakedMaterial->metallicProperty.texture = result.metallic;
+    bakedMaterial->metallicProperty.intensity = 1.0f;
+    result.material = bakedMaterial;
+
+    return result;
+}
+
+std::vector<float> makeGltfNodeMatrix(const Vec3& position, Vec3 forward, Vec3 upHint) {
+    if (forward.length_squared() < 1e-8f) {
+        forward = Vec3(0.0f, 0.0f, -1.0f);
+    } else {
+        forward = forward.normalize();
+    }
+
+    if (upHint.length_squared() < 1e-8f) {
+        upHint = Vec3(0.0f, 1.0f, 0.0f);
+    } else {
+        upHint = upHint.normalize();
+    }
+
+    if (std::abs(Vec3::dot(forward, upHint)) > 0.99f) {
+        upHint = (std::abs(forward.y) > 0.99f) ? Vec3(0.0f, 0.0f, 1.0f) : Vec3(0.0f, 1.0f, 0.0f);
+    }
+
+    Vec3 right = Vec3::cross(forward, upHint).normalize();
+    Vec3 up = Vec3::cross(right, forward).normalize();
+    Vec3 negForward = forward * -1.0f;
+
+    return {
+        right.x, right.y, right.z, 0.0f,
+        up.x, up.y, up.z, 0.0f,
+        negForward.x, negForward.y, negForward.z, 0.0f,
+        position.x, position.y, position.z, 1.0f
+    };
+}
+
+void setNodeMatrix(json& node, const std::vector<float>& matrix) {
+    node.erase("translation");
+    node.erase("rotation");
+    node.erase("scale");
+    node["matrix"] = matrix;
+}
+
+void setNodeTranslation(json& node, const Vec3& position) {
+    node.erase("matrix");
+    node["translation"] = { position.x, position.y, position.z };
+}
+
+int ensureDefaultScene(json& gltf) {
+    if (!gltf.contains("scenes") || !gltf["scenes"].is_array() || gltf["scenes"].empty()) {
+        gltf["scenes"] = json::array({ json::object({ {"nodes", json::array()} }) });
+    }
+
+    int sceneIndex = 0;
+    if (gltf.contains("scene") && gltf["scene"].is_number_integer()) {
+        sceneIndex = gltf["scene"].get<int>();
+    } else {
+        gltf["scene"] = 0;
+    }
+
+    if (sceneIndex < 0 || sceneIndex >= static_cast<int>(gltf["scenes"].size())) {
+        sceneIndex = 0;
+        gltf["scene"] = 0;
+    }
+
+    if (!gltf["scenes"][sceneIndex].contains("nodes") || !gltf["scenes"][sceneIndex]["nodes"].is_array()) {
+        gltf["scenes"][sceneIndex]["nodes"] = json::array();
+    }
+    return sceneIndex;
+}
+
+int ensureNodeByName(json& gltf, const std::string& name, int sceneIndex) {
+    if (!gltf.contains("nodes") || !gltf["nodes"].is_array()) {
+        gltf["nodes"] = json::array();
+    }
+
+    for (size_t i = 0; i < gltf["nodes"].size(); ++i) {
+        const json& node = gltf["nodes"][i];
+        if (node.contains("name") && node["name"].is_string() && node["name"].get<std::string>() == name) {
+            return static_cast<int>(i);
+        }
+    }
+
+    json node = json::object();
+    node["name"] = name;
+    gltf["nodes"].push_back(node);
+    int nodeIndex = static_cast<int>(gltf["nodes"].size() - 1);
+    gltf["scenes"][sceneIndex]["nodes"].push_back(nodeIndex);
+    return nodeIndex;
+}
+
+void ensureExtensionUsed(json& gltf, const char* extensionName) {
+    if (!gltf.contains("extensionsUsed") || !gltf["extensionsUsed"].is_array()) {
+        gltf["extensionsUsed"] = json::array();
+    }
+
+    for (const auto& ext : gltf["extensionsUsed"]) {
+        if (ext.is_string() && ext.get<std::string>() == extensionName) {
+            return;
+        }
+    }
+
+    gltf["extensionsUsed"].push_back(extensionName);
+}
+
+bool patchExportedGltfExtras(const std::string& filepath, SceneData& scene, const ExportSettings& settings) {
+    if ((!settings.export_cameras || !scene.camera) && (!settings.export_lights || scene.lights.empty())) {
+        return true;
+    }
+
+    auto patchJson = [&](json& gltf) {
+        if (!gltf.contains("asset") || !gltf["asset"].is_object()) {
+            gltf["asset"] = json::object();
+        }
+        gltf["asset"]["generator"] = "RayTrophi Studio";
+
+        int sceneIndex = ensureDefaultScene(gltf);
+
+        if (settings.export_cameras && scene.camera) {
+            if (!gltf.contains("cameras") || !gltf["cameras"].is_array()) {
+                gltf["cameras"] = json::array();
+            }
+
+            json cameraDef = {
+                {"name", "MainCamera"},
+                {"type", "perspective"},
+                {"perspective", {
+                    {"yfov", degToRad(scene.camera->vfov)},
+                    {"znear", (std::max)(0.0001f, scene.camera->near_dist)},
+                    {"zfar", (std::max)(scene.camera->near_dist + 0.0001f, scene.camera->far_dist)},
+                    {"aspectRatio", (std::max)(0.0001f, scene.camera->aspect_ratio)}
+                }}
+            };
+
+            gltf["cameras"].push_back(cameraDef);
+            int cameraIndex = static_cast<int>(gltf["cameras"].size() - 1);
+            int nodeIndex = ensureNodeByName(gltf, "MainCameraNode", sceneIndex);
+
+            json& node = gltf["nodes"][nodeIndex];
+            node["name"] = "MainCameraNode";
+            node["camera"] = cameraIndex;
+            setNodeMatrix(node, makeGltfNodeMatrix(scene.camera->lookfrom, scene.camera->lookat - scene.camera->lookfrom, scene.camera->vup));
+        }
+
+        if (settings.export_lights && !scene.lights.empty()) {
+            ensureExtensionUsed(gltf, "KHR_lights_punctual");
+            json& lightsRoot = gltf["extensions"]["KHR_lights_punctual"]["lights"];
+            if (!lightsRoot.is_array()) {
+                lightsRoot = json::array();
+            }
+
+            for (const auto& light : scene.lights) {
+                if (!light) {
+                    continue;
+                }
+
+                std::string lightType;
+                json lightDef = {
+                    {"name", light->nodeName.empty() ? "Light" : light->nodeName},
+                    {"color", { light->color.x, light->color.y, light->color.z }},
+                    {"intensity", (std::max)(0.0f, light->intensity)}
+                };
+
+                if (light->type() == LightType::Point) {
+                    lightType = "point";
+                } else if (light->type() == LightType::Directional) {
+                    lightType = "directional";
+                } else if (light->type() == LightType::Spot) {
+                    lightType = "spot";
+                    auto spot = std::dynamic_pointer_cast<SpotLight>(light);
+                    float outerCone = degToRad(spot ? spot->getAngleDegrees() * 0.5f : 22.5f);
+                    float innerCone = outerCone * (1.0f - clamp01(spot ? spot->getFalloff() : 0.1f));
+                    lightDef["spot"] = {
+                        {"innerConeAngle", (std::max)(0.0f, innerCone)},
+                        {"outerConeAngle", (std::max)(innerCone, outerCone)}
+                    };
+                } else {
+                    continue;
+                }
+
+                lightDef["type"] = lightType;
+                lightsRoot.push_back(lightDef);
+                int lightIndex = static_cast<int>(lightsRoot.size() - 1);
+                const std::string nodeName = light->nodeName.empty() ? ("Light_" + std::to_string(lightIndex)) : light->nodeName;
+                int nodeIndex = ensureNodeByName(gltf, nodeName, sceneIndex);
+
+                json& node = gltf["nodes"][nodeIndex];
+                node["name"] = nodeName;
+                node["extensions"]["KHR_lights_punctual"]["light"] = lightIndex;
+
+                if (light->type() == LightType::Point) {
+                    setNodeTranslation(node, light->position);
+                } else {
+                    setNodeMatrix(node, makeGltfNodeMatrix(light->position, light->direction, Vec3(0.0f, 1.0f, 0.0f)));
+                }
+            }
+        }
+    };
+
+    const std::filesystem::path outPath(filepath);
+    const std::string ext = outPath.extension().string();
+
+    if (ext == ".gltf") {
+        std::ifstream in(filepath, std::ios::binary);
+        if (!in) {
+            return false;
+        }
+
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        json gltf = json::parse(text, nullptr, false);
+        if (gltf.is_discarded()) {
+            return false;
+        }
+
+        patchJson(gltf);
+
+        std::ofstream out(filepath, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return false;
+        }
+        out << gltf.dump(2);
+        return out.good();
+    }
+
+    if (ext != ".glb") {
+        return true;
+    }
+
+    std::ifstream in(filepath, std::ios::binary);
+    if (!in) {
+        return false;
+    }
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (bytes.size() < 20) {
+        return false;
+    }
+
+    auto readU32 = [&](size_t offset) -> uint32_t {
+        return static_cast<uint32_t>(bytes[offset]) |
+               (static_cast<uint32_t>(bytes[offset + 1]) << 8) |
+               (static_cast<uint32_t>(bytes[offset + 2]) << 16) |
+               (static_cast<uint32_t>(bytes[offset + 3]) << 24);
+    };
+
+    if (readU32(0) != kGlbMagic || readU32(4) != kGlbVersion) {
+        return false;
+    }
+
+    const uint32_t jsonChunkLength = readU32(12);
+    const uint32_t jsonChunkType = readU32(16);
+    if (jsonChunkType != kGlbJsonChunkType || bytes.size() < 20ull + jsonChunkLength) {
+        return false;
+    }
+
+    std::string jsonText(reinterpret_cast<const char*>(bytes.data() + 20), jsonChunkLength);
+    json gltf = json::parse(jsonText, nullptr, false);
+    if (gltf.is_discarded()) {
+        return false;
+    }
+
+    patchJson(gltf);
+
+    std::string newJsonText = gltf.dump();
+    while ((newJsonText.size() % 4u) != 0u) {
+        newJsonText.push_back(' ');
+    }
+
+    std::vector<uint8_t> rebuilt;
+    rebuilt.reserve(bytes.size() + 1024);
+
+    auto appendU32 = [&](uint32_t value) {
+        rebuilt.push_back(static_cast<uint8_t>(value & 0xFFu));
+        rebuilt.push_back(static_cast<uint8_t>((value >> 8) & 0xFFu));
+        rebuilt.push_back(static_cast<uint8_t>((value >> 16) & 0xFFu));
+        rebuilt.push_back(static_cast<uint8_t>((value >> 24) & 0xFFu));
+    };
+
+    appendU32(kGlbMagic);
+    appendU32(kGlbVersion);
+    appendU32(0); // total length placeholder
+    appendU32(static_cast<uint32_t>(newJsonText.size()));
+    appendU32(kGlbJsonChunkType);
+    rebuilt.insert(rebuilt.end(), newJsonText.begin(), newJsonText.end());
+
+    size_t nextChunkOffset = 20ull + jsonChunkLength;
+    if (bytes.size() >= nextChunkOffset + 8ull) {
+        const uint32_t binChunkLength = readU32(nextChunkOffset);
+        const uint32_t binChunkType = readU32(nextChunkOffset + 4);
+        if (binChunkType == kGlbBinChunkType && bytes.size() >= nextChunkOffset + 8ull + binChunkLength) {
+            appendU32(binChunkLength);
+            appendU32(binChunkType);
+            rebuilt.insert(
+                rebuilt.end(),
+                bytes.begin() + static_cast<std::ptrdiff_t>(nextChunkOffset + 8ull),
+                bytes.begin() + static_cast<std::ptrdiff_t>(nextChunkOffset + 8ull + binChunkLength)
+            );
+        }
+    }
+
+    const uint32_t totalLength = static_cast<uint32_t>(rebuilt.size());
+    rebuilt[8] = static_cast<uint8_t>(totalLength & 0xFFu);
+    rebuilt[9] = static_cast<uint8_t>((totalLength >> 8) & 0xFFu);
+    rebuilt[10] = static_cast<uint8_t>((totalLength >> 16) & 0xFFu);
+    rebuilt[11] = static_cast<uint8_t>((totalLength >> 24) & 0xFFu);
+
+    std::ofstream out(filepath, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(rebuilt.data()), static_cast<std::streamsize>(rebuilt.size()));
+    return out.good();
+}
+} // namespace
 
 bool SceneExporter::drawExportPopup(SceneData& scene) {
     if (!show_export_popup) return false;
@@ -49,6 +556,19 @@ bool SceneExporter::drawExportPopup(SceneData& scene) {
         ImGui::Separator();
         ImGui::Checkbox("Selected Objects Only", &settings.export_selected_only);
         UIWidgets::HelpMarker("Export only the currently selected objects.");
+
+        if (TerrainManager::getInstance().hasActiveTerrain()) {
+            ImGui::Separator();
+            ImGui::Text("Terrain");
+            ImGui::Checkbox("Bake Terrain Layer Materials", &settings.bake_terrain_materials);
+            if (settings.bake_terrain_materials) {
+                ImGui::SliderInt("Terrain Bake Resolution", &settings.terrain_bake_resolution, 256, 4096);
+                UIWidgets::HelpMarker("Bakes splat-blended terrain layers into export textures and embeds them into the GLB.");
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+                    "Layered terrain materials will not be preserved in GLB without baking.");
+            }
+        }
 
         ImGui::Separator();
         ImGui::Text("Animation Support");
@@ -247,15 +767,44 @@ bool SceneExporter::exportScene(const std::string& filepath, SceneData& scene, c
     std::vector<aiMesh*> accumulated_meshes;
     std::vector<aiMaterial*> accumulated_materials;
     std::vector<aiNode*> child_nodes; 
+    std::map<uint16_t, std::shared_ptr<Material>> exportMaterialOverrides;
 
     // Map internal material ID to Assimp Material Index
     std::map<uint16_t, unsigned int> matIdToAiIndex;
+
+    if (settings.bake_terrain_materials) {
+        auto& terrains = TerrainManager::getInstance().getTerrains();
+        for (const auto& terrain : terrains) {
+            if (terrain.material_id == MaterialManager::INVALID_MATERIAL_ID) {
+                continue;
+            }
+            if (!terrain.splatMap || terrain.layers.empty()) {
+                continue;
+            }
+            if (std::none_of(batches.begin(), batches.end(), [&](const auto& kv) {
+                return kv.second.material_id == terrain.material_id;
+            })) {
+                continue;
+            }
+
+            TerrainBakeResult bakeResult = bakeTerrainMaterialForExport(
+                terrain,
+                terrain.material_id,
+                settings.terrain_bake_resolution);
+            if (bakeResult.material) {
+                exportMaterialOverrides[terrain.material_id] = bakeResult.material;
+            }
+        }
+    }
 
     // 4. Process Materials
     for (const auto& kv : batches) {
         uint16_t mat_id = kv.second.material_id;
         if (matIdToAiIndex.find(mat_id) == matIdToAiIndex.end()) {
-            auto matShared = MaterialManager::getInstance().getMaterialShared(mat_id);
+            auto overrideIt = exportMaterialOverrides.find(mat_id);
+            auto matShared = (overrideIt != exportMaterialOverrides.end())
+                ? overrideIt->second
+                : MaterialManager::getInstance().getMaterialShared(mat_id);
             std::string matName = "Mat_" + std::to_string(mat_id); 
             if (matShared && !matShared->materialName.empty()) matName = matShared->materialName;
             
@@ -658,6 +1207,13 @@ bool SceneExporter::exportScene(const std::string& filepath, SceneData& scene, c
         }
     }
 
+    if (!patchExportedGltfExtras(filepath, scene, settings)) {
+        SCENE_LOG_ERROR("Scene exported, but failed to inject glTF camera/light metadata into: " + filepath);
+        is_exporting = false;
+        current_export_status = "Export post-process failed";
+        return false;
+    }
+
     SCENE_LOG_INFO("Scene exported successfully to: " + filepath);
     is_exporting = false;
     current_export_status = "Done";
@@ -748,7 +1304,48 @@ aiMaterial* SceneExporter::createAssimpMaterial(const std::shared_ptr<Material>&
                     }
 
                     if (dataLoaded) {
-                         unsigned char* srcData = (stbi_pixels != nullptr) ? stbi_pixels : rawData.data();
+                         unsigned char* srcData = nullptr;
+
+                         // If we have float pixels (HDR) or linear byte pixels, ensure base color
+                         // textures are converted to sRGB before writing PNG to avoid washed-out results
+                         auto linearToSrgbByte = [](float v) -> unsigned char {
+                             v = std::clamp(v, 0.0f, 1.0f);
+                             float srgb = (v <= 0.0031308f) ? (v * 12.92f) : (1.055f * std::pow(v, 1.0f/2.4f) - 0.055f);
+                             return static_cast<unsigned char>(std::clamp(srgb * 255.0f, 0.0f, 255.0f));
+                         };
+
+                         std::vector<unsigned char> converted;
+                         if (!rawData.empty()) {
+                             // rawData came from tex->pixels (bytes) or constructed from float_pixels
+                             // If this texture is used as base color, and the Texture reports linear (is_srgb==false),
+                             // convert bytes from linear->sRGB before writing.
+                             bool needConvertBytes = false;
+                             if (tex->is_srgb == false && type == aiTextureType_BASE_COLOR) {
+                                 needConvertBytes = true;
+                             }
+
+                             if (needConvertBytes) {
+                                 converted.reserve(rawData.size());
+                                 for (size_t i = 0; i + 3 < rawData.size(); i += 4) {
+                                     float r = rawData[i + 0] / 255.0f;
+                                     float g = rawData[i + 1] / 255.0f;
+                                     float b = rawData[i + 2] / 255.0f;
+                                     unsigned char rc = linearToSrgbByte(r);
+                                     unsigned char gc = linearToSrgbByte(g);
+                                     unsigned char bc = linearToSrgbByte(b);
+                                     converted.push_back(rc);
+                                     converted.push_back(gc);
+                                     converted.push_back(bc);
+                                     converted.push_back(rawData[i + 3]);
+                                 }
+                                 srcData = converted.data();
+                             } else {
+                                 srcData = rawData.data();
+                             }
+                         } else {
+                             srcData = (stbi_pixels != nullptr) ? stbi_pixels : nullptr;
+                         }
+
                          stbi_write_png_to_func(stbi_write_to_mem, &pngBuffer, w, h, comp, srcData, w * 4);
                          if (stbi_pixels) stbi_image_free(stbi_pixels);
 

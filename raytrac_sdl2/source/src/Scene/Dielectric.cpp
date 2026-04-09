@@ -107,46 +107,17 @@ Vec3 Dielectric::apply_scratches(const Vec3& color, const Vec3& point) const {
 }
 bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered, bool& is_specular) const {
     is_specular = true;
-    // Normalizasyon
     Vec3 unit_direction = r_in.direction.normalize();
-    Vec3 outward_normal = rec.interpolated_normal;
-	outward_normal = outward_normal.normalize();
-    // Malzeme parametreleri
-    float adjusted_thickness = 0.01f;  // Daha küçük bir kalınlık değeri
+    Vec3 shading_normal = rec.interpolated_normal.normalize();
+    Vec3 macro_normal = rec.front_face ? shading_normal : -shading_normal;
 
-    // Açı hesaplamaları
-    float cos_theta = fmin(Vec3::dot(-unit_direction, outward_normal), 1.0f);
-    float sin_theta = sqrt(1.0f - cos_theta * cos_theta);
-
-    // Fresnel hesaplaması - kırılma indisi daha doğru kullanılıyor
-    Vec3 reversed_ir = Vec3(1.0f / ir.x, 1.0f / ir.y, 1.0f / ir.z);
-
-    Vec3 current_ir = rec.front_face ? ir : reversed_ir;
-    Vec3 fresnel_factor = fresnel(unit_direction, outward_normal, current_ir);
-    float fresnel_reflect = fresnel_factor.y; // Yeşil kanal üzerinden hesaplamak daha doğru olabilir
-
-    // Kırılma oranı (yeşil kanal için)
+    float cos_theta = fmin(Vec3::dot(-unit_direction, macro_normal), 1.0f);
+    float sin_theta = sqrt(std::max(0.0f, 1.0f - cos_theta * cos_theta));
     float refract_ratio = rec.front_face ? (1.0f / ir[1]) : ir[1];
-    bool cannot_refract = sin_theta * refract_ratio > 1.0;
+    bool cannot_refract = sin_theta * refract_ratio > 1.0f;
+    float reflect_prob = reflectance(cos_theta, ir[1]);
 
-    // Olasılık hesaplamaları
-    float direct_trans_prob = 0.05; // %5 doğrudan geçiş
-    float reflect_prob = fresnel_reflect;
-    float refract_prob = cannot_refract ? 0.0 : (1.0f - fresnel_reflect) * (1.0f - direct_trans_prob);
-
-    // Normalize
-    float total_prob = reflect_prob + refract_prob + direct_trans_prob;
-    reflect_prob /= total_prob;
-    refract_prob /= total_prob;
-    direct_trans_prob /= total_prob;
-
-    // Işık yönü hesaplaması
-    Vec3 direction;
-    float random_val = Vec3::random_float();
-    float thickness = 0.1f; // OptiX parity
-
-    // --- Unified Microfacet Sample (GGX) ---
-    // Physical roughness alignment for 3-path parity
+    Vec3 micro_normal = macro_normal;
     float alpha = roughness * roughness;
     float r1 = Vec3::random_float();
     float r2 = Vec3::random_float();
@@ -155,53 +126,48 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
     float sin_theta_h = std::sqrt(std::max(0.0f, 1.0f - cos_theta_h * cos_theta_h));
     Vec3 h_local(sin_theta_h * std::cos(phi), sin_theta_h * std::sin(phi), cos_theta_h);
     
-    // Build ONB
-    Vec3 up = (std::abs(outward_normal.z) < 0.999f) ? Vec3(0, 0, 1) : Vec3(1, 0, 0);
-    Vec3 tX = Vec3::cross(up, outward_normal).normalize();
-    Vec3 tY = Vec3::cross(outward_normal, tX);
-    Vec3 micro_normal = (tX * h_local.x + tY * h_local.y + outward_normal * h_local.z).normalize();
+    Vec3 up = (std::abs(macro_normal.z) < 0.999f) ? Vec3(0, 0, 1) : Vec3(1, 0, 0);
+    Vec3 tX = Vec3::cross(up, macro_normal).normalize();
+    Vec3 tY = Vec3::cross(macro_normal, tX);
+    if (roughness >= 0.01f) {
+        micro_normal = (tX * h_local.x + tY * h_local.y + macro_normal * h_local.z).normalize();
+    }
 
-    if (random_val < reflect_prob) {
-        // Yansıma (Microfacet)
+    bool do_reflect = cannot_refract || (Vec3::random_float() < reflect_prob);
+    Vec3 direction;
+    Vec3 offset_dir;
+    if (do_reflect) {
         direction = Vec3::reflect(unit_direction, micro_normal).normalize();
-        attenuation = calculate_reflected_attenuation(color, fresnel_factor);
-    }
-    else if (random_val < reflect_prob + refract_prob) {
-        // Kırılma (Microfacet)
+        if (Vec3::dot(direction, macro_normal) <= 0.0f) {
+            direction = Vec3::reflect(unit_direction, macro_normal).normalize();
+        }
+        attenuation = Vec3(1.0f, 1.0f, 1.0f);
+        offset_dir = macro_normal;
+    } else {
         direction = Vec3::refract(unit_direction, micro_normal, refract_ratio).normalize();
-
-        // OptiX-like transmission calculation (Beer's Law)
-        // absorbans için ters renk kullan (açık renkler daha az soğurur)
-        Vec3 absorption = Vec3(
-            (1.0f - color.x) * thickness,
-            (1.0f - color.y) * thickness,
-            (1.0f - color.z) * thickness
-        );
-        Vec3 transmission_color = Vec3(
-            std::exp(-absorption.x),
-            std::exp(-absorption.y),
-            std::exp(-absorption.z)
-        );
-
-        float fres_val = fresnel_factor.y; // Green channel for scalar fresnel probability
-        float trans_factor = 1.0f - fres_val * 0.0f; // Simplified
-
-        // Physical result assignment (No fake caustic addition)
-        attenuation = transmission_color * trans_factor;
+        if (Vec3::dot(direction, macro_normal) >= 0.0f) {
+            direction = Vec3::reflect(unit_direction, macro_normal).normalize();
+            attenuation = Vec3(1.0f, 1.0f, 1.0f);
+            offset_dir = macro_normal;
+        } else {
+            float cosInside = std::max(std::abs(Vec3::dot(direction.normalize(), -macro_normal)), 0.05f);
+            float thickness = 0.1f / cosInside;
+            Vec3 clampedColor = Vec3::clamp(color, 0.0f, 1.0f);
+            Vec3 absorption(
+                (1.0f - clampedColor.x) * thickness,
+                (1.0f - clampedColor.y) * thickness,
+                (1.0f - clampedColor.z) * thickness
+            );
+            attenuation = Vec3(
+                std::exp(-absorption.x),
+                std::exp(-absorption.y),
+                std::exp(-absorption.z)
+            );
+            offset_dir = -macro_normal;
+        }
     }
-    else {
-        // Doğrudan geçiş (Transparent/Thin)
-        direction = unit_direction;       
-        Vec3 absorption = Vec3(
-            (1.0f - color.x) * thickness,
-            (1.0f - color.y) * thickness,
-            (1.0f - color.z) * thickness
-        );
-        attenuation = Vec3(std::exp(-absorption.x), std::exp(-absorption.y), std::exp(-absorption.z));
-    }
-  
-    // Yeni ışının başlangıç noktası küçük bir offsetle
-    scattered = Ray(rec.point+ r_in.direction *adjusted_thickness, direction.normalize());
+
+    scattered = Ray(rec.point + offset_dir * 0.001f, direction.normalize());
 
     return true;
 }
@@ -255,6 +221,12 @@ Vec3 Dielectric::apply_roughness(const Vec3& dir, const Vec3& normal) const {
 float Dielectric::calculate_attenuation(float distance) const {
     const float absorption_coefficient = 0.01f;  // Daha düşük absorpsiyon
     return std::exp(-absorption_coefficient * distance);
+}
+
+float Dielectric::reflectance(float cosine, float ref_idx) {
+    float r0 = (1.0f - ref_idx) / (1.0f + ref_idx);
+    r0 = r0 * r0;
+    return r0 + (1.0f - r0) * std::pow(1.0f - cosine, 5.0f);
 }
 
 

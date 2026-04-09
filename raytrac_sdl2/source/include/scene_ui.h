@@ -21,7 +21,9 @@ class ColorProcessor;
 class SceneSelection;
 struct RenderSettings;
 class Texture;
+struct HitRecord;
 struct InstanceGroup;
+struct WaterSurface;
 class VDBVolume;
 class GasVolume;
 
@@ -43,12 +45,15 @@ class GasVolume;
 #include <string>
 #include <memory>
 #include <vector>
+#include <array>
 #include <unordered_map>
 #include "Vec3.h" // For bbox_cache
 #include "instancegroup.h"
 #include "Backend/IBackend.h"
 #include "Backend/OptixBackend.h"
 #include "AssetRegistry.h"
+#include "Paint/PaintModeState.h"
+#include "Paint/MeshPaintAdapter.h"
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - HEADER
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -114,6 +119,7 @@ public:
     bool show_animation_panel = true; // Default open
     bool show_foliage_tab = false;    // Default closed (User preference)
     bool show_water_tab = true;       // DEFAULT OPEN
+    bool show_scatter_tab = true;     // Scatter panel (legacy) - visible in main panel
     bool show_terrain_tab = true;     // DEFAULT OPEN
     bool show_system_tab = true;     // Default closed
     bool show_terrain_graph = false;  // Terrain node editor panel
@@ -123,11 +129,18 @@ public:
     bool show_world_tab = true;        // World & Sky tab (Default open)
     bool show_hair_tab = true;         // Hair & Fur tab (Default open)
     bool show_modifiers_tab = true;    // Modifiers & Sculpt tab (Default open)
+    bool show_paint_tab = true;        // Paint Mode tab (Default open)
+    bool focus_properties_panel_next_frame = false;
+    int active_water_subtab = 0;       // 0=Water, 1=River
+    int selected_water_surface_id = -1;
     int vdb_import_orientation_preset = 0; // 0=Auto, 1=Standard, 2=Y-up to Z-forward (-90 X)
     std::string tab_to_focus = "";    // For auto-focusing tabs upon activation
 
     // Hair/Fur System
     Hair::HairUI hairUI;               // Hair editing panel
+    // Persisted open/closed state for terrain subsections
+    bool terrain_layer_open[4] = { true, true, true, true };
+    bool foliage_section_open = true;
 
     // Static Helpers (Shared across modules)
     static std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const std::string& initialDir = "", const std::string& defaultFilename = "");
@@ -187,6 +200,7 @@ public:
      void drawCameraContent(UIContext& ctx);
      void drawLightsContent(UIContext& ctx);
      void drawRenderSettingsPanel(UIContext& ctx, float screen_y);
+     void drawRenderInspectorContent(UIContext& ctx);
      static void ClampWindowToDisplay();    
      void drawAnimationSettings(UIContext& ctx);  // Deprecated - timeline panel kullanılıyor
      void drawTimelinePanel(UIContext& ctx, float screen_y);  // Yeni timeline panel (Blender tarzı)
@@ -196,8 +210,48 @@ public:
      void drawWorldContent(UIContext& ctx);
      void drawSceneHierarchy(UIContext& ctx);  // Scene hierarchy / outliner panel
      void drawModifiersPanel(UIContext& ctx);  // Modifiers & Sculpting panel
+     void drawPaintPanel(UIContext& ctx);      // Lightweight paint workflow panel
+     void drawTerrainPaintPanel(UIContext& ctx, class TerrainObject* terrain);
+     void drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<class Triangle>& meshTriangle);
+     void drawPaintBrushDock(UIContext& ctx);
+     void drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<class Triangle>& meshTriangle);
+     void drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<class Triangle>& meshTriangle);
+     void drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapter);
+     void drawPaintChannelTextureSlots(UIContext& ctx, Paint::MeshPaintAdapter* adapter);
      void drawMaterialPanel(UIContext& ctx);   // Material/Texture editor for selected object
      void drawPrincipledBSDFEditor(class PrincipledBSDF* pbsdf, uint16_t mat_id, UIContext& ctx); // Reusable editor widget
+     void drawEditableMeshOverlay(UIContext& ctx); // Viewport edit overlay for selected mesh
+     bool ensureEditableMeshCache(UIContext& ctx, const std::string& objectName);
+     bool handleMeshElementSelection(UIContext& ctx, const ImVec2& mousePos);
+     Vec3 getSelectedMeshElementWorldPosition(UIContext& ctx, bool* valid = nullptr);
+     bool applySelectedMeshElementTranslation(UIContext& ctx, const Vec3& worldDelta);
+     bool applySelectedMeshElementTransform(UIContext& ctx, const Matrix4x4& worldTransform);
+     struct MeshShadingSettings;
+     MeshShadingSettings& ensureMeshShadingSettings(const std::string& objectName);
+     bool applyMeshShadingSettings(UIContext& ctx, const std::string& objectName, bool queueGpuSync = true);
+     bool refreshEditableDisplayMeshFromBase(UIContext& ctx, const std::string& objectName, bool queueGpuSync = true);
+     void clearEditableMeshSelection();
+     void resetMeshEditState(UIContext& ctx);
+     void syncMeshEditState(UIContext& ctx);
+     bool ensureMeshEditLayer(UIContext& ctx, const std::string& objectName);
+     void refreshMeshEditLayerEditedState(UIContext& ctx);
+     void captureMeshEditLayerState(UIContext& ctx, const std::string& objectName, std::vector<MeshEditTriangleState>& outStates);
+            // overlay grid removed; raster grid in backends handles depth-tested grid
+     void applyMeshEditTriangleStates(UIContext& ctx, const std::vector<MeshEditTriangleState>& states, bool queueGpuSync = true);
+     void setMeshEditLayerEnabled(UIContext& ctx, bool enabled);
+     void applyMeshEditLayer(UIContext& ctx);
+     void discardMeshEditLayer(UIContext& ctx);
+     void tryRestoreSerializedMeshEditLayer(UIContext& ctx);
+     void queueMeshEditGpuSync(const std::string& objectName);
+     void processPendingMeshEditGpuSync(UIContext& ctx);
+     bool mergeSelectedVerticesToCenter(UIContext& ctx);
+     bool weldSelectedVerticesByDistance(UIContext& ctx, float distance);
+     bool addFaceFromSelectedVertices(UIContext& ctx);
+     bool deleteSelectedMeshFaces(UIContext& ctx);
+     bool extrudeSelectedMeshFaces(UIContext& ctx, float distance);
+     bool loopCutSelectedEdges(UIContext& ctx, float t);
+     bool dissolveSelectedEdges(UIContext& ctx);
+     bool dissolveSelectedVertices(UIContext& ctx);
      void drawSelectionBoundingBox(UIContext& ctx);  // Draw bounding box for selected object
      void drawTransformGizmo(UIContext& ctx);  // ImGuizmo transform gizmo   
      void drawCameraGizmos(UIContext& ctx);    // Draw camera icons in viewport
@@ -210,6 +264,7 @@ public:
      void processAnimations(UIContext& ctx); // Apply keyframe data to scene objects
   
      void invalidateCache();
+     void rebuildTriToIndex(const std::vector<std::shared_ptr<class Hittable>>& objects);
      void rebuildMeshCache(const std::vector<std::shared_ptr<class Hittable>>& objects);
      void updateBBoxCache(const std::string& objectName);  // Update bounding box for specific object after transform
      void moveObjectPivot(UIContext& ctx, const std::string& objectName, const Vec3& worldDelta);
@@ -279,7 +334,8 @@ public:
      
      // Viewport Display Settings (Blender-style overlay)
      struct ViewportDisplaySettings {
-         int shading_mode = 1;  // 0=Solid, 1=Material, 2=Rendered
+         int shading_mode = 0;  // 0=Solid, 1=Material, 2=Rendered, 3=Matcap
+            int matcap_preset = 0; // 0..9 allowed: 0=Solid clay, 1=User texture, 2..9=procedural presets
          bool show_gizmos = true;
          
          // Camera HUD (viewport lens controls)
@@ -309,6 +365,144 @@ public:
          int focus_mode = 1;               // 0=MF, 1=AF-S, 2=AF-C (Default: AF-S)
      };
      ViewportDisplaySettings viewport_settings;
+
+     struct MeshOverlaySettings {
+         bool enabled = false;
+         bool edit_mode = false;
+         bool show_vertices = false;
+         bool proportional_edit = false;
+         float proportional_radius = 0.75f;
+         float proportional_falloff = 0.65f;
+         int proportional_falloff_type = 0; // 0=Smooth, 1=Linear, 2=Sharp, 3=Sphere, 4=Root
+         float edge_thickness = 1.15f;
+         float vertex_radius = 2.75f;
+         int max_overlay_triangles = 12000;
+         int max_vertex_markers = 1200;
+     };
+     MeshOverlaySettings mesh_overlay_settings;
+     struct MeshShadingSettings {
+         bool flat_shading = false;
+         bool auto_smooth = true;
+         float auto_smooth_angle_degrees = 60.0f;
+     };
+     std::unordered_map<std::string, MeshShadingSettings> mesh_shading_settings_by_object;
+     struct CachedMeshOverlayEdgeSource {
+         std::shared_ptr<class Triangle> triangle;
+         int a = 0;
+         int b = 0;
+     };
+     struct CachedMeshOverlayVertexSource {
+         std::shared_ptr<class Triangle> triangle;
+         int index = 0;
+     };
+     struct MeshOverlayCache {
+         std::string object_name;
+         size_t source_triangle_count = 0;
+         std::vector<CachedMeshOverlayEdgeSource> edges;
+         std::vector<CachedMeshOverlayVertexSource> vertices;
+     };
+     MeshOverlayCache mesh_overlay_cache;
+     struct EditableVertexRef {
+         std::shared_ptr<class Triangle> triangle;
+         int corner = 0;
+     };
+     struct EditableVertex {
+         Vec3 local_position;
+         bool is_boundary = false;
+         std::vector<EditableVertexRef> refs;
+     };
+     struct EditableEdge {
+         int v0 = -1;
+         int v1 = -1;
+     };
+     struct EditableFace {
+         std::shared_ptr<class Triangle> triangle;
+         int v0 = -1;
+         int v1 = -1;
+         int v2 = -1;
+     };
+     struct EditablePolygonFace {
+         std::vector<int> vertex_ids;
+         std::vector<int> triangle_ids;
+     };
+     struct EditableMeshSelection {
+         int active_vertex_id = -1;
+         int active_edge_id = -1;
+         int active_face_id = -1;
+         std::vector<int> vertex_ids;
+         std::vector<int> edge_ids;
+         std::vector<int> face_ids;
+     };
+     struct EditableSpatialCellKey {
+         int x = 0;
+         int y = 0;
+         int z = 0;
+
+         bool operator==(const EditableSpatialCellKey& other) const {
+             return x == other.x && y == other.y && z == other.z;
+         }
+     };
+     struct EditableSpatialCellKeyHasher {
+         std::size_t operator()(const EditableSpatialCellKey& key) const {
+             std::size_t hx = std::hash<int>{}(key.x);
+             std::size_t hy = std::hash<int>{}(key.y);
+             std::size_t hz = std::hash<int>{}(key.z);
+             return hx ^ (hy << 1) ^ (hz << 2);
+         }
+     };
+     struct EditableMeshCache {
+         std::string object_name;
+         size_t source_triangle_count = 0;
+         Matrix4x4 source_object_transform = Matrix4x4::identity();
+         bool shade_flat = false;
+         bool auto_smooth = true;
+         float auto_smooth_angle_degrees = 60.0f;
+         std::vector<EditableVertex> vertices;
+         std::vector<EditableEdge> edges;
+         std::vector<EditableEdge> polygon_edges;
+         std::vector<EditableFace> faces;
+         std::vector<EditablePolygonFace> polygon_faces;
+         std::vector<std::vector<int>> vertex_neighbors;
+         std::unordered_map<const class Triangle*, std::array<int, 3>> triangle_vertex_ids;
+         std::unordered_map<const class Triangle*, size_t> triangle_to_mesh_index;
+         float spatial_cell_size = 0.0f;
+         std::unordered_map<EditableSpatialCellKey, std::vector<int>, EditableSpatialCellKeyHasher> vertex_spatial_buckets;
+         std::vector<uint32_t> vertex_mark_stamps;
+         uint32_t vertex_mark_generation = 1;
+         std::vector<uint32_t> triangle_mark_stamps;
+         uint32_t triangle_mark_generation = 1;
+         EditableMeshSelection selection;
+     };
+     EditableMeshCache editable_mesh_cache;
+     std::vector<Vec3> sculpt_updated_local_positions;
+     std::vector<size_t> sculpt_dirty_mesh_cache_indices;
+     struct MeshEditLayer {
+         bool active = false;
+         bool enabled = true;
+         std::string object_name;
+         std::vector<MeshEditTriangleState> base_states;
+         std::vector<MeshEditTriangleState> edited_states;
+     };
+     MeshEditLayer mesh_edit_layer;
+     struct PendingSerializedMeshEditLayer {
+         bool has_data = false;
+         bool enabled = true;
+         std::string object_name;
+         std::vector<std::array<Vec3, 3>> base_positions;
+         std::vector<std::array<Vec3, 3>> edited_positions;
+     };
+     PendingSerializedMeshEditLayer pending_serialized_mesh_edit_layer;
+     std::string active_mesh_edit_object_name;
+     const class Triangle* active_mesh_edit_object_ptr = nullptr;
+     float mesh_face_extrude_distance = 0.2f;
+     float mesh_vertex_weld_distance = 0.05f;
+     float mesh_loop_cut_position = 0.5f;
+     std::string modifier_panel_exit_object; // Object for which user manually exited edit mode
+     bool mesh_edit_gpu_sync_pending = false;
+     std::string mesh_edit_gpu_sync_object_name;
+     ImVec2 mesh_overlay_view_min = ImVec2(0.0f, 0.0f);
+     ImVec2 mesh_overlay_view_max = ImVec2(0.0f, 0.0f);
+     bool mesh_overlay_view_valid = false;
      
      // Viewport Guide Settings (Safe areas, letterbox, grids)
      struct GuideSettings {
@@ -345,6 +539,7 @@ public:
      void drawScatterBrushPanel(UIContext& ctx);
      void handleScatterBrush(UIContext& ctx);  // Viewport brush interaction
      void drawBrushPreview(UIContext& ctx);    // Draw brush circle in viewport
+     void drawSculptBrushViewportPreview(UIContext& ctx, const HitRecord& hit, bool ghost = false); // Alpha grid + rings for sculpt
     
     // Terrain Brush Settings
     struct TerrainBrushSettings {
@@ -368,6 +563,73 @@ public:
         int paint_channel = 0; // 0=R(Layer0), 1=G(Layer1), 2=B(Layer2), 3=A(Layer3)
     };
     TerrainBrushSettings terrain_brush;
+    bool terrain_sculpt_proxy_active = false;
+    Paint::PaintModeState paint_mode_state;
+    enum class SculptBrushTool : int {
+        Grab = 0,
+        Inflate,
+        Smooth,
+        Flatten,
+        Draw,
+        Layer,
+        Pinch,
+        Clay,
+        ClayStrips,
+        Crease,
+        Scrape
+    };
+     struct SculptModeState {
+        bool enabled = false;
+        bool compact_ui = true;
+        std::string active_target_name;
+        SculptBrushTool tool = SculptBrushTool::Draw;
+        Paint::BrushSettings brush;
+        float normal_strength = 0.35f;
+        bool front_faces_only = true;
+        bool accumulate_live = true;
+        bool mirror_x = false;
+        bool mirror_y = false;
+        bool mirror_z = false;
+        // Reserved for the disabled experimental GPU sculpt path.
+        bool use_gpu = false;
+        SculptModeState() { brush.radius = 0.3f; brush.strength = 1.0f; brush.falloff = 0.75f; }
+    };
+    SculptModeState sculpt_mode_state;
+    struct SculptStrokeState {
+        bool active = false;
+        bool changed = false;
+        std::string object_name;
+        Vec3 start_world_hit;
+        Vec3 last_world_hit;
+        Vec3 stroke_normal;
+        std::vector<Vec3> start_local_positions;
+        std::vector<float> grab_weights;
+        std::vector<float> layer_accum;
+        std::vector<float> clay_layer_accum;
+        std::vector<float> clay_strips_layer_accum;
+        std::vector<MeshEditTriangleState> before_states;
+    };
+    SculptStrokeState sculpt_stroke_state;
+    enum class MeshWorkspaceMode : int {
+        Edit = 0,
+        Sculpt
+    };
+    MeshWorkspaceMode mesh_workspace_mode = MeshWorkspaceMode::Edit;
+    struct PaintBrushPreset {
+        std::string name;
+        Paint::BrushSettings brush;
+    };
+    std::vector<PaintBrushPreset> paint_brush_presets;
+    char paint_brush_preset_name[64] = "Custom Brush";
+    bool paint_brush_presets_initialized = false;
+    float paint_brush_dock_width = 286.0f;
+    float paint_layer_list_height = 160.0f; // user-resizable layer list height
+    void ensurePaintBrushPresets();
+
+    std::vector<PaintBrushPreset> sculpt_brush_presets;
+    char sculpt_brush_preset_name[64] = "Soft Sculpt";
+    bool sculpt_brush_presets_initialized = false;
+    void ensureSculptBrushPresets();
 
     // Terrain Foliage Brush Settings (Paint to add/remove foliage)
     struct FoliageBrushSettings {
@@ -387,13 +649,32 @@ public:
 
     // Water, River & Terrain UI
     void drawWaterPanel(UIContext& ctx);
+    bool drawWaterSurfaceMaterialEditor(UIContext& ctx, WaterSurface& surf, bool allow_delete = false);
     void drawRiverPanel(UIContext& ctx);       // Bezier spline river editor
     void drawRiverGizmos(UIContext& ctx, bool& gizmo_hit);  // River spline visualization
     void drawTerrainPanel(UIContext& ctx);
-    void handleTerrainBrush(UIContext& ctx);
-    void handleTerrainFoliageBrush(UIContext& ctx);  // Foliage paint brush
-    void handleHairBrush(UIContext& ctx);            // Hair paint brush
-    void drawHairBrushPreview(UIContext& ctx, const Vec3& hitPoint, const Vec3& hitNormal);       // Draw hair brush circle in viewport
+     // Central query: is ANY viewport tool/brush mode active?
+     // Used by idle-tier system so every tool keeps the viewport alive.
+     // Add new tools here — one place, all modes covered.
+     bool isAnyViewportToolActive() const {
+         return sculpt_stroke_state.active ||
+                paint_mode_state.enabled ||
+                terrain_brush.enabled ||
+                foliage_brush.enabled ||
+                scatter_brush.enabled ||
+                hairUI.isPainting() ||
+                (mesh_overlay_settings.enabled && mesh_overlay_settings.edit_mode) ||
+                (sculpt_mode_state.enabled);
+     }
+
+     void handleTerrainBrush(UIContext& ctx);
+     void handleTerrainFoliageBrush(UIContext& ctx);  // Foliage paint brush
+     void handleHairBrush(UIContext& ctx);            // Hair paint brush
+     void handleMeshSculpt(UIContext& ctx);           // Mesh sculpt brush interaction
+     void handleMeshPaint(UIContext& ctx);            // Mesh texture paint brush
+     bool shouldShowPaintBrushDock() const;
+     float getPaintBrushDockWidth() const;
+     void drawHairBrushPreview(UIContext& ctx, const Vec3& hitPoint, const Vec3& hitNormal);       // Draw hair brush circle in viewport
     void tickProgressiveVertexSync(); // Called each frame to process a chunk
     void updateAutofocus(UIContext& ctx);  // Run autofocus logic (raycast center)
     
@@ -405,18 +686,27 @@ public:
     void importVDBVolume(UIContext& ctx);          // Import single VDB file
     void importVDBSequence(UIContext& ctx);        // Import VDB Sequence
     void drawVDBImportMenu(UIContext& ctx);        // Import menu items
-   
-
+    SceneHistory history;  // Command history for undo/redo
+    // Fast lookup from Triangle pointer to its index in world.objects (for BVH Picking)
+    std::unordered_map<const class Triangle*, int> tri_to_index;
+    // Interaction State
+    bool is_dragging = false; // Tracks if a gizmo manipulation is in progress
+    bool is_bvh_dirty = false; // Flag for lazy BVH updates
+    bool focus_scene_edit_tab = false; // Auto-focus Scene Edit tab after model load
+    bool mesh_edit_optix_targeted_sync_enabled = true;
+    // picking fails because Triangle::hit() reads stale local-space positions.
+    bool picking_vertices_synced = false;
 private:
     // --- UI Structure ---
     void drawPanels(UIContext& ctx);
     void drawStatusAndBottom(UIContext& ctx, float screen_x, float screen_y, float left_offset);
      void drawAuxWindows(UIContext& ctx);
      void drawAssetBrowser(UIContext& ctx, bool embedded = false);
-     void appendAssetToScene(UIContext& ctx, const std::filesystem::path& asset_path, const std::string& display_name);
-     bool appendAnimationClipAssetToScene(UIContext& ctx, const AssetRecord& asset, const std::string& display_name);
-     bool raycastViewportPlacement(UIContext& ctx, const ImVec2& screen_pos, Vec3& hit_point, Vec3& hit_normal) const;
-     void drawAssetDragGhost(UIContext& ctx, const std::string& asset_name, const Vec3& hit_point, const Vec3& bounds_min, const Vec3& bounds_max) const;
+      void appendAssetToScene(UIContext& ctx, const std::filesystem::path& asset_path, const std::string& display_name);
+      bool appendAnimationClipAssetToScene(UIContext& ctx, const AssetRecord& asset, const std::string& display_name);
+      bool raycastViewportPlacement(UIContext& ctx, const ImVec2& screen_pos, Vec3& hit_point, Vec3& hit_normal) const;
+      bool raycastViewportHit(UIContext& ctx, const ImVec2& screen_pos, HitRecord& hit_record) const;
+      void drawAssetDragGhost(UIContext& ctx, const std::string& asset_name, const Vec3& hit_point, const Vec3& bounds_min, const Vec3& bounds_max) const;
      bool ensureSelectedAssetPreviewTexture(UIContext& ctx, const std::filesystem::path& preview_path, int& width, int& height);
      bool ensureAssetBrowserThumbnailTexture(UIContext& ctx, const std::filesystem::path& preview_path, SDL_Texture*& out_texture, int& width, int& height);
      void releaseSelectedAssetPreviewTexture();
@@ -442,6 +732,7 @@ private:
     void drawLightGizmos(UIContext& ctx, bool& gizmo_hit);
     void drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit);
     void drawSelectionGizmos(UIContext& ctx);
+    void drawOverlayGrid(UIContext& ctx);
     void drawFocusIndicator(UIContext& ctx);  // Split-prism focus aid
     void drawZoomRing(UIContext& ctx);        // FOV zoom control
     void drawExposureInfo(UIContext& ctx);    // Cinema camera exposure bar
@@ -461,6 +752,7 @@ private:
 
     // --- Deferred / Maintenance ---
     void processDeferredSceneUpdates(UIContext& ctx);
+    void validateSelectionAgainstScene(UIContext& ctx);
     bool showSidePanel = true;
      bool show_controls_window = false; // Controls/Help window visibility
      bool show_asset_browser = false;
@@ -499,6 +791,17 @@ private:
      std::filesystem::path pending_asset_library_root;
      std::string asset_library_refresh_status;
      bool asset_library_refresh_in_progress = false;
+    // Layer thumbnail cache for Photoshop-style layer panel
+    struct LayerThumbEntry {
+        SDL_Texture* texture = nullptr;
+        uint32_t layer_id = 0;
+        uint64_t content_hash = 0; // simple hash to detect changes
+        void release() { if (texture) { SDL_DestroyTexture(texture); texture = nullptr; } }
+    };
+    std::vector<LayerThumbEntry> layer_thumb_cache;
+    void releaseLayerThumbnails();
+    SDL_Texture* getOrCreateLayerThumbnail(UIContext& ctx, Paint::PaintLayerData* layer, Paint::PaintChannel channel);
+
     bool showResolutionPanel = true; // class üyesi
     bool camera_initialized = false;
     Vec3 camera_initial_pos;
@@ -510,6 +813,7 @@ private:
     bool pending_project_ui_restore = false;
     float side_panel_width = 360.0f; // Resizable Left Panel width
     float bottom_panel_height = 100.0f; // Default to minimum height
+    float preferred_bottom_panel_height = 100.0f; // Persist desired height; avoid shrinking permanently during minimized/small viewport frames
     float hierarchy_panel_height = 250.0f; // New: Resizable hierarchy list height
     float last_applied_width = 0.0f;
     float last_applied_height = 0.0f;
@@ -526,8 +830,7 @@ private:
     void deserialize(const std::string& data); // Deserialize and apply UI state
 
     std::map<std::string, std::vector<std::pair<int, std::shared_ptr<class Triangle>>>> mesh_cache;
-    // Fast lookup from Triangle pointer to its index in world.objects (for BVH Picking)
-    std::unordered_map<const class Triangle*, int> tri_to_index;
+  
     size_t cached_scene_triangle_count = 0;
     std::unordered_map<std::string, size_t> cached_triangle_count_by_object;
     // Sequential cache for ImGui Clipper (Visualization)
@@ -543,20 +846,24 @@ private:
 
     bool mesh_cache_valid = false;
     size_t last_scene_obj_count = 0; // Tracking for cache invalidation
+    size_t last_scene_light_count = 0;
+    size_t last_scene_camera_count = 0;
+    size_t last_scene_vdb_count = 0;
+    size_t last_scene_gas_count = 0;
+    size_t last_scene_forcefield_count = 0;
+    bool selection_validation_pending = false;
     
     // Lazy CPU Vertex Sync - objects that need CPU update before picking
     // In TLAS mode, we skip CPU vertex update on gizmo release for instant response.
     // Instead, we mark objects as "needing sync" and only update when picking is attempted.
     std::set<std::string> objects_needing_cpu_sync;
     void ensureCPUSyncForPicking(UIContext& ctx); // Called before mouse picking to sync pending objects
-   
-    // Interaction State
-    bool is_dragging = false; // Tracks if a gizmo manipulation is in progress
-    bool is_bvh_dirty = false; // Flag for lazy BVH updates
-    bool focus_scene_edit_tab = false; // Auto-focus Scene Edit tab after model load
-    
+
+    // Tracks whether a full CPU vertex sync has been performed since the last
+    // scene load / cache invalidation. Without this, Solid/Matcap viewport
+  
     // Undo/Redo System
-    SceneHistory history;  // Command history for undo/redo
+   
     
     // Transform Undo/Redo State
     // We store the initial state when drag starts
@@ -575,6 +882,18 @@ private:
     // Texture Safety
     std::vector<std::shared_ptr<class Texture>> texture_graveyard;
     void manageTextureGraveyard();
+
+    struct UvPreviewCacheEntry {
+        std::array<Vec2, 3> uvs;
+    };
+    bool uv_workflow_cache_dirty = true;
+    std::string uv_workflow_cached_object_name;
+    uint16_t uv_workflow_cached_material_id = 0xFFFF;
+    int uv_workflow_cached_uv_set = -1;
+    size_t uv_workflow_cached_object_triangle_count = 0;
+    int uv_workflow_cached_max_uv_sets = 1;
+    std::vector<std::shared_ptr<class Triangle>> uv_workflow_cached_triangles;
+    std::vector<UvPreviewCacheEntry> uv_workflow_preview_entries;
     
     // Terrain Node Graph (V2 System)
     TerrainNodesV2::TerrainNodeGraphV2 terrainNodeGraph;

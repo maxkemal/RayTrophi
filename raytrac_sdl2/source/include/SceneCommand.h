@@ -11,10 +11,14 @@
 #pragma once
 
 #include <memory>
+#include <array>
 #include <vector>
 #include <string>
 #include "Hittable.h"
 #include "Triangle.h"
+#include "Texture.h"
+#include "MeshModifiers.h"
+#include "Paint/PaintLayerData.h"
 
 // Forward declarations
 struct UIContext;
@@ -268,5 +272,195 @@ public:
     
 private:
     std::shared_ptr<Light> light_;
+};
+
+class PaintTextureCommand : public SceneCommand {
+public:
+    PaintTextureCommand(const std::string& object_name,
+                        uint16_t material_id,
+                        const std::shared_ptr<Texture>& texture,
+                        std::vector<CompactVec4> before_pixels,
+                        std::vector<CompactVec4> after_pixels)
+        : object_name_(object_name)
+        , material_id_(material_id)
+        , texture_(texture)
+        , before_pixels_(std::move(before_pixels))
+        , after_pixels_(std::move(after_pixels)) {}
+
+    void execute(UIContext& ctx) override;
+    void undo(UIContext& ctx) override;
+    Type getType() const override { return Type::Generic; }
+    std::string getDescription() const override {
+        return "Paint " + object_name_;
+    }
+
+private:
+    std::string object_name_;
+    uint16_t material_id_ = 0xFFFF;
+    std::shared_ptr<Texture> texture_;
+    std::vector<CompactVec4> before_pixels_;
+    std::vector<CompactVec4> after_pixels_;
+
+    void applyPixels(UIContext& ctx, const std::vector<CompactVec4>& pixels);
+};
+
+// ============================================================================
+// PAINT LAYER COMMAND - Undo/redo for layer-based painting
+// ============================================================================
+// Stores before/after pixels for a specific layer + channel, and also keeps
+// the flat texture ref so it can recomposite after restoring layer data.
+class PaintLayerCommand : public SceneCommand {
+public:
+    PaintLayerCommand(const std::string& object_name,
+                      uint16_t material_id,
+                      const std::string& layer_stack_key,
+                      uint32_t layer_id,
+                      Paint::PaintChannel channel,
+                      std::vector<CompactVec4> before_pixels,
+                      std::vector<CompactVec4> after_pixels)
+        : object_name_(object_name)
+        , material_id_(material_id)
+        , layer_stack_key_(layer_stack_key)
+        , layer_id_(layer_id)
+        , channel_(channel)
+        , before_pixels_(std::move(before_pixels))
+        , after_pixels_(std::move(after_pixels)) {}
+
+    void execute(UIContext& ctx) override;
+    void undo(UIContext& ctx) override;
+    Type getType() const override { return Type::Generic; }
+    std::string getDescription() const override {
+        return "Paint Layer " + object_name_;
+    }
+
+private:
+    std::string object_name_;
+    uint16_t material_id_ = 0xFFFF;
+    std::string layer_stack_key_;
+    uint32_t layer_id_ = 0;
+    Paint::PaintChannel channel_;
+    std::vector<CompactVec4> before_pixels_;
+    std::vector<CompactVec4> after_pixels_;
+
+    void applyPixels(UIContext& ctx, const std::vector<CompactVec4>& pixels);
+};
+
+struct TriangleUVSetState {
+    std::shared_ptr<Triangle> triangle;
+    size_t uv_set_index = 0;
+    std::array<Vec2, 3> uvs{};
+};
+
+class UVProjectionCommand : public SceneCommand {
+public:
+    UVProjectionCommand(const std::string& object_name,
+                        std::vector<TriangleUVSetState> before_states,
+                        std::vector<TriangleUVSetState> after_states)
+        : object_name_(object_name)
+        , before_states_(std::move(before_states))
+        , after_states_(std::move(after_states)) {}
+
+    void execute(UIContext& ctx) override;
+    void undo(UIContext& ctx) override;
+    Type getType() const override { return Type::Generic; }
+    std::string getDescription() const override {
+        return "Project UVs: " + object_name_;
+    }
+
+private:
+    std::string object_name_;
+    std::vector<TriangleUVSetState> before_states_;
+    std::vector<TriangleUVSetState> after_states_;
+
+    void applyStates(UIContext& ctx, const std::vector<TriangleUVSetState>& states);
+};
+
+struct MeshEditTriangleState {
+    std::shared_ptr<Triangle> triangle;
+    std::array<Vec3, 3> positions{};
+};
+
+class MeshEditCommand : public SceneCommand {
+public:
+    MeshEditCommand(const std::string& object_name,
+                    std::vector<MeshEditTriangleState> before_states,
+                    std::vector<MeshEditTriangleState> after_states)
+        : object_name_(object_name)
+        , before_states_(std::move(before_states))
+        , after_states_(std::move(after_states)) {}
+
+    void execute(UIContext& ctx) override;
+    void undo(UIContext& ctx) override;
+    Type getType() const override { return Type::Transform; }
+    std::string getDescription() const override {
+        return "Edit Mesh " + object_name_;
+    }
+
+private:
+    std::string object_name_;
+    std::vector<MeshEditTriangleState> before_states_;
+    std::vector<MeshEditTriangleState> after_states_;
+
+    void applyStates(UIContext& ctx, const std::vector<MeshEditTriangleState>& states);
+};
+
+class ReplaceMeshGeometryCommand : public SceneCommand {
+public:
+    ReplaceMeshGeometryCommand(const std::string& object_name,
+                              std::vector<std::shared_ptr<Triangle>> before_display_mesh,
+                              std::vector<std::shared_ptr<Triangle>> after_display_mesh,
+                              std::vector<std::shared_ptr<Triangle>> before_base_mesh,
+                              std::vector<std::shared_ptr<Triangle>> after_base_mesh,
+                              MeshModifiers::ModifierStack before_stack,
+                              MeshModifiers::ModifierStack after_stack)
+        : object_name_(object_name)
+        , before_display_mesh_(std::move(before_display_mesh))
+        , after_display_mesh_(std::move(after_display_mesh))
+        , before_base_mesh_(std::move(before_base_mesh))
+        , after_base_mesh_(std::move(after_base_mesh))
+        , before_stack_(std::move(before_stack))
+        , after_stack_(std::move(after_stack)) {}
+
+    void execute(UIContext& ctx) override;
+    void undo(UIContext& ctx) override;
+    Type getType() const override { return Type::Heavy; }
+    std::string getDescription() const override { return "Replace Mesh Geometry " + object_name_; }
+
+private:
+    std::string object_name_;
+    std::vector<std::shared_ptr<Triangle>> before_display_mesh_;
+    std::vector<std::shared_ptr<Triangle>> after_display_mesh_;
+    std::vector<std::shared_ptr<Triangle>> before_base_mesh_;
+    std::vector<std::shared_ptr<Triangle>> after_base_mesh_;
+    MeshModifiers::ModifierStack before_stack_;
+    MeshModifiers::ModifierStack after_stack_;
+
+    void applyMesh(UIContext& ctx,
+                   const std::vector<std::shared_ptr<Triangle>>& display_mesh,
+                   const std::vector<std::shared_ptr<Triangle>>& base_mesh,
+                   const MeshModifiers::ModifierStack& stack);
+};
+
+class CompositeSceneCommand : public SceneCommand {
+public:
+    explicit CompositeSceneCommand(std::string description)
+        : description_(std::move(description)) {}
+
+    void add(std::unique_ptr<SceneCommand> command) {
+        if (command) {
+            commands_.push_back(std::move(command));
+        }
+    }
+
+    bool empty() const { return commands_.empty(); }
+
+    void execute(UIContext& ctx) override;
+    void undo(UIContext& ctx) override;
+    Type getType() const override { return Type::Generic; }
+    std::string getDescription() const override { return description_; }
+
+private:
+    std::string description_;
+    std::vector<std::unique_ptr<SceneCommand>> commands_;
 };
 

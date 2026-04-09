@@ -2,6 +2,7 @@
 #include "scene_ui.h"
 #include "scene_data.h"
 #include "Triangle.h"
+#include "HittableInstance.h"
 #include "Light.h"
 #include "Camera.h"
 #include <chrono>
@@ -21,6 +22,7 @@
 #include "Matrix4x4.h"
 #include "world.h"
 #include "OptixWrapper.h"  // For direct instance transform updates
+#include "ui_modern.h"
 
 // External rendering state for animation render sync
 extern std::atomic<bool> rendering_in_progress;
@@ -83,6 +85,10 @@ static std::string resolveCharacterTrackName(SceneData& scene, const std::string
     if (selectionName.empty()) return selectionName;
     for (auto& mctx : scene.importedModelContexts) {
         if (mctx.importName == selectionName) return mctx.importName;
+        // Only resolve individual node names to model import name for models
+        // with actual skeletal/bone animation. Static imported objects (e.g. GLB
+        // cubes, props) keep their own node name so rigid keyframe animation works.
+        if (!mctx.hasAnimation) continue;
         for (const auto& member : mctx.members) {
             auto tri = std::dynamic_pointer_cast<Triangle>(member);
             if (tri && tri->getNodeName() == selectionName) {
@@ -201,6 +207,7 @@ static void addAnimGraphTrackTree(std::vector<TimelineTrack>& tracks,
 // MAIN DRAW FUNCTION
 // ============================================================================
 void TimelineWidget::draw(UIContext& ctx) {
+    UIWidgets::PushControlSurfaceStyle(ImVec4(0.46f, 0.86f, 0.92f, 1.0f));
     // ANIMATION RENDER SYNC: When animation render is active, 
     // timeline should FOLLOW the render frame, not control it
     if (ctx.render_settings.animation_render_locked && rendering_in_progress) {
@@ -383,12 +390,16 @@ void TimelineWidget::draw(UIContext& ctx) {
             
             // After applying all water keyframes, run actual water simulation update
             // This updates FFT ocean and geometric wave mesh animation
-            float frame_delta = 1.0f / static_cast<float>(ctx.render_settings.animation_fps);
-            if (WaterManager::getInstance().update(frame_delta)) {
+            float fps = static_cast<float>(ctx.render_settings.animation_fps > 0 ? ctx.render_settings.animation_fps : 24);
+            float frame_time = static_cast<float>(current_frame) / fps;
+            WaterUpdateResult waterUpdate = WaterManager::getInstance().update(frame_time);
+            if (waterUpdate.mesh_changed) {
                 // Water mesh changed - need geometry update
                 g_bvh_rebuild_pending = true;
                 g_optix_rebuild_pending = true;
-                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+            }
+            if (waterUpdate.requiresAccumulationReset() && ctx.backend_ptr) {
+                ctx.backend_ptr->resetAccumulation();
             }
             
             last_water_update_frame = current_frame;
@@ -412,7 +423,11 @@ void TimelineWidget::draw(UIContext& ctx) {
             bool needs_camera_update = false;
             
             // PERFORMANCE: Build object cache ONCE before the track loop, not per-track
-            static std::map<std::string, std::shared_ptr<Triangle>> object_cache;
+            struct CachedObject {
+                std::shared_ptr<Triangle> triangle;               // Representative triangle (always set)
+                std::shared_ptr<HittableInstance> instance;       // Set only if wrapped in HittableInstance
+            };
+            static std::map<std::string, CachedObject> object_cache;
             static bool cache_valid = false;
             static size_t last_object_count = 0;
             
@@ -428,7 +443,18 @@ void TimelineWidget::draw(UIContext& ctx) {
                 for (auto& obj : ctx.scene.world.objects) {
                     auto tri = std::dynamic_pointer_cast<Triangle>(obj);
                     if (tri && !tri->nodeName.empty()) {
-                        object_cache[tri->nodeName] = tri;
+                        object_cache[tri->nodeName] = { tri, nullptr };
+                    } else {
+                        // Also check HittableInstance objects (e.g., default scene cube)
+                        auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+                        if (inst && inst->source_triangles && !inst->source_triangles->empty()) {
+                            auto& first_tri = inst->source_triangles->at(0);
+                            if (first_tri && !first_tri->nodeName.empty()) {
+                                object_cache[first_tri->nodeName] = { first_tri, inst };
+                            } else if (!inst->node_name.empty()) {
+                                object_cache[inst->node_name] = { first_tri, inst };
+                            }
+                        }
                     }
                 }
                 cache_valid = true;
@@ -451,8 +477,8 @@ void TimelineWidget::draw(UIContext& ctx) {
                 // O(1) lookup using pre-built cache
                 auto it = object_cache.find(track_name);
                 if (it != object_cache.end()) {
-                    auto& tri = it->second;
-                    auto th = tri->getTransformHandle();
+                    auto& cached = it->second;
+                    auto th = cached.triangle ? cached.triangle->getTransformHandle() : nullptr;
                     if (th) {
                         // Build transform from evaluated keyframe
                         Matrix4x4 new_transform = Matrix4x4::fromTRS(
@@ -462,20 +488,28 @@ void TimelineWidget::draw(UIContext& ctx) {
                         );
                         th->setPivotMatrix(new_transform);
                         
-                        // Update each instance directly via backend sync at the end of the frame
-                        // so both OptiX and Vulkan can correctly refit TLAS in one go
+                        // Also update HittableInstance transform if this object is wrapped
+                        if (cached.instance) {
+                            cached.instance->setTransform(th->base);
+                        }
                         
                         // GPU mode: Skip CPU vertex update - TLAS handles transforms
                         // CPU mode: Need to update world-space vertices for raytracing
-                        bool using_gpu = ctx.render_settings.use_optix && ctx.backend_ptr;
+                        bool using_gpu = (ctx.render_settings.use_optix || ctx.render_settings.use_vulkan) && ctx.backend_ptr;
                         if (!using_gpu) {
-                            // CPU rendering - update world-space vertices for ALL triangles with same nodeName
-                            // A mesh with 2M triangles shares the same nodeName, so we must update all of them
-                            // This is slow but necessary for correct CPU raytracing
-                            for (auto& obj : ctx.scene.world.objects) {
-                                auto mesh_tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                if (mesh_tri && mesh_tri->nodeName == track_name) {
-                                    mesh_tri->updateTransformedVertices();
+                            // CPU rendering - update world-space vertices
+                            if (cached.instance && cached.instance->source_triangles) {
+                                // HittableInstance: update source triangles
+                                for (auto& src_tri : *cached.instance->source_triangles) {
+                                    if (src_tri) src_tri->updateTransformedVertices();
+                                }
+                            } else {
+                                // Raw triangles in scene: update all with same nodeName
+                                for (auto& obj : ctx.scene.world.objects) {
+                                    auto mesh_tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                    if (mesh_tri && mesh_tri->nodeName == track_name) {
+                                        mesh_tri->updateTransformedVertices();
+                                    }
                                 }
                             }
                         }
@@ -568,6 +602,7 @@ void TimelineWidget::draw(UIContext& ctx) {
                 if (evaluated.world.has_sun_azimuth) { nishita.sun_azimuth = evaluated.world.sun_azimuth; changed = true; }
                 if (evaluated.world.has_sun_intensity) { nishita.sun_intensity = evaluated.world.sun_intensity; changed = true; }
                 if (evaluated.world.has_sun_size) { nishita.sun_size = evaluated.world.sun_size; changed = true; }
+                if (evaluated.world.has_atmosphere_intensity) { nishita.atmosphere_intensity = evaluated.world.atmosphere_intensity; changed = true; }
                 if (evaluated.world.has_air_density) { nishita.air_density = evaluated.world.air_density; changed = true; }
                 if (evaluated.world.has_dust_density) { nishita.dust_density = evaluated.world.dust_density; changed = true; }
                 if (evaluated.world.has_ozone_density) { nishita.ozone_density = evaluated.world.ozone_density; changed = true; }
@@ -622,16 +657,16 @@ void TimelineWidget::draw(UIContext& ctx) {
             // GPU backend is active when backend_ptr exists and TLAS is built.
             // NOTE: use_optix is FALSE when Vulkan is the active renderer, so we
             // must NOT gate on use_optix here - both renderers use the same call.
-            bool using_gpu_render = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
             
-            if (using_gpu_render) {
-                // Works for both OptiX and Vulkan:
-                // Each backend's updateInstanceTransforms reads from the shared
-                // CPU transform handles (th->setBase done above) and refits its own TLAS.
+            if (ctx.backend_ptr) {
+                // Always update backend transforms - handles RT TLAS refit AND
+                // Solid/Matcap raster instance sync internally.
+                // This works even when TLAS was never built (e.g., Solid-only mode).
                 ctx.backend_ptr->updateInstanceTransforms(ctx.scene.world.objects);
-                // SKIP CPU BVH rebuild in GPU mode during animation!
-            } else {
-                // CPU rendering mode - need CPU BVH refit
+            }
+            // CPU BVH refit needed for CPU rendering and selection picking
+            // Skip in GPU mode to avoid expensive per-frame BVH rebuild during animation
+            if (!ctx.backend_ptr || !ctx.backend_ptr->isUsingTLAS()) {
                 g_cpu_bvh_refit_pending = true;
             }
             
@@ -724,39 +759,31 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
         
         // PAUSE/RESUME BUTTON
         if (rendering_paused.load()) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.8f, 0.3f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.1f, 0.5f, 0.1f, 1.0f));
-            if (ImGui::Button("RESUME", ImVec2(65, 20))) {
+            if (UIWidgets::IconActionButton("TimelineResume", UIWidgets::IconType::Play, "Resume", true,
+                                            ImVec4(0.42f, 0.90f, 0.52f, 1.0f), ImVec2(92.0f, 28.0f),
+                                            "Resume animation render")) {
                 rendering_paused = false;
                 SCENE_LOG_INFO("Animation render resumed from Timeline.");
             }
-            ImGui::PopStyleColor(3);
         } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.5f, 0.1f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.7f, 0.2f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5f, 0.4f, 0.1f, 1.0f));
-            if (ImGui::Button("PAUSE", ImVec2(65, 20))) {
+            if (UIWidgets::IconActionButton("TimelinePauseRender", UIWidgets::IconType::Pause, "Pause", false,
+                                            ImVec4(0.95f, 0.78f, 0.30f, 1.0f), ImVec2(88.0f, 28.0f),
+                                            "Pause animation render")) {
                 rendering_paused = true;
                 SCENE_LOG_INFO("Animation render paused from Timeline.");
             }
-            ImGui::PopStyleColor(3);
         }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pause/Resume render (or press P/Space)");
         
         ImGui::SameLine();
         
         // STOP BUTTON - Always accessible during render!
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.1f, 0.1f, 1.0f));
-        if (ImGui::Button("STOP", ImVec2(60, 20))) {
+        if (UIWidgets::IconActionButton("TimelineStopRender", UIWidgets::IconType::Stop, "Stop", false,
+                                        ImVec4(1.0f, 0.42f, 0.42f, 1.0f), ImVec2(80.0f, 28.0f),
+                                        "Stop animation render")) {
             rendering_stopped_cpu = true;
             rendering_stopped_gpu = true;
             SCENE_LOG_WARN("Animation render stopped from Timeline.");
         }
-        ImGui::PopStyleColor(3);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop animation render (or press ESC)");
         
         ImGui::SameLine();
         ImGui::TextDisabled("| P=Pause  ESC=Stop");
@@ -769,42 +796,42 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     bool has_keyframe_selected = has_selection && selected_keyframe_frame >= 0;
     
     // Keyframe buttons
-    ImGui::BeginDisabled(!has_selection);
-    if (ImGui::Button("+K", ImVec2(30, 20))) {
+    if (UIWidgets::IconActionButton("TimelineAddKey", UIWidgets::IconType::AddKey, "Key",
+                                    false, ImVec4(0.42f, 0.86f, 1.0f, 1.0f), ImVec2(76.0f, 28.0f),
+                                    "Insert keyframe", has_selection)) {
         insertKeyframeForTrack(ctx, selected_track, current_frame);
         tracks_dirty = true;
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Insert Keyframe (I)");
-    ImGui::EndDisabled();
     
     ImGui::SameLine();
     
-    ImGui::BeginDisabled(!has_keyframe_selected);
-    if (ImGui::Button("-K", ImVec2(30, 20))) {
+    if (UIWidgets::IconActionButton("TimelineRemoveKey", UIWidgets::IconType::RemoveKey, "Delete",
+                                    false, ImVec4(1.0f, 0.46f, 0.46f, 1.0f), ImVec2(88.0f, 28.0f),
+                                    "Delete selected keyframe", has_keyframe_selected)) {
         deleteKeyframe(ctx, selected_track, selected_keyframe_frame);
         selected_keyframe_frame = -1;
         tracks_dirty = true;
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete Keyframe (X)");
     
     ImGui::SameLine();
     
-    if (ImGui::Button("Dup", ImVec2(35, 20))) {
+    if (UIWidgets::IconActionButton("TimelineDuplicateKey", UIWidgets::IconType::Duplicate, "Duplicate",
+                                    false, ImVec4(0.86f, 0.68f, 1.0f, 1.0f), ImVec2(110.0f, 28.0f),
+                                    "Duplicate keyframe (+10 frames)", has_keyframe_selected)) {
         duplicateKeyframe(ctx, selected_track, selected_keyframe_frame, selected_keyframe_frame + 10);
         tracks_dirty = true;
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Duplicate Keyframe (+10 frames)");
-    ImGui::EndDisabled();
     
     ImGui::SameLine();
     ImGui::TextDisabled("|");
     ImGui::SameLine();
     
     // --- HELP BUTTON ---
-    if (ImGui::Button("?", ImVec2(25, 20))) {
+    if (UIWidgets::IconActionButton("TimelineHelp", UIWidgets::IconType::Help, "",
+                                    false, ImVec4(0.72f, 0.80f, 0.92f, 1.0f), ImVec2(34.0f, 28.0f),
+                                    "Timeline shortcuts and help")) {
         ImGui::OpenPopup("TimelineHelpPopup");
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Help - Keyboard Shortcuts");
     
     // Help Popup
     if (ImGui::BeginPopup("TimelineHelpPopup")) {
@@ -859,15 +886,22 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     ImGui::SameLine();
     
     // Play/Pause
-    if (ImGui::Button(is_playing ? "||" : "|>", ImVec2(30, 20))) {
+    if (UIWidgets::IconActionButton("TimelinePlayPause",
+                                    is_playing ? UIWidgets::IconType::Pause : UIWidgets::IconType::Play,
+                                    "",
+                                    is_playing,
+                                    ImVec4(0.46f, 0.86f, 0.92f, 1.0f),
+                                    ImVec2(34.0f, 28.0f),
+                                    is_playing ? "Pause" : "Play")) {
         is_playing = !is_playing;
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip(is_playing ? "Pause" : "Play");
     
     ImGui::SameLine();
     
     // Stop
-    if (ImGui::Button("[]", ImVec2(30, 20))) {
+    if (UIWidgets::IconActionButton("TimelineStop", UIWidgets::IconType::Stop, "",
+                                    false, ImVec4(1.0f, 0.46f, 0.46f, 1.0f), ImVec2(34.0f, 28.0f),
+                                    "Stop")) {
         is_playing = false;
         current_frame = start_frame;
         // Force animation re-evaluation at start_frame and backend update.
@@ -882,7 +916,6 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
         ctx.scene.timeline.current_frame = -1; // force frame mismatch next draw
         ctx.renderer.resetCPUAccumulation();
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
     
     ImGui::SameLine();
     ImGui::TextDisabled("|");
@@ -1687,6 +1720,7 @@ void TimelineWidget::drawFrameNumbers(ImDrawList* draw_list, ImVec2 canvas_pos, 
                 IM_COL32(100, 100, 100, 255), 1.0f);
         }
     }
+    UIWidgets::PopControlSurfaceStyle();
 }
 
 // ============================================================================

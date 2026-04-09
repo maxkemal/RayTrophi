@@ -12,6 +12,7 @@
 #define AABB_H
 
 #include "Ray.h"
+#include <limits>
 
 class AABB {
 public:
@@ -22,7 +23,14 @@ public:
     mutable float cached_surface_area;  // Önceden hesaplanmış alan
    
 
-    AABB() {}
+    AABB()
+        : min(std::numeric_limits<float>::infinity(),
+              std::numeric_limits<float>::infinity(),
+              std::numeric_limits<float>::infinity())
+        , max(-std::numeric_limits<float>::infinity(),
+              -std::numeric_limits<float>::infinity(),
+              -std::numeric_limits<float>::infinity())
+        , cached_surface_area(-1.0f) {}
     AABB(const Vec3& a, const Vec3& b)
         : min(a), max(b), cached_surface_area(-1.0f) {
     }  // İlk başta -1.0 olarak ayarla

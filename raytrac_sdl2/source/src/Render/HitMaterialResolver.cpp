@@ -3,8 +3,51 @@
 #include "MaterialManager.h"
 #include "TerrainManager.h"
 #include "PrincipledBSDF.h"
+#include <algorithm>
 
 namespace HitMaterialResolver {
+
+namespace {
+
+float sampleThicknessValue(const PrincipledBSDF& mat, const Vec2& uv) {
+    float thickness = 0.0f;
+    if (mat.heightProperty.texture) {
+        thickness = mat.heightProperty.texture->sampleIntensity(uv.u, uv.v);
+    } else {
+        thickness = static_cast<float>(mat.heightProperty.color.x * mat.heightProperty.intensity);
+    }
+
+    thickness = std::max(0.0f, thickness);
+    thickness *= mat.surface_deposition.thickness_scale;
+    thickness = std::min(thickness, mat.surface_deposition.max_thickness);
+    return thickness;
+}
+
+void applySurfaceDepositionIfNeeded(HitRecord& rec) {
+    if (rec.terrain_id != -1 || !rec.materialPtr) {
+        return;
+    }
+
+    auto* pbsdf = dynamic_cast<PrincipledBSDF*>(rec.materialPtr);
+    if (!pbsdf || !pbsdf->surface_deposition.enabled) {
+        return;
+    }
+
+    const float thickness = sampleThicknessValue(*pbsdf, rec.uv);
+    if (thickness <= 1e-6f) {
+        return;
+    }
+
+    const float world_offset = thickness * std::max(0.0f, pbsdf->surface_deposition.hit_offset_scale) * 0.1f;
+    if (world_offset <= 1e-6f) {
+        return;
+    }
+
+    rec.surface_override.deposited_thickness = thickness;
+    rec.surface_override.hit_offset = world_offset;
+}
+
+} // namespace
 
 void resolveMaterialPointers(HitRecord& rec) {
     if (!rec.materialPtr && rec.materialID != MaterialManager::INVALID_MATERIAL_ID) {
@@ -87,6 +130,7 @@ void applyTerrainBlendIfNeeded(HitRecord& rec) {
 void resolveSurfaceData(HitRecord& rec) {
     resolveMaterialPointers(rec);
     applyTerrainBlendIfNeeded(rec);
+    applySurfaceDepositionIfNeeded(rec);
 }
 
 }

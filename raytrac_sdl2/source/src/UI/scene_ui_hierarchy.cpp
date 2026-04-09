@@ -23,9 +23,48 @@
 #include "TerrainManager.h"
 #include "ProjectManager.h"
 #include "scene_ui_animgraph.hpp"
+#include "Backend/IViewportBackend.h"
 
 extern bool g_hasOptix;
 extern bool g_hasCUDA;
+extern std::unique_ptr<Backend::IBackend> g_backend;
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+
+namespace {
+Backend::IBackend* getHierarchyRenderBackend(UIContext& ctx) {
+    if (g_backend) {
+        return g_backend.get();
+    }
+    if (ctx.backend_ptr && dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) == nullptr) {
+        return ctx.backend_ptr;
+    }
+    return nullptr;
+}
+
+Backend::IViewportBackend* getHierarchyViewportBackend(UIContext& ctx) {
+    if (g_viewport_backend) {
+        return g_viewport_backend.get();
+    }
+    return dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr);
+}
+
+void setHierarchyObjectVisibility(UIContext& ctx, const std::string& nodeName, bool visible) {
+    if (nodeName.empty()) return;
+    if (ctx.scene.isEditorPendingDeleteObjectName(nodeName)) {
+        visible = false;
+    }
+
+    if (Backend::IViewportBackend* viewportBackend = getHierarchyViewportBackend(ctx)) {
+        viewportBackend->setVisibilityByNodeName(nodeName, visible);
+    }
+
+    if (Backend::IBackend* renderBackend = getHierarchyRenderBackend(ctx)) {
+        if (renderBackend != getHierarchyViewportBackend(ctx)) {
+            renderBackend->setVisibilityByNodeName(nodeName, visible);
+        }
+    }
+}
+}
 
 static void drawSkeletonHierarchyTree(const SceneData::ImportedModelContext& modelCtx, int nodeIndex) {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(modelCtx.skeletonNodes.size())) {
@@ -64,6 +103,25 @@ static void drawSkeletonHierarchyTree(const SceneData::ImportedModelContext& mod
 // SCENE HIERARCHY PANEL (Outliner)
 // ═══════════════════════════════════════════════════════════════════════════════
 void SceneUI::drawSceneHierarchy(UIContext& ctx) {
+    UIWidgets::PushControlSurfaceStyle(ImVec4(0.62f, 0.82f, 1.0f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_IndentSpacing, 16.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(8.0f, 6.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.115f, 0.14f, 0.94f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.13f, 0.145f, 0.17f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.16f, 0.18f, 0.215f, 0.99f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.19f, 0.215f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.14f, 0.17f, 0.21f, 0.96f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.18f, 0.21f, 0.26f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.155f, 0.18f, 0.94f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.20f, 0.24f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.22f, 0.24f, 0.28f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.62f, 0.82f, 1.0f, 0.18f));
     // Window creation logic removed - now embedded in tabs
 
     // Check if embedded in another window, if not create child
@@ -730,10 +788,12 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                 if (ImGui::Button(group_visible ? "(o)" : "( )")) {
                     for (const auto& member : grp.member_names) {
+                        if (ctx.scene.isEditorPendingDeleteObjectName(member)) continue;
                         auto it = mesh_cache.find(member);
                         if (it != mesh_cache.end()) {
                             for (auto& pair : it->second) pair.second->visible = !group_visible;
                         }
+                        setHierarchyObjectVisibility(ctx, member, !group_visible);
                     }
                     ctx.renderer.resetCPUAccumulation();
                 }
@@ -786,10 +846,12 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     }
                     if (ImGui::MenuItem("Toggle Visibility", nullptr, group_visible)) {
                         for (const auto& member : grp.member_names) {
+                            if (ctx.scene.isEditorPendingDeleteObjectName(member)) continue;
                             auto it = mesh_cache.find(member);
                             if (it != mesh_cache.end()) {
                                 for (auto& pair : it->second) pair.second->visible = !group_visible;
                             }
+                            setHierarchyObjectVisibility(ctx, member, !group_visible);
                         }
                         ctx.renderer.resetCPUAccumulation();
                     }
@@ -808,6 +870,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     // Show group members
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
                     for (const auto& member_name : grp.member_names) {
+                        if (ctx.scene.isEditorPendingDeleteObjectName(member_name)) continue;
                         ImGuiTreeNodeFlags mem_flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
                         
                         // Check if member is currently selected
@@ -866,6 +929,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                 // Simple filter check
                 if (filter.IsActive() && !filter.PassFilter(name.c_str())) continue;
+                if (ctx.scene.isEditorPendingDeleteObjectName(name)) continue;
                 
                 // Skip objects that are in a group (they're shown inside the group)
                 bool in_group = false;
@@ -902,18 +966,13 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 // Visibility Toggle (Mesh level)
                 bool all_visible = true;
                 if (!kv.second.empty()) all_visible = kv.second[0].second->visible;
+                if (ctx.scene.isEditorPendingDeleteObjectName(name)) all_visible = false;
 
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                 if (ImGui::Button(all_visible ? "(o)" : "( )")) {
-                    bool new_visible = !all_visible;
+                    bool new_visible = !all_visible && !ctx.scene.isEditorPendingDeleteObjectName(name);
                     for (auto& pair : kv.second) pair.second->visible = new_visible;
-                    
-                    if (ctx.backend_ptr) {
-                        ctx.backend_ptr->setVisibilityByNodeName(name, new_visible);
-                    }
-                    
-                    extern bool g_bvh_rebuild_pending;
-                    g_bvh_rebuild_pending = true;
+                    setHierarchyObjectVisibility(ctx, name, new_visible);
                     
                     ProjectManager::getInstance().markModified();
                     ctx.renderer.resetCPUAccumulation();
@@ -986,6 +1045,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             auto terrain = TerrainManager::getInstance().getTerrainByName(tName);
                             if (terrain) {
                                 terrain_brush.active_terrain_id = terrain->id;
+                                show_terrain_tab = true;
                                 SCENE_LOG_INFO("Terrain selected: " + tName);
                             }
                         }
@@ -1004,9 +1064,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     }
                     ImGui::Separator();
                     if (ImGui::MenuItem("Toggle Visibility", nullptr, all_visible)) {
-                        bool new_visible = !all_visible;
+                        bool new_visible = !all_visible && !ctx.scene.isEditorPendingDeleteObjectName(name);
                         for (auto& pair : kv.second) pair.second->visible = new_visible;
-                        if (ctx.backend_ptr) ctx.backend_ptr->setVisibilityByNodeName(name, new_visible);
+                        setHierarchyObjectVisibility(ctx, name, new_visible);
                         ctx.renderer.resetCPUAccumulation();
                     }
                     ImGui::EndPopup();
@@ -1160,7 +1220,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     // Selection Properties (Compact - Camera/Light only)
     // ─────────────────────────────────────────────────────────────────────────
     if (sel.hasSelection()) {
-        if (ImGui::CollapsingHeader("Selection Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+        {
 
             // Header with type and name + delete button
             const char* typeIcon = "[?]";
@@ -1175,44 +1235,49 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
             default: break;
             }
             ImGui::TextColored(typeColor, "%s %s", typeIcon, sel.selected.name.c_str());
+            ImGui::TextDisabled("Active selection details and contextual editing controls.");
 
             // Gizmo and Delete not applicable for World (environment can't be transformed or deleted)
             if (sel.selected.type != SelectableType::World) {
                 ImGui::Checkbox("Gizmo", &sel.show_gizmo);
-                ImGui::SameLine(ImGui::GetWindowWidth() - 55);
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
-                if (ImGui::SmallButton("Del")) {
+                ImGui::SameLine();
+                UIWidgets::PushControlSurfaceStyle(ImVec4(1.0f, 0.42f, 0.38f, 1.0f));
+                if (UIWidgets::IconActionButton("DeleteSelectionQuick", UIWidgets::IconType::Stop, "",
+                    false, ImVec4(1.0f, 0.42f, 0.38f, 1.0f), ImVec2(38.0f, 34.0f),
+                    "Delete the current selection.")) {
                     triggerDelete(ctx);
                 }
-                ImGui::PopStyleColor();
-                
-                // ─────────────────────────────────────────────────────────────────
-                // MANUAL TRANSFORM CONTROLS (POS / ROT / SCALE)
-                // ─────────────────────────────────────────────────────────────────
-                if (sel.selected.type == SelectableType::Object || sel.selected.type == SelectableType::Light || 
-                    sel.selected.type == SelectableType::Camera || sel.selected.type == SelectableType::VDBVolume ||
-                    sel.selected.type == SelectableType::GasVolume || sel.selected.type == SelectableType::ForceField ||
-                    sel.selected.type == SelectableType::CameraTarget) 
-                {
+                UIWidgets::PopControlSurfaceStyle();
+            }
+
+            // ─────────────────────────────────────────────────────────────────
+            // MANUAL TRANSFORM CONTROLS (POS / ROT / SCALE)
+            // ─────────────────────────────────────────────────────────────────
+            if (sel.selected.type != SelectableType::World &&
+                (sel.selected.type == SelectableType::Object || sel.selected.type == SelectableType::Light ||
+                 sel.selected.type == SelectableType::Camera || sel.selected.type == SelectableType::VDBVolume ||
+                 sel.selected.type == SelectableType::GasVolume || sel.selected.type == SelectableType::ForceField ||
+                 sel.selected.type == SelectableType::CameraTarget))
+            {
                     ImGui::Separator();
                     ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Transform");
-                    
+
                     static bool lock_scale = false;
-                    
+
                     bool transform_changed = false;
                     ImGui::PushItemWidth(std::max(100.0f, ImGui::GetContentRegionAvail().x - 60.0f));
-                    
+
                     if (ImGui::DragFloat3("Pos", &sel.selected.position.x, 0.1f)) transform_changed = true;
                     if (ImGui::DragFloat3("Rot", &sel.selected.rotation.x, 1.0f)) transform_changed = true;
-                    
+
                     Vec3 old_scale = sel.selected.scale;
                     if (ImGui::DragFloat3("Scl", &sel.selected.scale.x, 0.05f)) {
                         transform_changed = true;
-                        
+
                         if (lock_scale) {
                             float ratio = 1.0f;
                             float delta = 0.0f;
-                            
+
                             if (sel.selected.scale.x != old_scale.x) {
                                 if (old_scale.x != 0.0f) ratio = sel.selected.scale.x / old_scale.x;
                                 else delta = sel.selected.scale.x - old_scale.x;
@@ -1223,7 +1288,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                                 if (old_scale.z != 0.0f) ratio = sel.selected.scale.z / old_scale.z;
                                 else delta = sel.selected.scale.z - old_scale.z;
                             }
-                            
+
                             if (ratio != 1.0f) {
                                 sel.selected.scale = old_scale * ratio;
                             } else if (delta != 0.0f) {
@@ -1233,18 +1298,17 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             }
                         }
                     }
-                    
+
                     ImGui::PopItemWidth();
                     ImGui::SameLine();
-                    
-                    // Simple lock toggle button
+
                     ImGui::PushStyleColor(ImGuiCol_Button, lock_scale ? ImVec4(0.3f, 0.6f, 0.3f, 1.0f) : ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
                     if (ImGui::Button(lock_scale ? " L " : " U ")) {
                         lock_scale = !lock_scale;
                     }
                     ImGui::PopStyleColor();
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Uniform Scale Lock (L=Locked, U=Unlocked)");
-                    
+
                     if (transform_changed) {
                         for (auto& item : sel.multi_selection) {
                             // Apply same modified absolute transform
@@ -1314,20 +1378,21 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         ImGui::Separator();
                         ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.35f, 1.0f), "Pivot");
 
-                        if (pivot_edit_mode) {
+                        const bool pivot_button_active = pivot_edit_mode;
+                        if (pivot_button_active) {
                             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.55f, 0.18f, 1.0f));
                         }
                         if (ImGui::Button("Edit Pivot")) {
                             pivot_edit_mode = !pivot_edit_mode;
                         }
-                        if (pivot_edit_mode) {
+                        if (pivot_button_active) {
                             ImGui::PopStyleColor();
                         }
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Move pivot with gizmo only");
 
                         ImGui::SameLine();
                         if (ImGui::Button("Center Pivot")) {
-                            std::string object_name = sel.selected.object->nodeName;
+                            std::string object_name = !sel.selected.name.empty() ? sel.selected.name : sel.selected.object->nodeName;
                             if (object_name.empty()) object_name = "Unnamed";
                             recenterObjectPivotToBoundsCenter(ctx, object_name);
                             pivot_edit_mode = false;
@@ -1337,7 +1402,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                         Vec3 pivot_world = sel.selected.position;
                         if (ImGui::DragFloat3("Pivot Pos", &pivot_world.x, 0.1f)) {
-                            std::string object_name = sel.selected.object->nodeName;
+                            std::string object_name = !sel.selected.name.empty() ? sel.selected.name : sel.selected.object->nodeName;
                             if (object_name.empty()) object_name = "Unnamed";
                             moveObjectPivot(ctx, object_name, pivot_world - sel.selected.position);
                             ProjectManager::getInstance().markModified();
@@ -1350,13 +1415,14 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         ImGui::Separator();
                         ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.35f, 1.0f), "Pivot");
 
-                        if (pivot_edit_mode) {
+                        const bool pivot_button_active = pivot_edit_mode;
+                        if (pivot_button_active) {
                             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.55f, 0.18f, 1.0f));
                         }
                         if (ImGui::Button("Edit Pivot")) {
                             pivot_edit_mode = !pivot_edit_mode;
                         }
-                        if (pivot_edit_mode) {
+                        if (pivot_button_active) {
                             ImGui::PopStyleColor();
                         }
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Move pivot with gizmo only");
@@ -1413,8 +1479,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         }
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Set pivot world position directly");
                     }
-                }
-            } // End World check block
+            } // End transform block
 
 
 
@@ -2560,11 +2625,13 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
         // ─────────────────────────────────────────────────────────────────────────
         if (sel.selected.type == SelectableType::Object) {
             ImGui::Separator();
-            if (ImGui::CollapsingHeader("Material Editor", ImGuiTreeNodeFlags_DefaultOpen)) {
-                drawMaterialPanel(ctx);
-            }
+            ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.52f, 1.0f), "Material Properties");
+            drawMaterialPanel(ctx);
         }
     }
     // Light Gizmos and Transform Gizmos moved to main draw() loop for all tabs
+    ImGui::PopStyleColor(11);
+    ImGui::PopStyleVar(7);
+    UIWidgets::PopControlSurfaceStyle();
 }
 

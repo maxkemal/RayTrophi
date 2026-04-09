@@ -48,6 +48,8 @@ struct RayPayload {
     vec3  primaryAlbedo;
     vec3  primaryNormal;
     uint  primaryHit;
+    float primaryTransmission;
+    float primaryMetallic;
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -73,7 +75,7 @@ struct VkWorldDataExtended {
     float humidity;
     float temperature;
     float ozoneAbsorptionScale;
-    float _pad0;
+    float atmosphereIntensity;
     
     // ════════════════════════════ ATMOSPHERE DENSITY (32 bytes)
     float airDensity;
@@ -229,7 +231,7 @@ vec3 skyColor(vec3 dir) {
         // LUT not yet uploaded — simple Rayleigh fallback with smooth horizon transition.
         // No hard cutoff at cosAlt=0.
         float cosAltClamped = max(cosAlt, -0.15);
-        float skyBright = clamp(worldData.w.sunIntensity / 10.0, 0.0, 2.0);
+        float skyBright = clamp(worldData.w.atmosphereIntensity / 10.0, 0.0, 2.0);
         sky = rayleighColor(max(cosAltClamped, 0.0)) * skyBright;
         // air/dustDensity UI range 0-10 → divide by 10 to normalize
         float airN  = clamp(worldData.w.airDensity  / 10.0, 0.0, 1.0);
@@ -319,7 +321,7 @@ vec3 skyColor(vec3 dir) {
             const float MIE_SCAT = 3.996e-6;
             vec3 haloTintExcess = mix(vec3(1.0), transSun, 0.65);
             vec3 mieScat = vec3(MIE_SCAT) * worldData.w.mieDensity * (0.15 * 2.5);
-            sky += haloTintExcess * (mieScat * excessPhase * worldData.w.sunIntensity);
+            sky += haloTintExcess * (mieScat * excessPhase * worldData.w.atmosphereIntensity);
         }
 
         // ── Broad Mie background halo (capped, contributes to horizon glow) ──
@@ -332,7 +334,7 @@ vec3 skyColor(vec3 dir) {
             float v_trans = clamp(worldData.w.altitude / max(1.0, worldData.w.atmosphereHeight), 0.0, 1.0);
             haloTint = mix(vec3(1.0), texture(atmosphereLUTs[0], vec2(u_trans, v_trans)).rgb, 0.65);
         }
-        sky += haloTint * worldData.w.sunIntensity * phaseM_cap * mie_scale;
+        sky += haloTint * worldData.w.atmosphereIntensity * phaseM_cap * mie_scale;
 
         // NOTE: No air/dust post-tint here when LUT is loaded — LUT already has
         // air_density baked in from AtmosphereLUT.cpp precompute.

@@ -116,6 +116,70 @@ void InstanceGroup::clearInstances() {
     gpu_dirty = true;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// MESH SURFACE SAMPLER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+void MeshSurfaceSampler::build(const std::vector<std::shared_ptr<Triangle>>& triangles) {
+    source_tris = &triangles;
+    cdf.clear();
+    total_area = 0.f;
+    if (triangles.empty()) return;
+
+    cdf.reserve(triangles.size());
+    for (const auto& tri : triangles) {
+        if (!tri) { cdf.push_back(total_area); continue; }
+        Vec3 e1 = tri->getV1() - tri->getV0();
+        Vec3 e2 = tri->getV2() - tri->getV0();
+        float area = e1.cross(e2).length() * 0.5f;
+        total_area += area;
+        cdf.push_back(total_area);
+    }
+
+    // Normalise to [0..1] so binary search works with uniform(0,1)
+    if (total_area > 0.f)
+        for (auto& v : cdf) v /= total_area;
+}
+
+MeshSurfaceSampler::Sample MeshSurfaceSampler::sample(std::mt19937& rng) const {
+    Sample s;
+    if (!source_tris || cdf.empty()) return s;
+
+    std::uniform_real_distribution<float> dist(0.f, 1.f);
+
+    // Pick triangle proportional to its area
+    float r = dist(rng);
+    int idx = (int)(std::lower_bound(cdf.begin(), cdf.end(), r) - cdf.begin());
+    idx = std::clamp(idx, 0, (int)source_tris->size() - 1);
+
+    const auto& tri = (*source_tris)[idx];
+    if (!tri) return s;
+
+    // Uniform random point on triangle (Osada et al. 2002)
+    //   P = (1-√r1)*v0 + √r1*(1-r2)*v1 + √r1*r2*v2
+    float r1 = sqrtf(dist(rng));
+    float r2 = dist(rng);
+    float u = 1.f - r1;
+    float v = r1 * (1.f - r2);
+    float w = r1 * r2;
+
+    Vec3 v0 = tri->getV0();
+    Vec3 v1 = tri->getV1();
+    Vec3 v2 = tri->getV2();
+
+    s.position = v0 * u + v1 * v + v2 * w;
+
+    // Face normal
+    Vec3 fn = (v1 - v0).cross(v2 - v0);
+    float len = fn.length();
+    s.normal = (len > 1e-6f) ? fn / len : Vec3(0, 1, 0);
+
+    // Always point toward the upper hemisphere so scatter placement is consistent
+    if (s.normal.y < 0.f) s.normal = -s.normal;
+
+    return s;
+}
+
 InstanceTransform InstanceGroup::generateRandomTransform(const Vec3& position, const Vec3& normal) const {
     // Thread-local RNG for performance
     thread_local std::mt19937 rng(std::random_device{}());

@@ -126,7 +126,7 @@ public:
     void render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer, 
         const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration, int start_frame, int end_frame, SceneData& scene,
         const std::string& output_folder = "", bool use_denoiser = false, float denoiser_blend = 0.9f,
-        Backend::IBackend* backend = nullptr, bool use_optix = false, UIContext* ui_ctx = nullptr);
+        Backend::IBackend* backend = nullptr, bool use_gpu = false, UIContext* ui_ctx = nullptr);
 
     bool updateAnimationState(SceneData& scene, float time, bool apply_cpu_skinning = true, bool force_bind_pose = false);
     std::vector<Matrix4x4> finalBoneMatrices; // Stores computed bone matrices for the current frame

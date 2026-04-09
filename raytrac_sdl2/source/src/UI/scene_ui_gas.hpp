@@ -42,6 +42,7 @@ static std::shared_ptr<GasVolume> selected_gas_volume = nullptr;
  */
 inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVolume> gas) {
     if (!gas) return;
+    UIWidgets::PushControlSurfaceStyle(ImVec4(0.60f, 0.86f, 1.0f, 1.0f));
     auto& scene = ui_ctx.scene;
     auto& settings = gas->getSettings();
     
@@ -83,11 +84,13 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         
         if (!is_baking) {
             if (is_playing) {
-                if (ImGui::Button("Pause", ImVec2(60, 0))) {
+                if (UIWidgets::IconActionButton("GasPause", UIWidgets::IconType::Pause, "Pause", false,
+                    ImVec4(1.0f, 0.78f, 0.42f, 1.0f), ImVec2(96, 28), "Pause simulation playback.")) {
                     gas->pause();
                 }
             } else {
-                if (ImGui::Button("Play", ImVec2(60, 0))) {
+                if (UIWidgets::IconActionButton("GasPlay", UIWidgets::IconType::Play, "Play", false,
+                    ImVec4(0.48f, 0.92f, 0.60f, 1.0f), ImVec2(96, 28), "Start simulation playback.")) {
                     if (!gas->isInitialized()) {
                         gas->initialize();
                     }
@@ -96,12 +99,14 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
             }
             
             ImGui::SameLine();
-            if (ImGui::Button("Stop", ImVec2(60, 0))) {
+            if (UIWidgets::IconActionButton("GasStop", UIWidgets::IconType::Stop, "Stop", false,
+                ImVec4(1.0f, 0.54f, 0.46f, 1.0f), ImVec2(96, 28), "Stop playback and keep the current sim state.")) {
                 gas->stop();
             }
             
             ImGui::SameLine();
-            if (ImGui::Button("Reset", ImVec2(60, 0))) {
+            if (UIWidgets::IconActionButton("GasReset", UIWidgets::IconType::RemoveKey, "Reset", false,
+                ImVec4(0.74f, 0.82f, 1.0f, 1.0f), ImVec2(96, 28), "Reset simulation data and accumulation.")) {
                 gas->reset();
                 if (ui_ctx.optix_gpu_ptr) ui_ctx.optix_gpu_ptr->resetAccumulation();
                 ui_ctx.renderer.resetCPUAccumulation();
@@ -1008,6 +1013,7 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         }
         UIWidgets::EndSection();
     }
+    UIWidgets::PopControlSurfaceStyle();
 }
 
 } // namespace GasUI

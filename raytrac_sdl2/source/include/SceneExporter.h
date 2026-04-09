@@ -27,14 +27,16 @@ class Hittable;
 struct ExportSettings {
     bool export_geometry = true;
     bool export_materials = true;
-    bool export_lights = true;
-    bool export_cameras = true;
+    bool export_lights = false;
+    bool export_cameras = false;
     bool export_animations = true;
     bool export_skinning = true;  // Bones/Weights
     bool bake_transforms = false; // If true, bakes static transforms (good for static meshes)
     bool binary_mode = true;      // .glb vs .gltf
     bool export_selected_only = false; 
     bool embed_textures = true;
+    bool bake_terrain_materials = true;
+    int terrain_bake_resolution = 1024;
 };
 
 class SceneExporter {

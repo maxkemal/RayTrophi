@@ -48,7 +48,7 @@ struct MaterialProperty {
     // Texture varsa UV'den örnek al, yoksa sabit değeri döndür
     Vec3 evaluate(const Vec2& uv) const {
         if (texture) {
-            return texture->get_color(uv.u,uv.v) ;  // Texture örneğini yoğunlukla çarp
+            return texture->get_color_bilinear(uv.u, uv.v);  // CPU path should match GPU linear filtering
         }
         return color * intensity;
     }
@@ -56,9 +56,9 @@ struct MaterialProperty {
         if (texture) {
             float val = 0.0f;
             if (texture->has_alpha) {
-                val = texture->get_alpha(uv.u, uv.v);
+                val = texture->get_alpha_bilinear(uv.u, uv.v);
             } else {
-                val = texture->get_color(uv.u, uv.v).x;
+                val = texture->get_color_bilinear(uv.u, uv.v).x;
             }
             // Cutoff for noise/compression artifacts
             return (val < 0.1f) ? 0.0f : val * alpha;
@@ -93,8 +93,9 @@ public:
     std::string materialName;
     std::shared_ptr<GpuMaterial> gpuMaterial;
     Vec3 getPropertyValue(const MaterialProperty& prop, const Vec2& uv) const {
+        const Vec2 sampleUv = applyTextureTransform(uv.u, uv.v);
         if (prop.texture) {
-            return prop.texture->get_color(uv.u, uv.v) * prop.intensity;
+            return prop.texture->get_color_bilinear(sampleUv.u, sampleUv.v) * prop.intensity;
         }
         return prop.color * prop.intensity;
     }
@@ -148,6 +149,8 @@ public:
     
     virtual float get_metallic() const { return metallicProperty.intensity; }
     virtual Vec3 getEmission(const Vec2& uv, const Vec3& p) const {
+        (void)uv;
+        (void)p;
         return emissionProperty.color * emissionProperty.intensity;
     }
     virtual bool isEmissive() const { return false; }
@@ -160,7 +163,8 @@ public:
         return opacityProperty.alpha < 0.999f || opacityProperty.texture != nullptr;
     }
     virtual float get_opacity(const Vec2& uv) const {
-        return opacityProperty.evaluateOpacity(uv);
+        const Vec2 sampleUv = applyTextureTransform(uv.u, uv.v);
+        return opacityProperty.evaluateOpacity(sampleUv);
     }
 
     void setTexture(std::shared_ptr<Texture> tex) { albedoProperty.texture = tex; }

@@ -550,6 +550,7 @@ inline void HairUI::render(
     Renderer* renderer,
     std::function<void()> onPreGenerate
 ) {
+    UIWidgets::PushControlSurfaceStyle(ImVec4(1.0f, 0.72f, 0.42f, 1.0f));
 
     // 1. Handle Selection Change
     if (selectedMeshTriangles && !selectedMeshTriangles->empty()) {
@@ -594,13 +595,16 @@ inline void HairUI::render(
     // ═══════════════════════════════════════════════════════════════════════════
     
     float sidebar_w = 42.0f;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.07f, 0.09f, 0.12f, 0.82f));
     ImGui::BeginChild("HairSidebar", ImVec2(sidebar_w, 0), true, ImGuiWindowFlags_NoScrollbar);
     
     auto DrawIconButton = [&](int index, UIWidgets::IconType icon, const char* tooltip) {
         bool selected = (m_currentTab == index);
+        static float hover_anim[8] = {};
         ImVec2 pos = ImGui::GetCursorScreenPos();
-        float size = 32.0f;
+        float size = 34.0f;
         float margin = (sidebar_w - size) * 0.5f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
         
         ImGui::SetCursorPosX(margin);
         ImGui::PushID(index);
@@ -615,13 +619,58 @@ inline void HairUI::render(
             m_currentTab = index;
         }
         
-        // Draw the modern icon
-        ImU32 iconCol = selected ? ImGui::ColorConvertFloat4ToU32(ImVec4(0.4f, 0.8f, 1.0f, 1.0f)) 
-                                 : ImGui::ColorConvertFloat4ToU32(ImVec4(0.7f, 0.7f, 0.7f, 0.8f));
+        const bool is_hovered = ImGui::IsItemHovered();
+        const float target_hover = (is_hovered || selected) ? 1.0f : 0.0f;
+        const float anim_speed = 12.0f * ImGui::GetIO().DeltaTime;
+        hover_anim[index] += (target_hover - hover_anim[index]) * ImClamp(anim_speed, 0.0f, 1.0f);
+
+        auto getHoverTint = [&](UIWidgets::IconType iconType) -> ImVec4 {
+            switch (iconType) {
+                case UIWidgets::IconType::Mesh:   return ImVec4(0.56f, 0.88f, 1.00f, 1.0f);
+                case UIWidgets::IconType::Render: return ImVec4(1.00f, 0.84f, 0.42f, 1.0f);
+                case UIWidgets::IconType::Magnet: return ImVec4(1.00f, 0.58f, 0.40f, 1.0f);
+                case UIWidgets::IconType::Graph:  return ImVec4(0.60f, 0.92f, 0.62f, 1.0f);
+                default:                          return ImVec4(0.50f, 0.86f, 1.00f, 1.0f);
+            }
+        };
+
+        if (selected) {
+            dl->AddRectFilled(
+                ImVec2(pos.x - margin, pos.y),
+                ImVec2(pos.x + sidebar_w, pos.y + size),
+                ImGui::ColorConvertFloat4ToU32(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)),
+                0.0f
+            );
+            dl->AddRectFilled(
+                ImVec2(pos.x + sidebar_w - 3.0f, pos.y + 4.0f),
+                ImVec2(pos.x + sidebar_w, pos.y + size - 4.0f),
+                ImGui::ColorConvertFloat4ToU32(ImVec4(0.28f, 0.80f, 1.00f, 1.0f)),
+                2.0f
+            );
+        } else if (hover_anim[index] > 0.01f) {
+            dl->AddRectFilled(
+                ImVec2(pos.x, pos.y),
+                ImVec2(pos.x + size, pos.y + size),
+                ImGui::ColorConvertFloat4ToU32(ImVec4(0.18f, 0.50f, 0.68f, 0.16f * hover_anim[index])),
+                8.0f
+            );
+        }
+
+        const float iconSize = size * (0.60f + 0.10f * hover_anim[index]);
+        ImVec4 idleTint(0.70f, 0.70f, 0.70f, 0.82f);
+        ImVec4 activeTint(0.40f, 0.80f, 1.00f, 1.0f);
+        ImVec4 hoverTint = getHoverTint(icon);
+        ImVec4 iconTint = selected ? activeTint : ImLerp(idleTint, hoverTint, hover_anim[index]);
+
+        UIWidgets::DrawIcon(
+            icon,
+            ImVec2(pos.x + (size - iconSize) * 0.5f, pos.y + (size - iconSize) * 0.5f),
+            iconSize,
+            ImGui::ColorConvertFloat4ToU32(iconTint),
+            1.5f + 0.35f * hover_anim[index]
+        );
         
-        UIWidgets::DrawIcon(icon, ImVec2(pos.x + size*0.5f, pos.y + size*0.5f), size * 0.6f, iconCol);
-        
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
+        if (is_hovered) ImGui::SetTooltip("%s", tooltip);
         
         ImGui::PopStyleColor();
         ImGui::PopID();
@@ -634,10 +683,12 @@ inline void HairUI::render(
     DrawIconButton(3, UIWidgets::IconType::Graph,   "Presets & Styles");
     
     ImGui::EndChild();
+    ImGui::PopStyleColor();
 
     ImGui::SameLine();
 
     // Main Content Area
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.10f, 0.14f, 0.56f));
     ImGui::BeginChild("HairContent", ImVec2(0, 0), false);
     
     switch (m_currentTab) {
@@ -648,6 +699,7 @@ inline void HairUI::render(
     }
     
     ImGui::EndChild();
+    ImGui::PopStyleColor();
     
     // Show paint mode indicator if active
     if (m_paintMode != HairPaintMode::NONE) {
@@ -665,6 +717,7 @@ inline void HairUI::render(
     
     // Final sync of any UI edits back to the underlying groom model
     syncToGroom(hairSystem);
+    UIWidgets::PopControlSurfaceStyle();
 }
 
 
@@ -1439,35 +1492,31 @@ inline void HairUI::drawPaintPanel(HairSystem& hairSystem) {
     // Mode buttons with icons - STACK SAFE IMPLEMENTATION
     float btnW = (ImGui::GetContentRegionAvail().x - 3 * ImGui::GetStyle().ItemSpacing.x) / 4.0f;
 
-    auto DrawSafeBtn = [&](HairPaintMode mode, const char* label, const char* tooltip, int idx) {
+    auto DrawSafeBtn = [&](HairPaintMode mode, UIWidgets::IconType icon, const char* tooltip, int idx, const ImVec4& accent) {
         if (idx % 4 != 0) ImGui::SameLine();
         bool isCurrent = (m_paintMode == mode);
-        if (isCurrent) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 0.3f, 1.0f));
-        }
-        if (ImGui::Button(label, ImVec2(btnW, 35))) {
+        ImGui::PushID(idx);
+        if (UIWidgets::IconActionButton("##HairPaintMode", icon, "", isCurrent, accent, ImVec2(btnW, 42.0f), tooltip)) {
             m_paintMode = isCurrent ? HairPaintMode::NONE : mode;
         }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
-        if (isCurrent) ImGui::PopStyleColor(2);
+        ImGui::PopID();
     };
 
-    DrawSafeBtn(HairPaintMode::ADD,     "+ Add",     "Add new hair strands", 0);
-    DrawSafeBtn(HairPaintMode::REMOVE,  "- Rem",     "Remove strands", 1);
-    DrawSafeBtn(HairPaintMode::CUT,     "/ Cut",     "Cut strands shorter", 2);
-    DrawSafeBtn(HairPaintMode::COMB,    "~ Comb",    "Comb/style hair direction", 3);
-    DrawSafeBtn(HairPaintMode::LENGTH,  "| Len",     "Adjust strand length", 4);
-    DrawSafeBtn(HairPaintMode::DENSITY, "# Den",     "Adjust local density", 5);
-    DrawSafeBtn(HairPaintMode::CLUMP,   "* Clp",     "Increase clumpiness", 6);
-    DrawSafeBtn(HairPaintMode::PUFF,    "o Puf",     "Add volume/puff", 7);
+    DrawSafeBtn(HairPaintMode::ADD,     UIWidgets::IconType::PaintTool,   "Add new hair strands", 0,  ImVec4(0.50f, 0.90f, 0.62f, 1.0f));
+    DrawSafeBtn(HairPaintMode::REMOVE,  UIWidgets::IconType::EraseTool,   "Remove strands", 1,         ImVec4(1.00f, 0.58f, 0.50f, 1.0f));
+    DrawSafeBtn(HairPaintMode::CUT,     UIWidgets::IconType::ScrapeTool,  "Cut strands shorter", 2,    ImVec4(1.00f, 0.72f, 0.42f, 1.0f));
+    DrawSafeBtn(HairPaintMode::COMB,    UIWidgets::IconType::SoftenTool,  "Comb and style strand direction", 3, ImVec4(0.56f, 0.88f, 1.0f, 1.0f));
+    DrawSafeBtn(HairPaintMode::LENGTH,  UIWidgets::IconType::LayerTool,   "Adjust strand length", 4,    ImVec4(0.92f, 0.76f, 0.42f, 1.0f));
+    DrawSafeBtn(HairPaintMode::DENSITY, UIWidgets::IconType::StampTool,   "Adjust local density", 5,    ImVec4(0.74f, 0.84f, 1.0f, 1.0f));
+    DrawSafeBtn(HairPaintMode::CLUMP,   UIWidgets::IconType::ClayTool,    "Increase clumpiness", 6,     ImVec4(1.00f, 0.66f, 0.52f, 1.0f));
+    DrawSafeBtn(HairPaintMode::PUFF,    UIWidgets::IconType::InflateTool, "Add volume and puff", 7,     ImVec4(1.00f, 0.82f, 0.52f, 1.0f));
     
-    DrawSafeBtn(HairPaintMode::WAVE,    "S Wav",     "Add procedural waves", 8);
-    DrawSafeBtn(HairPaintMode::FRIZZ,   "~ Frz",     "Add random detail", 9);
-    DrawSafeBtn(HairPaintMode::SMOOTH,  "_ Smth",    "Relax/Straighten hair", 10);
-    DrawSafeBtn(HairPaintMode::PINCH,   "> Pnc",     "Bunch points together", 11);
-    DrawSafeBtn(HairPaintMode::SPREAD,  "< Spr",     "Spread points apart", 12);
-    DrawSafeBtn(HairPaintMode::BRAID,   "B Brd",     "Braid/twist strands together", 13);
+    DrawSafeBtn(HairPaintMode::WAVE,    UIWidgets::IconType::DrawTool,    "Add procedural waves", 8,    ImVec4(0.50f, 0.84f, 1.0f, 1.0f));
+    DrawSafeBtn(HairPaintMode::FRIZZ,   UIWidgets::IconType::Noise,       "Add random frizz detail", 9, ImVec4(0.94f, 0.66f, 1.0f, 1.0f));
+    DrawSafeBtn(HairPaintMode::SMOOTH,  UIWidgets::IconType::SmoothTool,  "Relax and straighten hair", 10, ImVec4(0.70f, 0.92f, 0.82f, 1.0f));
+    DrawSafeBtn(HairPaintMode::PINCH,   UIWidgets::IconType::PinchTool,   "Bunch points together", 11,  ImVec4(1.00f, 0.74f, 0.58f, 1.0f));
+    DrawSafeBtn(HairPaintMode::SPREAD,  UIWidgets::IconType::Move,        "Spread points apart", 12,    ImVec4(0.64f, 0.80f, 1.0f, 1.0f));
+    DrawSafeBtn(HairPaintMode::BRAID,   UIWidgets::IconType::Rotate,      "Braid and twist strands together", 13, ImVec4(1.00f, 0.72f, 0.46f, 1.0f));
     
     // Exit button
     if (m_paintMode != HairPaintMode::NONE) {
@@ -1834,6 +1883,16 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                             if (l > 1e-5f) strand.groomedPositions[i] = strand.groomedPositions[i-1] + (dir / l) * segmentLen;
                             else strand.groomedPositions[i] = strand.groomedPositions[i-1] + strand.rootNormal * segmentLen;
                         }
+                        // Keep restGroomedPositions in sync so skinning doesn't revert the cut
+                        if (strand.restGroomedPositions.size() == strand.groomedPositions.size()) {
+                            float restSegLen = (strand.restGroomedPositions.size() > 1) ? (strand.baseLength / (strand.restGroomedPositions.size() - 1)) : 0.0f;
+                            for (size_t i = 1; i < strand.restGroomedPositions.size(); ++i) {
+                                Vec3 dir = (strand.restGroomedPositions[i] - strand.restGroomedPositions[i-1]);
+                                float l = dir.length();
+                                if (l > 1e-5f) strand.restGroomedPositions[i] = strand.restGroomedPositions[i-1] + (dir / l) * restSegLen;
+                                else strand.restGroomedPositions[i] = strand.restGroomedPositions[i-1] + strand.rootNormal * restSegLen;
+                            }
+                        }
                     }
                 });
                 groom->isDirty = true;
@@ -2024,6 +2083,13 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                         Vec3 root = strand.groomedPositions[0];
                         for (size_t i = 1; i < strand.groomedPositions.size(); ++i) {
                             strand.groomedPositions[i] = root + (strand.groomedPositions[i] - root) * scaleFactor;
+                        }
+                        // Keep restGroomedPositions in sync so skinning doesn't revert the length change
+                        if (strand.restGroomedPositions.size() == strand.groomedPositions.size()) {
+                            Vec3 restRoot = strand.restGroomedPositions[0];
+                            for (size_t i = 1; i < strand.restGroomedPositions.size(); ++i) {
+                                strand.restGroomedPositions[i] = restRoot + (strand.restGroomedPositions[i] - restRoot) * scaleFactor;
+                            }
                         }
                     }
                 });

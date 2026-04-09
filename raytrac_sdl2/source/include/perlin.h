@@ -11,6 +11,7 @@
 #pragma once
 #include <Vec3.h>
 // Perlin.h
+// Deterministic Perlin with optional seed constructor
 class Perlin {
 private:
     static const int POINT_COUNT = 256;
@@ -66,6 +67,7 @@ private:
     }
 
 public:
+    // Default constructor (non-deterministic; kept for backward compatibility)
     Perlin() {
         ranvec = new Vec3[POINT_COUNT];
         for (int i = 0; i < POINT_COUNT; ++i) {
@@ -75,6 +77,33 @@ public:
         perm_x = perlin_generate_perm();
         perm_y = perlin_generate_perm();
         perm_z = perlin_generate_perm();
+    }
+
+    // Seeded constructor for deterministic output across runs
+    Perlin(unsigned int seed) {
+        ranvec = new Vec3[POINT_COUNT];
+        std::mt19937 rng(seed);
+        std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+        for (int i = 0; i < POINT_COUNT; ++i) {
+            Vec3 v(dist(rng), dist(rng), dist(rng));
+            ranvec[i] = unit_vector(v);
+        }
+
+        perm_x = new int[POINT_COUNT];
+        perm_y = new int[POINT_COUNT];
+        perm_z = new int[POINT_COUNT];
+        for (int i = 0; i < POINT_COUNT; ++i) perm_x[i] = perm_y[i] = perm_z[i] = i;
+
+        // Fisher-Yates using seeded rng
+        for (int i = POINT_COUNT - 1; i > 0; --i) {
+            std::uniform_int_distribution<int> idist(0, i);
+            int j = idist(rng);
+            std::swap(perm_x[i], perm_x[j]);
+            j = idist(rng);
+            std::swap(perm_y[i], perm_y[j]);
+            j = idist(rng);
+            std::swap(perm_z[i], perm_z[j]);
+        }
     }
 
     ~Perlin() {

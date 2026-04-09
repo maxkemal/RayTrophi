@@ -34,6 +34,10 @@
 #include <scene_ui_gas.hpp>
 // extern bool show_controls_window; // Assume defined elsewhere
 
+extern bool g_vulkan_rebuild_pending;
+extern bool g_viewport_raster_rebuild_pending;
+extern std::unique_ptr<Backend::IBackend> g_backend;
+
 namespace {
     void openFolderInExplorer(const std::filesystem::path& folder) {
 #ifdef _WIN32
@@ -42,14 +46,79 @@ namespace {
         (void)folder;
 #endif
     }
+
+    bool sceneUiMenuRenderBackendIsVulkan() {
+        return dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr;
+    }
 }
 
 
 
 void SceneUI::drawMainMenuBar(UIContext& ctx)
 {
+    ImGui::PushStyleColor(ImGuiCol_MenuBarBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.080f, 0.086f, 0.102f, 0.965f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.155f, 0.185f, 0.225f, 0.82f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.225f, 0.295f, 0.370f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.26f, 0.35f, 0.45f, 0.995f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.58f, 0.66f, 0.78f, 0.16f));
+    ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(0.60f, 0.68f, 0.78f, 0.10f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.90f, 0.92f, 0.96f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 8.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 7.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.0f, 0.5f));
+
     if (ImGui::BeginMainMenuBar())
     {
+        ImDrawList* menu_dl = ImGui::GetWindowDrawList();
+        const ImVec2 menu_min = ImGui::GetWindowPos();
+        const ImVec2 menu_max(menu_min.x + ImGui::GetWindowWidth(), menu_min.y + ImGui::GetWindowHeight());
+        // Keep the docked panels visually attached to the menu bar.
+        // The previous +6 px reserve left a visible gap above the left panel.
+        g_main_menu_reserved_height = (menu_max.y - menu_min.y) + 1.0f;
+        const ImVec2 shell_min(menu_min.x + 6.0f, menu_min.y + 4.0f);
+        const ImVec2 shell_max(menu_max.x - 6.0f, menu_max.y - 4.0f);
+        menu_dl->AddRectFilled(
+            shell_min,
+            shell_max,
+            ImGui::ColorConvertFloat4ToU32(ImVec4(0.070f, 0.076f, 0.092f, 0.92f)),
+            14.0f
+        );
+        menu_dl->AddRect(
+            shell_min,
+            shell_max,
+            ImGui::ColorConvertFloat4ToU32(ImVec4(0.70f, 0.78f, 0.90f, 0.12f)),
+            14.0f,
+            0,
+            1.0f
+        );
+        menu_dl->AddLine(
+            ImVec2(shell_min.x + 16.0f, shell_min.y + 1.0f),
+            ImVec2(shell_max.x - 16.0f, shell_min.y + 1.0f),
+            ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, 0.045f)),
+            1.0f
+        );
+        menu_dl->AddLine(
+            ImVec2(shell_min.x + 12.0f, shell_max.y - 1.0f),
+            ImVec2(shell_max.x - 12.0f, shell_max.y - 1.0f),
+            ImGui::ColorConvertFloat4ToU32(ImVec4(0.72f, 0.80f, 0.90f, 0.06f)),
+            1.0f
+        );
+
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.0f);
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.16f, 0.24f, 0.32f, 0.86f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.20f, 0.30f, 0.40f, 0.96f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.24f, 0.36f, 0.48f, 0.98f));
+        ImGui::Selectable("RayTrophi", false, 0, ImVec2(90.0f, 0.0f));
+        ImGui::PopStyleColor(3);
+        ImGui::SameLine(0.0f, 14.0f);
+
         if (ImGui::BeginMenu("File"))
         {
             // ================================================================
@@ -364,7 +433,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                          }
                          
                          // Import WITHOUT clearing scene
-                         bool success = ProjectManager::getInstance().importModel(file, ctx.scene, ctx.renderer, ctx.backend_ptr,
+                         bool success = ProjectManager::getInstance().importModel(file, ctx.scene, ctx.renderer, g_backend.get(),
                              [this](int p, const std::string& s) {
                                  scene_loading_progress = p; 
                                  setSceneLoadingStage(s);
@@ -376,6 +445,14 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                              // Despite the legacy name, this flag triggers deferred backend sync
                              // for both OptiX and Vulkan in Main.cpp scene-load finalization.
                              g_needs_optix_sync.store(ctx.backend_ptr != nullptr);
+                             extern bool g_geometry_dirty;
+                             extern bool g_materials_dirty;
+                             extern bool g_gas_volumes_dirty;
+                             extern std::atomic<uint64_t> g_scene_geometry_generation;
+                             g_geometry_dirty = true;
+                             g_materials_dirty = true;
+                             g_gas_volumes_dirty = true;
+                             g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
                          }
 
                          if(ctx.scene.camera) ctx.scene.camera->update_camera_vectors();
@@ -647,28 +724,35 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  if (show_scene_log) show_animation_panel = false;
             }
             ImGui::Separator();
-            
-
-            if (ImGui::MenuItem("Water Tab", nullptr, &show_water_tab)) { 
-                // if (show_water_tab) tab_to_focus = "Water"; 
-            }
             if (ImGui::MenuItem("Terrain Tab", nullptr, &show_terrain_tab)) { 
-                // if (show_terrain_tab) tab_to_focus = "Terrain"; 
+                if (show_terrain_tab) { tab_to_focus = "Terrain"; focus_properties_panel_next_frame = true; }
             }
-           
-         
+            if (ImGui::MenuItem("Water Tab", nullptr, &show_water_tab)) { 
+                if (show_water_tab) { tab_to_focus = "Water"; focus_properties_panel_next_frame = true; }
+            }
+            if (ImGui::MenuItem("Volumetrics Tab", nullptr, &show_volumetric_tab)) {
+                if (show_volumetric_tab) { tab_to_focus = "Volumetric"; focus_properties_panel_next_frame = true; }
+            }
             if (ImGui::MenuItem("Force Field Tab", nullptr, &show_forcefield_tab)) { 
-                if (show_forcefield_tab) tab_to_focus = "Force Field"; 
+                if (show_forcefield_tab) { tab_to_focus = "Force Field"; focus_properties_panel_next_frame = true; }
             }
             if (ImGui::MenuItem("World Tab", nullptr, &show_world_tab)) { 
-                if (show_world_tab) tab_to_focus = "World"; 
+                if (show_world_tab) { tab_to_focus = "World"; focus_properties_panel_next_frame = true; }
+            }
+            if (ImGui::MenuItem("Hair & Fur Tab", nullptr, &show_hair_tab)) {
+                if (show_hair_tab) { active_properties_tab = 8; focus_properties_panel_next_frame = true; }
+            }
+            if (ImGui::MenuItem("Scatter Tab", nullptr, &show_scatter_tab)) {
+                if (show_scatter_tab) { tab_to_focus = "Scatter"; focus_properties_panel_next_frame = true; }
             }
             if (ImGui::MenuItem("Modifiers & Sculpt Tab", nullptr, &show_modifiers_tab)) {
-                if (show_modifiers_tab) tab_to_focus = "Modifiers"; 
+                if (show_modifiers_tab) { tab_to_focus = "Modifiers"; focus_properties_panel_next_frame = true; }
             }
-            ImGui::Separator();
+            if (ImGui::MenuItem("Paint Mode Tab", nullptr, &show_paint_tab)) {
+                if (show_paint_tab) { tab_to_focus = "Paint"; focus_properties_panel_next_frame = true; }
+            }
             if (ImGui::MenuItem("System Tab", nullptr, &show_system_tab)) { 
-                // if (show_system_tab) tab_to_focus = "System"; 
+                if (show_system_tab) { tab_to_focus = "System"; focus_properties_panel_next_frame = true; }
             }
             
             
@@ -693,7 +777,11 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
         }
 
         ImGui::EndMainMenuBar();
+    } else {
+        g_main_menu_reserved_height = (std::max)(g_main_menu_reserved_height, 30.0f);
     }
+    ImGui::PopStyleVar(8);
+    ImGui::PopStyleColor(8);
 }
 
 // ============================================================================
@@ -761,7 +849,16 @@ void SceneUI::addProceduralPlane(UIContext& ctx) {
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
-    if (ctx.backend_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    if (g_backend) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    g_viewport_raster_rebuild_pending = true;
+    if (sceneUiMenuRenderBackendIsVulkan()) g_vulkan_rebuild_pending = true;
+    // Ensure Main loop sees geometry change and triggers necessary syncs
+    extern bool g_geometry_dirty;
+    extern std::atomic<uint64_t> g_scene_geometry_generation;
+    extern std::atomic<bool> g_needs_optix_sync;
+    g_geometry_dirty = true;
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+    g_needs_optix_sync.store(true, std::memory_order_release);
     
     SCENE_LOG_INFO("Added Plane: " + name);
     addViewportMessage("Added Plane: " + name);
@@ -827,7 +924,16 @@ void SceneUI::addProceduralCube(UIContext& ctx) {
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
-    if (ctx.backend_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    if (g_backend) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    g_viewport_raster_rebuild_pending = true;
+    if (sceneUiMenuRenderBackendIsVulkan()) g_vulkan_rebuild_pending = true;
+    // Ensure Main loop sees geometry change and triggers necessary syncs
+    extern bool g_geometry_dirty;
+    extern std::atomic<uint64_t> g_scene_geometry_generation;
+    extern std::atomic<bool> g_needs_optix_sync;
+    g_geometry_dirty = true;
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+    g_needs_optix_sync.store(true, std::memory_order_release);
     
     SCENE_LOG_INFO("Added Cube: " + name);
     addViewportMessage("Added Cube: " + name);
@@ -916,7 +1022,16 @@ void SceneUI::addProceduralSphere(UIContext& ctx) {
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
-    if (ctx.backend_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    if (g_backend) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    g_viewport_raster_rebuild_pending = true;
+    if (sceneUiMenuRenderBackendIsVulkan()) g_vulkan_rebuild_pending = true;
+        // Ensure Main loop sees geometry change and triggers necessary syncs
+        extern bool g_geometry_dirty;
+        extern std::atomic<uint64_t> g_scene_geometry_generation;
+        extern std::atomic<bool> g_needs_optix_sync;
+        g_geometry_dirty = true;
+        g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+        g_needs_optix_sync.store(true, std::memory_order_release);
     
     SCENE_LOG_INFO("Added Sphere: " + name);
     addViewportMessage("Added Sphere: " + name);
@@ -1037,8 +1152,17 @@ void SceneUI::addProceduralCylinder(UIContext& ctx) {
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
-    if (ctx.optix_gpu_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
-    
+    if (g_backend) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    g_viewport_raster_rebuild_pending = true;
+    if (sceneUiMenuRenderBackendIsVulkan()) g_vulkan_rebuild_pending = true;
+    // Ensure Main loop sees geometry change and triggers necessary syncs
+    extern bool g_geometry_dirty;
+    extern std::atomic<uint64_t> g_scene_geometry_generation;
+    extern std::atomic<bool> g_needs_optix_sync;
+    g_geometry_dirty = true;
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+    g_needs_optix_sync.store(true, std::memory_order_release);
+
     SCENE_LOG_INFO("Added Cylinder: " + name);
     addViewportMessage("Added Cylinder: " + name);
 }

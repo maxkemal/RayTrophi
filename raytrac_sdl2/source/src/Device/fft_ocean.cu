@@ -664,8 +664,8 @@ __global__ void kernelGeometricWaves(
     if (idx >= vertex_count) return;
     
     float3 orig = d_original[idx];
-    float x = orig.x;
-    float z = orig.z;
+    float x = orig.x * params.domain_coord_scale;
+    float z = orig.z * params.domain_coord_scale;
     float base_y = orig.y;
     
     float3 displacement = make_float3(0, 0, 0);
@@ -715,28 +715,82 @@ __global__ void kernelGeometricWaves(
         }
     } else {
         // Procedural noise types
-        float nx = x / scale + time * 0.1f;
-        float nz = z / scale + time * 0.1f;
         float height = 0.0f;
+        float wind_dx = cosf(params.swell_direction);
+        float wind_dz = sinf(params.swell_direction);
+        float cross_dx = -wind_dz;
+        float cross_dz = wind_dx;
+        float drift_speed = 0.25f + params.alignment * 0.75f;
+        float morph = 0.85f + params.lacunarity * 0.05f;
         
         switch (params.noise_type) {
             case 0: // Perlin
+            {
+                float nx = x / scale +
+                           wind_dx * time * drift_speed * 0.45f +
+                           cross_dx * sinf(time * 0.17f) * 0.12f +
+                           sinf(time * 0.31f * morph + 1.0f) * 0.22f;
+                float nz = z / scale +
+                           wind_dz * time * drift_speed * 0.45f +
+                           cross_dz * cosf(time * 0.13f) * 0.12f +
+                           cosf(time * 0.23f * morph + 0.7f) * 0.22f;
                 height = gpuGradientNoise(nx, nz);
                 break;
+            }
             case 1: // FBM
+            {
+                float nx = x / scale +
+                           wind_dx * time * drift_speed * 0.45f +
+                           cross_dx * sinf(time * 0.17f) * 0.12f +
+                           sinf(time * 0.31f * morph + 1.0f) * 0.22f;
+                float nz = z / scale +
+                           wind_dz * time * drift_speed * 0.45f +
+                           cross_dz * cosf(time * 0.13f) * 0.12f +
+                           cosf(time * 0.23f * morph + 0.7f) * 0.22f;
                 height = gpuFBM(nx, nz, params.octaves, params.persistence, params.lacunarity);
                 break;
+            }
             case 2: // Ridge
+            {
+                float nx = x / scale +
+                           wind_dx * time * drift_speed * 0.45f +
+                           cross_dx * sinf(time * 0.17f) * 0.12f +
+                           sinf(time * 0.31f * morph + 1.0f) * 0.22f;
+                float nz = z / scale +
+                           wind_dz * time * drift_speed * 0.45f +
+                           cross_dz * cosf(time * 0.13f) * 0.12f +
+                           cosf(time * 0.23f * morph + 0.7f) * 0.22f;
                 height = gpuRidgeNoise(nx, nz, params.octaves, params.persistence, 
                                        params.lacunarity, params.ridge_offset);
                 break;
+            }
             case 3: // Voronoi (simplified)
+            {
+                float nx = x / scale +
+                           wind_dx * time * drift_speed * 0.45f +
+                           cross_dx * sinf(time * 0.17f) * 0.12f +
+                           sinf(time * 0.31f * morph + 1.0f) * 0.22f;
+                float nz = z / scale +
+                           wind_dz * time * drift_speed * 0.45f +
+                           cross_dz * cosf(time * 0.13f) * 0.12f +
+                           cosf(time * 0.23f * morph + 0.7f) * 0.22f;
                 height = gpuFBM(nx * 2.0f, nz * 2.0f, params.octaves, params.persistence, params.lacunarity);
                 height = fabsf(height);
                 break;
+            }
             case 4: // Billow
+            {
+                float nx = x / scale +
+                           wind_dx * time * drift_speed * 0.45f +
+                           cross_dx * sinf(time * 0.17f) * 0.12f +
+                           sinf(time * 0.31f * morph + 1.0f) * 0.22f;
+                float nz = z / scale +
+                           wind_dz * time * drift_speed * 0.45f +
+                           cross_dz * cosf(time * 0.13f) * 0.12f +
+                           cosf(time * 0.23f * morph + 0.7f) * 0.22f;
                 height = fabsf(gpuFBM(nx, nz, params.octaves, params.persistence, params.lacunarity)) * 2.0f - 1.0f;
                 break;
+            }
         }
         
         displacement.y = height * params.wave_height;
