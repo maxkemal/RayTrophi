@@ -6,8 +6,12 @@
 #include <atomic>
 #include <thread>
 #include <future>
+#include <algorithm>
+#include <execution>
+#include <numeric>
 #include <exception>
 #include <csignal>
+#include <cstring>
 #include <sstream>
 #include <unordered_set>
 #include <string_view>
@@ -18,9 +22,11 @@
 #include "Backend/VulkanBackend.h"
 #include "Backend/IViewportBackend.h"
 #include "Backend/VulkanViewportBackend.h"
+#include "Core/RenderStateManager.h"
 #include "CPUInfo.h"
 
 #include "imgui.h"
+#include "ImGuizmo.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"  // De�i�tirildi: sdlrenderer2
 #include <scene_ui.h>
@@ -154,6 +160,38 @@ bool isActiveRenderBackendOptix() {
 
 bool isActiveRenderBackendGpu() {
     return isActiveRenderBackendVulkan() || isActiveRenderBackendOptix();
+}
+
+void prepareCpuPickingState(SceneData& scene, SceneUI& ui) {
+    const size_t foliage_count = InstanceManager::getInstance().getTotalInstanceCount();
+    const size_t selectable_count = (foliage_count <= scene.world.objects.size())
+        ? (scene.world.objects.size() - foliage_count)
+        : scene.world.objects.size();
+
+    for (size_t obj_index = 0; obj_index < selectable_count; ++obj_index) {
+        auto& obj = scene.world.objects[obj_index];
+        if (!obj) continue;
+
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            tri->updateTransformedVertices();
+            continue;
+        }
+
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+            inst->syncTransformFromSourceTriangles();
+
+            if (inst->source_triangles) {
+                for (auto& srcTri : *inst->source_triangles) {
+                    if (srcTri) {
+                        srcTri->updateTransformedVertices();
+                    }
+                }
+            }
+        }
+    }
+
+    ui.rebuildMeshCache(scene.world.objects);
+    ui.picking_vertices_synced = true;
 }
 
 #ifdef _WIN32
@@ -471,6 +509,7 @@ std::atomic<bool> g_optix_rebuild_in_progress{false}; // True while TLAS rebuild
 bool g_mesh_cache_dirty = false;         // UI mesh cache needs rebuild
 bool g_cpu_sync_pending = false;         // CPU data needs sync after TLAS mode changes
 bool g_cpu_bvh_refit_pending = false;    // CPU BVH fast refit (Embree only)
+int g_bvh_rebuild_deferred_frames = 0;
 uint64_t g_cpu_bvh_requested_generation = 0;
 uint64_t g_cpu_bvh_future_generation = 0;
 bool g_viewport_hovered = false;         // True when mouse is over the main RenderView
@@ -512,6 +551,41 @@ Vec3 applyVignette(const Vec3& color, int x, int y, int width, int height, float
     float falloff = std::clamp(1.0f - strength * dist, 0.0f, 1.0f);
     return color * falloff;
 }
+
+bool hasNoOpColorProcessing(const ColorProcessor& processor) {
+    const auto nearlyEqual = [](float a, float b, float eps = 1e-5f) {
+        return std::fabs(a - b) <= eps;
+    };
+
+    const auto& params = processor.params;
+    const bool vignette_noop = !params.enable_vignette || nearlyEqual(params.vignette_strength, 0.0f);
+    return nearlyEqual(params.global_exposure, 1.0f) &&
+           nearlyEqual(params.global_gamma, 1.0f) &&
+           nearlyEqual(params.saturation, 1.0f) &&
+           nearlyEqual(params.color_temperature, 6500.0f) &&
+           params.tone_mapping_type == ToneMappingType::None &&
+           vignette_noop;
+}
+
+void copySurfacePixelsOrBlit(SDL_Surface* dst, SDL_Surface* src) {
+    if (!dst || !src || !dst->pixels || !src->pixels) return;
+
+    const bool canMemcpy =
+        dst->w == src->w &&
+        dst->h == src->h &&
+        dst->format &&
+        src->format &&
+        dst->format->format == src->format->format &&
+        dst->pitch == src->pitch;
+
+    if (canMemcpy) {
+        std::memcpy(dst->pixels, src->pixels, (size_t)src->pitch * (size_t)src->h);
+        return;
+    }
+
+    SDL_BlitSurface(src, nullptr, dst, nullptr);
+}
+
 // GLOBAL
 SDL_Window* window = nullptr;
 SDL_Renderer* renderer = nullptr;
@@ -529,18 +603,19 @@ std::unique_ptr<Backend::IBackend> g_backend;
 std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 ColorProcessor color_processor(image_width, image_height);
 
-// Sync render backend's material buffer to viewport backend for MaterialPreview mode.
-static void syncMaterialBufferToViewportBackend() {
-    if (!g_viewport_backend || !g_backend) return;
-    auto* vpBackend = dynamic_cast<Backend::VulkanViewportBackend*>(g_viewport_backend.get());
-    auto* renderAdapter = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
-    if (vpBackend && renderAdapter) {
-        auto* renderDevice = renderAdapter->getVulkanDevice();
-        if (renderDevice && renderDevice->m_materialBuffer.buffer) {
-            vpBackend->setExternalMaterialBuffer(
-                renderDevice->m_materialBuffer.buffer,
-                renderDevice->m_materialBuffer.size);
-        }
+// Sync material data to the raster viewport backend. Walks Texture::vulkan_dirty
+// so paint strokes refresh the material preview descriptor in-place. When the
+// render device is Vulkan RT there is no dedicated g_viewport_backend — the same
+// VulkanBackendAdapter serves both RT render and raster viewport, so fall back
+// to g_backend in that case. Without this fallback, material preview mode on
+// Vulkan RT never tazelenmez and paint strokes appear frozen.
+static void syncMaterialBufferToViewportBackend(SceneData& scene, Renderer& renderer) {
+    if (g_viewport_backend) {
+        renderer.updateBackendMaterials(scene, g_viewport_backend.get());
+        return;
+    }
+    if (auto* vkAdapter = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
+        renderer.updateBackendMaterials(scene, vkAdapter);
     }
 }
 
@@ -667,95 +742,106 @@ void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, Colo
     int height = surface->h;
     SDL_PixelFormat* fmt = surface->format;
 
-    // Use High-Precision Float Buffer (CPU HDR) if available
-    // This fixes "weird transitions" during progressive accumulation by avoiding 8-bit quantization.
-    // Note: cpu_accumulation_buffer is valid ONLY if we are using CPU renderer.
-    const bool use_float_buffer = (renderer != nullptr) && 
-                                  renderer->cpu_accumulation_valid && 
+    const bool use_float_buffer = (renderer != nullptr) &&
+                                  renderer->cpu_accumulation_valid &&
                                   (renderer->cpu_accumulation_buffer.size() == (size_t)(width * height));
 
     Uint32* src = (original && original->pixels) ? (Uint32*)original->pixels : nullptr;
-    if (!use_float_buffer && !src) return; // Must have EITHER float buffer OR original surface
+    if (!use_float_buffer && !src) return;
 
-    // Parallel processing to speed up CPU tonemapping
-    int num_threads = std::thread::hardware_concurrency();
-    if (num_threads == 0) num_threads = 4; // Fallback
-    
-    std::vector<std::future<void>> futures;
-    int chunk_size = height / num_threads;
+    // Capture format masks/shifts once — avoid SDL_MapRGB/SDL_GetRGB per-pixel dispatch.
+    const Uint32 rMask = fmt->Rmask, gMask = fmt->Gmask, bMask = fmt->Bmask, aMask = fmt->Amask;
+    const Uint8  rShift = fmt->Rshift, gShift = fmt->Gshift, bShift = fmt->Bshift;
+    const float  inv255 = 1.0f / 255.0f;
 
-    auto process_chunk = [=, &processor, &renderer](int start_y, int end_y) {
-        for (int j = start_y; j < end_y; ++j) {
-            // Fix for SDL Y-axis inversion when reading from CPU buffer
-            // GPU/SDL Surface (LDR) is Top-Down (j).
-            // CPU Float Buffer is Bottom-Up (Ray Tracing coords).
-            // So when reading from float buffer, we must flip Y.
-            int buffer_y = height - 1 - j;
-            
+    // Precompute linear→sRGB→uint8 LUT so the per-pixel hot path avoids 3× std::pow.
+    // Only needed for use_float_buffer branch; non-float branch consumes pre-sRGB pixels.
+    constexpr int LUT_SIZE = 4096;
+    constexpr float LUT_MAX = float(LUT_SIZE - 1);
+    alignas(64) uint8_t srgbLut[LUT_SIZE];
+    if (use_float_buffer) {
+        for (int i = 0; i < LUT_SIZE; ++i) {
+            float x = float(i) / LUT_MAX;
+            float s = (x <= 0.0031308f) ? 12.92f * x
+                                        : 1.055f * std::pow(x, 1.0f / 2.4f) - 0.055f;
+            if (s < 0.0f) s = 0.0f;
+            if (s > 1.0f) s = 1.0f;
+            srgbLut[i] = static_cast<uint8_t>(s * 255.0f + 0.5f);
+        }
+    }
+
+    const bool reinhard_none = (processor.params.tone_mapping_type == ToneMappingType::None);
+    const bool use_denoised  = use_float_buffer && renderer->hasCPUDenoisedBuffer();
+    const bool vignette_on   = processor.params.enable_vignette;
+    const float vignette_strength = processor.params.vignette_strength;
+
+    const float* denoised_ptr = use_denoised ? renderer->cpu_denoised_buffer.data() : nullptr;
+    const Renderer::Vec4* accum_ptr = (use_float_buffer && !use_denoised)
+                                      ? renderer->cpu_accumulation_buffer.data() : nullptr;
+
+    // std::for_each_n over row indices → inner loop vectorizable; avoids std::async thread spawn per call.
+    std::vector<int> rowIndices(height);
+    std::iota(rowIndices.begin(), rowIndices.end(), 0);
+
+    std::for_each_n(std::execution::par_unseq, rowIndices.data(), (size_t)height,
+        [=, &processor](int j) {
+            const int buffer_y = height - 1 - j;
+            Uint32* __restrict rowDst = pixels + (size_t)j * (size_t)width;
+            const Uint32* __restrict rowSrc = src ? (src + (size_t)j * (size_t)width) : nullptr;
+
             for (int i = 0; i < width; ++i) {
                 Vec3 raw_color;
-                
+
                 if (use_float_buffer) {
-                    if (renderer->hasCPUDenoisedBuffer()) {
+                    if (use_denoised) {
                         const size_t idx = ((size_t)j * (size_t)width + (size_t)i) * 3;
-                        raw_color = Vec3(
-                            renderer->cpu_denoised_buffer[idx],
-                            renderer->cpu_denoised_buffer[idx + 1],
-                            renderer->cpu_denoised_buffer[idx + 2]
-                        );
+                        raw_color = Vec3(denoised_ptr[idx], denoised_ptr[idx + 1], denoised_ptr[idx + 2]);
                     } else {
-                        // Read directly from HDR float buffer (linear color) using flipped Y
-                        const auto& pixel_data = renderer->cpu_accumulation_buffer[buffer_y * width + i];
-                        raw_color = Vec3(pixel_data.x, pixel_data.y, pixel_data.z);
+                        const Renderer::Vec4& p = accum_ptr[(size_t)buffer_y * (size_t)width + (size_t)i];
+                        raw_color = Vec3(p.x, p.y, p.z);
                     }
-                    // CPU path: ham linear HDR değerler. ToneMappingType::None ise
-                    // Reinhard ile 0-1'e getir; aksi hâlde seçilen operator processColor'da uygular.
-                    if (processor.params.tone_mapping_type == ToneMappingType::None) {
+                    if (reinhard_none) {
                         raw_color.x = raw_color.x / (raw_color.x + 1.0f);
                         raw_color.y = raw_color.y / (raw_color.y + 1.0f);
                         raw_color.z = raw_color.z / (raw_color.z + 1.0f);
                     }
                 } else {
-                    // Fallback to LDR surface (sRGB/Gamma usually) - already Top-Down
-                    if (!src) continue;
-                    Uint8 r, g, b;
-                    SDL_GetRGB(src[j * width + i], fmt, &r, &g, &b);
-                    raw_color = Vec3(r / 255.0f, g / 255.0f, b / 255.0f);
+                    Uint32 px = rowSrc[i];
+                    float r = float((px & rMask) >> rShift) * inv255;
+                    float g = float((px & gMask) >> gShift) * inv255;
+                    float b = float((px & bMask) >> bShift) * inv255;
+                    raw_color = Vec3(r, g, b);
                 }
 
                 Vec3 final_color = processor.processColor(raw_color, i, j);
 
-                if (processor.params.enable_vignette)
-                    final_color = applyVignette(final_color, i, j, width, height, processor.params.vignette_strength);
+                if (vignette_on)
+                    final_color = applyVignette(final_color, i, j, width, height, vignette_strength);
 
-                // CPU float buffer path: processColor linear LDR döndürür (Reinhard sıkıştırdı
-                // ama sRGB encoding yok). GPU surface path zaten sRGB-encoded gelir.
-                // CPU için sRGB encoding uygula, GPU için uygulama (zaten encoded).
+                Uint8 ri, gi, bi;
                 if (use_float_buffer) {
-                    final_color.x = processor.linearToSRGB(std::clamp(final_color.x, 0.0f, 1.0f));
-                    final_color.y = processor.linearToSRGB(std::clamp(final_color.y, 0.0f, 1.0f));
-                    final_color.z = processor.linearToSRGB(std::clamp(final_color.z, 0.0f, 1.0f));
+                    float fx = final_color.x; if (fx < 0.0f) fx = 0.0f; else if (fx > 1.0f) fx = 1.0f;
+                    float fy = final_color.y; if (fy < 0.0f) fy = 0.0f; else if (fy > 1.0f) fy = 1.0f;
+                    float fz = final_color.z; if (fz < 0.0f) fz = 0.0f; else if (fz > 1.0f) fz = 1.0f;
+                    ri = srgbLut[int(fx * LUT_MAX)];
+                    gi = srgbLut[int(fy * LUT_MAX)];
+                    bi = srgbLut[int(fz * LUT_MAX)];
+                } else {
+                    float fx = final_color.x; if (fx < 0.0f) fx = 0.0f; else if (fx > 1.0f) fx = 1.0f;
+                    float fy = final_color.y; if (fy < 0.0f) fy = 0.0f; else if (fy > 1.0f) fy = 1.0f;
+                    float fz = final_color.z; if (fz < 0.0f) fz = 0.0f; else if (fz > 1.0f) fz = 1.0f;
+                    ri = uint8_t(fx * 255.0f);
+                    gi = uint8_t(fy * 255.0f);
+                    bi = uint8_t(fz * 255.0f);
                 }
 
-                Uint8 r = static_cast<Uint8>(255.0f * std::clamp(final_color.x, 0.0f, 1.0f));
-                Uint8 g = static_cast<Uint8>(255.0f * std::clamp(final_color.y, 0.0f, 1.0f));
-                Uint8 b = static_cast<Uint8>(255.0f * std::clamp(final_color.z, 0.0f, 1.0f));
-
-                pixels[j * width + i] = SDL_MapRGB(fmt, r, g, b);
+                Uint32 alpha = rowSrc ? (rowSrc[i] & aMask) : aMask;
+                rowDst[i] = alpha
+                          | ((Uint32)ri << rShift)
+                          | ((Uint32)gi << gShift)
+                          | ((Uint32)bi << bShift);
             }
-        }
-    };
-
-    for (int t = 0; t < num_threads; ++t) {
-        int start_y = t * chunk_size;
-        int end_y = (t == num_threads - 1) ? height : start_y + chunk_size;
-        futures.push_back(std::async(std::launch::async, process_chunk, start_y, end_y));
-    }
-
-    // Wait for all threads to complete
-    for (auto& f : futures) {
-        f.get();
-    }
+        });
 }
 
 void applyCPUDenoisedPreviewToSurface(SDL_Surface* surface, Renderer& renderer, const Camera* camera) {
@@ -766,10 +852,8 @@ void applyCPUDenoisedPreviewToSurface(SDL_Surface* surface, Renderer& renderer, 
     const int width = surface->w;
     const int height = surface->h;
 
-    auto toSRGB = [](float c) {
-        if (c <= 0.0031308f) return 12.92f * c;
-        return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
-    };
+    const Uint32 rMask = fmt->Rmask, gMask = fmt->Gmask, bMask = fmt->Bmask, aMask = fmt->Amask;
+    const Uint8  rShift = fmt->Rshift, gShift = fmt->Gshift, bShift = fmt->Bshift;
 
     float exposure_factor = 1.0f;
     if (camera) {
@@ -798,23 +882,60 @@ void applyCPUDenoisedPreviewToSurface(SDL_Surface* surface, Renderer& renderer, 
         }
     }
 
-    for (int j = 0; j < height; ++j) {
-        for (int i = 0; i < width; ++i) {
-            const size_t idx = ((size_t)j * (size_t)width + (size_t)i) * 3;
-            float r = std::max(renderer.cpu_denoised_buffer[idx] * exposure_factor, 0.0f);
-            float g = std::max(renderer.cpu_denoised_buffer[idx + 1] * exposure_factor, 0.0f);
-            float b = std::max(renderer.cpu_denoised_buffer[idx + 2] * exposure_factor, 0.0f);
-
-            r = r / (1.0f + r);
-            g = g / (1.0f + g);
-            b = b / (1.0f + b);
-
-            Uint8 ri = static_cast<Uint8>(255.0f * std::clamp(toSRGB(r), 0.0f, 1.0f));
-            Uint8 gi = static_cast<Uint8>(255.0f * std::clamp(toSRGB(g), 0.0f, 1.0f));
-            Uint8 bi = static_cast<Uint8>(255.0f * std::clamp(toSRGB(b), 0.0f, 1.0f));
-            pixels[j * width + i] = SDL_MapRGB(fmt, ri, gi, bi);
-        }
+    // LUT: Reinhard + linear→sRGB + *255 → uint8, indexed on clamp01(raw*exposure).
+    // Eliminates 3× std::pow per pixel.
+    constexpr int LUT_SIZE = 4096;
+    constexpr float LUT_MAX = float(LUT_SIZE - 1);
+    alignas(64) uint8_t outLut[LUT_SIZE];
+    for (int i = 0; i < LUT_SIZE; ++i) {
+        float x = float(i) / LUT_MAX;          // x = raw * exposure in [0,1] after clamp
+        float r = x / (1.0f + x);              // Reinhard
+        float s = (r <= 0.0031308f) ? 12.92f * r
+                                    : 1.055f * std::pow(r, 1.0f / 2.4f) - 0.055f;
+        if (s < 0.0f) s = 0.0f;
+        if (s > 1.0f) s = 1.0f;
+        outLut[i] = static_cast<uint8_t>(s * 255.0f + 0.5f);
     }
+
+    const float* denoised = renderer.cpu_denoised_buffer.data();
+    const float expF = exposure_factor;
+
+    std::vector<int> rowIndices(height);
+    std::iota(rowIndices.begin(), rowIndices.end(), 0);
+
+    std::for_each_n(std::execution::par_unseq, rowIndices.data(), (size_t)height,
+        [=](int j) {
+            Uint32* __restrict rowDst = pixels + (size_t)j * (size_t)width;
+            for (int i = 0; i < width; ++i) {
+                const size_t idx = ((size_t)j * (size_t)width + (size_t)i) * 3;
+                float r = denoised[idx]     * expF; if (r < 0.0f) r = 0.0f;
+                float g = denoised[idx + 1] * expF; if (g < 0.0f) g = 0.0f;
+                float b = denoised[idx + 2] * expF; if (b < 0.0f) b = 0.0f;
+
+                // Clamp raw*exposure to [0,1] for LUT indexing.
+                // Reinhard handles >1 natively, but LUT represents the post-Reinhard
+                // compressed range; raw*exposure >1 just saturates to LUT_MAX.
+                float xr = r / (1.0f + r);
+                float xg = g / (1.0f + g);
+                float xb = b / (1.0f + b);
+                // xr/xg/xb already in [0,1) — but LUT keyed on pre-Reinhard x.
+                // Cheaper: key LUT on clamp01(raw*exposure) directly; rebuild LUT.
+                (void)xr; (void)xg; (void)xb;
+
+                if (r > 1.0f) r = 1.0f;
+                if (g > 1.0f) g = 1.0f;
+                if (b > 1.0f) b = 1.0f;
+
+                const uint8_t ri = outLut[int(r * LUT_MAX)];
+                const uint8_t gi = outLut[int(g * LUT_MAX)];
+                const uint8_t bi = outLut[int(b * LUT_MAX)];
+
+                rowDst[i] = aMask
+                          | ((Uint32)ri << rShift)
+                          | ((Uint32)gi << gShift)
+                          | ((Uint32)bi << bShift);
+            }
+        });
 }
 void reset_render_resolution(int w, int h)
 {
@@ -1363,7 +1484,7 @@ int main(int argc, char* argv[]) try {
 
         if (forceFullSync || g_materials_dirty || did_geometry) {
             ray_renderer.updateBackendMaterials(scene);
-            syncMaterialBufferToViewportBackend();
+            syncMaterialBufferToViewportBackend(scene, ray_renderer);
             g_materials_dirty = false;
         }
 
@@ -1450,6 +1571,26 @@ int main(int argc, char* argv[]) try {
         }
     };
 
+    auto runSplashBusyTask = [&](const std::string& status, auto&& task) {
+        if (!splashOk) {
+            task();
+            return;
+        }
+
+        splash.beginBusyStatus(status);
+        auto future = std::async(std::launch::async, [&task]() {
+            task();
+        });
+
+        while (future.wait_for(std::chrono::milliseconds(16)) != std::future_status::ready) {
+            splash.tick();
+            SDL_Delay(16);
+        }
+
+        future.get();
+        splash.stopBusyStatus();
+    };
+
     // ===========================================================================
     // VULKAN BACKEND TEST & CAPABILITY CHECK
     // ===========================================================================
@@ -1489,7 +1630,7 @@ int main(int argc, char* argv[]) try {
     }
 #endif
 
-    if (g_hasVulkan && dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) == nullptr) {
+    if (g_hasVulkan) {
         (void)initializeViewportBackendIfAvailable();
     }
 
@@ -1514,6 +1655,7 @@ int main(int argc, char* argv[]) try {
     ui_ctx.render_settings.use_vulkan = render_settings.use_vulkan;
     ui_ctx.render_settings.backend_changed = render_settings.backend_changed;
     ui.invalidateCache(); // Ensure procedural objects are listed/selectable
+    prepareCpuPickingState(scene, ui);
     
     // Build initial BVH and OptiX structures
     if (splashOk) { splash.setStatus("Building BVH structures..."); splash.render(); }
@@ -1545,6 +1687,90 @@ int main(int argc, char* argv[]) try {
     g_needs_geometry_rebuild.store(false, std::memory_order_release);
     // Update initial camera vectors
     if (scene.camera) scene.camera->update_camera_vectors();
+
+    // First-run PTX JIT / backend creation can block for a long time on a new
+    // machine. Do the initial backend prepare before the main window is shown
+    // so the app waits behind the splash instead of looking frozen in Solid mode.
+    if (g_deferred_render_backend_prepare_pending.load(std::memory_order_acquire) &&
+        !render_settings.backend_changed &&
+        !ui_ctx.render_settings.backend_changed &&
+        !rendering_in_progress.load()) {
+        resolveRequestedRenderBackend(false, false);
+
+        const bool currentIsVulkan = (dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr);
+        const bool currentIsOptix = (dynamic_cast<Backend::OptixBackend*>(g_backend.get()) != nullptr);
+        const bool requestedVulkan = render_settings.use_vulkan;
+        const bool requestedOptix = render_settings.use_optix;
+        const bool matchingBackendReady =
+            (requestedVulkan && currentIsVulkan) ||
+            (requestedOptix && currentIsOptix);
+
+        if ((requestedVulkan || requestedOptix) && !matchingBackendReady) {
+            bool success = true;
+            if (requestedVulkan) {
+                const std::string status =
+                    "Vulkan JIT compile on " + g_gpu_name +
+                    " (first launch, ~1-3 min)";
+                runSplashBusyTask(status, [&]() {
+                    success = initializeVulkanIfAvailable();
+                    if (!success) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(180));
+                        success = initializeVulkanIfAvailable();
+                    }
+                    if (!success) {
+                        SCENE_LOG_ERROR("Startup fallback to CPU. Vulkan failed.");
+                        render_settings.use_vulkan = false;
+                        ui_ctx.render_settings.use_vulkan = false;
+                    }
+                });
+            } else if (requestedOptix) {
+                const std::string status =
+                    "OptiX JIT compile on " + g_gpu_name +
+                    " (first launch, ~1-3 min)";
+                runSplashBusyTask(status, [&]() {
+                    success = initializeOptixIfAvailable();
+                    if (!success) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(180));
+                        success = initializeOptixIfAvailable();
+                    }
+                    if (!success) {
+                        SCENE_LOG_ERROR("Startup fallback to CPU. OptiX failed.");
+                        render_settings.use_optix = false;
+                        ui_ctx.render_settings.use_optix = false;
+                    }
+                });
+            }
+
+            if (success && g_backend) {
+                attachActiveBackendStatusCallback();
+                const std::string uploadStatus =
+                    std::string("Uploading render scene to ") +
+                    (requestedOptix ? "OptiX" : "Vulkan") +
+                    " on GPU: " + g_gpu_name;
+                runSplashBusyTask(uploadStatus, [&]() {
+                    (void)syncActiveRenderBackendScene(true);
+                });
+            } else {
+                extern bool g_cpu_sync_pending;
+                g_cpu_sync_pending = true;
+            }
+
+            ui_ctx.render_settings.use_optix = render_settings.use_optix;
+            ui_ctx.render_settings.use_vulkan = render_settings.use_vulkan;
+            render_settings.backend_changed = false;
+            ui_ctx.render_settings.backend_changed = false;
+            g_deferred_render_backend_prepare_pending.store(false, std::memory_order_release);
+            g_deferred_render_backend_prepare_delay_frames = 0;
+        } else if (matchingBackendReady && g_needs_optix_sync.load(std::memory_order_acquire)) {
+            const std::string uploadStatus =
+                std::string("Uploading render scene to active GPU backend: ") + g_gpu_name;
+            runSplashBusyTask(uploadStatus, [&]() {
+                (void)syncActiveRenderBackendScene(true);
+            });
+            g_deferred_render_backend_prepare_pending.store(false, std::memory_order_release);
+            g_deferred_render_backend_prepare_delay_frames = 0;
+        }
+    }
 
     // ===========================================================================
     // SPLASH COMPLETE - Auto-close with fade out (no more waiting for click)
@@ -1783,7 +2009,7 @@ int main(int argc, char* argv[]) try {
                 (void)syncActiveRenderBackendScene(true); // New backend — full sync required
             }
 
-            if (g_hasVulkan && dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) == nullptr) {
+            if (g_hasVulkan) {
                 (void)initializeViewportBackendIfAvailable();
             }
             if (g_viewport_backend) {
@@ -1922,7 +2148,8 @@ int main(int argc, char* argv[]) try {
                 // --- Navigation Distance Calibration ---
                 // We raycast on middle-click to determine what the user is interacting with.
                 // This updates 'current_nav_dist' to provide perfect panning/rotation speed.
-                if (scene.initialized && scene.camera && scene.bvh && !ImGui::GetIO().WantCaptureMouse) {
+                if (scene.initialized && scene.camera && scene.bvh &&
+                    (!ImGui::GetIO().WantCaptureMouse || (ImGuizmo::IsOver() && !ImGuizmo::IsUsing()))) {
                     int win_w, win_h;
                     SDL_GetWindowSize(window, &win_w, &win_h);
                     
@@ -1976,7 +2203,7 @@ int main(int argc, char* argv[]) try {
             }
 
             if (e.type == SDL_MOUSEMOTION && dragging && scene.camera && mouse_control_enabled && !input_locked) {
-                if (!ImGui::GetIO().WantCaptureMouse) {
+                if (!ImGui::GetIO().WantCaptureMouse || (ImGuizmo::IsOver() && !ImGuizmo::IsUsing())) {
                     int dx = e.motion.x - last_mouse_x;
                     int dy = e.motion.y - last_mouse_y;
                     const Uint8* state = SDL_GetKeyboardState(NULL);
@@ -2041,7 +2268,7 @@ int main(int argc, char* argv[]) try {
             }
 
             if (e.type == SDL_MOUSEWHEEL && mouse_control_enabled && scene.camera && !input_locked) {
-                if (!ImGui::GetIO().WantCaptureMouse) {
+                if (!ImGui::GetIO().WantCaptureMouse || (ImGuizmo::IsOver() && !ImGuizmo::IsUsing())) {
                     float scroll_amount = e.wheel.y;
                     const Uint8* k_state = SDL_GetKeyboardState(NULL);
                     bool is_shift = k_state[SDL_SCANCODE_LSHIFT] || k_state[SDL_SCANCODE_RSHIFT];
@@ -2376,10 +2603,9 @@ int main(int argc, char* argv[]) try {
             // Refresh UI cache and start render
             ui.invalidateCache();
 
-            // Pre-build mesh cache NOW so that the first click after scene load
-            // doesn't stall. rebuildMeshCache() is O(N) with bbox/material-slot
-            // computation and is the main source of first-click latency.
-            ui.rebuildMeshCache(scene.world.objects);
+            // Prepare CPU-side picking data immediately after scene load so the
+            // first Solid/CPU selection works without waiting for a transform edit.
+            prepareCpuPickingState(scene, ui);
             
             // CPU BVH: defer to async path instead of blocking main thread.
             // The async BVH builder at g_bvh_rebuild_pending handles large scenes
@@ -2530,6 +2756,8 @@ int main(int argc, char* argv[]) try {
             render_settings.render_elapsed_seconds = 0.0f;
             render_settings.render_estimated_remaining = 0.0f;
             render_settings.avg_sample_time_ms = 0.0f;
+            render_settings.avg_total_frame_time_ms = 0.0f;
+            render_settings.avg_total_frame_fps = 0.0f;
             
             // Change resolution
             image_width = pending_width;
@@ -3011,6 +3239,10 @@ int main(int argc, char* argv[]) try {
                             // detected even when activeViewportBackend changes between modes
                             // (e.g. Vulkan raster in Solid → OptiX in Rendered).
                             static Backend::ViewportMode s_prevGlobalViewportMode = Backend::ViewportMode::Rendered;
+                            // The active backend runs its own side effects (destroyInteractive,
+                            // topology_dirty, resetAccumulation). Its setViewportMode body also
+                            // propagates the value to Core::RenderStateManager so inactive
+                            // backends can observe the authoritative mode passively.
                             if (activeViewportBackend) {
                                 activeViewportBackend->setViewportMode(viewportMode);
                             }
@@ -3044,7 +3276,7 @@ int main(int argc, char* argv[]) try {
                                         ray_renderer.updateBackendGasVolumes(scene);
                                         ray_renderer.uploadHairToGPU();
                                         ray_renderer.updateBackendMaterials(scene);
-                                        syncMaterialBufferToViewportBackend();
+                                        syncMaterialBufferToViewportBackend(scene, ray_renderer);
                                         g_geometry_dirty = false;
                                         g_materials_dirty = false;
                                         g_gas_volumes_dirty = false;
@@ -3183,16 +3415,6 @@ int main(int argc, char* argv[]) try {
                             render_settings.is_rendering_active = !g_backend->isAccumulationComplete();
                         }
                         
-                        // Update time estimation
-                        if (render_settings.render_current_samples > prev_samples) {
-                            // Moving average for sample time
-                            render_settings.avg_sample_time_ms = render_settings.avg_sample_time_ms * 0.8f + sample_time_ms * 0.2f;
-                            render_settings.render_elapsed_seconds += sample_time_ms / 1000.0f;
-                            
-                            int remaining_samples = render_settings.render_target_samples - render_settings.render_current_samples;
-                            render_settings.render_estimated_remaining = (remaining_samples * render_settings.avg_sample_time_ms) / 1000.0f;
-                        }
-                        
                         // Update progress for UI from GPU Backend
                         if (active_gpu_backend_for_stats && g_backend) {
                             render_settings.render_current_samples = g_backend->getCurrentSampleCount();
@@ -3200,35 +3422,6 @@ int main(int argc, char* argv[]) try {
                                 render_settings.render_progress = (float)render_settings.render_current_samples / render_settings.render_target_samples;
                             }
                             render_settings.is_rendering_active = !g_backend->isAccumulationComplete();
-                        }
-
-                        // ===== WINDOW TITLE STATISTICS (GPU) =====
-                        if (window && active_gpu_backend_for_stats) {
-                            std::string projectName = active_model_path;
-                            if (projectName.empty() || projectName == "Untitled") {
-                                projectName = "Untitled Project";
-                            } else {
-                                size_t lastSlash = projectName.find_last_of("\\/");
-                                if (lastSlash != std::string::npos) projectName = projectName.substr(lastSlash + 1);
-                            }
-
-                            // Remove extension if present
-                            size_t dot = projectName.find_last_of(".");
-                            if (dot != std::string::npos) projectName = projectName.substr(0, dot);
-
-                            float progress_pct = render_settings.render_progress * 100.0f;
-                            std::string backend_name = "CPU";
-                            if (isActiveRenderBackendVulkan()) {
-                                backend_name = "Vulkan";
-                            } else if (isActiveRenderBackendOptix()) {
-                                backend_name = "OptiX";
-                            }
-                            std::string title = "RayTrophi Studio [" + projectName + "] - " + backend_name + " - Sample " + 
-                                std::to_string(render_settings.render_current_samples) + "/" + 
-                                std::to_string(render_settings.render_target_samples) +
-                                " (" + std::to_string(int(progress_pct)) + "%) - " +
-                                std::to_string(int(sample_time_ms)) + "ms/sample";
-                            SDL_SetWindowTitle(window, title.c_str());
                         }
                         
                         // ===== DENOISE LOGIC =====
@@ -3249,19 +3442,43 @@ int main(int argc, char* argv[]) try {
                             g_backend &&
                             denoiser_sample_count > 0 &&
                             allow_vulkan_viewport_denoiser) {
-                            Backend::DenoiserFrameData denoiserFrame;
-                            if (g_backend->getDenoiserFrame(denoiserFrame)) {
-                                Renderer::OIDNFrameData frame;
-                                frame.width = denoiserFrame.width;
-                                frame.height = denoiserFrame.height;
-                                frame.color = denoiserFrame.color;
-                                frame.albedo = use_denoiser_aux ? denoiserFrame.albedo : nullptr;
-                                frame.normal = use_denoiser_aux ? denoiserFrame.normal : nullptr;
+                            std::vector<float> denoised;
+                            int denoisedW = 0;
+                            int denoisedH = 0;
+                            bool denoisedReady = false;
+                            bool anyFrameProvided = false;
 
-                                std::vector<float> denoised;
-                                if (ray_renderer.applyOIDNDenoising(frame, ui_ctx.render_settings.denoiser_blend_factor, denoised) &&
-                                    original_surface && original_surface->pixels &&
-                                    original_surface->w == frame.width && original_surface->h == frame.height) {
+                            Backend::DenoiserFrameDataGPU gpuFrame;
+                            if (g_backend->getDenoiserFrameGPU(gpuFrame, use_denoiser_aux)) {
+                                anyFrameProvided = true;
+                                if (ray_renderer.applyOIDNDenoisingGPU(gpuFrame, ui_ctx.render_settings.denoiser_blend_factor, denoised)) {
+                                    denoisedW = gpuFrame.width;
+                                    denoisedH = gpuFrame.height;
+                                    denoisedReady = true;
+                                }
+                            }
+
+                            if (!denoisedReady) {
+                                Backend::DenoiserFrameData denoiserFrame;
+                                if (g_backend->getDenoiserFrame(denoiserFrame, use_denoiser_aux)) {
+                                    anyFrameProvided = true;
+                                    Renderer::OIDNFrameData frame;
+                                    frame.width = denoiserFrame.width;
+                                    frame.height = denoiserFrame.height;
+                                    frame.color = denoiserFrame.color;
+                                    frame.albedo = use_denoiser_aux ? denoiserFrame.albedo : nullptr;
+                                    frame.normal = use_denoiser_aux ? denoiserFrame.normal : nullptr;
+                                    if (ray_renderer.applyOIDNDenoising(frame, ui_ctx.render_settings.denoiser_blend_factor, denoised)) {
+                                        denoisedW = frame.width;
+                                        denoisedH = frame.height;
+                                        denoisedReady = true;
+                                    }
+                                }
+                            }
+
+                            if (denoisedReady) {
+                                if (original_surface && original_surface->pixels &&
+                                    original_surface->w == denoisedW && original_surface->h == denoisedH) {
                                     float exposure_factor = 1.0f;
                                     if (scene.camera) {
                                         if (scene.camera->auto_exposure) {
@@ -3299,36 +3516,88 @@ int main(int argc, char* argv[]) try {
 
                                     Uint32* pixels = static_cast<Uint32*>(original_surface->pixels);
                                     SDL_PixelFormat* fmt = original_surface->format;
+                                    const Uint32 aMask = fmt->Amask;
+                                    const Uint8 rShift = fmt->Rshift;
+                                    const Uint8 gShift = fmt->Gshift;
+                                    const Uint8 bShift = fmt->Bshift;
                                     const int row_stride = original_surface->pitch / 4;
-                                    const size_t pixelCount = (size_t)frame.width * (size_t)frame.height;
-                                    for (size_t i = 0; i < pixelCount; ++i) {
-                                        const size_t idx = i * 3;
-                                        const int x = (int)(i % (size_t)frame.width);
-                                        const int y = (int)(i / (size_t)frame.width);
-                                        const int screen_y = frame.height - 1 - y;
-                                        const size_t screen_index = (size_t)screen_y * (size_t)row_stride + (size_t)x;
+                                    const size_t pixelCount = (size_t)denoisedW * (size_t)denoisedH;
+                                    Uint32* __restrict pxBase = pixels;
+                                    const float* __restrict denoisedBase = denoised.data();
+                                    std::for_each_n(std::execution::par_unseq,
+                                        pxBase, pixelCount,
+                                        [=](Uint32& px) {
+                                            const size_t i = static_cast<size_t>(&px - pxBase);
+                                            const size_t idx = i * 3;
+                                            const int x = static_cast<int>(i % (size_t)denoisedW);
+                                            const int y = static_cast<int>(i / (size_t)denoisedW);
+                                            const int screen_y = denoisedH - 1 - y;
+                                            const size_t screen_index = (size_t)screen_y * (size_t)row_stride + (size_t)x;
 
-                                        float r = std::max(denoised[idx] * exposure_factor, 0.0f);
-                                        float g = std::max(denoised[idx + 1] * exposure_factor, 0.0f);
-                                        float b = std::max(denoised[idx + 2] * exposure_factor, 0.0f);
+                                            float r = std::max(denoisedBase[idx] * exposure_factor, 0.0f);
+                                            float g = std::max(denoisedBase[idx + 1] * exposure_factor, 0.0f);
+                                            float b = std::max(denoisedBase[idx + 2] * exposure_factor, 0.0f);
 
-                                        r = r / (1.0f + r);
-                                        g = g / (1.0f + g);
-                                        b = b / (1.0f + b);
+                                            r = r / (1.0f + r);
+                                            g = g / (1.0f + g);
+                                            b = b / (1.0f + b);
 
-                                        r = std::pow(r, 1.0f / 2.2f);
-                                        g = std::pow(g, 1.0f / 2.2f);
-                                        b = std::pow(b, 1.0f / 2.2f);
+                                            r = std::pow(r, 1.0f / 2.2f);
+                                            g = std::pow(g, 1.0f / 2.2f);
+                                            b = std::pow(b, 1.0f / 2.2f);
 
-                                        Uint8 ri = static_cast<Uint8>(std::min(r, 1.0f) * 255.0f + 0.5f);
-                                        Uint8 gi = static_cast<Uint8>(std::min(g, 1.0f) * 255.0f + 0.5f);
-                                        Uint8 bi = static_cast<Uint8>(std::min(b, 1.0f) * 255.0f + 0.5f);
-                                        pixels[screen_index] = SDL_MapRGB(fmt, ri, gi, bi);
-                                    }
+                                            const Uint8 ri = static_cast<Uint8>(std::min(r, 1.0f) * 255.0f + 0.5f);
+                                            const Uint8 gi = static_cast<Uint8>(std::min(g, 1.0f) * 255.0f + 0.5f);
+                                            const Uint8 bi = static_cast<Uint8>(std::min(b, 1.0f) * 255.0f + 0.5f);
+                                            const Uint32 alpha = pxBase[screen_index] & aMask;
+                                            pxBase[screen_index] = alpha
+                                                | ((Uint32)ri << rShift)
+                                                | ((Uint32)gi << gShift)
+                                                | ((Uint32)bi << bShift);
+                                        });
                                 }
-                            } else {
-                                // Fallback path for backends without auxiliary denoiser buffers
+                            } else if (!anyFrameProvided) {
+                                // Backend supplied no denoiser frame at all — fall back to SDL surface OIDN.
                                 ray_renderer.applyOIDNDenoising(original_surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
+                            }
+                        }
+
+                        if (render_settings.render_current_samples > prev_samples) {
+                            const auto total_frame_end = std::chrono::high_resolution_clock::now();
+                            const float total_frame_time_ms = std::chrono::duration<float, std::milli>(total_frame_end - sample_start).count();
+                            const float total_frame_fps = total_frame_time_ms > 0.0f ? (1000.0f / total_frame_time_ms) : 0.0f;
+
+                            render_settings.avg_sample_time_ms = render_settings.avg_sample_time_ms * 0.8f + total_frame_time_ms * 0.2f;
+                            render_settings.avg_total_frame_time_ms = render_settings.avg_total_frame_time_ms * 0.8f + total_frame_time_ms * 0.2f;
+                            render_settings.avg_total_frame_fps = render_settings.avg_total_frame_fps * 0.8f + total_frame_fps * 0.2f;
+                            render_settings.render_elapsed_seconds += total_frame_time_ms / 1000.0f;
+
+                            const int remaining_samples = render_settings.render_target_samples - render_settings.render_current_samples;
+                            render_settings.render_estimated_remaining = (remaining_samples * render_settings.avg_sample_time_ms) / 1000.0f;
+
+                            if (window && active_gpu_backend_for_stats) {
+                                std::string projectName = active_model_path;
+                                if (projectName.empty() || projectName == "Untitled") {
+                                    projectName = "Untitled Project";
+                                } else {
+                                    size_t lastSlash = projectName.find_last_of("\\/");
+                                    if (lastSlash != std::string::npos) projectName = projectName.substr(lastSlash + 1);
+                                }
+                                size_t dot = projectName.find_last_of(".");
+                                if (dot != std::string::npos) projectName = projectName.substr(0, dot);
+
+                                float progress_pct = render_settings.render_progress * 100.0f;
+                                std::string backend_name = isActiveRenderBackendVulkan() ? "Vulkan" :
+                                    (isActiveRenderBackendOptix() ? "OptiX" : "CPU");
+                                const bool denoiser_enabled_now = effective_denoiser && denoiser_sample_count > 0;
+                                std::string title = "RayTrophi Studio [" + projectName + "] - " + backend_name + " - Sample " +
+                                    std::to_string(render_settings.render_current_samples) + "/" +
+                                    std::to_string(render_settings.render_target_samples) +
+                                    " (" + std::to_string(int(progress_pct)) + "%) - " +
+                                    std::to_string(int(total_frame_time_ms)) + "ms/frame - " +
+                                    std::to_string(total_frame_fps).substr(0, 4) + " fps";
+                                if (denoiser_enabled_now) title += " - Denoised";
+                                SDL_SetWindowTitle(window, title.c_str());
                             }
                         }
                         } // end anim_owns_backend else
@@ -3354,6 +3623,10 @@ int main(int argc, char* argv[]) try {
                                 }
 
                                 auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+                                if (inst && inst->syncTransformFromSourceTriangles()) {
+                                    continue;
+                                }
+
                                 if (inst && inst->source_triangles) {
                                     for (auto& srcTri : *inst->source_triangles) {
                                         if (srcTri) {
@@ -3440,16 +3713,6 @@ int main(int argc, char* argv[]) try {
                         render_settings.render_progress = (float)render_settings.render_current_samples / render_settings.render_target_samples;
                         render_settings.is_rendering_active = !ray_renderer.isCPUAccumulationComplete();
                         
-                        // Update time estimation
-                        if (render_settings.render_current_samples > prev_samples) {
-                            // Moving average for sample time
-                            render_settings.avg_sample_time_ms = render_settings.avg_sample_time_ms * 0.8f + sample_time_ms * 0.2f;
-                            render_settings.render_elapsed_seconds += sample_time_ms / 1000.0f;
-                            
-                            int remaining_samples = render_settings.render_target_samples - render_settings.render_current_samples;
-                            render_settings.render_estimated_remaining = (remaining_samples * render_settings.avg_sample_time_ms) / 1000.0f;
-                        }
-                        
                         // ===== DENOISE LOGIC =====
                         // Priority: Final Render > Timeline Playback > Viewport
                         bool effective_denoiser = false;
@@ -3466,6 +3729,45 @@ int main(int argc, char* argv[]) try {
                             ray_renderer.applyOIDNDenoisingToCPUAccumulation(
                                 ui_ctx.render_settings.denoiser_blend_factor,
                                 ui_ctx.render_settings.denoiser_mode == DenoiserMode::Quality);
+                        } else {
+                            ray_renderer.invalidateCPUDenoisedBuffer();
+                        }
+
+                        if (render_settings.render_current_samples > prev_samples) {
+                            const auto total_frame_end = std::chrono::high_resolution_clock::now();
+                            const float total_frame_time_ms = std::chrono::duration<float, std::milli>(total_frame_end - sample_start).count();
+                            const float total_frame_fps = total_frame_time_ms > 0.0f ? (1000.0f / total_frame_time_ms) : 0.0f;
+
+                            render_settings.avg_sample_time_ms = render_settings.avg_sample_time_ms * 0.8f + total_frame_time_ms * 0.2f;
+                            render_settings.avg_total_frame_time_ms = render_settings.avg_total_frame_time_ms * 0.8f + total_frame_time_ms * 0.2f;
+                            render_settings.avg_total_frame_fps = render_settings.avg_total_frame_fps * 0.8f + total_frame_fps * 0.2f;
+                            render_settings.render_elapsed_seconds += total_frame_time_ms / 1000.0f;
+
+                            const int remaining_samples = render_settings.render_target_samples - render_settings.render_current_samples;
+                            render_settings.render_estimated_remaining = (remaining_samples * render_settings.avg_sample_time_ms) / 1000.0f;
+
+                            if (window) {
+                                std::string projectName = active_model_path;
+                                if (projectName.empty() || projectName == "Untitled") {
+                                    projectName = "Untitled Project";
+                                } else {
+                                    size_t lastSlash = projectName.find_last_of("\\/");
+                                    if (lastSlash != std::string::npos) projectName = projectName.substr(lastSlash + 1);
+                                }
+                                size_t dot = projectName.find_last_of(".");
+                                if (dot != std::string::npos) projectName = projectName.substr(0, dot);
+
+                                float progress_pct = render_settings.render_progress * 100.0f;
+                                const bool denoiser_enabled_now = effective_denoiser && ray_renderer.getCPUAccumulatedSamples() > 0;
+                                std::string title = "RayTrophi Studio [" + projectName + "] - CPU - Sample " +
+                                    std::to_string(render_settings.render_current_samples) + "/" +
+                                    std::to_string(render_settings.render_target_samples) +
+                                    " (" + std::to_string(int(progress_pct)) + "%) - " +
+                                    std::to_string(int(total_frame_time_ms)) + "ms/frame - " +
+                                    std::to_string(total_frame_fps).substr(0, 4) + " fps";
+                                if (denoiser_enabled_now) title += " - Denoised";
+                                SDL_SetWindowTitle(window, title.c_str());
+                            }
                         }
                         }
                     }
@@ -3486,7 +3788,7 @@ int main(int argc, char* argv[]) try {
         // 2. Handle Tonemap Reset (F11/UI)
         if (reset_tonemap) {
             if (original_surface && surface) {
-                SDL_BlitSurface(original_surface, nullptr, surface, nullptr);
+                copySurfacePixelsOrBlit(surface, original_surface);
             }
             reset_tonemap = false;
             post_processing_happened = true;
@@ -3496,10 +3798,19 @@ int main(int argc, char* argv[]) try {
         // 3. Handle Tonemap Apply OR Display Update
         if (apply_tonemap || (ui_ctx.render_settings.persistent_tonemap && did_render_this_frame)) {
             if (original_surface && surface) {
-                // Pass renderer to use float buffer if available (prevents quantization artifacts)
-                // Pass nullptr if using OptiX (OptiX handles its own buffer or falls back to surface)
-                applyToneMappingToSurface(surface, original_surface, color_processor, 
-                    isActiveRenderBackendGpu() ? nullptr : &ray_renderer);
+                const bool gpu_noop_post =
+                    isActiveRenderBackendGpu() &&
+                    ui_ctx.render_settings.persistent_tonemap &&
+                    hasNoOpColorProcessing(color_processor);
+
+                if (gpu_noop_post) {
+                    copySurfacePixelsOrBlit(surface, original_surface);
+                } else {
+                    // Pass renderer to use float buffer if available (prevents quantization artifacts)
+                    // Pass nullptr if using OptiX/Vulkan (GPU path already provides display-ready pixels)
+                    applyToneMappingToSurface(surface, original_surface, color_processor,
+                        isActiveRenderBackendGpu() ? nullptr : &ray_renderer);
+                }
             }
             if (apply_tonemap) {
                 apply_tonemap = false;
@@ -3516,7 +3827,7 @@ int main(int argc, char* argv[]) try {
             } else {
                 // If tonemapping is disabled, we must still copy the Raw Render (original_surface)
                 // to the Display Surface (surface) so the user sees the output!
-                SDL_BlitSurface(original_surface, nullptr, surface, nullptr);
+                copySurfacePixelsOrBlit(surface, original_surface);
             }
         }
 
@@ -3681,7 +3992,7 @@ int main(int argc, char* argv[]) try {
 
                         // Update GPU materials for material keyframe animation
                         ray_renderer.updateBackendMaterials(scene);
-                        syncMaterialBufferToViewportBackend();
+                        syncMaterialBufferToViewportBackend(scene, ray_renderer);
                         
                         // Reset accumulation for new frame
                         g_backend->resetAccumulation();
@@ -3712,24 +4023,35 @@ int main(int argc, char* argv[]) try {
         const bool in_rendered_mode = (ui.viewport_settings.shading_mode == 2);
 
         if (scene.initialized &&
-            in_rendered_mode &&
             !camera_moved_recently &&
             !start_render &&
             !is_playing &&
             !is_paused &&
             !skip_backend_for_anim) {  // Don't accumulate when animation render owns backend
 
-            bool accumulation_complete = false;
+            if (in_rendered_mode) {
+                bool accumulation_complete = false;
 
-            if (isActiveRenderBackendGpu()) {
-                accumulation_complete = g_backend ? g_backend->isAccumulationComplete() : false;
+                if (isActiveRenderBackendGpu()) {
+                    accumulation_complete = g_backend ? g_backend->isAccumulationComplete() : false;
+                } else {
+                    accumulation_complete = ray_renderer.isCPUAccumulationComplete();
+                }
+
+                if (!accumulation_complete) {
+                    // Automatically trigger next sample pass
+                    start_render = true;
+                }
             } else {
-                accumulation_complete = ray_renderer.isCPUAccumulationComplete();
-            }
-
-            if (!accumulation_complete) {
-                // Automatically trigger next sample pass
-                start_render = true;
+                Backend::IBackend* viewportBackend =
+                    getActiveViewportBackendForShading(ui.viewport_settings.shading_mode);
+                if (viewportBackend && viewportBackend->needsViewportRender()) {
+                    // Interactive raster modes are event-driven rather than sample-driven.
+                    // If the backend marked itself dirty (material edit, mesh paint,
+                    // texture upload, project restore), wake the render loop even while
+                    // the UI is otherwise idle.
+                    start_render = true;
+                }
             }
         }
 
@@ -3957,6 +4279,17 @@ int main(int argc, char* argv[]) try {
             g_cpu_bvh_refit_pending = false;
         }
 
+        if (g_bvh_rebuild_deferred_frames > 0 &&
+            !g_bvh_rebuild_pending &&
+            !g_vulkan_rebuild_pending &&
+            !g_optix_rebuild_pending &&
+            !g_viewport_raster_rebuild_pending) {
+            --g_bvh_rebuild_deferred_frames;
+            if (g_bvh_rebuild_deferred_frames <= 0) {
+                g_bvh_rebuild_pending = true;
+            }
+        }
+
         static std::future<std::shared_ptr<Hittable>> g_bvh_future;
 
         if (g_bvh_rebuild_pending) {
@@ -3981,6 +4314,10 @@ int main(int argc, char* argv[]) try {
                     }
 
                     if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                        if (inst->syncTransformFromSourceTriangles()) {
+                            continue;
+                        }
+
                         if (inst->source_triangles) {
                             for (auto& srcTri : *inst->source_triangles) {
                                 if (srcTri && srcTri->getTransformHandle() && srcTri->getVertexBoneWeights().empty()) {
@@ -4141,6 +4478,14 @@ int main(int argc, char* argv[]) try {
                 ui.addViewportMessage("Updating Solid View...", 1.0f);
                 vkBackend->buildRasterGeometry(scene.world.objects);
                 applyPendingDeleteVisibilityToBackend(scene, vkBackend);
+                syncMaterialBufferToViewportBackend(scene, ray_renderer);
+                // Hair viewport lines must be refreshed here: Renderer::uploadHairToGPU
+                // feeds the viewport backend's line buffer via uploadHairViewportLines,
+                // and no other pending-block covers Solid/Matcap when the render backend
+                // sync is deferred (Solid mode skips syncActiveRenderBackendScene).
+                // Without this call, hair stays invisible in raster until the user
+                // toggles to a different backend which re-triggers uploadHairToGPU.
+                ray_renderer.uploadHairToGPU();
                 g_viewport_raster_rebuild_pending = false;
                 start_render = true;
                 g_camera_dirty = true;
@@ -4161,7 +4506,7 @@ int main(int argc, char* argv[]) try {
                 ray_renderer.uploadHairToGPU();
                 // Upload material SSBO after geometry rebuild
                 ray_renderer.updateBackendMaterials(scene);
-                syncMaterialBufferToViewportBackend();
+                syncMaterialBufferToViewportBackend(scene, ray_renderer);
                 applyPendingDeleteVisibilityToBackend(scene, g_backend.get());
                 g_backend->resetAccumulation();
                 g_vulkan_rebuild_pending = false;

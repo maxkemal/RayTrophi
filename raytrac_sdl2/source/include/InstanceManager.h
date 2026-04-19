@@ -15,6 +15,8 @@
 #include <vector>
 #include <memory>
 #include <functional>
+#include <istream>
+#include <ostream>
 #include <json.hpp>
 #include <simdjson.h>
 class OptixWrapper;
@@ -107,10 +109,10 @@ public:
     // SERIALIZATION
     // ─────────────────────────────────────────────────────────────────────────
 
-
-    nlohmann::json serialize();
+    nlohmann::json serialize(std::ostream* binaryOut = nullptr);
     void deserialize(const nlohmann::json& j, SceneData& scene);
     void deserializeFast(simdjson::dom::element el, SceneData& scene);
+    void deserializeBinaryInstances(simdjson::dom::element el, std::istream& binaryIn);
     void rebuildSceneObjects(SceneData& scene);
     
 private:

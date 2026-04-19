@@ -20,6 +20,7 @@ public:
 private:
     VkBuffer m_externalMaterialBuffer = VK_NULL_HANDLE;
     VkDeviceSize m_externalMaterialBufferSize = 0;
+    uint32_t m_externalMaterialCount = 0;
 public:
 
     void renderProgressive(void* outSurface, void* outWindow, void* outRenderer,
@@ -30,6 +31,8 @@ public:
     void setInteractiveViewportMatcapImpl(int64_t textureID) override;
     void setInteractiveViewportMatcapPresetImpl(int preset) override;
 
+    void uploadTerrainLayerMaterials(const std::vector<TerrainLayerData>& layers) override;
+
     bool updateRasterMeshFromTriangles(
         const std::string& nodeName,
         const std::vector<std::shared_ptr<Triangle>>& triangles) override;
@@ -38,6 +41,10 @@ public:
         const std::string& nodeName,
         const std::vector<size_t>& dirtyIndices,
         const std::vector<std::pair<int, std::shared_ptr<Triangle>>>& meshEntries) override;
+    bool cloneRasterObjectByNodeName(
+        const std::string& sourceNodeName,
+        const std::string& newNodeName,
+        const Matrix4x4& transform) override;
 
     void buildRasterGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) override;
     void syncRasterInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects) override;

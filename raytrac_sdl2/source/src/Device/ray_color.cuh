@@ -2457,7 +2457,12 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         float t_max = (bounce == 0) ? optixLaunchParams.clip_far : 1e16f;
         
         trace_ray(ray, &payload, t_min, t_max);
-        
+
+        // Path regularization hint: scatter_material / evaluate_brdf read this
+        // to clamp roughness on indirect bounces (Müller 2018). Writing it
+        // after trace_ray is safe — closesthit does not touch this field.
+        payload.bounce_index = bounce;
+
         // --- 1. HANDLE HAIR (Unified Path) ---
         if (payload.hit && payload.is_hair) {
             if (bounce == 0) {

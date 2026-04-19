@@ -360,35 +360,66 @@ void OptixWrapper::downloadFramebuffer(uchar4* host_ptr, int width, int height) 
     CUDA_CHECK(cudaMemcpy(host_ptr, d_framebuffer, width * height * sizeof(uchar4), cudaMemcpyDeviceToHost));
 }
 
-bool OptixWrapper::downloadDenoiserBuffers(std::vector<float>& color, std::vector<float>& albedo, std::vector<float>& normal) {
-    if (!d_accumulation_float4 || !d_denoiser_albedo || !d_denoiser_normal || prev_width <= 0 || prev_height <= 0) {
+bool OptixWrapper::downloadDenoiserBuffers(std::vector<float>& color, std::vector<float>& albedo, std::vector<float>& normal, bool useAuxiliary) {
+    // Snapshot buffer pointers and dimensions locally. Another thread may be
+    // resizing (resetBuffers) concurrently; we must not dereference or size
+    // against values that change mid-function.
+    float4* src_accum  = reinterpret_cast<float4*>(d_accumulation_float4);
+    float4* src_albedo = useAuxiliary ? reinterpret_cast<float4*>(d_denoiser_albedo) : nullptr;
+    float4* src_normal = useAuxiliary ? reinterpret_cast<float4*>(d_denoiser_normal) : nullptr;
+    const int snap_w = prev_width;
+    const int snap_h = prev_height;
+    if (!src_accum || snap_w <= 0 || snap_h <= 0) {
+        return false;
+    }
+    if (useAuxiliary && (!src_albedo || !src_normal)) {
         return false;
     }
 
-    const size_t pixelCount = (size_t)prev_width * (size_t)prev_height;
+    const size_t pixelCount = (size_t)snap_w * (size_t)snap_h;
     std::vector<float4> accum(pixelCount);
-    std::vector<float4> alb(pixelCount);
-    std::vector<float4> nrm(pixelCount);
+    std::vector<float4> alb;
+    std::vector<float4> nrm;
+    if (useAuxiliary) {
+        alb.resize(pixelCount);
+        nrm.resize(pixelCount);
+    }
 
-    CUDA_CHECK(cudaMemcpy(accum.data(), d_accumulation_float4, pixelCount * sizeof(float4), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(alb.data(), d_denoiser_albedo, pixelCount * sizeof(float4), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(nrm.data(), d_denoiser_normal, pixelCount * sizeof(float4), cudaMemcpyDeviceToHost));
+    // Use raw cuda calls (not CUDA_CHECK) — on a resize race we prefer to
+    // return false and let the caller retry next frame instead of calling
+    // std::terminate(). An oversized memcpy here used to crash the app on
+    // project-open → render-mode transitions.
+    const cudaError_t e1 = cudaMemcpy(accum.data(), src_accum, pixelCount * sizeof(float4), cudaMemcpyDeviceToHost);
+    const cudaError_t e2 = useAuxiliary ? cudaMemcpy(alb.data(), src_albedo, pixelCount * sizeof(float4), cudaMemcpyDeviceToHost) : cudaSuccess;
+    const cudaError_t e3 = useAuxiliary ? cudaMemcpy(nrm.data(), src_normal, pixelCount * sizeof(float4), cudaMemcpyDeviceToHost) : cudaSuccess;
+    if (e1 != cudaSuccess || e2 != cudaSuccess || e3 != cudaSuccess) {
+        // Clear any sticky CUDA error so subsequent launches don't inherit it.
+        cudaGetLastError();
+        return false;
+    }
 
     color.resize(pixelCount * 3);
-    albedo.resize(pixelCount * 3);
-    normal.resize(pixelCount * 3);
+    if (useAuxiliary) {
+        albedo.resize(pixelCount * 3);
+        normal.resize(pixelCount * 3);
+    } else {
+        albedo.clear();
+        normal.clear();
+    }
 
     for (size_t i = 0; i < pixelCount; ++i) {
         const size_t idx = i * 3;
         color[idx] = accum[i].x;
         color[idx + 1] = accum[i].y;
         color[idx + 2] = accum[i].z;
-        albedo[idx] = alb[i].x;
-        albedo[idx + 1] = alb[i].y;
-        albedo[idx + 2] = alb[i].z;
-        normal[idx] = nrm[i].x * 2.0f - 1.0f;
-        normal[idx + 1] = nrm[i].y * 2.0f - 1.0f;
-        normal[idx + 2] = nrm[i].z * 2.0f - 1.0f;
+        if (useAuxiliary) {
+            albedo[idx] = alb[i].x;
+            albedo[idx + 1] = alb[i].y;
+            albedo[idx + 2] = alb[i].z;
+            normal[idx] = nrm[i].x * 2.0f - 1.0f;
+            normal[idx + 1] = nrm[i].y * 2.0f - 1.0f;
+            normal[idx + 2] = nrm[i].z * 2.0f - 1.0f;
+        }
     }
 
     return true;
@@ -1924,27 +1955,35 @@ void OptixWrapper::resetBuffers(int width, int height) {
         if (d_variance_buffer) { cudaFree(d_variance_buffer); d_variance_buffer = nullptr; }
         if (d_sample_count_buffer) { cudaFree(d_sample_count_buffer); d_sample_count_buffer = nullptr; }
         if (d_converged_count) { cudaFree(d_converged_count); d_converged_count = nullptr; }
-        
+
         // Critical Fix: Also free float4 accumulation buffer to prevent crash on resize
         if (d_accumulation_float4) { cudaFree(d_accumulation_float4); d_accumulation_float4 = nullptr; }
         if (d_denoiser_albedo) { cudaFree(d_denoiser_albedo); d_denoiser_albedo = nullptr; }
         if (d_denoiser_normal) { cudaFree(d_denoiser_normal); d_denoiser_normal = nullptr; }
-        
+
         // Also invalidate framebuffer so launch functions re-allocate
         if (d_framebuffer) { cudaFree(d_framebuffer); d_framebuffer = nullptr; }
+
+        // Update the published dimensions BEFORE re-allocating so that any
+        // concurrent reader (e.g. downloadDenoiserBuffers on the UI thread)
+        // either sees null pointers and early-outs, or sees the fully
+        // re-allocated buffers matching the new dimensions. Without this
+        // ordering there is a race window where pointers are non-null at the
+        // new size while prev_width/prev_height still hold the old (larger)
+        // size — the download path then issues an oversized cudaMemcpy and
+        // trips CUDA_CHECK's std::terminate().
+        prev_width = width;
+        prev_height = height;
 
         cudaMalloc(&d_accumulation_buffer, sizeof(float) * width * height * 3);
         cudaMalloc(&d_variance_buffer, sizeof(float) * width * height);
         cudaMalloc(&d_sample_count_buffer, sizeof(int) * width * height);
-        
+
         // Re-allocate float4 accumulation buffer used by progressive renderer
         cudaMalloc(&d_accumulation_float4, sizeof(float4) * width * height);
         cudaMalloc(&d_denoiser_albedo, sizeof(float4) * width * height);
         cudaMalloc(&d_denoiser_normal, sizeof(float4) * width * height);
 
-        prev_width = width;
-        prev_height = height;
-        
         accumulated_samples = 0;
         accumulation_valid = false;
     }

@@ -1,6 +1,7 @@
 ﻿#include "scene_ui.h"
 
 #include "Backend/OptixBackend.h"
+#include "Backend/IViewportBackend.h"
 #include "Backend/VulkanBackend.h"
 #include "Viewport/ViewportSceneSync.h"
 #include "Triangle.h"
@@ -139,7 +140,14 @@ bool projectPointToScreen(const Camera& cam, const ImVec2& displaySize, const Ve
         return false;
     }
 
-    const float aspect = displaySize.x / displaySize.y;
+    // Use render resolution aspect ratio to match the GPU projection matrix.
+    // SDL_RenderCopy stretches the render texture to fill the window, so the
+    // final pixel coords still use displaySize — but the horizontal FOV must
+    // be derived from the render resolution (image_width/image_height), not
+    // the window size, to stay in sync with the Vulkan perspective matrix.
+    const float aspect = (image_height > 0)
+        ? (static_cast<float>(image_width) / static_cast<float>(image_height))
+        : (displaySize.x / displaySize.y);
     const float tanHalfFov = std::tan(cam.vfov * 3.14159265359f / 180.0f * 0.5f);
     if (std::fabs(aspect) <= 1e-6f || std::fabs(tanHalfFov) <= 1e-6f) {
         return false;
@@ -1007,6 +1015,36 @@ bool hasEnabledSubdivisionPreview(const MeshModifiers::ModifierStack& stack) {
     return false;
 }
 
+MeshModifiers::ModifierStack buildSubdivisionPreviewEvaluationStack(
+    const MeshModifiers::ModifierStack& stack,
+    bool interactivePreview) {
+    if (!interactivePreview) {
+        return stack;
+    }
+
+    MeshModifiers::ModifierStack previewStack = stack;
+    bool keptSubdivisionStage = false;
+    for (auto& mod : previewStack.modifiers) {
+        if (!mod.enabled) {
+            continue;
+        }
+        if (mod.type != MeshModifiers::ModifierType::FlatSubdivision &&
+            mod.type != MeshModifiers::ModifierType::SmoothSubdivision) {
+            continue;
+        }
+
+        if (!keptSubdivisionStage) {
+            mod.levels = std::clamp(mod.levels, 0, 1);
+            mod.enabled = mod.levels > 0;
+            keptSubdivisionStage = mod.enabled;
+        } else {
+            mod.enabled = false;
+        }
+    }
+
+    return previewStack;
+}
+
 bool isSubdivisionPreviewActive(UIContext& ctx, const std::string& objectName) {
     if (objectName.empty()) {
         return false;
@@ -1028,7 +1066,6 @@ std::vector<std::shared_ptr<Triangle>> evaluateDisplayMeshFromBase(
     }
     return stack.evaluate(baseMesh);
 }
-
 
 float saturateFloat(float value) {
     if (!std::isfinite(value)) {
@@ -1059,7 +1096,7 @@ float computeSafeClayStrength(float brushStrength, float brushFlow) {
     // Keep the first unit of strength fully responsive, then compress harder
     // so high clay strengths add mass without producing deep inversion artifacts.
     const float overshoot = combined - 1.0f;
-    return 1.0f + std::sqrt(overshoot) * 0.55f;
+    return 1.0f + std::sqrt(overshoot) * 0.42f;
 }
 
 float computeStrokeAdvanceFactor(float strokeDistance, float strokeSpacing) {
@@ -1082,13 +1119,97 @@ float computeClayRadiusCompensation(float radiusWorld) {
     if (normalizedRadius <= 1.0f) {
         return 1.0f;
     }
-    return std::clamp(1.0f / std::sqrt(normalizedRadius), 0.42f, 1.0f);
+    // Full inverse: radius controls area, not height.
+    // Large brushes affect more vertices but deposit the same height.
+    return std::clamp(kReferenceRadius / safeRadius, 0.12f, 1.0f);
 }
+
+float computeLargeBrushSurfaceFactor(float radiusWorld) {
+    const float safeRadius = sanitizeFiniteFloat(radiusWorld, 0.3f, 0.0001f, 100000.0f);
+    // 1.0 world units and below: no extra cleanup pressure.
+    // Past that, gradually increase smoothing/anti-pit behavior for broad brushes.
+    return std::clamp((safeRadius - 1.0f) / 3.0f, 0.0f, 1.0f);
+}
+
+float computeLargeBrushProjectionBlend(float radiusWorld) {
+    const float safeRadius = sanitizeFiniteFloat(radiusWorld, 0.3f, 0.0001f, 100000.0f);
+    return std::clamp((safeRadius - 1.2f) / 2.8f, 0.0f, 1.0f);
+}
+
+float computeHybridBrushDistance(
+    const Vec3& toPoint,
+    const Vec3& hitNormalWorld,
+    float planarDistance,
+    float radiusWorld) {
+    const float euclideanDistance = toPoint.length();
+    const float projectionBlend = computeLargeBrushProjectionBlend(radiusWorld);
+    return std::lerp(planarDistance, euclideanDistance, projectionBlend);
+}
+
+float computeFrontFaceBrushPenalty(
+    float heightFromPlane,
+    float radiusWorld,
+    bool frontFacesOnly) {
+    if (!frontFacesOnly) {
+        return 1.0f;
+    }
+
+    const float safeRadius = sanitizeFiniteFloat(radiusWorld, 0.3f, 0.0001f, 100000.0f);
+    const float softRejectStart = -safeRadius * 0.12f;
+    const float softRejectEnd = -safeRadius * (0.32f + 0.18f * computeLargeBrushProjectionBlend(radiusWorld));
+    if (heightFromPlane >= softRejectStart) {
+        return 1.0f;
+    }
+    if (heightFromPlane <= softRejectEnd) {
+        return 0.0f;
+    }
+
+    const float t = saturateFloat((heightFromPlane - softRejectEnd) / (softRejectStart - softRejectEnd));
+    return t * t * (3.0f - 2.0f * t);
+}
+
+float computeRepeatedStrokeDamping(
+    float strokeDistance,
+    float radiusWorld,
+    float dt,
+    bool strokeHasAccumulated) {
+    if (!strokeHasAccumulated) {
+        return 1.0f;
+    }
+
+    const float safeRadius = sanitizeFiniteFloat(radiusWorld, 0.3f, 0.0001f, 100000.0f);
+    const float safeDistance = sanitizeFiniteFloat(strokeDistance, 0.0f, 0.0f, 100000.0f);
+    const float safeDt = sanitizeFiniteFloat(dt, 1.0f / 60.0f, 1.0f / 240.0f, 0.25f);
+
+    const float movementWindow = (std::max)(safeRadius * 0.14f, 1e-4f);
+    const float movementRatio = saturateFloat(safeDistance / movementWindow);
+    const float movementRecovery = movementRatio * movementRatio * (3.0f - 2.0f * movementRatio);
+
+    const float dtT = saturateFloat((safeDt - (1.0f / 90.0f)) / ((1.0f / 18.0f) - (1.0f / 90.0f)));
+    const float lowMotionDamping = std::lerp(0.2f, 0.45f, 1.0f - dtT);
+    return std::lerp(lowMotionDamping, 1.0f, movementRecovery);
+}
+
 Vec3 sanitizeVec3(const Vec3& value, const Vec3& fallback) {
     return isFiniteVec3(value) ? value : fallback;
 }
+
+Vec3 resolveEditableSnapshotLocalPosition(
+    const SceneUI::EditableMeshCache& cache,
+    const std::vector<Vec3>& snapshotLocalPositions,
+    size_t vertexId) {
+    if (vertexId >= cache.vertices.size()) {
+        return Vec3(0.0f, 0.0f, 0.0f);
+    }
+    if (vertexId < snapshotLocalPositions.size() && isFiniteVec3(snapshotLocalPositions[vertexId])) {
+        return snapshotLocalPositions[vertexId];
+    }
+    return cache.vertices[vertexId].local_position;
+}
+
 Vec3 computeBoundarySafeSmoothDelta(
     const SceneUI::EditableMeshCache& cache,
+    const std::vector<Vec3>& snapshotLocalPositions,
     size_t vertexId,
     float brushStrength,
     float dt,
@@ -1114,7 +1235,7 @@ Vec3 computeBoundarySafeSmoothDelta(
         if (vertex.is_boundary && !neighbor.is_boundary) {
             continue;
         }
-        average += neighbor.local_position;
+        average += resolveEditableSnapshotLocalPosition(cache, snapshotLocalPositions, static_cast<size_t>(neighborId));
         ++neighborCount;
     }
 
@@ -1128,8 +1249,9 @@ Vec3 computeBoundarySafeSmoothDelta(
         smoothFactor *= 0.35f;
     }
 
+    const Vec3 currentLocal = resolveEditableSnapshotLocalPosition(cache, snapshotLocalPositions, vertexId);
     Vec3 smoothDelta = sanitizeVec3(
-        (average - vertex.local_position) * smoothFactor,
+        (average - currentLocal) * smoothFactor,
         Vec3(0.0f, 0.0f, 0.0f));
     const float deltaLen = smoothDelta.length();
     const float maxDelta = (std::max)(localRadius * (vertex.is_boundary ? 0.03f : 0.08f), 1e-5f);
@@ -1190,10 +1312,8 @@ void applyClayPolishPass(
             if (neighborId < 0 || neighborId >= static_cast<int>(cache.vertices.size())) {
                 continue;
             }
-            const auto& neighbor = cache.vertices[static_cast<size_t>(neighborId)];
-            if (vertex.is_boundary && !neighbor.is_boundary) {
-                continue;
-            }
+            // Include ALL neighbors for averaging — boundary vertices need
+            // interior neighbors to stay anchored and avoid folding.
             average += snapshot[static_cast<size_t>(neighborId)];
             ++neighborCount;
         }
@@ -1207,7 +1327,9 @@ void applyClayPolishPass(
         const Vec3 averageWorld = sanitizeVec3(transform.transform_point(average), average);
         Vec3 relaxWorld = averageWorld - currentWorld;
         relaxWorld = relaxWorld - strokeNormal * relaxWorld.dot(strokeNormal);
-        relaxWorld *= safePolish * (vertex.is_boundary ? 0.35f : 1.0f);
+        // Boundary vertices need stronger polish — their asymmetric topology
+        // makes them prone to folding/inverting under clay deposits.
+        relaxWorld *= safePolish * (vertex.is_boundary ? 0.8f : 1.0f);
 
         Vec3 relaxLocal = sanitizeVec3(inverseTransform.transform_vector(relaxWorld), Vec3(0.0f, 0.0f, 0.0f));
         const float deltaLen = relaxLocal.length();
@@ -1216,6 +1338,87 @@ void applyClayPolishPass(
         }
 
         updatedLocalPositions[vertexId] = sanitizeVec3(currentLocal + relaxLocal, currentLocal);
+    }
+}
+
+void applyClayAntiPitPass(
+    const SceneUI::EditableMeshCache& cache,
+    std::vector<Vec3>& updatedLocalPositions,
+    const std::vector<int>& touchedVertexIds,
+    const Matrix4x4& transform,
+    const Matrix4x4& inverseTransform,
+    const Vec3& strokeNormalWorld,
+    float localRadius,
+    float liftStrength,
+    float flattenStrength) {
+    if (touchedVertexIds.empty() || updatedLocalPositions.empty()) {
+        return;
+    }
+
+    const Vec3 strokeNormal = safeNormalizeVec3(strokeNormalWorld, Vec3(0.0f, 1.0f, 0.0f));
+    const float safeLift = sanitizeFiniteFloat(liftStrength, 0.0f, 0.0f, 1.0f);
+    const float safeFlatten = sanitizeFiniteFloat(flattenStrength, 0.0f, 0.0f, 1.0f);
+    if (safeLift <= 1e-5f && safeFlatten <= 1e-5f) {
+        return;
+    }
+
+    const std::vector<Vec3> snapshot = updatedLocalPositions;
+    const float maxLift = (std::max)(localRadius * 0.045f, 1e-5f);
+    const float maxFlatten = (std::max)(localRadius * 0.025f, 1e-5f);
+
+    for (const int vertexIdInt : touchedVertexIds) {
+        if (vertexIdInt < 0 || vertexIdInt >= static_cast<int>(cache.vertices.size())) {
+            continue;
+        }
+
+        const size_t vertexId = static_cast<size_t>(vertexIdInt);
+        const auto& neighbors = cache.vertex_neighbors[vertexId];
+        if (neighbors.empty()) {
+            continue;
+        }
+
+        Vec3 averageLocal(0.0f, 0.0f, 0.0f);
+        int neighborCount = 0;
+        for (const int neighborId : neighbors) {
+            if (neighborId < 0 || neighborId >= static_cast<int>(cache.vertices.size())) {
+                continue;
+            }
+            averageLocal += snapshot[static_cast<size_t>(neighborId)];
+            ++neighborCount;
+        }
+        if (neighborCount == 0) {
+            continue;
+        }
+        averageLocal /= static_cast<float>(neighborCount);
+
+        const Vec3 currentLocal = snapshot[vertexId];
+        const Vec3 currentWorld = sanitizeVec3(transform.transform_point(currentLocal), currentLocal);
+        const Vec3 averageWorld = sanitizeVec3(transform.transform_point(averageLocal), averageLocal);
+        const Vec3 toAverageWorld = averageWorld - currentWorld;
+        const float signedDepth = toAverageWorld.dot(strokeNormal);
+
+        Vec3 correctedWorld(0.0f, 0.0f, 0.0f);
+        if (signedDepth > 0.0f) {
+            Vec3 liftWorld = strokeNormal * signedDepth * safeLift;
+            const float liftLen = liftWorld.length();
+            if (std::isfinite(liftLen) && liftLen > maxLift) {
+                liftWorld *= (maxLift / liftLen);
+            }
+            correctedWorld += liftWorld;
+        }
+
+        Vec3 planarFlattenWorld = toAverageWorld - strokeNormal * toAverageWorld.dot(strokeNormal);
+        planarFlattenWorld *= safeFlatten;
+        const float flattenLen = planarFlattenWorld.length();
+        if (std::isfinite(flattenLen) && flattenLen > maxFlatten) {
+            planarFlattenWorld *= (maxFlatten / flattenLen);
+        }
+        correctedWorld += planarFlattenWorld;
+
+        const Vec3 correctedLocal = sanitizeVec3(
+            inverseTransform.transform_vector(correctedWorld),
+            Vec3(0.0f, 0.0f, 0.0f));
+        updatedLocalPositions[vertexId] = sanitizeVec3(currentLocal + correctedLocal, currentLocal);
     }
 }
 
@@ -1495,9 +1698,1214 @@ std::vector<int> collectEditableVertexCandidates(
     return candidates;
 }
 
+std::vector<int> collectSculptControlNodeCandidates(
+    const SceneUI::SculptControlGraph& graph,
+    const Vec3& localCenter,
+    float localRadius) {
+    std::vector<int> candidates;
+    if (graph.nodes.empty()) {
+        return candidates;
+    }
+
+    const float safeRadius = sanitizeFiniteFloat(localRadius, 0.1f, 0.0001f, 100000.0f);
+    const float cellSize = sanitizeFiniteFloat(graph.spatial_cell_size, 0.0f, 0.0f, 100000.0f);
+    // A leaf's member vertices can sit up to half the cell diagonal away from the
+    // leaf center. Pad the candidate radius so leaves that straddle the brush border
+    // are still picked; otherwise triangles split across a leaf boundary lose
+    // vertices on one side (one-corner-moves spikes for Grab, boundary gaps for Draw
+    // on dense meshes).
+    const float candidatePad = cellSize * 0.866f;
+    const float candidateRadius = safeRadius + candidatePad;
+    const float candidateRadiusSq = candidateRadius * candidateRadius;
+    if (cellSize <= 1e-6f || graph.node_spatial_buckets.empty()) {
+        candidates.reserve(graph.nodes.size());
+        for (size_t nodeId = 0; nodeId < graph.nodes.size(); ++nodeId) {
+            const Vec3 delta = graph.nodes[nodeId].local_position - localCenter;
+            const float distSq = delta.length_squared();
+            if (std::isfinite(distSq) && distSq <= candidateRadiusSq) {
+                candidates.push_back(static_cast<int>(nodeId));
+            }
+        }
+        return candidates;
+    }
+
+    const SceneUI::EditableSpatialCellKey centerKey = makeEditableSpatialCellKey(localCenter, cellSize);
+    const int cellRadius = (std::max)(1, static_cast<int>(std::ceil(candidateRadius / cellSize)));
+    if (cellRadius > 50) {
+        candidates.reserve(graph.nodes.size() / 4 + 1);
+        for (size_t nodeId = 0; nodeId < graph.nodes.size(); ++nodeId) {
+            const Vec3 delta = graph.nodes[nodeId].local_position - localCenter;
+            const float distSq = delta.length_squared();
+            if (std::isfinite(distSq) && distSq <= candidateRadiusSq) {
+                candidates.push_back(static_cast<int>(nodeId));
+            }
+        }
+        return candidates;
+    }
+
+    candidates.reserve((cellRadius * 2 + 1) * (cellRadius * 2 + 1) * 4);
+    for (int z = centerKey.z - cellRadius; z <= centerKey.z + cellRadius; ++z) {
+        for (int y = centerKey.y - cellRadius; y <= centerKey.y + cellRadius; ++y) {
+            for (int x = centerKey.x - cellRadius; x <= centerKey.x + cellRadius; ++x) {
+                const auto bucketIt = graph.node_spatial_buckets.find(SceneUI::EditableSpatialCellKey{ x, y, z });
+                if (bucketIt == graph.node_spatial_buckets.end()) {
+                    continue;
+                }
+                for (const int nodeId : bucketIt->second) {
+                    if (nodeId < 0 || nodeId >= static_cast<int>(graph.nodes.size())) {
+                        continue;
+                    }
+                    const Vec3 delta = graph.nodes[nodeId].local_position - localCenter;
+                    const float distSq = delta.length_squared();
+                    if (std::isfinite(distSq) && distSq <= candidateRadiusSq) {
+                        candidates.push_back(nodeId);
+                    }
+                }
+            }
+        }
+    }
+
+    return candidates;
+}
+
+std::vector<int> collectSourceVerticesForSculptNodes(
+    const SceneUI::SculptControlGraph& graph,
+    const std::vector<int>& nodeIds) {
+    std::vector<int> sourceVertexIds;
+    if (nodeIds.empty()) {
+        return sourceVertexIds;
+    }
+
+    size_t reserveCount = 0;
+    for (const int nodeId : nodeIds) {
+        if (nodeId >= 0 && nodeId < static_cast<int>(graph.nodes.size())) {
+            reserveCount += graph.nodes[nodeId].source_vertex_ids.size();
+        }
+    }
+    sourceVertexIds.reserve(reserveCount);
+
+    for (const int nodeId : nodeIds) {
+        if (nodeId < 0 || nodeId >= static_cast<int>(graph.nodes.size())) {
+            continue;
+        }
+        const auto& node = graph.nodes[nodeId];
+        sourceVertexIds.insert(
+            sourceVertexIds.end(),
+            node.source_vertex_ids.begin(),
+            node.source_vertex_ids.end());
+    }
+
+    std::sort(sourceVertexIds.begin(), sourceVertexIds.end());
+    sourceVertexIds.erase(
+        std::unique(sourceVertexIds.begin(), sourceVertexIds.end()),
+        sourceVertexIds.end());
+    return sourceVertexIds;
+}
+
+void beginSculptStroke(
+    SceneUI::SculptStrokeState& strokeState,
+    SceneUI::SculptBrushTool activeTool,
+    const std::string& objectName,
+    const HitRecord& hit,
+    size_t editableVertexCount) {
+    strokeState = SceneUI::SculptStrokeState{};
+    strokeState.active = true;
+    strokeState.object_name = objectName;
+    strokeState.start_world_hit = hit.point;
+    strokeState.last_world_hit = hit.point;
+    strokeState.stroke_normal = hit.normal.length_squared() > 1e-8f
+        ? hit.normal.normalize()
+        : Vec3(0.0f, 1.0f, 0.0f);
+
+    if (activeTool == SceneUI::SculptBrushTool::Grab) {
+        strokeState.grab_start_local_positions.reserve(512);
+        strokeState.grab_weights_by_vertex.reserve(512);
+    }
+
+    strokeState.before_triangle_states.reserve(512);
+    strokeState.touched_triangles.reserve(512);
+
+    if (activeTool == SceneUI::SculptBrushTool::Layer) {
+        strokeState.layer_accum.assign(editableVertexCount, 0.0f);
+    }
+    if (activeTool == SceneUI::SculptBrushTool::Clay) {
+        strokeState.clay_layer_accum.assign(editableVertexCount, 0.0f);
+    }
+    if (activeTool == SceneUI::SculptBrushTool::ClayStrips) {
+        strokeState.clay_strips_layer_accum.assign(editableVertexCount, 0.0f);
+    }
+}
+
+struct SculptCandidateSet {
+    std::vector<int> node_ids;
+    std::vector<int> source_vertex_ids;
+};
+
+SculptCandidateSet resolveSculptCandidates(
+    const SceneUI::SculptControlGraph& graph,
+    const Vec3& localCenter,
+    float localRadius) {
+    SculptCandidateSet result;
+    result.node_ids = collectSculptControlNodeCandidates(graph, localCenter, localRadius);
+    result.source_vertex_ids = collectSourceVerticesForSculptNodes(graph, result.node_ids);
+    return result;
+}
+
+void primeGrabStrokeWeights(
+    SceneUI::SculptStrokeState& strokeState,
+    const SceneUI::EditableMeshCache& editableMeshCache,
+    const Matrix4x4& transform,
+    const std::vector<int>& candidateVertexIds,
+    const Vec3& brushCenter,
+    const Vec3& hitNormalWorld,
+    float radiusWorld,
+    bool frontFacesOnly,
+    int falloffType) {
+    if (!strokeState.grab_weights_by_vertex.empty()) {
+        return;
+    }
+
+    strokeState.grab_start_local_positions.reserve(candidateVertexIds.size());
+    strokeState.grab_weights_by_vertex.reserve(candidateVertexIds.size());
+    for (const int vertexIdInt : candidateVertexIds) {
+        if (vertexIdInt < 0) {
+            continue;
+        }
+        const size_t vertexId = static_cast<size_t>(vertexIdInt);
+        if (vertexId >= editableMeshCache.vertices.size()) {
+            continue;
+        }
+
+        const Vec3 startLocalPos = editableMeshCache.vertices[vertexId].local_position;
+        strokeState.grab_start_local_positions.emplace(vertexIdInt, startLocalPos);
+        const Vec3 startWorldPos = sanitizeVec3(
+            transform.transform_point(startLocalPos),
+            brushCenter);
+        const Vec3 toVertex = startWorldPos - brushCenter;
+        const float heightFromPlane = toVertex.dot(hitNormalWorld);
+        const Vec3 planarOffset = toVertex - hitNormalWorld * heightFromPlane;
+        const float planarDistance = planarOffset.length();
+        if (!std::isfinite(heightFromPlane) || !std::isfinite(planarDistance) || planarDistance > radiusWorld) {
+            continue;
+        }
+        if (frontFacesOnly && heightFromPlane < -(radiusWorld * 0.12f)) {
+            continue;
+        }
+
+        const float weight = applyFalloffCurve(
+            1.0f - saturateFloat(planarDistance / radiusWorld),
+            falloffType);
+        strokeState.grab_weights_by_vertex[vertexIdInt] = weight;
+    }
+}
+float getSculptNodeVertexInfluence(
+    const SceneUI::SculptControlNode& node,
+    int sourceVertexId) {
+    for (size_t localIndex = 0; localIndex < node.source_vertex_ids.size(); ++localIndex) {
+        if (node.source_vertex_ids[localIndex] == sourceVertexId) {
+            if (localIndex < node.source_weights.size() && std::isfinite(node.source_weights[localIndex])) {
+                return node.source_weights[localIndex];
+            }
+            return 1.0f;
+        }
+    }
+    return 1.0f;
+}
+bool applyGrabSculptCandidate(
+    const SceneUI::SculptStrokeState& strokeState,
+    float brushStrength,
+    const Vec3& localGrabDelta,
+    int vertexIdInt,
+    Vec3& inOutLocalPosition) {
+    if (vertexIdInt < 0) {
+        return false;
+    }
+
+    const auto weightIt = strokeState.grab_weights_by_vertex.find(vertexIdInt);
+    const auto startIt = strokeState.grab_start_local_positions.find(vertexIdInt);
+    const float weight = weightIt != strokeState.grab_weights_by_vertex.end()
+        ? weightIt->second
+        : 0.0f;
+    if (weight <= 1e-5f || startIt == strokeState.grab_start_local_positions.end()) {
+        return false;
+    }
+
+    const Vec3& startLocalPos = startIt->second;
+    const float grabStrength = std::clamp(brushStrength * 0.5f, 0.0f, 5.0f);
+    Vec3 localDelta = localGrabDelta * weight * grabStrength;
+    const float localDeltaLenSq = localDelta.length_squared();
+    if (!std::isfinite(localDeltaLenSq) || localDeltaLenSq <= 1e-14f) {
+        return false;
+    }
+
+    const float localDeltaLen = std::sqrt(localDeltaLenSq);
+    const float baseGrabDeltaLen = localGrabDelta.length();
+    const float maxLocalDelta = (std::max)(baseGrabDeltaLen * 3.0f, 0.05f);
+    if (std::isfinite(localDeltaLen) && localDeltaLen > maxLocalDelta) {
+        localDelta *= (maxLocalDelta / localDeltaLen);
+    }
+
+    inOutLocalPosition = sanitizeVec3(startLocalPos + localDelta, startLocalPos);
+    return true;
+}
+
+struct SculptBrushSample {
+    Vec3 local_position;
+    Vec3 world_position;
+    Vec3 planar_offset;
+    float height_from_plane = 0.0f;
+    float planar_distance = 0.0f;
+    float weight = 0.0f;
+    float clay_drag_factor = 1.0f;
+};
+
+bool computeSculptBrushSample(
+    const SceneUI::EditableVertex& vertex,
+    const Matrix4x4& transform,
+    const Vec3& planePoint,
+    const Vec3& hitNormalWorld,
+    const Vec3& tangentWorld,
+    const Vec3& bitangentWorld,
+    const Paint::BrushSettings& brushSettings,
+    int proportionalFalloffType,
+    SceneUI::SculptBrushTool activeTool,
+    float falloff,
+    float brushStrength,
+    float radiusWorld,
+    float strokeDistance,
+    float strokeSpacing,
+    float dt,
+    bool strokeHasAccumulated,
+    bool frontFacesOnly,
+    SculptBrushSample& outSample) {
+    outSample = SculptBrushSample{};
+    outSample.local_position = vertex.local_position;
+    outSample.world_position = sanitizeVec3(
+        transform.transform_point(vertex.local_position),
+        Vec3(0.0f, 0.0f, 0.0f));
+
+    const Vec3 toVertex = outSample.world_position - planePoint;
+    outSample.height_from_plane = toVertex.dot(hitNormalWorld);
+    outSample.planar_offset = toVertex - hitNormalWorld * outSample.height_from_plane;
+    const float planarDistance = outSample.planar_offset.length();
+    outSample.planar_distance = computeHybridBrushDistance(
+        toVertex,
+        hitNormalWorld,
+        planarDistance,
+        radiusWorld);
+
+    if (!std::isfinite(outSample.height_from_plane) ||
+        !std::isfinite(outSample.planar_distance) ||
+        outSample.planar_distance > radiusWorld) {
+        return false;
+    }
+    const float frontFacePenalty = computeFrontFaceBrushPenalty(
+        outSample.height_from_plane,
+        radiusWorld,
+        frontFacesOnly);
+    if (frontFacePenalty <= 1e-5f) {
+        return false;
+    }
+
+    float weight = computeTerrainLikeBrushWeight(outSample.planar_distance / radiusWorld, falloff);
+    weight *= applyFalloffCurve(
+        1.0f - saturateFloat(outSample.planar_distance / radiusWorld),
+        proportionalFalloffType);
+    weight *= frontFacePenalty;
+    weight *= computeRepeatedStrokeDamping(
+        strokeDistance,
+        radiusWorld,
+        dt,
+        strokeHasAccumulated);
+
+    if ((activeTool == SceneUI::SculptBrushTool::Clay ||
+         activeTool == SceneUI::SculptBrushTool::ClayStrips) &&
+        strokeDistance > strokeSpacing * 0.15f) {
+        const float tangentNorm = outSample.planar_offset.dot(tangentWorld) / radiusWorld;
+        outSample.clay_drag_factor = std::clamp(0.5f + tangentNorm * 1.1f, 0.0f, 1.6f);
+    }
+
+    const float nxAlpha = outSample.planar_offset.dot(tangentWorld) / radiusWorld;
+    const float nyAlpha = outSample.planar_offset.dot(bitangentWorld) / radiusWorld;
+    weight *= uiSampleBrushMask(brushSettings, nxAlpha, nyAlpha);
+    if (!std::isfinite(weight) || weight <= 1e-5f) {
+        return false;
+    }
+
+    outSample.weight = weight;
+    return true;
+}
+
+bool computeSculptBrushSampleAtWorldPoint(
+    const Vec3& localPosition,
+    const Vec3& worldPosition,
+    const Vec3& planePoint,
+    const Vec3& hitNormalWorld,
+    const Vec3& tangentWorld,
+    const Vec3& bitangentWorld,
+    const Paint::BrushSettings& brushSettings,
+    int proportionalFalloffType,
+    SceneUI::SculptBrushTool activeTool,
+    float falloff,
+    float brushStrength,
+    float radiusWorld,
+    float strokeDistance,
+    float strokeSpacing,
+    float dt,
+    bool strokeHasAccumulated,
+    bool frontFacesOnly,
+    SculptBrushSample& outSample) {
+    outSample = SculptBrushSample{};
+    outSample.local_position = localPosition;
+    outSample.world_position = worldPosition;
+
+    const Vec3 toPoint = worldPosition - planePoint;
+    outSample.height_from_plane = toPoint.dot(hitNormalWorld);
+    outSample.planar_offset = toPoint - hitNormalWorld * outSample.height_from_plane;
+    const float planarDistance = outSample.planar_offset.length();
+    outSample.planar_distance = computeHybridBrushDistance(
+        toPoint,
+        hitNormalWorld,
+        planarDistance,
+        radiusWorld);
+
+    if (!std::isfinite(outSample.height_from_plane) ||
+        !std::isfinite(outSample.planar_distance) ||
+        outSample.planar_distance > radiusWorld) {
+        return false;
+    }
+    const float frontFacePenalty = computeFrontFaceBrushPenalty(
+        outSample.height_from_plane,
+        radiusWorld,
+        frontFacesOnly);
+    if (frontFacePenalty <= 1e-5f) {
+        return false;
+    }
+
+    float weight = computeTerrainLikeBrushWeight(outSample.planar_distance / radiusWorld, falloff);
+    weight *= applyFalloffCurve(
+        1.0f - saturateFloat(outSample.planar_distance / radiusWorld),
+        proportionalFalloffType);
+    weight *= frontFacePenalty;
+    weight *= computeRepeatedStrokeDamping(
+        strokeDistance,
+        radiusWorld,
+        dt,
+        strokeHasAccumulated);
+
+    if ((activeTool == SceneUI::SculptBrushTool::Clay ||
+         activeTool == SceneUI::SculptBrushTool::ClayStrips) &&
+        strokeDistance > strokeSpacing * 0.15f) {
+        const float tangentNorm = outSample.planar_offset.dot(tangentWorld) / radiusWorld;
+        outSample.clay_drag_factor = std::clamp(0.5f + tangentNorm * 1.1f, 0.0f, 1.6f);
+    }
+
+    const float nxAlpha = outSample.planar_offset.dot(tangentWorld) / radiusWorld;
+    const float nyAlpha = outSample.planar_offset.dot(bitangentWorld) / radiusWorld;
+    weight *= uiSampleBrushMask(brushSettings, nxAlpha, nyAlpha);
+    if (!std::isfinite(weight) || weight <= 1e-5f) {
+        return false;
+    }
+
+    outSample.weight = weight;
+    return true;
+}
+
+std::vector<int> collectTouchedSculptLeafIds(
+    const SceneUI::SculptControlGraph& graph,
+    const std::vector<int>& sourceVertexIds) {
+    std::vector<int> touchedLeafIds;
+    touchedLeafIds.reserve(sourceVertexIds.size());
+    for (const int vertexIdInt : sourceVertexIds) {
+        if (vertexIdInt < 0 || vertexIdInt >= static_cast<int>(graph.source_vertex_to_node_id.size())) {
+            continue;
+        }
+        const int nodeId = graph.source_vertex_to_node_id[static_cast<size_t>(vertexIdInt)];
+        if (nodeId >= 0) {
+            touchedLeafIds.push_back(nodeId);
+        }
+    }
+    std::sort(touchedLeafIds.begin(), touchedLeafIds.end());
+    touchedLeafIds.erase(std::unique(touchedLeafIds.begin(), touchedLeafIds.end()), touchedLeafIds.end());
+    return touchedLeafIds;
+}
+
+std::vector<int> collectTouchedSculptPBVHLeafIds(
+    const SceneUI::SculptPBVH& pbvh,
+    const std::vector<int>& sourceVertexIds) {
+    std::vector<int> touchedLeafIds;
+    touchedLeafIds.reserve(sourceVertexIds.size());
+    for (const int vertexIdInt : sourceVertexIds) {
+        if (vertexIdInt < 0 || vertexIdInt >= static_cast<int>(pbvh.source_vertex_to_leaf_id.size())) {
+            continue;
+        }
+        const int leafId = pbvh.source_vertex_to_leaf_id[static_cast<size_t>(vertexIdInt)];
+        if (leafId >= 0) {
+            touchedLeafIds.push_back(leafId);
+        }
+    }
+    std::sort(touchedLeafIds.begin(), touchedLeafIds.end());
+    touchedLeafIds.erase(std::unique(touchedLeafIds.begin(), touchedLeafIds.end()), touchedLeafIds.end());
+    return touchedLeafIds;
+}
+
+std::vector<int> collectSculptPBVHCandidateVertices(
+    SceneUI::SculptPBVH& pbvh,
+    const SceneUI::EditableMeshCache& editableMeshCache,
+    const Vec3& localCenter,
+    float localRadius);
+
+std::vector<int> collectSculptCandidateVerticesWithPBVHFallback(
+    SceneUI::SculptPBVH& pbvh,
+    const SceneUI::EditableMeshCache& editableMeshCache,
+    const Vec3& localCenter,
+    float localRadius) {
+    std::vector<int> candidateVertexIds = collectSculptPBVHCandidateVertices(
+        pbvh,
+        editableMeshCache,
+        localCenter,
+        localRadius);
+    if (!candidateVertexIds.empty()) {
+        return candidateVertexIds;
+    }
+    return collectEditableVertexCandidates(
+        editableMeshCache,
+        localCenter,
+        localRadius);
+}
+
+
+bool applyNonGrabSculptCandidate(
+    SceneUI::SculptBrushTool activeTool,
+    SceneUI::EditableMeshCache& editableMeshCache,
+    const SceneUI::SculptControlGraph& sculptControlGraph,
+    SceneUI::SculptStrokeState& strokeState,
+    const std::vector<Vec3>& snapshotLocalPositions,
+    const Matrix4x4& transform,
+    const Matrix4x4& inverseTransform,
+    const Vec3& planePoint,
+    const Vec3& claySamplePoint,
+    const Vec3& hitNormalWorld,
+    const Vec3& strokeTangentWorld,
+    const Vec3& strokeBitangentWorld,
+    float brushStrength,
+    float clayBrushStrength,
+    float clayRadiusCompensation,
+    float normalStrength,
+    float directionSign,
+    float radiusWorld,
+    float dt,
+    float localRadius,
+    float strokeAdvanceFactor,
+    int vertexIdInt,
+    const SculptBrushSample& sample,
+    Vec3& inOutLocalPosition) {
+    if (vertexIdInt < 0) {
+        return false;
+    }
+
+    const size_t vertexId = static_cast<size_t>(vertexIdInt);
+    if (vertexId >= editableMeshCache.vertices.size()) {
+        return false;
+    }
+
+    auto& vertex = editableMeshCache.vertices[vertexId];
+    const bool useSpatialNodeSolve = sculptControlGraph.uses_spatial_leaf_nodes;
+    const int nodeId = (useSpatialNodeSolve && vertexId < sculptControlGraph.source_vertex_to_node_id.size())
+        ? sculptControlGraph.source_vertex_to_node_id[vertexId]
+        : -1;
+    const SceneUI::SculptControlNode* node = nullptr;
+    if (useSpatialNodeSolve &&
+        nodeId >= 0 &&
+        nodeId < static_cast<int>(sculptControlGraph.nodes.size())) {
+        node = &sculptControlGraph.nodes[static_cast<size_t>(nodeId)];
+    }
+    const Vec3 nodeWorldPosition = (useSpatialNodeSolve && node)
+        ? sanitizeVec3(transform.transform_point(node->local_position), sample.world_position)
+        : sample.world_position;
+    const float nodeVertexInfluence = (useSpatialNodeSolve && node)
+        ? std::clamp(getSculptNodeVertexInfluence(*node, vertexIdInt), 0.15f, 1.0f)
+        : 1.0f;
+    const float leafWeightScale = (useSpatialNodeSolve && node)
+        ? (1.0f / std::sqrt((std::max)(1.0f, node->area_weight)))
+        : 1.0f;
+    const float largeBrushSurfaceFactor = computeLargeBrushSurfaceFactor(radiusWorld);
+    const Vec3 currentLocalPosition = resolveEditableSnapshotLocalPosition(
+        editableMeshCache,
+        snapshotLocalPositions,
+        vertexId);
+    Vec3 worldDelta(0.0f, 0.0f, 0.0f);
+
+    switch (activeTool) {
+    case SceneUI::SculptBrushTool::Inflate:
+        worldDelta = hitNormalWorld * (radiusWorld * 0.22f * brushStrength * dt * sample.weight * (1.0f + normalStrength) * directionSign);
+        break;
+    case SceneUI::SculptBrushTool::Draw: {
+        Vec3 vertexNormal = hitNormalWorld;
+        if (!vertex.refs.empty() && vertex.refs[0].triangle) {
+            const auto& ref = vertex.refs[0];
+            const Vec3 n = ref.triangle->vertices[ref.corner].normal;
+            if (n.length_squared() > 1e-8f) {
+                vertexNormal = safeNormalizeVec3(n, hitNormalWorld);
+            }
+        }
+        const float centerBias = std::clamp(sample.weight, 0.0f, 1.0f);
+        const float drawStrokeNormalMix =
+            std::clamp(0.68f + 0.22f * largeBrushSurfaceFactor + 0.08f * centerBias, 0.0f, 0.94f);
+        const Vec3 drawDirection = safeNormalizeVec3(
+            vertexNormal * (1.0f - drawStrokeNormalMix) + hitNormalWorld * drawStrokeNormalMix,
+            hitNormalWorld);
+        worldDelta = drawDirection * (radiusWorld * 0.22f * brushStrength * dt * sample.weight * (1.0f + normalStrength) * directionSign);
+        break;
+    }
+    case SceneUI::SculptBrushTool::Layer: {
+        if (vertexId >= strokeState.layer_accum.size()) {
+            return false;
+        }
+        float& layerAccum = strokeState.layer_accum[vertexId];
+        const float previousAccum = layerAccum;
+        const float targetLayer = radiusWorld * 0.22f * clayRadiusCompensation * sample.weight * (0.9f + 0.35f * normalStrength);
+        const float deposit = radiusWorld * 0.09f * clayRadiusCompensation * clayBrushStrength * dt * sample.weight * directionSign * leafWeightScale;
+        if (directionSign > 0.0f) {
+            layerAccum = std::min(layerAccum + std::max(0.0f, deposit), targetLayer);
+        } else {
+            layerAccum = std::max(layerAccum + std::min(0.0f, deposit), -targetLayer);
+        }
+        worldDelta = hitNormalWorld * (layerAccum - previousAccum);
+        break;
+    }
+    case SceneUI::SculptBrushTool::Clay: {
+        Vec3 vertexNormal = hitNormalWorld;
+        if (!vertex.refs.empty() && vertex.refs[0].triangle) {
+            const auto& ref = vertex.refs[0];
+            const Vec3 n = ref.triangle->vertices[ref.corner].normal;
+            if (n.length_squared() > 1e-8f) {
+                vertexNormal = safeNormalizeVec3(n, hitNormalWorld);
+            }
+        }
+        if (vertexId >= strokeState.clay_layer_accum.size()) {
+            return false;
+        }
+        const float clayHeightRef = radiusWorld * clayRadiusCompensation;
+        const Vec3 clayReferenceWorldPosition =
+            (sculptControlGraph.uses_spatial_leaf_nodes && node)
+                ? sanitizeVec3(
+                    sample.world_position + (nodeWorldPosition - sample.world_position) * (0.35f * nodeVertexInfluence),
+                    sample.world_position)
+                : sample.world_position;
+        const float signedDistance = (clayReferenceWorldPosition - claySamplePoint).dot(hitNormalWorld);
+        const float targetHeight =
+            directionSign * clayHeightRef * 0.16f * (0.8f + 0.5f * normalStrength) * sample.clay_drag_factor;
+        const float heightError = targetHeight - signedDistance;
+        const float absTarget = (std::abs)(targetHeight);
+        const float fillNeed = (absTarget > 1e-5f)
+            ? std::clamp(((directionSign > 0.0f) ? heightError : -heightError) / absTarget, 0.0f, 1.0f)
+            : 0.0f;
+        const float deposit =
+            clayHeightRef * 0.075f * clayBrushStrength * dt * sample.weight * strokeAdvanceFactor *
+            (0.8f + 0.5f * normalStrength) * directionSign * fillNeed * sample.clay_drag_factor * leafWeightScale *
+            (1.0f - 0.22f * largeBrushSurfaceFactor);
+        float& clayAccum = strokeState.clay_layer_accum[vertexId];
+        clayAccum = std::clamp(
+            clayAccum + deposit,
+            -clayHeightRef * (0.45f - 0.08f * largeBrushSurfaceFactor),
+            clayHeightRef * (0.45f - 0.08f * largeBrushSurfaceFactor));
+        const float settle =
+            std::clamp(
+                heightError * sample.weight * (0.28f + 0.32f * sample.weight),
+                -clayHeightRef * (0.05f - 0.012f * largeBrushSurfaceFactor),
+                clayHeightRef * (0.05f - 0.012f * largeBrushSurfaceFactor));
+        const float layerDelta = settle * (0.7f + 0.12f * largeBrushSurfaceFactor) +
+            deposit * (0.55f - 0.10f * largeBrushSurfaceFactor) +
+            clayAccum * (0.12f - 0.03f * largeBrushSurfaceFactor) * sample.clay_drag_factor;
+        const float buildup = (deposit * 0.14f + (std::max)(0.0f, heightError) * 0.10f * fillNeed) *
+            (1.0f - 0.45f * largeBrushSurfaceFactor);
+        if (vertex.is_boundary) {
+            worldDelta = hitNormalWorld * (layerDelta + buildup) * (0.6f - 0.12f * largeBrushSurfaceFactor);
+        } else {
+            const float vertexNormalMix = 1.0f - 0.35f * largeBrushSurfaceFactor;
+            worldDelta = hitNormalWorld * layerDelta + vertexNormal * (buildup * vertexNormalMix);
+        }
+        break;
+    }
+    case SceneUI::SculptBrushTool::ClayStrips: {
+        if (vertexId >= strokeState.clay_strips_layer_accum.size()) {
+            return false;
+        }
+        const Vec3 clayReferenceWorldPosition =
+            (sculptControlGraph.uses_spatial_leaf_nodes && node)
+                ? sanitizeVec3(
+                    sample.world_position + (nodeWorldPosition - sample.world_position) * (0.28f * nodeVertexInfluence),
+                    sample.world_position)
+                : sample.world_position;
+        const Vec3 clayPlanarOffset = clayReferenceWorldPosition - claySamplePoint -
+            hitNormalWorld * (clayReferenceWorldPosition - claySamplePoint).dot(hitNormalWorld);
+        const float stripCoord = clayPlanarOffset.dot(strokeBitangentWorld) / radiusWorld;
+        const float tineWave = 0.5f + 0.5f * std::cos(stripCoord * 22.0f);
+        const float tineProfile = std::pow((std::max)(0.0f, tineWave), 1.6f);
+        const float rakePattern = 0.45f + 0.55f * tineProfile;
+        const float stripsHeightRef = radiusWorld * clayRadiusCompensation;
+        const float signedDistance = (clayReferenceWorldPosition - claySamplePoint).dot(hitNormalWorld);
+        const float stripTargetHeight =
+            directionSign * stripsHeightRef * 0.14f * rakePattern * (0.9f + 0.35f * normalStrength) * sample.clay_drag_factor;
+        const float stripHeightError = stripTargetHeight - signedDistance;
+        const float absStripTarget = (std::abs)(stripTargetHeight);
+        const float stripFillNeed = (absStripTarget > 1e-5f)
+            ? std::clamp(((directionSign > 0.0f) ? stripHeightError : -stripHeightError) / absStripTarget, 0.0f, 1.0f)
+            : 0.0f;
+        const float deposit =
+            stripsHeightRef * 0.11f * clayBrushStrength * dt * sample.weight * strokeAdvanceFactor * rakePattern *
+            (0.95f + 0.45f * normalStrength) * directionSign * stripFillNeed * sample.clay_drag_factor * leafWeightScale *
+            (1.0f - 0.18f * largeBrushSurfaceFactor);
+        float& clayStripsAccum = strokeState.clay_strips_layer_accum[vertexId];
+        clayStripsAccum = std::clamp(
+            clayStripsAccum + deposit,
+            -stripsHeightRef * (0.6f - 0.10f * largeBrushSurfaceFactor),
+            stripsHeightRef * (0.6f - 0.10f * largeBrushSurfaceFactor));
+        const float settle =
+            std::clamp(
+                stripHeightError * sample.weight * (0.24f + 0.28f * sample.weight),
+                -stripsHeightRef * (0.05f - 0.012f * largeBrushSurfaceFactor),
+                stripsHeightRef * (0.05f - 0.012f * largeBrushSurfaceFactor));
+        const float layerDelta = settle * (0.62f + 0.10f * largeBrushSurfaceFactor) +
+            deposit * (0.62f - 0.10f * largeBrushSurfaceFactor) +
+            clayStripsAccum * (0.18f - 0.05f * largeBrushSurfaceFactor);
+        const float tineDrag =
+            radiusWorld * 0.05f * clayBrushStrength * dt * sample.weight * strokeAdvanceFactor *
+            (0.35f + 0.65f * tineProfile) * (1.0f - 0.25f * largeBrushSurfaceFactor);
+        if (vertex.is_boundary) {
+            worldDelta = hitNormalWorld * layerDelta * (0.6f - 0.10f * largeBrushSurfaceFactor);
+        } else {
+            worldDelta = hitNormalWorld * layerDelta + strokeTangentWorld * tineDrag;
+        }
+        break;
+    }
+    case SceneUI::SculptBrushTool::Pinch: {
+        const Vec3 toCenter = planePoint - sample.world_position;
+        const Vec3 lateral = toCenter - hitNormalWorld * toCenter.dot(hitNormalWorld);
+        const float lateralLen = lateral.length();
+        if (lateralLen > 1e-8f) {
+            worldDelta = (lateral / lateralLen) * (radiusWorld * 0.3f * brushStrength * dt * sample.weight);
+        }
+        break;
+    }
+    case SceneUI::SculptBrushTool::Flatten: {
+        const float signedDistance = (sample.world_position - planePoint).dot(hitNormalWorld);
+        worldDelta = hitNormalWorld * (-signedDistance * brushStrength * dt * 12.0f * sample.weight);
+        break;
+    }
+    case SceneUI::SculptBrushTool::Scrape: {
+        const float signedDistance = (sample.world_position - planePoint).dot(hitNormalWorld);
+        if (signedDistance > 0.0f) {
+            worldDelta = hitNormalWorld * (-signedDistance * brushStrength * dt * 14.0f * sample.weight);
+        }
+        break;
+    }
+    case SceneUI::SculptBrushTool::Crease: {
+        const Vec3 toCenter = planePoint - sample.world_position;
+        const Vec3 lateral = toCenter - hitNormalWorld * toCenter.dot(hitNormalWorld);
+        const float lateralLen = lateral.length();
+        const Vec3 pinchDelta = lateralLen > 1e-8f
+            ? (lateral / lateralLen) * (radiusWorld * 0.38f * brushStrength * dt * sample.weight)
+            : Vec3(0.0f, 0.0f, 0.0f);
+        const Vec3 cutDelta = hitNormalWorld * (-radiusWorld * 0.12f * brushStrength * dt * sample.weight * (1.0f + normalStrength));
+        worldDelta = pinchDelta + cutDelta;
+        break;
+    }
+    case SceneUI::SculptBrushTool::Smooth: {
+        const Vec3 smoothDeltaLocal = computeBoundarySafeSmoothDelta(
+            editableMeshCache,
+            snapshotLocalPositions,
+            vertexId,
+            brushStrength,
+            dt,
+            sample.weight,
+            localRadius);
+        const float smoothLenSq = smoothDeltaLocal.length_squared();
+        if (!std::isfinite(smoothLenSq) || smoothLenSq <= 1e-14f) {
+            return false;
+        }
+        inOutLocalPosition = sanitizeVec3(currentLocalPosition + smoothDeltaLocal, currentLocalPosition);
+        return true;
+    }
+    case SceneUI::SculptBrushTool::Grab:
+        return false;
+    }
+
+    worldDelta = sanitizeVec3(worldDelta, Vec3(0.0f, 0.0f, 0.0f));
+    const Vec3 localDelta = sanitizeVec3(inverseTransform.transform_vector(worldDelta), Vec3(0.0f, 0.0f, 0.0f));
+    const float localDeltaLenSq = localDelta.length_squared();
+    if (!std::isfinite(localDeltaLenSq) || localDeltaLenSq <= 1e-14f) {
+        return false;
+    }
+
+    inOutLocalPosition = sanitizeVec3(currentLocalPosition + localDelta, currentLocalPosition);
+    return true;
+}
+
+void rebuildSculptControlGraphBuckets(SceneUI::SculptControlGraph& graph) {
+    graph.node_spatial_buckets.clear();
+    graph.node_spatial_buckets.reserve(graph.nodes.size());
+    for (size_t nodeId = 0; nodeId < graph.nodes.size(); ++nodeId) {
+        const SceneUI::EditableSpatialCellKey key = makeEditableSpatialCellKey(
+            graph.nodes[nodeId].local_position,
+            graph.spatial_cell_size);
+        graph.node_spatial_buckets[key].push_back(static_cast<int>(nodeId));
+    }
+}
+
+void refreshSculptControlGraphNodeData(
+    SceneUI::SculptControlGraph& graph,
+    const SceneUI::EditableMeshCache& editableMeshCache) {
+    for (size_t nodeId = 0; nodeId < graph.nodes.size(); ++nodeId) {
+        auto& node = graph.nodes[nodeId];
+        Vec3 accumulatedPosition(0.0f, 0.0f, 0.0f);
+        Vec3 accumulatedNormal(0.0f, 0.0f, 0.0f);
+        float accumulatedWeight = 0.0f;
+        bool isBoundary = false;
+
+        for (size_t localIndex = 0; localIndex < node.source_vertex_ids.size(); ++localIndex) {
+            const int vertexIdInt = node.source_vertex_ids[localIndex];
+            const size_t vertexId = static_cast<size_t>(vertexIdInt);
+            if (vertexIdInt < 0 || vertexId >= editableMeshCache.vertices.size()) {
+                continue;
+            }
+
+            const auto& vertex = editableMeshCache.vertices[vertexId];
+            const float weight = (localIndex < node.source_weights.size() && std::isfinite(node.source_weights[localIndex]))
+                ? node.source_weights[localIndex]
+                : 1.0f;
+            accumulatedPosition += vertex.local_position * weight;
+
+            Vec3 vertexNormal(0.0f, 1.0f, 0.0f);
+            if (!vertex.refs.empty() && vertex.refs[0].triangle) {
+                const Vec3 normal = vertex.refs[0].triangle->getOriginalVertexNormal(vertex.refs[0].corner);
+                if (normal.length_squared() > 1e-8f) {
+                    vertexNormal = normal.normalize();
+                }
+            }
+            accumulatedNormal += vertexNormal * weight;
+            accumulatedWeight += weight;
+            isBoundary = isBoundary || vertex.is_boundary;
+        }
+
+        if (accumulatedWeight > 1e-8f) {
+            node.local_position = accumulatedPosition / accumulatedWeight;
+        }
+        if (accumulatedNormal.length_squared() > 1e-8f) {
+            node.local_normal = accumulatedNormal.normalize();
+        } else {
+            node.local_normal = Vec3(0.0f, 1.0f, 0.0f);
+        }
+        node.area_weight = (std::max)(1.0f, accumulatedWeight);
+        node.is_boundary = isBoundary;
+    }
+
+    rebuildSculptControlGraphBuckets(graph);
+}
+
+void buildVertexSculptControlGraph(
+    SceneUI::SculptControlGraph& graph,
+    const SceneUI::EditableMeshCache& editableMeshCache) {
+    graph.uses_spatial_leaf_nodes = false;
+    graph.source_vertex_to_node_id.resize(editableMeshCache.vertices.size(), -1);
+    graph.nodes.resize(editableMeshCache.vertices.size());
+    for (size_t vertexId = 0; vertexId < editableMeshCache.vertices.size(); ++vertexId) {
+        graph.source_vertex_to_node_id[vertexId] = static_cast<int>(vertexId);
+        auto& node = graph.nodes[vertexId];
+        node.neighbor_ids = editableMeshCache.vertex_neighbors[vertexId];
+        node.source_vertex_ids = { static_cast<int>(vertexId) };
+        node.source_weights = { 1.0f };
+    }
+    refreshSculptControlGraphNodeData(graph, editableMeshCache);
+}
+
+void buildSpatialLeafSculptControlGraph(
+    SceneUI::SculptControlGraph& graph,
+    const SceneUI::EditableMeshCache& editableMeshCache) {
+    graph.uses_spatial_leaf_nodes = true;
+    graph.source_vertex_to_node_id.assign(editableMeshCache.vertices.size(), -1);
+    graph.nodes.clear();
+    graph.nodes.reserve(editableMeshCache.vertex_spatial_buckets.size());
+
+    for (const auto& bucketEntry : editableMeshCache.vertex_spatial_buckets) {
+        const auto& sourceVertexIds = bucketEntry.second;
+        if (sourceVertexIds.empty()) {
+            continue;
+        }
+
+        const int nodeId = static_cast<int>(graph.nodes.size());
+        graph.nodes.push_back(SceneUI::SculptControlNode{});
+        auto& node = graph.nodes.back();
+        node.source_vertex_ids = sourceVertexIds;
+        node.source_weights.assign(sourceVertexIds.size(), 1.0f);
+
+        Vec3 center(0.0f, 0.0f, 0.0f);
+        int validCount = 0;
+        for (const int vertexIdInt : sourceVertexIds) {
+            if (vertexIdInt < 0 || vertexIdInt >= static_cast<int>(editableMeshCache.vertices.size())) {
+                continue;
+            }
+            center += editableMeshCache.vertices[static_cast<size_t>(vertexIdInt)].local_position;
+            ++validCount;
+        }
+        if (validCount > 0) {
+            center /= static_cast<float>(validCount);
+        }
+
+        for (size_t localIndex = 0; localIndex < sourceVertexIds.size(); ++localIndex) {
+            const int vertexIdInt = sourceVertexIds[localIndex];
+            if (vertexIdInt < 0 || vertexIdInt >= static_cast<int>(editableMeshCache.vertices.size())) {
+                continue;
+            }
+            const Vec3 offset = editableMeshCache.vertices[static_cast<size_t>(vertexIdInt)].local_position - center;
+            const float distance = offset.length();
+            node.source_weights[localIndex] = 1.0f / (1.0f + distance);
+        }
+        for (const int vertexIdInt : sourceVertexIds) {
+            if (vertexIdInt >= 0 && vertexIdInt < static_cast<int>(graph.source_vertex_to_node_id.size())) {
+                graph.source_vertex_to_node_id[static_cast<size_t>(vertexIdInt)] = nodeId;
+            }
+        }
+    }
+
+    std::vector<std::unordered_set<int>> neighborSets(graph.nodes.size());
+    for (size_t vertexId = 0; vertexId < editableMeshCache.vertex_neighbors.size(); ++vertexId) {
+        const int nodeId = (vertexId < graph.source_vertex_to_node_id.size())
+            ? graph.source_vertex_to_node_id[vertexId]
+            : -1;
+        if (nodeId < 0) {
+            continue;
+        }
+        for (const int neighborVertexId : editableMeshCache.vertex_neighbors[vertexId]) {
+            if (neighborVertexId < 0 || neighborVertexId >= static_cast<int>(graph.source_vertex_to_node_id.size())) {
+                continue;
+            }
+            const int neighborNodeId = graph.source_vertex_to_node_id[static_cast<size_t>(neighborVertexId)];
+            if (neighborNodeId >= 0 && neighborNodeId != nodeId) {
+                neighborSets[static_cast<size_t>(nodeId)].insert(neighborNodeId);
+            }
+        }
+    }
+    for (size_t nodeId = 0; nodeId < graph.nodes.size(); ++nodeId) {
+        graph.nodes[nodeId].neighbor_ids.assign(
+            neighborSets[nodeId].begin(),
+            neighborSets[nodeId].end());
+    }
+
+    refreshSculptControlGraphNodeData(graph, editableMeshCache);
+}
+
+float computeEditableAverageEdgeLength(const SceneUI::EditableMeshCache& editableMeshCache) {
+    float avgEdgeLength = 0.0f;
+    int avgEdgeSamples = 0;
+    for (const auto& edge : editableMeshCache.edges) {
+        if (edge.v0 < 0 || edge.v1 < 0 ||
+            edge.v0 >= static_cast<int>(editableMeshCache.vertices.size()) ||
+            edge.v1 >= static_cast<int>(editableMeshCache.vertices.size())) {
+            continue;
+        }
+        const float edgeLength = (
+            editableMeshCache.vertices[edge.v1].local_position -
+            editableMeshCache.vertices[edge.v0].local_position).length();
+        if (!std::isfinite(edgeLength) || edgeLength <= 1e-6f) {
+            continue;
+        }
+        avgEdgeLength += edgeLength;
+        ++avgEdgeSamples;
+    }
+
+    if (avgEdgeSamples > 0) {
+        avgEdgeLength /= static_cast<float>(avgEdgeSamples);
+    }
+    return avgEdgeLength;
+}
+
+AABB computeEditableVertexBounds(
+    const SceneUI::EditableMeshCache& editableMeshCache,
+    const std::vector<int>& vertexIds) {
+    AABB bounds;
+    bool hasVertex = false;
+    for (const int vertexIdInt : vertexIds) {
+        if (vertexIdInt < 0 || vertexIdInt >= static_cast<int>(editableMeshCache.vertices.size())) {
+            continue;
+        }
+        const Vec3 p = editableMeshCache.vertices[static_cast<size_t>(vertexIdInt)].local_position;
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+            continue;
+        }
+        if (!hasVertex) {
+            bounds = AABB(p, p);
+            hasVertex = true;
+        } else {
+            bounds.min.x = (std::min)(bounds.min.x, p.x);
+            bounds.min.y = (std::min)(bounds.min.y, p.y);
+            bounds.min.z = (std::min)(bounds.min.z, p.z);
+            bounds.max.x = (std::max)(bounds.max.x, p.x);
+            bounds.max.y = (std::max)(bounds.max.y, p.y);
+            bounds.max.z = (std::max)(bounds.max.z, p.z);
+        }
+    }
+    if (!hasVertex) {
+        bounds = AABB(Vec3(0.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 0.0f));
+    }
+    return bounds;
+}
+
+bool pbvhNodeIntersectsSphere(const SceneUI::SculptPBVHNode& node, const Vec3& center, float radius) {
+    const float safeRadius = sanitizeFiniteFloat(radius, 0.1f, 0.0001f, 100000.0f);
+    float distSq = 0.0f;
+    for (int axis = 0; axis < 3; ++axis) {
+        const float v = center[axis];
+        if (v < node.local_bounds.min[axis]) {
+            const float d = node.local_bounds.min[axis] - v;
+            distSq += d * d;
+        } else if (v > node.local_bounds.max[axis]) {
+            const float d = v - node.local_bounds.max[axis];
+            distSq += d * d;
+        }
+    }
+    return distSq <= safeRadius * safeRadius;
+}
+
+int buildSculptPBVHRecursive(
+    SceneUI::SculptPBVH& pbvh,
+    const SceneUI::EditableMeshCache& editableMeshCache,
+    std::vector<int>& vertexIds,
+    int parentNodeId,
+    int depth) {
+    const int nodeId = static_cast<int>(pbvh.nodes.size());
+    pbvh.nodes.push_back(SceneUI::SculptPBVHNode{});
+    auto& node = pbvh.nodes[static_cast<size_t>(nodeId)];
+    node.parent_id = parentNodeId;
+    node.depth = depth;
+    node.local_bounds = computeEditableVertexBounds(editableMeshCache, vertexIds);
+    pbvh.max_depth = (std::max)(pbvh.max_depth, depth);
+
+    if (vertexIds.size() <= static_cast<size_t>(pbvh.leaf_vertex_limit)) {
+        node.is_leaf = true;
+        node.vertex_ids = vertexIds;
+        node.is_boundary = false;
+        for (const int vertexIdInt : node.vertex_ids) {
+            if (vertexIdInt >= 0 && vertexIdInt < static_cast<int>(editableMeshCache.vertices.size())) {
+                pbvh.source_vertex_to_leaf_id[static_cast<size_t>(vertexIdInt)] = nodeId;
+                node.is_boundary = node.is_boundary || editableMeshCache.vertices[static_cast<size_t>(vertexIdInt)].is_boundary;
+            }
+        }
+        ++pbvh.leaf_count;
+        return nodeId;
+    }
+
+    const Vec3 diag = node.local_bounds.diagonal();
+    int splitAxis = 0;
+    if (diag.y > diag.x && diag.y >= diag.z) {
+        splitAxis = 1;
+    } else if (diag.z > diag.x && diag.z >= diag.y) {
+        splitAxis = 2;
+    }
+
+    std::sort(vertexIds.begin(), vertexIds.end(), [&](int lhs, int rhs) {
+        const Vec3& a = editableMeshCache.vertices[static_cast<size_t>(lhs)].local_position;
+        const Vec3& b = editableMeshCache.vertices[static_cast<size_t>(rhs)].local_position;
+        if (a[splitAxis] == b[splitAxis]) {
+            return lhs < rhs;
+        }
+        return a[splitAxis] < b[splitAxis];
+    });
+
+    const size_t mid = vertexIds.size() / 2;
+    std::vector<int> leftVertexIds(vertexIds.begin(), vertexIds.begin() + mid);
+    std::vector<int> rightVertexIds(vertexIds.begin() + mid, vertexIds.end());
+    if (leftVertexIds.empty() || rightVertexIds.empty()) {
+        node.is_leaf = true;
+        node.vertex_ids = vertexIds;
+        node.is_boundary = false;
+        for (const int vertexIdInt : node.vertex_ids) {
+            if (vertexIdInt >= 0 && vertexIdInt < static_cast<int>(editableMeshCache.vertices.size())) {
+                pbvh.source_vertex_to_leaf_id[static_cast<size_t>(vertexIdInt)] = nodeId;
+                node.is_boundary = node.is_boundary || editableMeshCache.vertices[static_cast<size_t>(vertexIdInt)].is_boundary;
+            }
+        }
+        ++pbvh.leaf_count;
+        return nodeId;
+    }
+
+    const int leftChildId = buildSculptPBVHRecursive(pbvh, editableMeshCache, leftVertexIds, nodeId, depth + 1);
+    const int rightChildId = buildSculptPBVHRecursive(pbvh, editableMeshCache, rightVertexIds, nodeId, depth + 1);
+    auto& parentNode = pbvh.nodes[static_cast<size_t>(nodeId)];
+    parentNode.left_child_id = leftChildId;
+    parentNode.right_child_id = rightChildId;
+    parentNode.is_leaf = false;
+    parentNode.vertex_ids.clear();
+    parentNode.local_bounds = surrounding_box(
+        pbvh.nodes[static_cast<size_t>(leftChildId)].local_bounds,
+        pbvh.nodes[static_cast<size_t>(rightChildId)].local_bounds);
+    parentNode.is_boundary =
+        pbvh.nodes[static_cast<size_t>(leftChildId)].is_boundary ||
+        pbvh.nodes[static_cast<size_t>(rightChildId)].is_boundary;
+    return nodeId;
+}
+
+AABB refreshSculptPBVHNodeBounds(
+    SceneUI::SculptPBVH& pbvh,
+    const SceneUI::EditableMeshCache& editableMeshCache,
+    int nodeId) {
+    auto& node = pbvh.nodes[static_cast<size_t>(nodeId)];
+    if (node.is_leaf) {
+        node.local_bounds = computeEditableVertexBounds(editableMeshCache, node.vertex_ids);
+        node.is_boundary = false;
+        for (const int vertexIdInt : node.vertex_ids) {
+            if (vertexIdInt >= 0 && vertexIdInt < static_cast<int>(editableMeshCache.vertices.size())) {
+                node.is_boundary = node.is_boundary || editableMeshCache.vertices[static_cast<size_t>(vertexIdInt)].is_boundary;
+            }
+        }
+        return node.local_bounds;
+    }
+
+    const AABB leftBounds = refreshSculptPBVHNodeBounds(pbvh, editableMeshCache, node.left_child_id);
+    const AABB rightBounds = refreshSculptPBVHNodeBounds(pbvh, editableMeshCache, node.right_child_id);
+    node.local_bounds = surrounding_box(leftBounds, rightBounds);
+    node.is_boundary =
+        pbvh.nodes[static_cast<size_t>(node.left_child_id)].is_boundary ||
+        pbvh.nodes[static_cast<size_t>(node.right_child_id)].is_boundary;
+    return node.local_bounds;
+}
+
+void refreshSculptPBVHLeavesAndAncestors(
+    SceneUI::SculptPBVH& pbvh,
+    const SceneUI::EditableMeshCache& editableMeshCache,
+    const std::vector<int>& touchedLeafIds) {
+    if (touchedLeafIds.empty() || pbvh.nodes.empty()) {
+        return;
+    }
+
+    std::vector<uint8_t> visited(pbvh.nodes.size(), 0u);
+    std::vector<int> dirtyChain;
+    dirtyChain.reserve(touchedLeafIds.size() * 8);
+
+    for (const int leafId : touchedLeafIds) {
+        int nodeId = leafId;
+        while (nodeId >= 0 &&
+               nodeId < static_cast<int>(pbvh.nodes.size()) &&
+               visited[static_cast<size_t>(nodeId)] == 0u) {
+            visited[static_cast<size_t>(nodeId)] = 1u;
+            dirtyChain.push_back(nodeId);
+            nodeId = pbvh.nodes[static_cast<size_t>(nodeId)].parent_id;
+        }
+    }
+
+    for (auto it = dirtyChain.rbegin(); it != dirtyChain.rend(); ++it) {
+        const int nodeId = *it;
+        if (nodeId < 0 || nodeId >= static_cast<int>(pbvh.nodes.size())) {
+            continue;
+        }
+
+        auto& node = pbvh.nodes[static_cast<size_t>(nodeId)];
+        if (node.is_leaf) {
+            node.local_bounds = computeEditableVertexBounds(editableMeshCache, node.vertex_ids);
+            node.is_boundary = false;
+            for (const int vertexIdInt : node.vertex_ids) {
+                if (vertexIdInt >= 0 && vertexIdInt < static_cast<int>(editableMeshCache.vertices.size())) {
+                    node.is_boundary = node.is_boundary || editableMeshCache.vertices[static_cast<size_t>(vertexIdInt)].is_boundary;
+                }
+            }
+            continue;
+        }
+
+        const bool hasLeft = node.left_child_id >= 0 && node.left_child_id < static_cast<int>(pbvh.nodes.size());
+        const bool hasRight = node.right_child_id >= 0 && node.right_child_id < static_cast<int>(pbvh.nodes.size());
+        if (hasLeft && hasRight) {
+            node.local_bounds = surrounding_box(
+                pbvh.nodes[static_cast<size_t>(node.left_child_id)].local_bounds,
+                pbvh.nodes[static_cast<size_t>(node.right_child_id)].local_bounds);
+            node.is_boundary =
+                pbvh.nodes[static_cast<size_t>(node.left_child_id)].is_boundary ||
+                pbvh.nodes[static_cast<size_t>(node.right_child_id)].is_boundary;
+        }
+    }
+}
+
+void buildSculptPBVH(
+    SceneUI::SculptPBVH& pbvh,
+    const SceneUI::EditableMeshCache& editableMeshCache) {
+    pbvh.nodes.clear();
+    pbvh.root_node_id = -1;
+    pbvh.max_depth = 0;
+    pbvh.leaf_count = 0;
+    pbvh.source_vertex_to_leaf_id.assign(editableMeshCache.vertices.size(), -1);
+    if (editableMeshCache.vertices.empty()) {
+        return;
+    }
+
+    pbvh.nodes.reserve(editableMeshCache.vertices.size() * 2);
+    std::vector<int> rootVertexIds(editableMeshCache.vertices.size());
+    std::iota(rootVertexIds.begin(), rootVertexIds.end(), 0);
+    pbvh.root_node_id = buildSculptPBVHRecursive(pbvh, editableMeshCache, rootVertexIds, -1, 0);
+}
+
+void refreshSculptPBVH(
+    SceneUI::SculptPBVH& pbvh,
+    const SceneUI::EditableMeshCache& editableMeshCache) {
+    if (pbvh.root_node_id < 0 || pbvh.nodes.empty()) {
+        return;
+    }
+    refreshSculptPBVHNodeBounds(pbvh, editableMeshCache, pbvh.root_node_id);
+}
+
+std::vector<int> collectSculptPBVHCandidateVertices(
+    SceneUI::SculptPBVH& pbvh,
+    const SceneUI::EditableMeshCache& editableMeshCache,
+    const Vec3& localCenter,
+    float localRadius) {
+    std::vector<int> candidateVertexIds;
+    pbvh.last_candidate_node_count = 0;
+    pbvh.last_candidate_vertex_count = 0;
+    if (pbvh.root_node_id < 0 || pbvh.nodes.empty()) {
+        return candidateVertexIds;
+    }
+
+    std::vector<int> stack = { pbvh.root_node_id };
+    while (!stack.empty()) {
+        const int nodeId = stack.back();
+        stack.pop_back();
+        if (nodeId < 0 || nodeId >= static_cast<int>(pbvh.nodes.size())) {
+            continue;
+        }
+
+        const auto& node = pbvh.nodes[static_cast<size_t>(nodeId)];
+        if (!pbvhNodeIntersectsSphere(node, localCenter, localRadius)) {
+            continue;
+        }
+
+        ++pbvh.last_candidate_node_count;
+        if (node.is_leaf) {
+            candidateVertexIds.insert(
+                candidateVertexIds.end(),
+                node.vertex_ids.begin(),
+                node.vertex_ids.end());
+            continue;
+        }
+
+        if (node.left_child_id >= 0) {
+            stack.push_back(node.left_child_id);
+        }
+        if (node.right_child_id >= 0) {
+            stack.push_back(node.right_child_id);
+        }
+    }
+
+    std::sort(candidateVertexIds.begin(), candidateVertexIds.end());
+    candidateVertexIds.erase(
+        std::unique(candidateVertexIds.begin(), candidateVertexIds.end()),
+        candidateVertexIds.end());
+    pbvh.last_candidate_vertex_count = candidateVertexIds.size();
+    return candidateVertexIds;
+}
+
 template <typename Fn>
 void forEachEditableCandidate(const std::vector<int>& candidateVertexIds, Fn&& fn) {
-    if (candidateVertexIds.size() >= 384u) {
+    constexpr size_t kEditableParallelThreshold = 96u;
+    if (candidateVertexIds.size() >= kEditableParallelThreshold) {
         std::for_each(
             std::execution::par_unseq,
             candidateVertexIds.begin(),
@@ -1511,6 +2919,10 @@ void forEachEditableCandidate(const std::vector<int>& candidateVertexIds, Fn&& f
         candidateVertexIds.end(),
         std::forward<Fn>(fn));
 }
+
+bool tryMarkEditableTriangleTouched(
+    SceneUI::EditableMeshCache& editableMeshCache,
+    const Triangle* triangle);
 
 std::vector<size_t> collectAffectedEditableVertexIds(
     SceneUI::EditableMeshCache& editableMeshCache,
@@ -1564,12 +2976,307 @@ std::vector<size_t> collectAffectedEditableVertexIds(
     return affectedVertexIds;
 }
 
+std::vector<int> expandEditableCandidateVerticesByTopology(
+    SceneUI::EditableMeshCache& editableMeshCache,
+    const std::vector<int>& seedVertexIds,
+    int ringCount) {
+    std::vector<int> expandedVertexIds;
+    if (seedVertexIds.empty() || ringCount <= 0 || editableMeshCache.vertices.empty()) {
+        return expandedVertexIds;
+    }
+
+    if (editableMeshCache.vertex_mark_stamps.size() != editableMeshCache.vertices.size()) {
+        editableMeshCache.vertex_mark_stamps.assign(editableMeshCache.vertices.size(), 0u);
+        editableMeshCache.vertex_mark_generation = 1u;
+    }
+    if (editableMeshCache.vertex_mark_generation == std::numeric_limits<uint32_t>::max()) {
+        std::fill(
+            editableMeshCache.vertex_mark_stamps.begin(),
+            editableMeshCache.vertex_mark_stamps.end(),
+            0u);
+        editableMeshCache.vertex_mark_generation = 1u;
+    }
+
+    const uint32_t currentGeneration = editableMeshCache.vertex_mark_generation++;
+    std::vector<int> frontier;
+    frontier.reserve(seedVertexIds.size());
+    expandedVertexIds.reserve(seedVertexIds.size() * (ringCount + 1));
+
+    auto tryMarkVertex = [&](int vertexIdInt, std::vector<int>* optionalFrontier) {
+        if (vertexIdInt < 0) {
+            return;
+        }
+        const size_t vertexId = static_cast<size_t>(vertexIdInt);
+        if (vertexId >= editableMeshCache.vertices.size() ||
+            editableMeshCache.vertex_mark_stamps[vertexId] == currentGeneration) {
+            return;
+        }
+        editableMeshCache.vertex_mark_stamps[vertexId] = currentGeneration;
+        expandedVertexIds.push_back(vertexIdInt);
+        if (optionalFrontier) {
+            optionalFrontier->push_back(vertexIdInt);
+        }
+    };
+
+    for (const int vertexIdInt : seedVertexIds) {
+        tryMarkVertex(vertexIdInt, &frontier);
+    }
+
+    for (int ring = 0; ring < ringCount && !frontier.empty(); ++ring) {
+        std::vector<int> nextFrontier;
+        for (const int vertexIdInt : frontier) {
+            if (vertexIdInt < 0 ||
+                vertexIdInt >= static_cast<int>(editableMeshCache.vertex_neighbors.size())) {
+                continue;
+            }
+            for (const int neighborVertexId : editableMeshCache.vertex_neighbors[static_cast<size_t>(vertexIdInt)]) {
+                tryMarkVertex(neighborVertexId, &nextFrontier);
+            }
+        }
+        frontier = std::move(nextFrontier);
+    }
+
+    return expandedVertexIds;
+}
+
+std::vector<size_t> collectAffectedEditableVertexIdsFromPBVHLeaves(
+    SceneUI::EditableMeshCache& editableMeshCache,
+    const SceneUI::SculptPBVH& pbvh,
+    const std::vector<int>& touchedLeafIds) {
+    std::vector<size_t> affectedVertexIds;
+    if (touchedLeafIds.empty() || editableMeshCache.vertices.empty() || pbvh.nodes.empty()) {
+        return affectedVertexIds;
+    }
+
+    if (editableMeshCache.vertex_mark_stamps.size() != editableMeshCache.vertices.size()) {
+        editableMeshCache.vertex_mark_stamps.assign(editableMeshCache.vertices.size(), 0u);
+        editableMeshCache.vertex_mark_generation = 1u;
+    }
+    if (editableMeshCache.vertex_mark_generation == std::numeric_limits<uint32_t>::max()) {
+        std::fill(
+            editableMeshCache.vertex_mark_stamps.begin(),
+            editableMeshCache.vertex_mark_stamps.end(),
+            0u);
+        editableMeshCache.vertex_mark_generation = 1u;
+    }
+
+    const uint32_t currentGeneration = editableMeshCache.vertex_mark_generation++;
+    affectedVertexIds.reserve(touchedLeafIds.size() * 64);
+
+    auto tryMarkVertex = [&](int vertexIdInt) {
+        if (vertexIdInt < 0) {
+            return;
+        }
+        const size_t vertexId = static_cast<size_t>(vertexIdInt);
+        if (vertexId >= editableMeshCache.vertices.size() ||
+            editableMeshCache.vertex_mark_stamps[vertexId] == currentGeneration) {
+            return;
+        }
+        editableMeshCache.vertex_mark_stamps[vertexId] = currentGeneration;
+        affectedVertexIds.push_back(vertexId);
+    };
+
+    for (const int leafId : touchedLeafIds) {
+        if (leafId < 0 || leafId >= static_cast<int>(pbvh.nodes.size())) {
+            continue;
+        }
+        const auto& leaf = pbvh.nodes[static_cast<size_t>(leafId)];
+        for (const int vertexIdInt : leaf.vertex_ids) {
+            tryMarkVertex(vertexIdInt);
+            if (vertexIdInt >= 0 &&
+                vertexIdInt < static_cast<int>(editableMeshCache.vertex_neighbors.size())) {
+                for (const int neighborVertexId : editableMeshCache.vertex_neighbors[static_cast<size_t>(vertexIdInt)]) {
+                    tryMarkVertex(neighborVertexId);
+                }
+            }
+        }
+    }
+
+    return affectedVertexIds;
+}
+
+std::vector<int> convertAffectedVertexIdsToIntList(const std::vector<size_t>& affectedVertexIds) {
+    std::vector<int> result;
+    result.reserve(affectedVertexIds.size());
+    for (const size_t vertexId : affectedVertexIds) {
+        if (vertexId <= static_cast<size_t>((std::numeric_limits<int>::max)())) {
+            result.push_back(static_cast<int>(vertexId));
+        }
+    }
+    return result;
+}
+
+void expandTouchedTrianglesFromAffectedVertices(
+    SceneUI::EditableMeshCache& editableMeshCache,
+    const std::vector<size_t>& affectedVertexIds,
+    std::vector<std::shared_ptr<Triangle>>& touchedTriangles) {
+    for (const size_t vertexId : affectedVertexIds) {
+        if (vertexId >= editableMeshCache.vertices.size()) {
+            continue;
+        }
+        for (const auto& ref : editableMeshCache.vertices[vertexId].refs) {
+            if (!ref.triangle) {
+                continue;
+            }
+            if (tryMarkEditableTriangleTouched(editableMeshCache, ref.triangle.get())) {
+                touchedTriangles.push_back(ref.triangle);
+            }
+        }
+    }
+}
+
+Vec3 resolveEditableProposedLocalPosition(
+    const SceneUI::EditableMeshCache& editableMeshCache,
+    const std::vector<Vec3>& proposedPositions,
+    const std::vector<int>& updatedVertexIdsSorted,
+    int vertexIdInt) {
+    if (vertexIdInt < 0) {
+        return Vec3(0.0f, 0.0f, 0.0f);
+    }
+    const size_t vertexId = static_cast<size_t>(vertexIdInt);
+    if (vertexId >= editableMeshCache.vertices.size()) {
+        return Vec3(0.0f, 0.0f, 0.0f);
+    }
+    if (std::binary_search(updatedVertexIdsSorted.begin(), updatedVertexIdsSorted.end(), vertexIdInt) &&
+        vertexId < proposedPositions.size()) {
+        return proposedPositions[vertexId];
+    }
+    return editableMeshCache.vertices[vertexId].local_position;
+}
+
+bool isEditableVertexTopologySafe(
+    const SceneUI::EditableMeshCache& editableMeshCache,
+    int vertexIdInt,
+    const std::vector<Vec3>& proposedPositions,
+    const std::vector<int>& updatedVertexIdsSorted) {
+    if (vertexIdInt < 0) {
+        return false;
+    }
+    const size_t vertexId = static_cast<size_t>(vertexIdInt);
+    if (vertexId >= editableMeshCache.vertices.size()) {
+        return false;
+    }
+
+    const auto& refs = editableMeshCache.vertices[vertexId].refs;
+    for (const auto& ref : refs) {
+        if (!ref.triangle) {
+            continue;
+        }
+
+        const auto triFound = editableMeshCache.triangle_vertex_ids.find(ref.triangle.get());
+        if (triFound == editableMeshCache.triangle_vertex_ids.end()) {
+            continue;
+        }
+
+        const auto& triVertexIds = triFound->second;
+        const Vec3 oldP0 = editableMeshCache.vertices[static_cast<size_t>(triVertexIds[0])].local_position;
+        const Vec3 oldP1 = editableMeshCache.vertices[static_cast<size_t>(triVertexIds[1])].local_position;
+        const Vec3 oldP2 = editableMeshCache.vertices[static_cast<size_t>(triVertexIds[2])].local_position;
+        const Vec3 newP0 = resolveEditableProposedLocalPosition(editableMeshCache, proposedPositions, updatedVertexIdsSorted, triVertexIds[0]);
+        const Vec3 newP1 = resolveEditableProposedLocalPosition(editableMeshCache, proposedPositions, updatedVertexIdsSorted, triVertexIds[1]);
+        const Vec3 newP2 = resolveEditableProposedLocalPosition(editableMeshCache, proposedPositions, updatedVertexIdsSorted, triVertexIds[2]);
+
+        const Vec3 oldNormal = Vec3::cross(oldP1 - oldP0, oldP2 - oldP0);
+        const Vec3 newNormal = Vec3::cross(newP1 - newP0, newP2 - newP0);
+        const float oldLenSq = oldNormal.length_squared();
+        const float newLenSq = newNormal.length_squared();
+
+        const float oldEdge01LenSq = (oldP1 - oldP0).length_squared();
+        const float oldEdge12LenSq = (oldP2 - oldP1).length_squared();
+        const float oldEdge20LenSq = (oldP0 - oldP2).length_squared();
+        const float newEdge01LenSq = (newP1 - newP0).length_squared();
+        const float newEdge12LenSq = (newP2 - newP1).length_squared();
+        const float newEdge20LenSq = (newP0 - newP2).length_squared();
+
+        if (!std::isfinite(newEdge01LenSq) || !std::isfinite(newEdge12LenSq) || !std::isfinite(newEdge20LenSq)) {
+            return false;
+        }
+        if (newEdge01LenSq <= (std::max)(1e-12f, oldEdge01LenSq * 0.0025f) ||
+            newEdge12LenSq <= (std::max)(1e-12f, oldEdge12LenSq * 0.0025f) ||
+            newEdge20LenSq <= (std::max)(1e-12f, oldEdge20LenSq * 0.0025f)) {
+            return false;
+        }
+
+        if (!std::isfinite(newLenSq) || newLenSq <= (std::max)(1e-12f, oldLenSq * 0.01f)) {
+            return false;
+        }
+
+        if (oldLenSq > 1e-12f) {
+            const float orientDot = oldNormal.dot(newNormal);
+            if (!std::isfinite(orientDot) || orientDot <= oldLenSq * 0.04f) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool resolveEditableTopologySafePosition(
+    const SceneUI::EditableMeshCache& editableMeshCache,
+    int vertexIdInt,
+    std::vector<Vec3>& proposedPositions,
+    const std::vector<int>& updatedVertexIdsSorted,
+    Vec3& outLocalPosition) {
+    if (vertexIdInt < 0) {
+        return false;
+    }
+
+    const size_t vertexId = static_cast<size_t>(vertexIdInt);
+    if (vertexId >= editableMeshCache.vertices.size() || vertexId >= proposedPositions.size()) {
+        return false;
+    }
+
+    const Vec3 originalLocalPosition = editableMeshCache.vertices[vertexId].local_position;
+    const Vec3 targetLocalPosition = proposedPositions[vertexId];
+    const Vec3 totalDelta = targetLocalPosition - originalLocalPosition;
+    const float totalDeltaLenSq = totalDelta.length_squared();
+    if (!std::isfinite(totalDeltaLenSq) || totalDeltaLenSq <= 1e-14f) {
+        outLocalPosition = originalLocalPosition;
+        proposedPositions[vertexId] = originalLocalPosition;
+        return false;
+    }
+
+    if (isEditableVertexTopologySafe(
+            editableMeshCache,
+            vertexIdInt,
+            proposedPositions,
+            updatedVertexIdsSorted)) {
+        outLocalPosition = targetLocalPosition;
+        return true;
+    }
+
+    float blend = 0.5f;
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        const Vec3 backedOffPosition = sanitizeVec3(
+            originalLocalPosition + totalDelta * blend,
+            originalLocalPosition);
+        proposedPositions[vertexId] = backedOffPosition;
+        if (isEditableVertexTopologySafe(
+                editableMeshCache,
+                vertexIdInt,
+                proposedPositions,
+                updatedVertexIdsSorted)) {
+            outLocalPosition = backedOffPosition;
+            return true;
+        }
+        blend *= 0.5f;
+    }
+
+    proposedPositions[vertexId] = originalLocalPosition;
+    outLocalPosition = originalLocalPosition;
+    return false;
+}
+
 void recomputeEditableSmoothNormals(
     SceneUI::EditableMeshCache& editableMeshCache,
     const std::vector<size_t>& affectedVertexIds) {
     if (affectedVertexIds.empty()) {
         return;
     }
+
+    const float clampedAngle = std::clamp(editableMeshCache.auto_smooth_angle_degrees, 1.0f, 180.0f);
+    const float autoSmoothThreshold = std::cos(clampedAngle * 3.14159265359f / 180.0f);
 
     auto recomputeVertexNormal = [&](const size_t vertexId) {
         if (vertexId >= editableMeshCache.vertices.size()) {
@@ -1581,7 +3288,8 @@ void recomputeEditableSmoothNormals(
             return;
         }
 
-        std::vector<Vec3> faceNormals;
+        thread_local std::vector<Vec3> faceNormals;
+        faceNormals.clear();
         faceNormals.reserve(refs.size());
         for (const auto& ref : refs) {
             if (!ref.triangle) {
@@ -1595,9 +3303,6 @@ void recomputeEditableSmoothNormals(
             const float len = faceNormal.length();
             faceNormals.push_back(len > 1e-8f ? faceNormal / len : Vec3(0.0f, 1.0f, 0.0f));
         }
-
-        const float clampedAngle = std::clamp(editableMeshCache.auto_smooth_angle_degrees, 1.0f, 180.0f);
-        const float autoSmoothThreshold = std::cos(clampedAngle * 3.14159265359f / 180.0f);
 
         for (size_t refIndex = 0; refIndex < refs.size(); ++refIndex) {
             const auto& ref = refs[refIndex];
@@ -1626,7 +3331,8 @@ void recomputeEditableSmoothNormals(
         }
     };
 
-    if (affectedVertexIds.size() >= 384u) {
+    constexpr size_t kNormalRecomputeParallelThreshold = 96u;
+    if (affectedVertexIds.size() >= kNormalRecomputeParallelThreshold) {
         std::for_each(
             std::execution::par_unseq,
             affectedVertexIds.begin(),
@@ -1774,6 +3480,32 @@ constexpr bool kEnableVulkanInteractiveMeshRtUpdates = false;
 
 } // namespace
 
+bool SceneUI::isInteractiveSubdivisionPreviewActiveForObject(const std::string& objectName) const {
+    return interactive_subdiv_preview_active &&
+        !objectName.empty() &&
+        interactive_subdiv_preview_object_name == objectName;
+}
+
+void SceneUI::beginInteractiveSubdivisionPreview(const std::string& objectName) {
+    if (objectName.empty()) {
+        return;
+    }
+    interactive_subdiv_preview_active = true;
+    interactive_subdiv_preview_object_name = objectName;
+}
+
+void SceneUI::endInteractiveSubdivisionPreview(UIContext& ctx, const std::string& objectName, bool rebuildFull) {
+    const bool wasActive = isInteractiveSubdivisionPreviewActiveForObject(objectName);
+    if (wasActive) {
+        interactive_subdiv_preview_active = false;
+        interactive_subdiv_preview_object_name.clear();
+    }
+
+    if (wasActive && rebuildFull && !objectName.empty()) {
+        refreshEditableDisplayMeshFromBase(ctx, objectName, true);
+    }
+}
+
 void SceneUI::clearEditableMeshSelection() {
     editable_mesh_cache.selection = EditableMeshSelection{};
 }
@@ -1781,6 +3513,8 @@ void SceneUI::clearEditableMeshSelection() {
 void SceneUI::resetMeshEditState(UIContext& ctx) {
     const std::string previewObjectName = active_mesh_edit_object_name;
     if (!previewObjectName.empty()) {
+        interactive_subdiv_preview_active = false;
+        interactive_subdiv_preview_object_name.clear();
         refreshEditableDisplayMeshFromBase(ctx, previewObjectName, false);
     }
     mesh_overlay_settings.enabled = false;
@@ -1798,6 +3532,8 @@ void SceneUI::resetMeshEditState(UIContext& ctx) {
     mesh_edit_gpu_sync_pending = false;
     mesh_edit_gpu_sync_object_name.clear();
     mesh_edit_optix_targeted_sync_enabled = true;
+    interactive_subdiv_preview_active = false;
+    interactive_subdiv_preview_object_name.clear();
     sculpt_stroke_state = SculptStrokeState{};
 }
 
@@ -2013,7 +3749,7 @@ bool SceneUI::applyMeshShadingSettings(UIContext& ctx, const std::string& object
     updateBBoxCache(objectName);
     objects_needing_cpu_sync.erase(objectName);
 
-    if (queueGpuSync && ctx.backend_ptr) {
+    if (queueGpuSync && (ctx.backend_ptr != nullptr || g_backend != nullptr || g_viewport_backend != nullptr)) {
         queueMeshEditGpuSync(objectName);
     }
 
@@ -2041,7 +3777,11 @@ bool SceneUI::refreshEditableDisplayMeshFromBase(UIContext& ctx, const std::stri
         return false;
     }
 
-    const std::vector<std::shared_ptr<Triangle>> displayMesh = evaluateDisplayMeshFromBase(baseIt->second, stack);
+    const MeshModifiers::ModifierStack evalStack =
+        buildSubdivisionPreviewEvaluationStack(
+            stack,
+            isInteractiveSubdivisionPreviewActiveForObject(objectName));
+    const std::vector<std::shared_ptr<Triangle>> displayMesh = evaluateDisplayMeshFromBase(baseIt->second, evalStack);
     const EditableMeshSelection preservedSelection =
         (editable_mesh_cache.object_name == objectName) ? editable_mesh_cache.selection : EditableMeshSelection{};
     auto& objects = ctx.scene.world.objects;
@@ -2081,7 +3821,7 @@ bool SceneUI::refreshEditableDisplayMeshFromBase(UIContext& ctx, const std::stri
     extern bool g_bvh_rebuild_pending;
     g_bvh_rebuild_pending = true;
 
-    if (queueGpuSync && ctx.backend_ptr) {
+    if (queueGpuSync && (ctx.backend_ptr != nullptr || g_backend != nullptr || g_viewport_backend != nullptr)) {
         queueMeshEditGpuSync(objectName);
     }
 
@@ -2199,6 +3939,8 @@ void SceneUI::tryRestoreSerializedMeshEditLayer(UIContext& ctx) {
 bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectName) {
     if (objectName.empty()) {
         editable_mesh_cache = EditableMeshCache{};
+        invalidateSculptControlGraph();
+        invalidateSculptPBVH();
         return false;
     }
 
@@ -2213,8 +3955,12 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     if (modifierStack &&
         hasEnabledSubdivisionPreview(*modifierStack) &&
         ctx.scene.base_mesh_cache.find(objectName) != ctx.scene.base_mesh_cache.end()) {
+        const MeshModifiers::ModifierStack evalStack =
+            buildSubdivisionPreviewEvaluationStack(
+                *modifierStack,
+                isInteractiveSubdivisionPreviewActiveForObject(objectName));
         size_t expectedTriangleCount = ctx.scene.base_mesh_cache[objectName].size();
-        for (const auto& mod : modifierStack->modifiers) {
+        for (const auto& mod : evalStack.modifiers) {
             if (!mod.enabled) {
                 continue;
             }
@@ -2242,6 +3988,8 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     }
     if (cacheIt == mesh_cache.end() || cacheIt->second.empty()) {
         editable_mesh_cache = EditableMeshCache{};
+        invalidateSculptControlGraph(objectName);
+        invalidateSculptPBVH(objectName);
         return false;
     }
 
@@ -2275,6 +4023,8 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     }
 
     editable_mesh_cache = EditableMeshCache{};
+    invalidateSculptControlGraph(objectName);
+    invalidateSculptPBVH(objectName);
     editable_mesh_cache.object_name = objectName;
     editable_mesh_cache.source_triangle_count = triangleCount;
     editable_mesh_cache.source_object_transform = currentObjectTransform;
@@ -2571,6 +4321,98 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     editable_mesh_cache.triangle_mark_generation = 1u;
 
     return !editable_mesh_cache.vertices.empty();
+}
+
+void SceneUI::invalidateSculptControlGraph(const std::string& objectName) {
+    if (objectName.empty() || sculpt_control_graph.object_name == objectName) {
+        sculpt_control_graph = SculptControlGraph{};
+    }
+}
+
+void SceneUI::invalidateSculptPBVH(const std::string& objectName) {
+    if (objectName.empty() || sculpt_pbvh.object_name == objectName) {
+        sculpt_pbvh = SculptPBVH{};
+    }
+}
+
+bool SceneUI::ensureSculptControlGraph(UIContext& ctx, const std::string& objectName) {
+    if (!ensureEditableMeshCache(ctx, objectName)) {
+        invalidateSculptControlGraph(objectName);
+        return false;
+    }
+
+    // Keep the legacy vertex graph active for every sculpt brush until the
+    // PBVH replacement is ready. The spatial leaf prototype produced visible
+    // blocking on curved surfaces without delivering a meaningful speedup.
+    constexpr bool shouldUseSpatialLeafNodes = false;
+    const bool needsRebuild =
+        sculpt_control_graph.object_name != editable_mesh_cache.object_name ||
+        sculpt_control_graph.source_triangle_count != editable_mesh_cache.source_triangle_count ||
+        !(sculpt_control_graph.source_object_transform == editable_mesh_cache.source_object_transform) ||
+        sculpt_control_graph.source_vertex_to_node_id.size() != editable_mesh_cache.vertices.size() ||
+        sculpt_control_graph.uses_spatial_leaf_nodes != shouldUseSpatialLeafNodes;
+    if (!needsRebuild) {
+        return !sculpt_control_graph.nodes.empty();
+    }
+
+    sculpt_control_graph = SculptControlGraph{};
+    sculpt_control_graph.object_name = editable_mesh_cache.object_name;
+    sculpt_control_graph.source_triangle_count = editable_mesh_cache.source_triangle_count;
+    sculpt_control_graph.source_object_transform = editable_mesh_cache.source_object_transform;
+
+    const float avgEdgeLength = computeEditableAverageEdgeLength(editable_mesh_cache);
+    sculpt_control_graph.avg_edge_length = avgEdgeLength;
+    sculpt_control_graph.spatial_cell_size = sanitizeFiniteFloat(
+        editable_mesh_cache.spatial_cell_size > 1e-6f ? editable_mesh_cache.spatial_cell_size : avgEdgeLength * 2.5f,
+        1e-4f,
+        1e-4f,
+        100000.0f);
+
+    buildVertexSculptControlGraph(sculpt_control_graph, editable_mesh_cache);
+
+    return !sculpt_control_graph.nodes.empty();
+}
+
+bool SceneUI::ensureSculptPBVH(UIContext& ctx, const std::string& objectName) {
+    if (!ensureEditableMeshCache(ctx, objectName)) {
+        invalidateSculptPBVH(objectName);
+        return false;
+    }
+
+    const bool needsRebuild =
+        sculpt_pbvh.object_name != editable_mesh_cache.object_name ||
+        sculpt_pbvh.source_triangle_count != editable_mesh_cache.source_triangle_count ||
+        !(sculpt_pbvh.source_object_transform == editable_mesh_cache.source_object_transform) ||
+        sculpt_pbvh.source_vertex_to_leaf_id.size() != editable_mesh_cache.vertices.size();
+    if (!needsRebuild) {
+        return !sculpt_pbvh.nodes.empty();
+    }
+
+    sculpt_pbvh = SculptPBVH{};
+    sculpt_pbvh.object_name = editable_mesh_cache.object_name;
+    sculpt_pbvh.source_triangle_count = editable_mesh_cache.source_triangle_count;
+    sculpt_pbvh.source_object_transform = editable_mesh_cache.source_object_transform;
+    sculpt_pbvh.avg_edge_length = computeEditableAverageEdgeLength(editable_mesh_cache);
+
+    const float safeAvgEdgeLength = sanitizeFiniteFloat(
+        sculpt_pbvh.avg_edge_length,
+        0.05f,
+        0.0001f,
+        100000.0f);
+    const size_t vertexCount = editable_mesh_cache.vertices.size();
+    if (vertexCount >= 200000) {
+        sculpt_pbvh.leaf_vertex_limit = 32;
+    } else if (vertexCount >= 50000) {
+        sculpt_pbvh.leaf_vertex_limit = 48;
+    } else {
+        sculpt_pbvh.leaf_vertex_limit = 64;
+    }
+    if (safeAvgEdgeLength > 1.0f) {
+        sculpt_pbvh.leaf_vertex_limit = (std::min)(sculpt_pbvh.leaf_vertex_limit + 16, 128);
+    }
+
+    buildSculptPBVH(sculpt_pbvh, editable_mesh_cache);
+    return !sculpt_pbvh.nodes.empty();
 }
 
 Vec3 SceneUI::getSelectedMeshElementWorldPosition(UIContext& ctx, bool* valid) {
@@ -2984,7 +4826,7 @@ bool SceneUI::applySelectedMeshElementTranslation(UIContext& ctx, const Vec3& wo
         g_cpu_bvh_refit_pending = true;
     }
 
-    if (ctx.backend_ptr && sculpt_mode_state.accumulate_live) {
+    if ((ctx.backend_ptr != nullptr || g_backend != nullptr || g_viewport_backend != nullptr) && sculpt_mode_state.accumulate_live) {
         queueMeshEditGpuSync(objectName);
     }
 
@@ -3144,7 +4986,7 @@ bool SceneUI::applySelectedMeshElementTransform(UIContext& ctx, const Matrix4x4&
         g_cpu_bvh_refit_pending = true;
     }
 
-    if (ctx.backend_ptr) {
+    if (ctx.backend_ptr != nullptr || g_backend != nullptr || g_viewport_backend != nullptr) {
         queueMeshEditGpuSync(objectName);
     }
 
@@ -4889,6 +6731,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         mesh_workspace_mode == MeshWorkspaceMode::Sculpt &&
         mesh_overlay_settings.edit_mode &&
         !sculpt_mode_state.active_target_name.empty();
+    const bool liveAccumulationEnabled = sculpt_mode_state.accumulate_live;
     const SculptBrushTool activeTool = io.KeyShift ? SculptBrushTool::Smooth : sculpt_mode_state.tool;
 
     auto finishStroke = [&]() {
@@ -4897,20 +6740,82 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         }
 
         if (sculpt_stroke_state.changed && !sculpt_stroke_state.object_name.empty()) {
+            const bool activeViewportInSolidMode =
+                ctx.backend_ptr &&
+                dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) != nullptr &&
+                ctx.backend_ptr->getViewportMode() != Backend::ViewportMode::Rendered;
+
+            if (activeViewportInSolidMode && !sculpt_stroke_state.touched_triangles.empty()) {
+                std::vector<std::shared_ptr<Triangle>> touchedTriangles;
+                touchedTriangles.reserve(sculpt_stroke_state.touched_triangles.size());
+                for (const auto& [trianglePtr, triangle] : sculpt_stroke_state.touched_triangles) {
+                    (void)trianglePtr;
+                    if (triangle) {
+                        touchedTriangles.push_back(triangle);
+                    }
+                }
+                if (!touchedTriangles.empty()) {
+                    const std::vector<size_t> affectedVertexIds =
+                        collectAffectedEditableVertexIds(editable_mesh_cache, touchedTriangles);
+                    recomputeEditableSmoothNormals(editable_mesh_cache, affectedVertexIds);
+
+                    const Matrix4x4 transform = getEditableObjectTransform(editable_mesh_cache);
+                    const Matrix4x4 inverseTransform = transform.inverse();
+                    const Matrix4x4 normalTransform = inverseTransform.transpose();
+                    for (const auto& tri : touchedTriangles) {
+                        for (int i = 0; i < 3; ++i) {
+                            tri->vertices[i].position = transform.transform_point(tri->vertices[i].original);
+                            tri->vertices[i].normal = normalTransform.transform_vector(tri->vertices[i].originalNormal).normalize();
+                        }
+                        tri->markAABBDirty();
+                        tri->update_bounding_box();
+                    }
+                }
+            }
+
             refreshMeshEditLayerEditedState(ctx);
 
             std::vector<MeshEditTriangleState> endStates;
-            captureMeshEditLayerState(ctx, sculpt_stroke_state.object_name, endStates);
-            if (!sculpt_stroke_state.before_states.empty() && !endStates.empty()) {
+            endStates.reserve(sculpt_stroke_state.before_triangle_states.size());
+            for (const auto& [trianglePtr, beforeState] : sculpt_stroke_state.before_triangle_states) {
+                (void)trianglePtr;
+                if (!beforeState.triangle) {
+                    continue;
+                }
+                MeshEditTriangleState endState;
+                endState.triangle = beforeState.triangle;
+                for (int corner = 0; corner < 3; ++corner) {
+                    endState.positions[corner] = beforeState.triangle->getOriginalVertexPosition(corner);
+                }
+                endStates.push_back(endState);
+            }
+            if (!sculpt_stroke_state.before_triangle_states.empty() && !endStates.empty()) {
+                std::vector<MeshEditTriangleState> beforeStates;
+                beforeStates.reserve(sculpt_stroke_state.before_triangle_states.size());
+                for (const auto& [trianglePtr, beforeState] : sculpt_stroke_state.before_triangle_states) {
+                    (void)trianglePtr;
+                    beforeStates.push_back(beforeState);
+                }
                 history.record(std::make_unique<MeshEditCommand>(
                     sculpt_stroke_state.object_name,
-                    sculpt_stroke_state.before_states,
+                    std::move(beforeStates),
                     endStates));
             }
 
-            if (ctx.backend_ptr) {
+            // Mark scene geometry dirty even when the solid-mode raster sync path
+            // handled the live viewport update. The Rendered/Vulkan RT transition
+            // checks these flags/generation to decide whether a full RT geometry
+            // sync is needed after leaving Solid mode.
+            extern bool g_geometry_dirty;
+            extern std::atomic<uint64_t> g_scene_geometry_generation;
+            g_geometry_dirty = true;
+            g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+
+            updateBBoxCache(sculpt_stroke_state.object_name);
+            if (ctx.backend_ptr != nullptr || g_backend != nullptr || g_viewport_backend != nullptr) {
                 queueMeshEditGpuSync(sculpt_stroke_state.object_name);
-            } else {
+            }
+            if (!ctx.backend_ptr) {
                 extern bool g_cpu_bvh_refit_pending;
                 g_cpu_bvh_refit_pending = true;
             }
@@ -4936,6 +6841,14 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         finishStroke();
         return;
     }
+    if (!ensureSculptControlGraph(ctx, objectName)) {
+        finishStroke();
+        return;
+    }
+    if (!ensureSculptPBVH(ctx, objectName)) {
+        finishStroke();
+        return;
+    }
     if (!mesh_edit_layer.active || mesh_edit_layer.object_name != objectName) {
         ensureMeshEditLayer(ctx, objectName);
     }
@@ -4945,10 +6858,11 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
     }
 
     auto meshEntryIt = mesh_cache.find(objectName);
+    const bool objectHadPendingCpuSync = objects_needing_cpu_sync.count(objectName) > 0;
     if (!sculpt_stroke_state.active &&
         meshEntryIt != mesh_cache.end() &&
         !meshEntryIt->second.empty() &&
-        (!picking_vertices_synced || objects_needing_cpu_sync.count(objectName) > 0)) {
+        (!picking_vertices_synced || objectHadPendingCpuSync)) {
         for (auto& entry : meshEntryIt->second) {
             if (entry.second) {
                 entry.second->updateTransformedVertices();
@@ -4965,35 +6879,31 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
 
     HitRecord hit;
     bool rawDidHit = false;
-    if (meshEntryIt != mesh_cache.end() && !meshEntryIt->second.empty()) {
-        // Sculpt targets a single editable object, so prefer a direct triangle scan
-        // over the object's current CPU triangles. This avoids stale global BVH hits
-        // immediately after scale/rotate transforms where triangle positions have
-        // already been synced but the acceleration structure is still catching up.
+
+    // Use the scene BVH as the hot path for sculpt picking. The previous behavior
+    // linearly scanned every triangle of the selected object each mouse update,
+    // which becomes catastrophic on dense meshes (e.g. 500k+ tris). Keep the
+    // direct-object scan only as a narrow fallback when the selected object was
+    // just CPU-synced and the scene BVH may still be one frame behind.
+    rawDidHit = raycastViewportHit(ctx, io.MousePos, hit) &&
+        hit.triangle &&
+        hit.triangle->getNodeName() == objectName;
+
+    if (!rawDidHit &&
+        objectHadPendingCpuSync &&
+        meshEntryIt != mesh_cache.end() &&
+        !meshEntryIt->second.empty()) {
         rawDidHit = raycastEditableObjectTriangles(meshEntryIt->second, ray, hit);
-    }
-    if (!rawDidHit) {
-        rawDidHit = raycastViewportHit(ctx, io.MousePos, hit) &&
-            hit.triangle &&
-            hit.triangle->getNodeName() == objectName;
     }
     bool didHit = rawDidHit;
 
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && didHit) {
-        sculpt_stroke_state = SculptStrokeState{};
-        sculpt_stroke_state.active = true;
-        sculpt_stroke_state.object_name = objectName;
-        sculpt_stroke_state.start_world_hit = hit.point;
-        sculpt_stroke_state.last_world_hit = hit.point;
-        sculpt_stroke_state.stroke_normal = hit.normal.length_squared() > 1e-8f ? hit.normal.normalize() : Vec3(0, 1, 0);
-        captureMeshEditLayerState(ctx, objectName, sculpt_stroke_state.before_states);
-        sculpt_stroke_state.start_local_positions.reserve(editable_mesh_cache.vertices.size());
-        for (const auto& vertex : editable_mesh_cache.vertices) {
-            sculpt_stroke_state.start_local_positions.push_back(vertex.local_position);
-        }
-        sculpt_stroke_state.layer_accum.assign(editable_mesh_cache.vertices.size(), 0.0f);
-        sculpt_stroke_state.clay_layer_accum.assign(editable_mesh_cache.vertices.size(), 0.0f);
-        sculpt_stroke_state.clay_strips_layer_accum.assign(editable_mesh_cache.vertices.size(), 0.0f);
+        beginSculptStroke(
+            sculpt_stroke_state,
+            activeTool,
+            objectName,
+            hit,
+            editable_mesh_cache.vertices.size());
     }
 
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -5034,7 +6944,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
     // The old pixel→world conversions created a mismatch: the on-screen circle showed
     // one radius while the actual vertex selection used a completely different radius.
     const float radiusWorld = sanitizeFiniteFloat(sculpt_mode_state.brush.radius, 0.3f, 0.0001f, 1000.0f);
-    const float brushStrength = sanitizeFiniteFloat(sculpt_mode_state.brush.strength, 1.0f, 0.0f, 100.0f);
+    const float brushStrength = sanitizeFiniteFloat(sculpt_mode_state.brush.strength, 1.0f, 0.0f, 1.0f);
     const float dt = sanitizeFiniteFloat(io.DeltaTime, 1.0f / 60.0f, 1.0f / 240.0f, 0.25f);
     const float normalStrength = sanitizeFiniteFloat(sculpt_mode_state.normal_strength, 0.35f, 0.0f, 8.0f);
     const float falloff = saturateFloat(sculpt_mode_state.brush.falloff);
@@ -5063,6 +6973,10 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
     // For Grab: use raw 3D delta so the mesh follows the mouse in all directions.
     // Stripping the normal component prevented movement when viewing at grazing angles.
     const Vec3 worldDragDelta = sanitizeVec3(planeHit - sanitizeVec3(sculpt_stroke_state.start_world_hit, planeHit), Vec3(0.0f, 0.0f, 0.0f));
+    const Vec3 localGrabDelta = sanitizeVec3(
+        inverseTransform.transform_point(planeHit) -
+        inverseTransform.transform_point(sanitizeVec3(sculpt_stroke_state.start_world_hit, planeHit)),
+        Vec3(0.0f, 0.0f, 0.0f));
     const Vec3 lastStrokeHit = sanitizeVec3(sculpt_stroke_state.last_world_hit, hitPoint);
     const Vec3 strokeStepWorld = sanitizeVec3(hitPoint - lastStrokeHit, Vec3(0.0f, 0.0f, 0.0f));
     const Vec3 projectedStrokeStep = sanitizeVec3(
@@ -5087,8 +7001,11 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         strokeDistance < strokeSpacing * 0.35f) {
         return;
     }
+    // Clay sample point: bias toward current hit (0.75) so the height reference
+    // tracks the brush front, not the midpoint. This prevents the "stamp behind"
+    // effect where the settle plane lags the brush and creates discrete mounds.
     const Vec3 claySamplePoint = (clayLikeTool && sculpt_stroke_state.changed)
-        ? sanitizeVec3(lastStrokeHit + (hitPoint - lastStrokeHit) * 0.5f, hitPoint)
+        ? sanitizeVec3(lastStrokeHit + (hitPoint - lastStrokeHit) * 0.75f, hitPoint)
         : hitPoint;
     const float localRadius = estimateEditableLocalBrushRadius(inverseTransform, radiusWorld);
     const Vec3 localHitPoint = sanitizeVec3(inverseTransform.transform_point(hitPoint), Vec3(0.0f, 0.0f, 0.0f));
@@ -5096,10 +7013,29 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
     const Vec3 localGrabStartPoint = sanitizeVec3(
         inverseTransform.transform_point(sanitizeVec3(sculpt_stroke_state.start_world_hit, hitPoint)),
         localHitPoint);
-    const std::vector<int> sculptCandidateVertexIds = collectEditableVertexCandidates(
+    // Candidate gathering now prefers PBVH traversal for broad-phase culling,
+    // but the actual brush solve remains vertex-based for consistent quality.
+    std::vector<int> sculptCandidateVertexIdsStorage;
+    const Vec3 candidateCenterLocal =
+        (activeTool == SculptBrushTool::Grab) ? localGrabStartPoint : localClaySamplePoint;
+    sculptCandidateVertexIdsStorage = collectSculptCandidateVerticesWithPBVHFallback(
+        sculpt_pbvh,
         editable_mesh_cache,
-        activeTool == SculptBrushTool::Grab ? localGrabStartPoint : localClaySamplePoint,
+        candidateCenterLocal,
         localRadius);
+    if (activeTool == SculptBrushTool::Draw || activeTool == SculptBrushTool::Inflate) {
+        const float largeBrushFactor = computeLargeBrushProjectionBlend(radiusWorld);
+        if (largeBrushFactor > 0.08f) {
+            const int expandRings = largeBrushFactor > 0.55f ? 2 : 1;
+            sculptCandidateVertexIdsStorage = expandEditableCandidateVerticesByTopology(
+                editable_mesh_cache,
+                sculptCandidateVertexIdsStorage,
+                expandRings);
+        }
+    }
+    const std::vector<int>& sculptCandidateVertexIds = sculptCandidateVertexIdsStorage;
+    sculpt_control_graph.last_candidate_node_count = sculpt_pbvh.last_candidate_node_count;
+    sculpt_control_graph.last_candidate_vertex_count = sculptCandidateVertexIds.size();
     std::vector<int> strokeTouchedVertexIds = sculptCandidateVertexIds;
     strokeTouchedVertexIds.reserve(sculptCandidateVertexIds.size() * 4 + 32);
 
@@ -5108,44 +7044,34 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
     beginEditableTriangleTouchPass(editable_mesh_cache);
 
     bool changed = false;
-    // Use persistent buffer to avoid per-frame allocation for large meshes
-    sculpt_updated_local_positions.resize(editable_mesh_cache.vertices.size());
+    std::vector<Vec3> sculpt_solve_snapshot_local_positions;
+    sculpt_solve_snapshot_local_positions.reserve(editable_mesh_cache.vertices.size());
+    for (const auto& vertex : editable_mesh_cache.vertices) {
+        sculpt_solve_snapshot_local_positions.push_back(vertex.local_position);
+    }
+
+    // Keep a full local-position buffer so post passes can safely read neighbors
+    // outside the directly touched set without seeing stale or zeroed data.
+    sculpt_updated_local_positions = sculpt_solve_snapshot_local_positions;
     for (const int vid : sculptCandidateVertexIds) {
         if (vid >= 0 && static_cast<size_t>(vid) < editable_mesh_cache.vertices.size()) {
-            sculpt_updated_local_positions[vid] = editable_mesh_cache.vertices[vid].local_position;
+            sculpt_updated_local_positions[static_cast<size_t>(vid)] =
+                sculpt_solve_snapshot_local_positions[static_cast<size_t>(vid)];
         }
     }
 
     if (activeTool == SculptBrushTool::Grab &&
-        sculpt_stroke_state.grab_weights.size() != editable_mesh_cache.vertices.size()) {
-        sculpt_stroke_state.grab_weights.assign(editable_mesh_cache.vertices.size(), 0.0f);
-        const Vec3 brushCenter = sanitizeVec3(sculpt_stroke_state.start_world_hit, hitPoint);
-        forEachEditableCandidate(sculptCandidateVertexIds, [&](int vertexIdInt) {
-            if (vertexIdInt < 0) {
-                return;
-            }
-            const size_t vertexId = static_cast<size_t>(vertexIdInt);
-            const Vec3 startWorldPos = sanitizeVec3(
-                transform.transform_point(sculpt_stroke_state.start_local_positions[vertexId]),
-                brushCenter);
-            const Vec3 toVertex = startWorldPos - brushCenter;
-            const float heightFromPlane = toVertex.dot(hitNormalWorld);
-            const Vec3 planarOffset = toVertex - hitNormalWorld * heightFromPlane;
-            const float planarDistance = planarOffset.length();
-            if (!std::isfinite(heightFromPlane) || !std::isfinite(planarDistance) || planarDistance > radiusWorld) {
-                return;
-            }
-            if (sculpt_mode_state.front_faces_only && heightFromPlane < -(radiusWorld * 0.12f)) {
-                return;
-            }
-            // Single smooth falloff for grab so the whole brush area moves together.
-            // Double-multiplying two falloff functions squared the weights, creating
-            // a sharp central spike where only center vertices received meaningful weight.
-            const float weight = applyFalloffCurve(
-                1.0f - saturateFloat(planarDistance / radiusWorld),
-                mesh_overlay_settings.proportional_falloff_type);
-            sculpt_stroke_state.grab_weights[vertexId] = weight;
-        });
+        sculpt_stroke_state.grab_weights_by_vertex.empty()) {
+        primeGrabStrokeWeights(
+            sculpt_stroke_state,
+            editable_mesh_cache,
+            transform,
+            sculptCandidateVertexIds,
+            sanitizeVec3(sculpt_stroke_state.start_world_hit, hitPoint),
+            hitNormalWorld,
+            radiusWorld,
+            sculpt_mode_state.front_faces_only,
+            mesh_overlay_settings.proportional_falloff_type);
     }
 
     const Vec3 planePoint = hitPoint;
@@ -5157,222 +7083,72 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         const size_t vertexId = static_cast<size_t>(vertexIdInt);
         EditableVertex& vertex = editable_mesh_cache.vertices[vertexId];
         if (activeTool == SculptBrushTool::Grab) {
-            const float weight = vertexId < sculpt_stroke_state.grab_weights.size()
-                ? sculpt_stroke_state.grab_weights[vertexId]
-                : 0.0f;
-            if (weight <= 1e-5f || vertexId >= sculpt_stroke_state.start_local_positions.size()) {
-                return;
-            }
-            // Remap strength: 1.0 = mesh tracks mouse 1:1; use 0.5 scaling so the
-            // user-facing [0,10] range doesn't cause runaway deltas at high values.
-            const float grabStrength = std::clamp(brushStrength * 0.5f, 0.0f, 5.0f);
-            Vec3 worldDelta = worldDragDelta * weight * grabStrength;
-            // Clamp world delta to radiusWorld to prevent vertices flying off on
-            // large drags or when the camera is far from the surface.
-            const float maxWorldDelta = radiusWorld * 3.0f;
-            const float worldDeltaLen = worldDelta.length();
-            if (!std::isfinite(worldDeltaLen)) {
-                return;
-            }
-            if (worldDeltaLen > maxWorldDelta) {
-                worldDelta = worldDelta * (maxWorldDelta / worldDeltaLen);
-            }
-            const Vec3 localDelta = sanitizeVec3(inverseTransform.transform_vector(worldDelta), Vec3(0.0f, 0.0f, 0.0f));
-            const float localDeltaLenSq = localDelta.length_squared();
-            if (!std::isfinite(localDeltaLenSq) || localDeltaLenSq <= 1e-14f) {
-                return;
-            }
-            sculpt_updated_local_positions[vertexId] = sanitizeVec3(
-                sculpt_stroke_state.start_local_positions[vertexId] + localDelta,
-                sculpt_stroke_state.start_local_positions[vertexId]);
-            basePassChanged.store(true, std::memory_order_relaxed);
-            return;
-        }
-
-        const Vec3 worldPos = sanitizeVec3(transform.transform_point(vertex.local_position), Vec3(0.0f, 0.0f, 0.0f));
-        const Vec3 toVertex = worldPos - planePoint;
-        const float heightFromPlane = toVertex.dot(hitNormalWorld);
-        const Vec3 planarOffset = toVertex - hitNormalWorld * heightFromPlane;
-        const float planarDistance = planarOffset.length();
-        if (!std::isfinite(heightFromPlane) || !std::isfinite(planarDistance) || planarDistance > radiusWorld) {
-            return;
-        }
-
-        if (sculpt_mode_state.front_faces_only && heightFromPlane < -(radiusWorld * 0.12f)) {
-            return;
-        }
-
-        float weight = computeTerrainLikeBrushWeight(
-            planarDistance / radiusWorld,
-            falloff);
-        weight *= applyFalloffCurve(
-            1.0f - saturateFloat(planarDistance / radiusWorld),
-            mesh_overlay_settings.proportional_falloff_type);
-
-        // Alpha mask modulates weight (same coordinate convention as mesh paint)
-        const float nx_alpha = planarOffset.dot(tangentWorld) / radiusWorld;
-        const float ny_alpha = planarOffset.dot(bitangentWorld) / radiusWorld;
-        weight *= uiSampleBrushMask(sculpt_mode_state.brush, nx_alpha, ny_alpha);
-        if (!std::isfinite(weight)) {
-            return;
-        }
-
-        if (weight <= 1e-5f) {
-            return;
-        }
-
-        Vec3 worldDelta(0.0f, 0.0f, 0.0f);
-        switch (activeTool) {
-        case SculptBrushTool::Inflate:
-            worldDelta = hitNormalWorld * (radiusWorld * 0.22f * brushStrength * dt * weight * (1.0f + normalStrength) * directionSign);
-            break;
-        case SculptBrushTool::Draw: {
-            // Push each vertex along its own world-space normal (per-vertex direction).
-            // Unlike Inflate which uses the stroke hit normal, Draw respects surface curvature.
-            Vec3 vertexNormal = hitNormalWorld;
-            if (!vertex.refs.empty() && vertex.refs[0].triangle) {
-                const auto& ref = vertex.refs[0];
-                const Vec3 n = ref.triangle->vertices[ref.corner].normal;
-                if (n.length_squared() > 1e-8f) {
-                    vertexNormal = safeNormalizeVec3(n, hitNormalWorld);
-                }
-            }
-            worldDelta = vertexNormal * (radiusWorld * 0.22f * brushStrength * dt * weight * (1.0f + normalStrength) * directionSign);
-            break;
-        }
-        case SculptBrushTool::Layer: {
-            if (vertexId >= sculpt_stroke_state.layer_accum.size()) {
-                return;
-            }
-            float& layerAccum = sculpt_stroke_state.layer_accum[vertexId];
-            const float previousAccum = layerAccum;
-            const float targetLayer = radiusWorld * 0.22f * clayRadiusCompensation * weight * (0.9f + 0.35f * normalStrength);
-            const float deposit = radiusWorld * 0.09f * clayRadiusCompensation * clayBrushStrength * dt * weight * directionSign;
-            if (directionSign > 0.0f) {
-                layerAccum = std::min(layerAccum + std::max(0.0f, deposit), targetLayer);
-            } else {
-                layerAccum = std::max(layerAccum + std::min(0.0f, deposit), -targetLayer);
-            }
-            worldDelta = hitNormalWorld * (layerAccum - previousAccum);
-            break;
-        }
-        case SculptBrushTool::Clay: {
-            Vec3 vertexNormal = hitNormalWorld;
-            if (!vertex.refs.empty() && vertex.refs[0].triangle) {
-                const auto& ref = vertex.refs[0];
-                const Vec3 n = ref.triangle->vertices[ref.corner].normal;
-                if (n.length_squared() > 1e-8f) {
-                    vertexNormal = safeNormalizeVec3(n, hitNormalWorld);
-                }
-            }
-            if (vertexId >= sculpt_stroke_state.clay_layer_accum.size()) {
-                return;
-            }
-            const float deposit =
-                radiusWorld * 0.075f * clayRadiusCompensation * clayBrushStrength * dt * weight * strokeAdvanceFactor *
-                (0.8f + 0.5f * normalStrength) * directionSign;
-            float& clayAccum = sculpt_stroke_state.clay_layer_accum[vertexId];
-            clayAccum = std::clamp(clayAccum + deposit, -radiusWorld * 0.45f, radiusWorld * 0.45f);
-            const float signedDistance = (worldPos - claySamplePoint).dot(hitNormalWorld);
-            const float targetHeight =
-                directionSign * radiusWorld * 0.16f * clayRadiusCompensation * weight * (0.8f + 0.5f * normalStrength);
-            const float heightError = targetHeight - signedDistance;
-            const float settle =
-                std::clamp(heightError * (0.28f + 0.32f * weight), -radiusWorld * 0.05f, radiusWorld * 0.05f);
-            const float layerDelta = settle * 0.7f + deposit * 0.55f + clayAccum * 0.16f;
-            const float buildup = deposit * 0.18f + (std::max)(0.0f, heightError) * 0.16f;
-            worldDelta = hitNormalWorld * layerDelta + vertexNormal * buildup;
-            break;
-        }
-        case SculptBrushTool::ClayStrips: {
-            if (vertexId >= sculpt_stroke_state.clay_strips_layer_accum.size()) {
-                return;
-            }
-            const Vec3 clayPlanarOffset = worldPos - claySamplePoint -
-                hitNormalWorld * (worldPos - claySamplePoint).dot(hitNormalWorld);
-            const float stripCoord = clayPlanarOffset.dot(strokeBitangentWorld) / radiusWorld;
-            const float tineWave = 0.5f + 0.5f * std::cos(stripCoord * 22.0f);
-            const float tineProfile = std::pow((std::max)(0.0f, tineWave), 1.6f);
-            const float rakePattern = 0.45f + 0.55f * tineProfile;
-            const float deposit =
-                radiusWorld * 0.11f * clayRadiusCompensation * clayBrushStrength * dt * weight * strokeAdvanceFactor * rakePattern *
-                (0.95f + 0.45f * normalStrength) * directionSign;
-            float& clayStripsAccum = sculpt_stroke_state.clay_strips_layer_accum[vertexId];
-            clayStripsAccum = std::clamp(clayStripsAccum + deposit, -radiusWorld * 0.6f, radiusWorld * 0.6f);
-            const float signedDistance = (worldPos - claySamplePoint).dot(hitNormalWorld);
-            const float stripTargetHeight =
-                directionSign * radiusWorld * 0.14f * clayRadiusCompensation * weight * rakePattern * (0.9f + 0.35f * normalStrength);
-            const float stripHeightError = stripTargetHeight - signedDistance;
-            const float settle =
-                std::clamp(stripHeightError * (0.24f + 0.28f * weight), -radiusWorld * 0.05f, radiusWorld * 0.05f);
-            const float layerDelta = settle * 0.62f + deposit * 0.62f + clayStripsAccum * 0.18f;
-            const float tineDrag =
-                radiusWorld * 0.05f * clayBrushStrength * dt * weight * strokeAdvanceFactor *
-                (0.35f + 0.65f * tineProfile);
-            worldDelta = hitNormalWorld * layerDelta + strokeTangentWorld * tineDrag;
-            break;
-        }
-        case SculptBrushTool::Pinch: {
-            // Pull vertices laterally toward the brush center (tightening effect).
-            const Vec3 toCenter = planePoint - worldPos;
-            const Vec3 lateral = toCenter - hitNormalWorld * toCenter.dot(hitNormalWorld);
-            const float lateralLen = lateral.length();
-            if (lateralLen > 1e-8f) {
-                worldDelta = (lateral / lateralLen) * (radiusWorld * 0.3f * brushStrength * dt * weight);
-            }
-            break;
-        }
-        case SculptBrushTool::Flatten: {
-            const float signedDistance = (worldPos - planePoint).dot(hitNormalWorld);
-            worldDelta = hitNormalWorld * (-signedDistance * brushStrength * dt * 12.0f * weight);
-            break;
-        }
-        case SculptBrushTool::Scrape: {
-            const float signedDistance = (worldPos - planePoint).dot(hitNormalWorld);
-            if (signedDistance > 0.0f) {
-                worldDelta = hitNormalWorld * (-signedDistance * brushStrength * dt * 14.0f * weight);
-            }
-            break;
-        }
-        case SculptBrushTool::Crease: {
-            const Vec3 toCenter = planePoint - worldPos;
-            const Vec3 lateral = toCenter - hitNormalWorld * toCenter.dot(hitNormalWorld);
-            const float lateralLen = lateral.length();
-            const Vec3 pinchDelta = lateralLen > 1e-8f
-                ? (lateral / lateralLen) * (radiusWorld * 0.38f * brushStrength * dt * weight)
-                : Vec3(0.0f, 0.0f, 0.0f);
-            const Vec3 cutDelta = hitNormalWorld * (-radiusWorld * 0.12f * brushStrength * dt * weight * (1.0f + normalStrength));
-            worldDelta = pinchDelta + cutDelta;
-            break;
-        }
-        case SculptBrushTool::Smooth: {
-            const Vec3 smoothDeltaLocal = computeBoundarySafeSmoothDelta(
-                editable_mesh_cache,
-                vertexId,
-                brushStrength,
-                dt,
-                weight,
-                localRadius);
-            const float smoothLenSq = smoothDeltaLocal.length_squared();
-            if (std::isfinite(smoothLenSq) && smoothLenSq > 1e-14f) {
-                sculpt_updated_local_positions[vertexId] = sanitizeVec3(vertex.local_position + smoothDeltaLocal, vertex.local_position);
+            if (applyGrabSculptCandidate(
+                    sculpt_stroke_state,
+                    brushStrength,
+                    localGrabDelta,
+                    vertexIdInt,
+                    sculpt_updated_local_positions[vertexId])) {
                 basePassChanged.store(true, std::memory_order_relaxed);
             }
             return;
         }
-        case SculptBrushTool::Grab:
+
+        const Vec3 snapshotLocalPosition = sculpt_solve_snapshot_local_positions[vertexId];
+        const Vec3 snapshotWorldPosition = sanitizeVec3(
+            transform.transform_point(snapshotLocalPosition),
+            Vec3(0.0f, 0.0f, 0.0f));
+
+        SculptBrushSample sample;
+        if (!computeSculptBrushSampleAtWorldPoint(
+                snapshotLocalPosition,
+                snapshotWorldPosition,
+                planePoint,
+                hitNormalWorld,
+                tangentWorld,
+                bitangentWorld,
+                sculpt_mode_state.brush,
+                mesh_overlay_settings.proportional_falloff_type,
+                activeTool,
+                falloff,
+                brushStrength,
+                radiusWorld,
+                strokeDistance,
+                strokeSpacing,
+                dt,
+                sculpt_stroke_state.changed,
+                sculpt_mode_state.front_faces_only,
+                sample)) {
             return;
         }
 
-        worldDelta = sanitizeVec3(worldDelta, Vec3(0.0f, 0.0f, 0.0f));
-
-        const Vec3 localDelta = sanitizeVec3(inverseTransform.transform_vector(worldDelta), Vec3(0.0f, 0.0f, 0.0f));
-        const float localDeltaLenSq = localDelta.length_squared();
-        if (!std::isfinite(localDeltaLenSq) || localDeltaLenSq <= 1e-14f) {
-            return;
+        if (applyNonGrabSculptCandidate(
+                activeTool,
+                editable_mesh_cache,
+                sculpt_control_graph,
+                sculpt_stroke_state,
+                sculpt_solve_snapshot_local_positions,
+                transform,
+                inverseTransform,
+                planePoint,
+                claySamplePoint,
+                hitNormalWorld,
+                strokeTangentWorld,
+                strokeBitangentWorld,
+                brushStrength,
+                clayBrushStrength,
+                clayRadiusCompensation,
+                normalStrength,
+                directionSign,
+                radiusWorld,
+                dt,
+                localRadius,
+                strokeAdvanceFactor,
+                vertexIdInt,
+                sample,
+                sculpt_updated_local_positions[vertexId])) {
+            basePassChanged.store(true, std::memory_order_relaxed);
         }
-        sculpt_updated_local_positions[vertexId] = sanitizeVec3(vertex.local_position + localDelta, vertex.local_position);
-        basePassChanged.store(true, std::memory_order_relaxed);
     });
     changed = changed || basePassChanged.load(std::memory_order_relaxed);
 
@@ -5509,7 +7285,8 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                 if (do_my) localStartHit.y = -localStartHit.y;
                 if (do_mz) localStartHit.z = -localStartHit.z;
                 const Vec3 mirWorldStartHit = sanitizeVec3(transform.transform_point(localStartHit), hitPoint);
-                const std::vector<int> mirrorGrabCandidateVertexIds = collectEditableVertexCandidates(
+                const std::vector<int> mirrorGrabCandidateVertexIds = collectSculptCandidateVerticesWithPBVHFallback(
+                    sculpt_pbvh,
                     editable_mesh_cache,
                     localStartHit,
                     localRadius);
@@ -5530,11 +7307,13 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                         return;
                     }
                     const size_t vertexId = static_cast<size_t>(vertexIdInt);
-                    if (vertexId >= sculpt_stroke_state.start_local_positions.size()) {
+                    auto startIt = sculpt_stroke_state.grab_start_local_positions.find(vertexIdInt);
+                    if (startIt == sculpt_stroke_state.grab_start_local_positions.end()) {
                         return;
                     }
+                    const Vec3& startLocalPos = startIt->second;
                     const Vec3 startWorldPos = sanitizeVec3(
-                        transform.transform_point(sculpt_stroke_state.start_local_positions[vertexId]),
+                        transform.transform_point(startLocalPos),
                         mirWorldStartHit);
                     const Vec3 toVertex = startWorldPos - mirWorldStartHit;
                     const float h = toVertex.dot(mirWorldNormal);
@@ -5566,8 +7345,8 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                         return;
                     }
                     sculpt_updated_local_positions[vertexId] = sanitizeVec3(
-                        sculpt_stroke_state.start_local_positions[vertexId] + ld,
-                        sculpt_stroke_state.start_local_positions[vertexId]);
+                        startLocalPos + ld,
+                        startLocalPos);
                     mirrorGrabChanged.store(true, std::memory_order_relaxed);
                 });
                 changed = changed || mirrorGrabChanged.load(std::memory_order_relaxed);
@@ -5581,17 +7360,19 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                     if (do_mx) localPrevHit.x = -localPrevHit.x;
                     if (do_my) localPrevHit.y = -localPrevHit.y;
                     if (do_mz) localPrevHit.z = -localPrevHit.z;
-                    return sanitizeVec3(localPrevHit + (mirLocalCenter - localPrevHit) * 0.5f, mirLocalCenter);
+                    return sanitizeVec3(localPrevHit + (mirLocalCenter - localPrevHit) * 0.75f, mirLocalCenter);
                 }()
                 : mirLocalCenter;
-            const std::vector<int> mirrorCandidateVertexIds = collectEditableVertexCandidates(
+            const std::vector<int> mirrorCandidateVertexIds = collectSculptCandidateVerticesWithPBVHFallback(
+                sculpt_pbvh,
                 editable_mesh_cache,
                 mirrorClaySampleCenter,
                 localRadius);
             // Initialize persistent buffer for mirror candidates
             for (const int vid : mirrorCandidateVertexIds) {
                 if (vid >= 0 && static_cast<size_t>(vid) < editable_mesh_cache.vertices.size()) {
-                    sculpt_updated_local_positions[vid] = editable_mesh_cache.vertices[vid].local_position;
+                    sculpt_updated_local_positions[static_cast<size_t>(vid)] =
+                        sculpt_solve_snapshot_local_positions[static_cast<size_t>(vid)];
                 }
             }
             strokeTouchedVertexIds.insert(
@@ -5605,21 +7386,49 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                 }
                 const size_t vertexId = static_cast<size_t>(vertexIdInt);
                 EditableVertex& vertex = editable_mesh_cache.vertices[vertexId];
-                const Vec3 worldPos = sanitizeVec3(transform.transform_point(vertex.local_position), mirWorldCenter);
+                const Vec3 snapshotLocalPosition = resolveEditableSnapshotLocalPosition(
+                    editable_mesh_cache,
+                    sculpt_solve_snapshot_local_positions,
+                    vertexId);
+                const Vec3 worldPos = sanitizeVec3(
+                    transform.transform_point(snapshotLocalPosition),
+                    mirWorldCenter);
                 const Vec3 toVertex = worldPos - mirWorldCenter;
                 const float h = toVertex.dot(mirWorldNormal);
                 const Vec3 planarOffset = toVertex - mirWorldNormal * h;
-                const float planarDist = planarOffset.length();
+                const float planarDist = computeHybridBrushDistance(
+                    toVertex,
+                    mirWorldNormal,
+                    planarOffset.length(),
+                    radiusWorld);
                 if (!std::isfinite(h) || !std::isfinite(planarDist) || planarDist > radiusWorld) {
                     return;
                 }
-                if (sculpt_mode_state.front_faces_only && h < -(radiusWorld * 0.12f)) {
+                const float frontFacePenalty = computeFrontFaceBrushPenalty(
+                    h,
+                    radiusWorld,
+                    sculpt_mode_state.front_faces_only);
+                if (frontFacePenalty <= 1e-5f) {
                     return;
                 }
                 float w = computeTerrainLikeBrushWeight(planarDist / radiusWorld, falloff);
                 w *= applyFalloffCurve(1.0f - saturateFloat(planarDist / radiusWorld), mesh_overlay_settings.proportional_falloff_type);
+                w *= frontFacePenalty;
+                w *= computeRepeatedStrokeDamping(
+                    strokeDistance,
+                    radiusWorld,
+                    dt,
+                    sculpt_stroke_state.changed);
                 if (!std::isfinite(w) || w <= 1e-5f) {
                     return;
+                }
+
+                // Directional drag factor for mirror pass Clay/ClayStrips
+                float mirDragFactor = 1.0f;
+                if ((activeTool == SculptBrushTool::Clay || activeTool == SculptBrushTool::ClayStrips)
+                    && strokeDistance > strokeSpacing * 0.15f) {
+                    const float tangentNorm = planarOffset.dot(strokeTangentWorld) / radiusWorld;
+                    mirDragFactor = std::clamp(0.5f + tangentNorm * 1.1f, 0.0f, 1.6f);
                 }
 
                 Vec3 wd(0.0f, 0.0f, 0.0f);
@@ -5633,7 +7442,13 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                         const Vec3 n = vertex.refs[0].triangle->vertices[vertex.refs[0].corner].normal;
                         if (n.length_squared() > 1e-8f) vn = safeNormalizeVec3(n, mirWorldNormal);
                     }
-                    wd = vn * (radiusWorld * 0.22f * brushStrength * dt * w * (1.0f + normalStrength) * directionSign);
+                    const float centerBias = std::clamp(w, 0.0f, 1.0f);
+                    const float drawStrokeNormalMix =
+                        std::clamp(0.68f + 0.22f * computeLargeBrushSurfaceFactor(radiusWorld) + 0.08f * centerBias, 0.0f, 0.94f);
+                    const Vec3 drawDirection = safeNormalizeVec3(
+                        vn * (1.0f - drawStrokeNormalMix) + mirWorldNormal * drawStrokeNormalMix,
+                        mirWorldNormal);
+                    wd = drawDirection * (radiusWorld * 0.22f * brushStrength * dt * w * (1.0f + normalStrength) * directionSign);
                     break;
                 }
                 case SculptBrushTool::Layer: {
@@ -5665,25 +7480,34 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                         if (do_my) localPrevHit.y = -localPrevHit.y;
                         if (do_mz) localPrevHit.z = -localPrevHit.z;
                         const Vec3 mirPrevCenter = sanitizeVec3(transform.transform_point(localPrevHit), mirWorldCenter);
-                        mirClaySampleCenter = sanitizeVec3(mirPrevCenter + (mirWorldCenter - mirPrevCenter) * 0.5f, mirWorldCenter);
+                        mirClaySampleCenter = sanitizeVec3(mirPrevCenter + (mirWorldCenter - mirPrevCenter) * 0.75f, mirWorldCenter);
                     }
+                    const float mirClayHeightRef = radiusWorld * clayRadiusCompensation;
                     const float sd = (worldPos - mirClaySampleCenter).dot(mirWorldNormal);
                     const float targetHeight =
-                        directionSign * radiusWorld * 0.16f * clayRadiusCompensation * w * (0.8f + 0.5f * normalStrength);
+                        directionSign * mirClayHeightRef * 0.16f * (0.8f + 0.5f * normalStrength) * mirDragFactor;
                     if (vertexId >= sculpt_stroke_state.clay_layer_accum.size()) {
                         return;
                     }
-                    const float deposit =
-                        radiusWorld * 0.075f * clayRadiusCompensation * clayBrushStrength * dt * w * strokeAdvanceFactor *
-                        (0.8f + 0.5f * normalStrength) * directionSign;
-                    float& clayAccum = sculpt_stroke_state.clay_layer_accum[vertexId];
-                    clayAccum = std::clamp(clayAccum + deposit, -radiusWorld * 0.45f, radiusWorld * 0.45f);
                     const float heightError = targetHeight - sd;
+                    const float absTarget = (std::abs)(targetHeight);
+                    const float fillNeed = (absTarget > 1e-5f)
+                        ? std::clamp(((directionSign > 0.0f) ? heightError : -heightError) / absTarget, 0.0f, 1.0f)
+                        : 0.0f;
+                    const float deposit =
+                        mirClayHeightRef * 0.075f * clayBrushStrength * dt * w * strokeAdvanceFactor *
+                        (0.8f + 0.5f * normalStrength) * directionSign * fillNeed * mirDragFactor;
+                    float& clayAccum = sculpt_stroke_state.clay_layer_accum[vertexId];
+                    clayAccum = std::clamp(clayAccum + deposit, -mirClayHeightRef * 0.45f, mirClayHeightRef * 0.45f);
                     const float settle =
-                        std::clamp(heightError * (0.28f + 0.32f * w), -radiusWorld * 0.05f, radiusWorld * 0.05f);
-                    const float layerDelta = settle * 0.7f + deposit * 0.55f + clayAccum * 0.16f;
-                    const float buildup = deposit * 0.18f + (std::max)(0.0f, heightError) * 0.16f;
-                    wd = mirWorldNormal * layerDelta + vn * buildup;
+                        std::clamp(heightError * w * (0.28f + 0.32f * w), -mirClayHeightRef * 0.05f, mirClayHeightRef * 0.05f);
+                    const float layerDelta = settle * 0.7f + deposit * 0.55f + clayAccum * 0.12f * mirDragFactor;
+                    const float buildup = deposit * 0.14f + (std::max)(0.0f, heightError) * 0.10f * fillNeed;
+                    if (vertex.is_boundary) {
+                        wd = mirWorldNormal * (layerDelta + buildup) * 0.6f;
+                    } else {
+                        wd = mirWorldNormal * layerDelta + vn * buildup;
+                    }
                     break;
                 }
                 case SculptBrushTool::ClayStrips: {
@@ -5694,7 +7518,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                         if (do_my) localPrevHit.y = -localPrevHit.y;
                         if (do_mz) localPrevHit.z = -localPrevHit.z;
                         const Vec3 mirPrevCenter = sanitizeVec3(transform.transform_point(localPrevHit), mirWorldCenter);
-                        mirClaySampleCenter = sanitizeVec3(mirPrevCenter + (mirWorldCenter - mirPrevCenter) * 0.5f, mirWorldCenter);
+                        mirClaySampleCenter = sanitizeVec3(mirPrevCenter + (mirWorldCenter - mirPrevCenter) * 0.75f, mirWorldCenter);
                     }
                     const float sd = (worldPos - mirClaySampleCenter).dot(mirWorldNormal);
                     const Vec3 mirStrokeTangent = strokeTangentWorld;
@@ -5710,21 +7534,30 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                     if (vertexId >= sculpt_stroke_state.clay_strips_layer_accum.size()) {
                         return;
                     }
-                    const float deposit =
-                        radiusWorld * 0.11f * clayRadiusCompensation * clayBrushStrength * dt * w * strokeAdvanceFactor * rakePattern *
-                        (0.95f + 0.45f * normalStrength) * directionSign;
-                    float& clayStripsAccum = sculpt_stroke_state.clay_strips_layer_accum[vertexId];
-                    clayStripsAccum = std::clamp(clayStripsAccum + deposit, -radiusWorld * 0.6f, radiusWorld * 0.6f);
+                    const float mirStripsHeightRef = radiusWorld * clayRadiusCompensation;
                     const float stripTargetHeight =
-                        directionSign * radiusWorld * 0.14f * clayRadiusCompensation * w * rakePattern * (0.9f + 0.35f * normalStrength);
+                        directionSign * mirStripsHeightRef * 0.14f * rakePattern * (0.9f + 0.35f * normalStrength) * mirDragFactor;
                     const float stripHeightError = stripTargetHeight - sd;
+                    const float absStripTarget = (std::abs)(stripTargetHeight);
+                    const float stripFillNeed = (absStripTarget > 1e-5f)
+                        ? std::clamp(((directionSign > 0.0f) ? stripHeightError : -stripHeightError) / absStripTarget, 0.0f, 1.0f)
+                        : 0.0f;
+                    const float deposit =
+                        mirStripsHeightRef * 0.11f * clayBrushStrength * dt * w * strokeAdvanceFactor * rakePattern *
+                        (0.95f + 0.45f * normalStrength) * directionSign * stripFillNeed * mirDragFactor;
+                    float& clayStripsAccum = sculpt_stroke_state.clay_strips_layer_accum[vertexId];
+                    clayStripsAccum = std::clamp(clayStripsAccum + deposit, -mirStripsHeightRef * 0.6f, mirStripsHeightRef * 0.6f);
                     const float settle =
-                        std::clamp(stripHeightError * (0.24f + 0.28f * w), -radiusWorld * 0.05f, radiusWorld * 0.05f);
+                        std::clamp(stripHeightError * w * (0.24f + 0.28f * w), -mirStripsHeightRef * 0.05f, mirStripsHeightRef * 0.05f);
                     const float layerDelta = settle * 0.62f + deposit * 0.62f + clayStripsAccum * 0.18f;
                     const float tineDrag =
                         radiusWorld * 0.05f * clayBrushStrength * dt * w * strokeAdvanceFactor *
                         (0.35f + 0.65f * tineProfile);
-                    wd = mirWorldNormal * layerDelta + mirStrokeTangent * tineDrag;
+                    if (vertex.is_boundary) {
+                        wd = mirWorldNormal * layerDelta * 0.6f;
+                    } else {
+                        wd = mirWorldNormal * layerDelta + mirStrokeTangent * tineDrag;
+                    }
                     break;
                 }
                 case SculptBrushTool::Pinch: {
@@ -5762,6 +7595,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                 case SculptBrushTool::Smooth: {
                     const Vec3 sld = computeBoundarySafeSmoothDelta(
                         editable_mesh_cache,
+                        sculpt_solve_snapshot_local_positions,
                         vertexId,
                         brushStrength,
                         dt,
@@ -5769,7 +7603,9 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                         localRadius);
                     const float sldLenSq = sld.length_squared();
                     if (std::isfinite(sldLenSq) && sldLenSq > 1e-14f) {
-                        sculpt_updated_local_positions[vertexId] = sanitizeVec3(vertex.local_position + sld, vertex.local_position);
+                        sculpt_updated_local_positions[vertexId] = sanitizeVec3(
+                            snapshotLocalPosition + sld,
+                            snapshotLocalPosition);
                         mirrorPassChanged.store(true, std::memory_order_relaxed);
                     }
                     return;
@@ -5785,7 +7621,9 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                 if (!std::isfinite(ldLenSq) || ldLenSq <= 1e-14f) {
                     return;
                 }
-                sculpt_updated_local_positions[vertexId] = sanitizeVec3(vertex.local_position + ld, vertex.local_position);
+                sculpt_updated_local_positions[vertexId] = sanitizeVec3(
+                    snapshotLocalPosition + ld,
+                    snapshotLocalPosition);
                 mirrorPassChanged.store(true, std::memory_order_relaxed);
             });
             changed = changed || mirrorPassChanged.load(std::memory_order_relaxed);
@@ -5801,13 +7639,27 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
     strokeTouchedVertexIds.erase(
         std::unique(strokeTouchedVertexIds.begin(), strokeTouchedVertexIds.end()),
         strokeTouchedVertexIds.end());
+    const std::vector<int> touchedPBVHLeafIds =
+        collectTouchedSculptPBVHLeafIds(sculpt_pbvh, strokeTouchedVertexIds);
+    sculpt_control_graph.last_touched_leaf_count = touchedPBVHLeafIds.size();
+    std::vector<size_t> pbvhExpandedAffectedVertexIds =
+        collectAffectedEditableVertexIdsFromPBVHLeaves(
+            editable_mesh_cache,
+            sculpt_pbvh,
+            touchedPBVHLeafIds);
+    const std::vector<int> expandedStrokeVertexIds =
+        convertAffectedVertexIdsToIntList(pbvhExpandedAffectedVertexIds);
 
     if (activeTool == SculptBrushTool::Clay || activeTool == SculptBrushTool::ClayStrips) {
-        const float clayPolishStrength = activeTool == SculptBrushTool::Clay ? 0.16f : 0.11f;
+        const float largeBrushSurfaceFactor = computeLargeBrushSurfaceFactor(radiusWorld);
+        const std::vector<int>& polishVertexIds =
+            !expandedStrokeVertexIds.empty() ? expandedStrokeVertexIds : strokeTouchedVertexIds;
+        const float clayPolishStrength = (activeTool == SculptBrushTool::Clay ? 0.16f : 0.11f) +
+            (activeTool == SculptBrushTool::Clay ? 0.10f : 0.08f) * largeBrushSurfaceFactor;
         applyClayPolishPass(
             editable_mesh_cache,
             sculpt_updated_local_positions,
-            strokeTouchedVertexIds,
+            polishVertexIds,
             transform,
             inverseTransform,
             hitNormalWorld,
@@ -5815,6 +7667,47 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
             dt,
             localRadius,
             clayPolishStrength);
+        applyClayAntiPitPass(
+            editable_mesh_cache,
+            sculpt_updated_local_positions,
+            polishVertexIds,
+            transform,
+            inverseTransform,
+            hitNormalWorld,
+            localRadius,
+            (activeTool == SculptBrushTool::Clay ? 0.42f : 0.28f) +
+                (activeTool == SculptBrushTool::Clay ? 0.24f : 0.18f) * largeBrushSurfaceFactor,
+            (activeTool == SculptBrushTool::Clay ? 0.12f : 0.18f) +
+                0.10f * largeBrushSurfaceFactor);
+    } else if (activeTool == SculptBrushTool::Draw && !expandedStrokeVertexIds.empty()) {
+        const float largeBrushSurfaceFactor = computeLargeBrushSurfaceFactor(radiusWorld);
+        const size_t touchedCount = expandedStrokeVertexIds.size();
+        const float densityFactor = std::clamp(
+            (static_cast<float>(touchedCount) - 24.0f) / 72.0f, 0.0f, 1.0f);
+        const float cleanupBoost = (std::max)(largeBrushSurfaceFactor, densityFactor);
+        if (cleanupBoost > 0.04f) {
+            applyClayPolishPass(
+                editable_mesh_cache,
+                sculpt_updated_local_positions,
+                expandedStrokeVertexIds,
+                transform,
+                inverseTransform,
+                hitNormalWorld,
+                brushStrength,
+                dt,
+                localRadius,
+                0.04f + 0.10f * cleanupBoost);
+            applyClayAntiPitPass(
+                editable_mesh_cache,
+                sculpt_updated_local_positions,
+                expandedStrokeVertexIds,
+                transform,
+                inverseTransform,
+                hitNormalWorld,
+                localRadius,
+                0.24f + 0.16f * cleanupBoost,
+                0.08f + 0.08f * cleanupBoost);
+        }
     }
 
     for (const int vertexIdInt : strokeTouchedVertexIds) {
@@ -5829,11 +7722,31 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         if ((sculpt_updated_local_positions[vertexId] - vertex.local_position).length_squared() <= 1e-14f) {
             continue;
         }
-        vertex.local_position = sculpt_updated_local_positions[vertexId];
+        Vec3 safeLocalPosition = vertex.local_position;
+        if (!resolveEditableTopologySafePosition(
+                editable_mesh_cache,
+                vertexIdInt,
+                sculpt_updated_local_positions,
+                strokeTouchedVertexIds,
+                safeLocalPosition)) {
+            continue;
+        }
+        vertex.local_position = safeLocalPosition;
+        sculpt_updated_local_positions[vertexId] = safeLocalPosition;
         for (const auto& ref : vertex.refs) {
             if (!ref.triangle) {
                 continue;
             }
+            sculpt_stroke_state.before_triangle_states.try_emplace(
+                ref.triangle.get(),
+                MeshEditTriangleState{
+                    ref.triangle,
+                    {
+                        ref.triangle->getOriginalVertexPosition(0),
+                        ref.triangle->getOriginalVertexPosition(1),
+                        ref.triangle->getOriginalVertexPosition(2)
+                    }
+                });
             ref.triangle->setOriginalVertexPosition(ref.corner, vertex.local_position);
             ref.triangle->markAABBDirty();
             if (tryMarkEditableTriangleTouched(editable_mesh_cache, ref.triangle.get())) {
@@ -5841,13 +7754,19 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
             }
         }
     }
-
-    // Recalculate per-vertex smooth normals for all vertices touched by this sculpt dab.
-    {
-        const std::vector<size_t> affectedVertexIds =
-            collectAffectedEditableVertexIds(editable_mesh_cache, touchedTriangles);
-        recomputeEditableSmoothNormals(editable_mesh_cache, affectedVertexIds);
+    std::vector<size_t> affectedVertexIds = pbvhExpandedAffectedVertexIds;
+    if (affectedVertexIds.empty()) {
+        affectedVertexIds = collectAffectedEditableVertexIds(editable_mesh_cache, touchedTriangles);
     }
+    expandTouchedTrianglesFromAffectedVertices(
+        editable_mesh_cache,
+        affectedVertexIds,
+        touchedTriangles);
+    recomputeEditableSmoothNormals(editable_mesh_cache, affectedVertexIds);
+    refreshSculptPBVHLeavesAndAncestors(
+        sculpt_pbvh,
+        editable_mesh_cache,
+        touchedPBVHLeafIds);
 
     // Batch-apply transform to all touched triangles using precomputed matrices
     // instead of per-triangle getTransformMatrix() + inverse().transpose().
@@ -5855,6 +7774,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         const Matrix4x4 finalTransform = transform;
         const Matrix4x4 normalTransform = inverseTransform.transpose();
         for (const auto& tri : touchedTriangles) {
+            sculpt_stroke_state.touched_triangles.try_emplace(tri.get(), tri);
             for (int i = 0; i < 3; ++i) {
                 tri->vertices[i].position = finalTransform.transform_point(tri->vertices[i].original);
                 tri->vertices[i].normal = normalTransform.transform_vector(tri->vertices[i].originalNormal).normalize();
@@ -5876,7 +7796,6 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
 
     // Don't invalidate overlay cache during sculpt — triangle data is updated in-place
     // so the overlay will read correct positions from the same Triangle pointers.
-    updateBBoxCache(objectName);
     objects_needing_cpu_sync.erase(objectName);
 
     if (!ctx.backend_ptr) {
@@ -5884,18 +7803,19 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         g_cpu_bvh_refit_pending = true;
     }
 
-    if (ctx.backend_ptr) {
-        queueMeshEditGpuSync(objectName);
+    if (liveAccumulationEnabled) {
+        if (ctx.backend_ptr != nullptr || g_backend != nullptr || g_viewport_backend != nullptr) {
+            queueMeshEditGpuSync(objectName);
+        }
+        ctx.renderer.resetCPUAccumulation();
+        ctx.start_render = true;
     }
-
-    ctx.renderer.resetCPUAccumulation();
-    ctx.start_render = true;
     sculpt_stroke_state.changed = true;
     sculpt_stroke_state.last_world_hit = (activeTool == SculptBrushTool::Grab) ? planeHit : hit.point;
 }
 
 void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
-    if (!mesh_edit_gpu_sync_pending || (!ctx.backend_ptr && !g_backend)) {
+    if (!mesh_edit_gpu_sync_pending || (!ctx.backend_ptr && !g_backend && !g_viewport_backend)) {
         return;
     }
 
@@ -5973,6 +7893,18 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
         g_cpu_bvh_refit_pending = true;
     } else {
         g_bvh_rebuild_pending = true;
+    }
+
+    // In Solid/Matcap sculpt we only need the interactive raster viewport to stay live.
+    // Syncing the inactive render backend here (OptiX / Vulkan RT / CPU render backend)
+    // duplicates geometry work every dab and can make Solid mode slower than Rendered.
+    // We already mark geometry dirty at stroke end, so Rendered mode can catch up when
+    // the user exits sculpt or switches viewport mode.
+    if (activeViewportInSolidMode) {
+        sculpt_dirty_mesh_cache_indices.clear();
+        ctx.renderer.resetCPUAccumulation();
+        ctx.start_render = true;
+        return;
     }
 
     if (renderBackendIsVulkan) {
@@ -6266,6 +8198,48 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
     const ImU32 selectedFaceColor = IM_COL32(72, 186, 214, 122);
     const ImU32 softRadiusColor = IM_COL32(72, 186, 214, 70);
     const float vertexRadius = (std::max)(1.0f, mesh_overlay_settings.vertex_radius);
+    const Matrix4x4 editableTransform =
+        hasEditableTopologyForObject ? getEditableObjectTransform(editable_mesh_cache) : Matrix4x4::identity();
+    std::vector<ImVec2> editableProjectedVertices;
+    std::vector<uint8_t> editableProjectedValid;
+    bool editableProjectionCacheReady = false;
+    auto ensureEditableProjectionCache = [&]() -> bool {
+        if (!hasEditableTopologyForObject || editable_mesh_cache.vertices.empty()) {
+            return false;
+        }
+        if (editableProjectionCacheReady) {
+            return true;
+        }
+
+        editableProjectedVertices.resize(editable_mesh_cache.vertices.size());
+        editableProjectedValid.assign(editable_mesh_cache.vertices.size(), 0u);
+        for (size_t i = 0; i < editable_mesh_cache.vertices.size(); ++i) {
+            ImVec2 screenPosition;
+            if (projectPointToScreen(
+                    *ctx.scene.camera,
+                    displaySize,
+                    editableTransform.transform_point(editable_mesh_cache.vertices[i].local_position),
+                    screenPosition)) {
+                editableProjectedVertices[i] = screenPosition;
+                editableProjectedValid[i] = 1u;
+            }
+        }
+        editableProjectionCacheReady = true;
+        return true;
+    };
+    auto tryGetEditableProjectedVertex = [&](int vertexId, ImVec2& out) -> bool {
+        if (vertexId < 0 || vertexId >= static_cast<int>(editable_mesh_cache.vertices.size())) {
+            return false;
+        }
+        if (!ensureEditableProjectionCache()) {
+            return false;
+        }
+        if (editableProjectedValid[vertexId] == 0u) {
+            return false;
+        }
+        out = editableProjectedVertices[vertexId];
+        return true;
+    };
 
     if (drawFaces) {
         const size_t overlayFaceCount =
@@ -6281,7 +8255,7 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
         if (!editable_mesh_cache.object_name.empty() &&
             editable_mesh_cache.object_name == objectName &&
             !editable_mesh_cache.polygon_faces.empty()) {
-            const Matrix4x4 transform = getEditableObjectTransform(editable_mesh_cache);
+            ensureEditableProjectionCache();
             for (size_t polygonFaceId = 0; polygonFaceId < editable_mesh_cache.polygon_faces.size(); polygonFaceId += faceStep) {
                 const std::vector<int> vertexIds =
                     getEditablePolygonVertexIds(editable_mesh_cache, static_cast<int>(polygonFaceId));
@@ -6289,34 +8263,25 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
                     continue;
                 }
 
-                std::vector<Vec3> worldVertices;
                 std::vector<ImVec2> screenVertices;
-                worldVertices.reserve(vertexIds.size());
                 screenVertices.reserve(vertexIds.size());
                 bool projectionFailed = false;
                 for (const int vertexId : vertexIds) {
-                    if (!isEditableVertexIdValid(editable_mesh_cache, vertexId)) {
-                        projectionFailed = true;
-                        break;
-                    }
-                    const Vec3 worldPosition =
-                        transform.transform_point(editable_mesh_cache.vertices[vertexId].local_position);
                     ImVec2 screenPosition;
-                    if (!projectPointToScreen(*ctx.scene.camera, displaySize, worldPosition, screenPosition)) {
+                    if (!tryGetEditableProjectedVertex(vertexId, screenPosition)) {
                         projectionFailed = true;
                         break;
                     }
-                    worldVertices.push_back(worldPosition);
                     screenVertices.push_back(screenPosition);
                 }
                 if (projectionFailed) {
                     continue;
                 }
 
-                const float visibility =
-                    (worldVertices.size() >= 3)
-                        ? computeOverlayVisibility(*ctx.scene.camera, worldVertices[0], worldVertices[1], worldVertices[2])
-                        : 1.0f;
+                const Vec3 world0 = editableTransform.transform_point(editable_mesh_cache.vertices[vertexIds[0]].local_position);
+                const Vec3 world1 = editableTransform.transform_point(editable_mesh_cache.vertices[vertexIds[1]].local_position);
+                const Vec3 world2 = editableTransform.transform_point(editable_mesh_cache.vertices[vertexIds[2]].local_position);
+                const float visibility = computeOverlayVisibility(*ctx.scene.camera, world0, world1, world2);
                 drawEditableScreenPolygonFill(
                     drawList,
                     screenVertices,
@@ -6354,50 +8319,39 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
             editable_mesh_cache.object_name == objectName &&
             !editable_mesh_cache.polygon_faces.empty();
         if (usePolygonEdges) {
-            const Matrix4x4 transform = getEditableObjectTransform(editable_mesh_cache);
-            for (const auto& polygonFace : editable_mesh_cache.polygon_faces) {
-                if (polygonFace.vertex_ids.size() < 2) {
+            ensureEditableProjectionCache();
+            const auto& weightedEdges =
+                !editable_mesh_cache.polygon_edges.empty()
+                    ? editable_mesh_cache.polygon_edges
+                    : editable_mesh_cache.edges;
+            const int maxOverlayEdges = (std::max)(1, mesh_overlay_settings.max_overlay_triangles * 2);
+            const size_t edgeStep = weightedEdges.size() > static_cast<size_t>(maxOverlayEdges)
+                ? static_cast<size_t>(std::ceil(static_cast<float>(weightedEdges.size()) / static_cast<float>(maxOverlayEdges)))
+                : static_cast<size_t>(1);
+
+            for (size_t edgeIndex = 0; edgeIndex < weightedEdges.size(); edgeIndex += edgeStep) {
+                const auto& edge = weightedEdges[edgeIndex];
+                if (edge.v0 < 0 || edge.v1 < 0 ||
+                    edge.v0 >= static_cast<int>(editable_mesh_cache.vertices.size()) ||
+                    edge.v1 >= static_cast<int>(editable_mesh_cache.vertices.size())) {
                     continue;
                 }
 
-                std::vector<Vec3> worldVertices;
-                std::vector<ImVec2> screenVertices;
-                worldVertices.reserve(polygonFace.vertex_ids.size());
-                screenVertices.reserve(polygonFace.vertex_ids.size());
-                bool projectionFailed = false;
-                for (const int vertexId : polygonFace.vertex_ids) {
-                    if (!isEditableVertexIdValid(editable_mesh_cache, vertexId)) {
-                        projectionFailed = true;
-                        break;
-                    }
-
-                    const Vec3 worldPosition =
-                        transform.transform_point(editable_mesh_cache.vertices[vertexId].local_position);
-                    ImVec2 screenPosition;
-                    if (!projectPointToScreen(*ctx.scene.camera, displaySize, worldPosition, screenPosition)) {
-                        projectionFailed = true;
-                        break;
-                    }
-                    worldVertices.push_back(worldPosition);
-                    screenVertices.push_back(screenPosition);
-                }
-                if (projectionFailed || screenVertices.size() < 2) {
+                ImVec2 a, b;
+                if (!tryGetEditableProjectedVertex(edge.v0, a) ||
+                    !tryGetEditableProjectedVertex(edge.v1, b)) {
                     continue;
                 }
 
-                const float visibility =
-                    (worldVertices.size() >= 3)
-                        ? computeOverlayVisibility(*ctx.scene.camera, worldVertices[0], worldVertices[1], worldVertices[2])
-                        : 1.0f;
-                const ImU32 color = scaleColorAlpha(edgeColor, visibility);
-                for (size_t edgeIndex = 0; edgeIndex < screenVertices.size(); ++edgeIndex) {
-                    const ImVec2 a = screenVertices[edgeIndex];
-                    const ImVec2 b = screenVertices[(edgeIndex + 1) % screenVertices.size()];
-                    drawList->AddLine(a, b, color, mesh_overlay_settings.edge_thickness);
-                }
+                drawList->AddLine(a, b, edgeColor, mesh_overlay_settings.edge_thickness);
             }
         } else {
-            for (const auto& edge : mesh_overlay_cache.edges) {
+            const int maxOverlayEdges = (std::max)(1, mesh_overlay_settings.max_overlay_triangles * 2);
+            const size_t edgeStep = mesh_overlay_cache.edges.size() > static_cast<size_t>(maxOverlayEdges)
+                ? static_cast<size_t>(std::ceil(static_cast<float>(mesh_overlay_cache.edges.size()) / static_cast<float>(maxOverlayEdges)))
+                : static_cast<size_t>(1);
+            for (size_t edgeIndex = 0; edgeIndex < mesh_overlay_cache.edges.size(); edgeIndex += edgeStep) {
+                const auto& edge = mesh_overlay_cache.edges[edgeIndex];
                 if (!edge.triangle) {
                     continue;
                 }
@@ -6421,30 +8375,24 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
     if (drawVertices) {
         const int maxVertexMarkers = (std::max)(1, mesh_overlay_settings.max_vertex_markers);
         if (hasEditableTopologyForObject && !editable_mesh_cache.vertices.empty()) {
-            const Matrix4x4 transform = getEditableObjectTransform(editable_mesh_cache);
+            ensureEditableProjectionCache();
             const size_t vertexStep = editable_mesh_cache.vertices.size() > static_cast<size_t>(maxVertexMarkers)
                 ? static_cast<size_t>(std::ceil(static_cast<float>(editable_mesh_cache.vertices.size()) / static_cast<float>(maxVertexMarkers)))
                 : static_cast<size_t>(1);
 
             for (size_t i = 0; i < editable_mesh_cache.vertices.size(); i += vertexStep) {
                 const auto& vertex = editable_mesh_cache.vertices[i];
-                if (vertex.refs.empty() || !vertex.refs[0].triangle) {
+                if (vertex.refs.empty()) {
                     continue;
                 }
 
-                const Vec3 p = transform.transform_point(vertex.local_position);
-                const auto& tri = vertex.refs[0].triangle;
-                const Vec3 p0 = transform.transform_point(tri->getOriginalVertexPosition(0));
-                const Vec3 p1 = transform.transform_point(tri->getOriginalVertexPosition(1));
-                const Vec3 p2 = transform.transform_point(tri->getOriginalVertexPosition(2));
-                const float visibility = computeOverlayVisibility(*ctx.scene.camera, p0, p1, p2);
                 ImVec2 screen;
-                if (!projectPointToScreen(*ctx.scene.camera, displaySize, p, screen)) {
+                if (!tryGetEditableProjectedVertex(static_cast<int>(i), screen)) {
                     continue;
                 }
 
-                drawList->AddCircleFilled(screen, vertexRadius + 1.0f, scaleColorAlpha(vertexOutline, visibility), 8);
-                drawList->AddCircleFilled(screen, vertexRadius, scaleColorAlpha(vertexColor, visibility), 8);
+                drawList->AddCircleFilled(screen, vertexRadius + 1.0f, vertexOutline, 8);
+                drawList->AddCircleFilled(screen, vertexRadius, vertexColor, 8);
             }
         } else {
             const size_t vertexStep = mesh_overlay_cache.vertices.size() > static_cast<size_t>(maxVertexMarkers)
@@ -6476,7 +8424,7 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
 
     if (!editable_mesh_cache.object_name.empty() &&
         editable_mesh_cache.object_name == objectName) {
-        const Matrix4x4 transform = getEditableObjectTransform(editable_mesh_cache);
+        ensureEditableProjectionCache();
         std::unordered_set<int> softTargets;
         for (const int vertexId : editable_mesh_cache.selection.vertex_ids) {
             softTargets.insert(vertexId);
@@ -6505,16 +8453,8 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
             screenVertices.reserve(vertexIds.size());
             bool projectionFailed = false;
             for (const int vertexId : vertexIds) {
-                if (!isEditableVertexIdValid(editable_mesh_cache, vertexId)) {
-                    projectionFailed = true;
-                    break;
-                }
                 ImVec2 screenVertex;
-                if (!projectPointToScreen(
-                        *ctx.scene.camera,
-                        displaySize,
-                        transform.transform_point(editable_mesh_cache.vertices[vertexId].local_position),
-                        screenVertex)) {
+                if (!tryGetEditableProjectedVertex(vertexId, screenVertex)) {
                     projectionFailed = true;
                     break;
                 }
@@ -6541,8 +8481,8 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
                 edge->v0 < static_cast<int>(editable_mesh_cache.vertices.size()) &&
                 edge->v1 < static_cast<int>(editable_mesh_cache.vertices.size())) {
                 ImVec2 s0, s1;
-                if (projectPointToScreen(*ctx.scene.camera, displaySize, transform.transform_point(editable_mesh_cache.vertices[edge->v0].local_position), s0) &&
-                    projectPointToScreen(*ctx.scene.camera, displaySize, transform.transform_point(editable_mesh_cache.vertices[edge->v1].local_position), s1)) {
+                if (tryGetEditableProjectedVertex(edge->v0, s0) &&
+                    tryGetEditableProjectedVertex(edge->v1, s1)) {
                     drawList->AddLine(s0, s1, selectedEdgeColor, mesh_overlay_settings.edge_thickness + 1.35f);
                 }
             }
@@ -6553,8 +8493,7 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
                 continue;
             }
             ImVec2 screen;
-            if (projectPointToScreen(*ctx.scene.camera, displaySize,
-                                     transform.transform_point(editable_mesh_cache.vertices[vertexId].local_position), screen)) {
+            if (tryGetEditableProjectedVertex(vertexId, screen)) {
                 drawList->AddCircleFilled(screen, vertexRadius + 2.0f, vertexOutline, 10);
                 drawList->AddCircleFilled(screen, vertexRadius + 0.8f, selectedVertexColor, 10);
             }
@@ -6595,16 +8534,8 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
                     screenVertices.reserve(vertexIds.size());
                     bool projectionFailed = false;
                     for (const int vertexId : vertexIds) {
-                        if (!isEditableVertexIdValid(editable_mesh_cache, vertexId)) {
-                            projectionFailed = true;
-                            break;
-                        }
                         ImVec2 screenVertex;
-                        if (!projectPointToScreen(
-                                *ctx.scene.camera,
-                                displaySize,
-                                transform.transform_point(editable_mesh_cache.vertices[vertexId].local_position),
-                                screenVertex)) {
+                        if (!tryGetEditableProjectedVertex(vertexId, screenVertex)) {
                             projectionFailed = true;
                             break;
                         }
@@ -6634,8 +8565,8 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
                     }
 
                     ImVec2 s0, s1;
-                    if (!projectPointToScreen(*ctx.scene.camera, displaySize, transform.transform_point(editable_mesh_cache.vertices[edge.v0].local_position), s0) ||
-                        !projectPointToScreen(*ctx.scene.camera, displaySize, transform.transform_point(editable_mesh_cache.vertices[edge.v1].local_position), s1)) {
+                    if (!tryGetEditableProjectedVertex(edge.v0, s0) ||
+                        !tryGetEditableProjectedVertex(edge.v1, s1)) {
                         continue;
                     }
 
@@ -6649,8 +8580,7 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
                     }
 
                     ImVec2 screen;
-                    if (!projectPointToScreen(*ctx.scene.camera, displaySize,
-                                              transform.transform_point(editable_mesh_cache.vertices[i].local_position), screen)) {
+                    if (!tryGetEditableProjectedVertex(static_cast<int>(i), screen)) {
                         continue;
                     }
 

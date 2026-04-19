@@ -1401,7 +1401,9 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
     ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.86f, 0.91f, 1.0f, 1.0f));
 
     const bool rendered_viewport_active = (viewport_settings.shading_mode == 2);
-    const bool raster_quality_active = (viewport_settings.shading_mode == 0 || viewport_settings.shading_mode == 3);
+    const bool raster_quality_active = (viewport_settings.shading_mode == 0 ||
+                                        viewport_settings.shading_mode == 1 ||
+                                        viewport_settings.shading_mode == 3);
 
     if (ctx.render_settings.use_optix && !g_hasOptix) {
         ctx.render_settings.use_optix = false;
@@ -1516,7 +1518,7 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
         const char* raster_quality_items[] = { "Auto", "Performance", "Balanced", "Quality" };
         int raster_quality = static_cast<int>(ctx.render_settings.raster_viewport_quality_preset);
         if (!raster_quality_active) ImGui::BeginDisabled();
-        if (ImGui::Combo("Solid / Matcap Quality", &raster_quality, raster_quality_items, IM_ARRAYSIZE(raster_quality_items))) {
+        if (ImGui::Combo("Raster / Preview Quality", &raster_quality, raster_quality_items, IM_ARRAYSIZE(raster_quality_items))) {
             ctx.render_settings.raster_viewport_quality_preset = static_cast<RasterViewportQualityPreset>(raster_quality);
             if (raster_quality_active) {
                 g_viewport_raster_rebuild_pending = true;
@@ -1525,9 +1527,25 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
         }
         if (!raster_quality_active) ImGui::EndDisabled();
         if (raster_quality_active) {
-            ImGui::TextDisabled("Controls how aggressively Solid/Matcap shifts foliage from full meshes to viewport proxies.");
+            ImGui::TextDisabled("Solid/Matcap: viewport proxy aggressiveness. Material Preview: specular BRDF quality.");
         } else {
-            ImGui::TextDisabled("Active only in Solid or Matcap viewport mode.");
+            ImGui::TextDisabled("Active only in Solid, Material Preview, or Matcap viewport mode.");
+        }
+
+        const bool material_preview_active = (viewport_settings.shading_mode == 1);
+        const char* preview_lighting_items[] = { "Classic 3-Point", "Studio", "Outdoor" };
+        int preview_lighting = static_cast<int>(ctx.render_settings.material_preview_lighting_preset);
+        if (!material_preview_active) ImGui::BeginDisabled();
+        if (ImGui::Combo("Preview Lighting", &preview_lighting, preview_lighting_items, IM_ARRAYSIZE(preview_lighting_items))) {
+            ctx.render_settings.material_preview_lighting_preset = static_cast<MaterialPreviewLightingPreset>(preview_lighting);
+            ctx.start_render = true;
+            if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+        }
+        if (!material_preview_active) ImGui::EndDisabled();
+        if (material_preview_active) {
+            ImGui::TextDisabled("Classic keeps the old key/fill/rim look. Studio and Outdoor use stable environment-style preview lighting.");
+        } else {
+            ImGui::TextDisabled("Preview lighting presets are only active in Material Preview mode.");
         }
 
         UIWidgets::Divider();
@@ -5579,8 +5597,18 @@ void SceneUI::ensureCPUSyncForPicking(UIContext& ctx) {
         auto it = mesh_cache.find(name);
         if (it != mesh_cache.end() && !it->second.empty()) {
             for (auto& pair : it->second) {
+                const int object_index = pair.first;
+                if (object_index >= 0 && static_cast<size_t>(object_index) < ctx.scene.world.objects.size()) {
+                    if (auto inst = std::dynamic_pointer_cast<HittableInstance>(ctx.scene.world.objects[object_index])) {
+                        if (inst->syncTransformFromSourceTriangles()) {
+                            ++synced_count;
+                            continue;
+                        }
+                    }
+                }
+
                 pair.second->updateTransformedVertices();
-                synced_count++;
+                ++synced_count;
             }
         }
     }
@@ -6065,7 +6093,9 @@ void SceneUI::performNewProject(UIContext& ctx) {
      }
      if (Backend::IViewportBackend* viewportBackend = getSceneUiViewportBackend(ctx)) {
          viewportBackend->setLights(ctx.scene.lights);
+         viewportBackend->buildRasterGeometry(ctx.scene.world.objects);
          viewportBackend->resetAccumulation();
+         ctx.renderer.uploadHairToGPU();
      }
      // Signal raster viewport rebuild for Solid/Matcap mode
      extern bool g_vulkan_rebuild_pending;

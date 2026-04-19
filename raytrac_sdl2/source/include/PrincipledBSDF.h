@@ -125,6 +125,10 @@ public:
     // Yeni metodlar
     void setOpacityTexture(const std::shared_ptr<Texture>& tex, float intensity = 1.0f);
     float get_roughness(float u, float v) const;
+    float getRoughnessValue(const Vec2& uv) const;
+    float getMetallicValue(const Vec2& uv) const;
+    float getScalarRoughness() const;
+    float getScalarMetallic() const;
     void setTransmission(float transmission, float ior);
    
     float getIOR() const;
@@ -195,6 +199,12 @@ public:
     SurfaceDepositionSettings surface_deposition;
     Vec3 anisotropicDirection;
     float opacityAlpha = 1.0f;
+
+    // Procedural surface detail
+    float micro_detail_strength = 0.0f;  // 0 = disabled; world-space color+dirt+roughness
+    float micro_detail_scale    = 2.0f;  // World-space frequency (1–5 typical)
+    float tile_break_strength   = 0.0f;  // UV tile-break (0 = off; 0.1–0.3 typical)
+
 private:
   
 

@@ -1,9 +1,87 @@
 ﻿#include "PrincipledBSDF.h"
+#include "PBRTextureChannelPolicy.h"
 #include <cmath>
 #include "Matrix4x4.h"
 #include "HittableList.h"
 #include <globals.h>
 #include <Dielectric.h>
+
+// ── Procedural detail helpers (CPU, mirrors procedural_detail.glsl) ──────────
+namespace {
+
+static inline float pd_frac(float x) { return x - std::floor(x); }
+
+static inline float pd_cpu_h3(float px, float py, float pz) {
+    // fract(p * vec3(443.897, 441.423, 437.195)) — matches GLSL pd_hash3
+    float qx = pd_frac(px * 443.897f);
+    float qy = pd_frac(py * 441.423f);
+    float qz = pd_frac(pz * 437.195f);
+    // p += dot(p, p.yzx + 19.19) — scalar broadcast
+    float d = qx*(qy + 19.19f) + qy*(qz + 19.19f) + qz*(qx + 19.19f);
+    qx += d; qy += d; qz += d;
+    return pd_frac((qx + qy) * qz);
+}
+
+static inline float pd_cpu_vnoise3(float px, float py, float pz) {
+    float ix = std::floor(px), iy = std::floor(py), iz = std::floor(pz);
+    float fx = px - ix, fy = py - iy, fz = pz - iz;
+    // quintic: eliminates block-edge C1/C2 discontinuities
+    fx = fx * fx * fx * (fx * (fx * 6.f - 15.f) + 10.f);
+    fy = fy * fy * fy * (fy * (fy * 6.f - 15.f) + 10.f);
+    fz = fz * fz * fz * (fz * (fz * 6.f - 15.f) + 10.f);
+
+    float n000 = pd_cpu_h3(ix,   iy,   iz  );
+    float n100 = pd_cpu_h3(ix+1, iy,   iz  );
+    float n010 = pd_cpu_h3(ix,   iy+1, iz  );
+    float n110 = pd_cpu_h3(ix+1, iy+1, iz  );
+    float n001 = pd_cpu_h3(ix,   iy,   iz+1);
+    float n101 = pd_cpu_h3(ix+1, iy,   iz+1);
+    float n011 = pd_cpu_h3(ix,   iy+1, iz+1);
+    float n111 = pd_cpu_h3(ix+1, iy+1, iz+1);
+
+    float x00 = n000*(1-fx) + n100*fx;
+    float x10 = n010*(1-fx) + n110*fx;
+    float x01 = n001*(1-fx) + n101*fx;
+    float x11 = n011*(1-fx) + n111*fx;
+    float y0  = x00*(1-fy)  + x10*fy;
+    float y1  = x01*(1-fy)  + x11*fy;
+    return y0*(1-fz) + y1*fz;
+}
+
+static inline float pd_cpu_fbm(float px, float py, float pz) {
+    // Domain-rotated fBm — XZ plane rotated ~0.5 rad between octaves
+    // to break grid alignment and remove blocky value-noise artifacts.
+    // cos(0.5)≈0.8776, sin(0.5)≈0.4794
+    float v = pd_cpu_vnoise3(px, py, pz) * 0.500f;
+    // Octave 2
+    float p2x = (px*0.8776f - pz*0.4794f)*2.0f + 1.7f;
+    float p2y = py*2.0f + 9.2f;
+    float p2z = (px*0.4794f + pz*0.8776f)*2.0f + 3.5f;
+    v += pd_cpu_vnoise3(p2x, p2y, p2z) * 0.250f;
+    // Octave 3
+    float p3x = (p2x*0.8776f - p2z*0.4794f)*2.0f + 8.3f;
+    float p3y = p2y*2.0f + 2.8f;
+    float p3z = (p2x*0.4794f + p2z*0.8776f)*2.0f + 5.1f;
+    v += pd_cpu_vnoise3(p3x, p3y, p3z) * 0.125f;
+    return v;
+}
+
+// Returns [0,1]: dirt accumulation factor
+static inline float pd_cpu_dirt(float px, float py, float pz, float scale) {
+    float n = pd_cpu_fbm(px*scale, py*scale, pz*scale);
+    float t = (n - 0.62f) / (0.28f - 0.62f);
+    t = std::max(0.f, std::min(1.f, t));
+    return t * t * (3.f - 2.f * t);
+}
+
+// Returns [-0.5, +0.5]: roughness delta
+static inline float pd_cpu_roughnessVar(float px, float py, float pz, float scale) {
+    return pd_cpu_vnoise3(px*scale*2.5f+5.5f,
+                          py*scale*2.5f+3.1f,
+                          pz*scale*2.5f+8.9f) - 0.5f;
+}
+
+} // namespace
 float PrincipledBSDF::getIndexOfRefraction() const {
     return ior;
 }
@@ -110,7 +188,35 @@ float PrincipledBSDF::get_opacity(const Vec2& uv) const {
 }
 
 float PrincipledBSDF::get_roughness(float u, float v) const {
-    return getPropertyValue(roughnessProperty, Vec2(u, v)).y;
+    return getRoughnessValue(Vec2(u, v));
+}
+
+float PrincipledBSDF::getRoughnessValue(const Vec2& uv) const {
+    Vec2 sampleUv = applyTextureTransform(uv.u, uv.v);
+    if (roughnessProperty.texture) {
+        const Vec3 sample = roughnessProperty.texture->get_color_bilinear(sampleUv.u, sampleUv.v);
+        return PBRTextureChannelPolicy::sampleScalar(sample, PBRTextureChannelPolicy::RoughnessChannel) *
+               roughnessProperty.intensity;
+    }
+    return roughnessProperty.color.x * roughnessProperty.intensity;
+}
+
+float PrincipledBSDF::getMetallicValue(const Vec2& uv) const {
+    Vec2 sampleUv = applyTextureTransform(uv.u, uv.v);
+    if (metallicProperty.texture) {
+        const Vec3 sample = metallicProperty.texture->get_color_bilinear(sampleUv.u, sampleUv.v);
+        return PBRTextureChannelPolicy::sampleScalar(sample, PBRTextureChannelPolicy::MetallicChannel) *
+               metallicProperty.intensity;
+    }
+    return metallicProperty.intensity;
+}
+
+float PrincipledBSDF::getScalarRoughness() const {
+    return roughnessProperty.color.x * roughnessProperty.intensity;
+}
+
+float PrincipledBSDF::getScalarMetallic() const {
+    return metallicProperty.intensity;
 }
 
 void PrincipledBSDF::setTransmission(float transmission, float ior) {
@@ -178,11 +284,42 @@ bool PrincipledBSDF::scatter(
         transmissionValue = rec.surface_override.transmission;
     } else {
         albedo = getPropertyValue(albedoProperty, Vec2(rec.u, rec.v));
-        roughness = getPropertyValue(roughnessProperty, Vec2(rec.u, rec.v)).y;
-        metallic = getPropertyValue(metallicProperty, Vec2(rec.u, rec.v)).z;
+        roughness = getRoughnessValue(Vec2(rec.u, rec.v));
+        metallic = getMetallicValue(Vec2(rec.u, rec.v));
         transmissionValue = getTransmission(Vec2(rec.u, rec.v));
     }
-    
+
+    // ── Procedural surface detail ────────────────────────────────────────────
+    // Mirrors the GPU path in material_scatter.cuh / closesthit.rchit.
+    // micro_detail_strength == 0 skips entirely (default behaviour unchanged).
+    // tile_break_strength is a shader-level UV warp — no equivalent in CPU scatter.
+    if (micro_detail_strength > 0.0f) {
+        float sc  = std::max(micro_detail_scale, 0.5f);
+        float str = micro_detail_strength;
+        float px  = static_cast<float>(rec.point.x);
+        float py  = static_cast<float>(rec.point.y);
+        float pz  = static_cast<float>(rec.point.z);
+
+        // Subtle world-space luminance variation — ±8% max, independent seed
+        float colorVar   = pd_cpu_vnoise3(px*sc*0.7f + 31.4f,
+                                          py*sc*0.7f + 17.2f,
+                                          pz*sc*0.7f + 42.9f);
+        float colorDelta = (colorVar - 0.5f) * 0.16f * str;
+        float cm = 1.0f + colorDelta;
+        albedo = Vec3(std::max(0.0f, std::min(1.0f, (float)albedo.x * cm)),
+                      std::max(0.0f, std::min(1.0f, (float)albedo.y * cm)),
+                      std::max(0.0f, std::min(1.0f, (float)albedo.z * cm)));
+
+        // Dirt: darken albedo in fBm "valleys"
+        float dirt = pd_cpu_dirt(px, py, pz, sc) * str;
+        const Vec3 dirtColor(0.14, 0.10, 0.08);
+        albedo = albedo * (Vec3(1.0) - dirt * (Vec3(1.0) - dirtColor));
+
+        // Roughness micro-variation
+        float roughDelta = pd_cpu_roughnessVar(px, py, pz, sc) * str * 0.5f;
+        roughness = std::max(0.0f, std::min(1.0f, roughness + roughDelta));
+    }
+
     // Emission is computed separately in the render loop (Renderer.cpp / ray_color.cuh),
     // NOT in scatter. Vulkan closesthit sets payload.radiance = emColor * emStrength
     // independently from scatter decision. Emissive surfaces still scatter normally.
@@ -297,8 +434,8 @@ float PrincipledBSDF::pdf(const HitRecord& rec, const Vec3& incoming, const Vec3
         metallic = rec.surface_override.metallic;
         roughness = rec.surface_override.roughness;
     } else {
-        metallic = getPropertyValue(metallicProperty, Vec2(rec.u, rec.v)).z;
-        roughness = getPropertyValue(roughnessProperty, Vec2(rec.u, rec.v)).y;
+        metallic = getMetallicValue(Vec2(rec.u, rec.v));
+        roughness = getRoughnessValue(Vec2(rec.u, rec.v));
     }
     float cos_theta = std::fmax(Vec3::dot(rec.normal, outgoing), 0.0f);
     Vec3 emission = getPropertyValue(emissionProperty, Vec2(rec.u, rec.v));
@@ -387,28 +524,49 @@ Vec3 PrincipledBSDF::sampleGGXVNDF(const Vec3& N, const Vec3& V, float roughness
     float safeRoughness = std::clamp(roughness, 0.02f, 1.0f);
     float alpha = safeRoughness * safeRoughness;
 
-    Vec3 Vh(alpha * V.x, alpha * V.y, V.z);
+    // 1. Build ONB from surface normal — Duff et al. 2017, matches Vulkan buildONB
+    float sign_ = ((float)N.z >= 0.0f) ? 1.0f : -1.0f;
+    float a     = -1.0f / (sign_ + (float)N.z);
+    float b     = (float)N.x * (float)N.y * a;
+    Vec3 tangent((1.0f + sign_ * (float)N.x * (float)N.x * a), sign_ * b, -sign_ * (float)N.x);
+    Vec3 bitangent(b, sign_ + (float)N.y * (float)N.y * a, -(float)N.y);
+
+    // 2. Transform V to tangent space
+    Vec3 Ve(Vec3::dot(V, tangent), Vec3::dot(V, bitangent), Vec3::dot(V, N));
+
+    // 3. Scale by alpha → stretched hemisphere
+    Vec3 Vh(alpha * (float)Ve.x, alpha * (float)Ve.y, (float)Ve.z);
     Vh = Vh.normalize();
 
-    float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    // 4. ONB perpendicular to Vh
+    float lensq = (float)Vh.x * (float)Vh.x + (float)Vh.y * (float)Vh.y;
     Vec3 T1;
     if (lensq > 1e-7f) {
-        T1 = Vec3(-Vh.y, Vh.x, 0.0f) * (1.0f / std::sqrt(lensq));
+        T1 = Vec3(-(float)Vh.y, (float)Vh.x, 0.0f) * (1.0f / std::sqrt(lensq));
     } else {
         T1 = Vec3(1.0f, 0.0f, 0.0f);
     }
     Vec3 T2 = Vec3::cross(Vh, T1);
 
+    // 5. Sample unit disk
     float r = std::sqrt(u1);
-    float phi = 2.0f * M_PI * u2;
+    float phi = 2.0f * (float)M_PI * u2;
     float t1 = r * std::cos(phi);
     float t2 = r * std::sin(phi);
-    float z = std::sqrt(std::max(0.0f, 1.0f - t1 * t1 - t2 * t2));
 
-    Vec3 sample = T1 * t1 + T2 * t2 + Vh * z;
-    Vec3 H(alpha * sample.x, alpha * sample.y, std::max(0.0f, sample.z));
-    H = H.normalize();
+    // 6. Hemisphere reprojection (Heitz 2018 — critical for correct roughness spread)
+    float s = 0.5f * (1.0f + (float)Vh.z);
+    t2 = (1.0f - s) * std::sqrt(std::max(0.0f, 1.0f - t1 * t1)) + s * t2;
 
+    // 7. Microfacet normal in local space
+    Vec3 Nh = T1 * t1 + T2 * t2 + Vh * std::sqrt(std::max(0.0f, 1.0f - t1 * t1 - t2 * t2));
+
+    // 8. Unstretch and transform back to world space
+    Vec3 Ne(alpha * (float)Nh.x, alpha * (float)Nh.y, std::max(0.0f, (float)Nh.z));
+    Ne = Ne.normalize();
+    Vec3 H = (tangent * (float)Ne.x + bitangent * (float)Ne.y + N * (float)Ne.z).normalize();
+
+    // 9. Reflect view around half-vector
     Vec3 L = Vec3::reflect(-V, H).normalize();
     if (Vec3::dot(N, L) <= 0.0f) {
         L = Vec3::reflect(-V, N).normalize();

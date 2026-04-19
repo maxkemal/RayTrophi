@@ -532,8 +532,23 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 for (auto& [obj_name, tris] : mesh_cache) {
                     if (tris.empty()) continue;
                     if (!tris[0].second->getTransformHandle()) continue;
+                    bool synced_instance_transform = false;
                     for (auto& pair : tris) {
+                        const int object_index = pair.first;
+                        if (object_index >= 0 && static_cast<size_t>(object_index) < ctx.scene.world.objects.size()) {
+                            if (auto inst = std::dynamic_pointer_cast<HittableInstance>(ctx.scene.world.objects[object_index])) {
+                                if (inst->syncTransformFromSourceTriangles()) {
+                                    synced_instance_transform = true;
+                                    continue;
+                                }
+                            }
+                        }
+
                         pair.second->updateTransformedVertices();
+                    }
+                    if (synced_instance_transform) {
+                        ++synced_objects;
+                        continue;
                     }
                     ++synced_objects;
                 }
@@ -553,6 +568,10 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                         continue;
                     }
                     auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+                    if (inst && inst->syncTransformFromSourceTriangles()) {
+                        ++synced_objects;
+                        continue;
+                    }
                     if (inst && inst->source_triangles) {
                         for (auto& srcTri : *inst->source_triangles) {
                             if (srcTri && srcTri->getTransformHandle()) {
@@ -1094,8 +1113,6 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                         bool retry_hit = false;
                         for (const auto& obj : ctx.scene.world.objects) {
                             if (!obj) continue;
-                            auto retry_tri_obj = std::dynamic_pointer_cast<Triangle>(obj);
-                            if (!retry_tri_obj) continue;
                             if (obj->hit(r, 0.001f, retry_closest, retry_rec)) {
                                 if (retry_rec.triangle) {
                                     const std::string& retry_name = retry_rec.triangle->getNodeName();
@@ -1525,6 +1542,13 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
     SceneSelection& sel = ctx.selection;
     if (!sel.hasSelection()) return;
 
+    struct PendingDuplicateCacheEntry {
+        std::string source_name;
+        std::string new_name;
+        Matrix4x4 transform;
+        std::vector<std::pair<int, std::shared_ptr<Triangle>>> cache_entries;
+    };
+
     // Build a list of objects to duplicate
     // If multi-selection exists, use it. Otherwise use the single active selection.
     std::vector<SelectableItem> itemsToDuplicate;
@@ -1536,6 +1560,7 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
 
     std::vector<std::shared_ptr<Hittable>> allNewTriangles;
     std::vector<SelectableItem> newSelectionList;
+    std::vector<PendingDuplicateCacheEntry> pendingCacheEntries;
     
     // Temporary map for name uniqueness check
     if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
@@ -1586,6 +1611,13 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
             std::shared_ptr<Triangle> firstNewTri = nullptr;
             auto it = mesh_cache.find(targetName);
             if (it != mesh_cache.end()) {
+                const int baseIndex = static_cast<int>(ctx.scene.world.objects.size() + allNewTriangles.size());
+                PendingDuplicateCacheEntry pendingCacheEntry;
+                pendingCacheEntry.source_name = targetName;
+                pendingCacheEntry.new_name = newName;
+                pendingCacheEntry.cache_entries.reserve(it->second.size());
+
+                int localIndex = 0;
                 for (auto& pair : it->second) {
                     auto& oldTri = pair.second;
                     auto newTri = std::make_shared<Triangle>(*oldTri);
@@ -1593,7 +1625,16 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
                     newTri->setNodeName(newName);
                     
                     allNewTriangles.push_back(newTri);
+                    pendingCacheEntry.cache_entries.push_back({baseIndex + localIndex, newTri});
+                    ++localIndex;
                     if (!firstNewTri) firstNewTri = newTri;
+                }
+
+                if (!pendingCacheEntry.cache_entries.empty()) {
+                    if (firstNewTri) {
+                        pendingCacheEntry.transform = firstNewTri->getTransformMatrix();
+                    }
+                    pendingCacheEntries.push_back(std::move(pendingCacheEntry));
                 }
             }
             
@@ -1690,7 +1731,22 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
     if (anyDuplicated) {
         if (!allNewTriangles.empty()) {
             ctx.scene.world.objects.insert(ctx.scene.world.objects.end(), allNewTriangles.begin(), allNewTriangles.end());
-            rebuildMeshCache(ctx.scene.world.objects);
+
+            // Incrementally extend selection caches instead of rescanning the full scene.
+            for (auto& pending : pendingCacheEntries) {
+                mesh_cache[pending.new_name] = pending.cache_entries;
+                mesh_ui_cache.push_back({pending.new_name, mesh_cache[pending.new_name]});
+
+                auto bbox_it = bbox_cache.find(pending.source_name);
+                if (bbox_it != bbox_cache.end()) {
+                    bbox_cache[pending.new_name] = bbox_it->second;
+                }
+
+                auto mats_it = material_slots_cache.find(pending.source_name);
+                if (mats_it != material_slots_cache.end()) {
+                    material_slots_cache[pending.new_name] = mats_it->second;
+                }
+            }
         }
         
         sel.clearSelection();
@@ -1698,19 +1754,73 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
             sel.addToSelection(newItem);
         }
         
-        if (g_viewport_backend) {
-            rebuildInteractiveViewportAfterTopologyChange(ctx);
-            g_viewport_raster_rebuild_pending = true;
+        bool rasterCloneSucceeded = false;
+        if (Backend::IViewportBackend* viewportBackend = getSelectionViewportBackend(ctx)) {
+            rasterCloneSucceeded = !pendingCacheEntries.empty();
+            for (const auto& pending : pendingCacheEntries) {
+                if (!viewportBackend->cloneRasterObjectByNodeName(pending.source_name, pending.new_name, pending.transform)) {
+                    rasterCloneSucceeded = false;
+                    break;
+                }
+            }
         }
+        g_viewport_raster_rebuild_pending = !rasterCloneSucceeded;
+        extern bool g_geometry_dirty;
+        extern std::atomic<uint64_t> g_scene_geometry_generation;
+        g_geometry_dirty = true;
+        g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
         extern bool g_vulkan_rebuild_pending;
         Backend::IBackend* renderBackend = getSelectionRenderBackend(ctx);
-        if (renderBackend && dynamic_cast<Backend::VulkanBackendAdapter*>(renderBackend) != nullptr) {
-            g_vulkan_rebuild_pending = true;
-        } else if (renderBackend) {
+        bool optixCloneSucceeded = false;
+        if (auto* optixBackend = dynamic_cast<Backend::OptixBackend*>(renderBackend)) {
+            for (const auto& pending : pendingCacheEntries) {
+                auto* optix = optixBackend->getOptixWrapper();
+                if (!optix) {
+                    optixCloneSucceeded = false;
+                    break;
+                }
+                const auto newIds = optix->cloneInstancesByNodeName(pending.source_name, pending.new_name);
+                if (newIds.empty()) {
+                    optixCloneSucceeded = false;
+                    break;
+                }
+                optixBackend->updateObjectTransform(pending.new_name, pending.transform);
+                optixCloneSucceeded = true;
+            }
+            if (optixCloneSucceeded) {
+                optixBackend->rebuildAccelerationStructure();
+                optixBackend->resetAccumulation();
+            }
+        }
+        bool vulkanCloneSucceeded = false;
+        if (auto* vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(renderBackend)) {
+            vulkanCloneSucceeded = !pendingCacheEntries.empty();
+            for (const auto& pending : pendingCacheEntries) {
+                std::shared_ptr<Hittable> representative;
+                if (!pending.cache_entries.empty()) {
+                    representative = pending.cache_entries.front().second;
+                }
+                if (!vkBackend->cloneRtObjectByNodeName(
+                        pending.source_name, pending.new_name, representative, pending.transform)) {
+                    vulkanCloneSucceeded = false;
+                    break;
+                }
+            }
+            g_vulkan_rebuild_pending = !vulkanCloneSucceeded;
+        } else if (renderBackend && !optixCloneSucceeded) {
             g_optix_rebuild_pending = true;
         }
         extern bool g_bvh_rebuild_pending;
-        g_bvh_rebuild_pending = true;
+        extern int g_bvh_rebuild_deferred_frames;
+        if (renderBackend && dynamic_cast<Backend::VulkanBackendAdapter*>(renderBackend) != nullptr) {
+            g_bvh_rebuild_deferred_frames = std::max(g_bvh_rebuild_deferred_frames, 30);
+            g_bvh_rebuild_pending = false;
+        } else if (renderBackend && dynamic_cast<Backend::OptixBackend*>(renderBackend) != nullptr) {
+            g_bvh_rebuild_deferred_frames = std::max(g_bvh_rebuild_deferred_frames, 30);
+            g_bvh_rebuild_pending = false;
+        } else {
+            g_bvh_rebuild_pending = true;
+        }
         
         ctx.renderer.resetCPUAccumulation();
         syncSelectionSceneState(ctx, true, false);

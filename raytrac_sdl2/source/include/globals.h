@@ -42,6 +42,12 @@ enum class RasterViewportQualityPreset {
     Quality = 3
 };
 
+enum class MaterialPreviewLightingPreset {
+    Classic = 0,
+    Studio = 1,
+    Outdoor = 2
+};
+
 // Helper to get sample count from timeline quality preset
 inline int getTimelineSamplesFromPreset(TimelineQualityPreset preset) {
     switch (preset) {
@@ -72,6 +78,7 @@ struct RenderSettings {
     // Quality Preset
     QualityPreset quality_preset = QualityPreset::Preview;
     RasterViewportQualityPreset raster_viewport_quality_preset = RasterViewportQualityPreset::Auto;
+    MaterialPreviewLightingPreset material_preview_lighting_preset = MaterialPreviewLightingPreset::Classic;
     
     // Sampling
     int samples_per_pixel = 1;
@@ -81,8 +88,8 @@ struct RenderSettings {
     // Adaptive Sampling
     bool use_adaptive_sampling = true;
     int min_samples = 1;
-    int max_samples = 32;
-    float variance_threshold = 0.1f;
+    int max_samples = 128;
+    float variance_threshold = 0.01f;
 
     // Denoiser
     bool use_denoiser = false;        // Viewport Denoiser
@@ -136,6 +143,8 @@ struct RenderSettings {
     float render_elapsed_seconds = 0.0f;
     float render_estimated_remaining = 0.0f;
     float avg_sample_time_ms = 0.0f;
+    float avg_total_frame_time_ms = 0.0f;
+    float avg_total_frame_fps = 0.0f;
     
     // Viewport Grid Settings
     bool grid_enabled = false;
@@ -327,6 +336,7 @@ extern bool g_optix_rebuild_pending;
 extern std::atomic<bool> g_optix_rebuild_in_progress; // True while TLAS rebuild is happening - blocks render // GPU OptiX geometry needs rebuild
 extern bool g_mesh_cache_dirty;         // UI mesh cache needs rebuild
 extern bool g_cpu_bvh_refit_pending;    // CPU BVH fast refit (Embree only)
+extern int g_bvh_rebuild_deferred_frames; // Delay CPU BVH rebuild briefly after heavy topology edits in GPU modes
 
 // ===========================================================================
 // SCENE LOADING FLAGS - Thread safety for project load/save operations

@@ -41,7 +41,7 @@ void main() {
         return;
     }
 
-    // 0: Solid clay (flat lambert, not matcap)
+    // 0: Solid clay (flat lambert)
     if (preset == 0) {
         vec3 lightDir = normalize(vec3(0.45, 0.8, 0.35));
         float lambert = max(dot(n, lightDir), 0.0);

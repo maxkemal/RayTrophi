@@ -6,6 +6,7 @@
 #include "ray.h"
 #include "payload.h"
 #include <material_gpu.h>
+#include "procedural_detail.cuh"
 
 
 // Industry standard minimum alpha value (matches Disney/Cycles/PBRT)
@@ -109,7 +110,7 @@ __device__ float G_Smith(float NdotV, float NdotL, float roughness) {
 
 __device__ float3 fresnel_schlick_roughness(float cosTheta, float3 F0, float roughness);
 
-__device__ float pdf_brdf(const GpuMaterial& mat, const float3& wo, const float3& wi, const float3& N) {
+__device__ float pdf_brdf(const GpuMaterial& mat, const float3& wo, const float3& wi, const float3& N, int bounce_index = 0) {
     float3 sum = wo + wi;
     float sum_len2 = dot(sum, sum);
     if (sum_len2 < 1e-12f) return 1e-6f;
@@ -118,6 +119,9 @@ __device__ float pdf_brdf(const GpuMaterial& mat, const float3& wo, const float3
     float VdotH = max(dot(wo, H), GPU_MIN_DOT);
 
     float roughness = fminf(fmaxf(mat.roughness, 0.02f), 1.0f);
+    // Must mirror the regularization applied in evaluate_brdf / scatter_material
+    // so MIS weights stay consistent with the actually-sampled BRDF.
+    if (bounce_index > 0) roughness = fmaxf(roughness, 0.1f);
     float alpha = max(roughness * roughness, GPU_MIN_ALPHA);
     float alpha2 = alpha * alpha;
     float denom = (NdotH * NdotH) * (alpha2 - 1.0f) + 1.0f;
@@ -164,6 +168,12 @@ __device__ float3 evaluate_brdf(
 {
     const float3 N = payload.normal;
     float2 uv = apply_material_uv_transform(material, payload.uv);
+
+    // Procedural tile-break: independent slider — set to 0 to keep albedo maps clean.
+    if (material.tile_break_strength > 0.0f &&
+        (material.albedo_tex || material.roughness_tex || material.normal_tex)) {
+        uv = pd_tileBreak(uv, payload.position, material.tile_break_strength);
+    }
 
     float NdotL = max(dot(N, wi), GPU_MIN_DOT);
     float NdotV = max(dot(N, wo), GPU_MIN_DOT);
@@ -217,6 +227,15 @@ __device__ float3 evaluate_brdf(
     }*/
     roughness = fminf(fmaxf(roughness, 0.02f), 1.0f);
 
+    // Path regularization (Müller 2018): on indirect bounces, clamp roughness
+    // to a floor so secondary GGX lobes cannot produce near-mirror D-peaks.
+    // Primary bounce (bounce_index == 0) is untouched — sharp direct
+    // reflections remain correct. Kills metallic fireflies at the source
+    // instead of masking them with per-path radiance clamps.
+    if (payload.bounce_index > 0) {
+        roughness = fmaxf(roughness, 0.1f);
+    }
+
     float metallic = material.metallic;
     if (payload.use_blended_data) {
         metallic = payload.blended_metallic;
@@ -229,7 +248,38 @@ __device__ float3 evaluate_brdf(
         // Legacy SBT Fallback
         metallic = tex2D<float4>(payload.metallic_tex, uv.x, uv.y).z;
     }
-  
+
+    // ── Procedural detail: subtle color variation + dirt + roughness ──────────
+    // micro_detail_strength drives all world-space effects without touching UVs.
+    // tile_break_strength (above) is the separate UV-warp control.
+    if (material.micro_detail_strength > 0.0f) {
+        float sc  = fmaxf(material.micro_detail_scale, 0.5f);
+        float str = material.micro_detail_strength;
+
+        // Subtle world-space luminance variation — ±8% max, independent seed
+        float3 colorSeed = make_float3(
+            payload.position.x * sc * 0.7f + 31.4f,
+            payload.position.y * sc * 0.7f + 17.2f,
+            payload.position.z * sc * 0.7f + 42.9f);
+        float colorVar   = pd_vnoise3(colorSeed);
+        float colorDelta = (colorVar - 0.5f) * 0.16f * str;
+        float cm = 1.0f + colorDelta;
+        albedo = make_float3(
+            fmaxf(0.0f, fminf(1.0f, albedo.x * cm)),
+            fmaxf(0.0f, fminf(1.0f, albedo.y * cm)),
+            fmaxf(0.0f, fminf(1.0f, albedo.z * cm)));
+
+        // Dirt: fBm darkening (dust, grime, worn patches)
+        float dirtFactor = pd_dirt(payload.position, sc) * str;
+        float3 dirtColor = make_float3(0.14f, 0.10f, 0.08f);
+        albedo = make_float3(
+            albedo.x + (albedo.x * dirtColor.x - albedo.x) * dirtFactor,
+            albedo.y + (albedo.y * dirtColor.y - albedo.y) * dirtFactor,
+            albedo.z + (albedo.z * dirtColor.z - albedo.z) * dirtFactor);
+
+        roughness = fmaxf(0.02f, fminf(1.0f,
+            roughness + pd_roughnessVar(payload.position, sc) * str * 0.5f));
+    }
 
     float alpha = max(roughness * roughness, GPU_MIN_ALPHA);
     float alpha2 = alpha * alpha;
@@ -288,12 +338,22 @@ __device__ float schlick(float cos_theta, float eta) {
     return r0 + (1.0f - r0) * powf(1.0f - cos_theta, 5.0f);
 }
 
-// GGX VNDF sampling (Heitz 2014) - returns outgoing direction L given N and view V
+// GGX VNDF sampling (Heitz 2018) — mirrors closesthit.rchit ggxSampleVNDF exactly
 __device__ float3 ggxSampleVNDF(const float3& N, const float3& V, float alpha, float r1, float r2) {
-    // Transform view direction to hemisphere configuration
-    float3 Vh = normalize(make_float3(alpha * V.x, alpha * V.y, V.z));
+    // 1. Build ONB from surface normal — Duff et al. 2017, matches Vulkan buildONB
+    float sign_ = (N.z >= 0.0f) ? 1.0f : -1.0f;
+    float a     = -1.0f / (sign_ + N.z);
+    float b     = N.x * N.y * a;
+    float3 tangent   = make_float3(1.0f + sign_ * N.x * N.x * a, sign_ * b, -sign_ * N.x);
+    float3 bitangent = make_float3(b, sign_ + N.y * N.y * a, -N.y);
 
-    // Orthonormal basis
+    // 2. Transform V to tangent space
+    float3 Ve = make_float3(dot(V, tangent), dot(V, bitangent), dot(V, N));
+
+    // 3. Scale by alpha → stretched hemisphere
+    float3 Vh = normalize(make_float3(alpha * Ve.x, alpha * Ve.y, Ve.z));
+
+    // 4. ONB perpendicular to Vh
     float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
     float3 T1;
     if (lensq > 1e-7f) {
@@ -303,20 +363,25 @@ __device__ float3 ggxSampleVNDF(const float3& N, const float3& V, float alpha, f
     }
     float3 T2 = cross(Vh, T1);
 
-    // Sample point on unit disk
+    // 5. Sample unit disk
     float r = sqrtf(r1);
     float phi = 2.0f * M_PIf * r2;
     float t1 = r * cosf(phi);
     float t2 = r * sinf(phi);
 
-    // Reproject onto hemisphere oriented by Vh
-    float3 sample = T1 * t1 + T2 * t2 + Vh * sqrtf(max(0.0f, 1.0f - t1 * t1 - t2 * t2));
+    // 6. Hemisphere reprojection (Heitz 2018 — critical for correct roughness spread)
+    float s = 0.5f * (1.0f + Vh.z);
+    t2 = (1.0f - s) * sqrtf(fmaxf(0.0f, 1.0f - t1 * t1)) + s * t2;
 
-    // Transform back to ellipsoid
-    float3 H = normalize(make_float3(alpha * sample.x, alpha * sample.y, max(0.0f, sample.z)));
-    // Reflect view around H to get outgoing L
-    float3 L = normalize(reflect(-V, H));
-    return L;
+    // 7. Microfacet normal in local space
+    float3 Nh = T1 * t1 + T2 * t2 + Vh * sqrtf(fmaxf(0.0f, 1.0f - t1 * t1 - t2 * t2));
+
+    // 8. Unstretch and transform back to world space
+    float3 Ne = normalize(make_float3(alpha * Nh.x, alpha * Nh.y, fmaxf(0.0f, Nh.z)));
+    float3 H = normalize(tangent * Ne.x + bitangent * Ne.y + N * Ne.z);
+
+    // 9. Reflect view around half-vector
+    return normalize(reflect(-V, H));
 }
 __device__ bool refract(const float3& V, const float3& N, float eta, float3* out_refracted) {
     float cos_theta = fminf(dot(-V, N), 1.0f);
@@ -774,6 +839,15 @@ __device__ bool scatter_material(
     metallic = fminf(fmaxf(metallic, 0.0f), 1.0f);
     transmission = fminf(fmaxf(transmission, 0.0f), 1.0f);
 
+    // Path regularization (Müller 2018): indirect bounces use a roughness
+    // floor so secondary GGX sampling cannot hit near-mirror D-peaks and
+    // create metallic fireflies. Primary bounce is untouched so direct
+    // specular highlights stay sharp. Must match the same clamp used in
+    // evaluate_brdf() so scatter and NEE evaluate the same BRDF.
+    if (payload.bounce_index > 0) {
+        roughness = fmaxf(roughness, 0.1f);
+    }
+
    
    
     float3 F0 = lerp(make_float3(0.04f, 0.04f, 0.04f), albedo, metallic);   
@@ -838,54 +912,83 @@ __device__ bool scatter_material(
     }
     
     // 5. STANDARD DIFFUSE + SPECULAR (Base layer)
-    // Stochastic lobe selection — mirrors GLSL closesthit.rchit dielectric branch.
-    // fresnelWeight modulated by (1 - roughness^2) so that roughness=1 → ~0% specular,
-    // roughness=0 → purely Fresnel-driven specular chance. metallic paths use full F luma.
+    // Mirror Vulkan closesthit.rchit three-case structure exactly:
+    //   metallic >= 0.999 → pure metal (always specular, no selection)
+    //   metallic <= 0.001 → pure dielectric (Fresnel-driven, white F0 specular, NO compensation)
+    //   otherwise         → stochastic metallic blend WITH 1/p compensation (unbiased estimator)
+    //
+    // The compensation is critical: without it the expected throughput is ~half of Vulkan
+    // for intermediate metallic values, making diffuse contribution too weak.
     float3 wo = -normalize(ray_in.direction);
     float cosTheta_N = fmaxf(dot(V, N), 0.0f);
-
     float3 F_avg = F0 + (make_float3(1.0f, 1.0f, 1.0f) - F0) / 21.0f;
-    float3 k_d = (make_float3(1.0f, 1.0f, 1.0f) - F_avg) * (1.0f - metallic);
+    float3 k_d   = (make_float3(1.0f, 1.0f, 1.0f) - F_avg) * (1.0f - metallic);
 
-    // Match Vulkan/CPU visual lobe selection more closely:
-    // use Schlick Fresnel at the macro normal angle without extra roughness damping.
-    float fresnelAtN = F0.x + (1.0f - F0.x) * powf(1.0f - cosTheta_N, 5.0f);
-    float p_spec = fresnelAtN * (1.0f - metallic) + metallic;
-    p_spec = fminf(fmaxf(p_spec, 0.001f), 0.999f);
-
-    if (random_float(rng) < p_spec) {
-        // --- Specular / Metal lobe ---
+    // Shared VNDF specular scatter helper (inline lambda replacement)
+    auto scatter_specular = [&](float3 F0_lobe, float comp) -> bool {
         float alpha = fmaxf(roughness * roughness, GPU_MIN_ALPHA);
         float3 L = ggxSampleVNDF(N, V, alpha, random_float(rng), random_float(rng));
-        if (dot(N, L) <= 0.0f) {
-            L = reflect(-V, N);
+        if (dot(N, L) <= 0.0f) L = reflect(-V, N);
+        float3 H        = normalize(V + L);
+        float  cos_th   = fmaxf(dot(V, H), 1e-4f);
+        float3 F        = fresnel_schlick_roughness(cos_th, F0_lobe, roughness);
+        float  NdotL_s  = fmaxf(dot(N, L), GPU_MIN_DOT);
+        float  k_g1     = alpha * 0.5f;
+        float  G1L      = NdotL_s / (NdotL_s * (1.0f - k_g1) + k_g1);
+        *scattered      = Ray(offset_ray(payload.position, N), L);
+        *attenuation    = clamp3f(F * G1L * comp, 0.0f, 1e4f);
+        *pdf            = pdf_brdf(material, wo, L, N, payload.bounce_index);
+        *is_specular    = (roughness < 0.02f);
+        return true;
+    };
+
+    if (metallic >= 0.999f) {
+        // ── Pure metal: always specular, no selection probability ──
+        // Matches Vulkan: if (metallic >= 0.999) scatterMetal(albedo, roughness)
+        scatter_specular(F0, 1.0f);
+
+    } else if (metallic <= 0.001f) {
+        // ── Pure dielectric: Fresnel-driven selection, NO compensation ──
+        // Matches Vulkan: fresnelBase-based rnd; specular uses vec3(1.0) as F0
+        // so that Fresnel=1 and attenuation=G1L (≈1) — the 0.04 weight comes
+        // from the selection probability itself, not from the F term.
+        float fresnelBase = 0.04f + (1.0f - 0.04f) * powf(1.0f - cosTheta_N, 5.0f);
+        if (random_float(rng) < fresnelBase) {
+            // Specular: white F0 → Fresnel=1, weight = G1L (naturally small chance)
+            scatter_specular(make_float3(1.0f, 1.0f, 1.0f), 1.0f);
+        } else {
+            // Diffuse: full albedo, no compensation (matches Vulkan scatterDiffuse)
+            float3 diff_dir  = random_cosine_direction(rng);
+            float3 up        = fabsf(N.z) < 0.999f ? make_float3(0,0,1) : make_float3(1,0,0);
+            float3 tanX      = normalize(cross(up, N));
+            float3 tanY      = cross(N, tanX);
+            float3 world_dir = normalize(tanX*diff_dir.x + tanY*diff_dir.y + N*diff_dir.z);
+            *scattered    = Ray(offset_ray(payload.position, N), world_dir);
+            *attenuation  = clamp3f(albedo, 0.0f, 1e4f);
+            *pdf          = fmaxf(dot(N, world_dir), GPU_MIN_DOT) / M_PIf;
+            *is_specular  = false;
         }
-        float3 H = normalize(V + L);
-        float cos_theta = fmaxf(dot(V, H), 1e-4f);
-        float3 F = fresnel_schlick_roughness(cos_theta, F0, roughness);
-        *scattered = Ray(offset_ray(payload.position, N), L);
-        float3 spec_tint = lerp(make_float3(1.0f, 1.0f, 1.0f), albedo, metallic);
-        *attenuation = clamp3f(F * spec_tint, 0.0f, 1e4f);
-        *pdf = pdf_brdf(material, wo, L, N) * p_spec;
-        
-        // --- VULKAN PARITY: Enable NEE for glossy surfaces ---
-        // Only mark as specular if roughness is very low (mirror-like)
-        *is_specular = (roughness < 0.02f);
+
     } else {
-        // --- Diffuse lobe ---
-        float3 diff_dir = random_cosine_direction(rng);
-        float3 up = fabsf(N.z) < 0.999f ? make_float3(0.0f, 0.0f, 1.0f) : make_float3(1.0f, 0.0f, 0.0f);
-        float3 tangentX = normalize(cross(up, N));
-        float3 tangentY = cross(N, tangentX);
-        float3 world_diff = normalize(tangentX * diff_dir.x + tangentY * diff_dir.y + N * diff_dir.z);
-
-        float NdotD = fmaxf(dot(N, world_diff), GPU_MIN_DOT);
-        float3 diffuse = k_d * albedo; 
-
-        *scattered = Ray(offset_ray(payload.position, N), world_diff);
-        *attenuation = clamp3f(diffuse, 0.0f, 1e4f);
-        *pdf = NdotD / M_PIf * (1.0f - p_spec);
-        *is_specular = false;
+        // ── Metallic blend: stochastic with 1/p compensation ──
+        // Matches Vulkan: rnd < metalWeight → scatterMetal * (1/metalWeight)
+        //                 else              → scatterDiffuse * (1/diffuseWeight)
+        // Compensation makes the estimator unbiased: E[throughput] = F*G1L + albedo
+        float p_metal = metallic;
+        if (random_float(rng) < p_metal) {
+            scatter_specular(F0, 1.0f / fmaxf(p_metal, 0.1f));
+        } else {
+            float  p_diff    = fmaxf(1.0f - p_metal, 0.1f);
+            float3 diff_dir  = random_cosine_direction(rng);
+            float3 up        = fabsf(N.z) < 0.999f ? make_float3(0,0,1) : make_float3(1,0,0);
+            float3 tanX      = normalize(cross(up, N));
+            float3 tanY      = cross(N, tanX);
+            float3 world_dir = normalize(tanX*diff_dir.x + tanY*diff_dir.y + N*diff_dir.z);
+            *scattered    = Ray(offset_ray(payload.position, N), world_dir);
+            *attenuation  = clamp3f(albedo * (1.0f / p_diff), 0.0f, 1e4f);
+            *pdf          = fmaxf(dot(N, world_dir), GPU_MIN_DOT) / M_PIf;
+            *is_specular  = false;
+        }
     }
 
     if (!finite3(*attenuation)) {

@@ -1793,10 +1793,15 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
             dirtyTriangleIndices,
             meshEntries);
 
+        // Terrain triangles are registered in the raster backend with the node name
+        // "<terrain->name>_Chunk" (set in TerrainManager), so we must use that name
+        // when looking up the raster mesh — not bare terrain->name.
+        const std::string terrainRasterNodeName = terrain->name + "_Chunk";
+
         if (hasDirtyPatchData &&
-            vkBackend->patchRasterMeshTriangles(terrain->name, dirtyTriangleIndices, meshEntries)) {
+            vkBackend->patchRasterMeshTriangles(terrainRasterNodeName, dirtyTriangleIndices, meshEntries)) {
             handled = true;
-        } else if (vkBackend->updateRasterMeshFromTriangles(terrain->name, terrain->mesh_triangles)) {
+        } else if (vkBackend->updateRasterMeshFromTriangles(terrainRasterNodeName, terrain->mesh_triangles)) {
             handled = true;
         } else if (allowFullRasterFallback) {
             vkBackend->buildRasterGeometry(ctx.scene.world.objects);

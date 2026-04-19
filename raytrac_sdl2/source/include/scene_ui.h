@@ -52,6 +52,7 @@ class GasVolume;
 #include "Backend/IBackend.h"
 #include "Backend/OptixBackend.h"
 #include "AssetRegistry.h"
+#include "AABB.h"
 #include "Paint/PaintModeState.h"
 #include "Paint/MeshPaintAdapter.h"
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -222,6 +223,10 @@ public:
      void drawPrincipledBSDFEditor(class PrincipledBSDF* pbsdf, uint16_t mat_id, UIContext& ctx); // Reusable editor widget
      void drawEditableMeshOverlay(UIContext& ctx); // Viewport edit overlay for selected mesh
      bool ensureEditableMeshCache(UIContext& ctx, const std::string& objectName);
+     bool ensureSculptControlGraph(UIContext& ctx, const std::string& objectName);
+     void invalidateSculptControlGraph(const std::string& objectName = std::string());
+     bool ensureSculptPBVH(UIContext& ctx, const std::string& objectName);
+     void invalidateSculptPBVH(const std::string& objectName = std::string());
      bool handleMeshElementSelection(UIContext& ctx, const ImVec2& mousePos);
      Vec3 getSelectedMeshElementWorldPosition(UIContext& ctx, bool* valid = nullptr);
      bool applySelectedMeshElementTranslation(UIContext& ctx, const Vec3& worldDelta);
@@ -230,6 +235,9 @@ public:
      MeshShadingSettings& ensureMeshShadingSettings(const std::string& objectName);
      bool applyMeshShadingSettings(UIContext& ctx, const std::string& objectName, bool queueGpuSync = true);
      bool refreshEditableDisplayMeshFromBase(UIContext& ctx, const std::string& objectName, bool queueGpuSync = true);
+     void beginInteractiveSubdivisionPreview(const std::string& objectName);
+     void endInteractiveSubdivisionPreview(UIContext& ctx, const std::string& objectName, bool rebuildFull = true);
+     bool isInteractiveSubdivisionPreviewActiveForObject(const std::string& objectName) const;
      void clearEditableMeshSelection();
      void resetMeshEditState(UIContext& ctx);
      void syncMeshEditState(UIContext& ctx);
@@ -473,7 +481,56 @@ public:
          uint32_t triangle_mark_generation = 1;
          EditableMeshSelection selection;
      };
+     struct SculptControlNode {
+         Vec3 local_position;
+         Vec3 local_normal;
+         float area_weight = 1.0f;
+         bool is_boundary = false;
+         std::vector<int> neighbor_ids;
+         std::vector<int> source_vertex_ids;
+         std::vector<float> source_weights;
+     };
+     struct SculptControlGraph {
+         std::string object_name;
+         size_t source_triangle_count = 0;
+         Matrix4x4 source_object_transform = Matrix4x4::identity();
+         float avg_edge_length = 0.0f;
+         float spatial_cell_size = 0.0f;
+         bool uses_spatial_leaf_nodes = false;
+         size_t last_candidate_node_count = 0;
+         size_t last_candidate_vertex_count = 0;
+         size_t last_touched_leaf_count = 0;
+         std::vector<SculptControlNode> nodes;
+         std::vector<int> source_vertex_to_node_id;
+         std::unordered_map<EditableSpatialCellKey, std::vector<int>, EditableSpatialCellKeyHasher> node_spatial_buckets;
+     };
+     struct SculptPBVHNode {
+         AABB local_bounds;
+         int parent_id = -1;
+         int left_child_id = -1;
+         int right_child_id = -1;
+         int depth = 0;
+         bool is_leaf = false;
+         bool is_boundary = false;
+         std::vector<int> vertex_ids;
+     };
+     struct SculptPBVH {
+         std::string object_name;
+         size_t source_triangle_count = 0;
+         Matrix4x4 source_object_transform = Matrix4x4::identity();
+         float avg_edge_length = 0.0f;
+         int root_node_id = -1;
+         int max_depth = 0;
+         int leaf_vertex_limit = 64;
+         size_t leaf_count = 0;
+         size_t last_candidate_node_count = 0;
+         size_t last_candidate_vertex_count = 0;
+         std::vector<SculptPBVHNode> nodes;
+         std::vector<int> source_vertex_to_leaf_id;
+     };
      EditableMeshCache editable_mesh_cache;
+     SculptControlGraph sculpt_control_graph;
+     SculptPBVH sculpt_pbvh;
      std::vector<Vec3> sculpt_updated_local_positions;
      std::vector<size_t> sculpt_dirty_mesh_cache_indices;
      struct MeshEditLayer {
@@ -602,12 +659,13 @@ public:
         Vec3 start_world_hit;
         Vec3 last_world_hit;
         Vec3 stroke_normal;
-        std::vector<Vec3> start_local_positions;
-        std::vector<float> grab_weights;
+        std::unordered_map<int, Vec3> grab_start_local_positions;
+        std::unordered_map<int, float> grab_weights_by_vertex;
         std::vector<float> layer_accum;
         std::vector<float> clay_layer_accum;
         std::vector<float> clay_strips_layer_accum;
-        std::vector<MeshEditTriangleState> before_states;
+        std::unordered_map<const class Triangle*, MeshEditTriangleState> before_triangle_states;
+        std::unordered_map<const class Triangle*, std::shared_ptr<class Triangle>> touched_triangles;
     };
     SculptStrokeState sculpt_stroke_state;
     enum class MeshWorkspaceMode : int {
@@ -694,6 +752,8 @@ public:
     bool is_bvh_dirty = false; // Flag for lazy BVH updates
     bool focus_scene_edit_tab = false; // Auto-focus Scene Edit tab after model load
     bool mesh_edit_optix_targeted_sync_enabled = true;
+    bool interactive_subdiv_preview_active = false;
+    std::string interactive_subdiv_preview_object_name;
     // picking fails because Triangle::hit() reads stale local-space positions.
     bool picking_vertices_synced = false;
 private:

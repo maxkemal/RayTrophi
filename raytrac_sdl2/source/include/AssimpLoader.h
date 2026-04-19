@@ -53,6 +53,7 @@
 #include "PrincipledBSDF.h"
 #include "Dielectric.h"
 #include "Texture.h"
+#include "PBRMaterialSnapshot.h"
 #include "AreaLight.h"
 #include "Light.h"
 #include "DirectionalLight.h"
@@ -1142,32 +1143,8 @@ public:
                 // Calculate GpuMaterial properties from PrincipledBSDF
                 if (mat->type() == MaterialType::PrincipledBSDF) {
                     PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat.get());
-                    Vec3 alb = pbsdf->albedoProperty.color;
-                    gpuMat.albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
-                    gpuMat.roughness = (float)pbsdf->roughnessProperty.color.x;
-                    gpuMat.metallic = (float)pbsdf->metallicProperty.intensity;
-                    Vec3 em = pbsdf->emissionProperty.color;
-                    float emStr = pbsdf->emissionProperty.intensity;
-                    gpuMat.emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
-                    gpuMat.ior = pbsdf->ior;
-                    gpuMat.transmission = pbsdf->transmission;
-                    gpuMat.opacity = pbsdf->opacityProperty.alpha;
-                    
-                    // SSS
-                    gpuMat.subsurface = pbsdf->subsurface;
-                    Vec3 sssColor = pbsdf->subsurfaceColor;
-                    gpuMat.subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
-                    Vec3 sssRadius = pbsdf->subsurfaceRadius;
-                    gpuMat.subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
-                    gpuMat.subsurface_scale = pbsdf->subsurfaceScale;
-                    gpuMat.subsurface_anisotropy = pbsdf->subsurfaceAnisotropy;
-                    gpuMat.subsurface_ior = pbsdf->subsurfaceIOR;
-                    
-                    // Clearcoat & Translucent
-                    gpuMat.clearcoat = pbsdf->clearcoat;
-                    gpuMat.clearcoat_roughness = pbsdf->clearcoatRoughness;
-                    gpuMat.translucent = pbsdf->translucent;
-                    gpuMat.anisotropic = pbsdf->anisotropic;
+                    const PBRMaterialSnapshot snapshot = capturePBRMaterialSnapshot(*pbsdf);
+                    applyPBRMaterialSnapshotToGpuMaterial(snapshot, gpuMat);
 
                     // Bindless Textures Population
                     gpuMat.albedo_tex      = getCudaTex(pbsdf->albedoProperty.texture);
@@ -1941,115 +1918,143 @@ private:
             }
         }
         // Pre-check Vertex Colors
-        bool hasColors0 = mesh->HasVertexColors(0);
-        bool hasColors1 = mesh->HasVertexColors(1);
+        const bool hasColors0 = mesh->HasVertexColors(0);
+        const bool hasColors1 = mesh->HasVertexColors(1);
+        const bool hasNormals = mesh->HasNormals();
+        const bool hasUV0 = mesh->HasTextureCoords(0);
+        const unsigned int uv_channel_count = std::min<unsigned int>(AI_MAX_NUMBER_OF_TEXTURECOORDS, mesh->GetNumUVChannels());
+
+        // Hoist the PrincipledBSDF lookup & UV-set selection out of the inner loop.
+        // Done once per mesh so parallel chunks just read the captured value.
+        PrincipledBSDF* const pbsdf = dynamic_cast<PrincipledBSDF*>(material.get());
+        const int selectedUvSet = pbsdf ? std::max(0, pbsdf->selected_uv_set) : 0;
         // ---------------------------------------------------
 
-        for (unsigned int i = 0; i < mesh->mNumFaces; i++) {
-            const aiFace& face = mesh->mFaces[i];
-            if (face.mNumIndices != 3) continue;
-
-            std::vector<Vec3> vertices;
-            std::vector<Vec3> normals;
-            std::vector<Vec2> texCoords;
-            std::vector<Vec3> colors;
-
-            for (unsigned int j = 0; j < 3; j++) {
-                unsigned int index = face.mIndices[j];
-
-                // Vertex - Mesh-local space'de sakla, transform etme!
-                // Transform sharedTransform tarafından uygulanacak
-                aiVector3D vertex = mesh->mVertices[index];
-                vertices.emplace_back(vertex.x, vertex.y, vertex.z);
-
-                // Normal - Mesh-local space'de sakla
-                if (mesh->HasNormals()) {
-                    aiVector3D normal = mesh->mNormals[index];
-                    normals.emplace_back(normal.x, normal.y, normal.z);
-                }
-
-                // UV
-                if (mesh->HasTextureCoords(0)) {
-                    aiVector3D texCoord = mesh->mTextureCoords[0][index];
-                    texCoords.emplace_back(texCoord.x, texCoord.y);
-                }
-                else {
-                    texCoords.emplace_back(0.0f, 0.0f);
-                }
-
-                // Color
-                if (hasColors0) {
-                    aiColor4D col = mesh->mColors[0][index];
-                    colors.emplace_back(col.r, col.g, col.b);
-                } else if (hasColors1) {
-                    aiColor4D col = mesh->mColors[1][index];
-                    colors.emplace_back(col.r, col.g, col.b);
-                } else {
-                    colors.emplace_back(0.0f, 0.0f, 0.0f);
-                }
+        // Pre-collect valid (triangle-count == 3) face indices so we can pre-size
+        // the output slot vector and run chunk-parallel construction.
+        std::vector<unsigned int> validFaces;
+        validFaces.reserve(mesh->mNumFaces);
+        for (unsigned int i = 0; i < mesh->mNumFaces; ++i) {
+            if (mesh->mFaces[i].mNumIndices == 3) {
+                validFaces.push_back(i);
             }
+        }
+        const size_t validCount = validFaces.size();
+        if (validCount == 0) return;
 
-            // Use optimized constructor with materialID
-            auto triangle = std::make_shared<Triangle>(
-                vertices[0], vertices[1], vertices[2],
-                normals[0], normals[1], normals[2],
-                texCoords[0], texCoords[1], texCoords[2],
-                materialID
-            );
+        const size_t baseFaceIndex = triangles.size();
+        std::vector<std::shared_ptr<Triangle>> localTriangles(validCount);
 
-            // Set shared transform (all triangles in this mesh share the same transform)
-            // Paylaşılan transformu ata (bu mesh'teki tüm üçgenler aynı transformu paylaşır)
-            triangle->setTransformHandle(sharedTransform);
-            
-            // Apply initial transform (for start position)
-            // İlk transform'u uygula (başlangıç pozisyonu için)
+        auto buildRange = [&](size_t start, size_t end) {
+            for (size_t i = start; i < end; ++i) {
+                const unsigned int faceIdx = validFaces[i];
+                const aiFace& face = mesh->mFaces[faceIdx];
 
+                Vec3 vertices[3];
+                Vec3 normals[3];
+                Vec2 texCoords[3];
+                Vec3 colors[3];
 
+                for (unsigned int j = 0; j < 3; ++j) {
+                    const unsigned int index = face.mIndices[j];
+                    const aiVector3D& vertex = mesh->mVertices[index];
+                    vertices[j] = Vec3(vertex.x, vertex.y, vertex.z);
 
-            triangle->setNodeName(nodeName);
-            triangle->setAssimpVertexIndices(face.mIndices[0], face.mIndices[1], face.mIndices[2]);
-            triangle->setAssimpVertexIndices(face.mIndices[0], face.mIndices[1], face.mIndices[2]);
-            triangle->setFaceIndex(static_cast<int>(triangles.size()));
-
-            const unsigned int uv_channel_count = std::min<unsigned int>(AI_MAX_NUMBER_OF_TEXTURECOORDS, mesh->GetNumUVChannels());
-            for (unsigned int uv_set = 0; uv_set < uv_channel_count; ++uv_set) {
-                Vec2 uv_set_coords[3];
-                for (unsigned int uv_vertex = 0; uv_vertex < 3; ++uv_vertex) {
-                    const unsigned int uv_index = face.mIndices[uv_vertex];
-                    if (mesh->HasTextureCoords(uv_set)) {
-                        const aiVector3D texCoord = mesh->mTextureCoords[uv_set][uv_index];
-                        uv_set_coords[uv_vertex] = Vec2(texCoord.x, texCoord.y);
+                    if (hasNormals) {
+                        const aiVector3D& normal = mesh->mNormals[index];
+                        normals[j] = Vec3(normal.x, normal.y, normal.z);
                     } else {
-                        uv_set_coords[uv_vertex] = Vec2(0.0f, 0.0f);
+                        normals[j] = Vec3(0);
+                    }
+
+                    if (hasUV0) {
+                        const aiVector3D& texCoord = mesh->mTextureCoords[0][index];
+                        texCoords[j] = Vec2(texCoord.x, texCoord.y);
+                    } else {
+                        texCoords[j] = Vec2(0.0f, 0.0f);
+                    }
+
+                    if (hasColors0) {
+                        const aiColor4D& col = mesh->mColors[0][index];
+                        colors[j] = Vec3(col.r, col.g, col.b);
+                    } else if (hasColors1) {
+                        const aiColor4D& col = mesh->mColors[1][index];
+                        colors[j] = Vec3(col.r, col.g, col.b);
+                    } else {
+                        colors[j] = Vec3(0.0f, 0.0f, 0.0f);
                     }
                 }
-                triangle->setUVSetCoordinates(uv_set, uv_set_coords[0], uv_set_coords[1], uv_set_coords[2]);
-            }
-            if (auto* pbsdf = dynamic_cast<PrincipledBSDF*>(material.get())) {
-                triangle->applyUVSet(static_cast<size_t>(std::max(0, pbsdf->selected_uv_set)));
-            }
 
-            // Assign Colors
-            triangle->setVertexColor(0, colors[0]);
-            triangle->setVertexColor(1, colors[1]);
-            triangle->setVertexColor(2, colors[2]);
+                auto triangle = std::make_shared<Triangle>(
+                    vertices[0], vertices[1], vertices[2],
+                    normals[0], normals[1], normals[2],
+                    texCoords[0], texCoords[1], texCoords[2],
+                    materialID
+                );
 
-            // --- NEW: Assign weights to triangle vertices ---
-            // Only initialize skin data if the mesh actually has weights
-            if (hasActualWeights) {
-                triangle->initializeSkinData();
-                triangle->setSkinBoneWeights(0, meshVertexWeights[face.mIndices[0]]);
-                triangle->setSkinBoneWeights(1, meshVertexWeights[face.mIndices[1]]);
-                triangle->setSkinBoneWeights(2, meshVertexWeights[face.mIndices[2]]);
+                triangle->setTransformHandle(sharedTransform);
+                triangle->setNodeName(nodeName);
+                triangle->setAssimpVertexIndices(face.mIndices[0], face.mIndices[1], face.mIndices[2]);
+                triangle->setFaceIndex(static_cast<int>(baseFaceIndex + i));
+
+                for (unsigned int uv_set = 0; uv_set < uv_channel_count; ++uv_set) {
+                    Vec2 uv_set_coords[3];
+                    const bool hasUVSet = mesh->HasTextureCoords(uv_set);
+                    for (unsigned int uv_vertex = 0; uv_vertex < 3; ++uv_vertex) {
+                        const unsigned int uv_index = face.mIndices[uv_vertex];
+                        if (hasUVSet) {
+                            const aiVector3D& texCoord = mesh->mTextureCoords[uv_set][uv_index];
+                            uv_set_coords[uv_vertex] = Vec2(texCoord.x, texCoord.y);
+                        } else {
+                            uv_set_coords[uv_vertex] = Vec2(0.0f, 0.0f);
+                        }
+                    }
+                    triangle->setUVSetCoordinates(uv_set, uv_set_coords[0], uv_set_coords[1], uv_set_coords[2]);
+                }
+                if (pbsdf) {
+                    triangle->applyUVSet(static_cast<size_t>(selectedUvSet));
+                }
+
+                triangle->setVertexColor(0, colors[0]);
+                triangle->setVertexColor(1, colors[1]);
+                triangle->setVertexColor(2, colors[2]);
+
+                if (hasActualWeights) {
+                    triangle->initializeSkinData();
+                    triangle->setSkinBoneWeights(0, meshVertexWeights[face.mIndices[0]]);
+                    triangle->setSkinBoneWeights(1, meshVertexWeights[face.mIndices[1]]);
+                    triangle->setSkinBoneWeights(2, meshVertexWeights[face.mIndices[2]]);
+                } else {
+                    triangle->updateTransformedVertices();
+                }
+
+                localTriangles[i] = std::move(triangle);
             }
-            // ------------------------------------------------
+        };
 
-            if (!hasActualWeights) {
-                triangle->updateTransformedVertices();
+        constexpr size_t kFaceParallelThreshold = 4096;
+        if (validCount < kFaceParallelThreshold) {
+            buildRange(0, validCount);
+        } else {
+            const unsigned int hw = std::max(2u, std::thread::hardware_concurrency());
+            const size_t maxChunks = std::min<size_t>(hw, (validCount + 2047) / 2048);
+            const size_t chunks = std::max<size_t>(1, maxChunks);
+            const size_t chunkSize = (validCount + chunks - 1) / chunks;
+
+            std::vector<std::future<void>> futures;
+            futures.reserve(chunks);
+            for (size_t c = 0; c < chunks; ++c) {
+                const size_t s = c * chunkSize;
+                const size_t e = std::min(s + chunkSize, validCount);
+                if (s >= e) break;
+                futures.push_back(std::async(std::launch::async, buildRange, s, e));
             }
-
-            triangles.push_back(triangle);
+            for (auto& f : futures) f.get();
         }
+
+        triangles.insert(triangles.end(),
+            std::make_move_iterator(localTriangles.begin()),
+            std::make_move_iterator(localTriangles.end()));
     }
 
     // =========================================================================

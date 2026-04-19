@@ -18,7 +18,8 @@ layout(push_constant) uniform SolidPushConstants {
 
 void main() {
     mat4 model = mat4(inModelCol0, inModelCol1, inModelCol2, inModelCol3);
-    gl_Position = pc.viewProj * model * vec4(inPosition, 1.0);
+    vec4 worldPos4 = model * vec4(inPosition, 1.0);
+    gl_Position = pc.viewProj * worldPos4;
     mat4 modelOrModelView = (pc.useMatcap != 0) ? (pc.view * model) : model;
     mat3 normalMatrix = mat3(modelOrModelView);
     vNormal = normalize(normalMatrix * inNormal);

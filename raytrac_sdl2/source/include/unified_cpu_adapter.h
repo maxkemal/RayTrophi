@@ -154,13 +154,8 @@ inline void extract_material_params(
     Vec3 alb = pbsdf->getPropertyValue(pbsdf->albedoProperty, uv);
     *albedo_out = toVec3f(alb);
     
-    // Roughness (Y channel)
-    Vec3 rough = pbsdf->getPropertyValue(pbsdf->roughnessProperty, uv);
-    *roughness_out = static_cast<float>(rough.y);
-    
-    // Metallic (Z channel)
-    Vec3 metal = pbsdf->getPropertyValue(pbsdf->metallicProperty, uv);
-    *metallic_out = static_cast<float>(metal.z);
+    *roughness_out = pbsdf->getRoughnessValue(uv);
+    *metallic_out = pbsdf->getMetallicValue(uv);
     
     // Opacity
     *opacity_out = pbsdf->get_opacity(uv);

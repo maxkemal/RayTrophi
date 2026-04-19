@@ -7,10 +7,13 @@
 #include "FoliageWindSystem.h"
 #include "TerrainManager.h"
 #include "globals.h"
+#include <cstdint>
 #include <random>
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <future>
+#include <cstring>
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GROUP MANAGEMENT
@@ -347,10 +350,288 @@ using json = nlohmann::json;
 
 #include "ParallelBVHNode.h"
 
-json InstanceManager::serialize() {
+namespace {
+    constexpr const char* kInstanceBinaryCodecRaw = "raw";
+    constexpr const char* kInstanceBinaryCodecPacked16 = "packed16";
+
+    struct PreparedInstanceBlob {
+        std::string codec = kInstanceBinaryCodecPacked16;
+        std::vector<char> bytes;
+        uint32_t count = 0;
+        Vec3 position_min = Vec3(0.0f);
+        Vec3 position_max = Vec3(0.0f);
+        Vec3 rotation_min = Vec3(0.0f);
+        Vec3 rotation_max = Vec3(0.0f);
+        Vec3 scale_min = Vec3(1.0f);
+        Vec3 scale_max = Vec3(1.0f);
+    };
+
+    struct PendingInstanceBlobRead {
+        size_t group_index = 0;
+        std::string codec = kInstanceBinaryCodecPacked16;
+        std::vector<char> bytes;
+        Vec3 position_min = Vec3(0.0f);
+        Vec3 position_max = Vec3(0.0f);
+        Vec3 rotation_min = Vec3(0.0f);
+        Vec3 rotation_max = Vec3(0.0f);
+        Vec3 scale_min = Vec3(1.0f);
+        Vec3 scale_max = Vec3(1.0f);
+    };
+
+    constexpr size_t instanceRecordSize() {
+        return sizeof(Vec3) * 3 + sizeof(int32_t);
+    }
+
+    constexpr size_t packed16RecordSize() {
+        return sizeof(uint16_t) * 10;
+    }
+
+    float quantizeNormalizedToFloat(uint16_t value) {
+        return static_cast<float>(value) / 65535.0f;
+    }
+
+    uint16_t quantizeFloatToU16(float value, float min_value, float max_value) {
+        const float range = max_value - min_value;
+        if (std::fabs(range) <= 1e-12f) {
+            return 0;
+        }
+        const float normalized = std::clamp((value - min_value) / range, 0.0f, 1.0f);
+        return static_cast<uint16_t>(std::lround(normalized * 65535.0f));
+    }
+
+    float dequantizeU16ToFloat(uint16_t value, float min_value, float max_value) {
+        const float range = max_value - min_value;
+        if (std::fabs(range) <= 1e-12f) {
+            return min_value;
+        }
+        return min_value + quantizeNormalizedToFloat(value) * range;
+    }
+
+    void updateBounds(Vec3& min_v, Vec3& max_v, const Vec3& value) {
+        min_v.x = std::min(min_v.x, value.x);
+        min_v.y = std::min(min_v.y, value.y);
+        min_v.z = std::min(min_v.z, value.z);
+        max_v.x = std::max(max_v.x, value.x);
+        max_v.y = std::max(max_v.y, value.y);
+        max_v.z = std::max(max_v.z, value.z);
+    }
+
+    json vec3ToJsonArray(const Vec3& v) {
+        return json::array({v.x, v.y, v.z});
+    }
+
+    bool readVec3JsonArray(simdjson::simdjson_result<simdjson::dom::element> el_result, Vec3& out) {
+        simdjson::dom::element el;
+        if (el_result.get(el)) return false;
+        simdjson::dom::array arr;
+        if (el.get_array().get(arr)) return false;
+        auto it = arr.begin();
+        if (it == arr.end()) return false;
+        double x = 0.0;
+        if ((*it).get(x)) return false;
+        ++it;
+        if (it == arr.end()) return false;
+        double y = 0.0;
+        if ((*it).get(y)) return false;
+        ++it;
+        if (it == arr.end()) return false;
+        double z = 0.0;
+        if ((*it).get(z)) return false;
+        out = Vec3(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
+        return true;
+    }
+
+    PreparedInstanceBlob prepareInstanceBlob(const InstanceGroup& group) {
+        PreparedInstanceBlob result;
+        result.count = static_cast<uint32_t>(group.instances.size());
+        result.bytes.resize(sizeof(uint32_t) + static_cast<size_t>(result.count) * packed16RecordSize());
+
+        char* write_ptr = result.bytes.data();
+        std::memcpy(write_ptr, &result.count, sizeof(result.count));
+        write_ptr += sizeof(result.count);
+
+        if (group.instances.empty()) {
+            return result;
+        }
+
+        result.position_min = group.instances.front().position;
+        result.position_max = group.instances.front().position;
+        result.rotation_min = group.instances.front().rotation;
+        result.rotation_max = group.instances.front().rotation;
+        result.scale_min = group.instances.front().scale;
+        result.scale_max = group.instances.front().scale;
+
+        bool can_pack = true;
+        for (const auto& inst : group.instances) {
+            updateBounds(result.position_min, result.position_max, inst.position);
+            updateBounds(result.rotation_min, result.rotation_max, inst.rotation);
+            updateBounds(result.scale_min, result.scale_max, inst.scale);
+            if (inst.source_index < 0 || inst.source_index > 65535) {
+                can_pack = false;
+            }
+        }
+
+        if (!can_pack) {
+            result.codec = kInstanceBinaryCodecRaw;
+            result.bytes.resize(sizeof(uint32_t) + static_cast<size_t>(result.count) * instanceRecordSize());
+            write_ptr = result.bytes.data();
+            std::memcpy(write_ptr, &result.count, sizeof(result.count));
+            write_ptr += sizeof(result.count);
+            for (const auto& inst : group.instances) {
+                std::memcpy(write_ptr, &inst.position, sizeof(Vec3));
+                write_ptr += sizeof(Vec3);
+                std::memcpy(write_ptr, &inst.rotation, sizeof(Vec3));
+                write_ptr += sizeof(Vec3);
+                std::memcpy(write_ptr, &inst.scale, sizeof(Vec3));
+                write_ptr += sizeof(Vec3);
+                const int32_t source_index = static_cast<int32_t>(inst.source_index);
+                std::memcpy(write_ptr, &source_index, sizeof(source_index));
+                write_ptr += sizeof(source_index);
+            }
+            return result;
+        }
+
+        for (const auto& inst : group.instances) {
+            const uint16_t px = quantizeFloatToU16(inst.position.x, result.position_min.x, result.position_max.x);
+            const uint16_t py = quantizeFloatToU16(inst.position.y, result.position_min.y, result.position_max.y);
+            const uint16_t pz = quantizeFloatToU16(inst.position.z, result.position_min.z, result.position_max.z);
+            const uint16_t rx = quantizeFloatToU16(inst.rotation.x, result.rotation_min.x, result.rotation_max.x);
+            const uint16_t ry = quantizeFloatToU16(inst.rotation.y, result.rotation_min.y, result.rotation_max.y);
+            const uint16_t rz = quantizeFloatToU16(inst.rotation.z, result.rotation_min.z, result.rotation_max.z);
+            const uint16_t sx = quantizeFloatToU16(inst.scale.x, result.scale_min.x, result.scale_max.x);
+            const uint16_t sy = quantizeFloatToU16(inst.scale.y, result.scale_min.y, result.scale_max.y);
+            const uint16_t sz = quantizeFloatToU16(inst.scale.z, result.scale_min.z, result.scale_max.z);
+            const uint16_t source_index = static_cast<uint16_t>(inst.source_index);
+
+            std::memcpy(write_ptr, &px, sizeof(px)); write_ptr += sizeof(px);
+            std::memcpy(write_ptr, &py, sizeof(py)); write_ptr += sizeof(py);
+            std::memcpy(write_ptr, &pz, sizeof(pz)); write_ptr += sizeof(pz);
+            std::memcpy(write_ptr, &rx, sizeof(rx)); write_ptr += sizeof(rx);
+            std::memcpy(write_ptr, &ry, sizeof(ry)); write_ptr += sizeof(ry);
+            std::memcpy(write_ptr, &rz, sizeof(rz)); write_ptr += sizeof(rz);
+            std::memcpy(write_ptr, &sx, sizeof(sx)); write_ptr += sizeof(sx);
+            std::memcpy(write_ptr, &sy, sizeof(sy)); write_ptr += sizeof(sy);
+            std::memcpy(write_ptr, &sz, sizeof(sz)); write_ptr += sizeof(sz);
+            std::memcpy(write_ptr, &source_index, sizeof(source_index)); write_ptr += sizeof(source_index);
+        }
+
+        return result;
+    }
+
+    bool decodeRawInstanceBlobToGroup(const std::vector<char>& raw_bytes, InstanceGroup& group) {
+        if (raw_bytes.size() < sizeof(uint32_t)) {
+            return false;
+        }
+
+        const char* read_ptr = raw_bytes.data();
+        uint32_t count = 0;
+        std::memcpy(&count, read_ptr, sizeof(count));
+        read_ptr += sizeof(count);
+
+        const size_t expected_size = sizeof(uint32_t) + static_cast<size_t>(count) * instanceRecordSize();
+        if (raw_bytes.size() < expected_size) {
+            return false;
+        }
+
+        group.instances.clear();
+        group.instances.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            InstanceTransform inst;
+            std::memcpy(&inst.position, read_ptr, sizeof(Vec3));
+            read_ptr += sizeof(Vec3);
+            std::memcpy(&inst.rotation, read_ptr, sizeof(Vec3));
+            read_ptr += sizeof(Vec3);
+            std::memcpy(&inst.scale, read_ptr, sizeof(Vec3));
+            read_ptr += sizeof(Vec3);
+            int32_t source_index = 0;
+            std::memcpy(&source_index, read_ptr, sizeof(source_index));
+            read_ptr += sizeof(source_index);
+            inst.source_index = static_cast<int>(source_index);
+            group.instances.push_back(inst);
+        }
+
+        group.initial_instances = group.instances;
+        return true;
+    }
+
+    bool decodePacked16InstanceBlobToGroup(const PendingInstanceBlobRead& pending, InstanceGroup& group) {
+        if (pending.bytes.size() < sizeof(uint32_t)) {
+            return false;
+        }
+
+        const char* read_ptr = pending.bytes.data();
+        uint32_t count = 0;
+        std::memcpy(&count, read_ptr, sizeof(count));
+        read_ptr += sizeof(count);
+
+        const size_t expected_size = sizeof(uint32_t) + static_cast<size_t>(count) * packed16RecordSize();
+        if (pending.bytes.size() < expected_size) {
+            return false;
+        }
+
+        group.instances.clear();
+        group.instances.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            uint16_t px = 0, py = 0, pz = 0;
+            uint16_t rx = 0, ry = 0, rz = 0;
+            uint16_t sx = 0, sy = 0, sz = 0;
+            uint16_t source_index = 0;
+
+            std::memcpy(&px, read_ptr, sizeof(px)); read_ptr += sizeof(px);
+            std::memcpy(&py, read_ptr, sizeof(py)); read_ptr += sizeof(py);
+            std::memcpy(&pz, read_ptr, sizeof(pz)); read_ptr += sizeof(pz);
+            std::memcpy(&rx, read_ptr, sizeof(rx)); read_ptr += sizeof(rx);
+            std::memcpy(&ry, read_ptr, sizeof(ry)); read_ptr += sizeof(ry);
+            std::memcpy(&rz, read_ptr, sizeof(rz)); read_ptr += sizeof(rz);
+            std::memcpy(&sx, read_ptr, sizeof(sx)); read_ptr += sizeof(sx);
+            std::memcpy(&sy, read_ptr, sizeof(sy)); read_ptr += sizeof(sy);
+            std::memcpy(&sz, read_ptr, sizeof(sz)); read_ptr += sizeof(sz);
+            std::memcpy(&source_index, read_ptr, sizeof(source_index)); read_ptr += sizeof(source_index);
+
+            InstanceTransform inst;
+            inst.position = Vec3(
+                dequantizeU16ToFloat(px, pending.position_min.x, pending.position_max.x),
+                dequantizeU16ToFloat(py, pending.position_min.y, pending.position_max.y),
+                dequantizeU16ToFloat(pz, pending.position_min.z, pending.position_max.z));
+            inst.rotation = Vec3(
+                dequantizeU16ToFloat(rx, pending.rotation_min.x, pending.rotation_max.x),
+                dequantizeU16ToFloat(ry, pending.rotation_min.y, pending.rotation_max.y),
+                dequantizeU16ToFloat(rz, pending.rotation_min.z, pending.rotation_max.z));
+            inst.scale = Vec3(
+                dequantizeU16ToFloat(sx, pending.scale_min.x, pending.scale_max.x),
+                dequantizeU16ToFloat(sy, pending.scale_min.y, pending.scale_max.y),
+                dequantizeU16ToFloat(sz, pending.scale_min.z, pending.scale_max.z));
+            inst.source_index = static_cast<int>(source_index);
+            group.instances.push_back(inst);
+        }
+
+        group.initial_instances = group.instances;
+        return true;
+    }
+}
+
+json InstanceManager::serialize(std::ostream* binaryOut) {
     json root = json::array();
+
+    std::vector<PreparedInstanceBlob> prepared_blobs;
+    if (binaryOut) {
+        std::vector<std::future<PreparedInstanceBlob>> futures;
+        futures.reserve(groups.size());
+        for (const auto& group : groups) {
+            const InstanceGroup* group_ptr = &group;
+            futures.push_back(std::async(std::launch::async, [group_ptr]() {
+                return prepareInstanceBlob(*group_ptr);
+            }));
+        }
+
+        prepared_blobs.reserve(groups.size());
+        for (auto& future : futures) {
+            prepared_blobs.push_back(future.get());
+        }
+    }
     
-    for (const auto& group : groups) {
+    for (size_t group_idx = 0; group_idx < groups.size(); ++group_idx) {
+        const auto& group = groups[group_idx];
         json j_group;
         j_group["id"] = group.id;
         j_group["name"] = group.name;
@@ -427,22 +708,135 @@ json InstanceManager::serialize() {
         j_group["sources"] = j_sources;
         
         // Instances
-        json j_insts = json::array();
-        for (const auto& inst : group.instances) {
-            // Save as compact array [x,y,z, rx,ry,rz, sx,sy,sz, src_idx]
-            // Note: Rotation is Euler Vec3 (x,y,z), NOT Quaternion
-            j_insts.push_back({
-                inst.position.x, inst.position.y, inst.position.z,
-                inst.rotation.x, inst.rotation.y, inst.rotation.z,
-                inst.scale.x, inst.scale.y, inst.scale.z,
-                inst.source_index
-            });
+        if (binaryOut) {
+            j_group["instances_storage"] = "binary";
+            const std::streampos startPos = binaryOut->tellp();
+            j_group["instances_binary_offset"] = static_cast<long long>(startPos);
+            const auto& blob = prepared_blobs[group_idx];
+            j_group["instances_count"] = blob.count;
+            j_group["instances_binary_codec"] = blob.codec;
+            if (blob.codec == kInstanceBinaryCodecPacked16) {
+                j_group["instances_position_min"] = vec3ToJsonArray(blob.position_min);
+                j_group["instances_position_max"] = vec3ToJsonArray(blob.position_max);
+                j_group["instances_rotation_min"] = vec3ToJsonArray(blob.rotation_min);
+                j_group["instances_rotation_max"] = vec3ToJsonArray(blob.rotation_max);
+                j_group["instances_scale_min"] = vec3ToJsonArray(blob.scale_min);
+                j_group["instances_scale_max"] = vec3ToJsonArray(blob.scale_max);
+            }
+
+            if (!blob.bytes.empty()) {
+                binaryOut->write(blob.bytes.data(), static_cast<std::streamsize>(blob.bytes.size()));
+            }
+
+            const std::streampos endPos = binaryOut->tellp();
+            j_group["instances_binary_size"] = static_cast<long long>(endPos - startPos);
+        } else {
+            json j_insts = json::array();
+            for (const auto& inst : group.instances) {
+                // Save as compact array [x,y,z, rx,ry,rz, sx,sy,sz, src_idx]
+                // Note: Rotation is Euler Vec3 (x,y,z), NOT Quaternion
+                j_insts.push_back({
+                    inst.position.x, inst.position.y, inst.position.z,
+                    inst.rotation.x, inst.rotation.y, inst.rotation.z,
+                    inst.scale.x, inst.scale.y, inst.scale.z,
+                    inst.source_index
+                });
+            }
+            j_group["instances"] = j_insts;
         }
-        j_group["instances"] = j_insts;
         root.push_back(j_group);
     }
     
     return root;
+}
+
+void InstanceManager::deserializeBinaryInstances(simdjson::dom::element el, std::istream& binaryIn) {
+    simdjson::dom::array arr;
+    if (el.get_array().get(arr)) return;
+
+    std::vector<PendingInstanceBlobRead> pending_reads;
+    pending_reads.reserve(groups.size());
+
+    size_t group_index = 0;
+    for (simdjson::dom::element j_group : arr) {
+        if (group_index >= groups.size()) break;
+
+        std::string storage = "json";
+        std::string_view storage_sv;
+        if (!j_group["instances_storage"].get(storage_sv)) {
+            storage = std::string(storage_sv);
+        }
+        if (storage != "binary") {
+            ++group_index;
+            continue;
+        }
+
+        int64_t offset_value = 0;
+        simdjson::dom::element offset_el;
+        if (j_group["instances_binary_offset"].get(offset_el) || offset_el.get(offset_value)) {
+            ++group_index;
+            continue;
+        }
+
+        int64_t size_value = 0;
+        simdjson::dom::element size_el;
+        if (j_group["instances_binary_size"].get(size_el) || size_el.get(size_value) || size_value < 0) {
+            ++group_index;
+            continue;
+        }
+
+        std::string codec = kInstanceBinaryCodecRaw;
+        std::string_view codec_sv;
+        if (!j_group["instances_binary_codec"].get(codec_sv)) {
+            codec = std::string(codec_sv);
+        }
+
+        binaryIn.clear();
+        binaryIn.seekg(static_cast<std::streamoff>(offset_value), std::ios::beg);
+        if (!binaryIn.good()) {
+            ++group_index;
+            continue;
+        }
+
+        PendingInstanceBlobRead pending;
+        pending.group_index = group_index;
+        pending.codec = codec;
+        if (codec == kInstanceBinaryCodecPacked16) {
+            readVec3JsonArray(j_group["instances_position_min"], pending.position_min);
+            readVec3JsonArray(j_group["instances_position_max"], pending.position_max);
+            readVec3JsonArray(j_group["instances_rotation_min"], pending.rotation_min);
+            readVec3JsonArray(j_group["instances_rotation_max"], pending.rotation_max);
+            readVec3JsonArray(j_group["instances_scale_min"], pending.scale_min);
+            readVec3JsonArray(j_group["instances_scale_max"], pending.scale_max);
+        }
+        pending.bytes.resize(static_cast<size_t>(size_value));
+        if (!pending.bytes.empty()) {
+            binaryIn.read(pending.bytes.data(), static_cast<std::streamsize>(pending.bytes.size()));
+        }
+        if (!binaryIn.good() && !pending.bytes.empty()) {
+            ++group_index;
+            continue;
+        }
+        pending_reads.push_back(std::move(pending));
+        ++group_index;
+    }
+
+    std::vector<std::future<void>> futures;
+    futures.reserve(pending_reads.size());
+    for (auto& pending : pending_reads) {
+        PendingInstanceBlobRead* pending_ptr = &pending;
+        futures.push_back(std::async(std::launch::async, [this, pending_ptr]() {
+            if (pending_ptr->codec == kInstanceBinaryCodecPacked16) {
+                decodePacked16InstanceBlobToGroup(*pending_ptr, groups[pending_ptr->group_index]);
+            } else {
+                decodeRawInstanceBlobToGroup(pending_ptr->bytes, groups[pending_ptr->group_index]);
+            }
+        }));
+    }
+
+    for (auto& future : futures) {
+        future.get();
+    }
 }
 
 #include "scene_ui.h" 
@@ -743,86 +1137,112 @@ void InstanceManager::rebuildSceneObjects(SceneData& scene) {
     for (auto& group : groups) {
         const auto group_bvh_start = std::chrono::steady_clock::now();
         // 1. Ensure BVHs are built for all sources
-        for (auto& source : group.sources) {
-            if (source.triangles.empty()) continue;
-            
-            // Build BVH if missing (reloaded)
-            if (!source.bvh) {
-                // Determine Bounds to find Center (Pivot)
-                Vec3 mesh_bbox_min(1e9, 1e9, 1e9);
-                Vec3 mesh_bbox_max(-1e9, -1e9, -1e9);
-                
-                // Calculate bounds from source triangles
-                bool has_geo = false;
-                for (const auto& src_tri : source.triangles) {
-                    Matrix4x4 transform = src_tri->getTransformMatrix();
-                    
-                    // Transform vertices to World Space (Bake Transform)
-                    // Use Original Vertices to avoid Double Transformation
-                    Vec3 v0 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexPosition(0), 1.0f)).xyz();
-                    Vec3 v1 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexPosition(1), 1.0f)).xyz();
-                    Vec3 v2 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexPosition(2), 1.0f)).xyz();
-                    
-                    Vec3 v[3] = { v0, v1, v2 };
-                    for(int k=0; k<3; k++) {
-                        mesh_bbox_min = Vec3::min(mesh_bbox_min, v[k]);
-                        mesh_bbox_max = Vec3::max(mesh_bbox_max, v[k]);
-                    }
-                    has_geo = true;
-                }
-                
-                if (!has_geo) continue;
+        //
+        // Per-source builds are independent (each source owns its own centered
+        // triangles, EmbreeBVH and local bbox), so we can run the heavy work in
+        // parallel. For foliage-heavy projects the source list typically holds
+        // 5-30 unique prefabs (trees, grass, rocks), each with thousands of
+        // triangles — serializing them was the dominant cost on project load.
+        auto buildOneSource = [](ScatterSource& source) {
+            if (source.triangles.empty()) return;
 
-                Vec3 mesh_center = (mesh_bbox_min + mesh_bbox_max) * 0.5f;
-                mesh_center.y = mesh_bbox_min.y; // Pivot at Bottom-Center (Crucial for foliage)
-
-                // Create Centered Copies (Local Space Prefab)
-                auto centered_tris = std::make_shared<std::vector<std::shared_ptr<Triangle>>>();
-                centered_tris->reserve(source.triangles.size());
-                
-                std::vector<std::shared_ptr<Hittable>> source_hittables;
-                source_hittables.reserve(source.triangles.size());
-                
-                for (const auto& src_tri : source.triangles) {
-                    Matrix4x4 transform = src_tri->getTransformMatrix();
-                    
-                    // Convert World (Baked) -> Local (Centered)
-                    // Use Original Vertices
-                    Vec3 v0 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexPosition(0), 1.0f)).xyz() - mesh_center;
-                    Vec3 v1 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexPosition(1), 1.0f)).xyz() - mesh_center;
-                    Vec3 v2 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexPosition(2), 1.0f)).xyz() - mesh_center;
-                    
-                    // Transform Normal (Rotation only)
-                    Vec3 n0 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexNormal(0), 0.0f)).xyz().normalize();
-                    Vec3 n1 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexNormal(1), 0.0f)).xyz().normalize();
-                    Vec3 n2 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexNormal(2), 0.0f)).xyz().normalize();
-                    
-                    auto new_tri = std::make_shared<Triangle>(
-                        v0, v1, v2, 
-                        n0, n1, n2,
-                        src_tri->t0, src_tri->t1, src_tri->t2,
-                        src_tri->getMaterial()
-                    );
-                    // CRITICAL: Append suffix to prevent OptixWrapper from reusing the BLAS 
-                    // of the original Source Mesh (which is unbaked/lying down).
-                    // This ensures instances get their own BAKED geometry on GPU.
-                    new_tri->setNodeName(source.name + "_BAKED"); 
-                    
-                    centered_tris->push_back(new_tri);
-                    source_hittables.push_back(new_tri);
+            if (source.bvh) {
+                if (!source.has_local_bbox) {
+                    source.has_local_bbox = source.bvh->bounding_box(0, 0, source.local_bbox);
                 }
-                
-                source.centered_triangles_ptr = centered_tris;
-                
-                // Build BVH (EmbreeBVH) over LOCAL geometry
-                auto embree = std::make_shared<EmbreeBVH>();
-                embree->build(source_hittables);
-                source.bvh = embree;
-                source.has_local_bbox = source.bvh->bounding_box(0, 0, source.local_bbox);
-                SCENE_LOG_INFO("[InstanceManager] Built Centered BVH (Baked Transform) for restored source: " + source.name);
+                return;
             }
-            else if (!source.has_local_bbox) {
+
+            // Determine Bounds to find Center (Pivot)
+            Vec3 mesh_bbox_min(1e9, 1e9, 1e9);
+            Vec3 mesh_bbox_max(-1e9, -1e9, -1e9);
+
+            bool has_geo = false;
+            for (const auto& src_tri : source.triangles) {
+                Matrix4x4 transform = src_tri->getTransformMatrix();
+
+                Vec3 v0 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexPosition(0), 1.0f)).xyz();
+                Vec3 v1 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexPosition(1), 1.0f)).xyz();
+                Vec3 v2 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexPosition(2), 1.0f)).xyz();
+
+                Vec3 v[3] = { v0, v1, v2 };
+                for(int k=0; k<3; k++) {
+                    mesh_bbox_min = Vec3::min(mesh_bbox_min, v[k]);
+                    mesh_bbox_max = Vec3::max(mesh_bbox_max, v[k]);
+                }
+                has_geo = true;
+            }
+
+            if (!has_geo) return;
+
+            Vec3 mesh_center = (mesh_bbox_min + mesh_bbox_max) * 0.5f;
+            mesh_center.y = mesh_bbox_min.y; // Pivot at Bottom-Center (Crucial for foliage)
+
+            auto centered_tris = std::make_shared<std::vector<std::shared_ptr<Triangle>>>();
+            centered_tris->reserve(source.triangles.size());
+
+            std::vector<std::shared_ptr<Hittable>> source_hittables;
+            source_hittables.reserve(source.triangles.size());
+
+            for (const auto& src_tri : source.triangles) {
+                Matrix4x4 transform = src_tri->getTransformMatrix();
+
+                Vec3 v0 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexPosition(0), 1.0f)).xyz() - mesh_center;
+                Vec3 v1 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexPosition(1), 1.0f)).xyz() - mesh_center;
+                Vec3 v2 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexPosition(2), 1.0f)).xyz() - mesh_center;
+
+                Vec3 n0 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexNormal(0), 0.0f)).xyz().normalize();
+                Vec3 n1 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexNormal(1), 0.0f)).xyz().normalize();
+                Vec3 n2 = transform.multiplyVector(Vec4(src_tri->getOriginalVertexNormal(2), 0.0f)).xyz().normalize();
+
+                auto new_tri = std::make_shared<Triangle>(
+                    v0, v1, v2,
+                    n0, n1, n2,
+                    src_tri->t0, src_tri->t1, src_tri->t2,
+                    src_tri->getMaterial()
+                );
+                new_tri->setNodeName(source.name + "_BAKED");
+
+                centered_tris->push_back(new_tri);
+                source_hittables.push_back(new_tri);
+            }
+
+            source.centered_triangles_ptr = centered_tris;
+
+            auto embree = std::make_shared<EmbreeBVH>();
+            embree->build(source_hittables);
+            source.bvh = embree;
+            source.has_local_bbox = source.bvh->bounding_box(0, 0, source.local_bbox);
+            SCENE_LOG_INFO("[InstanceManager] Built Centered BVH (Baked Transform) for restored source: " + source.name);
+        };
+
+        // Collect sources that actually need heavy work (missing BVH). Sources
+        // whose BVH already exists fall back to the quick bbox refresh.
+        std::vector<size_t> heavy_source_indices;
+        heavy_source_indices.reserve(group.sources.size());
+        for (size_t si = 0; si < group.sources.size(); ++si) {
+            auto& source = group.sources[si];
+            if (source.triangles.empty()) continue;
+            if (!source.bvh) {
+                heavy_source_indices.push_back(si);
+            } else if (!source.has_local_bbox) {
                 source.has_local_bbox = source.bvh->bounding_box(0, 0, source.local_bbox);
+            }
+        }
+
+        if (heavy_source_indices.size() >= 2) {
+            std::vector<std::future<void>> source_futures;
+            source_futures.reserve(heavy_source_indices.size());
+            for (size_t si : heavy_source_indices) {
+                source_futures.push_back(std::async(std::launch::async,
+                    [&buildOneSource, &group, si]() {
+                        buildOneSource(group.sources[si]);
+                    }));
+            }
+            for (auto& f : source_futures) f.get();
+        } else {
+            for (size_t si : heavy_source_indices) {
+                buildOneSource(group.sources[si]);
             }
         }
         total_bvh_build_ms += static_cast<size_t>(

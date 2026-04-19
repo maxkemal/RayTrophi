@@ -187,7 +187,7 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
         const ShadingBtn btns[] = {
             { 0, "##shade_solid",   "Solid",   hasRasterViewport ? "Fast raster preview for layout work." : "Requires Vulkan — not available on this machine.",              ImVec4(0.94f, 0.64f, 0.24f, 1.0f), hasRasterViewport  },
             { 3, "##shade_matcap",  "Matcap",  hasRasterViewport ? "Studio-style shaded preview with matcap lighting." : "Requires Vulkan — not available on this machine.", ImVec4(0.88f, 0.42f, 0.34f, 1.0f), hasRasterViewport  },
-            { 1, "##shade_preview", "Preview", hasRasterViewport ? "PBR material preview with 3-point lighting." : "Requires Vulkan — not available on this machine.", ImVec4(0.34f, 0.72f, 0.62f, 1.0f), hasRasterViewport },
+            { 1, "##shade_preview", "Preview", hasRasterViewport ? "PBR material preview with stable studio/environment lighting." : "Requires Vulkan — not available on this machine.", ImVec4(0.34f, 0.72f, 0.62f, 1.0f), hasRasterViewport },
             { 2, "##shade_render",  "Render",  "Full rendered viewport using the selected device.",  ImVec4(0.32f, 0.60f, 0.96f, 1.0f), true  },
         };
         static float hover_anim[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -1449,6 +1449,14 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                 } else {
                      status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples";
                 }
+
+                if (ctx.render_settings.avg_total_frame_time_ms > 0.0f) {
+                    char perf_text[96];
+                    snprintf(perf_text, sizeof(perf_text), " | %.0f ms/frame | %.1f fps",
+                             ctx.render_settings.avg_total_frame_time_ms,
+                             ctx.render_settings.avg_total_frame_fps);
+                    status_text += perf_text;
+                }
             } else {
                 // Solid/Matcap/MaterialPreview: show viewport mode name
                 switch (viewport_settings.shading_mode) {
@@ -1460,28 +1468,17 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                 text_col = IM_COL32(180, 210, 255, 255);
             }
 
-            // Suppress only the Vulkan progressive sample counter ("Samples") in HUD
-            bool show_render_status = true;
-            if (in_rendered_mode && ctx.render_settings.use_vulkan) {
-                if (status_text.find("Samples") != std::string::npos) {
-                    // hide progressive sample counter for Vulkan progressive renderer
-                    show_render_status = false;
-                }
-            }
+            ImVec2 pos = ImGui::GetCursorScreenPos();
 
-            if (show_render_status) {
-                ImVec2 pos = ImGui::GetCursorScreenPos();
+            // Shadow
+            ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x+1, pos.y+1), IM_COL32(0,0,0,200), status_text.c_str());
+            ImGui::GetWindowDrawList()->AddText(pos, text_col, status_text.c_str());
 
-                // Shadow
-                ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x+1, pos.y+1), IM_COL32(0,0,0,200), status_text.c_str());
-                ImGui::GetWindowDrawList()->AddText(pos, text_col, status_text.c_str());
+            // Advance cursor with DYNAMIC width to prevent clipping
+            ImVec2 text_size = ImGui::CalcTextSize(status_text.c_str());
+            ImGui::Dummy(text_size);
 
-                // Advance cursor with DYNAMIC width to prevent clipping
-                ImVec2 text_size = ImGui::CalcTextSize(status_text.c_str());
-                ImGui::Dummy(text_size);
-
-                ImGui::Dummy(ImVec2(0, 2)); // Small spacing
-            }
+            ImGui::Dummy(ImVec2(0, 2)); // Small spacing
         }
 
         // 2. Persistent HUD: Selected Object (BELOW RENDER STATUS)

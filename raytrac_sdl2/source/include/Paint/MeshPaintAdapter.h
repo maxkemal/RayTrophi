@@ -37,7 +37,9 @@ public:
     bool createTextureSet();
     bool paintAtUV(PaintChannel channel, const Vec2& uv, const BrushSettings& brush, float dt);
     bool cloneAtUV(PaintChannel channel, const Vec2& dst_uv, const Vec2& src_uv, const BrushSettings& brush, float dt);
-    bool fillChannel(PaintChannel channel, const BrushSettings& brush);
+    bool fillChannel(PaintChannel channel, const BrushSettings& brush, int layer_index = -1);
+
+    void releaseLayerStackFromScene() override;
     bool generateNormalFromHeight(float strength);
     bool updateNormalFromHeightArea(const Vec2& center_uv, float radius_px, float strength);
     bool bakeHeightIntoNormal(float strength, bool clear_height_mask);
@@ -52,8 +54,12 @@ public:
 
     // Paint onto a specific layer (by index) instead of the flat texture.
     // Supports Paint, Erase, Soften tools.  Returns dirty rect in pixel coords.
+    // `aspect_u` / `aspect_v` stretch the brush footprint in UV pixel space so
+    // the stamp remains roughly circular in world space when the UV mapping is
+    // anisotropic (e.g. resized/stretched meshes). Defaults = 1 = no correction.
     PaintDirtyRect paintLayerAtUV(int layer_index, PaintChannel channel, const Vec2& uv,
-                                  const BrushSettings& brush, float dt);
+                                  const BrushSettings& brush, float dt,
+                                  float aspect_u = 1.0f, float aspect_v = 1.0f);
 
     // Clone from src_uv to dst_uv on a specific layer.  Returns dirty rect.
     PaintDirtyRect cloneLayerAtUV(int layer_index, PaintChannel channel,

@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <chrono>      // For wall-clock deltaTime in animation fallback
 #include <execution>
+#include <algorithm>    // std::for_each_n
 #include <cstring>      // std::memcpy for camera hash
 #include <imgui.h>
 #include <imgui_impl_sdlrenderer2.h>
@@ -15,6 +16,8 @@
 #include <functional>
 #include <atomic>
 #include <vector_types.h>  // CUDA float4, float3 types for hair GPU upload
+#include <cuda_runtime.h>  // cudaGetDevice, cudaStreamSynchronize (OIDN GPU path)
+#include "oidn_blend_cuda.h"
 #include "Hair/HairBSDF.h"
 
 
@@ -51,6 +54,7 @@
 #include "unified_light_sampling.h"
 #include "unified_converters.h"
 #include "MaterialManager.h"
+#include "PBRMaterialSnapshot.h"
 #include "CameraPresets.h"
 #include "TerrainManager.h"
 #include "WaterSystem.h"      // For water/FFT keyframe animation
@@ -63,6 +67,7 @@
 #include "Hair/HairBSDF.h"       // Hair BSDF for shading
 #include "FoliageWindSystem.h"
 #include <Backend/VulkanBackend.h>
+#include "Backend/IViewportBackend.h"
 
 bool Renderer::isCudaAvailable() {
     try {
@@ -104,31 +109,38 @@ void Renderer::initOIDN() {
 
 void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend) {
     if (!surface) return;
-    std::vector<float> linearColor;
-    linearColor.resize((size_t)surface->w * (size_t)surface->h * 3);
+    const int w = surface->w;
+    const int h = surface->h;
+    const size_t pixelCount = (size_t)w * (size_t)h;
+    std::vector<float> linearColor(pixelCount * 3);
 
     const SDL_PixelFormat* fmt = surface->format;
     Uint32* pixels = static_cast<Uint32*>(surface->pixels);
+    const Uint32 rMask = fmt->Rmask, gMask = fmt->Gmask, bMask = fmt->Bmask, aMask = fmt->Amask;
+    const Uint8 rShift = fmt->Rshift, gShift = fmt->Gshift, bShift = fmt->Bshift;
     const float inv255 = 1.0f / 255.0f;
 
-    for (int y = 0; y < surface->h; ++y) {
-        for (int x = 0; x < surface->w; ++x) {
-            const size_t pixelIndex = (size_t)y * (size_t)surface->w + (size_t)x;
-            Uint32 pixel = pixels[pixelIndex];
-            float r = ((pixel & fmt->Rmask) >> fmt->Rshift) * inv255;
-            float g = ((pixel & fmt->Gmask) >> fmt->Gshift) * inv255;
-            float b = ((pixel & fmt->Bmask) >> fmt->Bshift) * inv255;
-
-            const size_t idx = pixelIndex * 3;
-            linearColor[idx] = r * r;
-            linearColor[idx + 1] = g * g;
-            linearColor[idx + 2] = b * b;
-        }
+    // Parallel sRGB→linear decode (gamma-2 approximation: x*x)
+    {
+        float* __restrict dst = linearColor.data();
+        Uint32* __restrict pxBase = pixels;
+        std::for_each_n(std::execution::par_unseq,
+            pxBase, pixelCount,
+            [=](Uint32& px) {
+                const size_t i = static_cast<size_t>(&px - pxBase);
+                float r = ((px & rMask) >> rShift) * inv255;
+                float g = ((px & gMask) >> gShift) * inv255;
+                float b = ((px & bMask) >> bShift) * inv255;
+                const size_t idx = i * 3;
+                dst[idx]     = r * r;
+                dst[idx + 1] = g * g;
+                dst[idx + 2] = b * b;
+            });
     }
 
     OIDNFrameData frame;
-    frame.width = surface->w;
-    frame.height = surface->h;
+    frame.width = w;
+    frame.height = h;
     frame.color = linearColor.data();
 
     std::vector<float> denoised;
@@ -136,27 +148,64 @@ void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool den
         return;
     }
 
-    for (size_t i = 0, pixelCount = (size_t)surface->w * (size_t)surface->h; i < pixelCount; ++i) {
-        const size_t idx = i * 3;
-        float r = std::max(denoised[idx], 0.0f);
-        float g = std::max(denoised[idx + 1], 0.0f);
-        float b = std::max(denoised[idx + 2], 0.0f);
+    // Parallel linear→sRGB encode + pack back into SDL surface
+    {
+        const float* __restrict src = denoised.data();
+        Uint32* __restrict pxBase = pixels;
+        std::for_each_n(std::execution::par_unseq,
+            pxBase, pixelCount,
+            [=](Uint32& px) {
+                const size_t i = static_cast<size_t>(&px - pxBase);
+                const size_t idx = i * 3;
+                float r = std::max(src[idx],     0.0f);
+                float g = std::max(src[idx + 1], 0.0f);
+                float b = std::max(src[idx + 2], 0.0f);
 
-        Uint8 ri = static_cast<Uint8>(std::min(r, 1.0f) * 255.0f + 0.5f);
-        Uint8 gi = static_cast<Uint8>(std::min(g, 1.0f) * 255.0f + 0.5f);
-        Uint8 bi = static_cast<Uint8>(std::min(b, 1.0f) * 255.0f + 0.5f);
+                Uint8 ri = static_cast<Uint8>(std::min(r, 1.0f) * 255.0f + 0.5f);
+                Uint8 gi = static_cast<Uint8>(std::min(g, 1.0f) * 255.0f + 0.5f);
+                Uint8 bi = static_cast<Uint8>(std::min(b, 1.0f) * 255.0f + 0.5f);
 
-        Uint32 alpha = pixels[i] & fmt->Amask;
-        pixels[i] = alpha
-            | ((Uint32)ri << fmt->Rshift)
-            | ((Uint32)gi << fmt->Gshift)
-            | ((Uint32)bi << fmt->Bshift);
+                Uint32 alpha = px & aMask;
+                px = alpha
+                    | ((Uint32)ri << rShift)
+                    | ((Uint32)gi << gShift)
+                    | ((Uint32)bi << bShift);
+            });
     }
 }
 
 bool Renderer::applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::vector<float>& output) {
     if (!frame.color || frame.width <= 0 || frame.height <= 0) return false;
     std::lock_guard<std::mutex> lock(oidnMutex);
+
+    // If we were previously bound to an external CUDA stream (GPU zero-copy path on OptiX),
+    // that stream may now be destroyed (e.g., after switching OptiX→Vulkan). Using the stale
+    // device from the host path crashes inside nvcuda64.dll during execute/write. Drop the
+    // bound device and let initOIDN() create a fresh, self-managed CUDA or CPU device.
+    if (oidnCudaInitialized) {
+        oidnColorBuffer  = oidn::BufferRef();
+        oidnAlbedoBuffer = oidn::BufferRef();
+        oidnNormalBuffer = oidn::BufferRef();
+        oidnOutputBuffer = oidn::BufferRef();
+        oidnFilter       = oidn::FilterRef();
+        oidnDevice       = oidn::DeviceRef();
+        oidnInitialized     = false;
+        oidnCudaInitialized = false;
+        oidnCudaOrdinal = -1;
+        oidnCudaStream  = nullptr;
+        if (oidnGpuOutputDevPtr) {
+            cudaFree(oidnGpuOutputDevPtr);
+            oidnGpuOutputDevPtr = nullptr;
+        }
+        oidnGpuOutputBytes = 0;
+        oidnCachedWidth = 0;
+        oidnCachedHeight = 0;
+        oidnUsingAlbedo = false;
+        oidnUsingNormal = false;
+        oidnGpuCachedColor  = nullptr;
+        oidnGpuCachedAlbedo = nullptr;
+        oidnGpuCachedNormal = nullptr;
+    }
 
     if (!oidnInitialized) {
         initOIDN();
@@ -174,10 +223,6 @@ bool Renderer::applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::
         (useNormal != oidnUsingNormal);
     bool sizeChanged = (width != oidnCachedWidth || height != oidnCachedHeight);
     if (sizeChanged || filterLayoutChanged) {
-        oidnColorData.resize(bufferSize);
-        oidnOriginalData.resize(bufferSize);
-        output.resize(bufferSize);
-
         try {
             oidnColorBuffer = oidnDevice.newBuffer(bufferSize * sizeof(float));
             oidnAlbedoBuffer = useAlbedo ? oidnDevice.newBuffer(bufferSize * sizeof(float)) : oidn::BufferRef();
@@ -213,20 +258,10 @@ bool Renderer::applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::
     }
 
     output.resize(bufferSize);
-    const float blend_inv = 1.0f - blend;
-
-    for (size_t i = 0; i < pixelCount; ++i) {
-        size_t idx = i * 3;
-        oidnColorData[idx] = frame.color[idx];
-        oidnColorData[idx + 1] = frame.color[idx + 1];
-        oidnColorData[idx + 2] = frame.color[idx + 2];
-        oidnOriginalData[idx] = frame.color[idx];
-        oidnOriginalData[idx + 1] = frame.color[idx + 1];
-        oidnOriginalData[idx + 2] = frame.color[idx + 2];
-    }
 
     try {
-        oidnColorBuffer.write(0, bufferSize * sizeof(float), oidnColorData.data());
+        // Direct upload from caller's contiguous float3 buffer — no staging copy
+        oidnColorBuffer.write(0, bufferSize * sizeof(float), frame.color);
         if (useAlbedo) {
             oidnAlbedoBuffer.write(0, bufferSize * sizeof(float), frame.albedo);
         }
@@ -241,29 +276,25 @@ bool Renderer::applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::
             return false;
         }
 
-        oidnOutputBuffer.read(0, bufferSize * sizeof(float), oidnColorData.data());
+        // Download straight into output — no intermediate vector
+        oidnOutputBuffer.read(0, bufferSize * sizeof(float), output.data());
     }
     catch (const std::exception& e) {
         SCENE_LOG_ERROR(std::string("[OIDN] Execution failed: ") + e.what());
         return false;
     }
 
-    for (size_t i = 0; i < pixelCount; ++i) {
-        size_t idx = i * 3;
-
-        float r = oidnColorData[idx];
-        float g = oidnColorData[idx + 1];
-        float b = oidnColorData[idx + 2];
-
-        if (blend < 0.999f) {
-            r = r * blend + oidnOriginalData[idx] * blend_inv;
-            g = g * blend + oidnOriginalData[idx + 1] * blend_inv;
-            b = b * blend + oidnOriginalData[idx + 2] * blend_inv;
-        }
-
-        output[idx] = r;
-        output[idx + 1] = g;
-        output[idx + 2] = b;
+    // Blend in-place with caller's color as the "original" reference
+    if (blend < 0.999f) {
+        const float blend_inv = 1.0f - blend;
+        const float* __restrict src = frame.color;
+        float* __restrict dst = output.data();
+        std::for_each_n(std::execution::par_unseq,
+            dst, bufferSize,
+            [=](float& d) {
+                const size_t i = static_cast<size_t>(&d - dst);
+                d = d * blend + src[i] * blend_inv;
+            });
     }
 
     return true;
@@ -284,27 +315,41 @@ bool Renderer::applyOIDNDenoisingToCPUAccumulation(float blend, bool useAuxiliar
     if (hasAlbedo) linearAlbedo.resize(pixelCount * 3);
     if (hasNormal) linearNormal.resize(pixelCount * 3);
 
-    for (int y = 0; y < image_height; ++y) {
-        const int bufferY = image_height - 1 - y;
-        for (int x = 0; x < image_width; ++x) {
-            const Vec4& src = cpu_accumulation_buffer[(size_t)bufferY * (size_t)image_width + (size_t)x];
-            const size_t idx = ((size_t)y * (size_t)image_width + (size_t)x) * 3;
-            linearColor[idx] = src.x;
-            linearColor[idx + 1] = src.y;
-            linearColor[idx + 2] = src.z;
-            if (hasAlbedo) {
-                const Vec4& alb = cpu_albedo_accumulation_buffer[(size_t)bufferY * (size_t)image_width + (size_t)x];
-                linearAlbedo[idx] = alb.x;
-                linearAlbedo[idx + 1] = alb.y;
-                linearAlbedo[idx + 2] = alb.z;
-            }
-            if (hasNormal) {
-                const Vec4& nrm = cpu_normal_accumulation_buffer[(size_t)bufferY * (size_t)image_width + (size_t)x];
-                linearNormal[idx] = nrm.x;
-                linearNormal[idx + 1] = nrm.y;
-                linearNormal[idx + 2] = nrm.z;
-            }
-        }
+    {
+        const int W = image_width;
+        const int H = image_height;
+        const Vec4* __restrict accSrc = cpu_accumulation_buffer.data();
+        const Vec4* __restrict albSrc = hasAlbedo ? cpu_albedo_accumulation_buffer.data() : nullptr;
+        const Vec4* __restrict nrmSrc = hasNormal ? cpu_normal_accumulation_buffer.data() : nullptr;
+        float* __restrict colDst = linearColor.data();
+        float* __restrict albDst = hasAlbedo ? linearAlbedo.data() : nullptr;
+        float* __restrict nrmDst = hasNormal ? linearNormal.data() : nullptr;
+        // Iterate over source pixels — pointer range is a valid parallel iterator.
+        // Y-flip is computed per element from index arithmetic.
+        std::for_each_n(std::execution::par_unseq,
+            accSrc, pixelCount,
+            [=](const Vec4& sRef) {
+                const size_t srcIdx = static_cast<size_t>(&sRef - accSrc);
+                const int y_from_bottom = static_cast<int>(srcIdx / (size_t)W);
+                const int x = static_cast<int>(srcIdx % (size_t)W);
+                const int dstY = H - 1 - y_from_bottom;
+                const size_t dstIdx = ((size_t)dstY * (size_t)W + (size_t)x) * 3;
+                colDst[dstIdx]     = sRef.x;
+                colDst[dstIdx + 1] = sRef.y;
+                colDst[dstIdx + 2] = sRef.z;
+                if (albDst) {
+                    const Vec4& a = albSrc[srcIdx];
+                    albDst[dstIdx]     = a.x;
+                    albDst[dstIdx + 1] = a.y;
+                    albDst[dstIdx + 2] = a.z;
+                }
+                if (nrmDst) {
+                    const Vec4& n = nrmSrc[srcIdx];
+                    nrmDst[dstIdx]     = n.x;
+                    nrmDst[dstIdx + 1] = n.y;
+                    nrmDst[dstIdx + 2] = n.z;
+                }
+            });
     }
 
     OIDNFrameData frame;
@@ -316,6 +361,185 @@ bool Renderer::applyOIDNDenoisingToCPUAccumulation(float blend, bool useAuxiliar
 
     cpu_denoised_valid = applyOIDNDenoising(frame, blend, cpu_denoised_buffer);
     return cpu_denoised_valid;
+}
+
+bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame, float blend,
+                                     std::vector<float>& output) {
+    if (!frame.colorDevPtr || frame.width <= 0 || frame.height <= 0) return false;
+
+    std::lock_guard<std::mutex> lock(oidnMutex);
+
+    // Resolve CUDA device ordinal
+    int desiredOrd = frame.cudaDeviceOrdinal;
+    if (desiredOrd < 0) {
+        if (cudaGetDevice(&desiredOrd) != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
+    }
+    cudaStream_t desiredStream = static_cast<cudaStream_t>(frame.cudaStream);
+
+    const bool deviceChanged =
+        !oidnCudaInitialized ||
+        oidnCudaOrdinal != desiredOrd ||
+        oidnCudaStream != frame.cudaStream;
+
+    if (deviceChanged) {
+        try {
+            oidnDevice = oidn::newCUDADevice(desiredOrd, desiredStream);
+            oidnDevice.commit();
+            const char* errMsg = nullptr;
+            if (oidnDevice.getError(errMsg) != oidn::Error::None) {
+                SCENE_LOG_WARN(std::string("[OIDN GPU] CUDA device commit failed: ")
+                               + (errMsg ? errMsg : "unknown"));
+                oidnCudaInitialized = false;
+                return false;
+            }
+            oidnCudaOrdinal = desiredOrd;
+            oidnCudaStream = frame.cudaStream;
+            oidnCudaInitialized = true;
+            oidnInitialized = true;
+            // Any previously cached filter/buffers belong to the old device — drop them.
+            oidnColorBuffer  = oidn::BufferRef();
+            oidnAlbedoBuffer = oidn::BufferRef();
+            oidnNormalBuffer = oidn::BufferRef();
+            oidnOutputBuffer = oidn::BufferRef();
+            oidnFilter       = oidn::FilterRef();
+            if (oidnGpuOutputDevPtr) {
+                cudaFree(oidnGpuOutputDevPtr);
+                oidnGpuOutputDevPtr = nullptr;
+            }
+            oidnGpuOutputBytes = 0;
+            oidnCachedWidth = 0;
+            oidnCachedHeight = 0;
+            oidnUsingAlbedo = false;
+            oidnUsingNormal = false;
+            oidnGpuCachedColor = nullptr;
+            oidnGpuCachedAlbedo = nullptr;
+            oidnGpuCachedNormal = nullptr;
+        } catch (const std::exception& e) {
+            SCENE_LOG_WARN(std::string("[OIDN GPU] CUDA device bind failed: ") + e.what());
+            oidnCudaInitialized = false;
+            return false;
+        }
+    }
+
+    const int width = frame.width;
+    const int height = frame.height;
+    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    const size_t outBufferSize = pixelCount * 3;
+
+    const bool useAlbedo = frame.albedoDevPtr != nullptr;
+    const bool useNormal = frame.normalDevPtr != nullptr;
+
+    const bool sizeChanged   = (width != oidnCachedWidth) || (height != oidnCachedHeight);
+    const bool layoutChanged = (useAlbedo != oidnUsingAlbedo) || (useNormal != oidnUsingNormal);
+    const bool ptrsChanged   =
+        (frame.colorDevPtr  != oidnGpuCachedColor)  ||
+        (frame.albedoDevPtr != oidnGpuCachedAlbedo) ||
+        (frame.normalDevPtr != oidnGpuCachedNormal);
+    const bool outputSizeChanged = oidnGpuOutputBytes != outBufferSize * sizeof(float);
+    const bool rebuildFilter = sizeChanged || layoutChanged || ptrsChanged || outputSizeChanged || !oidnFilter;
+
+    if (rebuildFilter) {
+        try {
+            if (outputSizeChanged) {
+                if (oidnGpuOutputDevPtr) {
+                    cudaFree(oidnGpuOutputDevPtr);
+                    oidnGpuOutputDevPtr = nullptr;
+                }
+                if (cudaMalloc(&oidnGpuOutputDevPtr, outBufferSize * sizeof(float)) != cudaSuccess) {
+                    cudaGetLastError();
+                    oidnGpuOutputDevPtr = nullptr;
+                    oidnGpuOutputBytes = 0;
+                    return false;
+                }
+                oidnGpuOutputBytes = outBufferSize * sizeof(float);
+            }
+
+            oidnFilter = oidnDevice.newFilter("RT");
+            // Device-resident inputs with explicit stride (float4 layout, 16B/pixel).
+            oidnFilter.setImage("color", frame.colorDevPtr, oidn::Format::Float3,
+                                static_cast<size_t>(width), static_cast<size_t>(height),
+                                /*byteOffset=*/0,
+                                frame.pixelByteStride, frame.rowByteStride);
+            if (useAlbedo) {
+                oidnFilter.setImage("albedo", frame.albedoDevPtr, oidn::Format::Float3,
+                                    static_cast<size_t>(width), static_cast<size_t>(height),
+                                    0, frame.pixelByteStride, frame.rowByteStride);
+            }
+            if (useNormal) {
+                oidnFilter.setImage("normal", frame.normalDevPtr, oidn::Format::Float3,
+                                    static_cast<size_t>(width), static_cast<size_t>(height),
+                                    0, frame.pixelByteStride, frame.rowByteStride);
+            }
+            // Output: packed float3 CUDA buffer owned by Renderer so we can optionally
+            // blend in-place on device before the final readback.
+            oidnFilter.setImage("output", oidnGpuOutputDevPtr, oidn::Format::Float3,
+                                static_cast<size_t>(width), static_cast<size_t>(height),
+                                /*byteOffset=*/0,
+                                sizeof(float) * 3,
+                                static_cast<size_t>(width) * sizeof(float) * 3);
+            oidnFilter.set("hdr", true);
+            oidnFilter.set("srgb", false);
+            oidnFilter.commit();
+
+            oidnCachedWidth  = width;
+            oidnCachedHeight = height;
+            oidnUsingAlbedo  = useAlbedo;
+            oidnUsingNormal  = useNormal;
+            oidnGpuCachedColor  = frame.colorDevPtr;
+            oidnGpuCachedAlbedo = frame.albedoDevPtr;
+            oidnGpuCachedNormal = frame.normalDevPtr;
+        } catch (const std::exception& e) {
+            SCENE_LOG_ERROR(std::string("[OIDN GPU] filter setup failed: ") + e.what());
+            return false;
+        }
+    }
+
+    output.resize(outBufferSize);
+
+    try {
+        // Ensure OptiX writes on its stream are visible before OIDN reads shared memory.
+        if (desiredStream) {
+            cudaStreamSynchronize(desiredStream);
+        }
+        oidnFilter.execute();
+
+        const char* errMsg = nullptr;
+        if (oidnDevice.getError(errMsg) != oidn::Error::None) {
+            SCENE_LOG_ERROR(std::string("[OIDN GPU] ") + (errMsg ? errMsg : "execute error"));
+            return false;
+        }
+
+        if (blend < 0.999f) {
+            if (!launchOidnBlendKernel(static_cast<float*>(oidnGpuOutputDevPtr),
+                                       frame.colorDevPtr,
+                                       pixelCount,
+                                       blend,
+                                       frame.pixelByteStride,
+                                       desiredStream)) {
+                cudaGetLastError();
+                return false;
+            }
+        }
+
+        if (desiredStream) {
+            cudaStreamSynchronize(desiredStream);
+        }
+
+        // Only unavoidable transfer on this path: final denoised output → host for display.
+        if (cudaMemcpy(output.data(), oidnGpuOutputDevPtr,
+                       outBufferSize * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
+    } catch (const std::exception& e) {
+        SCENE_LOG_ERROR(std::string("[OIDN GPU] execute failed: ") + e.what());
+        return false;
+    }
+
+    return true;
 }
 
 bool Renderer::hasCPUDenoisedBuffer() const {
@@ -372,6 +596,11 @@ void Renderer::resetResolution(int w, int h) {
 
 Renderer::~Renderer()
 {
+    if (oidnGpuOutputDevPtr) {
+        cudaFree(oidnGpuOutputDevPtr);
+        oidnGpuOutputDevPtr = nullptr;
+    }
+    oidnGpuOutputBytes = 0;
     frame_buffer.clear();
     sample_counts.clear();
     variance_map.clear();
@@ -2021,6 +2250,9 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
         }
 
         if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+            if (inst->syncTransformFromSourceTriangles()) {
+                continue;
+            }
             if (inst->source_triangles) {
                 for (auto& srcTri : *inst->source_triangles) {
                     if (srcTri && srcTri->getTransformHandle() && srcTri->getVertexBoneWeights().empty()) {
@@ -2214,16 +2446,37 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
 
     // 1. Update Triangle Bone Indices with Offset
     if (hasBones && boneIndexOffset > 0) {
-        for (auto& tri : loaded_triangles) {
-            if (tri->hasSkinData()) {
-                // Access bone weights via accessor which returns reference to internal data
-                auto& vertexWeightsList = tri->getVertexBoneWeights();
-                for (auto& vertexWeights : vertexWeightsList) {
-                    for (auto& bw : vertexWeights) {
-                        bw.first += boneIndexOffset; // .first is the bone index
+        const size_t triCount = loaded_triangles.size();
+        auto shiftRange = [&loaded_triangles, boneIndexOffset](size_t s, size_t e) {
+            for (size_t i = s; i < e; ++i) {
+                auto& tri = loaded_triangles[i];
+                if (tri->hasSkinData()) {
+                    auto& vertexWeightsList = tri->getVertexBoneWeights();
+                    for (auto& vertexWeights : vertexWeightsList) {
+                        for (auto& bw : vertexWeights) {
+                            bw.first += boneIndexOffset;
+                        }
                     }
                 }
             }
+        };
+
+        constexpr size_t kBoneShiftParallelThreshold = 8192;
+        if (triCount < kBoneShiftParallelThreshold) {
+            shiftRange(0, triCount);
+        } else {
+            const unsigned int hw = std::max(2u, std::thread::hardware_concurrency());
+            const size_t chunks = std::min<size_t>(hw, (triCount + 8191) / 8192);
+            const size_t chunkSize = (triCount + chunks - 1) / chunks;
+            std::vector<std::future<void>> futures;
+            futures.reserve(chunks);
+            for (size_t c = 0; c < chunks; ++c) {
+                const size_t s = c * chunkSize;
+                const size_t e = std::min(s + chunkSize, triCount);
+                if (s >= e) break;
+                futures.push_back(std::async(std::launch::async, shiftRange, s, e));
+            }
+            for (auto& f : futures) f.get();
         }
     }
 
@@ -2266,6 +2519,9 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
     // Add triangles to scene - animation is handled via TransformHandle and skinning
     // NOTE: AnimatedObject wrappers removed (were unused, wasted memory)
     // Add triangles to scene and model context members
+    // Reserve to avoid repeated vector reallocations when importing millions of triangles.
+    scene.world.reserve(scene.world.size() + loaded_triangles.size());
+    modelCtx.members.reserve(modelCtx.members.size() + loaded_triangles.size());
     for (const auto& tri : loaded_triangles) {
         scene.world.add(tri);
         modelCtx.members.push_back(tri);
@@ -2522,11 +2778,10 @@ void Renderer::apply_normal_map(HitRecord& rec) {
             Vec3 v1 = tri->getV1();
             Vec3 v2 = tri->getV2();
             auto [uv0, uv1, uv2] = tri->getUVCoordinates();
-            
-            // Paint system convention matches texture space: u, 1-v
-            uv0.v = 1.0f - uv0.v;
-            uv1.v = 1.0f - uv1.v;
-            uv2.v = 1.0f - uv2.v;
+
+            // TBN uses ORIGINAL mesh UVs — do NOT flip V here.
+            // Normal maps are authored in original UV space; flipping V
+            // would negate the bitangent and invert the Green channel.
 
             Vec3 edge1 = v1 - v0;
             Vec3 edge2 = v2 - v0;
@@ -4513,13 +4768,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     Vec3 alb = pbsdf->getPropertyValue(pbsdf->albedoProperty, uv);
                     albedo = toVec3f(alb).clamp(0.01f, 1.0f);
 
-                    // Roughness (Y channel)
-                    Vec3 rough = pbsdf->getPropertyValue(pbsdf->roughnessProperty, uv);
-                    roughness = static_cast<float>(rough.y);
-
-                    // Metallic (Z channel)
-                    Vec3 metal = pbsdf->getPropertyValue(pbsdf->metallicProperty, uv);
-                    metallic = static_cast<float>(metal.z);
+                    roughness = pbsdf->getRoughnessValue(uv);
+                    metallic = pbsdf->getMetallicValue(uv);
                     transmission = pbsdf->getTransmission(uv);
                 }
 
@@ -6135,10 +6385,55 @@ void Renderer::rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<
 // Performance: ~1-5ms vs ~200-500ms for rebuildOptiXGeometry
 // ============================================================================
 void Renderer::updateBackendMaterials(SceneData& scene) {
-    if (!m_backend) return;
+    // Snapshot paint-dirty textures before the first uploadMaterials call.
+    // getTexID() inside VulkanBackendAdapter consumes Texture::vulkan_dirty and
+    // clears it after doing the in-place VkImage refresh. With two independent
+    // Vulkan backends (RT render + dedicated raster viewport) each holding its
+    // own m_uploadedImages cache, the first sync would absorb the flag and the
+    // second sync would skip its own in-place refresh — leaving the raster
+    // viewport VkImage stale (mesh paint invisible in Material Preview on
+    // Vulkan RT devices). Re-arming the flag between the two syncs makes both
+    // caches pick up the same paint stroke.
+    std::vector<Texture*> dirtySnapshot;
+    {
+        auto& mgr = MaterialManager::getInstance();
+        const auto& all = mgr.getAllMaterials();
+        auto capture = [&](const std::shared_ptr<Texture>& t) {
+            if (t && t->vulkan_dirty) dirtySnapshot.push_back(t.get());
+        };
+        for (const auto& mat : all) {
+            if (!mat || mat->type() != MaterialType::PrincipledBSDF) continue;
+            auto* p = static_cast<PrincipledBSDF*>(mat.get());
+            capture(p->albedoProperty.texture);
+            capture(p->normalProperty.texture);
+            capture(p->roughnessProperty.texture);
+            capture(p->metallicProperty.texture);
+            capture(p->emissionProperty.texture);
+            capture(p->opacityProperty.texture);
+            capture(p->transmissionProperty.texture);
+            capture(p->heightProperty.texture);
+        }
+    }
+
+    updateBackendMaterials(scene, m_backend);
+
+    // Keep the dedicated Vulkan viewport backend in sync so Material Preview
+    // reflects live edits from the material UI, modifiers, terrain, water, etc.
+    extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+    if (g_viewport_backend && g_viewport_backend.get() != m_backend) {
+        for (Texture* t : dirtySnapshot) {
+            if (t) t->vulkan_dirty = true;
+        }
+        updateBackendMaterials(scene, g_viewport_backend.get());
+    }
+}
+
+void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targetBackend) {
+    Backend::IBackend* backend = targetBackend ? targetBackend : m_backend;
+    if (!backend) return;
 
     // Prefer OptiX/CUDA path if available
-    Backend::OptixBackend* optixBackend = dynamic_cast<Backend::OptixBackend*>(m_backend);
+    Backend::OptixBackend* optixBackend = dynamic_cast<Backend::OptixBackend*>(backend);
     OptixWrapper* optix_gpu_ptr = (optixBackend && g_hasCUDA) ? optixBackend->getOptixWrapper() : nullptr;
 
     if (optix_gpu_ptr) {
@@ -6214,41 +6509,8 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
                         if (mat->gpuMaterial) gpu_mat = *(mat->gpuMaterial);
                         bool is_water = mat->materialName.find("Water") != std::string::npos || mat->materialName.find("River") != std::string::npos;
                         if (!is_water) {
-                            Vec3 alb = pbsdf->albedoProperty.color;
-                            gpu_mat.albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
-                            gpu_mat.roughness = (float)pbsdf->roughnessProperty.color.x;
-                            gpu_mat.metallic = (float)pbsdf->metallicProperty.intensity;
-                            Vec3 em = pbsdf->emissionProperty.color;
-                            float emStr = pbsdf->emissionProperty.intensity;
-                            gpu_mat.emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
-                            gpu_mat.ior = pbsdf->ior;
-                            gpu_mat.transmission = pbsdf->transmission;
-                            gpu_mat.opacity = pbsdf->opacityProperty.alpha;
-                            gpu_mat.subsurface = pbsdf->subsurface;
-                            Vec3 sssColor = pbsdf->subsurfaceColor;
-                            gpu_mat.subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
-                            Vec3 sssRadius = pbsdf->subsurfaceRadius;
-                            gpu_mat.subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
-                            gpu_mat.subsurface_scale = pbsdf->subsurfaceScale;
-                            gpu_mat.subsurface_anisotropy = pbsdf->subsurfaceAnisotropy;
-                            gpu_mat.subsurface_ior = pbsdf->subsurfaceIOR;
-                            gpu_mat.sss_use_random_walk = pbsdf->useRandomWalkSSS ? 1 : 0;
-                            gpu_mat.sss_max_steps = pbsdf->sssMaxSteps;
-                            gpu_mat.clearcoat = pbsdf->clearcoat;
-                            gpu_mat.clearcoat_roughness = pbsdf->clearcoatRoughness;
-                            gpu_mat.translucent = pbsdf->translucent;
-                            gpu_mat.anisotropic = pbsdf->anisotropic;
-                            gpu_mat.normal_strength = pbsdf->get_normal_strength();
-                            gpu_mat.sheen = pbsdf->sheen;
-                            gpu_mat.sheen_tint = pbsdf->sheen_tint;
-                            gpu_mat.uv_scale_x = static_cast<float>(pbsdf->textureTransform.scale.u);
-                            gpu_mat.uv_scale_y = static_cast<float>(pbsdf->textureTransform.scale.v);
-                            gpu_mat.uv_offset_x = static_cast<float>(pbsdf->textureTransform.translation.u);
-                            gpu_mat.uv_offset_y = static_cast<float>(pbsdf->textureTransform.translation.v);
-                            gpu_mat.uv_rotation_degrees = pbsdf->textureTransform.rotation_degrees;
-                            gpu_mat.uv_tiling_x = static_cast<float>(pbsdf->textureTransform.tilingFactor.u);
-                            gpu_mat.uv_tiling_y = static_cast<float>(pbsdf->textureTransform.tilingFactor.v);
-                            gpu_mat.uv_wrap_mode = static_cast<int>(pbsdf->textureTransform.wrapMode);
+                            const PBRMaterialSnapshot snapshot = capturePBRMaterialSnapshot(*pbsdf);
+                            applyPBRMaterialSnapshotToGpuMaterial(snapshot, gpu_mat);
                         }
 
                         gpu_mat.albedo_tex      = getCudaTex(pbsdf->albedoProperty.texture);
@@ -6286,7 +6548,7 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
 
             optix_gpu_ptr->updateHairMaterialsOnly(hairSystem);
             setHairMaterial(hairMaterial);
-            VolumetricRenderer::syncVolumetricData(scene, m_backend);
+            VolumetricRenderer::syncVolumetricData(scene, backend);
             optix_gpu_ptr->resetAccumulation();
         }
         catch (std::exception& e) {
@@ -6346,36 +6608,8 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
 
             if (mat->type() == MaterialType::PrincipledBSDF) {
                 PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat.get());
-                data.albedo = pbsdf->albedoProperty.color;
-                data.opacity = pbsdf->opacityProperty.alpha;
-                data.roughness = (float)pbsdf->roughnessProperty.color.x;
-                data.metallic = (float)pbsdf->metallicProperty.intensity;
-                data.clearcoat = pbsdf->clearcoat;
-                data.transmission = pbsdf->transmission;
-                data.emission = pbsdf->emissionProperty.color;
-                data.emissionStrength = pbsdf->emissionProperty.intensity;
-                data.ior = pbsdf->ior;
-
-                data.subsurface = pbsdf->subsurface;
-                data.subsurfaceColor = pbsdf->subsurfaceColor;
-                data.subsurfaceRadius = pbsdf->subsurfaceRadius;
-                data.subsurfaceScale = pbsdf->subsurfaceScale;
-                data.subsurfaceAnisotropy = pbsdf->subsurfaceAnisotropy;
-                data.subsurfaceIOR = pbsdf->subsurfaceIOR;
-                data.useRandomWalkSSS = pbsdf->useRandomWalkSSS;
-                data.sssMaxSteps = pbsdf->sssMaxSteps;
-
-                data.clearcoatRoughness = pbsdf->clearcoatRoughness;
-                data.translucent = pbsdf->translucent;
-                data.anisotropic = pbsdf->anisotropic;
-                data.normalStrength = pbsdf->get_normal_strength();
-                data.sheen = pbsdf->sheen;
-                data.sheenTint = pbsdf->sheen_tint;
-                data.uvScale = pbsdf->textureTransform.scale;
-                data.uvOffset = pbsdf->textureTransform.translation;
-                data.uvTiling = pbsdf->textureTransform.tilingFactor;
-                data.uvRotationDegrees = pbsdf->textureTransform.rotation_degrees;
-                data.uvWrapMode = static_cast<uint32_t>(pbsdf->textureTransform.wrapMode);
+                const PBRMaterialSnapshot snapshot = capturePBRMaterialSnapshot(*pbsdf);
+                data = makeBackendMaterialDataFromSnapshot(snapshot);
 
                 auto getH = [](const std::shared_ptr<Texture>& tex) -> int64_t { return tex ? reinterpret_cast<int64_t>(tex.get()) : 0; };
                 data.albedoTexture = getH(pbsdf->albedoProperty.texture);
@@ -6393,6 +6627,7 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
                 const auto& gm = *mat->gpuMaterial;
                 data.micro_detail_strength = gm.micro_detail_strength;
                 data.micro_detail_scale    = gm.micro_detail_scale;
+                data.tile_break_strength   = gm.tile_break_strength;
                 data.foam_threshold        = gm.foam_threshold;
                 data.fft_ocean_size        = gm.fft_ocean_size;
                 data.fft_choppiness        = gm.fft_choppiness;
@@ -6405,10 +6640,10 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
                 data.foam_noise_scale      = gm.foam_noise_scale;
             }
 
-            if (m_backend && m_backend->getInfo().type == Backend::BackendType::VULKAN_RT && mat->gpuMaterial) {
+            if (backend && backend->getInfo().type == Backend::BackendType::VULKAN_RT && mat->gpuMaterial) {
                 int64_t fftHeightTexture = 0;
                 int64_t fftNormalTexture = 0;
-                if (WaterManager::getInstance().syncVulkanFFTTexturesForMaterial(static_cast<uint16_t>(i), m_backend, fftHeightTexture, fftNormalTexture)) {
+                if (WaterManager::getInstance().syncVulkanFFTTexturesForMaterial(static_cast<uint16_t>(i), backend, fftHeightTexture, fftNormalTexture)) {
                     data.heightTexture = fftHeightTexture;
                     data.normalTexture = fftNormalTexture;
                 }
@@ -6424,12 +6659,12 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
             backendMaterials.push_back(data);
         }
 
-        if (m_backend) {
-            m_backend->uploadMaterials(backendMaterials);
+        if (backend) {
+            backend->uploadMaterials(backendMaterials);
             if (!terrainLayers.empty())
-                m_backend->uploadTerrainLayerMaterials(terrainLayers);
-            VolumetricRenderer::syncVolumetricData(scene, m_backend);
-            m_backend->resetAccumulation();
+                backend->uploadTerrainLayerMaterials(terrainLayers);
+            VolumetricRenderer::syncVolumetricData(scene, backend);
+            backend->resetAccumulation();
         }
     }
     catch (std::exception& e) {
@@ -6447,6 +6682,82 @@ FoliageWindUpdateStats Renderer::updateWind(SceneData& scene, float time) {
     return FoliageWindSystem::update(scene, time, this->m_backend);
 }
 
+namespace {
+
+bool matchesRendererNodeNameForViewportSync(const std::string& instanceNodeName,
+                                            const std::string& queryNodeName) {
+    if (queryNodeName.empty() || instanceNodeName.empty()) return false;
+    if (instanceNodeName == queryNodeName) return true;
+    const std::string matPrefix = queryNodeName + "_mat_";
+    return instanceNodeName.rfind(matPrefix, 0) == 0;
+}
+
+void collectRendererTrianglesForNode(const std::shared_ptr<Hittable>& obj,
+                                     const std::string& nodeName,
+                                     std::vector<std::shared_ptr<Triangle>>& outTriangles) {
+    if (!obj) return;
+
+    if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+        if (matchesRendererNodeNameForViewportSync(inst->node_name, nodeName) &&
+            inst->source_triangles) {
+            for (const auto& tri : *inst->source_triangles) {
+                if (!tri) continue;
+                if (matchesRendererNodeNameForViewportSync(tri->getNodeName(), nodeName) ||
+                    matchesRendererNodeNameForViewportSync(nodeName, tri->getNodeName()) ||
+                    tri->getNodeName().empty()) {
+                    outTriangles.push_back(tri);
+                }
+            }
+        }
+        return;
+    }
+
+    if (auto list = std::dynamic_pointer_cast<HittableList>(obj)) {
+        for (const auto& child : list->objects) {
+            collectRendererTrianglesForNode(child, nodeName, outTriangles);
+        }
+        return;
+    }
+
+    if (auto bvh = std::dynamic_pointer_cast<ParallelBVHNode>(obj)) {
+        collectRendererTrianglesForNode(bvh->left, nodeName, outTriangles);
+        collectRendererTrianglesForNode(bvh->right, nodeName, outTriangles);
+        return;
+    }
+
+    if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+        if (matchesRendererNodeNameForViewportSync(tri->getNodeName(), nodeName)) {
+            outTriangles.push_back(tri);
+        }
+    }
+}
+
+void syncViewportMaterialBindingsFromScene(Backend::IBackend* backend,
+                                           SceneData& scene,
+                                           const std::string& nodeName,
+                                           int oldMatID,
+                                           int newMatID) {
+    auto* viewportBackend = dynamic_cast<Backend::IViewportBackend*>(backend);
+    if (!viewportBackend) {
+        if (backend) backend->updateInstanceMaterialBinding(nodeName, oldMatID, newMatID);
+        return;
+    }
+
+    std::vector<std::shared_ptr<Triangle>> triangles;
+    for (const auto& obj : scene.world.objects) {
+        collectRendererTrianglesForNode(obj, nodeName, triangles);
+    }
+
+    if (!triangles.empty() && viewportBackend->updateRasterMeshFromTriangles(nodeName, triangles)) {
+        viewportBackend->resetAccumulation();
+        return;
+    }
+
+    viewportBackend->updateInstanceMaterialBinding(nodeName, oldMatID, newMatID);
+}
+
+} // namespace
+
 // ===============================================================================
 // GAS VOLUME OPTIX SYNC
 // ===============================================================================
@@ -6457,9 +6768,13 @@ void Renderer::updateBackendGasVolumes(SceneData& scene) {
     VolumetricRenderer::syncVolumetricData(scene, m_backend);
 }
 
-void Renderer::updateMeshMaterialBinding(const std::string& node_name, int old_mat_id, int new_mat_id) {
+void Renderer::updateMeshMaterialBinding(SceneData& scene, const std::string& node_name, int old_mat_id, int new_mat_id) {
     if (m_backend) {
-        m_backend->updateInstanceMaterialBinding(node_name, old_mat_id, new_mat_id);
+        syncViewportMaterialBindingsFromScene(m_backend, scene, node_name, old_mat_id, new_mat_id);
+    }
+    extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+    if (g_viewport_backend && g_viewport_backend.get() != m_backend) {
+        syncViewportMaterialBindingsFromScene(g_viewport_backend.get(), scene, node_name, old_mat_id, new_mat_id);
     }
     resetCPUAccumulation(); // Ensure CPU path also resets
 }

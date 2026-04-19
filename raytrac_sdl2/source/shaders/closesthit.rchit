@@ -24,6 +24,7 @@
 #extension GL_EXT_scalar_block_layout                  : require
 #extension GL_EXT_nonuniform_qualifier                 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#include "pbr_texture_policy.glsl"
 
 // Push Constants — must match C++ CameraPushConstants
 layout(push_constant) uniform CameraPC {
@@ -147,7 +148,7 @@ struct Material {
     float subsurface_ior;
     uint _terrain_layer_idx; // terrain layer buffer index (valid when FLAG_TERRAIN set)
     float normal_strength;
-    uint _reserved_3;
+    float tile_break_strength;  // UV tile-break (independent from dirt/roughness)
 };
 
 float wrapRepeat(float x) {
@@ -398,6 +399,7 @@ uvec2 pnanovdb_buf_read_uint64(pnanovdb_buf_t buf, uint byte_offset) {
 void pnanovdb_buf_write_uint32(pnanovdb_buf_t buf, uint byte_offset, uint value)  {}
 void pnanovdb_buf_write_uint64(pnanovdb_buf_t buf, uint byte_offset, uvec2 value) {}
 #include "PNanoVDB.h"
+#include "procedural_detail.glsl"
 
 // Trilinear NanoVDB float grid sampler — inputs in VDB native world-space
 float ch_sampleNanoVDB(uint64_t gridAddr, vec3 worldPos) {
@@ -1641,12 +1643,12 @@ void main() {
         geomNormal = -geomNormalRaw;
     }
 
-    vec2 tbnUV0 = vec2(uv0.x, 1.0 - uv0.y);
-    vec2 tbnUV1 = vec2(uv1.x, 1.0 - uv1.y);
-    vec2 tbnUV2 = vec2(uv2.x, 1.0 - uv2.y);
+    // TBN must use ORIGINAL mesh UVs (not texture-sampling-flipped UVs).
+    // Normal maps are authored in the original UV parameterisation; flipping V
+    // here would negate the bitangent and invert the Green channel → bumps↔dents.
     vec3 surfaceTangent;
     vec3 surfaceBitangent;
-    buildSurfaceTBN(objV0, objV1, objV2, tbnUV0, tbnUV1, tbnUV2, worldNormal, surfaceTangent, surfaceBitangent);
+    buildSurfaceTBN(objV0, objV1, objV2, uv0, uv1, uv2, worldNormal, surfaceTangent, surfaceBitangent);
 
     // ----------------------------------------------------------
     // 2b. Terrain Splat-Layer Blending (FLAG_TERRAIN = bit 16)
@@ -1772,6 +1774,13 @@ void main() {
     float transmission = clamp(mat.transmission, 0.0, 1.0);
     vec2 materialUV = applyMaterialUVTransform(mat, hitUV);
 
+    // Procedural tile-break: perturb UV before any texture sampling.
+    // Independent slider — set to 0 to keep albedo maps clean.
+    if (mat.tile_break_strength > 0.0 &&
+        (mat.albedo_tex > 0u || mat.roughness_tex > 0u || mat.normal_tex > 0u)) {
+        materialUV = pd_tileBreak(materialUV, hitPos, mat.tile_break_strength);
+    }
+
     // ----------------------------------------------------------
     // 4. Emission — ayrı field, scatter ile karışmaz
     //    payload.radiance ve hitEmissive, emission texture sampling
@@ -1868,17 +1877,41 @@ if (emissionTexID > 0) {
     // Sample roughness texture
     int roughTexID = int(mat.roughness_tex);
     if (roughTexID > 0) {
-        float r = texture(materialTextures[nonuniformEXT(roughTexID)], materialUV).g;
+        float r = samplePackedRoughness(
+            texture(materialTextures[nonuniformEXT(roughTexID)], materialUV), 0.0);
         roughness = clamp(r, 0.0, 1.0);
     }
     
     // Sample metallic texture
     int metallicTexID = int(mat.metallic_tex);
     if (metallicTexID > 0) {
-        float m = texture(materialTextures[nonuniformEXT(metallicTexID)], materialUV).b;
+        float m = samplePackedMetallic(
+            texture(materialTextures[nonuniformEXT(metallicTexID)], materialUV));
         metallic = clamp(m, 0.0, 1.0);
     }
-    
+
+    // ── Procedural detail: subtle color variation + dirt + roughness ──────────
+    // micro_detail_strength drives all world-space effects without touching UVs.
+    // tile_break_strength (above) is the separate UV-warp control.
+    if (mat.micro_detail_strength > 0.0) {
+        float sc  = max(mat.micro_detail_scale, 0.5);
+        float str = mat.micro_detail_strength;
+
+        // Subtle world-space luminance variation — ±8% max, independent seed
+        float colorVar   = pd_vnoise3(hitPos * sc * 0.7 + vec3(31.4, 17.2, 42.9));
+        float colorDelta = (colorVar - 0.5) * 0.16 * str;
+        albedo = clamp(albedo * (1.0 + colorDelta), vec3(0.0), vec3(1.0));
+
+        // Dirt: fBm-based darkening (dust, grime, worn patches)
+        float dirtFactor = pd_dirt(hitPos, sc) * str;
+        vec3  dirtColor  = vec3(0.14, 0.10, 0.08);
+        albedo = mix(albedo, albedo * dirtColor, dirtFactor);
+
+        // Roughness micro-variation: breaks uniform-gloss appearance
+        roughness = clamp(roughness + pd_roughnessVar(hitPos, sc) * str * 0.5,
+                          0.0, 1.0);
+    }
+
     // Apply normal map if present (perturb surface normal)
     int normalTexID = int(mat.normal_tex);
     bool waterUsesFFT = mat.sheen > 0.001 &&

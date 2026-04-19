@@ -46,8 +46,12 @@ public:
     // Project Lifecycle
     // ========================================================================
     
-    // Create a new empty project
-    void newProject(SceneData& scene, Renderer& renderer);
+    // Create a new empty project.
+    // defer_backend_reset: when true, skip the early renderer.rebuildBackendGeometry()
+    // call on the render backend. The caller (openProject) is responsible for driving
+    // the full rebuild after the new scene finishes loading, so the early empty-scene
+    // rebuild is wasted work for foliage-heavy projects.
+    void newProject(SceneData& scene, Renderer& renderer, bool defer_backend_reset = false);
     
     // Save current project to .rtp file (NEW: includes geometry, lights, cameras)
     // Returns true on success
@@ -187,15 +191,27 @@ public:
         TextureType type;
     };
     std::unordered_map<std::string, EmbeddedTextureData> m_embedded_texture_cache;
-    
+    // Maps original embedded name (e.g. "embedded_0") -> resolved local disk path
+    // Populated during deserializeTextures for ProjectLocal-saved textures
+    std::unordered_map<std::string, std::string> m_texture_path_remap;
+
     // Get embedded texture data by name (returns nullptr if not found)
     const EmbeddedTextureData* getEmbeddedTexture(const std::string& name) const {
         auto it = m_embedded_texture_cache.find(name);
         return (it != m_embedded_texture_cache.end()) ? &it->second : nullptr;
     }
-    
+
+    // Get remapped disk path for an originally-embedded texture (returns nullptr if not found)
+    const std::string* getTexturePathRemap(const std::string& original_name) const {
+        auto it = m_texture_path_remap.find(original_name);
+        return (it != m_texture_path_remap.end()) ? &it->second : nullptr;
+    }
+
     // Clear embedded texture cache (call on new/open project)
-    void clearEmbeddedTextureCache() { m_embedded_texture_cache.clear(); }
+    void clearEmbeddedTextureCache() {
+        m_embedded_texture_cache.clear();
+        m_texture_path_remap.clear();
+    }
     
 private:
     

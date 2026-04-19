@@ -80,7 +80,7 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
     float subsurface_ior;
     uint32_t _terrain_layer_idx; // terrain layer buffer index (valid when FLAG_TERRAIN set)
     float normal_strength;
-    uint32_t _reserved[1];
+    float tile_break_strength;   // UV tile-break strength (0=off, 0.1–0.3 typical)
 };
 
 // Flag bits for VkGpuMaterial::flags

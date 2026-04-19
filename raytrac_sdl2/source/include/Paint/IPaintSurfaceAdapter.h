@@ -118,6 +118,11 @@ public:
     virtual bool beginStroke(const PaintStrokeContext& ctx) = 0;
     virtual bool applyDab(const Vec3& world_hit_point, const BrushSettings& brush, const PaintStrokeContext& ctx) = 0;
     virtual void endStroke() = 0;
+
+    // Drop any persistent layer-stack state this adapter keeps in its scene.
+    // Called when the user exits paint mode so stale data does not resurrect
+    // on re-entry (e.g. after Fill + Add Layer). Default no-op.
+    virtual void releaseLayerStackFromScene() {}
 };
 
 using PaintSurfaceAdapterPtr = std::shared_ptr<IPaintSurfaceAdapter>;

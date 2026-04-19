@@ -95,6 +95,11 @@ struct GPUCapabilities {
     bool supportsBC4 = false;
     bool supportsBC5 = false;
     bool supportsBC7 = false;
+
+    // External-memory interop (Vulkan ↔ CUDA for OIDN GPU-direct denoise)
+    bool supportsExternalMemoryWin32 = false;   // VK_KHR_external_memory_win32
+    uint8_t deviceUUID[16] = {};                // VK_UUID_SIZE — for CUDA device matching
+    bool hasDeviceUUID = false;
 };
 
 // ============================================================================
@@ -399,6 +404,21 @@ public:
     
     BufferHandle createBuffer(const BufferCreateInfo& info);
     void destroyBuffer(BufferHandle& buffer);
+
+    /**
+     * @brief Create a buffer whose backing VkDeviceMemory is exportable to CUDA.
+     *
+     * Uses VK_KHR_external_memory_win32 (Opaque Win32 handle) on Windows.
+     * The returned HANDLE is owned by the caller when useKmt=false; when passed
+     * to cudaImportExternalMemory with cudaExternalMemoryHandleTypeOpaqueWin32,
+     * CUDA takes ownership and the caller must NOT CloseHandle it.
+     *
+     * outAllocationSize returns the VkDeviceMemory size needed for CUDA import.
+     * Returns a zero BufferHandle on failure (extension missing, alloc failure).
+     */
+    BufferHandle createExportableBuffer(const BufferCreateInfo& info,
+                                        void** outWin32Handle,
+                                        uint64_t* outAllocationSize);
     
     void* mapBuffer(const BufferHandle& buffer);
     void unmapBuffer(const BufferHandle& buffer);
@@ -794,12 +814,17 @@ namespace {
 
 namespace Backend {
 
-
-
+// Maximum number of texture descriptor slots available to shaders.
+// Both the RT (binding 6) and raster-preview (binding 1) descriptor arrays
+// are sized to this value. Shaders declare runtime arrays ([]) so no shader
+// recompilation is needed when this constant changes.
+// Purge is triggered at (VULKAN_TEXTURE_CAPACITY - 64) to keep headroom.
+static constexpr int32_t VULKAN_TEXTURE_CAPACITY = 2048;
+static constexpr int32_t VULKAN_TEXTURE_PURGE_THRESHOLD = VULKAN_TEXTURE_CAPACITY - 64; // 1984
 
 /**
  * @brief Vulkan implementation of IBackend
- * 
+ *
  * Bridges the IBackend interface to VulkanRT::VulkanDevice.
  * Similar to how OptixBackend wraps OptixWrapper.
  */
@@ -844,6 +869,16 @@ public:
     int64_t uploadTexture3D(const void* data, uint32_t width, uint32_t height, uint32_t depth, uint32_t channels, bool isFloat = false) override;
     void destroyTexture(int64_t textureHandle) override;
 
+    // In-place re-upload: write `data` into the existing VkImage at `textureID`,
+    // provided width/height/format match. Used by the paint pipeline so that
+    // vulkan_dirty textures don't destroy/create their VkImage every dab — which
+    // both thrashes the allocator and forces the RT descriptor path even when
+    // the active backend is raster-only. Returns false when the slot is missing
+    // or dims/format diverge; caller should fall back to destroy + uploadTexture2D.
+    bool updateTexture2DInPlace(int64_t textureID, const void* data,
+                                uint32_t width, uint32_t height,
+                                uint32_t channels, bool sRGB, bool isFloat = false);
+
     // ========================================================================
     // IBackend - Rendering
     // ========================================================================
@@ -869,6 +904,13 @@ public:
     bool patchRasterMeshTriangles(const std::string& nodeName,
                                   const std::vector<size_t>& dirtyIndices,
                                   const std::vector<std::pair<int, std::shared_ptr<Triangle>>>& meshEntries);
+    bool cloneRasterObjectByNodeName(const std::string& sourceNodeName,
+                                     const std::string& newNodeName,
+                                     const Matrix4x4& transform) override;
+    bool cloneRtObjectByNodeName(const std::string& sourceNodeName,
+                                 const std::string& newNodeName,
+                                 const std::shared_ptr<Hittable>& representativeSource,
+                                 const Matrix4x4& transform);
     void buildRasterGeometry(const std::vector<std::shared_ptr<Hittable>>& objects);
     void syncRasterInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects);
     void syncRasterSkinnedVertices(const std::vector<std::shared_ptr<Hittable>>& objects,
@@ -879,9 +921,16 @@ public:
     void renderProgressive(void* outSurface, void* outWindow, void* outRenderer,
                            int width, int height, void* outFramebuffer, void* outTexture) override;
     void downloadImage(void* outPixels) override;
-    bool getDenoiserFrame(DenoiserFrameData& frame) override;
+    bool getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary = true) override;
+    bool getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool useAuxiliary = true) override;
     int getCurrentSampleCount() const override;
     bool isAccumulationComplete() const override;
+    bool needsViewportRender() const override {
+        if (shouldUseInteractiveViewport()) {
+            return m_interactiveViewport.dirty;
+        }
+        return m_currentSamples < m_targetSamples;
+    }
 
     // ========================================================================
     // IBackend - Environment
@@ -915,6 +964,14 @@ public:
     void uploadAtmosphereLUT(const AtmosphereLUT* lut);
     void setInteractiveViewportMatcap(int64_t textureID);
     void setInteractiveViewportMatcapPreset(int preset);
+
+    // Full teardown for New/Open project workflows. Destroys the interactive
+    // viewport descriptor set (so its binding-1 texture array no longer holds
+    // soon-to-be-dead VkImageViews) and then runs rebuildAccelerationStructure
+    // to purge m_uploadedImages / BLAS / TLAS / raster meshes. Safe to call on
+    // any VulkanBackendAdapter; the next frame will recreate interactive
+    // viewport resources and backfill textures from the fresh project.
+    void resetForProjectReload();
 protected:
     bool updateRasterMeshFromTrianglesImpl(const std::string& nodeName,
                                            const std::vector<std::shared_ptr<Triangle>>& triangles);
@@ -933,6 +990,39 @@ protected:
                                int width, int height, void* outFramebuffer, void* outTexture);
     virtual void setInteractiveViewportMatcapImpl(int64_t textureID);
     virtual void setInteractiveViewportMatcapPresetImpl(int preset);
+    // Write a single texture slot into the material-preview descriptor set (binding 1).
+    // Called from texture-upload paths so the viewport sees textures as they arrive.
+    void updateMaterialPreviewTextureDescriptor(uint32_t slot, const VulkanRT::ImageHandle& img) {
+        if (slot == 0 || slot >= 1024) return;
+        const bool hasDescIdx = m_device && m_device->getCapabilities().supportsDescriptorIndexing;
+        if (!hasDescIdx) return;
+
+        const VkDescriptorSet ds = m_interactiveViewport.materialPreviewDescSet;
+        if (ds == VK_NULL_HANDLE || !img.view || !img.sampler) return;
+        VkDevice vkDev = m_device ? m_device->getDevice() : VK_NULL_HANDLE;
+        if (!vkDev) return;
+        VkDescriptorImageInfo imgInfo{};
+        imgInfo.sampler     = img.sampler;
+        imgInfo.imageView   = img.view;
+        imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet wds{};
+        wds.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wds.dstSet          = ds;
+        wds.dstBinding      = 1;
+        wds.dstArrayElement = slot;
+        wds.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wds.descriptorCount = 1;
+        wds.pImageInfo      = &imgInfo;
+        vkUpdateDescriptorSets(vkDev, 1, &wds, 0, nullptr);
+        // Descriptor updates can happen while the viewport is otherwise idle
+        // (first texture assign, live paint, project load restore). Force the
+        // interactive viewport to redraw immediately instead of waiting for
+        // camera motion or a material re-selection.
+        m_currentSamples = 0;
+        m_hasPresentedRenderedFrame = false;
+        m_interactiveViewport.dirty = true;
+        m_forceClearOnNextPresent = true;
+    }
 
     struct InteractiveViewportState {
         bool initialized = false;
@@ -952,6 +1042,9 @@ protected:
         VkDescriptorSetLayout materialPreviewDescLayout = VK_NULL_HANDLE;
         VkDescriptorPool materialPreviewDescPool = VK_NULL_HANDLE;
         VkDescriptorSet materialPreviewDescSet = VK_NULL_HANDLE;
+        // Baked environment maps for specular reflection (binding 2): [0]=studio, [1]=outdoor
+        int64_t envMapStudioID  = 0;
+        int64_t envMapOutdoorID = 0;
         // Matcap resources for solid viewport
         VulkanRT::ImageHandle matcapImage; // optional matcap texture
         bool matcapUserLoaded = false;     // true only when user explicitly loaded a matcap texture
@@ -997,6 +1090,8 @@ protected:
     ViewportMode m_viewportMode = ViewportMode::Rendered;
     InteractiveViewportState m_interactiveViewport;
     bool m_loggedInteractiveViewportFallback = false;
+    bool m_materialPreviewUnsupportedNotified = false;
+    bool m_materialPreviewPipelineGaveUp = false;
     std::vector<float> m_hdrPixels;   // Float32 HDR readback buffer — her frame realloc önler
     std::vector<uint16_t> m_halfPixels;
     std::vector<float> m_denoiserColorPixels;
@@ -1012,6 +1107,32 @@ protected:
     VulkanRT::BufferHandle m_denoiserColorStagingBuffer;
     VulkanRT::BufferHandle m_denoiserAlbedoStagingBuffer;
     VulkanRT::BufferHandle m_denoiserNormalStagingBuffer;
+
+    // ---- GPU-direct denoiser interop (Vulkan→CUDA for OIDN) ----
+    // Parallel set of staging buffers whose VkDeviceMemory is exportable to
+    // CUDA as external memory. The CPU host-path uses the non-shared buffers
+    // above; the GPU-direct path uses these shared ones. Interop state
+    // (CUDA-imported memory + device ptrs + CUDA-owned prep output buffers)
+    // lives behind an opaque pointer so the public header stays CUDA-free.
+    VulkanRT::BufferHandle m_denoiserColorSharedStaging;
+    VulkanRT::BufferHandle m_denoiserAlbedoSharedStaging;
+    VulkanRT::BufferHandle m_denoiserNormalSharedStaging;
+    void* m_denoiserColorSharedHandle = nullptr;   // Win32 HANDLE; owned by CUDA once imported
+    void* m_denoiserAlbedoSharedHandle = nullptr;
+    void* m_denoiserNormalSharedHandle = nullptr;
+    uint64_t m_denoiserColorSharedAllocSize = 0;
+    uint64_t m_denoiserAlbedoSharedAllocSize = 0;
+    uint64_t m_denoiserNormalSharedAllocSize = 0;
+    struct VulkanCudaDenoiserInterop;
+    VulkanCudaDenoiserInterop* m_gpuDenoiserInterop = nullptr;
+    // Clamp false→true transitions: once the GPU path is known to be
+    // unsupported on this device (e.g., UUID mismatch), stop retrying.
+    bool m_gpuDenoiserDisabled = false;
+
+    // Lazy: imports exportable staging memory into CUDA + allocates prep buffers.
+    // Returns true if the interop is ready for this frame's dimensions.
+    bool ensureGpuDenoiserInterop(int width, int height, bool needAux);
+    void destroyGpuDenoiserInterop();
     
     // Status callback
     std::function<void(const std::string&, int)> m_statusCallback;
@@ -1116,6 +1237,7 @@ protected:
         // CPU shadow copy for dirty-range detection during sculpt
         std::vector<float> cpuPositions;
         std::vector<float> cpuNormals;
+        std::vector<uint32_t> cpuMatIds;
     };
 
     struct RasterInstance {

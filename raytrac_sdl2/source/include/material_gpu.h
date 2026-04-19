@@ -62,10 +62,11 @@ struct alignas(16) GpuMaterial {
     float sheen_tint;                 // 4 bytes - Sheen color tint
     float normal_strength;            // 4 bytes - tangent-space normal XY multiplier
 
-    // Subsurface control flags (1 = enable random-walk multi-scatter)
+    // Subsurface control flags + tile-break (fills the implicit 4-byte gap before 8-byte-aligned fft_height_tex)
     int flags;                        // 4 bytes - bitfield flags
     int sss_use_random_walk = 1;      // 4 bytes
     int sss_max_steps = 6;            // 4 bytes - bounded random-walk depth
+    float tile_break_strength = 0.0f; // 4 bytes - UV tile-break strength (0=off, 0.1–0.3 typical)
 
     // Block 8: Water FFT Textures (16 bytes)
     cudaTextureObject_t fft_height_tex; // 8 bytes 
@@ -201,9 +202,11 @@ inline bool operator==(const GpuMaterial& a, const GpuMaterial& b) {
         fabsf(a.clearcoat_roughness - b.clearcoat_roughness) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.translucent - b.translucent) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.normal_strength - b.normal_strength) < FLOAT_COMPARE_EPSILON &&
-        // Water Details
+        // Procedural Detail
         fabsf(a.micro_detail_strength - b.micro_detail_strength) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.micro_detail_scale - b.micro_detail_scale) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.tile_break_strength - b.tile_break_strength) < FLOAT_COMPARE_EPSILON &&
+        // Water Details
         fabsf(a.foam_noise_scale - b.foam_noise_scale) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.foam_threshold - b.foam_threshold) < FLOAT_COMPARE_EPSILON &&
         // FFT Settings
@@ -270,9 +273,11 @@ namespace std {
             hash_combine_f(h, m.translucent);
             hash_combine_f(h, m.normal_strength);
 
-            // Water Details
+            // Procedural Detail
             hash_combine_f(h, m.micro_detail_strength);
             hash_combine_f(h, m.micro_detail_scale);
+            hash_combine_f(h, m.tile_break_strength);
+            // Water Details
             hash_combine_f(h, m.foam_noise_scale);
             hash_combine_f(h, m.foam_threshold);
 

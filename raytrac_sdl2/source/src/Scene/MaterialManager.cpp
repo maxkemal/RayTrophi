@@ -1,5 +1,6 @@
 ﻿#include "MaterialManager.h"
 #include "PrincipledBSDF.h"
+#include "PBRMaterialSnapshot.h"
 #include "material_gpu.h"
 #include "globals.h"
 #include "ProjectManager.h"
@@ -273,18 +274,32 @@ static void deserializeProperty(MaterialProperty& prop, const json& j, const std
             if (textureCache && prop.texture) {
                 textureCache->emplace(cacheKey, prop.texture);
             }
-            // SCENE_LOG_INFO("[MATERIAL] Loaded embedded texture from memory: " + texPath);
             return;
         }
-        
+
         // FALLBACK: Try loading from disk (for external textures)
         std::string fullPath = texPath;
-        if (!std::filesystem::exists(fullPath) && !sceneDir.empty()) {
+        // Check if there's a remap for this name (e.g. "embedded_0" -> project-local copy path)
+        if (const std::string* remapped = pm.getTexturePathRemap(texPath)) {
+            fullPath = *remapped;
+        } else if (!std::filesystem::exists(fullPath) && !sceneDir.empty()) {
             fullPath = sceneDir + "/" + texPath;
         }
         if (std::filesystem::exists(fullPath)) {
             const auto start = std::chrono::steady_clock::now();
-            prop.texture = std::make_shared<Texture>(fullPath, texType);
+            if (std::filesystem::path(fullPath).extension() == ".bin") {
+                std::ifstream in(fullPath, std::ios::binary);
+                if (in.is_open()) {
+                    std::vector<char> buffer((std::istreambuf_iterator<char>(in)),
+                                             std::istreambuf_iterator<char>());
+                    if (!buffer.empty()) {
+                        prop.texture = std::make_shared<Texture>(buffer, texType, fullPath);
+                    }
+                }
+            }
+            if (!prop.texture || !prop.texture->is_loaded()) {
+                prop.texture = std::make_shared<Texture>(fullPath, texType);
+            }
             if (stats) {
                 ++stats->disk_hits;
                 stats->disk_construct_ms += static_cast<size_t>(
@@ -506,7 +521,12 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
                 
                 // Translucent
                 matJson["translucent"] = pbsdf->translucent;
-                
+
+                // Procedural surface detail
+                matJson["microDetailStrength"] = pbsdf->micro_detail_strength;
+                matJson["microDetailScale"]    = pbsdf->micro_detail_scale;
+                matJson["tileBreakStrength"]   = pbsdf->tile_break_strength;
+
                 // Legacy tiling fallback for older scene compatibility
                 matJson["tilingFactor"] = { pbsdf->tilingFactor.x, pbsdf->tilingFactor.y };
                 matJson["selectedUvSet"] = pbsdf->selected_uv_set;
@@ -631,7 +651,12 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
             
             // Translucent
             pbsdf->translucent = matJson.value("translucent", 0.0f);
-            
+
+            // Procedural surface detail (defaults = off for old scenes)
+            pbsdf->micro_detail_strength = matJson.value("microDetailStrength", 0.0f);
+            pbsdf->micro_detail_scale    = matJson.value("microDetailScale",    2.0f);
+            pbsdf->tile_break_strength   = matJson.value("tileBreakStrength",   0.0f);
+
             // Legacy tiling fallback
             if (matJson.contains("tilingFactor") && matJson["tilingFactor"].is_array()) {
                 pbsdf->tilingFactor = Vec2(matJson["tilingFactor"][0], matJson["tilingFactor"][1]);
@@ -709,49 +734,8 @@ void MaterialManager::syncAllGpuMaterials_internal() {
                 mat->gpuMaterial = std::make_shared<GpuMaterial>();
             }
             
-            // Sync all properties from PrincipledBSDF to GpuMaterial
-            Vec3 alb = pbsdf->albedoProperty.color;
-            mat->gpuMaterial->albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
-            mat->gpuMaterial->roughness = (float)pbsdf->roughnessProperty.color.x;
-            mat->gpuMaterial->metallic = (float)pbsdf->metallicProperty.intensity;
-            
-            Vec3 em = pbsdf->emissionProperty.color;
-            float emStr = pbsdf->emissionProperty.intensity;
-            mat->gpuMaterial->emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
-            
-            mat->gpuMaterial->ior = pbsdf->ior;
-            mat->gpuMaterial->transmission = pbsdf->transmission;
-            // IMPORTANT: Opacity property alpha is what we use for transparency
-            mat->gpuMaterial->opacity = pbsdf->opacityProperty.alpha;
-            
-            // SSS
-            mat->gpuMaterial->subsurface = pbsdf->subsurface;
-            Vec3 sssColor = pbsdf->subsurfaceColor;
-            mat->gpuMaterial->subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
-            Vec3 sssRadius = pbsdf->subsurfaceRadius;
-            mat->gpuMaterial->subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
-            mat->gpuMaterial->subsurface_scale = pbsdf->subsurfaceScale;
-            mat->gpuMaterial->subsurface_anisotropy = pbsdf->subsurfaceAnisotropy;
-            mat->gpuMaterial->subsurface_ior = pbsdf->subsurfaceIOR;
-            mat->gpuMaterial->sss_use_random_walk = pbsdf->useRandomWalkSSS ? 1 : 0;
-            mat->gpuMaterial->sss_max_steps = pbsdf->sssMaxSteps;
-            
-            // Clear Coat
-            mat->gpuMaterial->clearcoat = pbsdf->clearcoat;
-            mat->gpuMaterial->clearcoat_roughness = pbsdf->clearcoatRoughness;
-            
-            // Translucent & Anisotropic
-            mat->gpuMaterial->translucent = pbsdf->translucent;
-            mat->gpuMaterial->anisotropic = pbsdf->anisotropic;
-            mat->gpuMaterial->normal_strength = pbsdf->get_normal_strength();
-            mat->gpuMaterial->uv_scale_x = static_cast<float>(pbsdf->textureTransform.scale.u);
-            mat->gpuMaterial->uv_scale_y = static_cast<float>(pbsdf->textureTransform.scale.v);
-            mat->gpuMaterial->uv_offset_x = static_cast<float>(pbsdf->textureTransform.translation.u);
-            mat->gpuMaterial->uv_offset_y = static_cast<float>(pbsdf->textureTransform.translation.v);
-            mat->gpuMaterial->uv_rotation_degrees = pbsdf->textureTransform.rotation_degrees;
-            mat->gpuMaterial->uv_tiling_x = static_cast<float>(pbsdf->textureTransform.tilingFactor.u);
-            mat->gpuMaterial->uv_tiling_y = static_cast<float>(pbsdf->textureTransform.tilingFactor.v);
-            mat->gpuMaterial->uv_wrap_mode = static_cast<int>(pbsdf->textureTransform.wrapMode);
+            const PBRMaterialSnapshot snapshot = capturePBRMaterialSnapshot(*pbsdf);
+            applyPBRMaterialSnapshotToGpuMaterial(snapshot, *mat->gpuMaterial);
 
             synced_count++;
         }

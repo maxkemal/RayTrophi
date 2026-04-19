@@ -25,13 +25,8 @@ UnifiedMaterial toUnifiedMaterial(const PrincipledBSDF& bsdf, int material_id) {
     Vec3 albedo = bsdf.getPropertyValue(bsdf.albedoProperty, uv);
     unified.albedo = toVec3f(albedo);
     
-    // Roughness (stored in Y channel)
-    Vec3 roughness_vec = bsdf.getPropertyValue(bsdf.roughnessProperty, uv);
-    unified.roughness = static_cast<float>(roughness_vec.y);
-    
-    // Metallic (stored in Z channel)  
-    Vec3 metallic_vec = bsdf.getPropertyValue(bsdf.metallicProperty, uv);
-    unified.metallic = static_cast<float>(metallic_vec.z);
+    unified.roughness = bsdf.getRoughnessValue(uv);
+    unified.metallic = bsdf.getMetallicValue(uv);
     
     // Opacity
     unified.opacity = bsdf.get_opacity(uv);
