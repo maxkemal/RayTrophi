@@ -906,7 +906,7 @@ bool MeshPaintAdapter::paintAtUV(PaintChannel channel, const Vec2& uv, const Bru
     return true;
 }
 
-bool MeshPaintAdapter::fillChannel(PaintChannel channel, const BrushSettings& brush) {
+bool MeshPaintAdapter::fillChannel(PaintChannel channel, const BrushSettings& brush, int layer_index) {
     PaintTextureSet* set = getTextureSet();
     if (!set) {
         return false;
@@ -919,30 +919,56 @@ bool MeshPaintAdapter::fillChannel(PaintChannel channel, const BrushSettings& br
 
     const int width = texture->width;
     const int height = texture->height;
-    bool changed = false;
+
+    // Build the filled pixel buffer once so we can apply it both to the
+    // destination layer and fall back onto the raw texture.
+    std::vector<CompactVec4> filled(static_cast<size_t>(width) * static_cast<size_t>(height));
     for (int py = 0; py < height; ++py) {
         for (int px = 0; px < width; ++px) {
             const float u = width > 1 ? static_cast<float>(px) / static_cast<float>(width - 1) : 0.0f;
             const float v = height > 1 ? 1.0f - (static_cast<float>(py) / static_cast<float>(height - 1)) : 0.0f;
             const float nx = u * 2.0f - 1.0f;
             const float ny = v * 2.0f - 1.0f;
-            texture->pixels[static_cast<size_t>(py) * static_cast<size_t>(width) + static_cast<size_t>(px)] =
-                makeBrushTexturePixel(channel, brush, nx, ny);
-            changed = true;
+            CompactVec4 pixel = makeBrushTexturePixel(channel, brush, nx, ny);
+            pixel.a = 255;  // Fill is fully opaque so composite fully replaces lower layers.
+            filled[static_cast<size_t>(py) * static_cast<size_t>(width) + static_cast<size_t>(px)] = pixel;
         }
     }
 
-    if (!changed) {
-        return false;
+    // Route the fill through the layer stack so that subsequent brush strokes
+    // and Add-Layer operations (which trigger a full flatten via composite)
+    // see the fill as canonical pixel data instead of pulling stale pixels
+    // from a pre-fill base layer.
+    PaintLayerStack& stack = ensureLayerStack();
+    if (stack.width() != width || stack.height() != height) {
+        stack.setResolution(width, height);
     }
 
-    bindTextureSetToMaterial();
-    if (texture->isUploaded()) {
-        texture->updateGPU();
-    } else {
-        texture->upload_to_gpu();
+    // Pick the target layer: caller-supplied index, or base layer as fallback.
+    int target = (layer_index >= 0 && layer_index < stack.layerCount()) ? layer_index : 0;
+    if (stack.layerCount() == 0) {
+        stack.ensureBaseLayer();
+        target = 0;
     }
+
+    PaintLayerData* dst = stack.layerAt(target);
+    if (dst) {
+        auto& buf = dst->ensurePixels(channel);
+        buf = filled;
+    }
+
+    // Re-composite the channel into the texture and upload. This keeps the
+    // texture and the stack consistent so later dirty-region composites do
+    // not reintroduce the pre-fill pixels.
+    stack.flattenChannelInto(channel, *set);
+    bindTextureSetToMaterial();
     return true;
+}
+
+void MeshPaintAdapter::releaseLayerStackFromScene() {
+    if (!scene_ || !isValid()) return;
+    const std::string key = getNodeName() + "#" + std::to_string(getMaterialID());
+    scene_->mesh_paint_layer_stacks.erase(key);
 }
 
 bool MeshPaintAdapter::generateNormalFromHeight(float strength) {
@@ -1287,8 +1313,11 @@ PaintLayerStack& MeshPaintAdapter::ensureLayerStack() {
 }
 
 PaintDirtyRect MeshPaintAdapter::paintLayerAtUV(int layer_index, PaintChannel channel,
-                                                const Vec2& uv, const BrushSettings& brush, float dt)
+                                                const Vec2& uv, const BrushSettings& brush, float dt,
+                                                float aspect_u, float aspect_v)
 {
+    (void)aspect_u;
+    (void)aspect_v;
     PaintDirtyRect dirty;
     PaintLayerStack* stack = getLayerStack();
     if (!stack) return dirty;

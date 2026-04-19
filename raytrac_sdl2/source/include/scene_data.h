@@ -562,6 +562,10 @@ struct SceneData {
         // Clear paint data
         mesh_paint_texture_sets.clear();
         mesh_paint_layer_stacks.clear();
+        editor_pending_delete_object_names.clear();
+        object_groups.clear();
+        mesh_modifiers.clear();
+        base_mesh_cache.clear();
 
         // Reset Post-Processing to defaults
         color_processor = ColorProcessor();

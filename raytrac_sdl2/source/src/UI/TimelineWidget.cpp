@@ -499,9 +499,11 @@ void TimelineWidget::draw(UIContext& ctx) {
                         if (!using_gpu) {
                             // CPU rendering - update world-space vertices
                             if (cached.instance && cached.instance->source_triangles) {
-                                // HittableInstance: update source triangles
-                                for (auto& src_tri : *cached.instance->source_triangles) {
-                                    if (src_tri) src_tri->updateTransformedVertices();
+                                // Keep instanced source geometry local; CPU BVH should move the wrapper transform.
+                                if (!cached.instance->syncTransformFromSourceTriangles()) {
+                                    for (auto& src_tri : *cached.instance->source_triangles) {
+                                        if (src_tri) src_tri->updateTransformedVertices();
+                                    }
                                 }
                             } else {
                                 // Raw triangles in scene: update all with same nodeName

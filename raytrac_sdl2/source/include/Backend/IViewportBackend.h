@@ -18,6 +18,10 @@ public:
         const std::string& nodeName,
         const std::vector<size_t>& dirtyIndices,
         const std::vector<std::pair<int, std::shared_ptr<class Triangle>>>& meshEntries) = 0;
+    virtual bool cloneRasterObjectByNodeName(
+        const std::string& sourceNodeName,
+        const std::string& newNodeName,
+        const Matrix4x4& transform) = 0;
 
     virtual void buildRasterGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) = 0;
     virtual void syncRasterInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects) = 0;

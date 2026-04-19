@@ -465,7 +465,7 @@ public:
             }
         }
         else {
-            SCENE_LOG_WARN("[FILE CACHE MISS] '" + filename + "' - will load from disk");
+           // SCENE_LOG_WARN("[FILE CACHE MISS] '" + filename + "' - will load from disk");
         }
 
         // ===== CACHE MISS - Disk'ten yükle =====
@@ -480,8 +480,8 @@ public:
         height = surface->h;
         int pixel_count = width * height;
 
-        SCENE_LOG_INFO("[FILE DECODE] Starting decode for: " + filename +
-            " | Resolution: " + std::to_string(width) + "x" + std::to_string(height));
+       /* SCENE_LOG_INFO("[FILE DECODE] Starting decode for: " + filename +
+            " | Resolution: " + std::to_string(width) + "x" + std::to_string(height));*/
 
         if (SDL_LockSurface(surface) != 0) {
             SCENE_LOG_ERROR("Failed to lock surface for: " + filename + " | Error: " + std::string(SDL_GetError()));

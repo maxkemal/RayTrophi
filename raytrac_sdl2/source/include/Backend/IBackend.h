@@ -77,6 +77,20 @@ struct DenoiserFrameData {
     const float* normal = nullptr;
 };
 
+// GPU-side denoiser input. Pointers are device memory on the backend's CUDA device.
+// Used by Renderer to run OIDN (CUDA) with zero host round-trips on inputs.
+struct DenoiserFrameDataGPU {
+    int width = 0;
+    int height = 0;
+    void* colorDevPtr = nullptr;         // float4* (pixel stride = sizeof(float4))
+    void* albedoDevPtr = nullptr;        // optional
+    void* normalDevPtr = nullptr;        // optional
+    size_t pixelByteStride = 0;          // bytes per pixel in device layout
+    size_t rowByteStride = 0;            // bytes per row (pixelByteStride * width for packed)
+    void* cudaStream = nullptr;          // cudaStream_t (nullable; caller ensures ordering)
+    int cudaDeviceOrdinal = -1;          // -1 = use current CUDA device
+};
+
 struct CameraParams {
     Vec3 origin;
     Vec3 lookAt;
@@ -329,9 +343,11 @@ public:
         uint32_t flags = 0;
         uint32_t terrainLayerIdx = 0; // Index into terrain layer buffer (valid when MAT_FLAG_TERRAIN set)
 
-        // Water-specific parameters (maps to VkGpuMaterial Block 8 & Block 9)
+        // Procedural surface detail
         float micro_detail_strength = 0.0f;
         float micro_detail_scale    = 0.0f;
+        float tile_break_strength   = 0.0f;
+        // Water-specific parameters (maps to VkGpuMaterial Block 8 & Block 9)
         float foam_threshold        = 0.0f;
         float fft_ocean_size        = 0.0f;
         float fft_choppiness        = 0.0f;
@@ -538,8 +554,17 @@ public:
      * @param outPixels Output buffer (RGBA float or uint8 depending on format)
      */
     virtual void downloadImage(void* outPixels) = 0;
-    virtual bool getDenoiserFrame(DenoiserFrameData& frame) {
+    virtual bool getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary = true) {
         (void)frame;
+        (void)useAuxiliary;
+        return false;
+    }
+
+    // GPU-direct variant: fills device pointers so Renderer can run OIDN (CUDA) without
+    // downloading. Return false → caller must use getDenoiserFrame() host path.
+    virtual bool getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool useAuxiliary = true) {
+        (void)frame;
+        (void)useAuxiliary;
         return false;
     }
     
@@ -549,6 +574,12 @@ public:
      * @brief Check if target sample count is reached
      */
     virtual bool isAccumulationComplete() const = 0;
+
+    /**
+     * @brief Returns true when the backend wants another viewport render pass
+     * even if no new user input arrived yet.
+     */
+    virtual bool needsViewportRender() const { return false; }
     
     // ========================================================================
     // Environment

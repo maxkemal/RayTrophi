@@ -243,6 +243,7 @@
   <ItemGroup>
     <ClInclude Include="resource.h" />
     <ClInclude Include="external\miniz.h" />
+    <None Include="cpp.hint" />
     <None Include="source\include\gas_kernels.cuh" />
     <None Include="source\include\gas_fft_solver.cuh" />
     <ClInclude Include="source\include\ImGuizmo.h" />
@@ -304,6 +305,7 @@
     <ClInclude Include="source\include\EmbreeBVH.h" />
     <ClInclude Include="source\include\FoliageWindSystem.h" />
     <ClInclude Include="source\include\globals.h" />
+    <ClInclude Include="source\include\Core\RenderStateManager.h" />
     <ClInclude Include="source\include\Hittable.h" />
     <ClInclude Include="source\include\HittableList.h" />
     <ClInclude Include="source\include\json.hpp" />
@@ -447,6 +449,7 @@
     <ClCompile Include="source\src\Scene\PointLight.cpp" />
     <ClCompile Include="source\src\Scene\PrincipledBSDF.cpp" />
     <ClCompile Include="source\src\Core\ProjectManager.cpp" />
+    <ClCompile Include="source\src\Core\RenderStateManager.cpp" />
     <ClCompile Include="source\src\Render\Renderer.cpp" />
     <ClCompile Include="source\src\Physics\RiverManager.cpp" />
     <ClCompile Include="source\src\Utils\image_filters.cpp" />
@@ -522,6 +525,7 @@
     <None Include="source\src\Device\hair_kernels.cu">
       <FileType>Document</FileType>
     </None>
+    <CudaCompile Include="source\src\Device\oidn_blend.cu" />
     <CudaCompile Include="source\src\Device\skinning_kernels.cu" />
     <CudaCompile Include="source\src\Device\gas_kernels.cu" />
     <CudaCompile Include="source\src\Device\gas_fft_solver.cu" />

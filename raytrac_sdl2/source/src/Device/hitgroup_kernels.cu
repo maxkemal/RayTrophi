@@ -102,9 +102,9 @@ extern "C" __global__ void __closesthit__ch() {
              float2 uv0_local = hgd->uvs[tri.x];
              float2 uv1_local = hgd->uvs[tri.y];
              float2 uv2_local = hgd->uvs[tri.z];
-             uv0_local.y = 1.0f - uv0_local.y;
-             uv1_local.y = 1.0f - uv1_local.y;
-             uv2_local.y = 1.0f - uv2_local.y;
+             // TBN uses ORIGINAL mesh UVs — do NOT flip V here.
+             // Normal maps are authored in original UV space; flipping V
+             // would negate the bitangent and invert the Green channel.
              float2 dUV1 = uv1_local - uv0_local;
              float2 dUV2 = uv2_local - uv0_local;
              float det_uv = (dUV1.x * dUV2.y - dUV2.x * dUV1.y);

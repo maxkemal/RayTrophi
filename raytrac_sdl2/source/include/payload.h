@@ -118,6 +118,16 @@ struct OptixHitResult {
     float3 blended_normal;     // Tangent space or World space? Let's assume standard logic handles Normal.
                                // Actually, normal is already computed and stored in 'normal' field above.
                                // So we don't need blended_normal.
+
+    // Path regularization (Müller 2018 / Arnold-style).
+    // Set by the raygen loop AFTER each trace_ray call; consumed by
+    // scatter_material / evaluate_brdf to clamp roughness on indirect bounces.
+    // bounce_index == 0 → primary ray (no regularization, preserves sharp
+    // mirror highlights). bounce_index > 0 → indirect, clamp roughness to a
+    // floor (≈0.1) to kill metallic GGX D-peak fireflies without touching
+    // direct reflections. Not filled by closesthit — it's a raygen-side hint
+    // written into the struct between trace and scatter/eval calls.
+    int bounce_index;
 };
 
 

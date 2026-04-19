@@ -123,6 +123,12 @@ bool activeSceneGpuRenderBackend(UIContext& ctx) {
 }
 
 void scheduleSceneMutationRebuilds(UIContext& ctx, bool includeCpuBvh) {
+    // Invalidate cached raster geometry for both Solid/Matcap/Preview backends.
+    // Some CPU-side mesh edit paths only set rebuild-pending flags; without a
+    // generation bump, Vulkan raster buildRasterGeometry() may early-out and keep
+    // showing stale meshes until a later backend-specific edit forces a refresh.
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+
     if (includeCpuBvh) {
         g_bvh_rebuild_pending = true;
     }

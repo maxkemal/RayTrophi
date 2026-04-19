@@ -150,6 +150,8 @@ public:
     // Buffer accessors for IBackend
     uchar4* getFramebufferDevicePtr() const { return d_framebuffer; }
     float4* getAccumulationDevicePtr() const { return d_accumulation_float4; }
+    float4* getDenoiserAlbedoDevicePtr() const { return d_denoiser_albedo; }
+    float4* getDenoiserNormalDevicePtr() const { return d_denoiser_normal; }
     void* getParamsDevicePtr() const { return (void*)d_params; }
     int getImageWidth() const { return Image_width; }
     int getImageHeight() const { return Image_height; }
@@ -258,7 +260,7 @@ public:
     
     // Download image from GPU to host memory
     void downloadFramebuffer(uchar4* host_ptr, int width, int height);
-    bool downloadDenoiserBuffers(std::vector<float>& color, std::vector<float>& albedo, std::vector<float>& normal);
+    bool downloadDenoiserBuffers(std::vector<float>& color, std::vector<float>& albedo, std::vector<float>& normal, bool useAuxiliary = true);
 
 private:
     // Hair rendering members

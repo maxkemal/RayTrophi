@@ -86,6 +86,7 @@ enum class BVHType {
 
 class OptixWrapper;
 struct UIContext;
+namespace Backend { class IBackend; struct DenoiserFrameDataGPU; }
 
 
 class Renderer {
@@ -102,6 +103,9 @@ public:
 
     void applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend);
     bool applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::vector<float>& output);
+    // GPU zero-copy variant — inputs stay on CUDA device; only output is copied back.
+    // Returns false if binding fails (caller must fall back to host path).
+    bool applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame, float blend, std::vector<float>& output);
     bool applyOIDNDenoisingToCPUAccumulation(float blend, bool useAuxiliary = true);
     bool hasCPUDenoisedBuffer() const;
     void invalidateCPUDenoisedBuffer();
@@ -164,13 +168,14 @@ public:
     // Update backend materials only (fast path - no geometry rebuild)
     // Use when only material properties change (color, roughness, volumetric params, etc.)
     void updateBackendMaterials(SceneData& scene);
+    void updateBackendMaterials(SceneData& scene, Backend::IBackend* targetBackend);
 
     // Update Gas Volumes on backend (fast path - no geometry rebuild)
     // Updates texture handles, transforms, and shader parameters for gas volumes
     void updateBackendGasVolumes(SceneData& scene);
 
     // Fast update for mesh material binding (avoids full rebuild)
-    void updateMeshMaterialBinding(const std::string& node_name, int old_mat_id, int new_mat_id);
+    void updateMeshMaterialBinding(SceneData& scene, const std::string& node_name, int old_mat_id, int new_mat_id);
     
     // Helper to sync camera state to backend
     void syncCameraToBackend(const Camera& cam);
@@ -285,8 +290,17 @@ private:
     oidn::BufferRef oidnAlbedoBuffer;
     oidn::BufferRef oidnNormalBuffer;
     oidn::BufferRef oidnOutputBuffer;
-    std::vector<float> oidnColorData;      // CPU tarafı color buffer cache
-    std::vector<float> oidnOriginalData;   // Original pixel cache (blend için, double-read eliminasyonu)
+
+    // GPU-path binding cache (Faz 2 — zero-copy CUDA)
+    bool oidnCudaInitialized = false;
+    int  oidnCudaOrdinal = -1;
+    void* oidnCudaStream = nullptr;          // cudaStream_t as void*
+    void* oidnGpuOutputDevPtr = nullptr;     // packed float3 output buffer owned by Renderer
+    size_t oidnGpuOutputBytes = 0;
+    void* oidnGpuCachedColor = nullptr;      // last-seen device pointer (to detect OptiX re-alloc)
+    void* oidnGpuCachedAlbedo = nullptr;
+    void* oidnGpuCachedNormal = nullptr;
+
     int oidnCachedWidth = 0;
     int oidnCachedHeight = 0;
     bool oidnUsingAlbedo = false;

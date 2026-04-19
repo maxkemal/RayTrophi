@@ -19,6 +19,7 @@
 #include "scene_ui_forcefield.hpp"
 #include "Backend/IViewportBackend.h"
 #include <Backend/VulkanBackend.h>
+#include <Backend/OptixBackend.h>
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern std::unique_ptr<Backend::IBackend> g_backend;
@@ -138,6 +139,10 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
     ImGuiIO& io = ImGui::GetIO();
     float screen_w = io.DisplaySize.x;
     float screen_h = io.DisplaySize.y;
+    // Use render resolution for aspect ratio to match GPU projection matrix.
+    float aspect_ratio = (image_height > 0)
+        ? (static_cast<float>(image_width) / static_cast<float>(image_height))
+        : (screen_w / screen_h);
 
     // Camera basis vectors
     Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
@@ -608,7 +613,9 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
 
     float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
     float tan_half_fov = tanf(fov_rad * 0.5f);
-    float aspect = io.DisplaySize.x / io.DisplaySize.y;
+    float aspect = (image_height > 0)
+        ? (static_cast<float>(image_width) / static_cast<float>(image_height))
+        : (io.DisplaySize.x / io.DisplaySize.y);
 
     auto Project = [&](const Vec3& p) -> ImVec2 {
         Vec3 to_point = p - cam.lookfrom;
@@ -670,7 +677,23 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
         float dy = io.MousePos.y - center.y;
         float d = sqrtf(dx * dx + dy * dy);
 
-        if (d < 20.0f && ImGui::IsMouseClicked(0) && !ImGuizmo::IsOver()) {
+        // Mirror the viewport-raycast lock in handleObjectSelection: while
+        // sculpt/edit-mesh tools own the click, icon picks must not steal
+        // selection, otherwise the brush stays armed on an off-mesh target
+        // and subsequent clicks hit the lock and go nowhere.
+        const bool edit_mode_locked =
+            mesh_overlay_settings.enabled &&
+            mesh_overlay_settings.edit_mode &&
+            ctx.selection.mesh_element_mode != MeshElementSelectMode::Object &&
+            !active_mesh_edit_object_name.empty();
+        const bool sculpt_mode_locked =
+            sculpt_mode_state.enabled &&
+            mesh_workspace_mode == MeshWorkspaceMode::Sculpt &&
+            mesh_overlay_settings.edit_mode &&
+            (terrain_sculpt_proxy_active || !sculpt_mode_state.active_target_name.empty());
+
+        if (d < 20.0f && ImGui::IsMouseClicked(0) && !ImGuizmo::IsOver() &&
+            !edit_mode_locked && !sculpt_mode_locked) {
             ctx.selection.selectLight(light);
             gizmo_hit = true;
         }
@@ -925,6 +948,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
             edit_drag_start_states.clear();
             edit_drag_changed = false;
             if (!edit_drag_object_name.empty()) {
+                beginInteractiveSubdivisionPreview(edit_drag_object_name);
                 captureMeshEditLayerState(ctx, edit_drag_object_name, edit_drag_start_states);
             }
         }
@@ -973,6 +997,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
 
         if (edit_was_using_gizmo && !gizmo_is_using_now && edit_drag_changed &&
             !edit_drag_start_states.empty() && !edit_drag_object_name.empty()) {
+            endInteractiveSubdivisionPreview(ctx, edit_drag_object_name, true);
             refreshMeshEditLayerEditedState(ctx);
 
             std::vector<MeshEditTriangleState> edit_drag_end_states;
@@ -999,6 +1024,11 @@ mesh_edit_changed_confirmed:
                 ProjectManager::getInstance().markModified();
             }
 
+            edit_drag_start_states.clear();
+            edit_drag_object_name.clear();
+            edit_drag_changed = false;
+        } else if (edit_was_using_gizmo && !gizmo_is_using_now && !edit_drag_object_name.empty()) {
+            endInteractiveSubdivisionPreview(ctx, edit_drag_object_name, false);
             edit_drag_start_states.clear();
             edit_drag_object_name.clear();
             edit_drag_changed = false;
@@ -1352,11 +1382,60 @@ mesh_edit_changed_confirmed:
                     // ===========================================================
                     // DEFERRED FULL REBUILD (Reliable - async in Main.cpp)
                     // ===========================================================
+                    extern bool g_viewport_raster_rebuild_pending;
+                    extern bool g_geometry_dirty;
+                    extern std::atomic<uint64_t> g_scene_geometry_generation;
+                    bool rasterCloneSucceeded = false;
+                    if (Backend::IViewportBackend* viewportBackend = dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr)) {
+                        rasterCloneSucceeded = viewportBackend->cloneRasterObjectByNodeName(
+                            targetName, newName, firstNewTri ? firstNewTri->getTransformMatrix() : Matrix4x4());
+                    } else if (g_viewport_backend) {
+                        rasterCloneSucceeded = g_viewport_backend->cloneRasterObjectByNodeName(
+                            targetName, newName, firstNewTri ? firstNewTri->getTransformMatrix() : Matrix4x4());
+                    }
+                    g_viewport_raster_rebuild_pending = !rasterCloneSucceeded;
+                    g_geometry_dirty = true;
+                    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+
                     extern bool g_optix_rebuild_pending;
-                    g_optix_rebuild_pending = true;
+                    extern bool g_vulkan_rebuild_pending;
+                    bool vulkanCloneSucceeded = false;
+                    if (Backend::IBackend* renderBackend = getGizmoRenderBackend(ctx)) {
+                        if (auto* vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(renderBackend)) {
+                            vulkanCloneSucceeded = vkBackend->cloneRtObjectByNodeName(
+                                targetName, newName, firstNewTri, firstNewTri ? firstNewTri->getTransformMatrix() : Matrix4x4());
+                            g_vulkan_rebuild_pending = !vulkanCloneSucceeded;
+                        }
+                    }
+                    bool optixCloneSucceeded = false;
+                    if (Backend::IBackend* renderBackend = getGizmoRenderBackend(ctx)) {
+                        if (auto* optixBackend = dynamic_cast<Backend::OptixBackend*>(renderBackend)) {
+                            auto* optix = optixBackend->getOptixWrapper();
+                            if (optix) {
+                                const auto newIds = optix->cloneInstancesByNodeName(targetName, newName);
+                                if (!newIds.empty()) {
+                                    optixBackend->updateObjectTransform(newName, firstNewTri ? firstNewTri->getTransformMatrix() : Matrix4x4());
+                                    optixBackend->rebuildAccelerationStructure();
+                                    optixBackend->resetAccumulation();
+                                    optixCloneSucceeded = true;
+                                }
+                            }
+                        }
+                    }
+                    g_optix_rebuild_pending = !optixCloneSucceeded;
                     
                     extern bool g_bvh_rebuild_pending;
-                    g_bvh_rebuild_pending = true;
+                    extern int g_bvh_rebuild_deferred_frames;
+                    Backend::IBackend* renderBackend = getGizmoRenderBackend(ctx);
+                    if (renderBackend && dynamic_cast<Backend::VulkanBackendAdapter*>(renderBackend) != nullptr) {
+                        g_bvh_rebuild_deferred_frames = std::max(g_bvh_rebuild_deferred_frames, 30);
+                        g_bvh_rebuild_pending = false;
+                    } else if (renderBackend && dynamic_cast<Backend::OptixBackend*>(renderBackend) != nullptr) {
+                        g_bvh_rebuild_deferred_frames = std::max(g_bvh_rebuild_deferred_frames, 30);
+                        g_bvh_rebuild_pending = false;
+                    } else {
+                        g_bvh_rebuild_pending = true;
+                    }
                     ctx.renderer.resetCPUAccumulation();
                     
                     is_bvh_dirty = false;
@@ -2227,7 +2306,9 @@ void SceneUI::drawCameraGizmos(UIContext& ctx) {
     Vec3 cam_right = cam_forward.cross(activeCam.vup).normalize();
     Vec3 cam_up = cam_right.cross(cam_forward).normalize();
     float tan_half_fov = tan(activeCam.vfov * 0.5f * M_PI / 180.0f);
-    float aspect = screen_w / screen_h;
+    float aspect = (image_height > 0)
+        ? (static_cast<float>(image_width) / static_cast<float>(image_height))
+        : (screen_w / screen_h);
 
     // Lambda to project 3D point to screen
     auto Project = [&](const Vec3& world_pos, ImVec2& screen_pos) -> bool {
@@ -2279,7 +2360,9 @@ void SceneUI::drawCameraGizmos(UIContext& ctx) {
         float near_dist = 0.2f;
         float far_dist = frustum_length;
         float cam_fov_rad = cam->vfov * M_PI / 180.0f;
-        float cam_aspect = screen_w / screen_h;
+        float cam_aspect = (image_height > 0)
+            ? (static_cast<float>(image_width) / static_cast<float>(image_height))
+            : (screen_w / screen_h);
 
         float near_height = near_dist * tan(cam_fov_rad * 0.5f);
         float near_width = near_height * cam_aspect;
@@ -2353,7 +2436,9 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
     Vec3 cam_up = cam_right.cross(cam_forward).normalize();
     float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
     float tan_half_fov = tanf(fov_rad * 0.5f);
-    float aspect = io.DisplaySize.x / io.DisplaySize.y;
+    float aspect = (image_height > 0)
+        ? (static_cast<float>(image_width) / static_cast<float>(image_height))
+        : (io.DisplaySize.x / io.DisplaySize.y);
 
     auto Project = [&](const Vec3& p) -> ImVec2 {
         Vec3 to_point = p - cam.lookfrom;
@@ -2377,7 +2462,19 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
 
         // Picking check for Icon
         float mouse_dist = sqrtf(powf(io.MousePos.x - screen_pos.x, 2) + powf(io.MousePos.y - screen_pos.y, 2));
-        if (mouse_dist < 15.0f && ImGui::IsMouseClicked(0) && !ImGuizmo::IsOver()) {
+        // Same lock as drawLightGizmos: don't let icon picks bypass sculpt/edit-mesh selection lock.
+        const bool edit_mode_locked =
+            mesh_overlay_settings.enabled &&
+            mesh_overlay_settings.edit_mode &&
+            ctx.selection.mesh_element_mode != MeshElementSelectMode::Object &&
+            !active_mesh_edit_object_name.empty();
+        const bool sculpt_mode_locked =
+            sculpt_mode_state.enabled &&
+            mesh_workspace_mode == MeshWorkspaceMode::Sculpt &&
+            mesh_overlay_settings.edit_mode &&
+            (terrain_sculpt_proxy_active || !sculpt_mode_state.active_target_name.empty());
+        if (mouse_dist < 15.0f && ImGui::IsMouseClicked(0) && !ImGuizmo::IsOver() &&
+            !edit_mode_locked && !sculpt_mode_locked) {
             sel.selectForceField(ff, -1, ff->name);
             ForceFieldUI::selected_force_field = ff;
             gizmo_hit = true;
