@@ -402,7 +402,7 @@ uint16_t makeObjectSlotPaintMaterialUnique(UIContext& ctx,
                 }
             }
             slot_ids[slot_index] = existing_id;
-            ctx.renderer.updateMeshMaterialBinding(obj_name, source_material_id, existing_id);
+            ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, source_material_id, existing_id);
         }
         return existing_id;
     }
@@ -424,7 +424,7 @@ uint16_t makeObjectSlotPaintMaterialUnique(UIContext& ctx,
         slot_ids[slot_index] = new_id;
     }
 
-    ctx.renderer.updateMeshMaterialBinding(obj_name, source_material_id, new_id);
+    ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, source_material_id, new_id);
     return new_id;
 }
 
@@ -1291,6 +1291,19 @@ void SceneUI::ensureSculptBrushPresets() {
     soft.alpha_preset = Paint::BrushAlphaPreset::SoftRound;
     add("Soft Sculpt", soft);
 
+    Paint::BrushSettings grab = soft;
+    grab.radius = 0.42f;
+    grab.strength = 1.35f;
+    grab.falloff = 0.82f;
+    add("Grab Form", grab);
+
+    Paint::BrushSettings draw = soft;
+    draw.radius = 0.18f;
+    draw.strength = 2.1f;
+    draw.falloff = 0.58f;
+    draw.alpha_preset = Paint::BrushAlphaPreset::HardRound;
+    add("Draw Build", draw);
+
     Paint::BrushSettings clay;
     clay.radius   = 0.2f;
     clay.strength = 2.5f;
@@ -1317,6 +1330,13 @@ void SceneUI::ensureSculptBrushPresets() {
     smooth.falloff  = 0.8f;
     smooth.alpha_preset = Paint::BrushAlphaPreset::SoftRound;
     add("Smooth", smooth);
+
+    Paint::BrushSettings inflate = soft;
+    inflate.radius = 0.24f;
+    inflate.strength = 1.8f;
+    inflate.falloff = 0.52f;
+    inflate.alpha_preset = Paint::BrushAlphaPreset::HardRound;
+    add("Inflate Volume", inflate);
 
     Paint::BrushSettings sharp;
     sharp.radius   = 0.12f;
@@ -2846,7 +2866,10 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
                 paint_mode_state.syncLayersFromStack();
                 adapter->compositeAndUpload();
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
             }
             ImGui::SameLine();
             ImGui::SetNextItemWidth(slider_w);
@@ -2856,7 +2879,10 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
                 paint_mode_state.syncLayersFromStack();
                 adapter->compositeAndUpload();
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Opacity");
         }
@@ -2899,7 +2925,10 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
                 paint_mode_state.syncLayersFromStack();
                 adapter->compositeAndUpload();
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
                 g_ProjectManager.markModified();
             }
             ImGui::PopStyleVar();
@@ -2991,9 +3020,11 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
         if (ImGui::Button("+##add", ImVec2(btn_w, btn_h))) {
             const int idx = paint_mode_state.addLayerAboveCurrent();
             if (idx >= 0) {
-                adapter->compositeAndUpload();
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                // A brand-new empty layer contributes nothing to the composite,
+                // so skip compositeAndUpload() here: flattening the entire stack
+                // would clobber any texture state that drifted away from the
+                // stack (e.g. external edits, undo, or stale base layer seeded
+                // before the current session's fills/strokes).
                 g_ProjectManager.markModified();
             }
         }
@@ -3004,7 +3035,10 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
             if (paint_mode_state.duplicateCurrentLayer() >= 0) {
                 adapter->compositeAndUpload();
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
                 g_ProjectManager.markModified();
             }
         }
@@ -3016,7 +3050,10 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
             if (paint_mode_state.moveCurrentLayer(1)) {
                 adapter->compositeAndUpload();
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
                 g_ProjectManager.markModified();
             }
         }
@@ -3029,7 +3066,10 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
             if (paint_mode_state.moveCurrentLayer(-1)) {
                 adapter->compositeAndUpload();
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
                 g_ProjectManager.markModified();
             }
         }
@@ -3042,7 +3082,10 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
             if (paint_mode_state.mergeCurrentLayerDown()) {
                 adapter->compositeAndUpload();
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
                 g_ProjectManager.markModified();
             }
         }
@@ -3055,7 +3098,10 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
             paint_mode_state.flattenAllLayers();
             adapter->compositeAndUpload();
             ctx.renderer.resetCPUAccumulation();
-            if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.updateBackendMaterials(ctx.scene);
+                ctx.backend_ptr->resetAccumulation();
+            }
             g_ProjectManager.markModified();
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Flatten All");
@@ -3067,7 +3113,10 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
             if (paint_mode_state.removeCurrentLayer()) {
                 adapter->compositeAndUpload();
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
                 g_ProjectManager.markModified();
             }
         }
@@ -3531,7 +3580,7 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
                 adapter->assignTextureToChannel(channel);
                 std::shared_ptr<Texture> channel_texture = texture_set ? texture_set->getTexture(channel) : nullptr;
                 const std::vector<CompactVec4> before_pixels = channel_texture ? channel_texture->pixels : std::vector<CompactVec4>{};
-                if (adapter->fillChannel(channel, paint_mode_state.brush)) {
+                if (adapter->fillChannel(channel, paint_mode_state.brush, paint_mode_state.active_layer_index)) {
                     any_changed = true;
                     if (channel_texture) {
                         composite->add(std::make_unique<PaintTextureCommand>(
@@ -3554,7 +3603,7 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
                 adapter->assignTextureToChannel(Paint::PaintChannel::Mask);
                 std::shared_ptr<Texture> mask_texture = texture_set ? texture_set->getTexture(Paint::PaintChannel::Mask) : nullptr;
                 const std::vector<CompactVec4> mask_before_pixels = mask_texture ? mask_texture->pixels : std::vector<CompactVec4>{};
-                if (adapter->fillChannel(Paint::PaintChannel::Mask, height_brush)) {
+                if (adapter->fillChannel(Paint::PaintChannel::Mask, height_brush, paint_mode_state.active_layer_index)) {
                     any_changed = true;
                     if (mask_texture) {
                         composite->add(std::make_unique<PaintTextureCommand>(
@@ -3768,7 +3817,7 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
     if (beginBrushDockSection("Stroke")) {
         ImGui::TextDisabled("Mesh-only controls are active for this target");
         ImGui::SliderFloat("Radius", &sculpt_mode_state.brush.radius, 0.01f, 20.0f, "%.3f m");
-        ImGui::SliderFloat("Strength", &sculpt_mode_state.brush.strength, 0.01f, 10.0f, "%.2f");
+        ImGui::SliderFloat("Strength", &sculpt_mode_state.brush.strength, 0.01f, 1.0f, "%.2f");
         ImGui::SliderFloat("Falloff", &sculpt_mode_state.brush.falloff, 0.0f, 1.0f, "%.2f");
         if (!sculpt_mode_state.compact_ui) {
             ImGui::SliderFloat("Spacing", &sculpt_mode_state.brush.spacing, 0.01f, 1.0f, "%.2f");
@@ -3777,6 +3826,9 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
         ImGui::Checkbox("Show Brush Preview", &sculpt_mode_state.brush.show_preview);
         ImGui::Checkbox("Front Faces Only", &sculpt_mode_state.front_faces_only);
         ImGui::Checkbox("Accumulate Live", &sculpt_mode_state.accumulate_live);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("When off, sculpt updates stay local during the stroke and GPU/render sync waits for mouse release.");
+        }
         ImGui::Separator();
         ImGui::TextDisabled("Symmetry");
         ImGui::Checkbox("Mirror X##sculpt", &sculpt_mode_state.mirror_x); ImGui::SameLine();
@@ -4038,6 +4090,14 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
             paint_mode_state.stroke.has_clone_source = true;
             paint_mode_state.stroke.clone_source_u = clone_source_u;
             paint_mode_state.stroke.clone_source_v = clone_source_v;
+        }
+        // Final backend sync so the painted texture is fully up-to-date after
+        // the throttled mid-stroke updates. Paired with the 220 ms throttle in
+        // the per-dab loop below.
+        if (ctx.backend_ptr) {
+            ctx.renderer.updateBackendMaterials(ctx.scene);
+            ctx.backend_ptr->resetAccumulation();
+            last_vulkan_paint_sync_time = static_cast<float>(ImGui::GetTime());
         }
     };
 
@@ -4351,25 +4411,31 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
 
     // Collect channels that were actually painted for selective compositing.
     std::vector<Paint::PaintChannel> painted_channels;
+    Paint::PaintTextureSet* set = adapter->getTextureSet();
+    std::shared_ptr<Texture> active_texture = set ? set->getTexture(paint_mode_state.active_channel) : nullptr;
 
-    bool dab_changed = false;
-    if (paint_mode_state.brush.tool == Paint::BrushTool::Spray) {
-        Paint::PaintTextureSet* set = adapter->getTextureSet();
-        std::shared_ptr<Texture> active_texture = set ? set->getTexture(paint_mode_state.active_channel) : nullptr;
-        if (active_texture && active_texture->width > 0 && active_texture->height > 0) {
+    auto applyPaintAtHit = [&](const HitRecord& hit) -> bool {
+        bool hit_changed = false;
+        const Vec2 hit_uv = hit.uv;
+
+        if (paint_mode_state.brush.tool == Paint::BrushTool::Spray) {
+            if (!active_texture || active_texture->width <= 0 || active_texture->height <= 0) {
+                return false;
+            }
+
             const int particles = std::clamp(paint_mode_state.brush.spray_particles, 1, 64);
             const float spread = std::clamp(paint_mode_state.brush.spray_spread, 0.05f, 1.0f);
             const float size_jitter = std::clamp(paint_mode_state.brush.spray_size_jitter, 0.0f, 1.0f);
             const float opacity_jitter = std::clamp(paint_mode_state.brush.spray_opacity_jitter, 0.0f, 1.0f);
             for (int p = 0; p < particles; ++p) {
-                const float seed_u = rec.uv.u * (137.0f + static_cast<float>(p) * 17.0f);
-                const float seed_v = rec.uv.v * (251.0f + static_cast<float>(p) * 23.0f);
+                const float seed_u = hit_uv.u * (137.0f + static_cast<float>(p) * 17.0f);
+                const float seed_v = hit_uv.v * (251.0f + static_cast<float>(p) * 23.0f);
                 const float angle = uiHash01(seed_u, seed_v) * 6.2831853f;
                 const float radius = std::sqrt(uiHash01(seed_v + 13.0f, seed_u + 29.0f)) *
                     spread * paint_mode_state.brush.radius;
                 const Vec2 spray_uv(
-                    std::clamp(rec.uv.u + (std::cos(angle) * radius) / static_cast<float>(active_texture->width), 0.0f, 1.0f),
-                    std::clamp(rec.uv.v + (std::sin(angle) * radius) / static_cast<float>(active_texture->height), 0.0f, 1.0f));
+                    std::clamp(hit_uv.u + (std::cos(angle) * radius) / static_cast<float>(active_texture->width), 0.0f, 1.0f),
+                    std::clamp(hit_uv.v + (std::sin(angle) * radius) / static_cast<float>(active_texture->height), 0.0f, 1.0f));
                 Paint::BrushSettings spray_brush = dab_brush;
                 const float droplet_base_size = std::clamp(paint_mode_state.brush.spray_droplet_size, 0.05f, 1.0f);
                 const float size_noise = uiHash01(seed_u + 41.0f, seed_v + 97.0f) * 2.0f - 1.0f;
@@ -4380,14 +4446,14 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
                 spray_brush.strength *= (1.0f / std::sqrt(static_cast<float>(particles))) * droplet_strength;
                 for (Paint::PaintChannel channel : paint_channels) {
                     if (doPaintAtUV(channel, spray_uv, spray_brush, dab_dt)) {
-                        dab_changed = true;
+                        hit_changed = true;
                         painted_channels.push_back(channel);
                     }
                 }
                 if (auto_height_brush) {
                     const Paint::BrushSettings height_brush = makeHeightBrush(spray_brush, current_deposit_ratio);
                     if (doPaintAtUV(Paint::PaintChannel::Mask, spray_uv, height_brush, dab_dt)) {
-                        dab_changed = true;
+                        hit_changed = true;
                         painted_channels.push_back(Paint::PaintChannel::Mask);
                         if (paint_mode_state.auto_normal_from_height) {
                             updateAutoNormalAtUV(spray_uv, spray_brush.radius);
@@ -4395,40 +4461,47 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
                     }
                 }
             }
+            return hit_changed;
         }
-    } else if (paint_mode_state.brush.tool == Paint::BrushTool::Clone) {
-        if (!paint_mode_state.stroke.clone_offset_initialized) {
-            paint_mode_state.stroke.clone_offset_u = paint_mode_state.stroke.clone_source_u - rec.uv.u;
-            paint_mode_state.stroke.clone_offset_v = paint_mode_state.stroke.clone_source_v - rec.uv.v;
-            paint_mode_state.stroke.clone_offset_initialized = true;
-        }
-        const Vec2 src_uv(
-            dab_uv.u + paint_mode_state.stroke.clone_offset_u,
-            dab_uv.v + paint_mode_state.stroke.clone_offset_v);
-        for (Paint::PaintChannel channel : paint_channels) {
-            if (doCloneAtUV(channel, dab_uv, src_uv, dab_brush, dab_dt)) {
-                dab_changed = true;
-                painted_channels.push_back(channel);
+
+        if (paint_mode_state.brush.tool == Paint::BrushTool::Clone) {
+            if (!paint_mode_state.stroke.clone_offset_initialized) {
+                paint_mode_state.stroke.clone_offset_u = paint_mode_state.stroke.clone_source_u - rec.uv.u;
+                paint_mode_state.stroke.clone_offset_v = paint_mode_state.stroke.clone_source_v - rec.uv.v;
+                paint_mode_state.stroke.clone_offset_initialized = true;
             }
+            const Vec2 src_uv(
+                hit_uv.u + paint_mode_state.stroke.clone_offset_u,
+                hit_uv.v + paint_mode_state.stroke.clone_offset_v);
+            for (Paint::PaintChannel channel : paint_channels) {
+                if (doCloneAtUV(channel, hit_uv, src_uv, dab_brush, dab_dt)) {
+                    hit_changed = true;
+                    painted_channels.push_back(channel);
+                }
+            }
+            return hit_changed;
         }
-    } else {
+
         for (Paint::PaintChannel channel : paint_channels) {
-            if (doPaintAtUV(channel, dab_uv, dab_brush, dab_dt)) {
-                dab_changed = true;
+            if (doPaintAtUV(channel, hit_uv, dab_brush, dab_dt)) {
+                hit_changed = true;
                 painted_channels.push_back(channel);
             }
         }
         if (auto_height_brush) {
             const Paint::BrushSettings height_brush = makeHeightBrush(dab_brush, current_deposit_ratio);
-            if (doPaintAtUV(Paint::PaintChannel::Mask, dab_uv, height_brush, dab_dt)) {
-                dab_changed = true;
+            if (doPaintAtUV(Paint::PaintChannel::Mask, hit_uv, height_brush, dab_dt)) {
+                hit_changed = true;
                 painted_channels.push_back(Paint::PaintChannel::Mask);
                 if (paint_mode_state.auto_normal_from_height) {
-                    updateAutoNormalAtUV(dab_uv, dab_brush.radius);
+                    updateAutoNormalAtUV(hit_uv, dab_brush.radius);
                 }
             }
         }
-    }
+        return hit_changed;
+    };
+
+    const bool dab_changed = applyPaintAtHit(rec);
 
     // If using layers, composite the painted channels to the flat texture for display.
     if (dab_changed && use_layers && !painted_channels.empty()) {
@@ -4472,6 +4545,12 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         }
         ctx.renderer.resetCPUAccumulation();
         if (ctx.backend_ptr) {
+            // Paint-time material sync. uploadMaterials() routes dirty textures
+            // through the VulkanBackendAdapter in-place re-upload path, so each
+            // tick is just a staging copy into the existing VkImage (no destroy/
+            // create, no descriptor churn). A short throttle keeps the call rate
+            // sane without hurting brush responsiveness; the endStroke path runs
+            // a final sync so the texture is never left stale.
             const float now = static_cast<float>(ImGui::GetTime());
             if (now - last_vulkan_paint_sync_time > 0.08f) {
                 ctx.renderer.updateBackendMaterials(ctx.scene);
@@ -4491,22 +4570,9 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
 
             HitRecord mirrored_hit;
             if (resolveMirroredMeshPaintHit(ctx, *adapter, rec, mx, my, mz, mirrored_hit)) {
-                bool mirror_changed = false;
-                for (Paint::PaintChannel channel : paint_channels) {
-                    if (doPaintAtUV(channel, mirrored_hit.uv, dab_brush, dab_dt)) {
-                        paint_mode_state.stroke.changed = true;
-                        mirror_changed = true;
-                    }
-                }
-                if (auto_height_brush) {
-                    const Paint::BrushSettings height_brush = makeHeightBrush(dab_brush, current_deposit_ratio);
-                    if (doPaintAtUV(Paint::PaintChannel::Mask, mirrored_hit.uv, height_brush, dab_dt)) {
-                        paint_mode_state.stroke.changed = true;
-                        mirror_changed = true;
-                        if (paint_mode_state.auto_normal_from_height) {
-                            updateAutoNormalAtUV(mirrored_hit.uv, dab_brush.radius);
-                        }
-                    }
+                const bool mirror_changed = applyPaintAtHit(mirrored_hit);
+                if (mirror_changed) {
+                    paint_mode_state.stroke.changed = true;
                 }
                 if (mirror_changed && use_layers && !painted_channels.empty()) {
                     if (!accumulated_dirty.empty()) {

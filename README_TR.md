@@ -218,7 +218,7 @@ Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
 
 ### 🛠️ Modelleme & Mesh Düzenleme Araçları
 
-- **Sculpt Modu (Sculpt Mod)**: Gerçek zamanlı sculpt fırçaları (Grab, Smooth, Inflate, Draw, Flatten) — topoğrafya (topology)-dostu falloff ve simetri seçenekleriyle. Çoklu çözünürlük önizlemesi ve sculpt delta'larını bake/ihraç etme desteği.
+- **Sculpt Modu (Sculpt Mod)**: Gerçek zamanlı sculpt fırçaları (Grab, Draw, Inflate, Layer, Clay, Clay Strips, Pinch, Smooth, Flatten, Scrape, Crease) — topology-dostu falloff, alpha mask, canlı/ertelenmiş birikim ve simetri seçenekleriyle. Çoklu çözünürlük önizlemesi ve sculpt delta'larını bake/ihraç etme desteği.
 - **Mesh Paint**: Renk, roughness, metallic ve mask kanalları için vertex/texture boyama araçları. Fırça falloff, projeksiyon ve katman harmanlama; sonuçlar texture olarak bake edilebilir veya vertex renkleri olarak kaydedilebilir.
 - **Edit Mesh Modu**: Klasik polygon düzenleme araçları:
   - **Extrude** yüz/kenar transform gizmo ile

@@ -3,13 +3,21 @@
 #include "HittableList.h"
 #include "InstanceManager.h"
 #include "ParallelBVHNode.h"
+#include "Texture.h"
 #include "Triangle.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#if defined(_WIN32)
+#include <windows.h>
+#include <excpt.h>
+#endif
 #include <cstring>
 #include <fstream>
 #include <filesystem>
 #include <functional>
+#include <future>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -17,6 +25,27 @@ extern RenderSettings render_settings;
 
 namespace Backend {
 namespace {
+
+#if defined(_WIN32)
+static VkResult safeCreateMaterialPreviewPipeline(VkDevice device,
+                                                  const VkGraphicsPipelineCreateInfo* info,
+                                                  VkPipeline* outPipeline) {
+    VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+    __try {
+        result = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, info, nullptr, outPipeline);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (outPipeline) *outPipeline = VK_NULL_HANDLE;
+        result = VK_ERROR_INITIALIZATION_FAILED;
+    }
+    return result;
+}
+#else
+static VkResult safeCreateMaterialPreviewPipeline(VkDevice device,
+                                                  const VkGraphicsPipelineCreateInfo* info,
+                                                  VkPipeline* outPipeline) {
+    return vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, info, nullptr, outPipeline);
+}
+#endif
 
 inline bool viewportMatchesNodeNameForInstance(const std::string& instanceNodeName,
                                                const std::string& queryNodeName) {
@@ -41,6 +70,83 @@ inline std::vector<uint32_t> loadViewportSPV(const std::string& path) {
     return buffer;
 }
 
+// ── Preview environment map bake (CPU replication of material_preview_frag.frag GLSL) ──
+// Generates a 128×64 RGBA32F equirectangular map from the procedural studio/outdoor
+// functions so the fragment shader can do a single texture lookup for specular reflections
+// instead of the former analytical approximation.
+
+struct BakeVec3 { float x, y, z; };
+
+static inline float bkDot(BakeVec3 a, BakeVec3 b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+static inline BakeVec3 bkNorm(BakeVec3 v) {
+    float l = std::sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+    return (l > 1e-7f) ? BakeVec3{v.x/l, v.y/l, v.z/l} : BakeVec3{0,1,0};
+}
+static inline float bkSmooth(float e0, float e1, float x) {
+    float t = std::fmaxf(0.f, std::fminf(1.f, (x-e0)/(e1-e0)));
+    return t*t*(3.f-2.f*t);
+}
+static inline float bkMix(float a, float b, float t) { return a*(1.f-t)+b*t; }
+static inline float bkClamp(float v, float lo, float hi) { return std::fmaxf(lo, std::fminf(hi, v)); }
+
+static BakeVec3 bakeStudioEnv(BakeVec3 dir) {
+    float up = bkClamp(dir.y*0.5f+0.5f, 0.f, 1.f);
+    float t = bkSmooth(0.05f, 1.f, up);
+    BakeVec3 base{bkMix(0.07f,0.42f,t), bkMix(0.07f,0.44f,t), bkMix(0.08f,0.46f,t)};
+
+    auto lobe = [&](BakeVec3 d, float exp_) {
+        return std::powf(std::fmaxf(bkDot(dir, bkNorm(d)), 0.f), exp_);
+    };
+    float key  = lobe({0.62f, 0.54f, 0.56f}, 28.f);
+    float fill = lobe({-0.52f, 0.38f, 0.76f}, 20.f);
+    float rim  = lobe({-0.18f, 0.26f,-0.95f}, 56.f);
+
+    return {
+        base.x + 1.00f*1.8f*key + 0.72f*0.9f*fill + 0.95f*0.7f*rim,
+        base.y + 0.98f*1.8f*key + 0.80f*0.9f*fill + 0.96f*0.7f*rim,
+        base.z + 0.95f*1.8f*key + 0.96f*0.9f*fill + 1.00f*0.7f*rim
+    };
+}
+
+static BakeVec3 bakeOutdoorEnv(BakeVec3 dir) {
+    float up = bkClamp(dir.y*0.5f+0.5f, 0.f, 1.f);
+    BakeVec3 sky{bkMix(0.22f,0.55f,bkSmooth(0.1f,1.f,up)),
+                  bkMix(0.26f,0.70f,bkSmooth(0.1f,1.f,up)),
+                  bkMix(0.32f,0.96f,bkSmooth(0.1f,1.f,up))};
+    BakeVec3 gnd{0.12f,0.10f,0.08f};
+    float sun = std::powf(std::fmaxf(bkDot(dir, bkNorm({0.32f,0.82f,0.46f})), 0.f), 220.f);
+    float sunScale = 2.2f;
+    return {
+        bkMix(gnd.x,sky.x,up) + 1.0f*sunScale*sun,
+        bkMix(gnd.y,sky.y,up) + 0.96f*sunScale*sun,
+        bkMix(gnd.z,sky.z,up) + 0.82f*sunScale*sun
+    };
+}
+
+// Returns a 128×64 RGBA32F buffer (4 floats/pixel, alpha = 1).
+static std::vector<float> bakeEnvMap(bool outdoor) {
+    constexpr int W = 128, H = 64;
+    std::vector<float> pixels(W * H * 4);
+    constexpr float PI = 3.14159265359f;
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            float u = (x + 0.5f) / float(W);
+            float v = (y + 0.5f) / float(H);
+            float phi   = (2.f*u - 1.f) * PI;   // -π … π
+            float theta = v * PI;                  // 0 … π (top→bottom)
+            BakeVec3 dir{
+                std::sinf(theta) * std::cosf(phi),
+                std::cosf(theta),
+                std::sinf(theta) * std::sinf(phi)
+            };
+            BakeVec3 c = outdoor ? bakeOutdoorEnv(dir) : bakeStudioEnv(dir);
+            float* p = &pixels[(y*W + x)*4];
+            p[0]=c.x; p[1]=c.y; p[2]=c.z; p[3]=1.f;
+        }
+    }
+    return pixels;
+}
+
 } // namespace
 
 void VulkanViewportBackend::renderProgressive(
@@ -52,6 +158,87 @@ void VulkanViewportBackend::renderProgressive(
     void* outFramebuffer,
     void* outTexture) {
     renderProgressiveImpl(outSurface, outWindow, outRenderer, width, height, outFramebuffer, outTexture);
+}
+
+void VulkanViewportBackend::uploadTerrainLayerMaterials(const std::vector<TerrainLayerData>& layers) {
+    // Viewport-only implementation: does NOT call the RT base class path.
+    // No RT descriptor sets are touched — this backend has no RT pipeline.
+    if (!m_device || !m_device->isInitialized() || layers.empty()) return;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_device->waitIdle();
+
+    // Convert IBackend::TerrainLayerData → VkTerrainLayerData.
+    // Splat map textures are resolved from the viewport backend's own uploaded-image cache
+    // (they were already uploaded by the material texture upload pass).
+    std::vector<VulkanRT::VkTerrainLayerData> gpuLayers;
+    gpuLayers.reserve(layers.size());
+
+    for (const auto& ld : layers) {
+        VulkanRT::VkTerrainLayerData gld{};
+        for (int k = 0; k < 4; ++k) {
+            gld.layer_mat_id[k]   = ld.layer_mat_id[k];
+            gld.layer_uv_scale[k] = ld.layer_uv_scale[k];
+        }
+        gld.layer_count = ld.layer_count;
+
+        // Resolve splat map: check viewport texture cache first, upload if missing.
+        if (ld.splatMapTexture) {
+            Texture* splatTex = reinterpret_cast<Texture*>(ld.splatMapTexture);
+            if (splatTex && splatTex->is_loaded()) {
+                uint64_t cacheKey = static_cast<uint64_t>(ld.splatMapTexture) << 1;
+                if (splatTex->vulkan_dirty) {
+                    auto oldIt = m_uploadedImageIDs.find(cacheKey);
+                    if (oldIt != m_uploadedImageIDs.end()) {
+                        int64_t oldId = oldIt->second;
+                        if (oldId) this->destroyTexture(oldId);
+                    }
+                    splatTex->vulkan_dirty = false;
+                }
+                auto it = m_uploadedImageIDs.find(cacheKey);
+                if (it != m_uploadedImageIDs.end()) {
+                    gld.splat_map_tex = static_cast<uint32_t>(it->second);
+                } else {
+                    const auto& px = splatTex->pixels;
+                    if (!px.empty()) {
+                        std::vector<uint8_t> tmp(splatTex->width * splatTex->height * 4);
+                        for (size_t i = 0; i < px.size(); ++i) {
+                            tmp[i*4+0]=px[i].r; tmp[i*4+1]=px[i].g;
+                            tmp[i*4+2]=px[i].b; tmp[i*4+3]=px[i].a;
+                        }
+                        int64_t id = this->uploadTexture2D(tmp.data(), splatTex->width, splatTex->height, 4, false, false);
+                        if (id > 0) { m_uploadedImageIDs[cacheKey] = id; gld.splat_map_tex = static_cast<uint32_t>(id); }
+                    }
+                }
+            }
+        }
+        gpuLayers.push_back(gld);
+    }
+
+    // Upload terrain layer SSBO to this backend's device (no RT descriptor touched).
+    m_device->updateTerrainLayerBuffer(
+        gpuLayers.data(),
+        gpuLayers.size() * sizeof(VulkanRT::VkTerrainLayerData),
+        static_cast<uint32_t>(gpuLayers.size()));
+
+    // Update material preview descriptor binding 3.
+    const VkDescriptorSet ds = m_interactiveViewport.materialPreviewDescSet;
+    if (ds == VK_NULL_HANDLE || !m_device->m_terrainLayerBuffer.buffer) return;
+    VkDevice vkDev = m_device->getDevice();
+    if (!vkDev) return;
+
+    VkDescriptorBufferInfo tbi{};
+    tbi.buffer = m_device->m_terrainLayerBuffer.buffer;
+    tbi.offset = 0;
+    tbi.range  = m_device->m_terrainLayerBuffer.size > 0 ? m_device->m_terrainLayerBuffer.size : VK_WHOLE_SIZE;
+    VkWriteDescriptorSet wds{};
+    wds.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds.dstSet          = ds;
+    wds.dstBinding      = 3;
+    wds.descriptorCount = 1;
+    wds.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    wds.pBufferInfo     = &tbi;
+    vkUpdateDescriptorSets(vkDev, 1, &wds, 0, nullptr);
+    m_interactiveViewport.dirty = true;
 }
 
 void VulkanViewportBackend::setInteractiveViewportMatcap(int64_t textureID) {
@@ -137,6 +324,9 @@ void VulkanViewportBackend::setExternalMaterialBuffer(VkBuffer buffer, VkDeviceS
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_externalMaterialBuffer = buffer;
     m_externalMaterialBufferSize = size;
+    m_externalMaterialCount = static_cast<uint32_t>(
+        (size > 0) ? (size / sizeof(VulkanRT::VkGpuMaterial)) : 0);
+    m_interactiveViewport.dirty = true;
     if (!m_device) return;
 
     VkDevice vkDevice = m_device->getDevice();
@@ -181,6 +371,23 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
     if (m_interactiveViewport.hairLinePipeline != VK_NULL_HANDLE && !keepPipeline) {
         vkDestroyPipeline(vkDevice, m_interactiveViewport.hairLinePipeline, nullptr);
         m_interactiveViewport.hairLinePipeline = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.materialPreviewPipeline != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyPipeline(vkDevice, m_interactiveViewport.materialPreviewPipeline, nullptr);
+        m_interactiveViewport.materialPreviewPipeline = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.materialPreviewPipelineLayout != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyPipelineLayout(vkDevice, m_interactiveViewport.materialPreviewPipelineLayout, nullptr);
+        m_interactiveViewport.materialPreviewPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.materialPreviewDescPool != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyDescriptorPool(vkDevice, m_interactiveViewport.materialPreviewDescPool, nullptr);
+        m_interactiveViewport.materialPreviewDescPool = VK_NULL_HANDLE;
+        m_interactiveViewport.materialPreviewDescSet = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.materialPreviewDescLayout != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyDescriptorSetLayout(vkDevice, m_interactiveViewport.materialPreviewDescLayout, nullptr);
+        m_interactiveViewport.materialPreviewDescLayout = VK_NULL_HANDLE;
     }
     if (m_interactiveViewport.hairLineVertexBuffer.buffer) {
         m_device->destroyBuffer(m_interactiveViewport.hairLineVertexBuffer);
@@ -545,6 +752,426 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         m_interactiveViewport.initialized = true;
     }
 
+    if (m_interactiveViewport.materialPreviewPipeline == VK_NULL_HANDLE && !m_materialPreviewPipelineGaveUp) {
+        const std::string mpVertPath = shaderDir + "/material_preview.spv";
+        const std::string mpFragPath = shaderDir + "/material_preview_frag.spv";
+        // ── Capability gate ───────────────────────────────────────────────
+        // Material preview fragment shader uses `sampler2D textures[]` with
+        // nonuniformEXT indexing and push constants of 208 bytes. Without
+        // VK_EXT_descriptor_indexing (Vulkan 1.2 core) the runtime-sized
+        // texture array is undefined; older/low-end drivers also cap push
+        // constants at 128 bytes. When either requirement is missing we
+        // silently fall back to Matcap — solid pipeline + matcap descriptor
+        // set — and notify the user via the HUD message channel.
+        const bool mpHasDescIdx =
+            m_device && m_device->getCapabilities().supportsDescriptorIndexing;
+        constexpr uint32_t kMpPushBytes =
+            sizeof(float) * 48 + sizeof(uint32_t) * 4; // 208 bytes
+        uint32_t mpMaxPushBytes = 0;
+        if (m_device && m_device->getPhysicalDevice() != VK_NULL_HANDLE) {
+            VkPhysicalDeviceProperties mpDevProps{};
+            vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(), &mpDevProps);
+            mpMaxPushBytes = mpDevProps.limits.maxPushConstantsSize;
+        }
+        const bool mpPushOk = mpMaxPushBytes >= kMpPushBytes;
+        const bool mpCapsOk = mpHasDescIdx && mpPushOk;
+
+        if (!mpCapsOk) {
+            m_materialPreviewPipelineGaveUp = true;
+            if (!m_materialPreviewUnsupportedNotified) {
+                m_materialPreviewUnsupportedNotified = true;
+                std::string reason = !mpHasDescIdx
+                    ? "VK_EXT_descriptor_indexing missing"
+                    : ("maxPushConstantsSize=" + std::to_string(mpMaxPushBytes) +
+                       " < " + std::to_string(kMpPushBytes));
+                SCENE_LOG_WARN("[VulkanViewportBackend] Material preview disabled: " + reason +
+                               ". Falling back to Matcap.");
+                if (m_statusCallback) {
+                    m_statusCallback(
+                        "Material Preview not supported on this GPU (" + reason +
+                        "). Falling back to Matcap mode.",
+                        1 /* warning */);
+                }
+            }
+            // Leave materialPreviewPipeline == VK_NULL_HANDLE so the render
+            // path at useMaterialPreview check naturally binds the solid
+            // (matcap) pipeline instead.
+        } else
+        if (std::filesystem::exists(mpVertPath) && std::filesystem::exists(mpFragPath)) {
+            std::vector<uint32_t> mpVertSPV = loadViewportSPV(mpVertPath);
+            std::vector<uint32_t> mpFragSPV = loadViewportSPV(mpFragPath);
+            if (!mpVertSPV.empty() && !mpFragSPV.empty()) {
+                VkShaderModuleCreateInfo mpSmci{};
+                mpSmci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+
+                mpSmci.codeSize = mpVertSPV.size() * sizeof(uint32_t);
+                mpSmci.pCode = mpVertSPV.data();
+                VkShaderModule mpVertModule = VK_NULL_HANDLE;
+                vkCreateShaderModule(vkDevice, &mpSmci, nullptr, &mpVertModule);
+
+                mpSmci.codeSize = mpFragSPV.size() * sizeof(uint32_t);
+                mpSmci.pCode = mpFragSPV.data();
+                VkShaderModule mpFragModule = VK_NULL_HANDLE;
+                vkCreateShaderModule(vkDevice, &mpSmci, nullptr, &mpFragModule);
+
+                if (mpVertModule && mpFragModule) {
+                    // Binding 0: material SSBO
+                    // Binding 1: texture sampler2D array — requires VK_EXT_descriptor_indexing
+                    //   (Vulkan 1.2 core, no RT hardware needed).
+                    //   No PARTIALLY_BOUND/UPDATE_AFTER_BIND flags: the shader only accesses
+                    //   slots that were actually written (albedo_tex > 0 guard), so unwritten
+                    //   slots are never reached. Updating the set between frames (not during
+                    //   command-buffer recording) is always valid without those flags.
+                    // Binding 2: baked env maps [0]=studio, [1]=outdoor (specular reflection lookup)
+                    // Binding 3: terrain layer SSBO (same data as RT binding 12)
+                    const bool hasDescIdx = m_device && m_device->getCapabilities().supportsDescriptorIndexing;
+
+                    // Clamp the bindless texture array length to what this driver can
+                    // actually handle in a single fragment-stage descriptor set. Some
+                    // ICDs advertise descriptor indexing but cap non-UPDATE_AFTER_BIND
+                    // sampled-image arrays at a value well below VULKAN_TEXTURE_CAPACITY
+                    // (2048). Passing too-large a count slips past layout creation and
+                    // then crashes inside vkCreateGraphicsPipelines with a null deref
+                    // in nvoglv64.dll (fault_addr=0x8). Use the runtime limit instead.
+                    uint32_t mpTextureArrayLen = 1u;
+                    if (hasDescIdx && m_device && m_device->getPhysicalDevice() != VK_NULL_HANDLE) {
+                        VkPhysicalDeviceProperties mpProps{};
+                        vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(), &mpProps);
+                        const uint32_t limit = mpProps.limits.maxPerStageDescriptorSampledImages;
+                        const uint32_t want = static_cast<uint32_t>(VULKAN_TEXTURE_CAPACITY);
+                        // Reserve 2 slots for binding 2 (env maps) which shares the same stage limit.
+                        mpTextureArrayLen = (limit > 2u) ? (std::min)(want, limit - 2u) : 1u;
+                       /* SCENE_LOG_INFO(std::string("[MP-init] maxPerStageDescriptorSampledImages=") +
+                            std::to_string(limit) +
+                            " → binding1 descriptorCount=" + std::to_string(mpTextureArrayLen));*/
+                    }
+
+                    VkDescriptorSetLayoutBinding mpDslBindings[4]{};
+                    mpDslBindings[0].binding = 0;
+                    mpDslBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[0].descriptorCount = 1;
+                    mpDslBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[1].binding = 1;
+                    mpDslBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    mpDslBindings[1].descriptorCount = hasDescIdx ? mpTextureArrayLen : 1u;
+                    mpDslBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[2].binding = 2;
+                    mpDslBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    mpDslBindings[2].descriptorCount = 2; // [0]=studio, [1]=outdoor
+                    mpDslBindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[3].binding = 3;
+                    mpDslBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[3].descriptorCount = 1;
+                    mpDslBindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+                    VkDescriptorSetLayoutCreateInfo mpDslci{};
+                    mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+                    mpDslci.bindingCount = 4;
+                    mpDslci.pBindings = mpDslBindings;
+
+                    // Binding 1 is a sparse sampler2D array: only the slots whose texture IDs
+                    // were actually uploaded get written. Without PARTIALLY_BOUND, unwritten
+                    // slots are "undefined" per spec and stricter drivers (non-RT Intel/AMD
+                    // ICDs observed crashing in vkCmdBindDescriptorSets/first draw) dereference
+                    // them unconditionally. PARTIALLY_BOUND is core in Vulkan 1.2 and only
+                    // requires VK_EXT_descriptor_indexing — already gated by `hasDescIdx`.
+                    VkDescriptorBindingFlags mpBindingFlags[4] = {
+                        0,
+                        hasDescIdx ? VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT : VkDescriptorBindingFlags{0},
+                        0,
+                        0
+                    };
+                    VkDescriptorSetLayoutBindingFlagsCreateInfo mpBindingFlagsCI{};
+                    mpBindingFlagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+                    mpBindingFlagsCI.bindingCount = 4;
+                    mpBindingFlagsCI.pBindingFlags = mpBindingFlags;
+                    if (hasDescIdx) {
+                        mpDslci.pNext = &mpBindingFlagsCI;
+                    }
+                    vkCreateDescriptorSetLayout(vkDevice, &mpDslci, nullptr,
+                                                &m_interactiveViewport.materialPreviewDescLayout);
+
+                    if (m_interactiveViewport.materialPreviewDescLayout != VK_NULL_HANDLE) {
+                    VkDescriptorPoolSize mpPoolSizes[2]{};
+                    mpPoolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpPoolSizes[0].descriptorCount = 2; // binding 0 (materials) + binding 3 (terrain)
+                    mpPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    // +2 for the 2 env map slots at binding 2
+                    mpPoolSizes[1].descriptorCount = (hasDescIdx ? mpTextureArrayLen : 1u) + 2u;
+                    VkDescriptorPoolCreateInfo mpDpci{};
+                    mpDpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+                    mpDpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+                    mpDpci.poolSizeCount = 2;
+                    mpDpci.pPoolSizes = mpPoolSizes;
+                    mpDpci.maxSets = 1;
+                    vkCreateDescriptorPool(vkDevice, &mpDpci, nullptr,
+                                           &m_interactiveViewport.materialPreviewDescPool);
+
+                    VkPushConstantRange mpPushRange{};
+                    mpPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpPushRange.offset = 0;
+                    mpPushRange.size = sizeof(float) * 48 + sizeof(uint32_t) * 4;
+
+                    VkPipelineLayoutCreateInfo mpPlci{};
+                    mpPlci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+                    mpPlci.pushConstantRangeCount = 1;
+                    mpPlci.pPushConstantRanges = &mpPushRange;
+                    mpPlci.setLayoutCount = 1;
+                    mpPlci.pSetLayouts = &m_interactiveViewport.materialPreviewDescLayout;
+                    // Only create layout if desc layout and pool succeeded —
+                    // passing null desc layout to vkCreatePipelineLayout crashes old drivers.
+                    if (m_interactiveViewport.materialPreviewDescPool != VK_NULL_HANDLE) {
+                        vkCreatePipelineLayout(vkDevice, &mpPlci, nullptr,
+                                               &m_interactiveViewport.materialPreviewPipelineLayout);
+                    }
+                    } // end if materialPreviewDescLayout valid
+
+                    VkPipelineShaderStageCreateInfo mpStages[2]{};
+                    mpStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                    mpStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+                    mpStages[0].module = mpVertModule;
+                    mpStages[0].pName = "main";
+                    mpStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                    mpStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpStages[1].module = mpFragModule;
+                    mpStages[1].pName = "main";
+
+                    VkVertexInputBindingDescription mpBindings[5]{};
+                    mpBindings[0].binding = 0; mpBindings[0].stride = sizeof(float) * 3;  mpBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+                    mpBindings[1].binding = 1; mpBindings[1].stride = sizeof(float) * 3;  mpBindings[1].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+                    mpBindings[2].binding = 2; mpBindings[2].stride = sizeof(uint32_t);   mpBindings[2].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+                    mpBindings[3].binding = 3; mpBindings[3].stride = sizeof(float) * 16; mpBindings[3].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+                    mpBindings[4].binding = 4; mpBindings[4].stride = sizeof(float) * 2;  mpBindings[4].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+                    VkVertexInputAttributeDescription mpAttribs[8]{};
+                    mpAttribs[0].location = 0; mpAttribs[0].binding = 0; mpAttribs[0].format = VK_FORMAT_R32G32B32_SFLOAT;    mpAttribs[0].offset = 0;
+                    mpAttribs[1].location = 1; mpAttribs[1].binding = 1; mpAttribs[1].format = VK_FORMAT_R32G32B32_SFLOAT;    mpAttribs[1].offset = 0;
+                    mpAttribs[2].location = 2; mpAttribs[2].binding = 2; mpAttribs[2].format = VK_FORMAT_R32_UINT;            mpAttribs[2].offset = 0;
+                    mpAttribs[3].location = 3; mpAttribs[3].binding = 3; mpAttribs[3].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[3].offset = sizeof(float) * 0;
+                    mpAttribs[4].location = 4; mpAttribs[4].binding = 3; mpAttribs[4].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[4].offset = sizeof(float) * 4;
+                    mpAttribs[5].location = 5; mpAttribs[5].binding = 3; mpAttribs[5].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[5].offset = sizeof(float) * 8;
+                    mpAttribs[6].location = 6; mpAttribs[6].binding = 3; mpAttribs[6].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[6].offset = sizeof(float) * 12;
+                    mpAttribs[7].location = 7; mpAttribs[7].binding = 4; mpAttribs[7].format = VK_FORMAT_R32G32_SFLOAT;       mpAttribs[7].offset = 0;
+
+                    VkPipelineVertexInputStateCreateInfo mpVertInput{};
+                    mpVertInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+                    mpVertInput.vertexBindingDescriptionCount = 5;
+                    mpVertInput.pVertexBindingDescriptions = mpBindings;
+                    mpVertInput.vertexAttributeDescriptionCount = 8;
+                    mpVertInput.pVertexAttributeDescriptions = mpAttribs;
+
+                    VkPipelineInputAssemblyStateCreateInfo mpIA{};
+                    mpIA.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+                    mpIA.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+                    VkPipelineViewportStateCreateInfo mpVpState{};
+                    mpVpState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+                    mpVpState.viewportCount = 1;
+                    mpVpState.scissorCount = 1;
+
+                    VkPipelineRasterizationStateCreateInfo mpRast{};
+                    mpRast.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+                    mpRast.polygonMode = VK_POLYGON_MODE_FILL;
+                    mpRast.lineWidth = 1.0f;
+                    mpRast.cullMode = VK_CULL_MODE_NONE;
+                    mpRast.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+                    VkPipelineMultisampleStateCreateInfo mpMS{};
+                    mpMS.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+                    mpMS.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+                    VkPipelineDepthStencilStateCreateInfo mpDS{};
+                    mpDS.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+                    mpDS.depthTestEnable = VK_TRUE;
+                    mpDS.depthWriteEnable = VK_TRUE;
+                    mpDS.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+                    VkPipelineColorBlendAttachmentState mpCBA{};
+                    mpCBA.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+                    // Enable alpha blending for opacity texture and material alpha support.
+                    // Cutout materials (opacity <= 0.02) are handled via discard in the shader;
+                    // partial transparency (e.g. glass, foliage edges) uses standard src-over.
+                    mpCBA.blendEnable         = VK_TRUE;
+                    mpCBA.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+                    mpCBA.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                    mpCBA.colorBlendOp        = VK_BLEND_OP_ADD;
+                    mpCBA.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+                    mpCBA.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                    mpCBA.alphaBlendOp        = VK_BLEND_OP_ADD;
+
+                    VkPipelineColorBlendStateCreateInfo mpCB{};
+                    mpCB.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+                    mpCB.attachmentCount = 1;
+                    mpCB.pAttachments = &mpCBA;
+
+                    VkDynamicState mpDynStates[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+                    VkPipelineDynamicStateCreateInfo mpDyn{};
+                    mpDyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+                    mpDyn.dynamicStateCount = 2;
+                    mpDyn.pDynamicStates = mpDynStates;
+
+                    VkGraphicsPipelineCreateInfo mpPCI{};
+                    mpPCI.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+                    mpPCI.stageCount = 2;
+                    mpPCI.pStages = mpStages;
+                    mpPCI.pVertexInputState = &mpVertInput;
+                    mpPCI.pInputAssemblyState = &mpIA;
+                    mpPCI.pViewportState = &mpVpState;
+                    mpPCI.pRasterizationState = &mpRast;
+                    mpPCI.pMultisampleState = &mpMS;
+                    mpPCI.pDepthStencilState = &mpDS;
+                    mpPCI.pColorBlendState = &mpCB;
+                    mpPCI.pDynamicState = &mpDyn;
+                    mpPCI.layout = m_interactiveViewport.materialPreviewPipelineLayout;
+                    mpPCI.renderPass = m_interactiveViewport.renderPass;
+                    mpPCI.subpass = 0;
+
+                    // Guard: if layout or pool creation failed (e.g. device limits on older GPU),
+                    // skip pipeline creation entirely to avoid passing null layout to the driver.
+                    VkResult mpResult = VK_ERROR_INITIALIZATION_FAILED;
+                    if (m_interactiveViewport.materialPreviewPipelineLayout != VK_NULL_HANDLE &&
+                        m_interactiveViewport.materialPreviewDescPool != VK_NULL_HANDLE) {
+                       /* SCENE_LOG_INFO(std::string("[MP-init] step=preCreatePipeline layout=") +
+                            std::to_string((uintptr_t)m_interactiveViewport.materialPreviewPipelineLayout) +
+                            " renderPass=" + std::to_string((uintptr_t)m_interactiveViewport.renderPass) +
+                            " descLayout=" + std::to_string((uintptr_t)m_interactiveViewport.materialPreviewDescLayout) +
+                            " pool=" + std::to_string((uintptr_t)m_interactiveViewport.materialPreviewDescPool));*/
+                        mpResult = safeCreateMaterialPreviewPipeline(vkDevice, &mpPCI,
+                                                                     &m_interactiveViewport.materialPreviewPipeline);
+                       /* SCENE_LOG_INFO(std::string("[MP-init] step=postCreatePipeline result=") +
+                            std::to_string((int)mpResult) +
+                            " pipeline=" + std::to_string((uintptr_t)m_interactiveViewport.materialPreviewPipeline));*/
+                    } else {
+                        SCENE_LOG_WARN("[VulkanViewportBackend] Material preview pipeline skipped: layout or pool null (device limit exceeded or extension unsupported).");
+                    }
+                    if (mpResult != VK_SUCCESS) {
+                        SCENE_LOG_WARN("[VulkanViewportBackend] Material preview pipeline creation failed — falling back to solid/matcap permanently for this session (likely NVIDIA Maxwell driver bug).");
+                        m_interactiveViewport.materialPreviewPipeline = VK_NULL_HANDLE;
+                        m_materialPreviewPipelineGaveUp = true;
+                        if (m_statusCallback && !m_materialPreviewUnsupportedNotified) {
+                            m_materialPreviewUnsupportedNotified = true;
+                            m_statusCallback("Material Preview unavailable on this GPU — falling back to Matcap mode.", 1);
+                        }
+                    } else {
+                        VkDescriptorSetAllocateInfo mpDsai{};
+                        mpDsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+                        mpDsai.descriptorPool = m_interactiveViewport.materialPreviewDescPool;
+                        mpDsai.descriptorSetCount = 1;
+                        mpDsai.pSetLayouts = &m_interactiveViewport.materialPreviewDescLayout;
+                        VkResult mpAllocRes = vkAllocateDescriptorSets(vkDevice, &mpDsai, &m_interactiveViewport.materialPreviewDescSet);
+                       /* SCENE_LOG_INFO(std::string("[MP-init] step=allocDescSet result=") +
+                            std::to_string((int)mpAllocRes) +
+                            " descSet=" + std::to_string((uintptr_t)m_interactiveViewport.materialPreviewDescSet));*/
+
+                        const VkBuffer materialBuffer = m_externalMaterialBuffer
+                            ? m_externalMaterialBuffer
+                            : m_device->m_materialBuffer.buffer;
+                        const VkDeviceSize materialRange = m_externalMaterialBuffer
+                            ? ((m_externalMaterialBufferSize > 0) ? m_externalMaterialBufferSize : VK_WHOLE_SIZE)
+                            : VK_WHOLE_SIZE;
+                        if (materialBuffer != VK_NULL_HANDLE && m_interactiveViewport.materialPreviewDescSet != VK_NULL_HANDLE) {
+                            VkDescriptorBufferInfo matBufInfo{};
+                            matBufInfo.buffer = materialBuffer;
+                            matBufInfo.offset = 0;
+                            matBufInfo.range = materialRange;
+
+                            VkWriteDescriptorSet mpWds{};
+                            mpWds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                            mpWds.dstSet = m_interactiveViewport.materialPreviewDescSet;
+                            mpWds.dstBinding = 0;
+                            mpWds.descriptorCount = 1;
+                            mpWds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                            mpWds.pBufferInfo = &matBufInfo;
+                            vkUpdateDescriptorSets(vkDevice, 1, &mpWds, 0, nullptr);
+
+                            // Populate binding 1 with all textures already uploaded.
+                            // Textures uploaded later are handled by updateMaterialPreviewTextureDescriptor.
+                            for (auto& [texID, texImg] : m_uploadedImages) {
+                                if (texID <= 0 || texID >= VULKAN_TEXTURE_CAPACITY) continue;
+                                if (!texImg.view || !texImg.sampler) continue;
+                                VkDescriptorImageInfo tii{};
+                                tii.sampler     = texImg.sampler;
+                                tii.imageView   = texImg.view;
+                                tii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                                VkWriteDescriptorSet twds{};
+                                twds.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                                twds.dstSet          = m_interactiveViewport.materialPreviewDescSet;
+                                twds.dstBinding      = 1;
+                                twds.dstArrayElement = (uint32_t)texID;
+                                twds.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                                twds.descriptorCount = 1;
+                                twds.pImageInfo      = &tii;
+                                vkUpdateDescriptorSets(vkDevice, 1, &twds, 0, nullptr);
+                            }
+
+                            // ── Binding 2: baked env maps for specular reflection ──
+                            // Upload studio + outdoor 128×64 RGBA32F maps (one-time, ~256 KB total).
+                            if (m_interactiveViewport.envMapStudioID == 0) {
+                                auto studioPixels  = bakeEnvMap(false);
+                                auto outdoorPixels = bakeEnvMap(true);
+                                m_interactiveViewport.envMapStudioID  = this->uploadTexture2D(
+                                    studioPixels.data(), 128, 64, 4, false, true);
+                                m_interactiveViewport.envMapOutdoorID = this->uploadTexture2D(
+                                    outdoorPixels.data(), 128, 64, 4, false, true);
+                            }
+                            // Write them into binding 2 array slots 0 and 1.
+                            auto writeEnvSlot = [&](int64_t id, uint32_t slot) {
+                                auto it = m_uploadedImages.find(id);
+                                if (id <= 0 || it == m_uploadedImages.end()) return;
+                                const auto& img = it->second;
+                                if (!img.view || !img.sampler) return;
+                                VkDescriptorImageInfo eii{};
+                                eii.sampler     = img.sampler;
+                                eii.imageView   = img.view;
+                                eii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                                VkWriteDescriptorSet ewds{};
+                                ewds.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                                ewds.dstSet          = m_interactiveViewport.materialPreviewDescSet;
+                                ewds.dstBinding      = 2;
+                                ewds.dstArrayElement = slot;
+                                ewds.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                                ewds.descriptorCount = 1;
+                                ewds.pImageInfo      = &eii;
+                                vkUpdateDescriptorSets(vkDevice, 1, &ewds, 0, nullptr);
+                            };
+                            writeEnvSlot(m_interactiveViewport.envMapStudioID,  0);
+                            writeEnvSlot(m_interactiveViewport.envMapOutdoorID, 1);
+
+                            // ── Binding 3: terrain layer SSBO ──
+                            // Falls back to material buffer (a valid non-null SSBO) when no
+                            // terrain data has been uploaded yet — the shader guards on FLAG_TERRAIN
+                            // so it will never dereference stale data.
+                            const VkBuffer terrainBuf = (m_device && m_device->m_terrainLayerBuffer.buffer)
+                                ? m_device->m_terrainLayerBuffer.buffer
+                                : (m_externalMaterialBuffer ? m_externalMaterialBuffer : m_device->m_materialBuffer.buffer);
+                            if (terrainBuf != VK_NULL_HANDLE) {
+                                VkDescriptorBufferInfo tLayerBufInfo{};
+                                tLayerBufInfo.buffer = terrainBuf;
+                                tLayerBufInfo.offset = 0;
+                                tLayerBufInfo.range  = (m_device && m_device->m_terrainLayerBuffer.buffer)
+                                    ? (m_device->m_terrainLayerBuffer.size > 0 ? m_device->m_terrainLayerBuffer.size : VK_WHOLE_SIZE)
+                                    : VK_WHOLE_SIZE;
+                                VkWriteDescriptorSet twds3{};
+                                twds3.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                                twds3.dstSet          = m_interactiveViewport.materialPreviewDescSet;
+                                twds3.dstBinding      = 3;
+                                twds3.descriptorCount = 1;
+                                twds3.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                                twds3.pBufferInfo     = &tLayerBufInfo;
+                                vkUpdateDescriptorSets(vkDevice, 1, &twds3, 0, nullptr);
+                            }
+                        }
+                        SCENE_LOG_INFO("[VulkanViewportBackend] Material preview pipeline created successfully (texture + env map + terrain support enabled).");
+                    }
+                }
+                if (mpVertModule) vkDestroyShaderModule(vkDevice, mpVertModule, nullptr);
+                if (mpFragModule) vkDestroyShaderModule(vkDevice, mpFragModule, nullptr);
+            }
+        }
+    }
+
+  //  SCENE_LOG_INFO("[MP-init] step=enterHairPipeline");
     // --- Hair Line Pipeline ---
     if (m_interactiveViewport.hairLinePipeline == VK_NULL_HANDLE) {
         const std::string hairVertPath = shaderDir + "/hair_viewport.spv";
@@ -662,6 +1289,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         }
     }
 
+   // SCENE_LOG_INFO("[MP-init] step=postAllPipelines");
     if (m_interactiveViewport.width == width &&
         m_interactiveViewport.height == height &&
         m_interactiveViewport.framebuffer != VK_NULL_HANDLE &&
@@ -672,6 +1300,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
     }
 
     destroyInteractiveViewportResourcesImpl(true);
+   // SCENE_LOG_INFO("[MP-init] step=createImages");
 
     m_interactiveViewport.colorImage = m_device->createImage2D(
         (uint32_t)width, (uint32_t)height, VK_FORMAT_R8G8B8A8_UNORM,
@@ -714,6 +1343,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
 
     m_interactiveViewport.width = width;
     m_interactiveViewport.height = height;
+  //  SCENE_LOG_INFO("[MP-init] step=done");
     return true;
 }
 
@@ -865,11 +1495,11 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                     break;
             }
         }
-        const double pixelCount = std::max(1.0, static_cast<double>(width) * static_cast<double>(height));
+        const double pixelCount = (std::max)(1.0, static_cast<double>(width) * static_cast<double>(height));
         const double referencePixels = 1920.0 * 1080.0;
         const double resolutionScale = std::sqrt(referencePixels / pixelCount);
         const double feedbackScale = allowAdaptiveRasterBudget
-            ? std::clamp(static_cast<double>(m_rasterScatterBudgetScale), 0.35, 1.0)
+            ? (std::clamp)(static_cast<double>(m_rasterScatterBudgetScale), 0.35, 1.0)
             : 1.0;
         const uint64_t adaptiveBudget = static_cast<uint64_t>(72.0 * 1000.0 * 1000.0 * resolutionScale * rasterQualityScale * feedbackScale);
         m_rasterScatterTriangleBudget = std::clamp<uint64_t>(adaptiveBudget,
@@ -907,6 +1537,11 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         }
     }
 
+    if (!m_interactiveViewport.identityInstanceBuffer.buffer) {
+        // Buffer allocation failed (e.g. old driver / memory pressure) — skip raster frame
+        return;
+    }
+
     VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
     if (cmd == VK_NULL_HANDLE) {
         return;
@@ -931,9 +1566,25 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     renderPassInfo.pClearValues = clearValues;
 
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.solidPipeline);
-    if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE) {
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.pipelineLayout, 0, 1, &m_interactiveViewport.matcapDescSet, 0, nullptr);
+    const VkBuffer materialBuffer = m_externalMaterialBuffer
+        ? m_externalMaterialBuffer
+        : m_device->m_materialBuffer.buffer;
+    const bool useMaterialPreview = (m_viewportMode == ViewportMode::MaterialPreview) &&
+        !m_rasterInstances.empty() &&
+        m_interactiveViewport.materialPreviewPipeline != VK_NULL_HANDLE &&
+        m_interactiveViewport.materialPreviewDescSet != VK_NULL_HANDLE &&
+        materialBuffer != VK_NULL_HANDLE;
+
+    if (useMaterialPreview) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.materialPreviewPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                m_interactiveViewport.materialPreviewPipelineLayout,
+                                0, 1, &m_interactiveViewport.materialPreviewDescSet, 0, nullptr);
+    } else {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.solidPipeline);
+        if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.pipelineLayout, 0, 1, &m_interactiveViewport.matcapDescSet, 0, nullptr);
+        }
     }
 
     VkViewport viewport{};
@@ -975,20 +1626,70 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                 maxDrawMeshKey = meshKey;
             }
 
-            SolidPushConstants push{};
-            matrixToGL(viewProj, push.viewProj);
-            matrixToGL(view, push.view);
-            const bool isMatcap = (m_viewportMode == ViewportMode::Matcap);
-            push.useMatcap = isMatcap ? (m_interactiveViewport.matcapUserLoaded ? 1 : m_interactiveViewport.matcapPreset) : 0;
-            vkCmdPushConstants(cmd, m_interactiveViewport.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SolidPushConstants), &push);
+            if (useMaterialPreview) {
+                struct MaterialPreviewPushConstants {
+                    float viewProj[16];
+                    float view[16];
+                    float cameraPos[4];
+                    float lightDir0[4];
+                    float lightDir1[4];
+                    float lightDir2[4];
+                    uint32_t materialMeta[4];
+                };
+                MaterialPreviewPushConstants mpPush{};
+                matrixToGL(viewProj, mpPush.viewProj);
+                matrixToGL(view, mpPush.view);
+                mpPush.cameraPos[0] = m_camera.origin.x;
+                mpPush.cameraPos[1] = m_camera.origin.y;
+                mpPush.cameraPos[2] = m_camera.origin.z;
+                mpPush.cameraPos[3] = 0.0f;
+                mpPush.lightDir0[0] = 0.45f; mpPush.lightDir0[1] = 0.8f; mpPush.lightDir0[2] = 0.35f; mpPush.lightDir0[3] = 2.5f;
+                mpPush.lightDir1[0] = -0.6f; mpPush.lightDir1[1] = 0.3f; mpPush.lightDir1[2] = 0.4f; mpPush.lightDir1[3] = 0.8f;
+                mpPush.lightDir2[0] = -0.2f; mpPush.lightDir2[1] = 0.4f; mpPush.lightDir2[2] = -0.8f; mpPush.lightDir2[3] = 1.2f;
+                uint32_t previewQuality = 2u;
+                switch (::render_settings.raster_viewport_quality_preset) {
+                    case ::RasterViewportQualityPreset::Performance: previewQuality = 1u; break;
+                    case ::RasterViewportQualityPreset::Balanced: previewQuality = 2u; break;
+                    case ::RasterViewportQualityPreset::Quality: previewQuality = 3u; break;
+                    case ::RasterViewportQualityPreset::Auto:
+                    default: previewQuality = 2u; break;
+                }
+                const uint32_t materialCount = m_externalMaterialBuffer
+                    ? m_externalMaterialCount
+                    : (m_device ? m_device->m_materialCount : 0u);
+                mpPush.materialMeta[0] = materialCount;
+                mpPush.materialMeta[1] = previewQuality;
+                mpPush.materialMeta[2] = static_cast<uint32_t>(::render_settings.material_preview_lighting_preset);
+                mpPush.materialMeta[3] = 0;
+                vkCmdPushConstants(cmd, m_interactiveViewport.materialPreviewPipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(MaterialPreviewPushConstants), &mpPush);
 
-            VkBuffer vertexBuffers[3] = {
-                rmb.vertexBuffer.buffer,
-                rmb.normalBuffer.buffer ? rmb.normalBuffer.buffer : rmb.vertexBuffer.buffer,
-                rmb.instanceBuffer.buffer
-            };
-            VkDeviceSize offsets[3] = { 0, 0, 0 };
-            vkCmdBindVertexBuffers(cmd, 0, 3, vertexBuffers, offsets);
+                VkBuffer mpVertexBuffers[5] = {
+                    rmb.vertexBuffer.buffer,
+                    rmb.normalBuffer.buffer  ? rmb.normalBuffer.buffer  : rmb.vertexBuffer.buffer,
+                    rmb.matIdBuffer.buffer ? rmb.matIdBuffer.buffer : rmb.vertexBuffer.buffer,
+                    rmb.instanceBuffer.buffer,
+                    rmb.uvBuffer.buffer ? rmb.uvBuffer.buffer : rmb.vertexBuffer.buffer,
+                };
+                VkDeviceSize mpOffsets[5] = { 0, 0, 0, 0, 0 };
+                vkCmdBindVertexBuffers(cmd, 0, 5, mpVertexBuffers, mpOffsets);
+            } else {
+                SolidPushConstants push{};
+                matrixToGL(viewProj, push.viewProj);
+                matrixToGL(view, push.view);
+                const bool isMatcap = (m_viewportMode == ViewportMode::Matcap);
+                push.useMatcap = isMatcap ? (m_interactiveViewport.matcapUserLoaded ? 1 : m_interactiveViewport.matcapPreset) : 0;
+                vkCmdPushConstants(cmd, m_interactiveViewport.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SolidPushConstants), &push);
+
+                VkBuffer vertexBuffers[3] = {
+                    rmb.vertexBuffer.buffer,
+                    rmb.normalBuffer.buffer ? rmb.normalBuffer.buffer : rmb.vertexBuffer.buffer,
+                    rmb.instanceBuffer.buffer
+                };
+                VkDeviceSize offsets[3] = { 0, 0, 0 };
+                vkCmdBindVertexBuffers(cmd, 0, 3, vertexBuffers, offsets);
+            }
 
             if (rmb.indexBuffer.buffer && rmb.indexCount > 0) {
                 vkCmdBindIndexBuffer(cmd, rmb.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
@@ -1004,6 +1705,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
 
             const auto& blas = m_device->m_blasList[instance.blasIndex];
             if (!blas.vertexBuffer.buffer || blas.vertexCount == 0) continue;
+            if (!m_interactiveViewport.identityInstanceBuffer.buffer) continue;
 
             SolidPushConstants push{};
             matrixToGL(viewProj, push.viewProj);
@@ -1085,7 +1787,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         if (seg2Count > 0) {
             std::string sample = "[Grid] +Z sample:";
             uint32_t vstart = seg2Start * 3;
-            uint32_t vend = std::min((uint32_t)positions.size(), vstart + std::min(seg2Count, (uint32_t)6) * 3u);
+            uint32_t vend = (std::min)((uint32_t)positions.size(), vstart + (std::min)(seg2Count, (uint32_t)6) * 3u);
             for (uint32_t vi = vstart; vi + 2 < vend; vi += 3) {
                 sample += " (" + std::to_string(positions[vi]) + "," + std::to_string(positions[vi+1]) + "," + std::to_string(positions[vi+2]) + ")";
             }
@@ -1111,7 +1813,18 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         }
     }
 
-    if (m_interactiveViewport.gridVertexBuffer.buffer && m_interactiveViewport.gridVertexCount > 0) {
+    if (m_interactiveViewport.gridVertexBuffer.buffer &&
+        m_interactiveViewport.gridNormalBuffer.buffer &&
+        m_interactiveViewport.identityInstanceBuffer.buffer &&
+        m_interactiveViewport.gridVertexCount > 0) {
+        if (useMaterialPreview) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.solidPipeline);
+            if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        m_interactiveViewport.pipelineLayout,
+                                        0, 1, &m_interactiveViewport.matcapDescSet, 0, nullptr);
+            }
+        }
         Matrix4x4 identity = Matrix4x4::identity();
         Matrix4x4 gridMvp = proj * view;
 
@@ -1193,13 +1906,13 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     const double frameMs = std::chrono::duration<double, std::milli>(frameEnd - frameStart).count();
     if (::render_settings.raster_viewport_quality_preset == ::RasterViewportQualityPreset::Auto) {
         if (frameMs > 120.0) {
-            m_rasterScatterBudgetScale = std::max(0.35f, m_rasterScatterBudgetScale * 0.55f);
+            m_rasterScatterBudgetScale = (std::max)(0.35f, m_rasterScatterBudgetScale * 0.55f);
         } else if (frameMs > 60.0) {
-            m_rasterScatterBudgetScale = std::max(0.35f, m_rasterScatterBudgetScale * 0.75f);
+            m_rasterScatterBudgetScale = (std::max)(0.35f, m_rasterScatterBudgetScale * 0.75f);
         } else if (frameMs > 40.0) {
-            m_rasterScatterBudgetScale = std::max(0.35f, m_rasterScatterBudgetScale * 0.88f);
+            m_rasterScatterBudgetScale = (std::max)(0.35f, m_rasterScatterBudgetScale * 0.88f);
         } else if (frameMs < 20.0) {
-            m_rasterScatterBudgetScale = std::min(1.0f, m_rasterScatterBudgetScale * 1.04f);
+            m_rasterScatterBudgetScale = (std::min)(1.0f, m_rasterScatterBudgetScale * 1.04f);
         }
     } else {
         m_rasterScatterBudgetScale = 1.0f;
@@ -1231,15 +1944,20 @@ bool VulkanViewportBackend::updateRasterMeshFromTriangles(
     if (!m_device || !m_device->isInitialized() || triangles.empty()) return false;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
-    std::string targetKey;
-    for (const auto& ri : m_rasterInstances) {
-        if (viewportMatchesNodeNameForInstance(ri.nodeName, nodeName) ||
-            viewportMatchesNodeNameForInstance(nodeName, ri.nodeName) ||
-            ri.meshKey.find(nodeName) != std::string::npos) {
-            targetKey = ri.meshKey;
-            break;
+    auto findTargetKey = [&]() -> std::string {
+        if (nodeName.empty()) return {};
+        for (const auto& ri : m_rasterInstances) {
+            if (ri.nodeName == nodeName) return ri.meshKey;
         }
-    }
+        for (const auto& ri : m_rasterInstances) {
+            if (viewportMatchesNodeNameForInstance(ri.nodeName, nodeName)) return ri.meshKey;
+        }
+        for (const auto& ri : m_rasterInstances) {
+            if (viewportMatchesNodeNameForInstance(nodeName, ri.nodeName)) return ri.meshKey;
+        }
+        return {};
+    };
+    const std::string targetKey = findTargetKey();
     if (targetKey.empty()) return false;
 
     auto meshIt = m_rasterMeshes.find(targetKey);
@@ -1248,22 +1966,90 @@ bool VulkanViewportBackend::updateRasterMeshFromTriangles(
     auto& rmb = meshIt->second;
     const size_t vertCount = triangles.size() * 3;
     const size_t floatCount = vertCount * 3;
+    const size_t uvFloatCount = vertCount * 2;
+
+    auto ensurePreviewAttributeBuffers = [&]() {
+        if (!rmb.uvBuffer.buffer) {
+            VulkanRT::BufferCreateInfo uci{};
+            uci.size = uvFloatCount * sizeof(float);
+            uci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            uci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            uci.initialData = nullptr;
+            rmb.uvBuffer = m_device->createBuffer(uci);
+        }
+        if (!rmb.matIdBuffer.buffer) {
+            VulkanRT::BufferCreateInfo mci{};
+            mci.size = vertCount * sizeof(uint32_t);
+            mci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            mci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            mci.initialData = nullptr;
+            rmb.matIdBuffer = m_device->createBuffer(mci);
+        }
+    };
 
     std::vector<float> newPositions(floatCount);
     std::vector<float> newNormals(floatCount);
+    std::vector<float> newUVs(uvFloatCount);
+    std::vector<uint32_t> newMatIds(vertCount);
 
     size_t idx = 0;
+    size_t uvIdx = 0;
+    size_t matIdx = 0;
     for (const auto& tri : triangles) {
         if (!tri) continue;
         const bool hasSharedTransform = (tri->getTransformHandle() != nullptr);
+        auto [uv0, uv1, uv2] = tri->getUVCoordinates();
+        const Vec2 triUvs[3] = { uv0, uv1, uv2 };
+        const uint32_t triMatId = static_cast<uint32_t>(tri->getMaterialID());
         for (int v = 0; v < 3; ++v) {
             Vec3 p = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
             Vec3 n = hasSharedTransform ? tri->getOriginalVertexNormal(v) : tri->getOriginalVertexNormal(v);
             newPositions[idx]   = p.x; newPositions[idx + 1] = p.y; newPositions[idx + 2] = p.z;
             newNormals[idx]     = n.x; newNormals[idx + 1]   = n.y; newNormals[idx + 2]   = n.z;
+            newUVs[uvIdx]       = triUvs[v].x; newUVs[uvIdx + 1] = triUvs[v].y;
+            newMatIds[matIdx]   = triMatId;
             idx += 3;
+            uvIdx += 2;
+            ++matIdx;
         }
     }
+
+    auto logMaterialPreviewMatIds = [&](const char* stage,
+                                        const std::string& key,
+                                        const std::vector<uint32_t>& matIds) {
+        static std::unordered_set<std::string> loggedKeys;
+        const std::string logKey = std::string(stage) + ":" + key;
+        if (!loggedKeys.insert(logKey).second) {
+            return;
+        }
+        uint32_t minMat = 0;
+        uint32_t maxMat = 0;
+        std::unordered_set<uint32_t> uniqueMatIds;
+        std::string sampleList;
+        if (!matIds.empty()) {
+            minMat = matIds[0];
+            maxMat = matIds[0];
+            const size_t previewCount = std::min<size_t>(matIds.size(), 8);
+            for (size_t i = 0; i < matIds.size(); ++i) {
+                const uint32_t matId = matIds[i];
+                minMat = (std::min)(minMat, matId);
+                maxMat = (std::max)(maxMat, matId);
+                uniqueMatIds.insert(matId);
+                if (i < previewCount) {
+                    if (!sampleList.empty()) sampleList += ",";
+                    sampleList += std::to_string(matId);
+                }
+            }
+        }
+        SCENE_LOG_INFO("[MaterialPreview] matIds " + std::string(stage) +
+                       " mesh='" + key +
+                       "' verts=" + std::to_string(matIds.size()) +
+                       " unique=" + std::to_string(uniqueMatIds.size()) +
+                       " min=" + std::to_string(minMat) +
+                       " max=" + std::to_string(maxMat) +
+                       " sample=[" + sampleList + "]");
+    };
+    logMaterialPreviewMatIds("update", targetKey, newMatIds);
 
     const uint32_t newVertCount = static_cast<uint32_t>(vertCount);
     if (newVertCount != rmb.vertexCount) {
@@ -1287,19 +2073,41 @@ bool VulkanViewportBackend::updateRasterMeshFromTriangles(
         nci.initialData = nullptr;
         rmb.normalBuffer = m_device->createBuffer(nci);
 
+        VulkanRT::BufferCreateInfo uci{};
+        uci.size = uvFloatCount * sizeof(float);
+        uci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        uci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        uci.initialData = nullptr;
+        rmb.uvBuffer = m_device->createBuffer(uci);
+
+        VulkanRT::BufferCreateInfo mci{};
+        mci.size = newMatIds.size() * sizeof(uint32_t);
+        mci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        mci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        mci.initialData = nullptr;
+        rmb.matIdBuffer = m_device->createBuffer(mci);
+
         if (rmb.vertexBuffer.buffer) {
             m_device->uploadBuffer(rmb.vertexBuffer, newPositions.data(), floatCount * sizeof(float), 0);
         }
         if (rmb.normalBuffer.buffer) {
             m_device->uploadBuffer(rmb.normalBuffer, newNormals.data(), floatCount * sizeof(float), 0);
         }
+        if (rmb.uvBuffer.buffer) {
+            m_device->uploadBuffer(rmb.uvBuffer, newUVs.data(), uvFloatCount * sizeof(float), 0);
+        }
+        if (rmb.matIdBuffer.buffer) {
+            m_device->uploadBuffer(rmb.matIdBuffer, newMatIds.data(), newMatIds.size() * sizeof(uint32_t), 0);
+        }
 
         rmb.cpuPositions = std::move(newPositions);
         rmb.cpuNormals = std::move(newNormals);
+        rmb.cpuMatIds = std::move(newMatIds);
         if (!rmb.instanceIndices.empty()) {
             uploadRasterInstanceBuffer(rmb);
         }
     } else if (rmb.cpuPositions.size() == floatCount) {
+        ensurePreviewAttributeBuffers();
         size_t dirtyMin = floatCount;
         size_t dirtyMax = 0;
         for (size_t i = 0; i < floatCount; ++i) {
@@ -1323,11 +2131,27 @@ bool VulkanViewportBackend::updateRasterMeshFromTriangles(
             std::memcpy(&rmb.cpuPositions[dirtyMin], &newPositions[dirtyMin], byteSize);
             std::memcpy(&rmb.cpuNormals[dirtyMin], &newNormals[dirtyMin], byteSize);
         }
+
+        if (rmb.uvBuffer.buffer) {
+            m_device->uploadBuffer(rmb.uvBuffer, newUVs.data(), uvFloatCount * sizeof(float), 0);
+        }
+        if (rmb.matIdBuffer.buffer) {
+            m_device->uploadBuffer(rmb.matIdBuffer, newMatIds.data(), newMatIds.size() * sizeof(uint32_t), 0);
+        }
+        rmb.cpuMatIds = std::move(newMatIds);
     } else {
+        ensurePreviewAttributeBuffers();
         m_device->uploadBuffer(rmb.vertexBuffer, newPositions.data(), floatCount * sizeof(float));
         m_device->uploadBuffer(rmb.normalBuffer, newNormals.data(), floatCount * sizeof(float));
+        if (rmb.uvBuffer.buffer) {
+            m_device->uploadBuffer(rmb.uvBuffer, newUVs.data(), uvFloatCount * sizeof(float), 0);
+        }
+        if (rmb.matIdBuffer.buffer) {
+            m_device->uploadBuffer(rmb.matIdBuffer, newMatIds.data(), newMatIds.size() * sizeof(uint32_t), 0);
+        }
         rmb.cpuPositions = std::move(newPositions);
         rmb.cpuNormals = std::move(newNormals);
+        rmb.cpuMatIds = std::move(newMatIds);
     }
 
     m_interactiveViewport.dirty = true;
@@ -1343,15 +2167,20 @@ bool VulkanViewportBackend::patchRasterMeshTriangles(
     }
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
-    std::string targetKey;
-    for (const auto& ri : m_rasterInstances) {
-        if (viewportMatchesNodeNameForInstance(ri.nodeName, nodeName) ||
-            viewportMatchesNodeNameForInstance(nodeName, ri.nodeName) ||
-            ri.meshKey.find(nodeName) != std::string::npos) {
-            targetKey = ri.meshKey;
-            break;
+    auto findTargetKey = [&]() -> std::string {
+        if (nodeName.empty()) return {};
+        for (const auto& ri : m_rasterInstances) {
+            if (ri.nodeName == nodeName) return ri.meshKey;
         }
-    }
+        for (const auto& ri : m_rasterInstances) {
+            if (viewportMatchesNodeNameForInstance(ri.nodeName, nodeName)) return ri.meshKey;
+        }
+        for (const auto& ri : m_rasterInstances) {
+            if (viewportMatchesNodeNameForInstance(nodeName, ri.nodeName)) return ri.meshKey;
+        }
+        return {};
+    };
+    const std::string targetKey = findTargetKey();
     if (targetKey.empty()) return false;
 
     auto meshIt = m_rasterMeshes.find(targetKey);
@@ -1366,10 +2195,14 @@ bool VulkanViewportBackend::patchRasterMeshTriangles(
         return false;
     }
 
+    std::vector<size_t> sortedDirty = dirtyIndices;
+    std::sort(sortedDirty.begin(), sortedDirty.end());
+    sortedDirty.erase(std::unique(sortedDirty.begin(), sortedDirty.end()), sortedDirty.end());
+
     size_t dirtyMinFloat = expectedFloatCount;
     size_t dirtyMaxFloat = 0;
 
-    for (const size_t triIdx : dirtyIndices) {
+    for (const size_t triIdx : sortedDirty) {
         if (triIdx >= meshEntries.size()) continue;
         const auto& tri = meshEntries[triIdx].second;
         if (!tri) continue;
@@ -1394,7 +2227,39 @@ bool VulkanViewportBackend::patchRasterMeshTriangles(
         if (baseFloat + 8 > dirtyMaxFloat) dirtyMaxFloat = baseFloat + 8;
     }
 
-    if (dirtyMinFloat <= dirtyMaxFloat) {
+    std::vector<std::pair<size_t, size_t>> dirtyRuns;
+    dirtyRuns.reserve((std::min)(sortedDirty.size(), size_t(64)));
+    if (!sortedDirty.empty()) {
+        size_t runStart = sortedDirty.front();
+        size_t prev = sortedDirty.front();
+        for (size_t i = 1; i < sortedDirty.size(); ++i) {
+            const size_t triIdx = sortedDirty[i];
+            if (triIdx == prev + 1) {
+                prev = triIdx;
+                continue;
+            }
+            dirtyRuns.emplace_back(runStart, prev);
+            runStart = prev = triIdx;
+        }
+        dirtyRuns.emplace_back(runStart, prev);
+    }
+
+    const size_t dirtyTriCount = sortedDirty.size();
+    const size_t spanTriCount =
+        (dirtyMinFloat <= dirtyMaxFloat)
+        ? ((dirtyMaxFloat - dirtyMinFloat + 1) / 9)
+        : 0;
+    const bool smallBrushLikeUpdate = dirtyTriCount > 0 && dirtyTriCount <= 96;
+    const bool spanIsReasonable =
+        dirtyTriCount > 0 &&
+        spanTriCount > 0 &&
+        spanTriCount <= dirtyTriCount * 6;
+    const bool shouldUploadAsSingleSpan =
+        dirtyRuns.empty() ||
+        dirtyRuns.size() > 64 ||
+        (smallBrushLikeUpdate && spanIsReasonable);
+
+    if (shouldUploadAsSingleSpan && dirtyMinFloat <= dirtyMaxFloat) {
         dirtyMinFloat = (dirtyMinFloat / 3) * 3;
         dirtyMaxFloat = ((dirtyMaxFloat / 3) + 1) * 3;
         if (dirtyMaxFloat > expectedFloatCount) dirtyMaxFloat = expectedFloatCount;
@@ -1404,24 +2269,107 @@ bool VulkanViewportBackend::patchRasterMeshTriangles(
 
         m_device->uploadBuffer(rmb.vertexBuffer, &rmb.cpuPositions[dirtyMinFloat], byteSize, byteOffset);
         m_device->uploadBuffer(rmb.normalBuffer, &rmb.cpuNormals[dirtyMinFloat], byteSize, byteOffset);
+    } else {
+        for (const auto& [runStart, runEnd] : dirtyRuns) {
+            const size_t runStartFloat = runStart * 9;
+            size_t runEndFloat = runEnd * 9 + 9;
+            if (runStartFloat >= expectedFloatCount) {
+                continue;
+            }
+            if (runEndFloat > expectedFloatCount) {
+                runEndFloat = expectedFloatCount;
+            }
+
+            const uint64_t byteOffset = runStartFloat * sizeof(float);
+            const uint64_t byteSize = (runEndFloat - runStartFloat) * sizeof(float);
+            if (byteSize == 0) {
+                continue;
+            }
+
+            m_device->uploadBuffer(rmb.vertexBuffer, &rmb.cpuPositions[runStartFloat], byteSize, byteOffset);
+            m_device->uploadBuffer(rmb.normalBuffer, &rmb.cpuNormals[runStartFloat], byteSize, byteOffset);
+        }
     }
 
     m_interactiveViewport.dirty = true;
     return true;
 }
 
+bool VulkanViewportBackend::cloneRasterObjectByNodeName(
+    const std::string& sourceNodeName,
+    const std::string& newNodeName,
+    const Matrix4x4& transform) {
+    if (!m_device || !m_device->isInitialized() || sourceNodeName.empty() || newNodeName.empty()) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    std::vector<uint32_t> sourceIndices;
+    for (uint32_t i = 0; i < static_cast<uint32_t>(m_rasterInstances.size()); ++i) {
+        const auto& ri = m_rasterInstances[i];
+        if (ri.nodeName == sourceNodeName ||
+            viewportMatchesNodeNameForInstance(ri.nodeName, sourceNodeName) ||
+            viewportMatchesNodeNameForInstance(sourceNodeName, ri.nodeName)) {
+            sourceIndices.push_back(i);
+        }
+    }
+    if (sourceIndices.empty()) {
+        return false;
+    }
+
+    std::unordered_set<std::string> dirtyMeshKeys;
+    for (uint32_t sourceIndex : sourceIndices) {
+        if (sourceIndex >= m_rasterInstances.size()) continue;
+
+        RasterInstance clone = m_rasterInstances[sourceIndex];
+        clone.nodeName = newNodeName;
+        clone.transform = transform;
+        updateRasterInstanceWorldBBox(clone);
+
+        const uint32_t newIndex = static_cast<uint32_t>(m_rasterInstances.size());
+        m_rasterInstances.push_back(std::move(clone));
+
+        auto meshIt = m_rasterMeshes.find(m_rasterInstances.back().meshKey);
+        if (meshIt != m_rasterMeshes.end()) {
+            meshIt->second.instanceIndices.push_back(newIndex);
+            dirtyMeshKeys.insert(meshIt->first);
+        }
+    }
+
+    for (const auto& meshKey : dirtyMeshKeys) {
+        auto meshIt = m_rasterMeshes.find(meshKey);
+        if (meshIt != m_rasterMeshes.end()) {
+            uploadRasterInstanceBuffer(meshIt->second);
+        }
+    }
+
+    m_interactiveViewport.dirty = true;
+    return !dirtyMeshKeys.empty();
+}
+
 void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) {
-    if (!m_device || !m_device->isInitialized()) return;
+    if (!m_device || !m_device->isInitialized()) {
+        SCENE_LOG_WARN("[ViewportRaster] buildRasterGeometry skipped: device not initialized. objects=" +
+                       std::to_string(objects.size()));
+        return;
+    }
 
     // Skip rebuild if raster cache is still valid for the current scene generation.
     {
         extern std::atomic<uint64_t> g_scene_geometry_generation;
         const uint64_t curGen = g_scene_geometry_generation.load(std::memory_order_acquire);
+        const uint64_t prevGen = m_rasterBuiltGeometryGeneration;
         if (!m_rasterMeshes.empty() && m_rasterBuiltGeometryGeneration == curGen) {
-            // Geometry hasn't changed — reuse existing raster buffers.
+            SCENE_LOG_INFO("[ViewportRaster] buildRasterGeometry early-out: cache valid. gen=" +
+                           std::to_string(curGen) + " meshes=" + std::to_string(m_rasterMeshes.size()) +
+                           " objects=" + std::to_string(objects.size()));
             m_rasterGeometryDirty = false;
             return;
         }
+        SCENE_LOG_INFO("[ViewportRaster] buildRasterGeometry starting: gen " +
+                       std::to_string(prevGen) + " -> " + std::to_string(curGen) +
+                       " objects=" + std::to_string(objects.size()) +
+                       " prevMeshes=" + std::to_string(m_rasterMeshes.size()));
     }
 
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
@@ -1448,25 +2396,110 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         if (triangles.empty()) return;
         if (m_rasterMeshes.find(meshKey) != m_rasterMeshes.end()) return;
 
-        std::vector<float> positions;
-        std::vector<float> normals;
-        positions.reserve(triangles.size() * 9);
-        normals.reserve(triangles.size() * 9);
-
-        // Compute local-space AABB while iterating vertices
-        Vec3 bMin(1e18f, 1e18f, 1e18f), bMax(-1e18f, -1e18f, -1e18f);
-
+        // Filter nulls into a compact raw-pointer list so the parallel extraction can
+        // index output slots directly (9 floats pos + 9 normals + 6 uvs + 3 matIds per
+        // triangle). High-poly foliage sources (50-100K tri) used to burn a single core
+        // here during raster prep.
+        std::vector<const Triangle*> valid;
+        valid.reserve(triangles.size());
         for (const auto& t : triangles) {
-            if (!t) continue;
-            for (int v = 0; v < 3; ++v) {
-                Vec3 p = t->getOriginalVertexPosition(v);
-                Vec3 n = t->getOriginalVertexNormal(v);
-                positions.push_back(p.x); positions.push_back(p.y); positions.push_back(p.z);
-                normals.push_back(n.x); normals.push_back(n.y); normals.push_back(n.z);
-                bMin.x = std::min(bMin.x, p.x); bMin.y = std::min(bMin.y, p.y); bMin.z = std::min(bMin.z, p.z);
-                bMax.x = std::max(bMax.x, p.x); bMax.y = std::max(bMax.y, p.y); bMax.z = std::max(bMax.z, p.z);
+            if (t) valid.push_back(t.get());
+        }
+        if (valid.empty()) return;
+
+        const size_t validCount = valid.size();
+        std::vector<float> positions(validCount * 9);
+        std::vector<float> normals(validCount * 9);
+        std::vector<float> uvs(validCount * 6);
+        std::vector<uint32_t> matIds(validCount * 3);
+
+        struct LocalBBox { Vec3 bMin; Vec3 bMax; };
+
+        auto extractRange = [&valid, &positions, &normals, &uvs, &matIds]
+                            (size_t start, size_t end) -> LocalBBox {
+            Vec3 bMin(1e18f, 1e18f, 1e18f), bMax(-1e18f, -1e18f, -1e18f);
+            for (size_t i = start; i < end; ++i) {
+                const Triangle* t = valid[i];
+                auto [uv0, uv1, uv2] = t->getUVCoordinates();
+                const Vec2 triUvs[3] = { uv0, uv1, uv2 };
+                const uint32_t triMatId = static_cast<uint32_t>(t->getMaterialID());
+                const size_t posBase = i * 9;
+                const size_t uvBase  = i * 6;
+                const size_t matBase = i * 3;
+                for (int v = 0; v < 3; ++v) {
+                    Vec3 p = t->getOriginalVertexPosition(v);
+                    Vec3 n = t->getOriginalVertexNormal(v);
+                    positions[posBase + v * 3 + 0] = p.x;
+                    positions[posBase + v * 3 + 1] = p.y;
+                    positions[posBase + v * 3 + 2] = p.z;
+                    normals[posBase + v * 3 + 0] = n.x;
+                    normals[posBase + v * 3 + 1] = n.y;
+                    normals[posBase + v * 3 + 2] = n.z;
+                    uvs[uvBase + v * 2 + 0] = triUvs[v].x;
+                    uvs[uvBase + v * 2 + 1] = triUvs[v].y;
+                    matIds[matBase + v] = triMatId;
+                    bMin.x = (std::min)(bMin.x, p.x); bMin.y = (std::min)(bMin.y, p.y); bMin.z = (std::min)(bMin.z, p.z);
+                    bMax.x = (std::max)(bMax.x, p.x); bMax.y = (std::max)(bMax.y, p.y); bMax.z = (std::max)(bMax.z, p.z);
+                }
+            }
+            return { bMin, bMax };
+        };
+
+        Vec3 bMin(1e18f, 1e18f, 1e18f), bMax(-1e18f, -1e18f, -1e18f);
+        constexpr size_t kExtractParallelThreshold = 4096;
+        unsigned extract_threads = std::thread::hardware_concurrency();
+        if (extract_threads == 0) extract_threads = 4;
+
+        if (validCount < kExtractParallelThreshold || extract_threads < 2) {
+            LocalBBox lbb = extractRange(0, validCount);
+            bMin = lbb.bMin;
+            bMax = lbb.bMax;
+        } else {
+            const size_t chunk = (validCount + extract_threads - 1) / extract_threads;
+            std::vector<std::future<LocalBBox>> futures;
+            futures.reserve(extract_threads);
+            for (unsigned t = 0; t < extract_threads; ++t) {
+                const size_t s = t * chunk;
+                const size_t e = (std::min)(s + chunk, validCount);
+                if (s >= e) break;
+                futures.push_back(std::async(std::launch::async, extractRange, s, e));
+            }
+            for (auto& f : futures) {
+                LocalBBox lbb = f.get();
+                bMin.x = (std::min)(bMin.x, lbb.bMin.x); bMin.y = (std::min)(bMin.y, lbb.bMin.y); bMin.z = (std::min)(bMin.z, lbb.bMin.z);
+                bMax.x = (std::max)(bMax.x, lbb.bMax.x); bMax.y = (std::max)(bMax.y, lbb.bMax.y); bMax.z = (std::max)(bMax.z, lbb.bMax.z);
             }
         }
+
+        static std::unordered_set<std::string> loggedBuildKeys;
+        if (loggedBuildKeys.insert(meshKey).second) {
+            uint32_t minMat = 0;
+            uint32_t maxMat = 0;
+            std::unordered_set<uint32_t> uniqueMatIds;
+            std::string sampleList;
+            if (!matIds.empty()) {
+                minMat = matIds[0];
+                maxMat = matIds[0];
+                const size_t previewCount = std::min<size_t>(matIds.size(), 8);
+                for (size_t i = 0; i < matIds.size(); ++i) {
+                    const uint32_t matId = matIds[i];
+                    minMat = (std::min)(minMat, matId);
+                    maxMat = (std::max)(maxMat, matId);
+                    uniqueMatIds.insert(matId);
+                    if (i < previewCount) {
+                        if (!sampleList.empty()) sampleList += ",";
+                        sampleList += std::to_string(matId);
+                    }
+                }
+            }
+            SCENE_LOG_INFO("[MaterialPreview] matIds build mesh='" + meshKey +
+                           "' verts=" + std::to_string(matIds.size()) +
+                           " unique=" + std::to_string(uniqueMatIds.size()) +
+                           " min=" + std::to_string(minMat) +
+                           " max=" + std::to_string(maxMat) +
+                           " sample=[" + sampleList + "]");
+        }
+
         // Cache the local bounding box for this mesh key
         m_rasterMeshBBoxes[meshKey] = AABB(bMin, bMax);
 
@@ -1486,11 +2519,33 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         nci.initialData = nullptr;
         rmb.normalBuffer = m_device->createBuffer(nci);
 
+        // UV buffer — required for material-preview texture sampling
+        VulkanRT::BufferCreateInfo uci{};
+        uci.size = uvs.size() * sizeof(float);
+        uci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        uci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        uci.initialData = nullptr;
+        rmb.uvBuffer = m_device->createBuffer(uci);
+
+        // Material-ID buffer — per-vertex uint32
+        VulkanRT::BufferCreateInfo mci{};
+        mci.size = matIds.size() * sizeof(uint32_t);
+        mci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        mci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        mci.initialData = nullptr;
+        rmb.matIdBuffer = m_device->createBuffer(mci);
+
         if (rmb.vertexBuffer.buffer) {
             m_device->uploadBuffer(rmb.vertexBuffer, positions.data(), positions.size() * sizeof(float), 0);
         }
         if (rmb.normalBuffer.buffer) {
             m_device->uploadBuffer(rmb.normalBuffer, normals.data(), normals.size() * sizeof(float), 0);
+        }
+        if (rmb.uvBuffer.buffer && !uvs.empty()) {
+            m_device->uploadBuffer(rmb.uvBuffer, uvs.data(), uvs.size() * sizeof(float), 0);
+        }
+        if (rmb.matIdBuffer.buffer && !matIds.empty()) {
+            m_device->uploadBuffer(rmb.matIdBuffer, matIds.data(), matIds.size() * sizeof(uint32_t), 0);
         }
 
         bool hasSkinning = false;
@@ -1554,7 +2609,14 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                               rmb.boneIndexBuffer.buffer && rmb.boneWeightBuffer.buffer;
         }
 
-        m_rasterMeshes[meshKey] = rmb;
+        // Move vertex-attribute buffers into CPU shadow copies — updateRasterMeshFromTriangles
+        // uses these to detect dirty ranges and re-upload matIds. Moving (instead of copying)
+        // avoids a deep duplication of large per-source vectors for high-poly foliage.
+        rmb.cpuPositions = std::move(positions);
+        rmb.cpuNormals   = std::move(normals);
+        rmb.cpuMatIds    = std::move(matIds);
+
+        m_rasterMeshes[meshKey] = std::move(rmb);
     };
 
     auto ensureScatterProxyMesh = [&](const std::string& sourceMeshKey,
@@ -1580,8 +2642,8 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         const float maxZ = bbox.max.z;
         const float centerX = (minX + maxX) * 0.5f;
         const float centerZ = (minZ + maxZ) * 0.5f;
-        const float height = std::max(maxY - minY, 1e-4f);
-        const float fallbackRadius = std::max({ maxX - minX, maxZ - minZ, 1e-3f }) * 0.5f;
+        const float height = (std::max)(maxY - minY, 1e-4f);
+        const float fallbackRadius = (std::max)({ maxX - minX, maxZ - minZ, 1e-3f }) * 0.5f;
 
         std::vector<float> positions;
         std::vector<float> normals;
@@ -1641,7 +2703,7 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                     const float dz = p.z - centerZ;
                     for (auto& plane : planes) {
                         const float extent = std::abs(dx * plane.axis.x + dz * plane.axis.z);
-                        plane.extents[slice] = std::max(plane.extents[slice], extent);
+                        plane.extents[slice] = (std::max)(plane.extents[slice], extent);
                         plane.touched[slice] = true;
                     }
                 }
@@ -1684,7 +2746,7 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
 
                 for (int i = 0; i < kSliceCount; ++i) {
                     const float minExtent = fallbackRadius * 0.06f;
-                    plane.extents[i] = std::max(plane.extents[i] * 0.96f, minExtent);
+                    plane.extents[i] = (std::max)(plane.extents[i] * 0.96f, minExtent);
                 }
             }
 
@@ -1722,12 +2784,12 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         Vec3 proxyMin(1e18f, 1e18f, 1e18f);
         Vec3 proxyMax(-1e18f, -1e18f, -1e18f);
         for (size_t i = 0; i + 2 < positions.size(); i += 3) {
-            proxyMin.x = std::min(proxyMin.x, positions[i + 0]);
-            proxyMin.y = std::min(proxyMin.y, positions[i + 1]);
-            proxyMin.z = std::min(proxyMin.z, positions[i + 2]);
-            proxyMax.x = std::max(proxyMax.x, positions[i + 0]);
-            proxyMax.y = std::max(proxyMax.y, positions[i + 1]);
-            proxyMax.z = std::max(proxyMax.z, positions[i + 2]);
+            proxyMin.x = (std::min)(proxyMin.x, positions[i + 0]);
+            proxyMin.y = (std::min)(proxyMin.y, positions[i + 1]);
+            proxyMin.z = (std::min)(proxyMin.z, positions[i + 2]);
+            proxyMax.x = (std::max)(proxyMax.x, positions[i + 0]);
+            proxyMax.y = (std::max)(proxyMax.y, positions[i + 1]);
+            proxyMax.z = (std::max)(proxyMax.z, positions[i + 2]);
         }
 
         RasterMeshBuffer proxyMesh;
@@ -1767,13 +2829,15 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         std::string nodeName;
         std::vector<float> positions;
         std::vector<float> normals;
+        std::vector<float> uvs;
+        std::vector<uint32_t> matIds;
         std::vector<std::shared_ptr<Triangle>> triangles;
         Matrix4x4 transform;
         uint8_t mask = 0xFF;
     };
 
     std::vector<RasterTriGroup> groups;
-    std::unordered_map<void*, size_t> groupByKey;
+    std::unordered_map<std::string, size_t> groupByKey;
 
     std::function<void(const std::shared_ptr<Hittable>&)> processObj;
     processObj = [&](const std::shared_ptr<Hittable>& obj) {
@@ -1784,17 +2848,34 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
             if (hasInstancePrefix(inst->node_name)) return;
 
             const auto srcPtr = reinterpret_cast<uintptr_t>(inst->source_triangles.get());
-            std::string meshKey = "[Raster]-" + std::to_string(srcPtr) +
-                                  "-" + std::to_string(inst->source_triangles->size());
+            const std::string instanceNodeName = inst->node_name.empty()
+                ? ("[ViewportInst-" + std::to_string(m_rasterInstances.size()) + "]")
+                : inst->node_name;
+            std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>> trianglesByNode;
+            trianglesByNode.reserve(inst->source_triangles->size());
+            for (const auto& tri : *inst->source_triangles) {
+                if (!tri) continue;
+                const std::string triNodeName = tri->getNodeName().empty() ? instanceNodeName : tri->getNodeName();
+                trianglesByNode[triNodeName].push_back(tri);
+            }
 
-            ensureRasterMeshForTriangles(meshKey, *inst->source_triangles);
+            for (const auto& [triNodeName, groupedTriangles] : trianglesByNode) {
+                if (groupedTriangles.empty()) continue;
+                // Keep viewport raster meshes instance-local and node-local so material preview
+                // matches the same object grouping used by UI selection/material slots.
+                std::string meshKey = "[Viewport-Raster]-" + triNodeName +
+                                      "-src-" + std::to_string(srcPtr) +
+                                      "-tris-" + std::to_string(groupedTriangles.size());
 
-            RasterInstance ri;
-            ri.meshKey = meshKey;
-            ri.nodeName = inst->node_name;
-            ri.transform = inst->transform;
-            ri.mask = 0xFF;
-            m_rasterInstances.push_back(ri);
+                ensureRasterMeshForTriangles(meshKey, groupedTriangles);
+
+                RasterInstance ri;
+                ri.meshKey = meshKey;
+                ri.nodeName = triNodeName;
+                ri.transform = inst->transform;
+                ri.mask = 0xFF;
+                m_rasterInstances.push_back(ri);
+            }
 
         } else if (auto list = std::dynamic_pointer_cast<HittableList>(obj)) {
             for (auto& child : list->objects) processObj(child);
@@ -1804,18 +2885,18 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             if (!tri->visible) return;
 
-            void* groupKey = nullptr;
             auto triTransformHandle = tri->getTransformHandle();
-            if (triTransformHandle) groupKey = triTransformHandle.get();
-            else groupKey = tri.get();
-
             const bool hasSharedTransform = (triTransformHandle != nullptr);
+            std::string nodeName = tri->getNodeName();
+            if (nodeName.empty()) nodeName = "[Solo-" + std::to_string(groups.size()) + "]";
+            const uintptr_t transformKey = triTransformHandle
+                ? reinterpret_cast<uintptr_t>(triTransformHandle.get())
+                : reinterpret_cast<uintptr_t>(tri.get());
+            const std::string groupKey = nodeName + "#th=" + std::to_string(transformKey);
 
             auto found = groupByKey.find(groupKey);
             if (found == groupByKey.end()) {
                 RasterTriGroup g;
-                std::string nodeName = tri->getNodeName();
-                if (nodeName.empty()) nodeName = "[Solo-" + std::to_string(groups.size()) + "]";
                 g.meshKey = "[Raster-Solo]-" + nodeName;
                 g.nodeName = nodeName;
                 g.transform = hasSharedTransform ? tri->getTransformMatrix() : Matrix4x4::identity();
@@ -1825,11 +2906,16 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
 
             auto& grp = groups[found->second];
             grp.triangles.push_back(tri);
+            auto [uv0, uv1, uv2] = tri->getUVCoordinates();
+            const Vec2 triUvs[3] = { uv0, uv1, uv2 };
+            const uint32_t triMatId = static_cast<uint32_t>(tri->getMaterialID());
             for (int v = 0; v < 3; ++v) {
                 Vec3 p = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
                 Vec3 n = hasSharedTransform ? tri->getOriginalVertexNormal(v) : tri->getOriginalVertexNormal(v);
                 grp.positions.push_back(p.x); grp.positions.push_back(p.y); grp.positions.push_back(p.z);
                 grp.normals.push_back(n.x); grp.normals.push_back(n.y); grp.normals.push_back(n.z);
+                grp.uvs.push_back(triUvs[v].x); grp.uvs.push_back(triUvs[v].y);
+                grp.matIds.push_back(triMatId);
             }
         }
     };
@@ -1845,8 +2931,8 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         Vec3 bMin(1e18f, 1e18f, 1e18f), bMax(-1e18f, -1e18f, -1e18f);
         for (size_t pi = 0; pi + 2 < grp.positions.size(); pi += 3) {
             float px = grp.positions[pi], py = grp.positions[pi+1], pz = grp.positions[pi+2];
-            bMin.x = std::min(bMin.x, px); bMin.y = std::min(bMin.y, py); bMin.z = std::min(bMin.z, pz);
-            bMax.x = std::max(bMax.x, px); bMax.y = std::max(bMax.y, py); bMax.z = std::max(bMax.z, pz);
+            bMin.x = (std::min)(bMin.x, px); bMin.y = (std::min)(bMin.y, py); bMin.z = (std::min)(bMin.z, pz);
+            bMax.x = (std::max)(bMax.x, px); bMax.y = (std::max)(bMax.y, py); bMax.z = (std::max)(bMax.z, pz);
         }
         m_rasterMeshBBoxes[grp.meshKey] = AABB(bMin, bMax);
 
@@ -1867,12 +2953,40 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         nci.initialData = nullptr;
         rmb.normalBuffer = m_device->createBuffer(nci);
 
+        if (!grp.uvs.empty()) {
+            VulkanRT::BufferCreateInfo uci{};
+            uci.size = grp.uvs.size() * sizeof(float);
+            uci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            uci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            uci.initialData = nullptr;
+            rmb.uvBuffer = m_device->createBuffer(uci);
+        }
+
+        if (!grp.matIds.empty()) {
+            VulkanRT::BufferCreateInfo mci{};
+            mci.size = grp.matIds.size() * sizeof(uint32_t);
+            mci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            mci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            mci.initialData = nullptr;
+            rmb.matIdBuffer = m_device->createBuffer(mci);
+        }
+
         if (rmb.vertexBuffer.buffer) {
             m_device->uploadBuffer(rmb.vertexBuffer, grp.positions.data(), grp.positions.size() * sizeof(float), 0);
         }
         if (rmb.normalBuffer.buffer) {
             m_device->uploadBuffer(rmb.normalBuffer, grp.normals.data(), grp.normals.size() * sizeof(float), 0);
         }
+        if (rmb.uvBuffer.buffer && !grp.uvs.empty()) {
+            m_device->uploadBuffer(rmb.uvBuffer, grp.uvs.data(), grp.uvs.size() * sizeof(float), 0);
+        }
+        if (rmb.matIdBuffer.buffer && !grp.matIds.empty()) {
+            m_device->uploadBuffer(rmb.matIdBuffer, grp.matIds.data(), grp.matIds.size() * sizeof(uint32_t), 0);
+        }
+
+        rmb.cpuPositions = grp.positions;
+        rmb.cpuNormals   = grp.normals;
+        rmb.cpuMatIds    = grp.matIds;
 
         bool hasSkinning = false;
         for (const auto& tri : grp.triangles) {
@@ -1946,27 +3060,45 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
     }
 
     const auto& instanceGroups = InstanceManager::getInstance().getGroups();
-    for (const auto& group : instanceGroups) {
+
+    // ============================================================================
+    // Scatter-instance expansion — parallelized per-group inner loop.
+    //
+    // Serial pre-pass: per (group, srcIdx) we resolve the meshKey once and call
+    // ensureRasterMeshForTriangles / ensureScatterProxyMesh (these mutate
+    // m_rasterMeshes / m_rasterMeshBBoxes so they must stay single-threaded).
+    //
+    // Parallel pass: for each group fan out matrix composition + per-instance
+    // RasterInstance construction across threads using std::async chunks.
+    // Large foliage groups burned a single core here with inst.toMatrix() +
+    // nodeName concatenation + vector reallocation.
+    // ============================================================================
+    struct GroupSrcMeta {
+        std::vector<std::string> meshKeyBySrc;  // indexed by srcIdx; empty = invalid source
+    };
+    std::vector<GroupSrcMeta> groupMeta(instanceGroups.size());
+
+    size_t totalValidScatterInstances = 0;
+    for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
+        const auto& group = instanceGroups[gi];
         if (group.instances.empty() || group.sources.empty()) continue;
+        auto& meta = groupMeta[gi];
+        meta.meshKeyBySrc.resize(group.sources.size());
 
-        for (size_t instanceIdx = 0; instanceIdx < group.instances.size(); ++instanceIdx) {
-            const auto& inst = group.instances[instanceIdx];
-            int srcIdx = inst.source_index;
-            if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
-            const auto& source = group.sources[srcIdx];
-
+        for (size_t si = 0; si < group.sources.size(); ++si) {
+            const auto& source = group.sources[si];
             const auto* triSource = source.centered_triangles_ptr ? source.centered_triangles_ptr.get() : nullptr;
             if ((!triSource || triSource->empty()) && source.triangles.empty()) continue;
 
             std::string meshKey;
             if (triSource) {
                 const auto srcPtr = reinterpret_cast<uintptr_t>(triSource);
-                meshKey = "[Raster-Group]-" + std::to_string(group.id) + "-" + std::to_string(srcIdx) +
+                meshKey = "[Raster-Group]-" + std::to_string(group.id) + "-" + std::to_string(si) +
                           "-" + std::to_string(srcPtr) + "-" + std::to_string(triSource->size());
                 ensureRasterMeshForTriangles(meshKey, *triSource);
             } else {
                 const auto srcPtr = reinterpret_cast<uintptr_t>(&source.triangles);
-                meshKey = "[Raster-Group]-" + std::to_string(group.id) + "-" + std::to_string(srcIdx) +
+                meshKey = "[Raster-Group]-" + std::to_string(group.id) + "-" + std::to_string(si) +
                           "-" + std::to_string(srcPtr) + "-" + std::to_string(source.triangles.size());
                 ensureRasterMeshForTriangles(meshKey, source.triangles);
             }
@@ -1976,22 +3108,104 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                 rasterMeshIt->second.isScatterGroup = true;
                 ensureScatterProxyMesh(meshKey, triSource ? triSource : &source.triangles);
             }
+            meta.meshKeyBySrc[si] = std::move(meshKey);
+        }
 
-            RasterInstance ri;
-            ri.meshKey = meshKey;
-            ri.nodeName = "_inst_gid" + std::to_string(group.id) + "_" + std::to_string(instanceIdx);
-            ri.transform = inst.toMatrix();
-            ri.mask = 0xFF;
+        for (const auto& inst : group.instances) {
+            int srcIdx = inst.source_index;
+            if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
+            if (srcIdx < static_cast<int>(meta.meshKeyBySrc.size()) &&
+                !meta.meshKeyBySrc[srcIdx].empty()) {
+                ++totalValidScatterInstances;
+            }
+        }
+    }
+
+    m_rasterInstances.reserve(m_rasterInstances.size() + totalValidScatterInstances);
+
+    unsigned num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0) num_threads = 4;
+    const size_t kParallelThreshold = 1024;
+
+    for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
+        const auto& group = instanceGroups[gi];
+        if (group.instances.empty() || group.sources.empty()) continue;
+        const auto& meshKeyBySrc = groupMeta[gi].meshKeyBySrc;
+        if (meshKeyBySrc.empty()) continue;
+
+        const size_t count = group.instances.size();
+        std::vector<RasterInstance> localInstances(count);
+
+        auto fillRange = [&group, &meshKeyBySrc, &localInstances](size_t start, size_t end) {
+            const std::string nodePrefix = "_inst_gid" + std::to_string(group.id) + "_";
+            for (size_t i = start; i < end; ++i) {
+                const auto& inst = group.instances[i];
+                int srcIdx = inst.source_index;
+                if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
+                if (srcIdx >= static_cast<int>(meshKeyBySrc.size()) ||
+                    meshKeyBySrc[srcIdx].empty()) {
+                    continue;  // invalid src — leave default-constructed (meshKey stays empty)
+                }
+                auto& ri = localInstances[i];
+                ri.meshKey = meshKeyBySrc[srcIdx];
+                ri.nodeName = nodePrefix + std::to_string(i);
+                ri.transform = inst.toMatrix();
+                ri.mask = 0xFF;
+            }
+        };
+
+        if (count < kParallelThreshold || num_threads < 2) {
+            fillRange(0, count);
+        } else {
+            const size_t chunk = (count + num_threads - 1) / num_threads;
+            std::vector<std::future<void>> futures;
+            futures.reserve(num_threads);
+            for (unsigned t = 0; t < num_threads; ++t) {
+                const size_t s = t * chunk;
+                const size_t e = (std::min)(s + chunk, count);
+                if (s >= e) break;
+                futures.push_back(std::async(std::launch::async, fillRange, s, e));
+            }
+            for (auto& f : futures) f.get();
+        }
+
+        // Serial compact — preserves instance order so nodeName's encoded index
+        // still matches its position conceptually. Skip invalid slots.
+        for (auto& ri : localInstances) {
+            if (ri.meshKey.empty()) continue;
             m_rasterInstances.push_back(std::move(ri));
         }
     }
 
-    // Assign localBBox from cached mesh AABB and compute worldBBox per instance
-    for (auto& ri : m_rasterInstances) {
-        auto bboxIt = m_rasterMeshBBoxes.find(ri.meshKey);
-        if (bboxIt != m_rasterMeshBBoxes.end()) {
-            ri.localBBox = bboxIt->second;
-            updateRasterInstanceWorldBBox(ri);
+    // Assign localBBox from cached mesh AABB and compute worldBBox per instance.
+    // Parallelized — m_rasterMeshBBoxes is read-only from here on; per-instance
+    // writes touch disjoint RasterInstance objects.
+    {
+        const size_t total = m_rasterInstances.size();
+        auto bboxRange = [this](size_t start, size_t end) {
+            for (size_t i = start; i < end; ++i) {
+                auto& ri = m_rasterInstances[i];
+                auto bboxIt = m_rasterMeshBBoxes.find(ri.meshKey);
+                if (bboxIt != m_rasterMeshBBoxes.end()) {
+                    ri.localBBox = bboxIt->second;
+                    updateRasterInstanceWorldBBox(ri);
+                }
+            }
+        };
+
+        if (total < kParallelThreshold || num_threads < 2) {
+            bboxRange(0, total);
+        } else {
+            const size_t chunk = (total + num_threads - 1) / num_threads;
+            std::vector<std::future<void>> futures;
+            futures.reserve(num_threads);
+            for (unsigned t = 0; t < num_threads; ++t) {
+                const size_t s = t * chunk;
+                const size_t e = (std::min)(s + chunk, total);
+                if (s >= e) break;
+                futures.push_back(std::async(std::launch::async, bboxRange, s, e));
+            }
+            for (auto& f : futures) f.get();
         }
     }
 
@@ -2011,6 +3225,10 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
     {
         extern std::atomic<uint64_t> g_scene_geometry_generation;
         m_rasterBuiltGeometryGeneration = g_scene_geometry_generation.load(std::memory_order_acquire);
+        SCENE_LOG_INFO("[ViewportRaster] buildRasterGeometry done: gen=" +
+                       std::to_string(m_rasterBuiltGeometryGeneration) +
+                       " meshes=" + std::to_string(m_rasterMeshes.size()) +
+                       " instances=" + std::to_string(m_rasterInstances.size()));
     }
 }
 
@@ -2079,7 +3297,9 @@ void VulkanViewportBackend::syncRasterSkinnedVertices(
     const std::vector<std::shared_ptr<Hittable>>& objects,
     const std::vector<Matrix4x4>& boneMatrices) {
     if (m_rasterInstances.empty() || m_rasterMeshes.empty() || boneMatrices.empty()) return;
-    if (m_viewportMode != ViewportMode::Solid && m_viewportMode != ViewportMode::Matcap) return;
+    if (m_viewportMode != ViewportMode::Solid &&
+        m_viewportMode != ViewportMode::Matcap &&
+        m_viewportMode != ViewportMode::MaterialPreview) return;
 
     uint32_t skinnedMeshCount = 0;
     uint32_t gpuDispatchCount = 0;

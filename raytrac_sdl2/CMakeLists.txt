@@ -95,6 +95,7 @@ set(CUDA_SOURCES_OBJ
     "source/src/Device/skinning_kernels.cu"
     "source/src/Device/gas_kernels.cu"
     "source/src/Device/gas_fft_solver.cu"
+    "source/src/Device/oidn_blend.cu"
 )
 
 set(OZZ_RUNTIME_SOURCES

@@ -175,6 +175,8 @@ void main() {
             ui2 = uint(gl_PrimitiveID) * 3 + 2;
         }
         hitUV = uvBuf.u[ui0] * bary.x + uvBuf.u[ui1] * bary.y + uvBuf.u[ui2] * bary.z;
+        // Vulkan shader coordinate origin differs; flip V to match closesthit / texture upload
+        hitUV.y = 1.0 - hitUV.y;
         hitUV = applyMaterialUVTransform(mat, hitUV);
     }
 

@@ -11,6 +11,7 @@
 #include "SceneSelection.h"
 #include "imgui.h"
 #include "MaterialManager.h"
+#include "PBRMaterialSnapshot.h"
 #include "PrincipledBSDF.h"
 #include "Volumetric.h"
 #include "scene_data.h"
@@ -183,6 +184,11 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     uint16_t active_mat_id = (active_slot_index < (int)used_material_ids.size()) ? used_material_ids[active_slot_index] : MaterialManager::INVALID_MATERIAL_ID;
     Material* active_mat_ptr = MaterialManager::getInstance().getMaterial(active_mat_id);
     std::string current_mat_name = active_mat_ptr ? active_mat_ptr->materialName : "None";
+    static std::string last_logged_slot_debug_obj_name = "";
+    if (last_logged_slot_debug_obj_name != obj_name) {
+        last_logged_slot_debug_obj_name = obj_name;
+
+    }
 
     // �������������������������������������������������������������������������
     // 3. ASSIGN MATERIAL TO ACTIVE SLOT
@@ -417,7 +423,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                     ctx.renderer.resetCPUAccumulation();
                     
                     // Update bindings on GPU (Fast Path) - CRITICAL FIX
-                    ctx.renderer.updateMeshMaterialBinding(obj_name, active_mat_id, (uint16_t)i);
+                    ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, active_mat_id, (uint16_t)i);
 
                     if (ctx.backend_ptr) {
                         ctx.renderer.updateBackendMaterials(ctx.scene);
@@ -489,7 +495,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             ctx.renderer.resetCPUAccumulation();
             
             // Update bindings on GPU (Fast Path)
-            ctx.renderer.updateMeshMaterialBinding(obj_name, active_mat_id, new_id);
+            ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, active_mat_id, new_id);
 
             if (ctx.backend_ptr) {
                 ctx.renderer.updateBackendMaterials(ctx.scene);
@@ -545,7 +551,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             ctx.renderer.resetCPUAccumulation();
             
             // Update bindings on GPU (Fast Path)
-            ctx.renderer.updateMeshMaterialBinding(obj_name, active_mat_id, new_id);
+            ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, active_mat_id, new_id);
 
             if (ctx.backend_ptr) {
                 ctx.renderer.updateBackendMaterials(ctx.scene);
@@ -860,54 +866,8 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
     // Helper functions re-implemented locally to Context
     auto SyncGpuMaterial = [&](PrincipledBSDF* mat) -> void {
         if (!mat->gpuMaterial) mat->gpuMaterial = std::make_shared<GpuMaterial>();
-
-        Vec3 alb = mat->albedoProperty.color;
-        mat->gpuMaterial->albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
-        mat->gpuMaterial->roughness = (float)mat->roughnessProperty.color.x;
-        mat->gpuMaterial->metallic = (float)mat->metallicProperty.intensity;
-
-        Vec3 em = mat->emissionProperty.color;
-        float emStr = mat->emissionProperty.intensity;
-        mat->gpuMaterial->emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
-
-        mat->gpuMaterial->ior = mat->ior;
-        mat->gpuMaterial->transmission = mat->transmission;
-        mat->gpuMaterial->opacity = mat->opacityProperty.alpha;
-        
-        // SSS (Random Walk)
-        mat->gpuMaterial->subsurface = mat->subsurface;
-        Vec3 sssColor = mat->subsurfaceColor;
-        mat->gpuMaterial->subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
-        Vec3 sssRadius = mat->subsurfaceRadius;
-        mat->gpuMaterial->subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
-        mat->gpuMaterial->subsurface_scale = mat->subsurfaceScale;
-        mat->gpuMaterial->subsurface_anisotropy = mat->subsurfaceAnisotropy;
-        mat->gpuMaterial->subsurface_ior = mat->subsurfaceIOR;
-        mat->gpuMaterial->sss_use_random_walk = mat->useRandomWalkSSS ? 1 : 0;
-        mat->gpuMaterial->sss_max_steps = mat->sssMaxSteps;
-        
-        // Clear Coat
-        mat->gpuMaterial->clearcoat = mat->clearcoat;
-        mat->gpuMaterial->clearcoat_roughness = mat->clearcoatRoughness;
-        
-        // Translucent
-        mat->gpuMaterial->translucent = mat->translucent;
-        
-        // Anisotropic
-        mat->gpuMaterial->anisotropic = mat->anisotropic;
-        mat->gpuMaterial->normal_strength = mat->get_normal_strength();
-
-        // Sheen (Water flags)
-        mat->gpuMaterial->sheen = mat->sheen;
-        mat->gpuMaterial->sheen_tint = mat->sheen_tint;
-        mat->gpuMaterial->uv_scale_x = static_cast<float>(mat->textureTransform.scale.u);
-        mat->gpuMaterial->uv_scale_y = static_cast<float>(mat->textureTransform.scale.v);
-        mat->gpuMaterial->uv_offset_x = static_cast<float>(mat->textureTransform.translation.u);
-        mat->gpuMaterial->uv_offset_y = static_cast<float>(mat->textureTransform.translation.v);
-        mat->gpuMaterial->uv_rotation_degrees = mat->textureTransform.rotation_degrees;
-        mat->gpuMaterial->uv_tiling_x = static_cast<float>(mat->textureTransform.tilingFactor.u);
-        mat->gpuMaterial->uv_tiling_y = static_cast<float>(mat->textureTransform.tilingFactor.v);
-        mat->gpuMaterial->uv_wrap_mode = static_cast<int>(mat->textureTransform.wrapMode);
+        const PBRMaterialSnapshot snapshot = capturePBRMaterialSnapshot(*mat);
+        applyPBRMaterialSnapshotToGpuMaterial(snapshot, *mat->gpuMaterial);
     };
 
     auto UpdateTriangleTextureBundle = [&](std::shared_ptr<Triangle> target_tri, PrincipledBSDF* mat) {
@@ -1624,6 +1584,65 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         float trans = pbsdf->translucent;
         if (SceneUI::DrawSmartFloat("trns", "Transl", &trans, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
             pbsdf->translucent = trans;
+            changed = true;
+        }
+        UIWidgets::EndSection();
+    }
+
+    // Procedural Detail — world-space color/dirt/roughness + optional UV tile-break
+    // Shared by all three backends (Vulkan/GLSL, OptiX/CUDA, CPU).
+    if (UIWidgets::BeginSection("Procedural Detail", ImVec4(0.65f, 0.55f, 0.40f, 1.0f))) {
+        float det_str = pbsdf->micro_detail_strength;
+        if (SceneUI::DrawSmartFloat("pd_str", "Strength", &det_str, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
+            pbsdf->micro_detail_strength = det_str;
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("World-space color variation + dirt + roughness.\nDoes NOT warp UV — texture stays intact.\n0 = off, 0.2–0.5 = subtle, 1.0 = strong");
+
+        float det_sc = pbsdf->micro_detail_scale;
+        if (SceneUI::DrawSmartFloat("pd_sc", "Scale", &det_sc, 0.1f, 10.0f, "%.2f", false, nullptr, 12)) {
+            pbsdf->micro_detail_scale = det_sc;
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("World-space frequency\n1–2 = large patches\n4–8 = fine grain");
+
+        ImGui::Separator();
+
+        float tb_str = pbsdf->tile_break_strength;
+        if (SceneUI::DrawSmartFloat("pd_tb", "Tile Break", &tb_str, 0.0f, 0.35f, "%.3f", false, nullptr, 12)) {
+            pbsdf->tile_break_strength = tb_str;
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("UV warp to break repeating tiling seams.\nLeave at 0 for unique/non-tiling albedo maps.\n0.05–0.15 = subtle, 0.25–0.35 = strong");
+
+        ImGui::Separator();
+        if (ImGui::SmallButton("Worn Stone")) {
+            pbsdf->micro_detail_strength = 0.45f;
+            pbsdf->micro_detail_scale    = 3.5f;
+            pbsdf->tile_break_strength   = 0.0f;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Dusty")) {
+            pbsdf->micro_detail_strength = 0.30f;
+            pbsdf->micro_detail_scale    = 2.0f;
+            pbsdf->tile_break_strength   = 0.0f;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Tiled Tex")) {
+            pbsdf->micro_detail_strength = 0.20f;
+            pbsdf->micro_detail_scale    = 2.5f;
+            pbsdf->tile_break_strength   = 0.15f;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Off")) {
+            pbsdf->micro_detail_strength = 0.0f;
+            pbsdf->tile_break_strength   = 0.0f;
             changed = true;
         }
         UIWidgets::EndSection();

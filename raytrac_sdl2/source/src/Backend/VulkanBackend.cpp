@@ -8,6 +8,7 @@
  */
 #include "Backend/VulkanBackend.h"
 #include "Backend/vulkan_world_data.h"
+#include "Core/RenderStateManager.h"
 #include "globals.h"
 #include <iostream>
 #include <fstream>
@@ -19,6 +20,8 @@
 #include <array>
 #include <filesystem>
 #include <functional>
+#include <future>
+#include <thread>
 #include "HittableInstance.h"
 #include "HittableList.h"
 #include "ParallelBVHNode.h"
@@ -43,6 +46,11 @@
 // Delay-load handler: attempt to LoadLibrary when a delay-loaded DLL fails
 #include <windows.h>
 #include <delayimp.h>
+
+// CUDA runtime — used only by the Vulkan→CUDA OIDN denoiser interop path
+// (getDenoiserFrameGPU). Guarded by supportsExternalMemoryWin32 capability.
+#include <cuda_runtime.h>
+#include "oidn_blend_cuda.h"
 
 extern "C" FARPROC WINAPI DelayLoadFailureHook(unsigned int dliNotify, PDelayLoadInfo pdli) {
     if (!pdli) return nullptr;
@@ -89,6 +97,7 @@ extern "C" FARPROC WINAPI DelayLoadFailureHook(unsigned int dliNotify, PDelayLoa
 ExternC const PfnDliHook __pfnDliFailureHook2 = DelayLoadFailureHook;
 
 // ============================================================================
+#include <vulkan/vulkan_win32.h>
 // Debug Callback & Logging
 // ============================================================================
 
@@ -754,6 +763,20 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     bool hasDescIdx = hasExtension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
     if (hasDescIdx) deviceExtensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
 
+    // External-memory interop (Vulkan→CUDA for OIDN GPU-direct denoise).
+    // Requires VK_KHR_external_memory (core in 1.1, but still named) +
+    // VK_KHR_external_memory_win32 on Windows. Both are optional; capability
+    // flag on m_capabilities controls whether getDenoiserFrameGPU can succeed.
+#ifdef _WIN32
+    const bool hasExtMem    = hasExtension(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
+    const bool hasExtMemW32 = hasExtension(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+    if (hasExtMem && hasExtMemW32) {
+        deviceExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
+        deviceExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+        m_capabilities.supportsExternalMemoryWin32 = true;
+    }
+#endif
+
     // Deferred host operations (required by accel struct)
     bool hasDeferredOps = hasExtension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
     if (hasDeferredOps) deviceExtensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
@@ -802,9 +825,18 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     vkGetPhysicalDeviceFeatures2(m_physicalDevice, &supportedFeatures);
 
     const bool canUseBDA = hasBDA && supportedBdaFeatures.bufferDeviceAddress == VK_TRUE;
+    // All three feature bits are required by the material-preview pipeline:
+    //   - runtimeDescriptorArray              → `sampler2D textures[]`
+    //   - shaderSampledImageArrayNonUniformIndexing → `nonuniformEXT(...)`
+    //   - descriptorBindingPartiallyBound     → sparse array without writing every slot
+    // Older drivers (observed: GTX 850M / Maxwell 1 with nvoglv64.dll) expose
+    // the base extension but not partiallyBound; using the PARTIALLY_BOUND
+    // flag without the feature causes a null-descriptor dereference inside
+    // the ICD on first draw. Require all three together.
     const bool canUseDescIdx = hasDescIdx &&
         supportedDescIdxFeatures.runtimeDescriptorArray == VK_TRUE &&
-        supportedDescIdxFeatures.shaderSampledImageArrayNonUniformIndexing == VK_TRUE;
+        supportedDescIdxFeatures.shaderSampledImageArrayNonUniformIndexing == VK_TRUE &&
+        supportedDescIdxFeatures.descriptorBindingPartiallyBound == VK_TRUE;
     const bool canUseAccelStruct = hasAccelStruct && supportedAccelFeatures.accelerationStructure == VK_TRUE;
     const bool canUseRTPipeline = hasRTPipeline && supportedRtPipelineFeatures.rayTracingPipeline == VK_TRUE;
 
@@ -870,8 +902,17 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
 
     VkPhysicalDeviceDescriptorIndexingFeatures descIdxFeatures{};
     descIdxFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
-    descIdxFeatures.runtimeDescriptorArray = canUseDescIdx ? VK_TRUE : VK_FALSE;
-    descIdxFeatures.shaderSampledImageArrayNonUniformIndexing = canUseDescIdx ? VK_TRUE : VK_FALSE;
+    if (canUseDescIdx) {
+        descIdxFeatures.runtimeDescriptorArray = VK_TRUE;
+        descIdxFeatures.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        // Enable partial binding and update-after-bind so the material-preview
+        // texture array works on any Vulkan 1.2+ device without requiring RT hardware.
+        descIdxFeatures.descriptorBindingPartiallyBound =
+            supportedDescIdxFeatures.descriptorBindingPartiallyBound;
+      
+        descIdxFeatures.descriptorBindingSampledImageUpdateAfterBind =
+            supportedDescIdxFeatures.descriptorBindingSampledImageUpdateAfterBind;
+    }
 
     // Build pNext chain conservatively.
     void** nextLink = &features2.pNext;
@@ -902,6 +943,11 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     deviceCreateInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
     VkResult result = vkCreateDevice(m_physicalDevice, &deviceCreateInfo, nullptr, &m_device);
+    // Track which features were actually enabled on the created device.
+    // detectCapabilities() runs later and only queries the PHYSICAL device —
+    // that returns the device's "what it could do" not "what we enabled on it",
+    // so we latch the real post-create state into capabilities here.
+    bool enabledDescIdx = (result == VK_SUCCESS) && canUseDescIdx;
     if (result != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] vkCreateDevice failed: " << result << std::endl;
         // Log requested extensions for diagnostics
@@ -922,10 +968,20 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
             VK_ERROR() << "[VulkanDevice] Fallback vkCreateDevice also failed: " << fallback << std::endl;
             return false;
         }
-        // Fallback succeeded — mark capabilities conservatively
+        // Fallback succeeded — mark capabilities conservatively.
+        // Fallback path passes nullptr pNext, so NO extension features are
+        // enabled on the device — critically, descriptor indexing is OFF.
+        // Without latching this, the material-preview pipeline would later
+        // use runtimeDescriptorArray/PARTIALLY_BOUND against a device that
+        // never enabled them, dereferencing null descriptors inside the ICD
+        // (observed crash on GTX 850M: fault_addr=0x8 in nvoglv64.dll).
         m_capabilities.rtMode = RayTracingMode::COMPUTE;
-        VK_INFO() << "[VulkanDevice] Device created with fallback (no HW RT). Continuing in compute mode." << std::endl;
+        enabledDescIdx = false;
+        VK_INFO() << "[VulkanDevice] Device created with fallback (no HW RT, descriptor indexing disabled). Continuing in compute mode." << std::endl;
     }
+    // Latch enabled-at-create descriptor indexing state into capabilities.
+    // detectCapabilities() must NOT overwrite this — it now preserves the flag.
+    m_capabilities.supportsDescriptorIndexing = enabledDescIdx;
 
     vkGetDeviceQueue(m_device, m_computeQueueFamily, 0, &m_computeQueue);
     return true;
@@ -952,7 +1008,7 @@ bool VulkanDevice::createDescriptorPool() {
     VkDescriptorPoolSize poolSizes[] = {
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,              256 },
         { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                32 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     1024 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     Backend::VULKAN_TEXTURE_CAPACITY },
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               32 },
         { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   8 },
     };
@@ -1006,6 +1062,19 @@ void VulkanDevice::detectCapabilities() {
     m_capabilities.apiVersion = props.apiVersion;
     m_capabilities.driverVersion = props.driverVersion;
     m_capabilities.vendor = vendorFromID(props.vendorID);
+
+    // Device UUID — needed to match the Vulkan physical device to a CUDA device
+    // ordinal during external-memory interop (OIDN GPU-direct denoise).
+    {
+        VkPhysicalDeviceIDProperties idProps{};
+        idProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+        VkPhysicalDeviceProperties2 props2uuid{};
+        props2uuid.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props2uuid.pNext = &idProps;
+        vkGetPhysicalDeviceProperties2(m_physicalDevice, &props2uuid);
+        std::memcpy(m_capabilities.deviceUUID, idProps.deviceUUID, VK_UUID_SIZE);
+        m_capabilities.hasDeviceUUID = true;
+    }
 
     // Memory
     VkPhysicalDeviceMemoryProperties memProps;
@@ -1063,6 +1132,14 @@ void VulkanDevice::detectCapabilities() {
     m_capabilities.supportsBC4 = queryCompressedSupport(VK_FORMAT_BC4_UNORM_BLOCK);
     m_capabilities.supportsBC5 = queryCompressedSupport(VK_FORMAT_BC5_UNORM_BLOCK);
     m_capabilities.supportsBC7 = queryCompressedSupport(VK_FORMAT_BC7_UNORM_BLOCK);
+
+    // NOTE: supportsDescriptorIndexing is intentionally NOT set here anymore.
+    // It is latched inside createLogicalDevice() based on what was actually
+    // enabled on the VkDevice. Querying the physical device post-hoc would
+    // report "capable but not enabled", causing material-preview pipeline
+    // creation to use runtimeDescriptorArray against a device that never
+    // enabled the feature — observed to crash nvoglv64.dll on GTX 850M when
+    // the RT device creation path falls back to a featureless VkDevice.
 }
 
 GPUVendor VulkanDevice::vendorFromID(uint32_t vendorID) {
@@ -1216,6 +1293,116 @@ void VulkanDevice::destroyBuffer(BufferHandle& buffer) {
     if (buffer.buffer) vkDestroyBuffer(m_device, buffer.buffer, nullptr);
     if (buffer.memory) vkFreeMemory(m_device, buffer.memory, nullptr);
     buffer = {};
+}
+
+BufferHandle VulkanDevice::createExportableBuffer(const BufferCreateInfo& info,
+                                                  void** outWin32Handle,
+                                                  uint64_t* outAllocationSize) {
+    if (outWin32Handle) *outWin32Handle = nullptr;
+    if (outAllocationSize) *outAllocationSize = 0;
+    BufferHandle handle{};
+
+#ifdef _WIN32
+    if (!m_capabilities.supportsExternalMemoryWin32) {
+        return handle;
+    }
+
+    handle.size = info.size;
+
+    // The buffer itself must advertise that its memory will be externally shared.
+    VkExternalMemoryBufferCreateInfo extBufInfo{};
+    extBufInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
+    extBufInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.pNext = &extBufInfo;
+    bufferInfo.size = info.size;
+    bufferInfo.usage = translateBufferUsage(info.usage) | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateBuffer(m_device, &bufferInfo, nullptr, &handle.buffer) != VK_SUCCESS) {
+        handle = {};
+        return handle;
+    }
+
+    VkMemoryRequirements memReq;
+    vkGetBufferMemoryRequirements(m_device, handle.buffer, &memReq);
+
+    // Exported memory for CUDA interop must be DEVICE_LOCAL. Host-visible bits
+    // are not guaranteed on exportable heaps (NVIDIA Win32 commonly rejects
+    // HOST_VISIBLE+EXTERNAL in the same type). Callers that need host access
+    // must use the regular createBuffer path.
+    VkPhysicalDeviceMemoryProperties memProps;
+    vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProps);
+    uint32_t memType = UINT32_MAX;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+        if ((memReq.memoryTypeBits & (1u << i)) &&
+            (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            memType = i;
+            break;
+        }
+    }
+    if (memType == UINT32_MAX) {
+        vkDestroyBuffer(m_device, handle.buffer, nullptr);
+        handle = {};
+        return handle;
+    }
+
+    VkExportMemoryAllocateInfo exportInfo{};
+    exportInfo.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
+    exportInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+
+    // Dedicated allocation — NVIDIA's CUDA interop path requires the
+    // imported memory to be a dedicated buffer allocation on Windows.
+    VkMemoryDedicatedAllocateInfo dedicatedInfo{};
+    dedicatedInfo.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+    dedicatedInfo.buffer = handle.buffer;
+    dedicatedInfo.pNext = &exportInfo;
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    allocInfo.memoryTypeIndex = memType;
+    allocInfo.pNext = &dedicatedInfo;
+
+    if (vkAllocateMemory(m_device, &allocInfo, nullptr, &handle.memory) != VK_SUCCESS) {
+        vkDestroyBuffer(m_device, handle.buffer, nullptr);
+        handle = {};
+        return handle;
+    }
+    vkBindBufferMemory(m_device, handle.buffer, handle.memory, 0);
+
+    // Resolve vkGetMemoryWin32HandleKHR (device extension entry point).
+    auto fpGetMemHandle = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
+        vkGetDeviceProcAddr(m_device, "vkGetMemoryWin32HandleKHR"));
+    if (!fpGetMemHandle) {
+        vkFreeMemory(m_device, handle.memory, nullptr);
+        vkDestroyBuffer(m_device, handle.buffer, nullptr);
+        handle = {};
+        return handle;
+    }
+
+    VkMemoryGetWin32HandleInfoKHR getHandleInfo{};
+    getHandleInfo.sType = VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR;
+    getHandleInfo.memory = handle.memory;
+    getHandleInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+
+    HANDLE rawHandle = nullptr;
+    if (fpGetMemHandle(m_device, &getHandleInfo, &rawHandle) != VK_SUCCESS || !rawHandle) {
+        vkFreeMemory(m_device, handle.memory, nullptr);
+        vkDestroyBuffer(m_device, handle.buffer, nullptr);
+        handle = {};
+        return handle;
+    }
+
+    if (outWin32Handle) *outWin32Handle = rawHandle;
+    if (outAllocationSize) *outAllocationSize = memReq.size;
+    return handle;
+#else
+    (void)info;
+    return handle;
+#endif
 }
 
 void* VulkanDevice::mapBuffer(const BufferHandle& buffer) {
@@ -2507,7 +2694,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
 
     bindings[6].binding = 6;
     bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    bindings[6].descriptorCount = 1024; // runtime array capacity
+    bindings[6].descriptorCount = static_cast<uint32_t>(Backend::VULKAN_TEXTURE_CAPACITY);
     bindings[6].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
 
     bindings[7].binding = 7;
@@ -3092,7 +3279,7 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
         for (const auto& p : pendingTextureDescriptors) {
             const uint32_t slot = p.first;
             const ImageHandle& img = p.second;
-            if (slot >= 1024) continue;
+            if (slot >= static_cast<uint32_t>(Backend::VULKAN_TEXTURE_CAPACITY)) continue;
             if (img.sampler == VK_NULL_HANDLE || img.view == VK_NULL_HANDLE || img.image == VK_NULL_HANDLE) continue;
 
             VkDescriptorImageInfo ii{};
@@ -3164,7 +3351,7 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
 
 // Update a single combined image sampler entry in the RT descriptor set (binding 6)
 void VulkanDevice::updateRTTextureDescriptor(uint32_t slot, const ImageHandle& image) {
-    if (slot >= 1024) {
+    if (slot >= static_cast<uint32_t>(Backend::VULKAN_TEXTURE_CAPACITY)) {
         VK_WARN() << "[VulkanDevice] Texture slot " << slot << " out of range for materialTextures array" << std::endl;
         return;
     }
@@ -4796,6 +4983,22 @@ void VulkanBackendAdapter::shutdown() {
         m_device->destroyBuffer(m_denoiserNormalStagingBuffer);
     }
 
+    // GPU-direct OIDN interop: destroy CUDA imports + prep buffers BEFORE
+    // freeing the underlying exportable VkDeviceMemory.
+    destroyGpuDenoiserInterop();
+    if (m_denoiserColorSharedStaging.buffer)  m_device->destroyBuffer(m_denoiserColorSharedStaging);
+    if (m_denoiserAlbedoSharedStaging.buffer) m_device->destroyBuffer(m_denoiserAlbedoSharedStaging);
+    if (m_denoiserNormalSharedStaging.buffer) m_device->destroyBuffer(m_denoiserNormalSharedStaging);
+    m_denoiserColorSharedStaging = {};
+    m_denoiserAlbedoSharedStaging = {};
+    m_denoiserNormalSharedStaging = {};
+    m_denoiserColorSharedHandle = nullptr;
+    m_denoiserAlbedoSharedHandle = nullptr;
+    m_denoiserNormalSharedHandle = nullptr;
+    m_denoiserColorSharedAllocSize = 0;
+    m_denoiserAlbedoSharedAllocSize = 0;
+    m_denoiserNormalSharedAllocSize = 0;
+
     // Adapter-owned uploaded texture/image cache.
     purgeUploadedTextureCacheLocked();
 
@@ -5481,7 +5684,49 @@ void VulkanBackendAdapter::updateSceneGeometry(const std::vector<std::shared_ptr
     }
 }
 
-void VulkanBackendAdapter::updateInstanceMaterialBinding(const std::string& n, int o, int nw) { (void)n; (void)o; (void)nw; }
+void VulkanBackendAdapter::updateInstanceMaterialBinding(const std::string& nodeName, int oldMatID, int newMatID) {
+    if (!m_device || !m_device->isInitialized()) return;
+
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    bool changed = false;
+    std::unordered_set<std::string> dirtyMeshKeys;
+
+    for (const auto& ri : m_rasterInstances) {
+        if (matchesNodeNameForInstance(ri.nodeName, nodeName) ||
+            matchesNodeNameForInstance(nodeName, ri.nodeName)) {
+            dirtyMeshKeys.insert(ri.meshKey);
+        }
+    }
+
+    for (const auto& meshKey : dirtyMeshKeys) {
+        auto meshIt = m_rasterMeshes.find(meshKey);
+        if (meshIt == m_rasterMeshes.end()) continue;
+
+        auto& mesh = meshIt->second;
+        if (!mesh.matIdBuffer.buffer || mesh.cpuMatIds.empty()) continue;
+
+        bool meshChanged = false;
+        for (auto& matId : mesh.cpuMatIds) {
+            if (oldMatID < 0 || static_cast<int>(matId) == oldMatID) {
+                matId = static_cast<uint32_t>(newMatID);
+                meshChanged = true;
+            }
+        }
+
+        if (!meshChanged) continue;
+
+        m_device->uploadBuffer(mesh.matIdBuffer,
+                               mesh.cpuMatIds.data(),
+                               mesh.cpuMatIds.size() * sizeof(uint32_t),
+                               0);
+        changed = true;
+    }
+
+    if (changed) {
+        m_interactiveViewport.dirty = true;
+        resetAccumulation();
+    }
+}
 void VulkanBackendAdapter::setVisibilityByNodeName(const std::string& nodeName, bool visible) {
     if (!m_device || !m_device->isInitialized()) return;
 
@@ -5937,10 +6182,11 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_device->waitIdle();
 
-    // Avoid descriptor slot exhaustion/stale texture behavior after many scene/backend toggles.
-    // 1024 is binding-6 runtime array capacity; keep headroom.
-    if (m_nextTextureID >= 980 || m_uploadedImages.size() >= 980) {
-        SCENE_LOG_WARN("[Vulkan] Texture cache near descriptor capacity; purging and re-uploading active textures.");
+    // Avoid descriptor slot exhaustion. Purge and re-upload when approaching capacity.
+    if (m_nextTextureID >= VULKAN_TEXTURE_PURGE_THRESHOLD ||
+        static_cast<int32_t>(m_uploadedImages.size()) >= VULKAN_TEXTURE_PURGE_THRESHOLD) {
+        SCENE_LOG_WARN("[Vulkan] Texture cache near descriptor capacity (" +
+                       std::to_string(VULKAN_TEXTURE_CAPACITY) + " slots); purging and re-uploading active textures.");
         purgeUploadedTextureCacheLocked();
     }
 
@@ -5995,9 +6241,11 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         if (m.flags & Backend::IBackend::MAT_FLAG_TERRAIN) {
             gm._terrain_layer_idx = m.terrainLayerIdx;
         }
-        // Water-specific params → VkGpuMaterial Block 8 & Block 9
+        // Procedural detail params
         gm.micro_detail_strength = m.micro_detail_strength;
         gm.micro_detail_scale    = m.micro_detail_scale;
+        gm.tile_break_strength   = m.tile_break_strength;
+        // Water-specific params → VkGpuMaterial Block 8 & Block 9
         gm.fft_amplitude         = m.fft_amplitude;
         gm.fft_time_scale        = m.fft_time_scale;
         gm.foam_threshold        = m.foam_threshold;
@@ -6024,11 +6272,50 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
             uint64_t cacheKey = (static_cast<uint64_t>(key) << 2) |
                                 (forceLinear ? 1ull : 0ull) |
                                 (preferSingleChannel ? 2ull : 0ull);
-            // [FIX] If the texture content was updated in-place (e.g. autoMask / paintSplatMap),
-            // updateGPU() sets vulkan_dirty=true. Evict the stale cache entry so we re-upload.
             Texture* texCheck = reinterpret_cast<Texture*>(key);
-            if (texCheck && texCheck->vulkan_dirty) {
-                m_uploadedImageIDs.erase(cacheKey);
+            // [FIX] vulkan_dirty: texture content was updated in-place (paint stroke,
+            // autoMask, paintSplatMap, etc.). Prefer updateTexture2DInPlace when the
+            // dimensions/format still match — it reuses the existing VkImage slot,
+            // avoiding descriptor churn and the destroy/create storm that used to
+            // TDR the raster material preview. Only fall back to destroy+upload
+            // when in-place fails (first upload, dim change, HDR path, etc.).
+            const bool needsDirtyRefresh = (texCheck && texCheck->vulkan_dirty);
+            if (texCheck && texCheck->is_loaded() && !texCheck->is_hdr && needsDirtyRefresh) {
+                auto oldIt = m_uploadedImageIDs.find(cacheKey);
+                if (oldIt != m_uploadedImageIDs.end()) {
+                    const int64_t existingId = oldIt->second;
+                    const std::vector<CompactVec4>& dpx = texCheck->pixels;
+                    if (existingId > 0 && !dpx.empty()) {
+                        const bool dUseSrgb = forceLinear ? false : texCheck->is_srgb;
+                        const TextureCompressionPlan dPlan = buildTextureCompressionPlan(texCheck, textureType);
+                        const bool dCanUseSingleChannel =
+                            (preferSingleChannel || dPlan.preferSingleChannelFallback) &&
+                            !dUseSrgb && texCheck->is_gray_scale && !texCheck->has_alpha;
+                        const uint32_t dUploadChannels = dCanUseSingleChannel ? 1u : 4u;
+                        std::vector<uint8_t> dtmp((size_t)texCheck->width * texCheck->height * dUploadChannels);
+                        if (dCanUseSingleChannel) {
+                            for (size_t i = 0; i < dpx.size(); ++i) dtmp[i] = dpx[i].r;
+                        } else {
+                            for (size_t i = 0; i < dpx.size(); ++i) {
+                                dtmp[i*4+0] = dpx[i].r; dtmp[i*4+1] = dpx[i].g;
+                                dtmp[i*4+2] = dpx[i].b; dtmp[i*4+3] = dpx[i].a;
+                            }
+                        }
+                        if (this->updateTexture2DInPlace(existingId, dtmp.data(),
+                                                         texCheck->width, texCheck->height,
+                                                         dUploadChannels, dUseSrgb, false)) {
+                            texCheck->vulkan_dirty = false;
+                            return (uint32_t)existingId;
+                        }
+                    }
+                }
+                // In-place didn't apply (missing slot, dim change, compressed-only
+                // cache entry…). Evict and continue to the destroy+upload path.
+                auto evictIt = m_uploadedImageIDs.find(cacheKey);
+                if (evictIt != m_uploadedImageIDs.end()) {
+                    int64_t oldId = evictIt->second;
+                    if (oldId) this->destroyTexture(oldId);
+                }
                 texCheck->vulkan_dirty = false;
             }
             auto it = m_uploadedImageIDs.find(cacheKey);
@@ -6036,12 +6323,16 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
             Texture* tex = reinterpret_cast<Texture*>(key);
             if (!tex || !tex->is_loaded()) return 0;
             if (tex->is_hdr) {
+                // HDR path: no in-place fast path yet (rarely painted in practice).
+                // vulkan_dirty HDR textures simply re-upload here after the eviction
+                // above cleared the stale cache entry.
                 const std::vector<float4>& fp = tex->float_pixels;
                 if (fp.empty()) return 0;
                 int64_t id = this->uploadTexture2D(fp.data(), tex->width, tex->height, 4, false, true);
                 if (id) { m_uploadedImageIDs[cacheKey] = id; return (uint32_t)id; }
                 return 0;
             }
+            if (tex->vulkan_dirty) tex->vulkan_dirty = false;
             const std::vector<CompactVec4>& px = tex->pixels;
             if (px.empty()) return 0;
             const bool useSrgb = forceLinear ? false : tex->is_srgb;
@@ -6134,18 +6425,36 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         vkUpdateDescriptorSets(m_device->getDevice(), 1, &mpWds, 0, nullptr);
     }
 
+    // Re-upload per-vertex matId buffers from the CPU shadow so that any material
+    // reassignment that happened between buildRasterGeometry and uploadMaterials is
+    // reflected immediately (fixes startup material mismatch: wrong object → material).
+    for (auto& [key, rmb] : m_rasterMeshes) {
+        if (!rmb.cpuMatIds.empty() && rmb.matIdBuffer.buffer) {
+            m_device->uploadBuffer(rmb.matIdBuffer,
+                                   rmb.cpuMatIds.data(),
+                                   rmb.cpuMatIds.size() * sizeof(uint32_t), 0);
+        }
+    }
+
     if (m_textureUploadSummaryDirty) {
-        SCENE_LOG_INFO("[Perf] [Vulkan] textures | count=" + std::to_string(m_textureUploadCount) +
+       /* SCENE_LOG_INFO("[Perf] [Vulkan] textures | count=" + std::to_string(m_textureUploadCount) +
                        " | est_vram=" + std::to_string(m_textureUploadBytes) +
                        " bytes | bc4=" + std::to_string(m_textureUploadBC4Count) +
                        " | bc5=" + std::to_string(m_textureUploadBC5Count) +
                        " | bc7=" + std::to_string(m_textureUploadBC7Count) +
                        " | r8=" + std::to_string(m_textureUploadR8Count) +
                        " | rgba8=" + std::to_string(m_textureUploadRGBA8Count) +
-                       " | float=" + std::to_string(m_textureUploadFloatCount));
+                       " | float=" + std::to_string(m_textureUploadFloatCount));*/
         m_textureUploadSummaryDirty = false;
     }
     resetAccumulation();
+    // Material SSBO and/or texture descriptors have just been rewritten. The
+    // interactive raster viewport caches its last framebuffer and only re-renders
+    // on dirty — without this flag, paint strokes refresh the texture memory but
+    // Material Preview keeps presenting the stale cached frame (visible only when
+    // render device is Vulkan RT, since the CPU/OptiX path uses a dedicated
+    // VulkanViewportBackend that gets its own sync).
+    m_interactiveViewport.dirty = true;
 }
 
 void VulkanBackendAdapter::uploadHairMaterials(const std::vector<HairMaterialData>& materials) {
@@ -6218,7 +6527,8 @@ void VulkanBackendAdapter::uploadTerrainLayerMaterials(const std::vector<Terrain
     // the terrain layer SSBO (updateTerrainLayerBuffer frees it when resizing).
     m_device->waitIdle();
 
-    if (m_nextTextureID >= 980 || m_uploadedImages.size() >= 980) {
+    if (m_nextTextureID >= VULKAN_TEXTURE_PURGE_THRESHOLD ||
+        static_cast<int32_t>(m_uploadedImages.size()) >= VULKAN_TEXTURE_PURGE_THRESHOLD) {
         SCENE_LOG_WARN("[Vulkan] Texture cache near descriptor capacity (terrain upload); purging.");
         purgeUploadedTextureCacheLocked();
     }
@@ -6241,7 +6551,11 @@ void VulkanBackendAdapter::uploadTerrainLayerMaterials(const std::vector<Terrain
                 // [FIX] Evict stale Vulkan sampler entry when splat map pixels were modified
                 // in-place (autoMask / importSplatMap / paintSplatMap → updateGPU sets vulkan_dirty).
                 if (splatTex->vulkan_dirty) {
-                    m_uploadedImageIDs.erase(cacheKey);
+                    auto oldIt = m_uploadedImageIDs.find(cacheKey);
+                    if (oldIt != m_uploadedImageIDs.end()) {
+                        int64_t oldId = oldIt->second;
+                        if (oldId) this->destroyTexture(oldId);
+                    }
                     splatTex->vulkan_dirty = false;
                 }
                 auto it = m_uploadedImageIDs.find(cacheKey);
@@ -6362,9 +6676,13 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
     }
     m_textureUploadSummaryDirty = true;
     // Immediately update the RT descriptor array (binding 6) so shaders can sample this texture.
+// Immediately update the RT descriptor array (binding 6)
     if (m_device) {
         uint32_t slot = (uint32_t)id;
-        m_device->updateRTTextureDescriptor(slot, img);
+        if (m_device->hasHardwareRT()) {
+            m_device->updateRTTextureDescriptor(slot, img);
+        }
+        updateMaterialPreviewTextureDescriptor(slot, img);
     }
     // CRITICAL: release temporary upload staging buffer.
     // Missing destroy here caused per-texture memory growth across Vulkan sessions.
@@ -6447,7 +6765,10 @@ int64_t VulkanBackendAdapter::uploadCompressedTexture2D(
     m_textureUploadSummaryDirty = true;
     if (m_device) {
         const uint32_t slot = (uint32_t)id;
-        m_device->updateRTTextureDescriptor(slot, img);
+        if (m_device->hasHardwareRT()) {
+            m_device->updateRTTextureDescriptor(slot, img);
+        }
+        updateMaterialPreviewTextureDescriptor(slot, img);
     }
 
     m_device->destroyBuffer(staging);
@@ -6597,7 +6918,10 @@ int64_t VulkanBackendAdapter::uploadTexture3D(const void* data, uint32_t width, 
     int64_t id = m_nextTextureID++;
     m_uploadedImages[id] = img;
     if (m_device) {
-        m_device->updateRTTextureDescriptor((uint32_t)id, img);
+        if (m_device->hasHardwareRT()) {
+            m_device->updateRTTextureDescriptor((uint32_t)id, img);
+        }
+        updateMaterialPreviewTextureDescriptor((uint32_t)id, img);
     }
     return id;
 }
@@ -6606,7 +6930,13 @@ void VulkanBackendAdapter::destroyTexture(int64_t texID) {
     auto it = m_uploadedImages.find(texID);
     if (it == m_uploadedImages.end()) return;
     VulkanRT::ImageHandle& img = it->second;
-    m_device->removePendingRTTextureDescriptor(img);
+    // Only touch the RT pending-descriptor queue when RT is actually available.
+    // On raster-only devices the queue is never populated and the queue's internal
+    // mutex/state is still valid, but the guard keeps the intent explicit and mirrors
+    // the guard in uploadTexture2D.
+    if (m_device->hasHardwareRT()) {
+        m_device->removePendingRTTextureDescriptor(img);
+    }
     m_device->destroyImage(img);
     m_uploadedImages.erase(it);
     // Also remove any pointer -> id mappings that reference this id
@@ -6614,6 +6944,79 @@ void VulkanBackendAdapter::destroyTexture(int64_t texID) {
         if (it2->second == texID) it2 = m_uploadedImageIDs.erase(it2);
         else ++it2;
     }
+}
+
+bool VulkanBackendAdapter::updateTexture2DInPlace(int64_t textureID, const void* data,
+                                                  uint32_t width, uint32_t height,
+                                                  uint32_t channels, bool srgb, bool isFloat) {
+    if (!m_device || !m_device->isInitialized() || !data || textureID <= 0) return false;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    auto it = m_uploadedImages.find(textureID);
+    if (it == m_uploadedImages.end()) return false;
+    VulkanRT::ImageHandle& img = it->second;
+    if (!img.image || img.width != width || img.height != height) return false;
+
+    // Derive the expected format from (channels, srgb, isFloat) and bail if it
+    // doesn't match what the existing VkImage was created with — caller falls
+    // back to destroy + re-create in that case.
+    VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
+    uint32_t bpp = 4;
+    if (isFloat) {
+        if (channels == 1) { fmt = VK_FORMAT_R32_SFLOAT;           bpp = 4; }
+        else               { fmt = VK_FORMAT_R32G32B32A32_SFLOAT;  bpp = 16; }
+    } else if (channels == 1) {
+        fmt = srgb ? VK_FORMAT_R8_SRGB : VK_FORMAT_R8_UNORM;
+        bpp = 1;
+    } else if (srgb) {
+        fmt = VK_FORMAT_R8G8B8A8_SRGB;
+    }
+    if (img.format != fmt) return false;
+
+    m_device->waitIdle();
+
+    // Staging buffer -> existing VkImage. Same pattern as uploadTexture2D but
+    // without creating a new ImageHandle, sampler, descriptor slot, or id.
+    VulkanRT::BufferCreateInfo ci;
+    ci.size = (uint64_t)width * height * bpp;
+    ci.usage = VulkanRT::BufferUsage::STORAGE | VulkanRT::BufferUsage::TRANSFER_SRC;
+    ci.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
+
+    VulkanRT::BufferHandle staging = m_device->createBuffer(ci);
+    if (!staging.buffer) return false;
+    m_device->uploadBuffer(staging, data, ci.size);
+
+    // Transition SHADER_READ_ONLY_OPTIMAL -> GENERAL for the copy, then back.
+    // copyBufferToImage uses GENERAL layout (see VulkanDevice::copyBufferToImage),
+    // so we match that instead of TRANSFER_DST_OPTIMAL.
+    VkCommandBuffer cmdPre = m_device->beginSingleTimeCommands();
+    if (cmdPre == VK_NULL_HANDLE) {
+        m_device->destroyBuffer(staging);
+        return false;
+    }
+    m_device->transitionImageLayout(cmdPre, img.image,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    m_device->endSingleTimeCommands(cmdPre);
+
+    m_device->copyBufferToImage(staging, img);
+
+    VkCommandBuffer cmdPost = m_device->beginSingleTimeCommands();
+    if (cmdPost == VK_NULL_HANDLE) {
+        m_device->destroyBuffer(staging);
+        return false;
+    }
+    m_device->transitionImageLayout(cmdPost, img.image,
+        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m_device->endSingleTimeCommands(cmdPost);
+
+    m_device->destroyBuffer(staging);
+    // The VkImage / view / sampler are unchanged, so no descriptor rewrite is
+    // needed on either the RT pipeline or the material-preview raster pipeline.
+    // But the cached raster framebuffer in m_interactiveViewport is now stale —
+    // without this flag, renderInteractiveViewportImpl short-circuits and paint
+    // strokes stay invisible in Material Preview mode.
+    m_interactiveViewport.dirty = true;
+    return true;
 }
 
 void VulkanBackendAdapter::setLights(const std::vector<std::shared_ptr<Light>>& lights) {
@@ -7139,6 +7542,30 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResources(const std::string&
 
 void VulkanBackendAdapter::destroyInteractiveViewportResources(bool keepPipeline) {
     destroyInteractiveViewportResourcesImpl(keepPipeline);
+}
+
+void VulkanBackendAdapter::resetForProjectReload() {
+    // Order matters: the material preview descriptor set (binding 1) references
+    // VkImageViews from m_uploadedImages. rebuildAccelerationStructure() destroys
+    // those images. If we didn't tear down the interactive viewport resources
+    // first, the next material-preview draw would sample dead views and crash the
+    // driver. Destroying them here forces ensureInteractiveViewportResourcesImpl
+    // to rebuild and backfill on the next frame from the freshly uploaded textures.
+    if (m_device) {
+        try { m_device->waitIdle(); } catch (...) {}
+    }
+    destroyInteractiveViewportResourcesImpl(false);
+    // Zero out the interactive viewport state struct so cached handles
+    // (matcapImage, matcapUserLoaded, dirty flags, etc.) don't survive into
+    // the next ensure pass. rebuildAccelerationStructure() is about to destroy
+    // every VkImage in m_uploadedImages; if matcapImage still referenced one
+    // of them, the next ensure would write a dead VkImageView into the
+    // matcapDescSet via vkUpdateDescriptorSets and crash the driver. This
+    // mirrors the pattern used in the viewport-mode-switch path (see
+    // ViewportMode transition handling).
+    m_interactiveViewport = {};
+    m_interactiveViewport.dirty = true;
+    rebuildAccelerationStructure();
 }
 
 void VulkanBackendAdapter::renderInteractiveViewport(void* outSurface, int width, int height,
@@ -7674,32 +8101,78 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
         if (triangles.empty()) return;
         if (m_rasterMeshes.find(meshKey) != m_rasterMeshes.end()) return;
 
-        std::vector<float> positions, normals, uvs;
-        std::vector<uint32_t> matIds;
-        positions.reserve(triangles.size() * 9);
-        normals.reserve(triangles.size() * 9);
-        uvs.reserve(triangles.size() * 6);
-        matIds.reserve(triangles.size() * 3);
-
-        // Compute local-space AABB while iterating vertices
-        Vec3 bMin(1e18f, 1e18f, 1e18f), bMax(-1e18f, -1e18f, -1e18f);
-
+        // Filter nulls into a compact raw-pointer list so the parallel extraction can
+        // index output slots directly (9 floats pos + 9 normals + 6 uvs + 3 matIds per
+        // triangle). Mirrors VulkanViewportBackend::ensureRasterMeshForTriangles.
+        std::vector<const Triangle*> valid;
+        valid.reserve(triangles.size());
         for (const auto& t : triangles) {
-            if (!t) continue;
-            auto [uv0, uv1, uv2] = t->getUVCoordinates();
-            uint32_t mid = static_cast<uint32_t>(t->getMaterialID());
-            for (int v = 0; v < 3; ++v) {
-                Vec3 p = t->getOriginalVertexPosition(v);
-                Vec3 n = t->getOriginalVertexNormal(v);
-                positions.push_back(p.x); positions.push_back(p.y); positions.push_back(p.z);
-                normals.push_back(n.x); normals.push_back(n.y); normals.push_back(n.z);
-                matIds.push_back(mid);
-                bMin.x = std::min(bMin.x, p.x); bMin.y = std::min(bMin.y, p.y); bMin.z = std::min(bMin.z, p.z);
-                bMax.x = std::max(bMax.x, p.x); bMax.y = std::max(bMax.y, p.y); bMax.z = std::max(bMax.z, p.z);
+            if (t) valid.push_back(t.get());
+        }
+        if (valid.empty()) return;
+
+        const size_t validCount = valid.size();
+        std::vector<float> positions(validCount * 9);
+        std::vector<float> normals(validCount * 9);
+        std::vector<float> uvs(validCount * 6);
+        std::vector<uint32_t> matIds(validCount * 3);
+
+        struct LocalBBox { Vec3 bMin; Vec3 bMax; };
+
+        auto extractRange = [&valid, &positions, &normals, &uvs, &matIds]
+                            (size_t start, size_t end) -> LocalBBox {
+            Vec3 bMin(1e18f, 1e18f, 1e18f), bMax(-1e18f, -1e18f, -1e18f);
+            for (size_t i = start; i < end; ++i) {
+                const Triangle* t = valid[i];
+                auto [uv0, uv1, uv2] = t->getUVCoordinates();
+                const uint32_t mid = static_cast<uint32_t>(t->getMaterialID());
+                const size_t posBase = i * 9;
+                const size_t uvBase  = i * 6;
+                const size_t matBase = i * 3;
+                for (int v = 0; v < 3; ++v) {
+                    Vec3 p = t->getOriginalVertexPosition(v);
+                    Vec3 n = t->getOriginalVertexNormal(v);
+                    positions[posBase + v * 3 + 0] = p.x;
+                    positions[posBase + v * 3 + 1] = p.y;
+                    positions[posBase + v * 3 + 2] = p.z;
+                    normals[posBase + v * 3 + 0] = n.x;
+                    normals[posBase + v * 3 + 1] = n.y;
+                    normals[posBase + v * 3 + 2] = n.z;
+                    matIds[matBase + v] = mid;
+                    bMin.x = std::min(bMin.x, p.x); bMin.y = std::min(bMin.y, p.y); bMin.z = std::min(bMin.z, p.z);
+                    bMax.x = std::max(bMax.x, p.x); bMax.y = std::max(bMax.y, p.y); bMax.z = std::max(bMax.z, p.z);
+                }
+                uvs[uvBase + 0] = uv0.x; uvs[uvBase + 1] = uv0.y;
+                uvs[uvBase + 2] = uv1.x; uvs[uvBase + 3] = uv1.y;
+                uvs[uvBase + 4] = uv2.x; uvs[uvBase + 5] = uv2.y;
             }
-            uvs.push_back(uv0.x); uvs.push_back(uv0.y);
-            uvs.push_back(uv1.x); uvs.push_back(uv1.y);
-            uvs.push_back(uv2.x); uvs.push_back(uv2.y);
+            return { bMin, bMax };
+        };
+
+        Vec3 bMin(1e18f, 1e18f, 1e18f), bMax(-1e18f, -1e18f, -1e18f);
+        constexpr size_t kExtractParallelThreshold = 4096;
+        unsigned extract_threads = std::thread::hardware_concurrency();
+        if (extract_threads == 0) extract_threads = 4;
+
+        if (validCount < kExtractParallelThreshold || extract_threads < 2) {
+            LocalBBox lbb = extractRange(0, validCount);
+            bMin = lbb.bMin;
+            bMax = lbb.bMax;
+        } else {
+            const size_t chunk = (validCount + extract_threads - 1) / extract_threads;
+            std::vector<std::future<LocalBBox>> futures;
+            futures.reserve(extract_threads);
+            for (unsigned t = 0; t < extract_threads; ++t) {
+                const size_t s = t * chunk;
+                const size_t e = std::min(s + chunk, validCount);
+                if (s >= e) break;
+                futures.push_back(std::async(std::launch::async, extractRange, s, e));
+            }
+            for (auto& f : futures) {
+                LocalBBox lbb = f.get();
+                bMin.x = std::min(bMin.x, lbb.bMin.x); bMin.y = std::min(bMin.y, lbb.bMin.y); bMin.z = std::min(bMin.z, lbb.bMin.z);
+                bMax.x = std::max(bMax.x, lbb.bMax.x); bMax.y = std::max(bMax.y, lbb.bMax.y); bMax.z = std::max(bMax.z, lbb.bMax.z);
+            }
         }
 
         // Cache the local bounding box for this mesh key
@@ -7743,6 +8216,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
             if (rmb.matIdBuffer.buffer) {
                 m_device->uploadBuffer(rmb.matIdBuffer, matIds.data(), matIds.size() * sizeof(uint32_t), 0);
             }
+            rmb.cpuMatIds = std::move(matIds);
         }
 
         if (rmb.vertexBuffer.buffer) {
@@ -7752,7 +8226,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
             m_device->uploadBuffer(rmb.normalBuffer, normals.data(), normals.size() * sizeof(float), 0);
         }
 
-        m_rasterMeshes[meshKey] = rmb;
+        m_rasterMeshes[meshKey] = std::move(rmb);
     };
 
     struct RasterTriGroup {
@@ -7767,7 +8241,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
     };
 
     std::vector<RasterTriGroup> groups;
-    std::unordered_map<void*, size_t> groupByKey;
+    std::unordered_map<std::string, size_t> groupByKey;
 
     // Recursive traversal — same logic as updateGeometry but only collects vertex data
     std::function<void(const std::shared_ptr<Hittable>&)> processObj;
@@ -7779,17 +8253,34 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
             if (hasInstancePrefix(inst->node_name)) return;
 
             const auto srcPtr = reinterpret_cast<uintptr_t>(inst->source_triangles.get());
-            std::string meshKey = "[Raster]-" + std::to_string(srcPtr) +
-                                  "-" + std::to_string(inst->source_triangles->size());
+            const std::string instanceNodeName = inst->node_name.empty()
+                ? ("[RasterInst-" + std::to_string(m_rasterInstances.size()) + "]")
+                : inst->node_name;
+            std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>> trianglesByNode;
+            trianglesByNode.reserve(inst->source_triangles->size());
+            for (const auto& tri : *inst->source_triangles) {
+                if (!tri) continue;
+                const std::string triNodeName = tri->getNodeName().empty() ? instanceNodeName : tri->getNodeName();
+                trianglesByNode[triNodeName].push_back(tri);
+            }
 
-            ensureRasterMeshForTriangles(meshKey, *inst->source_triangles);
+            for (const auto& [triNodeName, groupedTriangles] : trianglesByNode) {
+                if (groupedTriangles.empty()) continue;
+                // Keep raster meshes instance-local and node-local so startup preview uses
+                // the same object/material grouping as the editor caches and selection code.
+                std::string meshKey = "[Raster]-" + triNodeName +
+                                      "-src-" + std::to_string(srcPtr) +
+                                      "-tris-" + std::to_string(groupedTriangles.size());
 
-            RasterInstance ri;
-            ri.meshKey = meshKey;
-            ri.nodeName = inst->node_name;
-            ri.transform = inst->transform;
-            ri.mask = 0xFF;
-            m_rasterInstances.push_back(ri);
+                ensureRasterMeshForTriangles(meshKey, groupedTriangles);
+
+                RasterInstance ri;
+                ri.meshKey = meshKey;
+                ri.nodeName = triNodeName;
+                ri.transform = inst->transform;
+                ri.mask = 0xFF;
+                m_rasterInstances.push_back(ri);
+            }
 
         } else if (auto list = std::dynamic_pointer_cast<HittableList>(obj)) {
             for (auto& child : list->objects) processObj(child);
@@ -7799,18 +8290,18 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             if (!tri->visible) return;
 
-            void* groupKey = nullptr;
             auto triTransformHandle = tri->getTransformHandle();
-            if (triTransformHandle) groupKey = triTransformHandle.get();
-            else groupKey = tri.get();
-
             const bool hasSharedTransform = (triTransformHandle != nullptr);
+            std::string nodeName = tri->getNodeName();
+            if (nodeName.empty()) nodeName = "[Solo-" + std::to_string(groups.size()) + "]";
+            const uintptr_t transformKey = triTransformHandle
+                ? reinterpret_cast<uintptr_t>(triTransformHandle.get())
+                : reinterpret_cast<uintptr_t>(tri.get());
+            const std::string groupKey = nodeName + "#th=" + std::to_string(transformKey);
 
             auto found = groupByKey.find(groupKey);
             if (found == groupByKey.end()) {
                 RasterTriGroup g;
-                std::string nodeName = tri->getNodeName();
-                if (nodeName.empty()) nodeName = "[Solo-" + std::to_string(groups.size()) + "]";
                 g.meshKey = "[Raster-Solo]-" + nodeName;
                 g.nodeName = nodeName;
                 g.transform = hasSharedTransform ? tri->getTransformMatrix() : Matrix4x4::identity();
@@ -7897,6 +8388,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
             if (rmb.matIdBuffer.buffer) {
                 m_device->uploadBuffer(rmb.matIdBuffer, grp.matIds.data(), grp.matIds.size() * sizeof(uint32_t), 0);
             }
+            rmb.cpuMatIds = grp.matIds;
         }
 
         m_rasterMeshes[grp.meshKey] = rmb;
@@ -7911,47 +8403,138 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
 
     // Append foliage/scatter instances directly from grouped instance data so
     // solid viewport does not have to traverse millions of expanded scene objects.
+    //
+    // Parallelized (mirrors VulkanViewportBackend::buildRasterGeometry):
+    //   - Serial pre-pass resolves meshKey per (group, srcIdx) once and calls
+    //     ensureRasterMeshForTriangles (mutates m_rasterMeshes / m_rasterMeshBBoxes).
+    //   - Parallel per-group inner loop composes inst.toMatrix() + RasterInstance.
+    //   - Parallel bbox assignment.
     const auto& instanceGroups = InstanceManager::getInstance().getGroups();
-    for (const auto& group : instanceGroups) {
+
+    struct GroupSrcMeta {
+        std::vector<std::string> meshKeyBySrc;  // indexed by srcIdx; empty = invalid source
+    };
+    std::vector<GroupSrcMeta> groupMeta(instanceGroups.size());
+
+    size_t totalValidScatterInstances = 0;
+    for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
+        const auto& group = instanceGroups[gi];
         if (group.instances.empty() || group.sources.empty()) continue;
+        auto& meta = groupMeta[gi];
+        meta.meshKeyBySrc.resize(group.sources.size());
 
-        for (size_t instanceIdx = 0; instanceIdx < group.instances.size(); ++instanceIdx) {
-            const auto& inst = group.instances[instanceIdx];
-            int srcIdx = inst.source_index;
-            if (srcIdx < 0 || srcIdx >= (int)group.sources.size()) srcIdx = 0;
-            const auto& source = group.sources[srcIdx];
-
+        for (size_t si = 0; si < group.sources.size(); ++si) {
+            const auto& source = group.sources[si];
             const auto* triSource = source.centered_triangles_ptr ? source.centered_triangles_ptr.get() : nullptr;
             if ((!triSource || triSource->empty()) && source.triangles.empty()) continue;
 
             std::string meshKey;
             if (triSource) {
                 const auto srcPtr = reinterpret_cast<uintptr_t>(triSource);
-                meshKey = "[Raster-Group]-" + std::to_string(group.id) + "-" + std::to_string(srcIdx) +
+                meshKey = "[Raster-Group]-" + std::to_string(group.id) + "-" + std::to_string(si) +
                           "-" + std::to_string(srcPtr) + "-" + std::to_string(triSource->size());
                 ensureRasterMeshForTriangles(meshKey, *triSource);
             } else {
                 const auto srcPtr = reinterpret_cast<uintptr_t>(&source.triangles);
-                meshKey = "[Raster-Group]-" + std::to_string(group.id) + "-" + std::to_string(srcIdx) +
+                meshKey = "[Raster-Group]-" + std::to_string(group.id) + "-" + std::to_string(si) +
                           "-" + std::to_string(srcPtr) + "-" + std::to_string(source.triangles.size());
                 ensureRasterMeshForTriangles(meshKey, source.triangles);
             }
+            meta.meshKeyBySrc[si] = std::move(meshKey);
+        }
 
-            RasterInstance ri;
-            ri.meshKey = meshKey;
-            ri.nodeName = "_inst_gid" + std::to_string(group.id) + "_" + std::to_string(instanceIdx);
-            ri.transform = inst.toMatrix();
-            ri.mask = 0xFF;
+        for (const auto& inst : group.instances) {
+            int srcIdx = inst.source_index;
+            if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
+            if (srcIdx < static_cast<int>(meta.meshKeyBySrc.size()) &&
+                !meta.meshKeyBySrc[srcIdx].empty()) {
+                ++totalValidScatterInstances;
+            }
+        }
+    }
+
+    m_rasterInstances.reserve(m_rasterInstances.size() + totalValidScatterInstances);
+
+    unsigned num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0) num_threads = 4;
+    const size_t kParallelThreshold = 1024;
+
+    for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
+        const auto& group = instanceGroups[gi];
+        if (group.instances.empty() || group.sources.empty()) continue;
+        const auto& meshKeyBySrc = groupMeta[gi].meshKeyBySrc;
+        if (meshKeyBySrc.empty()) continue;
+
+        const size_t count = group.instances.size();
+        std::vector<RasterInstance> localInstances(count);
+
+        auto fillRange = [&group, &meshKeyBySrc, &localInstances](size_t start, size_t end) {
+            const std::string nodePrefix = "_inst_gid" + std::to_string(group.id) + "_";
+            for (size_t i = start; i < end; ++i) {
+                const auto& inst = group.instances[i];
+                int srcIdx = inst.source_index;
+                if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
+                if (srcIdx >= static_cast<int>(meshKeyBySrc.size()) ||
+                    meshKeyBySrc[srcIdx].empty()) {
+                    continue;
+                }
+                auto& ri = localInstances[i];
+                ri.meshKey = meshKeyBySrc[srcIdx];
+                ri.nodeName = nodePrefix + std::to_string(i);
+                ri.transform = inst.toMatrix();
+                ri.mask = 0xFF;
+            }
+        };
+
+        if (count < kParallelThreshold || num_threads < 2) {
+            fillRange(0, count);
+        } else {
+            const size_t chunk = (count + num_threads - 1) / num_threads;
+            std::vector<std::future<void>> futures;
+            futures.reserve(num_threads);
+            for (unsigned t = 0; t < num_threads; ++t) {
+                const size_t s = t * chunk;
+                const size_t e = std::min(s + chunk, count);
+                if (s >= e) break;
+                futures.push_back(std::async(std::launch::async, fillRange, s, e));
+            }
+            for (auto& f : futures) f.get();
+        }
+
+        for (auto& ri : localInstances) {
+            if (ri.meshKey.empty()) continue;
             m_rasterInstances.push_back(std::move(ri));
         }
     }
 
-    // Assign localBBox from cached mesh AABB and compute worldBBox per instance
-    for (auto& ri : m_rasterInstances) {
-        auto bboxIt = m_rasterMeshBBoxes.find(ri.meshKey);
-        if (bboxIt != m_rasterMeshBBoxes.end()) {
-            ri.localBBox = bboxIt->second;
-            updateRasterInstanceWorldBBox(ri);
+    // Assign localBBox from cached mesh AABB and compute worldBBox per instance.
+    // Parallel: m_rasterMeshBBoxes is read-only here; writes target disjoint instances.
+    {
+        const size_t total = m_rasterInstances.size();
+        auto bboxRange = [this](size_t start, size_t end) {
+            for (size_t i = start; i < end; ++i) {
+                auto& ri = m_rasterInstances[i];
+                auto bboxIt = m_rasterMeshBBoxes.find(ri.meshKey);
+                if (bboxIt != m_rasterMeshBBoxes.end()) {
+                    ri.localBBox = bboxIt->second;
+                    updateRasterInstanceWorldBBox(ri);
+                }
+            }
+        };
+
+        if (total < kParallelThreshold || num_threads < 2) {
+            bboxRange(0, total);
+        } else {
+            const size_t chunk = (total + num_threads - 1) / num_threads;
+            std::vector<std::future<void>> futures;
+            futures.reserve(num_threads);
+            for (unsigned t = 0; t < num_threads; ++t) {
+                const size_t s = t * chunk;
+                const size_t e = std::min(s + chunk, total);
+                if (s >= e) break;
+                futures.push_back(std::async(std::launch::async, bboxRange, s, e));
+            }
+            for (auto& f : futures) f.get();
         }
     }
 
@@ -8348,6 +8931,139 @@ bool VulkanBackendAdapter::patchRasterMeshTrianglesImpl(
     return true;
 }
 
+bool VulkanBackendAdapter::cloneRasterObjectByNodeName(
+    const std::string& sourceNodeName,
+    const std::string& newNodeName,
+    const Matrix4x4& transform) {
+    if (!m_device || !m_device->isInitialized() || sourceNodeName.empty() || newNodeName.empty()) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    std::vector<uint32_t> sourceIndices;
+    for (uint32_t i = 0; i < static_cast<uint32_t>(m_rasterInstances.size()); ++i) {
+        const auto& ri = m_rasterInstances[i];
+        if (matchesNodeNameForInstance(ri.nodeName, sourceNodeName) ||
+            matchesNodeNameForInstance(sourceNodeName, ri.nodeName)) {
+            sourceIndices.push_back(i);
+        }
+    }
+    if (sourceIndices.empty()) {
+        return false;
+    }
+
+    std::unordered_set<std::string> dirtyMeshKeys;
+    for (uint32_t sourceIndex : sourceIndices) {
+        if (sourceIndex >= m_rasterInstances.size()) continue;
+
+        RasterInstance clone = m_rasterInstances[sourceIndex];
+        clone.nodeName = newNodeName;
+        clone.transform = transform;
+        updateRasterInstanceWorldBBox(clone);
+
+        const uint32_t newIndex = static_cast<uint32_t>(m_rasterInstances.size());
+        m_rasterInstances.push_back(std::move(clone));
+
+        auto meshIt = m_rasterMeshes.find(m_rasterInstances.back().meshKey);
+        if (meshIt != m_rasterMeshes.end()) {
+            meshIt->second.instanceIndices.push_back(newIndex);
+            dirtyMeshKeys.insert(meshIt->first);
+        }
+    }
+
+    for (const auto& meshKey : dirtyMeshKeys) {
+        auto meshIt = m_rasterMeshes.find(meshKey);
+        if (meshIt != m_rasterMeshes.end()) {
+            uploadRasterInstanceBuffer(meshIt->second);
+        }
+    }
+
+    m_interactiveViewport.dirty = true;
+    return !dirtyMeshKeys.empty();
+}
+
+bool VulkanBackendAdapter::cloneRtObjectByNodeName(
+    const std::string& sourceNodeName,
+    const std::string& newNodeName,
+    const std::shared_ptr<Hittable>& representativeSource,
+    const Matrix4x4& transform) {
+    if (!m_device || !m_device->isInitialized() || !m_device->hasHardwareRT() ||
+        sourceNodeName.empty() || newNodeName.empty() || !representativeSource) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    std::vector<size_t> sourceIndices;
+    for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
+        if (!m_instanceSources[i]) continue;
+        std::string instName;
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+            instName = inst->node_name;
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+            instName = tri->getNodeName();
+        }
+        if (matchesNodeNameForInstance(instName, sourceNodeName) ||
+            matchesNodeNameForInstance(sourceNodeName, instName)) {
+            sourceIndices.push_back(i);
+        }
+    }
+    if (sourceIndices.empty()) {
+        return false;
+    }
+
+    for (size_t sourceIndex : sourceIndices) {
+        VulkanRT::TLASInstance clone = m_vkInstances[sourceIndex];
+        clone.transform = transform;
+        m_vkInstances.push_back(clone);
+        m_instanceSources.push_back(representativeSource);
+
+        InstanceTransformCache item;
+        item.instance_id = static_cast<int>(m_instanceSources.size() - 1);
+        item.representative_hittable = representativeSource;
+        m_instance_sync_cache.push_back(item);
+    }
+
+    auto merged = m_vkInstances;
+    for (const auto& h : m_hairVkInstances) merged.push_back(h);
+    m_device->updateTLAS(merged);
+
+    std::vector<VulkanRT::VkInstanceData> instData;
+    instData.reserve(m_vkInstances.size());
+    for (const auto& vi : m_vkInstances) {
+        VulkanRT::VkInstanceData d;
+        d.materialIndex = vi.materialIndex;
+        d.blasIndex = vi.blasIndex;
+        instData.push_back(d);
+    }
+    if (m_device->m_instanceDataBuffer.buffer) {
+        m_device->destroyBuffer(m_device->m_instanceDataBuffer);
+    }
+    ::VulkanRT::BufferCreateInfo ci;
+    ci.size = static_cast<uint64_t>(instData.size()) * sizeof(::VulkanRT::VkInstanceData);
+    ci.usage = (::VulkanRT::BufferUsage)((uint32_t)::VulkanRT::BufferUsage::STORAGE | (uint32_t)::VulkanRT::BufferUsage::TRANSFER_DST);
+    ci.location = ::VulkanRT::MemoryLocation::CPU_TO_GPU;
+    ci.initialData = instData.data();
+    m_device->m_instanceDataBuffer = m_device->createBuffer(ci);
+    if (m_device->m_rtDescriptorSet != VK_NULL_HANDLE) {
+        VkDescriptorBufferInfo instInfo{};
+        instInfo.buffer = m_device->m_instanceDataBuffer.buffer;
+        instInfo.offset = 0;
+        instInfo.range = VK_WHOLE_SIZE;
+        VkWriteDescriptorSet w5{};
+        w5.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w5.dstSet = m_device->m_rtDescriptorSet;
+        w5.dstBinding = 5;
+        w5.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w5.descriptorCount = 1;
+        w5.pBufferInfo = &instInfo;
+        vkUpdateDescriptorSets(m_device->m_device, 1, &w5, 0, nullptr);
+    }
+
+    m_topology_dirty = false;
+    resetAccumulation();
+    return true;
+}
+
 void VulkanBackendAdapter::setViewportMode(ViewportMode mode) {
     if (m_viewportMode == mode) return;
     const ViewportMode oldMode = m_viewportMode;
@@ -8369,6 +9085,9 @@ void VulkanBackendAdapter::setViewportMode(ViewportMode mode) {
     }
 
     resetAccumulation();
+
+    // Publish to the passive authoritative store for any external reader.
+    Core::RenderStateManager::instance().setViewportMode(mode);
 }
 
 ViewportMode VulkanBackendAdapter::getViewportMode() const {
@@ -8789,7 +9508,33 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
     }
 
     // ── Material Preview Pipeline (created once, reuses solid render pass) ──
-    if (m_interactiveViewport.materialPreviewPipeline == VK_NULL_HANDLE &&
+    // Capability gate: this pipeline requires descriptor indexing (runtimeDescriptorArray +
+    // partially-bound) plus 208 bytes of push-constant space. The shader material_preview_frag.spv
+    // uses `sampler2D textures[]` with nonuniformEXT. On GPUs that lack these (e.g. GTX 850M),
+    // pipeline creation or first draw hits a null-deref inside the vendor driver.
+    // When unsupported, skip the pipeline entirely and fall back to the matcap path, and notify
+    // the user via the HUD. Covers the base VulkanBackendAdapter path (g_backend).
+    const bool mpHasDescIdx = m_device && m_device->getCapabilities().supportsDescriptorIndexing;
+    constexpr uint32_t kMpPushBytes_Base = sizeof(float) * 48 + sizeof(uint32_t) * 4;
+    bool mpPushOkGate = false;
+    if (m_device && m_device->getPhysicalDevice()) {
+        VkPhysicalDeviceProperties _p{};
+        vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(), &_p);
+        mpPushOkGate = _p.limits.maxPushConstantsSize >= kMpPushBytes_Base;
+    }
+    const bool mpCapsOk = mpHasDescIdx && mpPushOkGate;
+    if (!mpCapsOk) {
+        if (!m_materialPreviewUnsupportedNotified) {
+            m_materialPreviewUnsupportedNotified = true;
+            SCENE_LOG_WARN(std::string("[Vulkan] Material preview unsupported on this GPU ") +
+                "(descriptorIndexing=" + (mpHasDescIdx ? "yes" : "no") +
+                ", pushConstants>=208=" + (mpPushOkGate ? "yes" : "no") +
+                "). Falling back to matcap.");
+            if (m_statusCallback) {
+                m_statusCallback("Material preview not supported on this GPU - using matcap fallback.", 1);
+            }
+        }
+    } else if (m_interactiveViewport.materialPreviewPipeline == VK_NULL_HANDLE &&
         m_interactiveViewport.renderPass != VK_NULL_HANDLE) {
         const std::string mpVertPath = shaderDir + "/material_preview.spv";
         const std::string mpFragPath = shaderDir + "/material_preview_frag.spv";
@@ -8818,12 +9563,28 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     matBufBinding.descriptorCount = 1;
                     matBufBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+                    // Guard: check device push-constant limit before touching descriptor/pipeline layout.
+                    // Some older drivers crash inside vkCreateDescriptorSetLayout or vkCreatePipelineLayout
+                    // when push constants exceed maxPushConstantsSize, rather than returning an error.
+                    constexpr uint32_t kMpPushBytes = sizeof(float) * 48 + sizeof(uint32_t) * 4; // 208 bytes
+                    VkPhysicalDeviceProperties mpDevProps{};
+                    vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(), &mpDevProps);
+                    const bool mpPushOk = mpDevProps.limits.maxPushConstantsSize >= kMpPushBytes;
+                    if (!mpPushOk) {
+                        SCENE_LOG_WARN("[Vulkan] Material preview pipeline skipped: "
+                            "maxPushConstantsSize=" +
+                            std::to_string(mpDevProps.limits.maxPushConstantsSize) +
+                            " < required " + std::to_string(kMpPushBytes) + " bytes.");
+                    }
+
                     VkDescriptorSetLayoutCreateInfo mpDslci{};
                     mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
                     mpDslci.bindingCount = 1;
                     mpDslci.pBindings = &matBufBinding;
-                    vkCreateDescriptorSetLayout(vkDevice, &mpDslci, nullptr,
-                                                &m_interactiveViewport.materialPreviewDescLayout);
+                    if (mpPushOk) {
+                        vkCreateDescriptorSetLayout(vkDevice, &mpDslci, nullptr,
+                                                    &m_interactiveViewport.materialPreviewDescLayout);
+                    }
 
                     // Descriptor pool
                     VkDescriptorPoolSize mpPoolSize{};
@@ -8837,11 +9598,11 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     vkCreateDescriptorPool(vkDevice, &mpDpci, nullptr,
                                            &m_interactiveViewport.materialPreviewDescPool);
 
-                    // Push constant range: 2x mat4 + 4x vec4 = 128 + 64 = 192 bytes
+                    // Push constant range: 2x mat4 + 4x vec4 + uvec4 = 208 bytes
                     VkPushConstantRange mpPushRange{};
                     mpPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
                     mpPushRange.offset = 0;
-                    mpPushRange.size = sizeof(float) * 48; // 2x mat4(32) + 4x vec4(16)
+                    mpPushRange.size = kMpPushBytes;
 
                     VkPipelineLayoutCreateInfo mpPlci{};
                     mpPlci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -8849,8 +9610,10 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     mpPlci.pPushConstantRanges = &mpPushRange;
                     mpPlci.setLayoutCount = 1;
                     mpPlci.pSetLayouts = &m_interactiveViewport.materialPreviewDescLayout;
-                    vkCreatePipelineLayout(vkDevice, &mpPlci, nullptr,
-                                           &m_interactiveViewport.materialPreviewPipelineLayout);
+                    if (m_interactiveViewport.materialPreviewDescLayout != VK_NULL_HANDLE) {
+                        vkCreatePipelineLayout(vkDevice, &mpPlci, nullptr,
+                                               &m_interactiveViewport.materialPreviewPipelineLayout);
+                    }
 
                     // Shader stages
                     VkPipelineShaderStageCreateInfo mpStages[2]{};
@@ -8863,34 +9626,31 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     mpStages[1].module = mpFragModule;
                     mpStages[1].pName = "main";
 
-                    // Vertex input: binding 0=pos, 1=normal, 2=uv, 3=matId, 4=instance matrix
-                    VkVertexInputBindingDescription mpBindings[5]{};
+                    // Vertex input: binding 0=pos, 1=normal, 2=matId, 3=instance matrix
+                    VkVertexInputBindingDescription mpBindings[4]{};
                     mpBindings[0].binding = 0; mpBindings[0].stride = sizeof(float) * 3; mpBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
                     mpBindings[1].binding = 1; mpBindings[1].stride = sizeof(float) * 3; mpBindings[1].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-                    mpBindings[2].binding = 2; mpBindings[2].stride = sizeof(float) * 2; mpBindings[2].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-                    mpBindings[3].binding = 3; mpBindings[3].stride = sizeof(uint32_t);  mpBindings[3].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-                    mpBindings[4].binding = 4; mpBindings[4].stride = sizeof(float) * 16; mpBindings[4].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+                    mpBindings[2].binding = 2; mpBindings[2].stride = sizeof(uint32_t);  mpBindings[2].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+                    mpBindings[3].binding = 3; mpBindings[3].stride = sizeof(float) * 16; mpBindings[3].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
-                    VkVertexInputAttributeDescription mpAttribs[8]{};
+                    VkVertexInputAttributeDescription mpAttribs[7]{};
                     // location 0: position
                     mpAttribs[0].location = 0; mpAttribs[0].binding = 0; mpAttribs[0].format = VK_FORMAT_R32G32B32_SFLOAT; mpAttribs[0].offset = 0;
                     // location 1: normal
                     mpAttribs[1].location = 1; mpAttribs[1].binding = 1; mpAttribs[1].format = VK_FORMAT_R32G32B32_SFLOAT; mpAttribs[1].offset = 0;
-                    // location 2: uv
-                    mpAttribs[2].location = 2; mpAttribs[2].binding = 2; mpAttribs[2].format = VK_FORMAT_R32G32_SFLOAT; mpAttribs[2].offset = 0;
                     // location 3: materialID
-                    mpAttribs[3].location = 3; mpAttribs[3].binding = 3; mpAttribs[3].format = VK_FORMAT_R32_UINT; mpAttribs[3].offset = 0;
+                    mpAttribs[2].location = 2; mpAttribs[2].binding = 2; mpAttribs[2].format = VK_FORMAT_R32_UINT; mpAttribs[2].offset = 0;
                     // location 4-7: instance model matrix (4 columns)
-                    mpAttribs[4].location = 4; mpAttribs[4].binding = 4; mpAttribs[4].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[4].offset = sizeof(float) * 0;
-                    mpAttribs[5].location = 5; mpAttribs[5].binding = 4; mpAttribs[5].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[5].offset = sizeof(float) * 4;
-                    mpAttribs[6].location = 6; mpAttribs[6].binding = 4; mpAttribs[6].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[6].offset = sizeof(float) * 8;
-                    mpAttribs[7].location = 7; mpAttribs[7].binding = 4; mpAttribs[7].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[7].offset = sizeof(float) * 12;
+                    mpAttribs[3].location = 3; mpAttribs[3].binding = 3; mpAttribs[3].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[3].offset = sizeof(float) * 0;
+                    mpAttribs[4].location = 4; mpAttribs[4].binding = 3; mpAttribs[4].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[4].offset = sizeof(float) * 4;
+                    mpAttribs[5].location = 5; mpAttribs[5].binding = 3; mpAttribs[5].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[5].offset = sizeof(float) * 8;
+                    mpAttribs[6].location = 6; mpAttribs[6].binding = 3; mpAttribs[6].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[6].offset = sizeof(float) * 12;
 
                     VkPipelineVertexInputStateCreateInfo mpVertInput{};
                     mpVertInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-                    mpVertInput.vertexBindingDescriptionCount = 5;
+                    mpVertInput.vertexBindingDescriptionCount = 4;
                     mpVertInput.pVertexBindingDescriptions = mpBindings;
-                    mpVertInput.vertexAttributeDescriptionCount = 8;
+                    mpVertInput.vertexAttributeDescriptionCount = 7;
                     mpVertInput.pVertexAttributeDescriptions = mpAttribs;
 
                     VkPipelineInputAssemblyStateCreateInfo mpIA{};
@@ -8950,8 +9710,16 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     mpPCI.renderPass = m_interactiveViewport.renderPass;
                     mpPCI.subpass = 0;
 
-                    VkResult mpResult = vkCreateGraphicsPipelines(vkDevice, VK_NULL_HANDLE, 1, &mpPCI, nullptr,
-                                                                   &m_interactiveViewport.materialPreviewPipeline);
+                    // Guard: if layout creation failed (e.g. push constant size > maxPushConstantsSize
+                    // or descriptor layout null on older GPU), skip to avoid crash with null handle.
+                    VkResult mpResult = VK_ERROR_INITIALIZATION_FAILED;
+                    if (m_interactiveViewport.materialPreviewPipelineLayout != VK_NULL_HANDLE &&
+                        m_interactiveViewport.materialPreviewDescPool != VK_NULL_HANDLE) {
+                        mpResult = vkCreateGraphicsPipelines(vkDevice, VK_NULL_HANDLE, 1, &mpPCI, nullptr,
+                                                             &m_interactiveViewport.materialPreviewPipeline);
+                    } else {
+                        SCENE_LOG_WARN("[Vulkan] Material preview pipeline skipped: layout or pool null (device limit exceeded).");
+                    }
                     if (mpResult != VK_SUCCESS) {
                         SCENE_LOG_WARN("[Vulkan] Material preview pipeline creation failed.");
                         m_interactiveViewport.materialPreviewPipeline = VK_NULL_HANDLE;
@@ -8978,6 +9746,31 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                             mpWds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                             mpWds.pBufferInfo = &matBufInfo;
                             vkUpdateDescriptorSets(vkDevice, 1, &mpWds, 0, nullptr);
+
+                            // Backfill binding 1 with all textures already uploaded.
+                            // Without this, when the Vulkan RT backend serves its own
+                            // interactive viewport, Material Preview sees an empty texture
+                            // array (paint strokes look "missing") because textures loaded
+                            // before the descSet existed never reached binding 1.
+                            for (auto& kv : m_uploadedImages) {
+                                const int64_t texID = kv.first;
+                                if (texID <= 0 || texID >= static_cast<int64_t>(Backend::VULKAN_TEXTURE_CAPACITY)) continue;
+                                const VulkanRT::ImageHandle& texImg = kv.second;
+                                if (!texImg.view || !texImg.sampler) continue;
+                                VkDescriptorImageInfo tii{};
+                                tii.sampler     = texImg.sampler;
+                                tii.imageView   = texImg.view;
+                                tii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                                VkWriteDescriptorSet twds{};
+                                twds.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                                twds.dstSet          = m_interactiveViewport.materialPreviewDescSet;
+                                twds.dstBinding      = 1;
+                                twds.dstArrayElement = static_cast<uint32_t>(texID);
+                                twds.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                                twds.descriptorCount = 1;
+                                twds.pImageInfo      = &tii;
+                                vkUpdateDescriptorSets(vkDevice, 1, &twds, 0, nullptr);
+                            }
                         }
                         SCENE_LOG_INFO("[Vulkan] Material preview pipeline created successfully.");
                     }
@@ -9257,6 +10050,7 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                     float lightDir0[4];   // xyz = dir, w = intensity
                     float lightDir1[4];   // fill
                     float lightDir2[4];   // rim
+                    uint32_t materialMeta[4];
                 };
                 MaterialPreviewPushConstants mpPush{};
                 matrixToGL(viewProj, mpPush.viewProj);
@@ -9271,21 +10065,32 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                 mpPush.lightDir1[0] = -0.6f; mpPush.lightDir1[1] = 0.3f; mpPush.lightDir1[2] = 0.4f; mpPush.lightDir1[3] = 0.8f;
                 // Rim light: from behind
                 mpPush.lightDir2[0] = -0.2f; mpPush.lightDir2[1] = 0.4f; mpPush.lightDir2[2] = -0.8f; mpPush.lightDir2[3] = 1.2f;
+                uint32_t previewQuality = 2u;
+                switch (::render_settings.raster_viewport_quality_preset) {
+                    case ::RasterViewportQualityPreset::Performance: previewQuality = 1u; break;
+                    case ::RasterViewportQualityPreset::Balanced: previewQuality = 2u; break;
+                    case ::RasterViewportQualityPreset::Quality: previewQuality = 3u; break;
+                    case ::RasterViewportQualityPreset::Auto:
+                    default: previewQuality = 2u; break;
+                }
+                mpPush.materialMeta[0] = m_device ? m_device->m_materialCount : 0u;
+                mpPush.materialMeta[1] = previewQuality;
+                mpPush.materialMeta[2] = static_cast<uint32_t>(::render_settings.material_preview_lighting_preset);
+                mpPush.materialMeta[3] = 0;
 
                 vkCmdPushConstants(cmd, m_interactiveViewport.materialPreviewPipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(MaterialPreviewPushConstants), &mpPush);
 
-                // Bind 5 vertex buffers: pos, normal, uv, matId, instance
-                VkBuffer mpVertBuffers[5] = {
+                // Bind 4 vertex buffers: pos, normal, matId, instance
+                VkBuffer mpVertBuffers[4] = {
                     rmb.vertexBuffer.buffer,
                     rmb.normalBuffer.buffer ? rmb.normalBuffer.buffer : rmb.vertexBuffer.buffer,
-                    rmb.uvBuffer.buffer ? rmb.uvBuffer.buffer : rmb.vertexBuffer.buffer,
                     rmb.matIdBuffer.buffer ? rmb.matIdBuffer.buffer : rmb.vertexBuffer.buffer,
                     rmb.instanceBuffer.buffer
                 };
-                VkDeviceSize mpOffsets[5] = { 0, 0, 0, 0, 0 };
-                vkCmdBindVertexBuffers(cmd, 0, 5, mpVertBuffers, mpOffsets);
+                VkDeviceSize mpOffsets[4] = { 0, 0, 0, 0 };
+                vkCmdBindVertexBuffers(cmd, 0, 4, mpVertBuffers, mpOffsets);
             } else {
                 // Solid / Matcap push constants
                 SolidPushConstants push{};
@@ -9329,6 +10134,7 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
 
             const auto& blas = m_device->m_blasList[instance.blasIndex];
             if (!blas.vertexBuffer.buffer || blas.vertexCount == 0) continue;
+            if (!m_interactiveViewport.identityInstanceBuffer.buffer) continue;
 
             SolidPushConstants push{};
             matrixToGL(viewProj, push.viewProj);
@@ -9692,6 +10498,24 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         if (m_denoiserAlbedoStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserAlbedoStagingBuffer);
         if (m_denoiserNormalStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserNormalStagingBuffer);
 
+        // Tear down CUDA interop state + shared staging before reallocating.
+        // Interop destroy is a no-op on first call (null ptr guards inside).
+        destroyGpuDenoiserInterop();
+        if (m_denoiserColorSharedStaging.buffer)  m_device->destroyBuffer(m_denoiserColorSharedStaging);
+        if (m_denoiserAlbedoSharedStaging.buffer) m_device->destroyBuffer(m_denoiserAlbedoSharedStaging);
+        if (m_denoiserNormalSharedStaging.buffer) m_device->destroyBuffer(m_denoiserNormalSharedStaging);
+        m_denoiserColorSharedStaging = {};
+        m_denoiserAlbedoSharedStaging = {};
+        m_denoiserNormalSharedStaging = {};
+        m_denoiserColorSharedAllocSize = 0;
+        m_denoiserAlbedoSharedAllocSize = 0;
+        m_denoiserNormalSharedAllocSize = 0;
+        // The Win32 handles were either consumed by CUDA (ownership transferred
+        // in importGpuDenoiserInterop) or destroyed along with the VkDeviceMemory.
+        m_denoiserColorSharedHandle = nullptr;
+        m_denoiserAlbedoSharedHandle = nullptr;
+        m_denoiserNormalSharedHandle = nullptr;
+
         // Prefer half-float output to cut readback memory pressure by 50%.
         VkFormat outFmt = VK_FORMAT_R32G32B32A32_SFLOAT;
         VkFormatProperties fmtProps{};
@@ -9728,6 +10552,41 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         m_denoiserColorStagingBuffer = m_device->createBuffer(stagingInfo);
         m_denoiserAlbedoStagingBuffer = m_device->createBuffer(stagingInfo);
         m_denoiserNormalStagingBuffer = m_device->createBuffer(stagingInfo);
+
+        // Exportable parallel stagings for the GPU-direct path. Failure is
+        // non-fatal — getDenoiserFrameGPU will simply return false and the
+        // host path continues to work.
+        if (m_device->getCapabilities().supportsExternalMemoryWin32 && !m_gpuDenoiserDisabled) {
+            VulkanRT::BufferCreateInfo sharedInfo;
+            sharedInfo.size = stagingInfo.size;
+            sharedInfo.usage = VulkanRT::BufferUsage::TRANSFER_DST;
+            sharedInfo.location = VulkanRT::MemoryLocation::GPU_ONLY; // exported memory must be DEVICE_LOCAL
+            m_denoiserColorSharedStaging  = m_device->createExportableBuffer(
+                sharedInfo, &m_denoiserColorSharedHandle, &m_denoiserColorSharedAllocSize);
+            m_denoiserAlbedoSharedStaging = m_device->createExportableBuffer(
+                sharedInfo, &m_denoiserAlbedoSharedHandle, &m_denoiserAlbedoSharedAllocSize);
+            m_denoiserNormalSharedStaging = m_device->createExportableBuffer(
+                sharedInfo, &m_denoiserNormalSharedHandle, &m_denoiserNormalSharedAllocSize);
+            const bool allOK = m_denoiserColorSharedStaging.buffer
+                             && m_denoiserAlbedoSharedStaging.buffer
+                             && m_denoiserNormalSharedStaging.buffer;
+            if (!allOK) {
+                SCENE_LOG_WARN("[Vulkan] Exportable denoiser staging allocation failed — GPU-direct OIDN disabled.");
+                if (m_denoiserColorSharedStaging.buffer)  m_device->destroyBuffer(m_denoiserColorSharedStaging);
+                if (m_denoiserAlbedoSharedStaging.buffer) m_device->destroyBuffer(m_denoiserAlbedoSharedStaging);
+                if (m_denoiserNormalSharedStaging.buffer) m_device->destroyBuffer(m_denoiserNormalSharedStaging);
+                m_denoiserColorSharedStaging = {};
+                m_denoiserAlbedoSharedStaging = {};
+                m_denoiserNormalSharedStaging = {};
+                m_denoiserColorSharedHandle = nullptr;
+                m_denoiserAlbedoSharedHandle = nullptr;
+                m_denoiserNormalSharedHandle = nullptr;
+                m_denoiserColorSharedAllocSize = 0;
+                m_denoiserAlbedoSharedAllocSize = 0;
+                m_denoiserNormalSharedAllocSize = 0;
+                m_gpuDenoiserDisabled = true;
+            }
+        }
 
         const uint64_t output_bytes = (uint64_t)width * height * bytesPerPixelForFormat(outFmt);
         const uint64_t variance_bytes = (uint64_t)width * height * bytesPerPixelForFormat(VK_FORMAT_R32_SFLOAT);
@@ -10253,22 +11112,31 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
 }
 
 void VulkanBackendAdapter::downloadImage(void* out) { (void)out; }
-bool VulkanBackendAdapter::getDenoiserFrame(DenoiserFrameData& frame) {
+bool VulkanBackendAdapter::getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_device || !m_device->isInitialized() || m_imageWidth <= 0 || m_imageHeight <= 0) return false;
-    if (!m_denoiserColorImage.image || !m_denoiserAlbedoImage.image || !m_denoiserNormalImage.image) return false;
-    if (!m_denoiserColorStagingBuffer.buffer || !m_denoiserAlbedoStagingBuffer.buffer || !m_denoiserNormalStagingBuffer.buffer) return false;
+    if (!m_denoiserColorImage.image) return false;
+    if (!m_denoiserColorStagingBuffer.buffer) return false;
+    if (useAuxiliary && (!m_denoiserAlbedoImage.image || !m_denoiserNormalImage.image)) return false;
+    if (useAuxiliary && (!m_denoiserAlbedoStagingBuffer.buffer || !m_denoiserNormalStagingBuffer.buffer)) return false;
 
     const size_t pixelCount = (size_t)m_imageWidth * (size_t)m_imageHeight;
     const bool isHalfFloat = (m_denoiserColorImage.format == VK_FORMAT_R16G16B16A16_SFLOAT);
 
     m_device->copyImageToBuffer(m_denoiserColorImage, m_denoiserColorStagingBuffer);
-    m_device->copyImageToBuffer(m_denoiserAlbedoImage, m_denoiserAlbedoStagingBuffer);
-    m_device->copyImageToBuffer(m_denoiserNormalImage, m_denoiserNormalStagingBuffer);
+    if (useAuxiliary) {
+        m_device->copyImageToBuffer(m_denoiserAlbedoImage, m_denoiserAlbedoStagingBuffer);
+        m_device->copyImageToBuffer(m_denoiserNormalImage, m_denoiserNormalStagingBuffer);
+    }
 
     m_denoiserColorPixels.resize(pixelCount * 3);
-    m_denoiserAlbedoPixels.resize(pixelCount * 3);
-    m_denoiserNormalPixels.resize(pixelCount * 3);
+    if (useAuxiliary) {
+        m_denoiserAlbedoPixels.resize(pixelCount * 3);
+        m_denoiserNormalPixels.resize(pixelCount * 3);
+    } else {
+        m_denoiserAlbedoPixels.clear();
+        m_denoiserNormalPixels.clear();
+    }
 
     auto downloadFloat3 = [&](const VulkanRT::BufferHandle& staging, std::vector<float>& dst, bool decodeNormal) {
         if (isHalfFloat) {
@@ -10313,18 +11181,302 @@ bool VulkanBackendAdapter::getDenoiserFrame(DenoiserFrameData& frame) {
     };
 
     downloadFloat3(m_denoiserColorStagingBuffer, m_denoiserColorPixels, false);
-    downloadFloat3(m_denoiserAlbedoStagingBuffer, m_denoiserAlbedoPixels, false);
-    downloadFloat3(m_denoiserNormalStagingBuffer, m_denoiserNormalPixels, true);
+    if (useAuxiliary) {
+        downloadFloat3(m_denoiserAlbedoStagingBuffer, m_denoiserAlbedoPixels, false);
+        downloadFloat3(m_denoiserNormalStagingBuffer, m_denoiserNormalPixels, true);
+    }
 
     frame.width = m_imageWidth;
     frame.height = m_imageHeight;
     frame.color = m_denoiserColorPixels.data();
-    frame.albedo = m_denoiserAlbedoPixels.data();
-    frame.normal = m_denoiserNormalPixels.data();
+    frame.albedo = useAuxiliary ? m_denoiserAlbedoPixels.data() : nullptr;
+    frame.normal = useAuxiliary ? m_denoiserNormalPixels.data() : nullptr;
     return true;
 }
+
+// ============================================================================
+// GPU-direct denoiser interop (Vulkan → CUDA → OIDN)
+// ============================================================================
+
+struct VulkanBackendAdapter::VulkanCudaDenoiserInterop {
+    // Imported Vulkan memory (one per AOV). CUDA owns the Win32 handle once
+    // cudaImportExternalMemory succeeds; the memory itself stays owned by
+    // Vulkan, so we must destroy this import BEFORE freeing VkDeviceMemory.
+    cudaExternalMemory_t colorExt  = nullptr;
+    cudaExternalMemory_t albedoExt = nullptr;
+    cudaExternalMemory_t normalExt = nullptr;
+    // Mapped device pointers into the imported memory (read-only source).
+    void* colorSrcDev  = nullptr;
+    void* albedoSrcDev = nullptr;
+    void* normalSrcDev = nullptr;
+    // CUDA-owned destination buffers the prep kernel writes into. OIDN reads
+    // from these (float4, 16 B stride, Y-flipped + normal-decoded).
+    void* colorDstDev  = nullptr;
+    void* albedoDstDev = nullptr;
+    void* normalDstDev = nullptr;
+    // Cached shape — invalidates on mismatch.
+    int width  = 0;
+    int height = 0;
+    bool hasAux = false;
+    cudaStream_t stream = nullptr;
+    int cudaOrdinal = -1;
+};
+
+void VulkanBackendAdapter::destroyGpuDenoiserInterop() {
+    if (!m_gpuDenoiserInterop) return;
+    VulkanCudaDenoiserInterop* s = m_gpuDenoiserInterop;
+
+    // Order matters: free CUDA-owned dst buffers, drop mapped ptrs via destroyExternalMemory
+    // (which also closes the Win32 HANDLE CUDA took ownership of), then the VkDeviceMemory
+    // gets freed later when the caller destroys the VkBuffer handles.
+    auto freeDst = [](void*& p) {
+        if (p) { cudaFree(p); p = nullptr; }
+    };
+    freeDst(s->colorDstDev);
+    freeDst(s->albedoDstDev);
+    freeDst(s->normalDstDev);
+
+    auto dropExt = [](cudaExternalMemory_t& e, void*& mapped) {
+        mapped = nullptr; // was a child of `e`; destroyed with it
+        if (e) {
+            cudaDestroyExternalMemory(e);
+            e = nullptr;
+        }
+    };
+    dropExt(s->colorExt,  s->colorSrcDev);
+    dropExt(s->albedoExt, s->albedoSrcDev);
+    dropExt(s->normalExt, s->normalSrcDev);
+
+    s->width = 0;
+    s->height = 0;
+    s->hasAux = false;
+
+    delete s;
+    m_gpuDenoiserInterop = nullptr;
+}
+
+bool VulkanBackendAdapter::ensureGpuDenoiserInterop(int width, int height, bool needAux) {
+    if (m_gpuDenoiserDisabled) return false;
+    if (!m_device || !m_device->isInitialized()) return false;
+    if (!m_device->getCapabilities().supportsExternalMemoryWin32) return false;
+    if (width <= 0 || height <= 0) return false;
+    if (!m_denoiserColorSharedStaging.buffer || !m_denoiserColorSharedHandle) return false;
+    if (needAux && (!m_denoiserAlbedoSharedStaging.buffer || !m_denoiserAlbedoSharedHandle ||
+                    !m_denoiserNormalSharedStaging.buffer || !m_denoiserNormalSharedHandle)) {
+        return false;
+    }
+
+    // Fast path: interop already matches current shape/layout.
+    if (m_gpuDenoiserInterop &&
+        m_gpuDenoiserInterop->width == width &&
+        m_gpuDenoiserInterop->height == height &&
+        m_gpuDenoiserInterop->hasAux == needAux) {
+        return true;
+    }
+
+    // Shape/layout changed — tear down and rebuild.
+    destroyGpuDenoiserInterop();
+
+    // Match Vulkan physical device to a CUDA device ordinal via UUID. Without
+    // UUID match, the imported memory would be read from the wrong device and
+    // OIDN results would be garbage.
+    int cudaOrdinal = -1;
+    if (m_device->getCapabilities().hasDeviceUUID) {
+        int cudaDeviceCount = 0;
+        if (cudaGetDeviceCount(&cudaDeviceCount) == cudaSuccess) {
+            for (int i = 0; i < cudaDeviceCount; ++i) {
+                cudaDeviceProp props{};
+                if (cudaGetDeviceProperties(&props, i) != cudaSuccess) continue;
+                if (std::memcmp(props.uuid.bytes, m_device->getCapabilities().deviceUUID, 16) == 0) {
+                    cudaOrdinal = i;
+                    break;
+                }
+            }
+        }
+        cudaGetLastError(); // clear any sticky error from enumeration
+    }
+    if (cudaOrdinal < 0) {
+        SCENE_LOG_WARN("[Vulkan] No matching CUDA device for Vulkan physical device — GPU-direct OIDN disabled.");
+        m_gpuDenoiserDisabled = true;
+        return false;
+    }
+
+    int prevDevice = 0;
+    cudaGetDevice(&prevDevice);
+    cudaSetDevice(cudaOrdinal);
+
+    auto* s = new VulkanCudaDenoiserInterop();
+    s->width = width;
+    s->height = height;
+    s->hasAux = needAux;
+    s->cudaOrdinal = cudaOrdinal;
+    s->stream = nullptr; // default stream; CPU already fence-synced the Vulkan copy
+
+    auto importOne = [&](void* win32Handle, uint64_t allocSize, uint64_t mappedBytes,
+                         cudaExternalMemory_t& outExt, void*& outDev) -> bool {
+        cudaExternalMemoryHandleDesc desc{};
+        desc.type = cudaExternalMemoryHandleTypeOpaqueWin32;
+        desc.handle.win32.handle = win32Handle;
+        desc.handle.win32.name = nullptr;
+        desc.size = allocSize;
+        desc.flags = cudaExternalMemoryDedicated;
+        if (cudaImportExternalMemory(&outExt, &desc) != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
+        cudaExternalMemoryBufferDesc bufDesc{};
+        bufDesc.offset = 0;
+        bufDesc.size = mappedBytes;
+        bufDesc.flags = 0;
+        if (cudaExternalMemoryGetMappedBuffer(&outDev, outExt, &bufDesc) != cudaSuccess) {
+            cudaGetLastError();
+            cudaDestroyExternalMemory(outExt);
+            outExt = nullptr;
+            return false;
+        }
+        return true;
+    };
+
+    const uint64_t mappedBytes = static_cast<uint64_t>(width) * height * 4ull * sizeof(float);
+
+    bool ok = importOne(m_denoiserColorSharedHandle, m_denoiserColorSharedAllocSize,
+                        mappedBytes, s->colorExt, s->colorSrcDev);
+    // CUDA has taken ownership of the Win32 HANDLE — forget our copy so we
+    // don't try to close or re-import it.
+    m_denoiserColorSharedHandle = nullptr;
+
+    if (ok && needAux) {
+        ok = importOne(m_denoiserAlbedoSharedHandle, m_denoiserAlbedoSharedAllocSize,
+                       mappedBytes, s->albedoExt, s->albedoSrcDev);
+        m_denoiserAlbedoSharedHandle = nullptr;
+        if (ok) {
+            ok = importOne(m_denoiserNormalSharedHandle, m_denoiserNormalSharedAllocSize,
+                           mappedBytes, s->normalExt, s->normalSrcDev);
+            m_denoiserNormalSharedHandle = nullptr;
+        }
+    }
+
+    if (ok) {
+        // Allocate CUDA-owned destination buffers (Y-flipped / decoded AOVs).
+        auto allocDst = [&](void*& p) -> bool {
+            return cudaMalloc(&p, mappedBytes) == cudaSuccess;
+        };
+        ok = allocDst(s->colorDstDev);
+        if (ok && needAux) {
+            ok = allocDst(s->albedoDstDev) && allocDst(s->normalDstDev);
+        }
+        if (!ok) {
+            cudaGetLastError();
+        }
+    }
+
+    if (!ok) {
+        SCENE_LOG_WARN("[Vulkan] CUDA external-memory import failed — disabling GPU-direct OIDN.");
+        // Swap it in so destroyGpuDenoiserInterop can clean up what did succeed.
+        m_gpuDenoiserInterop = s;
+        destroyGpuDenoiserInterop();
+        m_gpuDenoiserDisabled = true;
+        cudaSetDevice(prevDevice);
+        return false;
+    }
+
+    m_gpuDenoiserInterop = s;
+    cudaSetDevice(prevDevice);
+    return true;
+}
+
+bool VulkanBackendAdapter::getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool useAuxiliary) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (m_gpuDenoiserDisabled) {
+        static bool loggedDisable = false;
+        if (!loggedDisable) {
+            loggedDisable = true;
+            SCENE_LOG_WARN("[Vulkan][OIDN-GPU] Disabled — falling back to CPU-visible OIDN path.");
+        }
+        return false;
+    }
+    if (!m_device || !m_device->isInitialized() || m_imageWidth <= 0 || m_imageHeight <= 0) return false;
+    if (!m_denoiserColorImage.image) return false;
+    if (useAuxiliary && (!m_denoiserAlbedoImage.image || !m_denoiserNormalImage.image)) return false;
+    if (!m_denoiserColorSharedStaging.buffer) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            SCENE_LOG_WARN(std::string("[Vulkan][OIDN-GPU] Skipped: exportable staging not allocated (supportsExternalMemoryWin32=")
+                           + std::to_string((int)m_device->getCapabilities().supportsExternalMemoryWin32)
+                           + ").");
+        }
+        return false;
+    }
+    if (useAuxiliary && (!m_denoiserAlbedoSharedStaging.buffer || !m_denoiserNormalSharedStaging.buffer)) return false;
+
+    if (!ensureGpuDenoiserInterop(m_imageWidth, m_imageHeight, useAuxiliary)) {
+        return false;
+    }
+    VulkanCudaDenoiserInterop* s = m_gpuDenoiserInterop;
+    static bool firstSuccessLogged = false;
+    if (!firstSuccessLogged) {
+        firstSuccessLogged = true;
+        SCENE_LOG_INFO(std::string("[Vulkan][OIDN-GPU] Active: Vulkan→CUDA external-memory path engaged (cudaOrdinal=")
+                       + std::to_string(s->cudaOrdinal)
+                       + ", " + std::to_string(m_imageWidth) + "x" + std::to_string(m_imageHeight)
+                       + ", aux=" + std::to_string((int)useAuxiliary) + ").");
+    }
+
+    // copyImageToBuffer blocks on a fence internally — no Vulkan↔CUDA semaphore
+    // interop needed; the CPU round-trip is the ordering barrier.
+    m_device->copyImageToBuffer(m_denoiserColorImage, m_denoiserColorSharedStaging);
+    if (useAuxiliary) {
+        m_device->copyImageToBuffer(m_denoiserAlbedoImage, m_denoiserAlbedoSharedStaging);
+        m_device->copyImageToBuffer(m_denoiserNormalImage, m_denoiserNormalSharedStaging);
+    }
+
+    int prevDevice = 0;
+    cudaGetDevice(&prevDevice);
+    cudaSetDevice(s->cudaOrdinal);
+
+    // Prep: Y-flip + (for normal AOV) decode [0,1]→[-1,1].
+    bool kernelOK = launchVulkanDenoiserPrepKernel(
+        s->colorDstDev, s->colorSrcDev, m_imageWidth, m_imageHeight,
+        /*decodeNormal=*/false, s->stream);
+    if (kernelOK && useAuxiliary) {
+        kernelOK = kernelOK && launchVulkanDenoiserPrepKernel(
+            s->albedoDstDev, s->albedoSrcDev, m_imageWidth, m_imageHeight,
+            /*decodeNormal=*/false, s->stream);
+        kernelOK = kernelOK && launchVulkanDenoiserPrepKernel(
+            s->normalDstDev, s->normalSrcDev, m_imageWidth, m_imageHeight,
+            /*decodeNormal=*/true, s->stream);
+    }
+    if (!kernelOK) {
+        cudaGetLastError();
+        cudaSetDevice(prevDevice);
+        return false;
+    }
+
+    frame.width = m_imageWidth;
+    frame.height = m_imageHeight;
+    frame.colorDevPtr  = s->colorDstDev;
+    frame.albedoDevPtr = useAuxiliary ? s->albedoDstDev : nullptr;
+    frame.normalDevPtr = useAuxiliary ? s->normalDstDev : nullptr;
+    frame.pixelByteStride = sizeof(float) * 4;
+    frame.rowByteStride   = static_cast<size_t>(m_imageWidth) * sizeof(float) * 4;
+    frame.cudaStream = static_cast<void*>(s->stream);
+    frame.cudaDeviceOrdinal = s->cudaOrdinal;
+
+    cudaSetDevice(prevDevice);
+    return true;
+}
+
 int VulkanBackendAdapter::getCurrentSampleCount() const { return this->m_currentSamples; }
-bool VulkanBackendAdapter::isAccumulationComplete() const { return this->m_currentSamples >= this->m_targetSamples; }
+bool VulkanBackendAdapter::isAccumulationComplete() const {
+    // Interactive viewport modes manage their own dirty/cached-frame lifecycle inside
+    // renderInteractiveViewportImpl(). The main loop should keep calling renderProgressive()
+    // so material/light/world edits can re-present immediately without waiting for camera motion.
+    if (shouldUseInteractiveViewport()) {
+        return false;
+    }
+    return this->m_currentSamples >= this->m_targetSamples;
+}
 
 // Environment stubs
 void VulkanBackendAdapter::setEnvironmentMap(int64_t h) {

@@ -81,6 +81,9 @@
     <ClInclude Include="source\include\DirectionalLight.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Core\RenderStateManager.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\globals.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
@@ -414,6 +417,7 @@
     </None>
     <None Include="source\shaders\volume_closesthit.rchit" />
     <None Include="source\shaders\volume_intersection.rint" />
+    <None Include="cpp.hint" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="source\resources\RayTrophi_icon.ico">
@@ -422,6 +426,9 @@
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="source\src\Device\fft_ocean.cu">
+      <Filter>Kaynak Dosyalar\Device</Filter>
+    </CudaCompile>
+    <CudaCompile Include="source\src\Device\oidn_blend.cu">
       <Filter>Kaynak Dosyalar\Device</Filter>
     </CudaCompile>
     <CudaCompile Include="source\src\Device\skinning_kernels.cu">
@@ -514,6 +521,9 @@
       <Filter>Kaynak Dosyalar\Core</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Core\ProjectManager.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\RenderStateManager.cpp">
       <Filter>Kaynak Dosyalar\Core</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Core\ThreadLocalRNG.cpp">

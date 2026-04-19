@@ -57,6 +57,15 @@ build_fix_test.txt
 .DS_Store
 Thumbs.db
 
+# Local tool/IDE caches
+.claude/
+.dotnet_home/
+*.hint
+
+# Local work notes (not for repo)
+/sculpt_control_graph_todo.md
+/vulkan_blas_batch_fix.md
+
 # Project Specific
 .agent/
 **/.agent/

@@ -7,6 +7,7 @@
  */
 #include "Backend/OptixBackend.h"
 #include "Backend/VulkanBackend.h"
+#include "Core/RenderStateManager.h"
 #include "OptixWrapper.h"
 #include "Camera.h"
 #include <iostream>
@@ -31,10 +32,10 @@ namespace {
     }
 }
 
-OptixBackend::OptixBackend() 
+OptixBackend::OptixBackend()
     : m_optix_owned(std::make_unique<OptixWrapper>()), m_optix(m_optix_owned.get()) {}
 
-OptixBackend::OptixBackend(OptixWrapper* existingWrapper) 
+OptixBackend::OptixBackend(OptixWrapper* existingWrapper)
     : m_optix_owned(nullptr), m_optix(existingWrapper) {}
 
 OptixBackend::~OptixBackend() = default;
@@ -296,7 +297,9 @@ void OptixBackend::renderProgressive(void* outSurface, void* outWindow, void* ou
 }
 
 void OptixBackend::setViewportMode(ViewportMode mode) {
+    if (m_viewportMode == mode) return;
     m_viewportMode = mode;
+    Core::RenderStateManager::instance().setViewportMode(mode);
 }
 
 ViewportMode OptixBackend::getViewportMode() const {
@@ -321,21 +324,42 @@ void OptixBackend::downloadImage(void* outPixels) {
     m_optix->downloadFramebuffer(static_cast<uchar4*>(outPixels), m_optix->getImageWidth(), m_optix->getImageHeight());
 }
 
-bool OptixBackend::getDenoiserFrame(DenoiserFrameData& frame) {
+bool OptixBackend::getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary) {
     if (!m_optix) return false;
 
     static std::vector<float> color;
     static std::vector<float> albedo;
     static std::vector<float> normal;
-    if (!m_optix->downloadDenoiserBuffers(color, albedo, normal)) {
+    if (!m_optix->downloadDenoiserBuffers(color, albedo, normal, useAuxiliary)) {
         return false;
     }
 
     frame.width = m_optix->getImageWidth();
     frame.height = m_optix->getImageHeight();
     frame.color = color.data();
-    frame.albedo = albedo.data();
-    frame.normal = normal.data();
+    frame.albedo = useAuxiliary ? albedo.data() : nullptr;
+    frame.normal = useAuxiliary ? normal.data() : nullptr;
+    return true;
+}
+
+bool OptixBackend::getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool useAuxiliary) {
+    if (!m_optix) return false;
+    float4* col = m_optix->getAccumulationDevicePtr();
+    float4* alb = useAuxiliary ? m_optix->getDenoiserAlbedoDevicePtr() : nullptr;
+    float4* nrm = useAuxiliary ? m_optix->getDenoiserNormalDevicePtr() : nullptr;
+    const int w = m_optix->getImageWidth();
+    const int h = m_optix->getImageHeight();
+    if (!col || w <= 0 || h <= 0) return false;
+
+    frame.width = w;
+    frame.height = h;
+    frame.colorDevPtr = col;
+    frame.albedoDevPtr = alb;
+    frame.normalDevPtr = nrm;
+    frame.pixelByteStride = sizeof(float4);
+    frame.rowByteStride = static_cast<size_t>(w) * sizeof(float4);
+    frame.cudaStream = static_cast<void*>(m_optix->getStream());
+    frame.cudaDeviceOrdinal = -1;  // OptiX uses current CUDA device; Renderer resolves via cudaGetDevice
     return true;
 }
 

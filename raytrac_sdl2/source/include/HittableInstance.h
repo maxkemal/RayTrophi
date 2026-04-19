@@ -12,9 +12,11 @@
 #include "Hittable.h"
 #include "Matrix4x4.h"
 #include "AABB.h"
+#include "Triangle.h"
 #include <memory>
 #include <vector>
 #include "Vec3.h"
+#include "Transform.h"
 class HittableInstance : public Hittable {
 public:
 	std::shared_ptr<Hittable> mesh;
@@ -49,6 +51,37 @@ public:
         transform = t;
         calculateInverse(); // Use helper or inline
         updateBounds();
+    }
+
+    bool syncTransformFromSourceTriangles() {
+        if (!source_triangles || source_triangles->empty()) {
+            return false;
+        }
+
+        std::shared_ptr<Transform> shared_transform;
+        const size_t sample_count = std::min<size_t>(source_triangles->size(), 16);
+        for (size_t i = 0; i < sample_count; ++i) {
+            const auto& tri = (*source_triangles)[i];
+            if (!tri) continue;
+
+            auto handle = tri->getTransformHandle();
+            if (!handle) {
+                return false;
+            }
+
+            if (!shared_transform) {
+                shared_transform = handle;
+            } else if (shared_transform.get() != handle.get()) {
+                return false;
+            }
+        }
+
+        if (!shared_transform) {
+            return false;
+        }
+
+        setTransform(shared_transform->getMatrix());
+        return true;
     }
 
 private:

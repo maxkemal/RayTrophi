@@ -245,7 +245,7 @@ Full Technical Report: [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ### 🛠️ Modeling & Mesh Editing Tools
 
-- **Sculpt Mode (Sculpt Mod)**: Real-time sculpting brushes (Grab, Smooth, Inflate, Draw, Flatten) with topology-aware falloff and symmetry options. Supports multi-resolution preview and bake/export of sculpt deltas.
+- **Sculpt Mode (Sculpt Mod)**: Real-time sculpting brushes (Grab, Draw, Inflate, Layer, Clay, Clay Strips, Pinch, Smooth, Flatten, Scrape, Crease) with topology-aware falloff, alpha masks, live/deferred accumulation and symmetry options. Supports multi-resolution preview and bake/export of sculpt deltas.
 - **Mesh Paint**: Vertex and texture painting for color, roughness, metallic and mask channels. Brush falloff, projection painting and layer blending supported; paint can be baked to textures or saved as vertex colors.
 - **Edit Mesh Mode**: Polygon editing toolbox with:
   - **Extrude** faces/edges with transform gizmo
