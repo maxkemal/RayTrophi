@@ -44,13 +44,13 @@
 #include "Triangle.h"         // Added for CPU sync
 #include "HittableInstance.h" // Added for instance CPU sync
 #include "WaterSystem.h"      // Added for WaterManager
-#include "CloudManager.h"     // Added for CloudManager
 
 #include <filesystem>
 #include <windows.h>
 #include <commdlg.h>
 #include <malloc.h>
 #include "SplashScreen.h"  // Splash screen support
+#include <cstdlib>
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -270,6 +270,23 @@ std::string startupCrashLogPath() {
         }
     }
     return "StartupCrash.log";
+}
+
+void removeStartupCrashLogIfExists() {
+    try {
+        std::string p = startupCrashLogPath();
+        if (!p.empty() && std::filesystem::exists(p)) {
+            std::error_code ec;
+            std::filesystem::remove(p, ec);
+            if (!ec) {
+                SCENE_LOG_INFO("StartupCrash.log removed on clean shutdown.");
+            } else {
+                SCENE_LOG_WARN(std::string("Failed to remove StartupCrash.log: ") + ec.message());
+            }
+        }
+    } catch (...) {
+        // best-effort, never throw from cleanup
+    }
 }
 
 void emergencyStartupLog(const std::string& message) {
@@ -492,6 +509,7 @@ bool g_original_surface_needs_sync = true;
 bool g_geometry_dirty = true;        // Mesh/triangle data changed
 bool g_materials_dirty = true;       // Material properties changed
 bool g_gas_volumes_dirty = true;     // Gas/VDB volumes changed
+bool g_texture_pool_dirty = false;   // Evict SceneTextureManager pool inside uploadMaterials (after waitIdle)
 
 // Scene geometry generation counter
 std::atomic<uint64_t> g_scene_geometry_generation{1};
@@ -995,6 +1013,7 @@ void reset_render_resolution(int w, int h)
         rp.imageWidth = w;
         rp.imageHeight = h;
         rp.samplesPerPixel = render_settings.samples_per_pixel;
+        rp.minSamples = render_settings.min_samples;
         rp.maxBounces = std::max(1, render_settings.max_bounces); // min 1: sıfır = primary ray only
         rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
         rp.adaptiveThreshold = render_settings.variance_threshold;
@@ -1333,6 +1352,10 @@ int main(int argc, char* argv[]) try {
                         " pid=" + std::to_string(GetCurrentProcessId()) +
                         " verbose=" + (g_startupDiagVerbose ? "1" : "0"));
 
+    // Register clean-shutdown cleanup: remove StartupCrash.log when the
+    // application exits normally. Crashes will not run this handler.
+    std::atexit(removeStartupCrashLogIfExists);
+
 #ifdef _WIN32
     checkVcRuntimeRedistributable();
 #endif
@@ -1458,9 +1481,10 @@ int main(int argc, char* argv[]) try {
         }
         g_backend->setStatusCallback([&](const std::string& msg, int type) {
             ImVec4 color = ImVec4(1, 1, 1, 1);
-            if (type == 1) color = ImVec4(1, 1, 0, 1);
-            if (type == 2) color = ImVec4(1, 0.2f, 0.2f, 1);
-            ui.addViewportMessage(msg, 4.0f, color);
+            float  duration = 4.0f;
+            if (type == 1) { color = ImVec4(1, 1, 0, 1);         duration = 6.0f; }
+            if (type == 2) { color = ImVec4(1, 0.2f, 0.2f, 1);   duration = 8.0f; }
+            ui.addViewportMessage(msg, duration, color);
         });
     };
 
@@ -1486,6 +1510,9 @@ int main(int argc, char* argv[]) try {
             ray_renderer.updateBackendMaterials(scene);
             syncMaterialBufferToViewportBackend(scene, ray_renderer);
             g_materials_dirty = false;
+            // Clear after both backends have evicted their pools (each backend checks
+            // g_texture_pool_dirty inside uploadMaterials after vkDeviceWaitIdle).
+            g_texture_pool_dirty = false;
         }
 
         if (forceFullSync || g_gas_volumes_dirty) {
@@ -2373,6 +2400,29 @@ int main(int argc, char* argv[]) try {
         last_sim_time = current_sim_time;
         
         bool timeline_playing = ui.timeline.isPlaying();
+        bool timeline_has_manual_keyframes = false;
+        bool timeline_has_water_keyframes = false;
+        bool timeline_has_transform_keyframes = false;
+        bool timeline_has_material_keyframes = false;
+        bool timeline_has_light_keyframes = false;
+        bool timeline_has_camera_keyframes = false;
+        bool timeline_has_world_keyframes = false;
+        for (const auto& [track_name, track] : scene.timeline.tracks) {
+            (void)track_name;
+            if (track.keyframes.empty()) continue;
+            timeline_has_manual_keyframes = true;
+            for (const auto& kf : track.keyframes) {
+                timeline_has_transform_keyframes |= kf.has_transform;
+                timeline_has_material_keyframes |= kf.has_material;
+                timeline_has_light_keyframes |= kf.has_light;
+                timeline_has_camera_keyframes |= kf.has_camera;
+                timeline_has_world_keyframes |= kf.has_world;
+                if (kf.has_water) {
+                    timeline_has_water_keyframes = true;
+                }
+            }
+        }
+
         bool autonomous_anim_graph_playing = false;
         for (const auto& modelCtx : scene.importedModelContexts) {
             auto activeGraph = modelCtx.runtimeGraph ? modelCtx.runtimeGraph : modelCtx.graph;
@@ -2394,6 +2444,47 @@ int main(int argc, char* argv[]) try {
         // ===================================================================
         static int last_volume_frame = -1;
         int current_volume_frame = ui.timeline.getCurrentFrame();
+        bool timeline_drives_volumes = false;
+        for (const auto& gas : scene.gas_volumes) {
+            if (gas && gas->isLinkedToTimeline()) {
+                timeline_drives_volumes = true;
+                break;
+            }
+        }
+        if (!timeline_drives_volumes) {
+            for (const auto& vdb : scene.vdb_volumes) {
+                if (vdb && vdb->isAnimated() && vdb->isLinkedToTimeline()) {
+                    timeline_drives_volumes = true;
+                    break;
+                }
+            }
+        }
+
+        bool timeline_drives_water = timeline_has_water_keyframes;
+        if (!timeline_drives_water && WaterManager::getInstance().getPreviewTimeMode() == WaterPreviewTimeMode::Timeline) {
+            for (const auto& surf : WaterManager::getInstance().getWaterSurfaces()) {
+                if (surf.params.use_fft_ocean || surf.params.use_geometric_waves ||
+                    surf.animate_mesh || surf.params.wave_strength > 0.0001f) {
+                    timeline_drives_water = true;
+                    break;
+                }
+            }
+        }
+
+        bool timeline_drives_wind = false;
+        for (const auto& group : InstanceManager::getInstance().getGroups()) {
+            if (group.wind_settings.enabled && !group.instances.empty()) {
+                timeline_drives_wind = true;
+                break;
+            }
+        }
+
+        const bool timeline_has_runtime_work =
+            timeline_has_manual_keyframes ||
+            timeline_drives_volumes ||
+            timeline_drives_water ||
+            timeline_drives_wind ||
+            !scene.animationDataList.empty();
         
         // =========================================================================
         // EARLY SCENE LOADING GUARD
@@ -2445,7 +2536,7 @@ int main(int argc, char* argv[]) try {
             continue;
         }
 
-        if (current_volume_frame != last_volume_frame && !skip_backend_for_anim) {
+        if (current_volume_frame != last_volume_frame && !skip_backend_for_anim && timeline_drives_volumes) {
             bool volume_changed = false;
             
             // Update Gas Volumes
@@ -2506,33 +2597,33 @@ int main(int argc, char* argv[]) try {
             start_render = true;
         }
 
-        if (timeline_playing) {
-             // Update Water Manager
-             WaterManager::getInstance().update(dt);
-             
+        if (timeline_playing && timeline_has_runtime_work) {
              // Use frame count from timeline (24 FPS assumption or settings)
              float time_seconds = current_volume_frame / 24.0f;
-             const bool has_instance_groups = InstanceManager::getInstance().getGroupCount() > 0;
 
              // Calculate wind transforms on CPU
             FoliageWindUpdateStats wind_stats;
-            if (has_instance_groups) {
+            if (timeline_drives_wind) {
                 wind_stats = InstanceManager::getInstance().updateWind(time_seconds, scene, g_backend.get());
             }
 
-             // Update OptiX Time
-             if (g_backend) g_backend->setTime(time_seconds, time_seconds);
+             // Update backend time only when something actually consumes timeline time.
+             if (g_backend && (timeline_drives_water || timeline_drives_wind || !scene.animationDataList.empty())) {
+                 g_backend->setTime(time_seconds, time_seconds);
+             }
              
              // Efficiently update instance transforms on GPU (no full rebuild)
-             if (has_instance_groups && g_backend && (wind_stats.any_cpu_update || wind_stats.gpu_deform_applied)) {
+             if (timeline_drives_wind && g_backend && (wind_stats.any_cpu_update || wind_stats.gpu_deform_applied)) {
                  g_backend->updateInstanceTransforms(scene.world.objects);
              }
              
-             // Force redraw (break accumulation)
+             // Force redraw only when playback has scene work to show.
              start_render = true;
-             g_needs_optix_sync.store(true, std::memory_order_release); // Signal that params changed
+             if (timeline_drives_water || timeline_drives_wind || !scene.animationDataList.empty()) {
+                 g_needs_optix_sync.store(true, std::memory_order_release); // Signal that params changed
+             }
              
-        } else {
+        } else if (!timeline_playing) {
              // Static update (for editor changes)
              WaterManager::getInstance().update(0.0f);
         }
@@ -2616,11 +2707,14 @@ int main(int argc, char* argv[]) try {
             
             ui_ctx.renderer.resetCPUAccumulation();
             const bool deferRenderBackendWarmup = isInteractiveViewportShadingMode(ui.viewport_settings.shading_mode);
+            // GPU build was deferred from create_scene — force a full backend sync here.
+            // forceFullSync=true bypasses dirty-flag guards (flags are set below, after
+            // this call), ensuring geometry/materials/lights/world are all uploaded.
             if (g_backend && !skip_backend_for_anim &&
-                g_needs_optix_sync.load(std::memory_order_acquire) &&
                 !ui_ctx.render_settings.backend_changed &&
                 !deferRenderBackendWarmup) {
-                (void)syncActiveRenderBackendScene();
+                g_needs_optix_sync.store(true, std::memory_order_release);
+                (void)syncActiveRenderBackendScene(true);
             }
             
             // Raster viewport rebuild only needed when in Solid/Matcap mode.
@@ -2776,7 +2870,13 @@ int main(int argc, char* argv[]) try {
             rendering_stopped_gpu = false;
             render_settings.is_render_paused = false;
             start_render = true;  // Trigger fresh render at new resolution
-            
+
+            // Notify viewport raster backend about the new camera aspect ratio and
+            // trigger a raster rebuild so Solid/Matcap mode updates without needing
+            // a camera move first.
+            g_camera_dirty = true;
+            g_viewport_raster_rebuild_pending = true;
+
             SCENE_LOG_INFO("Resolution changed to " + std::to_string(image_width) + "x" + std::to_string(image_height));
             
             // Skip to next loop iteration - render starts next frame
@@ -3055,7 +3155,7 @@ int main(int argc, char* argv[]) try {
                         bool geometry_updated = false;
                         const bool has_file_animations = !scene.animationDataList.empty();
                         bool force_bind_pose = (ui.show_hair_tab && ui.active_properties_tab == 8);
-                        const bool should_update_animation = has_file_animations || timeline_playing ||
+                        const bool should_update_animation = has_file_animations ||
                             autonomous_anim_graph_playing ||
                             ui_ctx.render_settings.animation_is_playing || force_bind_pose;
                         if (should_update_animation) {
@@ -3067,7 +3167,8 @@ int main(int argc, char* argv[]) try {
                         static float last_wind_time = -1.0f;
                         
 
-                        if (should_update_animation && std::abs(time - last_wind_time) > 0.001f) {
+                        if ((should_update_animation || (timeline_playing && timeline_drives_wind)) &&
+                            std::abs(time - last_wind_time) > 0.001f) {
                             FoliageWindUpdateStats wind_stats = ray_renderer.updateWind(scene, time);
                             wind_active = wind_stats.any_cpu_update || wind_stats.gpu_deform_applied;
                             
@@ -3105,7 +3206,7 @@ int main(int argc, char* argv[]) try {
                             g_lights_dirty = true;
                             g_world_dirty = true;
                         }
-                        
+
                         // OPTIMIZATION: Only update GPU buffers when data has changed
                         // [CAMERA SYNC FIX] Force sync every frame if camera shake is enabled to allow real-time animation
                         bool needs_camera_sync = g_camera_dirty || (scene.camera && (scene.camera->enable_camera_shake));
@@ -3135,36 +3236,12 @@ int main(int argc, char* argv[]) try {
                             g_lights_dirty = false;
                         }
 
-                        // Update Cloud FFT map binding dynamically
-                        // 1. Update Cloud Manager (independent FFT) if needed
-                        float dt_cloud = ImGui::GetIO().DeltaTime;
-                        if (ui.timeline.isPlaying()) {
-                           // Use animation time step if playing
-                           // dt_cloud is already calculated above as dt?
-                        }
-
-                        CloudManager::getInstance().update(ImGui::GetIO().DeltaTime, ray_renderer.world.getNishitaParams());
-
-                        NishitaSkyParams nishita = ray_renderer.world.getNishitaParams();
-                        cudaTextureObject_t waterFFT = WaterManager::getInstance().getFirstFFTHeightMap();
-                        cudaTextureObject_t cloudFFT = CloudManager::getInstance().getCloudFFTTexture();
-                        
-                        // Priority: Ocean > CloudFFT (Standalone)
-                        // If we have an ocean, sync clouds to it. If not, use independent cloud FFT.
-                        cudaTextureObject_t activeFFT = waterFFT ? waterFFT : cloudFFT;
-                        
-                        if (nishita.cloud_fft_map != activeFFT) {
-                             nishita.cloud_fft_map = activeFFT;
-                             // Only set 'use_fft' flag if User requested it in settings, 
-                             // not just because we have a texture. But nishita.cloud_use_fft comes from UI.
-                             // Actually, we should force it enabled if texture exists AND user checked it?
-                             // No, user checks 'cloud_use_fft' in UI. We just provide map.
-                             // But render_cloud_layer checks both.
-                             
-                             // Update texture handle
-                             nishita.cloud_fft_map = activeFFT;
-                             ray_renderer.world.setNishitaParams(nishita);
-                             g_world_dirty = true;
+                        if (g_gas_volumes_dirty) {
+                            if (activeViewportBackend && activeViewportBackend == g_backend.get()) {
+                                ray_renderer.updateBackendGasVolumes(scene);
+                                activeViewportBackend->resetAccumulation();
+                            }
+                            g_gas_volumes_dirty = false;
                         }
 
                         if (g_world_dirty) {
@@ -3196,7 +3273,7 @@ int main(int argc, char* argv[]) try {
                         auto sample_start = std::chrono::high_resolution_clock::now();
                         if (activeViewportBackend) {
                             static Backend::IBackend* last_backend = nullptr;
-                            static int last_w = -1, last_h = -1, last_max = -1, last_bounces = -1;
+                            static int last_w = -1, last_h = -1, last_max = -1, last_min = -1, last_bounces = -1;
                             static bool last_adaptive = false;
                             static float last_threshold = -1.0f;
                             int current_max = render_settings.is_final_render_mode ? render_settings.final_render_samples : render_settings.max_samples;
@@ -3204,6 +3281,7 @@ int main(int argc, char* argv[]) try {
                             if (activeViewportBackend != last_backend ||
                                 image_width != last_w || image_height != last_h || 
                                 current_max != last_max || 
+                                render_settings.min_samples != last_min ||
                                 render_settings.max_bounces != last_bounces ||
                                 render_settings.use_adaptive_sampling != last_adaptive ||
                                 std::abs(render_settings.variance_threshold - last_threshold) > 0.0001f) 
@@ -3212,6 +3290,7 @@ int main(int argc, char* argv[]) try {
                                 rp.imageWidth = image_width;
                                 rp.imageHeight = image_height;
                                 rp.samplesPerPixel = current_max;
+                                rp.minSamples = render_settings.min_samples;
                                 rp.maxBounces = std::max(1, render_settings.max_bounces);
                                 rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
                                 rp.adaptiveThreshold = render_settings.variance_threshold;
@@ -3221,6 +3300,7 @@ int main(int argc, char* argv[]) try {
                                 last_w = image_width;
                                 last_h = image_height;
                                 last_max = current_max;
+                                last_min = render_settings.min_samples;
                                 last_bounces = render_settings.max_bounces;
                                 last_adaptive = render_settings.use_adaptive_sampling;
                                 last_threshold = render_settings.variance_threshold;
@@ -3280,6 +3360,7 @@ int main(int argc, char* argv[]) try {
                                         g_geometry_dirty = false;
                                         g_materials_dirty = false;
                                         g_gas_volumes_dirty = false;
+                                        g_texture_pool_dirty = false;
                                     }
                                     // Always sync lightweight state (camera/lights/world may have changed)
                                     if (scene.camera) {
@@ -3911,13 +3992,7 @@ int main(int argc, char* argv[]) try {
                 
                 // SKIP EVERYTHING if no animations exist at all
                 if (!has_file_animations && !has_manual_keyframes) {
-                    // No animation data - just reset accumulation and skip geometry updates
-                    if (has_active_render_gpu_backend) {
-                        if (g_backend) g_backend->resetAccumulation();
-                    } else {
-                        ray_renderer.resetCPUAccumulation();
-                    }
-                    start_render = true;
+                    // No animation data: playhead can move without invalidating the scene.
                     last_playback_frame = current_playback_frame;
                     // FAST PATH: Skip all expensive work below
                 }
@@ -3936,10 +4011,10 @@ int main(int argc, char* argv[]) try {
                     }
                         // else: TimelineWidget::draw() handles manual keyframes with O(1) object lookup - FAST!
                     
-                    // Mark all buffers dirty for animation frame change
-                    g_camera_dirty = true;
-                    g_lights_dirty = true;
-                    g_world_dirty = true;
+                    if (has_file_animations || timeline_has_camera_keyframes) g_camera_dirty = true;
+                    if (has_file_animations || timeline_has_light_keyframes) g_lights_dirty = true;
+                    if (has_file_animations || timeline_has_world_keyframes) g_world_dirty = true;
+                    if (timeline_has_world_keyframes) g_gas_volumes_dirty = true;
                     
                     // Update Backend if needed
                         if (has_active_render_gpu_backend) {
@@ -3988,12 +4063,21 @@ int main(int argc, char* argv[]) try {
                         }
                         // If !has_file_animations && !has_manual_keyframes, we don't reach here
                         
-                        if (scene.camera) ray_renderer.syncCameraToBackend(*scene.camera);
+                        if ((has_file_animations || timeline_has_camera_keyframes) && scene.camera) {
+                            ray_renderer.syncCameraToBackend(*scene.camera);
+                        }
 
                         // Update GPU materials for material keyframe animation
-                        ray_renderer.updateBackendMaterials(scene);
-                        syncMaterialBufferToViewportBackend(scene, ray_renderer);
-                        
+                        if (has_file_animations) {
+                            ray_renderer.updateBackendMaterials(scene);
+                            syncMaterialBufferToViewportBackend(scene, ray_renderer);
+                        }
+
+                        if (timeline_has_world_keyframes) {
+                            ray_renderer.updateBackendGasVolumes(scene);
+                            g_gas_volumes_dirty = false;
+                        }
+
                         // Reset accumulation for new frame
                         g_backend->resetAccumulation();
                         
@@ -4307,7 +4391,7 @@ int main(int argc, char* argv[]) try {
                     if (!obj) continue;
 
                     if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-                        if (tri->getTransformHandle() && tri->getVertexBoneWeights().empty()) {
+                        if (tri->getTransformPtr() && tri->getVertexBoneWeights().empty()) {
                             tri->updateTransformedVertices();
                         }
                         continue;
@@ -4320,7 +4404,7 @@ int main(int argc, char* argv[]) try {
 
                         if (inst->source_triangles) {
                             for (auto& srcTri : *inst->source_triangles) {
-                                if (srcTri && srcTri->getTransformHandle() && srcTri->getVertexBoneWeights().empty()) {
+                                if (srcTri && srcTri->getTransformPtr() && srcTri->getVertexBoneWeights().empty()) {
                                     srcTri->updateTransformedVertices();
                                 }
                             }
@@ -4533,6 +4617,8 @@ int main(int argc, char* argv[]) try {
     SDL_FreeSurface(original_surface);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
+    // Perform clean-shutdown cleanup: remove StartupCrash.log since shutdown is clean.
+    removeStartupCrashLogIfExists();
     SDL_Quit();
     g_sceneLog.closeLogFile();
     return 0;

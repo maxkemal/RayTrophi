@@ -12,6 +12,7 @@ class VulkanViewportBackend final : public VulkanBackendAdapter {
 public:
     VulkanViewportBackend() = default;
     ~VulkanViewportBackend() override = default;
+    const char* sceneTextureOwnerScope() const override { return "VulkanViewportBackend"; }
 
     // Set external material buffer from the render backend for MaterialPreview mode.
     // This avoids duplicating material uploads — viewport backend borrows the buffer.

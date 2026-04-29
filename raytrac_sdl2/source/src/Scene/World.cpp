@@ -12,149 +12,6 @@
 inline float3 to_float3(const Vec3& v) { return make_float3(v.x, v.y, v.z); }
 inline Vec3 to_vec3(const float3& v) { return Vec3(v.x, v.y, v.z); }
 
-// Helper Noise class for CPU
-class CPUCloudNoise {
-public:
-    static float hash(float n) {
-        return fmodf(sinf(n) * 43758.5453f, 1.0f);
-    }
-    
-    // Fractional part (x - floor(x))
-    static float frac(float x) {
-        return x - floorf(x);
-    }
-
-    static float hash33(Vec3 p) {
-        // Explicit dot product if global dot() is not available for Vec3
-        float d = p.x * 12.9898f + p.y * 78.233f + p.z * 53.539f;
-        return fmodf(sinf(d) * 43758.5453f, 1.0f);
-    }
-
-    static float noise3D(Vec3 x) {
-        Vec3 p(floorf(x.x), floorf(x.y), floorf(x.z));
-        Vec3 f(x.x - p.x, x.y - p.y, x.z - p.z);
-        
-        // Smoothstep: f * f * (3.0 - 2.0 * f)
-        // Manual component-wise math to avoid operator ambiguities
-        f.x = f.x * f.x * (3.0f - 2.0f * f.x);
-        f.y = f.y * f.y * (3.0f - 2.0f * f.y);
-        f.z = f.z * f.z * (3.0f - 2.0f * f.z);
-
-        float n = p.x + p.y * 57.0f + p.z * 113.0f;
-
-        return lerp(lerp(lerp(hash(n + 0.0f), hash(n + 1.0f), f.x),
-                         lerp(hash(n + 57.0f), hash(n + 58.0f), f.x), f.y),
-                    lerp(lerp(hash(n + 113.0f), hash(n + 114.0f), f.x),
-                         lerp(hash(n + 170.0f), hash(n + 171.0f), f.x), f.y), f.z);
-    }
-    
-    static float lerp(float a, float b, float t) {
-        return a + t * (b - a);
-    }
-
-    static float fbm(Vec3 p, int octaves) {
-        float f = 0.0f;
-        float w = 0.5f;
-        for (int i = 0; i < octaves; i++) {
-            f += w * noise3D(p);
-            p = p * 2.0f;
-            w *= 0.5f;
-        }
-        return f;
-    }
-    
-    // 3D Hash for Worley noise
-    static Vec3 hash3(Vec3 p) {
-        float px = p.x * 127.1f + p.y * 311.7f + p.z * 74.7f;
-        float py = p.x * 269.5f + p.y * 183.3f + p.z * 246.1f;
-        float pz = p.x * 113.5f + p.y * 271.9f + p.z * 124.6f;
-        return Vec3(
-            frac(sinf(px) * 43758.5453f),
-            frac(sinf(py) * 43758.5453f),
-            frac(sinf(pz) * 43758.5453f)
-        );
-    }
-    
-    // Worley (Cellular) Noise - creates puffy cloud structures
-    static float worley(Vec3 p) {
-        Vec3 i = Vec3(floorf(p.x), floorf(p.y), floorf(p.z));
-        Vec3 f = Vec3(frac(p.x), frac(p.y), frac(p.z));
-        
-        float minDist = 1.0f;
-        
-        // Check 3x3x3 neighborhood
-        for (int z = -1; z <= 1; z++) {
-            for (int y = -1; y <= 1; y++) {
-                for (int x = -1; x <= 1; x++) {
-                    Vec3 neighbor((float)x, (float)y, (float)z);
-                    Vec3 point = hash3(i + neighbor);
-                    Vec3 diff = neighbor + point - f;
-                    float dist = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
-                    minDist = fminf(minDist, dist);
-                }
-            }
-        }
-        
-        return sqrtf(minDist);
-    }
-    
-    // Worley FBM
-    static float worleyFbm(Vec3 p, int octaves) {
-        float f = 0.0f;
-        float w = 0.5f;
-        for (int i = 0; i < octaves; i++) {
-            f += w * worley(p);
-            p = p * 2.0f;
-            w *= 0.5f;
-        }
-        return f;
-    }
-    
-    // ═══════════════════════════════════════════════════════════
-    // CINEMATIC CLOUD SHAPE - Matches GPU Exactly (CloudNoise.cuh)
-    // ═══════════════════════════════════════════════════════════
-    static float cloud_shape(Vec3 p, float coverage) {
-        // === LAYER 1: Base Shape ===
-        float baseShape = fbm(p * 0.8f, 4);
-        
-        // === LAYER 2: Worley Cellular Structure ===
-        float worleyBase = worley(p * 1.2f);
-        float worleyDetail = worleyFbm(p * 2.5f, 3);
-        float worlyClouds = 1.0f - worleyBase * 0.6f - worleyDetail * 0.3f;
-        
-        // === LAYER 3: Fine Detail Erosion ===
-        float detailNoise = fbm(p * 4.0f, 4);
-        float microDetail = fbm(p * 12.0f, 2) * 0.15f; // Matched to 0.15
-        
-        // === COMBINE LAYERS ===
-        float combined = baseShape * worlyClouds;
-        combined = combined - detailNoise * 0.15f - microDetail; // Matched subtraction
-        combined = fmaxf(0.0f, combined);
-        
-        // === COVERAGE REMAP ===
-        float threshold = (1.0f - coverage) * 0.55f;
-        float density = fmaxf(0.0f, combined - threshold);
-        
-        // === SOFT EDGE FALLOFF ===
-        float edge = fminf(1.0f, density * 4.0f);
-        edge = edge * edge;
-        density *= edge;
-        
-        // === DENSITY BOOST ===
-        density *= 5.0f; // Matched to 5.0 for volume appearance
-        
-        return density;
-    }
-    
-    // Powder effect for silver lining
-    static float powderEffect(float density, float cosTheta) {
-        float beer = expf(-density * 2.0f);
-        float powder = 1.0f - expf(-density * 4.0f);
-        float sunFactor = (1.0f + cosTheta) * 0.5f;
-        return beer + (powder * beer - beer) * sunFactor * 0.5f;
-    }
-};
-
 World::World() {
     data.mode = WORLD_MODE_NISHITA; // Default to Nishita Sky
     data.color = make_float3(0.05f, 0.05f, 0.05f); 
@@ -191,38 +48,38 @@ World::World() {
     data.nishita.altitude = 0.0f;          // Sea level (meters)
     
     
-    // Cloud Defaults - Lower heights for easier access
+    // Procedural VDB cloud defaults
     data.nishita.clouds_enabled = 0;       // Disabled by default
-    data.nishita.cloud_coverage = 0.5f;
-    data.nishita.cloud_density = 1.0f;
-    data.nishita.cloud_scale = 1.0f;
-    data.nishita.cloud_height_min = 500.0f;  // 500m - more accessible
-    data.nishita.cloud_height_max = 2000.0f; // 2km - gives 1.5km layer thickness
+    data.nishita.cloud_coverage = 0.18f;
+    data.nishita.cloud_density = 0.35f;
+    data.nishita.cloud_scale = 0.45f;
+    data.nishita.cloud_height_min = 2500.0f;
+    data.nishita.cloud_height_max = 4200.0f;
     data.nishita.cloud_offset_x = 0.0f;
     data.nishita.cloud_offset_z = 0.0f;
     data.nishita.cloud_quality = 1.0f;     // Normal quality (1.0 = 64-128 steps)
-    data.nishita.cloud_detail = 1.0f;      // Normal detail level
+    data.nishita.cloud_detail = 0.55f;     // Normal detail level
     data.nishita.cloud_base_steps = 48;    // Default base resolution
     
     // Cloud Layer 2 defaults (High altitude cirrus-like)
     data.nishita.cloud_layer2_enabled = 0;   // Disabled by default
-    data.nishita.cloud2_coverage = 0.3f;
-    data.nishita.cloud2_density = 0.3f;      // Thin/transparent
-    data.nishita.cloud2_scale = 8.0f;        // Large/wispy
-    data.nishita.cloud2_height_min = 6000.0f; // 6km
-    data.nishita.cloud2_height_max = 7000.0f; // 7km (thin layer)
+    data.nishita.cloud2_coverage = 0.16f;
+    data.nishita.cloud2_density = 0.18f;      // Thin/transparent
+    data.nishita.cloud2_scale = 0.25f;        // High wispy layer
+    data.nishita.cloud2_height_min = 7000.0f;
+    data.nishita.cloud2_height_max = 8500.0f;
     
     // Cloud Lighting defaults
     data.nishita.cloud_light_steps = 0;      // Light marching steps (0 = disabled)
-    data.nishita.cloud_shadow_strength = 1.0f;
+    data.nishita.cloud_shadow_strength = 0.35f;
     data.nishita.cloud_ambient_strength = 1.0f;
-    data.nishita.cloud_silver_intensity = 1.0f;
+    data.nishita.cloud_silver_intensity = 0.25f;
     data.nishita.cloud_absorption = 1.0f;
     
     // Cloud Advanced Scattering (VDB-like) defaults
-    data.nishita.cloud_anisotropy = 0.85f;       // Modern clouds forward scatter strongly
-    data.nishita.cloud_anisotropy_back = -0.3f;   // Standard back lobe
-    data.nishita.cloud_lobe_mix = 0.5f;          // Even mix
+    data.nishita.cloud_anisotropy = 0.55f;
+    data.nishita.cloud_anisotropy_back = -0.2f;
+    data.nishita.cloud_lobe_mix = 0.75f;
     
     // Cloud Emissive (Experimental) defaults
     data.nishita.cloud_emissive_color = make_float3(1.0f, 1.0f, 1.0f);
@@ -678,86 +535,6 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir, const Vec3& origin) {
          L += to_vec3(trans) * data.nishita.sun_intensity * 80000.0f * limbDarkening * edgeSoftness;
     }
 
-    // ═══════════════════════════════════════════════════════════
-    // VOLUMETRIC CLOUDS (CPU Optimized Path)
-    // ═══════════════════════════════════════════════════════════
-    if ((data.nishita.clouds_enabled || data.nishita.cloud_layer2_enabled) && dir.y > 0.001f) {
-        float transmittance = 1.0f;
-        Vec3 accumulatedCloudColor(0.0f);
-        float camY = std::max(0.0f, data.camera_y != 0.0f ? data.camera_y : data.nishita.altitude);
-        Vec3 camPos(0.0f, camY, 0.0f);
-        Vec3 rayDir = to_vec3(dir);
-
-        for (int layer = 0; layer < 2; ++layer) {
-            bool enabled = (layer == 0) ? data.nishita.clouds_enabled : data.nishita.cloud_layer2_enabled;
-            if (!enabled) continue;
-
-            float minH = (layer == 0) ? data.nishita.cloud_height_min : data.nishita.cloud2_height_min;
-            float maxH = (layer == 0) ? data.nishita.cloud_height_max : data.nishita.cloud2_height_max;
-            float coverage = (layer == 0) ? data.nishita.cloud_coverage : data.nishita.cloud2_coverage;
-            float densityMult = (layer == 0) ? data.nishita.cloud_density : data.nishita.cloud2_density;
-            float scale = 0.003f / std::max(0.01f, (layer == 0) ? data.nishita.cloud_scale : data.nishita.cloud2_scale);
-            float t_enter, t_exit;
-            if (camPos.y < minH) {
-                if (rayDir.y <= 0.0f) continue;
-                t_enter = (minH - camPos.y) / rayDir.y;
-                t_exit = (maxH - camPos.y) / rayDir.y;
-            }
-            else if (camPos.y > maxH) {
-                if (rayDir.y >= 0.0f) continue;
-                t_enter = (maxH - camPos.y) / rayDir.y;
-                t_exit = (minH - camPos.y) / rayDir.y;
-            }
-            else {
-                t_enter = 0.0f;
-                t_exit = (rayDir.y > 0.0f) ? (maxH - camPos.y) / rayDir.y : (minH - camPos.y) / rayDir.y;
-            }
-
-            if (t_exit > 0.0f && t_exit > t_enter) {
-                t_enter = std::max(t_enter, 0.0f);
-
-                float h_t = std::max(0.0f, std::min(1.0f, std::abs(rayDir.y) / 0.008f));
-                float horizonFade = h_t * h_t * (3.0f - 2.0f * h_t);
-
-                float quality = std::max(0.1f, std::min(3.0f, data.nishita.cloud_quality));
-                int numSteps = (int)(32.0f * quality);
-                float stepSize = (t_exit - t_enter) / (float)numSteps;
-
-                float layerTransmittance = 1.0f;
-                Vec3 layerColor(0.0f);
-                float sunMu = dot(sunDir, dir);
-
-                for (int i = 0; i < numSteps; ++i) {
-                    float t_sample = t_enter + stepSize * (i + 0.5f);
-                    Vec3 p = camPos + rayDir * t_sample;
-
-                    float h_frac = (p.y - minH) / (maxH - minH);
-                    float h_grad = std::max(0.01f, std::min(1.0f, h_frac / 0.05f)) * std::max(0.01f, std::min(1.0f, (1.0f - h_frac) / 0.3f));
-
-                    Vec3 noisePos = (p + Vec3(data.nishita.cloud_offset_x, 0, data.nishita.cloud_offset_z)) * scale;
-                    float density = CPUCloudNoise::cloud_shape(noisePos, coverage) * h_grad;
-
-                    if (density > 0.003f) {
-                        density *= densityMult * horizonFade;
-                        float sigma_t = density * 1.5f;
-                        float stepTrans = expf(-sigma_t * stepSize * 0.02f);
-
-                        // Improved scattering approximation
-                        float phase = (1.0f - g_mie * g_mie) / (4.0f * 3.14159f * powf(1.0f + g_mie * g_mie - 2.0f * g_mie * sunMu, 1.5f));
-                        Vec3 sunColor = (sunDir.y > 0.15f) ? Vec3(1.0f, 0.95f, 0.85f) : Vec3(1.0f, 0.6f, 0.3f);
-                        Vec3 inScat = sunColor * phase * data.nishita.sun_intensity * 0.2f;
-
-                        layerColor = layerColor + (inScat * (1.0f - stepTrans) * layerTransmittance);
-                        layerTransmittance *= stepTrans;
-                    }
-                    if (layerTransmittance < 0.01f) break;
-                }
-                accumulatedCloudColor += layerColor * transmittance;
-                transmittance *= layerTransmittance;
-            }
-            L = L * transmittance + accumulatedCloudColor;
-        }
-    }
     return L;
 }
        
@@ -993,36 +770,36 @@ void World::deserialize(const nlohmann::json& j) {
         
         // Cloud Layer 1
         data.nishita.clouds_enabled = n.value("clouds_enabled", 0);
-        data.nishita.cloud_coverage = n.value("cloud_coverage", 0.5f);
-        data.nishita.cloud_density = n.value("cloud_density", 1.0f);
-        data.nishita.cloud_scale = n.value("cloud_scale", 1.0f);
-        data.nishita.cloud_height_min = n.value("cloud_height_min", 500.0f);
-        data.nishita.cloud_height_max = n.value("cloud_height_max", 2000.0f);
+        data.nishita.cloud_coverage = n.value("cloud_coverage", 0.18f);
+        data.nishita.cloud_density = n.value("cloud_density", 0.35f);
+        data.nishita.cloud_scale = n.value("cloud_scale", 0.45f);
+        data.nishita.cloud_height_min = n.value("cloud_height_min", 2500.0f);
+        data.nishita.cloud_height_max = n.value("cloud_height_max", 4200.0f);
         data.nishita.cloud_offset_x = n.value("cloud_offset_x", 0.0f);
         data.nishita.cloud_offset_z = n.value("cloud_offset_z", 0.0f);
         data.nishita.cloud_quality = n.value("cloud_quality", 1.0f);
-        data.nishita.cloud_detail = n.value("cloud_detail", 1.0f);
+        data.nishita.cloud_detail = n.value("cloud_detail", 0.55f);
         data.nishita.cloud_base_steps = n.value("cloud_base_steps", 48);
         
         // Cloud Layer 2
         data.nishita.cloud_layer2_enabled = n.value("cloud_layer2_enabled", 0);
-        data.nishita.cloud2_coverage = n.value("cloud2_coverage", 0.3f);
-        data.nishita.cloud2_density = n.value("cloud2_density", 0.3f);
-        data.nishita.cloud2_scale = n.value("cloud2_scale", 8.0f);
-        data.nishita.cloud2_height_min = n.value("cloud2_height_min", 6000.0f);
-        data.nishita.cloud2_height_max = n.value("cloud2_height_max", 7000.0f);
+        data.nishita.cloud2_coverage = n.value("cloud2_coverage", 0.16f);
+        data.nishita.cloud2_density = n.value("cloud2_density", 0.18f);
+        data.nishita.cloud2_scale = n.value("cloud2_scale", 0.25f);
+        data.nishita.cloud2_height_min = n.value("cloud2_height_min", 7000.0f);
+        data.nishita.cloud2_height_max = n.value("cloud2_height_max", 8500.0f);
         
         // Cloud Lighting
         data.nishita.cloud_light_steps = n.value("cloud_light_steps", 0);
-        data.nishita.cloud_shadow_strength = n.value("cloud_shadow_strength", 1.0f);
+        data.nishita.cloud_shadow_strength = n.value("cloud_shadow_strength", 0.35f);
         data.nishita.cloud_ambient_strength = n.value("cloud_ambient_strength", 1.0f);
-        data.nishita.cloud_silver_intensity = n.value("cloud_silver_intensity", 1.0f);
+        data.nishita.cloud_silver_intensity = n.value("cloud_silver_intensity", 0.25f);
         data.nishita.cloud_absorption = n.value("cloud_absorption", 1.0f);
         
         // Cloud Advanced Scattering
-        data.nishita.cloud_anisotropy = n.value("cloud_anisotropy", 0.85f);
-        data.nishita.cloud_anisotropy_back = n.value("cloud_anisotropy_back", -0.3f);
-        data.nishita.cloud_lobe_mix = n.value("cloud_lobe_mix", 0.5f);
+        data.nishita.cloud_anisotropy = n.value("cloud_anisotropy", 0.55f);
+        data.nishita.cloud_anisotropy_back = n.value("cloud_anisotropy_back", -0.2f);
+        data.nishita.cloud_lobe_mix = n.value("cloud_lobe_mix", 0.75f);
         
         // Cloud Emissive
         data.nishita.cloud_emissive_intensity = n.value("cloud_emissive_intensity", 0.0f);
@@ -1030,6 +807,15 @@ void World::deserialize(const nlohmann::json& j) {
             auto ec = n["cloud_emissive_color"];
             data.nishita.cloud_emissive_color = make_float3(ec[0], ec[1], ec[2]);
         }
+
+        data.nishita.cloud_coverage = (std::max)(0.0f, (std::min)(0.6f, data.nishita.cloud_coverage));
+        data.nishita.cloud_density = (std::max)(0.0f, (std::min)(1.5f, data.nishita.cloud_density));
+        data.nishita.cloud_scale = (std::max)(0.1f, (std::min)(1.0f, data.nishita.cloud_scale));
+        data.nishita.cloud_detail = (std::max)(0.0f, (std::min)(1.0f, data.nishita.cloud_detail));
+        data.nishita.cloud_base_steps = (std::max)(8, (std::min)(96, data.nishita.cloud_base_steps));
+        data.nishita.cloud2_coverage = (std::max)(0.0f, (std::min)(0.6f, data.nishita.cloud2_coverage));
+        data.nishita.cloud2_density = (std::max)(0.0f, (std::min)(1.5f, data.nishita.cloud2_density));
+        data.nishita.cloud2_scale = (std::max)(0.1f, (std::min)(1.0f, data.nishita.cloud2_scale));
         
         // Physical Constants
         data.nishita.planet_radius = n.value("planet_radius", 6360000.0f);

@@ -14,17 +14,23 @@ enum class PaintChannel : unsigned char {
     Metallic,
     Emission,
     Mask,
-    Transmission
+    Transmission,
+    Opacity
 };
+
+// Number of values in PaintChannel. Centralised so layer/snapshot arrays,
+// composite loops and serialisation paths all stay aligned when channels
+// are added or removed.
+inline constexpr size_t kPaintChannelCount = 8;
 
 struct PaintTextureSet {
     std::string target_node_name;
     uint16_t material_id = 0xFFFF;
     int resolution = 1024;
     bool initialized = false;
-    std::array<bool, 7> seeded_from_existing{};
-    std::array<std::string, 7> source_texture_names{};
-    std::array<std::shared_ptr<Texture>, 7> source_textures{};
+    std::array<bool, kPaintChannelCount> seeded_from_existing{};
+    std::array<std::string, kPaintChannelCount> source_texture_names{};
+    std::array<std::shared_ptr<Texture>, kPaintChannelCount> source_textures{};
 
     std::shared_ptr<Texture> base_color;
     std::shared_ptr<Texture> normal;
@@ -33,6 +39,7 @@ struct PaintTextureSet {
     std::shared_ptr<Texture> emission;
     std::shared_ptr<Texture> mask;
     std::shared_ptr<Texture> transmission;
+    std::shared_ptr<Texture> opacity;
 
     std::string makeKey() const;
     std::shared_ptr<Texture> getTexture(PaintChannel channel) const;

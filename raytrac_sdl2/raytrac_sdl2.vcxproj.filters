@@ -333,7 +333,13 @@
     <ClInclude Include="source\include\Backend\IBackend.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Backend\RenderCapabilities.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Backend\OptixBackend.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Backend\SceneTextureManager.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Backend\VulkanBackend.h">
@@ -732,6 +738,9 @@
     </ClCompile>
     <ClCompile Include="source\src\Backend\OptixBackend.cpp">
       <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\SceneTextureManager.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp">
       <Filter>Kaynak Dosyalar</Filter>

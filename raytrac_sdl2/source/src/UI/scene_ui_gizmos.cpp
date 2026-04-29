@@ -67,7 +67,7 @@ void SceneUI::moveObjectPivot(UIContext& ctx, const std::string& objectName, con
     auto cache_it = mesh_cache.find(objectName);
     if (cache_it == mesh_cache.end() || cache_it->second.empty()) return;
 
-    auto transform = cache_it->second[0].second->getTransformHandle();
+    Transform* transform = cache_it->second[0].second->getTransformPtr();
     if (!transform) return;
 
     const Vec3 newPivotWorld = transform->position + worldDelta;
@@ -122,7 +122,7 @@ void SceneUI::recenterObjectPivotToBoundsCenter(UIContext& ctx, const std::strin
     auto cache_it = mesh_cache.find(objectName);
     if (cache_it == mesh_cache.end() || cache_it->second.empty()) return;
 
-    auto transform = cache_it->second[0].second->getTransformHandle();
+    Transform* transform = cache_it->second[0].second->getTransformPtr();
     if (!transform) return;
 
     const Vec3 targetPivotWorld = transform->base.transform_point(localCenter);
@@ -470,7 +470,7 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
 
                     // TRANSFORM THE BOUNDING BOX by object's current transform matrix
                     // This ensures bbox follows the object in TLAS mode where CPU vertices aren't updated
-                    auto transform = item.object->getTransformHandle();
+                    Transform* transform = item.object->getTransformPtr();
                     if (transform) {
                         Matrix4x4& m = transform->base;
 
@@ -2240,11 +2240,12 @@ mesh_edit_changed_confirmed:
             (getGizmoRenderBackend(ctx) && getGizmoRenderBackend(ctx)->isUsingTLAS());
         
         if (sel.multi_selection.size() > 0) {
+            bool any_object_moved = false;
             for (auto& item : sel.multi_selection) {
                 if (item.type == SelectableType::Object && item.object) {
                     std::string name = item.object->nodeName;
                     if (name.empty()) name = "Unnamed";
-                    
+
                     if (using_gpu_tlas) {
                         // TLAS mode: Just mark for lazy sync (instant release!)
                         objects_needing_cpu_sync.insert(name);
@@ -2257,11 +2258,14 @@ mesh_edit_changed_confirmed:
                             }
                         }
                     }
+                    any_object_moved = true;
                 }
             }
-            // BVH rebuild needed for both GPU and CPU - for accurate picking!
-            extern bool g_bvh_rebuild_pending;
-            g_bvh_rebuild_pending = true;
+            // BVH rebuild needed only when geometry (objects) actually moved — lights/cameras don't affect BVH
+            if (any_object_moved) {
+                extern bool g_bvh_rebuild_pending;
+                g_bvh_rebuild_pending = true;
+            }
         } else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
             std::string name = sel.selected.object->nodeName;
             if (name.empty()) name = "Unnamed";

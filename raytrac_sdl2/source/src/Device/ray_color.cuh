@@ -19,10 +19,6 @@
 #include "params.h"  // For GpuVDBVolume
 #include "GodRaysModel.h"
 
-
-// Helper function to render a single cloud layer
-// Returns ONLY the cloud color contribution (not blended with background)
-// Modifies transmittance based on cloud density encountered
 // =============================================================================
 // PHASE FUNCTIONS AND VOLUMETRIC HELPERS
 // =============================================================================
@@ -57,15 +53,11 @@ __device__ float gpu_powder_effect(float density, float cos_theta) {
     return powder * forward_bias;
 }
 
-__device__ inline float smoothstep_cloud(float edge0, float edge1, float x) {
-    float t = fmaxf(0.0f, fminf(1.0f, (x - edge0) / (edge1 - edge0)));
-    return t * t * (3.0f - 2.0f * t);
-}
-
 // Forward declaration for ambient sky radiance
 __device__ float3 gpu_get_sky_radiance(const WorldData& world, const float3& dir);
 __device__ float3 gpu_get_ambient_radiance_volume(const WorldData& world, const float3& dir);
 __device__ float3 gpu_get_volume_ambient_dir(const WorldData& world, const float3& view_dir);
+__device__ float sample_procedural_cloud_density(const GpuVDBVolume& vol, const float3& local_pos);
 
 // GPU helper: Get transmittance from LUT (Pfe-computed)
 __device__ float3 gpu_get_transmittance(const WorldData& world, float3 pos, float3 sunDir) {
@@ -85,317 +77,6 @@ __device__ float3 gpu_get_transmittance(const WorldData& world, float3 pos, floa
     
     float4 tex = tex2D<float4>(world.lut.transmittance_lut, u, v);
     return make_float3(tex.x, tex.y, tex.z);
-}
-
-__device__ float3 render_cloud_layer(
-    const WorldData& world, 
-    const float3& rayDir, 
-    float3 bg_color,  // Used for ambient calculation only
-    float cloudMinY, float cloudMaxY,
-    float scale, float coverage, float densityMult, float detail,
-    float& transmittance  // In/out parameter
-) {
-    // Use actual camera Y position
-    float camY = (world.camera_y != 0.0f) ? world.camera_y : world.nishita.altitude;
-    float3 cloudCamPos = make_float3(0.0f, camY, 0.0f);
-    
-    // Ray-Plane Intersection
-    float t_enter, t_exit;
-    
-    // No color contribution for all these early-exit cases
-    float3 noCloud = make_float3(0.0f, 0.0f, 0.0f);
-    
-    if (cloudCamPos.y < cloudMinY) {
-        if (rayDir.y <= 0.0f) return noCloud;  // Looking down, can't see clouds above
-        t_enter = (cloudMinY - cloudCamPos.y) / rayDir.y;
-        t_exit = (cloudMaxY - cloudCamPos.y) / rayDir.y;
-    }
-    else if (cloudCamPos.y > cloudMaxY) {
-        if (rayDir.y >= 0.0f) return noCloud;  // Looking up, can't see clouds below
-        t_enter = (cloudMaxY - cloudCamPos.y) / rayDir.y;
-        t_exit = (cloudMinY - cloudCamPos.y) / rayDir.y;
-    }
-    else {
-        t_enter = 0.0f;
-        if (rayDir.y > 0.001f) {
-            t_exit = (cloudMaxY - cloudCamPos.y) / rayDir.y;
-        } else if (rayDir.y < -0.001f) {
-            t_exit = (cloudMinY - cloudCamPos.y) / rayDir.y;
-        } else {
-            t_exit = 500000.0f;
-        }
-    }
-    
-    if (t_exit <= 0.0f || t_exit <= t_enter) return noCloud;  // No valid intersection
-    
-    // Performance Optimization: Distance Culling (Frustum/Range Limit)
-    // Extended to 500km to support realistic horizon and high-altitude views
-    const float MAX_CLOUD_DIST = 500000.0f;
-    if (t_enter > MAX_CLOUD_DIST) return noCloud;
-    t_exit = fminf(t_exit, MAX_CLOUD_DIST);
-    
-    if (t_enter < 0.0f) t_enter = 0.0f;
-    
-    // Horizon fade - MORE GENEROUS (approx 0.5 degree)
-    // Prevents hard cutoff at horizon but allows clouds to be seen lower
-    float h_val = rayDir.y / 0.008f;
-    float h_t = fmaxf(0.0f, fminf(1.0f, fabsf(h_val)));
-    float horizonFade = h_t * h_t * (3.0f - 2.0f * h_t);
-    
-    // Additional fade out at max distance (starts 100km before edge)
-    float distFade = 1.0f - fmaxf(0.0f, (t_enter - (MAX_CLOUD_DIST - 100000.0f)) / 100000.0f);
-    horizonFade *= distFade;
-
-    // Quality-based step count - BUFFED 3X (User controllable base)
-    float quality = fmaxf(0.1f, fminf(3.0f, world.nishita.cloud_quality));
-    int baseSteps = (int)((float)world.nishita.cloud_base_steps * quality); 
-    int numSteps = baseSteps + (int)((float)baseSteps * (1.0f - h_t));
-    
-    float stepSize = (t_exit - t_enter) / (float)numSteps;
-    float3 cloudColor = make_float3(0.0f, 0.0f, 0.0f);
-    float t = t_enter;
-    
-    float localDensityMult = densityMult * horizonFade;
-    
-    float3 ambientSky = bg_color * 0.3f;
-    float3 sunDirection = normalize(world.nishita.sun_direction);
-    
-    // Cloud Anisotropy (G-Factors)
-    float cloudG = fmaxf(0.0f, fminf(0.99f, world.nishita.cloud_anisotropy));
-    float cloudG_back = fmaxf(-0.99f, fminf(0.0f, world.nishita.cloud_anisotropy_back));
-    float lobeMix = fmaxf(0.0f, fminf(1.0f, world.nishita.cloud_lobe_mix));
-    
-    // Emissive
-    float3 cloudEmissive = world.nishita.cloud_emissive_color * world.nishita.cloud_emissive_intensity;
-    
-    for (int i = 0; i < numSteps; ++i) {
-        float jitterSeed = (float)i + (rayDir.x * 53.0f + rayDir.z * 91.0f) * 10.0f;
-        float3 pos = cloudCamPos + rayDir * (t + stepSize * hash(jitterSeed));
-        
-        float heightFraction = (pos.y - cloudMinY) / (cloudMaxY - cloudMinY);
-        
-        // CUMULUS PROFILE (Strict Flat Bottom)
-        float heightGradient = smoothstep_cloud(0.0f, 0.05f, heightFraction) * smoothstep_cloud(1.0f, 0.3f, heightFraction);
-        if (heightFraction < 0.2f) {
-           heightGradient = fmaxf(heightGradient, smoothstep_cloud(0.0f, 0.02f, heightFraction));
-        }
-        
-        float3 offsetPos = pos + make_float3(world.nishita.cloud_offset_x, 0.0f, world.nishita.cloud_offset_z);
-        float3 noisePos = offsetPos * scale;
-        float effectiveCoverage = coverage;
-        
-        // FFT Based Coverage Modulation
-        if (world.nishita.cloud_use_fft && world.nishita.cloud_fft_map) {
-            float uvScale = 0.002f; 
-            float u = offsetPos.x * uvScale;
-            float v = offsetPos.z * uvScale;
-            u = u - floorf(u);
-            v = v - floorf(v);
-            float4 fftData = tex2D<float4>(world.nishita.cloud_fft_map, u, v);
-            effectiveCoverage = fmaxf(0.0f, fminf(1.0f, effectiveCoverage + fftData.x * 0.15f));
-        }
-
-        float rawDensity = cloud_shape(noisePos, effectiveCoverage, detail);
-        
-        float density = rawDensity * heightGradient;
-        
-        if (density > 0.003f) {
-            density *= localDensityMult;
-            
-            // ═══════════════════════════════════════════════════════════
-            // LIGHT MARCHING (Self-Shadowing) - Controllable via UI
-            // ═══════════════════════════════════════════════════════════
-            float lightTransmittance = 1.0f;
-            int lightSteps = world.nishita.cloud_light_steps;  // UI controlled
-            
-            if (lightSteps > 0 && sunDirection.y > -0.1f) {
-                // Adaptive step size based on density
-                float lightStepSize = (cloudMaxY - pos.y) / fmaxf(0.1f, fabsf(sunDirection.y)) / (float)lightSteps;
-                lightStepSize = fminf(lightStepSize, 200.0f); // Clamp max step
-                
-                // ═══════════════════════════════════════════════════════════
-                // DUAL SCATTERING LIGHT MARCHING
-                // ═══════════════════════════════════════════════════════════
-                float lightDensitySum = 0.0f;
-
-                for (int j = 1; j <= lightSteps; ++j) {
-                    float3 lightPos = pos + sunDirection * (lightStepSize * (float)j);
-                    
-                    if (lightPos.y > cloudMaxY || lightPos.y < cloudMinY) break;
-                    
-                    float3 lightOffsetPos = lightPos + make_float3(world.nishita.cloud_offset_x, 0.0f, world.nishita.cloud_offset_z);
-                    
-                    float3 lightNoisePos = lightOffsetPos * scale;
-                    // Use fast_cloud_shape for performance in shadow rays
-                    float lightDensity = fast_cloud_shape(lightNoisePos, coverage);
-
-                    float lh = (lightPos.y - cloudMinY) / (cloudMaxY - cloudMinY);
-                    // Match the profile used in main loop for consistency (Sharp Cumulus)
-                    float lightHeightGrad = smoothstep_cloud(0.0f, 0.05f, lh) * smoothstep_cloud(1.0f, 0.3f, lh);
-                    if (lh < 0.2f) {
-                       lightHeightGrad = fmaxf(lightHeightGrad, smoothstep_cloud(0.0f, 0.02f, lh));
-                    }
-                    
-                    lightDensity *= lightHeightGrad * localDensityMult;
-                    
-                    lightDensitySum += lightDensity * lightStepSize;
-                    
-                    if (lightDensitySum > 10.0f) break; 
-                }
-
-                // Beer's Law (Primary Absorption)
-                float beersLaw = expf(-lightDensitySum * 0.02f * world.nishita.cloud_absorption);
-                
-                // Secondary Absorption (Softer, simulates scattered light) - Dual Scattering
-                float beersLaw2 = expf(-lightDensitySum * 0.02f * world.nishita.cloud_absorption * 0.2f);
-                
-                // Combine Terms with Silver intensity
-                lightTransmittance = beersLaw * 0.3f + beersLaw2 * 0.7f * world.nishita.cloud_silver_intensity;
-                
-                // Shadow stength from UI
-                lightTransmittance = lerp(1.0f, lightTransmittance, world.nishita.cloud_shadow_strength);
-            }
-            
-            
-            // ═══════════════════════════════════════════════════════════
-            // ADVANCED COLOR CALCULATION
-            // ═══════════════════════════════════════════════════════════
-            float cosTheta = dot(rayDir, sunDirection);
-            
-            // Henyey-Greenstein phase function (Dual-Lobe for Back Scattering)
-            // Lobe 1: Forward scattering (strong peak around sun)
-            float phase1 = (1.0f - cloudG * cloudG) / (4.0f * 3.14159f * powf(1.0f + cloudG * cloudG - 2.0f * cloudG * cosTheta, 1.5f));
-            
-            // Lobe 2: Backward scattering (softer peak opposite to sun)
-            float phase2 = (1.0f - cloudG_back * cloudG_back) / (4.0f * 3.14159f * powf(1.0f + cloudG_back * cloudG_back - 2.0f * cloudG_back * cosTheta, 1.5f));
-            
-            // Mix lobes
-            float phase = lerp(phase2, phase1, lobeMix);
-            
-            // Powder effect
-            float powder = powderEffect(density, cosTheta);
-            
-            // ═══════════════════════════════════════════════════════════
-            // SUN COLOR - IMPROVED GRADIENT (Sunset/Sunrise)
-            // ═══════════════════════════════════════════════════════════
-            float sunElevation = sunDirection.y;
-            
-            // Layered color transitions
-            float3 sunColor;
-            if (sunElevation > 0.5f) {
-                // High sun - warm white
-                sunColor = make_float3(1.0f, 0.98f, 0.95f);
-            } else if (sunElevation > 0.2f) {
-                // Golden hour
-                float t = (sunElevation - 0.2f) / 0.3f;
-                float3 goldenColor = make_float3(1.0f, 0.85f, 0.6f);
-                float3 whiteColor = make_float3(1.0f, 0.98f, 0.95f);
-                sunColor = goldenColor * (1.0f - t) + whiteColor * t;
-            } else if (sunElevation > 0.0f) {
-                // Sunset/sunrise - orange to red
-                float t = sunElevation / 0.2f;
-                float3 orangeColor = make_float3(1.0f, 0.6f, 0.3f);
-                float3 goldenColor = make_float3(1.0f, 0.85f, 0.6f);
-                sunColor = orangeColor * (1.0f - t) + goldenColor * t;
-            } else {
-                // Below horizon - deep orange/red
-                float t = fmaxf(0.0f, 1.0f + sunElevation * 5.0f);
-                float3 redColor = make_float3(0.8f, 0.3f, 0.1f);
-                float3 orangeColor = make_float3(1.0f, 0.6f, 0.3f);
-                sunColor = redColor * (1.0f - t) + orangeColor * t;
-            }
-            
-            // ═══════════════════════════════════════════════════════════
-            // DIRECT LIGHTING (with self-shadowing)
-            // ═══════════════════════════════════════════════════════════
-            float directIntensity = world.nishita.sun_intensity * phase * lightTransmittance * 5.0f;
-            float3 directLight = sunColor * directIntensity;
-            
-            // Silver lining (UI controlled intensity)
-            float silverBase = fmaxf(0.0f, cosTheta) * powder * lightTransmittance;
-            float silverLining = silverBase * 4.0f * world.nishita.cloud_silver_intensity;
-            directLight += sunColor * silverLining * world.nishita.sun_intensity;
-            
-            // ═══════════════════════════════════════════════════════════
-            // AMBIENT / MULTI-SCATTERING (UI controlled)
-            // ═══════════════════════════════════════════════════════════
-            float multiScatter = 0.25f * (1.0f - expf(-density * 4.0f));
-            
-            // Shadow color gradient - more blue in shadows
-            float shadowAmount = 1.0f - lightTransmittance;
-            float3 shadowColor = make_float3(0.12f, 0.18f, 0.35f);  // Deep blue shadow
-            
-            // Height-based ambient (upper parts brighter)
-            float heightFactor = (pos.y - cloudMinY) / (cloudMaxY - cloudMinY);
-            float ambientBoost = 1.0f + heightFactor * 0.3f;
-            
-            float3 ambient = ambientSky * 0.35f * world.nishita.cloud_ambient_strength * ambientBoost;
-            ambient += shadowColor * world.nishita.atmosphere_intensity * 0.12f * shadowAmount;
-            ambient += sunColor * multiScatter * world.nishita.atmosphere_intensity * 0.4f;
-            
-            // ═══════════════════════════════════════════════════════════
-            // FINAL COLOR - Energy conserving
-            // ═══════════════════════════════════════════════════════════
-            float3 lightColor = directLight + ambient + cloudEmissive;
-            
-            float3 stepColor = lightColor * density;
-            // INCREASED ABSORPTION MULTIPLIER (from 0.012 to 0.08) for better sun occlusion
-            float absorption = density * stepSize * 0.08f * world.nishita.cloud_absorption;
-            float stepTransmittance = expf(-absorption);
-            
-            // Enerji koruyucu ayrık integrasyon (Riemann Toplamı, Vulkan ile eşleşir).
-            // Eski hatalı `(1.0f - stepTransmittance)` çarpımı yerine `stepSize` kullanıyoruz.
-            cloudColor += stepColor * transmittance * stepSize;
-            transmittance *= stepTransmittance;
-            
-            if (transmittance < 0.01f) break;
-        }
-        t += stepSize;
-    }
-    
-    return cloudColor;
-}
-
-// Main function to render all cloud layers
-__device__ float3 render_clouds(const WorldData& world, const float3& rayDir, float3 bg_color) {
-    if (!world.nishita.clouds_enabled && !world.nishita.cloud_layer2_enabled) {
-        return bg_color;
-    }
-
-    float transmittance = 1.0f;
-    float3 cloudColor = make_float3(0.0f, 0.0f, 0.0f);
-    
-    // === LAYER 1 (Primary clouds) ===
-    if (world.nishita.clouds_enabled) {
-        // IMPROVED SCALE: UI Scale 1.0 = moderate size. 
-        // We use a non-linear mapping so that small UI values give huge clouds 
-        // and large UI values give dense small clouds without losing texture.
-        float scale = 0.003f / fmaxf(0.01f, world.nishita.cloud_scale);
-        float3 layer1 = render_cloud_layer(
-            world, rayDir, bg_color,
-            world.nishita.cloud_height_min, world.nishita.cloud_height_max,
-            scale, world.nishita.cloud_coverage, world.nishita.cloud_density,
-            world.nishita.cloud_detail,
-            transmittance
-        );
-        cloudColor += layer1;
-    }
-    
-    // === LAYER 2 (Secondary clouds - e.g., high cirrus) ===
-    if (world.nishita.cloud_layer2_enabled) {
-        float scale2 = 0.003f / fmaxf(0.01f, world.nishita.cloud2_scale);
-        float3 layer2 = render_cloud_layer(
-            world, rayDir, bg_color,
-            world.nishita.cloud2_height_min, world.nishita.cloud2_height_max,
-            scale2, world.nishita.cloud2_coverage, world.nishita.cloud2_density,
-            world.nishita.cloud_detail, // Use same detail for layer 2
-            transmittance
-        );
-        cloudColor += layer2;
-    }
-    
-    // Final blend with background
-    return bg_color * transmittance + cloudColor;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -515,7 +196,8 @@ __device__ float get_local_volumetric_extinction(float3 world_pos) {
     if (optixLaunchParams.vdb_volumes) {
         for (int v = 0; v < optixLaunchParams.vdb_volume_count; ++v) {
             const GpuVDBVolume& vol = optixLaunchParams.vdb_volumes[v];
-            if (!vol.density_grid) continue;
+            const bool procedural_cloud = (vol.source_type == 3);
+            if (!procedural_cloud && !vol.density_grid) continue;
             
             float3 local_pos = transform_point_affine(world_pos, vol.inv_transform);
             
@@ -530,43 +212,17 @@ __device__ float get_local_volumetric_extinction(float3 world_pos) {
                 sample_pos.y -= vol.pivot_offset[1];
                 sample_pos.z -= vol.pivot_offset[2];
 
-                nanovdb::FloatGrid* grid = (nanovdb::FloatGrid*)vol.density_grid;
-                nanovdb::math::SampleFromVoxels<nanovdb::FloatGrid::TreeType, 1> sampler(grid->tree());
-                nanovdb::Vec3f idx = grid->worldToIndexF(nanovdb::Vec3f(sample_pos.x, sample_pos.y, sample_pos.z));
-                
-                float d = sampler(idx);
+                float d = 0.0f;
+                if (procedural_cloud) {
+                    d = sample_procedural_cloud_density(vol, sample_pos);
+                } else {
+                    nanovdb::FloatGrid* grid = (nanovdb::FloatGrid*)vol.density_grid;
+                    nanovdb::math::SampleFromVoxels<nanovdb::FloatGrid::TreeType, 1> sampler(grid->tree());
+                    nanovdb::Vec3f idx = grid->worldToIndexF(nanovdb::Vec3f(sample_pos.x, sample_pos.y, sample_pos.z));
+                    d = sampler(idx);
+                }
                 float density = fmaxf((d - vol.density_remap_low) / (vol.density_remap_high - vol.density_remap_low + 1e-6f), 0.0f) * vol.density_multiplier;
                 total_extinction += density * (vol.scatter_coefficient + vol.absorption_coefficient);
-            }
-        }
-    }
-    
-    // 2. Procedural Clouds
-    if (optixLaunchParams.world.nishita.clouds_enabled || optixLaunchParams.world.nishita.cloud_layer2_enabled) {
-        float height = world_pos.y;
-        for (int layer = 0; layer < 2; ++layer) {
-            bool enabled = (layer == 0) ? optixLaunchParams.world.nishita.clouds_enabled : optixLaunchParams.world.nishita.cloud_layer2_enabled;
-            if (!enabled) continue;
-            
-            float minH = (layer == 0) ? optixLaunchParams.world.nishita.cloud_height_min : optixLaunchParams.world.nishita.cloud2_height_min;
-            float maxH = (layer == 0) ? optixLaunchParams.world.nishita.cloud_height_max : optixLaunchParams.world.nishita.cloud2_height_max;
-            
-            if (height >= minH && height <= maxH) {
-                // Simplified cloud sampling (similar to calculate_cloud_transmittance)
-                // Match the improved scale logic from main renderer
-                float scale = 0.003f / fmaxf(0.01f, (layer == 0) ? optixLaunchParams.world.nishita.cloud_scale : optixLaunchParams.world.nishita.cloud2_scale);
-                float coverage = (layer == 0) ? optixLaunchParams.world.nishita.cloud_coverage : optixLaunchParams.world.nishita.cloud2_coverage;
-                float density_mult = (layer == 0) ? optixLaunchParams.world.nishita.cloud_density : optixLaunchParams.world.nishita.cloud2_density;
-                float detail = optixLaunchParams.world.nishita.cloud_detail;
-                
-                float3 noise_pos = world_pos * scale;
-                float d = cloud_shape(noise_pos, coverage, detail);
-                
-                // Height gradient fade - match the cumulus profile roughly
-                float h_norm = (height - minH) / (maxH - minH);
-                float height_gradient = smoothstep_cloud(0.0f, 0.05f, h_norm) * smoothstep_cloud(1.0f, 0.3f, h_norm);
-                
-                total_extinction += d * density_mult * height_gradient;
             }
         }
     }
@@ -588,7 +244,8 @@ __device__ float get_stochastic_volumetric_occlusion(
     if (optixLaunchParams.vdb_volumes) {
         for (int v = 0; v < optixLaunchParams.vdb_volume_count; ++v) {
             const GpuVDBVolume& vol = optixLaunchParams.vdb_volumes[v];
-            if (!vol.density_grid) continue;
+            const bool procedural_cloud = (vol.source_type == 3);
+            if (!procedural_cloud && !vol.density_grid) continue;
             
             float3 local_origin = transform_point_affine(ray_origin, vol.inv_transform);
             float3 local_dir = transform_vector_affine(normalize(ray_dir), vol.inv_transform);
@@ -608,8 +265,7 @@ __device__ float get_stochastic_volumetric_occlusion(
                     float density_scale = fmaxf(0.01f, 1.0f - bias * 10.0f);
                     float p_factor = vol.density_multiplier * density_scale * (vol.scatter_coefficient + vol.absorption_coefficient) * world_step;
 
-                    nanovdb::FloatGrid* grid = (nanovdb::FloatGrid*)vol.density_grid;
-                    nanovdb::math::SampleFromVoxels<nanovdb::FloatGrid::TreeType, 1> sampler(grid->tree());
+                    nanovdb::FloatGrid* grid = procedural_cloud ? nullptr : (nanovdb::FloatGrid*)vol.density_grid;
 
                     while (probe_t < t1) {
                         float3 pos = local_origin + local_dir * probe_t;
@@ -619,8 +275,14 @@ __device__ float get_stochastic_volumetric_occlusion(
                         pos.y -= vol.pivot_offset[1];
                         pos.z -= vol.pivot_offset[2];
 
-                        nanovdb::Vec3f idx = grid->worldToIndexF(nanovdb::Vec3f(pos.x, pos.y, pos.z));
-                        float d = sampler(idx);
+                        float d = 0.0f;
+                        if (procedural_cloud) {
+                            d = sample_procedural_cloud_density(vol, pos);
+                        } else {
+                            nanovdb::math::SampleFromVoxels<nanovdb::FloatGrid::TreeType, 1> sampler(grid->tree());
+                            nanovdb::Vec3f idx = grid->worldToIndexF(nanovdb::Vec3f(pos.x, pos.y, pos.z));
+                            d = sampler(idx);
+                        }
                         float raw_d = fmaxf(0.0f, d - vol.density_remap_low);
                         
                         if (raw_d > 1e-5f) {
@@ -649,33 +311,6 @@ __device__ float get_stochastic_volumetric_occlusion(
         }
     }
     
-    // 2. Procedural Clouds (Dithered entry)
-    if (optixLaunchParams.world.nishita.clouds_enabled || optixLaunchParams.world.nishita.cloud_layer2_enabled) {
-        float3 rDir = normalize(ray_dir);
-        if (fabsf(rDir.y) > 1e-4f) {
-            for (int layer = 0; layer < 2; ++layer) {
-                bool enabled = (layer == 0) ? optixLaunchParams.world.nishita.clouds_enabled : optixLaunchParams.world.nishita.cloud_layer2_enabled;
-                if (enabled) {
-                    float minH = (layer == 0) ? optixLaunchParams.world.nishita.cloud_height_min : optixLaunchParams.world.nishita.cloud2_height_min;
-                    float maxH = (layer == 0) ? optixLaunchParams.world.nishita.cloud_height_max : optixLaunchParams.world.nishita.cloud2_height_max;
-                    
-                    float t_enter = (minH - ray_origin.y) / rDir.y;
-                    float t_exit = (maxH - ray_origin.y) / rDir.y;
-                    if (t_enter > t_exit) { float tmp = t_enter; t_enter = t_exit; t_exit = tmp; }
-                    
-                    if (t_exit > 0.0f && t_enter < max_dist) {
-                        float t_hit = fmaxf(t_enter, 0.0f);
-                        float layer_thickness = fmaxf(t_exit - t_enter, 1.0f);
-                        float norm_entry = fminf((t_hit - t_enter) / layer_thickness, 1.0f);
-                        float entry_ramp = norm_entry * norm_entry * (3.0f - 2.0f * norm_entry);
-                        float dither = (curand_uniform(rng) - 0.5f) * 50.0f * (1.0f - entry_ramp);
-                        t_min = fminf(t_min, t_hit + dither);
-                    }
-                }
-            }
-        }
-    }
-
     return t_min;
 }
 
@@ -691,7 +326,8 @@ __device__ float calculate_vdb_occlusion(
 
     for (int v = 0; v < optixLaunchParams.vdb_volume_count; ++v) {
         const GpuVDBVolume& vol = optixLaunchParams.vdb_volumes[v];
-        if (!vol.density_grid) continue;
+        const bool procedural_cloud = (vol.source_type == 3);
+        if (!procedural_cloud && !vol.density_grid) continue;
         
         // Transform ray to VDB local space
         float3 local_origin = transform_point_affine(ray_origin, vol.inv_transform);
@@ -720,10 +356,7 @@ __device__ float calculate_vdb_occlusion(
         // Jitter
         float t = t0 + local_step * random_float(rng); 
         
-        // NanoVDB Sampler (Trilinear) with Accessor for speed
-        nanovdb::FloatGrid* grid = (nanovdb::FloatGrid*)vol.density_grid;
-        auto acc = grid->getAccessor();
-        nanovdb::math::SampleFromVoxels<nanovdb::FloatGrid::AccessorType, 1, false> sampler(acc);
+        nanovdb::FloatGrid* grid = procedural_cloud ? nullptr : (nanovdb::FloatGrid*)vol.density_grid;
         
         float remap_range = fmaxf(0.001f, vol.density_remap_high - vol.density_remap_low);
         float density_sum = 0.0f;
@@ -739,9 +372,15 @@ __device__ float calculate_vdb_occlusion(
             pos.y -= vol.pivot_offset[1];
             pos.z -= vol.pivot_offset[2];
 
-            nanovdb::Vec3f idx = grid->worldToIndexF(nanovdb::Vec3f(pos.x, pos.y, pos.z));
-            
-            float d = sampler(idx);
+            float d = 0.0f;
+            if (procedural_cloud) {
+                d = sample_procedural_cloud_density(vol, pos);
+            } else {
+                auto acc = grid->getAccessor();
+                nanovdb::math::SampleFromVoxels<nanovdb::FloatGrid::AccessorType, 1, false> sampler(acc);
+                nanovdb::Vec3f idx = grid->worldToIndexF(nanovdb::Vec3f(pos.x, pos.y, pos.z));
+                d = sampler(idx);
+            }
             float density = fmaxf((d - vol.density_remap_low) / remap_range, 0.0f) * vol.density_multiplier;
             
             // Attenuate by scatter + absorption (sigma_t)
@@ -800,6 +439,54 @@ __device__ float3 sample_color_ramp_gas(const GpuGasVolume& vol, float t) {
     return vol.ramp_colors[vol.ramp_stop_count - 1];
 }
 
+__device__ float sample_procedural_cloud_density(const GpuVDBVolume& vol, const float3& local_pos) {
+    float3 extent = vol.local_bbox_max - vol.local_bbox_min;
+    float3 norm_pos = (local_pos - vol.local_bbox_min) / make_float3(
+        fmaxf(extent.x, 1e-5f),
+        fmaxf(extent.y, 1e-5f),
+        fmaxf(extent.z, 1e-5f));
+
+    if (norm_pos.x < 0.0f || norm_pos.x > 1.0f ||
+        norm_pos.y < 0.0f || norm_pos.y > 1.0f ||
+        norm_pos.z < 0.0f || norm_pos.z > 1.0f) {
+        return 0.0f;
+    }
+
+    float base_scale = fmaxf(vol.cloud_base_scale, 1.0f);
+    float3 cloud_pos = make_float3(
+        norm_pos.x * base_scale + vol.cloud_offset_x,
+        norm_pos.y * 1.35f,
+        norm_pos.z * base_scale + vol.cloud_offset_z);
+
+    float coverage = fmaxf(0.0f, fminf(1.0f, vol.cloud_coverage));
+    float detail = fmaxf(0.0f, fminf(1.0f, vol.cloud_detail));
+    float erosion = fmaxf(0.0f, fminf(1.0f, vol.cloud_erosion));
+
+    float warp_x = fbm(make_float3(cloud_pos.x * 0.38f, cloud_pos.y * 0.16f, cloud_pos.z * 0.38f) + make_float3(11.0f, 0.0f, 7.0f), 2) - 0.5f;
+    float warp_z = fbm(make_float3(cloud_pos.x * 0.38f, cloud_pos.y * 0.16f, cloud_pos.z * 0.38f) + make_float3(41.0f, 3.0f, 23.0f), 2) - 0.5f;
+    float3 warped = cloud_pos + make_float3(warp_x * 1.35f, 0.0f, warp_z * 1.35f);
+
+    float base = fbm(make_float3(warped.x * 0.52f, warped.y * 0.28f, warped.z * 0.52f), 4);
+    float billow = 1.0f - fabsf(fbm(make_float3(warped.x * 1.15f, warped.y * 0.5f, warped.z * 1.15f) + make_float3(17.0f, 3.0f, 11.0f), 4) * 2.0f - 1.0f);
+    float detail_noise = fbm(warped * lerp(2.8f, 7.0f, detail) + make_float3(31.0f, 7.0f, 19.0f), 2);
+
+    float puffy = smoothstep(0.32f, 0.88f, billow);
+    float shape = lerp(base, base * 0.45f + puffy * 0.75f, 0.72f);
+    shape -= detail_noise * lerp(0.06f, 0.28f, erosion);
+
+    float threshold = lerp(0.78f, 0.30f, coverage);
+    float density = fmaxf((shape - threshold) / fmaxf(1.0f - threshold, 1e-4f), 0.0f);
+
+    float bottom = smoothstep(0.12f, 0.42f, norm_pos.y);
+    float top = 1.0f - smoothstep(0.72f, 1.02f, norm_pos.y);
+    float3 edge = make_float3(0.5f) - make_float3(
+        fabsf(norm_pos.x - 0.5f),
+        fabsf(norm_pos.y - 0.5f),
+        fabsf(norm_pos.z - 0.5f));
+    float edge_falloff = smoothstep(0.0f, fmaxf(vol.cloud_edge_fade, 0.02f), fminf(edge.x, edge.z));
+    return density * density * bottom * top * edge_falloff * 4.6f;
+}
+
 /**
  * @brief VDB Volume Ray Marching (GPU Kernel)
  * 
@@ -816,8 +503,8 @@ __device__ float3 raymarch_vdb_volume(
     float max_t,
     curandState* rng
 ) {
-    // Skip if no density grid
-    if (!vol.density_grid) {
+    const bool use_procedural_cloud = (vol.source_type == 3);
+    if (!use_procedural_cloud && vol.density_grid == nullptr) {
         out_transmittance = 1.0f;
         return make_float3(0.0f);
     }
@@ -876,12 +563,7 @@ __device__ float3 raymarch_vdb_volume(
     float3 accumulated_color = make_float3(0.0f);
     
     // Grid Setup
-    const nanovdb::FloatGrid* grid = reinterpret_cast<const nanovdb::FloatGrid*>(vol.density_grid);
-    using AccT = nanovdb::FloatGrid::AccessorType;
-    AccT acc = grid->getAccessor();
-    
-    // Unified fast Trilinear Sampler (Order 1)
-    nanovdb::math::SampleFromVoxels<AccT, 1, false> sampler(acc);
+    const nanovdb::FloatGrid* grid = use_procedural_cloud ? nullptr : reinterpret_cast<const nanovdb::FloatGrid*>(vol.density_grid);
     
     float remap_range = vol.density_remap_high - vol.density_remap_low + 1e-6f;
     float3 local_sun_dir = normalize(transform_vector_affine(sun_dir, vol.inv_transform));
@@ -900,8 +582,16 @@ __device__ float3 raymarch_vdb_volume(
         local_pos.y -= vol.pivot_offset[1];
         local_pos.z -= vol.pivot_offset[2];
         
-        nanovdb::Vec3f idx = grid->worldToIndexF(nanovdb::Vec3f(local_pos.x, local_pos.y, local_pos.z));
-        float raw_density = sampler(idx);
+        float raw_density = 0.0f;
+        if (use_procedural_cloud) {
+            raw_density = sample_procedural_cloud_density(vol, local_pos);
+        } else {
+            using AccT = nanovdb::FloatGrid::AccessorType;
+            AccT acc = grid->getAccessor();
+            nanovdb::math::SampleFromVoxels<AccT, 1, false> sampler(acc);
+            nanovdb::Vec3f idx = grid->worldToIndexF(nanovdb::Vec3f(local_pos.x, local_pos.y, local_pos.z));
+            raw_density = sampler(idx);
+        }
         if (!isfinite(raw_density)) raw_density = 0.0f;
         
         float density = fmaxf((raw_density - vol.density_remap_low) / remap_range, 0.0f) * vol.density_multiplier;
@@ -932,8 +622,8 @@ __device__ float3 raymarch_vdb_volume(
             float3 emission = make_float3(0.0f);
             if (vol.emission_mode == 1) emission = vol.emission_color * vol.emission_intensity * density;
             else if (vol.emission_mode == 2 && temp_grid) {
-                AccT temp_acc = temp_grid->getAccessor();
-                nanovdb::math::SampleFromVoxels<AccT, 1, false> temp_sampler(temp_acc);
+                nanovdb::FloatGrid::AccessorType temp_acc = temp_grid->getAccessor();
+                nanovdb::math::SampleFromVoxels<nanovdb::FloatGrid::AccessorType, 1, false> temp_sampler(temp_acc);
                 nanovdb::Vec3f temp_idx = temp_grid->worldToIndexF(nanovdb::Vec3f(local_pos.x, local_pos.y, local_pos.z));
                 float temperature = temp_sampler(temp_idx);
                 if (!isfinite(temperature)) temperature = 293.0f;
@@ -978,8 +668,15 @@ __device__ float3 raymarch_vdb_volume(
                             curr_local_s_pos.y < vol.local_bbox_min.y || curr_local_s_pos.y > vol.local_bbox_max.y || 
                             curr_local_s_pos.z < vol.local_bbox_min.z || curr_local_s_pos.z > vol.local_bbox_max.z) break;
                         
-                        nanovdb::Vec3f s_idx = grid->worldToIndexF(nanovdb::Vec3f(curr_local_s_pos.x, curr_local_s_pos.y, curr_local_s_pos.z));
-                        float sd = sampler(s_idx);
+                        float sd = 0.0f;
+                        if (use_procedural_cloud) {
+                            sd = sample_procedural_cloud_density(vol, curr_local_s_pos);
+                        } else {
+                            nanovdb::FloatGrid::AccessorType s_acc = grid->getAccessor();
+                            nanovdb::math::SampleFromVoxels<nanovdb::FloatGrid::AccessorType, 1, false> s_sampler(s_acc);
+                            nanovdb::Vec3f s_idx = grid->worldToIndexF(nanovdb::Vec3f(curr_local_s_pos.x, curr_local_s_pos.y, curr_local_s_pos.z));
+                            sd = s_sampler(s_idx);
+                        }
                         if (isfinite(sd)) {
                             float s_rem = fmaxf((sd - vol.density_remap_low) / remap_range, 0.0f);
                             s_trans += s_rem * vol.density_multiplier * (vol.absorption_coefficient + vol.scatter_coefficient) * s_step_world;
@@ -1104,65 +801,6 @@ __device__ float3 apply_atmospheric_fog(
 // Forward declaration for shadow test
 __device__ bool trace_shadow_test(float3 origin, float3 direction, float maxDist);
 
-// Simplified cloud transmittance for shadow/godray rays - OPTIMIZED
-__device__ float calculate_cloud_transmittance(const WorldData& world, float3 origin, float3 dir, float maxDist, curandState* rng) {
-    if (!world.nishita.clouds_enabled && !world.nishita.cloud_layer2_enabled) return 1.0f;
-    
-    // Performance: Fast exit if coverage is zero
-    if (world.nishita.cloud_coverage < 0.01f && world.nishita.cloud2_coverage < 0.01f) return 1.0f;
-    
-    if (fabsf(dir.y) < 1e-6f) return 1.0f;
-
-    float cloud_trans = 1.0f;
-    
-    for (int layer = 0; layer < 2; ++layer) {
-        bool enabled = (layer == 0) ? world.nishita.clouds_enabled : world.nishita.cloud_layer2_enabled;
-        if (!enabled) continue;
-        
-        float minH = (layer == 0) ? world.nishita.cloud_height_min : world.nishita.cloud2_height_min;
-        float maxH = (layer == 0) ? world.nishita.cloud_height_max : world.nishita.cloud2_height_max;
-        
-        float scale = 0.003f / fmaxf(0.1f, (layer == 0) ? world.nishita.cloud_scale : world.nishita.cloud2_scale);
-        float coverage = (layer == 0) ? world.nishita.cloud_coverage : world.nishita.cloud2_coverage;
-        float density_mult = (layer == 0) ? world.nishita.cloud_density : world.nishita.cloud2_density;
-        
-        if (coverage < 0.01f) continue;
-        
-        float t0 = (minH - origin.y) / dir.y;
-        float t1 = (maxH - origin.y) / dir.y;
-        float t_enter = fminf(t0, t1);
-        float t_exit = fmaxf(t0, t1);
-        
-        t_enter = fmaxf(t_enter, 0.0f);
-        t_exit = fminf(t_exit, maxDist);
-        
-        if (t_exit > t_enter) {
-            float dist = t_exit - t_enter;
-            // REDUCED STEPS for sun transmittance (was 12, now 4-8 adaptive)
-            int steps = (world.nishita.cloud_quality > 1.0f) ? 8 : 4; 
-            float stepSize = dist / (float)steps;
-            float density_sum = 0.0f;
-            
-            for (int i = 0; i < steps; ++i) {
-                float t = t_enter + stepSize * (i + curand_uniform(rng));
-                float3 p = origin + dir * t;
-                float3 offsetP = p + make_float3(world.nishita.cloud_offset_x, 0.0f, world.nishita.cloud_offset_z);
-                float h_frac = (p.y - minH) / (maxH - minH);
-                
-                float h_grad = smoothstep_cloud(0.0f, 0.05f, h_frac) * smoothstep_cloud(1.0f, 0.3f, h_frac);
-                if (h_frac < 0.2f) {
-                     h_grad = fmaxf(h_grad, smoothstep_cloud(0.0f, 0.02f, h_frac));
-                }
-                
-                float d = fast_cloud_shape(offsetP * scale, coverage);
-                density_sum += d * h_grad * density_mult * stepSize;
-            }
-            cloud_trans *= expf(-density_sum * 15.0f * world.nishita.cloud_absorption);
-        }
-    }
-    return cloud_trans;
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
 // NEW: Combined Transmittance for God Rays (Solid + Volumetric)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1230,11 +868,6 @@ __device__ float calculate_sun_transmittance(
         }
     }
 
-    // 4. Check Procedural Cloud Occlusion
-    if (transmittance > 0.01f && (optixLaunchParams.world.nishita.clouds_enabled || optixLaunchParams.world.nishita.cloud_layer2_enabled)) {
-        transmittance *= calculate_cloud_transmittance(optixLaunchParams.world, origin, jitteredSunDir, maxDist, rng);
-    }
-    
     return transmittance;
 }
 
@@ -1450,9 +1083,9 @@ __device__ float3 gpu_get_aerial_perspective(const WorldData& world, float3 colo
     return res;
 }
 
-__device__ float3 evaluate_background(const WorldData& world, const float3& origin, const float3& dir, curandState* rng) {
+__device__ float3 evaluate_background(const WorldData& world, const float3& origin, const float3& dir, curandState* rng, bool skip_cloud_overlay = false) {
     if (world.mode == 0) { // WORLD_MODE_COLOR
-        return render_clouds(world, dir, world.color);
+        return world.color;
     }
     else if (world.mode == 1) { // WORLD_MODE_HDRI
         if (world.env_texture) {
@@ -1466,9 +1099,10 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
             u -= floorf(u);
             
             float4 tex = tex2D<float4>(world.env_texture, u, v);
-            return render_clouds(world, dir, make_float3(tex.x, tex.y, tex.z) * world.env_intensity);
+            float3 hdri = make_float3(tex.x, tex.y, tex.z) * world.env_intensity;
+            return hdri;
         }
-        return render_clouds(world, dir, world.color);
+        return world.color;
     }
     else if (world.mode == 2) { // WORLD_MODE_NISHITA
         // High-Quality LUT based Sky radiance
@@ -1548,8 +1182,10 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
             }
         }
 
-        // Clouds are rendered on top of the sky radiance
-        return render_clouds(world, dir, radiance);
+        // Clouds are a direct background layer.  For glass/refraction paths they
+        // can read like dirt painted onto the material, while Vulkan's miss shader
+        // returns only sky radiance here.
+        return radiance;
     }
 
     return make_float3(0,0,0);
@@ -1565,6 +1201,50 @@ __device__ float balance_heuristic(float pdf_a, float pdf_b) {
 }
 __device__ float luminance(const float3& c) {
     return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+}
+
+__device__ float3 soft_clip_fireflies(const float3& c, float max_luma) {
+    float l = luminance(c);
+    if (l <= max_luma) return c;
+    return c * (max_luma / fmaxf(l, 1e-6f));
+}
+
+__device__ float3 glass_background_response(const float3& bg) {
+    float l = luminance(bg);
+    float3 neutral = make_float3(l, l, l);
+    float3 desaturated = neutral * 0.32f + bg * 0.68f;
+    float max_luma = 10.0f;
+    float dl = luminance(desaturated);
+    if (dl > max_luma) {
+        desaturated *= max_luma / fmaxf(dl, 1e-6f);
+    }
+    return desaturated;
+}
+
+__device__ float resolve_surface_opacity(const GpuMaterial& mat, const OptixHitResult& payload) {
+    float opacity = fminf(fmaxf(mat.opacity, 0.0f), 1.0f);
+    if (payload.has_opacity_tex && payload.opacity_tex) {
+        float2 uv = apply_material_uv_transform(mat, payload.uv);
+        float4 tex = tex2D<float4>(payload.opacity_tex, uv.x, uv.y);
+        float mask = payload.opacity_has_alpha ? tex.w : tex.x;
+        opacity *= fminf(fmaxf(mask, 0.0f), 1.0f);
+    }
+    return fminf(fmaxf(opacity, 0.0f), 1.0f);
+}
+
+__device__ float resolve_surface_transmission(const GpuMaterial& mat, const OptixHitResult& payload) {
+    float transmission = fminf(fmaxf(mat.transmission, 0.0f), 1.0f);
+    if (!payload.use_blended_data && payload.has_transmission_tex && payload.transmission_tex) {
+        float2 uv = apply_material_uv_transform(mat, payload.uv);
+        transmission = tex2D<float4>(payload.transmission_tex, uv.x, uv.y).x;
+        transmission = fminf(fmaxf(transmission, 0.0f), 1.0f);
+    }
+
+    float opacity = resolve_surface_opacity(mat, payload);
+    if (opacity < 0.99f && mat.metallic < 0.1f && transmission < 0.01f) {
+        transmission = 1.0f - opacity;
+    }
+    return fminf(fmaxf(transmission, 0.0f), 1.0f);
 }
 
 __device__ int pick_smart_light(const float3& hit_position, curandState* rng, float* pdf_out = nullptr) {
@@ -2435,14 +2115,13 @@ __device__ float3 raymarch_gas_volume(
 __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_out = nullptr, float3* primary_normal_out = nullptr, int* primary_hit_out = nullptr) {
     float3 color = make_float3(0.0f, 0.0f, 0.0f);
     float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
-    float3 current_medium_absorb = make_float3(0.0f, 0.0f, 0.0f); // Default: Air (no absorption)
-
     const int max_depth = optixLaunchParams.max_depth;
     int light_count = optixLaunchParams.light_count;
     int light_index = -1;
     
     float first_hit_t = -1.0f;
     float first_hit_transmission = 0.0f;
+    bool path_touched_transmissive = false;
     float vol_depth = -1.0f;
     float vol_trans_accum = 1.0f;
     float3 first_ray_origin = ray.origin;
@@ -2486,9 +2165,6 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         }
 
         if (bounce == 0 && payload.hit) {
-            if (primary_albedo_out) *primary_albedo_out = payload.primary_albedo;
-            if (primary_normal_out) *primary_normal_out = payload.primary_normal;
-            if (primary_hit_out) *primary_hit_out = payload.primary_hit;
             first_hit_t = payload.t;
             
             // ═══════════════════════════════════════════════════════════
@@ -2523,17 +2199,6 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
             }
         }
 
-        // === VOLUMETRIC ABSORPTION (Beer's Law) ===
-        // Apply absorption based on the distance traveled in the current medium
-        if (payload.hit && (current_medium_absorb.x > 0.0f || current_medium_absorb.y > 0.0f || current_medium_absorb.z > 0.0f)) {
-            float dist = payload.t;
-            float3 transmission = make_float3(
-                expf(-current_medium_absorb.x * dist),
-                expf(-current_medium_absorb.y * dist),
-                expf(-current_medium_absorb.z * dist)
-            );
-            throughput *= transmission;
-        }
         if (optixLaunchParams.vdb_volumes && optixLaunchParams.vdb_volume_count > 0) {
             float3 sun_dir = normalize(optixLaunchParams.world.nishita.sun_direction);
             float sun_intensity = optixLaunchParams.world.nishita.sun_intensity;
@@ -2555,8 +2220,6 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
             // Step 1: Compute entry distances for all VDBs
             for (int v = 0; v < vdb_count; ++v) {
                 const GpuVDBVolume& vdb = optixLaunchParams.vdb_volumes[v];
-                if (!vdb.density_grid) continue;
-
                 // Transform ray to local space and compute AABB intersection
                 float3 local_origin = transform_point_affine(ray.origin, vdb.inv_transform);
                 float3 local_dir = transform_vector_affine(ray_dir_norm, vdb.inv_transform);
@@ -2729,7 +2392,16 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
 
         if (!payload.hit) {
             // --- Arka plan rengi ---
-            float3 bg_color = evaluate_background(optixLaunchParams.world, ray.origin, ray.direction, rng);
+            float3 bg_color = evaluate_background(
+                optixLaunchParams.world,
+                ray.origin,
+                ray.direction,
+                rng,
+                path_touched_transmissive
+            );
+            if (path_touched_transmissive) {
+                bg_color = glass_background_response(bg_color);
+            }
 
             // --- Infinite Grid Logic (GPU) ---
             if (optixLaunchParams.grid_enabled && optixLaunchParams.is_final_render == 0 && ray.direction.y < -0.0001f) {
@@ -2756,7 +2428,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
                      }
                  }
             }
-            color += throughput * bg_color;
+            color += soft_clip_fireflies(throughput * bg_color, 64.0f);
             break;
         }
 
@@ -2783,10 +2455,15 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
              mat.ior = payload.blended_ior;
         }
         if (bounce == 0) {
-            first_hit_transmission = fminf(fmaxf(mat.transmission, 0.0f), 1.0f);
-            if (!payload.use_blended_data && payload.has_transmission_tex) {
-                first_hit_transmission = tex2D<float4>(payload.transmission_tex, payload.uv.x, payload.uv.y).x;
-                first_hit_transmission = fminf(fmaxf(first_hit_transmission, 0.0f), 1.0f);
+            first_hit_transmission = resolve_surface_transmission(mat, payload);
+            if (first_hit_transmission < 0.5f) {
+                if (primary_albedo_out) *primary_albedo_out = payload.primary_albedo;
+                if (primary_normal_out) *primary_normal_out = payload.primary_normal;
+                if (primary_hit_out) *primary_hit_out = payload.primary_hit;
+            } else {
+                if (primary_albedo_out) *primary_albedo_out = make_float3(0.0f);
+                if (primary_normal_out) *primary_normal_out = make_float3(0.0f);
+                if (primary_hit_out) *primary_hit_out = 0;
             }
         }
 
@@ -2808,7 +2485,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         if (!scatter_material(mat, payload, ray, rng, &scattered, &attenuation, &pdf, &is_specular)) {
             // Vulkan parity: emissive-only yüzeyler hala ışık yayar.
             // raygen.rgen payload.radiance'ı payload.scattered kontrolünden ÖNCE toplar.
-            color += throughput * emission;
+            color += soft_clip_fireflies(throughput * emission, 64.0f);
             break;
         }
 
@@ -2821,26 +2498,14 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         float3 throughput_for_nee = throughput;
 
         throughput *= attenuation;
-
-        // --- Volumetric Medium Tracking (for Beer's Law) ---
-        if (is_specular && mat.transmission > 0.01f) {
-            // Check if we are entering or exiting based on normal direction
-            // Ray direction is incoming, Normal is surface normal
-            float NdotD = dot(normalize(ray.direction), payload.normal);
-            bool entering = NdotD < 0.0f; 
-            
-            if (entering) {
-                // Entering medium: Set absorption coefficient
-                // sigma_a = (1 - color) * density
-                float3 absorb_base = make_float3(1.0f, 1.0f, 1.0f) - mat.subsurface_color;
-                // Clamp to avoid negative values
-                absorb_base = make_float3(fmaxf(absorb_base.x, 0.0f), fmaxf(absorb_base.y, 0.0f), fmaxf(absorb_base.z, 0.0f));
-                
-                current_medium_absorb = absorb_base * mat.subsurface_scale;
-            } else {
-                // Exiting medium: Reset to air (no absorption)
-                current_medium_absorb = make_float3(0.0f, 0.0f, 0.0f);
-            }
+        throughput = soft_clip_fireflies(throughput, 128.0f);
+        float surface_transmission = resolve_surface_transmission(mat, payload);
+        float surface_opacity = resolve_surface_opacity(mat, payload);
+        bool alpha_passthrough = surface_opacity < 0.999f
+            && fabsf(dot(normalize(scattered.direction), normalize(ray.direction))) > 0.999f
+            && attenuation.x > 0.999f && attenuation.y > 0.999f && attenuation.z > 0.999f;
+        if (is_specular && (surface_transmission > 0.01f || alpha_passthrough)) {
+            path_touched_transmissive = true;
         }
 
         // --- GPU VOLUMETRIC RENDERING ---
@@ -2896,9 +2561,18 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
                 scattered = Ray(exit_payload.position + ray.direction * 0.01f, ray.direction);
             } else {
                 // Ray exited scene through volume
-                float3 bg_color = evaluate_background(optixLaunchParams.world, ray.origin, ray.direction, rng);
+                float3 bg_color = evaluate_background(
+                    optixLaunchParams.world,
+                    ray.origin,
+                    ray.direction,
+                    rng,
+                    path_touched_transmissive
+                );
+                if (path_touched_transmissive) {
+                    bg_color = glass_background_response(bg_color);
+                }
                 float bg_factor = (bounce == 0) ? 1.0f : fmaxf(0.1f, 1.0f / (1.0f + bounce * 0.5f));
-                color += throughput * bg_color * bg_factor;
+                color += soft_clip_fireflies(throughput * bg_color * bg_factor, 64.0f);
                 break;
             }
             
@@ -2906,24 +2580,17 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
             continue; // Skip surface shading
         }
         
-        // --- Throughput clamp - aşırı parlak yansımaları önle ---
+        // Clamp extreme future-bounce throughput before expensive continuation work.
         float max_throughput = fmaxf(throughput.x, fmaxf(throughput.y, throughput.z));
         if (max_throughput > MAX_CONTRIBUTION) {
             throughput *= (MAX_CONTRIBUTION / max_throughput);
         }
-        
-        // --- Russian roulette - bounce > 2'den sonra ---
-        if (bounce > 2) {
-            float p = fminf(fmaxf(throughput.x, fmaxf(throughput.y, throughput.z)), 0.95f);
-            if (random_float(rng) > p) break;
-            throughput /= p;            
-           
-        }
+
         // emission zaten scatter'dan önce hesaplandı (yukarıda)
         // --- Eğer hiç ışık yoksa sadece emissive katkı yap ---
         if (light_count == 0) {
             // Use pre-attenuation throughput: emission is self-emitted, not BRDF-filtered
-            color += throughput_for_nee * emission;
+            color += soft_clip_fireflies(throughput_for_nee * emission, 64.0f);
             ray = scattered;
             continue;
         }
@@ -3007,7 +2674,18 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         // surface BRDF, causing oversaturated albedo-tinted emission.
         // This matches the Vulkan raygen loop where radiance is accumulated
         // before throughput *= payload.attenuation.
-        color += throughput_for_nee * total_contribution;
+        color += soft_clip_fireflies(throughput_for_nee * total_contribution, 64.0f);
+
+        // Russian roulette must happen after the current vertex contribution.
+        // Otherwise surviving paths stay unbiased, but killed paths lose the
+        // direct/emissive light that belongs to this hit. That increases noise
+        // and biases OptiX against Vulkan, whose closest-hit radiance is added
+        // before its raygen loop applies RR to the continuation throughput.
+        if (bounce > 2) {
+            float p = fminf(fmaxf(fmaxf(throughput.x, fmaxf(throughput.y, throughput.z)), 0.05f), 1.0f);
+            if (random_float(rng) > p) break;
+            throughput /= p;
+        }
        
         ray = scattered;
     }
@@ -3033,6 +2711,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         else if (aerial_dist <= 0.0f) {
             aerial_dist = 10000.0f;
         }
+        aerial_dist *= (1.0f - first_hit_transmission);
         // Prepare ray origin/dir for aerial perspective sampling (use the first ray)
         float3 rayOrigin = first_ray_origin;
         float3 rayDir = normalize(first_ray_dir);
@@ -3041,6 +2720,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
     else if (world.nishita.fog_enabled && world.nishita.fog_density > 0.0f) {
         // Fallback to simple height fog for non-Nishita modes
         float fogDistance = (first_hit_t > 0.0f) ? first_hit_t : world.nishita.fog_distance * 0.8f;
+        fogDistance *= (1.0f - first_hit_transmission);
         float3 rayOrigin = first_ray_origin;
         float3 rayDir = normalize(first_ray_dir);
         

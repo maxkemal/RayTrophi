@@ -101,7 +101,15 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     float ramp_colors_g[8];       // stop G components
     float ramp_colors_b[8];       // stop B components
     float pivot_offset[3];        // Pivot correction identical to OptiX
-    float _ext_reserved[21];      // padding to reach 512 total bytes
+    int   source_type;            // 0=default/NanoVDB, 3=procedural cloud
+    float cloud_coverage;
+    float cloud_detail;
+    float cloud_erosion;
+    float cloud_base_scale;
+    float cloud_edge_fade;
+    float cloud_offset_x;
+    float cloud_offset_z;
+    float _ext_reserved[13];      // padding to reach 512 total bytes
 };
 
 // Compile-time size check (512 bytes = 8 cache lines)

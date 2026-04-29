@@ -963,7 +963,8 @@ public:
     // Efficiently update GPU data from current CPU pixels
     void updateGPU() {
         // Mark Vulkan sampler cache as stale so the backend re-uploads on next material sync.
-        vulkan_dirty = true;
+        // Whole-texture refresh — collapse any tracked partial rect into "full".
+        markVulkanDirtyFull();
         if (!is_gpu_uploaded || !g_hasOptix || !cuda_array) return;
 
         cudaError_t err = cudaSuccess;
@@ -1007,17 +1008,21 @@ public:
 
     // Upload a specific region to GPU (useful for partial splatmap updates)
     bool upload_region_to_gpu(int x, int y, int w, int h) {
-        // Vulkan cache must be invalidated even on partial updates (brush painting).
-        vulkan_dirty = true;
-        if (!is_gpu_uploaded || !g_hasOptix || !cuda_array) return false;
-
-        // Clamp to texture bounds
+        // Clamp to texture bounds first so the Vulkan dirty rect we accumulate
+        // is always in-range — the backend's partial-upload path requires it.
         x = std::max(0, x);
         y = std::max(0, y);
         w = std::min(w, width - x);
         h = std::min(h, height - y);
 
         if (w <= 0 || h <= 0) return false;
+
+        // Mark this region for the next Vulkan paint sync regardless of OptiX
+        // state: the raster viewport may still be the active backend even when
+        // CUDA/OptiX is unavailable.
+        markVulkanDirtyRegion(x, y, w, h);
+
+        if (!is_gpu_uploaded || !g_hasOptix || !cuda_array) return false;
 
         cudaError_t err = cudaSuccess;
         if (is_hdr) {
@@ -1065,6 +1070,12 @@ public:
 
     void cleanup_gpu() {
         if (tex_obj) {
+            // Notify SceneTextureManager FIRST so any cached optixTextureId entries
+            // pointing at this handle are cleared before the CUDA object is destroyed.
+            // Otherwise concurrent material resolves can fetch a stale handle that
+            // CUDA may have just recycled to a different texture — manifesting as
+            // wrong textures wrapping wrong meshes after a delete/replace.
+            notifyOptixTextureDestroyed(static_cast<int64_t>(tex_obj));
             cudaDestroyTextureObject(tex_obj);
             tex_obj = 0;
         }
@@ -1157,6 +1168,88 @@ public:
     // The Vulkan getTexID cache is keyed by pointer; in-place content changes
     // (autoMask, paintSplatMap, importSplatMap) would otherwise stay stale.
     bool vulkan_dirty = false;
+
+    // Optional dirty rect tracked alongside `vulkan_dirty` for partial Vulkan
+    // re-uploads. When a paint dab edits only a brush-sized area, the Vulkan
+    // backend uses this rect to issue a single vkCmdCopyBufferToImage with
+    // imageOffset/imageExtent, skipping the full-texture allocate+copy path
+    // that used to dominate paint cost at 2K/4K. `vulkan_dirty_full` collapses
+    // the rect into "whole texture" semantics for full updateGPU() refreshes
+    // or any edit whose region cannot be tracked precisely.
+    bool vulkan_dirty_full = false;
+    int  vulkan_dirty_min_x = 0;
+    int  vulkan_dirty_min_y = 0;
+    int  vulkan_dirty_max_x = -1;
+    int  vulkan_dirty_max_y = -1;
+
+    void markVulkanDirtyFull() {
+        vulkan_dirty = true;
+        vulkan_dirty_full = true;
+        vulkan_dirty_min_x = 0;
+        vulkan_dirty_min_y = 0;
+        vulkan_dirty_max_x = (width  > 0) ? width  - 1 : -1;
+        vulkan_dirty_max_y = (height > 0) ? height - 1 : -1;
+    }
+    void markVulkanDirtyRegion(int x, int y, int w, int h) {
+        if (w <= 0 || h <= 0) return;
+        vulkan_dirty = true;
+        if (vulkan_dirty_full) return;
+        const int x1 = x + w - 1;
+        const int y1 = y + h - 1;
+        if (vulkan_dirty_max_x < vulkan_dirty_min_x ||
+            vulkan_dirty_max_y < vulkan_dirty_min_y) {
+            vulkan_dirty_min_x = x;
+            vulkan_dirty_min_y = y;
+            vulkan_dirty_max_x = x1;
+            vulkan_dirty_max_y = y1;
+        } else {
+            if (x  < vulkan_dirty_min_x) vulkan_dirty_min_x = x;
+            if (y  < vulkan_dirty_min_y) vulkan_dirty_min_y = y;
+            if (x1 > vulkan_dirty_max_x) vulkan_dirty_max_x = x1;
+            if (y1 > vulkan_dirty_max_y) vulkan_dirty_max_y = y1;
+        }
+    }
+    void clearVulkanDirty() {
+        vulkan_dirty = false;
+        vulkan_dirty_full = false;
+        vulkan_dirty_min_x = 0;
+        vulkan_dirty_min_y = 0;
+        vulkan_dirty_max_x = -1;
+        vulkan_dirty_max_y = -1;
+    }
+    // Returns false when no dirty rect is tracked. When true, fills out the
+    // clamped region; `out_full` signals callers to take the full-texture
+    // path (allocate+copy whole image) instead of the region copy.
+    bool getVulkanDirtyRegion(int& out_x, int& out_y, int& out_w, int& out_h, bool& out_full) const {
+        if (!vulkan_dirty) return false;
+        if (width <= 0 || height <= 0) {
+            out_full = true;
+            out_x = 0; out_y = 0; out_w = width; out_h = height;
+            return true;
+        }
+        if (vulkan_dirty_full ||
+            vulkan_dirty_max_x < vulkan_dirty_min_x ||
+            vulkan_dirty_max_y < vulkan_dirty_min_y) {
+            out_full = true;
+            out_x = 0; out_y = 0; out_w = width; out_h = height;
+            return true;
+        }
+        int x0 = vulkan_dirty_min_x; if (x0 < 0) x0 = 0;
+        int y0 = vulkan_dirty_min_y; if (y0 < 0) y0 = 0;
+        int x1 = vulkan_dirty_max_x; if (x1 > width  - 1) x1 = width  - 1;
+        int y1 = vulkan_dirty_max_y; if (y1 > height - 1) y1 = height - 1;
+        if (x1 < x0 || y1 < y0) {
+            out_full = true;
+            out_x = 0; out_y = 0; out_w = width; out_h = height;
+            return true;
+        }
+        out_full = false;
+        out_x = x0;
+        out_y = y0;
+        out_w = x1 - x0 + 1;
+        out_h = y1 - y0 + 1;
+        return true;
+    }
     int width = 0, height = 0;
     std::vector<CompactVec4> pixels;
     std::vector<float4> float_pixels; // For HDR

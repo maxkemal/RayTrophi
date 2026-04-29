@@ -371,7 +371,15 @@ struct VkVolumeInstance {
     float ramp_colors_g[8];
     float ramp_colors_b[8];
     float pivot_offset[3];
-    float _ext_reserved[21];
+    int   source_type;
+    float cloud_coverage;
+    float cloud_detail;
+    float cloud_erosion;
+    float cloud_base_scale;
+    float cloud_edge_fade;
+    float cloud_offset_x;
+    float cloud_offset_z;
+    float _ext_reserved[13];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
@@ -437,19 +445,64 @@ float ch_hash3D(vec3 p) {
     p += dot(p, p.yzx + 19.19);
     return fract((p.x + p.y) * p.z);
 }
+
+vec3 ch_hash3Gradient(vec3 p) {
+    p = vec3(
+        dot(p, vec3(127.1, 311.7, 74.7)),
+        dot(p, vec3(269.5, 183.3, 246.1)),
+        dot(p, vec3(113.5, 271.9, 124.6))
+    );
+    return -1.0 + 2.0 * fract(sin(p) * 43758.5453);
+}
+
 float ch_noise3D(vec3 p) {
-    vec3 i = floor(p); vec3 f = fract(p); f = f*f*(3.0-2.0*f);
-    float n000=ch_hash3D(i+vec3(0,0,0)); float n100=ch_hash3D(i+vec3(1,0,0));
-    float n010=ch_hash3D(i+vec3(0,1,0)); float n110=ch_hash3D(i+vec3(1,1,0));
-    float n001=ch_hash3D(i+vec3(0,0,1)); float n101=ch_hash3D(i+vec3(1,0,1));
-    float n011=ch_hash3D(i+vec3(0,1,1)); float n111=ch_hash3D(i+vec3(1,1,1));
-    return mix(mix(mix(n000,n100,f.x),mix(n010,n110,f.x),f.y),
-               mix(mix(n001,n101,f.x),mix(n011,n111,f.x),f.y),f.z);
+    vec3 i = floor(p); vec3 f = fract(p);
+    vec3 u = f*f*f*(f*(f*6.0-vec3(15.0))+vec3(10.0));
+    float n000=dot(ch_hash3Gradient(i+vec3(0,0,0)), f-vec3(0,0,0)); float n100=dot(ch_hash3Gradient(i+vec3(1,0,0)), f-vec3(1,0,0));
+    float n010=dot(ch_hash3Gradient(i+vec3(0,1,0)), f-vec3(0,1,0)); float n110=dot(ch_hash3Gradient(i+vec3(1,1,0)), f-vec3(1,1,0));
+    float n001=dot(ch_hash3Gradient(i+vec3(0,0,1)), f-vec3(0,0,1)); float n101=dot(ch_hash3Gradient(i+vec3(1,0,1)), f-vec3(1,0,1));
+    float n011=dot(ch_hash3Gradient(i+vec3(0,1,1)), f-vec3(0,1,1)); float n111=dot(ch_hash3Gradient(i+vec3(1,1,1)), f-vec3(1,1,1));
+    return mix(mix(mix(n000,n100,u.x),mix(n010,n110,u.x),u.y),
+               mix(mix(n001,n101,u.x),mix(n011,n111,u.x),u.y),u.z) * 0.5 + 0.5;
 }
 float ch_fbmNoise(vec3 p, int oct) {
     float v=0.0,a=0.5,fr=1.0;
     for(int i=0;i<oct;i++){v+=a*ch_noise3D(p*fr);fr*=2.0;a*=0.5;}
     return v;
+}
+
+float ch_proceduralCloudDensity(VkVolumeInstance vol, vec3 lp, vec3 bmin, vec3 bmax) {
+    vec3 span = max(bmax - bmin, vec3(1e-5));
+    vec3 norm = clamp((lp - bmin) / span, vec3(0.0), vec3(1.0));
+    float baseScale = max(vol.cloud_base_scale, 1.0);
+    vec3 cloudCoord = vec3(
+        norm.x * baseScale + vol.cloud_offset_x,
+        norm.y * 1.35,
+        norm.z * baseScale + vol.cloud_offset_z);
+
+    float coverage = clamp(vol.cloud_coverage, 0.0, 1.0);
+    float detail = clamp(vol.cloud_detail, 0.0, 1.0);
+    float erosion = clamp(vol.cloud_erosion, 0.0, 1.0);
+    float warpX = ch_fbmNoise(vec3(cloudCoord.x * 0.38, cloudCoord.y * 0.16, cloudCoord.z * 0.38) + vec3(11.0, 0.0, 7.0), 2) - 0.5;
+    float warpZ = ch_fbmNoise(vec3(cloudCoord.x * 0.38, cloudCoord.y * 0.16, cloudCoord.z * 0.38) + vec3(41.0, 3.0, 23.0), 2) - 0.5;
+    vec3 warped = cloudCoord + vec3(warpX * 1.35, 0.0, warpZ * 1.35);
+
+    float base = ch_fbmNoise(vec3(warped.x * 0.52, warped.y * 0.28, warped.z * 0.52), 4);
+    float billow = 1.0 - abs(ch_fbmNoise(vec3(warped.x * 1.15, warped.y * 0.5, warped.z * 1.15) + vec3(17.0, 3.0, 11.0), 4) * 2.0 - 1.0);
+    float detailNoise = ch_fbmNoise(warped * mix(2.8, 7.0, detail) + vec3(31.0, 7.0, 19.0), 2);
+
+    float puffy = smoothstep(0.32, 0.88, billow);
+    float shape = mix(base, base * 0.45 + puffy * 0.75, 0.72);
+    shape -= detailNoise * mix(0.06, 0.28, erosion);
+
+    float threshold = mix(0.78, 0.30, coverage);
+    float density = max((shape - threshold) / max(1.0 - threshold, 1e-4), 0.0);
+
+    float bottom = smoothstep(0.12, 0.42, norm.y);
+    float top = 1.0 - smoothstep(0.72, 1.02, norm.y);
+    vec3 ed = vec3(0.5) - abs(norm - vec3(0.5));
+    float edge = smoothstep(0.0, max(vol.cloud_edge_fade, 0.02), min(ed.x, ed.z));
+    return density * density * bottom * top * edge * 4.6;
 }
 
 // World-pos → object-space density for shadow ray march.
@@ -489,6 +542,8 @@ float ch_volDensity(VkVolumeInstance vol, vec3 wp) {
             vec3 nc = norm * max(vol.noise_scale, 1.0);
             density = ch_fbmNoise(nc, 4);
         }
+    } else if (vol.volume_type == 3 || vol.source_type == 3) {
+        density = ch_proceduralCloudDensity(vol, lp, bmin, bmax);
     }
     density = max((density - vol.density_remap_low) /
                   max(vol.density_remap_high - vol.density_remap_low, 1e-6), 0.0);
@@ -506,6 +561,7 @@ float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float m
     for (int vi = 0; vi < min(volCount, 16); vi++) {
         VkVolumeInstance vol = volumes.v[vi];
         if (vol.is_active == 0) continue;
+        if (vol.volume_type == 3 || vol.source_type == 3) continue;
         float sigma_t = vol.scatter_coefficient + vol.absorption_coefficient;
         if (sigma_t < EPS || vol.density_multiplier < EPS) continue;
 
@@ -1073,10 +1129,9 @@ void scatterMetal(vec3 hitPos, vec3 normal, vec3 rayDir, vec3 albedo, float roug
 }
 
 // --- Dielectric Glass (Fresnel + TIR + Roughness) ---
-void scatterGlass(vec3 hitPos, vec3 normal, vec3 rayDir, vec3 albedo, float ior, float roughness, inout uint seed) {
+void scatterGlass(vec3 hitPos, vec3 normal, bool frontFace, vec3 rayDir, vec3 albedo, float ior, float roughness, inout uint seed) {
     // Işığın hangi taraftan geldiğini belirle
-    bool  frontFace    = dot(rayDir, normal) < 0.0;
-    vec3  macroNormal  = frontFace ? normal : -normal;
+    vec3  macroNormal  = normal;
     float etaRatio     = frontFace ? (1.0 / ior) : ior;
     
     vec3 outNormal = macroNormal;
@@ -1124,7 +1179,7 @@ void scatterGlass(vec3 hitPos, vec3 normal, vec3 rayDir, vec3 albedo, float ior,
     } else {
         vec3 glassTint = clamp(albedo, vec3(0.0), vec3(1.0));
         float cosInside = max(abs(dot(normalize(dir), -macroNormal)), 0.05);
-        float opticalThickness = 0.1 / cosInside;
+        float opticalThickness = 0.65 / cosInside;
         vec3 absorption = (vec3(1.0) - glassTint) * opticalThickness;
         vec3 transmissionColor = vec3(
             exp(-absorption.x),
@@ -1548,7 +1603,8 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
 
     // ── Tint attenuation with water color, then scatter as glass ─
     payload.attenuation *= finalAlbedo;
-    scatterGlass(hitPos, shadingNormal, rayDir, vec3(1.0), ior, mix(roughness, 0.8, totalFoam), seed);
+    bool waterFrontFace = dot(rayDir, shadingNormal) < 0.0;
+    scatterGlass(hitPos, shadingNormal, waterFrontFace, rayDir, vec3(1.0), ior, mix(roughness, 0.8, totalFoam), seed);
 }
 
 // ============================================================
@@ -1634,12 +1690,13 @@ void main() {
     // Vulkan shader coordinate origin differs; flip V to match OptiX (and texture upload)
     hitUV.y = 1.0 - hitUV.y;
 
+    bool surfaceFrontFace = dot(geomNormalRaw, rayDir) < 0.0;
     geomNormal = geomNormalRaw;
 
-    if (dot(geomNormalRaw, rayDir) > 0.0) {
+    if (!surfaceFrontFace) {
         worldNormal = -worldNormal;
     }
-    if (dot(geomNormal, rayDir) > 0.0) {
+    if (!surfaceFrontFace) {
         geomNormal = -geomNormalRaw;
     }
 
@@ -1696,17 +1753,22 @@ void main() {
                 }
                 blendAlbedo += weights[k] * lAlbedo;
 
-                // Layer roughness
+                // Layer roughness — terrain layers use the same per-material flag bits
+                // as the parent terrain material; channel selection follows pbr_texture_policy.
                 float lRough = clamp(lm.roughness, 0.0, 1.0);
                 if (int(lm.roughness_tex) > 0) {
-                    lRough = texture(materialTextures[nonuniformEXT(int(lm.roughness_tex))], layerUV).g;
+                    lRough = samplePackedRoughness(
+                        texture(materialTextures[nonuniformEXT(int(lm.roughness_tex))], layerUV),
+                        0.0, lm.flags);
                 }
                 blendRoughness += weights[k] * lRough;
 
                 // Layer metallic
                 float lMetal = clamp(lm.metallic, 0.0, 1.0);
                 if (int(lm.metallic_tex) > 0) {
-                    lMetal = texture(materialTextures[nonuniformEXT(int(lm.metallic_tex))], layerUV).b;
+                    lMetal = samplePackedMetallic(
+                        texture(materialTextures[nonuniformEXT(int(lm.metallic_tex))], layerUV),
+                        lm.flags);
                 }
                 blendMetallic += weights[k] * lMetal;
 
@@ -1721,8 +1783,9 @@ void main() {
                 // Keep channel orientation aligned with OptiX path (no ad-hoc X/Y flips).
                 // Layers without a normal map contribute a flat (0,0,1) tangent-space vector.
                 if (int(lm.normal_tex) > 0) {
-                    vec3 ns = texture(materialTextures[nonuniformEXT(int(lm.normal_tex))], layerUV).rgb;
-                    ns = ns * 2.0 - vec3(1.0); // [0,1] -> [-1,1]
+                    vec3 ns = decodeNormalMapSample(
+                        texture(materialTextures[nonuniformEXT(int(lm.normal_tex))], layerUV).rgb,
+                        lm.flags);
                     ns.x *= lm.normal_strength;
                     ns.y *= lm.normal_strength;
                     blendNormal_ts += weights[k] * ns;
@@ -1878,15 +1941,15 @@ if (emissionTexID > 0) {
     int roughTexID = int(mat.roughness_tex);
     if (roughTexID > 0) {
         float r = samplePackedRoughness(
-            texture(materialTextures[nonuniformEXT(roughTexID)], materialUV), 0.0);
+            texture(materialTextures[nonuniformEXT(roughTexID)], materialUV), 0.0, mat.flags);
         roughness = clamp(r, 0.0, 1.0);
     }
-    
+
     // Sample metallic texture
     int metallicTexID = int(mat.metallic_tex);
     if (metallicTexID > 0) {
         float m = samplePackedMetallic(
-            texture(materialTextures[nonuniformEXT(metallicTexID)], materialUV));
+            texture(materialTextures[nonuniformEXT(metallicTexID)], materialUV), mat.flags);
         metallic = clamp(m, 0.0, 1.0);
     }
 
@@ -1922,14 +1985,17 @@ if (emissionTexID > 0) {
                         abs(mat.sheen_tint) < 1e-5;
     vec3 tangentNormal = worldNormal;  // Default to geometry normal
     if (normalTexID > 0 && !waterUsesFFT) {
-        // Sample normal map (OpenGL format: RGB = normal direction)
+        // Sample normal map (OpenGL format: RGB = normal direction).
+        // BC5 cache only stores RG — decodeNormalMapSample reconstructs Z when
+        // bit 11 is set; otherwise the .b channel from the source RGB is used.
         vec3 normalMapSample = texture(materialTextures[nonuniformEXT(normalTexID)], materialUV).rgb;
-        
-        // Validate: ensure we don't have pure black or NaN
+
+        // Validate against pure-black sample (RGB normals encode the rest-pose at
+        // ~0.5,0.5,1.0 → length ≈ 1.22; BC5 with reconstructed Z is unit length
+        // so length ≈ 1.0; both safely above the 0.1 floor).
         float mapLength = length(normalMapSample);
-        if (mapLength > 0.1) {  // Non-zero check
-            // Convert from [0, 1] to [-1, 1] range
-            vec3 normalMapDir = normalMapSample * 2.0 - vec3(1.0);
+        if (mapLength > 0.1) {
+            vec3 normalMapDir = decodeNormalMapSample(normalMapSample, mat.flags);
             normalMapDir.x *= mat.normal_strength;
             normalMapDir.y *= mat.normal_strength;
             
@@ -2011,7 +2077,7 @@ if (emissionTexID > 0) {
     if (transmission > 0.01) {
         if (rnd(payload.seed) < transmission) {
             // 1) Chosen transmission path - act as Glass
-            scatterGlass(hitPos, worldNormal, rayDir, albedo, ior, roughness, payload.seed);
+            scatterGlass(hitPos, worldNormal, surfaceFrontFace, rayDir, albedo, ior, roughness, payload.seed);
             return; // Immediately return, skipping direct lighting (Next Event Estimation)
         } else {
             // 2) Chosen base path (diffuse/metal), compensate probability weight
@@ -2115,11 +2181,11 @@ if (emissionTexID > 0) {
     }                       // ← direct lighting scope
 
     // ----------------------------------------------------------
-    // Nishita Sun Direct Lighting (atmosphere mode == 2)
-    // The sun is NOT in the lights[] buffer, so it is sampled here.
-    // Uses the same shadow + volumetric-shadow pipeline as the light loop.
+    // Nishita direct sun lighting is intentionally disabled here.
+    // Direct sun contribution must come from scene Directional lights only;
+    // sky sun intensity remains handled by the miss/sky path.
     // ----------------------------------------------------------
-    if (worldData.w.mode == 2 && worldData.w.sunIntensity > 1e-4) {
+    if (false && worldData.w.mode == 2 && worldData.w.sunIntensity > 1e-4) {
         vec3 sunDir = normalize(worldData.w.sunDir);
         float NdotSun = max(dot(worldNormal, sunDir), 0.0);
         if (NdotSun > 1e-6) {
@@ -2251,13 +2317,16 @@ if (emissionTexID > 0) {
         }
     }
     else {
-        // Metallic blend: stochastic selection
+        // Metallic blend: stochastic selection.
+        //
+        // The lobe selection probability is the material weight. Do not apply
+        // 1/p compensation here unless the sampled lobe is also multiplied by
+        // its material weight first; otherwise intermediate metallic values
+        // estimate full diffuse + full specular energy and create fireflies.
         if (rnd(payload.seed) < metalWeight) {
             scatterMetal(hitPos, worldNormal, rayDir, albedo, roughness, payload.seed);
-            payload.attenuation *= (1.0 / max(metalWeight, 0.1));
         } else {
             scatterDiffuse(hitPos, worldNormal, albedo, payload.seed);
-            payload.attenuation *= (1.0 / max(diffuseWeight, 0.1));
         }
     }
 }

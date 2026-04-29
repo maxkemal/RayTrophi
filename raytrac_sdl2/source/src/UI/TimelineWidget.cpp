@@ -19,6 +19,7 @@
 #include "GasVolume.h"    // For gas/emitter keyframe animation
 #include "globals.h"
 #include "MaterialManager.h"
+#include "PrincipledBSDF.h"
 #include "Matrix4x4.h"
 #include "world.h"
 #include "OptixWrapper.h"  // For direct instance transform updates
@@ -85,10 +86,9 @@ static std::string resolveCharacterTrackName(SceneData& scene, const std::string
     if (selectionName.empty()) return selectionName;
     for (auto& mctx : scene.importedModelContexts) {
         if (mctx.importName == selectionName) return mctx.importName;
-        // Only resolve individual node names to model import name for models
-        // with actual skeletal/bone animation. Static imported objects (e.g. GLB
-        // cubes, props) keep their own node name so rigid keyframe animation works.
-        if (!mctx.hasAnimation) continue;
+        // Only remap to importName for SKELETAL models (bone-weighted meshes).
+        // Rigid node animation keeps its own unique node name as the track key.
+        if (!mctx.hasAnimation || mctx.weightedBoneCount == 0) continue;
         for (const auto& member : mctx.members) {
             auto tri = std::dynamic_pointer_cast<Triangle>(member);
             if (tri && tri->getNodeName() == selectionName) {
@@ -217,13 +217,8 @@ void TimelineWidget::draw(UIContext& ctx) {
         is_playing = false;
     }
     
-    // PERFORMANCE: Only sync once on first frame, or when explicitly triggered
-    // syncFromAnimationData is now called only when needed, not every frame
-    static bool first_sync_done = false;
-    if (!first_sync_done) {
-        syncFromAnimationData(ctx);
-        first_sync_done = true;
-    }
+    // Sync new AnimationData entries every frame — cheap (count compare + early return)
+    syncFromAnimationData(ctx);
     
     // PERFORMANCE: Handle selection change with minimal overhead
     handleSelectionSync(ctx);
@@ -307,6 +302,7 @@ void TimelineWidget::draw(UIContext& ctx) {
     }
     
     // Sync to render settings
+    ctx.render_settings.animation_is_playing = is_playing;
     ctx.render_settings.animation_current_frame = current_frame;
     ctx.render_settings.animation_playback_frame = current_frame;
     ctx.scene.timeline.current_frame = current_frame;
@@ -356,6 +352,7 @@ void TimelineWidget::draw(UIContext& ctx) {
     {
         static int last_water_update_frame = -1;
         if (current_frame != last_water_update_frame) {
+            bool has_any_water_kf = false;
             for (auto& [track_name, track] : ctx.scene.timeline.tracks) {
                 if (track.keyframes.empty()) continue;
                 
@@ -369,6 +366,7 @@ void TimelineWidget::draw(UIContext& ctx) {
                 }
                 
                 if (has_water_kf && track_name.find("Water_") == 0) {
+                    has_any_water_kf = true;
                     // Extract water surface ID from track name (e.g., "Water_1" -> 1)
                     int water_id = -1;
                     try {
@@ -387,19 +385,32 @@ void TimelineWidget::draw(UIContext& ctx) {
                     }
                 }
             }
+
+            bool timeline_preview_water = false;
+            if (WaterManager::getInstance().getPreviewTimeMode() == WaterPreviewTimeMode::Timeline) {
+                for (const auto& surf : WaterManager::getInstance().getWaterSurfaces()) {
+                    if (surf.params.use_fft_ocean || surf.params.use_geometric_waves ||
+                        surf.animate_mesh || surf.params.wave_strength > 0.0001f) {
+                        timeline_preview_water = true;
+                        break;
+                    }
+                }
+            }
             
             // After applying all water keyframes, run actual water simulation update
             // This updates FFT ocean and geometric wave mesh animation
-            float fps = static_cast<float>(ctx.render_settings.animation_fps > 0 ? ctx.render_settings.animation_fps : 24);
-            float frame_time = static_cast<float>(current_frame) / fps;
-            WaterUpdateResult waterUpdate = WaterManager::getInstance().update(frame_time);
-            if (waterUpdate.mesh_changed) {
-                // Water mesh changed - need geometry update
-                g_bvh_rebuild_pending = true;
-                g_optix_rebuild_pending = true;
-            }
-            if (waterUpdate.requiresAccumulationReset() && ctx.backend_ptr) {
-                ctx.backend_ptr->resetAccumulation();
+            if (has_any_water_kf || timeline_preview_water) {
+                float fps = static_cast<float>(ctx.render_settings.animation_fps > 0 ? ctx.render_settings.animation_fps : 24);
+                float frame_time = static_cast<float>(current_frame) / fps;
+                WaterUpdateResult waterUpdate = WaterManager::getInstance().update(frame_time);
+                if (waterUpdate.mesh_changed) {
+                    // Water mesh changed - need geometry update
+                    g_bvh_rebuild_pending = true;
+                    g_optix_rebuild_pending = true;
+                }
+                if (waterUpdate.requiresAccumulationReset() && ctx.backend_ptr) {
+                    ctx.backend_ptr->resetAccumulation();
+                }
             }
             
             last_water_update_frame = current_frame;
@@ -421,6 +432,7 @@ void TimelineWidget::draw(UIContext& ctx) {
             bool needs_bvh_update = false;
             bool needs_light_update = false;
             bool needs_camera_update = false;
+            std::map<std::string, Matrix4x4> pending_object_transforms;
             
             // PERFORMANCE: Build object cache ONCE before the track loop, not per-track
             struct CachedObject {
@@ -478,7 +490,7 @@ void TimelineWidget::draw(UIContext& ctx) {
                 auto it = object_cache.find(track_name);
                 if (it != object_cache.end()) {
                     auto& cached = it->second;
-                    auto th = cached.triangle ? cached.triangle->getTransformHandle() : nullptr;
+                    Transform* th = cached.triangle ? cached.triangle->getTransformPtr() : nullptr;
                     if (th) {
                         // Build transform from evaluated keyframe
                         Matrix4x4 new_transform = Matrix4x4::fromTRS(
@@ -492,6 +504,7 @@ void TimelineWidget::draw(UIContext& ctx) {
                         if (cached.instance) {
                             cached.instance->setTransform(th->base);
                         }
+                        pending_object_transforms[track_name] = new_transform;
                         
                         // GPU mode: Skip CPU vertex update - TLAS handles transforms
                         // CPU mode: Need to update world-space vertices for raytracing
@@ -621,6 +634,15 @@ void TimelineWidget::draw(UIContext& ctx) {
                 
                 if (changed) {
                     ctx.renderer.world.setNishitaParams(nishita);
+                    extern bool g_world_dirty;
+                    extern bool g_gas_volumes_dirty;
+                    g_world_dirty = true;
+                    g_gas_volumes_dirty = true;
+                    if (ctx.backend_ptr) {
+                        WorldData wd = ctx.renderer.world.getGPUData();
+                        ctx.backend_ptr->setWorldData(&wd);
+                        ctx.renderer.updateBackendGasVolumes(ctx.scene);
+                    }
                 }
                 
                 // Background color (not in Nishita, stored in scene)
@@ -641,10 +663,26 @@ void TimelineWidget::draw(UIContext& ctx) {
             }
             
             // Apply material keyframes
-            if (evaluated.has_material && evaluated.material.material_id > 0) {
+            if (evaluated.has_material && evaluated.material.material_id != MaterialManager::INVALID_MATERIAL_ID) {
                 auto mat = MaterialManager::getInstance().getMaterial(evaluated.material.material_id);
                 if (mat && mat->gpuMaterial) {
                     evaluated.material.applyTo(*mat->gpuMaterial);
+
+                    // Sync CPU-side PrincipledBSDF properties so updateBackendMaterials'
+                    // capturePBRMaterialSnapshot reads keyframed values, not stale CPU data.
+                    if (auto* pbsdf = dynamic_cast<PrincipledBSDF*>(mat)) {
+                        pbsdf->albedoProperty.color      = evaluated.material.albedo;
+                        pbsdf->roughnessProperty.color   = Vec3(evaluated.material.roughness);
+                        pbsdf->metallicProperty.intensity = evaluated.material.metallic;
+                        pbsdf->emissionProperty.color    = evaluated.material.emission;
+                        pbsdf->ior                       = evaluated.material.ior;
+                        pbsdf->transmission              = evaluated.material.transmission;
+                        pbsdf->opacityProperty.alpha     = evaluated.material.opacity;
+                    }
+
+                    // Push only the animated material slot; full material sync is too
+                    // expensive for keyframe playback in dense scenes.
+                    ctx.renderer.updateBackendMaterial(ctx.scene, evaluated.material.material_id);
                     ctx.renderer.resetCPUAccumulation();
                     if (ctx.backend_ptr) {
                         ctx.backend_ptr->resetAccumulation();
@@ -661,10 +699,22 @@ void TimelineWidget::draw(UIContext& ctx) {
             // must NOT gate on use_optix here - both renderers use the same call.
             
             if (ctx.backend_ptr) {
-                // Always update backend transforms - handles RT TLAS refit AND
-                // Solid/Matcap raster instance sync internally.
-                // This works even when TLAS was never built (e.g., Solid-only mode).
-                ctx.backend_ptr->updateInstanceTransforms(ctx.scene.world.objects);
+                // For the common "one keyed object in a crowded scene" case, avoid
+                // scanning every scene object each frame. RT backends rebuild/refit
+                // TLAS per targeted call, so keep the full batch path when several
+                // objects moved in the same frame.
+                const bool use_targeted_transform_update =
+                    !pending_object_transforms.empty() &&
+                    (!ctx.backend_ptr->isUsingTLAS() || pending_object_transforms.size() == 1);
+
+                if (use_targeted_transform_update) {
+                    for (const auto& [node_name, transform] : pending_object_transforms) {
+                        ctx.backend_ptr->updateObjectTransform(node_name, transform);
+                    }
+                } else {
+                    // Batch path: one scan and one TLAS update for many animated objects.
+                    ctx.backend_ptr->updateInstanceTransforms(ctx.scene.world.objects);
+                }
             }
             // CPU BVH refit needed for CPU rendering and selection picking
             // Skip in GPU mode to avoid expensive per-frame BVH rebuild during animation
@@ -2281,13 +2331,15 @@ void TimelineWidget::handleSelectionSync(UIContext& ctx) {
 // SYNC FROM IMPORTED ANIMATION DATA - Called ONCE on first frame
 // ============================================================================
 void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
-    // --- ONE-TIME: Convert AnimationData to Timeline Keyframes ---
-    static bool animation_imported = false;
-    if (!animation_imported && !ctx.scene.animationDataList.empty()) {
-        animation_imported = true;
-        
-        for (const auto& anim : ctx.scene.animationDataList) {
-            if (!anim) continue;
+    // Sync any AnimationData entries not yet converted to timeline keyframes.
+    // Uses a member counter so reset() clears it on project reload.
+    const size_t currentCount = ctx.scene.animationDataList.size();
+    if (currentCount <= lastSyncedAnimCount) return;
+
+    for (size_t animIdx = lastSyncedAnimCount; animIdx < currentCount; ++animIdx) {
+        const auto& anim = ctx.scene.animationDataList[animIdx];
+        if (!anim) continue;
+        {
             double tps = anim->ticksPerSecond > 0 ? anim->ticksPerSecond : 24.0;
             
             // Process Position Keys
@@ -2383,18 +2435,24 @@ void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
                 }
             }
             
-            // Set frame range from first animation (only on first import, user can change later)
-            if (start_frame == 0 && end_frame == 250) {  // Only if default values
-                start_frame = anim->startFrame;
-                end_frame = std::max(anim->endFrame, 1);  // Ensure at least 1 frame
+            // Expand frame range to cover this animation (keep user edits if already wider)
+            if (anim->endFrame > 0) {
+                if (start_frame == 0 && end_frame == 250) {
+                    start_frame = anim->startFrame;
+                    end_frame = std::max(anim->endFrame, 1);
+                } else {
+                    start_frame = std::min(start_frame, anim->startFrame);
+                    end_frame   = std::max(end_frame,   anim->endFrame);
+                }
             }
         }
-        
-        tracks_dirty = true;  // Rebuild track list to show new keyframes
     }
-    
+
+    lastSyncedAnimCount = currentCount;
+    tracks_dirty = true;  // Rebuild track list to show new keyframes
+
     // NOTE: Selection sync and keyboard shortcuts are now handled by handleSelectionSync()
-    // which is called every frame from draw(). This function is only called once on startup.
+    // which is called every frame from draw().
 }
 
 // INSERT KEYFRAME FOR TRACK - Uses selection data like existing code
@@ -2936,22 +2994,46 @@ void TimelineWidget::insertKeyframeType(UIContext& ctx, const std::string& track
     switch (type) {
         case KeyframeInsertType::Location:
             kf.transform.has_position = true;
+            kf.transform.has_pos_x = true;
+            kf.transform.has_pos_y = true;
+            kf.transform.has_pos_z = true;
             break;
         case KeyframeInsertType::Rotation:
             kf.transform.has_rotation = true;
+            kf.transform.has_rot_x = true;
+            kf.transform.has_rot_y = true;
+            kf.transform.has_rot_z = true;
             break;
         case KeyframeInsertType::Scale:
             kf.transform.has_scale = true;
+            kf.transform.has_scl_x = true;
+            kf.transform.has_scl_y = true;
+            kf.transform.has_scl_z = true;
             break;
         case KeyframeInsertType::LocRot:
             kf.transform.has_position = true;
+            kf.transform.has_pos_x = true;
+            kf.transform.has_pos_y = true;
+            kf.transform.has_pos_z = true;
             kf.transform.has_rotation = true;
+            kf.transform.has_rot_x = true;
+            kf.transform.has_rot_y = true;
+            kf.transform.has_rot_z = true;
             break;
         case KeyframeInsertType::All:
         default:
             kf.transform.has_position = true;
+            kf.transform.has_pos_x = true;
+            kf.transform.has_pos_y = true;
+            kf.transform.has_pos_z = true;
             kf.transform.has_rotation = true;
+            kf.transform.has_rot_x = true;
+            kf.transform.has_rot_y = true;
+            kf.transform.has_rot_z = true;
             kf.transform.has_scale = true;
+            kf.transform.has_scl_x = true;
+            kf.transform.has_scl_y = true;
+            kf.transform.has_scl_z = true;
             break;
     }
     

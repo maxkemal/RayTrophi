@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <sstream>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -68,6 +69,48 @@ inline std::vector<uint32_t> loadViewportSPV(const std::string& path) {
         return {};
     }
     return buffer;
+}
+
+static uint64_t estimateViewportTextureBytes(const Texture* tex, uint32_t uploadChannels) {
+    if (!tex || tex->width <= 0 || tex->height <= 0) return 0;
+    const uint64_t pixelCount = static_cast<uint64_t>(tex->width) * static_cast<uint64_t>(tex->height);
+    if (tex->is_hdr) {
+        return pixelCount * (uploadChannels <= 1 ? 4ull : 16ull);
+    }
+    return pixelCount * static_cast<uint64_t>((std::max)(1u, uploadChannels));
+}
+
+static std::string buildViewportSceneTextureKey(const Texture* tex,
+                                                TextureType textureType,
+                                                bool forceLinear,
+                                                bool preferSingleChannel) {
+    if (!tex) return {};
+
+    std::ostringstream oss;
+    if (!tex->name.empty()) {
+        oss << "tex:" << tex->name;
+    } else {
+        oss << "tex_ptr:" << reinterpret_cast<uintptr_t>(tex);
+    }
+    oss << "|type=" << static_cast<uint32_t>(textureType)
+        << "|forceLinear=" << (forceLinear ? 1 : 0)
+        << "|preferSingle=" << (preferSingleChannel ? 1 : 0)
+        << "|hdr=" << (tex->is_hdr ? 1 : 0);
+    return oss.str();
+}
+
+static TextureHandle registerViewportTerrainSplatTexture(SceneTextureManager* manager,
+                                                         const Texture* tex) {
+    if (!manager || !tex || !tex->is_loaded()) {
+        return {};
+    }
+
+    return manager->registerTextureKey(
+        buildViewportSceneTextureKey(tex, TextureType::Unknown, true, false),
+        TextureConsumer::RasterPreview,
+        static_cast<uint32_t>((std::max)(0, tex->width)),
+        static_cast<uint32_t>((std::max)(0, tex->height)),
+        estimateViewportTextureBytes(tex, 4u));
 }
 
 // ── Preview environment map bake (CPU replication of material_preview_frag.frag GLSL) ──
@@ -186,13 +229,29 @@ void VulkanViewportBackend::uploadTerrainLayerMaterials(const std::vector<Terrai
             Texture* splatTex = reinterpret_cast<Texture*>(ld.splatMapTexture);
             if (splatTex && splatTex->is_loaded()) {
                 uint64_t cacheKey = static_cast<uint64_t>(ld.splatMapTexture) << 1;
+                TextureHandle sceneHandle{};
+                if (m_sceneTextureManager) {
+                    sceneHandle = registerViewportTerrainSplatTexture(
+                        m_sceneTextureManager.get(),
+                        splatTex);
+                }
                 if (splatTex->vulkan_dirty) {
                     auto oldIt = m_uploadedImageIDs.find(cacheKey);
                     if (oldIt != m_uploadedImageIDs.end()) {
                         int64_t oldId = oldIt->second;
                         if (oldId) this->destroyTexture(oldId);
                     }
-                    splatTex->vulkan_dirty = false;
+                    splatTex->clearVulkanDirty();
+                }
+                if (sceneHandle.isValid() && m_sceneTextureManager) {
+                    int64_t existingSceneTextureId = 0;
+                    VulkanRT::ImageHandle existingSceneImage{};
+                    if (m_sceneTextureManager->tryGetVulkanTextureId(sceneHandle, sceneTextureOwnerScope(), existingSceneTextureId) &&
+                        existingSceneTextureId != 0 &&
+                        tryGetUploadedImageHandle(existingSceneTextureId, existingSceneImage)) {
+                        m_uploadedImageIDs[cacheKey] = existingSceneTextureId;
+                        m_textureIdToCacheKey[existingSceneTextureId] = cacheKey;
+                    }
                 }
                 auto it = m_uploadedImageIDs.find(cacheKey);
                 if (it != m_uploadedImageIDs.end()) {
@@ -206,7 +265,12 @@ void VulkanViewportBackend::uploadTerrainLayerMaterials(const std::vector<Terrai
                             tmp[i*4+2]=px[i].b; tmp[i*4+3]=px[i].a;
                         }
                         int64_t id = this->uploadTexture2D(tmp.data(), splatTex->width, splatTex->height, 4, false, false);
-                        if (id > 0) { m_uploadedImageIDs[cacheKey] = id; gld.splat_map_tex = static_cast<uint32_t>(id); }
+                        if (id > 0) {
+                            m_uploadedImageIDs[cacheKey] = id;
+                            m_textureIdToCacheKey[id] = cacheKey;
+                            registerSceneTextureUpload(sceneHandle, id);
+                            gld.splat_map_tex = static_cast<uint32_t>(id);
+                        }
                     }
                 }
             }
@@ -1412,8 +1476,8 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
             if (tex) {
                 SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, framebuffer->data(), width * 4);
             }
+            return;
         }
-        return;
     }
     m_lastCameraHash = camHash;
     m_interactiveViewport.dirty = false;
@@ -1477,6 +1541,9 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     m_rasterMinChunkScreenRadiusPixels = 3.0f;
     {
         double rasterQualityScale = 1.0;
+        double baseBudgetMillions = 72.0;
+        uint64_t minBudget = 24ull * 1000ull * 1000ull;
+        uint64_t maxBudget = 96ull * 1000ull * 1000ull;
         bool allowAdaptiveRasterBudget = false;
         if (m_viewportMode == ViewportMode::Solid || m_viewportMode == ViewportMode::Matcap) {
             switch (::render_settings.raster_viewport_quality_preset) {
@@ -1494,6 +1561,26 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                     allowAdaptiveRasterBudget = true;
                     break;
             }
+        } else if (m_viewportMode == ViewportMode::MaterialPreview) {
+            baseBudgetMillions = 36.0;
+            minBudget = 8ull * 1000ull * 1000ull;
+            maxBudget = 48ull * 1000ull * 1000ull;
+            switch (::render_settings.raster_viewport_quality_preset) {
+                case ::RasterViewportQualityPreset::Performance:
+                    rasterQualityScale = 0.45;
+                    break;
+                case ::RasterViewportQualityPreset::Balanced:
+                    rasterQualityScale = 0.65;
+                    break;
+                case ::RasterViewportQualityPreset::Quality:
+                    rasterQualityScale = 1.0;
+                    break;
+                case ::RasterViewportQualityPreset::Auto:
+                default:
+                    rasterQualityScale = 0.72;
+                    allowAdaptiveRasterBudget = true;
+                    break;
+            }
         }
         const double pixelCount = (std::max)(1.0, static_cast<double>(width) * static_cast<double>(height));
         const double referencePixels = 1920.0 * 1080.0;
@@ -1501,10 +1588,9 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         const double feedbackScale = allowAdaptiveRasterBudget
             ? (std::clamp)(static_cast<double>(m_rasterScatterBudgetScale), 0.35, 1.0)
             : 1.0;
-        const uint64_t adaptiveBudget = static_cast<uint64_t>(72.0 * 1000.0 * 1000.0 * resolutionScale * rasterQualityScale * feedbackScale);
-        m_rasterScatterTriangleBudget = std::clamp<uint64_t>(adaptiveBudget,
-                                                             24ull * 1000ull * 1000ull,
-                                                             96ull * 1000ull * 1000ull);
+        const uint64_t adaptiveBudget = static_cast<uint64_t>(
+            baseBudgetMillions * 1000.0 * 1000.0 * resolutionScale * rasterQualityScale * feedbackScale);
+        m_rasterScatterTriangleBudget = std::clamp<uint64_t>(adaptiveBudget, minBudget, maxBudget);
         if (!allowAdaptiveRasterBudget) {
             m_rasterScatterBudgetScale = 1.0f;
         }
@@ -1539,11 +1625,13 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
 
     if (!m_interactiveViewport.identityInstanceBuffer.buffer) {
         // Buffer allocation failed (e.g. old driver / memory pressure) — skip raster frame
+        m_interactiveViewport.dirty = true;
         return;
     }
 
     VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
     if (cmd == VK_NULL_HANDLE) {
+        m_interactiveViewport.dirty = true;
         return;
     }
 
@@ -1626,7 +1714,17 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                 maxDrawMeshKey = meshKey;
             }
 
-            if (useMaterialPreview) {
+            const bool drawMaterialPreview =
+                useMaterialPreview &&
+                !rmb.isScatterProxy &&
+                rmb.matIdBuffer.buffer &&
+                rmb.uvBuffer.buffer;
+
+            if (drawMaterialPreview) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.materialPreviewPipeline);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        m_interactiveViewport.materialPreviewPipelineLayout,
+                                        0, 1, &m_interactiveViewport.materialPreviewDescSet, 0, nullptr);
                 struct MaterialPreviewPushConstants {
                     float viewProj[16];
                     float view[16];
@@ -1675,6 +1773,12 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                 VkDeviceSize mpOffsets[5] = { 0, 0, 0, 0, 0 };
                 vkCmdBindVertexBuffers(cmd, 0, 5, mpVertexBuffers, mpOffsets);
             } else {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.solidPipeline);
+                if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE) {
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            m_interactiveViewport.pipelineLayout,
+                                            0, 1, &m_interactiveViewport.matcapDescSet, 0, nullptr);
+                }
                 SolidPushConstants push{};
                 matrixToGL(viewProj, push.viewProj);
                 matrixToGL(view, push.view);
@@ -1997,7 +2101,7 @@ bool VulkanViewportBackend::updateRasterMeshFromTriangles(
     size_t matIdx = 0;
     for (const auto& tri : triangles) {
         if (!tri) continue;
-        const bool hasSharedTransform = (tri->getTransformHandle() != nullptr);
+        const bool hasSharedTransform = (tri->getTransformPtr() != nullptr);
         auto [uv0, uv1, uv2] = tri->getUVCoordinates();
         const Vec2 triUvs[3] = { uv0, uv1, uv2 };
         const uint32_t triMatId = static_cast<uint32_t>(tri->getMaterialID());
@@ -2210,7 +2314,7 @@ bool VulkanViewportBackend::patchRasterMeshTriangles(
         const size_t baseFloat = triIdx * 9;
         if (baseFloat + 8 >= expectedFloatCount) continue;
 
-        const bool hasSharedTransform = (tri->getTransformHandle() != nullptr);
+        const bool hasSharedTransform = (tri->getTransformPtr() != nullptr);
         for (int v = 0; v < 3; ++v) {
             Vec3 p = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
             Vec3 n = hasSharedTransform ? tri->getOriginalVertexNormal(v) : tri->getOriginalVertexNormal(v);
@@ -2324,6 +2428,8 @@ bool VulkanViewportBackend::cloneRasterObjectByNodeName(
         RasterInstance clone = m_rasterInstances[sourceIndex];
         clone.nodeName = newNodeName;
         clone.transform = transform;
+        clone.scatterGroupId = -1;
+        clone.scatterInstanceIndex = UINT32_MAX;
         updateRasterInstanceWorldBBox(clone);
 
         const uint32_t newIndex = static_cast<uint32_t>(m_rasterInstances.size());
@@ -2390,6 +2496,51 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         }
         --baseObjectCount;
     }
+
+    auto buildSkinBuffersForTrianglePtrs = [](const std::vector<const Triangle*>& triangles,
+                                              uint32_t vertexCount,
+                                              std::vector<int32_t>& boneIndices,
+                                              std::vector<float>& boneWeights) {
+        boneIndices.assign(static_cast<size_t>(vertexCount) * 4, -1);
+        boneWeights.assign(static_cast<size_t>(vertexCount) * 4, 0.0f);
+
+        auto fillRange = [&triangles, &boneIndices, &boneWeights](size_t start, size_t end) {
+            for (size_t i = start; i < end; ++i) {
+                const Triangle* tri = triangles[i];
+                if (!tri) continue;
+                for (int v = 0; v < 3; ++v) {
+                    const auto& weights = tri->getSkinBoneWeights(v);
+                    const size_t base = (i * 3 + static_cast<size_t>(v)) * 4;
+                    for (int w = 0; w < 4; ++w) {
+                        if (w < static_cast<int>(weights.size())) {
+                            boneIndices[base + static_cast<size_t>(w)] = weights[w].first;
+                            boneWeights[base + static_cast<size_t>(w)] = weights[w].second;
+                        }
+                    }
+                }
+            }
+        };
+
+        constexpr size_t kSkinParallelThreshold = 4096;
+        unsigned skinThreads = std::thread::hardware_concurrency();
+        if (skinThreads == 0) skinThreads = 4;
+
+        const size_t count = triangles.size();
+        if (count < kSkinParallelThreshold || skinThreads < 2) {
+            fillRange(0, count);
+        } else {
+            const size_t chunk = (count + skinThreads - 1) / skinThreads;
+            std::vector<std::future<void>> futures;
+            futures.reserve(skinThreads);
+            for (unsigned t = 0; t < skinThreads; ++t) {
+                const size_t s = t * chunk;
+                const size_t e = (std::min)(s + chunk, count);
+                if (s >= e) break;
+                futures.push_back(std::async(std::launch::async, fillRange, s, e));
+            }
+            for (auto& f : futures) f.get();
+        }
+    };
 
     auto ensureRasterMeshForTriangles = [&](const std::string& meshKey,
                                             const std::vector<std::shared_ptr<Triangle>>& triangles) {
@@ -2549,7 +2700,7 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         }
 
         bool hasSkinning = false;
-        for (const auto& tri : triangles) {
+        for (const Triangle* tri : valid) {
             if (tri && tri->hasSkinData()) {
                 hasSkinning = true;
                 break;
@@ -2558,24 +2709,7 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         if (hasSkinning) {
             std::vector<int32_t> boneIndices;
             std::vector<float> boneWeights;
-            boneIndices.reserve(rmb.vertexCount * 4);
-            boneWeights.reserve(rmb.vertexCount * 4);
-
-            for (const auto& tri : triangles) {
-                if (!tri) continue;
-                for (int v = 0; v < 3; ++v) {
-                    const auto& weights = tri->getSkinBoneWeights(v);
-                    for (int i = 0; i < 4; ++i) {
-                        if (i < static_cast<int>(weights.size())) {
-                            boneIndices.push_back(weights[i].first);
-                            boneWeights.push_back(weights[i].second);
-                        } else {
-                            boneIndices.push_back(-1);
-                            boneWeights.push_back(0.0f);
-                        }
-                    }
-                }
-            }
+            buildSkinBuffersForTrianglePtrs(valid, rmb.vertexCount, boneIndices, boneWeights);
 
             VulkanRT::BufferCreateInfo sci{};
             sci.usage = VulkanRT::BufferUsage::STORAGE | VulkanRT::BufferUsage::TRANSFER_DST;
@@ -2612,6 +2746,176 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         // Move vertex-attribute buffers into CPU shadow copies — updateRasterMeshFromTriangles
         // uses these to detect dirty ranges and re-upload matIds. Moving (instead of copying)
         // avoids a deep duplication of large per-source vectors for high-poly foliage.
+        rmb.cpuPositions = std::move(positions);
+        rmb.cpuNormals   = std::move(normals);
+        rmb.cpuMatIds    = std::move(matIds);
+
+        m_rasterMeshes[meshKey] = std::move(rmb);
+    };
+
+    // Pointer-based overload: accept a list of raw Triangle pointers to avoid
+    // copying/shared_ptr refcount increments when grouping instance source meshes.
+    auto ensureRasterMeshForTrianglePtrs = [&](const std::string& meshKey,
+                                               const std::vector<const Triangle*>& triangles) {
+        if (triangles.empty()) return;
+        if (m_rasterMeshes.find(meshKey) != m_rasterMeshes.end()) return;
+
+        std::vector<const Triangle*> valid;
+        valid.reserve(triangles.size());
+        for (const Triangle* t : triangles) if (t) valid.push_back(t);
+        if (valid.empty()) return;
+
+        const size_t validCount = valid.size();
+        std::vector<float> positions(validCount * 9);
+        std::vector<float> normals(validCount * 9);
+        std::vector<float> uvs(validCount * 6);
+        std::vector<uint32_t> matIds(validCount * 3);
+
+        struct LocalBBox { Vec3 bMin; Vec3 bMax; };
+
+        auto extractRange = [&valid, &positions, &normals, &uvs, &matIds]
+                            (size_t start, size_t end) -> LocalBBox {
+            Vec3 bMin(1e18f, 1e18f, 1e18f), bMax(-1e18f, -1e18f, -1e18f);
+            for (size_t i = start; i < end; ++i) {
+                const Triangle* t = valid[i];
+                auto [uv0, uv1, uv2] = t->getUVCoordinates();
+                const Vec2 triUvs[3] = { uv0, uv1, uv2 };
+                const uint32_t triMatId = static_cast<uint32_t>(t->getMaterialID());
+                const size_t posBase = i * 9;
+                const size_t uvBase  = i * 6;
+                const size_t matBase = i * 3;
+                for (int v = 0; v < 3; ++v) {
+                    Vec3 p = t->getOriginalVertexPosition(v);
+                    Vec3 n = t->getOriginalVertexNormal(v);
+                    positions[posBase + v * 3 + 0] = p.x;
+                    positions[posBase + v * 3 + 1] = p.y;
+                    positions[posBase + v * 3 + 2] = p.z;
+                    normals[posBase + v * 3 + 0] = n.x;
+                    normals[posBase + v * 3 + 1] = n.y;
+                    normals[posBase + v * 3 + 2] = n.z;
+                    uvs[uvBase + v * 2 + 0] = triUvs[v].x;
+                    uvs[uvBase + v * 2 + 1] = triUvs[v].y;
+                    matIds[matBase + v] = triMatId;
+                    bMin.x = (std::min)(bMin.x, p.x); bMin.y = (std::min)(bMin.y, p.y); bMin.z = (std::min)(bMin.z, p.z);
+                    bMax.x = (std::max)(bMax.x, p.x); bMax.y = (std::max)(bMax.y, p.y); bMax.z = (std::max)(bMax.z, p.z);
+                }
+            }
+            return { bMin, bMax };
+        };
+
+        Vec3 bMin(1e18f, 1e18f, 1e18f), bMax(-1e18f, -1e18f, -1e18f);
+        constexpr size_t kExtractParallelThreshold = 4096;
+        unsigned extract_threads = std::thread::hardware_concurrency();
+        if (extract_threads == 0) extract_threads = 4;
+
+        if (validCount < kExtractParallelThreshold || extract_threads < 2) {
+            LocalBBox lbb = extractRange(0, validCount);
+            bMin = lbb.bMin;
+            bMax = lbb.bMax;
+        } else {
+            const size_t chunk = (validCount + extract_threads - 1) / extract_threads;
+            std::vector<std::future<LocalBBox>> futures;
+            futures.reserve(extract_threads);
+            for (unsigned t = 0; t < extract_threads; ++t) {
+                const size_t s = t * chunk;
+                const size_t e = (std::min)(s + chunk, validCount);
+                if (s >= e) break;
+                futures.push_back(std::async(std::launch::async, extractRange, s, e));
+            }
+            for (auto& f : futures) {
+                LocalBBox lbb = f.get();
+                bMin.x = (std::min)(bMin.x, lbb.bMin.x); bMin.y = (std::min)(bMin.y, lbb.bMin.y); bMin.z = (std::min)(bMin.z, lbb.bMin.z);
+                bMax.x = (std::max)(bMax.x, lbb.bMax.x); bMax.y = (std::max)(bMax.y, lbb.bMax.y); bMax.z = (std::max)(bMax.z, lbb.bMax.z);
+            }
+        }
+
+        // Cache bbox and upload buffers (same as shared_ptr variant)
+        m_rasterMeshBBoxes[meshKey] = AABB(bMin, bMax);
+
+        RasterMeshBuffer rmb;
+        rmb.vertexCount = static_cast<uint32_t>(positions.size() / 3);
+        VulkanRT::BufferCreateInfo vci{};
+        vci.size = positions.size() * sizeof(float);
+        vci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST | VulkanRT::BufferUsage::STORAGE;
+        vci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        vci.initialData = nullptr;
+        rmb.vertexBuffer = m_device->createBuffer(vci);
+
+        VulkanRT::BufferCreateInfo nci{};
+        nci.size = normals.size() * sizeof(float);
+        nci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST | VulkanRT::BufferUsage::STORAGE;
+        nci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        nci.initialData = nullptr;
+        rmb.normalBuffer = m_device->createBuffer(nci);
+
+        VulkanRT::BufferCreateInfo uci{};
+        uci.size = uvs.size() * sizeof(float);
+        uci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        uci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        uci.initialData = nullptr;
+        rmb.uvBuffer = m_device->createBuffer(uci);
+
+        VulkanRT::BufferCreateInfo mci{};
+        mci.size = matIds.size() * sizeof(uint32_t);
+        mci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        mci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        mci.initialData = nullptr;
+        rmb.matIdBuffer = m_device->createBuffer(mci);
+
+        if (rmb.vertexBuffer.buffer) {
+            m_device->uploadBuffer(rmb.vertexBuffer, positions.data(), positions.size() * sizeof(float), 0);
+        }
+        if (rmb.normalBuffer.buffer) {
+            m_device->uploadBuffer(rmb.normalBuffer, normals.data(), normals.size() * sizeof(float), 0);
+        }
+        if (rmb.uvBuffer.buffer && !uvs.empty()) {
+            m_device->uploadBuffer(rmb.uvBuffer, uvs.data(), uvs.size() * sizeof(float), 0);
+        }
+        if (rmb.matIdBuffer.buffer && !matIds.empty()) {
+            m_device->uploadBuffer(rmb.matIdBuffer, matIds.data(), matIds.size() * sizeof(uint32_t), 0);
+        }
+
+        bool hasSkinning = false;
+        for (const Triangle* tri : valid) {
+            if (tri && tri->hasSkinData()) { hasSkinning = true; break; }
+        }
+        if (hasSkinning) {
+            std::vector<int32_t> boneIndices;
+            std::vector<float> boneWeights;
+            buildSkinBuffersForTrianglePtrs(valid, rmb.vertexCount, boneIndices, boneWeights);
+
+            VulkanRT::BufferCreateInfo sci{};
+            sci.usage = VulkanRT::BufferUsage::STORAGE | VulkanRT::BufferUsage::TRANSFER_DST;
+            sci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+
+            sci.size = positions.size() * sizeof(float);
+            rmb.baseVertexBuffer = m_device->createBuffer(sci);
+            if (rmb.baseVertexBuffer.buffer) {
+                m_device->uploadBuffer(rmb.baseVertexBuffer, positions.data(), sci.size, 0);
+            }
+
+            sci.size = normals.size() * sizeof(float);
+            rmb.baseNormalBuffer = m_device->createBuffer(sci);
+            if (rmb.baseNormalBuffer.buffer) {
+                m_device->uploadBuffer(rmb.baseNormalBuffer, normals.data(), sci.size, 0);
+            }
+
+            sci.size = boneIndices.size() * sizeof(int32_t);
+            rmb.boneIndexBuffer = m_device->createBuffer(sci);
+            if (rmb.boneIndexBuffer.buffer) {
+                m_device->uploadBuffer(rmb.boneIndexBuffer, boneIndices.data(), sci.size, 0);
+            }
+
+            sci.size = boneWeights.size() * sizeof(float);
+            rmb.boneWeightBuffer = m_device->createBuffer(sci);
+            if (rmb.boneWeightBuffer.buffer) {
+                m_device->uploadBuffer(rmb.boneWeightBuffer, boneWeights.data(), sci.size, 0);
+            }
+
+            rmb.hasSkinning = rmb.baseVertexBuffer.buffer && rmb.baseNormalBuffer.buffer &&
+                              rmb.boneIndexBuffer.buffer && rmb.boneWeightBuffer.buffer;
+        }
+
         rmb.cpuPositions = std::move(positions);
         rmb.cpuNormals   = std::move(normals);
         rmb.cpuMatIds    = std::move(matIds);
@@ -2851,10 +3155,13 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
             const std::string instanceNodeName = inst->node_name.empty()
                 ? ("[ViewportInst-" + std::to_string(m_rasterInstances.size()) + "]")
                 : inst->node_name;
-            std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>> trianglesByNode;
+
+            // Group by node name using raw Triangle* to avoid incrementing shared_ptr refcounts
+            std::unordered_map<std::string, std::vector<const Triangle*>> trianglesByNode;
             trianglesByNode.reserve(inst->source_triangles->size());
-            for (const auto& tri : *inst->source_triangles) {
-                if (!tri) continue;
+            for (const auto& tri_sp : *inst->source_triangles) {
+                if (!tri_sp) continue;
+                const Triangle* tri = tri_sp.get();
                 const std::string triNodeName = tri->getNodeName().empty() ? instanceNodeName : tri->getNodeName();
                 trianglesByNode[triNodeName].push_back(tri);
             }
@@ -2867,7 +3174,8 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                                       "-src-" + std::to_string(srcPtr) +
                                       "-tris-" + std::to_string(groupedTriangles.size());
 
-                ensureRasterMeshForTriangles(meshKey, groupedTriangles);
+                // Call pointer-based mesh builder to avoid refcount churn
+                ensureRasterMeshForTrianglePtrs(meshKey, groupedTriangles);
 
                 RasterInstance ri;
                 ri.meshKey = meshKey;
@@ -2885,12 +3193,12 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             if (!tri->visible) return;
 
-            auto triTransformHandle = tri->getTransformHandle();
-            const bool hasSharedTransform = (triTransformHandle != nullptr);
+            Transform* triTransformPtr = tri->getTransformPtr();
+            const bool hasSharedTransform = (triTransformPtr != nullptr);
             std::string nodeName = tri->getNodeName();
             if (nodeName.empty()) nodeName = "[Solo-" + std::to_string(groups.size()) + "]";
-            const uintptr_t transformKey = triTransformHandle
-                ? reinterpret_cast<uintptr_t>(triTransformHandle.get())
+            const uintptr_t transformKey = triTransformPtr
+                ? reinterpret_cast<uintptr_t>(triTransformPtr)
                 : reinterpret_cast<uintptr_t>(tri.get());
             const std::string groupKey = nodeName + "#th=" + std::to_string(transformKey);
 
@@ -2984,10 +3292,6 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
             m_device->uploadBuffer(rmb.matIdBuffer, grp.matIds.data(), grp.matIds.size() * sizeof(uint32_t), 0);
         }
 
-        rmb.cpuPositions = grp.positions;
-        rmb.cpuNormals   = grp.normals;
-        rmb.cpuMatIds    = grp.matIds;
-
         bool hasSkinning = false;
         for (const auto& tri : grp.triangles) {
             if (tri && tri->hasSkinData()) {
@@ -2998,24 +3302,12 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         if (hasSkinning) {
             std::vector<int32_t> boneIndices;
             std::vector<float> boneWeights;
-            boneIndices.reserve(rmb.vertexCount * 4);
-            boneWeights.reserve(rmb.vertexCount * 4);
-
+            std::vector<const Triangle*> validSkinTriangles;
+            validSkinTriangles.reserve(grp.triangles.size());
             for (const auto& tri : grp.triangles) {
-                if (!tri) continue;
-                for (int v = 0; v < 3; ++v) {
-                    const auto& weights = tri->getSkinBoneWeights(v);
-                    for (int i = 0; i < 4; ++i) {
-                        if (i < static_cast<int>(weights.size())) {
-                            boneIndices.push_back(weights[i].first);
-                            boneWeights.push_back(weights[i].second);
-                        } else {
-                            boneIndices.push_back(-1);
-                            boneWeights.push_back(0.0f);
-                        }
-                    }
-                }
+                if (tri) validSkinTriangles.push_back(tri.get());
             }
+            buildSkinBuffersForTrianglePtrs(validSkinTriangles, rmb.vertexCount, boneIndices, boneWeights);
 
             VulkanRT::BufferCreateInfo sci{};
             sci.usage = VulkanRT::BufferUsage::STORAGE | VulkanRT::BufferUsage::TRANSFER_DST;
@@ -3049,7 +3341,11 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                               rmb.boneIndexBuffer.buffer && rmb.boneWeightBuffer.buffer;
         }
 
-        m_rasterMeshes[grp.meshKey] = rmb;
+        rmb.cpuPositions = std::move(grp.positions);
+        rmb.cpuNormals   = std::move(grp.normals);
+        rmb.cpuMatIds    = std::move(grp.matIds);
+
+        m_rasterMeshes[grp.meshKey] = std::move(rmb);
 
         RasterInstance ri;
         ri.meshKey = grp.meshKey;
@@ -3151,6 +3447,8 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                 ri.nodeName = nodePrefix + std::to_string(i);
                 ri.transform = inst.toMatrix();
                 ri.mask = 0xFF;
+                ri.scatterGroupId = group.id;
+                ri.scatterInstanceIndex = static_cast<uint32_t>(i);
             }
         };
 
@@ -3220,6 +3518,8 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
 
     m_rasterGeometryDirty = false;
     m_interactiveViewport.dirty = true;
+    m_hasPresentedRenderedFrame = false;
+    m_lastCameraHash = 0;
 
     // Stamp current scene generation so we can skip redundant rebuilds later.
     {
@@ -3238,6 +3538,7 @@ void VulkanViewportBackend::syncRasterInstanceTransforms(
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
     std::unordered_map<std::string, Matrix4x4> transformMap;
+    transformMap.reserve(objects.size());
 
     std::function<void(const std::shared_ptr<Hittable>&)> collectTransforms;
     collectTransforms = [&](const std::shared_ptr<Hittable>& obj) {
@@ -3252,7 +3553,7 @@ void VulkanViewportBackend::syncRasterInstanceTransforms(
             collectTransforms(bvh->left);
             collectTransforms(bvh->right);
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-            auto th = tri->getTransformHandle();
+            auto th = tri->getTransformPtr();
             std::string name = tri->getNodeName();
             if (!name.empty() && th) {
                 transformMap[name] = tri->getTransformMatrix();
@@ -3260,29 +3561,92 @@ void VulkanViewportBackend::syncRasterInstanceTransforms(
         }
     };
 
-    for (const auto& obj : objects) {
-        collectTransforms(obj);
+    auto hasInstancePrefix = [](const std::string& nodeName) -> bool {
+        return nodeName.rfind("_inst_gid", 0) == 0;
+    };
+    size_t baseObjectCount = objects.size();
+    while (baseObjectCount > 0) {
+        const auto& obj = objects[baseObjectCount - 1];
+        auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+        if (!inst || !hasInstancePrefix(inst->node_name)) {
+            break;
+        }
+        --baseObjectCount;
+    }
+
+    for (size_t i = 0; i < baseObjectCount; ++i) {
+        collectTransforms(objects[i]);
+    }
+
+    const auto& instanceGroups = InstanceManager::getInstance().getGroups();
+    std::unordered_map<int, const InstanceGroup*> scatterGroupsById;
+    scatterGroupsById.reserve(instanceGroups.size());
+    for (const auto& group : instanceGroups) {
+        if (!group.instances.empty()) {
+            scatterGroupsById.emplace(group.id, &group);
+        }
     }
 
     bool changed = false;
     std::unordered_set<std::string> dirtyMeshKeys;
-    for (auto& ri : m_rasterInstances) {
-        auto it = transformMap.find(ri.nodeName);
-        if (it != transformMap.end()) {
-            if (!(ri.transform == it->second)) {
-                ri.transform = it->second;
-                changed = true;
-                dirtyMeshKeys.insert(ri.meshKey);
+    const size_t kParallelThreshold = 2048;
+    unsigned numThreads = std::thread::hardware_concurrency();
+    if (numThreads == 0) numThreads = 4;
+
+    auto syncRange = [this, &transformMap, &scatterGroupsById]
+                     (size_t start, size_t end) {
+        std::unordered_set<std::string> localDirty;
+        for (size_t i = start; i < end; ++i) {
+            auto& ri = m_rasterInstances[i];
+            Matrix4x4 newTransform;
+            bool hasTransform = false;
+
+            if (ri.scatterGroupId >= 0 && ri.scatterInstanceIndex != UINT32_MAX) {
+                auto groupIt = scatterGroupsById.find(ri.scatterGroupId);
+                if (groupIt != scatterGroupsById.end()) {
+                    const auto* group = groupIt->second;
+                    if (ri.scatterInstanceIndex < group->instances.size()) {
+                        newTransform = group->instances[ri.scatterInstanceIndex].toMatrix();
+                        hasTransform = true;
+                    }
+                }
+            } else {
+                auto it = transformMap.find(ri.nodeName);
+                if (it != transformMap.end()) {
+                    newTransform = it->second;
+                    hasTransform = true;
+                }
             }
+
+            if (hasTransform && !(ri.transform == newTransform)) {
+                ri.transform = newTransform;
+                updateRasterInstanceWorldBBox(ri);
+                localDirty.insert(ri.meshKey);
+            }
+        }
+        return localDirty;
+    };
+
+    if (m_rasterInstances.size() < kParallelThreshold || numThreads < 2) {
+        dirtyMeshKeys = syncRange(0, m_rasterInstances.size());
+    } else {
+        const size_t chunk = (m_rasterInstances.size() + numThreads - 1) / numThreads;
+        std::vector<std::future<std::unordered_set<std::string>>> futures;
+        futures.reserve(numThreads);
+        for (unsigned t = 0; t < numThreads; ++t) {
+            const size_t s = t * chunk;
+            const size_t e = (std::min)(s + chunk, m_rasterInstances.size());
+            if (s >= e) break;
+            futures.push_back(std::async(std::launch::async, syncRange, s, e));
+        }
+        for (auto& f : futures) {
+            auto localDirty = f.get();
+            dirtyMeshKeys.insert(localDirty.begin(), localDirty.end());
         }
     }
+    changed = !dirtyMeshKeys.empty();
+
     if (changed) {
-        // Recompute worldBBox for instances whose transforms changed
-        for (auto& ri : m_rasterInstances) {
-            if (dirtyMeshKeys.count(ri.meshKey)) {
-                updateRasterInstanceWorldBBox(ri);
-            }
-        }
         for (const auto& meshKey : dirtyMeshKeys) {
             auto meshIt = m_rasterMeshes.find(meshKey);
             if (meshIt != m_rasterMeshes.end()) {
@@ -3369,8 +3733,8 @@ void VulkanViewportBackend::syncRasterSkinnedVertices(
             collectSkinned(bvh->right);
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             if (!tri->visible || !tri->hasSkinData()) return;
-            auto th = tri->getTransformHandle();
-            void* groupKey = th ? (void*)th.get() : (void*)tri.get();
+            auto th = tri->getTransformPtr();
+            void* groupKey = th ? (void*)th : (void*)tri.get();
             auto& grp = skinnedGroups[groupKey];
             if (grp.meshKey.empty()) {
                 std::string nodeName = tri->getNodeName();

@@ -28,3 +28,8 @@ bool tryBuildCompressedTextureCache(
     bool srgb,
     TextureCompressedCacheCandidate& outCandidate,
     std::string* outReason = nullptr);
+
+// Returns "BC7", "BC5", or "BC4" if a managed cache DDS exists for this texture+type,
+// otherwise empty. Checks managed cache only — suitable for per-frame UI queries
+// when results are memoised by the caller.
+std::string queryManagedCacheTag(const Texture& tex, TextureType type);

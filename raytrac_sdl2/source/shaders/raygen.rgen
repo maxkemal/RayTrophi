@@ -403,31 +403,6 @@ float godRaysSolarCoreFade(float sunDot, float sunSizeDeg) {
     return mix(0.6, 1.0, smoothstep(inner, outer, angle));
 }
 
-float godRaysCloudTransmittance(vec3 origin, vec3 dir, float maxDist) {
-    if (worldData.w.cloudsEnabled == 0) return 1.0;
-    if (abs(dir.y) < 1e-6) return 1.0;
-
-    float minH = worldData.w.cloudHeightMin;
-    float maxH = worldData.w.cloudHeightMax;
-    float t0 = (minH - origin.y) / dir.y;
-    float t1 = (maxH - origin.y) / dir.y;
-    float tEnter = max(min(t0, t1), 0.0);
-    float tExit = min(max(t0, t1), maxDist);
-    if (tExit <= tEnter) return 1.0;
-
-    float midT = 0.5 * (tEnter + tExit);
-    vec3 p = origin + dir * midT;
-    float scale = 0.003 / max(0.1, worldData.w.cloudScale);
-    float coverage = worldData.w.cloudCoverage;
-    float val = (sin(p.x * scale * 0.5) + sin(p.z * scale * 0.5)) * 0.5 + 0.5;
-
-    if (val < coverage) {
-        float dist = tExit - tEnter;
-        return exp(-dist * worldData.w.cloudDensity * 0.5);
-    }
-    return 1.0;
-}
-
 float traceGodRaysSunOcclusion(vec3 origin, vec3 sunDir, float maxDist) {
     shadowOccluded = true;
     uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
@@ -487,9 +462,6 @@ vec3 computePrimaryGodRays(vec3 rayOrigin, vec3 rayDir, float maxDistance, inout
 
             if (sigmaT > 1e-6) {
                 float occlusion = traceGodRaysSunOcclusion(samplePos + sunDir * 0.001, sunDir, 100000.0);
-                if (occlusion > 0.001) {
-                    occlusion *= godRaysCloudTransmittance(samplePos, sunDir, 10000.0);
-                }
                 if (occlusion > 0.001) {
                     vec3 inscatter = sunRadianceBase * phase * occlusion * (sigmaS / sigmaT) * nearFade * solarCoreFade;
                     godRayColor += transmittance * inscatter * (1.0 - stepTrans);
@@ -714,7 +686,7 @@ void main() {
         // Russian Roulette (bounce >= 3)
         if (bounce >= 3) {
             float maxComp     = max(throughput.r, max(throughput.g, throughput.b));
-            float surviveProb = clamp(maxComp, 0.05, 0.95);
+            float surviveProb = clamp(maxComp, 0.05, 1.0);
             if (rnd(seed) > surviveProb) break;
             throughput /= surviveProb;
         }
@@ -749,6 +721,7 @@ void main() {
         vec3 primaryOrigin = primaryRayOrigin;
         vec3 fogDir = firstHitValid ? normalize(firstHitPos - primaryOrigin) : normalize(primaryRayDir);
         float hitDist = firstHitValid ? length(firstHitPos - primaryOrigin) : (worldData.w.fogDistance * 0.8);
+        hitDist *= (1.0 - clamp(firstHitTransmission, 0.0, 1.0));
         hitDist = min(hitDist, worldData.w.fogDistance);
 
         // OptiX-parity analytical height fog.
@@ -781,6 +754,7 @@ void main() {
     if (worldData.w.mode == 2 && worldData.w.aerialEnabled != 0 && hasAtmosLUTs) {
         vec3 primaryOrigin = primaryRayOrigin;
         float hitDist = firstHitValid ? length(firstHitPos - primaryOrigin) : max(worldData.w.aerialMinDistance, 10000.0);
+        hitDist *= (1.0 - clamp(firstHitTransmission, 0.0, 1.0));
         
         if (hitDist > 0.1 && hitDist < 1e6) {
             vec3  rayDir      = firstHitValid ? normalize(firstHitPos - primaryOrigin) : normalize(primaryRayDir);

@@ -97,6 +97,7 @@ public:
         selected_track = "";
         selected_keyframe_frame = -1;
         is_dragging_keyframe = false;
+        lastSyncedAnimCount = 0;  // re-sync animation data after project reload
     }
 
 private:
@@ -148,6 +149,7 @@ private:
     // Track data
     std::vector<TimelineTrack> tracks;
     bool tracks_dirty = true;
+    size_t lastSyncedAnimCount = 0;  // how many AnimationData entries have been synced
     
     // Selection & Interaction
  

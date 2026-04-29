@@ -855,6 +855,7 @@ const char* paintChannelFileTag(Paint::PaintChannel channel) {
         case Paint::PaintChannel::Emission: return "emission";
         case Paint::PaintChannel::Mask: return "mask";
         case Paint::PaintChannel::Transmission: return "transmission";
+        case Paint::PaintChannel::Opacity: return "opacity";
     }
     return "channel";
 }
@@ -868,6 +869,7 @@ const char* paintChannelDisplayName(Paint::PaintChannel channel) {
         case Paint::PaintChannel::Emission: return "Emission";
         case Paint::PaintChannel::Mask: return "Height Mask";
         case Paint::PaintChannel::Transmission: return "Transmission";
+        case Paint::PaintChannel::Opacity: return "Opacity";
     }
     return "Channel";
 }
@@ -888,15 +890,26 @@ TextureType inferBrushTextureType(Paint::PaintChannel channel) {
             return TextureType::Unknown;
         case Paint::PaintChannel::Transmission:
             return TextureType::Transmission;
+        case Paint::PaintChannel::Opacity:
+            return TextureType::Opacity;
     }
     return TextureType::Unknown;
 }
 
+bool isMeshPaintUiChannelEnabled(Paint::PaintChannel channel) {
+    return channel != Paint::PaintChannel::Opacity;
+}
+
 std::vector<Paint::PaintChannel> getSelectedMaterialBrushChannels(const Paint::PaintModeState& state) {
     std::vector<Paint::PaintChannel> channels;
-    channels.push_back(state.active_channel);
-    for (int i = 0; i < 7; ++i) {
+    if (isMeshPaintUiChannelEnabled(state.active_channel)) {
+        channels.push_back(state.active_channel);
+    }
+    for (int i = 0; i < static_cast<int>(Paint::kPaintChannelCount); ++i) {
         const Paint::PaintChannel channel = static_cast<Paint::PaintChannel>(i);
+        if (!isMeshPaintUiChannelEnabled(channel)) {
+            continue;
+        }
         if (channel == state.active_channel) {
             continue;
         }
@@ -947,7 +960,8 @@ bool exportTextureSetChannels(const Paint::PaintTextureSet& set, const std::file
         { Paint::PaintChannel::Metallic, "metallic" },
         { Paint::PaintChannel::Emission, "emission" },
         { Paint::PaintChannel::Mask, "mask" },
-        { Paint::PaintChannel::Transmission, "transmission" }
+        { Paint::PaintChannel::Transmission, "transmission" },
+        { Paint::PaintChannel::Opacity, "opacity" }
     };
 
     bool wrote_any = false;
@@ -2433,6 +2447,9 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
     }
 
     const bool has_set = texture_set != nullptr && texture_set->initialized;
+    if (!isMeshPaintUiChannelEnabled(paint_mode_state.active_channel)) {
+        paint_mode_state.active_channel = Paint::PaintChannel::BaseColor;
+    }
     const std::shared_ptr<Texture> active_channel_texture =
         texture_set ? texture_set->getTexture(paint_mode_state.active_channel) : nullptr;
     const int effective_resolution = active_channel_texture
@@ -2453,14 +2470,35 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
         ImGui::TextDisabled("Current set size stays unchanged until you press Resize Texture Set.");
     }
 
-    int channel_index = static_cast<int>(paint_mode_state.active_channel);
+    const Paint::PaintChannel ui_channels[] = {
+        Paint::PaintChannel::BaseColor,
+        Paint::PaintChannel::Normal,
+        Paint::PaintChannel::Roughness,
+        Paint::PaintChannel::Metallic,
+        Paint::PaintChannel::Emission,
+        Paint::PaintChannel::Mask,
+        Paint::PaintChannel::Transmission
+    };
     const char* channel_labels[] = { "Base Color", "Normal", "Roughness", "Metallic", "Emission", "Height Mask", "Transmission" };
+    static_assert(IM_ARRAYSIZE(channel_labels) == IM_ARRAYSIZE(ui_channels),
+                  "channel_labels must stay in sync with mesh paint UI channels");
+    int channel_index = 0;
+    for (int i = 0; i < IM_ARRAYSIZE(ui_channels); ++i) {
+        if (ui_channels[i] == paint_mode_state.active_channel) {
+            channel_index = i;
+            break;
+        }
+    }
     if (ImGui::Combo("Channel", &channel_index, channel_labels, IM_ARRAYSIZE(channel_labels))) {
-        paint_mode_state.active_channel = static_cast<Paint::PaintChannel>(channel_index);
+        paint_mode_state.active_channel = ui_channels[channel_index];
     }
     ImGui::TextDisabled("Material Brush");
-    for (int i = 0; i < 7; ++i) {
+    for (int i = 0; i < static_cast<int>(Paint::kPaintChannelCount); ++i) {
         const Paint::PaintChannel channel = static_cast<Paint::PaintChannel>(i);
+        if (!isMeshPaintUiChannelEnabled(channel)) {
+            paint_mode_state.linked_channels[static_cast<size_t>(i)] = false;
+            continue;
+        }
         if (channel == paint_mode_state.active_channel) {
             continue;
         }
@@ -3137,14 +3175,22 @@ void SceneUI::drawPaintChannelTextureSlots(UIContext& ctx, Paint::MeshPaintAdapt
 
     UIWidgets::ColoredHeader("Channel Textures", ImVec4(0.75f, 0.88f, 0.55f, 1.0f));
 
-    // Compact channel overview — colored indicators for all 7 channels
+    // Compact channel overview — colored indicators for every channel
     {
         const char* short_labels[] = { "BC", "N", "R", "M", "E", "H", "T" };
-        const char* long_labels[] = { "Base Color", "Normal", "Roughness", "Metallic", "Emission", "Height Mask", "Transmission" };
-        for (int ch = 0; ch < 7; ++ch) {
-            if (ch > 0) ImGui::SameLine(0.0f, 4.0f);
-            const bool has_tex = texture_set->getTexture(static_cast<Paint::PaintChannel>(ch)) != nullptr;
-            const bool is_active = (ch == static_cast<int>(paint_mode_state.active_channel));
+        const char* long_labels[]  = { "Base Color", "Normal", "Roughness", "Metallic", "Emission", "Height Mask", "Transmission" };
+        static_assert(IM_ARRAYSIZE(short_labels) == IM_ARRAYSIZE(long_labels),
+                      "short and long channel labels must stay in sync");
+        bool printed_any = false;
+        for (int ch = 0; ch < static_cast<int>(Paint::kPaintChannelCount); ++ch) {
+            const auto channel = static_cast<Paint::PaintChannel>(ch);
+            if (!isMeshPaintUiChannelEnabled(channel)) {
+                continue;
+            }
+            if (printed_any) ImGui::SameLine(0.0f, 4.0f);
+            printed_any = true;
+            const bool has_tex = texture_set->getTexture(channel) != nullptr;
+            const bool is_active = (channel == paint_mode_state.active_channel);
             ImVec4 color = has_tex
                 ? (is_active ? ImVec4(0.3f, 1.0f, 0.5f, 1.0f) : ImVec4(0.6f, 0.8f, 0.6f, 1.0f))
                 : ImVec4(0.5f, 0.5f, 0.5f, 0.6f);
@@ -3152,7 +3198,7 @@ void SceneUI::drawPaintChannelTextureSlots(UIContext& ctx, Paint::MeshPaintAdapt
             ImGui::Text("[%s]", short_labels[ch]);
             ImGui::PopStyleColor();
             if (ImGui::IsItemHovered()) {
-                std::shared_ptr<Texture> t = texture_set->getTexture(static_cast<Paint::PaintChannel>(ch));
+                std::shared_ptr<Texture> t = texture_set->getTexture(channel);
                 if (t) ImGui::SetTooltip("%s: %dx%d", long_labels[ch], t->width, t->height);
                 else   ImGui::SetTooltip("%s: Empty", long_labels[ch]);
             }
@@ -3160,6 +3206,9 @@ void SceneUI::drawPaintChannelTextureSlots(UIContext& ctx, Paint::MeshPaintAdapt
     }
 
     // Active channel detail — import / export for the selected channel only
+    if (!isMeshPaintUiChannelEnabled(paint_mode_state.active_channel)) {
+        paint_mode_state.active_channel = Paint::PaintChannel::BaseColor;
+    }
     const auto active_ch = paint_mode_state.active_channel;
     std::shared_ptr<Texture> active_tex = texture_set->getTexture(active_ch);
     const char* ch_name = paintChannelDisplayName(active_ch);
@@ -3234,6 +3283,7 @@ void SceneUI::drawPaintChannelTextureSlots(UIContext& ctx, Paint::MeshPaintAdapt
 
                 Paint::PaintLayerStack* layer_stack = adapter->getLayerStack();
                 if (layer_stack && layer_stack->layerCount() > 0) {
+                    layer_stack->setResolution(target_res, target_res);
                     Paint::PaintLayerData* base_layer = layer_stack->layerAt(0);
                     if (base_layer) {
                         auto& buf = base_layer->ensurePixels(active_ch);
@@ -3980,6 +4030,9 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         paint_mode_state.stroke = Paint::PaintStroke{};
         return;
     }
+    if (!isMeshPaintUiChannelEnabled(paint_mode_state.active_channel)) {
+        paint_mode_state.active_channel = Paint::PaintChannel::BaseColor;
+    }
     const std::vector<Paint::PaintChannel> paint_channels = getSelectedMaterialBrushChannels(paint_mode_state);
     const bool auto_height_brush =
         paint_mode_state.brush.write_height_mask &&
@@ -4039,7 +4092,7 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
                 Paint::PaintLayerStack* undo_stack = adapter->getLayerStack();
                 Paint::PaintLayerData* undo_layer = undo_stack ? undo_stack->layerById(paint_mode_state.stroke.layer_id) : nullptr;
 
-                for (int i = 0; i < 7; ++i) {
+                for (int i = 0; i < static_cast<int>(Paint::kPaintChannelCount); ++i) {
                     const size_t idx = static_cast<size_t>(i);
                     const auto channel = static_cast<Paint::PaintChannel>(i);
                     std::vector<CompactVec4>& before_lp = paint_mode_state.stroke.before_layer_pixels[idx];
@@ -4065,7 +4118,7 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
                 }
             } else {
                 // Flat texture undo (no layers)
-                for (int i = 0; i < 7; ++i) {
+                for (int i = 0; i < static_cast<int>(Paint::kPaintChannelCount); ++i) {
                     std::shared_ptr<Texture> texture_ref = paint_mode_state.stroke.texture_snapshot_refs[static_cast<size_t>(i)];
                     std::vector<CompactVec4>& before_pixels = paint_mode_state.stroke.before_pixels_by_channel[static_cast<size_t>(i)];
                     if (!texture_ref || before_pixels.empty()) {
@@ -4548,14 +4601,9 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
             // Paint-time material sync. uploadMaterials() routes dirty textures
             // through the VulkanBackendAdapter in-place re-upload path, so each
             // tick is just a staging copy into the existing VkImage (no destroy/
-            // create, no descriptor churn). A short throttle keeps the call rate
-            // sane without hurting brush responsiveness; the endStroke path runs
-            // a final sync so the texture is never left stale.
-            const float now = static_cast<float>(ImGui::GetTime());
-            if (now - last_vulkan_paint_sync_time > 0.08f) {
-                ctx.renderer.updateBackendMaterials(ctx.scene);
-                last_vulkan_paint_sync_time = now;
-            }
+            // create, no descriptor churn).
+            ctx.renderer.updateBackendMaterials(ctx.scene);
+            last_vulkan_paint_sync_time = static_cast<float>(ImGui::GetTime());
             ctx.backend_ptr->resetAccumulation();
         }
 

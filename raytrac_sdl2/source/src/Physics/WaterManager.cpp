@@ -331,8 +331,10 @@ float WaterManager::getSurfaceWorldExtent(const WaterSurface* surf) const {
     }
 
     Vec3 world_scale(1.0f, 1.0f, 1.0f);
-    if (surf->reference_triangle && surf->reference_triangle->getTransformHandle()) {
-        world_scale = surf->reference_triangle->getTransformHandle()->scale;
+    if (surf->reference_triangle) {
+        if (Transform* t = surf->reference_triangle->getTransformPtr()) {
+            world_scale = t->scale;
+        }
     }
 
     extent_x *= fmaxf(fabsf(world_scale.x), 0.001f);
@@ -697,10 +699,12 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
 
     // Get world-space scale from transform so noise coords are scale-independent
     Vec3 world_scale(1.0f, 1.0f, 1.0f);
-    if (surf->reference_triangle && surf->reference_triangle->getTransformHandle()) {
-        world_scale = surf->reference_triangle->getTransformHandle()->scale;
-        if (fabsf(world_scale.x) < 1e-6f) world_scale.x = 1.0f;
-        if (fabsf(world_scale.z) < 1e-6f) world_scale.z = 1.0f;
+    if (surf->reference_triangle) {
+        if (Transform* t = surf->reference_triangle->getTransformPtr()) {
+            world_scale = t->scale;
+            if (fabsf(world_scale.x) < 1e-6f) world_scale.x = 1.0f;
+            if (fabsf(world_scale.z) < 1e-6f) world_scale.z = 1.0f;
+        }
     }
     const float domain_size = resolveWaveDomainSize(surf);
     const float domain_coord_scale = getLegacyDomainReferenceSize() / fmaxf(domain_size, 0.001f);
@@ -1124,10 +1128,13 @@ bool WaterManager::updateAnimatedWaterMesh(WaterSurface* surf, float time) {
 
     // Get world-space scale from transform so noise coords are scale-independent
     Vec3 world_scale(1.0f, 1.0f, 1.0f);
-    if (surf->reference_triangle && surf->reference_triangle->getTransformHandle()) {
-        world_scale = surf->reference_triangle->getTransformHandle()->scale;
-        if (fabsf(world_scale.x) < 1e-6f) world_scale.x = 1.0f;
-        if (fabsf(world_scale.z) < 1e-6f) world_scale.z = 1.0f;
+    if (surf->reference_triangle) {
+        Transform* rt = surf->reference_triangle->getTransformPtr();
+        if (rt) {
+            world_scale = rt->scale;
+            if (fabsf(world_scale.x) < 1e-6f) world_scale.x = 1.0f;
+            if (fabsf(world_scale.z) < 1e-6f) world_scale.z = 1.0f;
+        }
     }
 
     // Pre-compute Gerstner wave parameters ONCE (not per-vertex)

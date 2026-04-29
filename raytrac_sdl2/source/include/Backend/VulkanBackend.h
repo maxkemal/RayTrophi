@@ -37,6 +37,7 @@
 #include <mutex>
 #include "Backend/IBackend.h"
 #include "Backend/IViewportBackend.h"
+#include "Backend/SceneTextureManager.h"
 #include "AtmosphereLUT.h"
 namespace VulkanRT {
 
@@ -262,6 +263,8 @@ struct TLASInstance {
     uint8_t mask = 0xFF;                // Visibility mask
     bool frontFaceCCW = true;
     uint32_t sbtRecordOffset = 0;       // SBT hit group offset (0=triangle, 1=volume procedural)
+    int scatterGroupId = -1;            // Direct InstanceManager lookup for expanded scatter groups
+    uint32_t scatterInstanceIndex = UINT32_MAX;
 };
 
 struct VkInstanceData {
@@ -344,6 +347,7 @@ struct ImageHandle {
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkSampler sampler = VK_NULL_HANDLE;
     uint32_t width = 0, height = 0;
+    uint32_t mipLevels = 1;
     VkFormat format = VK_FORMAT_UNDEFINED;
 };
 
@@ -578,11 +582,29 @@ public:
     ImageHandle createImage2D(uint32_t width, uint32_t height, VkFormat format,
                               VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                               VkImageAspectFlags aspectMask = VK_IMAGE_ASPECT_COLOR_BIT);
+    // Creates image with full mip chain; pre-transitions all levels to TRANSFER_DST_OPTIMAL.
+    // Caller must fill mip 0 then call generateMipmaps to produce and finalize the chain.
+    ImageHandle createImage2DWithMips(uint32_t width, uint32_t height, uint32_t mipLevels, VkFormat format,
+                                      VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT |
+                                                                VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    // Records blit-based mip generation into cmd. Assumes mip 0 is in TRANSFER_DST_OPTIMAL.
+    // All mip levels are transitioned to SHADER_READ_ONLY_OPTIMAL on completion.
+    void generateMipmaps(VkCommandBuffer cmd, VkImage image, uint32_t width, uint32_t height, uint32_t mipLevels);
     void destroyImage(ImageHandle& image);
-    
+
     void copyImageToBuffer(const ImageHandle& src, const BufferHandle& dst);
     void copyBufferToImage(const BufferHandle& src, const ImageHandle& dst);
-    
+    // Copies a sub-rectangle from `src` into the existing `dst` VkImage. Used
+    // by the paint pipeline so that a brush-sized dab does not need a full
+    // image stage+copy. Image must already be in VK_IMAGE_LAYOUT_GENERAL.
+    void copyBufferToImageRegion(const BufferHandle& src, const ImageHandle& dst,
+                                 int32_t offsetX, int32_t offsetY,
+                                 uint32_t regionW, uint32_t regionH);
+    void recordCopyBufferToImage(VkCommandBuffer cmd, const BufferHandle& src, const ImageHandle& dst);
+    // Like recordCopyBufferToImage but assumes the image is in TRANSFER_DST_OPTIMAL (used for mip uploads).
+    void recordCopyBufferToImageDst(VkCommandBuffer cmd, const BufferHandle& src, const ImageHandle& dst);
+
     void transitionImageLayout(VkCommandBuffer cmd, VkImage image,
                                VkImageLayout oldLayout, VkImageLayout newLayout);
     
@@ -863,11 +885,16 @@ public:
     // IBackend - Materials & Textures
     // ========================================================================
     void uploadMaterials(const std::vector<MaterialData>& materials) override;
+    bool updateMaterial(uint32_t materialIndex, const MaterialData& material) override;
     void uploadHairMaterials(const std::vector<HairMaterialData>& materials) override;
     void uploadTerrainLayerMaterials(const std::vector<TerrainLayerData>& layers) override;
     int64_t uploadTexture2D(const void* data, uint32_t width, uint32_t height, uint32_t channels, bool sRGB, bool isFloat = false) override;
     int64_t uploadTexture3D(const void* data, uint32_t width, uint32_t height, uint32_t depth, uint32_t channels, bool isFloat = false) override;
     void destroyTexture(int64_t textureHandle) override;
+    virtual const char* sceneTextureOwnerScope() const { return "VulkanBackendAdapter"; }
+    bool tryGetUploadedImageHandle(int64_t textureHandle, VulkanRT::ImageHandle& outImage) const;
+    bool buildVulkanBackingRecord(int64_t textureHandle, VulkanBackingRecord& outBacking) const;
+    void registerSceneTextureUpload(TextureHandle sceneHandle, int64_t textureHandle);
 
     // In-place re-upload: write `data` into the existing VkImage at `textureID`,
     // provided width/height/format match. Used by the paint pipeline so that
@@ -878,6 +905,31 @@ public:
     bool updateTexture2DInPlace(int64_t textureID, const void* data,
                                 uint32_t width, uint32_t height,
                                 uint32_t channels, bool sRGB, bool isFloat = false);
+
+    // Partial-rectangle re-upload. `data` is a tightly-packed regionW × regionH
+    // buffer (no row padding) and is copied into the existing VkImage at the
+    // specified offset. Returns false on slot/format mismatch — caller falls
+    // back to updateTexture2DInPlace or full re-upload. Used by the paint
+    // sync to avoid full-texture transfers when only a brush-sized dab
+    // changed in CPU pixels.
+    bool updateTexture2DRegion(int64_t textureID, const void* data,
+                               uint32_t fullWidth, uint32_t fullHeight,
+                               uint32_t channels, bool sRGB,
+                               int32_t offsetX, int32_t offsetY,
+                               uint32_t regionW, uint32_t regionH);
+
+private:
+    // Records mip 1..N regeneration into `cmd` for paint-style partial
+    // updates: mip 0 is assumed to be in VK_IMAGE_LAYOUT_GENERAL (the layout
+    // updateTexture2DInPlace/Region use for the buffer→image copy) and mip
+    // 1..N in VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL (the steady state
+    // outside paint). On exit, every mip is left in SHADER_READ_ONLY_OPTIMAL
+    // so the very next sample sees the freshly-blitted chain. Only intended
+    // for color-aspect 2D images created with TRANSFER_SRC + TRANSFER_DST +
+    // SAMPLED usage flags (uploadTexture2D's mip-chain path).
+    void regenerateMipChainAfterPartialUpdate(VkCommandBuffer cmd, const VulkanRT::ImageHandle& img);
+
+public:
 
     // ========================================================================
     // IBackend - Rendering
@@ -1081,6 +1133,7 @@ protected:
     int m_imageHeight = 0;
     int m_currentSamples = 0;
     int m_targetSamples = 0;
+    int m_minSamples = 4;
     float m_currentTime = 0.0f;
     bool m_testInitialized = false;
     CameraParams m_camera;
@@ -1151,10 +1204,16 @@ protected:
     struct InstanceTransformCache { int instance_id; std::shared_ptr<Hittable> representative_hittable; };
     std::vector<InstanceTransformCache> m_instance_sync_cache;
     bool m_topology_dirty = false; // set when instances/BLAS list changes
+    // Lifetime sentinel shared with destroyFn lambdas stored in SceneTextureManager.
+    // Set to false before container teardown so lambdas that outlive this backend
+    // skip the container-erase step and only destroy GPU handles.
+    std::shared_ptr<bool> m_containerAlive = std::make_shared<bool>(true);
     // Uploaded textures (map from opaque handle/key -> ImageHandle)
     std::unordered_map<int64_t, VulkanRT::ImageHandle> m_uploadedImages;
-    std::unordered_map<uint64_t, int64_t> m_uploadedImageIDs; // maps pointer/key + color space mode -> texture ID
+    std::unordered_map<uint64_t, int64_t> m_uploadedImageIDs;     // cacheKey (pointer+flags) -> textureId
+    std::unordered_map<int64_t, uint64_t> m_textureIdToCacheKey;  // reverse: textureId -> cacheKey (O(1) eviction cleanup)
     int64_t m_nextTextureID = 1;
+    std::shared_ptr<SceneTextureManager> m_sceneTextureManager;
     uint64_t m_textureUploadBytes = 0;
     uint32_t m_textureUploadCount = 0;
     uint32_t m_textureUploadBC4Count = 0;
@@ -1234,6 +1293,7 @@ protected:
         std::vector<uint32_t> visibleInstanceIndicesCache;
         bool visibleInstancesDirty = true;
         uint64_t lastVisibleFrustumRevision = 0;
+        uint64_t lastScatterTriangleBudget = 0;
         // CPU shadow copy for dirty-range detection during sculpt
         std::vector<float> cpuPositions;
         std::vector<float> cpuNormals;
@@ -1247,10 +1307,17 @@ protected:
         AABB localBBox;            // local-space bounding box (from source mesh)
         AABB worldBBox;            // world-space AABB (localBBox transformed)
         uint8_t mask = 0xFF;       // visibility
+        int scatterGroupId = -1;   // direct InstanceManager lookup for large scatter groups
+        uint32_t scatterInstanceIndex = UINT32_MAX;
     };
 
     std::unordered_map<std::string, RasterMeshBuffer> m_rasterMeshes;
     std::vector<RasterInstance> m_rasterInstances;
+    std::vector<VulkanRT::VkGpuMaterial> m_cachedGpuMaterials;
+    std::unordered_map<std::string, std::vector<uint32_t>> m_rasterNodeIndex;
+    std::unordered_map<std::string, std::vector<uint32_t>> m_rtNodeIndex;
+    size_t m_rasterNodeIndexInstanceCount = 0;
+    size_t m_rtNodeIndexInstanceCount = 0;
     bool m_rasterGeometryDirty = true;  // force initial build
 
     // Generation counter: last g_scene_geometry_generation value seen when
@@ -1280,6 +1347,8 @@ protected:
     void rebuildRasterMeshCullingChunks(RasterMeshBuffer& mesh);
     void setRasterVisibleInstances(RasterMeshBuffer& mesh, const std::vector<uint32_t>& visibleInstanceIndices);
     void uploadVisibleRasterInstances(RasterMeshBuffer& mesh);
+    void invalidateTargetedTransformIndex();
+    void rebuildTargetedTransformIndex();
 
     // Per-mesh local AABB cache (computed once during buildRasterGeometry)
     std::unordered_map<std::string, AABB> m_rasterMeshBBoxes;
@@ -1287,6 +1356,13 @@ protected:
     void destroyRasterMesh(RasterMeshBuffer& mesh);
     void destroyAllRasterMeshes();
     void uploadRasterInstanceBuffer(RasterMeshBuffer& mesh);
+
+    // Batched texture upload — reduces N GPU submits to 1 during uploadMaterials
+    bool m_inBatchedTextureUpload = false;
+    VkCommandBuffer m_batchTextureCmd = VK_NULL_HANDLE;
+    std::vector<VulkanRT::BufferHandle> m_batchTextureStagingBuffers;
+    void beginBatchedTextureUpload();
+    void endBatchedTextureUpload();
 
     mutable std::recursive_mutex m_mutex;
 };

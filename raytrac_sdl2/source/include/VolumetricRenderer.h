@@ -40,7 +40,7 @@ public:
     /**
      * @brief Sync all volumetric data (VDB & Gas) to Optix GPU buffers
      */
-    static void syncVolumetricData(SceneData& scene, Backend::IBackend* backend);
+    static void syncVolumetricData(SceneData& scene, Backend::IBackend* backend, const WorldData* world_data = nullptr);
     
     /**
      * @brief Apply atmospheric aerial perspective and height fog to a color based on distance

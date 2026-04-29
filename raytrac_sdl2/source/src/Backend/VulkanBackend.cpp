@@ -17,10 +17,14 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <sstream>
 #include <thread>
 #include "HittableInstance.h"
 #include "HittableList.h"
@@ -122,6 +126,8 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL vulkanDebugCallback(
     return VK_FALSE;
 }
 namespace {
+    constexpr bool kRasterFrustumCullingEnabled = false;
+
     inline bool matchesNodeNameForInstance(const std::string& instanceNodeName, const std::string& queryNodeName) {
         if (queryNodeName.empty() || instanceNodeName.empty()) return false;
         if (instanceNodeName == queryNodeName) return true;
@@ -211,19 +217,42 @@ namespace {
         }
     }
 
-    inline uint64_t estimateImageStorageBytes(uint32_t width, uint32_t height, VkFormat format) {
+    inline uint64_t estimateImageStorageBytes(uint32_t width, uint32_t height, VkFormat format,
+                                               uint32_t mipLevels = 1) {
         const uint64_t w = std::max<uint32_t>(width, 1u);
         const uint64_t h = std::max<uint32_t>(height, 1u);
+        uint64_t base = 0;
         switch (format) {
             case VK_FORMAT_BC4_UNORM_BLOCK:
-                return ((w + 3ull) / 4ull) * ((h + 3ull) / 4ull) * 8ull;
+                base = ((w + 3ull) / 4ull) * ((h + 3ull) / 4ull) * 8ull;
+                break;
             case VK_FORMAT_BC5_UNORM_BLOCK:
             case VK_FORMAT_BC7_UNORM_BLOCK:
             case VK_FORMAT_BC7_SRGB_BLOCK:
-                return ((w + 3ull) / 4ull) * ((h + 3ull) / 4ull) * 16ull;
+                base = ((w + 3ull) / 4ull) * ((h + 3ull) / 4ull) * 16ull;
+                break;
             default:
-                return w * h * bytesPerPixelForFormat(format);
+                base = w * h * bytesPerPixelForFormat(format);
+                break;
         }
+        // Full mip chain is ~4/3 × base; partial chains are proportionally less.
+        if (mipLevels <= 1) return base;
+        // Approximate: sum of geometric series 1 + 1/4 + 1/16 + ... capped at mipLevels
+        uint64_t total = base;
+        uint64_t level = base;
+        for (uint32_t i = 1; i < mipLevels && level > 4; ++i) {
+            level /= 4;
+            total += level;
+        }
+        return total;
+    }
+
+    inline uint32_t calcMipLevels(uint32_t width, uint32_t height) {
+        uint32_t maxDim = std::max(width, height);
+        if (maxDim == 0) return 1;
+        uint32_t levels = 1;
+        while (maxDim > 1) { maxDim >>= 1; ++levels; }
+        return levels;
     }
 
     #pragma pack(push, 1)
@@ -1290,6 +1319,10 @@ BufferHandle VulkanDevice::createBuffer(const BufferCreateInfo& info) {
 }
 
 void VulkanDevice::destroyBuffer(BufferHandle& buffer) {
+    if (m_device == VK_NULL_HANDLE) {
+        buffer = {};
+        return;
+    }
     if (buffer.buffer) vkDestroyBuffer(m_device, buffer.buffer, nullptr);
     if (buffer.memory) vkFreeMemory(m_device, buffer.memory, nullptr);
     buffer = {};
@@ -2760,7 +2793,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     pushRange.offset = 0;
-    pushRange.size = 128; // Headroom for camera data and rendering params
+    pushRange.size = 256; // Matches the expanded CameraPushConstants payload.
 
     // --- 6) Pipeline layout ---
     VkPipelineLayoutCreateInfo plCI{};
@@ -3576,7 +3609,7 @@ void VulkanDevice::updateTerrainLayerBuffer(const void* data, uint64_t size, uin
     }
     uploadBuffer(m_terrainLayerBuffer, data, size);
     m_terrainLayerCount = count;
-    VK_INFO() << "[VulkanDevice] updateTerrainLayerBuffer - " << count << " terrain layers uploaded (" << size << " bytes)" << std::endl;
+   // VK_INFO() << "[VulkanDevice] updateTerrainLayerBuffer - " << count << " terrain layers uploaded (" << size << " bytes)" << std::endl;
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -4121,6 +4154,188 @@ ImageHandle VulkanDevice::createImage2D(uint32_t width, uint32_t height, VkForma
     return handle;
 }
 
+ImageHandle VulkanDevice::createImage2DWithMips(uint32_t width, uint32_t height, uint32_t mipLevels,
+                                                VkFormat format, VkImageUsageFlags usage) {
+    ImageHandle handle{};
+    if (width == 0 || height == 0 || mipLevels == 0) return {};
+    handle.width = width;
+    handle.height = height;
+    handle.mipLevels = mipLevels;
+    handle.format = format;
+
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = format;
+    imageInfo.extent = {width, height, 1};
+    imageInfo.mipLevels = mipLevels;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = usage;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vkCreateImage(m_device, &imageInfo, nullptr, &handle.image) != VK_SUCCESS) {
+        VK_ERROR() << "[VulkanDevice] createImage2DWithMips: vkCreateImage failed" << std::endl;
+        return {};
+    }
+
+    VkMemoryRequirements memReq;
+    vkGetImageMemoryRequirements(m_device, handle.image, &memReq);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    allocInfo.memoryTypeIndex = findMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (allocInfo.memoryTypeIndex == UINT32_MAX) {
+        vkDestroyImage(m_device, handle.image, nullptr);
+        return {};
+    }
+
+    VkResult allocRes = vkAllocateMemory(m_device, &allocInfo, nullptr, &handle.memory);
+    if (allocRes != VK_SUCCESS || !handle.memory) {
+        signalVulkanMemoryPressure(allocRes, "createImage2DWithMips/vkAllocateMemory");
+        vkDestroyImage(m_device, handle.image, nullptr);
+        return {};
+    }
+
+    if (vkBindImageMemory(m_device, handle.image, handle.memory, 0) != VK_SUCCESS) {
+        vkFreeMemory(m_device, handle.memory, nullptr);
+        vkDestroyImage(m_device, handle.image, nullptr);
+        return {};
+    }
+
+    // Image view covers all mip levels so the sampler can access the full chain.
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = handle.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = format;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = mipLevels;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+
+    if (vkCreateImageView(m_device, &viewInfo, nullptr, &handle.view) != VK_SUCCESS) {
+        vkFreeMemory(m_device, handle.memory, nullptr);
+        vkDestroyImage(m_device, handle.image, nullptr);
+        return {};
+    }
+
+    // Pre-transition all mip levels to TRANSFER_DST_OPTIMAL so the caller can copy into mip 0.
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) {
+        destroyImage(handle);
+        return {};
+    }
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = handle.image;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, 1};
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &barrier);
+    endSingleTimeCommands(cmd);
+
+    return handle;
+}
+
+void VulkanDevice::generateMipmaps(VkCommandBuffer cmd, VkImage image,
+                                    uint32_t width, uint32_t height, uint32_t mipLevels) {
+    if (mipLevels <= 1 || !image || cmd == VK_NULL_HANDLE) {
+        // Just finalize mip 0 if it was in TRANSFER_DST_OPTIMAL
+        if (mipLevels >= 1 && image && cmd != VK_NULL_HANDLE) {
+            VkImageMemoryBarrier b{};
+            b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b.image = image;
+            b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                0, 0, nullptr, 0, nullptr, 1, &b);
+        }
+        return;
+    }
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.image = image;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.subresourceRange.levelCount = 1;
+
+    int32_t mipW = (int32_t)width;
+    int32_t mipH = (int32_t)height;
+
+    for (uint32_t i = 1; i < mipLevels; ++i) {
+        // Transition mip i-1: TRANSFER_DST -> TRANSFER_SRC (ready as blit source)
+        barrier.subresourceRange.baseMipLevel = i - 1;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        const int32_t nextW = std::max(1, mipW / 2);
+        const int32_t nextH = std::max(1, mipH / 2);
+
+        VkImageBlit blit{};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, 1};
+        blit.srcOffsets[0] = {0, 0, 0};
+        blit.srcOffsets[1] = {mipW, mipH, 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1};
+        blit.dstOffsets[0] = {0, 0, 0};
+        blit.dstOffsets[1] = {nextW, nextH, 1};
+        vkCmdBlitImage(cmd,
+            image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blit, VK_FILTER_LINEAR);
+
+        // Transition mip i-1 to final SHADER_READ_ONLY_OPTIMAL
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        mipW = nextW;
+        mipH = nextH;
+    }
+
+    // Finalize the last mip level
+    barrier.subresourceRange.baseMipLevel = mipLevels - 1;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        0, 0, nullptr, 0, nullptr, 1, &barrier);
+}
+
 void VulkanDevice::destroyImage(ImageHandle& image) {
     if (image.sampler) vkDestroySampler(m_device, image.sampler, nullptr);
     if (image.view) vkDestroyImageView(m_device, image.view, nullptr);
@@ -4292,6 +4507,54 @@ void VulkanDevice::copyBufferToImage(const BufferHandle& src, const ImageHandle&
     vkCmdCopyBufferToImage(cmd, src.buffer, dst.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
 
     endSingleTimeCommands(cmd);
+}
+
+void VulkanDevice::copyBufferToImageRegion(const BufferHandle& src, const ImageHandle& dst,
+                                            int32_t offsetX, int32_t offsetY,
+                                            uint32_t regionW, uint32_t regionH) {
+    if (!src.buffer || !dst.image || dst.width == 0 || dst.height == 0 || regionW == 0 || regionH == 0) {
+        VK_ERROR() << "[VulkanDevice] copyBufferToImageRegion skipped: invalid src/dst handle." << std::endl;
+        return;
+    }
+    if (offsetX < 0 || offsetY < 0 ||
+        static_cast<uint32_t>(offsetX) + regionW > dst.width ||
+        static_cast<uint32_t>(offsetY) + regionH > dst.height) {
+        VK_ERROR() << "[VulkanDevice] copyBufferToImageRegion skipped: region out of bounds." << std::endl;
+        return;
+    }
+
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) {
+        VK_ERROR() << "[VulkanDevice] copyBufferToImageRegion skipped: failed to begin command buffer." << std::endl;
+        return;
+    }
+
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = { offsetX, offsetY, 0 };
+    region.imageExtent = { regionW, regionH, 1 };
+    vkCmdCopyBufferToImage(cmd, src.buffer, dst.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+
+    endSingleTimeCommands(cmd);
+}
+
+void VulkanDevice::recordCopyBufferToImage(VkCommandBuffer cmd, const BufferHandle& src, const ImageHandle& dst) {
+    if (cmd == VK_NULL_HANDLE || !src.buffer || !dst.image || dst.width == 0 || dst.height == 0) return;
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {dst.width, dst.height, 1};
+    vkCmdCopyBufferToImage(cmd, src.buffer, dst.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+}
+
+void VulkanDevice::recordCopyBufferToImageDst(VkCommandBuffer cmd, const BufferHandle& src, const ImageHandle& dst) {
+    if (cmd == VK_NULL_HANDLE || !src.buffer || !dst.image || dst.width == 0 || dst.height == 0) return;
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {dst.width, dst.height, 1};
+    vkCmdCopyBufferToImage(cmd, src.buffer, dst.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 }
 
 // ========================================================================
@@ -4790,10 +5053,78 @@ static std::vector<uint32_t> loadSPV(const std::string& path) {
     return code;
 }
 
+static uint64_t estimateSceneTextureBytes(const Texture* tex, uint32_t uploadChannels) {
+    if (!tex || tex->width <= 0 || tex->height <= 0) return 0;
+    const uint64_t pixelCount = static_cast<uint64_t>(tex->width) * static_cast<uint64_t>(tex->height);
+    if (tex->is_hdr) {
+        return pixelCount * (uploadChannels <= 1 ? 4ull : 16ull);
+    }
+    return pixelCount * static_cast<uint64_t>((std::max)(1u, uploadChannels));
+}
+
+static std::string buildSceneTextureKey(const Texture* tex,
+                                        TextureType textureType,
+                                        bool forceLinear,
+                                        bool preferSingleChannel) {
+    if (!tex) return {};
+
+    std::ostringstream oss;
+    if (!tex->name.empty()) {
+        oss << "tex:" << tex->name;
+    } else {
+        oss << "tex_ptr:" << reinterpret_cast<uintptr_t>(tex);
+    }
+    oss << "|type=" << static_cast<uint32_t>(textureType)
+        << "|forceLinear=" << (forceLinear ? 1 : 0)
+        << "|preferSingle=" << (preferSingleChannel ? 1 : 0)
+        << "|hdr=" << (tex->is_hdr ? 1 : 0);
+    return oss.str();
+}
+
+static Backend::TextureHandle registerSceneTexture(Backend::SceneTextureManager* manager,
+                                                   const Texture* tex,
+                                                   TextureType textureType,
+                                                   bool forceLinear,
+                                                   bool preferSingleChannel,
+                                                   Backend::TextureConsumer consumers) {
+    if (!manager || !tex || !tex->is_loaded()) {
+        return {};
+    }
+
+    const bool useSrgb = forceLinear ? false : tex->is_srgb;
+    const TextureCompressionPlan plan = buildTextureCompressionPlan(tex, textureType);
+    const bool canUseSingleChannel =
+        (preferSingleChannel || plan.preferSingleChannelFallback) &&
+        !useSrgb && tex->is_gray_scale && !tex->has_alpha;
+
+    return manager->registerTextureKey(
+        buildSceneTextureKey(tex, textureType, forceLinear, preferSingleChannel),
+        consumers,
+        static_cast<uint32_t>((std::max)(0, tex->width)),
+        static_cast<uint32_t>((std::max)(0, tex->height)),
+        estimateSceneTextureBytes(tex, canUseSingleChannel ? 1u : 4u));
+}
+
+static Backend::TextureHandle registerTerrainSplatTexture(Backend::SceneTextureManager* manager,
+                                                          const Texture* tex,
+                                                          Backend::TextureConsumer consumers) {
+    if (!manager || !tex || !tex->is_loaded()) {
+        return {};
+    }
+
+    return manager->registerTextureKey(
+        buildSceneTextureKey(tex, TextureType::Unknown, true, false),
+        consumers,
+        static_cast<uint32_t>((std::max)(0, tex->width)),
+        static_cast<uint32_t>((std::max)(0, tex->height)),
+        estimateSceneTextureBytes(tex, 4u));
+}
+
 namespace Backend {
 
 VulkanBackendAdapter::VulkanBackendAdapter()
-    : m_device(std::make_unique<VulkanRT::VulkanDevice>()) {
+    : m_device(std::make_unique<VulkanRT::VulkanDevice>()),
+      m_sceneTextureManager(getSharedSceneTextureManager()) {
     m_targetSamples = 1000; // Default
 }
 
@@ -4805,6 +5136,17 @@ bool VulkanBackendAdapter::initialize() {
     if (!m_device) {
         m_device = std::make_unique<VulkanRT::VulkanDevice>();
     }
+    if (!m_sceneTextureManager) {
+        m_sceneTextureManager = getSharedSceneTextureManager();
+    }
+    if (m_sceneTextureManager) {
+        // Shared manager outlives Vulkan device instances. When we recreate the
+        // backend after OptiX/device switches, any previously published raw
+        // VkImage/VkImageView/VkSampler handles for this owner scope are stale.
+        // Clear them before the new device comes online so reuse only happens
+        // against backings created by the current Vulkan device lifetime.
+        m_sceneTextureManager->clearAllVulkanBackingForOwner(sceneTextureOwnerScope());
+    }
 
 #ifdef _DEBUG
     bool validation = true;
@@ -4812,6 +5154,9 @@ bool VulkanBackendAdapter::initialize() {
     bool validation = false;
 #endif
     bool ok = m_device->initialize(true, validation);
+    if (ok) {
+        m_sceneTextureManager->initialize(captureRuntimeRenderCapabilities(), "VulkanBackendAdapter");
+    }
 
     if (ok && !m_device->hasHardwareRT()) {
         if (m_device->supportsGraphicsQueue()) {
@@ -4845,15 +5190,28 @@ void VulkanBackendAdapter::purgeUploadedTextureCacheLocked() {
     if (!m_device) return;
     m_device->waitIdle();
     m_device->clearPendingRTTextureDescriptors();
+    // Let manager call destroyFns for all manager-tracked textures (device still alive here).
+    // The callbacks erase their entries from m_uploadedImages and call destroyImage, so the
+    // loop below only has to clean up non-manager-tracked (legacy) entries.
+    if (m_sceneTextureManager) {
+        m_sceneTextureManager->destroyAllVulkanBackingForOwner(sceneTextureOwnerScope());
+    }
+    // Signal lambdas still in SceneTextureManager that containers are about to be cleared.
+    // Any lambda that runs after this point must not touch m_uploadedImages etc.
+    *m_containerAlive = false;
+    m_containerAlive = std::make_shared<bool>(true); // re-arm for next upload cycle
     for (auto& [id, img] : m_uploadedImages) {
-        (void)id;
         if (img.image || img.view || img.memory || img.sampler) {
             m_device->destroyImage(img);
         }
     }
     m_uploadedImages.clear();
     m_uploadedImageIDs.clear();
+    m_textureIdToCacheKey.clear();
     m_nextTextureID = 1;
+    if (m_sceneTextureManager) {
+        m_sceneTextureManager->logBudgetSummary("after-purge");
+    }
 }
 
 void VulkanBackendAdapter::setInteractiveViewportMatcap(int64_t textureID) {
@@ -4941,6 +5299,9 @@ void VulkanBackendAdapter::setInteractiveViewportMatcapPresetImpl(int preset) {
 /* custom matcap support removed */
 
 void VulkanBackendAdapter::shutdown() {
+    if (m_sceneTextureManager) {
+        m_sceneTextureManager->clearAllVulkanBackingForOwner(sceneTextureOwnerScope());
+    }
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
     if (!m_device) {
@@ -5104,41 +5465,73 @@ uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& 
         if (t.hasSkinData) { hasSkinning = true; break; }
     }
     
-    positions.reserve(triangles.size() * 9);
-    normals.reserve(triangles.size() * 9);
-    uvs.reserve(triangles.size() * 6);
+    positions.resize(triangles.size() * 9);
+    normals.resize(triangles.size() * 9);
+    uvs.resize(triangles.size() * 6);
     if (hasSkinning) {
-        boneIndices.reserve(triangles.size() * 12);
-        boneWeights.reserve(triangles.size() * 12);
+        boneIndices.assign(triangles.size() * 12, -1);
+        boneWeights.assign(triangles.size() * 12, 0.0f);
     }
+    std::vector<uint32_t> materialIndices(triangles.size());
 
-    for (const auto& t : triangles) {
-        positions.push_back(t.v0.x); positions.push_back(t.v0.y); positions.push_back(t.v0.z);
-        positions.push_back(t.v1.x); positions.push_back(t.v1.y); positions.push_back(t.v1.z);
-        positions.push_back(t.v2.x); positions.push_back(t.v2.y); positions.push_back(t.v2.z);
+    auto fillRange = [&triangles, &positions, &normals, &uvs,
+                      &materialIndices, &boneIndices, &boneWeights,
+                      hasSkinning](size_t start, size_t end) {
+        for (size_t i = start; i < end; ++i) {
+            const auto& t = triangles[i];
+            const size_t posBase = i * 9;
+            const size_t uvBase = i * 6;
+            const size_t skinBase = i * 12;
 
-        normals.push_back(t.n0.x); normals.push_back(t.n0.y); normals.push_back(t.n0.z);
-        normals.push_back(t.n1.x); normals.push_back(t.n1.y); normals.push_back(t.n1.z);
-        normals.push_back(t.n2.x); normals.push_back(t.n2.y); normals.push_back(t.n2.z);
+            positions[posBase + 0] = t.v0.x; positions[posBase + 1] = t.v0.y; positions[posBase + 2] = t.v0.z;
+            positions[posBase + 3] = t.v1.x; positions[posBase + 4] = t.v1.y; positions[posBase + 5] = t.v1.z;
+            positions[posBase + 6] = t.v2.x; positions[posBase + 7] = t.v2.y; positions[posBase + 8] = t.v2.z;
 
-        uvs.push_back(t.uv0.x); uvs.push_back(t.uv0.y);
-        uvs.push_back(t.uv1.x); uvs.push_back(t.uv1.y);
-        uvs.push_back(t.uv2.x); uvs.push_back(t.uv2.y);
-        
-        if (hasSkinning) {
-            for(int i=0; i<4; ++i) { boneIndices.push_back(t.hasSkinData ? t.boneIndices_v0[i] : -1); boneWeights.push_back(t.hasSkinData ? t.boneWeights_v0[i] : 0.0f); }
-            for(int i=0; i<4; ++i) { boneIndices.push_back(t.hasSkinData ? t.boneIndices_v1[i] : -1); boneWeights.push_back(t.hasSkinData ? t.boneWeights_v1[i] : 0.0f); }
-            for(int i=0; i<4; ++i) { boneIndices.push_back(t.hasSkinData ? t.boneIndices_v2[i] : -1); boneWeights.push_back(t.hasSkinData ? t.boneWeights_v2[i] : 0.0f); }
+            normals[posBase + 0] = t.n0.x; normals[posBase + 1] = t.n0.y; normals[posBase + 2] = t.n0.z;
+            normals[posBase + 3] = t.n1.x; normals[posBase + 4] = t.n1.y; normals[posBase + 5] = t.n1.z;
+            normals[posBase + 6] = t.n2.x; normals[posBase + 7] = t.n2.y; normals[posBase + 8] = t.n2.z;
+
+            uvs[uvBase + 0] = t.uv0.x; uvs[uvBase + 1] = t.uv0.y;
+            uvs[uvBase + 2] = t.uv1.x; uvs[uvBase + 3] = t.uv1.y;
+            uvs[uvBase + 4] = t.uv2.x; uvs[uvBase + 5] = t.uv2.y;
+
+            uint16_t mId = t.materialID;
+            if (mId == MaterialManager::INVALID_MATERIAL_ID) mId = 0;
+            materialIndices[i] = static_cast<uint32_t>(mId);
+
+            if (!hasSkinning) continue;
+            for (int b = 0; b < 4; ++b) {
+                boneIndices[skinBase + static_cast<size_t>(b)] = t.hasSkinData ? t.boneIndices_v0[b] : -1;
+                boneWeights[skinBase + static_cast<size_t>(b)] = t.hasSkinData ? t.boneWeights_v0[b] : 0.0f;
+                boneIndices[skinBase + 4 + static_cast<size_t>(b)] = t.hasSkinData ? t.boneIndices_v1[b] : -1;
+                boneWeights[skinBase + 4 + static_cast<size_t>(b)] = t.hasSkinData ? t.boneWeights_v1[b] : 0.0f;
+                boneIndices[skinBase + 8 + static_cast<size_t>(b)] = t.hasSkinData ? t.boneIndices_v2[b] : -1;
+                boneWeights[skinBase + 8 + static_cast<size_t>(b)] = t.hasSkinData ? t.boneWeights_v2[b] : 0.0f;
+            }
         }
+    };
+
+    constexpr size_t kUploadPackParallelThreshold = 4096;
+    unsigned packThreads = std::thread::hardware_concurrency();
+    if (packThreads == 0) packThreads = 4;
+    if (triangles.size() < kUploadPackParallelThreshold || packThreads < 2) {
+        fillRange(0, triangles.size());
+    } else {
+        const size_t chunk = (triangles.size() + packThreads - 1) / packThreads;
+        std::vector<std::future<void>> futures;
+        futures.reserve(packThreads);
+        for (unsigned t = 0; t < packThreads; ++t) {
+            const size_t s = t * chunk;
+            const size_t e = (std::min)(s + chunk, triangles.size());
+            if (s >= e) break;
+            futures.push_back(std::async(std::launch::async, fillRange, s, e));
+        }
+        for (auto& f : futures) f.get();
     }
 
-    // Per-primitive material indices (one per triangle)
-    std::vector<uint32_t> materialIndices;
-    materialIndices.reserve(triangles.size());
-    for (const auto& t : triangles) {
-        uint16_t mId = t.materialID;
-        if (mId == MaterialManager::INVALID_MATERIAL_ID) mId = 0; 
-        materialIndices.push_back((uint32_t)mId);
+    if (!hasSkinning) {
+        boneIndices.clear();
+        boneWeights.clear();
     }
 
     VulkanRT::BLASCreateInfo blasInfo;
@@ -5154,7 +5547,8 @@ uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& 
     const bool allowDynamicUpdate =
         hasSkinning ||
         meshName.rfind("[World-Solo]-", 0) == 0 ||
-        meshName.rfind("[InstSource]-", 0) == 0;
+        meshName.rfind("[InstSource]-", 0) == 0 ||
+        meshName.rfind("[InstGroup]-", 0) == 0;
     blasInfo.allowUpdate = allowDynamicUpdate;
     blasInfo.boneIndicesData = hasSkinning ? boneIndices.data() : nullptr;
     blasInfo.boneWeightsData = hasSkinning ? boneWeights.data() : nullptr;
@@ -5269,7 +5663,7 @@ bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, co
             instName = tri->getNodeName();
             if (tri.get() == firstTriangle) {
                 strongMatch = true;
-                targetUsesLocalSpace = (tri->getTransformHandle() != nullptr);
+                targetUsesLocalSpace = (tri->getTransformPtr() != nullptr);
             }
         }
 
@@ -5283,7 +5677,7 @@ bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, co
             if (std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
                 targetUsesLocalSpace = true;
             } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
-                targetUsesLocalSpace = (tri->getTransformHandle() != nullptr);
+                targetUsesLocalSpace = (tri->getTransformPtr() != nullptr);
             }
             break;
         }
@@ -5335,8 +5729,8 @@ bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, co
         if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
             m_vkInstances[i].transform = inst->transform;
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
-            if (tri->getTransformHandle()) {
-                m_vkInstances[i].transform = tri->getTransformHandle()->getFinal();
+            if (tri->getTransformPtr()) {
+                m_vkInstances[i].transform = tri->getTransformPtr()->getFinal();
             }
         }
     }
@@ -5581,19 +5975,14 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
         }
         m_device->destroyBuffer(m_device->m_tlas.buffer);
 
-        // Clear uploaded image/texture cache from previous scene.
-        // This is important for New/Open project workflows so old scene textures
-        // do not keep consuming VRAM until backend switch/shutdown.
-        m_device->clearPendingRTTextureDescriptors();
-        for (auto& [id, img] : m_uploadedImages) {
-            (void)id;
-            if (img.image || img.view || img.memory || img.sampler) {
-                m_device->destroyImage(img);
-            }
-        }
-        m_uploadedImages.clear();
-        m_uploadedImageIDs.clear();
-        m_nextTextureID = 1;
+        // purgeUploadedTextureCacheLocked tears down SceneTextureManager destroyFns
+        // BEFORE freeing VkImages, then invalidates the alive sentinel, then cleans
+        // any remaining non-manager-tracked images via the fallback loop.
+        // The old manual destroy loop here skipped all of that: SceneTextureManager
+        // still held destroyFns capturing the (now-freed) handles, so the next
+        // purgeUploadedTextureCacheLocked call (e.g. on material-preview → Vulkan RT
+        // transition) would call destroyImage on stale pointers → access violation.
+        purgeUploadedTextureCacheLocked();
 
         // Clear cached NanoVDB device buffers from previous scene/project.
         for (auto& [id, buf] : m_vdbBuffers) {
@@ -5903,7 +6292,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
             TriangleData d;
             // Use the live vertex state here so deformed standalone meshes such as
             // animated water surfaces reach Vulkan BLAS rebuilds correctly.
-            const bool hasSharedTransform = (tri->getTransformHandle() != nullptr);
+            const bool hasSharedTransform = (tri->getTransformPtr() != nullptr);
             if (hasSharedTransform) {
                 // Static imported meshes keep BLAS geometry in object-local space.
                 // Their world transform is carried by the TLAS instance transform.
@@ -5944,9 +6333,9 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
 
             // Group by transform handle so each object keeps independent TLAS transform updates.
             void* groupKey = nullptr;
-            auto triTransformHandle = tri->getTransformHandle();
+            Transform* triTransformHandle = tri->getTransformPtr();
             if (triTransformHandle) {
-                groupKey = triTransformHandle.get();
+                groupKey = triTransformHandle;
             } else {
                 groupKey = tri.get();
             }
@@ -6049,8 +6438,21 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         }
     };
 
-    for (const auto& obj : objects) {
-        processObj(obj);
+    auto hasInstancePrefix = [](const std::string& nodeName) -> bool {
+        return nodeName.rfind("_inst_gid", 0) == 0;
+    };
+    size_t baseObjectCount = objects.size();
+    while (baseObjectCount > 0) {
+        const auto& obj = objects[baseObjectCount - 1];
+        auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+        if (!inst || !hasInstancePrefix(inst->node_name)) {
+            break;
+        }
+        --baseObjectCount;
+    }
+
+    for (size_t i = 0; i < baseObjectCount; ++i) {
+        processObj(objects[i]);
     }
     
     // Store for updateInstanceTransforms
@@ -6079,6 +6481,168 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
             } else {
                 instanceSources.push_back(nullptr);
             }
+        }
+    }
+
+    auto makeTriangleData = [](const Triangle& tri) {
+        TriangleData d;
+        d.v0 = tri.getOriginalVertexPosition(0);
+        d.v1 = tri.getOriginalVertexPosition(1);
+        d.v2 = tri.getOriginalVertexPosition(2);
+        d.n0 = tri.getOriginalVertexNormal(0);
+        d.n1 = tri.getOriginalVertexNormal(1);
+        d.n2 = tri.getOriginalVertexNormal(2);
+        auto uv = tri.getUVCoordinates();
+        d.uv0 = std::get<0>(uv);
+        d.uv1 = std::get<1>(uv);
+        d.uv2 = std::get<2>(uv);
+        d.materialID = tri.getMaterialID();
+        if (d.materialID == MaterialManager::INVALID_MATERIAL_ID) d.materialID = 0;
+        d.hasSkinData = tri.hasSkinData();
+        if (d.hasSkinData) {
+            for (int v = 0; v < 3; ++v) {
+                const auto& weights = tri.getSkinBoneWeights(v);
+                for (size_t b = 0; b < 4; ++b) {
+                    int bid = -1;
+                    float bw = 0.0f;
+                    if (b < weights.size()) {
+                        bid = weights[b].first;
+                        bw = weights[b].second;
+                    }
+                    if (v == 0) {
+                        d.boneIndices_v0[b] = bid;
+                        d.boneWeights_v0[b] = bw;
+                    } else if (v == 1) {
+                        d.boneIndices_v1[b] = bid;
+                        d.boneWeights_v1[b] = bw;
+                    } else {
+                        d.boneIndices_v2[b] = bid;
+                        d.boneWeights_v2[b] = bw;
+                    }
+                }
+            }
+        }
+        return d;
+    };
+
+    const auto& instanceGroups = InstanceManager::getInstance().getGroups();
+    struct ScatterSourceMeta {
+        std::vector<uint32_t> blasBySource;
+        std::vector<uint32_t> materialBySource;
+    };
+    std::vector<ScatterSourceMeta> scatterMeta(instanceGroups.size());
+    size_t totalScatterInstances = 0;
+
+    for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
+        const auto& group = instanceGroups[gi];
+        if (group.instances.empty() || group.sources.empty()) continue;
+
+        auto& meta = scatterMeta[gi];
+        meta.blasBySource.assign(group.sources.size(), UINT32_MAX);
+        meta.materialBySource.assign(group.sources.size(), 0);
+
+        for (size_t si = 0; si < group.sources.size(); ++si) {
+            const auto& source = group.sources[si];
+            const auto* triSource = source.centered_triangles_ptr ? source.centered_triangles_ptr.get() : nullptr;
+            const auto& fallbackTriangles = source.triangles;
+            const auto* triangles = (triSource && !triSource->empty()) ? triSource : &fallbackTriangles;
+            if (!triangles || triangles->empty()) continue;
+
+            const uintptr_t srcPtr = reinterpret_cast<uintptr_t>(triangles);
+            const std::string meshKey = "[InstGroup]-" + std::to_string(group.id) + "-" +
+                                        std::to_string(si) + "-" + std::to_string(srcPtr) +
+                                        "-tris-" + std::to_string(triangles->size());
+
+            uint32_t blasIndex = UINT32_MAX;
+            auto registryIt = m_meshRegistry.find(meshKey);
+            if (registryIt != m_meshRegistry.end()) {
+                blasIndex = registryIt->second;
+            } else {
+                std::vector<TriangleData> triData;
+                triData.reserve(triangles->size());
+                for (const auto& tri : *triangles) {
+                    if (tri) triData.push_back(makeTriangleData(*tri));
+                }
+                if (!triData.empty()) {
+                    blasIndex = uploadTriangles(triData, meshKey);
+                }
+            }
+            if (blasIndex == UINT32_MAX) continue;
+
+            meta.blasBySource[si] = blasIndex;
+            if (!triangles->empty() && (*triangles)[0]) {
+                uint16_t matId = (*triangles)[0]->getMaterialID();
+                meta.materialBySource[si] =
+                    (matId == MaterialManager::INVALID_MATERIAL_ID) ? 0u : static_cast<uint32_t>(matId);
+            }
+        }
+
+        for (const auto& inst : group.instances) {
+            int srcIdx = inst.source_index;
+            if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
+            if (srcIdx < static_cast<int>(meta.blasBySource.size()) &&
+                meta.blasBySource[srcIdx] != UINT32_MAX) {
+                ++totalScatterInstances;
+            }
+        }
+    }
+
+    vkInstances.reserve(vkInstances.size() + totalScatterInstances);
+    instanceSources.reserve(instanceSources.size() + totalScatterInstances);
+
+    unsigned scatterThreads = std::thread::hardware_concurrency();
+    if (scatterThreads == 0) scatterThreads = 4;
+    constexpr size_t kScatterParallelThreshold = 1024;
+
+    for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
+        const auto& group = instanceGroups[gi];
+        if (group.instances.empty() || group.sources.empty()) continue;
+        const auto& meta = scatterMeta[gi];
+        if (meta.blasBySource.empty()) continue;
+
+        std::vector<VulkanRT::TLASInstance> local(group.instances.size());
+        for (auto& vi : local) vi.blasIndex = UINT32_MAX;
+        auto fillRange = [&group, &meta, &local](size_t start, size_t end) {
+            for (size_t i = start; i < end; ++i) {
+                const auto& inst = group.instances[i];
+                int srcIdx = inst.source_index;
+                if (srcIdx < 0 || srcIdx >= static_cast<int>(group.sources.size())) srcIdx = 0;
+                if (srcIdx >= static_cast<int>(meta.blasBySource.size()) ||
+                    meta.blasBySource[srcIdx] == UINT32_MAX) {
+                    continue;
+                }
+
+                auto& vi = local[i];
+                vi.blasIndex = meta.blasBySource[srcIdx];
+                vi.transform = inst.toMatrix();
+                vi.materialIndex = meta.materialBySource[srcIdx];
+                vi.customIndex = 0;
+                vi.mask = 0xFF;
+                vi.frontFaceCCW = true;
+                vi.scatterGroupId = group.id;
+                vi.scatterInstanceIndex = static_cast<uint32_t>(i);
+            }
+        };
+
+        if (group.instances.size() < kScatterParallelThreshold || scatterThreads < 2) {
+            fillRange(0, group.instances.size());
+        } else {
+            const size_t chunk = (group.instances.size() + scatterThreads - 1) / scatterThreads;
+            std::vector<std::future<void>> futures;
+            futures.reserve(scatterThreads);
+            for (unsigned t = 0; t < scatterThreads; ++t) {
+                const size_t s = t * chunk;
+                const size_t e = (std::min)(s + chunk, group.instances.size());
+                if (s >= e) break;
+                futures.push_back(std::async(std::launch::async, fillRange, s, e));
+            }
+            for (auto& f : futures) f.get();
+        }
+
+        for (auto& vi : local) {
+            if (vi.blasIndex == UINT32_MAX) continue;
+            vkInstances.push_back(std::move(vi));
+            instanceSources.push_back(nullptr);
         }
     }
     
@@ -6182,12 +6746,54 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     m_device->waitIdle();
 
-    // Avoid descriptor slot exhaustion. Purge and re-upload when approaching capacity.
+    // Bake hot-reload eviction: the UI sets g_texture_pool_dirty instead of calling
+    // destroyAllVulkanBackingForOwner directly, because that would destroy VkImageViews
+    // while the GPU still references them in the previous frame's command buffer.
+    // We call purgeUploadedTextureCacheLocked here (not bare destroyAllVulkanBackingForOwner)
+    // because it also clears RT descriptor bindings before destroying — skipping that step
+    // causes a Vulkan validation __debugbreak when the sampler is still bound to a slot.
+    // DDS-backed textures registered with createdByPool=true have no destroyFn and are
+    // only cleaned up by purge's fallback loop, so the full purge path is required.
+    // g_texture_pool_dirty is cleared by Main.cpp after BOTH backends have purged.
+    if (g_texture_pool_dirty) {
+        purgeUploadedTextureCacheLocked(); // waitIdle + clearDescriptors + destroy + clear containers
+    }
+
+    // Descriptor slot exhaustion guard.
     if (m_nextTextureID >= VULKAN_TEXTURE_PURGE_THRESHOLD ||
         static_cast<int32_t>(m_uploadedImages.size()) >= VULKAN_TEXTURE_PURGE_THRESHOLD) {
         SCENE_LOG_WARN("[Vulkan] Texture cache near descriptor capacity (" +
                        std::to_string(VULKAN_TEXTURE_CAPACITY) + " slots); purging and re-uploading active textures.");
         purgeUploadedTextureCacheLocked();
+    }
+
+    // VRAM byte-pressure check: warn at 70%, trigger LRU trim at 85%.
+    if (m_sceneTextureManager) {
+        const uint64_t dedicatedVRAM = m_device->getCapabilities().dedicatedVRAM;
+        if (dedicatedVRAM > 0) {
+            const uint64_t textureBytes = m_sceneTextureManager->totalEstimatedTextureBytes();
+            const uint64_t warnThreshold = dedicatedVRAM * 7 / 10;
+            const uint64_t trimThreshold = dedicatedVRAM * 85 / 100;
+            const uint64_t trimTarget    = dedicatedVRAM * 6 / 10;
+            const uint64_t usedMB  = textureBytes / (1024 * 1024);
+            const uint64_t totalMB = dedicatedVRAM / (1024 * 1024);
+            if (textureBytes > trimThreshold) {
+                const std::string msg = "VRAM critical: ~" + std::to_string(usedMB) +
+                                        " MB texture / " + std::to_string(totalMB) +
+                                        " MB — LRU eviction triggered.";
+                SCENE_LOG_WARN("[Vulkan] " + msg);
+                if (m_statusCallback) m_statusCallback(msg, 2); // kirmizi
+                const size_t evicted = m_sceneTextureManager->trimVulkanBackingLRU(sceneTextureOwnerScope(), trimTarget);
+                if (evicted > 0 && m_statusCallback) {
+                    m_statusCallback("Evicted " + std::to_string(evicted) + " textures to free VRAM.", 1);
+                }
+            } else if (textureBytes > warnThreshold) {
+                const std::string msg = "VRAM pressure: ~" + std::to_string(usedMB) +
+                                        " MB texture / " + std::to_string(totalMB) + " MB.";
+                SCENE_LOG_WARN("[Vulkan] " + msg);
+                if (m_statusCallback) m_statusCallback(msg, 1); // sari
+            }
+        }
     }
 
     m_textureUploadBytes = 0;
@@ -6202,6 +6808,221 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
 
     std::vector<VulkanRT::VkGpuMaterial> gpuMats;
     gpuMats.reserve(materials.size());
+
+    // ── Parallel pixel staging + batched GPU upload ───────────────────────────
+    // Phase 1: collect unique textures not yet uploaded and not dirty
+    struct TexPrepReq {
+        uint64_t    cacheKey;
+        Texture*    tex;
+        TextureType texType;
+        bool        forceLinear;
+        bool        preferSingleChannel;
+        TextureHandle sceneHandle;
+        std::string sceneKey;
+    };
+    std::vector<TexPrepReq> freshUploads;
+    {
+        std::unordered_set<uint64_t> seen;
+        auto maybeQueue = [&](int64_t key, TextureType tt, bool fl, bool psc) {
+            if (!key) return;
+            if (key > 0 && static_cast<uint64_t>(key) < (1ull << 32)) return;
+            const uint64_t ck = (static_cast<uint64_t>(key) << 2) |
+                                (fl  ? 1ull : 0ull) |
+                                (psc ? 2ull : 0ull);
+            if (m_uploadedImageIDs.count(ck) || seen.count(ck)) return;
+            Texture* t = reinterpret_cast<Texture*>(key);
+            if (!t || !t->is_loaded() || t->vulkan_dirty) return;
+            TextureHandle sceneHandle{};
+            std::string sceneKey;
+            if (m_sceneTextureManager) {
+                sceneKey = buildSceneTextureKey(t, tt, fl, psc);
+                sceneHandle = registerSceneTexture(
+                    m_sceneTextureManager.get(),
+                    t,
+                    tt,
+                    fl,
+                    psc,
+                    TextureConsumer::RasterPreview | TextureConsumer::VulkanRT);
+                int64_t existingSceneTextureId = 0;
+                VulkanRT::ImageHandle existingSceneImage{};
+                if (sceneHandle.isValid() &&
+                    m_sceneTextureManager->tryGetVulkanTextureId(sceneHandle, sceneTextureOwnerScope(), existingSceneTextureId) &&
+                    existingSceneTextureId != 0 &&
+                    tryGetUploadedImageHandle(existingSceneTextureId, existingSceneImage)) {
+                    m_uploadedImageIDs[ck] = existingSceneTextureId;
+                    m_textureIdToCacheKey[existingSceneTextureId] = ck;
+                    return;
+                }
+            }
+            seen.insert(ck);
+            freshUploads.push_back({ck, t, tt, fl, psc, sceneHandle, sceneKey});
+        };
+        for (const auto& m : materials) {
+            maybeQueue(m.albedoTexture,       TextureType::Albedo,       false, false);
+            maybeQueue(m.normalTexture,       TextureType::Normal,       true,  false);
+            maybeQueue(m.roughnessTexture,    TextureType::Roughness,    true,  false);
+            maybeQueue(m.metallicTexture,     TextureType::Metallic,     true,  false);
+            maybeQueue(m.emissionTexture,     TextureType::Emission,     false, false);
+            maybeQueue(m.transmissionTexture, TextureType::Transmission, true,  true);
+            maybeQueue(m.opacityTexture,      TextureType::Opacity,      true,  true);
+            maybeQueue(m.heightTexture,       TextureType::Unknown,      true,  false);
+        }
+    }
+
+    // Phase 2: parallel CPU decode — pure pixel packing, no Vulkan calls
+    struct StagedTexData {
+        uint64_t         cacheKey       = 0;
+        std::vector<uint8_t> bytes;        // raw bytes to upload (LDR or HDR cast)
+        uint32_t         width          = 0;
+        uint32_t         height         = 0;
+        uint32_t         uploadChannels = 4;
+        bool             useSrgb        = false;
+        bool             isHdr          = false;
+        TextureType      texType        = TextureType::Unknown;
+        bool             preferSingle   = false;
+    };
+    std::vector<StagedTexData> staged(freshUploads.size());
+    if (!freshUploads.empty()) {
+        std::vector<std::future<void>> futs;
+        futs.reserve(freshUploads.size());
+        for (size_t i = 0; i < freshUploads.size(); ++i) {
+            futs.push_back(std::async(std::launch::async, [&, i]() {
+                const auto& req  = freshUploads[i];
+                auto&       s    = staged[i];
+                const Texture*   tex = req.tex;
+                s.cacheKey       = req.cacheKey;
+                s.width          = (uint32_t)tex->width;
+                s.height         = (uint32_t)tex->height;
+                s.isHdr          = tex->is_hdr;
+                s.useSrgb        = req.forceLinear ? false : tex->is_srgb;
+                s.texType        = req.texType;
+                s.preferSingle   = req.preferSingleChannel;
+
+                if (tex->is_hdr) {
+                    const auto& fp = tex->float_pixels;
+                    if (fp.empty()) return;
+                    const size_t byteCount = fp.size() * sizeof(fp[0]);
+                    s.bytes.resize(byteCount);
+                    memcpy(s.bytes.data(), fp.data(), byteCount);
+                    s.uploadChannels = 4;
+                    return;
+                }
+
+                const TextureCompressionPlan plan = buildTextureCompressionPlan(tex, req.texType);
+                const bool canSingle = (req.preferSingleChannel || plan.preferSingleChannelFallback)
+                    && !s.useSrgb && tex->is_gray_scale && !tex->has_alpha;
+                s.uploadChannels = canSingle ? 1u : 4u;
+                const auto& px   = tex->pixels;
+                s.bytes.resize((size_t)tex->width * tex->height * s.uploadChannels);
+                if (canSingle) {
+                    for (size_t j = 0; j < px.size(); ++j) s.bytes[j] = px[j].r;
+                } else {
+                    for (size_t j = 0; j < px.size(); ++j) {
+                        s.bytes[j*4+0] = px[j].r; s.bytes[j*4+1] = px[j].g;
+                        s.bytes[j*4+2] = px[j].b; s.bytes[j*4+3] = px[j].a;
+                    }
+                }
+            }));
+        }
+        for (auto& f : futs) f.get();
+    }
+
+    // Phase 3: batched GPU upload — single command buffer per chunk (caps staging RAM)
+    if (!staged.empty()) {
+        const auto& caps             = m_device->getCapabilities();
+        // Flush the batch every ~256 MB of accumulated staging to cap host memory usage.
+        const uint64_t FLUSH_BYTES   = 256ull << 20;
+        uint64_t batchStagingBytes   = 0;
+
+        beginBatchedTextureUpload();
+        for (size_t i = 0; i < staged.size(); ++i) {
+            auto& s = staged[i];
+            if (s.bytes.empty()) continue;
+
+            auto uploadStagedTexture = [&]() -> int64_t {
+                if (s.isHdr) {
+                    return uploadTexture2D(s.bytes.data(), s.width, s.height, 4, false, true);
+                }
+
+                const Texture* texPtr = freshUploads[i].tex;
+                const TextureCompressionPlan plan = buildTextureCompressionPlan(texPtr, s.texType);
+                const bool supportsComp =
+                    (plan.preferredTarget == TextureCompressionTarget::BC4 && caps.supportsBC4) ||
+                    (plan.preferredTarget == TextureCompressionTarget::BC5 && caps.supportsBC5) ||
+                    (plan.preferredTarget == TextureCompressionTarget::BC7 && caps.supportsBC7);
+                if (supportsComp && !texPtr->name.empty()) {
+                    if (auto cand = findCompressedTextureCacheCandidate(*texPtr, s.texType, s.useSrgb)) {
+                        DDSCompressedPayload payload{};
+                        if (loadCompressedDDSFile(cand->ddsPath, cand->target, s.useSrgb, payload) &&
+                            payload.width == s.width && payload.height == s.height) {
+                            int64_t compressedId = uploadCompressedTexture2D(payload.bytes.data(), payload.bytes.size(),
+                                                                              s.width, s.height, payload.format);
+                            if (compressedId) {
+                                return compressedId;
+                            }
+                        }
+                    }
+                }
+                return uploadTexture2D(s.bytes.data(), s.width, s.height,
+                                       s.uploadChannels, s.useSrgb, false);
+            };
+
+            int64_t id = 0;
+            VulkanBackingRecord resolvedBacking{};
+            bool resolvedThroughPool = false;
+            bool createdByPool = false;
+            const auto& req = freshUploads[i];
+            if (m_sceneTextureManager && !req.sceneKey.empty()) {
+                resolvedThroughPool = m_sceneTextureManager->resolveOrCreateVulkanBacking(
+                    req.sceneKey,
+                    sceneTextureOwnerScope(),
+                    TextureConsumer::RasterPreview | TextureConsumer::VulkanRT,
+                    s.width,
+                    s.height,
+                    estimateSceneTextureBytes(req.tex, s.uploadChannels),
+                    [&](TextureHandle, VulkanBackingRecord& outBacking) -> bool {
+                        const int64_t uploadedId = uploadStagedTexture();
+                        if (!uploadedId) {
+                            return false;
+                        }
+                        return buildVulkanBackingRecord(uploadedId, outBacking);
+                    },
+                    resolvedBacking,
+                    &createdByPool);
+
+                if (resolvedThroughPool && resolvedBacking.textureId != 0) {
+                    VulkanRT::ImageHandle localImage{};
+                    if (tryGetUploadedImageHandle(resolvedBacking.textureId, localImage)) {
+                        id = resolvedBacking.textureId;
+                    } else {
+                        m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), resolvedBacking.textureId);
+                        resolvedThroughPool = false;
+                    }
+                }
+            }
+
+            if (!id) {
+                id = uploadStagedTexture();
+            }
+
+            if (id) {
+                m_uploadedImageIDs[s.cacheKey] = id;
+                m_textureIdToCacheKey[id] = s.cacheKey;
+                if (!resolvedThroughPool || !createdByPool) {
+                    registerSceneTextureUpload(req.sceneHandle, id);
+                }
+            }
+
+            batchStagingBytes += (uint64_t)s.width * s.height * s.uploadChannels;
+            if (batchStagingBytes >= FLUSH_BYTES && i + 1 < staged.size()) {
+                endBatchedTextureUpload();
+                beginBatchedTextureUpload();
+                batchStagingBytes = 0;
+            }
+        }
+        endBatchedTextureUpload();
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     for (const auto& m : materials) {
         VulkanRT::VkGpuMaterial gm{};
@@ -6259,8 +7080,8 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         // ... getTexID mapping (cast to uint32_t for GLSL compatibility)
         auto getTexID = [this](int64_t key, TextureType textureType, bool forceLinear = false, bool preferSingleChannel = false) -> uint32_t {
             if (!key) return 0;
-            auto uploadedIt = m_uploadedImages.find(key);
-            if (uploadedIt != m_uploadedImages.end()) {
+            VulkanRT::ImageHandle existingUploaded{};
+            if (tryGetUploadedImageHandle(key, existingUploaded)) {
                 return static_cast<uint32_t>(key);
             }
             // Runtime backend-owned texture handles are small integer ids, not real Texture* pointers.
@@ -6273,13 +7094,34 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                                 (forceLinear ? 1ull : 0ull) |
                                 (preferSingleChannel ? 2ull : 0ull);
             Texture* texCheck = reinterpret_cast<Texture*>(key);
-            // [FIX] vulkan_dirty: texture content was updated in-place (paint stroke,
-            // autoMask, paintSplatMap, etc.). Prefer updateTexture2DInPlace when the
-            // dimensions/format still match — it reuses the existing VkImage slot,
-            // avoiding descriptor churn and the destroy/create storm that used to
-            // TDR the raster material preview. Only fall back to destroy+upload
-            // when in-place fails (first upload, dim change, HDR path, etc.).
             const bool needsDirtyRefresh = (texCheck && texCheck->vulkan_dirty);
+            TextureHandle sceneHandle{};
+            if (texCheck && texCheck->is_loaded() && m_sceneTextureManager && !needsDirtyRefresh) {
+                sceneHandle = registerSceneTexture(
+                    m_sceneTextureManager.get(),
+                    texCheck,
+                    textureType,
+                    forceLinear,
+                    preferSingleChannel,
+                    TextureConsumer::RasterPreview | TextureConsumer::VulkanRT);
+                int64_t existingSceneTextureId = 0;
+                if (sceneHandle.isValid() &&
+                    m_sceneTextureManager->tryGetVulkanTextureId(sceneHandle, sceneTextureOwnerScope(), existingSceneTextureId) &&
+                    existingSceneTextureId != 0 &&
+                    tryGetUploadedImageHandle(existingSceneTextureId, existingUploaded)) {
+                    m_uploadedImageIDs[cacheKey] = existingSceneTextureId;
+                    m_textureIdToCacheKey[existingSceneTextureId] = cacheKey;
+                    return static_cast<uint32_t>(existingSceneTextureId);
+                }
+            }
+            // [FIX] vulkan_dirty: texture content was updated in-place (paint stroke,
+            // autoMask, paintSplatMap, etc.). Prefer updateTexture2DRegion when the
+            // texture tracked exactly which pixels changed (brush dab) — only the
+            // dirty rect is staged + copied, avoiding the fullWidth*fullHeight*bpp
+            // temp buffer that dominated paint cost at 2K/4K. Fall back to
+            // updateTexture2DInPlace (full image, same VkImage slot) when no rect
+            // is tracked or the partial path can't be used. Only fall back to
+            // destroy+upload when in-place fails too.
             if (texCheck && texCheck->is_loaded() && !texCheck->is_hdr && needsDirtyRefresh) {
                 auto oldIt = m_uploadedImageIDs.find(cacheKey);
                 if (oldIt != m_uploadedImageIDs.end()) {
@@ -6292,6 +7134,51 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                             (preferSingleChannel || dPlan.preferSingleChannelFallback) &&
                             !dUseSrgb && texCheck->is_gray_scale && !texCheck->has_alpha;
                         const uint32_t dUploadChannels = dCanUseSingleChannel ? 1u : 4u;
+
+                        // Try the partial-region fast path when a rect is known.
+                        int rx = 0, ry = 0, rw = 0, rh = 0;
+                        bool rfull = true;
+                        const bool haveRect = texCheck->getVulkanDirtyRegion(rx, ry, rw, rh, rfull);
+                        if (haveRect && !rfull && rw > 0 && rh > 0) {
+                            std::vector<uint8_t> region(static_cast<size_t>(rw) *
+                                                        static_cast<size_t>(rh) *
+                                                        dUploadChannels);
+                            const int srcW = texCheck->width;
+                            if (dCanUseSingleChannel) {
+                                for (int j = 0; j < rh; ++j) {
+                                    const size_t srcRow = static_cast<size_t>(ry + j) * static_cast<size_t>(srcW);
+                                    const size_t dstRow = static_cast<size_t>(j) * static_cast<size_t>(rw);
+                                    for (int i = 0; i < rw; ++i) {
+                                        region[dstRow + i] = dpx[srcRow + (rx + i)].r;
+                                    }
+                                }
+                            } else {
+                                for (int j = 0; j < rh; ++j) {
+                                    const size_t srcRow = static_cast<size_t>(ry + j) * static_cast<size_t>(srcW);
+                                    const size_t dstRow = static_cast<size_t>(j) * static_cast<size_t>(rw) * 4;
+                                    for (int i = 0; i < rw; ++i) {
+                                        const auto& p = dpx[srcRow + (rx + i)];
+                                        const size_t o = dstRow + static_cast<size_t>(i) * 4;
+                                        region[o + 0] = p.r;
+                                        region[o + 1] = p.g;
+                                        region[o + 2] = p.b;
+                                        region[o + 3] = p.a;
+                                    }
+                                }
+                            }
+                            if (this->updateTexture2DRegion(existingId, region.data(),
+                                                            texCheck->width, texCheck->height,
+                                                            dUploadChannels, dUseSrgb,
+                                                            rx, ry,
+                                                            static_cast<uint32_t>(rw),
+                                                            static_cast<uint32_t>(rh))) {
+                                texCheck->clearVulkanDirty();
+                                return (uint32_t)existingId;
+                            }
+                            // Region path failed (slot mismatch, format diverged).
+                            // Fall through to the full in-place path below.
+                        }
+
                         std::vector<uint8_t> dtmp((size_t)texCheck->width * texCheck->height * dUploadChannels);
                         if (dCanUseSingleChannel) {
                             for (size_t i = 0; i < dpx.size(); ++i) dtmp[i] = dpx[i].r;
@@ -6304,7 +7191,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                         if (this->updateTexture2DInPlace(existingId, dtmp.data(),
                                                          texCheck->width, texCheck->height,
                                                          dUploadChannels, dUseSrgb, false)) {
-                            texCheck->vulkan_dirty = false;
+                            texCheck->clearVulkanDirty();
                             return (uint32_t)existingId;
                         }
                     }
@@ -6316,80 +7203,199 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                     int64_t oldId = evictIt->second;
                     if (oldId) this->destroyTexture(oldId);
                 }
-                texCheck->vulkan_dirty = false;
+                texCheck->clearVulkanDirty();
+            }
+            if (texCheck && texCheck->is_loaded() && m_sceneTextureManager && !sceneHandle.isValid()) {
+                sceneHandle = registerSceneTexture(
+                    m_sceneTextureManager.get(),
+                    texCheck,
+                    textureType,
+                    forceLinear,
+                    preferSingleChannel,
+                    TextureConsumer::RasterPreview | TextureConsumer::VulkanRT);
             }
             auto it = m_uploadedImageIDs.find(cacheKey);
             if (it != m_uploadedImageIDs.end()) return (uint32_t)it->second;
-            Texture* tex = reinterpret_cast<Texture*>(key);
+            Texture* tex = texCheck;
             if (!tex || !tex->is_loaded()) return 0;
-            if (tex->is_hdr) {
-                // HDR path: no in-place fast path yet (rarely painted in practice).
-                // vulkan_dirty HDR textures simply re-upload here after the eviction
-                // above cleared the stale cache entry.
-                const std::vector<float4>& fp = tex->float_pixels;
-                if (fp.empty()) return 0;
-                int64_t id = this->uploadTexture2D(fp.data(), tex->width, tex->height, 4, false, true);
-                if (id) { m_uploadedImageIDs[cacheKey] = id; return (uint32_t)id; }
-                return 0;
-            }
-            if (tex->vulkan_dirty) tex->vulkan_dirty = false;
-            const std::vector<CompactVec4>& px = tex->pixels;
-            if (px.empty()) return 0;
             const bool useSrgb = forceLinear ? false : tex->is_srgb;
             const TextureCompressionPlan compressionPlan = buildTextureCompressionPlan(tex, textureType);
-            const bool supportsPreferredCompression =
-                (compressionPlan.preferredTarget == TextureCompressionTarget::BC4 && m_device->getCapabilities().supportsBC4) ||
-                (compressionPlan.preferredTarget == TextureCompressionTarget::BC5 && m_device->getCapabilities().supportsBC5) ||
-                (compressionPlan.preferredTarget == TextureCompressionTarget::BC7 && m_device->getCapabilities().supportsBC7);
-            if (supportsPreferredCompression && !tex->name.empty()) {
-                DDSCompressedPayload payload{};
-                if (auto cacheCandidate = findCompressedTextureCacheCandidate(*tex, textureType, useSrgb)) {
-                    if (loadCompressedDDSFile(cacheCandidate->ddsPath, cacheCandidate->target, useSrgb, payload) &&
-                        payload.width == static_cast<uint32_t>(tex->width) &&
-                        payload.height == static_cast<uint32_t>(tex->height)) {
-                        int64_t id = this->uploadCompressedTexture2D(
-                            payload.bytes.data(),
-                            payload.bytes.size(),
-                            payload.width,
-                            payload.height,
-                            payload.format);
-                        if (id) { m_uploadedImageIDs[cacheKey] = id; return (uint32_t)id; }
+            auto uploadTextureNow = [&]() -> int64_t {
+                if (tex->is_hdr) {
+                    // HDR path: no in-place fast path yet (rarely painted in practice).
+                    // vulkan_dirty HDR textures simply re-upload here after the eviction
+                    // above cleared the stale cache entry.
+                    const std::vector<float4>& fp = tex->float_pixels;
+                    if (fp.empty()) return 0;
+                    return this->uploadTexture2D(fp.data(), tex->width, tex->height, 4, false, true);
+                }
+
+                if (tex->vulkan_dirty) tex->clearVulkanDirty();
+                const std::vector<CompactVec4>& px = tex->pixels;
+                if (px.empty()) return 0;
+
+                const bool supportsPreferredCompression =
+                    (compressionPlan.preferredTarget == TextureCompressionTarget::BC4 && m_device->getCapabilities().supportsBC4) ||
+                    (compressionPlan.preferredTarget == TextureCompressionTarget::BC5 && m_device->getCapabilities().supportsBC5) ||
+                    (compressionPlan.preferredTarget == TextureCompressionTarget::BC7 && m_device->getCapabilities().supportsBC7);
+                if (supportsPreferredCompression && !tex->name.empty()) {
+                    DDSCompressedPayload payload{};
+                    if (auto cacheCandidate = findCompressedTextureCacheCandidate(*tex, textureType, useSrgb)) {
+                        if (loadCompressedDDSFile(cacheCandidate->ddsPath, cacheCandidate->target, useSrgb, payload) &&
+                            payload.width == static_cast<uint32_t>(tex->width) &&
+                            payload.height == static_cast<uint32_t>(tex->height)) {
+                            int64_t compressedId = this->uploadCompressedTexture2D(
+                                payload.bytes.data(),
+                                payload.bytes.size(),
+                                payload.width,
+                                payload.height,
+                                payload.format);
+                            if (compressedId) {
+                                return compressedId;
+                            }
+                        }
                     }
                 }
-            }
+
+                const bool canUseSingleChannel =
+                    (preferSingleChannel || compressionPlan.preferSingleChannelFallback) &&
+                    !useSrgb && tex->is_gray_scale && !tex->has_alpha;
+                std::vector<uint8_t> tmp;
+                const uint32_t uploadChannels = canUseSingleChannel ? 1u : 4u;
+                tmp.resize((size_t)tex->width * tex->height * uploadChannels);
+                if (canUseSingleChannel) {
+                    for (size_t i = 0; i < px.size(); ++i) {
+                        tmp[i] = px[i].r;
+                    }
+                } else {
+                    for (size_t i = 0; i < px.size(); ++i) {
+                        tmp[i*4 + 0] = px[i].r; tmp[i*4 + 1] = px[i].g; tmp[i*4 + 2] = px[i].b; tmp[i*4 + 3] = px[i].a;
+                    }
+                }
+                return this->uploadTexture2D(tmp.data(), tex->width, tex->height, uploadChannels, useSrgb, false);
+            };
+
             const bool canUseSingleChannel =
                 (preferSingleChannel || compressionPlan.preferSingleChannelFallback) &&
                 !useSrgb && tex->is_gray_scale && !tex->has_alpha;
-            std::vector<uint8_t> tmp;
-            const uint32_t uploadChannels = canUseSingleChannel ? 1u : 4u;
-            tmp.resize((size_t)tex->width * tex->height * uploadChannels);
-            if (canUseSingleChannel) {
-                for (size_t i = 0; i < px.size(); ++i) {
-                    tmp[i] = px[i].r;
-                }
-            } else {
-                for (size_t i = 0; i < px.size(); ++i) {
-                    tmp[i*4 + 0] = px[i].r; tmp[i*4 + 1] = px[i].g; tmp[i*4 + 2] = px[i].b; tmp[i*4 + 3] = px[i].a;
+            const uint32_t estimatedUploadChannels = tex->is_hdr ? 4u : (canUseSingleChannel ? 1u : 4u);
+            int64_t id = 0;
+            bool resolvedThroughPool = false;
+            bool createdByPool = false;
+            if (m_sceneTextureManager && sceneHandle.isValid()) {
+                VulkanBackingRecord resolvedBacking{};
+                resolvedThroughPool = m_sceneTextureManager->resolveOrCreateVulkanBacking(
+                    buildSceneTextureKey(tex, textureType, forceLinear, preferSingleChannel),
+                    sceneTextureOwnerScope(),
+                    TextureConsumer::RasterPreview | TextureConsumer::VulkanRT,
+                    static_cast<uint32_t>((std::max)(0, tex->width)),
+                    static_cast<uint32_t>((std::max)(0, tex->height)),
+                    estimateSceneTextureBytes(tex, estimatedUploadChannels),
+                    [&](TextureHandle, VulkanBackingRecord& outBacking) -> bool {
+                        const int64_t uploadedId = uploadTextureNow();
+                        if (!uploadedId) {
+                            return false;
+                        }
+                        return buildVulkanBackingRecord(uploadedId, outBacking);
+                    },
+                    resolvedBacking,
+                    &createdByPool);
+
+                if (resolvedThroughPool && resolvedBacking.textureId != 0) {
+                    VulkanRT::ImageHandle localImage{};
+                    if (tryGetUploadedImageHandle(resolvedBacking.textureId, localImage)) {
+                        id = resolvedBacking.textureId;
+                    } else {
+                        m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), resolvedBacking.textureId);
+                        resolvedThroughPool = false;
+                    }
                 }
             }
-            int64_t id = this->uploadTexture2D(tmp.data(), tex->width, tex->height, uploadChannels, useSrgb, false);
-            if (id) { m_uploadedImageIDs[cacheKey] = id; return (uint32_t)id; }
+
+            if (!id) {
+                id = uploadTextureNow();
+            }
+            if (id) {
+                m_uploadedImageIDs[cacheKey] = id;
+                m_textureIdToCacheKey[id] = cacheKey;
+                if (!resolvedThroughPool || !createdByPool) {
+                    registerSceneTextureUpload(sceneHandle, id);
+                }
+                return (uint32_t)id;
+            }
             return 0;
         };
 
         gm.albedo_tex = getTexID(m.albedoTexture, TextureType::Albedo, false);
         gm.normal_tex = getTexID(m.normalTexture, TextureType::Normal, true);
-        gm.roughness_tex = getTexID(m.roughnessTexture, TextureType::Roughness, true, true);
-        gm.metallic_tex = getTexID(m.metallicTexture, TextureType::Metallic, true, true);
+        gm.roughness_tex = getTexID(m.roughnessTexture, TextureType::Roughness, true, false);
+        gm.metallic_tex = getTexID(m.metallicTexture, TextureType::Metallic, true, false);
         gm.emission_tex = getTexID(m.emissionTexture, TextureType::Emission, false);
         gm.transmission_tex = getTexID(m.transmissionTexture, TextureType::Transmission, true, true);
         gm.opacity_tex = getTexID(m.opacityTexture, TextureType::Opacity, true, true);
-        // Set bit 8 in flags if opacity texture uses the alpha channel (RGBA texture)
-        // vs. bit 8 clear = grayscale mask (R channel)
+        // Bit 8: shader reads .a (RGBA source) vs .r (grayscale or BC4 DDS).
+        // After baking, BC4 stores the original .a data in its single R channel,
+        // so bit 8 must be cleared — otherwise the shader reads .a from a 1-channel
+        // texture and always gets 1.0 (fully opaque).
         if (m.opacityTexture) {
             Texture* opTex = reinterpret_cast<Texture*>(m.opacityTexture);
             if (opTex && opTex->is_loaded() && opTex->has_alpha) {
-                gm.flags |= (1u << 8); // Bit 8: opacity is in .a channel
+                const bool hasBc4Dds = [&]() -> bool {
+                    auto cand = findCompressedTextureCacheCandidate(*opTex, TextureType::Opacity, false);
+                    return cand && cand->target == TextureCompressionTarget::BC4;
+                }();
+                if (!hasBc4Dds) {
+                    gm.flags |= (1u << 8); // Bit 8: opacity is in .a channel
+                }
+            }
+        }
+
+        // Bits 9/10: shader reads .r (BC4 cache or single-channel R8 upload) vs
+        // the default ORM packed channels (.g for roughness, .b for metallic).
+        // Roughness/Metallic plan now ALWAYS targets BC4 (see TextureCompression.h),
+        // so as soon as a BC4 cache exists the shader must read .r — regardless of
+        // whether the source was grayscale or ORM-packed (the BC4 file holds the
+        // single channel that the plan chose to extract).
+        // Without a cache we fall back to R8 (grayscale, no alpha) or RGBA8 (ORM):
+        //   R8   → data is in .r → flag set
+        //   RGBA8 → data is in .g/.b (original ORM) → flag clear
+        auto needsRedChannelFlag = [](Texture* tex, TextureType type) -> bool {
+            if (!tex || !tex->is_loaded()) return false;
+            // Cache hit on BC4 always wins — the file contains a single R channel
+            // built from the planned sourceChannel.
+            if (auto cand = findCompressedTextureCacheCandidate(*tex, type, false)) {
+                if (cand->target == TextureCompressionTarget::BC4) return true;
+            }
+            // No BC4 cache: shader sees whatever the live upload path produces.
+            // R8 single-channel upload requires grayscale + no alpha (matches the
+            // canSingle gate in the upload pipeline).
+            return tex->is_gray_scale && !tex->has_alpha;
+        };
+        if (m.roughnessTexture) {
+            Texture* rTex = reinterpret_cast<Texture*>(m.roughnessTexture);
+            if (needsRedChannelFlag(rTex, TextureType::Roughness)) {
+                gm.flags |= (1u << 9);
+            }
+        }
+        if (m.metallicTexture) {
+            Texture* mTex = reinterpret_cast<Texture*>(m.metallicTexture);
+            if (needsRedChannelFlag(mTex, TextureType::Metallic)) {
+                gm.flags |= (1u << 10);
+            }
+        }
+
+        // Bit 11: normal map is BC5-encoded. BC5 only stores RG (XY); the shader
+        // must reconstruct Z = sqrt(1 - X² - Y²) instead of reading .b (which is
+        // always 0 in BC5). Without this flag, large 4K/8K normal maps that go
+        // through the BC5 cache decode to (X, Y, -1) → broken/black surface.
+        if (m.normalTexture) {
+            Texture* nTex = reinterpret_cast<Texture*>(m.normalTexture);
+            if (nTex && nTex->is_loaded()) {
+                if (auto cand = findCompressedTextureCacheCandidate(*nTex, TextureType::Normal, false)) {
+                    if (cand->target == TextureCompressionTarget::BC5) {
+                        gm.flags |= (1u << 11);
+                    }
+                }
             }
         }
         gm.height_tex = getTexID(m.heightTexture, TextureType::Unknown, true);
@@ -6405,6 +7411,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         gpuMats.push_back(defaultMat);
     }
 
+    m_cachedGpuMaterials = gpuMats;
     m_device->updateMaterialBuffer(gpuMats.data(), gpuMats.size() * sizeof(::VulkanRT::VkGpuMaterial), (uint32_t)gpuMats.size());
 
     // Update material preview descriptor set when material buffer changes
@@ -6437,14 +7444,16 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
     }
 
     if (m_textureUploadSummaryDirty) {
-       /* SCENE_LOG_INFO("[Perf] [Vulkan] textures | count=" + std::to_string(m_textureUploadCount) +
-                       " | est_vram=" + std::to_string(m_textureUploadBytes) +
-                       " bytes | bc4=" + std::to_string(m_textureUploadBC4Count) +
+        SCENE_LOG_INFO("[Vulkan] Texture upload summary | new=" + std::to_string(m_textureUploadCount) +
+                       " | bc4=" + std::to_string(m_textureUploadBC4Count) +
                        " | bc5=" + std::to_string(m_textureUploadBC5Count) +
                        " | bc7=" + std::to_string(m_textureUploadBC7Count) +
                        " | r8=" + std::to_string(m_textureUploadR8Count) +
                        " | rgba8=" + std::to_string(m_textureUploadRGBA8Count) +
-                       " | float=" + std::to_string(m_textureUploadFloatCount));*/
+                       " | float=" + std::to_string(m_textureUploadFloatCount));
+        if (m_sceneTextureManager) {
+            m_sceneTextureManager->logBudgetSummary("after-upload-materials");
+        }
         m_textureUploadSummaryDirty = false;
     }
     resetAccumulation();
@@ -6455,6 +7464,80 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
     // render device is Vulkan RT, since the CPU/OptiX path uses a dedicated
     // VulkanViewportBackend that gets its own sync).
     m_interactiveViewport.dirty = true;
+}
+
+bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const MaterialData& m) {
+    if (!m_device || !m_device->isInitialized()) return false;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    if (!m_device->m_materialBuffer.buffer ||
+        materialIndex >= m_cachedGpuMaterials.size() ||
+        (uint64_t)(materialIndex + 1) * sizeof(VulkanRT::VkGpuMaterial) > m_device->m_materialBuffer.size) {
+        return false;
+    }
+
+    VulkanRT::VkGpuMaterial gm = m_cachedGpuMaterials[materialIndex];
+    gm.albedo_r = m.albedo.x;
+    gm.albedo_g = m.albedo.y;
+    gm.albedo_b = m.albedo.z;
+    gm.opacity = m.opacity;
+    gm.roughness = m.roughness;
+    gm.metallic = m.metallic;
+    gm.ior = m.ior;
+    gm.transmission = m.transmission;
+    gm.emission_r = m.emission.x;
+    gm.emission_g = m.emission.y;
+    gm.emission_b = m.emission.z;
+    gm.emission_strength = m.emissionStrength;
+    gm.subsurface_r = m.subsurfaceColor.x;
+    gm.subsurface_g = m.subsurfaceColor.y;
+    gm.subsurface_b = m.subsurfaceColor.z;
+    gm.subsurface_amount = m.subsurface;
+    gm.subsurface_radius_r = m.subsurfaceRadius.x;
+    gm.subsurface_radius_g = m.subsurfaceRadius.y;
+    gm.subsurface_radius_b = m.subsurfaceRadius.z;
+    gm.subsurface_scale = m.subsurfaceScale;
+    gm.subsurface_ior = m.subsurfaceIOR;
+    gm.normal_strength = m.normalStrength;
+    gm.clearcoat = m.clearcoat;
+    gm.clearcoat_roughness = m.clearcoatRoughness;
+    gm.translucent = m.translucent;
+    gm.subsurface_anisotropy = m.subsurfaceAnisotropy;
+    gm.anisotropic = m.anisotropic;
+    gm.sheen = m.sheen;
+    gm.sheen_tint = m.sheenTint;
+    gm.flags = (uint32_t)m.flags;
+    gm.uv_scale_x = static_cast<float>(m.uvScale.x);
+    gm.uv_scale_y = static_cast<float>(m.uvScale.y);
+    gm.uv_offset_x = static_cast<float>(m.uvOffset.x);
+    gm.uv_offset_y = static_cast<float>(m.uvOffset.y);
+    gm.uv_rotation_degrees = m.uvRotationDegrees;
+    gm.uv_tiling_x = static_cast<float>(m.uvTiling.x);
+    gm.uv_tiling_y = static_cast<float>(m.uvTiling.y);
+    gm.uv_wrap_mode = m.uvWrapMode;
+    gm.micro_detail_strength = m.micro_detail_strength;
+    gm.micro_detail_scale = m.micro_detail_scale;
+    gm.tile_break_strength = m.tile_break_strength;
+    gm.fft_amplitude = m.fft_amplitude;
+    gm.fft_time_scale = m.fft_time_scale;
+    gm.foam_threshold = m.foam_threshold;
+    gm.fft_ocean_size = m.fft_ocean_size;
+    gm.fft_choppiness = m.fft_choppiness;
+    gm.fft_wind_speed = m.fft_wind_speed;
+    gm.fft_wind_direction = m.fft_wind_direction;
+    gm.micro_anim_speed = m.micro_anim_speed;
+    gm.micro_morph_speed = m.micro_morph_speed;
+    gm.foam_noise_scale = m.foam_noise_scale;
+    if (m.flags & Backend::IBackend::MAT_FLAG_TERRAIN) {
+        gm._terrain_layer_idx = m.terrainLayerIdx;
+    }
+
+    const uint64_t offset = (uint64_t)materialIndex * sizeof(VulkanRT::VkGpuMaterial);
+    m_device->uploadBuffer(m_device->m_materialBuffer, &gm, sizeof(VulkanRT::VkGpuMaterial), offset);
+    m_cachedGpuMaterials[materialIndex] = gm;
+    m_interactiveViewport.dirty = true;
+    resetAccumulation();
+    return true;
 }
 
 void VulkanBackendAdapter::uploadHairMaterials(const std::vector<HairMaterialData>& materials) {
@@ -6548,6 +7631,13 @@ void VulkanBackendAdapter::uploadTerrainLayerMaterials(const std::vector<Terrain
             Texture* splatTex = reinterpret_cast<Texture*>(ld.splatMapTexture);
             if (splatTex && splatTex->is_loaded()) {
                 uint64_t cacheKey = static_cast<uint64_t>(ld.splatMapTexture) << 1; // linear
+                TextureHandle sceneHandle{};
+                if (m_sceneTextureManager) {
+                    sceneHandle = registerTerrainSplatTexture(
+                        m_sceneTextureManager.get(),
+                        splatTex,
+                        TextureConsumer::RasterPreview | TextureConsumer::VulkanRT);
+                }
                 // [FIX] Evict stale Vulkan sampler entry when splat map pixels were modified
                 // in-place (autoMask / importSplatMap / paintSplatMap → updateGPU sets vulkan_dirty).
                 if (splatTex->vulkan_dirty) {
@@ -6556,22 +7646,67 @@ void VulkanBackendAdapter::uploadTerrainLayerMaterials(const std::vector<Terrain
                         int64_t oldId = oldIt->second;
                         if (oldId) this->destroyTexture(oldId);
                     }
-                    splatTex->vulkan_dirty = false;
+                    splatTex->clearVulkanDirty();
                 }
                 auto it = m_uploadedImageIDs.find(cacheKey);
                 if (it != m_uploadedImageIDs.end()) {
                     gld.splat_map_tex = (uint32_t)it->second;
                 } else {
-                    // Upload the splat map
-                    const std::vector<CompactVec4>& px = splatTex->pixels;
-                    if (!px.empty()) {
-                        std::vector<uint8_t> tmp(splatTex->width * splatTex->height * 4);
+                    auto uploadSplatTextureNow = [&]() -> int64_t {
+                        const std::vector<CompactVec4>& px = splatTex->pixels;
+                        if (px.empty()) return 0;
+
+                        std::vector<uint8_t> tmp(static_cast<size_t>(splatTex->width) * splatTex->height * 4);
                         for (size_t i = 0; i < px.size(); ++i) {
                             tmp[i*4+0] = px[i].r; tmp[i*4+1] = px[i].g;
                             tmp[i*4+2] = px[i].b; tmp[i*4+3] = px[i].a;
                         }
-                        int64_t id = this->uploadTexture2D(tmp.data(), splatTex->width, splatTex->height, 4, false, false);
-                        if (id) { m_uploadedImageIDs[cacheKey] = id; gld.splat_map_tex = (uint32_t)id; }
+                        return this->uploadTexture2D(tmp.data(), splatTex->width, splatTex->height, 4, false, false);
+                    };
+
+                    int64_t id = 0;
+                    bool resolvedThroughPool = false;
+                    bool createdByPool = false;
+                    if (sceneHandle.isValid() && m_sceneTextureManager) {
+                        VulkanBackingRecord resolvedBacking{};
+                        resolvedThroughPool = m_sceneTextureManager->resolveOrCreateVulkanBacking(
+                            buildSceneTextureKey(splatTex, TextureType::Unknown, true, false),
+                            sceneTextureOwnerScope(),
+                            TextureConsumer::RasterPreview | TextureConsumer::VulkanRT,
+                            static_cast<uint32_t>((std::max)(0, splatTex->width)),
+                            static_cast<uint32_t>((std::max)(0, splatTex->height)),
+                            estimateSceneTextureBytes(splatTex, 4u),
+                            [&](TextureHandle, VulkanBackingRecord& outBacking) -> bool {
+                                const int64_t uploadedId = uploadSplatTextureNow();
+                                if (!uploadedId) {
+                                    return false;
+                                }
+                                return buildVulkanBackingRecord(uploadedId, outBacking);
+                            },
+                            resolvedBacking,
+                            &createdByPool);
+
+                        if (resolvedThroughPool && resolvedBacking.textureId != 0) {
+                            VulkanRT::ImageHandle localImage{};
+                            if (tryGetUploadedImageHandle(resolvedBacking.textureId, localImage)) {
+                                id = resolvedBacking.textureId;
+                            } else {
+                                m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), resolvedBacking.textureId);
+                                resolvedThroughPool = false;
+                            }
+                        }
+                    }
+
+                    if (!id) {
+                        id = uploadSplatTextureNow();
+                    }
+                    if (id) {
+                        m_uploadedImageIDs[cacheKey] = id;
+                        m_textureIdToCacheKey[id] = cacheKey;
+                        if (!resolvedThroughPool || !createdByPool) {
+                            registerSceneTextureUpload(sceneHandle, id);
+                        }
+                        gld.splat_map_tex = (uint32_t)id;
                     }
                 }
             }
@@ -6588,10 +7723,29 @@ void VulkanBackendAdapter::uploadTerrainLayerMaterials(const std::vector<Terrain
     SCENE_LOG_INFO("[Vulkan] Terrain layer materials uploaded: " + std::to_string(gpuLayers.size()));
 }
 
+void VulkanBackendAdapter::beginBatchedTextureUpload() {
+    if (!m_device || m_inBatchedTextureUpload) return;
+    m_batchTextureCmd = m_device->beginSingleTimeCommands();
+    if (m_batchTextureCmd == VK_NULL_HANDLE) return;
+    m_inBatchedTextureUpload = true;
+}
+
+void VulkanBackendAdapter::endBatchedTextureUpload() {
+    if (!m_inBatchedTextureUpload) return;
+    m_inBatchedTextureUpload = false;
+    if (m_batchTextureCmd != VK_NULL_HANDLE) {
+        m_device->endSingleTimeCommands(m_batchTextureCmd);
+        m_batchTextureCmd = VK_NULL_HANDLE;
+    }
+    for (auto& buf : m_batchTextureStagingBuffers)
+        m_device->destroyBuffer(buf);
+    m_batchTextureStagingBuffers.clear();
+}
+
 int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, uint32_t height, uint32_t channels, bool srgb, bool isFloat) {
     if (!m_device || !m_device->isInitialized() || !data) return 0;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    m_device->waitIdle();
+    if (!m_inBatchedTextureUpload) m_device->waitIdle();
 
     VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
     uint32_t bpp = 4; // bytes per pixel
@@ -6611,6 +7765,29 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
         fmt = VK_FORMAT_R8G8B8A8_SRGB;
     }
 
+    // Budget-aware mip level calculation.
+    // vkCmdBlitImage requires a graphics-capable queue; float textures skip mips to
+    // avoid linear blit precision issues on some drivers.
+    const bool canGenerateMips = m_device->supportsGraphicsQueue() && !isFloat;
+    uint32_t mipLevels = 1;
+    if (canGenerateMips) {
+        const uint32_t fullMips = calcMipLevels(width, height);
+        const uint64_t dedicatedVRAM = m_device->getCapabilities().dedicatedVRAM;
+        if (m_sceneTextureManager && dedicatedVRAM > 0) {
+            const float pressure = static_cast<float>(m_sceneTextureManager->totalEstimatedTextureBytes())
+                                 / static_cast<float>(dedicatedVRAM);
+            if (pressure < 0.50f) {
+                mipLevels = fullMips;
+            } else if (pressure < 0.75f) {
+                mipLevels = std::min(fullMips, 4u);  // cap at ~1/8 minimum resolution
+            } else {
+                mipLevels = std::min(fullMips, 2u);  // cap at ~1/2 minimum resolution
+            }
+        } else {
+            mipLevels = fullMips;
+        }
+    }
+
     // Create staging buffer
     VulkanRT::BufferCreateInfo ci;
     ci.size = (uint64_t)width * height * bpp;
@@ -6622,27 +7799,54 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
 
     m_device->uploadBuffer(staging, data, ci.size);
 
-    // Create image as a sampled texture (allow transfer dst for upload)
-    VulkanRT::ImageHandle img = m_device->createImage2D(width, height, fmt,
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-    if (!img.image) {
-        m_device->destroyBuffer(staging);
-        return 0;
+    VulkanRT::ImageHandle img;
+    if (mipLevels > 1) {
+        // Mip path: create image pre-transitioned to TRANSFER_DST_OPTIMAL for all levels.
+        img = m_device->createImage2DWithMips(width, height, mipLevels, fmt);
+        if (!img.image) {
+            m_device->destroyBuffer(staging);
+            return 0;
+        }
+        if (m_inBatchedTextureUpload) {
+            m_device->recordCopyBufferToImageDst(m_batchTextureCmd, staging, img);
+            m_device->generateMipmaps(m_batchTextureCmd, img.image, width, height, mipLevels);
+        } else {
+            VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
+            if (cmd == VK_NULL_HANDLE) {
+                m_device->destroyImage(img);
+                m_device->destroyBuffer(staging);
+                return 0;
+            }
+            m_device->recordCopyBufferToImageDst(cmd, staging, img);
+            m_device->generateMipmaps(cmd, img.image, width, height, mipLevels);
+            m_device->endSingleTimeCommands(cmd);
+        }
+    } else {
+        // Single-mip path: existing GENERAL layout path.
+        img = m_device->createImage2D(width, height, fmt,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        if (!img.image) {
+            m_device->destroyBuffer(staging);
+            return 0;
+        }
+        if (m_inBatchedTextureUpload) {
+            m_device->recordCopyBufferToImage(m_batchTextureCmd, staging, img);
+            m_device->transitionImageLayout(m_batchTextureCmd, img.image,
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        } else {
+            m_device->copyBufferToImage(staging, img);
+            VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
+            if (cmd == VK_NULL_HANDLE) {
+                m_device->destroyImage(img);
+                m_device->destroyBuffer(staging);
+                return 0;
+            }
+            m_device->transitionImageLayout(cmd, img.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            m_device->endSingleTimeCommands(cmd);
+        }
     }
 
-    m_device->copyBufferToImage(staging, img);
-
-    // Transition uploaded image to SHADER_READ_ONLY_OPTIMAL for sampling in shaders
-    VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
-    if (cmd == VK_NULL_HANDLE) {
-        m_device->destroyImage(img);
-        m_device->destroyBuffer(staging);
-        return 0;
-    }
-    m_device->transitionImageLayout(cmd, img.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    m_device->endSingleTimeCommands(cmd);
-
-    // Create simple sampler
+    // Sampler: maxLod drives which mip levels the hardware will sample.
     VkSamplerCreateInfo sci{};
     sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     sci.magFilter = VK_FILTER_LINEAR;
@@ -6656,6 +7860,8 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
     sci.unnormalizedCoordinates = VK_FALSE;
     sci.compareEnable = VK_FALSE;
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sci.minLod = 0.0f;
+    sci.maxLod = static_cast<float>(mipLevels - 1);
 
     VkSampler sampler = VK_NULL_HANDLE;
     vkCreateSampler(m_device->getDevice(), &sci, nullptr, &sampler);
@@ -6664,7 +7870,7 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
     // Register image with an ID
     int64_t id = m_nextTextureID++;
     m_uploadedImages[id] = img;
-    const uint64_t estimated_vram_bytes = estimateImageStorageBytes(width, height, fmt);
+    const uint64_t estimated_vram_bytes = estimateImageStorageBytes(width, height, fmt, mipLevels);
     m_textureUploadBytes += estimated_vram_bytes;
     ++m_textureUploadCount;
     if (fmt == VK_FORMAT_R8_UNORM || fmt == VK_FORMAT_R8_SRGB) {
@@ -6675,8 +7881,6 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
         ++m_textureUploadRGBA8Count;
     }
     m_textureUploadSummaryDirty = true;
-    // Immediately update the RT descriptor array (binding 6) so shaders can sample this texture.
-// Immediately update the RT descriptor array (binding 6)
     if (m_device) {
         uint32_t slot = (uint32_t)id;
         if (m_device->hasHardwareRT()) {
@@ -6684,10 +7888,85 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
         }
         updateMaterialPreviewTextureDescriptor(slot, img);
     }
-    // CRITICAL: release temporary upload staging buffer.
-    // Missing destroy here caused per-texture memory growth across Vulkan sessions.
-    m_device->destroyBuffer(staging);
+    if (m_inBatchedTextureUpload) {
+        m_batchTextureStagingBuffers.push_back(staging);
+    } else {
+        // CRITICAL: release temporary upload staging buffer.
+        // Missing destroy here caused per-texture memory growth across Vulkan sessions.
+        m_device->destroyBuffer(staging);
+    }
     return id;
+}
+
+bool VulkanBackendAdapter::tryGetUploadedImageHandle(int64_t textureHandle, VulkanRT::ImageHandle& outImage) const {
+    auto it = m_uploadedImages.find(textureHandle);
+    if (it != m_uploadedImages.end()) {
+        outImage = it->second;
+        return outImage.image != VK_NULL_HANDLE && outImage.view != VK_NULL_HANDLE;
+    }
+    return false;
+}
+
+bool VulkanBackendAdapter::buildVulkanBackingRecord(int64_t textureHandle, VulkanBackingRecord& outBacking) const {
+    outBacking = VulkanBackingRecord{};
+    VulkanRT::ImageHandle image{};
+    if (!tryGetUploadedImageHandle(textureHandle, image)) {
+        return false;
+    }
+
+    outBacking.textureId = textureHandle;
+    outBacking.image = reinterpret_cast<uint64_t>(image.image);
+    outBacking.view = reinterpret_cast<uint64_t>(image.view);
+    outBacking.memory = reinterpret_cast<uint64_t>(image.memory);
+    outBacking.sampler = reinterpret_cast<uint64_t>(image.sampler);
+    outBacking.width = image.width;
+    outBacking.height = image.height;
+    outBacking.format = static_cast<uint32_t>(image.format);
+    return outBacking.isValid();
+}
+
+void VulkanBackendAdapter::registerSceneTextureUpload(TextureHandle sceneHandle, int64_t textureHandle) {
+    if (!m_sceneTextureManager || !sceneHandle.isValid() || textureHandle == 0) {
+        return;
+    }
+
+    VulkanBackingRecord backing{};
+    if (buildVulkanBackingRecord(textureHandle, backing)) {
+        // Attach a destroy callback so the manager can drive physical lifecycle.
+        // Use shared_ptr for device and alive-sentinel to survive backend rebuilds:
+        // if this backend's containers are torn down before the lambda runs, the
+        // sentinel is false and container access is skipped (GPU-only cleanup).
+        VulkanRT::VulkanDevice* devPtr = m_device.get();
+        std::shared_ptr<bool> alive = m_containerAlive;
+        auto* images = &m_uploadedImages;
+        auto* imageIDs = &m_uploadedImageIDs;
+        auto* idToCacheKey = &m_textureIdToCacheKey;
+        const int64_t capturedId = textureHandle;
+        VulkanRT::ImageHandle capturedImg{};
+        {
+            auto it = m_uploadedImages.find(capturedId);
+            if (it != m_uploadedImages.end()) capturedImg = it->second;
+        }
+        backing.destroyFn = [devPtr, alive, images, imageIDs, idToCacheKey, capturedId, capturedImg]() mutable {
+            // alive is false when the backend was torn down without going through
+            // purgeUploadedTextureCacheLocked (e.g. fast mode switch). In that case
+            // both the device and the containers are gone — skip everything.
+            if (!*alive) return;
+            if (devPtr && (capturedImg.image || capturedImg.view || capturedImg.memory || capturedImg.sampler)) {
+                devPtr->destroyImage(capturedImg);
+            }
+            images->erase(capturedId);
+            auto ckIt = idToCacheKey->find(capturedId);
+            if (ckIt != idToCacheKey->end()) {
+                imageIDs->erase(ckIt->second);
+                idToCacheKey->erase(ckIt);
+            }
+        };
+        m_sceneTextureManager->setVulkanBacking(sceneHandle, sceneTextureOwnerScope(), backing);
+        return;
+    }
+
+    m_sceneTextureManager->setVulkanTextureId(sceneHandle, sceneTextureOwnerScope(), textureHandle);
 }
 
 int64_t VulkanBackendAdapter::uploadCompressedTexture2D(
@@ -6699,7 +7978,7 @@ int64_t VulkanBackendAdapter::uploadCompressedTexture2D(
 {
     if (!m_device || !m_device->isInitialized() || !data || dataSize == 0) return 0;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    m_device->waitIdle();
+    if (!m_inBatchedTextureUpload) m_device->waitIdle();
 
     const uint64_t expectedBytes = estimateImageStorageBytes(width, height, format);
     if (expectedBytes == 0 || expectedBytes != dataSize) return 0;
@@ -6722,16 +8001,21 @@ int64_t VulkanBackendAdapter::uploadCompressedTexture2D(
         return 0;
     }
 
-    m_device->copyBufferToImage(staging, img);
-
-    VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
-    if (cmd == VK_NULL_HANDLE) {
-        m_device->destroyImage(img);
-        m_device->destroyBuffer(staging);
-        return 0;
+    if (m_inBatchedTextureUpload) {
+        m_device->recordCopyBufferToImage(m_batchTextureCmd, staging, img);
+        m_device->transitionImageLayout(m_batchTextureCmd, img.image,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    } else {
+        m_device->copyBufferToImage(staging, img);
+        VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
+        if (cmd == VK_NULL_HANDLE) {
+            m_device->destroyImage(img);
+            m_device->destroyBuffer(staging);
+            return 0;
+        }
+        m_device->transitionImageLayout(cmd, img.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        m_device->endSingleTimeCommands(cmd);
     }
-    m_device->transitionImageLayout(cmd, img.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    m_device->endSingleTimeCommands(cmd);
 
     VkSamplerCreateInfo sci{};
     sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -6771,7 +8055,11 @@ int64_t VulkanBackendAdapter::uploadCompressedTexture2D(
         updateMaterialPreviewTextureDescriptor(slot, img);
     }
 
-    m_device->destroyBuffer(staging);
+    if (m_inBatchedTextureUpload) {
+        m_batchTextureStagingBuffers.push_back(staging);
+    } else {
+        m_device->destroyBuffer(staging);
+    }
     return id;
 }
 
@@ -6927,23 +8215,131 @@ int64_t VulkanBackendAdapter::uploadTexture3D(const void* data, uint32_t width, 
 }
 
 void VulkanBackendAdapter::destroyTexture(int64_t texID) {
-    auto it = m_uploadedImages.find(texID);
-    if (it == m_uploadedImages.end()) return;
-    VulkanRT::ImageHandle& img = it->second;
-    // Only touch the RT pending-descriptor queue when RT is actually available.
-    // On raster-only devices the queue is never populated and the queue's internal
-    // mutex/state is still valid, but the guard keeps the intent explicit and mirrors
-    // the guard in uploadTexture2D.
+    VulkanRT::ImageHandle img{};
+    if (!tryGetUploadedImageHandle(texID, img)) return;
     if (m_device->hasHardwareRT()) {
         m_device->removePendingRTTextureDescriptor(img);
     }
-    m_device->destroyImage(img);
-    m_uploadedImages.erase(it);
-    // Also remove any pointer -> id mappings that reference this id
-    for (auto it2 = m_uploadedImageIDs.begin(); it2 != m_uploadedImageIDs.end(); ) {
-        if (it2->second == texID) it2 = m_uploadedImageIDs.erase(it2);
-        else ++it2;
+    // If the manager owns a destroy callback for this backing, let it drive lifecycle.
+    // destroyAndClearVulkanBacking will invoke the callback (which erases from m_uploadedImages
+    // and calls destroyImage), then clears the manager record. Fall back to direct destroy only
+    // when the backing has no registered callback (e.g., legacy non-scene textures).
+    bool destroyedByManager = false;
+    if (m_sceneTextureManager) {
+        destroyedByManager = m_sceneTextureManager->destroyAndClearVulkanBacking(
+            sceneTextureOwnerScope(), texID);
+        if (!destroyedByManager) {
+            m_sceneTextureManager->clearVulkanTextureId(sceneTextureOwnerScope(), texID);
+        }
     }
+    if (!destroyedByManager) {
+        m_device->destroyImage(img);
+        m_uploadedImages.erase(texID);
+        auto ckIt = m_textureIdToCacheKey.find(texID);
+        if (ckIt != m_textureIdToCacheKey.end()) {
+            m_uploadedImageIDs.erase(ckIt->second);
+            m_textureIdToCacheKey.erase(ckIt);
+        }
+    }
+}
+
+void VulkanBackendAdapter::regenerateMipChainAfterPartialUpdate(VkCommandBuffer cmd,
+                                                                 const VulkanRT::ImageHandle& img) {
+    if (cmd == VK_NULL_HANDLE || !img.image || img.mipLevels <= 1) return;
+
+    VkImageMemoryBarrier b{};
+    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.image = img.image;
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    b.subresourceRange.baseArrayLayer = 0;
+    b.subresourceRange.layerCount = 1;
+    b.subresourceRange.levelCount = 1;
+
+    // Step 1: mip 0 GENERAL -> TRANSFER_SRC_OPTIMAL (it just received a
+    // copyBufferToImage in GENERAL layout; we now use it as a blit source).
+    b.subresourceRange.baseMipLevel = 0;
+    b.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &b);
+
+    int32_t mipW = static_cast<int32_t>(img.width);
+    int32_t mipH = static_cast<int32_t>(img.height);
+
+    for (uint32_t i = 1; i < img.mipLevels; ++i) {
+        // Step 2a: mip i SHADER_READ_ONLY -> TRANSFER_DST_OPTIMAL (blit dst).
+        b.subresourceRange.baseMipLevel = i;
+        b.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &b);
+
+        const int32_t nextW = std::max(1, mipW / 2);
+        const int32_t nextH = std::max(1, mipH / 2);
+
+        VkImageBlit blit{};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, 1};
+        blit.srcOffsets[0] = {0, 0, 0};
+        blit.srcOffsets[1] = {mipW, mipH, 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1};
+        blit.dstOffsets[0] = {0, 0, 0};
+        blit.dstOffsets[1] = {nextW, nextH, 1};
+        vkCmdBlitImage(cmd,
+            img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blit, VK_FILTER_LINEAR);
+
+        // Step 2b: mip i TRANSFER_DST -> TRANSFER_SRC (next iteration's
+        // source) for non-final levels; final level goes straight to
+        // SHADER_READ_ONLY in the closing barrier below.
+        if (i + 1 < img.mipLevels) {
+            b.subresourceRange.baseMipLevel = i;
+            b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &b);
+        }
+
+        mipW = nextW;
+        mipH = nextH;
+    }
+
+    // Step 3a: mips 0 .. N-2 are in TRANSFER_SRC_OPTIMAL — flip them all to
+    // SHADER_READ_ONLY_OPTIMAL in a single barrier.
+    b.subresourceRange.baseMipLevel = 0;
+    b.subresourceRange.levelCount = img.mipLevels - 1;
+    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        0, 0, nullptr, 0, nullptr, 1, &b);
+
+    // Step 3b: final mip is in TRANSFER_DST_OPTIMAL.
+    b.subresourceRange.baseMipLevel = img.mipLevels - 1;
+    b.subresourceRange.levelCount = 1;
+    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        0, 0, nullptr, 0, nullptr, 1, &b);
 }
 
 bool VulkanBackendAdapter::updateTexture2DInPlace(int64_t textureID, const void* data,
@@ -6952,9 +8348,8 @@ bool VulkanBackendAdapter::updateTexture2DInPlace(int64_t textureID, const void*
     if (!m_device || !m_device->isInitialized() || !data || textureID <= 0) return false;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
-    auto it = m_uploadedImages.find(textureID);
-    if (it == m_uploadedImages.end()) return false;
-    VulkanRT::ImageHandle& img = it->second;
+    VulkanRT::ImageHandle img{};
+    if (!tryGetUploadedImageHandle(textureID, img)) return false;
     if (!img.image || img.width != width || img.height != height) return false;
 
     // Derive the expected format from (channels, srgb, isFloat) and bail if it
@@ -7005,8 +8400,19 @@ bool VulkanBackendAdapter::updateTexture2DInPlace(int64_t textureID, const void*
         m_device->destroyBuffer(staging);
         return false;
     }
-    m_device->transitionImageLayout(cmdPost, img.image,
-        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (img.mipLevels > 1) {
+        // Image was created with a mip chain (asset-style upload). Mip 0 just
+        // received the new pixels; mips 1..N still hold whatever they were
+        // last blitted from — typically the canvas's *initial* white fill
+        // when this is a paint texture. Regenerate the chain from mip 0 so
+        // the raster Material Preview viewport doesn't surface that stale
+        // content as soon as the camera moves a step away. Single-mip
+        // images skip this entirely (no behaviour change for them).
+        regenerateMipChainAfterPartialUpdate(cmdPost, img);
+    } else {
+        m_device->transitionImageLayout(cmdPost, img.image,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
     m_device->endSingleTimeCommands(cmdPost);
 
     m_device->destroyBuffer(staging);
@@ -7015,6 +8421,83 @@ bool VulkanBackendAdapter::updateTexture2DInPlace(int64_t textureID, const void*
     // But the cached raster framebuffer in m_interactiveViewport is now stale —
     // without this flag, renderInteractiveViewportImpl short-circuits and paint
     // strokes stay invisible in Material Preview mode.
+    m_interactiveViewport.dirty = true;
+    return true;
+}
+
+bool VulkanBackendAdapter::updateTexture2DRegion(int64_t textureID, const void* data,
+                                                 uint32_t fullWidth, uint32_t fullHeight,
+                                                 uint32_t channels, bool srgb,
+                                                 int32_t offsetX, int32_t offsetY,
+                                                 uint32_t regionW, uint32_t regionH) {
+    if (!m_device || !m_device->isInitialized() || !data || textureID <= 0) return false;
+    if (regionW == 0 || regionH == 0) return false;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    VulkanRT::ImageHandle img{};
+    if (!tryGetUploadedImageHandle(textureID, img)) return false;
+    if (!img.image || img.width != fullWidth || img.height != fullHeight) return false;
+
+    // Only the non-HDR formats produced by uploadTexture2D's paint path are
+    // valid here. Caller is expected to have ruled out the HDR path already.
+    VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
+    uint32_t bpp = 4;
+    if (channels == 1) {
+        fmt = srgb ? VK_FORMAT_R8_SRGB : VK_FORMAT_R8_UNORM;
+        bpp = 1;
+    } else if (srgb) {
+        fmt = VK_FORMAT_R8G8B8A8_SRGB;
+    }
+    if (img.format != fmt) return false;
+
+    if (offsetX < 0 || offsetY < 0 ||
+        static_cast<uint32_t>(offsetX) + regionW > fullWidth ||
+        static_cast<uint32_t>(offsetY) + regionH > fullHeight) {
+        return false;
+    }
+
+    m_device->waitIdle();
+
+    VulkanRT::BufferCreateInfo ci;
+    ci.size = static_cast<uint64_t>(regionW) * static_cast<uint64_t>(regionH) * bpp;
+    ci.usage = VulkanRT::BufferUsage::STORAGE | VulkanRT::BufferUsage::TRANSFER_SRC;
+    ci.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
+
+    VulkanRT::BufferHandle staging = m_device->createBuffer(ci);
+    if (!staging.buffer) return false;
+    m_device->uploadBuffer(staging, data, ci.size);
+
+    VkCommandBuffer cmdPre = m_device->beginSingleTimeCommands();
+    if (cmdPre == VK_NULL_HANDLE) {
+        m_device->destroyBuffer(staging);
+        return false;
+    }
+    m_device->transitionImageLayout(cmdPre, img.image,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    m_device->endSingleTimeCommands(cmdPre);
+
+    m_device->copyBufferToImageRegion(staging, img, offsetX, offsetY, regionW, regionH);
+
+    VkCommandBuffer cmdPost = m_device->beginSingleTimeCommands();
+    if (cmdPost == VK_NULL_HANDLE) {
+        m_device->destroyBuffer(staging);
+        return false;
+    }
+    if (img.mipLevels > 1) {
+        // Same mip-chain refresh as updateTexture2DInPlace. The partial-region
+        // copy only touched mip 0 inside the dirty rect, so without this the
+        // upper mip levels keep returning the canvas's initial fill (white
+        // for fresh paint canvases) every time the raster sampler picks a
+        // higher mip — which is exactly what happens once the camera moves
+        // a little further from a high-resolution paint surface.
+        regenerateMipChainAfterPartialUpdate(cmdPost, img);
+    } else {
+        m_device->transitionImageLayout(cmdPost, img.image,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+    m_device->endSingleTimeCommands(cmdPost);
+
+    m_device->destroyBuffer(staging);
     m_interactiveViewport.dirty = true;
     return true;
 }
@@ -7110,11 +8593,14 @@ void VulkanBackendAdapter::setLights(const std::vector<std::shared_ptr<Light>>& 
 void VulkanBackendAdapter::setRenderParams(const RenderParams& p) { 
     // Do NOT update m_imageWidth/Height here, otherwise renderProgressive detects no change
     const float clampedThreshold = std::clamp(p.adaptiveThreshold, 0.0f, 1.0f);
+    const int clampedMinSamples = std::clamp(p.minSamples, 1, 4096);
     if (m_targetSamples != p.samplesPerPixel ||
+        m_minSamples != clampedMinSamples ||
         m_useAdaptiveSampling != p.useAdaptiveSampling) {
         resetAccumulation();
     }
     m_targetSamples = p.samplesPerPixel; 
+    m_minSamples = clampedMinSamples;
     m_useAdaptiveSampling = p.useAdaptiveSampling;
     m_varianceThreshold = clampedThreshold;
     m_maxBounces = (p.maxBounces > 0) ? p.maxBounces : m_maxBounces; // 0 = UI henüz set etmedi, mevcut değeri koru
@@ -7217,9 +8703,53 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
     // Rebuild the mapping here to avoid syncing TLAS against stale representatives.
     syncInstanceTransforms(objects, true);
 
+    const auto& scatterGroups = InstanceManager::getInstance().getGroups();
+    std::unordered_map<int, const InstanceGroup*> scatterGroupsById;
+    scatterGroupsById.reserve(scatterGroups.size());
+    for (const auto& group : scatterGroups) {
+        if (!group.instances.empty()) {
+            scatterGroupsById.emplace(group.id, &group);
+        }
+    }
+
+    auto applyScatterTransforms = [&scatterGroupsById](std::vector<VulkanRT::TLASInstance>& instances) {
+        constexpr size_t kParallelThreshold = 2048;
+        unsigned threads = std::thread::hardware_concurrency();
+        if (threads == 0) threads = 4;
+
+        auto updateRange = [&instances, &scatterGroupsById](size_t start, size_t end) {
+            for (size_t i = start; i < end; ++i) {
+                auto& vi = instances[i];
+                if (vi.scatterGroupId < 0 || vi.scatterInstanceIndex == UINT32_MAX) continue;
+                auto groupIt = scatterGroupsById.find(vi.scatterGroupId);
+                if (groupIt == scatterGroupsById.end()) continue;
+                const auto* group = groupIt->second;
+                if (vi.scatterInstanceIndex >= group->instances.size()) continue;
+                vi.transform = group->instances[vi.scatterInstanceIndex].toMatrix();
+            }
+        };
+
+        if (instances.size() < kParallelThreshold || threads < 2) {
+            updateRange(0, instances.size());
+            return;
+        }
+
+        const size_t chunk = (instances.size() + threads - 1) / threads;
+        std::vector<std::future<void>> futures;
+        futures.reserve(threads);
+        for (unsigned t = 0; t < threads; ++t) {
+            const size_t s = t * chunk;
+            const size_t e = std::min(s + chunk, instances.size());
+            if (s >= e) break;
+            futures.push_back(std::async(std::launch::async, updateRange, s, e));
+        }
+        for (auto& f : futures) f.get();
+    };
+
     if (m_instance_sync_cache.empty() || m_instanceSources.size() != m_vkInstances.size()) {
         // Fallback to a conservative rebuild of full TLAS if mapping missing
         std::vector<VulkanRT::TLASInstance> updatedInstances = m_vkInstances;
+        applyScatterTransforms(updatedInstances);
         // Try to rebuild order by scanning objects (fallback behavior)
         for (const auto& obj : objects) {
             if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
@@ -7284,6 +8814,7 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
 
     // Use cached mapping for efficient per-instance transform update
     std::vector<VulkanRT::TLASInstance> updated = m_vkInstances;
+    applyScatterTransforms(updated);
     for (const auto& item : m_instance_sync_cache) {
         if (!item.representative_hittable) continue;
         Matrix4x4 m;
@@ -7439,43 +8970,130 @@ void VulkanBackendAdapter::updateInstanceTransform(int instance_id, const float 
     }
 }
 
+void VulkanBackendAdapter::invalidateTargetedTransformIndex() {
+    m_rasterNodeIndex.clear();
+    m_rtNodeIndex.clear();
+    m_rasterNodeIndexInstanceCount = 0;
+    m_rtNodeIndexInstanceCount = 0;
+}
+
+void VulkanBackendAdapter::rebuildTargetedTransformIndex() {
+    if (m_rasterNodeIndexInstanceCount == m_rasterInstances.size() &&
+        m_rtNodeIndexInstanceCount == m_instanceSources.size()) {
+        return;
+    }
+
+    m_rasterNodeIndex.clear();
+    m_rtNodeIndex.clear();
+
+    auto addNodeIndex = [](std::unordered_map<std::string, std::vector<uint32_t>>& index,
+                           const std::string& nodeName,
+                           uint32_t instanceIndex) {
+        if (nodeName.empty()) return;
+        index[nodeName].push_back(instanceIndex);
+
+        const std::string matToken = "_mat_";
+        const size_t matPos = nodeName.find(matToken);
+        if (matPos != std::string::npos && matPos > 0) {
+            const std::string baseName = nodeName.substr(0, matPos);
+            if (!baseName.empty() && baseName != nodeName) {
+                index[baseName].push_back(instanceIndex);
+            }
+        }
+    };
+
+    for (uint32_t i = 0; i < static_cast<uint32_t>(m_instanceSources.size()); ++i) {
+        if (!m_instanceSources[i]) continue;
+
+        std::string instName;
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+            instName = inst->node_name;
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+            instName = tri->getNodeName();
+        }
+        addNodeIndex(m_rtNodeIndex, instName, i);
+    }
+
+    for (uint32_t i = 0; i < static_cast<uint32_t>(m_rasterInstances.size()); ++i) {
+        addNodeIndex(m_rasterNodeIndex, m_rasterInstances[i].nodeName, i);
+    }
+
+    m_rasterNodeIndexInstanceCount = m_rasterInstances.size();
+    m_rtNodeIndexInstanceCount = m_instanceSources.size();
+}
+
 void VulkanBackendAdapter::updateObjectTransform(const std::string& nodeName, const Matrix4x4& transform) {
     if (!m_device || !m_device->isInitialized()) return;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    rebuildTargetedTransformIndex();
 
     bool changed = false;
     std::unordered_set<std::string> dirtyRasterMeshes;
 
     // Update RT instances (when hardware RT is available)
-    for (size_t i = 0; i < m_vkInstances.size(); ++i) {
+    auto updateRtInstance = [&](size_t i) {
+        if (i >= m_vkInstances.size()) return;
         if (m_instanceSources.size() > i && m_instanceSources[i]) {
-            std::string instName;
+            m_vkInstances[i].transform = transform;
             if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
-                instName = inst->node_name;
+                inst->setTransform(transform);
             } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
-                instName = tri->getNodeName();
+                tri->setBaseTransform(transform);
             }
+            changed = true;
+        }
+    };
 
-            if (matchesNodeNameForInstance(instName, nodeName)) {
-                m_vkInstances[i].transform = transform;
-                if (m_instanceSources.size() > i) {
-                     if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
-                          inst->setTransform(transform);
-                     } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
-                         tri->setBaseTransform(transform);
-                     }
+    bool usedRtIndex = false;
+    auto rtIt = m_rtNodeIndex.find(nodeName);
+    if (rtIt != m_rtNodeIndex.end()) {
+        usedRtIndex = true;
+        for (uint32_t i : rtIt->second) {
+            updateRtInstance(i);
+        }
+    }
+    if (!usedRtIndex) {
+        for (size_t i = 0; i < m_vkInstances.size(); ++i) {
+            if (m_instanceSources.size() > i && m_instanceSources[i]) {
+                std::string instName;
+                if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+                    instName = inst->node_name;
+                } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+                    instName = tri->getNodeName();
                 }
-                changed = true;
+
+                if (matchesNodeNameForInstance(instName, nodeName)) {
+                    updateRtInstance(i);
+                }
             }
         }
     }
 
     // Always sync raster instance transforms (for Solid/Matcap viewport)
-    for (auto& ri : m_rasterInstances) {
-        if (matchesNodeNameForInstance(ri.nodeName, nodeName)) {
+    auto updateRasterInstance = [&](uint32_t i) {
+        if (i >= m_rasterInstances.size()) return;
+        auto& ri = m_rasterInstances[i];
+        if (!(ri.transform == transform)) {
             ri.transform = transform;
+            updateRasterInstanceWorldBBox(ri);
             dirtyRasterMeshes.insert(ri.meshKey);
             changed = true;
+        }
+    };
+
+    bool usedRasterIndex = false;
+    auto rasterIt = m_rasterNodeIndex.find(nodeName);
+    if (rasterIt != m_rasterNodeIndex.end()) {
+        usedRasterIndex = true;
+        for (uint32_t i : rasterIt->second) {
+            updateRasterInstance(i);
+        }
+    }
+    if (!usedRasterIndex) {
+        for (uint32_t i = 0; i < static_cast<uint32_t>(m_rasterInstances.size()); ++i) {
+            if (matchesNodeNameForInstance(m_rasterInstances[i].nodeName, nodeName)) {
+                updateRasterInstance(i);
+            }
         }
     }
 
@@ -7833,6 +9451,7 @@ void VulkanBackendAdapter::setRasterVisibleInstances(RasterMeshBuffer& mesh,
         mesh.visibleInstanceIndicesCache.clear();
         mesh.visibleInstancesDirty = false;
         mesh.lastVisibleFrustumRevision = m_rasterFrustumRevision;
+        mesh.lastScatterTriangleBudget = m_rasterScatterTriangleBudget;
         return;
     }
 
@@ -7851,15 +9470,35 @@ void VulkanBackendAdapter::setRasterVisibleInstances(RasterMeshBuffer& mesh,
     };
 
     std::vector<RasterInstanceGPU> gpuInstances(mesh.instanceCount);
-    for (size_t i = 0; i < visibleInstanceIndices.size(); ++i) {
-        const uint32_t instanceIndex = visibleInstanceIndices[i];
-        if (instanceIndex >= m_rasterInstances.size()) continue;
-        matrixToGL(m_rasterInstances[instanceIndex].transform, gpuInstances[i].model);
+    const size_t kParallelMatrixThreshold = 4096;
+    unsigned numThreads = std::thread::hardware_concurrency();
+    if (numThreads == 0) numThreads = 4;
+    auto fillGpuRange = [this, &visibleInstanceIndices, &gpuInstances, &matrixToGL](size_t start, size_t end) {
+        for (size_t i = start; i < end; ++i) {
+            const uint32_t instanceIndex = visibleInstanceIndices[i];
+            if (instanceIndex >= m_rasterInstances.size()) continue;
+            matrixToGL(m_rasterInstances[instanceIndex].transform, gpuInstances[i].model);
+        }
+    };
+    if (visibleInstanceIndices.size() < kParallelMatrixThreshold || numThreads < 2) {
+        fillGpuRange(0, visibleInstanceIndices.size());
+    } else {
+        const size_t chunk = (visibleInstanceIndices.size() + numThreads - 1) / numThreads;
+        std::vector<std::future<void>> futures;
+        futures.reserve(numThreads);
+        for (unsigned t = 0; t < numThreads; ++t) {
+            const size_t s = t * chunk;
+            const size_t e = std::min(s + chunk, visibleInstanceIndices.size());
+            if (s >= e) break;
+            futures.push_back(std::async(std::launch::async, fillGpuRange, s, e));
+        }
+        for (auto& f : futures) f.get();
     }
 
     mesh.visibleInstanceIndicesCache = visibleInstanceIndices;
     mesh.visibleInstancesDirty = false;
     mesh.lastVisibleFrustumRevision = m_rasterFrustumRevision;
+    mesh.lastScatterTriangleBudget = m_rasterScatterTriangleBudget;
 
     const VkDeviceSize requiredSize = gpuInstances.size() * sizeof(RasterInstanceGPU);
     if (mesh.instanceBuffer.buffer && mesh.instanceBuffer.size >= requiredSize) {
@@ -7889,12 +9528,20 @@ void VulkanBackendAdapter::uploadVisibleRasterInstances(RasterMeshBuffer& mesh) 
     if (!m_device) return;
     if (mesh.isScatterProxy) return;
 
-    constexpr bool kDisableRasterFrustumCulling = true;
+    const bool proxySplitStale =
+        mesh.isScatterGroup &&
+        !mesh.proxyMeshKey.empty() &&
+        (mesh.lastVisibleFrustumRevision != m_rasterFrustumRevision ||
+         mesh.lastScatterTriangleBudget != m_rasterScatterTriangleBudget);
 
     if (!mesh.visibleInstancesDirty &&
-        mesh.lastVisibleFrustumRevision == m_rasterFrustumRevision &&
+        !proxySplitStale &&
+        (!kRasterFrustumCullingEnabled || mesh.lastVisibleFrustumRevision == m_rasterFrustumRevision) &&
         (mesh.instanceBuffer.buffer || mesh.visibleInstanceIndicesCache.empty())) {
         mesh.instanceCount = static_cast<uint32_t>(mesh.visibleInstanceIndicesCache.size());
+        if (!kRasterFrustumCullingEnabled) {
+            mesh.lastVisibleFrustumRevision = m_rasterFrustumRevision;
+        }
         return;
     }
 
@@ -7905,7 +9552,7 @@ void VulkanBackendAdapter::uploadVisibleRasterInstances(RasterMeshBuffer& mesh) 
         if (instanceIndex >= m_rasterInstances.size()) return;
         const auto& ri = m_rasterInstances[instanceIndex];
         if (ri.mask == 0) return;
-        if (!kDisableRasterFrustumCulling &&
+        if (kRasterFrustumCullingEnabled &&
             !skipFrustumTest &&
             !mesh.hasSkinning &&
             ri.worldBBox.is_valid() &&
@@ -7915,7 +9562,7 @@ void VulkanBackendAdapter::uploadVisibleRasterInstances(RasterMeshBuffer& mesh) 
         visibleInstanceIndices.push_back(instanceIndex);
     };
 
-    if (!kDisableRasterFrustumCulling && !mesh.hasSkinning && !mesh.cullingChunks.empty()) {
+    if (kRasterFrustumCullingEnabled && !mesh.hasSkinning && !mesh.cullingChunks.empty()) {
         for (const auto& chunk : mesh.cullingChunks) {
             if (chunk.worldBBox.is_valid() && !isAABBInFrustum(chunk.worldBBox)) {
                 continue;
@@ -7971,7 +9618,6 @@ void VulkanBackendAdapter::uploadVisibleRasterInstances(RasterMeshBuffer& mesh) 
                                      nearestInstances.end(),
                                      distanceCmp);
                     std::sort(nearestInstances.begin(), nearestInstances.begin() + cappedVisibleCount, distanceCmp);
-                    std::sort(nearestInstances.begin() + cappedVisibleCount, nearestInstances.end(), distanceCmp);
 
                     proxyInstanceIndices.reserve(nearestInstances.size() - cappedVisibleCount);
                     for (size_t i = cappedVisibleCount; i < nearestInstances.size(); ++i) {
@@ -8004,7 +9650,11 @@ void VulkanBackendAdapter::uploadRasterInstanceBuffer(RasterMeshBuffer& mesh) {
 
     mesh.visibleInstancesDirty = true;
     mesh.lastVisibleFrustumRevision = 0;
-    rebuildRasterMeshCullingChunks(mesh);
+    if (kRasterFrustumCullingEnabled) {
+        rebuildRasterMeshCullingChunks(mesh);
+    } else {
+        mesh.cullingChunks.clear();
+    }
 
     struct RasterInstanceGPU {
         float model[16];
@@ -8015,12 +9665,24 @@ void VulkanBackendAdapter::uploadRasterInstanceBuffer(RasterMeshBuffer& mesh) {
         mesh.instanceBuffer = VulkanRT::BufferHandle{};
     }
 
-    std::vector<uint32_t> visibleInstanceIndices;
-    visibleInstanceIndices.reserve(mesh.instanceIndices.size());
+    bool allInstancesVisible = true;
     for (uint32_t instanceIndex : mesh.instanceIndices) {
-        if (instanceIndex >= m_rasterInstances.size()) continue;
-        if (m_rasterInstances[instanceIndex].mask == 0) continue;
-        visibleInstanceIndices.push_back(instanceIndex);
+        if (instanceIndex >= m_rasterInstances.size() || m_rasterInstances[instanceIndex].mask == 0) {
+            allInstancesVisible = false;
+            break;
+        }
+    }
+
+    std::vector<uint32_t> visibleInstanceIndices;
+    if (allInstancesVisible) {
+        visibleInstanceIndices = mesh.instanceIndices;
+    } else {
+        visibleInstanceIndices.reserve(mesh.instanceIndices.size());
+        for (uint32_t instanceIndex : mesh.instanceIndices) {
+            if (instanceIndex >= m_rasterInstances.size()) continue;
+            if (m_rasterInstances[instanceIndex].mask == 0) continue;
+            visibleInstanceIndices.push_back(instanceIndex);
+        }
     }
 
     mesh.instanceCount = static_cast<uint32_t>(visibleInstanceIndices.size());
@@ -8041,9 +9703,29 @@ void VulkanBackendAdapter::uploadRasterInstanceBuffer(RasterMeshBuffer& mesh) {
     };
 
     std::vector<RasterInstanceGPU> gpuInstances(mesh.instanceCount);
-    for (size_t i = 0; i < visibleInstanceIndices.size(); ++i) {
-        const uint32_t instanceIndex = visibleInstanceIndices[i];
-        matrixToGL(m_rasterInstances[instanceIndex].transform, gpuInstances[i].model);
+    const size_t kParallelMatrixThreshold = 4096;
+    unsigned numThreads = std::thread::hardware_concurrency();
+    if (numThreads == 0) numThreads = 4;
+    auto fillGpuRange = [this, &visibleInstanceIndices, &gpuInstances, &matrixToGL](size_t start, size_t end) {
+        for (size_t i = start; i < end; ++i) {
+            const uint32_t instanceIndex = visibleInstanceIndices[i];
+            if (instanceIndex >= m_rasterInstances.size()) continue;
+            matrixToGL(m_rasterInstances[instanceIndex].transform, gpuInstances[i].model);
+        }
+    };
+    if (visibleInstanceIndices.size() < kParallelMatrixThreshold || numThreads < 2) {
+        fillGpuRange(0, visibleInstanceIndices.size());
+    } else {
+        const size_t chunk = (visibleInstanceIndices.size() + numThreads - 1) / numThreads;
+        std::vector<std::future<void>> futures;
+        futures.reserve(numThreads);
+        for (unsigned t = 0; t < numThreads; ++t) {
+            const size_t s = t * chunk;
+            const size_t e = std::min(s + chunk, visibleInstanceIndices.size());
+            if (s >= e) break;
+            futures.push_back(std::async(std::launch::async, fillGpuRange, s, e));
+        }
+        for (auto& f : futures) f.get();
     }
 
     VulkanRT::BufferCreateInfo ici{};
@@ -8061,6 +9743,8 @@ void VulkanBackendAdapter::uploadRasterInstanceBuffer(RasterMeshBuffer& mesh) {
 
     mesh.visibleInstanceIndicesCache = std::move(visibleInstanceIndices);
     mesh.visibleInstancesDirty = false;
+    mesh.lastVisibleFrustumRevision = m_rasterFrustumRevision;
+    mesh.lastScatterTriangleBudget = m_rasterScatterTriangleBudget;
 }
 
 void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared_ptr<Hittable>>& objects) {
@@ -8290,12 +9974,12 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             if (!tri->visible) return;
 
-            auto triTransformHandle = tri->getTransformHandle();
+            Transform* triTransformHandle = tri->getTransformPtr();
             const bool hasSharedTransform = (triTransformHandle != nullptr);
             std::string nodeName = tri->getNodeName();
             if (nodeName.empty()) nodeName = "[Solo-" + std::to_string(groups.size()) + "]";
             const uintptr_t transformKey = triTransformHandle
-                ? reinterpret_cast<uintptr_t>(triTransformHandle.get())
+                ? reinterpret_cast<uintptr_t>(triTransformHandle)
                 : reinterpret_cast<uintptr_t>(tri.get());
             const std::string groupKey = nodeName + "#th=" + std::to_string(transformKey);
 
@@ -8483,6 +10167,8 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
                 ri.nodeName = nodePrefix + std::to_string(i);
                 ri.transform = inst.toMatrix();
                 ri.mask = 0xFF;
+                ri.scatterGroupId = group.id;
+                ri.scatterInstanceIndex = static_cast<uint32_t>(i);
             }
         };
 
@@ -8549,6 +10235,8 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
 
     m_rasterGeometryDirty = false;
     m_interactiveViewport.dirty = true;
+    m_hasPresentedRenderedFrame = false;
+    m_lastCameraHash = 0;
 
     // Stamp current scene generation so we can skip redundant rebuilds later.
     {
@@ -8567,6 +10255,7 @@ void VulkanBackendAdapter::syncRasterInstanceTransformsImpl(const std::vector<st
 
     // Build nodeName → transform lookup from current scene objects
     std::unordered_map<std::string, Matrix4x4> transformMap;
+    transformMap.reserve(objects.size());
 
     std::function<void(const std::shared_ptr<Hittable>&)> collectTransforms;
     collectTransforms = [&](const std::shared_ptr<Hittable>& obj) {
@@ -8581,7 +10270,7 @@ void VulkanBackendAdapter::syncRasterInstanceTransformsImpl(const std::vector<st
             collectTransforms(bvh->left);
             collectTransforms(bvh->right);
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-            auto th = tri->getTransformHandle();
+            Transform* th = tri->getTransformPtr();
             std::string name = tri->getNodeName();
             if (!name.empty() && th) {
                 transformMap[name] = tri->getTransformMatrix();
@@ -8589,30 +10278,94 @@ void VulkanBackendAdapter::syncRasterInstanceTransformsImpl(const std::vector<st
         }
     };
 
-    for (const auto& obj : objects) {
-        collectTransforms(obj);
+    auto hasInstancePrefix = [](const std::string& nodeName) -> bool {
+        return nodeName.rfind("_inst_gid", 0) == 0;
+    };
+    size_t baseObjectCount = objects.size();
+    while (baseObjectCount > 0) {
+        const auto& obj = objects[baseObjectCount - 1];
+        auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+        if (!inst || !hasInstancePrefix(inst->node_name)) {
+            break;
+        }
+        --baseObjectCount;
     }
 
-    // Apply to raster instances
-    bool changed = false;
-    std::unordered_set<std::string> dirtyMeshKeys;
-    for (auto& ri : m_rasterInstances) {
-        auto it = transformMap.find(ri.nodeName);
-        if (it != transformMap.end()) {
-            if (!(ri.transform == it->second)) {
-                ri.transform = it->second;
-                changed = true;
-                dirtyMeshKeys.insert(ri.meshKey);
-            }
+    for (size_t i = 0; i < baseObjectCount; ++i) {
+        collectTransforms(objects[i]);
+    }
+
+    const auto& instanceGroups = InstanceManager::getInstance().getGroups();
+    std::unordered_map<int, const InstanceGroup*> scatterGroupsById;
+    scatterGroupsById.reserve(instanceGroups.size());
+    for (const auto& group : instanceGroups) {
+        if (!group.instances.empty()) {
+            scatterGroupsById.emplace(group.id, &group);
         }
     }
-    if (changed) {
-        // Recompute worldBBox for instances whose transforms changed
-        for (auto& ri : m_rasterInstances) {
-            if (dirtyMeshKeys.count(ri.meshKey)) {
+
+    // Apply to raster instances. Scatter instances can bypass nodeName hash
+    // lookup and read transforms directly from InstanceManager.
+    bool changed = false;
+    std::unordered_set<std::string> dirtyMeshKeys;
+    const size_t kParallelThreshold = 2048;
+    unsigned numThreads = std::thread::hardware_concurrency();
+    if (numThreads == 0) numThreads = 4;
+
+    auto syncRange = [this, &transformMap, &scatterGroupsById]
+                     (size_t start, size_t end) {
+        std::unordered_set<std::string> localDirty;
+        for (size_t i = start; i < end; ++i) {
+            auto& ri = m_rasterInstances[i];
+            Matrix4x4 newTransform;
+            bool hasTransform = false;
+
+            if (ri.scatterGroupId >= 0 && ri.scatterInstanceIndex != UINT32_MAX) {
+                auto groupIt = scatterGroupsById.find(ri.scatterGroupId);
+                if (groupIt != scatterGroupsById.end()) {
+                    const auto* group = groupIt->second;
+                    if (ri.scatterInstanceIndex < group->instances.size()) {
+                        newTransform = group->instances[ri.scatterInstanceIndex].toMatrix();
+                        hasTransform = true;
+                    }
+                }
+            } else {
+                auto it = transformMap.find(ri.nodeName);
+                if (it != transformMap.end()) {
+                    newTransform = it->second;
+                    hasTransform = true;
+                }
+            }
+
+            if (hasTransform && !(ri.transform == newTransform)) {
+                ri.transform = newTransform;
                 updateRasterInstanceWorldBBox(ri);
+                localDirty.insert(ri.meshKey);
             }
         }
+        return localDirty;
+    };
+
+    if (m_rasterInstances.size() < kParallelThreshold || numThreads < 2) {
+        dirtyMeshKeys = syncRange(0, m_rasterInstances.size());
+    } else {
+        const size_t chunk = (m_rasterInstances.size() + numThreads - 1) / numThreads;
+        std::vector<std::future<std::unordered_set<std::string>>> futures;
+        futures.reserve(numThreads);
+        for (unsigned t = 0; t < numThreads; ++t) {
+            const size_t s = t * chunk;
+            const size_t e = std::min(s + chunk, m_rasterInstances.size());
+            if (s >= e) break;
+            futures.push_back(std::async(std::launch::async, syncRange, s, e));
+        }
+        for (auto& f : futures) {
+            auto localDirty = f.get();
+            dirtyMeshKeys.insert(localDirty.begin(), localDirty.end());
+        }
+    }
+    changed = !dirtyMeshKeys.empty();
+
+    if (changed) {
         for (const auto& meshKey : dirtyMeshKeys) {
             auto meshIt = m_rasterMeshes.find(meshKey);
             if (meshIt != m_rasterMeshes.end()) {
@@ -8655,8 +10408,8 @@ void VulkanBackendAdapter::syncRasterSkinnedVerticesImpl(
             collectSkinned(bvh->right);
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             if (!tri->visible || !tri->hasSkinData()) return;
-            auto th = tri->getTransformHandle();
-            void* groupKey = th ? (void*)th.get() : (void*)tri.get();
+            Transform* th = tri->getTransformPtr();
+            void* groupKey = th ? (void*)th : (void*)tri.get();
             auto& grp = skinnedGroups[groupKey];
             if (grp.meshKey.empty()) {
                 std::string nodeName = tri->getNodeName();
@@ -8764,8 +10517,8 @@ bool VulkanBackendAdapter::updateRasterMeshFromTrianglesImpl(const std::string& 
 
     size_t idx = 0;
     for (const auto& tri : triangles) {
-        if (!tri) continue;
-        const bool hasSharedTransform = (tri->getTransformHandle() != nullptr);
+    if (!tri) continue;
+    const bool hasSharedTransform = (tri->getTransformPtr() != nullptr);
         for (int v = 0; v < 3; ++v) {
             Vec3 p = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
             Vec3 n = hasSharedTransform ? tri->getOriginalVertexNormal(v) : tri->getOriginalVertexNormal(v);
@@ -8897,7 +10650,7 @@ bool VulkanBackendAdapter::patchRasterMeshTrianglesImpl(
         const size_t baseFloat = triIdx * 9; // 3 vertices * 3 floats
         if (baseFloat + 8 >= expectedFloatCount) continue;
 
-        const bool hasSharedTransform = (tri->getTransformHandle() != nullptr);
+        const bool hasSharedTransform = (tri->getTransformPtr() != nullptr);
         for (int v = 0; v < 3; ++v) {
             Vec3 p = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
             Vec3 n = hasSharedTransform ? tri->getOriginalVertexNormal(v) : tri->getOriginalVertexNormal(v);
@@ -8959,6 +10712,8 @@ bool VulkanBackendAdapter::cloneRasterObjectByNodeName(
         RasterInstance clone = m_rasterInstances[sourceIndex];
         clone.nodeName = newNodeName;
         clone.transform = transform;
+        clone.scatterGroupId = -1;
+        clone.scatterInstanceIndex = UINT32_MAX;
         updateRasterInstanceWorldBBox(clone);
 
         const uint32_t newIndex = static_cast<uint32_t>(m_rasterInstances.size());
@@ -9014,6 +10769,8 @@ bool VulkanBackendAdapter::cloneRtObjectByNodeName(
     for (size_t sourceIndex : sourceIndices) {
         VulkanRT::TLASInstance clone = m_vkInstances[sourceIndex];
         clone.transform = transform;
+        clone.scatterGroupId = -1;
+        clone.scatterInstanceIndex = UINT32_MAX;
         m_vkInstances.push_back(clone);
         m_instanceSources.push_back(representativeSource);
 
@@ -9905,8 +11662,8 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
             if (tex) {
                 SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, framebuffer->data(), width * 4);
             }
+            return;
         }
-        return;
     }
     m_lastCameraHash = camHash;
     m_interactiveViewport.dirty = false;
@@ -9954,12 +11711,63 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
 
     Matrix4x4 view = makeViewMatrix(m_camera.origin, m_camera.lookAt, m_camera.up);
     const float aspect = (height > 0) ? ((float)width / (float)height) : 1.0f;
+    const float fovDeg = m_camera.fov > 1.0f ? m_camera.fov : 60.0f;
     Matrix4x4 proj = makePerspectiveMatrix(
-        m_camera.fov > 1.0f ? m_camera.fov : 60.0f,
+        fovDeg,
         aspect,
         0.01f,
         1000000.0f);
     Matrix4x4 viewProj = proj * view;
+
+    const float tanHalfFov = std::tan(fovDeg * 0.5f * 3.14159265358979f / 180.0f);
+    m_rasterCullCameraPosition = m_camera.origin;
+    m_rasterCullFocalLengthPixels = (height > 0 && tanHalfFov > 1e-4f)
+        ? ((0.5f * static_cast<float>(height)) / tanHalfFov)
+        : 0.0f;
+    m_rasterMinChunkScreenRadiusPixels = 3.0f;
+    {
+        double rasterQualityScale = 1.0;
+        double baseBudgetMillions = 72.0;
+        uint64_t minBudget = 24ull * 1000ull * 1000ull;
+        uint64_t maxBudget = 96ull * 1000ull * 1000ull;
+        bool allowAdaptiveRasterBudget = false;
+        if (m_viewportMode == ViewportMode::Solid || m_viewportMode == ViewportMode::Matcap) {
+            switch (::render_settings.raster_viewport_quality_preset) {
+                case ::RasterViewportQualityPreset::Performance: rasterQualityScale = 0.58; break;
+                case ::RasterViewportQualityPreset::Balanced: rasterQualityScale = 0.78; break;
+                case ::RasterViewportQualityPreset::Quality: rasterQualityScale = 1.0; break;
+                case ::RasterViewportQualityPreset::Auto:
+                default: allowAdaptiveRasterBudget = true; break;
+            }
+        } else if (m_viewportMode == ViewportMode::MaterialPreview) {
+            baseBudgetMillions = 36.0;
+            minBudget = 8ull * 1000ull * 1000ull;
+            maxBudget = 48ull * 1000ull * 1000ull;
+            switch (::render_settings.raster_viewport_quality_preset) {
+                case ::RasterViewportQualityPreset::Performance: rasterQualityScale = 0.45; break;
+                case ::RasterViewportQualityPreset::Balanced: rasterQualityScale = 0.65; break;
+                case ::RasterViewportQualityPreset::Quality: rasterQualityScale = 1.0; break;
+                case ::RasterViewportQualityPreset::Auto:
+                default:
+                    rasterQualityScale = 0.72;
+                    allowAdaptiveRasterBudget = true;
+                    break;
+            }
+        }
+        const double pixelCount = (std::max)(1.0, static_cast<double>(width) * static_cast<double>(height));
+        const double referencePixels = 1920.0 * 1080.0;
+        const double resolutionScale = std::sqrt(referencePixels / pixelCount);
+        const double feedbackScale = allowAdaptiveRasterBudget
+            ? (std::clamp)(static_cast<double>(m_rasterScatterBudgetScale), 0.35, 1.0)
+            : 1.0;
+        const uint64_t adaptiveBudget = static_cast<uint64_t>(
+            baseBudgetMillions * 1000.0 * 1000.0 * resolutionScale * rasterQualityScale * feedbackScale);
+        m_rasterScatterTriangleBudget = std::clamp<uint64_t>(adaptiveBudget, minBudget, maxBudget);
+        if (!allowAdaptiveRasterBudget) {
+            m_rasterScatterBudgetScale = 1.0f;
+        }
+    }
+
     if (!m_interactiveViewport.identityInstanceBuffer.buffer) {
         struct RasterInstanceGPU {
             float model[16];
@@ -9981,6 +11789,7 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
 
     VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
     if (cmd == VK_NULL_HANDLE) {
+        m_interactiveViewport.dirty = true;
         return;
     }
 
@@ -10041,7 +11850,17 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
         for (const auto& [meshKey, rmb] : m_rasterMeshes) {
             if (!rmb.vertexBuffer.buffer || !rmb.instanceBuffer.buffer || rmb.vertexCount == 0 || rmb.instanceCount == 0) continue;
 
-            if (useMaterialPreview) {
+            const bool drawMaterialPreview =
+                useMaterialPreview &&
+                !rmb.isScatterProxy &&
+                rmb.matIdBuffer.buffer &&
+                rmb.uvBuffer.buffer;
+
+            if (drawMaterialPreview) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.materialPreviewPipeline);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        m_interactiveViewport.materialPreviewPipelineLayout,
+                                        0, 1, &m_interactiveViewport.materialPreviewDescSet, 0, nullptr);
                 // Material Preview push constants
                 struct MaterialPreviewPushConstants {
                     float viewProj[16];
@@ -10092,6 +11911,12 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                 VkDeviceSize mpOffsets[4] = { 0, 0, 0, 0 };
                 vkCmdBindVertexBuffers(cmd, 0, 4, mpVertBuffers, mpOffsets);
             } else {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.solidPipeline);
+                if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE) {
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            m_interactiveViewport.pipelineLayout,
+                                            0, 1, &m_interactiveViewport.matcapDescSet, 0, nullptr);
+                }
                 // Solid / Matcap push constants
                 SolidPushConstants push{};
                 matrixToGL(viewProj, push.viewProj);
@@ -10845,7 +12670,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     pushConst.vertical[0] = vertical.x; pushConst.vertical[1] = vertical.y; pushConst.vertical[2] = vertical.z; pushConst.vertical[3] = 0.0f;
     pushConst.lowerLeft[0] = lower_left_corner.x; pushConst.lowerLeft[1] = lower_left_corner.y; pushConst.lowerLeft[2] = lower_left_corner.z; pushConst.lowerLeft[3] = 0.0f;
     pushConst.frameCount = this->m_currentSamples;
-    pushConst.minSamples = m_useAdaptiveSampling ? 4u : 0u;
+    pushConst.minSamples = m_useAdaptiveSampling ? static_cast<uint32_t>(std::max(1, m_minSamples)) : 0u;
     pushConst.lightCount = (uint32_t)m_cachedLights.size();
     pushConst.varianceThreshold = m_useAdaptiveSampling ? m_varianceThreshold : 0.0f;
     pushConst.maxSamples = m_targetSamples;
@@ -11667,7 +13492,9 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
     // ═════════════════════════════════════════════════════════════════
     // CLOUD LAYER 1 PARAMETERS
     // ═════════════════════════════════════════════════════════════════
-    gw.cloudsEnabled = wd->nishita.clouds_enabled ? 1 : 0;
+    // Legacy sky-shader clouds are disabled. Sky cloud UI now drives an internal
+    // procedural VDBVolume, so Vulkan sees clouds through the volume pipeline.
+    gw.cloudsEnabled = 0;
     gw.cloudCoverage = wd->nishita.cloud_coverage;
     gw.cloudDensity = wd->nishita.cloud_density;
     gw.cloudScale = wd->nishita.cloud_scale;
@@ -11754,7 +13581,7 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
 
 void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vols) {
     if (!m_device) return;
-    if (vols.empty() && m_orderedVDBInstances.empty()) {
+    if (vols.empty()) {
         // No active volumes: release any stale cached VDB buffers immediately.
         for (auto& [id, buf] : m_vdbBuffers) {
             (void)id;
@@ -11766,7 +13593,8 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
             if (buf.buffer) m_device->destroyBuffer(buf);
         }
         m_vdbTempBuffers.clear();
-        m_device->m_volumeCount = 0;
+        m_orderedVDBInstances.clear();
+        m_device->updateVolumeBuffer(nullptr, 0, 0);
         return;
     }
 
@@ -11802,10 +13630,13 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
             int volume_id = -1;
             if (vdb) {
                 volume_id = vdb->getVDBVolumeID();
+                if (volume_id < 0 && vdb->isProceduralVolume()) {
+                    volume_id = -1;
+                }
             } else if (auto gas = std::dynamic_pointer_cast<GasVolume>(hittable)) {
                 volume_id = gas->live_vdb_id;
             }
-            if (volume_id < 0) { orderedVols.push_back(nullptr); continue; }
+            if (volume_id < 0 && !(vdb && vdb->isProceduralVolume())) { orderedVols.push_back(nullptr); continue; }
             auto it = volByID.find(volume_id);
             orderedVols.push_back(it != volByID.end() ? it->second : nullptr);
         }
@@ -11834,6 +13665,14 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.pivot_offset[0] = src.pivot_offset[0];
         dst.pivot_offset[1] = src.pivot_offset[1];
         dst.pivot_offset[2] = src.pivot_offset[2];
+        dst.source_type = src.source_type;
+        dst.cloud_coverage = src.cloud_coverage;
+        dst.cloud_detail = src.cloud_detail;
+        dst.cloud_erosion = src.cloud_erosion;
+        dst.cloud_base_scale = src.cloud_base_scale;
+        dst.cloud_edge_fade = src.cloud_edge_fade;
+        dst.cloud_offset_x = src.cloud_offset_x;
+        dst.cloud_offset_z = src.cloud_offset_z;
 
         // VDB native (original file) world-space AABB — used by the shader to remap
         // localPos [-0.5,0.5] → VDB world space before NanoVDB index lookup.
@@ -11845,7 +13684,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.density_multiplier = src.density_multiplier;
         dst.density_remap_low = src.density_remap_low;
         dst.density_remap_high = src.density_remap_high;
-        dst.noise_scale = 10.0f; // Give a non-zero scale so the procedural cloud actually renders nicely
+        dst.noise_scale = (std::max)(src.voxel_size, 1.0f);
         
         // Sync NanoVDB Host Buffer to Vulkan Device Buffer
         dst.volume_type = 2; // 2 = NanoVDB
@@ -11953,9 +13792,9 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.shadow_strength = src.shadow_strength;
 
         // Flags
-        // volume_type = 2 (NanoVDB) when grid address was successfully uploaded,
-        // fall back to 1 (procedural noise) only if no NanoVDB buffer is available.
-        dst.volume_type = (dst.vdb_grid_address != 0) ? 2 : 1;
+        // volume_type = 3 is an explicit procedural cloud source. Otherwise use
+        // NanoVDB when uploaded, with the existing procedural-noise fallback.
+        dst.volume_type = (src.source_type == 3) ? 3 : ((dst.vdb_grid_address != 0) ? 2 : 1);
         dst.is_active = 1;
         dst.voxel_size = src.voxel_size;
     }

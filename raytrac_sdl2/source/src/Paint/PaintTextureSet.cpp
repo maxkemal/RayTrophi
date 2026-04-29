@@ -23,6 +23,7 @@ std::shared_ptr<Texture> PaintTextureSet::getTexture(PaintChannel channel) const
         case PaintChannel::Emission: return emission;
         case PaintChannel::Mask: return mask;
         case PaintChannel::Transmission: return transmission;
+        case PaintChannel::Opacity: return opacity;
     }
     return nullptr;
 }
@@ -36,6 +37,7 @@ std::shared_ptr<Texture>& PaintTextureSet::getTextureRef(PaintChannel channel) {
         case PaintChannel::Emission: return emission;
         case PaintChannel::Mask: return mask;
         case PaintChannel::Transmission: return transmission;
+        case PaintChannel::Opacity: return opacity;
     }
     return base_color;
 }

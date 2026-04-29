@@ -372,7 +372,8 @@ void TransformCommand::applyState(UIContext& ctx, const TransformState& state) {
     for (auto& obj : ctx.scene.world.objects) {
         auto tri = std::dynamic_pointer_cast<Triangle>(obj);
         if (tri && tri->nodeName == object_name_) {
-             if (auto t = tri->getTransformHandle()) {
+             Transform* t = tri->getTransformPtr();
+             if (t) {
                  t->setBase(state.matrix);
                  tri->updateTransformedVertices(); // Important
              }

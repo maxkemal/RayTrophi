@@ -1086,10 +1086,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         cloudParams.clouds_enabled = 1;
                         cloudParams.cloud_height_min = 8000.0f;
                         cloudParams.cloud_height_max = 8800.0f;
-                        cloudParams.cloud_scale = 12.0f;
-                        cloudParams.cloud_coverage = 0.35f;
-                        cloudParams.cloud_density = 0.45f;
-                        cloudParams.cloud_detail = 1.2f;
+                        cloudParams.cloud_scale = 0.25f;
+                        cloudParams.cloud_coverage = 0.16f;
+                        cloudParams.cloud_density = 0.22f;
+                        cloudParams.cloud_detail = 0.75f;
                         cloudParams.cloud_shadow_strength = 0.1f;
                         cloudParamsChanged = true;
                         break;
@@ -1097,42 +1097,42 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         cloudParams.clouds_enabled = 1;
                         cloudParams.cloud_height_min = 1000.0f;
                         cloudParams.cloud_height_max = 2800.0f;
-                        cloudParams.cloud_scale = 4.5f;
-                        cloudParams.cloud_coverage = 0.45f;
-                        cloudParams.cloud_density = 2.5f;
-                        cloudParams.cloud_detail = 1.0f;
-                        cloudParams.cloud_shadow_strength = 0.8f;
+                        cloudParams.cloud_scale = 0.55f;
+                        cloudParams.cloud_coverage = 0.32f;
+                        cloudParams.cloud_density = 0.75f;
+                        cloudParams.cloud_detail = 0.55f;
+                        cloudParams.cloud_shadow_strength = 0.45f;
                         cloudParamsChanged = true;
                         break;
                     case 3: // Stratocumulus (Layered puffy)
                         cloudParams.clouds_enabled = 1;
                         cloudParams.cloud_height_min = 800.0f;
                         cloudParams.cloud_height_max = 1800.0f;
-                        cloudParams.cloud_scale = 2.5f;
-                        cloudParams.cloud_coverage = 0.75f;
-                        cloudParams.cloud_density = 1.8f;
-                        cloudParams.cloud_detail = 0.8f;
+                        cloudParams.cloud_scale = 0.42f;
+                        cloudParams.cloud_coverage = 0.42f;
+                        cloudParams.cloud_density = 0.95f;
+                        cloudParams.cloud_detail = 0.45f;
                         cloudParamsChanged = true;
                         break;
                     case 4: // Overcast (Stratus)
                         cloudParams.clouds_enabled = 1;
                         cloudParams.cloud_height_min = 400.0f;
                         cloudParams.cloud_height_max = 1000.0f;
-                        cloudParams.cloud_scale = 1.2f;
-                        cloudParams.cloud_coverage = 0.95f;
-                        cloudParams.cloud_density = 4.0f;
-                        cloudParams.cloud_detail = 0.6f;
+                        cloudParams.cloud_scale = 0.28f;
+                        cloudParams.cloud_coverage = 0.58f;
+                        cloudParams.cloud_density = 1.15f;
+                        cloudParams.cloud_detail = 0.35f;
                         cloudParamsChanged = true;
                         break;
                     case 5: // Cumulonimbus (Storm/Rain clouds)
                         cloudParams.clouds_enabled = 1;
                         cloudParams.cloud_height_min = 600.0f;
                         cloudParams.cloud_height_max = 12000.0f;
-                        cloudParams.cloud_scale = 3.5f;
-                        cloudParams.cloud_coverage = 0.9f;
-                        cloudParams.cloud_density = 8.0f;
-                        cloudParams.cloud_detail = 1.8f;
-                        cloudParams.cloud_shadow_strength = 1.8f;
+                        cloudParams.cloud_scale = 0.65f;
+                        cloudParams.cloud_coverage = 0.52f;
+                        cloudParams.cloud_density = 1.5f;
+                        cloudParams.cloud_detail = 0.9f;
+                        cloudParams.cloud_shadow_strength = 0.85f;
                         cloudParams.cloud_absorption = 2.0f;
                         cloudParamsChanged = true;
                         break;
@@ -1140,10 +1140,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         cloudParams.clouds_enabled = 1;
                         cloudParams.cloud_height_min = 0.0f;
                         cloudParams.cloud_height_max = 350.0f;
-                        cloudParams.cloud_scale = 0.8f;
-                        cloudParams.cloud_coverage = 0.95f;
-                        cloudParams.cloud_density = 4.0f;
-                        cloudParams.cloud_detail = 0.6f;
+                        cloudParams.cloud_scale = 0.18f;
+                        cloudParams.cloud_coverage = 0.55f;
+                        cloudParams.cloud_density = 0.9f;
+                        cloudParams.cloud_detail = 0.25f;
                         cloudParamsChanged = true;
                         break;
                     case 7: // Custom
@@ -1168,15 +1168,15 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             if (show_details || ImGui::CollapsingHeader("Cloud Details")) {
                 // Coverage
                 bool covKeyed = isWorldKeyed(WorldProp::CloudCoverage);
-                if (SceneUI::DrawSmartFloat("clcov", "Coverage", &cloudParams.cloud_coverage, 0.0f, 1.0f, "%.2f", covKeyed, [&]{ insertWorldKey("Cloud Cov", WorldProp::CloudCoverage); }, 16)) {
+                if (SceneUI::DrawSmartFloat("clcov", "Coverage", &cloudParams.cloud_coverage, 0.0f, 0.6f, "%.2f", covKeyed, [&]{ insertWorldKey("Cloud Cov", WorldProp::CloudCoverage); }, 16)) {
                     cloudParamsChanged = true;
                     weather_preset_index = 7;
                 }
-                ImGui::SameLine(); UIWidgets::HelpMarker("0 = clear, 1 = overcast");
+                ImGui::SameLine(); UIWidgets::HelpMarker("0 = clear, 0.3 = broken cumulus, 0.6 = near overcast");
 
                 // Density
                 bool denKeyed = isWorldKeyed(WorldProp::CloudDensity);
-                if (SceneUI::DrawSmartFloat("clden", "Density", &cloudParams.cloud_density, 0.0f, 10.0f, "%.2f", denKeyed, [&]{ insertWorldKey("Cloud Den", WorldProp::CloudDensity); }, 16)) {
+                if (SceneUI::DrawSmartFloat("clden", "Density", &cloudParams.cloud_density, 0.0f, 1.5f, "%.2f", denKeyed, [&]{ insertWorldKey("Cloud Den", WorldProp::CloudDensity); }, 16)) {
                     cloudParamsChanged = true;
                     weather_preset_index = 7;
                 }
@@ -1184,21 +1184,21 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 
                 // Scale
                 bool sclKeyed = isWorldKeyed(WorldProp::CloudScale);
-                if (SceneUI::DrawSmartFloat("clscl", "Scale", &cloudParams.cloud_scale, 0.1f, 100.0f, "%.2f", sclKeyed, [&]{ insertWorldKey("Cloud Scale", WorldProp::CloudScale); }, 16)) {
+                if (SceneUI::DrawSmartFloat("clscl", "Scale", &cloudParams.cloud_scale, 0.1f, 1.0f, "%.2f", sclKeyed, [&]{ insertWorldKey("Cloud Scale", WorldProp::CloudScale); }, 16)) {
                     cloudParamsChanged = true;
                     weather_preset_index = 7;
                 }
-                ImGui::SameLine(); UIWidgets::HelpMarker("Cloud feature size (UI scale: larger = smaller clouds)");
+                ImGui::SameLine(); UIWidgets::HelpMarker("Cloud feature size. Lower = broader layers, higher = smaller puffs.");
 
                 // Detail
-                if (ImGui::SliderFloat("Noise Detail", &cloudParams.cloud_detail, 0.1f, 3.0f, "%.2f")) {
+                if (ImGui::SliderFloat("Noise Detail", &cloudParams.cloud_detail, 0.0f, 1.0f, "%.2f")) {
                     cloudParamsChanged = true;
                     weather_preset_index = 7;
                 }
                 UIWidgets::HelpMarker("Richness of high-frequency noise.");
 
                 // Base Steps
-                if (ImGui::SliderInt("Base Steps", &cloudParams.cloud_base_steps, 8, 256)) {
+                if (ImGui::SliderInt("Base Steps", &cloudParams.cloud_base_steps, 8, 96)) {
                     cloudParamsChanged = true;
                     weather_preset_index = 7;
                 }
@@ -1232,13 +1232,13 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Self-Shadowing:");
                 
                 // Light Steps (0 = disabled for performance)
-                if (ImGui::SliderInt("Light Steps", &cloudParams.cloud_light_steps, 0, 12)) {
+                if (ImGui::SliderInt("Light Steps", &cloudParams.cloud_light_steps, 0, 24)) {
                     cloudParamsChanged = true;
                 }
                 UIWidgets::HelpMarker("Number of light marching steps.\n0 = Disabled (fast)\n4-6 = Normal\n8-12 = High quality");
                 
                 // Shadow Strength
-                if (SceneUI::DrawSmartFloat("cshd", "Shadow Strength", &cloudParams.cloud_shadow_strength, 0.0f, 2.0f, "%.2f", lightKeyed, [&]{ insertWorldKey("Cloud Light", WorldProp::CloudLighting); }, 16)) {
+                if (SceneUI::DrawSmartFloat("cshd", "Shadow Strength", &cloudParams.cloud_shadow_strength, 0.0f, 1.0f, "%.2f", lightKeyed, [&]{ insertWorldKey("Cloud Light", WorldProp::CloudLighting); }, 16)) {
                     cloudParamsChanged = true;
                 }
                 UIWidgets::HelpMarker("Cloud self-shadowing intensity.\n0 = No shadows\n1 = Normal\n2 = Dark, dramatic shadows");
@@ -1247,7 +1247,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Lighting Effects:");
                 
                 // Silver Lining
-                if (SceneUI::DrawSmartFloat("csil", "Silver Lining", &cloudParams.cloud_silver_intensity, 0.0f, 3.0f, "%.2f", lightKeyed, [&]{ insertWorldKey("Cloud Light", WorldProp::CloudLighting); }, 16)) {
+                if (SceneUI::DrawSmartFloat("csil", "Silver Lining", &cloudParams.cloud_silver_intensity, 0.0f, 1.0f, "%.2f", lightKeyed, [&]{ insertWorldKey("Cloud Light", WorldProp::CloudLighting); }, 16)) {
                     cloudParamsChanged = true;
                 }
                 UIWidgets::HelpMarker("Bright rim effect when backlit by sun.\n0 = Off\n1 = Normal\n2+ = Strong glow");
@@ -1259,7 +1259,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 UIWidgets::HelpMarker("Sky ambient light contribution.\nLower = Darker shadows\nHigher = Softer look");
                 
                 // Absorption
-                if (SceneUI::DrawSmartFloat("cabs", "Absorption", &cloudParams.cloud_absorption, 0.2f, 3.0f, "%.2f", lightKeyed, [&]{ insertWorldKey("Cloud Light", WorldProp::CloudLighting); }, 16)) {
+                if (SceneUI::DrawSmartFloat("cabs", "Absorption", &cloudParams.cloud_absorption, 0.1f, 3.0f, "%.2f", lightKeyed, [&]{ insertWorldKey("Cloud Light", WorldProp::CloudLighting); }, 16)) {
                     cloudParamsChanged = true;
                 }
                 UIWidgets::HelpMarker("Light absorption rate.\n0.5 = Thin, transparent\n1.0 = Normal\n2.0 = Thick, opaque");
@@ -1268,13 +1268,13 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Advanced Scattering (Anisotropy):");
                 
                 // Scattering Anisotropy (Forward)
-                if (ImGui::SliderFloat("Anisotropy (Forward)", &cloudParams.cloud_anisotropy, 0.0f, 0.99f, "%.2f")) {
+                if (ImGui::SliderFloat("Anisotropy (Forward)", &cloudParams.cloud_anisotropy, 0.0f, 0.85f, "%.2f")) {
                     cloudParamsChanged = true;
                 }
                 UIWidgets::HelpMarker("Forward scattering intensity (g-factor).\n0.0 = Uniform light\n0.9 = Strong forward glow (silver lining)");
 
                 // Scattering Anisotropy (Back)
-                if (ImGui::SliderFloat("Anisotropy (Back)", &cloudParams.cloud_anisotropy_back, -0.99f, 0.0f, "%.2f")) {
+                if (ImGui::SliderFloat("Anisotropy (Back)", &cloudParams.cloud_anisotropy_back, -0.6f, 0.0f, "%.2f")) {
                     cloudParamsChanged = true;
                 }
                 UIWidgets::HelpMarker("Back scattering intensity.\nControls how much light 'bounces back' toward the sun.");
@@ -1289,7 +1289,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Cloud Emission (Glow):");
                 
                 // Emissive Intensity
-                if (ImGui::SliderFloat("Emission Intensity", &cloudParams.cloud_emissive_intensity, 0.0f, 10.0f, "%.2f")) {
+                if (ImGui::SliderFloat("Emission Intensity", &cloudParams.cloud_emissive_intensity, 0.0f, 1.0f, "%.2f")) {
                     cloudParamsChanged = true;
                 }
                 UIWidgets::HelpMarker("Internal cloud glow brightness.");
@@ -1308,10 +1308,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     cloudParams.cloud_height_min, cloudParams.cloud_height_max,
                     cloudParams.cloud_height_max - cloudParams.cloud_height_min);
                 
-                if (SceneUI::DrawSmartFloat("cmnh", "Min Height##L1", &cloudParams.cloud_height_min, 0.0f, 20000.0f, "%.0f m", false, nullptr, 16)) {
+                if (SceneUI::DrawSmartFloat("cmnh", "Min Height##L1", &cloudParams.cloud_height_min, 500.0f, 12000.0f, "%.0f m", false, nullptr, 16)) {
                     cloudParamsChanged = true;
                 }
-                if (SceneUI::DrawSmartFloat("cmxh", "Max Height##L1", &cloudParams.cloud_height_max, 0.0f, 20000.0f, "%.0f m", false, nullptr, 16)) {
+                if (SceneUI::DrawSmartFloat("cmxh", "Max Height##L1", &cloudParams.cloud_height_max, 1000.0f, 16000.0f, "%.0f m", false, nullptr, 16)) {
                     cloudParamsChanged = true;
                 }
                 ImGui::TreePop();
@@ -1342,51 +1342,51 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         case 1: // High Cirrus
                             cloudParams.cloud2_height_min = 8000.0f;
                             cloudParams.cloud2_height_max = 9000.0f;
-                            cloudParams.cloud2_scale = 12.0f;
-                            cloudParams.cloud2_coverage = 0.25f;
-                            cloudParams.cloud2_density = 0.2f;
+                            cloudParams.cloud2_scale = 0.25f;
+                            cloudParams.cloud2_coverage = 0.14f;
+                            cloudParams.cloud2_density = 0.18f;
                             cloudParamsChanged = true;
                             break;
                         case 2: // Mid Stratus
                             cloudParams.cloud2_height_min = 2500.0f;
                             cloudParams.cloud2_height_max = 3500.0f;
-                            cloudParams.cloud2_scale = 3.0f;
-                            cloudParams.cloud2_coverage = 0.5f;
-                            cloudParams.cloud2_density = 0.8f;
+                            cloudParams.cloud2_scale = 0.35f;
+                            cloudParams.cloud2_coverage = 0.35f;
+                            cloudParams.cloud2_density = 0.65f;
                             cloudParamsChanged = true;
                             break;
                         case 3: // Low Fog
                             cloudParams.cloud2_height_min = 0.0f;
                             cloudParams.cloud2_height_max = 150.0f;
-                            cloudParams.cloud2_scale = 0.5f;
-                            cloudParams.cloud2_coverage = 0.7f;
-                            cloudParams.cloud2_density = 2.0f;
+                            cloudParams.cloud2_scale = 0.15f;
+                            cloudParams.cloud2_coverage = 0.5f;
+                            cloudParams.cloud2_density = 0.8f;
                             cloudParamsChanged = true;
                             break;
                     }
                 }
                 
                 bool l2pKeyed = isWorldKeyed(WorldProp::CloudLayer2Params);
-                if (SceneUI::DrawSmartFloat("ccov2", "Coverage##L2", &cloudParams.cloud2_coverage, 0.0f, 1.0f, "%.2f", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
+                if (SceneUI::DrawSmartFloat("ccov2", "Coverage##L2", &cloudParams.cloud2_coverage, 0.0f, 0.6f, "%.2f", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
                     cloudParamsChanged = true;
                     layer2_preset = 0;
                 }
-                if (SceneUI::DrawSmartFloat("cden2", "Density##L2", &cloudParams.cloud2_density, 0.0f, 5.0f, "%.2f", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
+                if (SceneUI::DrawSmartFloat("cden2", "Density##L2", &cloudParams.cloud2_density, 0.0f, 1.5f, "%.2f", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
                     cloudParamsChanged = true;
                     layer2_preset = 0;
                 }
-                if (SceneUI::DrawSmartFloat("cscl2", "Scale##L2", &cloudParams.cloud2_scale, 0.1f, 50.0f, "%.2f", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
+                if (SceneUI::DrawSmartFloat("cscl2", "Scale##L2", &cloudParams.cloud2_scale, 0.1f, 1.0f, "%.2f", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
                     cloudParamsChanged = true;
                     layer2_preset = 0;
                 }
                 
                 ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Layer 2: %.0f - %.0f m", 
                     cloudParams.cloud2_height_min, cloudParams.cloud2_height_max);
-                if (SceneUI::DrawSmartFloat("cmnh2", "Min Height##L2", &cloudParams.cloud2_height_min, 0.0f, 20000.0f, "%.0f m", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
+                if (SceneUI::DrawSmartFloat("cmnh2", "Min Height##L2", &cloudParams.cloud2_height_min, 500.0f, 12000.0f, "%.0f m", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
                     cloudParamsChanged = true;
                     layer2_preset = 0;
                 }
-                if (SceneUI::DrawSmartFloat("cmxh2", "Max Height##L2", &cloudParams.cloud2_height_max, 0.0f, 20000.0f, "%.0f m", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
+                if (SceneUI::DrawSmartFloat("cmxh2", "Max Height##L2", &cloudParams.cloud2_height_max, 1000.0f, 16000.0f, "%.0f m", l2pKeyed, [&]{ insertWorldKey("Cloud L2", WorldProp::CloudLayer2Params); }, 16)) {
                     cloudParamsChanged = true;
                     layer2_preset = 0;
                 }
@@ -1412,6 +1412,14 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         UIWidgets::EndSection();
 
         if (cloudParamsChanged) {
+            cloudParams.cloud_coverage = (std::max)(0.0f, (std::min)(0.6f, cloudParams.cloud_coverage));
+            cloudParams.cloud_density = (std::max)(0.0f, (std::min)(1.5f, cloudParams.cloud_density));
+            cloudParams.cloud_scale = (std::max)(0.1f, (std::min)(1.0f, cloudParams.cloud_scale));
+            cloudParams.cloud_detail = (std::max)(0.0f, (std::min)(1.0f, cloudParams.cloud_detail));
+            cloudParams.cloud_base_steps = (std::max)(8, (std::min)(96, cloudParams.cloud_base_steps));
+            cloudParams.cloud2_coverage = (std::max)(0.0f, (std::min)(0.6f, cloudParams.cloud2_coverage));
+            cloudParams.cloud2_density = (std::max)(0.0f, (std::min)(1.5f, cloudParams.cloud2_density));
+            cloudParams.cloud2_scale = (std::max)(0.1f, (std::min)(1.0f, cloudParams.cloud2_scale));
             world.setNishitaParams(cloudParams);
             changed = true;
         }
@@ -1428,7 +1436,9 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         // Let Main loop handle it once per frame after flushLUT() to avoid
         // double GPU transfer and ensure LUT is fresh before upload.
         extern bool g_world_dirty;
+        extern bool g_gas_volumes_dirty;
         g_world_dirty = true;
+        g_gas_volumes_dirty = true;
         
         // Reset GPU accumulation so change is visible on next render pass
         if (ctx.backend_ptr) {

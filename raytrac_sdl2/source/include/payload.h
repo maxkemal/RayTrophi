@@ -22,6 +22,7 @@ struct OptixHitResult {
     float3 position;
     float3 normal;
     float3 geom_normal;
+    int front_face;
     float3 primary_albedo;
     float3 primary_normal;
     float3 emission;

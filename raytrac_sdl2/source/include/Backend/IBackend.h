@@ -62,6 +62,7 @@ struct RenderParams {
     int imageWidth;
     int imageHeight;
     int samplesPerPixel;
+    int minSamples;
     int maxBounces;
     int currentPass;
     int frameNumber;
@@ -382,6 +383,11 @@ public:
     };
 
     virtual void uploadMaterials(const std::vector<MaterialData>& materials) = 0;
+    virtual bool updateMaterial(uint32_t materialIndex, const MaterialData& material) {
+        (void)materialIndex;
+        (void)material;
+        return false;
+    }
 
     /**
      * @brief Upload terrain layer descriptors for splat-map blending (Vulkan path).

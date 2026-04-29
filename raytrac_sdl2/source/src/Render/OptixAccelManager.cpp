@@ -1,5 +1,7 @@
 ﻿#include "OptixAccelManager.h"
 
+#include "Backend/SceneTextureManager.h"
+#include "globals.h"
 #include <optix_stack_size.h>
 #include <optix_stubs.h>
 #include <iostream>
@@ -28,6 +30,50 @@ void computeGeometryBounds(const MeshGeometry& geometry, float3& outMin, float3&
         outMax.y = (std::max)(outMax.y, v.y);
         outMax.z = (std::max)(outMax.z, v.z);
     }
+}
+
+std::string buildOptixSceneTextureKey(const Texture* tex) {
+    if (!tex) return {};
+    std::string key = tex->name.empty()
+        ? "tex_ptr:" + std::to_string(reinterpret_cast<uintptr_t>(tex))
+        : "tex:" + tex->name;
+    key += (tex->is_hdr ? "|backend=optix|hdr=1" : "|backend=optix|hdr=0");
+    return key;
+}
+
+uint64_t estimateOptixTextureBytes(const Texture* tex) {
+    if (!tex || tex->width <= 0 || tex->height <= 0) return 0;
+    const uint64_t pixelCount = static_cast<uint64_t>(tex->width) * static_cast<uint64_t>(tex->height);
+    return tex->is_hdr ? pixelCount * 16ull : pixelCount * 4ull;
+}
+
+cudaTextureObject_t resolveSharedOptixTexture(const std::shared_ptr<Texture>& tex) {
+    if (!tex) return 0;
+
+    auto manager = getSharedSceneTextureManager();
+    if (manager) {
+        int64_t resolvedTextureId = 0;
+        if (manager->resolveOrCreateOptixTextureId(
+            buildOptixSceneTextureKey(tex.get()),
+            Backend::TextureConsumer::Optix,
+            static_cast<uint32_t>((std::max)(0, tex->width)),
+            static_cast<uint32_t>((std::max)(0, tex->height)),
+            estimateOptixTextureBytes(tex.get()),
+            [&tex](Backend::TextureHandle) -> int64_t {
+                if (!tex->is_gpu_uploaded) {
+                    tex->upload_to_gpu();
+                }
+                return static_cast<int64_t>(tex->get_cuda_texture());
+            },
+            resolvedTextureId)) {
+            return static_cast<cudaTextureObject_t>(resolvedTextureId);
+        }
+    }
+
+    if (!tex->is_gpu_uploaded) {
+        tex->upload_to_gpu();
+    }
+    return tex->get_cuda_texture();
 }
 }
 
@@ -761,15 +807,54 @@ bool OptixAccelManager::refitMeshBLAS(int mesh_id, bool sync) {
 // ----------------------------------------------------------------------------
 void OptixAccelManager::syncInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects, bool force_rebuild_cache) {
     if (!context) return;
+
+    const auto& scatterGroups = InstanceManager::getInstance().getGroups();
+    std::unordered_map<int, const InstanceGroup*> scatterGroupsById;
+    scatterGroupsById.reserve(scatterGroups.size());
+    for (const auto& group : scatterGroups) {
+        if (!group.instances.empty()) {
+            scatterGroupsById.emplace(group.id, &group);
+        }
+    }
+
+    bool hasScatterBindings = false;
+    for (auto& inst : instances) {
+        if (inst.scatter_group_id < 0 || inst.scatter_instance_index == UINT32_MAX) continue;
+        hasScatterBindings = true;
+        auto groupIt = scatterGroupsById.find(inst.scatter_group_id);
+        if (groupIt == scatterGroupsById.end()) continue;
+        const auto* group = groupIt->second;
+        if (inst.scatter_instance_index >= group->instances.size()) continue;
+
+        Matrix4x4 m = group->instances[inst.scatter_instance_index].toMatrix();
+        inst.transform[0] = m.m[0][0]; inst.transform[1] = m.m[0][1]; inst.transform[2] = m.m[0][2]; inst.transform[3] = m.m[0][3];
+        inst.transform[4] = m.m[1][0]; inst.transform[5] = m.m[1][1]; inst.transform[6] = m.m[1][2]; inst.transform[7] = m.m[1][3];
+        inst.transform[8] = m.m[2][0]; inst.transform[9] = m.m[2][1]; inst.transform[10] = m.m[2][2]; inst.transform[11] = m.m[2][3];
+        tlas_needs_rebuild = true;
+    }
     
     // 1. REBUILD CACHE IF DIRTY
     // Using source_hittable pointers for O(1) direct mapping (fixes naming collisions!)
-    if (m_topology_dirty || m_instance_sync_cache.empty() || force_rebuild_cache) {
+    if (m_topology_dirty || force_rebuild_cache || (m_instance_sync_cache.empty() && !hasScatterBindings)) {
         m_instance_sync_cache.clear();
+
+        auto hasInstancePrefix = [](const std::string& nodeName) -> bool {
+            return nodeName.rfind("_inst_gid", 0) == 0;
+        };
+        size_t baseObjectCount = objects.size();
+        while (baseObjectCount > 0) {
+            const auto& obj = objects[baseObjectCount - 1];
+            auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+            if (!inst || !hasInstancePrefix(inst->node_name)) {
+                break;
+            }
+            --baseObjectCount;
+        }
         
         // Build a map of Hittable pointers to objects in the scene
         std::unordered_map<void*, std::shared_ptr<Hittable>> ptr_to_obj;
-        for (const auto& obj : objects) {
+        for (size_t oi = 0; oi < baseObjectCount; ++oi) {
+            const auto& obj = objects[oi];
             ptr_to_obj[obj.get()] = obj;
         }
 
@@ -791,7 +876,8 @@ void OptixAccelManager::syncInstanceTransforms(const std::vector<std::shared_ptr
                 size_t mat_pos = name.find("_mat_");
                 if (mat_pos != std::string::npos) name = name.substr(0, mat_pos);
                 
-                for (const auto& obj : objects) {
+                for (size_t oi = 0; oi < baseObjectCount; ++oi) {
+                    const auto& obj = objects[oi];
                     // ONLY match named instances (characters/props), NEVER individual triangles by name.
                     // Doing so for thousands of triangles named "default" causes them to all collapse
                     // to the same world position (the first one found).
@@ -842,7 +928,20 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
         m_cached_triangles.clear();
         m_cached_triangles.reserve(objects.size());
         std::unordered_set<void*> seen_triangles;
-        for (const auto& obj : objects) {
+        auto hasInstancePrefix = [](const std::string& nodeName) -> bool {
+            return nodeName.rfind("_inst_gid", 0) == 0;
+        };
+        size_t baseObjectCount = objects.size();
+        while (baseObjectCount > 0) {
+            const auto& obj = objects[baseObjectCount - 1];
+            auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+            if (!inst || !hasInstancePrefix(inst->node_name)) {
+                break;
+            }
+            --baseObjectCount;
+        }
+        for (size_t oi = 0; oi < baseObjectCount; ++oi) {
+             const auto& obj = objects[oi];
              if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
                  if (seen_triangles.insert(tri.get()).second) {
                      m_cached_triangles.push_back(tri);
@@ -1054,6 +1153,14 @@ void OptixAccelManager::updateInstanceTransform(int instance_id, const float tra
     tlas_needs_rebuild = true;
 }
 
+void OptixAccelManager::setInstanceScatterBinding(int instance_id, int group_id, uint32_t instance_index) {
+    if (instance_id < 0 || instance_id >= static_cast<int>(instances.size())) {
+        return;
+    }
+    instances[instance_id].scatter_group_id = group_id;
+    instances[instance_id].scatter_instance_index = instance_index;
+}
+
 void OptixAccelManager::removeInstance(int instance_id) {
     if (instance_id < 0 || instance_id >= static_cast<int>(instances.size())) {
         return;
@@ -1109,6 +1216,8 @@ int OptixAccelManager::cloneInstance(int source_instance_id, const std::string& 
     newInst.node_name = newNodeName;
     newInst.visible = true;
     newInst.visibility_mask = 255;
+    newInst.scatter_group_id = -1;
+    newInst.scatter_instance_index = UINT32_MAX;
     
     int new_id;
     if (!free_instance_slots.empty()) {
@@ -1390,8 +1499,7 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
                 
                 // 1. Splat Map
                 if (terrain.splatMap) {
-                     if (!terrain.splatMap->is_gpu_uploaded) terrain.splatMap->upload_to_gpu();
-                     rec.data.splat_map_tex = terrain.splatMap->get_cuda_texture();
+                     rec.data.splat_map_tex = resolveSharedOptixTexture(terrain.splatMap);
                 } else {
                      rec.data.splat_map_tex = 0;
                      SCENE_LOG_WARN("[TERRAIN SBT] No splatMap for terrain '" + terrain.name + "'");
@@ -1414,14 +1522,10 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
                         // might not have been uploaded to GPU if they weren't used elsewhere.
                         PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(terrain.layers[i].get());
                         if (pbsdf) {
-                            if (pbsdf->albedoProperty.texture && !pbsdf->albedoProperty.texture->is_gpu_uploaded)
-                                pbsdf->albedoProperty.texture->upload_to_gpu();
-                            if (pbsdf->normalProperty.texture && !pbsdf->normalProperty.texture->is_gpu_uploaded)
-                                pbsdf->normalProperty.texture->upload_to_gpu();
-                            if (pbsdf->roughnessProperty.texture && !pbsdf->roughnessProperty.texture->is_gpu_uploaded)
-                                pbsdf->roughnessProperty.texture->upload_to_gpu();
-                            if (pbsdf->heightProperty.texture && !pbsdf->heightProperty.texture->is_gpu_uploaded)
-                                pbsdf->heightProperty.texture->upload_to_gpu();
+                            resolveSharedOptixTexture(pbsdf->albedoProperty.texture);
+                            resolveSharedOptixTexture(pbsdf->normalProperty.texture);
+                            resolveSharedOptixTexture(pbsdf->roughnessProperty.texture);
+                            resolveSharedOptixTexture(pbsdf->heightProperty.texture);
                         }
 
                         // UV SCALE
@@ -1554,9 +1658,7 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
     };
 
     auto uploadTextureIfNeeded = [](const std::shared_ptr<Texture>& tex) -> cudaTextureObject_t {
-        if (!tex) return 0;
-        if (!tex->is_gpu_uploaded) tex->upload_to_gpu();
-        return tex->get_cuda_texture();
+        return resolveSharedOptixTexture(tex);
     };
 
     std::vector<MaterialTextureSyncState> materialTextureStates(materials.size());
@@ -1645,8 +1747,7 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
                 if (terrain.material_id == mat_id) {
                     // Sync Splat Map
                     if (terrain.splatMap) {
-                        if (!terrain.splatMap->is_gpu_uploaded) terrain.splatMap->upload_to_gpu();
-                        rec.data.splat_map_tex = terrain.splatMap->get_cuda_texture();
+                        rec.data.splat_map_tex = resolveSharedOptixTexture(terrain.splatMap);
                     } else {
                         rec.data.splat_map_tex = 0;
                     }
@@ -1665,14 +1766,10 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
                              // Ensure textures are uploaded (SBT sync is usually for runtime changes)
                              PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(terrain.layers[i].get());
                              if (pbsdf) {
-                                 if (pbsdf->albedoProperty.texture && !pbsdf->albedoProperty.texture->is_gpu_uploaded)
-                                     pbsdf->albedoProperty.texture->upload_to_gpu();
-                                 if (pbsdf->normalProperty.texture && !pbsdf->normalProperty.texture->is_gpu_uploaded)
-                                     pbsdf->normalProperty.texture->upload_to_gpu();
-                                 if (pbsdf->roughnessProperty.texture && !pbsdf->roughnessProperty.texture->is_gpu_uploaded)
-                                     pbsdf->roughnessProperty.texture->upload_to_gpu();
-                                 if (pbsdf->heightProperty.texture && !pbsdf->heightProperty.texture->is_gpu_uploaded)
-                                     pbsdf->heightProperty.texture->upload_to_gpu();
+                                 resolveSharedOptixTexture(pbsdf->albedoProperty.texture);
+                                 resolveSharedOptixTexture(pbsdf->normalProperty.texture);
+                                 resolveSharedOptixTexture(pbsdf->roughnessProperty.texture);
+                                 resolveSharedOptixTexture(pbsdf->heightProperty.texture);
                              }
                         }
                     }

@@ -53,9 +53,9 @@ void SceneUI::processAnimations(UIContext& ctx) {
                          auto tri = pair.second;
                          if (!tri) continue;
                          
-                         auto transform_handle = tri->getTransformHandle();
+                         Transform* transform_handle = tri->getTransformPtr();
                          if (!transform_handle) continue;
-                         
+
                          Vec3 final_pos = transform_handle->position;
                          Vec3 final_rot = transform_handle->rotation;
                          Vec3 final_scale = transform_handle->scale;

@@ -151,7 +151,7 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
             offset_dir = macro_normal;
         } else {
             float cosInside = std::max(std::abs(Vec3::dot(direction.normalize(), -macro_normal)), 0.05f);
-            float thickness = 0.1f / cosInside;
+            float thickness = 0.65f / cosInside;
             Vec3 clampedColor = Vec3::clamp(color, 0.0f, 1.0f);
             Vec3 absorption(
                 (1.0f - clampedColor.x) * thickness,

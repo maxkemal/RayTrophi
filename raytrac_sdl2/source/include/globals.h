@@ -16,9 +16,15 @@
 #include <limits>
 #include <cmath>
 #include <vector>
+#include <memory>
 #include "Vec3.h"
+#include "Backend/RenderCapabilities.h"
 #include <filesystem>
 #include <fstream>
+
+namespace Backend {
+class SceneTextureManager;
+}
 
 // Quality presets for easy selection
 enum class QualityPreset {
@@ -291,6 +297,12 @@ extern bool g_hasOptix ;
 extern bool g_hasVulkan;
 extern bool g_hasVulkanRT;
 extern bool g_hasCUDA; // General CUDA availability (independent of OptiX)
+Backend::RenderBackendCapabilities captureRuntimeRenderCapabilities();
+std::shared_ptr<Backend::SceneTextureManager> getSharedSceneTextureManager();
+// Clears any cached OptiX textureId entries equal to `textureId` from the shared
+// SceneTextureManager. Call this BEFORE cudaDestroyTextureObject so concurrent
+// lookups never receive a stale (about-to-be-destroyed) handle.
+void notifyOptixTextureDestroyed(int64_t textureId);
 extern float last_render_time_ms;
 extern bool pending_resolution_change;
 extern int pending_width;
@@ -317,6 +329,9 @@ extern bool g_world_dirty;
 extern bool g_geometry_dirty;        // Mesh/triangle data changed (requires rebuildBackendGeometry)
 extern bool g_materials_dirty;       // Material properties changed (requires updateBackendMaterials)
 extern bool g_gas_volumes_dirty;     // Gas/VDB volumes changed
+// Set after a bake hot-reload so uploadMaterials evicts the pool AFTER vkDeviceWaitIdle.
+// Never evict the pool from the UI thread directly — GPU may still reference the old views.
+extern bool g_texture_pool_dirty;
 
 // Scene geometry generation counter — monotonically increasing.
 // Incremented whenever scene geometry actually changes (load, add, delete, edit).

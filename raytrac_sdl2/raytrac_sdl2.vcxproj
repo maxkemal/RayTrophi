@@ -359,7 +359,9 @@
     <ClInclude Include="source\include\unified_cpu_adapter.h" />
     <!-- Vulkan / Backend System -->
     <ClInclude Include="source\include\Backend\IBackend.h" />
+    <ClInclude Include="source\include\Backend\RenderCapabilities.h" />
     <ClInclude Include="source\include\Backend\OptixBackend.h" />
+    <ClInclude Include="source\include\Backend\SceneTextureManager.h" />
     <ClInclude Include="source\include\Backend\VulkanBackend.h" />
   </ItemGroup>
   <ItemGroup>
@@ -405,6 +407,7 @@
     <ClCompile Include="external\ozz-animation\src\animation\offline\skeleton_builder.cc" />
     <ClCompile Include="source\src\Animation\OzzRuntime.cpp" />
     <ClCompile Include="source\src\Backend\OptixBackend.cpp" />
+    <ClCompile Include="source\src\Backend\SceneTextureManager.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp" />
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp" />
     <ClCompile Include="source\src\Paint\PaintLayerStack.cpp" />

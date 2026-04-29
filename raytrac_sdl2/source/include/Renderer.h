@@ -169,6 +169,8 @@ public:
     // Use when only material properties change (color, roughness, volumetric params, etc.)
     void updateBackendMaterials(SceneData& scene);
     void updateBackendMaterials(SceneData& scene, Backend::IBackend* targetBackend);
+    void updateBackendMaterial(SceneData& scene, uint16_t material_id);
+    void updateBackendMaterial(SceneData& scene, uint16_t material_id, Backend::IBackend* targetBackend);
 
     // Update Gas Volumes on backend (fast path - no geometry rebuild)
     // Updates texture handles, transforms, and shader parameters for gas volumes
@@ -206,7 +208,7 @@ public:
 
     bool hideInterpolatedHair = false; // [NEW] Toggle to hide child hairs (interpolated) for performance during grooming
 
-    Backend::IBackend* m_backend = nullptr; 
+    Backend::IBackend* m_backend = nullptr;
     SDL_Renderer* sdlRenderer; // SDL_Renderer pointer'ı ekleyin
 private:
     std::vector<float> variance_buffer;

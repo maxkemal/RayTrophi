@@ -233,7 +233,7 @@ vec2 applyUVTransform(vec2 uv, const GpuMaterial mat) {
 
 // Derivative-based TBN (tangent from screen-space partial derivatives)
 // Returns a new perturbed normal using the normal map sample.
-vec3 applyNormalMap(vec3 N, vec3 worldPos, vec2 uv, vec3 nmSample, float strength) {
+vec3 applyNormalMap(vec3 N, vec3 worldPos, vec2 uv, vec3 nmSample, float strength, uint matFlags) {
     vec3 dp1  = dFdx(worldPos);
     vec3 dp2  = dFdy(worldPos);
     vec2 duv1 = dFdx(uv);
@@ -254,8 +254,8 @@ vec3 applyNormalMap(vec3 N, vec3 worldPos, vec2 uv, vec3 nmSample, float strengt
     // the normal map was authored in. Negate B to compensate.
     B = -B;
 
-    // Decode tangent-space normal
-    vec3 tNormal = nmSample * 2.0 - 1.0;
+    // Decode tangent-space normal — handles BC5 Z reconstruction when bit 11 set.
+    vec3 tNormal = decodeNormalMapSample(nmSample, matFlags);
     tNormal.xy  *= max(strength, 0.0);
     tNormal       = normalize(tNormal);
 
@@ -334,8 +334,9 @@ void main() {
                 blendMetallic += weights[k] * lMetal;
 
                 if (lm.normal_tex > 0u) {
-                    vec3 ns = texture(textures[nonuniformEXT(lm.normal_tex)], layerUV).rgb;
-                    ns = ns * 2.0 - 1.0;
+                    vec3 ns = decodeNormalMapSample(
+                        texture(textures[nonuniformEXT(lm.normal_tex)], layerUV).rgb,
+                        lm.flags);
                     ns.xy *= max(lm.normal_strength, 0.0);
                     blendNormal_ts += weights[k] * ns;
                     anyNormalTex = true;
@@ -347,8 +348,10 @@ void main() {
             // Apply blended normal first (derivative TBN — no surfaceTBN available in raster)
             if (anyNormalTex) {
                 vec3 nts = normalize(blendNormal_ts);
-                // Re-encode to [0,1] range so applyNormalMap can decode it back
-                N = applyNormalMap(N, vWorldPos, uv, nts * 0.5 + 0.5, 1.0);
+                // Already in tangent space, fully decoded — re-encode to [0,1] and
+                // pass flags=0 so applyNormalMap takes the plain decode path
+                // (we already handled BC5 reconstruction inside the per-layer loop).
+                N = applyNormalMap(N, vWorldPos, uv, nts * 0.5 + 0.5, 1.0, 0u);
             }
 
             // Override albedo/roughness/metallic — skip per-material texture sections below
@@ -379,7 +382,7 @@ void main() {
     if (mat.normal_tex > 0u) {
         vec3 nmSample = texture(textures[nonuniformEXT(mat.normal_tex)], uv).rgb;
         float strength = (mat.normal_strength > 0.0) ? mat.normal_strength : 1.0;
-        N = applyNormalMap(N, vWorldPos, uv, nmSample, strength);
+        N = applyNormalMap(N, vWorldPos, uv, nmSample, strength, mat.flags);
     }
 
     // ── Roughness / Metallic ──
@@ -387,11 +390,11 @@ void main() {
     float metallic  = clamp(mat.metallic,  0.0,  1.0);
     if (mat.roughness_tex > 0u) {
         roughness = samplePackedRoughness(
-            texture(textures[nonuniformEXT(mat.roughness_tex)], uv), 0.04);
+            texture(textures[nonuniformEXT(mat.roughness_tex)], uv), 0.04, mat.flags);
     }
     if (mat.metallic_tex > 0u) {
         metallic = samplePackedMetallic(
-            texture(textures[nonuniformEXT(mat.metallic_tex)], uv));
+            texture(textures[nonuniformEXT(mat.metallic_tex)], uv), mat.flags);
     }
 
     float opacity = clamp(mat.opacity, 0.0, 1.0);

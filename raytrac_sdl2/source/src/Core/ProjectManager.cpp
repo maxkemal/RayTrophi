@@ -506,7 +506,7 @@ void ProjectManager::syncProjectToScene(SceneData& scene) {
                 auto tri = it->second;
                 
                 // Update Transform
-                if (auto th = tri->getTransformHandle()) {
+                if (auto th = tri->getTransformPtr()) {
                     inst.transform = th->base;
                 } else {
                     // Fallback if no handle (shouldn't happen for valid objects)
@@ -539,7 +539,7 @@ void ProjectManager::syncProjectToScene(SceneData& scene) {
         // Better: Procedural creation assigns 'nodeName' = 'display_name'.
         auto it = scene_obj_map.find(proc.display_name);
         if (it != scene_obj_map.end()) {
-             if (auto th = it->second->getTransformHandle()) {
+             if (auto th = it->second->getTransformPtr()) {
                  proc.transform = th->base;
              }
              proc.material_id = it->second->getMaterialID();
@@ -598,7 +598,11 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer
     // This guarantees "empty scene" cleanup path and prevents stale instance carryover.
     scene.clear();
 
-    renderer.uploadHairToGPU();                 // Sync GPU (clear it)
+    // Do not call uploadHairToGPU() here after clearing the hair system.
+    // The empty-scene backend rebuild below is the authoritative GPU reset.
+    // Calling the hair upload path with zero grooms can make Vulkan interpret
+    // stale pre-reset BLAS entries as hair BLASes and destroy old buffers twice
+    // during project open/new-project transitions.
 
     // 4. CRITICAL: Rebuild backend geometry for the empty scene.
     // This ensures that all GPU BLAS, instances, and TLAS are fully cleared/reset.
@@ -1872,7 +1876,7 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
             
             ImportedModelData::ObjectInstance inst;
             inst.node_name = unique_name;
-            auto th = tri->getTransformHandle();
+            auto th = tri->getTransformPtr();
             if (th) {
                 inst.transform = th->base;
             }
@@ -2640,7 +2644,9 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["final_render_width"] = settings.final_render_width;
     j["final_render_height"] = settings.final_render_height;
     j["use_embree"] = settings.UI_use_embree;
-    j["use_denoiser"] = settings.use_denoiser;
+    // use_denoiser (viewport denoiser) intentionally not serialized:
+    // restoring it as true on project load can trigger a data race during
+    // the OptiX path-trace GPU transition before the denoiser is ready.
     j["render_use_denoiser"] = settings.render_use_denoiser;
     j["denoiser_mode"] = static_cast<int>(settings.denoiser_mode);
     j["max_samples"] = settings.max_samples;
@@ -2671,7 +2677,8 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     // Backend/device selection is no longer serialized with project files.
     // Keep current runtime backend choice and ignore legacy fields if present.
     settings.UI_use_embree = j.value("use_embree", true);
-    settings.use_denoiser = j.value("use_denoiser", false);
+    // use_denoiser not restored from disk — always starts false to avoid
+    // GPU transition races before the denoiser pipeline is initialized.
     settings.render_use_denoiser = j.value("render_use_denoiser", true);
     settings.denoiser_mode = static_cast<DenoiserMode>(j.value("denoiser_mode", static_cast<int>(DenoiserMode::Quality)));
     settings.max_samples = j.value("max_samples", 32);
