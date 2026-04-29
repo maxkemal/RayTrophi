@@ -41,14 +41,14 @@ struct PaintStroke {
     PaintChannel channel = PaintChannel::BaseColor;
     std::shared_ptr<Texture> texture_snapshot_ref;
     std::vector<CompactVec4> before_pixels;
-    std::array<std::shared_ptr<Texture>, 7> texture_snapshot_refs{};
-    std::array<std::vector<CompactVec4>, 7> before_pixels_by_channel{};
+    std::array<std::shared_ptr<Texture>, kPaintChannelCount> texture_snapshot_refs{};
+    std::array<std::vector<CompactVec4>, kPaintChannelCount> before_pixels_by_channel{};
 
     // Layer-aware undo snapshots
     bool using_layers = false;
     std::string layer_stack_key;           // e.g. "NodeName#42"
     uint32_t layer_id = 0;                 // id of the painted layer
-    std::array<std::vector<CompactVec4>, 7> before_layer_pixels{};
+    std::array<std::vector<CompactVec4>, kPaintChannelCount> before_layer_pixels{};
 };
 
 class PaintModeState {
@@ -64,7 +64,7 @@ public:
     float height_to_normal_strength = 4.0f;
     bool auto_normal_from_height = false;
     bool clear_height_after_bake = true;
-    std::array<bool, 7> linked_channels{};
+    std::array<bool, kPaintChannelCount> linked_channels{};
     BrushSettings brush;
     PaintStroke stroke;
     std::vector<PaintLayer> ui_layers;

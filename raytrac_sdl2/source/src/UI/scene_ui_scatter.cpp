@@ -124,8 +124,12 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
     
     ImGui::SameLine();
     if (UIWidgets::DangerButton("Delete Layer") && scatter_brush.active_group_id >= 0) {
+        if (InstanceGroup* group = im.getGroup(scatter_brush.active_group_id)) {
+            syncInstancesToScene(ctx, *group, true);
+        }
         im.deleteGroup(scatter_brush.active_group_id);
         scatter_brush.active_group_id = -1;
+        rebuildScatterSceneMutation(ctx);
     }
 
     // Layer Combo

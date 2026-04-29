@@ -7,6 +7,7 @@
 #include "PrincipledBSDF.h"
 #include <algorithm>
 #include <cmath>
+#include <tuple>
 
 namespace Paint {
 
@@ -21,6 +22,7 @@ TextureType toTextureType(PaintChannel channel) {
         case PaintChannel::Emission: return TextureType::Emission;
         case PaintChannel::Mask: return TextureType::Unknown;
         case PaintChannel::Transmission: return TextureType::Transmission;
+        case PaintChannel::Opacity: return TextureType::Opacity;
     }
     return TextureType::Unknown;
 }
@@ -34,6 +36,7 @@ const char* channelName(PaintChannel channel) {
         case PaintChannel::Emission: return "Emission";
         case PaintChannel::Mask: return "Mask";
         case PaintChannel::Transmission: return "Transmission";
+        case PaintChannel::Opacity: return "Opacity";
     }
     return "Channel";
 }
@@ -50,6 +53,10 @@ CompactVec4 defaultChannelPixel(PaintChannel channel) {
         case PaintChannel::Mask:
         case PaintChannel::Transmission:
             return CompactVec4(0, 0, 0, 255);
+        case PaintChannel::Opacity:
+            // Default = fully visible: a freshly-created opacity canvas should
+            // not silently hide the surface. Erase reverts texels to this.
+            return CompactVec4(255, 255, 255, 255);
     }
     return CompactVec4(255, 255, 255, 255);
 }
@@ -94,10 +101,24 @@ CompactVec4 makeBrushPixel(PaintChannel channel, const BrushSettings& brush) {
         case PaintChannel::Emission:
             return CompactVec4(toByte(brush.color.x), toByte(brush.color.y), toByte(brush.color.z), 255);
         case PaintChannel::Normal: {
-            Vec3 n = Vec3(
+            // Tangent-space normals must point out of the surface (n.z >= 0).
+            // brush.color is a free RGB picker, so a user-chosen red (1,0,0)
+            // would otherwise decode to (1,-1,-1) → n.z negative → BSDFs
+            // see a normal pointing into the surface, producing flipped
+            // shading and NaN reflection terms. Clamp z to non-negative
+            // before re-normalising.
+            Vec3 n(
                 brush.color.x * 2.0f - 1.0f,
                 brush.color.y * 2.0f - 1.0f,
-                brush.color.z * 2.0f - 1.0f).normalize();
+                brush.color.z * 2.0f - 1.0f);
+            if (n.z < 0.0f) n.z = 0.0f;
+            n = n.normalize();
+            // Edge case: clamping z to 0 with x=y=0 leaves a zero vector.
+            // Snap to the flat normal in that pathological case.
+            if (!std::isfinite(n.x) || !std::isfinite(n.y) || !std::isfinite(n.z) ||
+                (n.x == 0.0f && n.y == 0.0f && n.z == 0.0f)) {
+                n = Vec3(0.0f, 0.0f, 1.0f);
+            }
             return CompactVec4(
                 toByte(n.x * 0.5f + 0.5f),
                 toByte(n.y * 0.5f + 0.5f),
@@ -111,6 +132,18 @@ CompactVec4 makeBrushPixel(PaintChannel channel, const BrushSettings& brush) {
             const float grayscale = std::clamp((brush.color.x + brush.color.y + brush.color.z) / 3.0f, 0.0f, 1.0f);
             const uint8_t value = toByte(grayscale);
             return CompactVec4(value, value, value, 255);
+        }
+        case PaintChannel::Opacity: {
+            // Write the same value into all four channels (incl. alpha) so the
+            // material_preview_frag opacity sampler returns the painted mask
+            // regardless of which path it picks: RGBA-alpha mode reads .a,
+            // grayscale-mask mode reads .r. If we left .a hard-coded at 255,
+            // any material whose flags bit 256 (or shared albedo+opacity slot)
+            // selected the alpha branch would see "always opaque" and the dab
+            // would have no visible effect.
+            const float grayscale = std::clamp((brush.color.x + brush.color.y + brush.color.z) / 3.0f, 0.0f, 1.0f);
+            const uint8_t value = toByte(grayscale);
+            return CompactVec4(value, value, value, value);
         }
     }
     return CompactVec4(255, 255, 255, 255);
@@ -214,12 +247,33 @@ CompactVec4 makeBrushTexturePixel(PaintChannel channel, const BrushSettings& bru
             const uint8_t value = toByte(grayscale);
             return CompactVec4(value, value, value, 255);
         }
+        case PaintChannel::Opacity: {
+            // Mirror the same all-channel write that makeBrushPixel does for
+            // Opacity: shader reads .a or .r depending on material flags;
+            // putting the value in both leaves the mask working in either mode.
+            const float texture_value = brush.paint_texture->sampleIntensity(u, v);
+            const float tint_value = std::clamp((brush.color.x + brush.color.y + brush.color.z) / 3.0f, 0.0f, 1.0f);
+            const float grayscale = texture_value + (texture_value * tint_value - texture_value) *
+                std::clamp(brush.paint_texture_tint_strength, 0.0f, 1.0f);
+            const uint8_t value = toByte(grayscale);
+            return CompactVec4(value, value, value, value);
+        }
         case PaintChannel::Normal: {
             Vec3 sampled = brush.paint_texture->get_color_bilinear(u, v);
-            Vec3 n = Vec3(
+            Vec3 n(
                 sampled.x * 2.0f - 1.0f,
                 sampled.y * 2.0f - 1.0f,
-                sampled.z * 2.0f - 1.0f).normalize();
+                sampled.z * 2.0f - 1.0f);
+            // Defensive: a paint_texture wired in by the user that isn't a
+            // real tangent-space normal map (random photo, height map, etc.)
+            // can yield n.z < 0. Clamp to keep the normal on the
+            // outward-facing hemisphere.
+            if (n.z < 0.0f) n.z = 0.0f;
+            n = n.normalize();
+            if (!std::isfinite(n.x) || !std::isfinite(n.y) || !std::isfinite(n.z) ||
+                (n.x == 0.0f && n.y == 0.0f && n.z == 0.0f)) {
+                n = Vec3(0.0f, 0.0f, 1.0f);
+            }
             return CompactVec4(
                 toByte(n.x * 0.5f + 0.5f),
                 toByte(n.y * 0.5f + 0.5f),
@@ -250,6 +304,100 @@ float computeBrushWeight(float distance_px, float radius_px, float falloff) {
 
     const float t = std::clamp((normalized - inner) / std::max(0.001f, 1.0f - inner), 0.0f, 1.0f);
     return 1.0f - (t * t * (3.0f - 2.0f * t));
+}
+
+// Same falloff curve as computeBrushWeight but the distance is already
+// normalised (0 = brush centre, 1 = brush edge). The elliptical footprint
+// path uses this so the unit-circle metric stays exact regardless of axis
+// scaling.
+float computeBrushWeightNormalized(float dist_norm, float radius_px, float falloff) {
+    if (radius_px <= 0.0f) {
+        return 0.0f;
+    }
+    if (radius_px <= 1.0f) {
+        const float scale = radius_px / (radius_px + 0.75f);
+        return std::clamp(1.0f - dist_norm * scale, 0.0f, 1.0f);
+    }
+    const float normalized = std::clamp(dist_norm, 0.0f, 1.0f);
+    const float inner = std::clamp(1.0f - falloff, 0.0f, 1.0f);
+    if (normalized <= inner) {
+        return 1.0f;
+    }
+    const float t = std::clamp((normalized - inner) / std::max(0.001f, 1.0f - inner), 0.0f, 1.0f);
+    return 1.0f - (t * t * (3.0f - 2.0f * t));
+}
+
+// World-space lengths of ∂P/∂U and ∂P/∂V across the active UV set on `tri`.
+// Tells the caller "1 unit of U covers `out_world_per_u` world units, 1 unit
+// of V covers `out_world_per_v`". Falls back to (1,1) on degenerate input
+// so the caller transparently drops to the isotropic pixel-space footprint.
+void computeTriangleUvJacobianLengths(const Triangle& tri, int uv_set,
+                                       float& out_world_per_u, float& out_world_per_v) {
+    out_world_per_u = 1.0f;
+    out_world_per_v = 1.0f;
+
+    Vec2 uv0, uv1, uv2;
+    if (uv_set > 0 && static_cast<size_t>(uv_set) < tri.getUVSetCount()) {
+        std::tie(uv0, uv1, uv2) = tri.getUVSetCoordinates(static_cast<size_t>(uv_set));
+    } else {
+        std::tie(uv0, uv1, uv2) = tri.getUVCoordinates();
+    }
+
+    const Vec3 p0 = tri.getVertexPosition(0);
+    const Vec3 e1 = tri.getVertexPosition(1) - p0;
+    const Vec3 e2 = tri.getVertexPosition(2) - p0;
+
+    const float du1 = uv1.u - uv0.u;
+    const float dv1 = uv1.v - uv0.v;
+    const float du2 = uv2.u - uv0.u;
+    const float dv2 = uv2.v - uv0.v;
+
+    const float det = du1 * dv2 - du2 * dv1;
+    if (std::abs(det) < 1e-10f) return;
+
+    const float inv = 1.0f / det;
+    const Vec3 dPdU = (e1 * dv2 - e2 * dv1) * inv;
+    const Vec3 dPdV = (e2 * du1 - e1 * du2) * inv;
+
+    const float lu = dPdU.length();
+    const float lv = dPdV.length();
+    if (lu > 1e-12f) out_world_per_u = lu;
+    if (lv > 1e-12f) out_world_per_v = lv;
+}
+
+// Per-axis pixel-radius correction so a brush that is circular in world
+// space lands as an axis-aligned ellipse in texel space, while preserving
+// the geometric mean radius (`kx*ky == 1`). A unit-aspect mesh + square
+// texture yields (1,1); stretched UVs / non-uniform mesh scale produce the
+// elongation needed to cancel the distortion.
+//
+// Anisotropy is clamped to 6:1 — past that point the painted ellipse
+// becomes uncomfortably elongated and the better answer is for the user
+// to fix their UVs.
+void computeBrushAxisCorrection(float world_per_u, float world_per_v,
+                                int width, int height,
+                                float& out_kx, float& out_ky) {
+    out_kx = 1.0f;
+    out_ky = 1.0f;
+    if (world_per_u <= 0.0f || world_per_v <= 0.0f || width <= 0 || height <= 0) return;
+
+    const float tex_per_world_u = static_cast<float>(width)  / world_per_u;
+    const float tex_per_world_v = static_cast<float>(height) / world_per_v;
+    if (tex_per_world_u <= 0.0f || tex_per_world_v <= 0.0f) return;
+
+    const float mean = std::sqrt(tex_per_world_u * tex_per_world_v);
+    if (mean <= 1e-12f) return;
+
+    constexpr float kMaxAnisotropy = 6.0f;
+    constexpr float kMinAnisotropy = 1.0f / kMaxAnisotropy;
+    float kx = tex_per_world_u / mean;
+    float ky = tex_per_world_v / mean;
+    if (kx > kMaxAnisotropy) kx = kMaxAnisotropy;
+    if (ky > kMaxAnisotropy) ky = kMaxAnisotropy;
+    if (kx < kMinAnisotropy) kx = kMinAnisotropy;
+    if (ky < kMinAnisotropy) ky = kMinAnisotropy;
+    out_kx = kx;
+    out_ky = ky;
 }
 
 void blendPixelChannel(uint8_t& dst, uint8_t target, float alpha) {
@@ -336,28 +484,58 @@ float sampleBrushMask(const BrushSettings& brush, float nx, float ny) {
     return sampleBrushAlpha(brush.alpha_preset, nx, ny, brush.alpha_scale, brush.alpha_rotation_degrees);
 }
 
+CompactVec4 sampleTexturePixelBilinear(const std::vector<CompactVec4>& pixels, int width, int height, float u, float v);
+
 std::shared_ptr<Texture> cloneTextureForPaint(const std::shared_ptr<Texture>& source,
                                               const std::string& name,
                                               int resolution,
                                               TextureType type,
+                                              PaintChannel channel,
                                               bool& out_seeded) {
     out_seeded = false;
 
     if (source && source->is_loaded() && !source->pixels.empty()) {
-        const int source_w = source->width > 0 ? source->width : resolution;
-        const int source_h = source->height > 0 ? source->height : resolution;
-        auto texture = std::make_shared<Texture>(name, source_w, source_h, type);
-        texture->width = source_w;
-        texture->height = source_h;
-        texture->pixels = source->pixels;
+        const int fallback_resolution = resolution > 0 ? resolution : 1024;
+        const int source_w = source->width > 0 ? source->width : fallback_resolution;
+        const int source_h = source->height > 0 ? source->height : fallback_resolution;
+        const int target_resolution = resolution > 0 ? resolution : std::max(source_w, source_h);
+        auto texture = std::make_shared<Texture>(name, target_resolution, target_resolution, type);
+        texture->width = target_resolution;
+        texture->height = target_resolution;
+        if (source_w == target_resolution && source_h == target_resolution) {
+            texture->pixels = source->pixels;
+        } else {
+            texture->pixels.resize(static_cast<size_t>(target_resolution) * static_cast<size_t>(target_resolution));
+            for (int y = 0; y < target_resolution; ++y) {
+                for (int x = 0; x < target_resolution; ++x) {
+                    const float u = target_resolution > 1
+                        ? static_cast<float>(x) / static_cast<float>(target_resolution - 1)
+                        : 0.0f;
+                    const float v = target_resolution > 1
+                        ? 1.0f - (static_cast<float>(y) / static_cast<float>(target_resolution - 1))
+                        : 0.0f;
+                    texture->pixels[static_cast<size_t>(y) * static_cast<size_t>(target_resolution) + static_cast<size_t>(x)] =
+                        sampleTexturePixelBilinear(source->pixels, source_w, source_h, u, v);
+                }
+            }
+        }
         texture->has_alpha = source->has_alpha;
         texture->is_gray_scale = source->is_gray_scale;
         texture->m_is_loaded = true;
+        // Force opaque alpha on the paint canvas itself for every channel
+        // *except* Opacity. Opacity stores the mask in alpha, so clobbering
+        // it would silently delete the asset's opacity information on the
+        // first paint binding. For all other channels alpha=0 leaks would
+        // propagate into the bound albedo/opacity slot, producing the
+        // black-square symptom we hardened seedFromTextureSet against.
+        if (channel != PaintChannel::Opacity) {
+            for (auto& p : texture->pixels) p.a = 255;
+        }
         out_seeded = true;
         return texture;
     }
 
-    return createBlankTexture(name, resolution, type);
+    return createBlankTexture(name, resolution > 0 ? resolution : 1024, type);
 }
 
 CompactVec4 sampleTexturePixelBilinear(const std::vector<CompactVec4>& pixels, int width, int height, float u, float v) {
@@ -436,16 +614,6 @@ Vec3 buildNormalFromHeight(const std::shared_ptr<Texture>& height_texture, int p
     return Vec3(-dx, -dy, 1.0f).normalize();
 }
 
-Vec3 getWorldPositionAtUV(const Triangle& tri, const Vec2& uv) {
-    auto [uv0, uv1, uv2] = tri.getUVCoordinates();
-    float det = (uv1.v - uv2.v) * (uv0.u - uv2.u) + (uv2.u - uv1.u) * (uv0.v - uv2.v);
-    if (std::abs(det) < 1e-10f) return tri.getVertexPosition(0);
-    float l0 = ((uv1.v - uv2.v) * (uv.u - uv2.u) + (uv2.u - uv1.u) * (uv.v - uv2.v)) / det;
-    float l1 = ((uv2.v - uv0.v) * (uv.u - uv2.u) + (uv0.u - uv2.u) * (uv.v - uv2.v)) / det;
-    float l2 = 1.0f - l0 - l1;
-    return tri.getVertexPosition(0) * l0 + tri.getVertexPosition(1) * l1 + tri.getVertexPosition(2) * l2;
-}
-
 CompactVec4 encodeNormalPixel(const Vec3& normal) {
     const Vec3 n = normal.normalize();
     const auto to_byte = [](float value) -> uint8_t {
@@ -458,10 +626,12 @@ CompactVec4 encodeNormalPixel(const Vec3& normal) {
         255);
 }
 
-Vec3 buildNormalFromHeightGeometryAware(const std::shared_ptr<Texture>& height_texture, const Triangle& tri, int px, int py, float strength) {
+Vec3 buildNormalFromHeightGeometryAware(const std::shared_ptr<Texture>& height_texture,
+                                         const Triangle& tri, int uv_set,
+                                         int px, int py, float strength) {
     const int width = height_texture->width;
     const int height = height_texture->height;
-    
+
     auto get_h = [&](int x, int y) {
         x = std::clamp(x, 0, width - 1);
         y = std::clamp(y, 0, height - 1);
@@ -470,12 +640,11 @@ Vec3 buildNormalFromHeightGeometryAware(const std::shared_ptr<Texture>& height_t
 
     // 5-tap Cross Sampling for smoother gradients (especially at high res like 4096)
     // Helps reducing the 8-bit quantization "steps/layers" artifacts.
-    const float hC = get_h(px, py);
     const float hR1 = get_h(px + 1, py);
     const float hL1 = get_h(px - 1, py);
     const float hU1 = get_h(px, py - 1);
     const float hD1 = get_h(px, py + 1);
-    
+
     const float hR2 = get_h(px + 2, py);
     const float hL2 = get_h(px - 2, py);
     const float hU2 = get_h(px, py - 2);
@@ -485,24 +654,60 @@ Vec3 buildNormalFromHeightGeometryAware(const std::shared_ptr<Texture>& height_t
     const float gH = ((hR2 - hL2) * 0.5f + (hR1 - hL1)) * 0.5f;
     const float gV = ((hD2 - hU2) * 0.5f + (hD1 - hU1)) * 0.5f;
 
-    // World distance for the same 5-tap range
-    auto uv_at_pixel = [&](int x, int y) {
-        return Vec2(static_cast<float>(x) / (width - 1), 1.0f - (static_cast<float>(y) / (height - 1)));
-    };
+    // Use the triangle's UV→world Jacobian (constant across the triangle) to
+    // convert "2 texel offset" into a world distance. Calling
+    // getWorldPositionAtUV per neighbour barycentric-extrapolated outside the
+    // UV bbox at triangle edges, blowing distH/distV up to random values and
+    // turning the painted bump noisy. The Jacobian uses fixed edge vectors
+    // so the world distance is stable for every texel inside or outside the
+    // triangle UV rect alike.
+    // Use the same UV set the paint texture is sampled through. Falling
+    // back to set 0 here on a multi-set mesh would derive the Jacobian
+    // from a different parametrisation than the one the brush dab landed
+    // on, producing visibly tilted bumps along seams of secondary UV sets.
+    Vec2 uv0, uv1, uv2;
+    if (uv_set > 0 && static_cast<size_t>(uv_set) < tri.getUVSetCount()) {
+        std::tie(uv0, uv1, uv2) = tri.getUVSetCoordinates(static_cast<size_t>(uv_set));
+    } else {
+        std::tie(uv0, uv1, uv2) = tri.getUVCoordinates();
+    }
+    const Vec3 p0 = tri.getVertexPosition(0);
+    const Vec3 e1 = tri.getVertexPosition(1) - p0;
+    const Vec3 e2 = tri.getVertexPosition(2) - p0;
+    const float du1 = uv1.u - uv0.u;
+    const float dv1 = uv1.v - uv0.v;
+    const float du2 = uv2.u - uv0.u;
+    const float dv2 = uv2.v - uv0.v;
+    const float det = du1 * dv2 - du2 * dv1;
 
-    Vec3 pR = getWorldPositionAtUV(tri, uv_at_pixel(px + 2, py));
-    Vec3 pL = getWorldPositionAtUV(tri, uv_at_pixel(px - 2, py));
-    Vec3 pD = getWorldPositionAtUV(tri, uv_at_pixel(px, py + 2));
-    Vec3 pU = getWorldPositionAtUV(tri, uv_at_pixel(px, py - 2));
+    // Default to "1 texel = 1 world unit" if the UV→world map is degenerate;
+    // matches the pre-Jacobian fallback in buildNormalFromHeight.
+    float distH = 1.0f;
+    float distV = 1.0f;
+    if (std::abs(det) >= 1e-10f) {
+        const float inv = 1.0f / det;
+        const Vec3 dPdU = (e1 * dv2 - e2 * dv1) * inv;
+        const Vec3 dPdV = (e2 * du1 - e1 * du2) * inv;
+        // 2-texel offset in pixel space → UV delta = 2 / (texDim - 1).
+        // World distance for that span is |dPdU| * uv_step (note sign flip
+        // for V because pixel y axis runs opposite to UV v axis — only the
+        // magnitude matters here).
+        const float du_step = (width  > 1) ? (2.0f / static_cast<float>(width  - 1)) : 0.0f;
+        const float dv_step = (height > 1) ? (2.0f / static_cast<float>(height - 1)) : 0.0f;
+        distH = dPdU.length() * du_step;
+        distV = dPdV.length() * dv_step;
+    }
 
-    float distH = (pR - pL).length();
-    float distV = (pD - pU).length();
+    // Anti-divergence floor: clamp the world distance to a small fraction of
+    // the triangle's average edge length. This stops scaled-down meshes (or
+    // tiny UV islands) from making `gH / distH` explode.
+    const float edge_avg = (e1.length() + e2.length() + (e1 - e2).length()) * (1.0f / 3.0f);
+    const float min_dist = std::max(1e-5f, edge_avg * 1e-4f);
+    if (distH < min_dist) distH = min_dist;
+    if (distV < min_dist) distV = min_dist;
 
-    if (distH < 1e-7f) distH = 0.001f;
-    if (distV < 1e-7f) distV = 0.001f;
-
-    // Sensitivity Dampening: Geometry aware gradients can be extreme on high-poly meshes
-    // We multiply by a standard scaler 0.1f down so that 1.0 strength feels usable.
+    // Sensitivity Dampening: Geometry aware gradients can be extreme on high-poly meshes.
+    // 0.15 scaler so that 1.0 strength still feels usable on default meshes.
     const float sensitivity = 0.15f;
     float dx = (gH / distH) * strength * sensitivity;
     float dy = (gV / distV) * strength * sensitivity;
@@ -630,7 +835,7 @@ PaintTextureSet& MeshPaintAdapter::ensureTextureSet(int resolution) {
     PaintTextureSet set;
     set.target_node_name = getNodeName();
     set.material_id = getMaterialID();
-    set.resolution = resolution;
+    set.resolution = resolution > 0 ? resolution : 1024;
 
     const std::string key = set.makeKey();
     auto [it, inserted] = scene_->mesh_paint_texture_sets.emplace(key, set);
@@ -654,6 +859,7 @@ std::shared_ptr<Texture> MeshPaintAdapter::getChannelSourceTexture(PaintChannel 
         case PaintChannel::Emission: return material->emissionProperty.texture;
         case PaintChannel::Mask: return material->heightProperty.texture;
         case PaintChannel::Transmission: return material->transmissionProperty.texture;
+        case PaintChannel::Opacity: return material->opacityProperty.texture;
     }
     return nullptr;
 }
@@ -673,7 +879,7 @@ bool MeshPaintAdapter::assignTextureToChannel(PaintChannel channel) {
         const std::string texture_name = std::string("generated/") + baseName + ".png";
         bool seeded = false;
         std::shared_ptr<Texture> source_texture = getChannelSourceTexture(channel);
-        target_texture = cloneTextureForPaint(source_texture, texture_name, set.resolution, toTextureType(channel), seeded);
+        target_texture = cloneTextureForPaint(source_texture, texture_name, set.resolution, toTextureType(channel), channel, seeded);
         if (!seeded && target_texture) {
             fillTextureDefault(*target_texture, channel);
         }
@@ -736,6 +942,9 @@ void MeshPaintAdapter::bindTextureSetToMaterial() {
     if (set->transmission) {
         material->transmissionProperty.texture = set->transmission;
     }
+    if (set->opacity) {
+        material->opacityProperty.texture = set->opacity;
+    }
 }
 
 bool MeshPaintAdapter::restoreOriginalMaterialTextures() {
@@ -756,6 +965,7 @@ bool MeshPaintAdapter::restoreOriginalMaterialTextures() {
     material->emissionProperty.texture = set->getSourceTexture(PaintChannel::Emission);
     material->heightProperty.texture = set->getSourceTexture(PaintChannel::Mask);
     material->transmissionProperty.texture = set->getSourceTexture(PaintChannel::Transmission);
+    material->opacityProperty.texture = set->getSourceTexture(PaintChannel::Opacity);
 
     set->base_color.reset();
     set->normal.reset();
@@ -764,6 +974,7 @@ bool MeshPaintAdapter::restoreOriginalMaterialTextures() {
     set->emission.reset();
     set->mask.reset();
     set->transmission.reset();
+    set->opacity.reset();
     set->initialized = false;
     set->seeded_from_existing.fill(false);
     set->source_texture_names.fill(std::string{});
@@ -797,7 +1008,15 @@ bool MeshPaintAdapter::resizeTextureSet(int resolution) {
     resize_channel(PaintChannel::Emission);
     resize_channel(PaintChannel::Mask);
     resize_channel(PaintChannel::Transmission);
+    resize_channel(PaintChannel::Opacity);
     set->resolution = resolution;
+
+    PaintLayerStack* stack = getLayerStack();
+    if (stack && stack->layerCount() > 0) {
+        stack->setResolution(resolution, resolution);
+        stack->flattenInto(*set);
+    }
+
     bindTextureSetToMaterial();
     return true;
 }
@@ -822,29 +1041,46 @@ bool MeshPaintAdapter::paintAtUV(PaintChannel channel, const Vec2& uv, const Bru
     const float reference_res = 1024.0f;
     const float res_scale = static_cast<float>(width) / reference_res;
     const float radius_px = std::max(0.1f, brush.radius * res_scale);
-    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - radius_px)));
-    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + radius_px)));
-    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - radius_px)));
-    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + radius_px)));
+
+    // Anisotropy correction so a circular brush in world space lands as an
+    // axis-aligned ellipse in texel space (preserves world-area).
+    float kx = 1.0f, ky = 1.0f;
+    if (triangle_) {
+        float wpu = 1.0f, wpv = 1.0f;
+        const int uv_set = getTarget().uv_set;
+        computeTriangleUvJacobianLengths(*triangle_, uv_set, wpu, wpv);
+        computeBrushAxisCorrection(wpu, wpv, width, height, kx, ky);
+    }
+    const float radius_x = std::max(0.1f, radius_px * kx);
+    const float radius_y = std::max(0.1f, radius_px * ky);
+
+    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - radius_x)));
+    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + radius_x)));
+    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - radius_y)));
+    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + radius_y)));
     const float strength = std::clamp(brush.strength * brush.flow * dt * 60.0f, 0.0f, 1.0f);
     const CompactVec4 erase_pixel = defaultChannelPixel(channel);
-    const std::vector<CompactVec4> source_pixels = texture->pixels;
+    std::vector<CompactVec4> source_pixels;
+    if (brush.tool == BrushTool::Soften) {
+        source_pixels = texture->pixels;
+    }
 
     bool changed = false;
     for (int py = min_y; py <= max_y; ++py) {
         for (int px = min_x; px <= max_x; ++px) {
             const float dx = (static_cast<float>(px) + 0.5f) - center_x;
             const float dy = (static_cast<float>(py) + 0.5f) - center_y;
-            const float distance = std::sqrt(dx * dx + dy * dy);
-            if (distance > radius_px) {
+            const float nx = dx / radius_x;
+            const float ny = dy / radius_y;
+            const float dist_norm = std::sqrt(nx * nx + ny * ny);
+            if (dist_norm > 1.0f) {
                 continue;
             }
 
-            const float nx = dx / radius_px;
-            const float ny = dy / radius_px;
             const float alpha_mask = sampleBrushMask(brush, nx, ny);
             const CompactVec4 brush_pixel = makeBrushTexturePixel(channel, brush, nx, ny);
-            const float weight = computeBrushWeight(distance, radius_px, std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * strength;
+            const float weight = computeBrushWeightNormalized(dist_norm, radius_px,
+                                    std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * strength;
             if (weight <= 0.001f) {
                 continue;
             }
@@ -1140,10 +1376,21 @@ bool MeshPaintAdapter::cloneAtUV(PaintChannel channel, const Vec2& dst_uv, const
     const float reference_res = 1024.0f;
     const float res_scale = static_cast<float>(width) / reference_res;
     const float radius_px = std::max(0.1f, brush.radius * res_scale);
-    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - radius_px)));
-    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + radius_px)));
-    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - radius_px)));
-    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + radius_px)));
+
+    float kx = 1.0f, ky = 1.0f;
+    if (triangle_) {
+        float wpu = 1.0f, wpv = 1.0f;
+        const int uv_set = getTarget().uv_set;
+        computeTriangleUvJacobianLengths(*triangle_, uv_set, wpu, wpv);
+        computeBrushAxisCorrection(wpu, wpv, width, height, kx, ky);
+    }
+    const float radius_x = std::max(0.1f, radius_px * kx);
+    const float radius_y = std::max(0.1f, radius_px * ky);
+
+    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - radius_x)));
+    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + radius_x)));
+    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - radius_y)));
+    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + radius_y)));
     const float strength = std::clamp(brush.strength * brush.flow * dt * 60.0f, 0.0f, 1.0f);
     const std::vector<CompactVec4> source_pixels = texture->pixels;
 
@@ -1152,24 +1399,29 @@ bool MeshPaintAdapter::cloneAtUV(PaintChannel channel, const Vec2& dst_uv, const
         for (int px = min_x; px <= max_x; ++px) {
             const float dx = (static_cast<float>(px) + 0.5f) - center_x;
             const float dy = (static_cast<float>(py) + 0.5f) - center_y;
-            const float distance = std::sqrt(dx * dx + dy * dy);
-            if (distance > radius_px) {
+            const float nx = dx / radius_x;
+            const float ny = dy / radius_y;
+            const float dist_norm = std::sqrt(nx * nx + ny * ny);
+            if (dist_norm > 1.0f) {
                 continue;
             }
 
-            const float nx = dx / radius_px;
-            const float ny = dy / radius_px;
             const float alpha_mask = sampleBrushMask(brush, nx, ny);
-            const float weight = computeBrushWeight(distance, radius_px, std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * strength;
+            const float weight = computeBrushWeightNormalized(dist_norm, radius_px,
+                                    std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * strength;
             if (weight <= 0.001f) {
                 continue;
             }
 
             const float src_px_f = std::clamp(src_center_x + dx, 0.0f, static_cast<float>(width - 1));
             const float src_py_f = std::clamp(src_center_y + dy, 0.0f, static_cast<float>(height - 1));
-            const int src_px = static_cast<int>(src_px_f);
-            const int src_py = static_cast<int>(src_py_f);
-            const CompactVec4& src = source_pixels[static_cast<size_t>(src_py) * static_cast<size_t>(width) + static_cast<size_t>(src_px)];
+            // Bilinear sample for sub-pixel source offsets — matches
+            // cloneLayerAtUV's behaviour. Nearest-neighbour truncation here
+            // produced visible stair-step artefacts on the legacy (non-layer)
+            // clone path when the user dragged the brush diagonally.
+            const float src_u = (width  > 1) ? (src_px_f / static_cast<float>(width  - 1)) : 0.0f;
+            const float src_v = (height > 1) ? (1.0f - src_py_f / static_cast<float>(height - 1)) : 0.0f;
+            const CompactVec4 src = sampleTexturePixelBilinear(source_pixels, width, height, src_u, src_v);
             CompactVec4& dst = texture->pixels[static_cast<size_t>(py) * static_cast<size_t>(width) + static_cast<size_t>(px)];
             blendPixelChannel(dst.r, src.r, weight);
             blendPixelChannel(dst.g, src.g, weight);
@@ -1213,23 +1465,41 @@ bool MeshPaintAdapter::updateNormalFromHeightArea(const Vec2& center_uv, float r
     const float res_scale = static_cast<float>(width) / reference_res;
     const float effective_radius_px = radius_px * res_scale;
 
+    // Match the elliptical footprint used by paintLayerAtUV / paintAtUV so
+    // the height-driven normal update covers the same texels the brush dab
+    // touched. Without this, anisotropic UVs leave a circular Sobel band
+    // surrounded by the elliptical paint area, producing visible seams.
+    const int active_uv_set = getTarget().uv_set;
+    float kx = 1.0f, ky = 1.0f;
+    if (triangle_) {
+        float wpu = 1.0f, wpv = 1.0f;
+        computeTriangleUvJacobianLengths(*triangle_, active_uv_set, wpu, wpv);
+        computeBrushAxisCorrection(wpu, wpv, width, height, kx, ky);
+    }
+    const float radius_x = std::max(0.1f, effective_radius_px * kx);
+    const float radius_y = std::max(0.1f, effective_radius_px * ky);
+
     // Convert UV to pixel space
     const float cx = center_uv.u * static_cast<float>(width - 1);
     const float cy = (1.0f - center_uv.v) * static_cast<float>(height - 1);
 
-    // Sobel needs 1 extra pixel for neighbor sampling
-    const float range = effective_radius_px + 2.0f;
-    const int min_x = std::max(0, static_cast<int>(std::floor(cx - range)));
-    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(cx + range)));
-    const int min_y = std::max(0, static_cast<int>(std::floor(cy - range)));
-    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(cy + range)));
+    // Sobel needs 2 extra pixels for the 5-tap kernel; widen each axis
+    // independently so the elliptical footprint stays covered on both axes.
+    const float range_x = radius_x + 2.0f;
+    const float range_y = radius_y + 2.0f;
+    const int min_x = std::max(0, static_cast<int>(std::floor(cx - range_x)));
+    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(cx + range_x)));
+    const int min_y = std::max(0, static_cast<int>(std::floor(cy - range_y)));
+    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(cy + range_y)));
 
     bool changed = false;
     for (int py = min_y; py <= max_y; ++py) {
         for (int px = min_x; px <= max_x; ++px) {
             const float dx = (static_cast<float>(px) + 0.5f) - cx;
             const float dy = (static_cast<float>(py) + 0.5f) - cy;
-            if ((dx * dx + dy * dy) > (effective_radius_px * effective_radius_px)) {
+            const float ex = dx / radius_x;
+            const float ey = dy / radius_y;
+            if (ex * ex + ey * ey > 1.0f) {
                 continue;
             }
 
@@ -1237,8 +1507,9 @@ bool MeshPaintAdapter::updateNormalFromHeightArea(const Vec2& center_uv, float r
             if (idx >= normal_tex->pixels.size()) continue;
 
             // Re-calculate normal for this specific pixel from current height map state
-            // Use triangle info for geometry-aware scaling
-            Vec3 baked_bump = triangle_ ? buildNormalFromHeightGeometryAware(height_tex, *triangle_, px, py, strength)
+            // Use triangle info for geometry-aware scaling, sampling the same UV
+            // set the paint surface is bound to.
+            Vec3 baked_bump = triangle_ ? buildNormalFromHeightGeometryAware(height_tex, *triangle_, active_uv_set, px, py, strength)
                                         : buildNormalFromHeight(height_tex, px, py, strength);
 
             Vec3 base_normal = decodeNormalPixel(normal_tex->pixels[idx]);
@@ -1283,7 +1554,7 @@ PaintLayerStack& MeshPaintAdapter::ensureLayerStack() {
             PaintLayerData* base = existing.layerAt(0);
             if (base) {
                 bool has_any = false;
-                for (int ch = 0; ch < 6 && !has_any; ++ch)
+                for (int ch = 0; ch < static_cast<int>(kPaintChannelCount) && !has_any; ++ch)
                     has_any = base->hasPixels(static_cast<PaintChannel>(ch));
                 if (!has_any) {
                     PaintTextureSet* tex_set = getTextureSet();
@@ -1316,11 +1587,17 @@ PaintDirtyRect MeshPaintAdapter::paintLayerAtUV(int layer_index, PaintChannel ch
                                                 const Vec2& uv, const BrushSettings& brush, float dt,
                                                 float aspect_u, float aspect_v)
 {
-    (void)aspect_u;
-    (void)aspect_v;
     PaintDirtyRect dirty;
     PaintLayerStack* stack = getLayerStack();
     if (!stack) return dirty;
+
+    if (PaintTextureSet* tex_set = getTextureSet()) {
+        std::shared_ptr<Texture> texture = tex_set->getTexture(channel);
+        if (texture && texture->width > 0 && texture->height > 0 &&
+            (stack->width() != texture->width || stack->height() != texture->height)) {
+            stack->setResolution(texture->width, texture->height);
+        }
+    }
 
     PaintLayerData* layer = stack->layerAt(layer_index);
     if (!layer || layer->meta.locked || !layer->meta.visible) return dirty;
@@ -1337,10 +1614,25 @@ PaintDirtyRect MeshPaintAdapter::paintLayerAtUV(int layer_index, PaintChannel ch
     const float reference_res = 1024.0f;
     const float res_scale = static_cast<float>(width) / reference_res;
     const float radius_px = std::max(0.1f, brush.radius * res_scale);
-    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - radius_px)));
-    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + radius_px)));
-    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - radius_px)));
-    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + radius_px)));
+
+    // Per-axis pixel radius. Caller may pass overrides (e.g. for tools that
+    // already compute their own footprint); otherwise we derive one from the
+    // hit triangle's UV→world Jacobian so a circular brush in world space
+    // lands as an ellipse in texel space, preserving area.
+    float kx = aspect_u, ky = aspect_v;
+    if (triangle_ && std::abs(aspect_u - 1.0f) < 1e-6f && std::abs(aspect_v - 1.0f) < 1e-6f) {
+        float wpu = 1.0f, wpv = 1.0f;
+        const int uv_set = getTarget().uv_set;
+        computeTriangleUvJacobianLengths(*triangle_, uv_set, wpu, wpv);
+        computeBrushAxisCorrection(wpu, wpv, width, height, kx, ky);
+    }
+    const float radius_x = std::max(0.1f, radius_px * kx);
+    const float radius_y = std::max(0.1f, radius_px * ky);
+
+    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - radius_x)));
+    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + radius_x)));
+    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - radius_y)));
+    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + radius_y)));
     const float strength = std::clamp(brush.strength * brush.flow * dt * 60.0f, 0.0f, 1.0f);
 
     bool changed = false;
@@ -1348,14 +1640,14 @@ PaintDirtyRect MeshPaintAdapter::paintLayerAtUV(int layer_index, PaintChannel ch
         for (int px = min_x; px <= max_x; ++px) {
             const float dx = (static_cast<float>(px) + 0.5f) - center_x;
             const float dy = (static_cast<float>(py) + 0.5f) - center_y;
-            const float distance = std::sqrt(dx * dx + dy * dy);
-            if (distance > radius_px) continue;
+            const float nx = dx / radius_x;
+            const float ny = dy / radius_y;
+            const float dist_norm = std::sqrt(nx * nx + ny * ny);
+            if (dist_norm > 1.0f) continue;
 
-            const float nx = dx / radius_px;
-            const float ny = dy / radius_px;
             const float alpha_mask = sampleBrushMask(brush, nx, ny);
             const CompactVec4 brush_pixel = makeBrushTexturePixel(channel, brush, nx, ny);
-            const float weight = computeBrushWeight(distance, radius_px,
+            const float weight = computeBrushWeightNormalized(dist_norm, radius_px,
                                     std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * strength;
             if (weight <= 0.001f) continue;
 
@@ -1413,6 +1705,14 @@ PaintDirtyRect MeshPaintAdapter::cloneLayerAtUV(int layer_index, PaintChannel ch
     PaintLayerStack* stack = getLayerStack();
     if (!stack) return dirty;
 
+    if (PaintTextureSet* tex_set = getTextureSet()) {
+        std::shared_ptr<Texture> texture = tex_set->getTexture(channel);
+        if (texture && texture->width > 0 && texture->height > 0 &&
+            (stack->width() != texture->width || stack->height() != texture->height)) {
+            stack->setResolution(texture->width, texture->height);
+        }
+    }
+
     PaintLayerData* layer = stack->layerAt(layer_index);
     if (!layer || layer->meta.locked || !layer->meta.visible) return dirty;
 
@@ -1428,10 +1728,21 @@ PaintDirtyRect MeshPaintAdapter::cloneLayerAtUV(int layer_index, PaintChannel ch
     const float reference_res = 1024.0f;
     const float res_scale = static_cast<float>(width) / reference_res;
     const float radius_px = std::max(0.1f, brush.radius * res_scale);
-    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - radius_px)));
-    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + radius_px)));
-    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - radius_px)));
-    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + radius_px)));
+
+    float kx = 1.0f, ky = 1.0f;
+    if (triangle_) {
+        float wpu = 1.0f, wpv = 1.0f;
+        const int uv_set = getTarget().uv_set;
+        computeTriangleUvJacobianLengths(*triangle_, uv_set, wpu, wpv);
+        computeBrushAxisCorrection(wpu, wpv, width, height, kx, ky);
+    }
+    const float radius_x = std::max(0.1f, radius_px * kx);
+    const float radius_y = std::max(0.1f, radius_px * ky);
+
+    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - radius_x)));
+    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + radius_x)));
+    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - radius_y)));
+    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + radius_y)));
     const float strength = std::clamp(brush.strength * brush.flow * dt * 60.0f, 0.0f, 1.0f);
 
     // Source data: read from the layer's own pixels (clone within layer).
@@ -1442,13 +1753,13 @@ PaintDirtyRect MeshPaintAdapter::cloneLayerAtUV(int layer_index, PaintChannel ch
         for (int px = min_x; px <= max_x; ++px) {
             const float dx = (static_cast<float>(px) + 0.5f) - center_x;
             const float dy = (static_cast<float>(py) + 0.5f) - center_y;
-            const float distance = std::sqrt(dx * dx + dy * dy);
-            if (distance > radius_px) continue;
+            const float nx = dx / radius_x;
+            const float ny = dy / radius_y;
+            const float dist_norm = std::sqrt(nx * nx + ny * ny);
+            if (dist_norm > 1.0f) continue;
 
-            const float nx = dx / radius_px;
-            const float ny = dy / radius_px;
             const float alpha_mask = sampleBrushMask(brush, nx, ny);
-            const float weight = computeBrushWeight(distance, radius_px,
+            const float weight = computeBrushWeightNormalized(dist_norm, radius_px,
                                     std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * strength;
             if (weight <= 0.001f) continue;
 

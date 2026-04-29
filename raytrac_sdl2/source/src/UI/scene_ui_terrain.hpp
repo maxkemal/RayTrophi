@@ -1236,6 +1236,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         SceneUI::syncInstancesToScene(ctx, group, false);
                         // Trigger appropriate rebuilds depending on active render backend
                         const bool hasVulkanViewportPath = TerrainRenderBackendIsVulkan(ctx) || (g_viewport_backend != nullptr);
+                        g_viewport_raster_rebuild_pending = true;
                         if (ctx.render_settings.use_optix) {
                             g_optix_rebuild_pending = true;
                         } else if (ctx.render_settings.use_vulkan) {
@@ -1278,6 +1279,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                          group.clearInstances();
                          SceneUI::syncInstancesToScene(ctx, group, true);
                          const bool hasVulkanViewportPath_clear = TerrainRenderBackendIsVulkan(ctx) || (g_viewport_backend != nullptr);
+                         g_viewport_raster_rebuild_pending = true;
                          if (ctx.render_settings.use_optix) {
                              g_optix_rebuild_pending = true;
                          } else if (ctx.render_settings.use_vulkan) {
@@ -1405,6 +1407,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
 
                     // Trigger backend updates so Solid/Vulkan/Optix reflect deletion
                     const bool hasVulkanViewportPath_del = TerrainRenderBackendIsVulkan(ctx) || (g_viewport_backend != nullptr);
+                    g_viewport_raster_rebuild_pending = true;
                     if (ctx.render_settings.use_optix) {
                         g_optix_rebuild_pending = true;
                     } else if (ctx.render_settings.use_vulkan) {

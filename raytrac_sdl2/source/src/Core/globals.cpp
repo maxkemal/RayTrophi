@@ -2,6 +2,7 @@
 
 // Include new node system to verify compilation
 #include "NodeSystemV2.h"
+#include "Backend/SceneTextureManager.h"
 // Old TerrainNodes folder removed - now using TerrainNodesV2 directly
 
 std::atomic<int> completed_pixels(0);
@@ -28,6 +29,41 @@ bool g_hasOptix = false;
 bool g_hasVulkan = false;
 bool g_hasVulkanRT = false;
 bool g_hasCUDA = false;
+namespace {
+std::mutex g_sharedSceneTextureManagerMutex;
+std::shared_ptr<Backend::SceneTextureManager> g_sharedSceneTextureManager;
+}
+
+Backend::RenderBackendCapabilities captureRuntimeRenderCapabilities() {
+    Backend::RenderBackendCapabilities caps;
+    caps.hasVulkan = g_hasVulkan;
+    caps.hasMaterialPreview = g_hasVulkan;
+    caps.hasVulkanRT = g_hasVulkan && g_hasVulkanRT;
+    caps.hasOptix = g_hasOptix;
+    caps.hasCUDA = g_hasCUDA;
+    return caps;
+}
+std::shared_ptr<Backend::SceneTextureManager> getSharedSceneTextureManager() {
+    std::lock_guard<std::mutex> lock(g_sharedSceneTextureManagerMutex);
+    if (!g_sharedSceneTextureManager) {
+        g_sharedSceneTextureManager = std::make_shared<Backend::SceneTextureManager>();
+    }
+    return g_sharedSceneTextureManager;
+}
+
+void notifyOptixTextureDestroyed(int64_t textureId) {
+    if (textureId == 0) return;
+    // Use the existing instance only — never create a manager during a destroy notification
+    // (would be wasteful and risks reviving a singleton during shutdown).
+    std::shared_ptr<Backend::SceneTextureManager> mgr;
+    {
+        std::lock_guard<std::mutex> lock(g_sharedSceneTextureManagerMutex);
+        mgr = g_sharedSceneTextureManager;
+    }
+    if (mgr) {
+        mgr->clearOptixTextureId(textureId);
+    }
+}
 float last_render_time_ms = 0.0f;  // Render süresi buraya yazılacak
 int pending_width = 1280;
 int pending_height = 720;

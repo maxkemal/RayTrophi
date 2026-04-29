@@ -85,6 +85,8 @@ struct RayPayload {
     vec3  primaryAlbedo;
     vec3  primaryNormal;
     uint  primaryHit;
+    float primaryTransmission;
+    float primaryMetallic;
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -171,7 +173,15 @@ struct VkVolumeInstance {
     float ramp_colors_g[8];
     float ramp_colors_b[8];
     float pivot_offset[3];
-    float _ext_reserved[21];
+    int   source_type;
+    float cloud_coverage;
+    float cloud_detail;
+    float cloud_erosion;
+    float cloud_base_scale;
+    float cloud_edge_fade;
+    float cloud_offset_x;
+    float cloud_offset_z;
+    float _ext_reserved[13];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
@@ -322,29 +332,36 @@ float hash3D(vec3 p) {
     return fract((p.x + p.y) * p.z);
 }
 
+vec3 hash3Gradient(vec3 p) {
+    p = vec3(
+        dot(p, vec3(127.1, 311.7, 74.7)),
+        dot(p, vec3(269.5, 183.3, 246.1)),
+        dot(p, vec3(113.5, 271.9, 124.6))
+    );
+    return -1.0 + 2.0 * fract(sin(p) * 43758.5453);
+}
+
 float noise3D(vec3 p) {
     vec3 i = floor(p);
     vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f); // Smoothstep
-    
-    float n000 = hash3D(i + vec3(0, 0, 0));
-    float n100 = hash3D(i + vec3(1, 0, 0));
-    float n010 = hash3D(i + vec3(0, 1, 0));
-    float n110 = hash3D(i + vec3(1, 1, 0));
-    float n001 = hash3D(i + vec3(0, 0, 1));
-    float n101 = hash3D(i + vec3(1, 0, 1));
-    float n011 = hash3D(i + vec3(0, 1, 1));
-    float n111 = hash3D(i + vec3(1, 1, 1));
-    
-    float nx00 = mix(n000, n100, f.x);
-    float nx10 = mix(n010, n110, f.x);
-    float nx01 = mix(n001, n101, f.x);
-    float nx11 = mix(n011, n111, f.x);
-    
-    float nxy0 = mix(nx00, nx10, f.y);
-    float nxy1 = mix(nx01, nx11, f.y);
-    
-    return mix(nxy0, nxy1, f.z);
+    vec3 u = f * f * f * (f * (f * 6.0 - vec3(15.0)) + vec3(10.0));
+
+    float n000 = dot(hash3Gradient(i + vec3(0, 0, 0)), f - vec3(0, 0, 0));
+    float n100 = dot(hash3Gradient(i + vec3(1, 0, 0)), f - vec3(1, 0, 0));
+    float n010 = dot(hash3Gradient(i + vec3(0, 1, 0)), f - vec3(0, 1, 0));
+    float n110 = dot(hash3Gradient(i + vec3(1, 1, 0)), f - vec3(1, 1, 0));
+    float n001 = dot(hash3Gradient(i + vec3(0, 0, 1)), f - vec3(0, 0, 1));
+    float n101 = dot(hash3Gradient(i + vec3(1, 0, 1)), f - vec3(1, 0, 1));
+    float n011 = dot(hash3Gradient(i + vec3(0, 1, 1)), f - vec3(0, 1, 1));
+    float n111 = dot(hash3Gradient(i + vec3(1, 1, 1)), f - vec3(1, 1, 1));
+
+    float nx00 = mix(n000, n100, u.x);
+    float nx10 = mix(n010, n110, u.x);
+    float nx01 = mix(n001, n101, u.x);
+    float nx11 = mix(n011, n111, u.x);
+    float nxy0 = mix(nx00, nx10, u.y);
+    float nxy1 = mix(nx01, nx11, u.y);
+    return mix(nxy0, nxy1, u.z) * 0.5 + 0.5;
 }
 
 float fbmNoise(vec3 p, int octaves) {
@@ -358,6 +375,43 @@ float fbmNoise(vec3 p, int octaves) {
         amplitude *= 0.5;
     }
     return value;
+}
+
+float proceduralCloudDensity(VkVolumeInstance vol, vec3 localPos) {
+    vec3 span = max(vol.aabb_max - vol.aabb_min, vec3(1e-5));
+    vec3 normPos = clamp((localPos - vol.aabb_min) / span, vec3(0.0), vec3(1.0));
+    float baseScale = max(vol.cloud_base_scale, 1.0);
+    vec3 cloudCoord = vec3(
+        normPos.x * baseScale + vol.cloud_offset_x,
+        normPos.y * 1.35,
+        normPos.z * baseScale + vol.cloud_offset_z);
+
+    float coverage = clamp(vol.cloud_coverage, 0.0, 1.0);
+    float detail = clamp(vol.cloud_detail, 0.0, 1.0);
+    float erosion = clamp(vol.cloud_erosion, 0.0, 1.0);
+
+    float warpX = fbmNoise(vec3(cloudCoord.x * 0.38, cloudCoord.y * 0.16, cloudCoord.z * 0.38) + vec3(11.0, 0.0, 7.0), 2) - 0.5;
+    float warpZ = fbmNoise(vec3(cloudCoord.x * 0.38, cloudCoord.y * 0.16, cloudCoord.z * 0.38) + vec3(41.0, 3.0, 23.0), 2) - 0.5;
+    vec3 warped = cloudCoord + vec3(warpX * 1.35, 0.0, warpZ * 1.35);
+
+    float base = fbmNoise(vec3(warped.x * 0.52, warped.y * 0.28, warped.z * 0.52), 4);
+    float billow = 1.0 - abs(fbmNoise(vec3(warped.x * 1.15, warped.y * 0.5, warped.z * 1.15) + vec3(17.0, 3.0, 11.0), 4) * 2.0 - 1.0);
+    float detailNoise = fbmNoise(warped * mix(2.8, 7.0, detail) + vec3(31.0, 7.0, 19.0), 2);
+
+    float puffy = smoothstep(0.32, 0.88, billow);
+    float shape = mix(base, base * 0.45 + puffy * 0.75, 0.72);
+    shape -= detailNoise * mix(0.06, 0.28, erosion);
+
+    float threshold = mix(0.78, 0.30, coverage);
+    float density = max((shape - threshold) / max(1.0 - threshold, 1e-4), 0.0);
+
+    float bottom = smoothstep(0.12, 0.42, normPos.y);
+    float top = 1.0 - smoothstep(0.72, 1.02, normPos.y);
+    float heightProfile = bottom * top;
+
+    vec3 edge = vec3(0.5) - abs(normPos - vec3(0.5));
+    float edgeFalloff = smoothstep(0.0, max(vol.cloud_edge_fade, 0.02), min(edge.x, edge.z));
+    return density * density * heightProfile * edgeFalloff * 4.6;
 }
 
 // ============================================================
@@ -561,6 +615,8 @@ float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
             vec3 edgeDist = vec3(0.5) - abs(normPos - vec3(0.5));
             density *= smoothstep(0.0, 0.1, min(min(edgeDist.x, edgeDist.y), edgeDist.z));
         }
+    } else if (vol.volume_type == 3 || vol.source_type == 3) {
+        density = proceduralCloudDensity(vol, localPos);
     }
     
     // Apply density remap (No upper clamp, matches OptiX fmaxf)
@@ -754,8 +810,10 @@ void main() {
     float scatterT = tFar; // will be set if scatter event happens
     vec3 ambientSky = sampleSkyAmbient(rayDir);
 
-    // Jitter first sample to reduce banding
-    float t = tNear + rnd(payload.seed) * baseStep;
+    // Jitter first sample to reduce banding. Mix in ray state so horizon rays do
+    // not share coherent step planes across neighboring pixels.
+    float rayJitter = fract(sin(dot(rayOrigin + rayDir * 17.0, vec3(12.9898, 78.233, 37.719)) + float(payload.seed) * 0.000173) * 43758.5453);
+    float t = tNear + rayJitter * baseStep;
     int step = 0;
     while (t < tFar && step < maxSteps) {
         vec3  samplePos = rayOrigin + rayDir * t;
@@ -946,7 +1004,6 @@ void main() {
     // Accumulated in-scattered radiance
     payload.radiance  = accumulated_radiance;
     payload.skipAABBs = false; // default; overridden below if solid found
-
     // ── Solid surface found inside the volume: hand off to closesthit ──
     // March was already clamped to solidT. Now position the scatter ray
     // just before the solid surface and tell raygen to skip AABBs next
@@ -959,6 +1016,16 @@ void main() {
         payload.hitEmissive   = false;
         payload.skipAABBs     = true;
         return;
+    }
+
+    float volumeContribution = max(max(accumulated_radiance.r, accumulated_radiance.g), accumulated_radiance.b);
+    bool primaryVolumeInteraction = didScatter || (1.0 - transmittance) > 0.01 || volumeContribution > 1e-5;
+    if (payload.primaryHit == 0u && primaryVolumeInteraction) {
+        payload.primaryAlbedo = vol.scatter_color;
+        payload.primaryNormal = -rayDir;
+        payload.primaryHit = 1u;
+        payload.primaryTransmission = transmittance;
+        payload.primaryMetallic = 0.0;
     }
 
     if (didScatter && transmittance < 0.99) {

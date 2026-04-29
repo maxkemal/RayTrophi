@@ -105,6 +105,17 @@ Backend::IViewportBackend* getSceneUiViewportBackend(UIContext& ctx) {
     return dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr);
 }
 
+void resetSceneUiSamplingAccumulation(UIContext& ctx) {
+    Backend::IBackend* renderBackend = getSceneUiRenderBackend(ctx);
+    Backend::IViewportBackend* viewportBackend = getSceneUiViewportBackend(ctx);
+    if (renderBackend) {
+        renderBackend->resetAccumulation();
+    }
+    if (viewportBackend && viewportBackend != renderBackend) {
+        viewportBackend->resetAccumulation();
+    }
+}
+
 bool sceneUiRenderBackendIsVulkan(UIContext& ctx) {
     return dynamic_cast<Backend::VulkanBackendAdapter*>(getSceneUiRenderBackend(ctx)) != nullptr;
 }
@@ -1506,12 +1517,17 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
 
     if (UIWidgets::BeginSection("Sampling & Quality", ImVec4(0.5f, 0.9f, 0.6f, 1.0f))) {
         UIWidgets::ColoredHeader("Viewport Sampling", ImVec4(0.84f, 0.94f, 0.86f, 1.0f));
-        ImGui::Checkbox("Use Adaptive Sampling##view", &ctx.render_settings.use_adaptive_sampling);
+        bool sampling_changed = false;
+        sampling_changed |= ImGui::Checkbox("Use Adaptive Sampling##view", &ctx.render_settings.use_adaptive_sampling);
         if (ctx.render_settings.use_adaptive_sampling) {
-            ImGui::DragFloat("Noise Threshold", &ctx.render_settings.variance_threshold, 0.001f, 0.001f, 0.8f, "%.3f");
-            ImGui::DragInt("Min Samples##view", &ctx.render_settings.min_samples, 1, 1, 512);
+            sampling_changed |= ImGui::DragFloat("Noise Threshold", &ctx.render_settings.variance_threshold, 0.001f, 0.001f, 0.8f, "%.3f");
+            sampling_changed |= ImGui::DragInt("Min Samples##view", &ctx.render_settings.min_samples, 1, 1, 512);
         }
-        ImGui::DragInt("Max Samples##view", &ctx.render_settings.max_samples, 1, 1, 10000);
+        sampling_changed |= ImGui::DragInt("Max Samples##view", &ctx.render_settings.max_samples, 1, 1, 10000);
+        if (sampling_changed) {
+            ctx.start_render = true;
+            resetSceneUiSamplingAccumulation(ctx);
+        }
 
         UIWidgets::Divider();
         UIWidgets::ColoredHeader("Raster Viewport Quality", ImVec4(0.96f, 0.84f, 0.58f, 1.0f));
@@ -2217,12 +2233,17 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     // ─────────────────────────────────────────────────────────────────────────
                     if (UIWidgets::BeginSection("Sampling", ImVec4(0.5f, 0.9f, 0.6f, 1.0f))) {
                         UIWidgets::ColoredHeader("Viewport", ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
-                        ImGui::Checkbox("Use Adaptive Sampling##view", &ctx.render_settings.use_adaptive_sampling);
+                        bool sampling_changed = false;
+                        sampling_changed |= ImGui::Checkbox("Use Adaptive Sampling##view", &ctx.render_settings.use_adaptive_sampling);
                         if (ctx.render_settings.use_adaptive_sampling) {
-                            ImGui::DragFloat("Noise Threshold", &ctx.render_settings.variance_threshold, 0.001f, 0.001f, 0.8f, "%.3f");
-                            ImGui::DragInt("Min Samples##view", &ctx.render_settings.min_samples, 1, 1, 512);
+                            sampling_changed |= ImGui::DragFloat("Noise Threshold", &ctx.render_settings.variance_threshold, 0.001f, 0.001f, 0.8f, "%.3f");
+                            sampling_changed |= ImGui::DragInt("Min Samples##view", &ctx.render_settings.min_samples, 1, 1, 512);
                         }
-                        ImGui::DragInt("Max Samples##view", &ctx.render_settings.max_samples, 1, 1, 10000);
+                        sampling_changed |= ImGui::DragInt("Max Samples##view", &ctx.render_settings.max_samples, 1, 1, 10000);
+                        if (sampling_changed) {
+                            ctx.start_render = true;
+                            resetSceneUiSamplingAccumulation(ctx);
+                        }
                         
                         UIWidgets::Divider();
                         UIWidgets::ColoredHeader("Final Render (F12)", ImVec4(0.7f, 0.7f, 0.7f, 1.0f));

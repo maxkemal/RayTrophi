@@ -17,43 +17,6 @@
 #include <algorithm> // For std::min, std::max
 #include "AtmosphereLUT.h"
 #include "GodRaysModel.h"
-// Helper for cloud transmittance (placeholder implementation based on original code)
-static float determine_cloud_transmittance(const WorldData& world, const Vec3& origin, const Vec3& dir, float maxDist) {
-    if (!world.nishita.clouds_enabled && !world.nishita.cloud_layer2_enabled) return 1.0f;
-    if (std::abs(dir.y) < 1e-6f) return 1.0f;
-
-    float cloud_trans = 1.0f;
-
-    // Check layer 1
-    if (world.nishita.clouds_enabled) {
-        float minH = world.nishita.cloud_height_min;
-        float maxH = world.nishita.cloud_height_max;
-        float t0 = (minH - origin.y) / dir.y;
-        float t1 = (maxH - origin.y) / dir.y;
-        float t_enter = std::min(t0, t1);
-        float t_exit = std::max(t0, t1);
-
-        t_enter = std::max(t_enter, 0.0f);
-        t_exit = std::min(t_exit, maxDist);
-
-        if (t_exit > t_enter) {
-            // CPU simplified check: just check middle point to save perf
-            float mid_t = (t_enter + t_exit) * 0.5f;
-            Vec3 p = origin + dir * mid_t;
-            float scale = 0.003f / std::max(0.1f, world.nishita.cloud_scale);
-
-            // Simple noise approximation
-            float coverage = world.nishita.cloud_coverage;
-            float val = (std::sin(p.x * scale * 0.5f) + std::sin(p.z * scale * 0.5f)) * 0.5f + 0.5f; // Very rough
-
-            if (val < coverage) {
-                float dist = t_exit - t_enter;
-                cloud_trans *= std::exp(-dist * world.nishita.cloud_density * 0.5f);
-            }
-        }
-    }
-    return cloud_trans;
-}
 
 static Vec3 get_sun_color(float sun_elevation) {
     if (sun_elevation < -0.1f) {
@@ -74,7 +37,7 @@ static Vec3 get_sun_color(float sun_elevation) {
         return orangeColor * (1.0f - t) + goldenColor * t;
     }
     else { // Just around horizon
-        float t = std::max(0.0f, 1.0f + sun_elevation * 5.0f);
+        float t = (std::max)(0.0f, 1.0f + sun_elevation * 5.0f);
         Vec3 redColor = Vec3(0.8f, 0.3f, 0.1f);
         Vec3 orangeColor = Vec3(1.0f, 0.6f, 0.3f);
         return redColor * (1.0f - t) + orangeColor * t;
@@ -82,6 +45,121 @@ static Vec3 get_sun_color(float sun_elevation) {
 }
 
 static Vec3 to_vec3(const float3& v) { return Vec3(v.x, v.y, v.z); }
+
+namespace {
+constexpr const char* kInternalSkyCloudVolumeName = "__RayTrophi_Internal_SkyCloudVolume";
+
+float clamp01(float v) {
+    return (std::max)(0.0f, (std::min)(1.0f, v));
+}
+
+std::shared_ptr<VDBVolume> findInternalSkyCloudVolume(SceneData& scene) {
+    for (const auto& vdb : scene.vdb_volumes) {
+        if (vdb && vdb->name == kInternalSkyCloudVolumeName) {
+            return vdb;
+        }
+    }
+    return nullptr;
+}
+
+void removeInternalSkyCloudVolume(SceneData& scene, const std::shared_ptr<VDBVolume>& volume) {
+    if (!volume) return;
+    scene.vdb_volumes.erase(
+        std::remove(scene.vdb_volumes.begin(), scene.vdb_volumes.end(), volume),
+        scene.vdb_volumes.end());
+    scene.world.objects.erase(
+        std::remove(scene.world.objects.begin(), scene.world.objects.end(), volume),
+        scene.world.objects.end());
+}
+
+bool ensureInternalSkyCloudVolume(SceneData& scene, const WorldData& worldData) {
+    const auto& n = worldData.nishita;
+    const bool enabled = (worldData.mode == WORLD_MODE_NISHITA) &&
+                         ((n.clouds_enabled != 0 && n.cloud_coverage > 0.001f && n.cloud_density > 0.001f) ||
+                          (n.cloud_layer2_enabled != 0 && n.cloud2_coverage > 0.001f && n.cloud2_density > 0.001f));
+
+    auto volume = findInternalSkyCloudVolume(scene);
+    if (!enabled) {
+        if (volume) {
+            removeInternalSkyCloudVolume(scene, volume);
+            return true;
+        }
+        return false;
+    }
+
+    const bool created = !volume;
+    if (!volume) {
+        volume = std::make_shared<VDBVolume>();
+        volume->name = kInternalSkyCloudVolumeName;
+        volume->visible = true;
+        scene.vdb_volumes.push_back(volume);
+        scene.world.objects.push_back(volume);
+    } else if (std::find(scene.world.objects.begin(), scene.world.objects.end(), volume) == scene.world.objects.end()) {
+        scene.world.objects.push_back(volume);
+    }
+
+    float minH = n.cloud_height_min;
+    float maxH = n.cloud_height_max;
+    float coverage = n.cloud_coverage;
+    float density = n.cloud_density;
+    float scale = n.cloud_scale;
+    int maxSteps = n.cloud_base_steps;
+    int shadowSteps = n.cloud_light_steps;
+    float shadowStrength = n.cloud_shadow_strength;
+    float absorption = n.cloud_absorption;
+
+    if (n.cloud_layer2_enabled && (!n.clouds_enabled || n.cloud2_density > density)) {
+        minH = n.cloud2_height_min;
+        maxH = n.cloud2_height_max;
+        coverage = n.cloud2_coverage;
+        density = n.cloud2_density;
+        scale = n.cloud2_scale;
+    }
+
+    if (maxH <= minH + 1.0f) maxH = minH + 100.0f;
+    const float thickness = (std::max)(1.0f, maxH - minH);
+    const float extent = (std::max)(50000.0f, (std::min)(500000.0f, maxH * 20.0f + thickness * 40.0f));
+
+    Vec3 boundsMin(-extent, minH, -extent);
+    Vec3 boundsMax( extent, maxH,  extent);
+    const Vec3 oldMin = volume->getLocalBoundsMin();
+    const Vec3 oldMax = volume->getLocalBoundsMax();
+    const bool boundsChanged =
+        std::abs(oldMin.x - boundsMin.x) > 0.01f || std::abs(oldMin.y - boundsMin.y) > 0.01f ||
+        std::abs(oldMin.z - boundsMin.z) > 0.01f || std::abs(oldMax.x - boundsMax.x) > 0.01f ||
+        std::abs(oldMax.y - boundsMax.y) > 0.01f || std::abs(oldMax.z - boundsMax.z) > 0.01f;
+
+    volume->setProceduralVolumeBounds(boundsMin, boundsMax);
+    volume->setTransform(Matrix4x4::identity());
+    volume->density_scale = (std::max)(0.0f, density);
+    volume->voxel_size = (std::max)(1.0f, 24.0f / (std::max)(0.1f, scale));
+
+    auto shader = volume->getOrCreateShader();
+    shader->name = "World Sky Cloud Volume";
+    shader->density.multiplier = (std::max)(0.0f, density);
+    // Coverage is baked into the procedural cloud density source. Keep the
+    // material remap neutral so all backends treat it like a normal volume.
+    shader->density.remap_low = 0.0f;
+    shader->density.remap_high = 1.0f;
+    shader->scattering.color = Vec3(1.0f);
+    shader->scattering.coefficient = 0.0045f;
+    shader->scattering.anisotropy = clamp01(n.cloud_anisotropy);
+    shader->scattering.anisotropy_back = (std::max)(-0.99f, (std::min)(0.0f, n.cloud_anisotropy_back));
+    shader->scattering.lobe_mix = clamp01(n.cloud_lobe_mix);
+    shader->scattering.multi_scatter = clamp01(n.cloud_silver_intensity * 0.35f);
+    shader->absorption.color = Vec3(0.85f, 0.9f, 1.0f);
+    shader->absorption.coefficient = 0.00008f * (std::max)(0.2f, absorption);
+    shader->emission.mode = n.cloud_emissive_intensity > 0.001f ? VolumeEmissionMode::Constant : VolumeEmissionMode::None;
+    shader->emission.color = Vec3(n.cloud_emissive_color.x, n.cloud_emissive_color.y, n.cloud_emissive_color.z);
+    shader->emission.intensity = n.cloud_emissive_intensity * 4.0f;
+    shader->quality.step_size = (std::max)(18.0f, thickness / (std::max)(6, (int)(maxSteps * 0.75f)));
+    shader->quality.max_steps = (std::max)(6, (int)(maxSteps * 0.45f));
+    shader->quality.shadow_steps = (std::max)(0, (int)(shadowSteps * 0.5f));
+    shader->quality.shadow_strength = (std::max)(0.0f, shadowStrength);
+
+    return created || boundsChanged;
+}
+}
 
 // ============================================================================
 // GOD RAYS (CPU) — OptiX GPU calculate_volumetric_god_rays ile birebir eşleşme
@@ -124,7 +202,7 @@ Vec3 VolumetricRenderer::calculateGodRays(const SceneData& scene, const WorldDat
     // is available, but still modulate with the LUT if present for physical reddening.
     Vec3 sunRadianceBase = get_sun_color(sunDir.y) * nishita.sun_intensity * GodRaysModel::kSunRadianceScale;
     if (lut) {
-        float3 st = lut->sampleTransmittance(std::max(0.01f, sunDir.y), nishita.altitude, nishita.atmosphere_height);
+        float3 st = lut->sampleTransmittance((std::max)(0.01f, sunDir.y), nishita.altitude, nishita.atmosphere_height);
         sunRadianceBase = sunRadianceBase * Vec3(st.x, st.y, st.z);
     }
 
@@ -151,11 +229,6 @@ Vec3 VolumetricRenderer::calculateGodRays(const SceneData& scene, const WorldDat
             if (sigma_t > 1e-6f) {
                 // Solid shadow test
                 float occlusion = determineSunTransmittance(samplePos, sunDir, 100000.0f, bvh, scene, world_data);
-
-                // Cloud occlusion
-                if (occlusion > 0.001f) {
-                    occlusion *= determine_cloud_transmittance(world_data, samplePos, sunDir, 10000.0f);
-                }
 
                 if (occlusion > 0.001f) {
                     // === MATCH GPU inscatter formula exactly ===
@@ -213,10 +286,15 @@ float VolumetricRenderer::determineSunTransmittance(const Vec3& origin, const Ve
 // ============================================================================
 // GPU SYNC
 // ============================================================================
-void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend* backend) {
+void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend* backend, const WorldData* world_data) {
     // Allow sync for both OptiX (CUDA) and Vulkan backends.
     // Legacy CUDA texture gas volumes are still guarded by g_hasCUDA below.
+    const bool skyCloudVolumeChanged = world_data && ensureInternalSkyCloudVolume(scene, *world_data);
     if (!backend) return;
+
+    if (skyCloudVolumeChanged) {
+        backend->updateGeometry(scene.world.objects);
+    }
 
     // 1. Prepare VDB Volumes (Unified for VDB and Unified-Path Gas)
     std::vector<GpuVDBVolume> gpu_vdb_volumes;
@@ -228,11 +306,12 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
 
         GpuVDBVolume gv = {};
         gv.vdb_id = vdb->getVDBVolumeID();
-        gv.density_grid = mgr.getGPUGrid(gv.vdb_id);
-        gv.temperature_grid = mgr.getGPUTemperatureGrid(gv.vdb_id);
+        const bool proceduralVolume = vdb->isProceduralVolume();
+        gv.density_grid = proceduralVolume ? nullptr : mgr.getGPUGrid(gv.vdb_id);
+        gv.temperature_grid = proceduralVolume ? nullptr : mgr.getGPUTemperatureGrid(gv.vdb_id);
 
         // Allow Vulkan path: density_grid is null (no CUDA), but host grid exists for Vulkan upload
-        if (!gv.density_grid && !mgr.getHostGrid(gv.vdb_id)) continue;
+        if (!proceduralVolume && !gv.density_grid && !mgr.getHostGrid(gv.vdb_id)) continue;
 
         Matrix4x4 m = vdb->getTransform();
         Matrix4x4 inv = vdb->getInverseTransform();
@@ -252,6 +331,33 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         gv.pivot_offset[0] = 0.0f;
         gv.pivot_offset[1] = 0.0f;
         gv.pivot_offset[2] = 0.0f;
+        gv.source_type = proceduralVolume ? 3 : 0;
+        gv.cloud_coverage = 1.0f;
+        gv.cloud_detail = 1.0f;
+        gv.cloud_erosion = 0.5f;
+        gv.cloud_base_scale = (std::max)(1.0f, vdb->getVoxelSize());
+        gv.cloud_edge_fade = 0.08f;
+        gv.cloud_offset_x = 0.0f;
+        gv.cloud_offset_z = 0.0f;
+
+        if (proceduralVolume && world_data) {
+            const auto& n = world_data->nishita;
+            float coverage = n.cloud_coverage;
+            float density = n.cloud_density;
+            float scale = n.cloud_scale;
+            if (n.cloud_layer2_enabled && (!n.clouds_enabled || n.cloud2_density > density)) {
+                coverage = n.cloud2_coverage;
+                density = n.cloud2_density;
+                scale = n.cloud2_scale;
+            }
+            gv.cloud_coverage = clamp01(coverage);
+            gv.cloud_detail = clamp01(n.cloud_detail);
+            gv.cloud_erosion = clamp01(1.0f - coverage);
+            gv.cloud_base_scale = (std::max)(8.0f, (std::min)(72.0f, 10.0f / (std::max)(0.1f, scale)));
+            gv.cloud_edge_fade = 0.08f;
+            gv.cloud_offset_x = n.cloud_offset_x * 0.00002f;
+            gv.cloud_offset_z = n.cloud_offset_z * 0.00002f;
+        }
 
         // Shader
         auto shader = vdb->volume_shader; 
@@ -318,7 +424,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         // Allow Vulkan path: density_grid is null (no CUDA), but host grid exists for Vulkan upload
         if (!gv.density_grid && !mgr.getHostGrid(gv.vdb_id)) continue;
 
-        auto trans = gas->getTransformHandle();
+        Transform* trans = gas->getTransformPtr();
         Matrix4x4 m = trans ? trans->getFinal() : Matrix4x4::identity();
         
         // PHYSICAL SIZE SYNC
@@ -368,7 +474,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
 
             // Color Ramp
             gv.color_ramp_enabled = shader->emission.color_ramp.enabled ? 1 : 0;
-            gv.ramp_stop_count = static_cast<int>(std::min(shader->emission.color_ramp.stops.size(), static_cast<size_t>(8)));
+            gv.ramp_stop_count = static_cast<int>((std::min)(shader->emission.color_ramp.stops.size(), static_cast<size_t>(8)));
             for (int i = 0; i < gv.ramp_stop_count; ++i) {
                 gv.ramp_positions[i] = shader->emission.color_ramp.stops[i].position;
                 gv.ramp_colors[i] = make_float3(
@@ -399,7 +505,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         gv.temperature_texture = (cudaTextureObject_t)gas->getTemperatureTexture();
         gv.has_texture = (gv.density_texture != 0) ? 1 : 0;
 
-        auto trans = gas->getTransformHandle();
+        Transform* trans = gas->getTransformPtr();
         if (trans) {
             Matrix4x4 mat = trans->getFinal();
             Matrix4x4 inv = mat.inverse();
@@ -438,7 +544,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
 
             // Color Ramp (Legacy)
             gv.color_ramp_enabled = shader->emission.color_ramp.enabled ? 1 : 0;
-            gv.ramp_stop_count = static_cast<int>(std::min(shader->emission.color_ramp.stops.size(), static_cast<size_t>(8)));
+            gv.ramp_stop_count = static_cast<int>((std::min)(shader->emission.color_ramp.stops.size(), static_cast<size_t>(8)));
             for (int i = 0; i < gv.ramp_stop_count; ++i) {
                 gv.ramp_positions[i] = shader->emission.color_ramp.stops[i].position;
                 gv.ramp_colors[i] = make_float3(
@@ -477,21 +583,21 @@ Vec3 VolumetricRenderer::applyAerialPerspective(const SceneData& scene, const Wo
     float current_altitude = p.length() - Rg;
     Vec3 up = p / (Rg + current_altitude);
     
-    float cosTheta = std::max(0.01f, Vec3::dot(up, dir));
+    float cosTheta = (std::max)(0.01f, Vec3::dot(up, dir));
     float3 trans3 = lut->sampleTransmittance(cosTheta, current_altitude, world_data.nishita.atmosphere_height);
     Vec3 transmittance(trans3.x, trans3.y, trans3.z);
     
     // Matched to GPU density scaling
     float densityFactor = 1.0f + world_data.nishita.fog_density * 300.0f;
-    float clampedDist = std::min(dist, 1000000.0f);
+    float clampedDist = (std::min)(dist, 1000000.0f);
     float effectiveDist = clampedDist * densityFactor;
     
     const float min_dist = world_data.advanced.aerial_min_distance;
     const float max_dist = world_data.advanced.aerial_max_distance;
-    float ramp = (clampedDist < min_dist) ? 0.0f : std::min(1.0f, (clampedDist - min_dist) / std::max(1.0f, max_dist - min_dist));
+    float ramp = (clampedDist < min_dist) ? 0.0f : (std::min)(1.0f, (clampedDist - min_dist) / (std::max)(1.0f, max_dist - min_dist));
     
     // 20km -> 10km scale matched to GPU
-    float distFactor = std::min(1.0f, effectiveDist / 10000.0f);
+    float distFactor = (std::min)(1.0f, effectiveDist / 10000.0f);
     distFactor *= (ramp * ramp);
 
     Vec3 finalTrans(
@@ -500,7 +606,7 @@ Vec3 VolumetricRenderer::applyAerialPerspective(const SceneData& scene, const Wo
         powf(transmittance.z, distFactor)
     );
     
-    float3 lookupDir = make_float3(dir.x, std::max(0.0f, dir.y), dir.z);
+    float3 lookupDir = make_float3(dir.x, (std::max)(0.0f, dir.y), dir.z);
     float3 skyRadiance3 = lut->sampleSkyView(lookupDir, world_data.nishita.sun_direction, Rg, Rg + world_data.nishita.atmosphere_height);
     Vec3 skyRadiance(skyRadiance3.x, skyRadiance3.y, skyRadiance3.z);
     

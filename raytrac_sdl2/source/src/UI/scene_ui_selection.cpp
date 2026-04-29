@@ -1,4 +1,4 @@
-// ===============================================================================
+﻿// ===============================================================================
 // SCENE UI - SELECTION & INTERACTION
 // ===============================================================================
 // This file handles Mouse picking, Marquee selection, and Delete operations.
@@ -282,14 +282,14 @@ void SceneUI::handleMarqueeSelection(UIContext& ctx) {
 
             // IMPORTANT: Check if all triangles share the same TransformHandle
             // Procedural objects may have separate transforms per triangle
-            auto firstHandle = triangles[0].second->getTransformHandle();
+            Transform* firstHandle = triangles[0].second->getTransformPtr();
             bool all_same_transform = true;
 
             // Performance: for objects with many triangles, only sample a few
             const size_t check_limit = std::min(triangles.size(), (size_t)16);
             for (size_t i = 1; i < check_limit && all_same_transform; ++i) {
-                auto handle = triangles[i].second->getTransformHandle();
-                if (handle.get() != firstHandle.get()) {
+                Transform* handle = triangles[i].second->getTransformPtr();
+                if (handle != firstHandle) {
                     all_same_transform = false;
                 }
             }
@@ -531,7 +531,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             if (mesh_cache_valid) {
                 for (auto& [obj_name, tris] : mesh_cache) {
                     if (tris.empty()) continue;
-                    if (!tris[0].second->getTransformHandle()) continue;
+                    if (!tris[0].second->getTransformPtr()) continue;
                     bool synced_instance_transform = false;
                     for (auto& pair : tris) {
                         const int object_index = pair.first;
@@ -562,7 +562,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     const auto& obj = ctx.scene.world.objects[si];
                     if (!obj) continue;
                     auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                    if (tri && tri->getTransformHandle()) {
+                    if (tri && tri->getTransformPtr()) {
                         tri->updateTransformedVertices();
                         ++synced_objects;
                         continue;
@@ -574,7 +574,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     }
                     if (inst && inst->source_triangles) {
                         for (auto& srcTri : *inst->source_triangles) {
-                            if (srcTri && srcTri->getTransformHandle()) {
+                            if (srcTri && srcTri->getTransformPtr()) {
                                 srcTri->updateTransformedVertices();
                             }
                         }
@@ -1603,8 +1603,8 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
 
             // Create Unique Transform
             std::shared_ptr<Transform> newTransform = std::make_shared<Transform>();
-            if (item.object->getTransformHandle()) {
-                *newTransform = *item.object->getTransformHandle();
+            if (Transform* th = item.object->getTransformPtr()) {
+                *newTransform = *th;
             }
 
             // Duplicate Triangles - search by targetName
@@ -1645,7 +1645,7 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
                 newItem.object_index = (int)ctx.scene.world.objects.size() + (int)allNewTriangles.size() - 1;
                 newItem.name = newName;
                 
-                if (auto th = firstNewTri->getTransformHandle()) {
+                if (Transform* th = firstNewTri->getTransformPtr()) {
                     Matrix4x4 pivotMat = th->getPivotMatrix();
                     newItem.position = Vec3(pivotMat.m[0][3], pivotMat.m[1][3], pivotMat.m[2][3]);
                 } else {

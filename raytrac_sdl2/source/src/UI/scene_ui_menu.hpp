@@ -27,6 +27,12 @@
 #include "SceneExporter.h" // For GLTF Export
 #include "GasVolume.h"     // For Gas Volume creation
 #include <filesystem>
+#include <thread>
+#include <atomic>
+#include <future>
+#include <deque>
+#include <algorithm>
+#include <unordered_set>
 #ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
@@ -39,6 +45,72 @@ extern bool g_viewport_raster_rebuild_pending;
 extern std::unique_ptr<Backend::IBackend> g_backend;
 
 namespace {
+    std::atomic<bool>  s_bakeRunning{false};
+    std::atomic<int>   s_bakeDone{0};
+    std::atomic<int>   s_bakeTotal{0};
+    std::atomic<bool>  s_bakeNeedsHotReload{false};
+
+    // Launched in a detached thread. Iterates all materials and builds
+    // compressed DDS cache for every eligible texture slot.
+    void runTextureBakeThread() {
+        const auto& mats = MaterialManager::getInstance().getAllMaterials();
+
+        struct BakeSlot { std::shared_ptr<Texture> tex; TextureType type; bool srgb; };
+        std::vector<BakeSlot> slots;
+        slots.reserve(mats.size() * 5);
+
+        // Deduplicate by (path, type): same texture shared across materials must only
+        // be compressed once. Without this, two concurrent threads write the same DDS
+        // simultaneously → file corruption + wasted work.
+        std::unordered_set<std::string> seen;
+        for (const auto& mat : mats) {
+            if (!mat) continue;
+            auto addSlot = [&](const MaterialProperty& prop, TextureType t, bool sg) {
+                if (!prop.texture || prop.texture->name.empty() || prop.texture->pixels.empty()) return;
+                const std::string key = prop.texture->name + '|' + std::to_string(static_cast<int>(t));
+                if (!seen.insert(key).second) return; // already queued
+                slots.push_back({prop.texture, t, sg});
+            };
+            addSlot(mat->albedoProperty,    TextureType::Albedo,    mat->albedoProperty.texture ? mat->albedoProperty.texture->is_srgb : false);
+            addSlot(mat->normalProperty,    TextureType::Normal,    false);
+            addSlot(mat->roughnessProperty, TextureType::Roughness, false);
+            addSlot(mat->metallicProperty,  TextureType::Metallic,  false);
+            addSlot(mat->opacityProperty,   TextureType::Opacity,   false);
+            if (mat->emissionProperty.texture && !mat->emissionProperty.texture->is_hdr)
+                addSlot(mat->emissionProperty, TextureType::Emission, false);
+        }
+
+        // Sort small → large so progress advances quickly at first and large
+        // textures are deferred to the end where the wait is more expected.
+        std::sort(slots.begin(), slots.end(), [](const BakeSlot& a, const BakeSlot& b) {
+            return (a.tex->width * a.tex->height) < (b.tex->width * b.tex->height);
+        });
+
+        s_bakeTotal.store(static_cast<int>(slots.size()), std::memory_order_release);
+        s_bakeDone.store(0, std::memory_order_release);
+
+        // 2 concurrent textures: each uses TEX_COMPRESS_PARALLEL internally,
+        // so total threads ≈ 2 × core count — acceptable without severe contention.
+        const size_t MAX_PARALLEL = 2;
+        std::deque<std::future<void>> inflight;
+        for (const auto& slot : slots) {
+            // Drain oldest future when at capacity
+            if (inflight.size() >= MAX_PARALLEL) {
+                inflight.front().wait();
+                inflight.pop_front();
+            }
+            inflight.push_back(std::async(std::launch::async, [slot]() {
+                TextureCompressedCacheCandidate cand;
+                tryBuildCompressedTextureCache(*slot.tex, slot.type, slot.srgb, cand);
+                s_bakeDone.fetch_add(1, std::memory_order_release);
+            }));
+        }
+        for (auto& f : inflight) f.wait();
+
+        s_bakeNeedsHotReload.store(true, std::memory_order_release);
+        s_bakeRunning.store(false, std::memory_order_release);
+    }
+
     void openFolderInExplorer(const std::filesystem::path& folder) {
 #ifdef _WIN32
         ShellExecuteW(nullptr, L"open", folder.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -193,7 +265,31 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                 }
 
                 ImGui::Separator();
-                ImGui::TextWrapped("Project open only uses existing cache. Cache generation is disabled in the UI for now.");
+                {
+                    const bool baking = s_bakeRunning.load(std::memory_order_acquire);
+                    if (baking) {
+                        const int done  = s_bakeDone.load(std::memory_order_acquire);
+                        const int total = s_bakeTotal.load(std::memory_order_acquire);
+                        if (total > 0) {
+                            char buf[64];
+                            snprintf(buf, sizeof(buf), "Baking... %d / %d", done, total);
+                            ImGui::TextDisabled("%s", buf);
+                            ImGui::ProgressBar(static_cast<float>(done) / static_cast<float>(total), ImVec2(-1.f, 0.f));
+                        } else {
+                            ImGui::TextDisabled("Baking...");
+                        }
+                    } else {
+                        const bool canBake = hasSavedProjectPath &&
+                                             !MaterialManager::getInstance().getAllMaterials().empty();
+                        if (ImGui::MenuItem("Bake Texture Cache", nullptr, false, canBake)) {
+                            s_bakeRunning.store(true, std::memory_order_release);
+                            std::thread(runTextureBakeThread).detach();
+                        }
+                        if (!hasSavedProjectPath) {
+                            ImGui::TextDisabled("Save the project first to enable baking.");
+                        }
+                    }
+                }
                 ImGui::EndMenu();
             }
             
@@ -782,6 +878,47 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
     }
     ImGui::PopStyleVar(8);
     ImGui::PopStyleColor(8);
+
+    // Bake progress — HUD message updated in-place each frame (no new entries, no flickering).
+    {
+        static bool s_bakeWasRunning = false;
+        const bool bakeNow = s_bakeRunning.load(std::memory_order_acquire);
+
+        if (bakeNow) {
+            const int done  = s_bakeDone.load(std::memory_order_acquire);
+            const int total = s_bakeTotal.load(std::memory_order_acquire);
+            char buf[80];
+            if (total > 0) snprintf(buf, sizeof(buf), "Baking textures: %d / %d", done, total);
+            else           snprintf(buf, sizeof(buf), "Baking textures...");
+
+            // Find existing bake message and update it in-place (text + timer reset).
+            // This avoids adding a new entry every frame, which caused fade flicker.
+            auto it = std::find_if(active_messages.begin(), active_messages.end(),
+                [](const ViewportMessage& m) { return m.text.rfind("Baking", 0) == 0; });
+            if (it != active_messages.end()) {
+                it->text           = buf;
+                it->time_remaining = 1.0f;
+            } else {
+                addViewportMessage(buf, 1.0f, ImVec4(1.f, 0.85f, 0.2f, 1.f));
+            }
+
+        } else if (s_bakeWasRunning) {
+            // Remove the in-progress message immediately so it doesn't linger.
+            active_messages.erase(
+                std::remove_if(active_messages.begin(), active_messages.end(),
+                    [](const ViewportMessage& m) { return m.text.rfind("Baking", 0) == 0; }),
+                active_messages.end());
+
+            s_bakeNeedsHotReload.store(false, std::memory_order_release);
+            { extern void invalidateTextureCacheTagCache(); invalidateTextureCacheTagCache(); }
+            const int total = s_bakeTotal.load(std::memory_order_acquire);
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                "Texture bake complete (%d cached) — reload the project file to apply.", total);
+            addViewportMessage(buf, 8.f, ImVec4(0.3f, 1.f, 0.4f, 1.f));
+        }
+        s_bakeWasRunning = bakeNow;
+    }
 }
 
 // ============================================================================

@@ -9,6 +9,7 @@
 #define OPTIX_BACKEND_H
 
 #include "Backend/IBackend.h"
+#include "Backend/SceneTextureManager.h"
 #include <memory>
 #include <vector>
 
@@ -94,6 +95,7 @@ public:
 private:
     std::unique_ptr<OptixWrapper> m_optix_owned;  // Owning pointer (when we create our own)
     OptixWrapper* m_optix = nullptr;               // Always valid, may point to owned or external
+    std::shared_ptr<SceneTextureManager> m_sceneTextureManager;
     ViewportMode m_viewportMode = ViewportMode::Rendered;
 };
 

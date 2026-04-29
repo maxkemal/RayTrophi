@@ -226,7 +226,7 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
             json oj;
             oj["name"] = tri->nodeName;
             oj["material_id"] = tri->getMaterialID();
-            auto th = tri->getTransformHandle();
+            Transform* th = tri->getTransformPtr();
             if (th) {
                 oj["transform"] = mat4ToJson(th->getPivotMatrix());
                 oj["pivot_offset"] = vec3ToJson(th->pivot_offset);
@@ -400,11 +400,12 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
             if (idx >= scene.world.objects.size()) break;
             auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[idx]);
             if (tri) {
-                auto th = tri->getTransformHandle(); 
-                if (!th) {
-                     th = std::make_shared<Transform>();
-                     tri->setTransformHandle(th);
-                }
+                  Transform* th = tri->getTransformPtr(); 
+                  if (!th) {
+                      auto th_shared = std::make_shared<Transform>();
+                      tri->setTransformHandle(th_shared);
+                      th = th_shared.get();
+                  }
 
                 simdjson::dom::element pivot_offset_el;
                 if (!o["pivot_offset"].get(pivot_offset_el)) {

@@ -16,6 +16,7 @@
 #include <string>
 #include <memory>
 #include <unordered_map>
+#include <cstdint>
 #include "Vec3.h"
 #include "material_gpu.h"
 #include "sbt_record.h"
@@ -156,6 +157,8 @@ struct SceneInstance {
     std::string node_name;                  // Node name for lookup
     void* source_hittable = nullptr;        // Pointer to CPU Hittable for transform sync
     bool visible = true;                    // CPU-side visibility flag for incremental delete
+    int scatter_group_id = -1;              // Direct InstanceManager lookup for large scatter groups
+    uint32_t scatter_instance_index = UINT32_MAX;
     
     // Set identity transform
     void setIdentity() {
@@ -288,6 +291,7 @@ public:
     
     // Update instance transform (fast - only TLAS rebuild needed)
     void updateInstanceTransform(int instance_id, const float transform[12]);
+    void setInstanceScatterBinding(int instance_id, int group_id, uint32_t instance_index);
     
     // Remove instance (marks for removal, call compactInstances to clean up)
     void removeInstance(int instance_id);

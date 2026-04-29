@@ -100,6 +100,9 @@ public:
     /// @brief Get transform handle for gizmo integration
     std::shared_ptr<Transform> getTransformHandle() const { return transform; }
 
+    /// @brief Fast non-owning accessor to transform (avoid shared_ptr refcount ops)
+    Transform* getTransformPtr() const noexcept { return transform.get(); }
+
     /// @brief Get the final transformation matrix
     Matrix4x4 getTransform() const { return transform ? transform->base : Matrix4x4::identity(); }
     
