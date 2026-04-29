@@ -56,7 +56,8 @@ void SceneUI::syncVDBVolumesToGPU(UIContext& ctx) {
     // Previously guarded by !g_hasOptix which caused animated VDB frames
     // to never be re-uploaded in Vulkan mode.
     if (Backend::IBackend* renderBackend = getVdbRenderBackend(ctx)) {
-        VolumetricRenderer::syncVolumetricData(ctx.scene, renderBackend);
+        WorldData wd = ctx.renderer.world.getGPUData();
+        VolumetricRenderer::syncVolumetricData(ctx.scene, renderBackend, &wd);
     }
 }
 

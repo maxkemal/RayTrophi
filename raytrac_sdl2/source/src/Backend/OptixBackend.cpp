@@ -8,8 +8,11 @@
 #include "Backend/OptixBackend.h"
 #include "Backend/VulkanBackend.h"
 #include "Core/RenderStateManager.h"
+#include "globals.h"
 #include "OptixWrapper.h"
 #include "Camera.h"
+#include "Texture.h"
+#include <algorithm>
 #include <iostream>
 #include <cuda_runtime.h>
 
@@ -30,18 +33,79 @@ namespace {
         }
 #endif
     }
+
+    std::string buildOptixSceneTextureKey(const Texture* tex) {
+        if (!tex) return {};
+        std::string key = tex->name.empty()
+            ? "tex_ptr:" + std::to_string(reinterpret_cast<uintptr_t>(tex))
+            : "tex:" + tex->name;
+        key += (tex->is_hdr ? "|backend=optix|hdr=1" : "|backend=optix|hdr=0");
+        return key;
+    }
+
+    uint64_t estimateOptixTextureBytes(const Texture* tex) {
+        if (!tex || tex->width <= 0 || tex->height <= 0) return 0;
+        const uint64_t pixelCount = static_cast<uint64_t>(tex->width) * static_cast<uint64_t>(tex->height);
+        return tex->is_hdr ? pixelCount * 16ull : pixelCount * 4ull;
+    }
+
+    cudaTextureObject_t resolveOptixTexture(SceneTextureManager* manager, int64_t rawHandle) {
+        if (!rawHandle) return 0;
+
+        // Small positive handles are already backend/runtime ids in several
+        // transitional paths. Do not reinterpret them as host Texture pointers.
+        if (rawHandle > 0 && static_cast<uint64_t>(rawHandle) < (1ull << 32)) {
+            return static_cast<cudaTextureObject_t>(rawHandle);
+        }
+
+        Texture* tex = reinterpret_cast<Texture*>(rawHandle);
+        if (!tex || !tex->is_loaded()) {
+            return static_cast<cudaTextureObject_t>(rawHandle);
+        }
+
+        if (manager) {
+            int64_t resolvedTextureId = 0;
+            if (manager->resolveOrCreateOptixTextureId(
+                buildOptixSceneTextureKey(tex),
+                TextureConsumer::Optix,
+                static_cast<uint32_t>(std::max(0, tex->width)),
+                static_cast<uint32_t>(std::max(0, tex->height)),
+                estimateOptixTextureBytes(tex),
+                [tex](TextureHandle) -> int64_t {
+                    if (!tex->is_gpu_uploaded) {
+                        tex->upload_to_gpu();
+                    }
+                    return static_cast<int64_t>(tex->get_cuda_texture());
+                },
+                resolvedTextureId)) {
+                return static_cast<cudaTextureObject_t>(resolvedTextureId);
+            }
+        }
+
+        if (!tex->is_gpu_uploaded) {
+            tex->upload_to_gpu();
+        }
+        return tex->get_cuda_texture();
+    }
 }
 
 OptixBackend::OptixBackend()
-    : m_optix_owned(std::make_unique<OptixWrapper>()), m_optix(m_optix_owned.get()) {}
+    : m_optix_owned(std::make_unique<OptixWrapper>()),
+      m_optix(m_optix_owned.get()),
+      m_sceneTextureManager(getSharedSceneTextureManager()) {}
 
 OptixBackend::OptixBackend(OptixWrapper* existingWrapper)
-    : m_optix_owned(nullptr), m_optix(existingWrapper) {}
+    : m_optix_owned(nullptr),
+      m_optix(existingWrapper),
+      m_sceneTextureManager(getSharedSceneTextureManager()) {}
 
 OptixBackend::~OptixBackend() = default;
 
 bool OptixBackend::initialize() {
     try {
+        if (m_sceneTextureManager) {
+            m_sceneTextureManager->initialize(captureRuntimeRenderCapabilities(), "OptixBackend");
+        }
         m_optix->initialize();
         return true;
     } catch (const std::exception& e) {
@@ -142,7 +206,15 @@ void OptixBackend::uploadMaterials(const std::vector<MaterialData>& materials) {
         gpuMat.uv_tiling_y = static_cast<float>(mat.uvTiling.y);
         gpuMat.uv_wrap_mode = static_cast<int>(mat.uvWrapMode);
         
-        gpuMat.albedo_tex = (cudaTextureObject_t)mat.albedoTexture;
+        SceneTextureManager* textureManager = m_sceneTextureManager.get();
+        gpuMat.albedo_tex = resolveOptixTexture(textureManager, mat.albedoTexture);
+        gpuMat.normal_tex = resolveOptixTexture(textureManager, mat.normalTexture);
+        gpuMat.roughness_tex = resolveOptixTexture(textureManager, mat.roughnessTexture);
+        gpuMat.metallic_tex = resolveOptixTexture(textureManager, mat.metallicTexture);
+        gpuMat.emission_tex = resolveOptixTexture(textureManager, mat.emissionTexture);
+        gpuMat.transmission_tex = resolveOptixTexture(textureManager, mat.transmissionTexture);
+        gpuMat.opacity_tex = resolveOptixTexture(textureManager, mat.opacityTexture);
+        gpuMat.height_tex = resolveOptixTexture(textureManager, mat.heightTexture);
         
         gpuMaterials.push_back(gpuMat);
     }
@@ -168,15 +240,16 @@ void OptixBackend::uploadHairMaterials(const std::vector<HairMaterialData>& mate
     );
     m_optix->setHairColorMode(mat.colorMode);
 
-    // Textures
-    cudaTextureObject_t albedoTex = (mat.albedoTexture != -1) ? (cudaTextureObject_t)mat.albedoTexture : 0;
-    cudaTextureObject_t roughnessTex = (mat.roughnessTexture != -1) ? (cudaTextureObject_t)mat.roughnessTexture : 0;
-    cudaTextureObject_t scalpAlbedoTex = (mat.scalpAlbedoTexture != -1) ? (cudaTextureObject_t)mat.scalpAlbedoTexture : 0;
+    // Textures are carried as Texture* handles and resolved through the shared pool.
+    SceneTextureManager* textureManager = m_sceneTextureManager.get();
+    cudaTextureObject_t albedoTex = (mat.albedoTexture != -1) ? resolveOptixTexture(textureManager, mat.albedoTexture) : 0;
+    cudaTextureObject_t roughnessTex = (mat.roughnessTexture != -1) ? resolveOptixTexture(textureManager, mat.roughnessTexture) : 0;
+    cudaTextureObject_t scalpAlbedoTex = (mat.scalpAlbedoTexture != -1) ? resolveOptixTexture(textureManager, mat.scalpAlbedoTexture) : 0;
 
     m_optix->setHairTextures(
-        albedoTex, mat.albedoTexture != -1,
-        roughnessTex, mat.roughnessTexture != -1,
-        scalpAlbedoTex, mat.scalpAlbedoTexture != -1,
+        albedoTex, albedoTex != 0,
+        roughnessTex, roughnessTex != 0,
+        scalpAlbedoTex, scalpAlbedoTex != 0,
         make_float3(mat.scalpBaseColor.x, mat.scalpBaseColor.y, mat.scalpBaseColor.z)
     );
 }
@@ -187,6 +260,11 @@ int64_t OptixBackend::uploadTexture2D(const void* data, uint32_t width, uint32_t
 
 void OptixBackend::destroyTexture(int64_t textureHandle) {
     if (textureHandle) {
+        // Clear cache BEFORE destroying the CUDA object so concurrent resolves
+        // never receive a stale handle that CUDA may have recycled to another texture.
+        if (m_sceneTextureManager) {
+            m_sceneTextureManager->clearOptixTextureId(textureHandle);
+        }
         cudaDestroyTextureObject((cudaTextureObject_t)textureHandle);
     }
 }

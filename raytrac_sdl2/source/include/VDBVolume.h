@@ -137,6 +137,11 @@ public:
      * @brief Get transform handle for gizmo integration
      */
     std::shared_ptr<Transform> getTransformHandle() { return transform_handle; }
+
+    /**
+     * @brief Fast non-owning accessor to transform (avoid shared_ptr refcount ops)
+     */
+    Transform* getTransformPtr() const noexcept { return transform_handle.get(); }
     
     // ═══════════════════════════════════════════════════════════════════════════
     // VDB DATA ACCESS
@@ -155,7 +160,15 @@ public:
     /**
      * @brief Check if VDB is loaded
      */
-    bool isLoaded() const { return vdb_volume_id >= 0 || vdb_sequence_id >= 0; }
+    bool isLoaded() const { return procedural_volume || vdb_volume_id >= 0 || vdb_sequence_id >= 0; }
+    bool isProceduralVolume() const { return procedural_volume; }
+    void setProceduralVolumeBounds(const Vec3& min, const Vec3& max) {
+        procedural_volume = true;
+        vdb_volume_id = -1;
+        vdb_sequence_id = -1;
+        filepath.clear();
+        setLocalBounds(min, max);
+    }
     
     /**
      * @brief Get native VDB bounds (before transform)
@@ -317,6 +330,7 @@ private:
     // VDB data reference
     int vdb_volume_id = -1;
     int vdb_sequence_id = -1;
+    bool procedural_volume = false;
     
     // Transform components
     std::shared_ptr<Transform> transform_handle;

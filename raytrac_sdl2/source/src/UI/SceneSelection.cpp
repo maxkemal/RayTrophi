@@ -49,7 +49,7 @@ void SceneSelection::updatePositionFromSelection() {
         case SelectableType::Object:
             if (selected.object) {
                 // Get transform from TransformHandle if available
-                auto transform = selected.object->getTransformHandle();
+                Transform* transform = selected.object->getTransformPtr();
                 if (transform) {
                     Matrix4x4 mat = transform->getPivotMatrix();
                     mat.decompose(selected.position, selected.rotation, selected.scale);
@@ -142,7 +142,7 @@ static void ApplyTransformToItem(SelectableItem& item, const Matrix4x4& delta_tr
             
         case SelectableType::Object:
             if (item.object) {
-                auto transform = item.object->getTransformHandle();
+                Transform* transform = item.object->getTransformPtr();
                 if (transform) {
                     Matrix4x4 current = transform->getPivotMatrix();
                     // Note: This applies delta in World Space relative to object
@@ -249,7 +249,7 @@ Matrix4x4 SceneSelection::getSelectionMatrix() const {
             
         case SelectableType::Object:
             if (selected.object) {
-                auto transform = selected.object->getTransformHandle();
+                Transform* transform = selected.object->getTransformPtr();
                 if (transform) {
                     result = transform->getPivotMatrix();
                 }

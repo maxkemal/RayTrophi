@@ -219,6 +219,16 @@ struct GpuVDBVolume {
     int motion_blur_enabled;
     float velocity_scale;
     int vdb_id;
+
+    // Procedural density source. 0 = NanoVDB/default, 3 = procedural cloud.
+    int source_type;
+    float cloud_coverage;
+    float cloud_detail;
+    float cloud_erosion;
+    float cloud_base_scale;
+    float cloud_edge_fade;
+    float cloud_offset_x;
+    float cloud_offset_z;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════

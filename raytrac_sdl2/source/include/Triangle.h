@@ -136,6 +136,9 @@ public:
     
     void setTransformHandle(std::shared_ptr<Transform> handle) { transformHandle = handle; }
     std::shared_ptr<Transform> getTransformHandle() const { return transformHandle; }
+    // Fast non-owning accessor to avoid atomic refcount operations in hot paths.
+    // Returns a raw pointer to the internal Transform (may be nullptr).
+    inline Transform* getTransformPtr() const noexcept { return transformHandle.get(); }
     
     void setBaseTransform(const Matrix4x4& transform);
     void updateAnimationTransform(const Matrix4x4& animTransform);

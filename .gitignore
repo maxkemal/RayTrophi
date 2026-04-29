@@ -65,6 +65,8 @@ Thumbs.db
 # Local work notes (not for repo)
 /sculpt_control_graph_todo.md
 /vulkan_blas_batch_fix.md
+/shared_texture_pool_refactor_plan.md
+/docs/mesh_paint_uvless_plan.md
 
 # Project Specific
 .agent/

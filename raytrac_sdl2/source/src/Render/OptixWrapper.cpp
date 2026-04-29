@@ -10,6 +10,8 @@
 #include <cmath>        // std::isfinite for hair validation
 #include <set>          // for unique_nodes in TLAS building
 #include <atomic>
+#include <future>
+#include <thread>
 
 
 #include "TerrainManager.h"
@@ -20,6 +22,8 @@
 #include <imgui_impl_sdlrenderer2.h>
 #include "Matrix4x4.h"
 #include "HittableInstance.h"  
+#include "InstanceManager.h"
+#include "MaterialManager.h"
 #include "Triangle.h"
 #include "ParallelBVHNode.h"
 #include "CameraPresets.h"
@@ -105,97 +109,120 @@ OptixWrapper::OptixWrapper()
 void OptixWrapper::partialCleanup() {
     // Sadece buildFromData'da oluşturulan kaynakları temizle
     // stream ve context gibi önemli yapılar korunur
+    bool freedAny = false;
 
     if (d_vertices) {
         cudaFree(reinterpret_cast<void*>(d_vertices));
         d_vertices = 0;
+        freedAny = true;
     }
     if (d_indices) {
         cudaFree(reinterpret_cast<void*>(d_indices));
         d_indices = 0;
+        freedAny = true;
     }
     if (d_normals) {
         cudaFree(reinterpret_cast<void*>(d_normals));
         d_normals = 0;
+        freedAny = true;
     }
     if (d_uvs) {
         cudaFree(reinterpret_cast<void*>(d_uvs));
         d_uvs = 0;
+        freedAny = true;
     }
     if (d_tangents) {
         cudaFree(reinterpret_cast<void*>(d_tangents));
         d_tangents = 0;
+        freedAny = true;
     }
     if (d_material_indices) {
         cudaFree(reinterpret_cast<void*>(d_material_indices));
         d_material_indices = 0;
+        freedAny = true;
     }
     if (d_bvh_output) {
         cudaFree(reinterpret_cast<void*>(d_bvh_output));
         d_bvh_output = 0;
+        freedAny = true;
     }
     if (d_temp_buffer) {
         cudaFree(reinterpret_cast<void*>(d_temp_buffer));
         d_temp_buffer = 0;
+        freedAny = true;
     }
     if (d_output_buffer) {
         cudaFree(reinterpret_cast<void*>(d_output_buffer));
         d_output_buffer = 0;
+        freedAny = true;
     }
     if (d_compacted_size) {
         cudaFree(reinterpret_cast<void*>(d_compacted_size));
         d_compacted_size = 0;
+        freedAny = true;
     }
     if (d_params) {
         cudaFree(reinterpret_cast<void*>(d_params));
         d_params = 0;
+        freedAny = true;
     }
     if (d_coords_x) {
         cudaFree(reinterpret_cast<void*>(d_coords_x));
         d_coords_x = 0;
+        freedAny = true;
     }
     if (d_coords_y) {
         cudaFree(reinterpret_cast<void*>(d_coords_y));
         d_coords_y = 0;
+        freedAny = true;
     }
     if (d_materials) {
         cudaFree(reinterpret_cast<void*>(d_materials));
         d_materials = nullptr;
+        freedAny = true;
     }
     if (d_volumetric_infos) {
         cudaFree(reinterpret_cast<void*>(d_volumetric_infos));
         d_volumetric_infos = nullptr;
+        freedAny = true;
     }
     
     if (d_accumulation_buffer) {
         cudaFree(reinterpret_cast<void*>(d_accumulation_buffer));
         d_accumulation_buffer = nullptr;
+        freedAny = true;
     }
     if (d_variance_buffer) {
         cudaFree(reinterpret_cast<void*>(d_variance_buffer));
         d_variance_buffer = nullptr;
+        freedAny = true;
     }
     if (d_sample_count_buffer) {
         cudaFree(reinterpret_cast<void*>(d_sample_count_buffer));
         d_sample_count_buffer = nullptr;
+        freedAny = true;
     }
     if (d_framebuffer) {
         cudaFree(reinterpret_cast<void*>(d_framebuffer));
         d_framebuffer = nullptr;
+        freedAny = true;
     }
     if (d_accumulation_float4) {
         cudaFree(reinterpret_cast<void*>(d_accumulation_float4));
         d_accumulation_float4 = nullptr;
         accumulation_valid = false;
         accumulated_samples = 0;
+        freedAny = true;
     }
     if (d_denoiser_albedo) {
         cudaFree(reinterpret_cast<void*>(d_denoiser_albedo));
         d_denoiser_albedo = nullptr;
+        freedAny = true;
     }
     if (d_denoiser_normal) {
         cudaFree(reinterpret_cast<void*>(d_denoiser_normal));
         d_denoiser_normal = nullptr;
+        freedAny = true;
     }
     host_denoiser_color.clear();
     host_denoiser_albedo.clear();
@@ -206,12 +233,16 @@ void OptixWrapper::partialCleanup() {
         cudaFree(reinterpret_cast<void*>(sbt.hitgroupRecordBase));
         sbt.hitgroupRecordBase = 0;
         sbt.hitgroupRecordCount = 0;
+        freedAny = true;
     }
 
     traversable_handle = 0;
 
-    // Senkronizasyon: zorunlu değil ama debug için güvenli
-    cudaDeviceSynchronize();
+    // Senkronizasyon: zorunlu değil ama debug için güvenli. Boş cleanup'ta
+    // gereksiz device-wide stall üretmeyelim.
+    if (freedAny) {
+        cudaDeviceSynchronize();
+    }
 }
 
 void OptixWrapper::clearScene() {
@@ -2509,97 +2540,96 @@ MeshGeometry OptixWrapper::extractMeshGeometry(
     geom.mesh_name = mesh.mesh_name;
     geom.material_id = mesh.material_id;
     
-    // Reserve space
-    size_t tri_count = mesh.triangle_indices.size();
-    geom.vertices.reserve(tri_count * 3);
-    geom.indices.reserve(tri_count);
-    geom.normals.reserve(tri_count * 3);
-    geom.uvs.reserve(tri_count * 3);
-    
-    uint32_t vertex_offset = 0;
+    std::vector<const Triangle*> validTriangles;
+    validTriangles.reserve(mesh.triangle_indices.size());
     for (int tri_idx : mesh.triangle_indices) {
         if (tri_idx < 0 || tri_idx >= static_cast<int>(all_triangles.size())) continue;
         const auto& tri = all_triangles[tri_idx];
         if (!tri) continue;
-        
-        // ===========================================================================
-        // Use LOCAL-SPACE data for BLAS efficiency
-        // Instance transform will convert to world-space at ray trace time.
-        // The shader uses OptiX built-in optixTransformNormalFromObjectToWorldSpace()
-        // which handles the inverse-transpose correctly.
-        // ===========================================================================
-        
-        // Vertices (3 per triangle) - LOCAL SPACE (bind-pose)
-        geom.vertices.push_back(toFloat3(tri->getOriginalVertexPosition(0)));
-        geom.vertices.push_back(toFloat3(tri->getOriginalVertexPosition(1)));
-        geom.vertices.push_back(toFloat3(tri->getOriginalVertexPosition(2)));
-        
-        // Index - Standard winding
-        geom.indices.push_back(make_uint3(vertex_offset, vertex_offset + 1, vertex_offset + 2));
-        vertex_offset += 3;
-        
-        // Normals - LOCAL SPACE (bind-pose, shader will transform)
-        geom.normals.push_back(toFloat3(tri->getOriginalVertexNormal(0)));
-        geom.normals.push_back(toFloat3(tri->getOriginalVertexNormal(1)));
-        geom.normals.push_back(toFloat3(tri->getOriginalVertexNormal(2)));
-        
-        // UVs
-        geom.uvs.push_back(make_float2(tri->t0.x, tri->t0.y));
-        geom.uvs.push_back(make_float2(tri->t1.x, tri->t1.y));
-        geom.uvs.push_back(make_float2(tri->t2.x, tri->t2.y));
+        validTriangles.push_back(tri.get());
+    }
 
-        // Skinning Data (Bone Weights)
-        // Check if triangle has skinning data (all vertices)
-        bool tri_has_skinning = !tri->getSkinBoneWeights(0).empty() || 
-                                !tri->getSkinBoneWeights(1).empty() || 
-                                !tri->getSkinBoneWeights(2).empty();
+    const size_t tri_count = validTriangles.size();
+    geom.vertices.resize(tri_count * 3);
+    geom.indices.resize(tri_count);
+    geom.normals.resize(tri_count * 3);
+    geom.uvs.resize(tri_count * 3);
         
-        if (tri_has_skinning) {
-            auto packWeights = [](const std::vector<std::pair<int, float>>& weights) {
-                int4 idx = make_int4(0, 0, 0, 0);
-                float4 w = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-                
-                // Pack up to 4 weights
-                if (weights.size() > 0) { idx.x = weights[0].first; w.x = weights[0].second; }
-                if (weights.size() > 1) { idx.y = weights[1].first; w.y = weights[1].second; }
-                if (weights.size() > 2) { idx.z = weights[2].first; w.z = weights[2].second; }
-                if (weights.size() > 3) { idx.w = weights[3].first; w.w = weights[3].second; }
-                
-                // Normalize mechanism could be added here if needed, but Assimp usually provides normalized weights.
-                return std::make_pair(idx, w);
-            };
-
-            auto w0 = packWeights(tri->getSkinBoneWeights(0));
-            auto w1 = packWeights(tri->getSkinBoneWeights(1));
-            auto w2 = packWeights(tri->getSkinBoneWeights(2));
-
-            // If this is the first skinned triangle, resize previous elements to match (fill with zeros)
-            if (geom.boneIndices.empty() && !geom.vertices.empty()) {
-                // We added 3 vertices just now (geom.vertices is already pushed)
-                // We need to fill 0..N-3 with zeros
-                size_t num_existing = geom.vertices.size() - 3; 
-                geom.boneIndices.resize(num_existing, make_int4(0,0,0,0));
-                geom.boneWeights.resize(num_existing, make_float4(0,0,0,0));
-            }
-
-            geom.boneIndices.push_back(w0.first);
-            geom.boneIndices.push_back(w1.first);
-            geom.boneIndices.push_back(w2.first);
-
-            geom.boneWeights.push_back(w0.second);
-            geom.boneWeights.push_back(w1.second);
-            geom.boneWeights.push_back(w2.second);
-        } else if (!geom.boneIndices.empty()) {
-            // Triangle has NO skinning, but mesh DOES (mixed?). Fill with zeros to keep alignment.
-            geom.boneIndices.push_back(make_int4(0,0,0,0));
-            geom.boneIndices.push_back(make_int4(0,0,0,0));
-            geom.boneIndices.push_back(make_int4(0,0,0,0));
-
-            geom.boneWeights.push_back(make_float4(0,0,0,0));
-            geom.boneWeights.push_back(make_float4(0,0,0,0));
-            geom.boneWeights.push_back(make_float4(0,0,0,0));
+    bool hasSkinning = false;
+    for (const Triangle* tri : validTriangles) {
+        if (!tri->getSkinBoneWeights(0).empty() ||
+            !tri->getSkinBoneWeights(1).empty() ||
+            !tri->getSkinBoneWeights(2).empty()) {
+            hasSkinning = true;
+            break;
         }
+    }
+    if (hasSkinning) {
+        geom.boneIndices.assign(tri_count * 3, make_int4(0, 0, 0, 0));
+        geom.boneWeights.assign(tri_count * 3, make_float4(0.0f, 0.0f, 0.0f, 0.0f));
+    }
 
+    auto packWeights = [](const std::vector<std::pair<int, float>>& weights) {
+        int4 idx = make_int4(0, 0, 0, 0);
+        float4 w = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (weights.size() > 0) { idx.x = weights[0].first; w.x = weights[0].second; }
+        if (weights.size() > 1) { idx.y = weights[1].first; w.y = weights[1].second; }
+        if (weights.size() > 2) { idx.z = weights[2].first; w.z = weights[2].second; }
+        if (weights.size() > 3) { idx.w = weights[3].first; w.w = weights[3].second; }
+        return std::make_pair(idx, w);
+    };
+
+    auto fillRange = [&validTriangles, &geom, hasSkinning, &packWeights](size_t start, size_t end) {
+        for (size_t i = start; i < end; ++i) {
+            const Triangle* tri = validTriangles[i];
+            const size_t base = i * 3;
+
+            geom.vertices[base + 0] = toFloat3(tri->getOriginalVertexPosition(0));
+            geom.vertices[base + 1] = toFloat3(tri->getOriginalVertexPosition(1));
+            geom.vertices[base + 2] = toFloat3(tri->getOriginalVertexPosition(2));
+
+            geom.indices[i] = make_uint3(static_cast<uint32_t>(base),
+                                         static_cast<uint32_t>(base + 1),
+                                         static_cast<uint32_t>(base + 2));
+
+            geom.normals[base + 0] = toFloat3(tri->getOriginalVertexNormal(0));
+            geom.normals[base + 1] = toFloat3(tri->getOriginalVertexNormal(1));
+            geom.normals[base + 2] = toFloat3(tri->getOriginalVertexNormal(2));
+
+            geom.uvs[base + 0] = make_float2(tri->t0.x, tri->t0.y);
+            geom.uvs[base + 1] = make_float2(tri->t1.x, tri->t1.y);
+            geom.uvs[base + 2] = make_float2(tri->t2.x, tri->t2.y);
+
+            if (hasSkinning) {
+                auto w0 = packWeights(tri->getSkinBoneWeights(0));
+                auto w1 = packWeights(tri->getSkinBoneWeights(1));
+                auto w2 = packWeights(tri->getSkinBoneWeights(2));
+                geom.boneIndices[base + 0] = w0.first;
+                geom.boneIndices[base + 1] = w1.first;
+                geom.boneIndices[base + 2] = w2.first;
+                geom.boneWeights[base + 0] = w0.second;
+                geom.boneWeights[base + 1] = w1.second;
+                geom.boneWeights[base + 2] = w2.second;
+            }
+        }
+    };
+
+    constexpr size_t kExtractParallelThreshold = 4096;
+    unsigned extractThreads = std::thread::hardware_concurrency();
+    if (extractThreads == 0) extractThreads = 4;
+    if (tri_count < kExtractParallelThreshold || extractThreads < 2) {
+        fillRange(0, tri_count);
+    } else {
+        const size_t chunk = (tri_count + extractThreads - 1) / extractThreads;
+        std::vector<std::future<void>> futures;
+        futures.reserve(extractThreads);
+        for (unsigned t = 0; t < extractThreads; ++t) {
+            const size_t s = t * chunk;
+            const size_t e = (std::min)(s + chunk, tri_count);
+            if (s >= e) break;
+            futures.push_back(std::async(std::launch::async, fillRange, s, e));
+        }
+        for (auto& f : futures) f.get();
     }
     
     return geom;
@@ -2661,9 +2691,23 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
         }
     };
     
-    // Flatten everything
-    for (const auto& obj : objects) {
-        collectRenderables(obj);
+    auto hasInstancePrefix = [](const std::string& nodeName) -> bool {
+        return nodeName.rfind("_inst_gid", 0) == 0;
+    };
+    size_t baseObjectCount = objects.size();
+    while (baseObjectCount > 0) {
+        const auto& obj = objects[baseObjectCount - 1];
+        auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+        if (!inst || !hasInstancePrefix(inst->node_name)) {
+            break;
+        }
+        --baseObjectCount;
+    }
+
+    // Flatten base scene objects only. Large scatter groups are appended below
+    // directly from InstanceManager so backend switches do not walk expanded tails.
+    for (size_t i = 0; i < baseObjectCount; ++i) {
+        collectRenderables(objects[i]);
     }
     
    // SCENE_LOG_INFO("[OptiX] Geometry Source - Static Triangles: " + std::to_string(static_triangles.size()) + 
@@ -2737,75 +2781,83 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
             geom.original_name = mesh.original_name;  // Base node name for GPU picking
             geom.material_id = mesh.material_id;
             
-            // Reserve memory
-            size_t num_tris = mesh.triangle_indices.size();
-            geom.vertices.reserve(num_tris * 3);
-            geom.normals.reserve(num_tris * 3);
-            geom.uvs.reserve(num_tris * 3);
-            geom.indices.reserve(num_tris);
-            
-            uint32_t v_off = 0;
+            std::vector<const Triangle*> validStaticTriangles;
+            validStaticTriangles.reserve(mesh.triangle_indices.size());
             for (int idx : mesh.triangle_indices) {
+                if (idx < 0 || idx >= static_cast<int>(static_triangles.size())) continue;
                 const auto& tri = static_triangles[idx];
-                
-                // VERTICES: Use LOCAL Space (getOriginalVertexPosition)
-                // We will apply the transform via the Instance Matrix.
-                // This allows correct updates via updateObjectTransform without rebuilding BLAS.
-                Vec3 v0 = tri->getOriginalVertexPosition(0);
-                Vec3 v1 = tri->getOriginalVertexPosition(1);
-                Vec3 v2 = tri->getOriginalVertexPosition(2);
-                geom.vertices.push_back(toFloat3(v0));
-                geom.vertices.push_back(toFloat3(v1));
-                geom.vertices.push_back(toFloat3(v2));
-                
-                // NORMALS
-                Vec3 n0 = tri->getOriginalVertexNormal(0);
-                Vec3 n1 = tri->getOriginalVertexNormal(1);
-                Vec3 n2 = tri->getOriginalVertexNormal(2);
-                geom.normals.push_back(toFloat3(n0));
-                geom.normals.push_back(toFloat3(n1));
-                geom.normals.push_back(toFloat3(n2));
-                
-                // UVS
-                geom.uvs.push_back(make_float2(tri->t0.x, tri->t0.y));
-                geom.uvs.push_back(make_float2(tri->t1.x, tri->t1.y));
-                geom.uvs.push_back(make_float2(tri->t2.x, tri->t2.y));
-                
-                // COLORS
-                geom.colors.push_back(toFloat3(tri->getVertexColor(0)));
-                geom.colors.push_back(toFloat3(tri->getVertexColor(1)));
-                geom.colors.push_back(toFloat3(tri->getVertexColor(2)));
-                
-                // SKINNING DATA: Only push if the triangle and group are skinned
-                // (Guaranteed to match because of grouping key (_skinned vs _static))
-                if (isSkinned) {
-                    if (tri->hasSkinData()) {
-                        for (int k = 0; k < 3; ++k) {
-                            const auto& weights = tri->getSkinBoneWeights(k);
-                            int4 bi = make_int4(-1, -1, -1, -1);
-                            float4 bw = make_float4(0, 0, 0, 0);
-                            for (size_t w = 0; w < (std::min)(weights.size(), (size_t)4); ++w) {
-                                if (w == 0) { bi.x = weights[w].first; bw.x = weights[w].second; }
-                                else if (w == 1) { bi.y = weights[w].first; bw.y = weights[w].second; }
-                                else if (w == 2) { bi.z = weights[w].first; bw.z = weights[w].second; }
-                                else if (w == 3) { bi.w = weights[w].first; bw.w = weights[w].second; }
-                            }
-                            geom.boneIndices.push_back(bi);
-                            geom.boneWeights.push_back(bw);
+                if (tri) validStaticTriangles.push_back(tri.get());
+            }
+
+            const size_t num_tris = validStaticTriangles.size();
+            geom.vertices.resize(num_tris * 3);
+            geom.normals.resize(num_tris * 3);
+            geom.uvs.resize(num_tris * 3);
+            geom.colors.resize(num_tris * 3);
+            geom.indices.resize(num_tris);
+            if (isSkinned) {
+                geom.boneIndices.assign(num_tris * 3, make_int4(-1, -1, -1, -1));
+                geom.boneWeights.assign(num_tris * 3, make_float4(0, 0, 0, 0));
+            }
+
+            auto fillStaticMeshRange = [&validStaticTriangles, &geom, isSkinned, &toFloat3](size_t start, size_t end) {
+                for (size_t i = start; i < end; ++i) {
+                    const Triangle* tri = validStaticTriangles[i];
+                    const size_t base = i * 3;
+
+                    geom.vertices[base + 0] = toFloat3(tri->getOriginalVertexPosition(0));
+                    geom.vertices[base + 1] = toFloat3(tri->getOriginalVertexPosition(1));
+                    geom.vertices[base + 2] = toFloat3(tri->getOriginalVertexPosition(2));
+
+                    geom.normals[base + 0] = toFloat3(tri->getOriginalVertexNormal(0));
+                    geom.normals[base + 1] = toFloat3(tri->getOriginalVertexNormal(1));
+                    geom.normals[base + 2] = toFloat3(tri->getOriginalVertexNormal(2));
+
+                    geom.uvs[base + 0] = make_float2(tri->t0.x, tri->t0.y);
+                    geom.uvs[base + 1] = make_float2(tri->t1.x, tri->t1.y);
+                    geom.uvs[base + 2] = make_float2(tri->t2.x, tri->t2.y);
+
+                    geom.colors[base + 0] = toFloat3(tri->getVertexColor(0));
+                    geom.colors[base + 1] = toFloat3(tri->getVertexColor(1));
+                    geom.colors[base + 2] = toFloat3(tri->getVertexColor(2));
+
+                    geom.indices[i] = make_uint3(static_cast<uint32_t>(base),
+                                                 static_cast<uint32_t>(base + 1),
+                                                 static_cast<uint32_t>(base + 2));
+
+                    if (!isSkinned || !tri->hasSkinData()) continue;
+                    for (int k = 0; k < 3; ++k) {
+                        const auto& weights = tri->getSkinBoneWeights(k);
+                        int4 bi = make_int4(-1, -1, -1, -1);
+                        float4 bw = make_float4(0, 0, 0, 0);
+                        for (size_t w = 0; w < (std::min)(weights.size(), (size_t)4); ++w) {
+                            if (w == 0) { bi.x = weights[w].first; bw.x = weights[w].second; }
+                            else if (w == 1) { bi.y = weights[w].first; bw.y = weights[w].second; }
+                            else if (w == 2) { bi.z = weights[w].first; bw.z = weights[w].second; }
+                            else { bi.w = weights[w].first; bw.w = weights[w].second; }
                         }
-                    } else {
-                        // Group is skinned but this triangle has no skin data (unlikely but possible)
-                        // Push identity weights to maintain vertex/bone buffer alignment
-                        for (int k = 0; k < 3; ++k) {
-                            geom.boneIndices.push_back(make_int4(-1, -1, -1, -1));
-                            geom.boneWeights.push_back(make_float4(0, 0, 0, 0));
-                        }
+                        geom.boneIndices[base + static_cast<size_t>(k)] = bi;
+                        geom.boneWeights[base + static_cast<size_t>(k)] = bw;
                     }
                 }
-                
-                // INDICES (0-based local)
-                geom.indices.push_back(make_uint3(v_off, v_off+1, v_off+2));
-                v_off += 3;
+            };
+
+            constexpr size_t kOptixStaticExtractParallelThreshold = 4096;
+            unsigned staticExtractThreads = std::thread::hardware_concurrency();
+            if (staticExtractThreads == 0) staticExtractThreads = 4;
+            if (num_tris < kOptixStaticExtractParallelThreshold || staticExtractThreads < 2) {
+                fillStaticMeshRange(0, num_tris);
+            } else {
+                const size_t chunk = (num_tris + staticExtractThreads - 1) / staticExtractThreads;
+                std::vector<std::future<void>> futures;
+                futures.reserve(staticExtractThreads);
+                for (unsigned t = 0; t < staticExtractThreads; ++t) {
+                    const size_t s = t * chunk;
+                    const size_t e = (std::min)(s + chunk, num_tris);
+                    if (s >= e) break;
+                    futures.push_back(std::async(std::launch::async, fillStaticMeshRange, s, e));
+                }
+                for (auto& f : futures) f.get();
             }
             
             if (geom.vertices.empty()) continue;
@@ -2984,6 +3036,155 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                      node_to_instance[inst->node_name].push_back(inst_id);
                      instance_to_node[inst_id] = inst->node_name;
                      inst->optix_instance_ids.push_back(inst_id); 
+                }
+            }
+        }
+    }
+
+    const auto& instanceGroups = InstanceManager::getInstance().getGroups();
+    for (const auto& group : instanceGroups) {
+        if (group.instances.empty() || group.sources.empty()) continue;
+
+        std::vector<std::vector<int>> meshIdsBySource(group.sources.size());
+        for (size_t si = 0; si < group.sources.size(); ++si) {
+            const auto& source = group.sources[si];
+            const auto* centered = source.centered_triangles_ptr ? source.centered_triangles_ptr.get() : nullptr;
+            const auto* sourceTriangles = (centered && !centered->empty()) ? centered : &source.triangles;
+            if (!sourceTriangles || sourceTriangles->empty()) continue;
+
+            void* source_key = (void*)sourceTriangles;
+            auto cached = processed_sources.find(source_key);
+            if (cached != processed_sources.end()) {
+                meshIdsBySource[si] = cached->second;
+                continue;
+            }
+
+            std::unordered_map<std::string, MeshData> groups;
+            for (size_t i = 0; i < sourceTriangles->size(); ++i) {
+                Triangle* tri = (*sourceTriangles)[i].get();
+                if (!tri) continue;
+
+                std::string base = tri->getNodeName();
+                if (base.empty()) base = "inst_group_source";
+                int mat = tri->getMaterialID();
+                if (mat == MaterialManager::INVALID_MATERIAL_ID) mat = 0;
+                bool hasSkin = tri->hasSkinData();
+                std::string key = base + "_mat_" + std::to_string(mat) +
+                                  (hasSkin ? "_skinned" : "_static");
+
+                auto& m = groups[key];
+                if (m.mesh_name.empty()) {
+                    m.mesh_name = key;
+                    m.original_name = base;
+                    m.material_id = mat;
+                }
+                m.triangle_indices.push_back((int)i);
+            }
+
+            std::vector<int> mesh_ids;
+            for (const auto& [key, grp] : groups) {
+                bool isSkinned = (key.find("_skinned") != std::string::npos);
+                int existing_id = accel_manager->findBLAS(grp.original_name, grp.material_id, isSkinned);
+                if (existing_id != -1) {
+                    mesh_ids.push_back(existing_id);
+                    continue;
+                }
+
+                MeshGeometry geom;
+                geom.mesh_name = grp.mesh_name;
+                geom.original_name = grp.original_name;
+                geom.material_id = grp.material_id;
+                geom.vertices.reserve(grp.triangle_indices.size() * 3);
+                geom.normals.reserve(grp.triangle_indices.size() * 3);
+                geom.uvs.reserve(grp.triangle_indices.size() * 3);
+                geom.colors.reserve(grp.triangle_indices.size() * 3);
+                geom.indices.reserve(grp.triangle_indices.size());
+
+                for (int idx : grp.triangle_indices) {
+                    Triangle* tri = (*sourceTriangles)[idx].get();
+                    if (!tri) continue;
+
+                    Vec3 v0 = tri->getOriginalVertexPosition(0);
+                    Vec3 v1 = tri->getOriginalVertexPosition(1);
+                    Vec3 v2 = tri->getOriginalVertexPosition(2);
+                    geom.vertices.push_back(toFloat3(v0));
+                    geom.vertices.push_back(toFloat3(v1));
+                    geom.vertices.push_back(toFloat3(v2));
+
+                    Vec3 n0 = tri->getOriginalVertexNormal(0);
+                    Vec3 n1 = tri->getOriginalVertexNormal(1);
+                    Vec3 n2 = tri->getOriginalVertexNormal(2);
+                    geom.normals.push_back(toFloat3(n0));
+                    geom.normals.push_back(toFloat3(n1));
+                    geom.normals.push_back(toFloat3(n2));
+
+                    geom.uvs.push_back(make_float2(tri->t0.x, tri->t0.y));
+                    geom.uvs.push_back(make_float2(tri->t1.x, tri->t1.y));
+                    geom.uvs.push_back(make_float2(tri->t2.x, tri->t2.y));
+                    geom.colors.push_back(toFloat3(tri->getVertexColor(0)));
+                    geom.colors.push_back(toFloat3(tri->getVertexColor(1)));
+                    geom.colors.push_back(toFloat3(tri->getVertexColor(2)));
+
+                    if (isSkinned) {
+                        if (tri->hasSkinData()) {
+                            for (int k = 0; k < 3; ++k) {
+                                const auto& weights = tri->getSkinBoneWeights(k);
+                                int4 bi = make_int4(-1, -1, -1, -1);
+                                float4 bw = make_float4(0, 0, 0, 0);
+                                for (size_t w = 0; w < (std::min)(weights.size(), (size_t)4); ++w) {
+                                    if (w == 0) { bi.x = weights[w].first; bw.x = weights[w].second; }
+                                    else if (w == 1) { bi.y = weights[w].first; bw.y = weights[w].second; }
+                                    else if (w == 2) { bi.z = weights[w].first; bw.z = weights[w].second; }
+                                    else { bi.w = weights[w].first; bw.w = weights[w].second; }
+                                }
+                                geom.boneIndices.push_back(bi);
+                                geom.boneWeights.push_back(bw);
+                            }
+                        } else {
+                            for (int k = 0; k < 3; ++k) {
+                                geom.boneIndices.push_back(make_int4(-1, -1, -1, -1));
+                                geom.boneWeights.push_back(make_float4(0, 0, 0, 0));
+                            }
+                        }
+                    }
+
+                    uint32_t base_v = (uint32_t)geom.vertices.size() - 3;
+                    geom.indices.push_back(make_uint3(base_v, base_v + 1, base_v + 2));
+                }
+
+                if (!geom.vertices.empty()) {
+                    int new_id = accel_manager->buildMeshBLAS(geom);
+                    if (new_id >= 0) mesh_ids.push_back(new_id);
+                }
+            }
+
+            processed_sources[source_key] = mesh_ids;
+            meshIdsBySource[si] = std::move(mesh_ids);
+        }
+
+        const std::string scatterNodeName =
+            group.name.empty() ? ("ScatterGroup_" + std::to_string(group.id)) : group.name;
+
+        for (size_t ii = 0; ii < group.instances.size(); ++ii) {
+            const auto& inst = group.instances[ii];
+            int srcIdx = inst.source_index;
+            if (srcIdx < 0 || srcIdx >= static_cast<int>(meshIdsBySource.size())) srcIdx = 0;
+            if (srcIdx >= static_cast<int>(meshIdsBySource.size())) continue;
+
+            float transform[12];
+            Matrix4x4 m = inst.toMatrix();
+            transform[0] = m.m[0][0]; transform[1] = m.m[0][1]; transform[2] = m.m[0][2]; transform[3] = m.m[0][3];
+            transform[4] = m.m[1][0]; transform[5] = m.m[1][1]; transform[6] = m.m[1][2]; transform[7] = m.m[1][3];
+            transform[8] = m.m[2][0]; transform[9] = m.m[2][1]; transform[10] = m.m[2][2]; transform[11] = m.m[2][3];
+
+            for (int mid : meshIdsBySource[srcIdx]) {
+                const MeshBLAS* blas = accel_manager->getBLAS(mid);
+                if (!blas) continue;
+                int inst_id = accel_manager->addInstance(
+                    mid, transform, blas->material_id, InstanceType::Mesh, scatterNodeName, nullptr);
+                if (inst_id >= 0) {
+                    accel_manager->setInstanceScatterBinding(inst_id, group.id, static_cast<uint32_t>(ii));
+                    node_to_instance[scatterNodeName].push_back(inst_id);
                 }
             }
         }

@@ -41,10 +41,10 @@ struct PaintLayerData {
     int width  = 0;
     int height = 0;
 
-    // One pixel buffer per PaintChannel (BaseColor..Transmission = 7 channels).
-    // Empty vector means "this channel has no paint on this layer yet" and
-    // compositing should treat it as fully transparent / default.
-    std::array<std::vector<CompactVec4>, 7> channel_pixels;
+    // One pixel buffer per PaintChannel. Empty vector means "this channel
+    // has no paint on this layer yet" and compositing should treat it as
+    // fully transparent / default.
+    std::array<std::vector<CompactVec4>, kPaintChannelCount> channel_pixels;
 
     // ---------- helpers ----------
 

@@ -47,6 +47,7 @@ bool VDBVolume::loadVDB(const std::string& path) {
     
     vdb_volume_id = id;
     vdb_sequence_id = -1;
+    procedural_volume = false;
     is_sequence = false;
     filepath = path;
     
@@ -265,6 +266,7 @@ void VDBVolume::unload() {
     }
     
     vdb_sequence_id = -1;
+    procedural_volume = false;
     is_sequence = false;
     filepath.clear();
     
@@ -339,6 +341,7 @@ bool VDBVolume::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool
 
 bool VDBVolume::occluded(const Ray& r, float t_min, float t_max) const {
     if (!visible || !isLoaded()) return false;
+    if (procedural_volume) return false;
     
     float t_enter, t_exit;
     // Intersect AABB

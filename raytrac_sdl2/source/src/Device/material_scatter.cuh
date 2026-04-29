@@ -332,6 +332,23 @@ __device__ float3 importance_sample_ggx(float u1, float u2, float roughness, con
 
     return normalize(tangentX * H.x + tangentY * H.y + N * H.z);
 }
+
+__device__ float3 ggx_glass_effective_normal(float u1, float u2, float roughness, const float3& N, const float3& V) {
+    float safeRoughness = fminf(fmaxf(roughness, 0.02f), 1.0f);
+    float alpha = safeRoughness * safeRoughness;
+    float phi = 2.0f * M_PIf * u1;
+    float cosTheta = sqrtf((1.0f - u2) / fmaxf(1.0f + (alpha * alpha - 1.0f) * u2, 1e-7f));
+    float sinTheta = sqrtf(fmaxf(0.0f, 1.0f - cosTheta * cosTheta));
+
+    float3 halfVecLocal = make_float3(sinTheta * cosf(phi), sinTheta * sinf(phi), cosTheta);
+
+    float3 up = fabsf(N.z) < 0.999f ? make_float3(0, 0, 1) : make_float3(1, 0, 0);
+    float3 tangentX = normalize(cross(up, N));
+    float3 tangentY = cross(N, tangentX);
+    float3 halfVec = normalize(tangentX * halfVecLocal.x + tangentY * halfVecLocal.y + N * halfVecLocal.z);
+
+    return normalize(reflect(-V, halfVec));
+}
 __device__ float schlick(float cos_theta, float eta) {
     float r0 = (1.0f - eta) / (1.0f + eta);
     r0 = r0 * r0;
@@ -679,8 +696,8 @@ __device__ bool transmission_scatter(
 
     float ior = material.ior;
     if (payload.use_blended_data) ior = payload.blended_ior;
-    bool front_face = dot(unit_direction, N) < 0.0f;
-    float3 macro_normal = front_face ? N : -N;
+    bool front_face = payload.front_face != 0;
+    float3 macro_normal = N;
     float eta = front_face ? (1.0f / ior) : ior;
 
     float roughness = material.roughness;
@@ -698,7 +715,13 @@ __device__ bool transmission_scatter(
 
     float3 micro_normal = macro_normal;
     if (roughness >= 0.01f) {
-        micro_normal = importance_sample_ggx(random_float(rng), random_float(rng), roughness, macro_normal);
+        micro_normal = ggx_glass_effective_normal(
+            random_float(rng),
+            random_float(rng),
+            roughness,
+            macro_normal,
+            -unit_direction
+        );
     }
 
     float cos_theta = fminf(dot(-unit_direction, macro_normal), 1.0f);
@@ -717,7 +740,6 @@ __device__ bool transmission_scatter(
         bool refracted_success = refract(unit_direction, micro_normal, eta, &direction);
         if (!refracted_success || dot(direction, macro_normal) >= 0.0f) {
             direction = reflect(unit_direction, macro_normal);
-            do_reflect = true;
             offset_n = macro_normal;
         }
         else {
@@ -742,7 +764,7 @@ __device__ bool transmission_scatter(
     else {
         tint = clamp3f(tint, 0.0f, 1.0f);
         float cosInside = fmaxf(fabsf(dot(normalize(direction), -macro_normal)), 0.05f);
-        float thickness = 0.1f / cosInside;
+        float thickness = 0.65f / cosInside;
         float3 absorption = make_float3(
             (1.0f - tint.x) * thickness,
             (1.0f - tint.y) * thickness,
@@ -888,9 +910,13 @@ __device__ bool scatter_material(
     // roughness is clamped >= 0.02f above, so (roughness < 0.02f) is always false —
     // meaning NEE ran for every refraction. evaluate_brdf gives (diffuse*0 + spec) for
     // high-transmission glass, causing bright specular fireflies on the refracted path.
-    if (transmission > 0.01f && random_float(rng) < transmission) {
-        *is_specular = true;
-        return transmission_scatter(material, payload, ray_in, rng, scattered, attenuation);
+    if (transmission > 0.01f) {
+        if (random_float(rng) < transmission) {
+            *is_specular = true;
+            return transmission_scatter(material, payload, ray_in, rng, scattered, attenuation);
+        }
+        albedo *= 1.0f / fmaxf(1.0f - transmission, 0.01f);
+        transmission = 0.0f;
     }
     
     // 3. SUBSURFACE SCATTERING (Random Walk)
@@ -915,10 +941,7 @@ __device__ bool scatter_material(
     // Mirror Vulkan closesthit.rchit three-case structure exactly:
     //   metallic >= 0.999 → pure metal (always specular, no selection)
     //   metallic <= 0.001 → pure dielectric (Fresnel-driven, white F0 specular, NO compensation)
-    //   otherwise         → stochastic metallic blend WITH 1/p compensation (unbiased estimator)
-    //
-    // The compensation is critical: without it the expected throughput is ~half of Vulkan
-    // for intermediate metallic values, making diffuse contribution too weak.
+    //   otherwise         → stochastic metallic blend weighted by the selection probability
     float3 wo = -normalize(ray_in.direction);
     float cosTheta_N = fmaxf(dot(V, N), 0.0f);
     float3 F_avg = F0 + (make_float3(1.0f, 1.0f, 1.0f) - F0) / 21.0f;
@@ -970,22 +993,24 @@ __device__ bool scatter_material(
         }
 
     } else {
-        // ── Metallic blend: stochastic with 1/p compensation ──
-        // Matches Vulkan: rnd < metalWeight → scatterMetal * (1/metalWeight)
-        //                 else              → scatterDiffuse * (1/diffuseWeight)
-        // Compensation makes the estimator unbiased: E[throughput] = F*G1L + albedo
+        // Metallic blend: stochastic selection.
+        //
+        // The selection probability already is the material weight. Applying
+        // 1/p compensation without also multiplying the lobe by that weight
+        // makes intermediate metallic values estimate full diffuse + full
+        // specular energy, which is not energy conserving and causes bright
+        // outlier paths on metal/rough-metal surfaces.
         float p_metal = metallic;
         if (random_float(rng) < p_metal) {
-            scatter_specular(F0, 1.0f / fmaxf(p_metal, 0.1f));
+            scatter_specular(F0, 1.0f);
         } else {
-            float  p_diff    = fmaxf(1.0f - p_metal, 0.1f);
             float3 diff_dir  = random_cosine_direction(rng);
             float3 up        = fabsf(N.z) < 0.999f ? make_float3(0,0,1) : make_float3(1,0,0);
             float3 tanX      = normalize(cross(up, N));
             float3 tanY      = cross(N, tanX);
             float3 world_dir = normalize(tanX*diff_dir.x + tanY*diff_dir.y + N*diff_dir.z);
             *scattered    = Ray(offset_ray(payload.position, N), world_dir);
-            *attenuation  = clamp3f(albedo * (1.0f / p_diff), 0.0f, 1e4f);
+            *attenuation  = clamp3f(albedo, 0.0f, 1e4f);
             *pdf          = fmaxf(dot(N, world_dir), GPU_MIN_DOT) / M_PIf;
             *is_specular  = false;
         }
@@ -996,4 +1021,3 @@ __device__ bool scatter_material(
     }
     return true;
 }
-

@@ -232,7 +232,7 @@ bool PaintLayerStack::mergeDown(int index) {
         return true;
     }
 
-    for (int ch = 0; ch < 7; ++ch) {
+    for (int ch = 0; ch < static_cast<int>(kPaintChannelCount); ++ch) {
         const auto channel = static_cast<PaintChannel>(ch);
         if (!upper.hasPixels(channel)) continue;
 
@@ -254,7 +254,7 @@ void PaintLayerStack::flattenAll() {
 
     const size_t pixel_count = static_cast<size_t>(width_) * static_cast<size_t>(height_);
 
-    for (int ch = 0; ch < 7; ++ch) {
+    for (int ch = 0; ch < static_cast<int>(kPaintChannelCount); ++ch) {
         const auto channel = static_cast<PaintChannel>(ch);
         std::vector<CompactVec4> result(pixel_count, CompactVec4(0, 0, 0, 0));
 
@@ -311,7 +311,7 @@ bool PaintLayerStack::anyLayerHasPixels(PaintChannel channel) const {
 void PaintLayerStack::flattenInto(PaintTextureSet& texture_set) const {
     if (width_ <= 0 || height_ <= 0) return;
 
-    for (int ch = 0; ch < 7; ++ch) {
+    for (int ch = 0; ch < static_cast<int>(kPaintChannelCount); ++ch) {
         const auto channel = static_cast<PaintChannel>(ch);
         auto texture = texture_set.getTexture(channel);
         if (!texture) continue;
@@ -431,7 +431,7 @@ void PaintLayerStack::seedFromTextureSet(const PaintTextureSet& src) {
 
     PaintLayerData& base = layers_[0];
 
-    for (int ch = 0; ch < 7; ++ch) {
+    for (int ch = 0; ch < static_cast<int>(kPaintChannelCount); ++ch) {
         const auto channel = static_cast<PaintChannel>(ch);
         auto texture = src.getTexture(channel);
         if (!texture || !texture->is_loaded() || texture->pixels.empty()) continue;
@@ -449,6 +449,18 @@ void PaintLayerStack::seedFromTextureSet(const PaintTextureSet& src) {
         } else {
             resamplePixels(texture->pixels, texture->width, texture->height,
                            buf, width_, height_);
+        }
+
+        // Base layer must always be fully opaque for every channel except
+        // Opacity. compositeChannel starts from CompactVec4(0,0,0,0) and uses
+        // Porter-Duff "over" via blendPixel; alpha < 255 on the base would
+        // compose to black on the first dab. Opacity is the one channel
+        // where alpha *is* the user-meaningful value (the mask itself), so
+        // we leave its base layer alpha alone — the composite still works
+        // because makeBrushPixel writes the same grayscale into all four
+        // channels for Opacity, keeping RGB and A in lockstep.
+        if (channel != PaintChannel::Opacity) {
+            for (auto& p : buf) p.a = 255;
         }
     }
 }
@@ -488,7 +500,7 @@ void PaintLayerStack::serialize(nlohmann::json& j, std::ostream& bin) const {
         jl["enabled_channels"] = layer.meta.enabled_channels;
 
         nlohmann::json j_channels = nlohmann::json::array();
-        for (int ch = 0; ch < 7; ++ch) {
+        for (int ch = 0; ch < static_cast<int>(kPaintChannelCount); ++ch) {
             const auto& buf = layer.channel_pixels[ch];
             if (buf.empty()) continue;
 
@@ -548,7 +560,7 @@ void PaintLayerStack::deserialize(const nlohmann::json& j, std::istream& bin) {
                 const int ch          = jc.value("ch", -1);
                 const int64_t offset  = jc.value("offset", int64_t(-1));
                 const int64_t size    = jc.value("size", int64_t(0));
-                if (ch < 0 || ch >= 6 || offset < 0 || size <= 0) continue;
+                if (ch < 0 || ch >= static_cast<int>(kPaintChannelCount) || offset < 0 || size <= 0) continue;
 
                 // Read PNG blob from binary stream.
                 std::vector<uint8_t> png_buf(static_cast<size_t>(size));

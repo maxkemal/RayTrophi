@@ -69,6 +69,99 @@
 #include <Backend/VulkanBackend.h>
 #include "Backend/IViewportBackend.h"
 
+namespace {
+float rt_cloud_lerp(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+float rt_cloud_smoothstep(float edge0, float edge1, float x) {
+    float t = std::clamp((x - edge0) / std::max(edge1 - edge0, 1e-6f), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+float rt_cloud_hash(const Vec3& p) {
+    const float d = p.x * 127.1f + p.y * 311.7f + p.z * 74.7f;
+    const float v = std::sin(d) * 43758.5453f;
+    return v - std::floor(v);
+}
+
+float rt_cloud_noise(Vec3 p) {
+    Vec3 i(std::floor(p.x), std::floor(p.y), std::floor(p.z));
+    Vec3 f(p.x - i.x, p.y - i.y, p.z - i.z);
+    f.x = f.x * f.x * (3.0f - 2.0f * f.x);
+    f.y = f.y * f.y * (3.0f - 2.0f * f.y);
+    f.z = f.z * f.z * (3.0f - 2.0f * f.z);
+
+    const float n000 = rt_cloud_hash(i + Vec3(0, 0, 0));
+    const float n100 = rt_cloud_hash(i + Vec3(1, 0, 0));
+    const float n010 = rt_cloud_hash(i + Vec3(0, 1, 0));
+    const float n110 = rt_cloud_hash(i + Vec3(1, 1, 0));
+    const float n001 = rt_cloud_hash(i + Vec3(0, 0, 1));
+    const float n101 = rt_cloud_hash(i + Vec3(1, 0, 1));
+    const float n011 = rt_cloud_hash(i + Vec3(0, 1, 1));
+    const float n111 = rt_cloud_hash(i + Vec3(1, 1, 1));
+
+    const float nx00 = rt_cloud_lerp(n000, n100, f.x);
+    const float nx10 = rt_cloud_lerp(n010, n110, f.x);
+    const float nx01 = rt_cloud_lerp(n001, n101, f.x);
+    const float nx11 = rt_cloud_lerp(n011, n111, f.x);
+    return rt_cloud_lerp(rt_cloud_lerp(nx00, nx10, f.y), rt_cloud_lerp(nx01, nx11, f.y), f.z);
+}
+
+float rt_cloud_fbm(Vec3 p, int octaves) {
+    float value = 0.0f;
+    float amp = 0.5f;
+    for (int i = 0; i < octaves; ++i) {
+        value += amp * rt_cloud_noise(p);
+        p = p * 2.0f;
+        amp *= 0.5f;
+    }
+    return value;
+}
+
+float rt_sample_procedural_cloud_cpu(const Vec3& local_p, const VDBVolume* vdb, const NishitaSkyParams& n) {
+    if (!vdb) return 0.0f;
+    const Vec3 bmin = vdb->getLocalBoundsMin();
+    const Vec3 bmax = vdb->getLocalBoundsMax();
+    const Vec3 span(std::max(1e-5f, bmax.x - bmin.x), std::max(1e-5f, bmax.y - bmin.y), std::max(1e-5f, bmax.z - bmin.z));
+    Vec3 norm((local_p.x - bmin.x) / span.x, (local_p.y - bmin.y) / span.y, (local_p.z - bmin.z) / span.z);
+    if (norm.x < 0.0f || norm.x > 1.0f || norm.y < 0.0f || norm.y > 1.0f || norm.z < 0.0f || norm.z > 1.0f) return 0.0f;
+
+    float coverage = n.cloud_coverage;
+    float density_ref = n.cloud_density;
+    float scale = n.cloud_scale;
+    if (n.cloud_layer2_enabled && (!n.clouds_enabled || n.cloud2_density > density_ref)) {
+        coverage = n.cloud2_coverage;
+        density_ref = n.cloud2_density;
+        scale = n.cloud2_scale;
+    }
+
+    const float base_scale = std::max(8.0f, std::min(72.0f, 10.0f / std::max(0.1f, scale)));
+    Vec3 cloud_pos(norm.x * base_scale + n.cloud_offset_x * 0.00002f, norm.y * 1.35f, norm.z * base_scale + n.cloud_offset_z * 0.00002f);
+    const float detail = std::clamp(n.cloud_detail, 0.0f, 1.0f);
+    const float erosion = std::clamp(1.0f - coverage, 0.0f, 1.0f);
+
+    const float warp_x = rt_cloud_fbm(Vec3(cloud_pos.x * 0.38f, cloud_pos.y * 0.16f, cloud_pos.z * 0.38f) + Vec3(11, 0, 7), 2) - 0.5f;
+    const float warp_z = rt_cloud_fbm(Vec3(cloud_pos.x * 0.38f, cloud_pos.y * 0.16f, cloud_pos.z * 0.38f) + Vec3(41, 3, 23), 2) - 0.5f;
+    const Vec3 warped = cloud_pos + Vec3(warp_x * 1.35f, 0.0f, warp_z * 1.35f);
+
+    const float base = rt_cloud_fbm(Vec3(warped.x * 0.52f, warped.y * 0.28f, warped.z * 0.52f), 4);
+    const float billow = 1.0f - std::abs(rt_cloud_fbm(Vec3(warped.x * 1.15f, warped.y * 0.5f, warped.z * 1.15f) + Vec3(17, 3, 11), 4) * 2.0f - 1.0f);
+    const float detail_noise = rt_cloud_fbm(warped * rt_cloud_lerp(2.8f, 7.0f, detail) + Vec3(31, 7, 19), 2);
+    const float puffy = rt_cloud_smoothstep(0.32f, 0.88f, billow);
+    float shape = rt_cloud_lerp(base, base * 0.45f + puffy * 0.75f, 0.72f);
+    shape -= detail_noise * rt_cloud_lerp(0.06f, 0.28f, erosion);
+
+    const float threshold = rt_cloud_lerp(0.78f, 0.30f, std::clamp(coverage, 0.0f, 1.0f));
+    float d = std::max((shape - threshold) / std::max(1.0f - threshold, 1e-4f), 0.0f);
+    const float bottom = rt_cloud_smoothstep(0.12f, 0.42f, norm.y);
+    const float top = 1.0f - rt_cloud_smoothstep(0.72f, 1.02f, norm.y);
+    const Vec3 edge(0.5f - std::abs(norm.x - 0.5f), 0.5f - std::abs(norm.y - 0.5f), 0.5f - std::abs(norm.z - 0.5f));
+    const float edge_falloff = rt_cloud_smoothstep(0.0f, 0.08f, std::min(edge.x, edge.z));
+    return d * d * bottom * top * edge_falloff * 4.6f;
+}
+}
+
 bool Renderer::isCudaAvailable() {
     try {
         oidn::DeviceRef testDevice = oidn::newDevice(oidn::DeviceType::CUDA);
@@ -432,6 +525,16 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
     const bool useAlbedo = frame.albedoDevPtr != nullptr;
     const bool useNormal = frame.normalDevPtr != nullptr;
 
+    // Basic validation of device-resident layout to avoid illegal accesses
+    if (frame.pixelByteStride < sizeof(float) * 3) {
+        SCENE_LOG_ERROR("[OIDN GPU] invalid pixelByteStride (too small)");
+        return false;
+    }
+    if (frame.rowByteStride < frame.pixelByteStride * static_cast<size_t>(width)) {
+        SCENE_LOG_ERROR("[OIDN GPU] invalid rowByteStride (too small for width)");
+        return false;
+    }
+
     const bool sizeChanged   = (width != oidnCachedWidth) || (height != oidnCachedHeight);
     const bool layoutChanged = (useAlbedo != oidnUsingAlbedo) || (useNormal != oidnUsingNormal);
     const bool ptrsChanged   =
@@ -443,6 +546,21 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
 
     if (rebuildFilter) {
         try {
+            // Ensure we're on the device expected by the frame to avoid stale-context issues
+            int currentDev = -1;
+            if (cudaGetDevice(&currentDev) != cudaSuccess) {
+                cudaGetLastError();
+                SCENE_LOG_WARN("[OIDN GPU] cudaGetDevice failed before setup");
+                return false;
+            }
+            if (desiredOrd >= 0 && desiredOrd != currentDev) {
+                if (cudaSetDevice(desiredOrd) != cudaSuccess) {
+                    cudaGetLastError();
+                    SCENE_LOG_WARN("[OIDN GPU] cudaSetDevice failed when binding desired device");
+                    return false;
+                }
+            }
+
             if (outputSizeChanged) {
                 if (oidnGpuOutputDevPtr) {
                     cudaFree(oidnGpuOutputDevPtr);
@@ -458,7 +576,7 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
             }
 
             oidnFilter = oidnDevice.newFilter("RT");
-            // Device-resident inputs with explicit stride (float4 layout, 16B/pixel).
+            // Device-resident inputs with explicit stride.
             oidnFilter.setImage("color", frame.colorDevPtr, oidn::Format::Float3,
                                 static_cast<size_t>(width), static_cast<size_t>(height),
                                 /*byteOffset=*/0,
@@ -502,8 +620,13 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
     try {
         // Ensure OptiX writes on its stream are visible before OIDN reads shared memory.
         if (desiredStream) {
-            cudaStreamSynchronize(desiredStream);
+            if (cudaStreamSynchronize(desiredStream) != cudaSuccess) {
+                cudaGetLastError();
+                SCENE_LOG_WARN("[OIDN GPU] cudaStreamSynchronize failed before execute");
+                // proceed — OIDN may still report an error
+            }
         }
+
         oidnFilter.execute();
 
         const char* errMsg = nullptr;
@@ -519,19 +642,25 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
                                        blend,
                                        frame.pixelByteStride,
                                        desiredStream)) {
-                cudaGetLastError();
+                cudaError_t le = cudaGetLastError();
+                SCENE_LOG_ERROR(std::string("[OIDN GPU] blend kernel launch failed: ") + std::to_string(static_cast<int>(le)));
                 return false;
             }
         }
 
         if (desiredStream) {
-            cudaStreamSynchronize(desiredStream);
+            if (cudaStreamSynchronize(desiredStream) != cudaSuccess) {
+                cudaError_t se = cudaGetLastError();
+                SCENE_LOG_ERROR(std::string("[OIDN GPU] cudaStreamSynchronize failed after blend: ") + std::to_string(static_cast<int>(se)));
+                return false;
+            }
         }
 
         // Only unavoidable transfer on this path: final denoised output → host for display.
         if (cudaMemcpy(output.data(), oidnGpuOutputDevPtr,
                        outBufferSize * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
-            cudaGetLastError();
+            cudaError_t me = cudaGetLastError();
+            SCENE_LOG_ERROR(std::string("[OIDN GPU] final cudaMemcpy failed: ") + std::to_string(static_cast<int>(me)));
             return false;
         }
     } catch (const std::exception& e) {
@@ -844,12 +973,12 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                         std::vector<Transform*> processed;
                         for (auto& member : ctx.members) {
                             if (auto tri = std::dynamic_pointer_cast<Triangle>(member)) {
-                                auto h = tri->getTransformHandle();
-                                if (h && std::find(processed.begin(), processed.end(), h.get()) == processed.end()) {
+                                Transform* h = tri->getTransformPtr();
+                                if (h && std::find(processed.begin(), processed.end(), h) == processed.end()) {
                                     h->position = h->position + horizontalDelta;
                                     h->updateMatrix();
                                     h->markDirty();
-                                    processed.push_back(h.get());
+                                    processed.push_back(h);
                                 }
                             }
                         }
@@ -1081,11 +1210,11 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                         std::vector<Transform*> processed;
                         for (auto& member : ctx.members) {
                             if (auto tri = std::dynamic_pointer_cast<Triangle>(member)) {
-                                auto h = tri->getTransformHandle();
-                                if (h && std::find(processed.begin(), processed.end(), h.get()) == processed.end()) {
+                                Transform* h = tri->getTransformPtr();
+                                if (h && std::find(processed.begin(), processed.end(), h) == processed.end()) {
                                     h->position = h->position + horizontalDelta;
                                     h->updateMatrix(); h->markDirty();
-                                    processed.push_back(h.get());
+                                    processed.push_back(h);
                                 }
                             }
                         }
@@ -1183,7 +1312,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                 for (auto& obj : scene.world.objects) {
                     auto tri = std::dynamic_pointer_cast<Triangle>(obj);
                     if (!tri) continue;
-                    void* transformKey = tri->getTransformHandle().get();
+                    void* transformKey = tri->getTransformPtr();
                     if (transformToGroup.find(transformKey) == transformToGroup.end()) {
                         transformToGroup[transformKey] = animation_groups.size();
                         AnimatableGroup newGroup;
@@ -1271,11 +1400,92 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 
         // Drive the animation
         bool changed = updateAnimationWithGraph(scene, deltaTime, apply_cpu_skinning);
-        
+
         geometry_changed = changed || timelineScrubbed;
-        
+
         last_sim_time = current_time;
         last_timeline_frame = scene.timeline.current_frame;
+
+        // Rigid (non-skinned) node animation: updateAnimationWithGraph only updates bone matrices.
+        // Meshes animated via node-level TRS keys (e.g. props, cubes) need their transformHandle
+        // updated from the Assimp node hierarchy every frame — do that here.
+        {
+            std::unordered_map<std::string, Matrix4x4> animatedGlobalNodeTransforms;
+
+            for (const auto& modelCtx : scene.importedModelContexts) {
+                if (!modelCtx.loader || !modelCtx.loader->getScene() || !modelCtx.loader->getScene()->mRootNode) continue;
+                if (!modelCtx.hasAnimation) continue;
+
+                std::map<std::string, std::shared_ptr<AnimationData>> animLookup;
+                for (const auto& anim : scene.animationDataList) {
+                    if (!anim) continue;
+                    for (const auto& p : anim->positionKeys) animLookup[p.first] = anim;
+                    for (const auto& p : anim->rotationKeys) animLookup[p.first] = anim;
+                    for (const auto& p : anim->scalingKeys)  animLookup[p.first] = anim;
+                }
+
+                std::unordered_map<std::string, Matrix4x4> modelNodeTransforms;
+                modelCtx.loader->calculateAnimatedNodeTransformsRecursive(
+                    modelCtx.loader->getScene()->mRootNode,
+                    Matrix4x4::identity(),
+                    animLookup,
+                    current_time,
+                    modelNodeTransforms);
+
+                for (const auto& pair : modelNodeTransforms)
+                    animatedGlobalNodeTransforms[pair.first] = pair.second;
+            }
+
+            if (!animatedGlobalNodeTransforms.empty()) {
+                // Ensure animation_groups are populated
+                if (animation_groups_dirty || animation_groups.empty()) {
+                    animation_groups.clear();
+                    std::unordered_map<void*, size_t> transformToGroup;
+                    for (auto& obj : scene.world.objects) {
+                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                        if (!tri) continue;
+                        void* key = tri->getTransformPtr();
+                        if (transformToGroup.find(key) == transformToGroup.end()) {
+                            transformToGroup[key] = animation_groups.size();
+                            AnimatableGroup ng;
+                            ng.nodeName       = tri->getNodeName();
+                            ng.isSkinned      = tri->hasSkinData();
+                            ng.transformHandle = tri->getTransformHandle();
+                            animation_groups.push_back(ng);
+                        }
+                        animation_groups[transformToGroup[key]].triangles.push_back(tri);
+                    }
+                    animation_groups_dirty = false;
+                }
+
+                for (auto& group : animation_groups) {
+                    if (group.isSkinned) continue;
+
+                    bool nodeHasAnim = false;
+                    for (const auto& anim : scene.animationDataList) {
+                        if (!anim) continue;
+                        if (anim->positionKeys.count(group.nodeName) ||
+                            anim->rotationKeys.count(group.nodeName) ||
+                            anim->scalingKeys.count(group.nodeName)) {
+                            nodeHasAnim = true;
+                            break;
+                        }
+                    }
+
+                    if (nodeHasAnim && animatedGlobalNodeTransforms.count(group.nodeName)) {
+                        Matrix4x4 animTransform = animatedGlobalNodeTransforms[group.nodeName];
+                        if (group.transformHandle) {
+                            group.transformHandle->setBase(animTransform);
+                            group.transformHandle->setCurrent(Matrix4x4::identity());
+                            if (apply_cpu_skinning) {
+                                for (auto& tri : group.triangles) tri->updateTransformedVertices();
+                            }
+                            geometry_changed = true;
+                        }
+                    }
+                }
+            }
+        }
     }
     else {
         // --- LEGACY FALLBACK PATH ---
@@ -1364,7 +1574,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
             if (!tri) continue;
 
-            void* transformKey = tri->getTransformHandle().get();
+                    void* transformKey = tri->getTransformPtr();
             if (transformToGroup.find(transformKey) == transformToGroup.end()) {
                 transformToGroup[transformKey] = animation_groups.size();
                 AnimatableGroup newGroup;
@@ -1616,6 +1826,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
         // OPTIMIZATION: This cache should ideally be built once when scene loads,
         // but for now we only process tracks that have keyframes - much faster than 10M objects
 
+        bool any_material_keyframed = false;
         for (auto& [track_name, track] : scene.timeline.tracks) {
             // Skip tracks without material keyframes
             if (track.keyframes.empty()) continue;
@@ -1627,21 +1838,19 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
             // Get material ID from keyframe
             uint16_t mat_id = kf.material.material_id;
 
-            // If no material ID in keyframe, we need to find it from an object with this node name
-            // This is a fallback - ideally material ID should be stored in the keyframe
-            if (mat_id == 0) {
-                // Quick lookup: find first object with this node name
-                // TODO: Cache this mapping for better performance
+            // Fallback: if material_id wasn't stored in the keyframe (INVALID), find it by node name.
+            // NOTE: ID 0 is a valid material (first slot) — only INVALID_MATERIAL_ID means "not set".
+            if (mat_id == MaterialManager::INVALID_MATERIAL_ID) {
                 for (const auto& obj : scene.world.objects) {
                     auto tri = std::dynamic_pointer_cast<Triangle>(obj);
                     if (tri && tri->getNodeName() == track_name) {
                         mat_id = tri->getMaterialID();
-                        break; // Found it, no need to continue
+                        break;
                     }
                 }
             }
 
-            if (mat_id == 0) continue; // No material ID found
+            if (mat_id == MaterialManager::INVALID_MATERIAL_ID) continue;
 
             // Get material and apply keyframe values
             Material* mat_ptr = MaterialManager::getInstance().getMaterial(mat_id);
@@ -1649,7 +1858,9 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                 // Apply interpolated material properties to GpuMaterial
                 kf.material.applyTo(*mat_ptr->gpuMaterial);
 
-                // Also update CPU-side material properties if it's a PrincipledBSDF
+                // Also update CPU-side PrincipledBSDF properties so that
+                // capturePBRMaterialSnapshot in updateBackendMaterials reads
+                // the keyframed values instead of overriding them with stale CPU data.
                 if (auto* pbsdf = dynamic_cast<PrincipledBSDF*>(mat_ptr)) {
                     pbsdf->albedoProperty.color = kf.material.albedo;
                     pbsdf->roughnessProperty.color = Vec3(kf.material.roughness);
@@ -1659,7 +1870,15 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                     pbsdf->transmission = kf.material.transmission;
                     pbsdf->opacityProperty.alpha = kf.material.opacity;
                 }
+                any_material_keyframed = true;
             }
+        }
+
+        // Push material changes to all GPU backends now that CPU props are in sync.
+        // updateBackendMaterials reads CPU BSDF props via capturePBRMaterialSnapshot,
+        // which would override gpuMaterial unless we updated the CPU props above first.
+        if (any_material_keyframed) {
+            this->updateBackendMaterials(scene);
         }
 
         // --- WORLD KEYFRAME EVALUATION (NEW!) ---
@@ -2051,6 +2270,7 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
                     rp.imageWidth = target_surface->w;
                     rp.imageHeight = target_surface->h;
                     rp.samplesPerPixel = total_samples_per_pixel;
+                    rp.minSamples = render_settings.min_samples;
                     rp.maxBounces = std::max(1, render_settings.max_bounces);
                     rp.useAdaptiveSampling = false;
                     rp.adaptiveThreshold = 0.0f;
@@ -2198,6 +2418,7 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         rp.imageWidth = image_width;
         rp.imageHeight = image_height;
         rp.samplesPerPixel = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
+        rp.minSamples = render_settings.min_samples;
         rp.maxBounces = std::max(1, render_settings.max_bounces);
         rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
         rp.adaptiveThreshold = render_settings.variance_threshold;
@@ -2243,7 +2464,7 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
         if (!obj) continue;
 
         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-            if (tri->getTransformHandle() && tri->getVertexBoneWeights().empty()) {
+            if (tri->getTransformPtr() && tri->getVertexBoneWeights().empty()) {
                 tri->updateTransformedVertices();
             }
             continue;
@@ -2255,7 +2476,7 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
             }
             if (inst->source_triangles) {
                 for (auto& srcTri : *inst->source_triangles) {
-                    if (srcTri && srcTri->getTransformHandle() && srcTri->getVertexBoneWeights().empty()) {
+                    if (srcTri && srcTri->getTransformPtr() && srcTri->getVertexBoneWeights().empty()) {
                         srcTri->updateTransformedVertices();
                     }
                 }
@@ -2654,82 +2875,14 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
         SCENE_LOG_INFO("[RayTrophi: RT_BVH]  structure built successfully.");
     }
 
-    update_progress(75, "Setting up GPU rendering...");
-
-    // ---- 3. GPU OptiX setup ----
-    // CRITICAL: In append mode, SKIP GPU build here!
-    // The caller (ProjectManager::importModel) will call rebuildOptiXGeometry() 
-    // which properly builds from ALL triangles in the scene.
-    // If we build here with only loaded_triangles, we destroy the existing 
-    // materials' texture handles, causing the second object to use first object's textures!
-    if (g_hasOptix && backend && !append)
-    {
-        try
-        {
-            update_progress(78, "Creating OptiX geometry...");
-            SCENE_LOG_INFO("OptiX GPU detected. Creating OptiX geometry data...");
-            // Use newLoader here
-            OptixGeometryData optix_data = newLoader->convertTrianglesToOptixData(loaded_triangles);
-            SCENE_LOG_INFO("Converting " + std::to_string(loaded_triangles.size()) + " triangles to OptiX format.");
-
-            Backend::OptixBackend* optixBackend = dynamic_cast<Backend::OptixBackend*>(backend);
-            OptixWrapper* optix_gpu = optixBackend ? optixBackend->getOptixWrapper() : nullptr;
-
-            update_progress(82, "Validating materials...");
-            if (optix_gpu) optix_gpu->validateMaterialIndices(optix_data);
-            SCENE_LOG_INFO("Material indices validated.");
-
-            update_progress(85, "Building OptiX acceleration...");
-            if (optix_gpu) optix_gpu->buildFromData(optix_data);
-            SCENE_LOG_INFO("OptiX BVH and acceleration structures built.");
-
-            update_progress(90, "Configuring OptiX camera...");
-            if (scene.camera) {
-                SCENE_LOG_INFO("Setting up OptiX camera parameters...");
-                backend->syncCamera(*scene.camera);
-                SCENE_LOG_INFO("OptiX camera configured successfully.");
-            }
-
-            update_progress(93, "Setting up OptiX lights...");
-            if (!scene.lights.empty()) {
-                SCENE_LOG_INFO("Configuring " + std::to_string(scene.lights.size()) + " lights for OptiX...");
-                backend->setLights(scene.lights);
-                SCENE_LOG_INFO("OptiX light parameters set successfully.");
-            }
-
-            // Consistently sync all volumes using unified logic
-            VolumetricRenderer::syncVolumetricData(scene, m_backend);
-            update_progress(96, "Finalizing world environment...");
-            // backend->setBackgroundColor(scene.background_color);
-            // Do not force COLOR mode - preserve existing mode set by createDefaultScene or UI
-            // this->world.setMode(WORLD_MODE_COLOR); 
-
-            // Only update solid color provided by scene if we are in Color mode, 
-            // OR if we want to ensure scene.background_color is synced.
-            // But for default scene, we want Nishita.
-            if (this->world.getMode() == WORLD_MODE_COLOR) {
-                this->world.setColor(scene.background_color);
-            }
-            if (optix_gpu) optix_gpu->setWorld(this->world.getGPUData());
-
-            SCENE_LOG_INFO("World environment set for OptiX rendering.");
-        }
-        catch (std::exception& e)
-        {
-            SCENE_LOG_ERROR(std::string("OptiX exception occurred: ") + e.what());
-            SCENE_LOG_WARN("Falling back to CPU-only rendering.");
-            g_hasOptix = false;
-        }
-    }
-    else
-    {
-        if (!g_hasOptix) {
-            SCENE_LOG_INFO("OptiX not available. Using CPU-only path.");
-        }
-        else {
-            SCENE_LOG_INFO("OptiX disabled or not initialized. Using CPU-only path.");
-        }
-    }
+    // ---- 3. GPU setup deferred ----
+    // GPU backend build (OptiX GAS / Vulkan AS) is deferred to scene_loading_done in
+    // Main.cpp, which calls syncActiveRenderBackendScene() with all dirty flags set.
+    // This avoids a double build: create_scene would build from loaded_triangles, then
+    // syncActiveRenderBackendScene rebuilds from scene.world.objects immediately after.
+    // For the startup path, syncActiveRenderBackendScene(true) is called explicitly via
+    // the splash screen prepare block — no action needed here in either case.
+    SCENE_LOG_INFO("GPU backend build deferred to post-load sync.");
 
     // ---- 4. Son bilgiler ----
     update_progress(100, "Complete!");
@@ -3169,8 +3322,9 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
             else if (shadow_rec.gas_volume && shadow_rec.gas_volume->render_path == GasVolume::VolumeRenderPath::VDBUnified) {
                 live_vol_id = shadow_rec.gas_volume->live_vdb_id;
                 vol_shader = shadow_rec.gas_volume->getShader();
-                if (shadow_rec.gas_volume->getTransformHandle()) {
-                    Matrix4x4 m = shadow_rec.gas_volume->getTransformHandle()->getFinal();
+                Transform* gv_trans = shadow_rec.gas_volume->getTransformPtr();
+                if (gv_trans) {
+                    Matrix4x4 m = gv_trans->getFinal();
                     Vec3 gsize = shadow_rec.gas_volume->getSettings().grid_size;
                     if (gsize.x > 0 && gsize.y > 0 && gsize.z > 0) {
                         m = m * Matrix4x4::scaling(Vec3(1.0f / gsize.x, 1.0f / gsize.y, 1.0f / gsize.z));
@@ -4108,8 +4262,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         else if (rec.gas_volume && rec.gas_volume->render_path == GasVolume::VolumeRenderPath::VDBUnified) {
             live_vol_id = rec.gas_volume->live_vdb_id;
             vol_shader = rec.gas_volume->getShader();
-            if (rec.gas_volume->getTransformHandle()) {
-                Matrix4x4 m = rec.gas_volume->getTransformHandle()->getFinal();
+            Transform* gv_trans = rec.gas_volume->getTransformPtr();
+            if (gv_trans) {
+                Matrix4x4 m = gv_trans->getFinal();
                 Vec3 gsize = rec.gas_volume->getSettings().grid_size;
                 if (gsize.x > 0 && gsize.y > 0 && gsize.z > 0) {
                     m = m * Matrix4x4::scaling(Vec3(1.0f / gsize.x, 1.0f / gsize.y, 1.0f / gsize.z));
@@ -4119,7 +4274,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             den_scale = 1.0f;
         }
         float actual_step_size = 0.0f;
-        if (live_vol_id >= 0) {
+        const bool procedural_vdb = (vdb && vdb->isProceduralVolume());
+        if (live_vol_id >= 0 || procedural_vdb) {
             // Get entry and exit points
             float t_enter, t_exit;
             bool hit_box = false;
@@ -4231,7 +4387,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     Vec3 p = current_ray.at(t);
                     Vec3 local_p = inv_transform.transform_point(p);
 
-                    float density = mgr.sampleDensityCPU(live_vol_id, local_p.x, local_p.y, local_p.z);
+                    float density = procedural_vdb
+                        ? rt_sample_procedural_cloud_cpu(local_p, vdb, world.data.nishita)
+                        : mgr.sampleDensityCPU(live_vol_id, local_p.x, local_p.y, local_p.z);
 
                     float edge_falloff = shader ? shader->density.edge_falloff : 0.0f;
                     if (edge_falloff > 0.0f && density > 0.0f) {
@@ -4331,7 +4489,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
                                         while (t_shadow < tv_exit) {
                                             Vec3 slocal_p = inv_transform.transform_point(shadow_ray_vol.at(t_shadow));
-                                            float s_density = mgr.sampleDensityCPU(live_vol_id, slocal_p.x, slocal_p.y, slocal_p.z);
+                                            float s_density = procedural_vdb
+                                                ? rt_sample_procedural_cloud_cpu(slocal_p, vdb, world.data.nishita)
+                                                : mgr.sampleDensityCPU(live_vol_id, slocal_p.x, slocal_p.y, slocal_p.z);
                                             float s_rem = std::max(0.0f, (s_density - remap_low) / remap_range);
                                             if (s_rem > 1e-4f) {
                                                 density_accum += (s_rem * density_scale * (scattering_intensity + absorption_coeff)) * shadow_march_step;
@@ -5407,17 +5567,11 @@ void Renderer::uploadHairToGPU() {
 
             // 1. Albedo Texture
             if (mp.customAlbedoTexture && mp.customAlbedoTexture->is_loaded()) {
-                if (!mp.customAlbedoTexture->isUploaded()) mp.customAlbedoTexture->upload_to_gpu();
-                if (mp.customAlbedoTexture->isUploaded()) {
-                    mat.albedoTexture = (int64_t)mp.customAlbedoTexture->getTextureObject();
-                }
+                mat.albedoTexture = reinterpret_cast<int64_t>(mp.customAlbedoTexture.get());
             }
             // 2. Roughness Texture
             if (mp.customRoughnessTexture && mp.customRoughnessTexture->is_loaded()) {
-                if (!mp.customRoughnessTexture->isUploaded()) mp.customRoughnessTexture->upload_to_gpu();
-                if (mp.customRoughnessTexture->isUploaded()) {
-                    mat.roughnessTexture = (int64_t)mp.customRoughnessTexture->getTextureObject();
-                }
+                mat.roughnessTexture = reinterpret_cast<int64_t>(mp.customRoughnessTexture.get());
             }
             // 3. Scalp Mesh Texture (Automatic detection for ROOT_UV_MAP mode)
             if (mp.colorMode == Hair::HairMaterialParams::ColorMode::ROOT_UV_MAP && mat.albedoTexture == -1) {
@@ -5428,10 +5582,7 @@ void Renderer::uploadHairToGPU() {
                     const auto& scalpMat = all_mats[scalpMatID];
                     if (scalpMat) {
                         if (scalpMat->albedoProperty.texture && scalpMat->albedoProperty.texture->is_loaded()) {
-                            if (!scalpMat->albedoProperty.texture->isUploaded()) scalpMat->albedoProperty.texture->upload_to_gpu();
-                            if (scalpMat->albedoProperty.texture->isUploaded()) {
-                                mat.scalpAlbedoTexture = (int64_t)scalpMat->albedoProperty.texture->getTextureObject();
-                            }
+                            mat.scalpAlbedoTexture = reinterpret_cast<int64_t>(scalpMat->albedoProperty.texture.get());
                         }
                         mat.scalpBaseColor = scalpMat->albedoProperty.color;
                     }
@@ -5543,7 +5694,7 @@ void Renderer::uploadHairToGPU() {
         }
     }
     
-    SCENE_LOG_INFO("[Hair GPU] Integrated " + std::to_string(groomNames.size()) + " hair grooms into TLAS");
+   // SCENE_LOG_INFO("[Hair GPU] Integrated " + std::to_string(groomNames.size()) + " hair grooms into TLAS");
     m_backend->resetAccumulation();
 }
 
@@ -5592,17 +5743,11 @@ void Renderer::setHairMaterial(const Hair::HairMaterialParams& mat) {
 
             // 1. Albedo Texture
             if (p.customAlbedoTexture && p.customAlbedoTexture->is_loaded()) {
-                if (!p.customAlbedoTexture->isUploaded()) p.customAlbedoTexture->upload_to_gpu();
-                if (p.customAlbedoTexture->isUploaded()) {
-                    h.albedoTexture = (int64_t)p.customAlbedoTexture->getTextureObject();
-                }
+                h.albedoTexture = reinterpret_cast<int64_t>(p.customAlbedoTexture.get());
             }
             // 2. Roughness Texture
             if (p.customRoughnessTexture && p.customRoughnessTexture->is_loaded()) {
-                if (!p.customRoughnessTexture->isUploaded()) p.customRoughnessTexture->upload_to_gpu();
-                if (p.customRoughnessTexture->isUploaded()) {
-                    h.roughnessTexture = (int64_t)p.customRoughnessTexture->getTextureObject();
-                }
+                h.roughnessTexture = reinterpret_cast<int64_t>(p.customRoughnessTexture.get());
             }
             // 3. Scalp Mesh Texture (Automatic detection for ROOT_UV_MAP mode)
             if (p.colorMode == Hair::HairMaterialParams::ColorMode::ROOT_UV_MAP && h.albedoTexture == -1) {
@@ -5615,10 +5760,7 @@ void Renderer::setHairMaterial(const Hair::HairMaterialParams& mat) {
                         const auto& scalpMat = all_mats[scalpMatID];
                         if (scalpMat) {
                             if (scalpMat->albedoProperty.texture && scalpMat->albedoProperty.texture->is_loaded()) {
-                                if (!scalpMat->albedoProperty.texture->isUploaded()) scalpMat->albedoProperty.texture->upload_to_gpu();
-                                if (scalpMat->albedoProperty.texture->isUploaded()) {
-                                    h.scalpAlbedoTexture = (int64_t)scalpMat->albedoProperty.texture->getTextureObject();
-                                }
+                                h.scalpAlbedoTexture = reinterpret_cast<int64_t>(scalpMat->albedoProperty.texture.get());
                             }
                             h.scalpBaseColor = scalpMat->albedoProperty.color;
                         }
@@ -6167,7 +6309,8 @@ void Renderer::rebuildBackendGeometry(SceneData& scene) {
     // m_orderedVDBInstances, syncVDBVolumesToGPU() + updateBackendMaterials() ensure the SSBO
     // is in the right order. Skip the premature call here for Vulkan.
     if (!render_settings.use_vulkan) {
-        VolumetricRenderer::syncVolumetricData(scene, m_backend);
+        WorldData wd = world.getGPUData();
+        VolumetricRenderer::syncVolumetricData(scene, m_backend, &wd);
     }
     // Restore hair after rebuild.
     // For Vulkan the actual BLAS/TLAS rebuild is deferred: rebuildBackendGeometryWithList()
@@ -6394,12 +6537,29 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
     // viewport VkImage stale (mesh paint invisible in Material Preview on
     // Vulkan RT devices). Re-arming the flag between the two syncs makes both
     // caches pick up the same paint stroke.
-    std::vector<Texture*> dirtySnapshot;
+    struct PaintDirtySnapshot {
+        Texture* tex;
+        bool full;
+        int min_x, min_y, max_x, max_y;
+    };
+    std::vector<PaintDirtySnapshot> dirtySnapshot;
     {
         auto& mgr = MaterialManager::getInstance();
         const auto& all = mgr.getAllMaterials();
         auto capture = [&](const std::shared_ptr<Texture>& t) {
-            if (t && t->vulkan_dirty) dirtySnapshot.push_back(t.get());
+            if (!t || !t->vulkan_dirty) return;
+            // Snapshot the rect alongside the flag. The first backend's
+            // getTexID will consume + clear it via clearVulkanDirty(); to make
+            // the second backend take the same partial-upload path we restore
+            // the exact rect (not just re-arm the boolean).
+            dirtySnapshot.push_back({
+                t.get(),
+                t->vulkan_dirty_full,
+                t->vulkan_dirty_min_x,
+                t->vulkan_dirty_min_y,
+                t->vulkan_dirty_max_x,
+                t->vulkan_dirty_max_y
+            });
         };
         for (const auto& mat : all) {
             if (!mat || mat->type() != MaterialType::PrincipledBSDF) continue;
@@ -6421,8 +6581,14 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
     // reflects live edits from the material UI, modifiers, terrain, water, etc.
     extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
     if (g_viewport_backend && g_viewport_backend.get() != m_backend) {
-        for (Texture* t : dirtySnapshot) {
-            if (t) t->vulkan_dirty = true;
+        for (const auto& s : dirtySnapshot) {
+            if (!s.tex) continue;
+            s.tex->vulkan_dirty       = true;
+            s.tex->vulkan_dirty_full  = s.full;
+            s.tex->vulkan_dirty_min_x = s.min_x;
+            s.tex->vulkan_dirty_min_y = s.min_y;
+            s.tex->vulkan_dirty_max_x = s.max_x;
+            s.tex->vulkan_dirty_max_y = s.max_y;
         }
         updateBackendMaterials(scene, g_viewport_backend.get());
     }
@@ -6548,7 +6714,8 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
 
             optix_gpu_ptr->updateHairMaterialsOnly(hairSystem);
             setHairMaterial(hairMaterial);
-            VolumetricRenderer::syncVolumetricData(scene, backend);
+            WorldData wd = world.getGPUData();
+            VolumetricRenderer::syncVolumetricData(scene, backend, &wd);
             optix_gpu_ptr->resetAccumulation();
         }
         catch (std::exception& e) {
@@ -6663,12 +6830,75 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
             backend->uploadMaterials(backendMaterials);
             if (!terrainLayers.empty())
                 backend->uploadTerrainLayerMaterials(terrainLayers);
-            VolumetricRenderer::syncVolumetricData(scene, backend);
+            WorldData wd = world.getGPUData();
+            VolumetricRenderer::syncVolumetricData(scene, backend, &wd);
             backend->resetAccumulation();
         }
     }
     catch (std::exception& e) {
         SCENE_LOG_ERROR(std::string("[Renderer] updateBackendMaterials failed: ") + e.what());
+    }
+}
+
+void Renderer::updateBackendMaterial(SceneData& scene, uint16_t material_id) {
+    updateBackendMaterial(scene, material_id, m_backend);
+
+    extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+    if (g_viewport_backend && g_viewport_backend.get() != m_backend) {
+        updateBackendMaterial(scene, material_id, g_viewport_backend.get());
+    }
+}
+
+void Renderer::updateBackendMaterial(SceneData& scene, uint16_t material_id, Backend::IBackend* targetBackend) {
+    Backend::IBackend* backend = targetBackend ? targetBackend : m_backend;
+    if (!backend || material_id == MaterialManager::INVALID_MATERIAL_ID) return;
+
+    auto& mgr = MaterialManager::getInstance();
+    auto mat = mgr.getMaterial(material_id);
+    if (!mat) return;
+
+    Backend::IBackend::MaterialData data{};
+    data.albedo = mat->albedo;
+    data.ior = mat->ior;
+    data.opacity = 1.0f;
+
+    if (mat->type() == MaterialType::PrincipledBSDF) {
+        PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat);
+        const PBRMaterialSnapshot snapshot = capturePBRMaterialSnapshot(*pbsdf);
+        data = makeBackendMaterialDataFromSnapshot(snapshot);
+
+        auto getH = [](const std::shared_ptr<Texture>& tex) -> int64_t {
+            return tex ? reinterpret_cast<int64_t>(tex.get()) : 0;
+        };
+        data.albedoTexture = getH(pbsdf->albedoProperty.texture);
+        data.normalTexture = getH(pbsdf->normalProperty.texture);
+        data.roughnessTexture = getH(pbsdf->roughnessProperty.texture);
+        data.metallicTexture = getH(pbsdf->metallicProperty.texture);
+        data.emissionTexture = getH(pbsdf->emissionProperty.texture);
+        data.transmissionTexture = getH(pbsdf->transmissionProperty.texture);
+        data.opacityTexture = getH(pbsdf->opacityProperty.texture);
+        data.heightTexture = getH(pbsdf->heightProperty.texture);
+    }
+
+    if (mat->gpuMaterial) {
+        const auto& gm = *mat->gpuMaterial;
+        data.micro_detail_strength = gm.micro_detail_strength;
+        data.micro_detail_scale    = gm.micro_detail_scale;
+        data.tile_break_strength   = gm.tile_break_strength;
+        data.foam_threshold        = gm.foam_threshold;
+        data.fft_ocean_size        = gm.fft_ocean_size;
+        data.fft_choppiness        = gm.fft_choppiness;
+        data.fft_wind_speed        = gm.fft_wind_speed;
+        data.fft_wind_direction    = gm.fft_wind_direction;
+        data.fft_amplitude         = gm.fft_amplitude;
+        data.fft_time_scale        = gm.fft_time_scale;
+        data.micro_anim_speed      = gm.micro_anim_speed;
+        data.micro_morph_speed     = gm.micro_morph_speed;
+        data.foam_noise_scale      = gm.foam_noise_scale;
+    }
+
+    if (!backend->updateMaterial(material_id, data)) {
+        updateBackendMaterials(scene, backend);
     }
 }
 
@@ -6765,7 +6995,8 @@ void syncViewportMaterialBindingsFromScene(Backend::IBackend* backend,
 // Volumetric Sync - Unified logic for Gas and VDB
 // �����������������������������������������������������������������������������
 void Renderer::updateBackendGasVolumes(SceneData& scene) {
-    VolumetricRenderer::syncVolumetricData(scene, m_backend);
+    WorldData wd = world.getGPUData();
+    VolumetricRenderer::syncVolumetricData(scene, m_backend, &wd);
 }
 
 void Renderer::updateMeshMaterialBinding(SceneData& scene, const std::string& node_name, int old_mat_id, int new_mat_id) {

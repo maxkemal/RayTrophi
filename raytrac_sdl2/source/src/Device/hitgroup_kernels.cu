@@ -72,7 +72,8 @@ extern "C" __global__ void __closesthit__ch() {
         world_normal = world_geo_normal;
     }
 
-    if (dot(world_geo_normal, rayDir) > 0.0f) {
+    const bool front_face = dot(world_geo_normal, rayDir) < 0.0f;
+    if (!front_face) {
         world_normal = -world_normal;
         world_geo_normal = -world_geo_normal;
     }
@@ -437,6 +438,7 @@ extern "C" __global__ void __closesthit__ch() {
     payload->position = hitPoint;
     payload->normal = final_normal;
     payload->geom_normal = world_geo_normal;
+    payload->front_face = front_face ? 1 : 0;
     payload->primary_albedo = primary_albedo;
     payload->primary_normal = final_normal;
     payload->primary_hit = hgd->is_volumetric ? 0 : 1;
@@ -765,6 +767,7 @@ extern "C" __global__ void __closesthit__hair() {
     payload->position = hit_point;
     payload->normal = normal;
     payload->geom_normal = normal;
+    payload->front_face = 1;
     payload->primary_albedo = hair_color;
     payload->primary_normal = normal;
     payload->primary_hit = 1;

@@ -17,16 +17,26 @@
 #include "scene_data.h"
 #include "VDBVolumeManager.h"
 #include "HittableInstance.h"
-#include "Texture.h" 
+#include "Texture.h"
 #include "Triangle.h"
+#include "TextureCompressionCache.h"
 #include "TerrainManager.h"
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <unordered_map>
 #include <unordered_set>
 
 // Static editor instance
 static bool showMatNodeEditor = false;
+
+// Cache tag map: key = "texname|type_int", value = "BC7"/"BC5"/"BC4"/"" (empty = no managed cache).
+// Populated lazily per texture slot; cleared when a bake completes.
+static std::unordered_map<std::string, std::string> s_cacheTagMap;
+
+void invalidateTextureCacheTagCache() {
+    s_cacheTagMap.clear();
+}
 
 void projectObjectUVsFromView(UIContext& ctx, SceneUI& ui, const std::string& nodeName);
 
@@ -625,7 +635,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                      Vec3 center = min_pt + size * 0.5f;
                      
                      // Update selected object using generic TransformHandle interface
-                     auto transform_handle = sel.selected.object->getTransformHandle();
+                     Transform* transform_handle = sel.selected.object->getTransformPtr();
                      
                      if (transform_handle) {
                          // Assumes object is a unit cube originally (-0.5 to 0.5 or similar unit size)
@@ -644,7 +654,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                          for (auto& obj : ctx.scene.world.objects) {
                              if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
                                  // Check if they share the exact same transform handle instance
-                                 if (tri->getTransformHandle() == transform_handle) {
+                                 if (tri->getTransformPtr() == transform_handle) {
                                      tri->updateTransformedVertices();
                                  }
                              }
@@ -1705,7 +1715,21 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
                         }
                     }
                 }
-                
+
+                if (type != TextureType::Unknown && !tex_ref->name.empty()) {
+                    const std::string cacheKey = tex_ref->name + "|" + std::to_string(static_cast<int>(type));
+                    auto it = s_cacheTagMap.find(cacheKey);
+                    if (it == s_cacheTagMap.end()) {
+                        it = s_cacheTagMap.emplace(cacheKey, queryManagedCacheTag(*tex_ref, type)).first;
+                    }
+                    if (!it->second.empty()) {
+                        ImGui::SameLine(0, 6);
+                        ImGui::TextColored(ImVec4(0.3f, 0.7f, 1.0f, 1.0f), "[%s]", it->second.c_str());
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("GPU cache: %s (managed)\nReload project to activate.", it->second.c_str());
+                    }
+                }
+
                 // 4. Buttons (Right Aligned)
                 ImGui::SameLine();
                 if (ImGui::GetCursorPosX() < (rightEdge - buttonsWidth)) {
@@ -1801,7 +1825,7 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         DrawTextureSlot("Emission", pbsdf->emissionProperty.texture, TextureType::Emission, Paint::PaintChannel::Emission);
         DrawTextureSlot("Transmission", pbsdf->transmissionProperty.texture, TextureType::Transmission, Paint::PaintChannel::Transmission);
         DrawTextureSlot("Height", pbsdf->heightProperty.texture, TextureType::Unknown, Paint::PaintChannel::Mask);
-        DrawTextureSlot("Opacity", pbsdf->opacityProperty.texture, TextureType::Opacity, Paint::PaintChannel::Mask);
+        DrawTextureSlot("Opacity", pbsdf->opacityProperty.texture, TextureType::Opacity, Paint::PaintChannel::Opacity);
 
         UIWidgets::EndSection();
     }

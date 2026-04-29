@@ -71,6 +71,9 @@
 #include <future>
 #include <thread>
 #include <mutex>
+#include <atomic>
+#include <chrono>
+#include <string_view>
 #include <limits>
 #include "json.hpp"
 
@@ -312,12 +315,16 @@ struct AnimationData {
             Vec3 position(0, 0, 0);
             const auto& keys = positionKeys.at(nodeName);
 
+            // Binary search: keys are sorted ascending by mTime (guaranteed by Assimp).
+            // upper_bound finds the first key strictly after animationTime; step back one
+            // to get the key at-or-before it.  Wraps to 0 if past the last key (loop semantics).
             size_t frameIndex = 0;
-            for (size_t i = 0; i < keys.size() - 1; i++) {
-                if (animationTime < keys[i + 1].mTime) {
-                    frameIndex = i;
-                    break;
-                }
+            if (keys.size() > 1) {
+                auto it = std::upper_bound(keys.begin(), keys.end(), animationTime,
+                    [](double t, const aiVectorKey& k) { return t < k.mTime; });
+                if (it != keys.begin()) --it;
+                frameIndex = static_cast<size_t>(it - keys.begin());
+                if (frameIndex >= keys.size() - 1) frameIndex = 0;
             }
 
             size_t nextFrameIndex = (frameIndex + 1) % keys.size();
@@ -346,11 +353,12 @@ struct AnimationData {
             const auto& keys = rotationKeys.at(nodeName);
 
             size_t frameIndex = 0;
-            for (size_t i = 0; i < keys.size() - 1; i++) {
-                if (animationTime < keys[i + 1].mTime) {
-                    frameIndex = i;
-                    break;
-                }
+            if (keys.size() > 1) {
+                auto it = std::upper_bound(keys.begin(), keys.end(), animationTime,
+                    [](double t, const aiQuatKey& k) { return t < k.mTime; });
+                if (it != keys.begin()) --it;
+                frameIndex = static_cast<size_t>(it - keys.begin());
+                if (frameIndex >= keys.size() - 1) frameIndex = 0;
             }
 
             size_t nextFrameIndex = (frameIndex + 1) % keys.size();
@@ -377,11 +385,12 @@ struct AnimationData {
             const auto& keys = scalingKeys.at(nodeName);
 
             size_t frameIndex = 0;
-            for (size_t i = 0; i < keys.size() - 1; i++) {
-                if (animationTime < keys[i + 1].mTime) {
-                    frameIndex = i;
-                    break;
-                }
+            if (keys.size() > 1) {
+                auto it = std::upper_bound(keys.begin(), keys.end(), animationTime,
+                    [](double t, const aiVectorKey& k) { return t < k.mTime; });
+                if (it != keys.begin()) --it;
+                frameIndex = static_cast<size_t>(it - keys.begin());
+                if (frameIndex >= keys.size() - 1) frameIndex = 0;
             }
 
             size_t nextFrameIndex = (frameIndex + 1) % keys.size();
@@ -524,6 +533,20 @@ public:
     std::vector<std::shared_ptr<Light>> lights;
     std::unordered_map<std::string, std::shared_ptr<Texture>> textureCache;
     std::vector<TextureInfo> textureInfos;
+
+    // Per-import material cache: aiMaterial* → converted material + hit_data snapshot + tex bundle.
+    // processMaterial is called once per mesh; without this, N meshes sharing a material pay N×
+    // the texture lookup / GpuMaterial setup cost. Keyed by aiMaterial* (stable for scene lifetime).
+    struct CachedMaterial {
+        std::shared_ptr<Material> material;
+        HitGroupData hitData;
+        OptixGeometryData::TextureBundle texBundle;
+    };
+    std::unordered_map<const aiMaterial*, CachedMaterial> materialCache;
+    // Caches resolved filesystem paths so each unique texture name pays at most 1 set of fs::exists() calls.
+    std::unordered_map<std::string, std::string> resolvedPathCache_;
+    // Caches global transforms so parent-chain walks are done once per node, not once per mesh.
+    std::unordered_map<const aiNode*, aiMatrix4x4> nodeGlobalTransformCache_;
     std::vector<std::shared_ptr<Camera>> cameras; // Camera list (Kamera listesi)
     bool isFBX = false; // Track if current file is FBX (FBX formatı kontrolü)
     bool isGLTF = false; // Track if current file is GLTF/GLB (GLTF/GLB formatı kontrolü)
@@ -564,6 +587,8 @@ public:
     void clearTransformCache() {
         nodeNameToTransform.clear();
         nodeNameUsageCount_.clear();
+        resolvedPathCache_.clear();
+        nodeGlobalTransformCache_.clear();
     }
     
     // Get or create shared Transform for a node
@@ -784,14 +809,53 @@ public:
         // a temporary decoded copy where %20 -> space so Assimp can open the referenced
         // files on disk. We only replace %20 to avoid touching data URIs or other
         // percent-encodings that are not common for file names.
-        std::filesystem::path tempDecodedPath; 
+        //
+        // Hızlı ön-tarama: dosyayı 64KB bloklar hâlinde okuyup ilk "%20" eşleşmesinde
+        // erken çık. %20 yoksa (tipik durum) 50MB'lık bir string alloc'una gerek yok.
+        std::filesystem::path tempDecodedPath;
         if (this->isGLTF && ext == ".gltf") {
             try {
-                std::ifstream ifs(fileNameStr, std::ios::binary);
-                if (ifs) {
-                    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-                    if (content.find("%20") != std::string::npos) {
-                        std::string decoded = content;
+                bool has_percent20 = false;
+                {
+                    std::ifstream ifs(fileNameStr, std::ios::binary);
+                    if (ifs) {
+                        constexpr size_t kChunk = 64 * 1024;
+                        std::vector<char> buf(kChunk);
+                        char overlap[2] = {0, 0}; // "%20" buffer sınırında kesilebilir
+                        size_t overlapLen = 0;
+                        while (ifs) {
+                            ifs.read(buf.data(), kChunk);
+                            const std::streamsize n = ifs.gcount();
+                            if (n <= 0) break;
+
+                            // Önceki chunk'tan devralınan 1-2 bayt + yeni chunk içinde ara.
+                            if (overlapLen > 0) {
+                                char seam[4] = {0, 0, 0, 0};
+                                size_t si = 0;
+                                for (size_t i = 0; i < overlapLen; ++i) seam[si++] = overlap[i];
+                                for (size_t i = 0; i < std::min<size_t>(3 - overlapLen, (size_t)n); ++i) seam[si++] = buf[i];
+                                if (std::string_view(seam, si).find("%20") != std::string_view::npos) {
+                                    has_percent20 = true;
+                                    break;
+                                }
+                            }
+                            if (std::string_view(buf.data(), static_cast<size_t>(n)).find("%20") != std::string_view::npos) {
+                                has_percent20 = true;
+                                break;
+                            }
+
+                            // Son 2 baytı overlap için sakla.
+                            const size_t tailLen = std::min<size_t>(2, static_cast<size_t>(n));
+                            for (size_t i = 0; i < tailLen; ++i) overlap[i] = buf[n - tailLen + i];
+                            overlapLen = tailLen;
+                        }
+                    }
+                }
+
+                if (has_percent20) {
+                    std::ifstream ifs(fileNameStr, std::ios::binary);
+                    if (ifs) {
+                        std::string decoded((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
                         size_t pos = 0;
                         while ((pos = decoded.find("%20", pos)) != std::string::npos) {
                             decoded.replace(pos, 3, " ");
@@ -864,6 +928,9 @@ public:
         SCENE_LOG_INFO("Building Bone Data...");
         buildBoneData(scene, boneData);
 
+        // Paralel texture ön yüklemesi: processMaterial her çağrısı cache'e düşer.
+        prefetchTextures(scene);
+
         std::vector<std::shared_ptr<Triangle>> triangles;
         std::vector<std::shared_ptr<AnimationData>> animationDataList;
         OptixGeometryData geometry_data;
@@ -893,52 +960,40 @@ public:
 
                 unsigned int totalKeys = 0;
 
+                // Assimp key'leri zaman sırasına göre dolduruyor; [0] ve [last] yeter.
+                // Eski kod tüm key'leri 3 kez daha geziyordu — O(totalKeys) → O(mNumChannels).
+                double minTime = std::numeric_limits<double>::max();
+                double maxTime = std::numeric_limits<double>::lowest();
+
                 for (unsigned int j = 0; j < animation->mNumChannels; ++j) {
                     const aiNodeAnim* channel = animation->mChannels[j];
                     std::string nodeName = getUniqueName(channel->mNodeName.C_Str());
 
-                    for (unsigned int k = 0; k < channel->mNumPositionKeys; ++k) {
-                        animData->positionKeys[nodeName].push_back(channel->mPositionKeys[k]);
+                    if (channel->mNumPositionKeys > 0) {
+                        auto& dst = animData->positionKeys[nodeName];
+                        dst.insert(dst.end(), channel->mPositionKeys,
+                                   channel->mPositionKeys + channel->mNumPositionKeys);
+                        minTime = std::min(minTime, channel->mPositionKeys[0].mTime);
+                        maxTime = std::max(maxTime, channel->mPositionKeys[channel->mNumPositionKeys - 1].mTime);
                     }
 
-                    for (unsigned int k = 0; k < channel->mNumRotationKeys; ++k) {
-                        animData->rotationKeys[nodeName].push_back(channel->mRotationKeys[k]);
+                    if (channel->mNumRotationKeys > 0) {
+                        auto& dst = animData->rotationKeys[nodeName];
+                        dst.insert(dst.end(), channel->mRotationKeys,
+                                   channel->mRotationKeys + channel->mNumRotationKeys);
+                        minTime = std::min(minTime, channel->mRotationKeys[0].mTime);
+                        maxTime = std::max(maxTime, channel->mRotationKeys[channel->mNumRotationKeys - 1].mTime);
                     }
 
-                    for (unsigned int k = 0; k < channel->mNumScalingKeys; ++k) {
-                        animData->scalingKeys[nodeName].push_back(channel->mScalingKeys[k]);
+                    if (channel->mNumScalingKeys > 0) {
+                        auto& dst = animData->scalingKeys[nodeName];
+                        dst.insert(dst.end(), channel->mScalingKeys,
+                                   channel->mScalingKeys + channel->mNumScalingKeys);
+                        minTime = std::min(minTime, channel->mScalingKeys[0].mTime);
+                        maxTime = std::max(maxTime, channel->mScalingKeys[channel->mNumScalingKeys - 1].mTime);
                     }
 
                     totalKeys += channel->mNumPositionKeys + channel->mNumRotationKeys + channel->mNumScalingKeys;
-                }
-
-                // Frame range hesapla (tüm keyframe'lerden min/max time bul)
-                // Calculate frame range (find min/max time from all keyframes)
-                double minTime = std::numeric_limits<double>::max();
-                double maxTime = std::numeric_limits<double>::lowest();
-                
-                // Position keys
-                for (const auto& [nodeName, keys] : animData->positionKeys) {
-                    for (const auto& key : keys) {
-                        minTime = std::min(minTime, key.mTime);
-                        maxTime = std::max(maxTime, key.mTime);
-                    }
-                }
-                
-                // Rotation keys
-                for (const auto& [nodeName, keys] : animData->rotationKeys) {
-                    for (const auto& key : keys) {
-                        minTime = std::min(minTime, key.mTime);
-                        maxTime = std::max(maxTime, key.mTime);
-                    }
-                }
-                
-                // Scaling keys
-                for (const auto& [nodeName, keys] : animData->scalingKeys) {
-                    for (const auto& key : keys) {
-                        minTime = std::min(minTime, key.mTime);
-                        maxTime = std::max(maxTime, key.mTime);
-                    }
                 }
                 
                 // Time'ı frame'e çevir (Time to frame conversion)
@@ -1043,16 +1098,39 @@ public:
                 animData->name = getUniqueName(animation->mName.C_Str());
                 animData->duration = animation->mDuration;
                 animData->ticksPerSecond = animation->mTicksPerSecond;
+                double minTime = std::numeric_limits<double>::max();
+                double maxTime = std::numeric_limits<double>::lowest();
+
                 for (unsigned int j = 0; j < animation->mNumChannels; ++j) {
                     const aiNodeAnim* channel = animation->mChannels[j];
                     std::string nodeName = getUniqueName(channel->mNodeName.C_Str());
-                    for (unsigned int k = 0; k < channel->mNumPositionKeys; ++k)
-                        animData->positionKeys[nodeName].push_back(channel->mPositionKeys[k]);
-                    for (unsigned int k = 0; k < channel->mNumRotationKeys; ++k)
-                        animData->rotationKeys[nodeName].push_back(channel->mRotationKeys[k]);
-                    for (unsigned int k = 0; k < channel->mNumScalingKeys; ++k)
-                        animData->scalingKeys[nodeName].push_back(channel->mScalingKeys[k]);
+                    // assign() does a single pre-sized bulk copy — no incremental push_back reallocs.
+                    animData->positionKeys[nodeName].assign(
+                        channel->mPositionKeys, channel->mPositionKeys + channel->mNumPositionKeys);
+                    animData->rotationKeys[nodeName].assign(
+                        channel->mRotationKeys, channel->mRotationKeys + channel->mNumRotationKeys);
+                    animData->scalingKeys[nodeName].assign(
+                        channel->mScalingKeys, channel->mScalingKeys + channel->mNumScalingKeys);
+
+                    if (channel->mNumPositionKeys > 0) {
+                        minTime = std::min(minTime, channel->mPositionKeys[0].mTime);
+                        maxTime = std::max(maxTime, channel->mPositionKeys[channel->mNumPositionKeys - 1].mTime);
+                    }
+                    if (channel->mNumRotationKeys > 0) {
+                        minTime = std::min(minTime, channel->mRotationKeys[0].mTime);
+                        maxTime = std::max(maxTime, channel->mRotationKeys[channel->mNumRotationKeys - 1].mTime);
+                    }
+                    if (channel->mNumScalingKeys > 0) {
+                        minTime = std::min(minTime, channel->mScalingKeys[0].mTime);
+                        maxTime = std::max(maxTime, channel->mScalingKeys[channel->mNumScalingKeys - 1].mTime);
+                    }
                 }
+
+                if (animData->ticksPerSecond > 0 && maxTime > minTime) {
+                    animData->startFrame = static_cast<int>(std::round(minTime / animData->ticksPerSecond * 24.0));
+                    animData->endFrame   = static_cast<int>(std::round(maxTime / animData->ticksPerSecond * 24.0));
+                }
+
                 animationDataList.push_back(animData);
             }
         }
@@ -1079,14 +1157,19 @@ public:
     }
 
      aiMatrix4x4 getGlobalTransform(const aiNode* node) {
-        aiMatrix4x4 transform = node ? node->mTransformation : aiMatrix4x4();
-        const aiNode* parent = node ? node->mParent : nullptr;
+        if (!node) return aiMatrix4x4();
 
+        auto cacheIt = nodeGlobalTransformCache_.find(node);
+        if (cacheIt != nodeGlobalTransformCache_.end()) return cacheIt->second;
+
+        aiMatrix4x4 transform = node->mTransformation;
+        const aiNode* parent = node->mParent;
         while (parent) {
             transform = parent->mTransformation * transform;
             parent = parent->mParent;
         }
 
+        nodeGlobalTransformCache_[node] = transform;
         return transform;
     }
 
@@ -1369,7 +1452,7 @@ public:
       //  SCENE_LOG_INFO("[TEXTURE CLEANUP] Starting texture cache cleanup...");
         int gpu_cleaned = 0;
         int cpu_cleaned = 0;
-        
+
         // 1. AssimpLoader'ın local cache'ini temizle
         for (auto& [name, tex] : textureCache) {
             if (tex) {
@@ -1379,19 +1462,154 @@ public:
         }
         cpu_cleaned = textureCache.size();
         textureCache.clear(); // CPU cache'i temizle
-        
+
         // 2. Global singleton cache'leri de temizle
         size_t global_texture_cache_size = TextureCache::instance().size();
         size_t global_file_cache_size = FileTextureCache::instance().size();
-        
+
         TextureCache::instance().clear();
         FileTextureCache::instance().clear();
-        
+
        /* SCENE_LOG_INFO("[TEXTURE CLEANUP] Complete! Stats:");
         SCENE_LOG_INFO("  - GPU textures cleaned: " + std::to_string(gpu_cleaned));
         SCENE_LOG_INFO("  - CPU cache entries removed: " + std::to_string(cpu_cleaned));
         SCENE_LOG_INFO("  - Global TextureCache cleared: " + std::to_string(global_texture_cache_size) + " entries");
         SCENE_LOG_INFO("  - Global FileTextureCache cleared: " + std::to_string(global_file_cache_size) + " entries");*/
+    }
+
+    // =========================================================================
+    // PARALLEL TEXTURE PREFETCH (Paralel Doku Ön Yüklemesi)
+    // =========================================================================
+    // Walks every aiMaterial up front, deduplicates unique (path, type) pairs,
+    // then decodes file textures on worker threads (CPU-only). GPU uploads and
+    // textureCache inserts stay on the calling thread to keep CUDA/state safe.
+    // Must produce the EXACT cache keys that processMaterial / loadTextureWithCache
+    // use, otherwise the sequential path will miss and re-decode.
+    //
+    // Tüm aiMaterial'ları gezer, benzersiz (yol, tip) çiftlerini tekilleştirir
+    // ve dosya texture'larını worker thread'lerde paralel decode eder. GPU upload
+    // ve cache yazma ana thread'de kalır (CUDA güvenliği). Cache key'leri
+    // processMaterial / loadTextureWithCache ile birebir aynı olmalı.
+    // =========================================================================
+    void prefetchTextures(const aiScene* scene) {
+        if (!scene || scene->mNumMaterials == 0) return;
+
+        struct PrefetchJob {
+            std::string cacheKey;
+            std::string path;            // file textures için çözümlenmiş yol
+            const aiTexture* embedded;   // dosya ise nullptr
+            TextureType texType;
+        };
+
+        std::unordered_map<std::string, PrefetchJob> jobs;
+        jobs.reserve(scene->mNumMaterials * 4);
+
+        static constexpr aiTextureType kScanTypes[] = {
+            aiTextureType_DIFFUSE, aiTextureType_SPECULAR, aiTextureType_EMISSIVE,
+            aiTextureType_NORMALS, aiTextureType_OPACITY, aiTextureType_METALNESS,
+            aiTextureType_DIFFUSE_ROUGHNESS, aiTextureType_AMBIENT_OCCLUSION,
+            aiTextureType_TRANSMISSION
+        };
+
+        for (unsigned int m = 0; m < scene->mNumMaterials; ++m) {
+            aiMaterial* aiMat = scene->mMaterials[m];
+            if (!aiMat) continue;
+
+            for (auto type : kScanTypes) {
+                if (aiMat->GetTextureCount(type) <= 0) continue;
+                aiString str;
+                if (AI_SUCCESS != aiMat->GetTexture(type, 0, &str) || str.length == 0) continue;
+
+                const std::string sanitizedName = sanitizeTextureName(str);
+                if (sanitizedName.empty()) continue;
+
+                const TextureType ttype = convertToTextureType(type);
+
+                const aiTexture* emb = scene->GetEmbeddedTexture(sanitizedName.c_str());
+                std::string cacheKey;
+                std::string resolvedPath;
+
+                if (emb) {
+                    cacheKey = "embedded_" + currentImportName + "_" +
+                               std::to_string(reinterpret_cast<uintptr_t>(emb)) + "_" +
+                               std::to_string(static_cast<int>(ttype));
+                } else {
+                    resolvedPath = resolveTexturePath(sanitizedName);
+                    if (resolvedPath.empty()) continue;
+                    resolvedPath = std::filesystem::path(resolvedPath).lexically_normal().string();
+                    cacheKey = resolvedPath + "_" + std::to_string(static_cast<int>(ttype));
+                }
+
+                if (textureCache.find(cacheKey) != textureCache.end()) continue;
+                if (jobs.find(cacheKey) != jobs.end()) continue;
+
+                jobs.emplace(cacheKey, PrefetchJob{cacheKey, std::move(resolvedPath), emb, ttype});
+            }
+        }
+
+        if (jobs.empty()) return;
+
+        std::vector<PrefetchJob> jobList;
+        jobList.reserve(jobs.size());
+        for (auto& [k, job] : jobs) jobList.push_back(std::move(job));
+
+        const size_t jobCount = jobList.size();
+        std::vector<std::shared_ptr<Texture>> results(jobCount);
+
+        SCENE_LOG_INFO("[TEXTURE PREFETCH] Parallel-decoding " + std::to_string(jobCount) + " unique texture(s)...");
+        const auto prefetch_start = std::chrono::high_resolution_clock::now();
+
+        // Bounded worker threads, atomic job index. std::async her çağrıda yeni
+        // thread açabildiği için büyük sahnelerde oversubscription'a yol açar.
+        const unsigned int hw = std::max(2u, std::thread::hardware_concurrency());
+        const size_t workerCount = std::min<size_t>(hw, jobCount);
+        std::atomic<size_t> nextJob{0};
+
+        auto worker = [&]() {
+            for (;;) {
+                const size_t i = nextJob.fetch_add(1, std::memory_order_relaxed);
+                if (i >= jobCount) return;
+                const auto& job = jobList[i];
+                std::shared_ptr<Texture> tex;
+                try {
+                    if (job.embedded) {
+                        tex = std::make_shared<Texture>(job.embedded, job.texType, job.cacheKey);
+                    } else {
+                        tex = std::make_shared<Texture>(job.path, job.texType);
+                    }
+                } catch (...) {
+                    tex.reset();
+                }
+                if (tex && tex->is_loaded()) {
+                    results[i] = std::move(tex);
+                }
+            }
+        };
+
+        std::vector<std::thread> threads;
+        threads.reserve(workerCount);
+        for (size_t t = 0; t < workerCount; ++t) threads.emplace_back(worker);
+        for (auto& t : threads) t.join();
+
+        // CUDA upload + cache insert serial on the calling thread.
+        size_t uploaded = 0;
+        for (size_t i = 0; i < jobCount; ++i) {
+            if (!results[i]) continue;
+            if (g_hasOptix) {
+                if (!results[i]->upload_to_gpu()) {
+                    // Upload başarısız: cache'e koyma; sequential path yeniden denesin.
+                    continue;
+                }
+            }
+            textureCache[jobList[i].cacheKey] = results[i];
+            ++uploaded;
+        }
+
+        const auto prefetch_end = std::chrono::high_resolution_clock::now();
+        const auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(prefetch_end - prefetch_start);
+        SCENE_LOG_INFO("[TEXTURE PREFETCH] Prefetched " + std::to_string(uploaded) + "/" +
+            std::to_string(jobCount) + " textures in " + std::to_string(dur.count()) + "ms using " +
+            std::to_string(workerCount) + " worker(s).");
     }
     // AssimpLoader sınıfı içinde veya uygun bir namespace'de
     // Helper to generate unique names
@@ -1413,25 +1631,20 @@ public:
     ) {
         // Original name for Animation lookup
         std::string originalNodeName = node->mName.C_Str();
-        
+        std::string uniqueNodeName = getUniqueName(originalNodeName);
+
         // Varsayılan olarak node'un static (bind pose) local transform'unu al
         Matrix4x4 nodeLocalTransform = convert(node->mTransformation);
 
-        // Eğer bu düğüm için animasyon verisi varsa, animasyonlu lokal transformu hesapla
-        if (animationMap.count(originalNodeName) > 0) {
-            std::shared_ptr<AnimationData> anim = animationMap.at(originalNodeName);
-            // AnimationData::calculateAnimationTransform animasyon keyframe'lerinden transform oluşturur
-            // Blender'dan gelen animasyon keyframe'leri zaten objenin doğru pozisyonunu içerir
-            // YENİ: Bind pose'u (nodeLocalTransform) varsayılan olarak gönderiyoruz.
-            nodeLocalTransform = anim->calculateAnimationTransform(*anim, currentTime, originalNodeName, nodeLocalTransform);
+        // animationMap keys are prefixed (e.g. "modelPrefix_Cube") — must use uniqueNodeName
+        if (animationMap.count(uniqueNodeName) > 0) {
+            std::shared_ptr<AnimationData> anim = animationMap.at(uniqueNodeName);
+            nodeLocalTransform = anim->calculateAnimationTransform(*anim, currentTime, uniqueNodeName, nodeLocalTransform);
         }
         // Animasyon yoksa, static transform kullanılır (yukarıda zaten atandı)
 
         // Parent'ın global transform'u ile bu node'un local transform'unu birleştir
         Matrix4x4 currentAnimatedGlobalTransform = parentAnimatedGlobalTransform * nodeLocalTransform;
-        
-        // STORE WITH UNIQUE NAME to match BoneData keys
-        std::string uniqueNodeName = getUniqueName(originalNodeName);
         animatedGlobalTransformsStore[uniqueNodeName] = currentAnimatedGlobalTransform;
 
         // Çocuk düğümler için rekürsif olarak devam et
@@ -1551,20 +1764,14 @@ private:
         // Store this model's specific inverse
         boneData.perModelInverses[this->currentImportName] = boneData.globalInverseTransform;
 
-        // Temporary map for all nodes in the scene
-        std::unordered_map<std::string, aiNode*> sceneNodeMap;
-        std::function<void(aiNode*)> collectAllNodes = [&](aiNode* node) {
-            sceneNodeMap[node->mName.C_Str()] = node;
-            for (unsigned int i = 0; i < node->mNumChildren; ++i)
-                collectAllNodes(node->mChildren[i]);
-        };
-        collectAllNodes(scene->mRootNode);
+        // Reuse the member nodeMap built by loadModelToTriangles — tüm hiyerarşiyi
+        // ikinci kez gezmeye gerek yok.
 
         // 1. Identify all nodes that are either bones OR parents of bones
         std::set<std::string> technicalBones; // Original names
         std::set<std::string> indexedBones;   // Nodes that need runtime bone slots
         std::unordered_map<std::string, Matrix4x4> weightedOffsets;
-        
+
         for (unsigned int m = 0; m < scene->mNumMeshes; ++m) {
             aiMesh* mesh = scene->mMeshes[m];
             if (!mesh->HasBones()) continue;
@@ -1574,7 +1781,8 @@ private:
                 boneData.weightedBoneNames.insert(getUniqueName(boneName));
                 weightedOffsets[boneName] = convert(mesh->mBones[b]->mOffsetMatrix);
 
-                aiNode* boneNode = sceneNodeMap[boneName];
+                auto boneIt = nodeMap.find(boneName);
+                aiNode* boneNode = (boneIt != nodeMap.end()) ? boneIt->second : nullptr;
                 while (boneNode) {
                     technicalBones.insert(boneNode->mName.C_Str());
                     boneNode = boneNode->mParent; // Include the whole chain up to root
@@ -1594,8 +1802,8 @@ private:
                 const std::string channelNodeName = channel->mNodeName.C_Str();
                 indexedBones.insert(channelNodeName);
 
-                auto nodeIt = sceneNodeMap.find(channelNodeName);
-                if (nodeIt == sceneNodeMap.end()) {
+                auto nodeIt = nodeMap.find(channelNodeName);
+                if (nodeIt == nodeMap.end()) {
                     continue;
                 }
 
@@ -1648,8 +1856,8 @@ private:
 
         // Safety net for animated nodes that were not reachable in the hierarchy walk
         for (const std::string& origName : indexedBones) {
-            auto nodeIt = sceneNodeMap.find(origName);
-            if (nodeIt == sceneNodeMap.end()) {
+            auto nodeIt = nodeMap.find(origName);
+            if (nodeIt == nodeMap.end()) {
                 continue;
             }
 
@@ -1892,11 +2100,13 @@ private:
         auto sharedTransform = getOrCreateNodeTransform(nodeName, convertMatrix(transform));
 
         // --- NEW: Pre-process bone weights for this mesh ---
-        // This ensures every vertex gets its correct weight list before triangle splits
-        std::vector<std::vector<std::pair<int, float>>> meshVertexWeights(mesh->mNumVertices);
+        // This ensures every vertex gets its correct weight list before triangle splits.
+        // Static meshes skip the per-vertex vector table entirely.
+        std::vector<std::vector<std::pair<int, float>>> meshVertexWeights;
         bool hasActualWeights = false;
 
         if (mesh->HasBones()) {
+            meshVertexWeights.resize(mesh->mNumVertices);
             for (unsigned int i = 0; i < mesh->mNumBones; i++) {
                 aiBone* bone = mesh->mBones[i];
                 if (bone->mNumWeights == 0) continue;
@@ -2078,7 +2288,9 @@ private:
                 std::string camName = getUniqueName(originalCamName);
                 
                 cameraNodeNames.insert(camName);
-                aiNode* camNode = scene->mRootNode->FindNode(originalCamName.c_str());
+                // nodeMap O(1); Assimp'in FindNode'u O(N) hiyerarşi dolaşımı yapar.
+                auto nodeIt = nodeMap.find(originalCamName);
+                aiNode* camNode = (nodeIt != nodeMap.end()) ? nodeIt->second : nullptr;
                 if (!camNode) {
                     continue;
                 }
@@ -2159,7 +2371,9 @@ private:
 
                 lightNodeNames.insert(name);
 
-                const aiNode* node = scene->mRootNode->FindNode(originalName.c_str());
+                // nodeMap O(1); FindNode tüm hiyerarşiyi dolaşır.
+                auto nodeIt = nodeMap.find(originalName);
+                const aiNode* node = (nodeIt != nodeMap.end()) ? nodeIt->second : nullptr;
                 if (!node) {
                   //  SCENE_LOG_WARN("Node not found for light: " + name);
                     continue;
@@ -2324,6 +2538,17 @@ private:
     )
 
     {
+       // Cache hit: aynı aiMaterial için tüm texture/GPU upload/string işlerini atla.
+       // Kalıcı behavior ile uyumlu: hit_data'yı doldurup tex_bundle'ı geometry_data'ya pushla.
+       if (aiMat) {
+           auto cacheIt = materialCache.find(aiMat);
+           if (cacheIt != materialCache.end()) {
+               if (hit_data) *hit_data = cacheIt->second.hitData;
+               if (geometry_data) geometry_data->textures.push_back(cacheIt->second.texBundle);
+               return cacheIt->second.material;
+           }
+       }
+
        auto material = std::make_shared<PrincipledBSDF>();
        aiString str;
        textureInfos.clear();
@@ -2683,6 +2908,14 @@ private:
                    geometry_data->textures.push_back(tex_bundle);
                }
 
+               if (aiMat) {
+                   materialCache[aiMat] = {
+                       volumetric_material,
+                       hit_data ? *hit_data : HitGroupData{},
+                       OptixGeometryData::TextureBundle{}
+                   };
+               }
+
                return volumetric_material;
            }
            auto gpu = std::make_shared<GpuMaterial>();
@@ -2734,9 +2967,8 @@ private:
                << material->materialName <<  std::endl;*/              
 
            // TextureBundle'ı doldur ve pushla (varsa geometry_data)
-           if (geometry_data && hit_data) {
-               OptixGeometryData::TextureBundle tex_bundle = {};
-
+           OptixGeometryData::TextureBundle tex_bundle = {};
+           if (hit_data) {
                tex_bundle.albedo_tex = hit_data->albedo_tex;
                tex_bundle.has_albedo_tex = hit_data->has_albedo_tex;
 
@@ -2757,11 +2989,20 @@ private:
 
                tex_bundle.emission_tex = hit_data->emission_tex;
                tex_bundle.has_emission_tex = hit_data->has_emission_tex;
+           }
 
+           if (geometry_data && hit_data) {
                geometry_data->textures.push_back(tex_bundle);
            }
 
-		 
+           if (aiMat) {
+               materialCache[aiMat] = {
+                   material,
+                   hit_data ? *hit_data : HitGroupData{},
+                   tex_bundle
+               };
+           }
+
        return material;
    }
     std::shared_ptr<Texture> loadTexture(const std::string& filepath, TextureType type = TextureType::Unknown, const std::string& opacityMapPath = "") {
@@ -2810,66 +3051,66 @@ private:
     // Kırık veya mutlak yolları birden fazla potansiyel konumda arayarak çözer.
     // =========================================================================
     std::string resolveTexturePath(const std::string& originalPath) {
+        auto cacheIt = resolvedPathCache_.find(originalPath);
+        if (cacheIt != resolvedPathCache_.end()) return cacheIt->second;
+
         namespace fs = std::filesystem;
-        
+        std::string result;
+
         try {
             fs::path p(originalPath);
             fs::path modelDir(baseDirectory);
 
             // 1. Try directly (as is)
-            if (fs::exists(p)) return p.string();
+            if (fs::exists(p)) { result = p.string(); }
 
             // 2. Try relative to model directory (standard case)
-            fs::path relPath = modelDir / p;
-            if (fs::exists(relPath)) return relPath.string();
+            else if (fs::path relPath = modelDir / p; fs::exists(relPath)) { result = relPath.string(); }
 
             // 3. Try just the filename in model directory
-            fs::path filenameOnly = modelDir / p.filename();
-            if (fs::exists(filenameOnly)) return filenameOnly.string();
+            else if (fs::path filenameOnly = modelDir / p.filename(); fs::exists(filenameOnly)) { result = filenameOnly.string(); }
 
             // 4. Try in "textures" or "Textures" subfolder
-            fs::path texSub = modelDir / "textures" / p.filename();
-            if (fs::exists(texSub)) return texSub.string();
-
-            fs::path texSubUpper = modelDir / "Textures" / p.filename();
-            if (fs::exists(texSubUpper)) return texSubUpper.string();
+            else if (fs::path texSub = modelDir / "textures" / p.filename(); fs::exists(texSub)) { result = texSub.string(); }
+            else if (fs::path texSubUpper = modelDir / "Textures" / p.filename(); fs::exists(texSubUpper)) { result = texSubUpper.string(); }
 
             // 4b. Try in folder named after the model (e.g. "ModelName/texture.png")
-            if (!currentModelStem.empty()) {
-                fs::path modelFolderSub = modelDir / currentModelStem / p.filename();
-                if (fs::exists(modelFolderSub)) return modelFolderSub.string();
+            else if (!currentModelStem.empty()) {
+                if (fs::path modelFolderSub = modelDir / currentModelStem / p.filename(); fs::exists(modelFolderSub))
+                    result = modelFolderSub.string();
             }
 
             // 4c. Try in parent directory's "textures" (common in some asset packs)
-            fs::path parentTex = modelDir.parent_path() / "textures" / p.filename();
-            if (fs::exists(parentTex)) return parentTex.string();
+            if (result.empty()) {
+                if (fs::path parentTex = modelDir.parent_path() / "textures" / p.filename(); fs::exists(parentTex))
+                    result = parentTex.string();
+            }
 
             // 5. Recursive reconstruction from absolute path
             // e.g. "C:/Project/Assets/Textures/skin.png" -> check "Textures/skin.png" then "Assets/Textures/skin.png" etc.
-            if (p.is_absolute()) {
+            if (result.empty() && p.is_absolute()) {
                 fs::path suffix = p.filename();
                 fs::path parent = p.parent_path();
-                
-                // Try up to 3 levels of parent folders
                 for (int i = 0; i < 3; ++i) {
                     if (!parent.has_relative_path() || parent == parent.root_path()) break;
-                    
                     suffix = parent.filename() / suffix;
-                    fs::path candidate = modelDir / suffix;
-                    if (fs::exists(candidate)) return candidate.string();
-                    
+                    if (fs::path candidate = modelDir / suffix; fs::exists(candidate)) {
+                        result = candidate.string();
+                        break;
+                    }
                     parent = parent.parent_path();
                 }
             }
 
             // 6. Final attempt: Scan the model directory recursively for the filename (expensive but effective)
             // SADECE küçük dosyalarda veya opsiyonel olarak yapılabilir. Şimdilik kapalı tutalım.
-            
+
         } catch (const std::exception& e) {
             SCENE_LOG_WARN("Path resolution error: " + std::string(e.what()));
         }
 
-        return ""; // Not found
+        resolvedPathCache_[originalPath] = result;
+        return result;
     }
 
 public:

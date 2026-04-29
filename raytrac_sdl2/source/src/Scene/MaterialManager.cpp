@@ -130,15 +130,7 @@ static void preloadTexturesParallel(const std::unordered_map<std::string, Textur
               });
 
     const unsigned hw_threads = std::max(1u, std::thread::hardware_concurrency());
-    const size_t worker_cap = std::max<size_t>(1, hw_threads / 2);
-    size_t max_parallel = 2;
-    if (total_estimated_cost >= (64u * 1024u * 1024u) || large_texture_count >= 4) {
-        max_parallel = 4;
-    } else if (total_estimated_cost >= (24u * 1024u * 1024u) || large_texture_count >= 2 || ordered_requests.size() >= 16) {
-        max_parallel = 3;
-    }
-    max_parallel = std::min(worker_cap, max_parallel);
-    max_parallel = std::max<size_t>(1, max_parallel);
+    const size_t max_parallel = std::max<size_t>(1, std::min(static_cast<size_t>(hw_threads), size_t(8)));
 
     std::deque<std::future<TextureLoadResult>> active_jobs;
 
