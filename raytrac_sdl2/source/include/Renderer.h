@@ -318,9 +318,9 @@ private:
     };
     std::vector<AnimatableGroup> animation_groups;
     bool animation_groups_dirty = true;
-    SDL_Window* window;
-   
+
 public:
+    SDL_Window* window;
     // ============ CYCLES-STYLE ACCUMULATIVE RENDERING (CPU) ============
     struct Vec4 { float x, y, z, w; };  // For accumulation buffer (RGB + sample count)
     

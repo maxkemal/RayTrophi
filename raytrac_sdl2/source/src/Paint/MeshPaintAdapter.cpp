@@ -50,9 +50,11 @@ CompactVec4 defaultChannelPixel(PaintChannel channel) {
             return CompactVec4(128, 128, 255, 255);
         case PaintChannel::Roughness:
         case PaintChannel::Metallic:
-        case PaintChannel::Mask:
         case PaintChannel::Transmission:
             return CompactVec4(0, 0, 0, 255);
+        case PaintChannel::Mask:
+            // Height masks use mid-gray as neutral displacement.
+            return CompactVec4(128, 128, 128, 255);
         case PaintChannel::Opacity:
             // Default = fully visible: a freshly-created opacity canvas should
             // not silently hide the surface. Erase reverts texels to this.
@@ -1483,6 +1485,15 @@ bool MeshPaintAdapter::updateNormalFromHeightArea(const Vec2& center_uv, float r
     const size_t expected_pixels = static_cast<size_t>(width) * static_cast<size_t>(height);
     if (normal_tex->pixels.size() < expected_pixels || height_tex->pixels.size() < expected_pixels) return false;
 
+    std::shared_ptr<Texture> source_normal = set->getSourceTexture(PaintChannel::Normal);
+    const bool has_source_normal =
+        source_normal &&
+        source_normal->is_loaded() &&
+        source_normal->width > 0 &&
+        source_normal->height > 0 &&
+        !source_normal->pixels.empty();
+    const Vec3 flat_normal(0.0f, 0.0f, 1.0f);
+
     const float reference_res = 1024.0f;
     const float res_scale = static_cast<float>(width) / reference_res;
     const float effective_radius_px = radius_px * res_scale;
@@ -1534,7 +1545,17 @@ bool MeshPaintAdapter::updateNormalFromHeightArea(const Vec2& center_uv, float r
             Vec3 baked_bump = triangle_ ? buildNormalFromHeightGeometryAware(height_tex, *triangle_, active_uv_set, px, py, strength)
                                         : buildNormalFromHeight(height_tex, px, py, strength);
 
-            Vec3 base_normal = decodeNormalPixel(normal_tex->pixels[idx]);
+            Vec3 base_normal = flat_normal;
+            if (has_source_normal) {
+                const float u = width > 1 ? static_cast<float>(px) / static_cast<float>(width - 1) : 0.0f;
+                const float v = height > 1 ? 1.0f - (static_cast<float>(py) / static_cast<float>(height - 1)) : 0.0f;
+                base_normal = decodeNormalPixel(sampleTexturePixelBilinear(
+                    source_normal->pixels,
+                    source_normal->width,
+                    source_normal->height,
+                    u,
+                    v));
+            }
             Vec3 combined = combineNormalsPD(base_normal, baked_bump);
 
             normal_tex->pixels[idx] = encodeNormalPixel(combined);
@@ -1569,9 +1590,41 @@ PaintLayerStack& MeshPaintAdapter::ensureLayerStack() {
     const std::string key = getNodeName() + "#" + std::to_string(getMaterialID());
     auto it = scene_->mesh_paint_layer_stacks.find(key);
     if (it != scene_->mesh_paint_layer_stacks.end()) {
+        PaintLayerStack& existing = it->second;
+        PaintTextureSet* tex_set = getTextureSet();
+
+        if (tex_set && tex_set->initialized && existing.layerCount() > 0) {
+            PaintLayerData* base = existing.layerAt(0);
+            if (base) {
+                for (int ch = 0; ch < static_cast<int>(kPaintChannelCount); ++ch) {
+                    const auto channel = static_cast<PaintChannel>(ch);
+                    if (base->hasPixels(channel)) {
+                        continue;
+                    }
+
+                    std::shared_ptr<Texture> texture = tex_set->getTexture(channel);
+                    if (!texture || !texture->is_loaded() || texture->pixels.empty()) {
+                        continue;
+                    }
+
+                    auto& buf = base->ensurePixels(channel);
+                    if (texture->width == base->width && texture->height == base->height) {
+                        buf = texture->pixels;
+                    } else {
+                        buf.assign(static_cast<size_t>(base->width) * static_cast<size_t>(base->height),
+                                   defaultChannelPixel(channel));
+                    }
+                    if (channel != PaintChannel::Opacity) {
+                        for (auto& p : buf) {
+                            p.a = 255;
+                        }
+                    }
+                }
+            }
+        }
+
         // Defensive: if the stack was created before the texture set was ready
         // (e.g. base layer has no pixels for any channel), try to seed now.
-        PaintLayerStack& existing = it->second;
         if (existing.layerCount() == 1) {
             PaintLayerData* base = existing.layerAt(0);
             if (base) {
