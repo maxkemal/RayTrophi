@@ -12,6 +12,25 @@ namespace Paint {
 
 namespace {
 
+CompactVec4 defaultCompositePixel(PaintChannel channel) {
+    switch (channel) {
+        case PaintChannel::BaseColor:
+        case PaintChannel::Emission:
+            return CompactVec4(255, 255, 255, 255);
+        case PaintChannel::Normal:
+            return CompactVec4(128, 128, 255, 255);
+        case PaintChannel::Mask:
+            return CompactVec4(128, 128, 128, 255);
+        case PaintChannel::Opacity:
+            return CompactVec4(255, 255, 255, 255);
+        case PaintChannel::Roughness:
+        case PaintChannel::Metallic:
+        case PaintChannel::Transmission:
+            return CompactVec4(0, 0, 0, 255);
+    }
+    return CompactVec4(0, 0, 0, 255);
+}
+
 // Bilinear-resample a pixel buffer from (src_w, src_h) to (dst_w, dst_h).
 void resamplePixels(const std::vector<CompactVec4>& src, int src_w, int src_h,
                     std::vector<CompactVec4>& dst, int dst_w, int dst_h)
@@ -285,7 +304,7 @@ void PaintLayerStack::compositeChannel(PaintChannel channel,
                                        int w, int h) const
 {
     const size_t pixel_count = static_cast<size_t>(w) * static_cast<size_t>(h);
-    dst_pixels.assign(pixel_count, CompactVec4(0, 0, 0, 0));
+    dst_pixels.assign(pixel_count, defaultCompositePixel(channel));
 
     for (const auto& layer : layers_) {
         if (!layer.meta.visible) continue;
@@ -389,7 +408,7 @@ void PaintLayerStack::flattenChannelRegionInto(PaintChannel channel, PaintTextur
     for (int y = ry0; y <= ry1; ++y) {
         for (int x = rx0; x <= rx1; ++x) {
             const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(width_) + static_cast<size_t>(x);
-            CompactVec4 result(0, 0, 0, 0);
+            CompactVec4 result = defaultCompositePixel(channel);
 
             for (const auto& layer : layers_) {
                 if (!layer.meta.visible || !layer.hasPixels(channel)) continue;

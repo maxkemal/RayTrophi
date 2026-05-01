@@ -5,6 +5,8 @@
 #include <memory>
 #include <string>
 #include <array>
+#include <cstdint>
+#include <unordered_map>
 #include "Paint/PaintLayer.h"
 #include "Paint/IPaintSurfaceAdapter.h"
 #include "Paint/PaintTextureSet.h"
@@ -57,6 +59,7 @@ public:
     bool compact_ui = true;
     std::string active_target_name;
     int active_layer_index = 0;
+    uint32_t active_layer_id = 0;
     int active_material_slot = 0;
     MaterialBindingMode material_binding_mode = MaterialBindingMode::UseCurrentMaterial;
     PaintChannel active_channel = PaintChannel::BaseColor;
@@ -68,6 +71,7 @@ public:
     BrushSettings brush;
     PaintStroke stroke;
     std::vector<PaintLayer> ui_layers;
+    std::unordered_map<std::string, uint32_t> last_layer_id_by_target;
 
     PaintModeState();
 

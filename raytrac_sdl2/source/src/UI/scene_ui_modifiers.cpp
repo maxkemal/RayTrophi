@@ -337,6 +337,27 @@ bool brushSupportsRaisedPaint(Paint::BrushTool tool) {
     return false;
 }
 
+void syncHeightMaskPaintToggles(Paint::PaintModeState& state) {
+    if (state.active_channel != Paint::PaintChannel::Mask) {
+        return;
+    }
+
+    state.brush.write_height_mask = true;
+    state.auto_normal_from_height = true;
+}
+
+float raisedPaintHeightValue(float contribution) {
+    return 0.5f + std::clamp(contribution, 0.0f, 1.0f) * 0.5f;
+}
+
+float wrapBrushAngleDegrees(float degrees) {
+    float wrapped = std::fmod(degrees + 180.0f, 360.0f);
+    if (wrapped < 0.0f) {
+        wrapped += 360.0f;
+    }
+    return wrapped - 180.0f;
+}
+
 bool beginBrushDockSection(const char* label, bool default_open = true) {
     ImVec4 accent(0.40f, 0.78f, 1.0f, 1.0f);
     const std::string section_label = label ? label : "";
@@ -1039,7 +1060,7 @@ ImU32 makePreviewColorU32(const Paint::BrushSettings& brush, Paint::PaintChannel
         a);
 }
 
-void drawMeshPaintPreview(UIContext& ctx, const HitRecord& rec, const Paint::MeshPaintAdapter& adapter, const Paint::BrushSettings& brush, Paint::PaintChannel channel, bool ghost = false) {
+void drawMeshPaintPreview(UIContext& ctx, const HitRecord& rec, const Paint::MeshPaintAdapter& adapter, const Paint::BrushSettings& brush, Paint::PaintChannel channel, bool ghost = false, bool show_alpha_rotate_ring = false) {
     if (!brush.show_preview || !rec.triangle || !ctx.scene.camera) {
         return;
     }
@@ -1216,6 +1237,20 @@ void drawMeshPaintPreview(UIContext& ctx, const HitRecord& rec, const Paint::Mes
     const ImU32 inner = ghost ? IM_COL32(255, 196, 96, 70) : IM_COL32(255, 196, 96, 120);
     draw_ring(world_radius, outer, ghost ? 1.2f : 2.0f);
     draw_ring(inner_radius, inner, 1.0f);
+
+    if (show_alpha_rotate_ring && !ghost) {
+        const float radians = brush.alpha_rotation_degrees * 3.14159265f / 180.0f;
+        const Vec3 dir = tangent * std::cos(radians) + bitangent * std::sin(radians);
+        const ImVec2 center = project(rec.point + normal * 0.004f);
+        const ImVec2 tip = project(rec.point + dir * world_radius * 1.18f + normal * 0.004f);
+        if (center.x > -900.0f && tip.x > -900.0f) {
+            const ImU32 ring = IM_COL32(112, 220, 255, 230);
+            const ImU32 fill = IM_COL32(112, 220, 255, 245);
+            draw_ring(world_radius * 1.18f, ring, 2.0f);
+            dl->AddLine(center, tip, ring, 2.4f);
+            dl->AddCircleFilled(tip, 4.0f, fill, 16);
+        }
+    }
 }
 
  // namespace
@@ -2450,6 +2485,7 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
     if (!isMeshPaintUiChannelEnabled(paint_mode_state.active_channel)) {
         paint_mode_state.active_channel = Paint::PaintChannel::BaseColor;
     }
+    syncHeightMaskPaintToggles(paint_mode_state);
     const std::shared_ptr<Texture> active_channel_texture =
         texture_set ? texture_set->getTexture(paint_mode_state.active_channel) : nullptr;
     const int effective_resolution = active_channel_texture
@@ -2490,7 +2526,13 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
         }
     }
     if (ImGui::Combo("Channel", &channel_index, channel_labels, IM_ARRAYSIZE(channel_labels))) {
+        const Paint::PaintChannel previous_channel = paint_mode_state.active_channel;
         paint_mode_state.active_channel = ui_channels[channel_index];
+        if (previous_channel == Paint::PaintChannel::Mask &&
+            paint_mode_state.active_channel != Paint::PaintChannel::Mask) {
+            paint_mode_state.brush.write_height_mask = false;
+        }
+        syncHeightMaskPaintToggles(paint_mode_state);
     }
     ImGui::TextDisabled("Material Brush");
     for (int i = 0; i < static_cast<int>(Paint::kPaintChannelCount); ++i) {
@@ -2546,8 +2588,8 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
     }
 
     const char* create_button_label = !has_set
-        ? "Create Texture Set"
-        : (has_active_channel_texture ? "Ensure Channel Texture" : "Create Channel Texture");
+        ? "Create Selected Channels"
+        : (has_active_channel_texture ? "Ensure Selected Channels" : "Create Selected Channels");
     if (UIWidgets::PrimaryButton(create_button_label, ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
         uint16_t paint_material_id = slot_material_id;
         if (paint_mode_state.material_binding_mode == Paint::MaterialBindingMode::MakeUniqueForPaint) {
@@ -2570,10 +2612,12 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
         }
 
         adapter->ensureTextureSet(paint_mode_state.requested_texture_resolution);
-        if (!has_set) {
-            adapter->createTextureSet();
-        } else {
-            adapter->assignTextureToChannel(paint_mode_state.active_channel);
+        std::vector<Paint::PaintChannel> channels_to_create = getSelectedMaterialBrushChannels(paint_mode_state);
+        if (channels_to_create.empty()) {
+            channels_to_create.push_back(paint_mode_state.active_channel);
+        }
+        for (Paint::PaintChannel channel : channels_to_create) {
+            adapter->assignTextureToChannel(channel);
         }
         ctx.renderer.resetCPUAccumulation();
         if (ctx.backend_ptr) {
@@ -2652,6 +2696,11 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
 
         if (UIWidgets::SecondaryButton("Restore Original Material", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
             if (adapter->restoreOriginalMaterialTextures()) {
+                adapter->releaseLayerStackFromScene();
+                paint_mode_state.bindLayerStack(nullptr);
+                paint_mode_state.active_layer_index = 0;
+                paint_mode_state.active_layer_id = 0;
+                releaseLayerThumbnails();
                 texture_set = adapter->getTextureSet();
                 ctx.renderer.resetCPUAccumulation();
                 if (ctx.backend_ptr) {
@@ -2986,6 +3035,10 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
                                   ImGuiSelectableFlags_AllowItemOverlap,
                                   ImVec2(selectable_w, ROW_HEIGHT))) {
                 paint_mode_state.active_layer_index = i;
+                paint_mode_state.active_layer_id = ld->id;
+                if (!paint_mode_state.active_target_name.empty()) {
+                    paint_mode_state.last_layer_id_by_target[paint_mode_state.active_target_name] = ld->id;
+                }
             }
             if (!ld->meta.visible) ImGui::PopStyleColor();
             ImGui::PopStyleColor(3);
@@ -3332,6 +3385,7 @@ float SceneUI::getPaintBrushDockWidth() const {
 }
 
 void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Triangle>& meshTriangle) {
+    syncHeightMaskPaintToggles(paint_mode_state);
     auto adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
     if (!adapter && meshTriangle) {
         paint_mode_state.setAdapter(std::make_shared<Paint::MeshPaintAdapter>(&ctx.scene, meshTriangle));
@@ -3475,10 +3529,23 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
 
         if (brushSupportsRaisedPaint(paint_mode_state.brush.tool)) {
             ImGui::Separator();
+            const bool height_mask_channel_active = paint_mode_state.active_channel == Paint::PaintChannel::Mask;
+            if (height_mask_channel_active) {
+                ImGui::BeginDisabled();
+            }
             ImGui::Checkbox("Raised Paint", &paint_mode_state.brush.write_height_mask);
+            if (height_mask_channel_active) {
+                ImGui::EndDisabled();
+            }
             if (paint_mode_state.brush.write_height_mask) {
                 ImGui::SliderFloat("Height Contribution", &paint_mode_state.brush.height_contribution, 0.01f, 1.0f, "%.2f");
+                if (height_mask_channel_active) {
+                    ImGui::BeginDisabled();
+                }
                 ImGui::Checkbox("Auto Normal From Height", &paint_mode_state.auto_normal_from_height);
+                if (height_mask_channel_active) {
+                    ImGui::EndDisabled();
+                }
                 if (paint_mode_state.auto_normal_from_height) {
                     ImGui::SliderFloat("Normal Strength", &paint_mode_state.height_to_normal_strength, 0.1f, 32.0f, "%.2f");
                 }
@@ -3587,6 +3654,9 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
             ImGui::SliderFloat("Alpha Scale", &paint_mode_state.brush.alpha_scale, 0.25f, 8.0f, "%.2f");
         }
         ImGui::SliderFloat("Alpha Rotation", &paint_mode_state.brush.alpha_rotation_degrees, -180.0f, 180.0f, "%.0f deg");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Ctrl + right-drag in the viewport");
+        }
         ImGui::Checkbox("Follow Stroke Angle", &paint_mode_state.brush.follow_stroke_angle);
         if (paint_mode_state.brush.tool != Paint::BrushTool::Stamp) {
             ImGui::BeginDisabled();
@@ -3647,7 +3717,7 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
                 height_brush.use_paint_texture = false;
                 height_brush.paint_texture.reset();
                 height_brush.paint_texture_path.clear();
-                const float h = std::clamp(height_brush.height_contribution, 0.0f, 1.0f);
+                const float h = raisedPaintHeightValue(height_brush.height_contribution);
                 height_brush.color = Vec3(h, h, h);
 
                 adapter->assignTextureToChannel(Paint::PaintChannel::Mask);
@@ -4038,11 +4108,18 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
     if (!isMeshPaintUiChannelEnabled(paint_mode_state.active_channel)) {
         paint_mode_state.active_channel = Paint::PaintChannel::BaseColor;
     }
+    syncHeightMaskPaintToggles(paint_mode_state);
     const std::vector<Paint::PaintChannel> paint_channels = getSelectedMaterialBrushChannels(paint_mode_state);
+    const bool mask_channel_selected =
+        std::find(paint_channels.begin(), paint_channels.end(), Paint::PaintChannel::Mask) != paint_channels.end();
     const bool auto_height_brush =
         paint_mode_state.brush.write_height_mask &&
+        !mask_channel_selected &&
         brushSupportsRaisedPaint(paint_mode_state.brush.tool) &&
         paint_mode_state.brush.tool != Paint::BrushTool::Clone;
+    const bool normal_from_height_active =
+        paint_mode_state.auto_normal_from_height &&
+        (auto_height_brush || mask_channel_selected);
     auto makeHeightBrush = [&](const Paint::BrushSettings& source_brush, float deposit_ratio) {
         Paint::BrushSettings height_brush = source_brush;
         height_brush.use_paint_texture = false;
@@ -4055,7 +4132,7 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         // cleanly preventing the erasure of existing geometry and blocking unearned spikes.
         height_brush.strength *= deposit_ratio;
 
-        const float h = std::clamp(height_brush.height_contribution, 0.0f, 1.0f);
+        const float h = raisedPaintHeightValue(height_brush.height_contribution);
         height_brush.color = Vec3(h, h, h);
         return height_brush;
     };
@@ -4064,7 +4141,7 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
             std::find(channels.begin(), channels.end(), Paint::PaintChannel::Mask) == channels.end()) {
             channels.push_back(Paint::PaintChannel::Mask);
         }
-        if (auto_height_brush && paint_mode_state.auto_normal_from_height &&
+        if (normal_from_height_active &&
             std::find(channels.begin(), channels.end(), Paint::PaintChannel::Normal) == channels.end()) {
             channels.push_back(Paint::PaintChannel::Normal);
         }
@@ -4120,6 +4197,28 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
                         channel,
                         std::move(before_lp),
                         std::move(after_lp)));
+                }
+
+                // Layer strokes can also mutate flat generated textures, most
+                // importantly auto-normal-from-height. Capture those deltas so
+                // undo/redo restores the generated texture as well as the layer.
+                for (int i = 0; i < static_cast<int>(Paint::kPaintChannelCount); ++i) {
+                    const size_t idx = static_cast<size_t>(i);
+                    std::shared_ptr<Texture> texture_ref = paint_mode_state.stroke.texture_snapshot_refs[idx];
+                    const std::vector<CompactVec4>& before_pixels = paint_mode_state.stroke.before_pixels_by_channel[idx];
+                    if (!texture_ref || before_pixels.empty()) {
+                        continue;
+                    }
+                    if (before_pixels.size() == texture_ref->pixels.size() &&
+                        before_pixels == texture_ref->pixels) {
+                        continue;
+                    }
+                    composite->add(std::make_unique<PaintTextureCommand>(
+                        adapter->getNodeName(),
+                        adapter->getMaterialID(),
+                        texture_ref,
+                        before_pixels,
+                        texture_ref->pixels));
                 }
             } else {
                 // Flat texture undo (no layers)
@@ -4179,9 +4278,50 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
     // triangle positions and produce UV drift when the object was recently moved.
     ensureCPUSyncForPicking(ctx);
 
+    static bool alpha_rotate_drag_active = false;
+    static ImVec2 alpha_rotate_anchor(0.0f, 0.0f);
+    const bool can_rotate_alpha =
+        paint_mode_state.brush.use_imported_alpha &&
+        paint_mode_state.brush.alpha_texture &&
+        paint_mode_state.brush.alpha_texture->is_loaded();
+    const bool alpha_rotate_shortcut =
+        can_rotate_alpha &&
+        io.KeyCtrl &&
+        ImGui::IsMouseDown(ImGuiMouseButton_Right) &&
+        !ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    if (alpha_rotate_shortcut && !alpha_rotate_drag_active) {
+        alpha_rotate_drag_active = true;
+        alpha_rotate_anchor = ImGui::GetMousePos();
+    }
+
+    const ImVec2 paint_mouse_pos = alpha_rotate_drag_active ? alpha_rotate_anchor : ImGui::GetMousePos();
     HitRecord rec;
-    const bool has_hit = raycastViewportHit(ctx, ImGui::GetMousePos(), rec);
+    const bool has_hit = raycastViewportHit(ctx, paint_mouse_pos, rec);
     const bool is_target_hit = has_hit && isMeshPaintTargetHit(rec, *adapter);
+
+    if (alpha_rotate_shortcut) {
+        const float delta = io.MouseDelta.x + io.MouseDelta.y;
+        if (std::abs(delta) > 0.001f) {
+            paint_mode_state.brush.alpha_rotation_degrees =
+                wrapBrushAngleDegrees(paint_mode_state.brush.alpha_rotation_degrees + delta * 0.65f);
+        }
+        if (ctx.renderer.window) {
+            SDL_WarpMouseInWindow(
+                ctx.renderer.window,
+                static_cast<int>(alpha_rotate_anchor.x),
+                static_cast<int>(alpha_rotate_anchor.y));
+            io.MousePos = alpha_rotate_anchor;
+        }
+    } else {
+        if (alpha_rotate_drag_active && ctx.renderer.window) {
+            SDL_WarpMouseInWindow(
+                ctx.renderer.window,
+                static_cast<int>(alpha_rotate_anchor.x),
+                static_cast<int>(alpha_rotate_anchor.y));
+            io.MousePos = alpha_rotate_anchor;
+        }
+        alpha_rotate_drag_active = false;
+    }
     if (paint_mode_state.brush.tool == Paint::BrushTool::Clone &&
         io.KeyCtrl &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
@@ -4193,7 +4333,7 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         return;
     }
     if (has_hit && is_target_hit) {
-        drawMeshPaintPreview(ctx, rec, *adapter, paint_mode_state.brush, paint_mode_state.active_channel);
+        drawMeshPaintPreview(ctx, rec, *adapter, paint_mode_state.brush, paint_mode_state.active_channel, false, can_rotate_alpha && io.KeyCtrl);
         for (int i = 1; i < 8; ++i) {
             const bool mx = (i & 1) && paint_mode_state.brush.mirror_x;
             const bool my = (i & 2) && paint_mode_state.brush.mirror_y;
@@ -4209,7 +4349,7 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         }
     }
 
-    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    if (alpha_rotate_shortcut || !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         if (paint_mode_state.stroke.active) {
             finish_stroke();
         }
@@ -4226,8 +4366,9 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         if (!adapter->assignTextureToChannel(Paint::PaintChannel::Mask)) {
             return;
         }
-        if (paint_mode_state.auto_normal_from_height &&
-            !adapter->assignTextureToChannel(Paint::PaintChannel::Normal)) {
+    }
+    if (normal_from_height_active) {
+        if (!adapter->assignTextureToChannel(Paint::PaintChannel::Normal)) {
             return;
         }
     }
@@ -4506,6 +4647,10 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
                     if (doPaintAtUV(channel, spray_uv, spray_brush, dab_dt)) {
                         hit_changed = true;
                         painted_channels.push_back(channel);
+                        if (channel == Paint::PaintChannel::Mask &&
+                            paint_mode_state.auto_normal_from_height) {
+                            updateAutoNormalAtUV(spray_uv, spray_brush.radius);
+                        }
                     }
                 }
                 if (auto_height_brush) {
@@ -4544,6 +4689,10 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
             if (doPaintAtUV(channel, hit_uv, dab_brush, dab_dt)) {
                 hit_changed = true;
                 painted_channels.push_back(channel);
+                if (channel == Paint::PaintChannel::Mask &&
+                    paint_mode_state.auto_normal_from_height) {
+                    updateAutoNormalAtUV(hit_uv, dab_brush.radius);
+                }
             }
         }
         if (auto_height_brush) {
