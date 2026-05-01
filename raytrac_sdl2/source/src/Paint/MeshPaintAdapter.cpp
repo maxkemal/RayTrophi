@@ -484,6 +484,27 @@ float sampleBrushMask(const BrushSettings& brush, float nx, float ny) {
     return sampleBrushAlpha(brush.alpha_preset, nx, ny, brush.alpha_scale, brush.alpha_rotation_degrees);
 }
 
+// Alpha gate from the user-loaded paint texture itself. PNG stamps with a
+// transparent background usually store RGB=(0,0,0) on alpha=0 pixels, so
+// without this the brush deposits visible black rings around the actual
+// stamp. Mirrors makeBrushTexturePixel's UV transform so the alpha lines up
+// with the colour sample.
+float sampleBrushPaintTextureAlpha(const BrushSettings& brush, float nx, float ny) {
+    if (!brush.use_paint_texture || !brush.paint_texture || !brush.paint_texture->is_loaded()) {
+        return 1.0f;
+    }
+    if (!brush.paint_texture->has_alpha) {
+        return 1.0f;
+    }
+
+    float sx = nx * std::max(0.01f, brush.alpha_scale);
+    float sy = ny * std::max(0.01f, brush.alpha_scale);
+    rotateBrushCoords(sx, sy, brush.alpha_rotation_degrees);
+    const float u = std::clamp(sx * 0.5f + 0.5f, 0.0f, 1.0f);
+    const float v = std::clamp(sy * 0.5f + 0.5f, 0.0f, 1.0f);
+    return std::clamp(brush.paint_texture->get_alpha_bilinear(u, v), 0.0f, 1.0f);
+}
+
 CompactVec4 sampleTexturePixelBilinear(const std::vector<CompactVec4>& pixels, int width, int height, float u, float v);
 
 std::shared_ptr<Texture> cloneTextureForPaint(const std::shared_ptr<Texture>& source,
@@ -1078,9 +1099,10 @@ bool MeshPaintAdapter::paintAtUV(PaintChannel channel, const Vec2& uv, const Bru
             }
 
             const float alpha_mask = sampleBrushMask(brush, nx, ny);
+            const float texture_alpha = sampleBrushPaintTextureAlpha(brush, nx, ny);
             const CompactVec4 brush_pixel = makeBrushTexturePixel(channel, brush, nx, ny);
             const float weight = computeBrushWeightNormalized(dist_norm, radius_px,
-                                    std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * strength;
+                                    std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * texture_alpha * strength;
             if (weight <= 0.001f) {
                 continue;
             }
@@ -1646,9 +1668,10 @@ PaintDirtyRect MeshPaintAdapter::paintLayerAtUV(int layer_index, PaintChannel ch
             if (dist_norm > 1.0f) continue;
 
             const float alpha_mask = sampleBrushMask(brush, nx, ny);
+            const float texture_alpha = sampleBrushPaintTextureAlpha(brush, nx, ny);
             const CompactVec4 brush_pixel = makeBrushTexturePixel(channel, brush, nx, ny);
             const float weight = computeBrushWeightNormalized(dist_norm, radius_px,
-                                    std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * strength;
+                                    std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * texture_alpha * strength;
             if (weight <= 0.001f) continue;
 
             CompactVec4& pixel = pixels[static_cast<size_t>(py) * static_cast<size_t>(width) + static_cast<size_t>(px)];
@@ -1682,12 +1705,28 @@ PaintDirtyRect MeshPaintAdapter::paintLayerAtUV(int layer_index, PaintChannel ch
                     static_cast<float>(pixel.a) + (asum * inv - static_cast<float>(pixel.a)) * weight,
                     0.0f, 255.0f));
             } else {
-                // Paint/Stamp/Spray: set colour and increase alpha.
-                blendPixelChannel(pixel.r, brush_pixel.r, weight);
-                blendPixelChannel(pixel.g, brush_pixel.g, weight);
-                blendPixelChannel(pixel.b, brush_pixel.b, weight);
-                const float new_alpha = static_cast<float>(pixel.a) + (255.0f - static_cast<float>(pixel.a)) * weight;
-                pixel.a = static_cast<uint8_t>(std::clamp(new_alpha, 0.0f, 255.0f));
+                // Porter-Duff source-over with straight (un-premultiplied) alpha.
+                // Blending RGB with `weight` directly would store premultiplied
+                // colour while the compositor treats layer RGB as straight,
+                // producing a `weight^2` darkening at the falloff edges (the
+                // black-ring artefact on fresh transparent layers).
+                const float src_a = std::clamp(weight, 0.0f, 1.0f);
+                const float dst_a = static_cast<float>(pixel.a) / 255.0f;
+                const float out_a = src_a + dst_a * (1.0f - src_a);
+                if (out_a > 1e-6f) {
+                    const float inv_out_a = 1.0f / out_a;
+                    const float dr = static_cast<float>(pixel.r);
+                    const float dg = static_cast<float>(pixel.g);
+                    const float db = static_cast<float>(pixel.b);
+                    const float sr = static_cast<float>(brush_pixel.r);
+                    const float sg = static_cast<float>(brush_pixel.g);
+                    const float sb = static_cast<float>(brush_pixel.b);
+                    const float keep = dst_a * (1.0f - src_a);
+                    pixel.r = static_cast<uint8_t>(std::clamp((sr * src_a + dr * keep) * inv_out_a, 0.0f, 255.0f));
+                    pixel.g = static_cast<uint8_t>(std::clamp((sg * src_a + dg * keep) * inv_out_a, 0.0f, 255.0f));
+                    pixel.b = static_cast<uint8_t>(std::clamp((sb * src_a + db * keep) * inv_out_a, 0.0f, 255.0f));
+                }
+                pixel.a = static_cast<uint8_t>(std::clamp(out_a * 255.0f, 0.0f, 255.0f));
             }
             changed = true;
         }
@@ -1771,11 +1810,25 @@ PaintDirtyRect MeshPaintAdapter::cloneLayerAtUV(int layer_index, PaintChannel ch
                 1.0f - src_py_f / static_cast<float>(height - 1));
 
             CompactVec4& pixel = pixels[static_cast<size_t>(py) * static_cast<size_t>(width) + static_cast<size_t>(px)];
-            blendPixelChannel(pixel.r, sampled.r, weight);
-            blendPixelChannel(pixel.g, sampled.g, weight);
-            blendPixelChannel(pixel.b, sampled.b, weight);
-            const float new_alpha = static_cast<float>(pixel.a) + (255.0f - static_cast<float>(pixel.a)) * weight;
-            pixel.a = static_cast<uint8_t>(std::clamp(new_alpha, 0.0f, 255.0f));
+            // Same Porter-Duff straight-alpha source-over as paintLayerAtUV;
+            // see comment there for the black-ring rationale.
+            const float src_a = std::clamp(weight, 0.0f, 1.0f);
+            const float dst_a = static_cast<float>(pixel.a) / 255.0f;
+            const float out_a = src_a + dst_a * (1.0f - src_a);
+            if (out_a > 1e-6f) {
+                const float inv_out_a = 1.0f / out_a;
+                const float dr = static_cast<float>(pixel.r);
+                const float dg = static_cast<float>(pixel.g);
+                const float db = static_cast<float>(pixel.b);
+                const float sr = static_cast<float>(sampled.r);
+                const float sg = static_cast<float>(sampled.g);
+                const float sb = static_cast<float>(sampled.b);
+                const float keep = dst_a * (1.0f - src_a);
+                pixel.r = static_cast<uint8_t>(std::clamp((sr * src_a + dr * keep) * inv_out_a, 0.0f, 255.0f));
+                pixel.g = static_cast<uint8_t>(std::clamp((sg * src_a + dg * keep) * inv_out_a, 0.0f, 255.0f));
+                pixel.b = static_cast<uint8_t>(std::clamp((sb * src_a + db * keep) * inv_out_a, 0.0f, 255.0f));
+            }
+            pixel.a = static_cast<uint8_t>(std::clamp(out_a * 255.0f, 0.0f, 255.0f));
             changed = true;
         }
     }

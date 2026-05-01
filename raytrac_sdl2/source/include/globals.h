@@ -349,6 +349,7 @@ extern bool g_vulkan_rebuild_pending;    // GPU Vulkan geometry needs rebuild
 extern bool g_viewport_raster_rebuild_pending; // Interactive raster viewport needs rebuild
 extern bool g_optix_rebuild_pending;
 extern std::atomic<bool> g_optix_rebuild_in_progress; // True while TLAS rebuild is happening - blocks render // GPU OptiX geometry needs rebuild
+extern std::atomic<bool> g_viewport_rebuild_in_progress; // True while viewport backend resources are being torn down/rebuilt - blocks denoiser device access
 extern bool g_mesh_cache_dirty;         // UI mesh cache needs rebuild
 extern bool g_cpu_bvh_refit_pending;    // CPU BVH fast refit (Embree only)
 extern int g_bvh_rebuild_deferred_frames; // Delay CPU BVH rebuild briefly after heavy topology edits in GPU modes

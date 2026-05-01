@@ -39,7 +39,7 @@ if(WIN32)
         set(CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO} /DEBUG /SUBSYSTEM:CONSOLE")
         
         # Match VS build flags required for optimal CPU performance and proper OpenMP enablement
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /Zc:__cplusplus /openmp /arch:AVX2 /fp:fast")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /bigobj /Zc:__cplusplus /openmp /arch:AVX2 /fp:fast")
     endif()
 endif()
 

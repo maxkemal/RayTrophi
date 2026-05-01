@@ -218,8 +218,23 @@ Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
 
 ### 🛠️ Modelleme & Mesh Düzenleme Araçları
 
-- **Sculpt Modu (Sculpt Mod)**: Gerçek zamanlı sculpt fırçaları (Grab, Draw, Inflate, Layer, Clay, Clay Strips, Pinch, Smooth, Flatten, Scrape, Crease) — topology-dostu falloff, alpha mask, canlı/ertelenmiş birikim ve simetri seçenekleriyle. Çoklu çözünürlük önizlemesi ve sculpt delta'larını bake/ihraç etme desteği.
-- **Mesh Paint**: Renk, roughness, metallic ve mask kanalları için vertex/texture boyama araçları. Fırça falloff, projeksiyon ve katman harmanlama; sonuçlar texture olarak bake edilebilir veya vertex renkleri olarak kaydedilebilir.
+- **Sculpt Modu (Sculpt Mod)**: Mesh ve terrain hedefleri için fırça tabanlı yüzey düzenleme sistemi.
+  - Mesh sculpting, Modeling workspace içinde editable mesh cache'i kullanır; stroke'lar obje transformunu bozmadan üçgenlerin local/original pozisyonlarını günceller.
+  - Grab, Draw, Inflate, Layer, Clay, Clay Strips, Pinch, Smooth, Flatten, Scrape ve Crease araçları vardır; Shift geçici Smooth, Ctrl ise additive sculpt fırçalarında ters yön davranışı verir.
+  - `SculptModeState`, aktif hedefi, fırça presetini, screen-space/world radius seçimini, strength, falloff, front-face filtresi, live accumulation ve X/Y/Z mirror bayraklarını tutar.
+  - `SculptControlGraph`, editable vertex'leri komşuluk bağlantılı sculpt control node'larına bağlar; `SculptPBVH` ise local AABB leaf node'larıyla yoğun mesh'lerde fırça yarıçapına göre aday vertex aramasını daraltır.
+  - Stroke state dokunulan üçgenlerin önceki halini yakalar, topology-dostu güvenli vertex hareketi uygular, etkilenen smooth normal'leri yeniden hesaplar ve sonucu undo/redo için `MeshEditCommand` olarak kaydeder.
+  - Live accumulation açıkken raster viewport mesh'i stroke sırasında patch/update edilebilir; ertelenmiş sync stroke sonunda render backend, CPU BVH ve scene-geometry dirty flag'lerini kuyruğa alır.
+  - Mesh yoğunluğu `ModifierStack` üzerinden gelir (`FlatSubdivision` / `SmoothSubdivision`); stack `base_mesh_cache` üzerinden evaluate edilir ve `mesh_modifiers` olarak serileştirilir.
+  - Terrain sculpt aynı Sculpt workspace/dock'u proxy yol olarak kullanır; Raise/Lower/Flatten/Smooth/Stamp kontrolleri mesh PBVH hattı yerine `TerrainManager` tarafına yönlenir.
+- **Mesh Paint**: Mesh materyalleri üzerinde doğrudan katmanlı texture boyama sistemi.
+  - `MeshPaintAdapter`, seçili üçgeni/materyal slotunu hedefler ve node adı + materyal id ile anahtarlanan obje bazlı `PaintTextureSet` yapısını yönetir.
+  - Base Color, Normal, Roughness, Metallic, Emission, Mask, Transmission ve Opacity kanalları desteklenir; mevcut materyal texture'ları yeni stroke'lardan önce paint canvas'ını besleyebilir.
+  - Fırçalar paint, erase, soften, stamp, fill, clone ve spray modlarını; falloff, spacing, alpha texture, paint texture, tint, mirror ve wet/mix/smudge davranışlarını destekler.
+  - `PaintLayerStack`, her kanal için katman başına pixel buffer tutar; görünürlük, kilit, opacity ve Normal/Add/Multiply/Screen/Overlay blend modlarıyla görünür stack renderer'ın kullandığı düz texture'lara compositelenir.
+  - Dirty-region compositing ve GPU texture güncellemeleri interaktif stroke'ları akıcı tutar; `PaintTextureCommand` ve `PaintLayerCommand` stroke'ları undo/redo sistemine bağlar.
+  - Height-mask akışı normal üretme, lokal normal bölgesi güncelleme, height bilgisini normal map'e bake etme ve istenirse bake sonrası height mask'i temizleme desteği sağlar.
+  - Proje kaydetme/yükleme, mesh paint katmanlarını `mesh_paint_layers` altında saklar; katman pixelleri proje verisinin yanında binary PNG blob'ları olarak serileştirilir.
 - **Edit Mesh Modu**: Klasik polygon düzenleme araçları:
   - **Extrude** yüz/kenar transform gizmo ile
   - **Yüz/Kenar/Vertex Silme** (akıllı yeniden üçgenleme)

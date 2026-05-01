@@ -1055,6 +1055,20 @@ float schlickFresnel(float cosTheta, float ior) {
     return r0 + (1.0 - r0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
+bool refractLikeOptix(vec3 incident, vec3 normal, float eta, out vec3 refractedDir) {
+    vec3 unitDir = normalize(incident);
+    float cosTheta = clamp(dot(-unitDir, normal), -1.0, 1.0);
+    vec3 rOutPerp = eta * (unitDir + cosTheta * normal);
+    float k = 1.0 - dot(rOutPerp, rOutPerp);
+    if (k < 0.0) {
+        refractedDir = vec3(0.0);
+        return false;
+    }
+    vec3 rOutParallel = -sqrt(k) * normal;
+    refractedDir = normalize(rOutPerp + rOutParallel);
+    return true;
+}
+
 // Metal için renkli Fresnel (F0 = albedo)
 vec3 schlickFresnelVec(float cosTheta, vec3 f0) {
     return f0 + (vec3(1.0) - f0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
@@ -1129,17 +1143,21 @@ void scatterMetal(vec3 hitPos, vec3 normal, vec3 rayDir, vec3 albedo, float roug
 }
 
 // --- Dielectric Glass (Fresnel + TIR + Roughness) ---
-void scatterGlass(vec3 hitPos, vec3 normal, bool frontFace, vec3 rayDir, vec3 albedo, float ior, float roughness, inout uint seed) {
+void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool frontFace, vec3 rayDir, vec3 albedo, float ior, float roughness, inout uint seed) {
     // Işığın hangi taraftan geldiğini belirle
-    vec3  macroNormal  = normal;
+    vec3  macroNormal  = safeNormalize(macroNormalIn, vec3(0.0, 1.0, 0.0));
+    vec3  shadingNormal = safeNormalize(shadingNormalIn, macroNormal);
+    if (dot(shadingNormal, macroNormal) < 0.0) {
+        shadingNormal = -shadingNormal;
+    }
     float etaRatio     = frontFace ? (1.0 / ior) : ior;
     
-    vec3 outNormal = macroNormal;
+    vec3 outNormal = shadingNormal;
 
     // Use GGX microfacet normal if surface is rough
     if (roughness >= 0.01) {
         vec3 V = -rayDir;
-        outNormal = ggxSampleHemisphere(macroNormal, V, roughness, seed);
+        outNormal = ggxSampleHemisphere(shadingNormal, V, roughness, seed);
     }
 
     // Fresnel ve TIR kararı için makro normal kullan (OptiX ile aynı).
@@ -1158,21 +1176,21 @@ void scatterGlass(vec3 hitPos, vec3 normal, bool frontFace, vec3 rayDir, vec3 al
         dir       = reflect(rayDir, outNormal);
         offsetDir = macroNormal;           // Yüzeyin dışına offset
     } else {
-        dir       = refract(rayDir, outNormal, etaRatio);
+        bool refractedSuccess = refractLikeOptix(rayDir, outNormal, etaRatio, dir);
         offsetDir = -macroNormal;          // Yüzeyin içine offset (refract için)
+        if (!refractedSuccess) {
+            dir = reflect(rayDir, macroNormal);
+            offsetDir = macroNormal;
+        }
     }
 
-    // Prevent rays from going through the wrong side of the macroscopic surface due to high roughness.
-    // Use safe fallback instead of hard absorb to avoid black pixel artifacts.
-    if (doReflect && dot(dir, macroNormal) <= 0.0) {
-        dir = reflect(rayDir, macroNormal);
-        offsetDir = macroNormal;
-    } else if (!doReflect && dot(dir, macroNormal) >= 0.0) {
+    // OptiX parity: only refraction is guarded against escaping to the wrong side.
+    if (!doReflect && dot(dir, macroNormal) >= 0.0) {
         dir = reflect(rayDir, macroNormal);
         offsetDir = macroNormal;
     }
 
-    payload.scatterOrigin = hitPos + offsetDir * RAY_OFFSET;
+    payload.scatterOrigin = offset_ray(hitPos, offsetDir);
     payload.scatterDir    = normalize(dir);
     if (doReflect) {
         payload.attenuation *= vec3(1.0);
@@ -1604,7 +1622,7 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
     // ── Tint attenuation with water color, then scatter as glass ─
     payload.attenuation *= finalAlbedo;
     bool waterFrontFace = dot(rayDir, shadingNormal) < 0.0;
-    scatterGlass(hitPos, shadingNormal, waterFrontFace, rayDir, vec3(1.0), ior, mix(roughness, 0.8, totalFoam), seed);
+    scatterGlass(hitPos, shadingNormal, shadingNormal, waterFrontFace, rayDir, vec3(1.0), ior, mix(roughness, 0.8, totalFoam), seed);
 }
 
 // ============================================================
@@ -2074,10 +2092,11 @@ if (emissionTexID > 0) {
     // Evaluated before Direct Lighting to prevent mismatched diffuse/GGX specular highlights.
     // OptiX-like probablilistic branching based on transmission weight.
     // ----------------------------------------------------------
+    vec3 directAttenuation = payload.attenuation;
     if (transmission > 0.01) {
         if (rnd(payload.seed) < transmission) {
             // 1) Chosen transmission path - act as Glass
-            scatterGlass(hitPos, worldNormal, surfaceFrontFace, rayDir, albedo, ior, roughness, payload.seed);
+            scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, albedo, ior, roughness, payload.seed);
             return; // Immediately return, skipping direct lighting (Next Event Estimation)
         } else {
             // 2) Chosen base path (diffuse/metal), compensate probability weight
@@ -2168,7 +2187,7 @@ if (emissionTexID > 0) {
                             // Apply volumetric transmittance (soft shadow from volumes)
                             contrib *= volShadowTr * shadowVisibility;
 
-                            vec3 att = max(payload.attenuation, vec3(0.0));
+                            vec3 att = max(directAttenuation, vec3(0.0));
                             att.x = isnan(att.x) ? 0.0 : (isinf(att.x) ? (att.x > 0.0 ? 1e2 : 0.0) : att.x);
                             att.y = isnan(att.y) ? 0.0 : (isinf(att.y) ? (att.y > 0.0 ? 1e2 : 0.0) : att.y);
                             att.z = isnan(att.z) ? 0.0 : (isinf(att.z) ? (att.z > 0.0 ? 1e2 : 0.0) : att.z);
@@ -2214,7 +2233,7 @@ if (emissionTexID > 0) {
                 vec3 sunLi    = worldData.w.sunColor * worldData.w.sunIntensity;
                 vec3 sunContrib = sunBRDF * sunLi * NdotSun * sunVolTr * sunShadowVisibility;
                 sunContrib = clamp(sunContrib, vec3(0.0), vec3(1e4));
-                vec3 att = clamp(payload.attenuation, vec3(0.0), vec3(1e2));
+                vec3 att = clamp(directAttenuation, vec3(0.0), vec3(1e2));
                 payload.radiance += att * sunContrib;
             }
         }

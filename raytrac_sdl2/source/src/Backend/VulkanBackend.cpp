@@ -7077,6 +7077,16 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         gm.micro_anim_speed      = m.micro_anim_speed;
         gm.micro_morph_speed     = m.micro_morph_speed;
         gm.foam_noise_scale      = m.foam_noise_scale;
+        // Backend-owned texture handles (e.g. FFT ocean height/normal returned by
+        // uploadTexture2D) are small integer ids, NOT host Texture* pointers. The
+        // flag blocks below need a host Texture* to inspect cache/format state, so
+        // filter handles out instead of dereferencing them as pointers.
+        auto resolveHostTexture = [](int64_t key) -> Texture* {
+            if (!key) return nullptr;
+            if (key > 0 && static_cast<uint64_t>(key) < (1ull << 32)) return nullptr;
+            return reinterpret_cast<Texture*>(key);
+        };
+
         // ... getTexID mapping (cast to uint32_t for GLSL compatibility)
         auto getTexID = [this](int64_t key, TextureType textureType, bool forceLinear = false, bool preferSingleChannel = false) -> uint32_t {
             if (!key) return 0;
@@ -7338,7 +7348,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         // so bit 8 must be cleared — otherwise the shader reads .a from a 1-channel
         // texture and always gets 1.0 (fully opaque).
         if (m.opacityTexture) {
-            Texture* opTex = reinterpret_cast<Texture*>(m.opacityTexture);
+            Texture* opTex = resolveHostTexture(m.opacityTexture);
             if (opTex && opTex->is_loaded() && opTex->has_alpha) {
                 const bool hasBc4Dds = [&]() -> bool {
                     auto cand = findCompressedTextureCacheCandidate(*opTex, TextureType::Opacity, false);
@@ -7372,13 +7382,13 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
             return tex->is_gray_scale && !tex->has_alpha;
         };
         if (m.roughnessTexture) {
-            Texture* rTex = reinterpret_cast<Texture*>(m.roughnessTexture);
+            Texture* rTex = resolveHostTexture(m.roughnessTexture);
             if (needsRedChannelFlag(rTex, TextureType::Roughness)) {
                 gm.flags |= (1u << 9);
             }
         }
         if (m.metallicTexture) {
-            Texture* mTex = reinterpret_cast<Texture*>(m.metallicTexture);
+            Texture* mTex = resolveHostTexture(m.metallicTexture);
             if (needsRedChannelFlag(mTex, TextureType::Metallic)) {
                 gm.flags |= (1u << 10);
             }
@@ -7389,7 +7399,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         // always 0 in BC5). Without this flag, large 4K/8K normal maps that go
         // through the BC5 cache decode to (X, Y, -1) → broken/black surface.
         if (m.normalTexture) {
-            Texture* nTex = reinterpret_cast<Texture*>(m.normalTexture);
+            Texture* nTex = resolveHostTexture(m.normalTexture);
             if (nTex && nTex->is_loaded()) {
                 if (auto cand = findCompressedTextureCacheCandidate(*nTex, TextureType::Normal, false)) {
                     if (cand->target == TextureCompressionTarget::BC5) {
@@ -9163,6 +9173,12 @@ void VulkanBackendAdapter::destroyInteractiveViewportResources(bool keepPipeline
 }
 
 void VulkanBackendAdapter::resetForProjectReload() {
+    // Block the OIDN viewport denoiser from touching backend CUDA buffers while
+    // we tear down/rebuild. Without this, the render thread keeps calling
+    // applyOIDNDenoisingGPU against the now-freed device pointers from
+    // getDenoiserFrameGPU, hits cudaErrorIllegalAddress (700), and poisons the
+    // CUDA context — which then takes down the OptiX rebuild that runs after.
+    g_viewport_rebuild_in_progress.store(true, std::memory_order_release);
     // Order matters: the material preview descriptor set (binding 1) references
     // VkImageViews from m_uploadedImages. rebuildAccelerationStructure() destroys
     // those images. If we didn't tear down the interactive viewport resources
@@ -9184,6 +9200,7 @@ void VulkanBackendAdapter::resetForProjectReload() {
     m_interactiveViewport = {};
     m_interactiveViewport.dirty = true;
     rebuildAccelerationStructure();
+    g_viewport_rebuild_in_progress.store(false, std::memory_order_release);
 }
 
 void VulkanBackendAdapter::renderInteractiveViewport(void* outSurface, int width, int height,

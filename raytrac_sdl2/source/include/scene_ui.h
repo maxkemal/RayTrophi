@@ -644,6 +644,8 @@ public:
         float normal_strength = 0.35f;
         bool front_faces_only = true;
         bool accumulate_live = true;
+        bool use_screen_space_radius = true;
+        float screen_radius_px = 72.0f;
         bool mirror_x = false;
         bool mirror_y = false;
         bool mirror_z = false;

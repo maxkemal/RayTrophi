@@ -245,8 +245,23 @@ Full Technical Report: [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ### 🛠️ Modeling & Mesh Editing Tools
 
-- **Sculpt Mode (Sculpt Mod)**: Real-time sculpting brushes (Grab, Draw, Inflate, Layer, Clay, Clay Strips, Pinch, Smooth, Flatten, Scrape, Crease) with topology-aware falloff, alpha masks, live/deferred accumulation and symmetry options. Supports multi-resolution preview and bake/export of sculpt deltas.
-- **Mesh Paint**: Vertex and texture painting for color, roughness, metallic and mask channels. Brush falloff, projection painting and layer blending supported; paint can be baked to textures or saved as vertex colors.
+- **Sculpt Mode (Sculpt Mod)**: Brush-based surface editing for mesh and terrain targets.
+  - Mesh sculpting lives in the Modeling workspace and reuses the editable mesh cache, so strokes modify local/original triangle positions while object transforms stay intact.
+  - Tools include Grab, Draw, Inflate, Layer, Clay, Clay Strips, Pinch, Smooth, Flatten, Scrape and Crease; Shift temporarily switches to Smooth and Ctrl inverts additive sculpt brushes.
+  - `SculptModeState` stores the active target, brush preset, screen-space/world radius, strength, falloff, front-face filtering, live accumulation and X/Y/Z mirror flags.
+  - `SculptControlGraph` maps editable vertices to sculpt control nodes with neighbor links and spatial buckets, while `SculptPBVH` prunes dense meshes to the brush radius through local AABB leaf nodes.
+  - Stroke data captures touched triangles before editing, applies safe topology-aware vertex movement, recomputes affected smooth normals and records the final delta through `MeshEditCommand` for undo/redo.
+  - Live accumulation can patch/update raster viewport meshes during a stroke; deferred sync queues render backend, CPU BVH and scene-geometry dirty flags when the stroke finishes.
+  - Mesh density comes from the `ModifierStack` (`FlatSubdivision` / `SmoothSubdivision`), which evaluates from `base_mesh_cache` and is serialized as `mesh_modifiers`.
+  - Terrain sculpt uses the same Sculpt workspace/dock as a proxy path, routing Raise/Lower/Flatten/Smooth/Stamp controls to `TerrainManager` instead of the mesh PBVH path.
+- **Mesh Paint**: Layered texture painting directly on mesh materials.
+  - `MeshPaintAdapter` targets the selected triangle/material slot and manages a per-object `PaintTextureSet` keyed by node name + material id.
+  - Paint channels cover Base Color, Normal, Roughness, Metallic, Emission, Mask, Transmission and Opacity; existing material textures can seed the paint canvas before new strokes are applied.
+  - Brushes support paint, erase, soften, stamp, fill, clone and spray modes with falloff, spacing, alpha textures, paint textures, tinting, mirroring and wet/mix/smudge behavior.
+  - `PaintLayerStack` stores per-layer pixel buffers per channel, with visibility, lock, opacity and Normal/Add/Multiply/Screen/Overlay blend modes; the visible stack is composited into flat textures for the renderer.
+  - Dirty-region compositing and GPU texture updates keep interactive strokes responsive, while `PaintTextureCommand` and `PaintLayerCommand` integrate strokes with undo/redo.
+  - Height-mask workflows can generate normals, update local normal regions, bake height into normal maps and optionally clear the height mask after baking.
+  - Project save/load serializes mesh paint layer stacks under `mesh_paint_layers`, with layer pixels written as binary PNG blobs alongside the project data.
 - **Edit Mesh Mode**: Polygon editing toolbox with:
   - **Extrude** faces/edges with transform gizmo
   - **Delete Face/Edge/Vertex** with smart re-triangulation

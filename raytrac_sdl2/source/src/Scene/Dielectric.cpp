@@ -1,8 +1,48 @@
 ﻿#include "Ray.h"
 #include "Hittable.h"
 #include <cmath>
+#include <algorithm>
 #include "Dielectric.h"
 #include <perlin.h>
+
+namespace {
+bool refract_like_optix(const Vec3& uv, const Vec3& n, float eta, Vec3& refracted) {
+    Vec3 unit = uv.normalize();
+    float cos_theta = std::clamp(Vec3::dot(-unit, n), -1.0f, 1.0f);
+    Vec3 r_out_perp = eta * (unit + cos_theta * n);
+    float k = 1.0f - r_out_perp.length_squared();
+    if (k < 0.0f) {
+        return false;
+    }
+    Vec3 r_out_parallel = -std::sqrt(k) * n;
+    refracted = (r_out_perp + r_out_parallel).normalize();
+    return true;
+}
+
+Vec3 offset_ray_like_optix(const Vec3& p, const Vec3& n) {
+    constexpr float origin = 1.0f / 32.0f;
+    constexpr float float_scale = 1.0f / 65536.0f;
+    constexpr float int_scale = 256.0f;
+
+    float p_val[3] = { p.x, p.y, p.z };
+    float n_val[3] = { n.x, n.y, n.z };
+    float out[3];
+
+    for (int i = 0; i < 3; ++i) {
+        if (std::fabs(p_val[i]) < origin) {
+            out[i] = p_val[i] + float_scale * n_val[i];
+        } else {
+            union { float f; int i; } u;
+            u.f = p_val[i];
+            int of_i = static_cast<int>(int_scale * n_val[i]);
+            u.i += (p_val[i] < 0.0f ? -of_i : of_i);
+            out[i] = u.f;
+        }
+    }
+
+    return Vec3(out[0], out[1], out[2]);
+}
+}
 
 Dielectric::Dielectric(float index_of_refraction,  const Vec3& color, float caustic_intensity,
      float tint_factor, float roughness, float scratch_density)
@@ -108,8 +148,7 @@ Vec3 Dielectric::apply_scratches(const Vec3& color, const Vec3& point) const {
 bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered, bool& is_specular) const {
     is_specular = true;
     Vec3 unit_direction = r_in.direction.normalize();
-    Vec3 shading_normal = rec.interpolated_normal.normalize();
-    Vec3 macro_normal = rec.front_face ? shading_normal : -shading_normal;
+    Vec3 macro_normal = rec.interpolated_normal.normalize();
 
     float cos_theta = fmin(Vec3::dot(-unit_direction, macro_normal), 1.0f);
     float sin_theta = sqrt(std::max(0.0f, 1.0f - cos_theta * cos_theta));
@@ -138,14 +177,11 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
     Vec3 offset_dir;
     if (do_reflect) {
         direction = Vec3::reflect(unit_direction, micro_normal).normalize();
-        if (Vec3::dot(direction, macro_normal) <= 0.0f) {
-            direction = Vec3::reflect(unit_direction, macro_normal).normalize();
-        }
         attenuation = Vec3(1.0f, 1.0f, 1.0f);
         offset_dir = macro_normal;
     } else {
-        direction = Vec3::refract(unit_direction, micro_normal, refract_ratio).normalize();
-        if (Vec3::dot(direction, macro_normal) >= 0.0f) {
+        bool refracted_success = refract_like_optix(unit_direction, micro_normal, refract_ratio, direction);
+        if (!refracted_success || Vec3::dot(direction, macro_normal) >= 0.0f) {
             direction = Vec3::reflect(unit_direction, macro_normal).normalize();
             attenuation = Vec3(1.0f, 1.0f, 1.0f);
             offset_dir = macro_normal;
@@ -167,7 +203,7 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
         }
     }
 
-    scattered = Ray(rec.point + offset_dir * 0.001f, direction.normalize());
+    scattered = Ray(offset_ray_like_optix(rec.point, offset_dir), direction.normalize());
 
     return true;
 }
