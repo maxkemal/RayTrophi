@@ -1141,9 +1141,15 @@ float computeHybridBrushDistance(
     const Vec3& hitNormalWorld,
     float planarDistance,
     float radiusWorld) {
-    const float euclideanDistance = toPoint.length();
-    const float projectionBlend = computeLargeBrushProjectionBlend(radiusWorld);
-    return std::lerp(planarDistance, euclideanDistance, projectionBlend);
+    // Capsule along the hit normal: vertex normalde 0.5*R bandı içindeyken planar
+    // mesafe (silindir gibi) kullanılır; bu band dışına çıkanlarda height fazlası
+    // mesafeye eklenip karekök ile birleşir. Bu, küçük fırçaların sonsuz silindir
+    // gibi davranıp ince duvarın arka yüzeyini ya da fırça ekseninde uzaktaki
+    // katmanları yutmasını engeller.
+    const float heightAlong = toPoint.dot(hitNormalWorld);
+    const float halfLength = radiusWorld * 0.5f;
+    const float heightOver = (std::max)(0.0f, std::abs(heightAlong) - halfLength);
+    return std::sqrt(planarDistance * planarDistance + heightOver * heightOver);
 }
 
 float computeFrontFaceBrushPenalty(
@@ -1155,8 +1161,12 @@ float computeFrontFaceBrushPenalty(
     }
 
     const float safeRadius = sanitizeFiniteFloat(radiusWorld, 0.3f, 0.0001f, 100000.0f);
-    const float softRejectStart = -safeRadius * 0.12f;
-    const float softRejectEnd = -safeRadius * (0.32f + 0.18f * computeLargeBrushProjectionBlend(radiusWorld));
+    // Yumuşak kesim bandını biraz daha geniş "tam kabul" tut: yüksek vertex
+    // yoğunluğunda yüzey normalleri dalgalanan vertexler eskiden bu banda
+    // düşüp yutuluyordu. Capsule height-clamp (computeHybridBrushDistance)
+    // arka yüzü zaten sıkı kapatıyor; burada false-negative'leri azaltıyoruz.
+    const float softRejectStart = -safeRadius * 0.22f;
+    const float softRejectEnd = -safeRadius * (0.50f + 0.20f * computeLargeBrushProjectionBlend(radiusWorld));
     if (heightFromPlane >= softRejectStart) {
         return 1.0f;
     }
@@ -1186,7 +1196,10 @@ float computeRepeatedStrokeDamping(
     const float movementRecovery = movementRatio * movementRatio * (3.0f - 2.0f * movementRatio);
 
     const float dtT = saturateFloat((safeDt - (1.0f / 90.0f)) / ((1.0f / 18.0f) - (1.0f / 90.0f)));
-    const float lowMotionDamping = std::lerp(0.2f, 0.45f, 1.0f - dtT);
+    // Yavaş hareketli stroke'larda bile vertex ağırlığı 0.2'ye inip epsilon kapısına
+    // takılıyordu; yüksek vertex yoğunluğunda fırça altında "atlanan" vertexlerin
+    // başlıca nedeni buydu. Tabanı 0.55-0.75 aralığına yükseltiyoruz.
+    const float lowMotionDamping = std::lerp(0.55f, 0.75f, 1.0f - dtT);
     return std::lerp(lowMotionDamping, 1.0f, movementRecovery);
 }
 
@@ -1271,6 +1284,54 @@ Vec3 safeNormalizeVec3(const Vec3& value, const Vec3& fallback) {
     const Vec3 normalized = value / std::sqrt(lenSq);
     return isFiniteVec3(normalized) ? normalized : fallback;
 }
+
+Vec3 computeStableSculptHitNormal(const HitRecord& hit, const Vec3& fallbackNormal) {
+    const Vec3 fallback = safeNormalizeVec3(fallbackNormal, Vec3(0.0f, 1.0f, 0.0f));
+    if (hit.interpolated_normal.length_squared() > 1e-8f) {
+        return safeNormalizeVec3(hit.interpolated_normal, fallback);
+    }
+    if (!hit.triangle) {
+        return fallback;
+    }
+
+    const Vec3 e1 = hit.triangle->vertices[1].position - hit.triangle->vertices[0].position;
+    const Vec3 e2 = hit.triangle->vertices[2].position - hit.triangle->vertices[0].position;
+    Vec3 geometricNormal = Vec3::cross(e1, e2);
+    const float geometricLenSq = geometricNormal.length_squared();
+    if (!std::isfinite(geometricLenSq) || geometricLenSq <= 1e-12f) {
+        return fallback;
+    }
+    geometricNormal = geometricNormal / std::sqrt(geometricLenSq);
+
+    return geometricNormal;
+}
+
+Vec3 computeOrientationPreservingFaceNormal(const Triangle& triangle, const Vec3& fallbackNormal) {
+    Vec3 faceNormal = Vec3::cross(
+        triangle.vertices[1].original - triangle.vertices[0].original,
+        triangle.vertices[2].original - triangle.vertices[0].original);
+    const float faceLenSq = faceNormal.length_squared();
+    if (!std::isfinite(faceLenSq) || faceLenSq <= 1e-12f) {
+        return safeNormalizeVec3(fallbackNormal, Vec3(0.0f, 1.0f, 0.0f));
+    }
+    faceNormal = faceNormal / std::sqrt(faceLenSq);
+
+    Vec3 referenceNormal(0.0f, 0.0f, 0.0f);
+    for (int corner = 0; corner < 3; ++corner) {
+        if (triangle.vertices[corner].originalNormal.length_squared() > 1e-8f) {
+            referenceNormal += triangle.vertices[corner].originalNormal;
+        } else if (triangle.vertices[corner].normal.length_squared() > 1e-8f) {
+            referenceNormal += triangle.vertices[corner].normal;
+        }
+    }
+
+    if (referenceNormal.length_squared() > 1e-8f &&
+        faceNormal.dot(referenceNormal) < 0.0f) {
+        faceNormal = -faceNormal;
+    }
+    return faceNormal;
+}
+
 void applyClayPolishPass(
     const SceneUI::EditableMeshCache& cache,
     std::vector<Vec3>& updatedLocalPositions,
@@ -2040,6 +2101,7 @@ bool computeSculptBrushSampleAtWorldPoint(
     const Vec3& localPosition,
     const Vec3& worldPosition,
     const Vec3& planePoint,
+    const Vec3& prevPlanePoint,
     const Vec3& hitNormalWorld,
     const Vec3& tangentWorld,
     const Vec3& bitangentWorld,
@@ -2059,7 +2121,23 @@ bool computeSculptBrushSampleAtWorldPoint(
     outSample.local_position = localPosition;
     outSample.world_position = worldPosition;
 
-    const Vec3 toPoint = worldPosition - planePoint;
+    // Capsule sweep: nokta yerine [prevPlanePoint -> planePoint] segmentine olan
+    // mesafeyi kullanıyoruz. Bu, fare hızlı hareket ettiğinde ardışık dab merkezleri
+    // arasında oluşan boşluğu tek pass ile kapatır — ekstra dab maliyeti yok,
+    // vertex başına yalnızca +1 dot product, +1 clamp.
+    const Vec3 segDir = planePoint - prevPlanePoint;
+    const float segLenSq = segDir.dot(segDir);
+    Vec3 closestPlanePoint;
+    if (segLenSq > 1e-10f) {
+        const float t = std::clamp(
+            (worldPosition - prevPlanePoint).dot(segDir) / segLenSq,
+            0.0f,
+            1.0f);
+        closestPlanePoint = prevPlanePoint + segDir * t;
+    } else {
+        closestPlanePoint = planePoint;
+    }
+    const Vec3 toPoint = worldPosition - closestPlanePoint;
     outSample.height_from_plane = toPoint.dot(hitNormalWorld);
     outSample.planar_offset = toPoint - hitNormalWorld * outSample.height_from_plane;
     const float planarDistance = outSample.planar_offset.length();
@@ -2293,28 +2371,35 @@ bool applyNonGrabSculptCandidate(
                     sample.world_position + (nodeWorldPosition - sample.world_position) * (0.35f * nodeVertexInfluence),
                     sample.world_position)
                 : sample.world_position;
+        // Clay'i tamamen brush strength'e duyarlı hale getir: saturated clayAccum
+        // ve settle terimleri yerleşim referansına bağlı olduğu için eskiden
+        // strength düşürülse bile alt sınır azalmıyordu. clayHeightRef'i strength
+        // ile ölçeklediğimizde tüm türev terimler (target, deposit, accum cap,
+        // settle clamp) orantılı olarak küçülür.
+        const float clayStrengthScale = sanitizeFiniteFloat(clayBrushStrength, 1.0f, 0.0f, 5.0f);
+        const float clayHeightRefScaled = clayHeightRef * clayStrengthScale;
         const float signedDistance = (clayReferenceWorldPosition - claySamplePoint).dot(hitNormalWorld);
         const float targetHeight =
-            directionSign * clayHeightRef * 0.16f * (0.8f + 0.5f * normalStrength) * sample.clay_drag_factor;
+            directionSign * clayHeightRefScaled * 0.16f * (0.8f + 0.5f * normalStrength) * sample.clay_drag_factor;
         const float heightError = targetHeight - signedDistance;
         const float absTarget = (std::abs)(targetHeight);
         const float fillNeed = (absTarget > 1e-5f)
             ? std::clamp(((directionSign > 0.0f) ? heightError : -heightError) / absTarget, 0.0f, 1.0f)
             : 0.0f;
         const float deposit =
-            clayHeightRef * 0.075f * clayBrushStrength * dt * sample.weight * strokeAdvanceFactor *
+            clayHeightRefScaled * 0.075f * clayBrushStrength * dt * sample.weight * strokeAdvanceFactor *
             (0.8f + 0.5f * normalStrength) * directionSign * fillNeed * sample.clay_drag_factor * leafWeightScale *
             (1.0f - 0.22f * largeBrushSurfaceFactor);
         float& clayAccum = strokeState.clay_layer_accum[vertexId];
         clayAccum = std::clamp(
             clayAccum + deposit,
-            -clayHeightRef * (0.45f - 0.08f * largeBrushSurfaceFactor),
-            clayHeightRef * (0.45f - 0.08f * largeBrushSurfaceFactor));
+            -clayHeightRefScaled * (0.45f - 0.08f * largeBrushSurfaceFactor),
+            clayHeightRefScaled * (0.45f - 0.08f * largeBrushSurfaceFactor));
         const float settle =
             std::clamp(
                 heightError * sample.weight * (0.28f + 0.32f * sample.weight),
-                -clayHeightRef * (0.05f - 0.012f * largeBrushSurfaceFactor),
-                clayHeightRef * (0.05f - 0.012f * largeBrushSurfaceFactor));
+                -clayHeightRefScaled * (0.05f - 0.012f * largeBrushSurfaceFactor),
+                clayHeightRefScaled * (0.05f - 0.012f * largeBrushSurfaceFactor));
         const float layerDelta = settle * (0.7f + 0.12f * largeBrushSurfaceFactor) +
             deposit * (0.55f - 0.10f * largeBrushSurfaceFactor) +
             clayAccum * (0.12f - 0.03f * largeBrushSurfaceFactor) * sample.clay_drag_factor;
@@ -2344,7 +2429,9 @@ bool applyNonGrabSculptCandidate(
         const float tineWave = 0.5f + 0.5f * std::cos(stripCoord * 22.0f);
         const float tineProfile = std::pow((std::max)(0.0f, tineWave), 1.6f);
         const float rakePattern = 0.45f + 0.55f * tineProfile;
-        const float stripsHeightRef = radiusWorld * clayRadiusCompensation;
+        // ClayStrips: stripsHeightRef'i de strength ile ölçekle (Clay ile aynı gerekçe).
+        const float stripsStrengthScale = sanitizeFiniteFloat(clayBrushStrength, 1.0f, 0.0f, 5.0f);
+        const float stripsHeightRef = radiusWorld * clayRadiusCompensation * stripsStrengthScale;
         const float signedDistance = (clayReferenceWorldPosition - claySamplePoint).dot(hitNormalWorld);
         const float stripTargetHeight =
             directionSign * stripsHeightRef * 0.14f * rakePattern * (0.9f + 0.35f * normalStrength) * sample.clay_drag_factor;
@@ -2433,10 +2520,25 @@ bool applyNonGrabSculptCandidate(
     }
 
     worldDelta = sanitizeVec3(worldDelta, Vec3(0.0f, 0.0f, 0.0f));
-    const Vec3 localDelta = sanitizeVec3(inverseTransform.transform_vector(worldDelta), Vec3(0.0f, 0.0f, 0.0f));
+    Vec3 localDelta = sanitizeVec3(inverseTransform.transform_vector(worldDelta), Vec3(0.0f, 0.0f, 0.0f));
     const float localDeltaLenSq = localDelta.length_squared();
     if (!std::isfinite(localDeltaLenSq) || localDeltaLenSq <= 1e-14f) {
         return false;
+    }
+
+    // Subdivide ile yoğunlaşmış meshlerde dab başına yer değiştirme tek bir tiny
+    // üçgenin kenarını birkaç katı geçebiliyor; bu durumda
+    // isEditableVertexTopologySafe vertex'i geri çeviriyor ve "anchor + komşular
+    // hareket etmiş" desenli flip/çukur oluşuyor. Yerel ortalama kenar uzunluğunun
+    // küçük bir kesri kadar adım sınırı koyuyoruz — vertex hâlâ doğru yönde
+    // hareket eder ama her dab güvenli aralıkta kalır. Coarse meshlerde clamp
+    // pratikte tetiklenmez; yalnızca yoğun bölgelerde devreye girer.
+    const float meshAvgEdgeLocal = sanitizeFiniteFloat(
+        sculptControlGraph.avg_edge_length, 0.05f, 1e-6f, 1000000.0f);
+    const float maxLocalStep = (std::max)(meshAvgEdgeLocal * 0.4f, localRadius * 1e-4f);
+    const float localDeltaLen = std::sqrt(localDeltaLenSq);
+    if (std::isfinite(localDeltaLen) && localDeltaLen > maxLocalStep) {
+        localDelta *= (maxLocalStep / localDeltaLen);
     }
 
     inOutLocalPosition = sanitizeVec3(currentLocalPosition + localDelta, currentLocalPosition);
@@ -3297,11 +3399,9 @@ void recomputeEditableSmoothNormals(
                 continue;
             }
 
-            const Vec3 faceNormal = Vec3::cross(
-                ref.triangle->vertices[1].original - ref.triangle->vertices[0].original,
-                ref.triangle->vertices[2].original - ref.triangle->vertices[0].original);
-            const float len = faceNormal.length();
-            faceNormals.push_back(len > 1e-8f ? faceNormal / len : Vec3(0.0f, 1.0f, 0.0f));
+            faceNormals.push_back(computeOrientationPreservingFaceNormal(
+                *ref.triangle,
+                ref.triangle->getOriginalVertexNormal(ref.corner)));
         }
 
         for (size_t refIndex = 0; refIndex < refs.size(); ++refIndex) {
@@ -3331,16 +3431,6 @@ void recomputeEditableSmoothNormals(
         }
     };
 
-    constexpr size_t kNormalRecomputeParallelThreshold = 96u;
-    if (affectedVertexIds.size() >= kNormalRecomputeParallelThreshold) {
-        std::for_each(
-            std::execution::par_unseq,
-            affectedVertexIds.begin(),
-            affectedVertexIds.end(),
-            recomputeVertexNormal);
-        return;
-    }
-
     for (const size_t vertexId : affectedVertexIds) {
         recomputeVertexNormal(vertexId);
     }
@@ -3369,11 +3459,9 @@ void applyShadingSettingsToTriangles(
             continue;
         }
 
-        const Vec3 flatNormalRaw = Vec3::cross(
-            tri->getOriginalVertexPosition(1) - tri->getOriginalVertexPosition(0),
-            tri->getOriginalVertexPosition(2) - tri->getOriginalVertexPosition(0));
-        const float flatLen = flatNormalRaw.length();
-        const Vec3 flatNormal = flatLen > 1e-8f ? flatNormalRaw / flatLen : Vec3(0.0f, 1.0f, 0.0f);
+        const Vec3 flatNormal = computeOrientationPreservingFaceNormal(
+            *tri,
+            tri->getOriginalVertexNormal(0));
 
         for (int corner = 0; corner < 3; ++corner) {
             refsByVertex[quantizeTopologyVertex(tri->getOriginalVertexPosition(corner))].push_back(
@@ -6765,7 +6853,9 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                     for (const auto& tri : touchedTriangles) {
                         for (int i = 0; i < 3; ++i) {
                             tri->vertices[i].position = transform.transform_point(tri->vertices[i].original);
-                            tri->vertices[i].normal = normalTransform.transform_vector(tri->vertices[i].originalNormal).normalize();
+                            tri->vertices[i].normal = safeNormalizeVec3(
+                                normalTransform.transform_vector(tri->vertices[i].originalNormal),
+                                tri->vertices[i].normal);
                         }
                         tri->markAABBDirty();
                         tri->update_bounding_box();
@@ -6896,6 +6986,10 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         rawDidHit = raycastEditableObjectTriangles(meshEntryIt->second, ray, hit);
     }
     bool didHit = rawDidHit;
+    if (didHit) {
+        hit.normal = computeStableSculptHitNormal(hit, hit.normal);
+        hit.interpolated_normal = hit.normal;
+    }
 
     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && didHit) {
         beginSculptStroke(
@@ -6939,11 +7033,20 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
     const Vec3 hitNormalWorld = strokeNormal.length_squared() > 1e-8f
         ? safeNormalizeVec3(strokeNormal, fallbackWorldNormal)
         : safeNormalizeVec3(hitNormal, fallbackWorldNormal);
-    // Use brush.radius directly as world-space distance, matching the preview circle
-    // which also uses it as world units (same convention as scatter_brush.brush_radius).
-    // The old pixel→world conversions created a mismatch: the on-screen circle showed
-    // one radius while the actual vertex selection used a completely different radius.
-    const float radiusWorld = sanitizeFiniteFloat(sculpt_mode_state.brush.radius, 0.3f, 0.0001f, 1000.0f);
+    // Sculpt can use either object/world units or a screen-space brush. Keep the
+    // preview and the actual vertex selection on the same resolved world radius.
+    float radiusWorld = sanitizeFiniteFloat(sculpt_mode_state.brush.radius, 0.3f, 0.0001f, 1000.0f);
+    if (sculpt_mode_state.use_screen_space_radius && ctx.scene.camera) {
+        const float radiusPx = sanitizeFiniteFloat(sculpt_mode_state.screen_radius_px, 72.0f, 1.0f, 1000.0f);
+        const float estimatedRadius = estimateBrushWorldRadius(
+            *ctx.scene.camera,
+            ImGui::GetIO().DisplaySize,
+            hitPoint,
+            radiusPx);
+        if (std::isfinite(estimatedRadius) && estimatedRadius > 1e-5f) {
+            radiusWorld = std::clamp(estimatedRadius, 0.0001f, 1000.0f);
+        }
+    }
     const float brushStrength = sanitizeFiniteFloat(sculpt_mode_state.brush.strength, 1.0f, 0.0f, 1.0f);
     const float dt = sanitizeFiniteFloat(io.DeltaTime, 1.0f / 60.0f, 1.0f / 240.0f, 0.25f);
     const float normalStrength = sanitizeFiniteFloat(sculpt_mode_state.normal_strength, 0.35f, 0.0f, 8.0f);
@@ -7013,16 +7116,30 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
     const Vec3 localGrabStartPoint = sanitizeVec3(
         inverseTransform.transform_point(sanitizeVec3(sculpt_stroke_state.start_world_hit, hitPoint)),
         localHitPoint);
+    const Vec3 localPrevHitPoint = sanitizeVec3(inverseTransform.transform_point(lastStrokeHit), localHitPoint);
     // Candidate gathering now prefers PBVH traversal for broad-phase culling,
     // but the actual brush solve remains vertex-based for consistent quality.
+    // Capsule sweep: non-Grab tool'larda toplama küresini [prevHit, currentHit]
+    // segmentini kuşatacak şekilde genişletip merkeziyetlendiriyoruz. Yarıçap
+    // kapsüller (3R)'a kadar büyüyor — fare hızlı hareket ettiğinde aradaki
+    // vertexleri tek pass ile yakalamamızı sağlar.
     std::vector<int> sculptCandidateVertexIdsStorage;
-    const Vec3 candidateCenterLocal =
-        (activeTool == SculptBrushTool::Grab) ? localGrabStartPoint : localClaySamplePoint;
+    Vec3 candidateCenterLocal;
+    float candidateCollectionRadius;
+    if (activeTool == SculptBrushTool::Grab) {
+        candidateCenterLocal = localGrabStartPoint;
+        candidateCollectionRadius = localRadius;
+    } else {
+        candidateCenterLocal = (localClaySamplePoint + localPrevHitPoint) * 0.5f;
+        const float halfSeg = (localClaySamplePoint - localPrevHitPoint).length() * 0.5f;
+        const float cappedHalf = (std::min)(halfSeg, localRadius * 2.0f);
+        candidateCollectionRadius = localRadius + cappedHalf;
+    }
     sculptCandidateVertexIdsStorage = collectSculptCandidateVerticesWithPBVHFallback(
         sculpt_pbvh,
         editable_mesh_cache,
         candidateCenterLocal,
-        localRadius);
+        candidateCollectionRadius);
     if (activeTool == SculptBrushTool::Draw || activeTool == SculptBrushTool::Inflate) {
         const float largeBrushFactor = computeLargeBrushProjectionBlend(radiusWorld);
         if (largeBrushFactor > 0.08f) {
@@ -7075,6 +7192,10 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
     }
 
     const Vec3 planePoint = hitPoint;
+    // Capsule sweep'in segment ucu: bu frame'in dab merkezi (planePoint) ile bir
+    // önceki dab merkezi arasındaki boşluğu kapatıyoruz. Stroke ilk frame'inde
+    // last_world_hit == hitPoint olduğu için segment dejenere — eski davranış.
+    const Vec3 prevPlanePoint = sanitizeVec3(sculpt_stroke_state.last_world_hit, hitPoint);
     std::atomic<bool> basePassChanged{ false };
     forEachEditableCandidate(sculptCandidateVertexIds, [&](int vertexIdInt) {
         if (vertexIdInt < 0) {
@@ -7104,6 +7225,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                 snapshotLocalPosition,
                 snapshotWorldPosition,
                 planePoint,
+                prevPlanePoint,
                 hitNormalWorld,
                 tangentWorld,
                 bitangentWorld,
@@ -7255,6 +7377,20 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
             const Vec3 mirWorldCenter = sanitizeVec3(transform.transform_point(localHit), hitPoint);
             const Vec3 mirLocalCenter = localHit;
 
+            // Capsule sweep'in mirror karşılığı için bir önceki dab merkezini de
+            // aynı eksenlerde aynalıyoruz; segment [mirPrevCenter -> mirWorldCenter]
+            // olur. Stroke ilk frame'inde lastStrokeHit == hitPoint olduğu için
+            // segment dejenere — eski davranış korunur.
+            Vec3 localMirPrevHit = sanitizeVec3(
+                inverseTransform.transform_point(lastStrokeHit),
+                Vec3(0.0f, 0.0f, 0.0f));
+            if (do_mx) localMirPrevHit.x = -localMirPrevHit.x;
+            if (do_my) localMirPrevHit.y = -localMirPrevHit.y;
+            if (do_mz) localMirPrevHit.z = -localMirPrevHit.z;
+            const Vec3 mirWorldPrevCenter = sanitizeVec3(
+                transform.transform_point(localMirPrevHit),
+                mirWorldCenter);
+
             // Mirror the stroke normal in local space.
             Vec3 localNormal = sanitizeVec3(inverseTransform.transform_vector(hitNormalWorld), hitNormalWorld);
             const float lnLen = localNormal.length();
@@ -7393,7 +7529,20 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                 const Vec3 worldPos = sanitizeVec3(
                     transform.transform_point(snapshotLocalPosition),
                     mirWorldCenter);
-                const Vec3 toVertex = worldPos - mirWorldCenter;
+                // Capsule sweep mirror eşdeğeri: segment [mirWorldPrevCenter -> mirWorldCenter].
+                const Vec3 mirSegDir = mirWorldCenter - mirWorldPrevCenter;
+                const float mirSegLenSq = mirSegDir.dot(mirSegDir);
+                Vec3 mirClosestCenter;
+                if (mirSegLenSq > 1e-10f) {
+                    const float mirT = std::clamp(
+                        (worldPos - mirWorldPrevCenter).dot(mirSegDir) / mirSegLenSq,
+                        0.0f,
+                        1.0f);
+                    mirClosestCenter = mirWorldPrevCenter + mirSegDir * mirT;
+                } else {
+                    mirClosestCenter = mirWorldCenter;
+                }
+                const Vec3 toVertex = worldPos - mirClosestCenter;
                 const float h = toVertex.dot(mirWorldNormal);
                 const Vec3 planarOffset = toVertex - mirWorldNormal * h;
                 const float planarDist = computeHybridBrushDistance(
@@ -7616,10 +7765,19 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
 
                 wd = sanitizeVec3(wd, Vec3(0.0f, 0.0f, 0.0f));
 
-                const Vec3 ld = sanitizeVec3(inverseTransform.transform_vector(wd), Vec3(0.0f, 0.0f, 0.0f));
+                Vec3 ld = sanitizeVec3(inverseTransform.transform_vector(wd), Vec3(0.0f, 0.0f, 0.0f));
                 const float ldLenSq = ld.length_squared();
                 if (!std::isfinite(ldLenSq) || ldLenSq <= 1e-14f) {
                     return;
+                }
+                // Mirror non-grab pass: aynı dab-step clamp'ı (yoğun meshde flip
+                // önler).
+                const float mirMeshAvgEdge = sanitizeFiniteFloat(
+                    sculpt_control_graph.avg_edge_length, 0.05f, 1e-6f, 1000000.0f);
+                const float mirMaxLocalStep = (std::max)(mirMeshAvgEdge * 0.4f, localRadius * 1e-4f);
+                const float ldLen = std::sqrt(ldLenSq);
+                if (std::isfinite(ldLen) && ldLen > mirMaxLocalStep) {
+                    ld *= (mirMaxLocalStep / ldLen);
                 }
                 sculpt_updated_local_positions[vertexId] = sanitizeVec3(
                     snapshotLocalPosition + ld,
@@ -7777,7 +7935,9 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
             sculpt_stroke_state.touched_triangles.try_emplace(tri.get(), tri);
             for (int i = 0; i < 3; ++i) {
                 tri->vertices[i].position = finalTransform.transform_point(tri->vertices[i].original);
-                tri->vertices[i].normal = normalTransform.transform_vector(tri->vertices[i].originalNormal).normalize();
+                tri->vertices[i].normal = safeNormalizeVec3(
+                    normalTransform.transform_vector(tri->vertices[i].originalNormal),
+                    tri->vertices[i].normal);
             }
             tri->markAABBDirty();
             tri->update_bounding_box();
@@ -8618,7 +8778,18 @@ void SceneUI::drawSculptBrushViewportPreview(UIContext& ctx, const HitRecord& hi
     if (!ctx.scene.camera) return;
 
     const Paint::BrushSettings& brush = sculpt_mode_state.brush;
-    const float world_radius = (std::max)(0.0001f, brush.radius);
+    float world_radius = (std::max)(0.0001f, brush.radius);
+    if (sculpt_mode_state.use_screen_space_radius && ctx.scene.camera) {
+        const float radiusPx = sanitizeFiniteFloat(sculpt_mode_state.screen_radius_px, 72.0f, 1.0f, 1000.0f);
+        const float estimatedRadius = estimateBrushWorldRadius(
+            *ctx.scene.camera,
+            ImGui::GetIO().DisplaySize,
+            hit.point,
+            radiusPx);
+        if (std::isfinite(estimatedRadius) && estimatedRadius > 1e-5f) {
+            world_radius = estimatedRadius;
+        }
+    }
 
     // Build tangent frame from the hit normal
     const Vec3 normal = hit.normal.length_squared() > 1e-8f ? hit.normal.normalize() : Vec3(0, 1, 0);

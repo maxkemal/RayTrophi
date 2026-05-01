@@ -2195,6 +2195,18 @@ private:
                     }
                 }
 
+                const Vec3 faceNormalRaw = Vec3::cross(vertices[1] - vertices[0], vertices[2] - vertices[0]);
+                const float faceNormalLen = faceNormalRaw.length();
+                const Vec3 faceNormal = faceNormalLen > 1e-8f
+                    ? faceNormalRaw / faceNormalLen
+                    : Vec3(0.0f, 1.0f, 0.0f);
+                const Vec3 averagedNormal = normals[0] + normals[1] + normals[2];
+                if (!hasNormals || averagedNormal.length_squared() <= 1e-8f) {
+                    normals[0] = faceNormal;
+                    normals[1] = faceNormal;
+                    normals[2] = faceNormal;
+                }
+
                 auto triangle = std::make_shared<Triangle>(
                     vertices[0], vertices[1], vertices[2],
                     normals[0], normals[1], normals[2],

@@ -524,6 +524,7 @@ bool g_vulkan_rebuild_pending = false;    // GPU Vulkan geometry needs rebuild
 bool g_viewport_raster_rebuild_pending = false; // Interactive raster viewport needs rebuild
 bool g_optix_rebuild_pending = false;
 std::atomic<bool> g_optix_rebuild_in_progress{false}; // True while TLAS rebuild is happening // GPU OptiX geometry needs rebuild
+std::atomic<bool> g_viewport_rebuild_in_progress{false}; // True while viewport backend resources are being torn down/rebuilt
 bool g_mesh_cache_dirty = false;         // UI mesh cache needs rebuild
 bool g_cpu_sync_pending = false;         // CPU data needs sync after TLAS mode changes
 bool g_cpu_bvh_refit_pending = false;    // CPU BVH fast refit (Embree only)
@@ -3522,7 +3523,9 @@ int main(int argc, char* argv[]) try {
                         if (effective_denoiser &&
                             g_backend &&
                             denoiser_sample_count > 0 &&
-                            allow_vulkan_viewport_denoiser) {
+                            allow_vulkan_viewport_denoiser &&
+                            !g_viewport_rebuild_in_progress.load(std::memory_order_acquire) &&
+                            !g_optix_rebuild_in_progress.load(std::memory_order_acquire)) {
                             std::vector<float> denoised;
                             int denoisedW = 0;
                             int denoisedH = 0;
@@ -3694,33 +3697,40 @@ int main(int argc, char* argv[]) try {
                         // ===============================================================
                         if (g_cpu_sync_pending) {
                             ui.addViewportMessage("Syncing CPU data...", 5.0f);
-                            
-                            // Update all CPU vertices from their Transform handles
-                            for (auto& obj : scene.world.objects) {
-                                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                if (tri) {
-                                    tri->updateTransformedVertices();
-                                    continue;
-                                }
 
-                                auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
-                                if (inst && inst->syncTransformFromSourceTriangles()) {
-                                    continue;
-                                }
+                            // Update all CPU vertices from their Transform handles.
+                            // Per-object work is independent (each writes only its own
+                            // transform/AABB) so par_unseq is safe; foliage scenes with
+                            // millions of HittableInstances were single-thread bound here.
+                            std::for_each(std::execution::par_unseq,
+                                scene.world.objects.begin(), scene.world.objects.end(),
+                                [](std::shared_ptr<Hittable>& obj) {
+                                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                    if (tri) {
+                                        tri->updateTransformedVertices();
+                                        return;
+                                    }
 
-                                if (inst && inst->source_triangles) {
-                                    for (auto& srcTri : *inst->source_triangles) {
-                                        if (srcTri) {
-                                            srcTri->updateTransformedVertices();
+                                    auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+                                    if (inst && inst->syncTransformFromSourceTriangles()) {
+                                        return;
+                                    }
+
+                                    if (inst && inst->source_triangles) {
+                                        for (auto& srcTri : *inst->source_triangles) {
+                                            if (srcTri) {
+                                                srcTri->updateTransformedVertices();
+                                            }
                                         }
                                     }
-                                }
-                            }
-                            
+                                });
+
                             // Trigger CPU BVH rebuild (SYNCHRONOUS for safety)
-                            // Async rebuild causes crashes if objects were deleted in GPU mode
+                            // Async rebuild causes crashes if objects were deleted in GPU mode.
+                            // skip_sync=true: we already did the per-object sync above,
+                            // don't repeat the same serial-equivalent work inside rebuildBVH.
                             extern bool use_embree;
-                            ray_renderer.rebuildBVH(scene, use_embree);
+                            ray_renderer.rebuildBVH(scene, use_embree, /*skip_sync=*/true);
                             
                             g_bvh_rebuild_pending = false; // Cancel any pending async rebuilds
                             ray_renderer.resetCPUAccumulation();
@@ -4387,30 +4397,34 @@ int main(int argc, char* argv[]) try {
                 // Async allows it to happen without freezing.
 
                 // Sync transform-handle based geometry to CPU-space before snapshot.
-                for (auto& obj : scene.world.objects) {
-                    if (!obj) continue;
+                // Runs on the main thread before the async BVH build is dispatched, so
+                // a serial loop here stalls the UI for foliage-heavy scenes.
+                std::for_each(std::execution::par_unseq,
+                    scene.world.objects.begin(), scene.world.objects.end(),
+                    [](std::shared_ptr<Hittable>& obj) {
+                        if (!obj) return;
 
-                    if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-                        if (tri->getTransformPtr() && tri->getVertexBoneWeights().empty()) {
-                            tri->updateTransformedVertices();
+                        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                            if (tri->getTransformPtr() && tri->getVertexBoneWeights().empty()) {
+                                tri->updateTransformedVertices();
+                            }
+                            return;
                         }
-                        continue;
-                    }
 
-                    if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
-                        if (inst->syncTransformFromSourceTriangles()) {
-                            continue;
-                        }
+                        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                            if (inst->syncTransformFromSourceTriangles()) {
+                                return;
+                            }
 
-                        if (inst->source_triangles) {
-                            for (auto& srcTri : *inst->source_triangles) {
-                                if (srcTri && srcTri->getTransformPtr() && srcTri->getVertexBoneWeights().empty()) {
-                                    srcTri->updateTransformedVertices();
+                            if (inst->source_triangles) {
+                                for (auto& srcTri : *inst->source_triangles) {
+                                    if (srcTri && srcTri->getTransformPtr() && srcTri->getVertexBoneWeights().empty()) {
+                                        srcTri->updateTransformedVertices();
+                                    }
                                 }
                             }
                         }
-                    }
-                }
+                    });
                 // Vertices are now in world-space; mark UI flag so the first
                 // mouse-click selection won't redundantly re-sync them.
                 ui.picking_vertices_synced = true;

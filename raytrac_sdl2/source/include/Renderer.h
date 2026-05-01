@@ -152,7 +152,7 @@ public:
     void setBackend(Backend::IBackend* backend) { m_backend = backend; }
 
 
-    void rebuildBVH(SceneData& scene, bool use_embree);
+    void rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync = false);
     void updateBVH(SceneData& scene, bool use_embree);
    
     void create_scene(SceneData& scene, Backend::IBackend* backend, const std::string& model_path,

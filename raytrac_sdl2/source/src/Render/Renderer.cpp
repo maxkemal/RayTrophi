@@ -460,6 +460,17 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
                                      std::vector<float>& output) {
     if (!frame.colorDevPtr || frame.width <= 0 || frame.height <= 0) return false;
 
+    // Skip while the viewport backend is tearing down/rebuilding its CUDA-imported
+    // textures or while OptiX TLAS rebuild is running. Touching frame.colorDevPtr
+    // during either window hits cudaErrorIllegalAddress (700), poisons the CUDA
+    // context, and trashes the subsequent OptiX BLAS build.
+    extern std::atomic<bool> g_viewport_rebuild_in_progress;
+    extern std::atomic<bool> g_optix_rebuild_in_progress;
+    if (g_viewport_rebuild_in_progress.load(std::memory_order_acquire) ||
+        g_optix_rebuild_in_progress.load(std::memory_order_acquire)) {
+        return false;
+    }
+
     std::lock_guard<std::mutex> lock(oidnMutex);
 
     // Resolve CUDA device ordinal
@@ -479,6 +490,38 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
 
     if (deviceChanged) {
         try {
+            // CRITICAL: drain in-flight work on the OLD device/stream BEFORE we
+            // reassign oidnDevice. FilterRef/BufferRef dtors release handles
+            // owned by the old device; if the old stream still has pending
+            // OIDN kernels in flight, dtor races against running work and we
+            // get an access violation in oidn::FilterRef::~FilterRef
+            // (oidn.hpp:384). Sync first, then drop refs while the old
+            // device is still the live oidnDevice.
+            if (oidnInitialized) {
+                if (oidnCudaStream) {
+                    cudaStreamSynchronize(static_cast<cudaStream_t>(oidnCudaStream));
+                    cudaGetLastError();
+                }
+                try { oidnDevice.sync(); } catch (...) {}
+                oidnFilter       = oidn::FilterRef();
+                oidnColorBuffer  = oidn::BufferRef();
+                oidnAlbedoBuffer = oidn::BufferRef();
+                oidnNormalBuffer = oidn::BufferRef();
+                oidnOutputBuffer = oidn::BufferRef();
+                if (oidnGpuOutputDevPtr) {
+                    cudaFree(oidnGpuOutputDevPtr);
+                    oidnGpuOutputDevPtr = nullptr;
+                }
+                oidnGpuOutputBytes = 0;
+                oidnCachedWidth = 0;
+                oidnCachedHeight = 0;
+                oidnUsingAlbedo = false;
+                oidnUsingNormal = false;
+                oidnGpuCachedColor = nullptr;
+                oidnGpuCachedAlbedo = nullptr;
+                oidnGpuCachedNormal = nullptr;
+            }
+
             oidnDevice = oidn::newCUDADevice(desiredOrd, desiredStream);
             oidnDevice.commit();
             const char* errMsg = nullptr;
@@ -492,24 +535,6 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
             oidnCudaStream = frame.cudaStream;
             oidnCudaInitialized = true;
             oidnInitialized = true;
-            // Any previously cached filter/buffers belong to the old device — drop them.
-            oidnColorBuffer  = oidn::BufferRef();
-            oidnAlbedoBuffer = oidn::BufferRef();
-            oidnNormalBuffer = oidn::BufferRef();
-            oidnOutputBuffer = oidn::BufferRef();
-            oidnFilter       = oidn::FilterRef();
-            if (oidnGpuOutputDevPtr) {
-                cudaFree(oidnGpuOutputDevPtr);
-                oidnGpuOutputDevPtr = nullptr;
-            }
-            oidnGpuOutputBytes = 0;
-            oidnCachedWidth = 0;
-            oidnCachedHeight = 0;
-            oidnUsingAlbedo = false;
-            oidnUsingNormal = false;
-            oidnGpuCachedColor = nullptr;
-            oidnGpuCachedAlbedo = nullptr;
-            oidnGpuCachedNormal = nullptr;
         } catch (const std::exception& e) {
             SCENE_LOG_WARN(std::string("[OIDN GPU] CUDA device bind failed: ") + e.what());
             oidnCudaInitialized = false;
@@ -559,6 +584,20 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
                     SCENE_LOG_WARN("[OIDN GPU] cudaSetDevice failed when binding desired device");
                     return false;
                 }
+            }
+
+            // Drain any in-flight OIDN/CUDA work on this stream before tearing
+            // down the existing filter and (optionally) freeing the output
+            // buffer. Reassigning oidnFilter destroys the old FilterRef; if its
+            // device still has pending async work, the dtor races and we crash
+            // in oidn::FilterRef::~FilterRef (oidn.hpp:384).
+            if (oidnFilter) {
+                if (desiredStream) {
+                    cudaStreamSynchronize(desiredStream);
+                    cudaGetLastError();
+                }
+                try { oidnDevice.sync(); } catch (...) {}
+                oidnFilter = oidn::FilterRef();
             }
 
             if (outputSizeChanged) {
@@ -644,6 +683,12 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
                                        desiredStream)) {
                 cudaError_t le = cudaGetLastError();
                 SCENE_LOG_ERROR(std::string("[OIDN GPU] blend kernel launch failed: ") + std::to_string(static_cast<int>(le)));
+                // Drain sticky CUDA error and force OIDN device rebind on next frame
+                // so we don't keep launching kernels into a poisoned context.
+                if (le == cudaErrorIllegalAddress) {
+                    cudaGetLastError();
+                    oidnCudaInitialized = false;
+                }
                 return false;
             }
         }
@@ -652,6 +697,11 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
             if (cudaStreamSynchronize(desiredStream) != cudaSuccess) {
                 cudaError_t se = cudaGetLastError();
                 SCENE_LOG_ERROR(std::string("[OIDN GPU] cudaStreamSynchronize failed after blend: ") + std::to_string(static_cast<int>(se)));
+                // Same recovery: drain sticky error and force device rebind.
+                if (se == cudaErrorIllegalAddress) {
+                    cudaGetLastError();
+                    oidnCudaInitialized = false;
+                }
                 return false;
             }
         }
@@ -2451,7 +2501,7 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
     }
 }
 
-void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
+void Renderer::rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync) {
     if (!scene.initialized) {
         SCENE_LOG_WARN("Scene not initialized, BVH rebuild skipped.");
         return;
@@ -2460,28 +2510,35 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
     // Keep CPU geometry in sync with transform handles before building BVH.
     // Open-project deserialization already does this for static meshes, but
     // runtime import/add flows may leave triangles in local space.
-    for (auto& obj : scene.world.objects) {
-        if (!obj) continue;
+    // Caller may pass skip_sync=true when it has just performed this work
+    // (e.g. the GPU->CPU switch path) to avoid duplicating millions of
+    // dynamic_pointer_cast + matrix-inverse + AABB-rebuild iterations.
+    if (!skip_sync) {
+        std::for_each(std::execution::par_unseq,
+            scene.world.objects.begin(), scene.world.objects.end(),
+            [](std::shared_ptr<Hittable>& obj) {
+                if (!obj) return;
 
-        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-            if (tri->getTransformPtr() && tri->getVertexBoneWeights().empty()) {
-                tri->updateTransformedVertices();
-            }
-            continue;
-        }
+                if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                    if (tri->getTransformPtr() && tri->getVertexBoneWeights().empty()) {
+                        tri->updateTransformedVertices();
+                    }
+                    return;
+                }
 
-        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
-            if (inst->syncTransformFromSourceTriangles()) {
-                continue;
-            }
-            if (inst->source_triangles) {
-                for (auto& srcTri : *inst->source_triangles) {
-                    if (srcTri && srcTri->getTransformPtr() && srcTri->getVertexBoneWeights().empty()) {
-                        srcTri->updateTransformedVertices();
+                if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                    if (inst->syncTransformFromSourceTriangles()) {
+                        return;
+                    }
+                    if (inst->source_triangles) {
+                        for (auto& srcTri : *inst->source_triangles) {
+                            if (srcTri && srcTri->getTransformPtr() && srcTri->getVertexBoneWeights().empty()) {
+                                srcTri->updateTransformedVertices();
+                            }
+                        }
                     }
                 }
-            }
-        }
+            });
     }
 
     // Create a temporary list of ALL hittable objects for the BVH

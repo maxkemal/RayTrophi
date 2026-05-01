@@ -3866,7 +3866,12 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
 
     if (beginBrushDockSection("Stroke")) {
         ImGui::TextDisabled("Mesh-only controls are active for this target");
-        ImGui::SliderFloat("Radius", &sculpt_mode_state.brush.radius, 0.01f, 20.0f, "%.3f m");
+        ImGui::Checkbox("Screen Radius", &sculpt_mode_state.use_screen_space_radius);
+        if (sculpt_mode_state.use_screen_space_radius) {
+            ImGui::SliderFloat("Radius", &sculpt_mode_state.screen_radius_px, 8.0f, 240.0f, "%.0f px");
+        } else {
+            ImGui::SliderFloat("Radius", &sculpt_mode_state.brush.radius, 0.01f, 20.0f, "%.3f m");
+        }
         ImGui::SliderFloat("Strength", &sculpt_mode_state.brush.strength, 0.01f, 1.0f, "%.2f");
         ImGui::SliderFloat("Falloff", &sculpt_mode_state.brush.falloff, 0.0f, 1.0f, "%.2f");
         if (!sculpt_mode_state.compact_ui) {
