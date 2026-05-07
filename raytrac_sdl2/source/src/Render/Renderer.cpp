@@ -5028,7 +5028,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
                 // === WATER WAVE SHADER (CPU) ===
                 // Detect water materials using sheen > 0 (IS_WATER flag)
-                bool is_water = (pbsdf->sheen > 0.0001f && transmission > 0.1f);
+                bool is_water = WaterShader::isActiveWater(pbsdf->sheen, transmission);
 
                 if (is_water) {
                     extern RenderSettings render_settings;
@@ -5062,7 +5062,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         params.sss_intensity = g_mat.subsurface_radius.z;
                         params.sss_color = params.absorption_color;
 
-                        params.use_fft_ocean = (g_mat.fft_height_tex != 0);
+                        params.use_fft_ocean = g_mat.fft_height_tex != 0 &&
+                                               g_mat.fft_normal_tex != 0 &&
+                                               g_mat.fft_ocean_size > 0.001f;
                         params.fft_ocean_size = g_mat.fft_ocean_size;
                         params.fft_choppiness = g_mat.fft_choppiness;
 
@@ -5116,10 +5118,12 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         params.time = water_time;
                     }
 
-                    // Evaluate water displacement and appearance
+                    // Evaluate water through the shared CPU reference contract.
                     Vec3 base_normal(0.0f, 1.0f, 0.0f);
-                    WaterResultCPU wave = evaluateWaterCPU(
-                        rec.point, base_normal, water_time, params
+                    WaterShader::SurfaceParams surface_params = toWaterSurfaceParamsCPU(params);
+                    surface_params.time = water_time;
+                    WaterShader::SurfaceSample wave = evaluateWaterSurfaceCPU(
+                        rec.point, base_normal, surface_params
                     );
 
                     // Apply wave normal
@@ -6862,6 +6866,9 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
                 data.micro_anim_speed      = gm.micro_anim_speed;
                 data.micro_morph_speed     = gm.micro_morph_speed;
                 data.foam_noise_scale      = gm.foam_noise_scale;
+                if ((gm.flags & GPU_MAT_FLAG_WATER) != 0 || gm.sheen > 0.0001f) {
+                    data.flags |= Backend::IBackend::MAT_FLAG_WATER;
+                }
             }
 
             if (backend && backend->getInfo().type == Backend::BackendType::VULKAN_RT && mat->gpuMaterial) {
@@ -6870,6 +6877,7 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
                 if (WaterManager::getInstance().syncVulkanFFTTexturesForMaterial(static_cast<uint16_t>(i), backend, fftHeightTexture, fftNormalTexture)) {
                     data.heightTexture = fftHeightTexture;
                     data.normalTexture = fftNormalTexture;
+                    data.flags |= Backend::IBackend::MAT_FLAG_WATER_FFT_READY;
                 }
             }
 
@@ -6898,10 +6906,53 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
 }
 
 void Renderer::updateBackendMaterial(SceneData& scene, uint16_t material_id) {
+    auto& mgr = MaterialManager::getInstance();
+    auto mat = mgr.getMaterial(material_id);
+
+    struct PaintDirtySnapshot {
+        Texture* tex;
+        bool full;
+        int min_x, min_y, max_x, max_y;
+    };
+    std::vector<PaintDirtySnapshot> dirtySnapshot;
+
+    if (mat && mat->type() == MaterialType::PrincipledBSDF) {
+        auto* pbsdf = static_cast<PrincipledBSDF*>(mat);
+        auto capture = [&](const std::shared_ptr<Texture>& tex) {
+            if (!tex || !tex->vulkan_dirty) return;
+            dirtySnapshot.push_back({
+                tex.get(),
+                tex->vulkan_dirty_full,
+                tex->vulkan_dirty_min_x,
+                tex->vulkan_dirty_min_y,
+                tex->vulkan_dirty_max_x,
+                tex->vulkan_dirty_max_y
+            });
+        };
+
+        capture(pbsdf->albedoProperty.texture);
+        capture(pbsdf->normalProperty.texture);
+        capture(pbsdf->roughnessProperty.texture);
+        capture(pbsdf->metallicProperty.texture);
+        capture(pbsdf->emissionProperty.texture);
+        capture(pbsdf->opacityProperty.texture);
+        capture(pbsdf->transmissionProperty.texture);
+        capture(pbsdf->heightProperty.texture);
+    }
+
     updateBackendMaterial(scene, material_id, m_backend);
 
     extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
     if (g_viewport_backend && g_viewport_backend.get() != m_backend) {
+        for (const auto& snapshot : dirtySnapshot) {
+            if (!snapshot.tex) continue;
+            snapshot.tex->vulkan_dirty = true;
+            snapshot.tex->vulkan_dirty_full = snapshot.full;
+            snapshot.tex->vulkan_dirty_min_x = snapshot.min_x;
+            snapshot.tex->vulkan_dirty_min_y = snapshot.min_y;
+            snapshot.tex->vulkan_dirty_max_x = snapshot.max_x;
+            snapshot.tex->vulkan_dirty_max_y = snapshot.max_y;
+        }
         updateBackendMaterial(scene, material_id, g_viewport_backend.get());
     }
 }
@@ -6952,6 +7003,19 @@ void Renderer::updateBackendMaterial(SceneData& scene, uint16_t material_id, Bac
         data.micro_anim_speed      = gm.micro_anim_speed;
         data.micro_morph_speed     = gm.micro_morph_speed;
         data.foam_noise_scale      = gm.foam_noise_scale;
+        if ((gm.flags & GPU_MAT_FLAG_WATER) != 0 || gm.sheen > 0.0001f) {
+            data.flags |= Backend::IBackend::MAT_FLAG_WATER;
+        }
+    }
+
+    if (backend && backend->getInfo().type == Backend::BackendType::VULKAN_RT && mat->gpuMaterial) {
+        int64_t fftHeightTexture = 0;
+        int64_t fftNormalTexture = 0;
+        if (WaterManager::getInstance().syncVulkanFFTTexturesForMaterial(material_id, backend, fftHeightTexture, fftNormalTexture)) {
+            data.heightTexture = fftHeightTexture;
+            data.normalTexture = fftNormalTexture;
+            data.flags |= Backend::IBackend::MAT_FLAG_WATER_FFT_READY;
+        }
     }
 
     if (!backend->updateMaterial(material_id, data)) {

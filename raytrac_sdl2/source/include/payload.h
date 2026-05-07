@@ -104,6 +104,11 @@ struct OptixHitResult {
     
     // Blended Material Data (For Terrain Layers)
     int use_blended_data;      // 1 = use baked values below instead of sampling textures again
+    // Water surface flag — when set, ray_color keeps mat.albedo at the original
+    // (constant deep_color) so transmission_scatter applies CPU-parity Beer-Lambert
+    // tint, while evaluate_brdf still reads blended_albedo as the depth+foam
+    // blended water_color for direct-lighting (NEE) BRDF parity with CPU.
+    int water_surface_active;
     float3 blended_albedo;
     float blended_roughness;
     float blended_metallic;

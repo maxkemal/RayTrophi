@@ -9,6 +9,7 @@
 #pragma once
 
 #include "Vec3.h"
+#include "WaterShaderCommon.h"
 #include <cmath>
 #include <algorithm>
 
@@ -81,6 +82,53 @@ struct WaterParamsCPU {
     float wind_speed;               // m/s
     float time;                     // Current animation time
 };
+
+inline WaterShader::SurfaceParams toWaterSurfaceParamsCPU(const WaterParamsCPU& params) {
+    WaterShader::SurfaceParams out;
+    out.wave_speed = params.wave_speed;
+    out.wave_strength = params.wave_strength;
+    out.wave_frequency = params.wave_frequency;
+    out.shallow_color = params.shallow_color;
+    out.deep_color = params.deep_color;
+    out.absorption_color = params.absorption_color;
+    out.depth_max = params.depth_max;
+    out.absorption_density = params.absorption_density;
+    out.clarity = params.clarity;
+    out.foam_level = params.foam_level;
+    out.shore_foam_distance = params.shore_foam_distance;
+    out.shore_foam_intensity = params.shore_foam_intensity;
+    out.caustic_intensity = params.caustic_intensity_scale;
+    out.caustic_scale = params.caustic_scale;
+    out.caustic_speed = params.caustic_speed;
+    out.sss_intensity = params.sss_intensity;
+    out.sss_color = params.sss_color;
+    out.use_fft_ocean = params.use_fft_ocean;
+    out.fft_ocean_size = WaterShader::resolvedDomain(params.fft_ocean_size);
+    out.fft_choppiness = params.fft_choppiness;
+    out.micro_detail_strength = params.micro_detail_strength;
+    out.micro_detail_scale = params.micro_detail_scale;
+    out.micro_anim_speed = params.micro_anim_speed;
+    out.micro_morph_speed = params.micro_morph_speed;
+    out.foam_noise_scale = params.foam_noise_scale;
+    out.foam_threshold = params.foam_threshold;
+    out.wind_direction = params.wind_direction;
+    out.wind_speed = params.wind_speed;
+    out.time = params.time;
+    return out;
+}
+
+inline WaterShader::SurfaceSample toWaterSurfaceSampleCPU(const WaterResultCPU& res) {
+    WaterShader::SurfaceSample out;
+    out.normal = res.normal;
+    out.foam = res.foam;
+    out.height = res.height;
+    out.depth = res.depth;
+    out.shore_factor = res.shore_factor;
+    out.caustic_intensity = res.caustic_intensity;
+    out.water_color = res.water_color;
+    out.absorption = res.absorption;
+    return out;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // HELPER FUNCTIONS
@@ -344,7 +392,6 @@ inline WaterResultCPU evaluateWaterCPU(
 
     // Apply Micro Details if strength > 0 (hybrid drift + morph, matching GPU/Vulkan)
     if (params.micro_detail_strength > 0.001f) {
-        float domain_coord_scale = 20.0f / std::fmax(params.fft_ocean_size, 0.001f);
         // Wind direction vectors (main and cross-wind)
         float wind_dx = cosf(params.wind_direction);
         float wind_dz = sinf(params.wind_direction);
@@ -354,7 +401,7 @@ inline WaterResultCPU evaluateWaterCPU(
         // Base speed scales with wind and user-controlled anim speed
         float base_speed = sqrtf(std::fmax(1.0f, params.wind_speed)) * params.micro_anim_speed;
         float t = params.time;
-        float scale = params.micro_detail_scale * domain_coord_scale;
+        float scale = params.micro_detail_scale;
         float morph = params.micro_morph_speed;
         
         // === LAYER 1: Primary ripples (wind direction) ===
@@ -404,7 +451,7 @@ inline WaterResultCPU evaluateWaterCPU(
         Vec3 micro_n = Vec3(-dsdx * params.micro_detail_strength, 1.0f, -dsdz * params.micro_detail_strength).normalize();
         res.normal = (res.normal + micro_n).normalize();
 
-        float foam_noise_scale = params.foam_noise_scale * domain_coord_scale;
+        float foam_noise_scale = params.foam_noise_scale;
         float foam_noise = fbm_cpu(position.x * foam_noise_scale + off1_x * 0.5f,
                                    position.z * foam_noise_scale + off1_z * 0.5f);
         float foam_breakup = foam_noise * 0.5f + 0.5f;
@@ -442,6 +489,44 @@ inline WaterResultCPU evaluateWaterCPU(
     res.absorption = calculateWaterAbsorptionCPU(depth_proxy, params.absorption_color, params.absorption_density);
 
     return res;
+}
+
+inline WaterShader::SurfaceSample evaluateWaterSurfaceCPU(
+    const Vec3& position,
+    const Vec3& baseNormal,
+    const WaterShader::SurfaceParams& params
+) {
+    WaterParamsCPU legacy;
+    legacy.wave_speed = params.wave_speed;
+    legacy.wave_strength = params.wave_strength;
+    legacy.wave_frequency = params.wave_frequency;
+    legacy.shallow_color = params.shallow_color;
+    legacy.deep_color = params.deep_color;
+    legacy.absorption_color = params.absorption_color;
+    legacy.depth_max = params.depth_max;
+    legacy.absorption_density = params.absorption_density;
+    legacy.clarity = params.clarity;
+    legacy.foam_level = params.foam_level;
+    legacy.shore_foam_distance = params.shore_foam_distance;
+    legacy.shore_foam_intensity = params.shore_foam_intensity;
+    legacy.caustic_intensity_scale = params.caustic_intensity;
+    legacy.caustic_scale = params.caustic_scale;
+    legacy.caustic_speed = params.caustic_speed;
+    legacy.sss_intensity = params.sss_intensity;
+    legacy.sss_color = params.sss_color;
+    legacy.use_fft_ocean = params.use_fft_ocean;
+    legacy.fft_ocean_size = WaterShader::resolvedDomain(params.fft_ocean_size);
+    legacy.fft_choppiness = params.fft_choppiness;
+    legacy.micro_detail_strength = params.micro_detail_strength;
+    legacy.micro_detail_scale = params.micro_detail_scale;
+    legacy.micro_anim_speed = params.micro_anim_speed;
+    legacy.micro_morph_speed = params.micro_morph_speed;
+    legacy.foam_noise_scale = params.foam_noise_scale;
+    legacy.foam_threshold = params.foam_threshold;
+    legacy.wind_direction = params.wind_direction;
+    legacy.wind_speed = params.wind_speed;
+    legacy.time = params.time;
+    return toWaterSurfaceSampleCPU(evaluateWaterCPU(position, baseNormal, params.time, legacy));
 }
 
 

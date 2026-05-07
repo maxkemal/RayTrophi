@@ -144,6 +144,7 @@ extern "C" __global__ void __closesthit__ch() {
     // 6. Terrain vs Standard
     float3 final_normal = world_normal;
     payload->use_blended_data = 0;
+    payload->water_surface_active = 0;
 
     if (hgd->is_terrain && hgd->splat_map_tex) {
         float4 mask = tex2D<float4>(hgd->splat_map_tex, uv.x, uv.y);
@@ -309,7 +310,8 @@ extern "C" __global__ void __closesthit__ch() {
     // 7. Water Wave Perturbation
     if (hgd->material_id >= 0 && optixLaunchParams.materials) {
          const GpuMaterial& mat = optixLaunchParams.materials[hgd->material_id];
-         if (mat.sheen > 0.0001f) {
+         const bool is_water_material = ((mat.flags & GPU_MAT_FLAG_WATER) != 0) || mat.sheen > 0.0001f;
+         if (is_water_material) {
              float time = optixLaunchParams.water_time;
              WaterParams params;
              params.wave_speed = mat.anisotropic;
@@ -329,7 +331,9 @@ extern "C" __global__ void __closesthit__ch() {
              params.caustic_speed = mat.subsurface_anisotropy;
              params.sss_intensity = mat.subsurface_radius.z;
              params.sss_color = mat.subsurface_color;
-             params.use_fft_ocean = (mat.fft_height_tex != 0);
+             // CPU parity mode: keep FFT resources available for geometry/upload,
+             // but shade water through the same Gerstner + micro-detail path.
+             params.use_fft_ocean = false;
              params.fft_ocean_size = mat.fft_ocean_size;
              params.fft_choppiness = mat.fft_choppiness;
              params.fft_height_tex = mat.fft_height_tex;
@@ -344,8 +348,29 @@ extern "C" __global__ void __closesthit__ch() {
              params.wind_speed = mat.fft_wind_speed;
              params.time = time;
              
-             WaterResult wave_res = evaluateWater(hitPoint, final_normal, time, params);
-             final_normal = wave_res.normal;
+             const float3 water_base_normal = final_normal;
+             WaterResult wave_res = evaluateWater(hitPoint, water_base_normal, time, params);
+
+             // Build a synthetic ONB from the base normal — water meshes don't
+             // carry per-vertex tangents, so the global world_tangent here is
+             // typically (0,0,0). Reusing it yields NaN through normalize(),
+             // which then poisons water_shading_normal and silently flips the
+             // dot(>,0) check below into the fallback path (flat normal) — the
+             // exact symptom: OptiX showing static water with no wave shading.
+             // Vulkan's closesthit uses buildONB(geoNormal,...) for the same
+             // reason. Pick a helper axis that's least parallel to base_normal
+             // so the cross product stays well-conditioned.
+             const float3 water_helper = fabsf(water_base_normal.y) < 0.999f
+                 ? make_float3(0.0f, 1.0f, 0.0f)
+                 : make_float3(1.0f, 0.0f, 0.0f);
+             float3 water_tangent = normalize(cross(water_helper, water_base_normal));
+             float3 water_bitangent = normalize(cross(water_base_normal, water_tangent));
+             float3 water_shading_normal = normalize(
+                 water_tangent * wave_res.normal.x +
+                 water_base_normal * wave_res.normal.y +
+                 water_bitangent * wave_res.normal.z
+             );
+             final_normal = dot(water_shading_normal, -rayDir) > 0.0f ? water_shading_normal : water_base_normal;
              
              // Measure actual water depth by tracing DOWN to the floor
              float water_depth = params.depth_max > 0.1f ? params.depth_max : 100.0f;
@@ -374,7 +399,8 @@ extern "C" __global__ void __closesthit__ch() {
              }
 
              // Prepare blended data struct so depth color & caustics actually render everywhere!
-             payload->use_blended_data = 1; 
+             payload->use_blended_data = 1;
+             payload->water_surface_active = 1;  // CPU parity: keep mat.albedo for transmission tint
              payload->blended_albedo = mat.albedo;
              payload->blended_roughness = mat.roughness;
              payload->blended_metallic = mat.metallic;
@@ -383,7 +409,8 @@ extern "C" __global__ void __closesthit__ch() {
              payload->blended_subsurface = mat.subsurface;
              payload->blended_subsurface_color = mat.subsurface_color;
              payload->blended_emission = mat.emission;
-             payload->blended_transmission = mat.transmission;
+             const float water_transmission = mat.transmission;
+             payload->blended_transmission = water_transmission;
              payload->blended_translucent = mat.translucent;
              payload->blended_ior = mat.ior;
 
@@ -409,13 +436,19 @@ extern "C" __global__ void __closesthit__ch() {
              if (total_foam > 0.01f) {
                  float3 foam_color = make_float3(0.92f, 0.96f, 1.0f); // White/Blueish foam
                  base_color = lerp(base_color, foam_color, total_foam);
-                 payload->blended_roughness = lerp(mat.roughness, 0.8f, total_foam); 
-                 
-                 // Foam is opaque and diffuse, prevent "glass" transmission which makes it completely black!
-                 payload->blended_transmission = lerp(mat.transmission, 0.0f, total_foam);
+                 payload->blended_roughness = lerp(mat.roughness, 0.8f, total_foam);
+                 // CPU parity: foam does NOT lerp transmission (PrincipledBSDF/Dielectric
+                 // keeps full transmission; foam visibility comes from roughness boost
+                 // and the water_color BRDF channel below). Removing the foam transmission
+                 // lerp also stops the "100x albedo boost" path in scatter_material:914-919
+                 // when foam fired the non-transmission branch — which can flash hot pixels.
                  payload->blended_metallic = lerp(mat.metallic, 0.0f, total_foam);
                  payload->blended_clearcoat = lerp(mat.clearcoat, 0.0f, total_foam);
              }
+             // CPU parity: blended_albedo carries water_color (depth+foam blended) for
+             // direct-lighting BRDF (evaluate_brdf reads payload.blended_albedo).
+             // ray_color separately keeps mat.albedo at the constant deep_color for
+             // transmission_scatter (CPU Dielectric tint) when water_surface_active is set.
              payload->blended_albedo = base_color;
          }
     }

@@ -48,6 +48,7 @@
 #include "RiverSpline.h"
 
 #include "stb_image_write.h"
+#include "stb_image.h"
 #include "ColorProcessingParams.h"
 
 // Helper for stbi_write_to_func
@@ -56,6 +57,122 @@ namespace {
         auto* vec = static_cast<std::vector<char>*>(context);
         const char* d = static_cast<const char*>(data);
         vec->insert(vec->end(), d, d + size);
+    }
+
+    // JPG quality used for embedded color textures. q=92 is visually transparent
+    // for albedo/emission while shrinking 5-10x vs PNG.
+    constexpr int kEmbeddedJpegQuality = 92;
+
+    bool isLossyEncodableUsage(const std::string& usage) {
+        // Only pure color channels tolerate JPG. Normal/roughness/metallic/height/
+        // opacity/transmission carry numeric data — JPG artifacts corrupt shading
+        // or masks, so they must stay PNG.
+        return usage == "albedo" || usage == "emission";
+    }
+
+    // Role-aware encoder: JPG for color textures with fully-opaque alpha,
+    // PNG everywhere else (including any albedo/emission that uses alpha).
+    bool encodeTextureRoleAware(const uint8_t* rgba, int width, int height,
+                                const std::string& usage,
+                                std::vector<char>& out_bytes,
+                                std::string& out_ext) {
+        out_bytes.clear();
+        out_ext.clear();
+
+        const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+
+        bool prefer_jpg = isLossyEncodableUsage(usage);
+        if (prefer_jpg) {
+            for (size_t i = 0; i < pixel_count; ++i) {
+                if (rgba[i * 4 + 3] != 255) { prefer_jpg = false; break; }
+            }
+        }
+
+        if (prefer_jpg) {
+            std::vector<uint8_t> rgb(pixel_count * 3);
+            for (size_t i = 0; i < pixel_count; ++i) {
+                rgb[i * 3 + 0] = rgba[i * 4 + 0];
+                rgb[i * 3 + 1] = rgba[i * 4 + 1];
+                rgb[i * 3 + 2] = rgba[i * 4 + 2];
+            }
+            if (stbi_write_jpg_to_func(write_to_vector_func, &out_bytes,
+                                       width, height, 3, rgb.data(),
+                                       kEmbeddedJpegQuality) && !out_bytes.empty()) {
+                out_ext = ".jpg";
+                return true;
+            }
+            out_bytes.clear();
+        }
+
+        if (stbi_write_png_to_func(write_to_vector_func, &out_bytes,
+                                   width, height, 4, rgba, width * 4) &&
+            !out_bytes.empty()) {
+            out_ext = ".png";
+            return true;
+        }
+        return false;
+    }
+
+    // Result of attempting PNG → JPG recompression on a passthrough blob.
+    // If recompressed is true, `bytes` owns the new encoded data; otherwise
+    // callers should write the original bytes through unchanged.
+    struct ColorRecompressionResult {
+        bool recompressed = false;
+        std::vector<char> bytes;
+        std::string ext;
+    };
+
+    // For albedo/emission blobs that are PNG with fully-opaque alpha, decode
+    // and re-encode as JPG q92. Anything else (other roles, non-PNG inputs,
+    // any alpha < 255, or recompression that didn't shrink the file) returns
+    // recompressed=false so the caller falls back to byte-for-byte passthrough.
+    ColorRecompressionResult pickColorRecompression(const char* in_data, size_t in_size,
+                                                     const std::string& usage) {
+        ColorRecompressionResult result;
+        if (!isLossyEncodableUsage(usage) || in_data == nullptr || in_size < 8) {
+            return result;
+        }
+
+        const unsigned char* magic = reinterpret_cast<const unsigned char*>(in_data);
+        const bool is_png = (magic[0] == 0x89 && magic[1] == 0x50 && magic[2] == 0x4E && magic[3] == 0x47 &&
+                             magic[4] == 0x0D && magic[5] == 0x0A && magic[6] == 0x1A && magic[7] == 0x0A);
+        if (!is_png) {
+            return result;
+        }
+
+        int w = 0, h = 0, ch = 0;
+        unsigned char* decoded = stbi_load_from_memory(
+            reinterpret_cast<const stbi_uc*>(in_data),
+            static_cast<int>(in_size),
+            &w, &h, &ch, 4);
+        if (!decoded || w <= 0 || h <= 0) {
+            if (decoded) stbi_image_free(decoded);
+            return result;
+        }
+
+        const size_t pixel_count = static_cast<size_t>(w) * static_cast<size_t>(h);
+        bool fully_opaque = true;
+        for (size_t i = 0; i < pixel_count; ++i) {
+            if (decoded[i * 4 + 3] != 255) { fully_opaque = false; break; }
+        }
+        if (!fully_opaque) {
+            stbi_image_free(decoded);
+            return result;
+        }
+
+        std::vector<char> recoded;
+        std::string recoded_ext;
+        const bool ok = encodeTextureRoleAware(decoded, w, h, usage, recoded, recoded_ext);
+        stbi_image_free(decoded);
+
+        if (!ok || recoded_ext != ".jpg" || recoded.empty() || recoded.size() >= in_size) {
+            return result;
+        }
+
+        result.recompressed = true;
+        result.bytes = std::move(recoded);
+        result.ext = std::move(recoded_ext);
+        return result;
     }
 
     class ScopedPerfTimer {
@@ -152,6 +269,138 @@ namespace {
         }
         return ext.empty() ? std::string(".png") : ext;
     }
+
+    struct PreviousEmbeddedTextureEntry {
+        std::filesystem::path bin_path;
+        int64_t offset = -1;
+        int64_t size = 0;
+        std::string format;
+    };
+
+    std::unordered_map<std::string, PreviousEmbeddedTextureEntry> g_previous_embedded_texture_entries;
+
+    std::string previousEmbeddedTextureKey(const std::string& original_name,
+                                           const std::string& usage,
+                                           int width,
+                                           int height) {
+        return original_name + "\n" + usage + "\n" +
+               std::to_string(width) + "x" + std::to_string(height);
+    }
+
+    void loadPreviousEmbeddedTextureEntries(const std::filesystem::path& json_path,
+                                            const std::filesystem::path& bin_path) {
+        g_previous_embedded_texture_entries.clear();
+        if (!std::filesystem::exists(json_path) || !std::filesystem::exists(bin_path)) {
+            return;
+        }
+
+        try {
+            std::ifstream in(json_path);
+            if (!in.is_open()) {
+                return;
+            }
+
+            nlohmann::json root;
+            in >> root;
+            if (!root.contains("textures") || !root["textures"].is_array()) {
+                return;
+            }
+
+            for (const auto& tex : root["textures"]) {
+                if (tex.value("mode", std::string{}) != "embed") {
+                    continue;
+                }
+
+                const std::string original_name = tex.value("original_name", std::string{});
+                const std::string usage = tex.value("usage", std::string{});
+                const int width = tex.value("width", 0);
+                const int height = tex.value("height", 0);
+                const int64_t offset = tex.value("offset", int64_t(-1));
+                const int64_t size = tex.value("size", int64_t(0));
+                if (original_name.empty() || usage.empty() || width <= 0 || height <= 0 || offset < 0 || size <= 0) {
+                    continue;
+                }
+
+                PreviousEmbeddedTextureEntry entry;
+                entry.bin_path = bin_path;
+                entry.offset = offset;
+                entry.size = size;
+                entry.format = tex.value("format", std::string{});
+                g_previous_embedded_texture_entries[previousEmbeddedTextureKey(original_name, usage, width, height)] = std::move(entry);
+            }
+
+            SCENE_LOG_INFO("[ProjectManager] Loaded " +
+                           std::to_string(g_previous_embedded_texture_entries.size()) +
+                           " previous embedded texture entries for save reuse.");
+        } catch (const std::exception& e) {
+            g_previous_embedded_texture_entries.clear();
+            SCENE_LOG_WARN("[ProjectManager] Failed to read previous embedded texture manifest: " + std::string(e.what()));
+        }
+    }
+
+    bool readPreviousEmbeddedTextureBlob(const PreviousEmbeddedTextureEntry& entry,
+                                         std::vector<char>& out) {
+        out.clear();
+        if (entry.offset < 0 || entry.size <= 0 || !std::filesystem::exists(entry.bin_path)) {
+            return false;
+        }
+
+        std::error_code ec;
+        const auto source_size = std::filesystem::file_size(entry.bin_path, ec);
+        if (ec || source_size < static_cast<uint64_t>(entry.offset + entry.size)) {
+            return false;
+        }
+
+        std::ifstream in(entry.bin_path, std::ios::binary);
+        if (!in.is_open()) {
+            return false;
+        }
+
+        in.seekg(entry.offset, std::ios::beg);
+        out.resize(static_cast<size_t>(entry.size));
+        in.read(out.data(), static_cast<std::streamsize>(out.size()));
+        if (in.gcount() != static_cast<std::streamsize>(out.size())) {
+            out.clear();
+            return false;
+        }
+        return true;
+    }
+
+    bool copyPreviousEmbeddedTextureBlob(const PreviousEmbeddedTextureEntry& entry,
+                                         std::ofstream& out,
+                                         std::vector<char>& buffer) {
+        if (entry.offset < 0 || entry.size <= 0 || !std::filesystem::exists(entry.bin_path)) {
+            return false;
+        }
+
+        std::error_code ec;
+        const auto source_size = std::filesystem::file_size(entry.bin_path, ec);
+        if (ec || source_size < static_cast<uint64_t>(entry.offset + entry.size)) {
+            return false;
+        }
+
+        std::ifstream in(entry.bin_path, std::ios::binary);
+        if (!in.is_open()) {
+            return false;
+        }
+
+        in.seekg(entry.offset, std::ios::beg);
+        int64_t remaining = entry.size;
+        while (remaining > 0 && in) {
+            const std::streamsize chunk = static_cast<std::streamsize>(
+                std::min<int64_t>(remaining, static_cast<int64_t>(buffer.size())));
+            in.read(buffer.data(), chunk);
+            const std::streamsize read_count = in.gcount();
+            if (read_count <= 0) {
+                return false;
+            }
+            out.write(buffer.data(), read_count);
+            remaining -= static_cast<int64_t>(read_count);
+        }
+
+        return remaining == 0;
+    }
+
 }
 
 using json = nlohmann::json;
@@ -729,6 +978,8 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
     temp_json_path += ".tmp";
     fs::path temp_bin_path = final_bin_path;
     temp_bin_path += ".tmp";
+
+    loadPreviousEmbeddedTextureEntries(final_json_path, final_bin_path);
 
     // 2. Open Streams
     std::ofstream out_json(temp_json_path);
@@ -1735,6 +1986,8 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                     scene.animationDataList.push_back(std::make_shared<AnimationData>(anim));
                 }
             }
+
+            clearEmbeddedTextureCache();
         } else {
             SCENE_LOG_ERROR("Project file is in legacy format. Please re-import your models.");
             return false;
@@ -2719,6 +2972,7 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
     size_t png_reencoded_count = 0;
     size_t file_copied_count = 0;
     size_t cache_passthrough_count = 0;
+    size_t previous_embed_reused_count = 0;
     uint64_t texture_bin_bytes_written = 0;
     uint64_t project_local_bytes_written = 0;
     std::vector<char> file_copy_buffer(1024 * 1024);
@@ -2791,34 +3045,65 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                     tex_entry["mode"] = "embed";
                     tex_entry["offset"] = static_cast<long long>(bin_out.tellp());
 
+                    const std::string previous_key = previousEmbeddedTextureKey(
+                        path, usage, prop.texture->width, prop.texture->height);
+                    auto previous_it = g_previous_embedded_texture_entries.find(previous_key);
+                    if (!prop.texture->isSaveDirty() &&
+                        previous_it != g_previous_embedded_texture_entries.end()) {
+                        std::vector<char> prev_blob;
+                        if (readPreviousEmbeddedTextureBlob(previous_it->second, prev_blob)) {
+                            auto recomp = pickColorRecompression(prev_blob.data(), prev_blob.size(), usage);
+                            const char* write_data = recomp.recompressed ? recomp.bytes.data() : prev_blob.data();
+                            const size_t write_size = recomp.recompressed ? recomp.bytes.size() : prev_blob.size();
+                            const std::string write_ext = recomp.recompressed ? recomp.ext : previous_it->second.format;
+
+                            bin_out.write(write_data, static_cast<std::streamsize>(write_size));
+                            tex_entry["size"] = write_size;
+                            tex_entry["format"] = write_ext;
+                            if (recomp.recompressed) ++png_reencoded_count;
+                            else ++previous_embed_reused_count;
+                            texture_bin_bytes_written += static_cast<uint64_t>(write_size);
+                            prop.texture->clearSaveDirty();
+                            texture_map[path] = texture_id++;
+                            arr.push_back(tex_entry);
+                            return;
+                        }
+                    }
+
                     // If we have in-memory pixels (e.g. painted/generated texture) prefer encoding them
                     // even if a file exists with the same name. This ensures painted overrides are serialized.
                     if (fs::exists(path) && prop.texture->pixels.empty() && !is_generated_name) {
-                        // Prefer passthrough from the original source file to avoid costly re-encoding.
-                        std::ifstream tex_file(path, std::ios::binary);
+                        // Read the source into memory so we can attempt PNG → JPG
+                        // recompression for color textures; if it doesn't pay off,
+                        // we fall back to byte-for-byte passthrough.
+                        std::ifstream tex_file(path, std::ios::binary | std::ios::ate);
                         if (tex_file) {
-                            tex_file.seekg(0, std::ios::end);
-                            const std::streamoff size_pos = tex_file.tellg();
+                            const std::streamoff total_size = tex_file.tellg();
                             tex_file.seekg(0, std::ios::beg);
+                            std::vector<char> blob;
+                            if (total_size > 0) {
+                                blob.resize(static_cast<size_t>(total_size));
+                                tex_file.read(blob.data(), static_cast<std::streamsize>(blob.size()));
+                                if (tex_file.gcount() != static_cast<std::streamsize>(blob.size())) {
+                                    blob.clear();
+                                }
+                            }
 
-                            const size_t size = size_pos > 0
-                                ? streamFileToOutput(tex_file, bin_out, file_copy_buffer)
-                                : 0;
-                            ++file_copied_count;
-                            texture_bin_bytes_written += static_cast<uint64_t>(size);
-                            
-                            tex_entry["size"] = size;
-                            tex_entry["format"] = fs::path(path).extension().string();
+                            auto recomp = pickColorRecompression(blob.data(), blob.size(), usage);
+                            const char* write_data = recomp.recompressed ? recomp.bytes.data() : blob.data();
+                            const size_t write_size = recomp.recompressed ? recomp.bytes.size() : blob.size();
+                            const std::string write_ext = recomp.recompressed
+                                ? recomp.ext
+                                : fs::path(path).extension().string();
+
+                            bin_out.write(write_data, static_cast<std::streamsize>(write_size));
+                            if (recomp.recompressed) ++png_reencoded_count;
+                            else ++file_copied_count;
+                            texture_bin_bytes_written += static_cast<uint64_t>(write_size);
+
+                            tex_entry["size"] = write_size;
+                            tex_entry["format"] = write_ext;
                         }
-                    } else if (const auto* cached = getEmbeddedTexture(path)) {
-                        bin_out.write(cached->data.data(), static_cast<std::streamsize>(cached->data.size()));
-                        tex_entry["size"] = cached->data.size();
-                        tex_entry["format"] = fs::path(path).extension().string();
-                        ++cache_passthrough_count;
-                        texture_bin_bytes_written += static_cast<uint64_t>(cached->data.size());
-                        texture_map[path] = texture_id++;
-                        arr.push_back(tex_entry);
-                        return;
                     } else if (!prop.texture->pixels.empty()) {
                          // Encode from in-memory pixels (painted/generated textures).
                          std::vector<uint8_t> raw_pixels(prop.texture->pixels.size() * 4);
@@ -2850,21 +3135,38 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                              }
                          }
 
-                         std::vector<char> png_data;
-                         stbi_write_png_to_func(write_to_vector_func, &png_data,
-                             prop.texture->width, prop.texture->height, 4,
-                             raw_pixels.data(), prop.texture->width * 4);
-
-                         if (!png_data.empty()) {
-                            ++png_reencoded_count;
-                            bin_out.write(png_data.data(), png_data.size());
-                            tex_entry["size"] = png_data.size();
-                            tex_entry["format"] = ".png";
-                            texture_bin_bytes_written += static_cast<uint64_t>(png_data.size());
+                         std::vector<char> encoded;
+                         std::string encoded_ext;
+                         if (encodeTextureRoleAware(raw_pixels.data(),
+                                                    prop.texture->width, prop.texture->height,
+                                                    usage, encoded, encoded_ext)) {
+                             ++png_reencoded_count;
+                             bin_out.write(encoded.data(), encoded.size());
+                             tex_entry["size"] = encoded.size();
+                             tex_entry["format"] = encoded_ext;
+                             texture_bin_bytes_written += static_cast<uint64_t>(encoded.size());
                          } else {
-                             SCENE_LOG_ERROR("Failed to encode memory texture to PNG: " + path);
+                             SCENE_LOG_ERROR("Failed to encode memory texture: " + path);
                          }
 
+                    } else if (const auto* cached = getEmbeddedTexture(path)) {
+                        auto recomp = pickColorRecompression(cached->data.data(), cached->data.size(), usage);
+                        const char* write_data = recomp.recompressed ? recomp.bytes.data() : cached->data.data();
+                        const size_t write_size = recomp.recompressed ? recomp.bytes.size() : cached->data.size();
+                        const std::string write_ext = recomp.recompressed
+                            ? recomp.ext
+                            : fs::path(path).extension().string();
+
+                        bin_out.write(write_data, static_cast<std::streamsize>(write_size));
+                        tex_entry["size"] = write_size;
+                        tex_entry["format"] = write_ext;
+                        if (recomp.recompressed) ++png_reencoded_count;
+                        else ++cache_passthrough_count;
+                        texture_bin_bytes_written += static_cast<uint64_t>(write_size);
+                        prop.texture->clearSaveDirty();
+                        texture_map[path] = texture_id++;
+                        arr.push_back(tex_entry);
+                        return;
                     } else if (!prop.texture->float_pixels.empty()) {
                         // Handle Float textures (EXR/HDR) - TODO: Need stbi_write_hdr or similar
                         // For now, skip or implement later.
@@ -2872,9 +3174,12 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                     } 
                 } else {
                     bool wrote_project_local = false;
-                    auto write_generated_png_from_pixels = [&](const fs::path& local_target) -> bool {
+                    // Role-aware encoder: takes a target path WITHOUT extension and
+                    // returns the actual final path (with .jpg or .png suffix), or
+                    // empty fs::path on failure.
+                    auto write_generated_image_from_pixels = [&](const fs::path& target_stem) -> fs::path {
                         if (prop.texture->pixels.empty()) {
-                            return false;
+                            return {};
                         }
 
                         auto linear_to_srgb_byte = [](float lin) -> uint8_t {
@@ -2904,32 +3209,31 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                             }
                         }
 
-                        std::vector<char> png_data;
-                        stbi_write_png_to_func(
-                            write_to_vector_func, &png_data,
-                            prop.texture->width, prop.texture->height, 4,
-                            raw_pixels.data(), prop.texture->width * 4);
-                        if (png_data.empty()) {
-                            return false;
+                        std::vector<char> encoded;
+                        std::string encoded_ext;
+                        if (!encodeTextureRoleAware(raw_pixels.data(),
+                                                    prop.texture->width, prop.texture->height,
+                                                    usage, encoded, encoded_ext)) {
+                            return {};
                         }
+
+                        fs::path local_target = target_stem;
+                        local_target += encoded_ext;
 
                         std::ofstream local_out(local_target, std::ios::binary);
                         if (!local_out.is_open()) {
-                            return false;
+                            return {};
                         }
-                        local_out.write(png_data.data(), static_cast<std::streamsize>(png_data.size()));
+                        local_out.write(encoded.data(), static_cast<std::streamsize>(encoded.size()));
                         ++png_reencoded_count;
-                        project_local_bytes_written += static_cast<uint64_t>(png_data.size());
-                        return true;
+                        project_local_bytes_written += static_cast<uint64_t>(encoded.size());
+                        return local_target;
                     };
                     if (save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::ProjectLocal &&
                         !project_local_texture_dir.empty()) {
                         try {
                             fs::create_directories(project_local_texture_dir);
                             const std::string base_name = sanitizeFilenameComponent(fs::path(path).stem().string());
-                            const std::string source_ext = !fs::path(path).extension().string().empty()
-                                ? fs::path(path).extension().string()
-                                : std::string(".png");
 
                             auto finalize_project_local_path = [&](const fs::path& local_target) {
                                 tex_entry["mode"] = "path";
@@ -2957,42 +3261,88 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                                 return fs::file_size(local_target, ec) == expected_size;
                             };
 
-                            if (fs::exists(path)) {
+                            if (is_generated_name && !prop.texture->pixels.empty()) {
+                                const fs::path local_target_stem = project_local_texture_dir /
+                                    (std::to_string(texture_id) + "_" + base_name);
+                                fs::path local_target = write_generated_image_from_pixels(local_target_stem);
+                                if (!local_target.empty() && fs::exists(local_target)) {
+                                    finalize_project_local_path(local_target);
+                                }
+                            } else if (fs::exists(path)) {
                                 const fs::path source_path(path);
-                                const std::string ext = !source_path.extension().string().empty()
+                                const std::string ext_orig = !source_path.extension().string().empty()
                                     ? source_path.extension().string()
                                     : std::string(".bin");
-                                const fs::path local_target = project_local_texture_dir /
-                                    (std::to_string(texture_id) + "_" + base_name + ext);
-                                if (!target_matches_source_file(local_target, source_path)) {
-                                    fs::copy_file(source_path, local_target, fs::copy_options::overwrite_existing);
-                                    ++file_copied_count;
-                                    std::error_code size_ec;
-                                    project_local_bytes_written += static_cast<uint64_t>(fs::file_size(local_target, size_ec));
+
+                                bool wrote_recompressed = false;
+                                if (isLossyEncodableUsage(usage)) {
+                                    std::ifstream src(source_path, std::ios::binary | std::ios::ate);
+                                    if (src) {
+                                        const std::streamoff sz = src.tellg();
+                                        src.seekg(0, std::ios::beg);
+                                        std::vector<char> blob;
+                                        if (sz > 0) {
+                                            blob.resize(static_cast<size_t>(sz));
+                                            src.read(blob.data(), static_cast<std::streamsize>(blob.size()));
+                                            if (src.gcount() != static_cast<std::streamsize>(blob.size())) {
+                                                blob.clear();
+                                            }
+                                        }
+                                        auto recomp = pickColorRecompression(blob.data(), blob.size(), usage);
+                                        if (recomp.recompressed) {
+                                            const fs::path local_target = project_local_texture_dir /
+                                                (std::to_string(texture_id) + "_" + base_name + recomp.ext);
+                                            std::ofstream out(local_target, std::ios::binary);
+                                            if (out.is_open()) {
+                                                out.write(recomp.bytes.data(), static_cast<std::streamsize>(recomp.bytes.size()));
+                                                ++png_reencoded_count;
+                                                project_local_bytes_written += static_cast<uint64_t>(recomp.bytes.size());
+                                                finalize_project_local_path(local_target);
+                                                wrote_recompressed = true;
+                                            }
+                                        }
+                                    }
                                 }
-                                finalize_project_local_path(local_target);
+
+                                if (!wrote_recompressed) {
+                                    const fs::path local_target = project_local_texture_dir /
+                                        (std::to_string(texture_id) + "_" + base_name + ext_orig);
+                                    if (!target_matches_source_file(local_target, source_path)) {
+                                        fs::copy_file(source_path, local_target, fs::copy_options::overwrite_existing);
+                                        ++file_copied_count;
+                                        std::error_code size_ec;
+                                        project_local_bytes_written += static_cast<uint64_t>(fs::file_size(local_target, size_ec));
+                                    }
+                                    finalize_project_local_path(local_target);
+                                }
                             } else if (const auto* cached = getEmbeddedTexture(path)) {
-                                const std::string ext = chooseMaterializedTextureExtension(fs::path(path), &cached->data);
+                                auto recomp = pickColorRecompression(cached->data.data(), cached->data.size(), usage);
+                                const std::string ext = recomp.recompressed
+                                    ? recomp.ext
+                                    : chooseMaterializedTextureExtension(fs::path(path), &cached->data);
                                 const fs::path local_target = project_local_texture_dir /
                                     (std::to_string(texture_id) + "_" + base_name + ext);
-                                if (!target_matches_cached_bytes(local_target, cached->data.size())) {
+                                const char* write_data = recomp.recompressed ? recomp.bytes.data() : cached->data.data();
+                                const size_t write_size = recomp.recompressed ? recomp.bytes.size() : cached->data.size();
+                                const bool already_present = !recomp.recompressed &&
+                                    target_matches_cached_bytes(local_target, write_size);
+                                if (!already_present) {
                                     std::ofstream local_out(local_target, std::ios::binary);
                                     if (local_out.is_open()) {
-                                        local_out.write(cached->data.data(), static_cast<std::streamsize>(cached->data.size()));
-                                        ++cache_passthrough_count;
-                                        project_local_bytes_written += static_cast<uint64_t>(cached->data.size());
+                                        local_out.write(write_data, static_cast<std::streamsize>(write_size));
+                                        if (recomp.recompressed) ++png_reencoded_count;
+                                        else ++cache_passthrough_count;
+                                        project_local_bytes_written += static_cast<uint64_t>(write_size);
                                     }
                                 }
                                 if (fs::exists(local_target)) {
                                     finalize_project_local_path(local_target);
                                 }
                             } else if (!prop.texture->pixels.empty()) {
-                                const fs::path local_target = project_local_texture_dir /
-                                    (std::to_string(texture_id) + "_" + base_name + source_ext);
-                                if (!fs::exists(local_target)) {
-                                    write_generated_png_from_pixels(local_target);
-                                }
-                                if (fs::exists(local_target)) {
+                                const fs::path local_target_stem = project_local_texture_dir /
+                                    (std::to_string(texture_id) + "_" + base_name);
+                                fs::path local_target = write_generated_image_from_pixels(local_target_stem);
+                                if (!local_target.empty() && fs::exists(local_target)) {
                                     finalize_project_local_path(local_target);
                                 }
                             }
@@ -3007,20 +3357,17 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                     if (!wrote_project_local) {
                         bool wrote_generated_keep_path = false;
                         if (save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::KeepOriginalPaths &&
-                            !fs::exists(path) &&
+                            (is_generated_name || !fs::exists(path)) &&
                             !generated_texture_dir.empty()) {
                             try {
                                 fs::create_directories(generated_texture_dir);
                                 const std::string base_name = sanitizeFilenameComponent(fs::path(path).stem().string().empty()
                                     ? ("generated_tex_" + std::to_string(texture_id))
                                     : fs::path(path).stem().string());
-                                const fs::path generated_target = generated_texture_dir /
-                                    (std::to_string(texture_id) + "_" + base_name + ".png");
-                                if (!fs::exists(generated_target)) {
-                                    wrote_generated_keep_path = write_generated_png_from_pixels(generated_target);
-                                } else {
-                                    wrote_generated_keep_path = true;
-                                }
+                                const fs::path generated_target_stem = generated_texture_dir /
+                                    (std::to_string(texture_id) + "_" + base_name);
+                                fs::path generated_target = write_generated_image_from_pixels(generated_target_stem);
+                                wrote_generated_keep_path = !generated_target.empty();
                                 if (wrote_generated_keep_path) {
                                     tex_entry["path"] = fs::relative(generated_target, project_dir).generic_string();
                                 }
@@ -3035,16 +3382,20 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                                         const std::string base_name = sanitizeFilenameComponent(fs::path(path).stem().string().empty()
                                             ? ("generated_tex_" + std::to_string(texture_id))
                                             : fs::path(path).stem().string());
-                                        const std::string ext = chooseMaterializedTextureExtension(fs::path(path), &cached->data);
+                                        auto recomp = pickColorRecompression(cached->data.data(), cached->data.size(), usage);
+                                        const std::string ext = recomp.recompressed
+                                            ? recomp.ext
+                                            : chooseMaterializedTextureExtension(fs::path(path), &cached->data);
                                         const fs::path generated_target = generated_texture_dir /
                                             (std::to_string(texture_id) + "_" + base_name + ext);
-                                        if (!fs::exists(generated_target)) {
-                                            std::ofstream generated_out(generated_target, std::ios::binary);
-                                            if (generated_out.is_open()) {
-                                                generated_out.write(cached->data.data(), static_cast<std::streamsize>(cached->data.size()));
-                                                project_local_bytes_written += static_cast<uint64_t>(cached->data.size());
-                                                ++cache_passthrough_count;
-                                            }
+                                        const char* write_data = recomp.recompressed ? recomp.bytes.data() : cached->data.data();
+                                        const size_t write_size = recomp.recompressed ? recomp.bytes.size() : cached->data.size();
+                                        std::ofstream generated_out(generated_target, std::ios::binary);
+                                        if (generated_out.is_open()) {
+                                            generated_out.write(write_data, static_cast<std::streamsize>(write_size));
+                                            project_local_bytes_written += static_cast<uint64_t>(write_size);
+                                            if (recomp.recompressed) ++png_reencoded_count;
+                                            else ++cache_passthrough_count;
                                         }
                                         if (fs::exists(generated_target)) {
                                             wrote_generated_keep_path = true;
@@ -3064,6 +3415,7 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                     }
                 }
                 
+                prop.texture->clearSaveDirty();
                 texture_map[path] = texture_id++;
                 arr.push_back(tex_entry);
             }
@@ -3086,6 +3438,7 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                    ", png re-encoded: " + std::to_string(png_reencoded_count) +
                    ", file-copied-bytesources: " + std::to_string(file_copied_count) +
                    ", cache-passthrough: " + std::to_string(cache_passthrough_count) +
+                   ", previous-embed-reused: " + std::to_string(previous_embed_reused_count) +
                    ", bin-bytes: " + std::to_string(texture_bin_bytes_written) +
                    ", project-local-bytes: " + std::to_string(project_local_bytes_written));
     return arr;

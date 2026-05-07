@@ -33,3 +33,11 @@ bool tryBuildCompressedTextureCache(
 // otherwise empty. Checks managed cache only — suitable for per-frame UI queries
 // when results are memoised by the caller.
 std::string queryManagedCacheTag(const Texture& tex, TextureType type);
+
+// Removes any managed DDS cache entries that belong to this texture (matched by
+// filename stem). Call this when the texture's pixels are mutated in memory
+// (mesh paint, autoMask, etc.) so the next session re-bakes from the new pixel
+// data instead of resurrecting the pre-edit compressed bytes from disk.
+// Adjacent (user-supplied) DDS files next to the source asset are NOT touched.
+// Returns the number of files removed (0 when nothing matched).
+size_t invalidateManagedTextureCacheForTexture(const Texture& tex);

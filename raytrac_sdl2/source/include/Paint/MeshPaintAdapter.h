@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "Paint/IPaintSurfaceAdapter.h"
 #include "Paint/PaintTextureSet.h"
 #include "Paint/PaintLayerStack.h"
@@ -42,6 +44,7 @@ public:
     void releaseLayerStackFromScene() override;
     bool generateNormalFromHeight(float strength);
     bool updateNormalFromHeightArea(const Vec2& center_uv, float radius_px, float strength);
+    bool updateNormalFromHeightRegion(const PaintDirtyRect& dirty, float strength);
     bool bakeHeightIntoNormal(float strength, bool clear_height_mask);
     bool restoreOriginalMaterialTextures();
     bool resizeTextureSet(int resolution);
@@ -76,9 +79,76 @@ public:
     void compositeAndUploadRegion(const PaintChannel* channels, int count,
                                   const PaintDirtyRect& dirty);
 
+    void noteWetDab(int layer_index, const Vec2& uv, const BrushSettings& brush,
+                    float dt, float deposit_ratio);
+    float sampleWetPickupReservoir(const Vec2& uv) const;
+    bool tickWetPaint(const BrushSettings& brush, float dt,
+                      bool auto_normal_from_height_enabled,
+                      float normal_strength);
+    void clearWetSimulation();
+
 private:
+    struct WetSeamLink {
+        std::array<Vec2, 3> source_uvs{};
+        std::array<Vec2, 3> target_uvs{};
+        int source_edge_a = 0;
+        int source_edge_b = 1;
+        int source_opposite = 2;
+        int target_edge_a = 0;
+        int target_edge_b = 1;
+        int target_opposite = 2;
+    };
+
+    struct WetSimulationState {
+        std::string target_key;
+        int width = 0;
+        int height = 0;
+        bool uses_layers = false;
+        uint32_t layer_id = 0;
+        float simulation_time_accumulator = 0.0f;
+        std::vector<float> wetness;
+        std::vector<float> pigment;
+        std::vector<float> thickness;
+        PaintDirtyRect active_region;
+    };
+
+    struct WetFlowTriangleInfo {
+        std::array<Vec2, 3> uvs{};
+        float min_u = 0.0f;
+        float max_u = 0.0f;
+        float min_v = 0.0f;
+        float max_v = 0.0f;
+        float flow_x = 0.0f;
+        float flow_y = 0.0f;
+        float flow_length = 0.0f;
+        float slope = 0.0f;
+    };
+
+    struct WetFlowFieldCache {
+        std::string target_key;
+        int width = 0;
+        int height = 0;
+        int uv_set = 0;
+        int lookup_resolution = 0;
+        float max_slope = 0.0f;
+        float max_flow_length = 0.0f;
+        std::vector<WetFlowTriangleInfo> infos;
+        std::vector<int> lookup_indices;
+    };
+
+    void rebuildWetSeamLinks();
+    void invalidateWetFlowField();
+    void rebuildWetFlowField(int width, int height);
+    int findWetFlowTriangleIndex(const Vec2& uv, int hint_index) const;
+    void mirrorWetRegionAcrossSeams(std::vector<CompactVec4>& pixels, int width, int height,
+                                    PaintDirtyRect region, float blend_strength);
+
     SceneData* scene_ = nullptr;
     std::shared_ptr<Triangle> triangle_;
+    WetSimulationState wet_basecolor_state_;
+    WetFlowFieldCache wet_flow_field_cache_;
+    std::vector<WetSeamLink> wet_seam_links_;
+    std::string wet_seam_key_;
 };
 
 } // namespace Paint

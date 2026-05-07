@@ -668,6 +668,24 @@ uint64_t SceneTextureManager::totalEstimatedTextureBytes() const {
     return total;
 }
 
+uint64_t SceneTextureManager::totalResidentTextureBytes() const {
+    std::lock_guard<std::mutex> guard(m_mutex);
+    uint64_t total = 0;
+    for (const auto& [key, record] : m_recordsByKey) {
+        (void)key;
+        for (const auto& [owner, backing] : record.vulkanBackingsByOwner) {
+            (void)owner;
+            if (backing.isValid()) {
+                total += record.estimatedBytes;
+            }
+        }
+        if (record.optixTextureId != 0) {
+            total += record.estimatedBytes;
+        }
+    }
+    return total;
+}
+
 uint64_t SceneTextureManager::estimatedTextureBytesForOwner(const std::string& ownerTag) const {
     if (ownerTag.empty()) return 0;
     std::lock_guard<std::mutex> guard(m_mutex);
@@ -766,23 +784,31 @@ void SceneTextureManager::logBudgetSummary(const std::string& context) const {
     std::lock_guard<std::mutex> guard(m_mutex);
 
     uint64_t totalBytes = 0;
+    uint64_t residentBytes = 0;
     size_t   totalCount = m_recordsByKey.size();
+    size_t   residentRecordCount = 0;
     std::unordered_map<std::string, uint64_t> bytesByOwner;
     std::unordered_map<std::string, uint32_t> countByOwner;
 
     for (const auto& [key, record] : m_recordsByKey) {
         (void)key;
         totalBytes += record.estimatedBytes;
+        bool anyBacking = false;
         for (const auto& [owner, backing] : record.vulkanBackingsByOwner) {
             if (backing.isValid()) {
                 bytesByOwner[owner] += record.estimatedBytes;
                 countByOwner[owner]++;
+                residentBytes += record.estimatedBytes;
+                anyBacking = true;
             }
         }
         if (record.optixTextureId != 0) {
             bytesByOwner["optix"] += record.estimatedBytes;
             countByOwner["optix"]++;
+            residentBytes += record.estimatedBytes;
+            anyBacking = true;
         }
+        if (anyBacking) ++residentRecordCount;
     }
 
     const auto mbStr = [](uint64_t b) -> std::string {
@@ -794,7 +820,9 @@ void SceneTextureManager::logBudgetSummary(const std::string& context) const {
 
     std::string prefix = context.empty() ? "[SceneTextureManager]" : "[SceneTextureManager:" + context + "]";
     SCENE_LOG_INFO(prefix + " Budget summary | total=" +
-                   std::to_string(totalCount) + " textures | ~" + mbStr(totalBytes));
+                   std::to_string(totalCount) + " textures (~" + mbStr(totalBytes) +
+                   ") | resident=" + std::to_string(residentRecordCount) +
+                   " (~" + mbStr(residentBytes) + " across all owners)");
     for (const auto& [owner, bytes] : bytesByOwner) {
         SCENE_LOG_INFO(prefix + "  owner=" + owner +
                        " | count=" + std::to_string(countByOwner[owner]) +

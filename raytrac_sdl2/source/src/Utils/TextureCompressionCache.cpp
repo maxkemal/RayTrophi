@@ -3,6 +3,8 @@
 
 #include <DirectXTex.h>
 
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 
@@ -415,4 +417,46 @@ std::string queryManagedCacheTag(const Texture& tex, TextureType type) {
         }
     }
     return {};
+}
+
+size_t invalidateManagedTextureCacheForTexture(const Texture& tex) {
+    if (tex.name.empty()) return 0;
+
+    const auto cacheDir = getManagedProjectTextureCacheDirectory();
+    if (!cacheDir) return 0;
+
+    std::error_code ec;
+    if (!fs::exists(*cacheDir, ec) || ec) return 0;
+
+    // Cache filenames are written as `<stem>.<bc4|bc5|bc7>.<srgb|linear>.<hex>.dds`.
+    // The texture identity hash binds metadata only (no pixel content), so after a
+    // paint stroke the same hash would still resolve to the stale on-disk DDS.
+    // Match by stem prefix so we cover BC4/BC5/BC7 + sRGB/linear variants the
+    // texture may have spawned at different upload sites.
+    const std::string stem = fs::path(tex.name).stem().string();
+    if (stem.empty()) return 0;
+    const std::string prefix = stem + ".";
+
+    size_t removed = 0;
+    for (auto it = fs::directory_iterator(*cacheDir, ec);
+         !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        const fs::directory_entry& entry = *it;
+        std::error_code regularEc;
+        if (!entry.is_regular_file(regularEc) || regularEc) continue;
+
+        const std::string filename = entry.path().filename().string();
+        if (filename.rfind(prefix, 0) != 0) continue;
+
+        std::string extension = entry.path().extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (extension != ".dds") continue;
+
+        std::error_code rmEc;
+        if (fs::remove(entry.path(), rmEc) && !rmEc) {
+            ++removed;
+        }
+    }
+    return removed;
 }

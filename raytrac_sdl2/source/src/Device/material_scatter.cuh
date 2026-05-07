@@ -748,7 +748,13 @@ __device__ bool transmission_scatter(
     }
 
     float3 tint = material.albedo;
-    if (payload.use_blended_data) {
+    if (payload.use_blended_data && !payload.water_surface_active) {
+        // Terrain (or other blended) surfaces: use the blended albedo as tint.
+        // Water surfaces deliberately keep material.albedo (= deep_color) here
+        // so the Beer-Lambert tint matches CPU PrincipledBSDF::scatter, which
+        // passes albedoProperty.color (= constant deep_color) to Dielectric.
+        // payload.blended_albedo carries the depth+foam-blended water_color
+        // for direct-lighting BRDF (consumed in evaluate_brdf), not for tint.
         tint = payload.blended_albedo;
     }
     else if (payload.has_albedo_tex) {

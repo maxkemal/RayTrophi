@@ -11,6 +11,7 @@
 #include "Backend/VulkanBackend.h"
 #include "Backend/IViewportBackend.h"
 #include <algorithm>
+#include <cmath>
 #include <SceneSelection.h>
 
 extern bool g_optix_rebuild_pending;
@@ -514,16 +515,201 @@ void AddLightCommand::undo(UIContext& ctx) {
     SCENE_LOG_INFO("Undo: Removed Light");
 }
 
+namespace {
+
+bool inferSquareDimensions(size_t pixel_count, int& width, int& height) {
+    if (pixel_count == 0) {
+        return false;
+    }
+    const int side = static_cast<int>(std::sqrt(static_cast<double>(pixel_count)) + 0.5);
+    if (side > 0 && static_cast<size_t>(side) * static_cast<size_t>(side) == pixel_count) {
+        width = side;
+        height = side;
+        return true;
+    }
+    return false;
+}
+
+bool findChangedRegion(const std::vector<CompactVec4>& before,
+                       const std::vector<CompactVec4>& after,
+                       int width,
+                       int height,
+                       int& x,
+                       int& y,
+                       int& w,
+                       int& h) {
+    if (width <= 0 || height <= 0 ||
+        before.size() != after.size() ||
+        before.size() != static_cast<size_t>(width) * static_cast<size_t>(height)) {
+        return false;
+    }
+
+    int min_x = width;
+    int min_y = height;
+    int max_x = -1;
+    int max_y = -1;
+    for (int py = 0; py < height; ++py) {
+        const size_t row = static_cast<size_t>(py) * static_cast<size_t>(width);
+        for (int px = 0; px < width; ++px) {
+            const size_t index = row + static_cast<size_t>(px);
+            const CompactVec4& a = before[index];
+            const CompactVec4& b = after[index];
+            if (a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a) {
+                continue;
+            }
+            min_x = std::min(min_x, px);
+            min_y = std::min(min_y, py);
+            max_x = std::max(max_x, px);
+            max_y = std::max(max_y, py);
+        }
+    }
+
+    if (max_x < min_x || max_y < min_y) {
+        return false;
+    }
+    x = min_x;
+    y = min_y;
+    w = max_x - min_x + 1;
+    h = max_y - min_y + 1;
+    return true;
+}
+
+bool findNonTransparentRegion(const std::vector<CompactVec4>& pixels,
+                              int width,
+                              int height,
+                              int& x,
+                              int& y,
+                              int& w,
+                              int& h) {
+    if (width <= 0 || height <= 0 ||
+        pixels.size() != static_cast<size_t>(width) * static_cast<size_t>(height)) {
+        return false;
+    }
+
+    int min_x = width;
+    int min_y = height;
+    int max_x = -1;
+    int max_y = -1;
+    for (int py = 0; py < height; ++py) {
+        const size_t row = static_cast<size_t>(py) * static_cast<size_t>(width);
+        for (int px = 0; px < width; ++px) {
+            const CompactVec4& p = pixels[row + static_cast<size_t>(px)];
+            if (p.a == 0) {
+                continue;
+            }
+            min_x = std::min(min_x, px);
+            min_y = std::min(min_y, py);
+            max_x = std::max(max_x, px);
+            max_y = std::max(max_y, py);
+        }
+    }
+
+    if (max_x < min_x || max_y < min_y) {
+        return false;
+    }
+    x = min_x;
+    y = min_y;
+    w = max_x - min_x + 1;
+    h = max_y - min_y + 1;
+    return true;
+}
+
+std::vector<CompactVec4> extractPixelRegion(const std::vector<CompactVec4>& src,
+                                            int width,
+                                            int height,
+                                            int x,
+                                            int y,
+                                            int w,
+                                            int h) {
+    std::vector<CompactVec4> out;
+    if (src.empty() || width <= 0 || height <= 0 || w <= 0 || h <= 0) {
+        return out;
+    }
+    out.resize(static_cast<size_t>(w) * static_cast<size_t>(h));
+    for (int row = 0; row < h; ++row) {
+        const size_t src_offset = static_cast<size_t>(y + row) * static_cast<size_t>(width) + static_cast<size_t>(x);
+        const size_t dst_offset = static_cast<size_t>(row) * static_cast<size_t>(w);
+        std::copy_n(src.begin() + static_cast<std::ptrdiff_t>(src_offset), w, out.begin() + static_cast<std::ptrdiff_t>(dst_offset));
+    }
+    return out;
+}
+
+void applyPixelRegion(std::vector<CompactVec4>& dst,
+                      const std::vector<CompactVec4>& region,
+                      int width,
+                      int height,
+                      int x,
+                      int y,
+                      int w,
+                      int h) {
+    if (width <= 0 || height <= 0 || w <= 0 || h <= 0 || region.empty()) {
+        return;
+    }
+    if (dst.size() != static_cast<size_t>(width) * static_cast<size_t>(height)) {
+        dst.assign(static_cast<size_t>(width) * static_cast<size_t>(height), CompactVec4(0, 0, 0, 0));
+    }
+    if (region.size() != static_cast<size_t>(w) * static_cast<size_t>(h)) {
+        return;
+    }
+    for (int row = 0; row < h; ++row) {
+        const size_t dst_offset = static_cast<size_t>(y + row) * static_cast<size_t>(width) + static_cast<size_t>(x);
+        const size_t src_offset = static_cast<size_t>(row) * static_cast<size_t>(w);
+        std::copy_n(region.begin() + static_cast<std::ptrdiff_t>(src_offset), w, dst.begin() + static_cast<std::ptrdiff_t>(dst_offset));
+    }
+}
+
+} // namespace
+
+PaintTextureCommand::PaintTextureCommand(const std::string& object_name,
+                                         uint16_t material_id,
+                                         const std::shared_ptr<Texture>& texture,
+                                         std::vector<CompactVec4> before_pixels,
+                                         std::vector<CompactVec4> after_pixels)
+    : object_name_(object_name)
+    , material_id_(material_id)
+    , texture_(texture) {
+    width_ = texture_ ? texture_->width : 0;
+    height_ = texture_ ? texture_->height : 0;
+    if (width_ <= 0 || height_ <= 0) {
+        inferSquareDimensions(std::max(before_pixels.size(), after_pixels.size()), width_, height_);
+    }
+
+    int x = 0, y = 0, w = 0, h = 0;
+    if (findChangedRegion(before_pixels, after_pixels, width_, height_, x, y, w, h)) {
+        region_mode_ = true;
+        region_x_ = x;
+        region_y_ = y;
+        region_w_ = w;
+        region_h_ = h;
+        before_pixels_ = extractPixelRegion(before_pixels, width_, height_, x, y, w, h);
+        after_pixels_ = extractPixelRegion(after_pixels, width_, height_, x, y, w, h);
+    } else {
+        before_pixels_ = std::move(before_pixels);
+        after_pixels_ = std::move(after_pixels);
+    }
+}
+
 void PaintTextureCommand::applyPixels(UIContext& ctx, const std::vector<CompactVec4>& pixels) {
     if (!texture_ || pixels.empty()) {
         return;
     }
 
-    texture_->pixels = pixels;
-    if (texture_->isUploaded()) {
-        texture_->updateGPU();
+    if (region_mode_) {
+        applyPixelRegion(texture_->pixels, pixels, width_, height_, region_x_, region_y_, region_w_, region_h_);
+        if (texture_->isUploaded()) {
+            texture_->updateGPURegion(region_x_, region_y_, region_w_, region_h_);
+        } else {
+            texture_->markVulkanDirtyRegion(region_x_, region_y_, region_w_, region_h_);
+            texture_->upload_to_gpu();
+        }
     } else {
-        texture_->upload_to_gpu();
+        texture_->pixels = pixels;
+        texture_->markVulkanDirtyFull();
+        if (texture_->isUploaded()) {
+            texture_->updateGPU();
+        } else {
+            texture_->upload_to_gpu();
+        }
     }
 
     ctx.renderer.resetCPUAccumulation();
@@ -549,7 +735,45 @@ void PaintTextureCommand::undo(UIContext& ctx) {
 // PAINT LAYER COMMAND IMPLEMENTATION
 // ============================================================================
 
-void PaintLayerCommand::applyPixels(UIContext& ctx, const std::vector<CompactVec4>& pixels) {
+PaintLayerCommand::PaintLayerCommand(const std::string& object_name,
+                                     uint16_t material_id,
+                                     const std::string& layer_stack_key,
+                                     uint32_t layer_id,
+                                     Paint::PaintChannel channel,
+                                     std::vector<CompactVec4> before_pixels,
+                                     std::vector<CompactVec4> after_pixels)
+    : object_name_(object_name)
+    , material_id_(material_id)
+    , layer_stack_key_(layer_stack_key)
+    , layer_id_(layer_id)
+    , channel_(channel)
+    , before_empty_(before_pixels.empty())
+    , after_empty_(after_pixels.empty()) {
+    inferSquareDimensions(std::max(before_pixels.size(), after_pixels.size()), width_, height_);
+
+    int x = 0, y = 0, w = 0, h = 0;
+    const bool can_region =
+        (!before_empty_ && !after_empty_ &&
+         findChangedRegion(before_pixels, after_pixels, width_, height_, x, y, w, h)) ||
+        (before_empty_ && !after_empty_ &&
+         findNonTransparentRegion(after_pixels, width_, height_, x, y, w, h));
+    if (can_region) {
+        region_mode_ = true;
+        region_x_ = x;
+        region_y_ = y;
+        region_w_ = w;
+        region_h_ = h;
+        before_pixels_ = before_empty_
+            ? std::vector<CompactVec4>{}
+            : extractPixelRegion(before_pixels, width_, height_, x, y, w, h);
+        after_pixels_ = extractPixelRegion(after_pixels, width_, height_, x, y, w, h);
+    } else {
+        before_pixels_ = std::move(before_pixels);
+        after_pixels_ = std::move(after_pixels);
+    }
+}
+
+void PaintLayerCommand::applyPixels(UIContext& ctx, const std::vector<CompactVec4>& pixels, bool empty_state) {
     // Find layer stack
     auto it = ctx.scene.mesh_paint_layer_stacks.find(layer_stack_key_);
     if (it == ctx.scene.mesh_paint_layer_stacks.end()) return;
@@ -560,14 +784,26 @@ void PaintLayerCommand::applyPixels(UIContext& ctx, const std::vector<CompactVec
 
     // Restore layer pixel data
     const size_t ch_idx = static_cast<size_t>(channel_);
-    layer->channel_pixels[ch_idx] = pixels;
+    if (empty_state) {
+        layer->channel_pixels[ch_idx].clear();
+    } else if (region_mode_) {
+        applyPixelRegion(layer->channel_pixels[ch_idx], pixels, width_, height_, region_x_, region_y_, region_w_, region_h_);
+    } else {
+        layer->channel_pixels[ch_idx] = pixels;
+    }
 
     // Recomposite the affected channel into the flat texture set
     auto tex_it = ctx.scene.mesh_paint_texture_sets.find(layer_stack_key_);
     if (tex_it != ctx.scene.mesh_paint_texture_sets.end()) {
         Paint::PaintTextureSet& tex_set = tex_it->second;
         if (tex_set.initialized) {
-            stack.flattenChannelInto(channel_, tex_set);
+            if (region_mode_ && !empty_state) {
+                Paint::PaintDirtyRect dirty;
+                dirty.expand(region_x_, region_y_, region_x_ + region_w_ - 1, region_y_ + region_h_ - 1);
+                stack.flattenChannelRegionInto(channel_, tex_set, dirty);
+            } else {
+                stack.flattenChannelInto(channel_, tex_set);
+            }
         }
     }
 
@@ -581,12 +817,12 @@ void PaintLayerCommand::applyPixels(UIContext& ctx, const std::vector<CompactVec
 }
 
 void PaintLayerCommand::execute(UIContext& ctx) {
-    applyPixels(ctx, after_pixels_);
+    applyPixels(ctx, after_pixels_, after_empty_);
     SCENE_LOG_INFO("Redo: Paint Layer " + object_name_);
 }
 
 void PaintLayerCommand::undo(UIContext& ctx) {
-    applyPixels(ctx, before_pixels_);
+    applyPixels(ctx, before_pixels_, before_empty_);
     SCENE_LOG_INFO("Undo: Paint Layer " + object_name_);
 }
 
