@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RayTrophi Manual - Sculpt</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <h2>RayTrophi</h2>
+        <a href="index.html" class="nav-link">Home / Overview</a>
+        <a href="world.html" class="nav-link">World & Sky</a>
+        <a href="water.html" class="nav-link">Water System</a>
+        <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
+        <a href="edit-mesh.html" class="nav-link">Edit Mesh</a>
+        <a href="sculpt.html" class="nav-link active">Sculpt</a>
+        <a href="mesh-paint.html" class="nav-link">Mesh Paint</a>
+        <a href="hair.html" class="nav-link">Hair & Fur</a>
+        <a href="animation.html" class="nav-link">Animation</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
+        <a href="camera.html" class="nav-link">Pro Camera</a>
+        <a href="system.html" class="nav-link">System & File</a>
+    </div>
+
+    <div id="content">
+        <div class="container">
+            <h1>Sculpt</h1>
+
+            <div class="screenshot-area hero-shot">
+                <img src="images/sculpt_header.jpg" alt="Sculpt Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">Please save the sculpt overview screenshot as <code>docs/images/sculpt_header.jpg</code></div>
+            </div>
+
+            <div class="card">
+                <p>Sculpt is the shared brush workflow for both editable meshes and terrain. The main modifier panel handles workspace activation, while the right sculpt dock holds the actual brush controls.</p>
+            </div>
+
+            <h2 id="overview">1. Shared Sculpt Workflow</h2>
+            <div class="split-layout">
+                <div class="screenshot-area compact-shot panel-shot">
+                    <img src="images/sculpt_workspace.jpg" alt="Sculpt Workspace"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Please save the sculpt workspace screenshot as <code>docs/images/sculpt_workspace.jpg</code></div>
+                </div>
+                <div>
+                    <p>The Sculpt workspace is selected from the same panel as Edit Mesh. Once active, target lock, compact mode, and brush setup are split between the modifier panel and the right brush dock.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>UI Block</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Workspace Toggle</td>
+                            <td>Switches from topology editing to brush-based surface editing.</td>
+                        </tr>
+                        <tr>
+                            <td>Unlock / Exit</td>
+                            <td>Unlock keeps the workspace alive but releases the target, Exit resets the sculpt session.</td>
+                        </tr>
+                        <tr>
+                            <td>Right Sculpt Dock</td>
+                            <td>Hosts mesh sculpt or terrain sculpt controls based on the selected target type.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <h2 id="mesh-sculpt">2. Mesh Sculpt Dock</h2>
+            <div class="split-layout">
+                <div>
+                    <p>Mesh sculpt is focused on surface-form editing with dedicated brush tools, stroke settings, alpha control, symmetry, and shared falloff behavior.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Section</th>
+                            <th>Contains</th>
+                        </tr>
+                        <tr>
+                            <td>Tool</td>
+                            <td>Grab, Draw, Inflate, Layer, Clay, Pinch, Clay Strips, Smooth, Flatten, Scrape, and Crease.</td>
+                        </tr>
+                        <tr>
+                            <td>Stroke</td>
+                            <td>Screen-space or world radius, strength, falloff, spacing, flow, preview, front faces only, and live accumulation.</td>
+                        </tr>
+                        <tr>
+                            <td>Behavior</td>
+                            <td>Normal strength, falloff type, and tool-specific usage hints.</td>
+                        </tr>
+                        <tr>
+                            <td>Alpha</td>
+                            <td>Preset alpha, imported alpha, alpha scale, and alpha rotation.</td>
+                        </tr>
+                    </table>
+                </div>
+                <div class="stacked-shots compact-stack">
+                    <div class="screenshot-area compact-shot panel-shot">
+                        <img src="images/sculpt_mesh_dock_top.jpg" alt="Mesh Sculpt Dock Top"
+                            onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                        <div class="missing-img">Please save the upper mesh sculpt dock screenshot as <code>docs/images/sculpt_mesh_dock_top.jpg</code></div>
+                    </div>
+                    <div class="screenshot-area compact-shot panel-shot">
+                        <img src="images/sculpt_mesh_dock_bottom.jpg" alt="Mesh Sculpt Dock Bottom"
+                            onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                        <div class="missing-img">Please save the lower mesh sculpt dock screenshot as <code>docs/images/sculpt_mesh_dock_bottom.jpg</code></div>
+                    </div>
+                </div>
+            </div>
+
+            <h2 id="terrain-sculpt">3. Terrain Sculpt Variant</h2>
+            <div class="split-layout">
+                <div class="screenshot-area compact-shot panel-shot">
+                    <img src="images/sculpt_terrain_dock.jpg" alt="Terrain Sculpt Dock"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Please save the terrain sculpt dock screenshot as <code>docs/images/sculpt_terrain_dock.jpg</code></div>
+                </div>
+                <div>
+                    <p>When the active target is terrain, the same Sculpt workspace switches to terrain-safe controls instead of mesh sculpt tools.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Terrain Mode</th>
+                            <th>What Changes</th>
+                        </tr>
+                        <tr>
+                            <td>Tool</td>
+                            <td>Raise, Lower, Flatten, Smooth, and Stamp.</td>
+                        </tr>
+                        <tr>
+                            <td>Stroke</td>
+                            <td>Radius in meters, strength, curve, and preview are exposed directly for terrain height editing.</td>
+                        </tr>
+                        <tr>
+                            <td>Mode-specific Blocks</td>
+                            <td>Flatten adds fixed-height controls, Stamp adds rotation and stamp texture loading.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <div style="height: 50px;"></div>
+        </div>
+    </div>
+</body>
+
+</html>

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RayTrophi Manual - Mesh Paint</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <h2>RayTrophi</h2>
+        <a href="index.html" class="nav-link">Home / Overview</a>
+        <a href="world.html" class="nav-link">World & Sky</a>
+        <a href="water.html" class="nav-link">Water System</a>
+        <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
+        <a href="edit-mesh.html" class="nav-link">Edit Mesh</a>
+        <a href="sculpt.html" class="nav-link">Sculpt</a>
+        <a href="mesh-paint.html" class="nav-link active">Mesh Paint</a>
+        <a href="hair.html" class="nav-link">Hair & Fur</a>
+        <a href="animation.html" class="nav-link">Animation</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
+        <a href="camera.html" class="nav-link">Pro Camera</a>
+        <a href="system.html" class="nav-link">System & File</a>
+    </div>
+
+    <div id="content">
+        <div class="container">
+            <h1>Mesh Paint</h1>
+
+            <div class="screenshot-area hero-shot">
+                <img src="images/mesh_paint_header.jpg" alt="Mesh Paint Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">Please save the mesh paint overview screenshot as <code>docs/images/mesh_paint_header.jpg</code></div>
+            </div>
+
+            <div class="card">
+                <p>Mesh Paint in RayTrophi is split across two working areas: the left inspector that binds the target, slot, and texture set, and the right brush dock that holds layers, tools, stroke controls, color sources, behavior, and brush shape.</p>
+                <p>This page mirrors the current implementation in the UI code so the docs match the real editor layout.</p>
+            </div>
+
+            <h2 id="layout">1. Workspace Layout</h2>
+            <div class="callout-grid">
+                <div class="callout-card">
+                    <h3>Left Main Panel</h3>
+                    <ul class="mini-list">
+                        <li>Paint Mode enable and compact toggle</li>
+                        <li>Mesh target, material slot, and binding mode</li>
+                        <li>Texture set resolution and active channel</li>
+                        <li>Channel texture import, export, and bake actions</li>
+                    </ul>
+                </div>
+                <div class="callout-card">
+                    <h3>Right Brush Dock</h3>
+                    <ul class="mini-list">
+                        <li>Layer stack with visibility, lock, blend, and opacity</li>
+                        <li>Tool, stroke, color, and per-channel source controls</li>
+                        <li>Wet, mix, smudge, and oil behavior settings</li>
+                        <li>Shape, alpha, stamp, spray, and fill controls</li>
+                    </ul>
+                </div>
+            </div>
+
+            <h2 id="left-panel">2. Left Main Panel</h2>
+            <div class="split-layout">
+                <div class="screenshot-area compact-shot panel-shot">
+                    <img src="images/mesh_paint_left_panel.jpg" alt="Mesh Paint Left Panel"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Please save the left mesh paint panel screenshot as <code>docs/images/mesh_paint_left_panel.jpg</code></div>
+                </div>
+                <div>
+                    <p>The main inspector is the setup side of mesh painting. It decides which object-slot is editable, how textures are bound, and which channels exist before any brush stroke is applied.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Section</th>
+                            <th>Role</th>
+                        </tr>
+                        <tr>
+                            <td>Target</td>
+                            <td>Shows the active mesh and the selected material name for the current slot.</td>
+                        </tr>
+                        <tr>
+                            <td>Slot</td>
+                            <td>Switches between material slots on multi-material meshes.</td>
+                        </tr>
+                        <tr>
+                            <td>Binding</td>
+                            <td>Chooses between painting the current shared material or making a unique paint material.</td>
+                        </tr>
+                        <tr>
+                            <td>Texture Set</td>
+                            <td>Creates, resizes, seeds, restores, bakes, and exports channel textures.</td>
+                        </tr>
+                        <tr>
+                            <td>Channel Textures</td>
+                            <td>Displays per-channel occupancy and import or export for the active channel.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <div class="panel-note">
+                <p>The left side is intentionally about ownership and texture-set lifecycle. Brush editing itself is moved to the dock so viewport painting stays focused and the layer stack remains visible while working.</p>
+            </div>
+
+            <h2 id="right-dock">3. Right Brush Dock</h2>
+            <div class="split-layout">
+                <div>
+                    <p>The brush dock opens on the right while Paint Mode is active. Its top starts with the layer panel, then brush presets and tool selection, then continues through stroke, color, behavior, and shape sections.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Dock Area</th>
+                            <th>Contains</th>
+                        </tr>
+                        <tr>
+                            <td>Layer Stack</td>
+                            <td>Photoshop-style rows, active layer selection, blend mode, opacity, and layer actions.</td>
+                        </tr>
+                        <tr>
+                            <td>Tool + Stroke</td>
+                            <td>Paint, erase, soften, stamp, fill, clone, spray, radius, strength, falloff, spacing, and flow.</td>
+                        </tr>
+                        <tr>
+                            <td>Color &amp; Texture</td>
+                            <td>Fallback paint value, imported paint texture, per-channel overrides, and raised paint controls.</td>
+                        </tr>
+                        <tr>
+                            <td>Behavior</td>
+                            <td>Mix, smudge, wet, and oil parameters including simulation quality and paint transport.</td>
+                        </tr>
+                        <tr>
+                            <td>Shape + Alpha</td>
+                            <td>Mirror axes, shape preset, alpha preset, imported alpha, rotation, and preview widgets.</td>
+                        </tr>
+                    </table>
+                </div>
+                <div class="stacked-shots compact-stack">
+                    <div class="screenshot-area compact-shot panel-shot">
+                        <img src="images/mesh_paint_brush_dock_top.jpg" alt="Mesh Paint Brush Dock Top"
+                            onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                        <div class="missing-img">Please save the upper brush dock screenshot as <code>docs/images/mesh_paint_brush_dock_top.jpg</code></div>
+                    </div>
+                    <div class="screenshot-area compact-shot panel-shot">
+                        <img src="images/mesh_paint_brush_dock_bottom.jpg" alt="Mesh Paint Brush Dock Bottom"
+                            onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                        <div class="missing-img">Please save the lower brush dock screenshot as <code>docs/images/mesh_paint_brush_dock_bottom.jpg</code></div>
+                    </div>
+                </div>
+            </div>
+
+            <h2 id="workflow">4. Practical Flow</h2>
+            <div class="callout-grid">
+                <div class="callout-card">
+                    <h3>1. Bind</h3>
+                    <p>Select the mesh, choose the material slot, and decide whether the slot stays shared or becomes unique for paint.</p>
+                </div>
+                <div class="callout-card">
+                    <h3>2. Prepare</h3>
+                    <p>Create the texture set, enable the channels you want to paint, and seed from existing textures if the material already has maps.</p>
+                </div>
+                <div class="callout-card">
+                    <h3>3. Layer</h3>
+                    <p>Use the dock layer stack to separate color, height-mask buildup, and material variation without flattening too early.</p>
+                </div>
+                <div class="callout-card">
+                    <h3>4. Paint</h3>
+                    <p>Switch tools, tune stroke and behavior, then paint directly in the viewport while the dock stays available on the right.</p>
+                </div>
+            </div>
+
+            <div style="height: 50px;"></div>
+        </div>
+    </div>
+</body>
+
+</html>
