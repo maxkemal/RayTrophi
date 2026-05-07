@@ -30,6 +30,7 @@ extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern bool g_viewport_raster_rebuild_pending;
 extern bool g_optix_rebuild_pending;
 extern bool g_vulkan_rebuild_pending;
+extern bool g_materials_dirty;
 
 extern bool g_geometry_dirty;
 extern std::atomic<uint64_t> g_scene_geometry_generation;
@@ -66,6 +67,21 @@ Backend::IBackend* getWaterRenderBackend(UIContext& ctx) {
 
 bool waterRenderBackendIsVulkan(UIContext& ctx) {
     return dynamic_cast<Backend::VulkanBackendAdapter*>(getWaterRenderBackend(ctx)) != nullptr;
+}
+
+void syncWaterMaterialPreview(UIContext& ctx, WaterSurface& surf) {
+    WaterManager::getInstance().syncSurfaceMaterial(&surf);
+    g_materials_dirty = true;
+
+    ctx.renderer.updateBackendMaterial(ctx.scene, surf.material_id);
+    ctx.renderer.resetCPUAccumulation();
+
+    if (Backend::IBackend* renderBackend = getWaterRenderBackend(ctx)) {
+        renderBackend->resetAccumulation();
+    }
+    if (g_viewport_backend && g_viewport_backend.get() != getWaterRenderBackend(ctx)) {
+        g_viewport_backend->resetAccumulation();
+    }
 }
 
 void rebuildWaterSceneMutation(UIContext& ctx, bool updateMaterials) {
@@ -161,15 +177,7 @@ inline bool SceneUI::drawWaterSurfaceMaterialEditor(UIContext& ctx, WaterSurface
 
     if (changed) {
         surf.params.current_preset = WaterWaveParams::WaterPreset::Custom;
-        WaterManager::getInstance().syncSurfaceMaterial(&surf);
-        ctx.renderer.resetCPUAccumulation();
-        if (Backend::IBackend* renderBackend = getWaterRenderBackend(ctx)) {
-            ctx.renderer.updateBackendMaterials(ctx.scene);
-            renderBackend->resetAccumulation();
-        }
-        if (g_viewport_backend && g_viewport_backend.get() != getWaterRenderBackend(ctx)) {
-            g_viewport_backend->resetAccumulation();
-        }
+        syncWaterMaterialPreview(ctx, surf);
         ProjectManager::getInstance().markModified();
     }
 
@@ -418,14 +426,20 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                         toggleFFTKeyframe(false, false, false, false, false, true);
                     }
                     ImGui::SameLine();
-                    ImGui::BeginDisabled(surf.params.auto_domain_from_mesh);
                     if (SceneUI::DrawSmartFloat("fft_sz", "Ocean Size", &surf.params.fft_ocean_size, 10.0f, 10000.0f, "%.0f m", false, nullptr, 16)) changed = true;
-                    ImGui::EndDisabled();
                     ImGui::SetItemTooltip("World space covered by one tile (tiles infinitely)");
-                    if (ImGui::Checkbox("Auto Domain From Mesh", &surf.params.auto_domain_from_mesh)) changed = true;
-                    ImGui::SetItemTooltip("Use the water surface world extent as the shared wave domain for FFT, geometric waves and noise.");
-                    if (SceneUI::DrawSmartFloat("dom_mul", "Domain Multiplier", &surf.params.domain_size_multiplier, 0.1f, 20.0f, "%.2fx", false, nullptr, 16)) changed = true;
-                    ImGui::SetItemTooltip("Scales the shared domain size after mesh/world-scale adaptation.");
+                    ImGui::BeginDisabled(true);
+                    bool auto_domain_disabled = false;
+                    ImGui::Checkbox("Auto Domain From Mesh", &auto_domain_disabled);
+                    ImGui::EndDisabled();
+                    surf.params.auto_domain_from_mesh = false;
+                    ImGui::SetItemTooltip("Disabled: explicit Ocean Size now keeps OptiX/Vulkan micro detail stable across mesh scale.");
+                    surf.params.domain_size_multiplier = 1.0f;
+                    ImGui::BeginDisabled(true);
+                    float fixed_domain_multiplier = 1.0f;
+                    SceneUI::DrawSmartFloat("dom_mul", "Domain Multiplier", &fixed_domain_multiplier, 1.0f, 1.0f, "%.2fx", false, nullptr, 16);
+                    ImGui::EndDisabled();
+                    ImGui::SetItemTooltip("Disabled: Ocean Size is the only water domain scale.");
                     ImGui::Text("Resolved Domain: %.2f m", WaterManager::getInstance().resolveWaveDomainSize(&surf));
                     
                     ImGui::Separator();
@@ -534,39 +548,13 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 EndWaterSection();
             }
             
-            // === PHYSICS ===
-            if (BeginWaterSection("Physics", ImVec4(0.2f, 1.0f, 0.2f, 1.0f), false)) {
-                if (SceneUI::DrawSmartFloat("w_ior", "IOR", &surf.params.ior, 1.0f, 2.0f, "%.3f", false, nullptr, 16)) changed = true;
-                ImGui::SetItemTooltip("Index of Refraction (Water = 1.333)");
-                if (SceneUI::DrawSmartFloat("w_rgh", "Roughness", &surf.params.roughness, 0.0f, 0.2f, "%.3f", false, nullptr, 16)) changed = true;
-                ImGui::SetItemTooltip("Surface micro-roughness");
-                if (SceneUI::DrawSmartFloat("w_clr", "Clarity", &surf.params.clarity, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
-                ImGui::SetItemTooltip("Legacy control. Current water shading derives perceived clarity from Absorption Density rather than this standalone value.");
-                EndWaterSection();
-            }
-            
-            // === SURFACE DETAIL ===
-            if (BeginWaterSection("Surface Detail (Realism)", ImVec4(1.0f, 0.6f, 0.0f, 1.0f))) {
-                if (SceneUI::DrawSmartFloat("w_mds", "Micro Detail Strength", &surf.params.micro_detail_strength, 0.0f, 0.2f, "%.3f", false, nullptr, 16)) changed = true;
-                ImGui::SetItemTooltip("Adds high-frequency noise/ripples to break up the smooth surface");
-                if (SceneUI::DrawSmartFloat("w_msc", "Micro Detail Scale", &surf.params.micro_detail_scale, 1.0f, 100.0f, "%.1f", false, nullptr, 16)) changed = true;
-                
-                ImGui::Separator();
-                ImGui::TextDisabled("Animation Speed");
-                if (SceneUI::DrawSmartFloat("w_mas", "Animation Speed", &surf.params.micro_anim_speed, 0.01f, 1.0f, "%.3f", false, nullptr, 16)) changed = true;
-                ImGui::SetItemTooltip("How fast the micro ripples move (lower = calmer water)");
-                if (SceneUI::DrawSmartFloat("w_mms", "Morph Speed", &surf.params.micro_morph_speed, 0.1f, 5.0f, "%.2f", false, nullptr, 16)) changed = true;
-                ImGui::SetItemTooltip("How fast the ripple shapes change (lower = more stable patterns)");
-                
-                ImGui::Separator();
-                ImGui::TextDisabled("Foam Tuning");
-                if (SceneUI::DrawSmartFloat("w_fns", "Foam Noise Scale", &surf.params.foam_noise_scale, 1.0f, 50.0f, "%.1f", false, nullptr, 16)) changed = true;
-                ImGui::SetItemTooltip("Scale of noise used to break up foam");
-                if (SceneUI::DrawSmartFloat("w_fth", "Foam Threshold", &surf.params.foam_threshold, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
-                EndWaterSection();
-            }
-            
             // === GEOMETRIC WAVES (Physical Mesh Displacement) ===
+            // (Physics + Surface Detail panels intentionally removed here —
+            //  drawWaterSurfaceMaterialEditor above already exposes ior/roughness/
+            //  clarity (Depth & Optics), foam_noise_scale/foam_threshold (Foam),
+            //  and micro_detail_* (Surface Detail). Duplicating them here let
+            //  the same `surf.params.*` field be edited from two places, which
+            //  was confusing and triggered redundant syncWaterMaterialPreview.)
             // NOTE: This is a legacy/alternative to FFT Mesh Displacement
             // When FFT Mesh Displacement is enabled, this section is disabled
             if (surf.params.use_fft_mesh_displacement) {
@@ -853,14 +841,7 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 surf.params.current_preset = WaterWaveParams::WaterPreset::Custom;
                 
                 // Reset accumulation and sync GPU materials for real-time preview
-                ctx.renderer.resetCPUAccumulation();
-                if (Backend::IBackend* renderBackend = getWaterRenderBackend(ctx)) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    renderBackend->resetAccumulation();
-                }
-                if (g_viewport_backend && g_viewport_backend.get() != getWaterRenderBackend(ctx)) {
-                    g_viewport_backend->resetAccumulation();
-                }
+                syncWaterMaterialPreview(ctx, surf);
             }
             
         }

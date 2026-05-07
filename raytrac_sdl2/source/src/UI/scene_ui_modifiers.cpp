@@ -322,6 +322,65 @@ bool drawSculptToolSelectorButton(const char* id,
     return false;
 }
 
+UIWidgets::IconType getPaintBehaviorIcon(Paint::BrushPaintMode mode) {
+    switch (mode) {
+        case Paint::BrushPaintMode::Normal: return UIWidgets::IconType::PaintTool;
+        case Paint::BrushPaintMode::Mix:    return UIWidgets::IconType::Brush;
+        case Paint::BrushPaintMode::Smudge: return UIWidgets::IconType::SoftenTool;
+        case Paint::BrushPaintMode::Wet:    return UIWidgets::IconType::Water;
+        case Paint::BrushPaintMode::Oil:    return UIWidgets::IconType::ClayTool;
+    }
+    return UIWidgets::IconType::PaintTool;
+}
+
+ImVec4 getPaintBehaviorAccent(Paint::BrushPaintMode mode) {
+    switch (mode) {
+        case Paint::BrushPaintMode::Normal: return ImVec4(0.52f, 0.80f, 1.0f, 1.0f);
+        case Paint::BrushPaintMode::Mix:    return ImVec4(0.78f, 0.66f, 1.0f, 1.0f);
+        case Paint::BrushPaintMode::Smudge: return ImVec4(1.0f, 0.62f, 0.42f, 1.0f);
+        case Paint::BrushPaintMode::Wet:    return ImVec4(0.34f, 0.84f, 1.0f, 1.0f);
+        case Paint::BrushPaintMode::Oil:    return ImVec4(1.0f, 0.74f, 0.28f, 1.0f);
+    }
+    return ImVec4(0.52f, 0.80f, 1.0f, 1.0f);
+}
+
+void drawPaintBehaviorSelector(Paint::PaintModeState& paint_mode_state) {
+    struct PaintBehaviorOption {
+        Paint::BrushPaintMode mode;
+        const char* label;
+        const char* tooltip;
+    };
+    const PaintBehaviorOption paint_mode_options[] = {
+        { Paint::BrushPaintMode::Normal, "Normal", "Normal\nDirect paint deposit" },
+        { Paint::BrushPaintMode::Mix,    "Mix",    "Mix\nBlend brush and surface color" },
+        { Paint::BrushPaintMode::Smudge, "Smudge", "Smudge\nDrag existing surface color" },
+        { Paint::BrushPaintMode::Wet,    "Wet",    "Wet\nWatery paint flow" },
+        { Paint::BrushPaintMode::Oil,    "Oil",    "Oil\nHeavy pigment body" },
+    };
+
+    ImGui::TextUnformatted("Paint Behavior");
+    const float available_width = ImGui::GetContentRegionAvail().x;
+    const float spacing = 2.0f;
+    const float button_width = std::max(56.0f, (available_width - spacing * 4.0f) / 5.0f);
+    for (int mode_index = 0; mode_index < IM_ARRAYSIZE(paint_mode_options); ++mode_index) {
+        const PaintBehaviorOption& option = paint_mode_options[mode_index];
+        const bool selected = paint_mode_state.brush.paint_mode == option.mode;
+        if (UIWidgets::IconActionButton(
+                option.label,
+                getPaintBehaviorIcon(option.mode),
+                "",
+                selected,
+                getPaintBehaviorAccent(option.mode),
+                ImVec2(button_width, 42.0f),
+                option.tooltip)) {
+            paint_mode_state.brush.paint_mode = option.mode;
+        }
+        if (mode_index + 1 < IM_ARRAYSIZE(paint_mode_options)) {
+            ImGui::SameLine(0.0f, spacing);
+        }
+    }
+}
+
 bool brushSupportsRaisedPaint(Paint::BrushTool tool) {
     switch (tool) {
         case Paint::BrushTool::Paint:
@@ -356,6 +415,95 @@ float wrapBrushAngleDegrees(float degrees) {
         wrapped += 360.0f;
     }
     return wrapped - 180.0f;
+}
+
+bool brushHasDirectionalShape(const Paint::BrushSettings& brush) {
+    return brush.shape != Paint::BrushShape::Circle &&
+           (brush.shape == Paint::BrushShape::Flat ||
+            brush.shape == Paint::BrushShape::Rectangle ||
+            brush.shape == Paint::BrushShape::Capsule ||
+            std::abs(brush.shape_aspect - 1.0f) > 0.01f);
+}
+
+bool brushHasRotatableTexture(const Paint::BrushSettings& brush) {
+    const bool has_imported_alpha =
+        brush.use_imported_alpha &&
+        brush.alpha_texture &&
+        brush.alpha_texture->is_loaded();
+    const bool has_paint_texture =
+        brush.use_paint_texture &&
+        brush.paint_texture &&
+        brush.paint_texture->is_loaded();
+    const bool has_procedural_direction =
+        brush.alpha_preset == Paint::BrushAlphaPreset::Noise ||
+        brush.alpha_preset == Paint::BrushAlphaPreset::Scratch ||
+        brush.alpha_preset == Paint::BrushAlphaPreset::Cloud;
+    bool has_channel_texture = false;
+    for (const Paint::BrushChannelInput& input : brush.channel_inputs) {
+        if (input.enabled &&
+            input.use_paint_texture &&
+            input.paint_texture &&
+            input.paint_texture->is_loaded()) {
+            has_channel_texture = true;
+            break;
+        }
+    }
+    return has_imported_alpha || has_paint_texture || has_channel_texture || has_procedural_direction;
+}
+
+bool brushSupportsViewportRotation(const Paint::BrushSettings& brush) {
+    return brushHasDirectionalShape(brush) || brushHasRotatableTexture(brush);
+}
+
+Paint::BrushChannelInput* getBrushChannelInput(Paint::BrushSettings& brush, Paint::PaintChannel channel) {
+    const size_t index = static_cast<size_t>(channel);
+    if (index >= brush.channel_inputs.size()) {
+        return nullptr;
+    }
+    return &brush.channel_inputs[index];
+}
+
+const Paint::BrushChannelInput* getBrushChannelInput(const Paint::BrushSettings& brush, Paint::PaintChannel channel) {
+    const size_t index = static_cast<size_t>(channel);
+    if (index >= brush.channel_inputs.size()) {
+        return nullptr;
+    }
+    const Paint::BrushChannelInput& input = brush.channel_inputs[index];
+    return input.enabled ? &input : nullptr;
+}
+
+Vec3 getPreviewChannelColor(const Paint::BrushSettings& brush, Paint::PaintChannel channel) {
+    if (const Paint::BrushChannelInput* input = getBrushChannelInput(brush, channel)) {
+        return input->color;
+    }
+    return brush.color;
+}
+
+std::shared_ptr<Texture> getPreviewChannelTexture(const Paint::BrushSettings& brush, Paint::PaintChannel channel) {
+    if (const Paint::BrushChannelInput* input = getBrushChannelInput(brush, channel)) {
+        if (input->use_paint_texture && input->paint_texture && input->paint_texture->is_loaded()) {
+            return input->paint_texture;
+        }
+        return nullptr;
+    }
+    if (brush.use_paint_texture && brush.paint_texture && brush.paint_texture->is_loaded()) {
+        return brush.paint_texture;
+    }
+    return nullptr;
+}
+
+float getPreviewChannelTintStrength(const Paint::BrushSettings& brush, Paint::PaintChannel channel) {
+    if (const Paint::BrushChannelInput* input = getBrushChannelInput(brush, channel)) {
+        return input->tint_strength;
+    }
+    return brush.paint_texture_tint_strength;
+}
+
+Paint::PaintTextureTintMode getPreviewChannelTintMode(const Paint::BrushSettings& brush, Paint::PaintChannel channel) {
+    if (const Paint::BrushChannelInput* input = getBrushChannelInput(brush, channel)) {
+        return input->tint_mode;
+    }
+    return brush.paint_texture_tint_mode;
 }
 
 bool beginBrushDockSection(const char* label, bool default_open = true) {
@@ -538,6 +686,116 @@ Vec2 interpolateTriangleUV(const Triangle& tri, float bu, float bv, float bw) {
     );
 }
 
+bool computeTriangleUvFrame(const Triangle& tri, const Vec3& normal_hint, Vec3& tangent, Vec3& bitangent) {
+    Vec3 normal = normal_hint.length_squared() > 1e-8f ? normal_hint.normalize() : Vec3(0.0f, 1.0f, 0.0f);
+    const Vec3 p0 = tri.getVertexPosition(0);
+    const Vec3 p1 = tri.getVertexPosition(1);
+    const Vec3 p2 = tri.getVertexPosition(2);
+    const Vec3 edge1 = p1 - p0;
+    const Vec3 edge2 = p2 - p0;
+    const Vec2 deltaUV1 = tri.t1 - tri.t0;
+    const Vec2 deltaUV2 = tri.t2 - tri.t0;
+    const float det = deltaUV1.u * deltaUV2.v - deltaUV2.u * deltaUV1.v;
+    if (std::abs(det) <= 1e-6f) {
+        return false;
+    }
+
+    const float f = 1.0f / det;
+    tangent = Vec3(
+        f * (deltaUV2.v * edge1.x - deltaUV1.v * edge2.x),
+        f * (deltaUV2.v * edge1.y - deltaUV1.v * edge2.y),
+        f * (deltaUV2.v * edge1.z - deltaUV1.v * edge2.z));
+    if (tangent.length_squared() <= 1e-8f) {
+        return false;
+    }
+    tangent = (tangent - normal * tangent.dot(normal)).normalize();
+    if (tangent.length_squared() <= 1e-8f) {
+        return false;
+    }
+
+    Vec3 computed_bitangent(
+        f * (-deltaUV2.u * edge1.x + deltaUV1.u * edge2.x),
+        f * (-deltaUV2.u * edge1.y + deltaUV1.u * edge2.y),
+        f * (-deltaUV2.u * edge1.z + deltaUV1.u * edge2.z));
+    if (computed_bitangent.length_squared() <= 1e-8f) {
+        return false;
+    }
+    computed_bitangent = (computed_bitangent - normal * computed_bitangent.dot(normal)).normalize();
+
+    bitangent = normal.cross(tangent).normalize();
+    if (bitangent.dot(computed_bitangent) < 0.0f) {
+        bitangent = -bitangent;
+    }
+    return bitangent.length_squared() > 1e-8f;
+}
+
+Vec3 reflectVectorForMeshMirror(const Matrix4x4& local_to_world,
+                                const Matrix4x4& world_to_local,
+                                const Vec3& world_vector,
+                                bool mx,
+                                bool my,
+                                bool mz) {
+    Vec3 local_vector = world_to_local.transform_vector(world_vector);
+    if (mx) local_vector.x *= -1.0f;
+    if (my) local_vector.y *= -1.0f;
+    if (mz) local_vector.z *= -1.0f;
+    Vec3 reflected = local_to_world.transform_vector(local_vector);
+    return reflected.length_squared() > 1e-8f ? reflected.normalize() : reflected;
+}
+
+Paint::BrushSettings makeMirroredBrushForHit(const Paint::BrushSettings& brush,
+                                             const HitRecord& source_hit,
+                                             const HitRecord& mirrored_hit,
+                                             bool mx,
+                                             bool my,
+                                             bool mz) {
+    Paint::BrushSettings mirrored_brush = brush;
+    if (!source_hit.triangle || !mirrored_hit.triangle) {
+        if (mx || mz) mirrored_brush.flip_alpha_x = !mirrored_brush.flip_alpha_x;
+        if (my) mirrored_brush.flip_alpha_y = !mirrored_brush.flip_alpha_y;
+        return mirrored_brush;
+    }
+
+    Vec3 source_tangent, source_bitangent;
+    Vec3 target_tangent, target_bitangent;
+    if (!computeTriangleUvFrame(*source_hit.triangle, source_hit.normal, source_tangent, source_bitangent) ||
+        !computeTriangleUvFrame(*mirrored_hit.triangle, mirrored_hit.normal, target_tangent, target_bitangent)) {
+        if (mx || mz) mirrored_brush.flip_alpha_x = !mirrored_brush.flip_alpha_x;
+        if (my) mirrored_brush.flip_alpha_y = !mirrored_brush.flip_alpha_y;
+        return mirrored_brush;
+    }
+
+    const Matrix4x4 local_to_world = source_hit.triangle->getTransformMatrix();
+    const Matrix4x4 world_to_local = local_to_world.inverse();
+    const Vec3 reflected_tangent = reflectVectorForMeshMirror(local_to_world, world_to_local, source_tangent, mx, my, mz);
+    const Vec3 reflected_bitangent = reflectVectorForMeshMirror(local_to_world, world_to_local, source_bitangent, mx, my, mz);
+
+    const float a00 = target_tangent.dot(reflected_tangent);
+    const float a01 = target_bitangent.dot(reflected_tangent);
+    const float a10 = target_tangent.dot(reflected_bitangent);
+    const float a11 = target_bitangent.dot(reflected_bitangent);
+    const float det = a00 * a11 - a01 * a10;
+
+    if (det < 0.0f) {
+        mirrored_brush.flip_alpha_x = !mirrored_brush.flip_alpha_x;
+        const float r00 = -a00;
+        const float r10 = -a10;
+        if (std::isfinite(r00) && std::isfinite(r10) && (r00 * r00 + r10 * r10) > 1e-6f) {
+            const float angle_degrees = std::atan2(r10, r00) * 57.2957795f;
+            mirrored_brush.alpha_rotation_degrees =
+                wrapBrushAngleDegrees(mirrored_brush.alpha_rotation_degrees + angle_degrees);
+        }
+    } else {
+        if (std::isfinite(a00) && std::isfinite(a10) && (a00 * a00 + a10 * a10) > 1e-6f) {
+            const float angle_degrees = std::atan2(a10, a00) * 57.2957795f;
+            mirrored_brush.alpha_rotation_degrees =
+                wrapBrushAngleDegrees(mirrored_brush.alpha_rotation_degrees + angle_degrees);
+        }
+    }
+
+    return mirrored_brush;
+}
+
 bool resolveMirroredMeshPaintHit(UIContext& ctx,
                                  const Paint::MeshPaintAdapter& adapter,
                                  const HitRecord& source_hit,
@@ -706,11 +964,57 @@ void uiRotateBrushCoords(float& x, float& y, float degrees) {
     y = ry;
 }
 
-float uiSampleBrushAlpha(Paint::BrushAlphaPreset preset, float nx, float ny, float scale, float rotation_degrees) {
+float uiBrushShapeAspectScale(const Paint::BrushSettings& brush) {
+    return std::sqrt(std::clamp(brush.shape_aspect, 0.1f, 8.0f));
+}
+
+float uiBrushShapeDistance(Paint::BrushShape shape, float x, float y, float roundness) {
+    const float ax = std::abs(x);
+    const float ay = std::abs(y);
+    switch (shape) {
+        case Paint::BrushShape::Circle:
+            return std::sqrt(x * x + y * y);
+        case Paint::BrushShape::Rectangle: {
+            const float p = 8.0f + std::clamp(roundness, 0.0f, 1.0f) * 16.0f;
+            return std::pow(std::pow(ax, p) + std::pow(ay, p), 1.0f / p);
+        }
+        case Paint::BrushShape::Capsule: {
+            const float half_segment = 0.55f;
+            const float qx = std::max(ax - half_segment, 0.0f);
+            return std::sqrt(qx * qx + ay * ay);
+        }
+        case Paint::BrushShape::Flat: {
+            const float p = 10.0f + std::clamp(roundness, 0.0f, 1.0f) * 18.0f;
+            return std::pow(std::pow(ax, p) + std::pow(ay, p), 1.0f / p);
+        }
+    }
+    return std::sqrt(x * x + y * y);
+}
+
+struct UIBrushFootprintSample {
+    float x = 0.0f;
+    float y = 0.0f;
+    float dist_norm = 0.0f;
+};
+
+UIBrushFootprintSample uiSampleBrushFootprint(const Paint::BrushSettings& brush, float x, float y) {
+    uiRotateBrushCoords(x, y, -brush.alpha_rotation_degrees);
+    const float aspect_scale = uiBrushShapeAspectScale(brush);
+    x /= aspect_scale;
+    y *= aspect_scale;
+
+    UIBrushFootprintSample sample;
+    sample.x = x;
+    sample.y = y;
+    sample.dist_norm = uiBrushShapeDistance(brush.shape, x, y, brush.shape_roundness);
+    return sample;
+}
+
+float uiSampleBrushAlpha(Paint::BrushAlphaPreset preset, float nx, float ny, float scale, float rotation_degrees, bool radial_gate) {
     float sx = nx * std::max(0.01f, scale);
     float sy = ny * std::max(0.01f, scale);
     uiRotateBrushCoords(sx, sy, rotation_degrees);
-    const float radial = std::clamp(1.0f - std::sqrt(nx * nx + ny * ny), 0.0f, 1.0f);
+    const float radial = radial_gate ? std::clamp(1.0f - std::sqrt(nx * nx + ny * ny), 0.0f, 1.0f) : 1.0f;
 
     switch (preset) {
         case Paint::BrushAlphaPreset::SoftRound:
@@ -753,11 +1057,14 @@ float uiSampleImportedBrushAlpha(const std::shared_ptr<Texture>& texture, float 
 }
 
 float uiSampleBrushMask(const Paint::BrushSettings& brush, float nx, float ny) {
+    if (brush.flip_alpha_x) nx = -nx;
+    if (brush.flip_alpha_y) ny = -ny;
     if (brush.use_imported_alpha && brush.alpha_texture && brush.alpha_texture->is_loaded()) {
         return uiSampleImportedBrushAlpha(brush.alpha_texture, nx, ny, brush.alpha_scale, brush.alpha_rotation_degrees);
     }
 
-    return uiSampleBrushAlpha(brush.alpha_preset, nx, ny, brush.alpha_scale, brush.alpha_rotation_degrees);
+    const bool radial_gate = brush.shape == Paint::BrushShape::Circle;
+    return uiSampleBrushAlpha(brush.alpha_preset, nx, ny, brush.alpha_scale, brush.alpha_rotation_degrees, radial_gate);
 }
 
 void drawBrushAlphaPreview(const Paint::BrushSettings& brush) {
@@ -781,16 +1088,16 @@ void drawBrushAlphaPreview(const Paint::BrushSettings& brush) {
         for (int x = 0; x < cells; ++x) {
             const float u = ((static_cast<float>(x) + 0.5f) / static_cast<float>(cells)) * 2.0f - 1.0f;
             const float v = ((static_cast<float>(y) + 0.5f) / static_cast<float>(cells)) * 2.0f - 1.0f;
-            const float r = std::sqrt(u * u + v * v);
-            if (r > 1.0f) {
+            const UIBrushFootprintSample fp = uiSampleBrushFootprint(brush, u, v);
+            if (fp.dist_norm > 1.0f) {
                 continue;
             }
 
             const float falloff = std::clamp(brush.falloff, 0.0f, 1.0f);
             const float inner = std::clamp(1.0f - falloff, 0.0f, 1.0f);
             float base = 1.0f;
-            if (r > inner) {
-                const float t = std::clamp((r - inner) / std::max(0.001f, 1.0f - inner), 0.0f, 1.0f);
+            if (fp.dist_norm > inner) {
+                const float t = std::clamp((fp.dist_norm - inner) / std::max(0.001f, 1.0f - inner), 0.0f, 1.0f);
                 base = 1.0f - (t * t * (3.0f - 2.0f * t));
             }
 
@@ -1025,26 +1332,33 @@ float estimateMeshPaintWorldRadius(const Triangle& tri, const Texture& texture, 
 }
 
 ImU32 makePreviewColorU32(const Paint::BrushSettings& brush, Paint::PaintChannel channel, float nx, float ny, float alpha, bool ghost) {
-    Vec3 color = brush.color;
-    if (brush.use_paint_texture && brush.paint_texture && brush.paint_texture->is_loaded()) {
+    Vec3 color = getPreviewChannelColor(brush, channel);
+    std::shared_ptr<Texture> paint_texture = getPreviewChannelTexture(brush, channel);
+    if (paint_texture) {
         float sx = nx * std::max(0.01f, brush.alpha_scale);
         float sy = ny * std::max(0.01f, brush.alpha_scale);
+        if (brush.flip_alpha_x) sx = -sx;
+        if (brush.flip_alpha_y) sy = -sy;
         uiRotateBrushCoords(sx, sy, brush.alpha_rotation_degrees);
         const float u = std::clamp(sx * 0.5f + 0.5f, 0.0f, 1.0f);
         const float v = std::clamp(sy * 0.5f + 0.5f, 0.0f, 1.0f);
 
         if (channel == Paint::PaintChannel::BaseColor || channel == Paint::PaintChannel::Emission) {
-            Vec3 sampled = brush.paint_texture->get_color_bilinear(u, v);
-            sampled = applyPreviewTint(sampled, brush.color, brush.paint_texture_tint_strength, brush.paint_texture_tint_mode);
+            Vec3 sampled = paint_texture->get_color_bilinear(u, v);
+            sampled = applyPreviewTint(
+                sampled,
+                color,
+                getPreviewChannelTintStrength(brush, channel),
+                getPreviewChannelTintMode(brush, channel));
             color = Vec3(
                 std::clamp(sampled.x, 0.0f, 1.0f),
                 std::clamp(sampled.y, 0.0f, 1.0f),
                 std::clamp(sampled.z, 0.0f, 1.0f));
         } else {
-            const float texture_value = brush.paint_texture->sampleIntensity(u, v);
-            const float tint_value = std::clamp((brush.color.x + brush.color.y + brush.color.z) / 3.0f, 0.0f, 1.0f);
+            const float texture_value = paint_texture->sampleIntensity(u, v);
+            const float tint_value = std::clamp((color.x + color.y + color.z) / 3.0f, 0.0f, 1.0f);
             const float grayscale = texture_value + (texture_value * tint_value - texture_value) *
-                std::clamp(brush.paint_texture_tint_strength, 0.0f, 1.0f);
+                std::clamp(getPreviewChannelTintStrength(brush, channel), 0.0f, 1.0f);
             color = Vec3(grayscale, grayscale, grayscale);
         }
     } else if (channel != Paint::PaintChannel::BaseColor && channel != Paint::PaintChannel::Emission) {
@@ -1153,7 +1467,6 @@ void drawMeshPaintPreview(UIContext& ctx, const HitRecord& rec, const Paint::Mes
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     constexpr int segments = 40;
     const float inner_scale = std::clamp(1.0f - brush.falloff, 0.15f, 0.95f);
-    const float inner_radius = world_radius * inner_scale;
     const ImVec2 center_screen = project(rec.point + normal * 0.002f);
     const ImVec2 radius_screen = project(rec.point + tangent * world_radius + normal * 0.002f);
     const float approx_screen_radius = (center_screen.x < -900.0f || radius_screen.x < -900.0f)
@@ -1164,43 +1477,46 @@ void drawMeshPaintPreview(UIContext& ctx, const HitRecord& rec, const Paint::Mes
 
     if (!ghost) {
         const int grid = std::clamp(static_cast<int>(approx_screen_radius * 1.15f), 36, 96);
-        const float cell_span = 2.0f / static_cast<float>(grid);
+        const float extent_scale = std::max(uiBrushShapeAspectScale(brush), 1.0f / uiBrushShapeAspectScale(brush));
+        const float cell_span = (2.0f * extent_scale) / static_cast<float>(grid);
         for (int gy = 0; gy < grid; ++gy) {
             for (int gx = 0; gx < grid; ++gx) {
-                const float nx = ((static_cast<float>(gx) + 0.5f) / static_cast<float>(grid)) * 2.0f - 1.0f;
-                const float ny = ((static_cast<float>(gy) + 0.5f) / static_cast<float>(grid)) * 2.0f - 1.0f;
-                const float rr = std::sqrt(nx * nx + ny * ny);
-                if (rr > 1.0f) {
+                const float bx = (((static_cast<float>(gx) + 0.5f) / static_cast<float>(grid)) * 2.0f - 1.0f) * extent_scale;
+                const float by = (((static_cast<float>(gy) + 0.5f) / static_cast<float>(grid)) * 2.0f - 1.0f) * extent_scale;
+                const UIBrushFootprintSample fp = uiSampleBrushFootprint(brush, bx, by);
+                if (fp.dist_norm > 1.0f) {
                     continue;
                 }
 
                 const float falloff = std::clamp(brush.falloff, 0.0f, 1.0f);
                 const float inner = std::clamp(1.0f - falloff, 0.0f, 1.0f);
                 float base = 1.0f;
-                if (rr > inner) {
-                    const float t = std::clamp((rr - inner) / std::max(0.001f, 1.0f - inner), 0.0f, 1.0f);
+                if (fp.dist_norm > inner) {
+                    const float t = std::clamp((fp.dist_norm - inner) / std::max(0.001f, 1.0f - inner), 0.0f, 1.0f);
                     base = 1.0f - (t * t * (3.0f - 2.0f * t));
                 }
 
-                const float mask_alpha = uiSampleBrushMask(brush, nx, ny);
+                const float sample_x = bx;
+                const float sample_y = -by;
+                const float mask_alpha = uiSampleBrushMask(brush, sample_x, sample_y);
                 const float alpha = base * mask_alpha;
                 if (alpha <= 0.025f) {
                     continue;
                 }
 
-                const float local_x = nx * world_radius;
-                const float local_y = ny * world_radius;
+                const float local_x = bx * world_radius;
+                const float local_y = by * world_radius;
                 const float half_cell = world_radius * cell_span * 0.42f;
-                const Vec3 center = rec.point + tangent * local_x - bitangent * local_y + normal * 0.002f;
+                const Vec3 center = rec.point + tangent * local_x + bitangent * local_y + normal * 0.002f;
                 const Vec3 right = tangent * half_cell;
-                const Vec3 up = -bitangent * half_cell;
+                const Vec3 up = bitangent * half_cell;
                 const ImVec2 c = project(center);
                 const ImVec2 px = project(center + right);
                 const ImVec2 py = project(center + up);
                 if (c.x < -900.0f || px.x < -900.0f || py.x < -900.0f) {
                     continue;
                 }
-                const ImU32 fill = makePreviewColorU32(brush, channel, nx, ny, alpha, ghost);
+                const ImU32 fill = makePreviewColorU32(brush, channel, sample_x, sample_y, alpha, ghost);
                 const ImVec2 p0 = project(center - right - up);
                 const ImVec2 p1 = project(center + right - up);
                 const ImVec2 p2 = project(center + right + up);
@@ -1233,10 +1549,43 @@ void drawMeshPaintPreview(UIContext& ctx, const HitRecord& rec, const Paint::Mes
         }
     };
 
+    auto draw_shape_outline = [&](float scale, ImU32 color, float thickness) {
+        const float extent_scale = std::max(uiBrushShapeAspectScale(brush), 1.0f / uiBrushShapeAspectScale(brush));
+        ImVec2 prev;
+        bool has_prev = false;
+        for (int i = 0; i <= segments; ++i) {
+            const float angle = (static_cast<float>(i) / static_cast<float>(segments)) * 6.2831853f;
+            const float dir_x = std::cos(angle);
+            const float dir_y = std::sin(angle);
+            float lo = 0.0f;
+            float hi = extent_scale * 1.25f;
+            for (int step = 0; step < 10; ++step) {
+                const float mid = (lo + hi) * 0.5f;
+                const UIBrushFootprintSample fp = uiSampleBrushFootprint(brush, dir_x * mid, dir_y * mid);
+                if (fp.dist_norm <= scale) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            const Vec3 offset = tangent * (dir_x * lo * world_radius) + bitangent * (dir_y * lo * world_radius);
+            const ImVec2 p = project(rec.point + offset + normal * 0.002f);
+            if (p.x > -900.0f && p.y > -900.0f) {
+                if (has_prev) {
+                    dl->AddLine(prev, p, color, thickness);
+                }
+                prev = p;
+                has_prev = true;
+            } else {
+                has_prev = false;
+            }
+        }
+    };
+
     const ImU32 outer = ghost ? IM_COL32(255, 196, 96, 120) : IM_COL32(255, 196, 96, 230);
     const ImU32 inner = ghost ? IM_COL32(255, 196, 96, 70) : IM_COL32(255, 196, 96, 120);
-    draw_ring(world_radius, outer, ghost ? 1.2f : 2.0f);
-    draw_ring(inner_radius, inner, 1.0f);
+    draw_shape_outline(1.0f, outer, ghost ? 1.2f : 2.0f);
+    draw_shape_outline(inner_scale, inner, 1.0f);
 
     if (show_alpha_rotate_ring && !ghost) {
         const float radians = brush.alpha_rotation_degrees * 3.14159265f / 180.0f;
@@ -1283,6 +1632,47 @@ void SceneUI::ensurePaintBrushPresets() {
     hard_stamp.stamp_mode = Paint::StampPlacementMode::Single;
     add_preset("Hard Stamp", hard_stamp);
 
+    Paint::BrushSettings flat_brush;
+    flat_brush.radius = 42.0f;
+    flat_brush.strength = 0.85f;
+    flat_brush.falloff = 0.28f;
+    flat_brush.spacing = 0.08f;
+    flat_brush.alpha_preset = Paint::BrushAlphaPreset::HardRound;
+    flat_brush.shape = Paint::BrushShape::Flat;
+    flat_brush.shape_aspect = 4.0f;
+    flat_brush.shape_roundness = 0.75f;
+    flat_brush.follow_stroke_angle = true;
+    add_preset("Flat Brush", flat_brush);
+
+    Paint::BrushSettings oil_bristle = flat_brush;
+    oil_bristle.strength = 0.7f;
+    oil_bristle.falloff = 0.42f;
+    oil_bristle.alpha_preset = Paint::BrushAlphaPreset::Scratch;
+    oil_bristle.paint_mode = Paint::BrushPaintMode::Oil;
+    oil_bristle.wetness = 0.62f;
+    oil_bristle.wet_lifetime_seconds = 4.8f;
+    oil_bristle.wet_diffusion = 0.16f;
+    oil_bristle.wet_runoff = 0.06f;
+    oil_bristle.wet_absorption = 0.08f;
+    oil_bristle.paint_load = 0.93f;
+    oil_bristle.pickup_rate = 0.12f;
+    oil_bristle.deposit_rate = 0.88f;
+    oil_bristle.wet_terminal_buildup = 0.72f;
+    oil_bristle.wet_terminal_softness = 0.72f;
+    add_preset("Oil Bristle", oil_bristle);
+
+    Paint::BrushSettings marker;
+    marker.radius = 18.0f;
+    marker.strength = 0.8f;
+    marker.falloff = 0.18f;
+    marker.spacing = 0.06f;
+    marker.alpha_preset = Paint::BrushAlphaPreset::Noise;
+    marker.shape = Paint::BrushShape::Capsule;
+    marker.shape_aspect = 3.0f;
+    marker.shape_roundness = 0.65f;
+    marker.follow_stroke_angle = true;
+    add_preset("Marker Chisel", marker);
+
     Paint::BrushSettings grunge;
     grunge.tool = Paint::BrushTool::Stamp;
     grunge.radius = 56.0f;
@@ -1302,6 +1692,8 @@ void SceneUI::ensurePaintBrushPresets() {
     wet.paint_load = 0.9f;
     wet.pickup_rate = 0.3f;
     wet.deposit_rate = 0.7f;
+    wet.wet_terminal_buildup = 0.58f;
+    wet.wet_terminal_softness = 0.68f;
     add_preset("Wet Blend", wet);
 
     Paint::BrushSettings smudge;
@@ -2158,6 +2550,9 @@ void SceneUI::drawPaintPanel(UIContext& ctx) {
         paint_mode_state.enabled = enabled;
         if (!paint_mode_state.enabled) {
             terrain_brush.enabled = false;
+            if (auto mesh_adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter())) {
+                mesh_adapter->clearWetSimulation();
+            }
         }
     }
 
@@ -2467,7 +2862,12 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
         if (loaded_stack && !loaded_stack->empty() && loaded_stack->width() > 0) {
             const int res = loaded_stack->width();
             adapter->ensureTextureSet(res);
-            adapter->createTextureSet();
+            for (int i = 0; i < static_cast<int>(Paint::kPaintChannelCount); ++i) {
+                const Paint::PaintChannel channel = static_cast<Paint::PaintChannel>(i);
+                if (loaded_stack->anyLayerHasPixels(channel)) {
+                    adapter->assignTextureToChannel(channel);
+                }
+            }
             texture_set = adapter->getTextureSet();
             if (texture_set && texture_set->initialized) {
                 loaded_stack->flattenInto(*texture_set);
@@ -3481,6 +3881,7 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
     }
 
     if (beginBrushDockSection("Color & Texture")) {
+        ImGui::TextDisabled("Fallback Source");
         float brush_color[3] = {
             paint_mode_state.brush.color.x,
             paint_mode_state.brush.color.y,
@@ -3527,6 +3928,80 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
             ImGui::SliderFloat("Tint Strength", &paint_mode_state.brush.paint_texture_tint_strength, 0.0f, 1.0f, "%.2f");
         }
 
+        std::vector<Paint::PaintChannel> source_channels = getSelectedMaterialBrushChannels(paint_mode_state);
+        if (source_channels.empty() && isMeshPaintUiChannelEnabled(paint_mode_state.active_channel)) {
+            source_channels.push_back(paint_mode_state.active_channel);
+        }
+        if (!source_channels.empty()) {
+            ImGui::Separator();
+            ImGui::TextDisabled("Per-Channel Sources");
+            ImGui::TextDisabled("Active and linked channel sources.");
+            for (Paint::PaintChannel channel : source_channels) {
+                Paint::BrushChannelInput* input = getBrushChannelInput(paint_mode_state.brush, channel);
+                if (!input) {
+                    continue;
+                }
+                const std::string channel_name = paintChannelDisplayName(channel);
+                ImGui::PushID(static_cast<int>(channel));
+                const bool is_active_channel = channel == paint_mode_state.active_channel;
+                const std::string header = channel_name + (is_active_channel ? "  *" : "");
+                if (ImGui::TreeNodeEx(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::Checkbox("Override", &input->enabled);
+                    if (!input->enabled) {
+                        ImGui::BeginDisabled();
+                    }
+
+                    float channel_color[3] = { input->color.x, input->color.y, input->color.z };
+                    if (ImGui::ColorEdit3("Value", channel_color, ImGuiColorEditFlags_NoInputs)) {
+                        input->enabled = true;
+                        input->color = Vec3(channel_color[0], channel_color[1], channel_color[2]);
+                    }
+
+                    if (ImGui::Button("Load Texture")) {
+                        const std::string path = SceneUI::openFileDialogW(
+                            L"Image Files\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.exr;*.hdr\0",
+                            "",
+                            "");
+                        if (!path.empty()) {
+                            auto paint_texture = std::make_shared<Texture>(path, inferBrushTextureType(channel));
+                            if (paint_texture && paint_texture->is_loaded()) {
+                                input->paint_texture = paint_texture;
+                                input->paint_texture_path = path;
+                                input->use_paint_texture = true;
+                                input->enabled = true;
+                            }
+                        }
+                    }
+                    if (input->paint_texture && input->paint_texture->is_loaded()) {
+                        ImGui::SameLine();
+                        if (ImGui::Button("Clear Texture")) {
+                            input->paint_texture.reset();
+                            input->paint_texture_path.clear();
+                            input->use_paint_texture = false;
+                        }
+                        ImGui::Checkbox("Use Texture", &input->use_paint_texture);
+                        const std::string texture_name = brushAssetDisplayName(input->paint_texture_path);
+                        ImGui::TextDisabled("Texture: %s", texture_name.empty() ? "Untitled" : texture_name.c_str());
+                        int tint_mode = static_cast<int>(input->tint_mode);
+                        const char* tint_mode_labels[] = { "Multiply", "Recolor", "Overlay" };
+                        if (ImGui::Combo("Tint Mode", &tint_mode, tint_mode_labels, IM_ARRAYSIZE(tint_mode_labels))) {
+                            input->tint_mode = static_cast<Paint::PaintTextureTintMode>(tint_mode);
+                            input->enabled = true;
+                        }
+                        if (ImGui::SliderFloat("Tint Strength", &input->tint_strength, 0.0f, 1.0f, "%.2f")) {
+                            input->enabled = true;
+                        }
+                    }
+
+                    if (!input->enabled) {
+                        ImGui::EndDisabled();
+                    }
+                    ImGui::TreePop();
+                }
+                ImGui::PopID();
+            }
+        }
+
         if (brushSupportsRaisedPaint(paint_mode_state.brush.tool)) {
             ImGui::Separator();
             const bool height_mask_channel_active = paint_mode_state.active_channel == Paint::PaintChannel::Mask;
@@ -3559,20 +4034,72 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
         paint_mode_state.brush.tool != Paint::BrushTool::Fill &&
         paint_mode_state.brush.tool != Paint::BrushTool::Clone &&
         beginBrushDockSection("Behavior")) {
-        int paint_mode = static_cast<int>(paint_mode_state.brush.paint_mode);
-        const char* paint_mode_labels[] = { "Normal", "Mix", "Smudge", "Wet" };
-        if (ImGui::Combo("Paint Behavior", &paint_mode, paint_mode_labels, IM_ARRAYSIZE(paint_mode_labels))) {
-            paint_mode_state.brush.paint_mode = static_cast<Paint::BrushPaintMode>(paint_mode);
-        }
+        auto wetParamTip = [](const char* text) {
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                ImGui::BeginTooltip();
+                ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+                ImGui::TextUnformatted(text);
+                ImGui::PopTextWrapPos();
+                ImGui::EndTooltip();
+            }
+        };
+        drawPaintBehaviorSelector(paint_mode_state);
         if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Mix) {
             ImGui::SliderFloat("Mix Amount", &paint_mode_state.brush.mix_amount, 0.05f, 0.95f, "%.2f");
         } else if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Smudge) {
             ImGui::SliderFloat("Smudge Strength", &paint_mode_state.brush.smudge_strength, 0.05f, 1.00f, "%.2f");
-        } else if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Wet) {
-            ImGui::SliderFloat("Wetness", &paint_mode_state.brush.wetness, 0.05f, 1.00f, "%.2f");
+        } else if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Wet ||
+                   paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Oil) {
+            const bool oil_mode = paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Oil;
+            static const char* wet_quality_labels[] = { "Auto", "Balanced", "High", "Ultra" };
+            int wet_quality_index = static_cast<int>(paint_mode_state.brush.wet_simulation_quality);
+            if (ImGui::Combo("Simulation Quality", &wet_quality_index, wet_quality_labels, IM_ARRAYSIZE(wet_quality_labels))) {
+                wet_quality_index = std::clamp(wet_quality_index, 0, static_cast<int>(IM_ARRAYSIZE(wet_quality_labels)) - 1);
+                paint_mode_state.brush.wet_simulation_quality = static_cast<Paint::WetSimulationQuality>(wet_quality_index);
+            }
+            wetParamTip("Controls how often Wet/Oil flow simulation updates. Balanced is intentionally much lighter, High is a middle ground, Ultra keeps the highest realtime fidelity, and Auto becomes much more aggressive on 2K/4K textures.");
+            ImGui::SliderFloat(oil_mode ? "Body" : "Wetness", &paint_mode_state.brush.wetness, 0.05f, 1.00f, "%.2f");
+            wetParamTip(oil_mode
+                ? "How dense and heavy the brush body feels on the surface. Higher values keep oil strokes richer and slower to break apart."
+                : "Fresh paint amount carried by the brush and left on the surface. Higher values keep the stroke wetter for longer.");
+            ImGui::SliderFloat("Wet Lifetime", &paint_mode_state.brush.wet_lifetime_seconds, 0.20f, 15.00f, "%.2fs");
+            wetParamTip(oil_mode
+                ? "How long the oily stroke stays workable before setting. Longer lifetime keeps blending active without needing much runoff."
+                : "How long a stroke stays active before it fully dries. Longer lifetime means more time for blending and runoff.");
+            ImGui::SliderFloat("Wet Diffusion", &paint_mode_state.brush.wet_diffusion, 0.00f, 1.50f, "%.2f");
+            wetParamTip(oil_mode
+                ? "How much thick pigment smears sideways into neighboring paint. Higher values create buttery bristle drag."
+                : "Sideways spreading and color blending while paint is still wet. Higher values soften edges faster.");
+            ImGui::SliderFloat("Wet Runoff", &paint_mode_state.brush.wet_runoff, 0.00f, 1.50f, "%.2f");
+            wetParamTip(oil_mode
+                ? "How much gravity can still pull heavy pigment downhill. Oil usually wants much lower values than watercolor-like wet paint."
+                : "How strongly gravity pulls wet paint downhill in world space. Use this to make paint visibly slide on sloped surfaces.");
+            ImGui::SliderFloat("Absorption", &paint_mode_state.brush.wet_absorption, 0.00f, 1.00f, "%.2f");
+            wetParamTip(oil_mode
+                ? "How much pigment settles into the surface instead of continuing to smear. Lower values keep an oily, movable stroke."
+                : "How much wet paint sinks back toward the surface as it dries. Higher values can create soil-like settling or a shallow dried center.");
+            ImGui::SliderFloat("Drip Head", &paint_mode_state.brush.wet_drip_head, 0.00f, 1.50f, "%.2f");
+            wetParamTip(oil_mode
+                ? "Extra buildup at the trailing end of a dragged stroke. Use lightly for palette-knife style ridges, not watery drops."
+                : "Extra buildup at the lower end of a running stroke. Higher values make drips end in a thicker droplet head.");
+            if (paint_mode_state.brush.write_height_mask) {
+                ImGui::SliderFloat("Dry-End Buildup", &paint_mode_state.brush.wet_terminal_buildup, 0.00f, 1.50f, "%.2f");
+                wetParamTip("Adds a soft raised bead only where enough pigment accumulates at the end of a wet run. Higher values strengthen the dried droplet buildup.");
+                ImGui::SliderFloat("Buildup Softness", &paint_mode_state.brush.wet_terminal_softness, 0.10f, 1.00f, "%.2f");
+                wetParamTip("Controls how broadly the dried droplet bead spreads around the terminal pigment pocket. Lower values stay tight, higher values soften the mound.");
+            }
             ImGui::SliderFloat("Load", &paint_mode_state.brush.paint_load, 0.05f, 1.00f, "%.2f");
+            wetParamTip(oil_mode
+                ? "How much dense pigment the brush starts with. Higher values make early dabs stay opaque and saturated longer."
+                : "How much fresh paint the brush starts with at the beginning of a stroke.");
             ImGui::SliderFloat("Pickup", &paint_mode_state.brush.pickup_rate, 0.00f, 1.00f, "%.2f");
+            wetParamTip(oil_mode
+                ? "How much existing paint the bristles pick back up. Lower values keep oil strokes laying paint down instead of washing it away."
+                : "How strongly the brush picks color back up from the surface while moving.");
             ImGui::SliderFloat("Deposit", &paint_mode_state.brush.deposit_rate, 0.05f, 1.00f, "%.2f");
+            wetParamTip(oil_mode
+                ? "How aggressively thick paint is left on the surface each dab. Higher values make oil feel weighty and opaque."
+                : "How aggressively the brush leaves its carried paint on the surface each dab.");
         }
     }
 
@@ -3617,6 +4144,22 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
         ImGui::Checkbox("Mirror Y", &paint_mode_state.brush.mirror_y); ImGui::SameLine();
         ImGui::Checkbox("Mirror Z", &paint_mode_state.brush.mirror_z);
 
+        int brush_shape = static_cast<int>(paint_mode_state.brush.shape);
+        const char* shape_labels[] = { "Circle", "Rectangle", "Capsule", "Flat" };
+        if (ImGui::Combo("Brush Shape", &brush_shape, shape_labels, IM_ARRAYSIZE(shape_labels))) {
+            paint_mode_state.brush.shape = static_cast<Paint::BrushShape>(brush_shape);
+            if (paint_mode_state.brush.shape == Paint::BrushShape::Circle) {
+                paint_mode_state.brush.shape_aspect = 1.0f;
+            } else if (paint_mode_state.brush.shape == Paint::BrushShape::Flat &&
+                       paint_mode_state.brush.shape_aspect < 2.0f) {
+                paint_mode_state.brush.shape_aspect = 4.0f;
+            }
+        }
+        if (paint_mode_state.brush.shape != Paint::BrushShape::Circle) {
+            ImGui::SliderFloat("Aspect", &paint_mode_state.brush.shape_aspect, 0.25f, 8.0f, "%.2f");
+            ImGui::SliderFloat("Roundness", &paint_mode_state.brush.shape_roundness, 0.0f, 1.0f, "%.2f");
+        }
+
         int alpha_preset = static_cast<int>(paint_mode_state.brush.alpha_preset);
         const char* alpha_labels[] = { "Soft Round", "Hard Round", "Noise", "Scratch", "Cloud" };
         if (ImGui::Combo("Brush Alpha", &alpha_preset, alpha_labels, IM_ARRAYSIZE(alpha_labels))) {
@@ -3653,9 +4196,9 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
             paint_mode_state.brush.use_imported_alpha) {
             ImGui::SliderFloat("Alpha Scale", &paint_mode_state.brush.alpha_scale, 0.25f, 8.0f, "%.2f");
         }
-        ImGui::SliderFloat("Alpha Rotation", &paint_mode_state.brush.alpha_rotation_degrees, -180.0f, 180.0f, "%.0f deg");
+        ImGui::SliderFloat("Brush Rotation", &paint_mode_state.brush.alpha_rotation_degrees, -180.0f, 180.0f, "%.0f deg");
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Ctrl + right-drag in the viewport");
+            ImGui::SetTooltip("Ctrl + right-drag in the viewport rotates alpha textures and directional brush shapes.");
         }
         ImGui::Checkbox("Follow Stroke Angle", &paint_mode_state.brush.follow_stroke_angle);
         if (paint_mode_state.brush.tool != Paint::BrushTool::Stamp) {
@@ -3717,6 +4260,7 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
                 height_brush.use_paint_texture = false;
                 height_brush.paint_texture.reset();
                 height_brush.paint_texture_path.clear();
+                height_brush.channel_inputs = {};
                 const float h = raisedPaintHeightValue(height_brush.height_contribution);
                 height_brush.color = Vec3(h, h, h);
 
@@ -4125,12 +4669,15 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         height_brush.use_paint_texture = false;
         height_brush.paint_texture.reset();
         height_brush.paint_texture_path.clear();
+        height_brush.channel_inputs = {};
+        const float deposit_t = std::clamp((deposit_ratio - 0.05f) / 0.85f, 0.0f, 1.0f);
+        const float deposit_coverage = deposit_t * deposit_t * (3.0f - 2.0f * deposit_t);
         
         // The core user request calculation: Scale the height mask application speed
         // by the exact amount of physical paint deposited during wet/mix modes.
         // By reducing the strength towards 0, the blending weight natively drops to 0,
         // cleanly preventing the erasure of existing geometry and blocking unearned spikes.
-        height_brush.strength *= deposit_ratio;
+        height_brush.strength *= deposit_ratio * deposit_coverage;
 
         const float h = raisedPaintHeightValue(height_brush.height_contribution);
         height_brush.color = Vec3(h, h, h);
@@ -4149,6 +4696,18 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
     };
 
     ImGuiIO& io = ImGui::GetIO();
+    const float simulation_dt = io.DeltaTime > 0.0f ? io.DeltaTime : (1.0f / 60.0f);
+    if (adapter->tickWetPaint(
+            paint_mode_state.brush,
+            simulation_dt,
+            normal_from_height_active,
+            paint_mode_state.height_to_normal_strength)) {
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.renderer.updateBackendMaterial(ctx.scene, adapter->getMaterialID());
+            ctx.backend_ptr->resetAccumulation();
+        }
+    }
     static float last_vulkan_paint_sync_time = -1000.0f;
     auto finish_stroke = [&]() {
         if (!paint_mode_state.stroke.active) {
@@ -4280,12 +4839,9 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
 
     static bool alpha_rotate_drag_active = false;
     static ImVec2 alpha_rotate_anchor(0.0f, 0.0f);
-    const bool can_rotate_alpha =
-        paint_mode_state.brush.use_imported_alpha &&
-        paint_mode_state.brush.alpha_texture &&
-        paint_mode_state.brush.alpha_texture->is_loaded();
+    const bool can_rotate_brush_orientation = brushSupportsViewportRotation(paint_mode_state.brush);
     const bool alpha_rotate_shortcut =
-        can_rotate_alpha &&
+        can_rotate_brush_orientation &&
         io.KeyCtrl &&
         ImGui::IsMouseDown(ImGuiMouseButton_Right) &&
         !ImGui::IsMouseDown(ImGuiMouseButton_Left);
@@ -4333,7 +4889,7 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         return;
     }
     if (has_hit && is_target_hit) {
-        drawMeshPaintPreview(ctx, rec, *adapter, paint_mode_state.brush, paint_mode_state.active_channel, false, can_rotate_alpha && io.KeyCtrl);
+        drawMeshPaintPreview(ctx, rec, *adapter, paint_mode_state.brush, paint_mode_state.active_channel, false, can_rotate_brush_orientation && io.KeyCtrl);
         for (int i = 1; i < 8; ++i) {
             const bool mx = (i & 1) && paint_mode_state.brush.mirror_x;
             const bool my = (i & 2) && paint_mode_state.brush.mirror_y;
@@ -4344,7 +4900,14 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
 
             HitRecord mirrored_hit;
             if (resolveMirroredMeshPaintHit(ctx, *adapter, rec, mx, my, mz, mirrored_hit)) {
-                drawMeshPaintPreview(ctx, mirrored_hit, *adapter, paint_mode_state.brush, paint_mode_state.active_channel, true);
+                Paint::BrushSettings mirrored_brush = makeMirroredBrushForHit(
+                    paint_mode_state.brush,
+                    rec,
+                    mirrored_hit,
+                    mx,
+                    my,
+                    mz);
+                drawMeshPaintPreview(ctx, mirrored_hit, *adapter, mirrored_brush, paint_mode_state.active_channel, true);
             }
         }
     }
@@ -4393,7 +4956,9 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         paint_mode_state.stroke.changed = false;
         paint_mode_state.stroke.channel = paint_mode_state.active_channel;
         paint_mode_state.stroke.remaining_paint_load = paint_mode_state.brush.paint_load;
-        paint_mode_state.stroke.wet_color = paint_mode_state.brush.color;
+        paint_mode_state.stroke.wet_color = getPreviewChannelColor(
+            paint_mode_state.brush,
+            paint_mode_state.active_channel);
         paint_mode_state.stroke.has_wet_color = true;
         Paint::PaintTextureSet* set = adapter->getTextureSet();
         const std::vector<Paint::PaintChannel> snapshot_channels = snapshot_channels_for_stroke(paint_channels);
@@ -4426,6 +4991,8 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         }
     }
 
+    paint_mode_state.stroke.elapsed += simulation_dt;
+
     bool should_apply = true;
     if (paint_mode_state.brush.tool == Paint::BrushTool::Stamp) {
         if (paint_mode_state.brush.stamp_mode == Paint::StampPlacementMode::Single) {
@@ -4456,6 +5023,13 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         const float scaled_radius = paint_mode_state.brush.radius * (static_cast<float>(active_texture->width) / baseline);
         const float spacing_px = std::max(1.0f, scaled_radius * std::max(0.05f, paint_mode_state.brush.spacing));
         should_apply = distance_px >= spacing_px;
+        if (!should_apply &&
+            (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Wet ||
+             paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Oil) &&
+            paint_mode_state.brush.tool == Paint::BrushTool::Paint) {
+            const float dwell_interval = std::clamp(0.02f + spacing_px * 0.0009f, 0.02f, 0.12f);
+            should_apply = paint_mode_state.stroke.elapsed >= dwell_interval;
+        }
     }
     }
 
@@ -4469,7 +5043,9 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         const float du = rec.uv.u - paint_mode_state.stroke.last_u;
         const float dv = rec.uv.v - paint_mode_state.stroke.last_v;
         if ((du * du + dv * dv) > 1e-8f) {
-            dab_brush.alpha_rotation_degrees += std::atan2(dv, du) * 57.2957795f;
+            const float stroke_angle = std::atan2(dv, du) * 57.2957795f;
+            dab_brush.alpha_rotation_degrees = wrapBrushAngleDegrees(
+                paint_mode_state.brush.alpha_rotation_degrees + stroke_angle);
         }
     }
     if (paint_mode_state.brush.tool == Paint::BrushTool::Stamp) {
@@ -4516,54 +5092,87 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
                     sampled,
                     0.35f);
             }
+            const Vec3 effective_paint_color = getPreviewChannelColor(
+                dab_brush,
+                paint_mode_state.active_channel);
+            auto syncActiveChannelColorOverride = [&](const Vec3& color) {
+                if (Paint::BrushChannelInput* input = getBrushChannelInput(dab_brush, paint_mode_state.active_channel)) {
+                    input->color = color;
+                }
+            };
+
             if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Mix) {
                 dab_brush.color = lerpColor(
-                    paint_mode_state.brush.color,
+                    effective_paint_color,
                     paint_mode_state.stroke.pickup_color,
                     paint_mode_state.brush.mix_amount);
+                syncActiveChannelColorOverride(dab_brush.color);
             } else if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Smudge) {
                 dab_brush.color = lerpColor(
                     sampled,
                     paint_mode_state.stroke.pickup_color,
                     paint_mode_state.brush.smudge_strength);
+                syncActiveChannelColorOverride(dab_brush.color);
                 dab_brush.strength *= 0.75f;
                 dab_brush.flow *= 0.9f;
-            } else if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Wet) {
+            } else if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Wet ||
+                       paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Oil) {
+                const bool oil_mode = paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Oil;
                 if (!paint_mode_state.stroke.has_wet_color) {
-                    paint_mode_state.stroke.wet_color = paint_mode_state.brush.color;
+                    paint_mode_state.stroke.wet_color = effective_paint_color;
                     paint_mode_state.stroke.has_wet_color = true;
                 }
                 const float load = std::clamp(paint_mode_state.stroke.remaining_paint_load, 0.0f, 1.0f);
                 const float wetness = std::clamp(paint_mode_state.brush.wetness, 0.0f, 1.0f);
                 const float pickup = std::clamp(paint_mode_state.brush.pickup_rate, 0.0f, 1.0f);
                 const float deposit = std::clamp(paint_mode_state.brush.deposit_rate, 0.0f, 1.0f);
+                const float substrate_reservoir = std::clamp(adapter->sampleWetPickupReservoir(rec.uv), 0.0f, 1.0f);
+                const float fresh_bias = std::clamp(
+                    deposit * (0.82f + 0.18f * wetness) * (0.78f + 0.22f * load),
+                    0.0f,
+                    1.0f);
+                const float underpaint_mix = std::clamp(
+                        substrate_reservoir * wetness * (1.0f - fresh_bias * (oil_mode ? 0.92f : 0.82f)) *
+                            ((oil_mode ? 0.08f : 0.18f) + pickup * (oil_mode ? 0.18f : 0.34f)) *
+                            ((oil_mode ? 0.36f : 0.55f) - load * (oil_mode ? 0.10f : 0.18f)),
+                    0.0f,
+                        oil_mode ? 0.20f : 0.42f);
                 
                 const Vec3 loaded_paint = lerpColor(
                     paint_mode_state.stroke.wet_color,
-                    paint_mode_state.brush.color,
+                    effective_paint_color,
                     load);
-                    
-                dab_brush.color = lerpColor(
-                    sampled,
-                    loaded_paint,
-                    deposit * (0.35f + 0.65f * wetness));
+
+                dab_brush.color = lerpColor(loaded_paint, sampled, underpaint_mix);
+                syncActiveChannelColorOverride(dab_brush.color);
                 
                 paint_mode_state.stroke.wet_color = lerpColor(
                     paint_mode_state.stroke.wet_color,
                     sampled,
-                    pickup * wetness);
+                    std::clamp(
+                        substrate_reservoir * pickup * wetness *
+                            ((oil_mode ? 0.04f : 0.10f) + (1.0f - deposit) * (oil_mode ? 0.08f : 0.18f)) *
+                            (1.0f - load * (oil_mode ? 0.82f : 0.62f)),
+                        0.0f,
+                        oil_mode ? 0.18f : 0.45f));
                     
                 paint_mode_state.stroke.remaining_paint_load = std::clamp(
-                    paint_mode_state.stroke.remaining_paint_load - deposit * 0.08f + pickup * 0.03f,
+                    paint_mode_state.stroke.remaining_paint_load - deposit * (oil_mode ? 0.010f : 0.020f) +
+                        pickup * substrate_reservoir * (oil_mode ? 0.004f : 0.010f),
                     0.0f,
                     1.0f);
-                dab_brush.flow *= 0.9f + 0.2f * wetness;
+                dab_brush.paint_load = load;
+                dab_brush.flow *= oil_mode ? (0.96f + 0.08f * wetness) : (0.9f + 0.2f * wetness);
+                current_deposit_ratio = std::clamp(fresh_bias * (0.78f + 0.22f * load), 0.0f, 1.0f);
             }
             
             // Calculate the absolute visual difference representing strictly how much fresh external paint weight
             // was introduced exactly to this blended pixel by the engine algorithms vs standard background color.
-            const float color_diff = (dab_brush.color - sampled).length() / 1.73205f;
-            current_deposit_ratio = std::clamp(color_diff, 0.0f, 1.0f);
+            if (paint_mode_state.brush.paint_mode != Paint::BrushPaintMode::Wet &&
+                paint_mode_state.brush.paint_mode != Paint::BrushPaintMode::Oil) {
+                const float color_diff = (dab_brush.color - sampled).length() / 1.73205f;
+                current_deposit_ratio = std::clamp(color_diff, 0.0f, 1.0f);
+            }
         }
     }
 
@@ -4571,7 +5180,7 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
     Paint::PaintLayerStack* layer_stack = adapter->getLayerStack();
     const bool use_layers = (layer_stack != nullptr && layer_stack->layerCount() > 0);
     const int active_layer = paint_mode_state.active_layer_index;
-    const float dab_dt = io.DeltaTime > 0.0f ? io.DeltaTime : (1.0f / 60.0f);
+    const float dab_dt = std::max(io.DeltaTime > 0.0f ? io.DeltaTime : (1.0f / 60.0f), paint_mode_state.stroke.elapsed);
 
     // Accumulated dirty rect for region-based compositing (layers only).
     Paint::PaintDirtyRect accumulated_dirty;
@@ -4593,6 +5202,18 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
             return false;
         }
         return adapter->cloneAtUV(ch, dst, src, br, dt);
+    };
+    auto isWetManagedAuxChannel = [&](Paint::PaintChannel ch, const Paint::BrushSettings& br) -> bool {
+        if (br.paint_mode != Paint::BrushPaintMode::Wet &&
+            br.paint_mode != Paint::BrushPaintMode::Oil) {
+            return false;
+        }
+        if (ch != Paint::PaintChannel::Roughness &&
+            ch != Paint::PaintChannel::Metallic &&
+            ch != Paint::PaintChannel::Transmission) {
+            return false;
+        }
+        return getBrushChannelInput(br, ch) != nullptr;
     };
     auto updateAutoNormalAtUV = [&](const Vec2& uv, float brush_radius) -> bool {
         if (!paint_mode_state.auto_normal_from_height) {
@@ -4644,9 +5265,17 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
                 spray_brush.radius = std::max(1.0f, paint_mode_state.brush.radius * droplet_size);
                 spray_brush.strength *= (1.0f / std::sqrt(static_cast<float>(particles))) * droplet_strength;
                 for (Paint::PaintChannel channel : paint_channels) {
+                    if (isWetManagedAuxChannel(channel, spray_brush)) {
+                        continue;
+                    }
                     if (doPaintAtUV(channel, spray_uv, spray_brush, dab_dt)) {
                         hit_changed = true;
                         painted_channels.push_back(channel);
+                        if (channel == Paint::PaintChannel::BaseColor &&
+                            (spray_brush.paint_mode == Paint::BrushPaintMode::Wet ||
+                             spray_brush.paint_mode == Paint::BrushPaintMode::Oil)) {
+                            adapter->noteWetDab(active_layer, spray_uv, spray_brush, dab_dt, current_deposit_ratio);
+                        }
                         if (channel == Paint::PaintChannel::Mask &&
                             paint_mode_state.auto_normal_from_height) {
                             updateAutoNormalAtUV(spray_uv, spray_brush.radius);
@@ -4686,9 +5315,17 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         }
 
         for (Paint::PaintChannel channel : paint_channels) {
+            if (isWetManagedAuxChannel(channel, dab_brush)) {
+                continue;
+            }
             if (doPaintAtUV(channel, hit_uv, dab_brush, dab_dt)) {
                 hit_changed = true;
                 painted_channels.push_back(channel);
+                if (channel == Paint::PaintChannel::BaseColor &&
+                    (dab_brush.paint_mode == Paint::BrushPaintMode::Wet ||
+                     dab_brush.paint_mode == Paint::BrushPaintMode::Oil)) {
+                    adapter->noteWetDab(active_layer, hit_uv, dab_brush, dab_dt, current_deposit_ratio);
+                }
                 if (channel == Paint::PaintChannel::Mask &&
                     paint_mode_state.auto_normal_from_height) {
                     updateAutoNormalAtUV(hit_uv, dab_brush.radius);
@@ -4723,6 +5360,7 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
     }
 
     if (dab_changed) {
+        paint_mode_state.stroke.elapsed = 0.0f;
         paint_mode_state.stroke.changed = true;
         paint_mode_state.stroke.has_last_uv = true;
         paint_mode_state.stroke.last_u = rec.uv.u;
@@ -4743,20 +5381,21 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
                 dab_brush.color,
                 0.65f);
             paint_mode_state.stroke.has_pickup_color = true;
-        } else if (dab_brush.paint_mode == Paint::BrushPaintMode::Wet) {
+        } else if (dab_brush.paint_mode == Paint::BrushPaintMode::Wet ||
+                   dab_brush.paint_mode == Paint::BrushPaintMode::Oil) {
             paint_mode_state.stroke.pickup_color = lerpColor(
                 paint_mode_state.stroke.pickup_color,
                 dab_brush.color,
-                0.35f);
+                dab_brush.paint_mode == Paint::BrushPaintMode::Oil ? 0.18f : 0.35f);
             paint_mode_state.stroke.has_pickup_color = true;
         }
         ctx.renderer.resetCPUAccumulation();
         if (ctx.backend_ptr) {
-            // Paint-time material sync. uploadMaterials() routes dirty textures
-            // through the VulkanBackendAdapter in-place re-upload path, so each
-            // tick is just a staging copy into the existing VkImage (no destroy/
-            // create, no descriptor churn).
-            ctx.renderer.updateBackendMaterials(ctx.scene);
+            // Paint-time material sync should stay scoped to the painted
+            // material; rebuilding the full backend material table every dab
+            // scales with total scene material count and becomes visible in
+            // crowded scenes.
+            ctx.renderer.updateBackendMaterial(ctx.scene, adapter->getMaterialID());
             last_vulkan_paint_sync_time = static_cast<float>(ImGui::GetTime());
             ctx.backend_ptr->resetAccumulation();
         }
@@ -4772,7 +5411,17 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
 
             HitRecord mirrored_hit;
             if (resolveMirroredMeshPaintHit(ctx, *adapter, rec, mx, my, mz, mirrored_hit)) {
+                Paint::BrushSettings original_dab_brush = dab_brush;
+                Paint::BrushSettings mirrored_brush = makeMirroredBrushForHit(
+                    original_dab_brush,
+                    rec,
+                    mirrored_hit,
+                    mx,
+                    my,
+                    mz);
+                dab_brush = mirrored_brush;
                 const bool mirror_changed = applyPaintAtHit(mirrored_hit);
+                dab_brush = original_dab_brush;
                 if (mirror_changed) {
                     paint_mode_state.stroke.changed = true;
                 }

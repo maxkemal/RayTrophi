@@ -76,6 +76,8 @@ const float EPSILON     = 1e-4;
 const float RAY_OFFSET  = 1e-3;   // Yüzey offset (self-intersection önleme)
 const float SHADOW_TMIN = 1e-3;   // Shadow rays: avoid near-field self/adjacent contact acne
 const float OPACITY_THRESHOLD = 0.5;  // Alpha cutout threshold
+const uint MAT_FLAG_WATER = (1u << 17);
+const uint MAT_FLAG_WATER_FFT_READY = (1u << 18);
 
 // ============================================================
 // Payload — raygen shader ile eşleşmeli
@@ -1535,8 +1537,9 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
 
     // ── Micro-detail capillary ripples ──────────────────────────
     if (micro_strength > 0.001) {
-        float domainCoordScale = 20.0 / max(fft_ocean_size, 0.001);
-        float sc = max(micro_scale * domainCoordScale, 0.001);
+        // micro_scale is authored in world space. Do not scale it by the FFT
+        // ocean tile size, or large water surfaces lose their capillary detail.
+        float sc = max(micro_scale, 0.001);
         float wind_dx = cos(wind_direction);
         float wind_dz = sin(wind_direction);
         float cross_dx = -wind_dz;
@@ -1573,13 +1576,13 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
 
         float dsdx = (hx - hc) / dx;
         float dsdz = (hz - hc) / dx;
-        float microGain = useFFTOcean ? 1.45 : 1.0;
+        float microGain = 1.0;
         vec3 microN = normalize(vec3(-dsdx * micro_strength * microGain, 1.0, -dsdz * micro_strength * microGain));
         waveNormal  = normalize(waveNormal + microN);
 
         // Micro-peak foam (replaces/supplements Gerstner foam for FFT-style look)
         float microSlope = clamp(hc * 0.5 + 0.5, 0.0, 1.0);
-        float scaledFoamNoise = max(foam_noise_scale * domainCoordScale, 0.001);
+        float scaledFoamNoise = max(foam_noise_scale, 0.001);
         float foamBreakup = water_fbm(vec2(hitPos.x * scaledFoamNoise + off1_x * 0.5,
                                            hitPos.z * scaledFoamNoise + off1_z * 0.5)) * 0.5 + 0.5;
         float microFoam  = clamp((microSlope + (foamBreakup - 0.5) * 0.35 - foam_threshold) * 5.0, 0.0, 1.0);
@@ -1608,7 +1611,7 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
     }
     float shoreFoam = 0.0;
     if (shore_foam_intensity > 0.01 && foundFloor) {
-        shoreFoam = calculateShoreFoamGL(waterDepth, shore_foam_distance, shore_foam_intensity, hitPos, time, max(foam_noise_scale * (20.0 / max(fft_ocean_size, 0.001)), 0.001));
+        shoreFoam = calculateShoreFoamGL(waterDepth, shore_foam_distance, shore_foam_intensity, hitPos, time, max(foam_noise_scale, 0.001));
     }
     float totalFoam = min(foamSignal * foam_level + shoreFoam, 1.0);
     float cosNV = 0.0;
@@ -1617,12 +1620,15 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
     float tDepth   = 1.0 - cosNV;  // grazing angle → deeper look
 
     // ── Blend foam (white crest) ─────────────────────────────────
-    vec3 finalAlbedo = mix(baseWaterColor, vec3(0.92, 0.95, 1.0), clamp(totalFoam, 0.0, 0.85));
-
-    // ── Tint attenuation with water color, then scatter as glass ─
-    payload.attenuation *= finalAlbedo;
+    // CPU parity: foam tint goes only into the glass scatter color (alongside
+    // deep_color), it is NOT multiplied into payload.attenuation.
+    // Previously this multiplied finalAlbedo (depth+foam blended water_color)
+    // into the throughput AND passed vec3(1.0) to scatterGlass — which is the
+    // opposite of CPU PrincipledBSDF::scatter, where Dielectric receives the
+    // constant deep_color as tint and there is no separate throughput modulation.
+    vec3 transmissionTint = mix(deep_color, vec3(0.92, 0.95, 1.0), clamp(totalFoam, 0.0, 0.85));
     bool waterFrontFace = dot(rayDir, shadingNormal) < 0.0;
-    scatterGlass(hitPos, shadingNormal, shadingNormal, waterFrontFace, rayDir, vec3(1.0), ior, mix(roughness, 0.8, totalFoam), seed);
+    scatterGlass(hitPos, shadingNormal, shadingNormal, waterFrontFace, rayDir, transmissionTint, ior, mix(roughness, 0.8, totalFoam), seed);
 }
 
 // ============================================================
@@ -1995,7 +2001,9 @@ if (emissionTexID > 0) {
 
     // Apply normal map if present (perturb surface normal)
     int normalTexID = int(mat.normal_tex);
-    bool waterUsesFFT = mat.sheen > 0.001 &&
+    bool isWaterMaterial = ((mat.flags & MAT_FLAG_WATER) != 0u) || mat.sheen > 0.001;
+    bool waterUsesFFT = isWaterMaterial &&
+                        ((mat.flags & MAT_FLAG_WATER_FFT_READY) != 0u) &&
                         mat.height_tex > 0u &&
                         mat.normal_tex > 0u &&
                         mat.fft_ocean_size > 0.001 &&
@@ -2048,11 +2056,11 @@ if (emissionTexID > 0) {
     worldNormal = tangentNormal;
 
     // ----------------------------------------------------------
-    // IS_WATER fast path  (mat.sheen > 0 = IS_WATER flag)
+    // IS_WATER fast path. Prefer the explicit material flag, keep sheen as legacy fallback.
     // Water has its own scatter: Gerstner waves + glass refraction.
     // Must run BEFORE transmission/direct-lighting/diffuse paths.
     // ----------------------------------------------------------
-    if (mat.sheen > 0.001) {
+    if (isWaterMaterial) {
         scatterWater(
             hitPos, worldNormal, rayDir,
             /*wave_speed*/     mat.anisotropic,
@@ -2069,8 +2077,8 @@ if (emissionTexID > 0) {
             /*wind_speed*/     mat.fft_wind_speed,
             /*fft_time_scale*/ mat.fft_time_scale,
             /*fft_ocean_size*/ mat.fft_ocean_size,
-            /*fft_height_tex*/ mat.height_tex,
-            /*fft_normal_tex*/ mat.normal_tex,
+            /*fft_height_tex*/ 0u,
+            /*fft_normal_tex*/ 0u,
             /*depth_max*/      mat.subsurface_amount * 100.0,
             /*absorption*/     mat.subsurface_scale,
             /*shore_dist*/     mat.subsurface_radius_r,

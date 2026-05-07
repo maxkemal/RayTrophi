@@ -2442,17 +2442,34 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
 
         // --- GPU Terrain Blending Override ---
         if (payload.use_blended_data) {
-             mat.albedo = payload.blended_albedo;
-             mat.roughness = payload.blended_roughness;
-             mat.metallic = payload.blended_metallic;
-             mat.clearcoat = payload.blended_clearcoat;
-             mat.clearcoat_roughness = payload.blended_clearcoat_roughness;
-             mat.subsurface = payload.blended_subsurface;
-             mat.subsurface_color = payload.blended_subsurface_color;
-             mat.transmission = payload.blended_transmission;
-             mat.translucent = payload.blended_translucent;
-             mat.emission = payload.blended_emission;
-             mat.ior = payload.blended_ior;
+             if (payload.water_surface_active) {
+                 // CPU parity: water has TWO color channels.
+                 //   - direct lighting BRDF albedo  = water_color (depth+foam blended)
+                 //     evaluate_brdf reads payload.blended_albedo directly, so NEE
+                 //     already gets the right tint without overriding mat.albedo here.
+                 //   - transmission scatter tint   = constant deep_color (mat.albedo)
+                 //     CPU PrincipledBSDF::scatter passes albedoProperty.color (deep_color)
+                 //     to Dielectric, which is the unblended water material albedo.
+                 // Keep mat.albedo at its original deep_color so transmission_scatter
+                 // applies CPU-parity Beer-Lambert tint instead of the depth-blended
+                 // water_color (which collapses to near-black through Beer's law).
+                 mat.roughness = payload.blended_roughness;
+                 mat.transmission = payload.blended_transmission;
+                 mat.emission = payload.blended_emission;
+                 mat.ior = payload.blended_ior;
+             } else {
+                 mat.albedo = payload.blended_albedo;
+                 mat.roughness = payload.blended_roughness;
+                 mat.metallic = payload.blended_metallic;
+                 mat.clearcoat = payload.blended_clearcoat;
+                 mat.clearcoat_roughness = payload.blended_clearcoat_roughness;
+                 mat.subsurface = payload.blended_subsurface;
+                 mat.subsurface_color = payload.blended_subsurface_color;
+                 mat.transmission = payload.blended_transmission;
+                 mat.translucent = payload.blended_translucent;
+                 mat.emission = payload.blended_emission;
+                 mat.ior = payload.blended_ior;
+             }
         }
         if (bounce == 0) {
             first_hit_transmission = resolve_surface_transmission(mat, payload);

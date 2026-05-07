@@ -17,6 +17,7 @@
 
 // Float comparison epsilon
 constexpr float FLOAT_COMPARE_EPSILON = 1e-4f;  
+static constexpr int GPU_MAT_FLAG_WATER = (1 << 17);
 
 /**
  * @brief Optimized GPU Material structure

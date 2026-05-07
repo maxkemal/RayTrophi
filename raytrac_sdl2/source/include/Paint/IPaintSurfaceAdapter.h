@@ -1,10 +1,12 @@
 #pragma once
 
+#include <array>
 #include <memory>
 #include <string>
 #include "Vec3.h"
 #include "Paint/PaintLayer.h"
 #include "Paint/PaintSurfaceTarget.h"
+#include "Paint/PaintTextureSet.h"
 
 class Texture;
 
@@ -18,11 +20,26 @@ enum class BrushAlphaPreset : unsigned char {
     Cloud
 };
 
+enum class BrushShape : unsigned char {
+    Circle = 0,
+    Rectangle,
+    Capsule,
+    Flat
+};
+
 enum class BrushPaintMode : unsigned char {
     Normal = 0,
     Mix,
     Smudge,
-    Wet
+    Wet,
+    Oil
+};
+
+enum class WetSimulationQuality : unsigned char {
+    Auto = 0,
+    Balanced,
+    High,
+    Ultra
 };
 
 enum class BrushTool : unsigned char {
@@ -46,6 +63,16 @@ enum class PaintTextureTintMode : unsigned char {
     Overlay
 };
 
+struct BrushChannelInput {
+    bool enabled = false;
+    Vec3 color = Vec3(1.0f, 1.0f, 1.0f);
+    std::shared_ptr<Texture> paint_texture;
+    std::string paint_texture_path;
+    bool use_paint_texture = false;
+    float tint_strength = 0.6f;
+    PaintTextureTintMode tint_mode = PaintTextureTintMode::Recolor;
+};
+
 struct BrushSettings {
     float radius = 5.0f;
     float strength = 0.5f;
@@ -54,7 +81,10 @@ struct BrushSettings {
     float flow = 1.0f;
     BrushTool tool = BrushTool::Paint;
     BrushAlphaPreset alpha_preset = BrushAlphaPreset::SoftRound;
+    BrushShape shape = BrushShape::Circle;
     BrushPaintMode paint_mode = BrushPaintMode::Normal;
+    float shape_aspect = 1.0f;
+    float shape_roundness = 0.5f;
     float alpha_scale = 1.0f;
     float alpha_rotation_degrees = 0.0f;
     bool follow_stroke_angle = false;
@@ -70,9 +100,19 @@ struct BrushSettings {
     bool mirror_x = false;
     bool mirror_y = false;
     bool mirror_z = false;
+    bool flip_alpha_x = false;
+    bool flip_alpha_y = false;
     float mix_amount = 0.45f;
     float smudge_strength = 0.75f;
     float wetness = 0.65f;
+    float wet_lifetime_seconds = 2.5f;
+    float wet_diffusion = 0.24f;
+    float wet_runoff = 0.35f;
+    float wet_absorption = 0.18f;
+    float wet_drip_head = 0.45f;
+    float wet_terminal_buildup = 0.55f;
+    float wet_terminal_softness = 0.65f;
+    WetSimulationQuality wet_simulation_quality = WetSimulationQuality::Auto;
     float paint_load = 0.85f;
     float pickup_rate = 0.35f;
     float deposit_rate = 0.65f;
@@ -87,6 +127,7 @@ struct BrushSettings {
     Vec3 color = Vec3(1.0f, 1.0f, 1.0f);
     float paint_texture_tint_strength = 0.6f;
     PaintTextureTintMode paint_texture_tint_mode = PaintTextureTintMode::Recolor;
+    std::array<BrushChannelInput, kPaintChannelCount> channel_inputs{};
     bool show_preview = true;
 };
 

@@ -2355,6 +2355,7 @@ void OptixWrapper::updateMaterialBuffer(const std::vector<GpuMaterial>& material
     }
     
     m_material_count = static_cast<int>(new_count);
+    m_cached_materials = materials;
     
     // Reset accumulation to show material buffer change immediately
     resetAccumulation();

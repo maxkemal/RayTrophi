@@ -436,7 +436,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                     ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, active_mat_id, (uint16_t)i);
 
                     if (ctx.backend_ptr) {
-                        ctx.renderer.updateBackendMaterials(ctx.scene);
+                        ctx.renderer.updateBackendMaterial(ctx.scene, static_cast<uint16_t>(i));
                         ctx.backend_ptr->resetAccumulation();
                     }
                     g_ProjectManager.markModified();
@@ -508,7 +508,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, active_mat_id, new_id);
 
             if (ctx.backend_ptr) {
-                ctx.renderer.updateBackendMaterials(ctx.scene);
+                ctx.renderer.updateBackendMaterial(ctx.scene, new_id);
                 ctx.backend_ptr->resetAccumulation();
             }
             g_ProjectManager.markModified();
@@ -564,7 +564,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, active_mat_id, new_id);
 
             if (ctx.backend_ptr) {
-                ctx.renderer.updateBackendMaterials(ctx.scene);
+                ctx.renderer.updateBackendMaterial(ctx.scene, new_id);
                 ctx.backend_ptr->resetAccumulation();
             }
             g_ProjectManager.markModified();
@@ -842,7 +842,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             // Only reset accumulation and update GPU material buffers
             ctx.renderer.resetCPUAccumulation();
             if (ctx.backend_ptr) {
-                ctx.renderer.updateBackendMaterials(ctx.scene);
+                ctx.renderer.updateBackendMaterial(ctx.scene, active_mat_id);
                 ctx.backend_ptr->resetAccumulation();
             }
         }
@@ -920,7 +920,7 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
 
         ctx.renderer.resetCPUAccumulation();
         if (ctx.backend_ptr) {
-            ctx.renderer.updateBackendMaterials(ctx.scene);
+            ctx.renderer.updateBackendMaterial(ctx.scene, mat_id);
             ctx.backend_ptr->resetAccumulation();
         }
     };

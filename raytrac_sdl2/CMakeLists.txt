@@ -3,6 +3,17 @@ project(RayTrophi VERSION 1.0 LANGUAGES CXX CUDA)
 
 option(RAYTROPHI_ENABLE_OZZ "Enable future Ozz animation integration hooks" ON)
 
+set(RAYTROPHI_XATLAS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/external/xatlas" CACHE PATH "Path to vendored xatlas source directory")
+set(RAYTROPHI_HAS_XATLAS OFF)
+if(NOT (EXISTS "${RAYTROPHI_XATLAS_ROOT}/xatlas.h" AND EXISTS "${RAYTROPHI_XATLAS_ROOT}/xatlas.cpp"))
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/xatlas/source/xatlas/xatlas.h" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/xatlas/source/xatlas/xatlas.cpp")
+        set(RAYTROPHI_XATLAS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/external/xatlas/source/xatlas" CACHE PATH "Path to vendored xatlas source directory" FORCE)
+    endif()
+endif()
+if(EXISTS "${RAYTROPHI_XATLAS_ROOT}/xatlas.h" AND EXISTS "${RAYTROPHI_XATLAS_ROOT}/xatlas.cpp")
+    set(RAYTROPHI_HAS_XATLAS ON)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_ARCHITECTURES 50)  # SM 5.0 for broad GPU support
@@ -139,6 +150,9 @@ set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${MINIZ_SOURCES} ${CUDA_SOURCES_
 if(RAYTROPHI_ENABLE_OZZ)
     list(APPEND ALL_SOURCES ${OZZ_RUNTIME_SOURCES})
 endif()
+if(RAYTROPHI_HAS_XATLAS)
+    list(APPEND ALL_SOURCES "${RAYTROPHI_XATLAS_ROOT}/xatlas.cpp")
+endif()
 
 # --- CUDA / OPTIX ---
 find_package(CUDAToolkit REQUIRED)
@@ -205,6 +219,9 @@ set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "RayTrophi Studio")
 if(RAYTROPHI_ENABLE_OZZ)
     target_compile_definitions(${PROJECT_NAME} PRIVATE RAYTROPHI_ENABLE_OZZ=1)
 endif()
+if(RAYTROPHI_HAS_XATLAS)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE RAYTROPHI_HAS_XATLAS=1)
+endif()
 
 # --- INCLUDE DIRECTORIES ---
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -238,6 +255,13 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${ASSIMP_ROOT}/include"
     "${VULKAN_SDK}/Include"
 )
+
+if(RAYTROPHI_HAS_XATLAS)
+    target_include_directories(${PROJECT_NAME} PRIVATE "${RAYTROPHI_XATLAS_ROOT}")
+    message(STATUS "xatlas backend enabled from: ${RAYTROPHI_XATLAS_ROOT}")
+else()
+    message(STATUS "xatlas backend disabled: vendored source not found at ${RAYTROPHI_XATLAS_ROOT}")
+endif()
 
 # --- LIBRARIES (FULL PATHS) ---
 # SDL2

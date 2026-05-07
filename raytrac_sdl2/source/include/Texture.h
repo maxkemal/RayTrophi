@@ -965,6 +965,7 @@ public:
         // Mark Vulkan sampler cache as stale so the backend re-uploads on next material sync.
         // Whole-texture refresh — collapse any tracked partial rect into "full".
         markVulkanDirtyFull();
+        markSaveDirty();
         if (!is_gpu_uploaded || !g_hasOptix || !cuda_array) return;
 
         cudaError_t err = cudaSuccess;
@@ -1021,6 +1022,7 @@ public:
         // state: the raster viewport may still be the active backend even when
         // CUDA/OptiX is unavailable.
         markVulkanDirtyRegion(x, y, w, h);
+        markSaveDirty();
 
         if (!is_gpu_uploaded || !g_hasOptix || !cuda_array) return false;
 
@@ -1163,6 +1165,7 @@ public:
     bool is_gray_scale = true;
     bool m_is_loaded = false;
     bool is_gpu_uploaded = false;
+    bool save_dirty = false;
     // [FIX] Set to true by updateGPU() so that Vulkan backend knows to re-upload
     // the texture to its sampler array even though the pointer hasn't changed.
     // The Vulkan getTexID cache is keyed by pointer; in-place content changes
@@ -1184,6 +1187,7 @@ public:
 
     void markVulkanDirtyFull() {
         vulkan_dirty = true;
+        save_dirty = true;
         vulkan_dirty_full = true;
         vulkan_dirty_min_x = 0;
         vulkan_dirty_min_y = 0;
@@ -1193,6 +1197,7 @@ public:
     void markVulkanDirtyRegion(int x, int y, int w, int h) {
         if (w <= 0 || h <= 0) return;
         vulkan_dirty = true;
+        save_dirty = true;
         if (vulkan_dirty_full) return;
         const int x1 = x + w - 1;
         const int y1 = y + h - 1;
@@ -1208,6 +1213,15 @@ public:
             if (x1 > vulkan_dirty_max_x) vulkan_dirty_max_x = x1;
             if (y1 > vulkan_dirty_max_y) vulkan_dirty_max_y = y1;
         }
+    }
+    void markSaveDirty() {
+        save_dirty = true;
+    }
+    void clearSaveDirty() {
+        save_dirty = false;
+    }
+    bool isSaveDirty() const {
+        return save_dirty;
     }
     void clearVulkanDirty() {
         vulkan_dirty = false;

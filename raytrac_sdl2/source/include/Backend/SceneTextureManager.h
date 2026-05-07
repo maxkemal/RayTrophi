@@ -116,6 +116,15 @@ public:
     void clearOptixTextureId(int64_t textureId);
     size_t textureCount() const;
     uint64_t totalEstimatedTextureBytes() const;
+    // Bytes physically resident on GPU. The Vulkan raster viewport and the
+    // active RT backend (OptiX or Vulkan-RT, never both — switching one in
+    // tears the other's backings down) each keep their own VRAM copy, so we
+    // sum across owners that actually have live backings. Records that exist
+    // as CPU-side metadata only (no live backing — DDS cache, paint history,
+    // etc.) are excluded; those are the ghost entries that previously inflated
+    // the VRAM-pressure check and triggered false-positive LRU eviction during
+    // mesh paint.
+    uint64_t totalResidentTextureBytes() const;
     uint64_t estimatedTextureBytesForOwner(const std::string& ownerTag) const;
     void logBudgetSummary(const std::string& context = {}) const;
     // Evict LRU Vulkan backings for ownerTag until estimatedTextureBytesForOwner(ownerTag) <= targetBytes.

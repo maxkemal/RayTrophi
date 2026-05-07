@@ -13,6 +13,7 @@
 #include "Vec3.h"
 #include "Material.h"
 #include "Triangle.h"
+#include "WaterShaderCommon.h"
 #include "json.hpp"
 #include <vector>
 #include <memory>
@@ -60,8 +61,8 @@ struct WaterWaveParams {
     bool use_fft_ocean = false;         // Enable FFT ocean simulation
     int fft_resolution = 256;           // FFT grid size (64, 128, 256, 512)
     float fft_ocean_size = 100.0f;      // World space coverage (meters)
-    bool auto_domain_from_mesh = true;  // Derive wave/FFT domain from water surface world size
-    float domain_size_multiplier = 1.0f;// Extra tiling/coverage multiplier for all wave models
+    bool auto_domain_from_mesh = false; // Deprecated: keep explicit FFT domain stable across mesh scale
+    float domain_size_multiplier = 1.0f;// Deprecated: ignored to keep one stable water domain
     float fft_wind_speed = 10.0f;       // Wind speed (m/s) - affects wave size
     float fft_wind_direction = 0.0f;    // Wind direction (degrees)
     float fft_choppiness = 1.0f;        // Horizontal displacement strength
@@ -124,6 +125,40 @@ struct WaterWaveParams {
         Pond            // Small pond with subtle ripples
     };
     WaterPreset current_preset = WaterPreset::Custom;
+
+    WaterShader::SurfaceParams toShaderParams(float time_seconds = 0.0f, float resolved_domain_size = -1.0f) const {
+        WaterShader::SurfaceParams out;
+        out.wave_speed = wave_speed;
+        out.wave_strength = wave_strength;
+        out.wave_frequency = wave_frequency;
+        out.shallow_color = shallow_color;
+        out.deep_color = deep_color;
+        out.absorption_color = absorption_color;
+        out.depth_max = depth_max;
+        out.absorption_density = absorption_density;
+        out.clarity = clarity;
+        out.foam_level = foam_level;
+        out.shore_foam_distance = shore_foam_distance;
+        out.shore_foam_intensity = shore_foam_intensity;
+        out.caustic_intensity = caustic_intensity;
+        out.caustic_scale = caustic_scale;
+        out.caustic_speed = caustic_speed;
+        out.sss_intensity = sss_intensity;
+        out.sss_color = sss_color;
+        out.use_fft_ocean = use_fft_ocean;
+        out.fft_ocean_size = resolved_domain_size > 0.0f ? resolved_domain_size : fft_ocean_size;
+        out.fft_choppiness = fft_choppiness;
+        out.micro_detail_strength = micro_detail_strength;
+        out.micro_detail_scale = micro_detail_scale;
+        out.micro_anim_speed = micro_anim_speed;
+        out.micro_morph_speed = micro_morph_speed;
+        out.foam_noise_scale = foam_noise_scale;
+        out.foam_threshold = foam_threshold;
+        out.wind_direction = fft_wind_direction;
+        out.wind_speed = fft_wind_speed;
+        out.time = time_seconds;
+        return out;
+    }
     
     // Apply preset values
     void applyPreset(WaterPreset preset) {

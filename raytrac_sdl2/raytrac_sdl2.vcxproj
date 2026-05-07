@@ -101,7 +101,13 @@
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
-  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Label="UserMacros">
+    <RayTrophiXatlasRoot Condition="Exists('$(ProjectDir)external\xatlas\xatlas.cpp') and Exists('$(ProjectDir)external\xatlas\xatlas.h')">$(ProjectDir)external\xatlas</RayTrophiXatlasRoot>
+    <RayTrophiXatlasRoot Condition="'$(RayTrophiXatlasRoot)'=='' and Exists('$(ProjectDir)external\xatlas\source\xatlas\xatlas.cpp') and Exists('$(ProjectDir)external\xatlas\source\xatlas\xatlas.h')">$(ProjectDir)external\xatlas\source\xatlas</RayTrophiXatlasRoot>
+    <RayTrophiHasXatlas Condition="'$(RayTrophiXatlasRoot)'!=''">true</RayTrophiHasXatlas>
+    <RayTrophiXatlasInclude Condition="'$(RayTrophiHasXatlas)'=='true'">;$(RayTrophiXatlasRoot)</RayTrophiXatlasInclude>
+    <RayTrophiXatlasDefine Condition="'$(RayTrophiHasXatlas)'=='true'">;RAYTROPHI_HAS_XATLAS=1</RayTrophiXatlasDefine>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)external;$(ProjectDir)external\imgui;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;$(IncludePath)</IncludePath>
     <LibraryPath>$(VULKAN_SDK)\Lib;$(ProjectDir)..\vcpkg\installed\x64-windows\debug\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(EMBREE_ROOT)\lib;$(LibraryPath)</LibraryPath>
@@ -150,7 +156,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>_DEBUG;_CONSOLE;RAYTROPHI_ENABLE_OZZ=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;RAYTROPHI_ENABLE_OZZ=1$(RayTrophiXatlasDefine);%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>Default</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -161,7 +167,7 @@
       <SupportJustMyCode>false</SupportJustMyCode>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -192,7 +198,7 @@
       <FunctionLevelLinking>false</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;RAYTROPHI_ENABLE_OZZ=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;RAYTROPHI_ENABLE_OZZ=1$(RayTrophiXatlasDefine);%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>Default</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
@@ -207,7 +213,7 @@
       <WholeProgramOptimization>true</WholeProgramOptimization>
       <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
       <OpenMPSupport>true</OpenMPSupport>
-      <AdditionalIncludeDirectories>$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
       <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -281,6 +287,8 @@
     <ClInclude Include="external\imgui\imgui_impl_sdl2.h" />
     <ClInclude Include="external\imgui\imgui_impl_sdlrenderer2.h" />
     <ClInclude Include="external\imgui\imgui_internal.h" />
+    <ClInclude Include="external\xatlas\xatlas.h" Condition="Exists('$(ProjectDir)external\xatlas\xatlas.h')" />
+    <ClInclude Include="external\xatlas\source\xatlas\xatlas.h" Condition="'$(RayTrophiHasXatlas)'=='true' and !Exists('$(ProjectDir)external\xatlas\xatlas.h')" />
     <ClInclude Include="source\src\UI\scene_ui_nodeeditor.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_river.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_terrain.hpp" />
@@ -509,6 +517,8 @@
     <ClCompile Include="external\imgui\imgui_impl_sdlrenderer2.cpp" />
     <ClCompile Include="external\imgui\imgui_tables.cpp" />
     <ClCompile Include="external\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="external\xatlas\xatlas.cpp" Condition="Exists('$(ProjectDir)external\xatlas\xatlas.cpp')" />
+    <ClCompile Include="external\xatlas\source\xatlas\xatlas.cpp" Condition="'$(RayTrophiHasXatlas)'=='true' and !Exists('$(ProjectDir)external\xatlas\xatlas.cpp')" />
     <!-- Unified Rendering System -->
     <ClCompile Include="source\src\Render\unified_converters.cpp" />
   </ItemGroup>

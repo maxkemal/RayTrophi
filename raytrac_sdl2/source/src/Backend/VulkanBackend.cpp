@@ -6771,7 +6771,13 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
     if (m_sceneTextureManager) {
         const uint64_t dedicatedVRAM = m_device->getCapabilities().dedicatedVRAM;
         if (dedicatedVRAM > 0) {
-            const uint64_t textureBytes = m_sceneTextureManager->totalEstimatedTextureBytes();
+            // Use GPU-resident bytes only — totalEstimatedTextureBytes() also
+            // counts CPU-side ghost records (DDS cache, paint history, records
+            // whose backings have been torn down), which used to inflate the
+            // estimate ~4x and triggered false-positive LRU eviction during
+            // mesh paint, evicting freshly uploaded paint textures before
+            // raster (and the active RT backend) could pick them up.
+            const uint64_t textureBytes = m_sceneTextureManager->totalResidentTextureBytes();
             const uint64_t warnThreshold = dedicatedVRAM * 7 / 10;
             const uint64_t trimThreshold = dedicatedVRAM * 85 / 100;
             const uint64_t trimTarget    = dedicatedVRAM * 6 / 10;
@@ -7240,7 +7246,35 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                     return this->uploadTexture2D(fp.data(), tex->width, tex->height, 4, false, true);
                 }
 
+                // Use the dirty snapshot captured at function entry
+                // (`needsDirtyRefresh`, line 7113) — by the time we reach this
+                // lambda the in-place fast path above has already called
+                // clearVulkanDirty() at line 7222 when it failed (which is
+                // exactly the BC/DDS-backed case we care about), so reading
+                // tex->vulkan_dirty here would always see false.
+                // If the user just painted on this texture, `pixels` holds the
+                // new content and any on-disk DDS cache is stale (it was
+                // written before the stroke). Skipping the cache forces
+                // re-encoding from `pixels`, which is what makes paint visible
+                // in raster + Vulkan-RT. CPU/OptiX worked already because
+                // they never consult the cache.
+                const bool hasPendingPaintEdits = needsDirtyRefresh;
                 if (tex->vulkan_dirty) tex->clearVulkanDirty();
+
+                // Wipe the stale managed DDS cache for this texture on the
+                // first dirty transition. Without this, closing and reopening
+                // the project would replay the pre-paint compressed bytes,
+                // silently reverting the stroke. Idempotent: subsequent
+                // strokes hit the in-place fast path and never reach this
+                // lambda, so file I/O stays one-shot per painted texture.
+                // Adjacent user-supplied DDS files are not touched.
+                if (hasPendingPaintEdits && !tex->name.empty()) {
+                    const size_t removed = invalidateManagedTextureCacheForTexture(*tex);
+                    if (removed > 0) {
+                        SCENE_LOG_INFO("[Vulkan] Invalidated " + std::to_string(removed) +
+                                       " stale DDS cache file(s) for painted texture: " + tex->name);
+                    }
+                }
                 const std::vector<CompactVec4>& px = tex->pixels;
                 if (px.empty()) return 0;
 
@@ -7248,7 +7282,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                     (compressionPlan.preferredTarget == TextureCompressionTarget::BC4 && m_device->getCapabilities().supportsBC4) ||
                     (compressionPlan.preferredTarget == TextureCompressionTarget::BC5 && m_device->getCapabilities().supportsBC5) ||
                     (compressionPlan.preferredTarget == TextureCompressionTarget::BC7 && m_device->getCapabilities().supportsBC7);
-                if (supportsPreferredCompression && !tex->name.empty()) {
+                if (supportsPreferredCompression && !tex->name.empty() && !hasPendingPaintEdits) {
                     DDSCompressedPayload payload{};
                     if (auto cacheCandidate = findCompressedTextureCacheCandidate(*tex, textureType, useSrgb)) {
                         if (loadCompressedDDSFile(cacheCandidate->ddsPath, cacheCandidate->target, useSrgb, payload) &&
@@ -7486,6 +7520,130 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
         return false;
     }
 
+    auto resolveHostTexture = [](int64_t key) -> Texture* {
+        if (!key) return nullptr;
+        if (key > 0 && static_cast<uint64_t>(key) < (1ull << 32)) return nullptr;
+        return reinterpret_cast<Texture*>(key);
+    };
+
+    auto syncExistingTexture = [&](int64_t hostHandle,
+                                   uint32_t& gpuTextureId,
+                                   TextureType textureType,
+                                   bool forceLinear,
+                                   bool preferSingleChannel = false) -> bool {
+        if (!hostHandle) {
+            gpuTextureId = 0;
+            return true;
+        }
+
+        Texture* tex = resolveHostTexture(hostHandle);
+        if (!tex || !tex->is_loaded()) {
+            gpuTextureId = 0;
+            return true;
+        }
+
+        if (gpuTextureId == 0) {
+            return false;
+        }
+
+        if (!tex->vulkan_dirty) {
+            return true;
+        }
+
+        if (tex->is_hdr) {
+            return false;
+        }
+
+        const auto& pixels = tex->pixels;
+        if (pixels.empty()) {
+            return false;
+        }
+
+        const bool useSrgb = forceLinear ? false : tex->is_srgb;
+        const TextureCompressionPlan compressionPlan = buildTextureCompressionPlan(tex, textureType);
+        const bool canUseSingleChannel =
+            (preferSingleChannel || compressionPlan.preferSingleChannelFallback) &&
+            !useSrgb && tex->is_gray_scale && !tex->has_alpha;
+        const uint32_t uploadChannels = canUseSingleChannel ? 1u : 4u;
+
+        int rx = 0, ry = 0, rw = 0, rh = 0;
+        bool fullRegion = true;
+        const bool haveDirtyRect = tex->getVulkanDirtyRegion(rx, ry, rw, rh, fullRegion);
+        if (haveDirtyRect && !fullRegion && rw > 0 && rh > 0) {
+            std::vector<uint8_t> region(static_cast<size_t>(rw) *
+                                        static_cast<size_t>(rh) *
+                                        static_cast<size_t>(uploadChannels));
+            const int srcW = tex->width;
+            if (canUseSingleChannel) {
+                for (int j = 0; j < rh; ++j) {
+                    const size_t srcRow = static_cast<size_t>(ry + j) * static_cast<size_t>(srcW);
+                    const size_t dstRow = static_cast<size_t>(j) * static_cast<size_t>(rw);
+                    for (int i = 0; i < rw; ++i) {
+                        region[dstRow + static_cast<size_t>(i)] = pixels[srcRow + static_cast<size_t>(rx + i)].r;
+                    }
+                }
+            } else {
+                for (int j = 0; j < rh; ++j) {
+                    const size_t srcRow = static_cast<size_t>(ry + j) * static_cast<size_t>(srcW);
+                    const size_t dstRow = static_cast<size_t>(j) * static_cast<size_t>(rw) * 4u;
+                    for (int i = 0; i < rw; ++i) {
+                        const auto& pixel = pixels[srcRow + static_cast<size_t>(rx + i)];
+                        const size_t dstOffset = dstRow + static_cast<size_t>(i) * 4u;
+                        region[dstOffset + 0] = pixel.r;
+                        region[dstOffset + 1] = pixel.g;
+                        region[dstOffset + 2] = pixel.b;
+                        region[dstOffset + 3] = pixel.a;
+                    }
+                }
+            }
+
+            if (updateTexture2DRegion(gpuTextureId,
+                                      region.data(),
+                                      static_cast<uint32_t>(tex->width),
+                                      static_cast<uint32_t>(tex->height),
+                                      uploadChannels,
+                                      useSrgb,
+                                      rx,
+                                      ry,
+                                      static_cast<uint32_t>(rw),
+                                      static_cast<uint32_t>(rh))) {
+                tex->clearVulkanDirty();
+                return true;
+            }
+        }
+
+        std::vector<uint8_t> packedPixels(static_cast<size_t>(tex->width) *
+                                          static_cast<size_t>(tex->height) *
+                                          static_cast<size_t>(uploadChannels));
+        if (canUseSingleChannel) {
+            for (size_t i = 0; i < pixels.size(); ++i) {
+                packedPixels[i] = pixels[i].r;
+            }
+        } else {
+            for (size_t i = 0; i < pixels.size(); ++i) {
+                const auto& pixel = pixels[i];
+                const size_t dstOffset = i * 4u;
+                packedPixels[dstOffset + 0] = pixel.r;
+                packedPixels[dstOffset + 1] = pixel.g;
+                packedPixels[dstOffset + 2] = pixel.b;
+                packedPixels[dstOffset + 3] = pixel.a;
+            }
+        }
+
+        if (!updateTexture2DInPlace(gpuTextureId,
+                                    packedPixels.data(),
+                                    static_cast<uint32_t>(tex->width),
+                                    static_cast<uint32_t>(tex->height),
+                                    uploadChannels,
+                                    useSrgb,
+                                    false)) {
+            return false;
+        }
+
+        tex->clearVulkanDirty();
+        return true;
+    };
+
     VulkanRT::VkGpuMaterial gm = m_cachedGpuMaterials[materialIndex];
     gm.albedo_r = m.albedo.x;
     gm.albedo_g = m.albedo.y;
@@ -7540,6 +7698,60 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
     gm.foam_noise_scale = m.foam_noise_scale;
     if (m.flags & Backend::IBackend::MAT_FLAG_TERRAIN) {
         gm._terrain_layer_idx = m.terrainLayerIdx;
+    }
+
+    if (!syncExistingTexture(m.albedoTexture, gm.albedo_tex, TextureType::Albedo, false) ||
+        !syncExistingTexture(m.normalTexture, gm.normal_tex, TextureType::Normal, true) ||
+        !syncExistingTexture(m.roughnessTexture, gm.roughness_tex, TextureType::Roughness, true, false) ||
+        !syncExistingTexture(m.metallicTexture, gm.metallic_tex, TextureType::Metallic, true, false) ||
+        !syncExistingTexture(m.emissionTexture, gm.emission_tex, TextureType::Emission, false) ||
+        !syncExistingTexture(m.transmissionTexture, gm.transmission_tex, TextureType::Transmission, true, true) ||
+        !syncExistingTexture(m.opacityTexture, gm.opacity_tex, TextureType::Opacity, true, true) ||
+        !syncExistingTexture(m.heightTexture, gm.height_tex, TextureType::Unknown, true)) {
+        return false;
+    }
+
+    if (m.opacityTexture) {
+        Texture* opTex = resolveHostTexture(m.opacityTexture);
+        if (opTex && opTex->is_loaded() && opTex->has_alpha) {
+            const bool hasBc4Dds = [&]() -> bool {
+                auto cand = findCompressedTextureCacheCandidate(*opTex, TextureType::Opacity, false);
+                return cand && cand->target == TextureCompressionTarget::BC4;
+            }();
+            if (!hasBc4Dds) {
+                gm.flags |= (1u << 8);
+            }
+        }
+    }
+
+    auto needsRedChannelFlag = [](Texture* tex, TextureType type) -> bool {
+        if (!tex || !tex->is_loaded()) return false;
+        if (auto cand = findCompressedTextureCacheCandidate(*tex, type, false)) {
+            if (cand->target == TextureCompressionTarget::BC4) return true;
+        }
+        return tex->is_gray_scale && !tex->has_alpha;
+    };
+    if (m.roughnessTexture) {
+        Texture* roughnessTex = resolveHostTexture(m.roughnessTexture);
+        if (needsRedChannelFlag(roughnessTex, TextureType::Roughness)) {
+            gm.flags |= (1u << 9);
+        }
+    }
+    if (m.metallicTexture) {
+        Texture* metallicTex = resolveHostTexture(m.metallicTexture);
+        if (needsRedChannelFlag(metallicTex, TextureType::Metallic)) {
+            gm.flags |= (1u << 10);
+        }
+    }
+    if (m.normalTexture) {
+        Texture* normalTex = resolveHostTexture(m.normalTexture);
+        if (normalTex && normalTex->is_loaded()) {
+            if (auto cand = findCompressedTextureCacheCandidate(*normalTex, TextureType::Normal, false)) {
+                if (cand->target == TextureCompressionTarget::BC5) {
+                    gm.flags |= (1u << 11);
+                }
+            }
+        }
     }
 
     const uint64_t offset = (uint64_t)materialIndex * sizeof(VulkanRT::VkGpuMaterial);

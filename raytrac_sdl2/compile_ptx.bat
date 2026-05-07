@@ -88,4 +88,22 @@ echo.
 echo ========================================
 echo   All PTX files compiled successfully!
 echo ========================================
+
+echo.
+echo Deploying PTX files to runtime directories...
+set DEPLOY1=%~dp0..\x64\Release
+set DEPLOY2=%~dp0..\x64\Debug
+set DEPLOY3=%~dp0
+
+for %%d in ("%DEPLOY1%" "%DEPLOY2%" "%DEPLOY3%") do (
+    if exist %%d (
+        echo   Copying to %%d
+        copy /Y "e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\raygen.ptx" %%d >nul 2>&1
+        copy /Y "e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\miss_kernels.ptx" %%d >nul 2>&1
+        copy /Y "e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\hitgroup_kernels.ptx" %%d >nul 2>&1
+        copy /Y "e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\erosion_kernels.ptx" %%d >nul 2>&1
+        copy /Y "e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\foliage_deform.ptx" %%d >nul 2>&1
+    )
+)
+echo Deploy complete.
 pause

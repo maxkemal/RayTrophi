@@ -6,12 +6,28 @@
 #include "MaterialManager.h"
 #include "PrincipledBSDF.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <unordered_map>
 #include <tuple>
 
 namespace Paint {
 
 namespace {
+
+constexpr std::array<PaintChannel, 3> kWetAuxScalarChannels = {
+    PaintChannel::Roughness,
+    PaintChannel::Metallic,
+    PaintChannel::Transmission
+};
+
+struct WetAuxChannelBinding {
+    PaintChannel channel = PaintChannel::Roughness;
+    std::vector<CompactVec4>* pixels = nullptr;
+    std::shared_ptr<Texture> texture;
+    std::vector<CompactVec4> source_pixels;
+    bool changed = false;
+};
 
 TextureType toTextureType(PaintChannel channel) {
     switch (channel) {
@@ -79,7 +95,93 @@ void fillTextureDefault(Texture& texture, PaintChannel channel) {
     }
 }
 
+const BrushChannelInput* getBrushChannelInput(const BrushSettings& brush, PaintChannel channel) {
+    const size_t index = static_cast<size_t>(channel);
+    if (index >= brush.channel_inputs.size()) {
+        return nullptr;
+    }
+    const BrushChannelInput& input = brush.channel_inputs[index];
+    return input.enabled ? &input : nullptr;
+}
+
+Vec3 getBrushChannelColor(PaintChannel channel, const BrushSettings& brush) {
+    if (const BrushChannelInput* input = getBrushChannelInput(brush, channel)) {
+        return input->color;
+    }
+    return brush.color;
+}
+
+std::shared_ptr<Texture> getBrushChannelTexture(PaintChannel channel, const BrushSettings& brush) {
+    if (const BrushChannelInput* input = getBrushChannelInput(brush, channel)) {
+        if (input->use_paint_texture && input->paint_texture && input->paint_texture->is_loaded()) {
+            return input->paint_texture;
+        }
+        return nullptr;
+    }
+    if (brush.use_paint_texture && brush.paint_texture && brush.paint_texture->is_loaded()) {
+        return brush.paint_texture;
+    }
+    return nullptr;
+}
+
+float getBrushChannelTintStrength(PaintChannel channel, const BrushSettings& brush) {
+    if (const BrushChannelInput* input = getBrushChannelInput(brush, channel)) {
+        return input->tint_strength;
+    }
+    return brush.paint_texture_tint_strength;
+}
+
+PaintTextureTintMode getBrushChannelTintMode(PaintChannel channel, const BrushSettings& brush) {
+    if (const BrushChannelInput* input = getBrushChannelInput(brush, channel)) {
+        return input->tint_mode;
+    }
+    return brush.paint_texture_tint_mode;
+}
+
+float srgbToLinear01(float value) {
+    const float clamped = std::clamp(value, 0.0f, 1.0f);
+    return clamped <= 0.04045f
+        ? (clamped / 12.92f)
+        : std::pow((clamped + 0.055f) / 1.055f, 2.4f);
+}
+
+float linearToSrgb01(float value) {
+    const float clamped = std::clamp(value, 0.0f, 1.0f);
+    return clamped <= 0.0031308f
+        ? (clamped * 12.92f)
+        : (1.055f * std::pow(clamped, 1.0f / 2.4f) - 0.055f);
+}
+
+uint8_t linearToSrgbByte01(float value) {
+    return static_cast<uint8_t>(std::clamp(linearToSrgb01(value) * 255.0f + 0.5f, 0.0f, 255.0f));
+}
+
+float srgbByteToLinear01(uint8_t value) {
+    return srgbToLinear01(static_cast<float>(value) / 255.0f);
+}
+
+void blendBaseColorChannelLinear(uint8_t& dst, uint8_t target, float alpha) {
+    const float t = std::clamp(alpha, 0.0f, 1.0f);
+    const float current_linear = srgbByteToLinear01(dst);
+    const float target_linear = srgbByteToLinear01(target);
+    dst = linearToSrgbByte01(current_linear + (target_linear - current_linear) * t);
+}
+void blendHeightMaskPixelChannels(CompactVec4& dst, const CompactVec4& src, float opacity) {
+    const float sa = std::clamp(opacity, 0.0f, 1.0f);
+    const float neutral = 128.0f;
+    const float dst_delta = static_cast<float>(dst.r) - neutral;
+    const float src_delta = static_cast<float>(src.r) - neutral;
+    const float out = neutral + dst_delta + src_delta * sa;
+    const uint8_t value = static_cast<uint8_t>(std::clamp(out, 0.0f, 255.0f) + 0.5f);
+    dst.r = value;
+    dst.g = value;
+    dst.b = value;
+    dst.a = 255;
+}
+}
+
 CompactVec4 makeBrushPixel(PaintChannel channel, const BrushSettings& brush) {
+    const Vec3 channel_color = getBrushChannelColor(channel, brush);
     const auto toByte = [](float value) -> uint8_t {
         return static_cast<uint8_t>(std::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
     };
@@ -96,12 +198,12 @@ CompactVec4 makeBrushPixel(PaintChannel channel, const BrushSettings& brush) {
             // Albedo textures are sampled as sRGB->linear later, so painted values must be
             // encoded back to sRGB bytes before storing or repeated mix/smudge will darken.
             return CompactVec4(
-                linearToSrgbByte(brush.color.x),
-                linearToSrgbByte(brush.color.y),
-                linearToSrgbByte(brush.color.z),
+                linearToSrgbByte(channel_color.x),
+                linearToSrgbByte(channel_color.y),
+                linearToSrgbByte(channel_color.z),
                 255);
         case PaintChannel::Emission:
-            return CompactVec4(toByte(brush.color.x), toByte(brush.color.y), toByte(brush.color.z), 255);
+            return CompactVec4(toByte(channel_color.x), toByte(channel_color.y), toByte(channel_color.z), 255);
         case PaintChannel::Normal: {
             // Tangent-space normals must point out of the surface (n.z >= 0).
             // brush.color is a free RGB picker, so a user-chosen red (1,0,0)
@@ -110,9 +212,9 @@ CompactVec4 makeBrushPixel(PaintChannel channel, const BrushSettings& brush) {
             // shading and NaN reflection terms. Clamp z to non-negative
             // before re-normalising.
             Vec3 n(
-                brush.color.x * 2.0f - 1.0f,
-                brush.color.y * 2.0f - 1.0f,
-                brush.color.z * 2.0f - 1.0f);
+                channel_color.x * 2.0f - 1.0f,
+                channel_color.y * 2.0f - 1.0f,
+                channel_color.z * 2.0f - 1.0f);
             if (n.z < 0.0f) n.z = 0.0f;
             n = n.normalize();
             // Edge case: clamping z to 0 with x=y=0 leaves a zero vector.
@@ -131,7 +233,7 @@ CompactVec4 makeBrushPixel(PaintChannel channel, const BrushSettings& brush) {
         case PaintChannel::Metallic:
         case PaintChannel::Mask:
         case PaintChannel::Transmission: {
-            const float grayscale = std::clamp((brush.color.x + brush.color.y + brush.color.z) / 3.0f, 0.0f, 1.0f);
+            const float grayscale = std::clamp((channel_color.x + channel_color.y + channel_color.z) / 3.0f, 0.0f, 1.0f);
             const uint8_t value = toByte(grayscale);
             return CompactVec4(value, value, value, 255);
         }
@@ -143,7 +245,7 @@ CompactVec4 makeBrushPixel(PaintChannel channel, const BrushSettings& brush) {
             // any material whose flags bit 256 (or shared albedo+opacity slot)
             // selected the alpha branch would see "always opaque" and the dab
             // would have no visible effect.
-            const float grayscale = std::clamp((brush.color.x + brush.color.y + brush.color.z) / 3.0f, 0.0f, 1.0f);
+            const float grayscale = std::clamp((channel_color.x + channel_color.y + channel_color.z) / 3.0f, 0.0f, 1.0f);
             const uint8_t value = toByte(grayscale);
             return CompactVec4(value, value, value, value);
         }
@@ -162,6 +264,55 @@ void rotateBrushCoords(float& x, float& y, float degrees) {
     const float ry = x * sn + y * cs;
     x = rx;
     y = ry;
+}
+
+float brushShapeAspectScale(const BrushSettings& brush) {
+    return std::sqrt(std::clamp(brush.shape_aspect, 0.1f, 8.0f));
+}
+
+float brushShapeDistance(BrushShape shape, float x, float y, float roundness) {
+    const float ax = std::abs(x);
+    const float ay = std::abs(y);
+    switch (shape) {
+        case BrushShape::Circle:
+            return std::sqrt(x * x + y * y);
+        case BrushShape::Rectangle: {
+            const float p = 8.0f + std::clamp(roundness, 0.0f, 1.0f) * 16.0f;
+            return std::pow(std::pow(ax, p) + std::pow(ay, p), 1.0f / p);
+        }
+        case BrushShape::Capsule: {
+            const float half_segment = 0.55f;
+            const float qx = std::max(ax - half_segment, 0.0f);
+            return std::sqrt(qx * qx + ay * ay);
+        }
+        case BrushShape::Flat: {
+            const float p = 10.0f + std::clamp(roundness, 0.0f, 1.0f) * 18.0f;
+            return std::pow(std::pow(ax, p) + std::pow(ay, p), 1.0f / p);
+        }
+    }
+    return std::sqrt(x * x + y * y);
+}
+
+struct BrushFootprintSample {
+    float x = 0.0f;
+    float y = 0.0f;
+    float dist_norm = 0.0f;
+};
+
+BrushFootprintSample sampleBrushFootprint(const BrushSettings& brush, float dx, float dy, float radius_x, float radius_y) {
+    float x = dx / std::max(0.001f, radius_x);
+    float y = dy / std::max(0.001f, radius_y);
+    rotateBrushCoords(x, y, brush.alpha_rotation_degrees);
+
+    const float aspect_scale = brushShapeAspectScale(brush);
+    x /= aspect_scale;
+    y *= aspect_scale;
+
+    BrushFootprintSample sample;
+    sample.x = x;
+    sample.y = y;
+    sample.dist_norm = brushShapeDistance(brush.shape, x, y, brush.shape_roundness);
+    return sample;
 }
 
 Vec3 applyTintToSample(const Vec3& sampled, const Vec3& tint, float tint_strength, PaintTextureTintMode tint_mode) {
@@ -202,12 +353,18 @@ Vec3 applyTintToSample(const Vec3& sampled, const Vec3& tint, float tint_strengt
 }
 
 CompactVec4 makeBrushTexturePixel(PaintChannel channel, const BrushSettings& brush, float nx, float ny) {
-    if (!brush.use_paint_texture || !brush.paint_texture || !brush.paint_texture->is_loaded()) {
+    std::shared_ptr<Texture> paint_texture = getBrushChannelTexture(channel, brush);
+    if (!paint_texture) {
         return makeBrushPixel(channel, brush);
     }
+    const Vec3 channel_color = getBrushChannelColor(channel, brush);
+    const float tint_strength = getBrushChannelTintStrength(channel, brush);
+    const PaintTextureTintMode tint_mode = getBrushChannelTintMode(channel, brush);
 
     float sx = nx * std::max(0.01f, brush.alpha_scale);
     float sy = ny * std::max(0.01f, brush.alpha_scale);
+    if (brush.flip_alpha_x) sx = -sx;
+    if (brush.flip_alpha_y) sy = -sy;
     rotateBrushCoords(sx, sy, brush.alpha_rotation_degrees);
     const float u = std::clamp(sx * 0.5f + 0.5f, 0.0f, 1.0f);
     const float v = std::clamp(sy * 0.5f + 0.5f, 0.0f, 1.0f);
@@ -225,8 +382,8 @@ CompactVec4 makeBrushTexturePixel(PaintChannel channel, const BrushSettings& bru
 
     switch (channel) {
         case PaintChannel::BaseColor: {
-            Vec3 sampled = brush.paint_texture->get_color_bilinear(u, v);
-            sampled = applyTintToSample(sampled, brush.color, brush.paint_texture_tint_strength, brush.paint_texture_tint_mode);
+            Vec3 sampled = paint_texture->get_color_bilinear(u, v);
+            sampled = applyTintToSample(sampled, channel_color, tint_strength, tint_mode);
             return CompactVec4(
                 linearToSrgbByte(sampled.x),
                 linearToSrgbByte(sampled.y),
@@ -234,18 +391,18 @@ CompactVec4 makeBrushTexturePixel(PaintChannel channel, const BrushSettings& bru
                 255);
         }
         case PaintChannel::Emission: {
-            Vec3 sampled = brush.paint_texture->get_color_bilinear(u, v);
-            sampled = applyTintToSample(sampled, brush.color, brush.paint_texture_tint_strength, brush.paint_texture_tint_mode);
+            Vec3 sampled = paint_texture->get_color_bilinear(u, v);
+            sampled = applyTintToSample(sampled, channel_color, tint_strength, tint_mode);
             return CompactVec4(toByte(sampled.x), toByte(sampled.y), toByte(sampled.z), 255);
         }
         case PaintChannel::Roughness:
         case PaintChannel::Metallic:
         case PaintChannel::Mask:
         case PaintChannel::Transmission: {
-            const float texture_value = brush.paint_texture->sampleIntensity(u, v);
-            const float tint_value = std::clamp((brush.color.x + brush.color.y + brush.color.z) / 3.0f, 0.0f, 1.0f);
+            const float texture_value = paint_texture->sampleIntensity(u, v);
+            const float tint_value = std::clamp((channel_color.x + channel_color.y + channel_color.z) / 3.0f, 0.0f, 1.0f);
             const float grayscale = texture_value + (texture_value * tint_value - texture_value) *
-                std::clamp(brush.paint_texture_tint_strength, 0.0f, 1.0f);
+                std::clamp(tint_strength, 0.0f, 1.0f);
             const uint8_t value = toByte(grayscale);
             return CompactVec4(value, value, value, 255);
         }
@@ -253,15 +410,15 @@ CompactVec4 makeBrushTexturePixel(PaintChannel channel, const BrushSettings& bru
             // Mirror the same all-channel write that makeBrushPixel does for
             // Opacity: shader reads .a or .r depending on material flags;
             // putting the value in both leaves the mask working in either mode.
-            const float texture_value = brush.paint_texture->sampleIntensity(u, v);
-            const float tint_value = std::clamp((brush.color.x + brush.color.y + brush.color.z) / 3.0f, 0.0f, 1.0f);
+            const float texture_value = paint_texture->sampleIntensity(u, v);
+            const float tint_value = std::clamp((channel_color.x + channel_color.y + channel_color.z) / 3.0f, 0.0f, 1.0f);
             const float grayscale = texture_value + (texture_value * tint_value - texture_value) *
-                std::clamp(brush.paint_texture_tint_strength, 0.0f, 1.0f);
+                std::clamp(tint_strength, 0.0f, 1.0f);
             const uint8_t value = toByte(grayscale);
             return CompactVec4(value, value, value, value);
         }
         case PaintChannel::Normal: {
-            Vec3 sampled = brush.paint_texture->get_color_bilinear(u, v);
+            Vec3 sampled = paint_texture->get_color_bilinear(u, v);
             Vec3 n(
                 sampled.x * 2.0f - 1.0f,
                 sampled.y * 2.0f - 1.0f,
@@ -402,10 +559,223 @@ void computeBrushAxisCorrection(float world_per_u, float world_per_v,
     out_ky = ky;
 }
 
+bool computeTriangleDownhillPixelFlow(const Triangle& tri, int uv_set, int width, int height,
+                                      float& out_flow_x, float& out_flow_y, float& out_slope) {
+    out_flow_x = 0.0f;
+    out_flow_y = 0.0f;
+    out_slope = 0.0f;
+    if (width <= 1 || height <= 1) {
+        return false;
+    }
+
+    Vec2 uv0, uv1, uv2;
+    if (uv_set > 0 && static_cast<size_t>(uv_set) < tri.getUVSetCount()) {
+        std::tie(uv0, uv1, uv2) = tri.getUVSetCoordinates(static_cast<size_t>(uv_set));
+    } else {
+        std::tie(uv0, uv1, uv2) = tri.getUVCoordinates();
+    }
+
+    const Vec3 p0 = tri.getVertexPosition(0);
+    const Vec3 e1 = tri.getVertexPosition(1) - p0;
+    const Vec3 e2 = tri.getVertexPosition(2) - p0;
+    const Vec3 raw_normal = e1.cross(e2);
+    const float raw_len_sq = raw_normal.length_squared();
+    // Vec3::normalize()'ın 1e-6 eşiği alt-mm üçgenleri sıfırlıyor; yüz gibi
+    // yoğun mesh'lerde geçerli kalmak için kendi normalize'ımızı yapıyoruz.
+    if (raw_len_sq <= 1e-20f) {
+        return false;
+    }
+    const float raw_len = std::sqrt(raw_len_sq);
+    const Vec3 geom_normal(raw_normal.x / raw_len, raw_normal.y / raw_len, raw_normal.z / raw_len);
+
+    const float du1 = uv1.u - uv0.u;
+    const float dv1 = uv1.v - uv0.v;
+    const float du2 = uv2.u - uv0.u;
+    const float dv2 = uv2.v - uv0.v;
+    const float det = du1 * dv2 - du2 * dv1;
+    if (std::abs(det) < 1e-10f) {
+        return false;
+    }
+
+    const float inv = 1.0f / det;
+    const Vec3 dPdU = (e1 * dv2 - e2 * dv1) * inv;
+    const Vec3 dPdV = (e2 * du1 - e1 * du2) * inv;
+
+    const Vec3 gravity(0.0f, -1.0f, 0.0f);
+    const Vec3 downhill_tangent = gravity - geom_normal * gravity.dot(geom_normal);
+    const float tangent_len = downhill_tangent.length();
+    if (tangent_len <= 1e-5f) {
+        return false;
+    }
+    const Vec3 downhill_dir = downhill_tangent / tangent_len;
+    out_slope = tangent_len;
+
+    const float a = dPdU.dot(dPdU);
+    const float b = dPdU.dot(dPdV);
+    const float c = dPdV.dot(dPdV);
+    const float rhs_u = dPdU.dot(downhill_dir);
+    const float rhs_v = dPdV.dot(downhill_dir);
+    const float metric_det = a * c - b * b;
+    if (std::abs(metric_det) < 1e-10f) {
+        return false;
+    }
+
+    float flow_u = (c * rhs_u - b * rhs_v) / metric_det;
+    float flow_v = (a * rhs_v - b * rhs_u) / metric_det;
+    const float flow_len = std::sqrt(flow_u * flow_u + flow_v * flow_v);
+    if (flow_len <= 1e-8f) {
+        return false;
+    }
+    flow_u /= flow_len;
+    flow_v /= flow_len;
+
+    const float pixel_flow_x = flow_u * static_cast<float>(width - 1);
+    const float pixel_flow_y = -flow_v * static_cast<float>(height - 1);
+    const float pixel_flow_len = std::sqrt(pixel_flow_x * pixel_flow_x + pixel_flow_y * pixel_flow_y);
+    if (pixel_flow_len <= 1e-6f) {
+        return false;
+    }
+
+    out_flow_x = pixel_flow_x;
+    out_flow_y = pixel_flow_y;
+    return std::isfinite(out_flow_x) && std::isfinite(out_flow_y);
+}
+
+std::array<Vec2, 3> getTriangleUvArray(const Triangle& tri, int uv_set) {
+    Vec2 uv0, uv1, uv2;
+    if (uv_set > 0 && static_cast<size_t>(uv_set) < tri.getUVSetCount()) {
+        std::tie(uv0, uv1, uv2) = tri.getUVSetCoordinates(static_cast<size_t>(uv_set));
+    } else {
+        std::tie(uv0, uv1, uv2) = tri.getUVCoordinates();
+    }
+    return { uv0, uv1, uv2 };
+}
+
+bool computeUvBarycentric(const Vec2& p, const std::array<Vec2, 3>& tri_uvs,
+                          float& w0, float& w1, float& w2) {
+    const float x0 = tri_uvs[0].u;
+    const float y0 = tri_uvs[0].v;
+    const float x1 = tri_uvs[1].u;
+    const float y1 = tri_uvs[1].v;
+    const float x2 = tri_uvs[2].u;
+    const float y2 = tri_uvs[2].v;
+    const float det = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+    if (std::abs(det) < 1e-10f) {
+        return false;
+    }
+
+    w0 = ((y1 - y2) * (p.u - x2) + (x2 - x1) * (p.v - y2)) / det;
+    w1 = ((y2 - y0) * (p.u - x2) + (x0 - x2) * (p.v - y2)) / det;
+    w2 = 1.0f - w0 - w1;
+    return std::isfinite(w0) && std::isfinite(w1) && std::isfinite(w2);
+}
+
+Vec2 uvFromBarycentric(const std::array<Vec2, 3>& tri_uvs, float w0, float w1, float w2) {
+    return Vec2(
+        tri_uvs[0].u * w0 + tri_uvs[1].u * w1 + tri_uvs[2].u * w2,
+        tri_uvs[0].v * w0 + tri_uvs[1].v * w1 + tri_uvs[2].v * w2);
+}
+
 void blendPixelChannel(uint8_t& dst, uint8_t target, float alpha) {
     const float current = static_cast<float>(dst);
     const float blended = current + (static_cast<float>(target) - current) * std::clamp(alpha, 0.0f, 1.0f);
     dst = static_cast<uint8_t>(std::clamp(blended, 0.0f, 255.0f));
+}
+
+void blendScalarPixel(CompactVec4& dst, uint8_t target, float alpha) {
+    blendPixelChannel(dst.r, target, alpha);
+    dst.g = dst.r;
+    dst.b = dst.r;
+    dst.a = 255;
+}
+
+void blendScalarPixel(CompactVec4& dst, const CompactVec4& src, float alpha) {
+    blendScalarPixel(dst, src.r, alpha);
+}
+
+bool isScalarMaterialChannel(PaintChannel channel) {
+    return channel == PaintChannel::Roughness ||
+           channel == PaintChannel::Metallic ||
+           channel == PaintChannel::Transmission;
+}
+
+float applyScalarLayerBlendMode(float dst, float src, LayerBlendMode mode) {
+    switch (mode) {
+        default:
+        case LayerBlendMode::Normal:
+            return src;
+        case LayerBlendMode::Add:
+            return std::min(dst + src, 1.0f);
+        case LayerBlendMode::Multiply:
+            return dst * src;
+        case LayerBlendMode::Screen:
+            return 1.0f - ((1.0f - dst) * (1.0f - src));
+        case LayerBlendMode::Overlay:
+            return dst < 0.5f
+                ? (2.0f * dst * src)
+                : (1.0f - 2.0f * (1.0f - dst) * (1.0f - src));
+    }
+}
+
+float compositeScalarLayerValue(float dst, const CompactVec4& src, float opacity, LayerBlendMode mode) {
+    const float sa = (static_cast<float>(src.a) / 255.0f) * std::clamp(opacity, 0.0f, 1.0f);
+    if (sa <= 0.0f) {
+        return dst;
+    }
+    const float src_value = static_cast<float>(src.r) / 255.0f;
+    const float blended = applyScalarLayerBlendMode(dst, src_value, mode);
+    return std::clamp(dst + (blended - dst) * sa, 0.0f, 1.0f);
+}
+
+float compositeScalarBelowLayer(const PaintLayerStack* stack, int layer_index, PaintChannel channel, size_t pixel_index) {
+    if (!stack) {
+        return 0.0f;
+    }
+
+    float result = static_cast<float>(defaultChannelPixel(channel).r) / 255.0f;
+    for (int index = 0; index < layer_index; ++index) {
+        const PaintLayerData* below = stack->layerAt(index);
+        if (!below || !below->meta.visible || !below->hasPixels(channel)) {
+            continue;
+        }
+        const auto& src = below->getPixels(channel);
+        if (pixel_index >= src.size()) {
+            continue;
+        }
+        result = compositeScalarLayerValue(result, src[pixel_index], below->meta.opacity, below->meta.blend_mode);
+    }
+    return result;
+}
+
+float sampleScalarBilinear(const std::vector<float>& values, int width, int height, float x, float y) {
+    if (width <= 0 || height <= 0 || values.empty()) {
+        return 0.0f;
+    }
+
+    const float sx = std::clamp(x, 0.0f, static_cast<float>(width - 1));
+    const float sy = std::clamp(y, 0.0f, static_cast<float>(height - 1));
+    const int x0 = std::clamp(static_cast<int>(std::floor(sx)), 0, width - 1);
+    const int y0 = std::clamp(static_cast<int>(std::floor(sy)), 0, height - 1);
+    const int x1 = std::clamp(x0 + 1, 0, width - 1);
+    const int y1 = std::clamp(y0 + 1, 0, height - 1);
+    const float tx = sx - static_cast<float>(x0);
+    const float ty = sy - static_cast<float>(y0);
+
+    const float v00 = values[static_cast<size_t>(y0) * static_cast<size_t>(width) + static_cast<size_t>(x0)];
+    const float v10 = values[static_cast<size_t>(y0) * static_cast<size_t>(width) + static_cast<size_t>(x1)];
+    const float v01 = values[static_cast<size_t>(y1) * static_cast<size_t>(width) + static_cast<size_t>(x0)];
+    const float v11 = values[static_cast<size_t>(y1) * static_cast<size_t>(width) + static_cast<size_t>(x1)];
+    const float a0 = v00 + (v10 - v00) * tx;
+    const float a1 = v01 + (v11 - v01) * tx;
+    return a0 + (a1 - a0) * ty;
+}
+
+float decodeRaisedThickness(uint8_t value) {
+    return std::clamp((static_cast<float>(value) - 128.0f) / 127.0f, 0.0f, 1.0f);
+}
+
+uint8_t encodeRaisedThickness(float value) {
+    return static_cast<uint8_t>(std::clamp(128.0f + std::clamp(value, 0.0f, 1.0f) * 127.0f, 128.0f, 255.0f) + 0.5f);
 }
 
 float hashNoise(float x, float y) {
@@ -445,11 +815,11 @@ float sampleImportedBrushAlpha(const std::shared_ptr<Texture>& texture, float nx
     return std::clamp(texture->sampleIntensity(u, v), 0.0f, 1.0f);
 }
 
-float sampleBrushAlpha(BrushAlphaPreset preset, float nx, float ny, float scale, float rotation_degrees) {
+float sampleBrushAlpha(BrushAlphaPreset preset, float nx, float ny, float scale, float rotation_degrees, bool radial_gate) {
     float sx = nx * std::max(0.01f, scale);
     float sy = ny * std::max(0.01f, scale);
     rotateBrushCoords(sx, sy, rotation_degrees);
-    const float radial = std::clamp(1.0f - std::sqrt(nx * nx + ny * ny), 0.0f, 1.0f);
+    const float radial = radial_gate ? std::clamp(1.0f - std::sqrt(nx * nx + ny * ny), 0.0f, 1.0f) : 1.0f;
 
     switch (preset) {
         case BrushAlphaPreset::SoftRound:
@@ -479,11 +849,14 @@ float sampleBrushAlpha(BrushAlphaPreset preset, float nx, float ny, float scale,
 }
 
 float sampleBrushMask(const BrushSettings& brush, float nx, float ny) {
+    if (brush.flip_alpha_x) nx = -nx;
+    if (brush.flip_alpha_y) ny = -ny;
     if (brush.use_imported_alpha && brush.alpha_texture && brush.alpha_texture->is_loaded()) {
         return sampleImportedBrushAlpha(brush.alpha_texture, nx, ny, brush.alpha_scale, brush.alpha_rotation_degrees);
     }
 
-    return sampleBrushAlpha(brush.alpha_preset, nx, ny, brush.alpha_scale, brush.alpha_rotation_degrees);
+    const bool radial_gate = brush.shape == BrushShape::Circle;
+    return sampleBrushAlpha(brush.alpha_preset, nx, ny, brush.alpha_scale, brush.alpha_rotation_degrees, radial_gate);
 }
 
 // Alpha gate from the user-loaded paint texture itself. PNG stamps with a
@@ -491,20 +864,23 @@ float sampleBrushMask(const BrushSettings& brush, float nx, float ny) {
 // without this the brush deposits visible black rings around the actual
 // stamp. Mirrors makeBrushTexturePixel's UV transform so the alpha lines up
 // with the colour sample.
-float sampleBrushPaintTextureAlpha(const BrushSettings& brush, float nx, float ny) {
-    if (!brush.use_paint_texture || !brush.paint_texture || !brush.paint_texture->is_loaded()) {
+float sampleBrushPaintTextureAlpha(PaintChannel channel, const BrushSettings& brush, float nx, float ny) {
+    std::shared_ptr<Texture> paint_texture = getBrushChannelTexture(channel, brush);
+    if (!paint_texture) {
         return 1.0f;
     }
-    if (!brush.paint_texture->has_alpha) {
+    if (!paint_texture->has_alpha) {
         return 1.0f;
     }
 
     float sx = nx * std::max(0.01f, brush.alpha_scale);
     float sy = ny * std::max(0.01f, brush.alpha_scale);
+    if (brush.flip_alpha_x) sx = -sx;
+    if (brush.flip_alpha_y) sy = -sy;
     rotateBrushCoords(sx, sy, brush.alpha_rotation_degrees);
     const float u = std::clamp(sx * 0.5f + 0.5f, 0.0f, 1.0f);
     const float v = std::clamp(sy * 0.5f + 0.5f, 0.0f, 1.0f);
-    return std::clamp(brush.paint_texture->get_alpha_bilinear(u, v), 0.0f, 1.0f);
+    return std::clamp(paint_texture->get_alpha_bilinear(u, v), 0.0f, 1.0f);
 }
 
 CompactVec4 sampleTexturePixelBilinear(const std::vector<CompactVec4>& pixels, int width, int height, float u, float v);
@@ -770,7 +1146,7 @@ void resizeTexturePixels(Texture& texture, int resolution) {
     }
 }
 
-} // namespace
+ // namespace
 
 MeshPaintAdapter::MeshPaintAdapter(SceneData* scene, const std::shared_ptr<Triangle>& triangle)
     : scene_(scene), triangle_(triangle) {}
@@ -831,6 +1207,1285 @@ bool MeshPaintAdapter::applyDab(const Vec3& world_hit_point, const BrushSettings
 }
 
 void MeshPaintAdapter::endStroke() {}
+
+void MeshPaintAdapter::clearWetSimulation() {
+    wet_basecolor_state_ = WetSimulationState{};
+    invalidateWetFlowField();
+}
+
+void MeshPaintAdapter::invalidateWetFlowField() {
+    wet_flow_field_cache_ = WetFlowFieldCache{};
+}
+
+void MeshPaintAdapter::rebuildWetFlowField(int width, int height) {
+    WetFlowFieldCache cache;
+    cache.target_key = getNodeName() + "#" + std::to_string(getMaterialID());
+    cache.width = width;
+    cache.height = height;
+    cache.uv_set = getTarget().uv_set;
+
+    std::vector<std::shared_ptr<Triangle>> candidates;
+    if (scene_) {
+        auto cache_it = scene_->base_mesh_cache.find(getNodeName());
+        if (cache_it != scene_->base_mesh_cache.end()) {
+            candidates = cache_it->second;
+        } else {
+            candidates.reserve(scene_->world.objects.size());
+            for (const auto& object : scene_->world.objects) {
+                auto tri = std::dynamic_pointer_cast<Triangle>(object);
+                if (tri && tri->getNodeName() == getNodeName() && tri->getMaterialID() == getMaterialID()) {
+                    candidates.push_back(tri);
+                }
+            }
+        }
+    }
+
+    cache.infos.reserve(candidates.size() + 1);
+    auto add_flow_info = [&](const std::shared_ptr<Triangle>& tri) {
+        if (!tri || tri->getNodeName() != getNodeName() || tri->getMaterialID() != getMaterialID()) {
+            return;
+        }
+
+        WetFlowTriangleInfo info;
+        if (!computeTriangleDownhillPixelFlow(*tri, cache.uv_set, width, height, info.flow_x, info.flow_y, info.slope)) {
+            return;
+        }
+        info.flow_length = std::sqrt(info.flow_x * info.flow_x + info.flow_y * info.flow_y);
+        info.uvs = getTriangleUvArray(*tri, cache.uv_set);
+        info.min_u = std::min({ info.uvs[0].u, info.uvs[1].u, info.uvs[2].u });
+        info.max_u = std::max({ info.uvs[0].u, info.uvs[1].u, info.uvs[2].u });
+        info.min_v = std::min({ info.uvs[0].v, info.uvs[1].v, info.uvs[2].v });
+        info.max_v = std::max({ info.uvs[0].v, info.uvs[1].v, info.uvs[2].v });
+        cache.max_slope = std::max(cache.max_slope, info.slope);
+        cache.max_flow_length = std::max(cache.max_flow_length, info.flow_length);
+        cache.infos.push_back(info);
+    };
+
+    add_flow_info(triangle_);
+    for (const auto& tri : candidates) {
+        if (!triangle_ || tri.get() != triangle_.get()) {
+            add_flow_info(tri);
+        }
+    }
+
+    cache.lookup_resolution = std::clamp(std::min(width, height) / 8, 16, 64);
+    cache.lookup_indices.assign(static_cast<size_t>(cache.lookup_resolution) * static_cast<size_t>(cache.lookup_resolution), -1);
+    for (int gy = 0; gy < cache.lookup_resolution; ++gy) {
+        for (int gx = 0; gx < cache.lookup_resolution; ++gx) {
+            const Vec2 uv(
+                cache.lookup_resolution > 1 ? static_cast<float>(gx) / static_cast<float>(cache.lookup_resolution - 1) : 0.0f,
+                cache.lookup_resolution > 1 ? 1.0f - static_cast<float>(gy) / static_cast<float>(cache.lookup_resolution - 1) : 0.0f);
+            int best_index = -1;
+            float best_margin = -1e9f;
+            for (int info_index = 0; info_index < static_cast<int>(cache.infos.size()); ++info_index) {
+                const WetFlowTriangleInfo& info = cache.infos[info_index];
+                const float uv_pad = 0.0025f;
+                if (uv.u < info.min_u - uv_pad || uv.u > info.max_u + uv_pad ||
+                    uv.v < info.min_v - uv_pad || uv.v > info.max_v + uv_pad) {
+                    continue;
+                }
+                float w0 = 0.0f, w1 = 0.0f, w2 = 0.0f;
+                if (!computeUvBarycentric(uv, info.uvs, w0, w1, w2)) {
+                    continue;
+                }
+                const float min_w = std::min({ w0, w1, w2 });
+                if (min_w < -0.003f) {
+                    continue;
+                }
+                if (min_w > best_margin) {
+                    best_margin = min_w;
+                    best_index = info_index;
+                }
+            }
+            cache.lookup_indices[static_cast<size_t>(gy) * static_cast<size_t>(cache.lookup_resolution) + static_cast<size_t>(gx)] = best_index;
+        }
+    }
+
+    wet_flow_field_cache_ = std::move(cache);
+}
+
+int MeshPaintAdapter::findWetFlowTriangleIndex(const Vec2& uv, int hint_index) const {
+    const WetFlowFieldCache& cache = wet_flow_field_cache_;
+    if (cache.infos.empty()) {
+        return -1;
+    }
+
+    const auto try_match = [&](int info_index) -> bool {
+        if (info_index < 0 || info_index >= static_cast<int>(cache.infos.size())) {
+            return false;
+        }
+        const WetFlowTriangleInfo& info = cache.infos[info_index];
+        const float uv_pad = 0.0025f;
+        if (uv.u < info.min_u - uv_pad || uv.u > info.max_u + uv_pad ||
+            uv.v < info.min_v - uv_pad || uv.v > info.max_v + uv_pad) {
+            return false;
+        }
+        float w0 = 0.0f, w1 = 0.0f, w2 = 0.0f;
+        if (!computeUvBarycentric(uv, info.uvs, w0, w1, w2)) {
+            return false;
+        }
+        return w0 >= -0.003f && w1 >= -0.003f && w2 >= -0.003f;
+    };
+
+    if (try_match(hint_index)) {
+        return hint_index;
+    }
+
+    if (cache.lookup_resolution > 0 && !cache.lookup_indices.empty()) {
+        const int gx = std::clamp(static_cast<int>(std::round(uv.u * static_cast<float>(cache.lookup_resolution - 1))), 0, cache.lookup_resolution - 1);
+        const int gy = std::clamp(static_cast<int>(std::round((1.0f - uv.v) * static_cast<float>(cache.lookup_resolution - 1))), 0, cache.lookup_resolution - 1);
+        const int lookup_index = cache.lookup_indices[static_cast<size_t>(gy) * static_cast<size_t>(cache.lookup_resolution) + static_cast<size_t>(gx)];
+        if (try_match(lookup_index)) {
+            return lookup_index;
+        }
+    }
+
+    for (int info_index = 0; info_index < static_cast<int>(cache.infos.size()); ++info_index) {
+        if (try_match(info_index)) {
+            return info_index;
+        }
+    }
+
+    return -1;
+}
+
+void MeshPaintAdapter::rebuildWetSeamLinks() {
+    wet_seam_links_.clear();
+    wet_seam_key_.clear();
+    if (!scene_ || !triangle_) {
+        return;
+    }
+
+    const std::string target_key = getNodeName() + "#" + std::to_string(getMaterialID());
+    wet_seam_key_ = target_key;
+
+    const auto& source_indices = triangle_->getAssimpVertexIndices();
+    std::array<Vec2, 3> source_uvs{};
+    if (getTarget().uv_set > 0 && static_cast<size_t>(getTarget().uv_set) < triangle_->getUVSetCount()) {
+        auto [u0, u1, u2] = triangle_->getUVSetCoordinates(static_cast<size_t>(getTarget().uv_set));
+        source_uvs = { u0, u1, u2 };
+    } else {
+        auto [u0, u1, u2] = triangle_->getUVCoordinates();
+        source_uvs = { u0, u1, u2 };
+    }
+
+    std::vector<std::shared_ptr<Triangle>> candidates;
+    auto cache_it = scene_->base_mesh_cache.find(getNodeName());
+    if (cache_it != scene_->base_mesh_cache.end()) {
+        candidates = cache_it->second;
+    } else {
+        candidates.reserve(scene_->world.objects.size());
+        for (const auto& object : scene_->world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(object);
+            if (tri && tri->getNodeName() == getNodeName() && tri->getMaterialID() == getMaterialID()) {
+                candidates.push_back(tri);
+            }
+        }
+    }
+
+    for (const auto& candidate : candidates) {
+        if (!candidate || candidate.get() == triangle_.get() || candidate->getMaterialID() != getMaterialID()) {
+            continue;
+        }
+
+        const auto& other_indices = candidate->getAssimpVertexIndices();
+        std::array<int, 2> source_shared = { -1, -1 };
+        std::array<int, 2> target_shared = { -1, -1 };
+        int shared_count = 0;
+        for (int si = 0; si < 3; ++si) {
+            for (int ti = 0; ti < 3; ++ti) {
+                if (source_indices[si] == other_indices[ti]) {
+                    if (shared_count < 2) {
+                        source_shared[shared_count] = si;
+                        target_shared[shared_count] = ti;
+                    }
+                    ++shared_count;
+                }
+            }
+        }
+        if (shared_count != 2) {
+            continue;
+        }
+
+        int source_opposite = 0;
+        while (source_opposite == source_shared[0] || source_opposite == source_shared[1]) {
+            ++source_opposite;
+        }
+        int target_opposite = 0;
+        while (target_opposite == target_shared[0] || target_opposite == target_shared[1]) {
+            ++target_opposite;
+        }
+
+        std::array<Vec2, 3> target_uvs{};
+        if (getTarget().uv_set > 0 && static_cast<size_t>(getTarget().uv_set) < candidate->getUVSetCount()) {
+            auto [u0, u1, u2] = candidate->getUVSetCoordinates(static_cast<size_t>(getTarget().uv_set));
+            target_uvs = { u0, u1, u2 };
+        } else {
+            auto [u0, u1, u2] = candidate->getUVCoordinates();
+            target_uvs = { u0, u1, u2 };
+        }
+
+        WetSeamLink link;
+        link.source_uvs = source_uvs;
+        link.target_uvs = target_uvs;
+        link.source_edge_a = source_shared[0];
+        link.source_edge_b = source_shared[1];
+        link.source_opposite = source_opposite;
+        link.target_edge_a = target_shared[0];
+        link.target_edge_b = target_shared[1];
+        link.target_opposite = target_opposite;
+        wet_seam_links_.push_back(link);
+    }
+}
+
+void MeshPaintAdapter::mirrorWetRegionAcrossSeams(std::vector<CompactVec4>& pixels, int width, int height,
+                                                  PaintDirtyRect region, float blend_strength) {
+    if (region.empty() || wet_basecolor_state_.wetness.empty() || width <= 1 || height <= 1) {
+        return;
+    }
+    const std::string target_key = getNodeName() + "#" + std::to_string(getMaterialID());
+    if (wet_seam_key_ != target_key) {
+        rebuildWetSeamLinks();
+    }
+    if (wet_seam_links_.empty()) {
+        return;
+    }
+
+    const float seam_band = 0.08f;
+    const float blend = std::clamp(blend_strength, 0.0f, 1.0f);
+    for (int py = std::max(0, region.min_y); py <= std::min(height - 1, region.max_y); ++py) {
+        for (int px = std::max(0, region.min_x); px <= std::min(width - 1, region.max_x); ++px) {
+            const size_t src_idx = static_cast<size_t>(py) * static_cast<size_t>(width) + static_cast<size_t>(px);
+            const float wet = wet_basecolor_state_.wetness[src_idx];
+            if (wet <= 0.001f) {
+                continue;
+            }
+
+            const Vec2 source_uv(
+                width > 1 ? static_cast<float>(px) / static_cast<float>(width - 1) : 0.0f,
+                height > 1 ? 1.0f - static_cast<float>(py) / static_cast<float>(height - 1) : 0.0f);
+            const CompactVec4 src_pixel = pixels[src_idx];
+
+            for (const WetSeamLink& link : wet_seam_links_) {
+                float w0 = 0.0f, w1 = 0.0f, w2 = 0.0f;
+                if (!computeUvBarycentric(source_uv, link.source_uvs, w0, w1, w2)) {
+                    continue;
+                }
+                const float weights[3] = { w0, w1, w2 };
+                const float edge_distance = weights[link.source_opposite];
+                if (edge_distance < -0.005f || edge_distance > seam_band) {
+                    continue;
+                }
+
+                float mapped[3] = { 0.0f, 0.0f, 0.0f };
+                mapped[link.target_edge_a] = std::max(0.0f, weights[link.source_edge_a]);
+                mapped[link.target_edge_b] = std::max(0.0f, weights[link.source_edge_b]);
+                mapped[link.target_opposite] = std::max(0.0f, edge_distance);
+                const float sum = mapped[0] + mapped[1] + mapped[2];
+                if (sum <= 1e-6f) {
+                    continue;
+                }
+                mapped[0] /= sum;
+                mapped[1] /= sum;
+                mapped[2] /= sum;
+
+                const Vec2 target_uv = uvFromBarycentric(link.target_uvs, mapped[0], mapped[1], mapped[2]);
+                const int dst_x = std::clamp(static_cast<int>(std::round(target_uv.u * static_cast<float>(width - 1))), 0, width - 1);
+                const int dst_y = std::clamp(static_cast<int>(std::round((1.0f - target_uv.v) * static_cast<float>(height - 1))), 0, height - 1);
+                const size_t dst_idx = static_cast<size_t>(dst_y) * static_cast<size_t>(width) + static_cast<size_t>(dst_x);
+                const float proximity = 1.0f - std::clamp(edge_distance / seam_band, 0.0f, 1.0f);
+                const float alpha = std::clamp(blend * wet * proximity, 0.0f, 1.0f);
+                if (alpha <= 0.001f) {
+                    continue;
+                }
+
+                blendBaseColorChannelLinear(pixels[dst_idx].r, src_pixel.r, alpha);
+                blendBaseColorChannelLinear(pixels[dst_idx].g, src_pixel.g, alpha);
+                blendBaseColorChannelLinear(pixels[dst_idx].b, src_pixel.b, alpha);
+                wet_basecolor_state_.wetness[dst_idx] = std::max(wet_basecolor_state_.wetness[dst_idx], wet * proximity);
+                if (dst_idx < wet_basecolor_state_.thickness.size() && src_idx < wet_basecolor_state_.thickness.size()) {
+                    wet_basecolor_state_.thickness[dst_idx] = std::max(
+                        wet_basecolor_state_.thickness[dst_idx],
+                        wet_basecolor_state_.thickness[src_idx] * proximity);
+                }
+                wet_basecolor_state_.active_region.expand(dst_x, dst_y, dst_x, dst_y);
+            }
+        }
+    }
+}
+
+void MeshPaintAdapter::noteWetDab(int layer_index, const Vec2& uv, const BrushSettings& brush,
+                                  float dt, float deposit_ratio) {
+    if ((brush.paint_mode != BrushPaintMode::Wet && brush.paint_mode != BrushPaintMode::Oil) || !isValid()) {
+        return;
+    }
+
+    PaintLayerData* layer = nullptr;
+    PaintTextureSet* texture_set = nullptr;
+    std::shared_ptr<Texture> texture;
+    std::vector<CompactVec4>* mask_pixels = nullptr;
+    std::vector<WetAuxChannelBinding> aux_channels;
+    bool uses_layers = false;
+    uint32_t layer_id = 0;
+    int width = 0;
+    int height = 0;
+
+    PaintLayerStack* stack = getLayerStack();
+    if (stack && stack->layerCount() > 0) {
+        layer = stack->layerAt(layer_index);
+        if (!layer || layer->meta.locked || !layer->meta.visible) {
+            return;
+        }
+        layer->ensurePixels(PaintChannel::BaseColor);
+        if (brush.write_height_mask) {
+            mask_pixels = &layer->ensurePixels(PaintChannel::Mask);
+        }
+        for (PaintChannel aux_channel : kWetAuxScalarChannels) {
+            if (!getBrushChannelInput(brush, aux_channel)) {
+                continue;
+            }
+            aux_channels.push_back(WetAuxChannelBinding{
+                aux_channel,
+                &layer->ensurePixels(aux_channel),
+                nullptr
+            });
+        }
+        uses_layers = true;
+        layer_id = layer->id;
+        width = layer->width;
+        height = layer->height;
+    } else {
+        texture_set = getTextureSet();
+        if (!texture_set) {
+            return;
+        }
+        texture = texture_set->getTexture(PaintChannel::BaseColor);
+        if (!texture || texture->width <= 0 || texture->height <= 0 || texture->pixels.empty()) {
+            return;
+        }
+        if (brush.write_height_mask) {
+            std::shared_ptr<Texture> mask_texture = texture_set->getTexture(PaintChannel::Mask);
+            if (mask_texture && mask_texture->width == texture->width && mask_texture->height == texture->height && !mask_texture->pixels.empty()) {
+                mask_pixels = &mask_texture->pixels;
+            }
+        }
+        for (PaintChannel aux_channel : kWetAuxScalarChannels) {
+            if (!getBrushChannelInput(brush, aux_channel)) {
+                continue;
+            }
+            if (!assignTextureToChannel(aux_channel)) {
+                continue;
+            }
+            std::shared_ptr<Texture> aux_texture = texture_set->getTexture(aux_channel);
+            if (!aux_texture || aux_texture->width != texture->width || aux_texture->height != texture->height || aux_texture->pixels.empty()) {
+                continue;
+            }
+            aux_channels.push_back(WetAuxChannelBinding{ aux_channel, &aux_texture->pixels, aux_texture });
+        }
+        width = texture->width;
+        height = texture->height;
+    }
+
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    const std::string target_key = getNodeName() + "#" + std::to_string(getMaterialID());
+    WetSimulationState& state = wet_basecolor_state_;
+    if (state.target_key != target_key ||
+        state.width != width ||
+        state.height != height ||
+        state.uses_layers != uses_layers ||
+        state.layer_id != layer_id) {
+        state = WetSimulationState{};
+        state.target_key = target_key;
+        state.width = width;
+        state.height = height;
+        state.uses_layers = uses_layers;
+        state.layer_id = layer_id;
+        state.wetness.assign(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
+        state.pigment.assign(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
+        state.thickness.assign(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
+    } else if (state.wetness.size() != static_cast<size_t>(width) * static_cast<size_t>(height)) {
+        state.wetness.assign(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
+        state.pigment.assign(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
+        state.thickness.assign(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
+        state.active_region = PaintDirtyRect{};
+    } else if (state.pigment.size() != static_cast<size_t>(width) * static_cast<size_t>(height)) {
+        state.pigment.assign(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
+    } else if (state.thickness.size() != static_cast<size_t>(width) * static_cast<size_t>(height)) {
+        state.thickness.assign(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
+    }
+
+    if (brush.write_height_mask && mask_pixels && !state.thickness.empty()) {
+        for (size_t idx = 0; idx < state.thickness.size() && idx < mask_pixels->size(); ++idx) {
+            state.thickness[idx] = std::max(state.thickness[idx], decodeRaisedThickness((*mask_pixels)[idx].r));
+        }
+    }
+
+    const float clamped_u = std::clamp(uv.u, 0.0f, 1.0f);
+    const float clamped_v = std::clamp(uv.v, 0.0f, 1.0f);
+    const float center_x = clamped_u * static_cast<float>(width - 1);
+    const float center_y = (1.0f - clamped_v) * static_cast<float>(height - 1);
+    const float reference_res = 1024.0f;
+    const float res_scale = static_cast<float>(width) / reference_res;
+    const float radius_px = std::max(0.1f, brush.radius * res_scale);
+
+    float kx = 1.0f;
+    float ky = 1.0f;
+    if (triangle_) {
+        float wpu = 1.0f;
+        float wpv = 1.0f;
+        const int uv_set = getTarget().uv_set;
+        computeTriangleUvJacobianLengths(*triangle_, uv_set, wpu, wpv);
+        computeBrushAxisCorrection(wpu, wpv, width, height, kx, ky);
+    }
+    const float extent_scale = std::max(brushShapeAspectScale(brush), 1.0f / brushShapeAspectScale(brush));
+    const float radius_x = std::max(0.1f, radius_px * kx);
+    const float radius_y = std::max(0.1f, radius_px * ky);
+    const float bound_radius_x = radius_x * extent_scale;
+    const float bound_radius_y = radius_y * extent_scale;
+
+    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - bound_radius_x)));
+    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + bound_radius_x)));
+    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - bound_radius_y)));
+    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + bound_radius_y)));
+    const float strength = std::clamp(brush.strength * brush.flow * dt * 60.0f, 0.0f, 1.0f);
+    const float carried_paint = std::clamp(brush.paint_load, 0.0f, 1.0f);
+    const float deposited_pigment = std::clamp(deposit_ratio, 0.0f, 1.0f) * (0.25f + carried_paint * 0.75f);
+    const float activation = std::clamp(
+        strength * std::clamp(brush.wetness, 0.0f, 1.0f) * (0.04f + deposited_pigment * 0.96f),
+        0.0f,
+        1.0f);
+    if (activation <= 0.001f) {
+        return;
+    }
+
+    std::vector<CompactVec4>* pixels = nullptr;
+    if (uses_layers) {
+        pixels = &layer->ensurePixels(PaintChannel::BaseColor);
+    } else if (texture) {
+        pixels = &texture->pixels;
+    }
+    PaintDirtyRect dirty;
+
+    for (int py = min_y; py <= max_y; ++py) {
+        for (int px = min_x; px <= max_x; ++px) {
+            const float dx = (static_cast<float>(px) + 0.5f) - center_x;
+            const float dy = (static_cast<float>(py) + 0.5f) - center_y;
+            const BrushFootprintSample fp = sampleBrushFootprint(brush, dx, dy, radius_x, radius_y);
+            if (fp.dist_norm > 1.0f) {
+                continue;
+            }
+
+            const float nx = dx / radius_x;
+            const float ny = dy / radius_y;
+            const float alpha_mask = sampleBrushMask(brush, nx, ny);
+            const float texture_alpha = sampleBrushPaintTextureAlpha(PaintChannel::BaseColor, brush, nx, ny);
+        const CompactVec4 brush_pixel = makeBrushTexturePixel(PaintChannel::BaseColor, brush, nx, ny);
+            const float wet_add = computeBrushWeightNormalized(
+                    fp.dist_norm,
+                    radius_px,
+                    std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * texture_alpha * activation;
+            if (wet_add <= 0.001f) {
+                continue;
+            }
+
+            const size_t idx = static_cast<size_t>(py) * static_cast<size_t>(width) + static_cast<size_t>(px);
+            const float pigment_add = wet_add * deposited_pigment;
+            state.wetness[idx] = std::clamp(state.wetness[idx] + wet_add * (0.18f + deposited_pigment * 0.82f), 0.0f, 1.0f);
+            if (idx < state.pigment.size()) {
+                state.pigment[idx] = std::clamp(state.pigment[idx] + pigment_add, 0.0f, 1.0f);
+            }
+            if (brush.write_height_mask && idx < state.thickness.size()) {
+                const float thickness_add = pigment_add * std::clamp(brush.height_contribution * 1.6f, 0.0f, 1.0f);
+                state.thickness[idx] = std::clamp(state.thickness[idx] + thickness_add, 0.0f, 1.0f);
+            }
+
+            if (pixels && idx < pixels->size() && pigment_add > 0.0f) {
+                CompactVec4& pixel = (*pixels)[idx];
+                const float dst_alpha = static_cast<float>(pixel.a) / 255.0f;
+                const float seed_alpha = std::clamp(
+                    wet_add * (0.22f + deposited_pigment * 0.78f),
+                    0.0f,
+                    1.0f);
+                const float seed_visibility = std::clamp((0.2f - dst_alpha) / 0.2f, 0.0f, 1.0f);
+                const float effective_seed = seed_alpha * seed_visibility;
+                if (effective_seed > 0.001f) {
+                    const float out_alpha = effective_seed + dst_alpha * (1.0f - effective_seed);
+                    if (out_alpha > 1e-6f) {
+                        const float inv_out_alpha = 1.0f / out_alpha;
+                        const float keep = dst_alpha * (1.0f - effective_seed);
+                        pixel.r = static_cast<uint8_t>(std::clamp((static_cast<float>(brush_pixel.r) * effective_seed +
+                                                                  static_cast<float>(pixel.r) * keep) * inv_out_alpha,
+                                                                 0.0f, 255.0f));
+                        pixel.g = static_cast<uint8_t>(std::clamp((static_cast<float>(brush_pixel.g) * effective_seed +
+                                                                  static_cast<float>(pixel.g) * keep) * inv_out_alpha,
+                                                                 0.0f, 255.0f));
+                        pixel.b = static_cast<uint8_t>(std::clamp((static_cast<float>(brush_pixel.b) * effective_seed +
+                                                                  static_cast<float>(pixel.b) * keep) * inv_out_alpha,
+                                                                 0.0f, 255.0f));
+                        pixel.a = static_cast<uint8_t>(std::clamp(out_alpha * 255.0f, 0.0f, 255.0f));
+                    }
+                }
+            }
+
+            for (WetAuxChannelBinding& aux : aux_channels) {
+                if (!aux.pixels || idx >= aux.pixels->size()) {
+                    continue;
+                }
+                const float aux_texture_alpha = sampleBrushPaintTextureAlpha(aux.channel, brush, nx, ny);
+                const float aux_wet_add = computeBrushWeightNormalized(
+                    fp.dist_norm,
+                    radius_px,
+                    std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * aux_texture_alpha * activation;
+                if (aux_wet_add <= 0.001f) {
+                    continue;
+                }
+
+                CompactVec4& aux_pixel = (*aux.pixels)[idx];
+                const CompactVec4 aux_brush_pixel = makeBrushTexturePixel(aux.channel, brush, nx, ny);
+                const float aux_seed_alpha = std::clamp(
+                    aux_wet_add * (0.22f + deposited_pigment * 0.78f),
+                    0.0f,
+                    1.0f);
+                blendScalarPixel(aux_pixel, aux_brush_pixel, aux_seed_alpha);
+                dirty.expand(px, py, px, py);
+            }
+
+            state.active_region.expand(px, py, px, py);
+            dirty.expand(px, py, px, py);
+        }
+    }
+
+    if (pixels && !dirty.empty()) {
+        mirrorWetRegionAcrossSeams(*pixels, width, height, dirty, 0.55f);
+        for (WetAuxChannelBinding& aux : aux_channels) {
+            if (aux.pixels) {
+                mirrorWetRegionAcrossSeams(*aux.pixels, width, height, dirty, 0.55f);
+            }
+        }
+    }
+}
+
+float MeshPaintAdapter::sampleWetPickupReservoir(const Vec2& uv) const {
+    const WetSimulationState& state = wet_basecolor_state_;
+    if (state.width <= 0 || state.height <= 0 || state.wetness.empty()) {
+        return 0.0f;
+    }
+
+    const float clamped_u = std::clamp(uv.u, 0.0f, 1.0f);
+    const float clamped_v = std::clamp(uv.v, 0.0f, 1.0f);
+    const float sample_x = clamped_u * static_cast<float>(std::max(1, state.width - 1));
+    const float sample_y = (1.0f - clamped_v) * static_cast<float>(std::max(1, state.height - 1));
+    const float wet = sampleScalarBilinear(state.wetness, state.width, state.height, sample_x, sample_y);
+    const float thickness = state.thickness.empty()
+        ? 0.0f
+        : sampleScalarBilinear(state.thickness, state.width, state.height, sample_x, sample_y);
+
+    const float wet_gate = std::clamp((wet - 0.04f) / 0.28f, 0.0f, 1.0f);
+    const float thickness_gate = std::clamp((thickness - 0.02f) / 0.20f, 0.0f, 1.0f);
+    return std::clamp(wet_gate * (0.30f + thickness_gate * 0.70f), 0.0f, 1.0f);
+}
+
+bool MeshPaintAdapter::tickWetPaint(const BrushSettings& brush, float dt,
+                                    bool auto_normal_from_height_enabled,
+                                    float normal_strength) {
+    WetSimulationState& state = wet_basecolor_state_;
+    if (state.wetness.empty() || state.active_region.empty()) {
+        return false;
+    }
+
+    dt = dt > 0.0f ? dt : (1.0f / 60.0f);
+
+    const int max_dimension = std::max(state.width, state.height);
+    auto targetSimulationHz = [&]() -> float {
+        switch (brush.wet_simulation_quality) {
+            case WetSimulationQuality::Balanced:
+                return 18.0f;
+            case WetSimulationQuality::High:
+                return 30.0f;
+            case WetSimulationQuality::Ultra:
+                return 60.0f;
+            case WetSimulationQuality::Auto:
+            default:
+                if (max_dimension <= 1024) return 60.0f;
+                if (max_dimension <= 2048) return 30.0f;
+                if (max_dimension <= 4096) return 15.0f;
+                return 10.0f;
+        }
+    };
+
+    state.simulation_time_accumulator += dt;
+    const float target_hz = std::max(1.0f, targetSimulationHz());
+    const float target_step = 1.0f / target_hz;
+    if (state.simulation_time_accumulator + 1e-6f < target_step) {
+        return false;
+    }
+    dt = std::min(state.simulation_time_accumulator, target_step * 2.5f);
+    state.simulation_time_accumulator = 0.0f;
+
+    std::vector<CompactVec4>* pixels = nullptr;
+    std::vector<CompactVec4>* mask_pixels = nullptr;
+    std::shared_ptr<Texture> texture;
+    std::shared_ptr<Texture> mask_texture;
+    std::vector<WetAuxChannelBinding> aux_channels;
+    if (state.uses_layers) {
+        PaintLayerStack* stack = getLayerStack();
+        PaintLayerData* layer = stack ? stack->layerById(state.layer_id) : nullptr;
+        if (!layer) {
+            clearWetSimulation();
+            return false;
+        }
+        pixels = &layer->ensurePixels(PaintChannel::BaseColor);
+        if (brush.write_height_mask || auto_normal_from_height_enabled) {
+            mask_pixels = &layer->ensurePixels(PaintChannel::Mask);
+        }
+        for (PaintChannel aux_channel : kWetAuxScalarChannels) {
+            if (!getBrushChannelInput(brush, aux_channel)) {
+                continue;
+            }
+            aux_channels.push_back(WetAuxChannelBinding{
+                aux_channel,
+                &layer->ensurePixels(aux_channel),
+                nullptr
+            });
+        }
+        if (layer->width != state.width || layer->height != state.height) {
+            clearWetSimulation();
+            return false;
+        }
+    } else {
+        PaintTextureSet* set = getTextureSet();
+        texture = set ? set->getTexture(PaintChannel::BaseColor) : nullptr;
+        if (!texture || texture->width != state.width || texture->height != state.height || texture->pixels.empty()) {
+            clearWetSimulation();
+            return false;
+        }
+        pixels = &texture->pixels;
+        if (brush.write_height_mask || auto_normal_from_height_enabled) {
+            PaintTextureSet* set = getTextureSet();
+            mask_texture = set ? set->getTexture(PaintChannel::Mask) : nullptr;
+            if (mask_texture && mask_texture->width == state.width && mask_texture->height == state.height && !mask_texture->pixels.empty()) {
+                mask_pixels = &mask_texture->pixels;
+            }
+        }
+        for (PaintChannel aux_channel : kWetAuxScalarChannels) {
+            if (!getBrushChannelInput(brush, aux_channel)) {
+                continue;
+            }
+            if (!assignTextureToChannel(aux_channel)) {
+                continue;
+            }
+            PaintTextureSet* set = getTextureSet();
+            std::shared_ptr<Texture> aux_texture = set ? set->getTexture(aux_channel) : nullptr;
+            if (!aux_texture || aux_texture->width != state.width || aux_texture->height != state.height || aux_texture->pixels.empty()) {
+                continue;
+            }
+            aux_channels.push_back(WetAuxChannelBinding{ aux_channel, &aux_texture->pixels, aux_texture });
+        }
+    }
+
+    if (!pixels || pixels->size() != static_cast<size_t>(state.width) * static_cast<size_t>(state.height)) {
+        clearWetSimulation();
+        return false;
+    }
+    for (const WetAuxChannelBinding& aux : aux_channels) {
+        if (!aux.pixels || aux.pixels->size() != static_cast<size_t>(state.width) * static_cast<size_t>(state.height)) {
+            clearWetSimulation();
+            return false;
+        }
+    }
+
+    const bool oil_mode = brush.paint_mode == BrushPaintMode::Oil;
+    const float lifetime = std::max(0.05f, brush.wet_lifetime_seconds);
+    const float lifetime_runoff_factor = std::clamp((lifetime - 0.35f) / 1.5f, 0.0f, 1.0f);
+    const float diffusion = std::clamp(brush.wet_diffusion, 0.0f, 2.0f) * (oil_mode ? 0.58f : 1.0f);
+    const float runoff = std::clamp(brush.wet_runoff, 0.0f, 2.0f) * lifetime_runoff_factor * (oil_mode ? 0.18f : 1.0f);
+    const float absorption = std::clamp(brush.wet_absorption, 0.0f, 1.0f) * (oil_mode ? 0.55f : 1.0f);
+    const float drip_head = std::clamp(brush.wet_drip_head, 0.0f, 1.5f) * lifetime_runoff_factor * (oil_mode ? 0.24f : 1.0f);
+    const float terminal_buildup = std::clamp(brush.wet_terminal_buildup, 0.0f, 1.5f) * (oil_mode ? 1.35f : 1.0f);
+    const float terminal_softness = std::clamp(brush.wet_terminal_softness, 0.1f, 1.0f);
+
+    const std::string target_key = getNodeName() + "#" + std::to_string(getMaterialID());
+    if (wet_flow_field_cache_.target_key != target_key ||
+        wet_flow_field_cache_.width != state.width ||
+        wet_flow_field_cache_.height != state.height ||
+        wet_flow_field_cache_.uv_set != getTarget().uv_set) {
+        rebuildWetFlowField(state.width, state.height);
+    }
+
+    const WetFlowFieldCache& flow_cache = wet_flow_field_cache_;
+    const bool has_downhill = !flow_cache.infos.empty();
+    const float reference_res = 1024.0f;
+    const float brush_radius_px = std::max(0.1f, brush.radius * (static_cast<float>(state.width) / reference_res));
+    const float max_flow_metric = has_downhill
+        ? std::clamp(1.0f + std::log1p(std::max(0.0f, flow_cache.max_flow_length)) * 0.85f, 1.0f, 4.0f)
+        : 0.0f;
+    const float max_shift = has_downhill
+        ? std::min(28.0f, brush_radius_px * 0.35f + max_flow_metric * runoff * std::max(0.18f, flow_cache.max_slope) * dt * 60.0f * 6.0f)
+        : 0.0f;
+    const int pad = std::max(2, static_cast<int>(std::ceil(max_shift)) + 2);
+
+    const int min_x = std::max(0, state.active_region.min_x - pad);
+    const int min_y = std::max(0, state.active_region.min_y - pad);
+    const int max_x = std::min(state.width - 1, state.active_region.max_x + pad);
+    const int max_y = std::min(state.height - 1, state.active_region.max_y + pad);
+
+    const int source_min_x = std::max(0, min_x - pad);
+    const int source_min_y = std::max(0, min_y - pad);
+    const int source_max_x = std::min(state.width - 1, max_x + pad);
+    const int source_max_y = std::min(state.height - 1, max_y + pad);
+    const int source_width = source_max_x - source_min_x + 1;
+    const int source_height = source_max_y - source_min_y + 1;
+
+    auto copyPixelWindow = [&](const std::vector<CompactVec4>& src) {
+        std::vector<CompactVec4> window(static_cast<size_t>(source_width) * static_cast<size_t>(source_height));
+        for (int y = 0; y < source_height; ++y) {
+            const size_t src_offset = static_cast<size_t>(source_min_y + y) * static_cast<size_t>(state.width) + static_cast<size_t>(source_min_x);
+            const size_t dst_offset = static_cast<size_t>(y) * static_cast<size_t>(source_width);
+            std::copy_n(src.begin() + static_cast<std::ptrdiff_t>(src_offset), source_width, window.begin() + static_cast<std::ptrdiff_t>(dst_offset));
+        }
+        return window;
+    };
+
+    auto copyScalarWindow = [&](const std::vector<float>& src) {
+        std::vector<float> window(static_cast<size_t>(source_width) * static_cast<size_t>(source_height));
+        for (int y = 0; y < source_height; ++y) {
+            const size_t src_offset = static_cast<size_t>(source_min_y + y) * static_cast<size_t>(state.width) + static_cast<size_t>(source_min_x);
+            const size_t dst_offset = static_cast<size_t>(y) * static_cast<size_t>(source_width);
+            std::copy_n(src.begin() + static_cast<std::ptrdiff_t>(src_offset), source_width, window.begin() + static_cast<std::ptrdiff_t>(dst_offset));
+        }
+        return window;
+    };
+
+    const std::vector<CompactVec4> source_pixels = copyPixelWindow(*pixels);
+    const std::vector<CompactVec4> source_mask_pixels = mask_pixels ? copyPixelWindow(*mask_pixels) : std::vector<CompactVec4>{};
+    const std::vector<float> source_wetness = copyScalarWindow(state.wetness);
+    const std::vector<float> source_pigment = copyScalarWindow(state.pigment);
+    const std::vector<float> source_thickness = copyScalarWindow(state.thickness);
+    for (WetAuxChannelBinding& aux : aux_channels) {
+        aux.source_pixels = copyPixelWindow(*aux.pixels);
+    }
+
+    auto sourcePixelIndex = [&](int gx, int gy) -> size_t {
+        const int local_x = std::clamp(gx - source_min_x, 0, source_width - 1);
+        const int local_y = std::clamp(gy - source_min_y, 0, source_height - 1);
+        return static_cast<size_t>(local_y) * static_cast<size_t>(source_width) + static_cast<size_t>(local_x);
+    };
+
+    auto sampleSourcePixel = [&](const std::vector<CompactVec4>& src, float gx, float gy) {
+        const float local_x = gx - static_cast<float>(source_min_x);
+        const float local_y = gy - static_cast<float>(source_min_y);
+        const float u = source_width > 1 ? (local_x / static_cast<float>(source_width - 1)) : 0.0f;
+        const float v = source_height > 1 ? (1.0f - local_y / static_cast<float>(source_height - 1)) : 0.0f;
+        return sampleTexturePixelBilinear(src, source_width, source_height, u, v);
+    };
+
+    auto sampleSourceScalar = [&](const std::vector<float>& src, float gx, float gy) {
+        return sampleScalarBilinear(src, source_width, source_height,
+                                    gx - static_cast<float>(source_min_x),
+                                    gy - static_cast<float>(source_min_y));
+    };
+
+    PaintDirtyRect dirty;
+    PaintDirtyRect next_active;
+    bool changed = false;
+    bool mask_changed = false;
+    auto liftLayerAlpha = [&](CompactVec4& pixel, float pigment_amount, float wet_amount,
+                              float incoming_alpha, float blend_alpha) {
+        if (!state.uses_layers) {
+            return;
+        }
+
+        const float current_alpha = static_cast<float>(pixel.a) / 255.0f;
+        const float pigment_alpha = std::clamp(
+            pigment_amount * (0.24f + std::clamp(wet_amount, 0.0f, 1.0f) * 0.60f),
+            0.0f,
+            1.0f);
+        const float carried_alpha = std::clamp(incoming_alpha * blend_alpha, 0.0f, 1.0f);
+        const float target_alpha = std::max(current_alpha, std::max(pigment_alpha, carried_alpha));
+        if (target_alpha > current_alpha) {
+            pixel.a = static_cast<uint8_t>(std::clamp(target_alpha * 255.0f, 0.0f, 255.0f));
+        }
+    };
+    int last_flow_info_index = flow_cache.infos.empty() ? -1 : 0;
+    for (int py = min_y; py <= max_y; ++py) {
+        for (int px = min_x; px <= max_x; ++px) {
+            const size_t idx = static_cast<size_t>(py) * static_cast<size_t>(state.width) + static_cast<size_t>(px);
+            const float wet = state.wetness[idx];
+            const float pigment = idx < state.pigment.size() ? state.pigment[idx] : 0.0f;
+            const float thickness = source_thickness[sourcePixelIndex(px, py)];
+            float advected_wet = 0.0f;
+            float advected_pigment = 0.0f;
+            float advected_thickness = 0.0f;
+            const CompactVec4 current_source_pixel = source_pixels[sourcePixelIndex(px, py)];
+            CompactVec4 advected_pixel = current_source_pixel;
+            CompactVec4 advected_mask = mask_pixels
+                ? source_mask_pixels[sourcePixelIndex(px, py)]
+                : CompactVec4(128, 128, 128, 255);
+            float runoff_alpha = 0.0f;
+            float drip_head_alpha = 0.0f;
+            float flow_scale = 0.0f;
+            float downhill_px_x = 0.0f;
+            float downhill_px_y = 0.0f;
+            float local_slope = 0.0f;
+            float advected_source_x = static_cast<float>(px);
+            float advected_source_y = static_cast<float>(py);
+            bool pixel_has_downhill = false;
+            if (!flow_cache.infos.empty()) {
+                const Vec2 pixel_uv(
+                    state.width > 1 ? static_cast<float>(px) / static_cast<float>(state.width - 1) : 0.0f,
+                    state.height > 1 ? 1.0f - static_cast<float>(py) / static_cast<float>(state.height - 1) : 0.0f);
+                const int matched_index = findWetFlowTriangleIndex(pixel_uv, last_flow_info_index);
+                if (matched_index >= 0) {
+                    const WetFlowTriangleInfo& info = flow_cache.infos[matched_index];
+                    downhill_px_x = info.flow_x;
+                    downhill_px_y = info.flow_y;
+                    local_slope = info.slope;
+                    pixel_has_downhill = true;
+                    last_flow_info_index = matched_index;
+                }
+            }
+            if (pixel_has_downhill) {
+                const float effective_slope = std::max(0.18f, local_slope);
+                const float local_flow_length = std::sqrt(downhill_px_x * downhill_px_x + downhill_px_y * downhill_px_y);
+                const float local_flow_metric = std::clamp(1.0f + std::log1p(std::max(0.0f, local_flow_length)) * 0.85f, 1.0f, 4.0f);
+                const float dir_x = local_flow_length > 1e-6f ? (downhill_px_x / local_flow_length) : 0.0f;
+                const float dir_y = local_flow_length > 1e-6f ? (downhill_px_y / local_flow_length) : 0.0f;
+                flow_scale = std::min(6.0f, runoff * effective_slope * local_flow_metric * std::max(wet, 0.05f) * dt * 60.0f * 1.65f);
+                if (flow_scale > 0.001f) {
+                    const float pixel_shift_x = dir_x * flow_scale;
+                    const float pixel_shift_y = dir_y * flow_scale;
+                    advected_source_x = static_cast<float>(px) - pixel_shift_x;
+                    advected_source_y = static_cast<float>(py) - pixel_shift_y;
+                    advected_pixel = sampleSourcePixel(source_pixels, advected_source_x, advected_source_y);
+                    if (mask_pixels) {
+                        advected_mask = sampleSourcePixel(source_mask_pixels, advected_source_x, advected_source_y);
+                    }
+                    advected_wet = sampleSourceScalar(source_wetness, advected_source_x, advected_source_y);
+                    advected_pigment = sampleSourceScalar(source_pigment, advected_source_x, advected_source_y);
+                    advected_thickness = sampleSourceScalar(source_thickness, advected_source_x, advected_source_y);
+                    runoff_alpha = std::clamp(flow_scale * (0.26f + (local_flow_metric - 1.0f) * 0.12f), 0.0f, 1.0f);
+                    const float drip_bias = std::clamp(advected_wet - wet * 0.25f, 0.0f, 1.0f);
+                    drip_head_alpha = std::clamp(runoff_alpha * drip_head * (0.35f + drip_bias), 0.0f, 1.0f);
+                }
+            }
+
+            if (wet <= 0.001f && advected_wet <= 0.001f) {
+                continue;
+            }
+
+            const float pigment_presence = std::max(pigment, advected_pigment);
+            const float runoff_wet_presence = std::max(wet, advected_wet);
+            const float pigment_gate = oil_mode
+                ? std::clamp((pigment_presence - 0.03f) / 0.18f, 0.0f, 1.0f)
+                : std::clamp((pigment_presence - 0.008f) / 0.10f, 0.0f, 1.0f);
+            const float carrier_gate = oil_mode
+                ? pigment_gate
+                : std::clamp(pigment_gate * 0.7f + runoff_wet_presence * 0.45f, 0.0f, 1.0f);
+            const float color_runoff_alpha = runoff_alpha * carrier_gate;
+            const float color_drip_head_alpha = drip_head_alpha * carrier_gate;
+            const float mix_alpha = std::clamp(
+                diffusion * wet * (oil_mode ? (0.10f + pigment_gate * 0.90f) : (0.22f + carrier_gate * 0.78f)) * dt * 60.0f,
+                0.0f,
+                1.0f);
+            float sum_r = 0.0f;
+            float sum_g = 0.0f;
+            float sum_b = 0.0f;
+            float sum_w = 0.0f;
+            if (mix_alpha > 0.015f) {
+                for (int oy = -1; oy <= 1; ++oy) {
+                    const int sy = std::clamp(py + oy, 0, state.height - 1);
+                    for (int ox = -1; ox <= 1; ++ox) {
+                        const int sx = std::clamp(px + ox, 0, state.width - 1);
+                        const size_t sidx = sourcePixelIndex(sx, sy);
+                        const CompactVec4& sample = source_pixels[sidx];
+                        const float sample_pigment = source_pigment[sidx];
+                        const float sample_weight = sample_pigment * (0.10f + source_wetness[sidx]);
+                        if (sample_weight <= 0.0005f) {
+                            continue;
+                        }
+                        sum_r += srgbByteToLinear01(sample.r) * sample_weight;
+                        sum_g += srgbByteToLinear01(sample.g) * sample_weight;
+                        sum_b += srgbByteToLinear01(sample.b) * sample_weight;
+                        sum_w += sample_weight;
+                    }
+                }
+            }
+
+            CompactVec4& dst = (*pixels)[idx];
+            const uint8_t before_r = dst.r;
+            const uint8_t before_g = dst.g;
+            const uint8_t before_b = dst.b;
+            const uint8_t before_a = dst.a;
+            CompactVec4* dst_mask = mask_pixels ? &(*mask_pixels)[idx] : nullptr;
+            const uint8_t before_mask = dst_mask ? dst_mask->r : 0;
+            float next_thickness = thickness;
+            float next_pigment = pigment;
+            if (color_runoff_alpha > 0.001f) {
+                blendBaseColorChannelLinear(dst.r, advected_pixel.r, color_runoff_alpha);
+                blendBaseColorChannelLinear(dst.g, advected_pixel.g, color_runoff_alpha);
+                blendBaseColorChannelLinear(dst.b, advected_pixel.b, color_runoff_alpha);
+                if (color_drip_head_alpha > 0.001f) {
+                    blendBaseColorChannelLinear(dst.r, advected_pixel.r, color_drip_head_alpha);
+                    blendBaseColorChannelLinear(dst.g, advected_pixel.g, color_drip_head_alpha);
+                    blendBaseColorChannelLinear(dst.b, advected_pixel.b, color_drip_head_alpha);
+                }
+                liftLayerAlpha(dst,
+                               std::max(pigment, advected_pigment),
+                               std::max(wet, advected_wet),
+                               static_cast<float>(advected_pixel.a) / 255.0f,
+                               std::max(color_runoff_alpha, color_drip_head_alpha));
+            }
+            next_thickness = std::clamp(
+                next_thickness * (1.0f - color_runoff_alpha * (oil_mode ? 0.10f : 0.28f)) +
+                    advected_thickness * color_runoff_alpha * (oil_mode ? 0.55f : 1.0f),
+                0.0f,
+                1.0f);
+            next_pigment = std::clamp(
+                std::max(
+                    pigment * (oil_mode ? 0.985f : 0.992f),
+                    advected_pigment * (oil_mode ? color_runoff_alpha : (0.28f + color_runoff_alpha * 0.72f))) -
+                    dt * (oil_mode ? (0.10f + absorption * 0.20f) : (0.06f + absorption * 0.12f)),
+                0.0f,
+                1.0f);
+
+            if (sum_w > 0.0f) {
+                const uint8_t avg_r = linearToSrgbByte01(sum_r / sum_w);
+                const uint8_t avg_g = linearToSrgbByte01(sum_g / sum_w);
+                const uint8_t avg_b = linearToSrgbByte01(sum_b / sum_w);
+                blendBaseColorChannelLinear(dst.r, avg_r, mix_alpha);
+                blendBaseColorChannelLinear(dst.g, avg_g, mix_alpha);
+                blendBaseColorChannelLinear(dst.b, avg_b, mix_alpha);
+                liftLayerAlpha(dst,
+                               std::max(next_pigment, pigment_presence),
+                               std::max(wet, advected_wet),
+                               1.0f,
+                               mix_alpha);
+                if (idx < state.thickness.size()) {
+                    const float thickness_mix_alpha = std::clamp(mix_alpha * 0.32f, 0.0f, 1.0f);
+                    const float local_thickness_target = std::clamp(
+                        std::max(thickness, advected_thickness * (0.55f + color_runoff_alpha * 0.25f)),
+                        0.0f,
+                        1.0f);
+                    next_thickness = std::clamp(
+                        next_thickness + (local_thickness_target - next_thickness) * thickness_mix_alpha,
+                        0.0f,
+                        1.0f);
+                }
+                if (dst.r != before_r || dst.g != before_g || dst.b != before_b) {
+                    dirty.expand(px, py, px, py);
+                    changed = true;
+                }
+                if (dst.a != before_a) {
+                    dirty.expand(px, py, px, py);
+                    changed = true;
+                }
+                if (dst_mask && dst_mask->r != before_mask) {
+                    dirty.expand(px, py, px, py);
+                    mask_changed = true;
+                }
+            } else if (dst.a != before_a) {
+                dirty.expand(px, py, px, py);
+                changed = true;
+            } else if (dst_mask && dst_mask->r != before_mask) {
+                dirty.expand(px, py, px, py);
+                mask_changed = true;
+            }
+
+            for (WetAuxChannelBinding& aux : aux_channels) {
+                CompactVec4& aux_dst = (*aux.pixels)[idx];
+                const CompactVec4 current_aux_source = aux.source_pixels[sourcePixelIndex(px, py)];
+                CompactVec4 advected_aux_pixel = current_aux_source;
+                if (flow_scale > 0.001f) {
+                    advected_aux_pixel = sampleSourcePixel(aux.source_pixels, advected_source_x, advected_source_y);
+                }
+
+                float sum_scalar = 0.0f;
+                float sum_scalar_weight = 0.0f;
+                if (mix_alpha > 0.015f) {
+                    for (int oy = -1; oy <= 1; ++oy) {
+                        const int sy = std::clamp(py + oy, 0, state.height - 1);
+                        for (int ox = -1; ox <= 1; ++ox) {
+                            const int sx = std::clamp(px + ox, 0, state.width - 1);
+                            const size_t sidx = sourcePixelIndex(sx, sy);
+                            const float sample_pigment = source_pigment[sidx];
+                            const float sample_weight = sample_pigment * (0.10f + source_wetness[sidx]);
+                            if (sample_weight <= 0.0005f) {
+                                continue;
+                            }
+                            sum_scalar += static_cast<float>(aux.source_pixels[sidx].r) * sample_weight;
+                            sum_scalar_weight += sample_weight;
+                        }
+                    }
+                }
+
+                const uint8_t before_aux = aux_dst.r;
+                if (color_runoff_alpha > 0.001f) {
+                    blendScalarPixel(aux_dst, advected_aux_pixel, color_runoff_alpha);
+                    if (color_drip_head_alpha > 0.001f) {
+                        blendScalarPixel(aux_dst, advected_aux_pixel, color_drip_head_alpha);
+                    }
+                }
+                if (sum_scalar_weight > 0.0f) {
+                    const uint8_t avg_scalar = static_cast<uint8_t>(std::clamp(sum_scalar / sum_scalar_weight, 0.0f, 255.0f));
+                    blendScalarPixel(aux_dst, avg_scalar, mix_alpha);
+                }
+                if (aux_dst.r != before_aux) {
+                    dirty.expand(px, py, px, py);
+                    aux.changed = true;
+                }
+            }
+
+            const float absorbed = absorption * std::max(wet, advected_wet) * dt * 0.7f;
+            next_thickness = std::max(0.0f, next_thickness - absorbed * 0.35f);
+
+            if (idx < state.pigment.size()) {
+                state.pigment[idx] = next_pigment;
+            }
+            if (idx < state.thickness.size()) {
+                state.thickness[idx] = next_thickness;
+            }
+
+            if (dst_mask) {
+                const uint8_t mask_value = encodeRaisedThickness(next_thickness);
+                dst_mask->r = mask_value;
+                dst_mask->g = mask_value;
+                dst_mask->b = mask_value;
+                dst_mask->a = 255;
+                if (dst_mask->r != before_mask) {
+                    dirty.expand(px, py, px, py);
+                    mask_changed = true;
+                }
+            }
+
+            state.wetness[idx] = std::max(0.0f, std::max(wet, advected_wet * runoff_alpha) - (dt / lifetime) - absorbed);
+            if (state.wetness[idx] > 0.001f) {
+                next_active.expand(px, py, px, py);
+            }
+            if (next_thickness > 0.001f) {
+                next_active.expand(px, py, px, py);
+            }
+
+            if (pixel_has_downhill && flow_scale > 0.02f && runoff_alpha > 0.01f) {
+                const float local_flow_length = std::sqrt(downhill_px_x * downhill_px_x + downhill_px_y * downhill_px_y);
+                const float dir_x = local_flow_length > 1e-6f ? (downhill_px_x / local_flow_length) : 0.0f;
+                const float dir_y = local_flow_length > 1e-6f ? (downhill_px_y / local_flow_length) : 0.0f;
+                const float trail_distance = std::min(brush_radius_px * 0.6f + 2.0f, std::max(flow_scale * 0.95f, brush_radius_px * std::clamp(wet, 0.15f, 1.0f) * 0.22f));
+                const float target_xf = static_cast<float>(px) + dir_x * trail_distance;
+                const float target_yf = static_cast<float>(py) + dir_y * trail_distance;
+                const int target_x = std::clamp(static_cast<int>(std::round(target_xf)), 0, state.width - 1);
+                const int target_y = std::clamp(static_cast<int>(std::round(target_yf)), 0, state.height - 1);
+                const size_t target_idx = static_cast<size_t>(target_y) * static_cast<size_t>(state.width) + static_cast<size_t>(target_x);
+                if (target_idx != idx) {
+                    CompactVec4& downstream = (*pixels)[target_idx];
+                    const float transport_alpha = std::clamp(
+                        runoff_alpha * (oil_mode ? 0.24f : 0.55f) + drip_head_alpha * (oil_mode ? 0.12f : 0.35f),
+                        0.0f,
+                        1.0f);
+                    const float transported_wet = std::max(
+                        wet * (oil_mode ? (0.18f + transport_alpha * 0.08f) : (0.55f + transport_alpha * 0.25f)),
+                        advected_wet * runoff_alpha * (oil_mode ? 0.32f : 1.0f));
+                    const float transported_pigment = std::clamp(
+                        std::max(
+                            pigment * (oil_mode ? (0.58f + transport_alpha * 0.22f) : (0.44f + transport_alpha * 0.28f)),
+                            advected_pigment * (oil_mode ? color_runoff_alpha : (0.24f + color_runoff_alpha * 0.76f))),
+                        0.0f,
+                        1.0f);
+                    const float pigment_transport_alpha = std::clamp(
+                        oil_mode
+                            ? (transport_alpha * (0.24f + transported_pigment * 0.76f) + color_runoff_alpha * 0.08f) *
+                                std::clamp((transported_pigment - 0.015f) / 0.22f, 0.0f, 1.0f)
+                            : transport_alpha * (0.18f + transported_pigment * 0.82f),
+                        0.0f,
+                        1.0f);
+                    if (pigment_transport_alpha > 0.001f) {
+                        blendBaseColorChannelLinear(downstream.r, current_source_pixel.r, pigment_transport_alpha);
+                        blendBaseColorChannelLinear(downstream.g, current_source_pixel.g, pigment_transport_alpha);
+                        blendBaseColorChannelLinear(downstream.b, current_source_pixel.b, pigment_transport_alpha);
+                        liftLayerAlpha(downstream,
+                                       transported_pigment,
+                                       transported_wet,
+                                       static_cast<float>(current_source_pixel.a) / 255.0f,
+                                       pigment_transport_alpha);
+                        dirty.expand(target_x, target_y, target_x, target_y);
+                        changed = true;
+                    }
+
+                    if (mask_pixels && transported_pigment > (oil_mode ? 0.08f : 0.02f)) {
+                        const float transported_thickness = std::clamp(
+                            std::max(thickness, next_thickness) * transported_pigment *
+                                (oil_mode ? (0.52f + pigment_transport_alpha * 0.30f) : (0.28f + pigment_transport_alpha * 0.45f)),
+                            0.0f,
+                            1.0f);
+                        if (target_idx < state.thickness.size()) {
+                            state.thickness[target_idx] = std::max(state.thickness[target_idx], transported_thickness);
+                        }
+
+                        const float pigment_mass = std::clamp(
+                            transported_thickness * (0.45f + transported_wet * 0.35f) *
+                            (0.35f + std::clamp(brush.paint_load, 0.0f, 1.0f) * 0.65f) *
+                            (0.25f + std::clamp(brush.deposit_rate, 0.0f, 1.0f) * 0.75f),
+                            0.0f,
+                            1.0f);
+                        const float pigment_gate = std::clamp((pigment_mass - 0.18f) / 0.42f, 0.0f, 1.0f);
+                        const float thickness_gate = std::clamp((transported_thickness - 0.10f) / 0.35f, 0.0f, 1.0f);
+                        const float wet_gate = std::clamp((transported_wet - 0.08f) / 0.30f, 0.0f, 1.0f);
+                        const float dry_phase = std::clamp((0.32f - transported_wet) / 0.24f, 0.0f, 1.0f);
+                        const float terminal_flow = std::clamp(1.0f - flow_scale / std::max(0.8f, brush_radius_px * 0.12f + 0.65f), 0.0f, 1.0f);
+                        const float bead_strength = terminal_buildup * pigment_gate * thickness_gate * wet_gate * dry_phase * terminal_flow;
+                        if (bead_strength > 0.001f) {
+                            const int tail_back_step = std::max(1, static_cast<int>(std::round(1.0f + terminal_softness * 1.5f)));
+                            const int side_step = terminal_softness > 0.45f ? 1 : 0;
+                            auto applyBeadSample = [&](int bead_x, int bead_y, float weight_scale, float color_scale) {
+                                if (bead_x < 0 || bead_x >= state.width || bead_y < 0 || bead_y >= state.height) {
+                                    return;
+                                }
+                                const size_t bead_idx = static_cast<size_t>(bead_y) * static_cast<size_t>(state.width) + static_cast<size_t>(bead_x);
+                                if (bead_idx >= state.thickness.size()) {
+                                    return;
+                                }
+                                const float bead_add = bead_strength * weight_scale * 0.28f;
+                                if (bead_add <= 0.0005f) {
+                                    return;
+                                }
+                                CompactVec4& bead_pixel = (*pixels)[bead_idx];
+                                const float bead_color_alpha = std::clamp(
+                                    bead_strength * color_scale * (0.16f + pigment_transport_alpha * 0.36f),
+                                    0.0f,
+                                    1.0f);
+                                if (bead_color_alpha > 0.0005f) {
+                                    blendBaseColorChannelLinear(bead_pixel.r, downstream.r, bead_color_alpha);
+                                    blendBaseColorChannelLinear(bead_pixel.g, downstream.g, bead_color_alpha);
+                                    blendBaseColorChannelLinear(bead_pixel.b, downstream.b, bead_color_alpha);
+                                    liftLayerAlpha(bead_pixel,
+                                                   transported_pigment,
+                                                   transported_wet,
+                                                   static_cast<float>(downstream.a) / 255.0f,
+                                                   bead_color_alpha);
+                                    dirty.expand(bead_x, bead_y, bead_x, bead_y);
+                                    changed = true;
+                                }
+                                state.thickness[bead_idx] = std::clamp(state.thickness[bead_idx] + bead_add, 0.0f, 1.0f);
+                                next_active.expand(bead_x, bead_y, bead_x, bead_y);
+                            };
+
+                            applyBeadSample(target_x, target_y, 1.0f, 1.0f);
+                            applyBeadSample(
+                                std::clamp(target_x - static_cast<int>(std::round(dir_x * tail_back_step)), 0, state.width - 1),
+                                std::clamp(target_y - static_cast<int>(std::round(dir_y * tail_back_step)), 0, state.height - 1),
+                                0.38f + terminal_softness * 0.12f,
+                                0.55f);
+                            if (side_step > 0) {
+                                const int side_x = static_cast<int>(std::round(-dir_y * side_step));
+                                const int side_y = static_cast<int>(std::round(dir_x * side_step));
+                                applyBeadSample(std::clamp(target_x + side_x, 0, state.width - 1), std::clamp(target_y + side_y, 0, state.height - 1), 0.12f, 0.22f);
+                                applyBeadSample(std::clamp(target_x - side_x, 0, state.width - 1), std::clamp(target_y - side_y, 0, state.height - 1), 0.12f, 0.22f);
+                            }
+                        }
+                        mask_changed = true;
+                    }
+
+                    state.wetness[target_idx] = std::max(
+                        state.wetness[target_idx],
+                        transported_wet * (0.16f + transported_pigment * 0.84f));
+                    if (target_idx < state.pigment.size()) {
+                        state.pigment[target_idx] = std::max(
+                            state.pigment[target_idx],
+                            transported_pigment * (0.70f + pigment_transport_alpha * 0.20f));
+                    }
+                    if (target_idx < state.thickness.size()) {
+                        next_active.expand(target_x, target_y, target_x, target_y);
+                    }
+                    next_active.expand(target_x, target_y, target_x, target_y);
+
+                    for (WetAuxChannelBinding& aux : aux_channels) {
+                        CompactVec4& downstream_aux = (*aux.pixels)[target_idx];
+                        const uint8_t before_aux = downstream_aux.r;
+                        if (pigment_transport_alpha > 0.001f) {
+                            const CompactVec4 current_aux_source = aux.source_pixels[sourcePixelIndex(px, py)];
+                            blendScalarPixel(downstream_aux, current_aux_source, pigment_transport_alpha);
+                        }
+                        if (downstream_aux.r != before_aux) {
+                            dirty.expand(target_x, target_y, target_x, target_y);
+                            aux.changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    state.active_region = next_active;
+    const bool aux_changed = std::any_of(aux_channels.begin(), aux_channels.end(), [](const WetAuxChannelBinding& aux) {
+        return aux.changed;
+    });
+    if ((!changed && !mask_changed && !aux_changed) || dirty.empty()) {
+        return false;
+    }
+
+    mirrorWetRegionAcrossSeams(*pixels, state.width, state.height, dirty, 0.35f);
+    if (mask_pixels) {
+        mirrorWetRegionAcrossSeams(*mask_pixels, state.width, state.height, dirty, 0.45f);
+        mask_changed = true;
+    }
+    for (WetAuxChannelBinding& aux : aux_channels) {
+        if (aux.changed && aux.pixels) {
+            mirrorWetRegionAcrossSeams(*aux.pixels, state.width, state.height, dirty, 0.35f);
+        }
+    }
+
+    if (state.uses_layers) {
+        std::vector<PaintChannel> channels;
+        channels.reserve(2 + aux_channels.size());
+        channels.push_back(PaintChannel::BaseColor);
+        if (mask_changed) {
+            channels.push_back(PaintChannel::Mask);
+        }
+        for (const WetAuxChannelBinding& aux : aux_channels) {
+            if (aux.changed) {
+                channels.push_back(aux.channel);
+            }
+        }
+        compositeAndUploadRegion(channels.data(), static_cast<int>(channels.size()), dirty);
+    } else if (texture) {
+        bindTextureSetToMaterial();
+        if (texture->isUploaded()) {
+            texture->upload_region_to_gpu(dirty.min_x, dirty.min_y,
+                                          dirty.max_x - dirty.min_x + 1,
+                                          dirty.max_y - dirty.min_y + 1);
+        } else {
+            texture->upload_to_gpu();
+        }
+        if (mask_changed && mask_texture) {
+            if (mask_texture->isUploaded()) {
+                mask_texture->upload_region_to_gpu(dirty.min_x, dirty.min_y,
+                                                   dirty.max_x - dirty.min_x + 1,
+                                                   dirty.max_y - dirty.min_y + 1);
+            } else {
+                mask_texture->upload_to_gpu();
+            }
+        }
+        for (WetAuxChannelBinding& aux : aux_channels) {
+            if (!aux.changed || !aux.texture) {
+                continue;
+            }
+            if (aux.texture->isUploaded()) {
+                aux.texture->upload_region_to_gpu(dirty.min_x, dirty.min_y,
+                                                  dirty.max_x - dirty.min_x + 1,
+                                                  dirty.max_y - dirty.min_y + 1);
+            } else {
+                aux.texture->upload_to_gpu();
+            }
+        }
+    }
+
+    if (mask_changed && auto_normal_from_height_enabled) {
+        updateNormalFromHeightRegion(dirty, normal_strength);
+    }
+    return true;
+}
 
 uint16_t MeshPaintAdapter::getMaterialID() const {
     return triangle_ ? triangle_->getMaterialID() : MaterialManager::INVALID_MATERIAL_ID;
@@ -1016,8 +2671,13 @@ bool MeshPaintAdapter::resizeTextureSet(int resolution) {
         if (!texture) {
             return;
         }
+        const int old_width = texture->width;
+        const int old_height = texture->height;
         const bool was_uploaded = texture->isUploaded();
         resizeTexturePixels(*texture, resolution);
+        if (texture->width != old_width || texture->height != old_height) {
+            texture->markVulkanDirtyFull();
+        }
         if (was_uploaded) {
             texture->cleanup_gpu();
         }
@@ -1074,13 +2734,16 @@ bool MeshPaintAdapter::paintAtUV(PaintChannel channel, const Vec2& uv, const Bru
         computeTriangleUvJacobianLengths(*triangle_, uv_set, wpu, wpv);
         computeBrushAxisCorrection(wpu, wpv, width, height, kx, ky);
     }
+    const float extent_scale = std::max(brushShapeAspectScale(brush), 1.0f / brushShapeAspectScale(brush));
     const float radius_x = std::max(0.1f, radius_px * kx);
     const float radius_y = std::max(0.1f, radius_px * ky);
+    const float bound_radius_x = radius_x * extent_scale;
+    const float bound_radius_y = radius_y * extent_scale;
 
-    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - radius_x)));
-    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + radius_x)));
-    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - radius_y)));
-    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + radius_y)));
+    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - bound_radius_x)));
+    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + bound_radius_x)));
+    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - bound_radius_y)));
+    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + bound_radius_y)));
     const float strength = std::clamp(brush.strength * brush.flow * dt * 60.0f, 0.0f, 1.0f);
     const CompactVec4 erase_pixel = defaultChannelPixel(channel);
     std::vector<CompactVec4> source_pixels;
@@ -1093,15 +2756,16 @@ bool MeshPaintAdapter::paintAtUV(PaintChannel channel, const Vec2& uv, const Bru
         for (int px = min_x; px <= max_x; ++px) {
             const float dx = (static_cast<float>(px) + 0.5f) - center_x;
             const float dy = (static_cast<float>(py) + 0.5f) - center_y;
+            const BrushFootprintSample fp = sampleBrushFootprint(brush, dx, dy, radius_x, radius_y);
             const float nx = dx / radius_x;
             const float ny = dy / radius_y;
-            const float dist_norm = std::sqrt(nx * nx + ny * ny);
+            const float dist_norm = fp.dist_norm;
             if (dist_norm > 1.0f) {
                 continue;
             }
 
             const float alpha_mask = sampleBrushMask(brush, nx, ny);
-            const float texture_alpha = sampleBrushPaintTextureAlpha(brush, nx, ny);
+            const float texture_alpha = sampleBrushPaintTextureAlpha(channel, brush, nx, ny);
             const CompactVec4 brush_pixel = makeBrushTexturePixel(channel, brush, nx, ny);
             const float weight = computeBrushWeightNormalized(dist_norm, radius_px,
                                     std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * texture_alpha * strength;
@@ -1111,9 +2775,13 @@ bool MeshPaintAdapter::paintAtUV(PaintChannel channel, const Vec2& uv, const Bru
 
             CompactVec4& pixel = texture->pixels[static_cast<size_t>(py) * static_cast<size_t>(width) + static_cast<size_t>(px)];
             if (brush.tool == BrushTool::Erase) {
-                blendPixelChannel(pixel.r, erase_pixel.r, weight);
-                blendPixelChannel(pixel.g, erase_pixel.g, weight);
-                blendPixelChannel(pixel.b, erase_pixel.b, weight);
+                if (channel == PaintChannel::Mask) {
+                    blendHeightMaskPixelChannels(pixel, erase_pixel, weight);
+                } else {
+                    blendPixelChannel(pixel.r, erase_pixel.r, weight);
+                    blendPixelChannel(pixel.g, erase_pixel.g, weight);
+                    blendPixelChannel(pixel.b, erase_pixel.b, weight);
+                }
             } else if (brush.tool == BrushTool::Soften) {
                 Vec3 sum(0.0f, 0.0f, 0.0f);
                 int sample_count = 0;
@@ -1132,13 +2800,21 @@ bool MeshPaintAdapter::paintAtUV(PaintChannel channel, const Vec2& uv, const Bru
                 const uint8_t avg_r = static_cast<uint8_t>(sum.x / static_cast<float>(sample_count));
                 const uint8_t avg_g = static_cast<uint8_t>(sum.y / static_cast<float>(sample_count));
                 const uint8_t avg_b = static_cast<uint8_t>(sum.z / static_cast<float>(sample_count));
-                blendPixelChannel(pixel.r, avg_r, weight);
-                blendPixelChannel(pixel.g, avg_g, weight);
-                blendPixelChannel(pixel.b, avg_b, weight);
+                if (channel == PaintChannel::Mask) {
+                    blendHeightMaskPixelChannels(pixel, CompactVec4(avg_r, avg_g, avg_b, 255), weight);
+                } else {
+                    blendPixelChannel(pixel.r, avg_r, weight);
+                    blendPixelChannel(pixel.g, avg_g, weight);
+                    blendPixelChannel(pixel.b, avg_b, weight);
+                }
             } else {
-                blendPixelChannel(pixel.r, brush_pixel.r, weight);
-                blendPixelChannel(pixel.g, brush_pixel.g, weight);
-                blendPixelChannel(pixel.b, brush_pixel.b, weight);
+                if (channel == PaintChannel::Mask) {
+                    blendHeightMaskPixelChannels(pixel, brush_pixel, weight);
+                } else {
+                    blendPixelChannel(pixel.r, brush_pixel.r, weight);
+                    blendPixelChannel(pixel.g, brush_pixel.g, weight);
+                    blendPixelChannel(pixel.b, brush_pixel.b, weight);
+                }
                 if (channel == PaintChannel::Normal) {
                     Vec3 n = Vec3(
                         (pixel.r / 255.0f) * 2.0f - 1.0f,
@@ -1408,13 +3084,16 @@ bool MeshPaintAdapter::cloneAtUV(PaintChannel channel, const Vec2& dst_uv, const
         computeTriangleUvJacobianLengths(*triangle_, uv_set, wpu, wpv);
         computeBrushAxisCorrection(wpu, wpv, width, height, kx, ky);
     }
+    const float extent_scale = std::max(brushShapeAspectScale(brush), 1.0f / brushShapeAspectScale(brush));
     const float radius_x = std::max(0.1f, radius_px * kx);
     const float radius_y = std::max(0.1f, radius_px * ky);
+    const float bound_radius_x = radius_x * extent_scale;
+    const float bound_radius_y = radius_y * extent_scale;
 
-    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - radius_x)));
-    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + radius_x)));
-    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - radius_y)));
-    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + radius_y)));
+    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - bound_radius_x)));
+    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + bound_radius_x)));
+    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - bound_radius_y)));
+    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + bound_radius_y)));
     const float strength = std::clamp(brush.strength * brush.flow * dt * 60.0f, 0.0f, 1.0f);
     const std::vector<CompactVec4> source_pixels = texture->pixels;
 
@@ -1423,9 +3102,10 @@ bool MeshPaintAdapter::cloneAtUV(PaintChannel channel, const Vec2& dst_uv, const
         for (int px = min_x; px <= max_x; ++px) {
             const float dx = (static_cast<float>(px) + 0.5f) - center_x;
             const float dy = (static_cast<float>(py) + 0.5f) - center_y;
+            const BrushFootprintSample fp = sampleBrushFootprint(brush, dx, dy, radius_x, radius_y);
             const float nx = dx / radius_x;
             const float ny = dy / radius_y;
-            const float dist_norm = std::sqrt(nx * nx + ny * ny);
+            const float dist_norm = fp.dist_norm;
             if (dist_norm > 1.0f) {
                 continue;
             }
@@ -1447,9 +3127,13 @@ bool MeshPaintAdapter::cloneAtUV(PaintChannel channel, const Vec2& dst_uv, const
             const float src_v = (height > 1) ? (1.0f - src_py_f / static_cast<float>(height - 1)) : 0.0f;
             const CompactVec4 src = sampleTexturePixelBilinear(source_pixels, width, height, src_u, src_v);
             CompactVec4& dst = texture->pixels[static_cast<size_t>(py) * static_cast<size_t>(width) + static_cast<size_t>(px)];
-            blendPixelChannel(dst.r, src.r, weight);
-            blendPixelChannel(dst.g, src.g, weight);
-            blendPixelChannel(dst.b, src.b, weight);
+            if (channel == PaintChannel::Mask) {
+                blendHeightMaskPixelChannels(dst, src, weight);
+            } else {
+                blendPixelChannel(dst.r, src.r, weight);
+                blendPixelChannel(dst.g, src.g, weight);
+                blendPixelChannel(dst.b, src.b, weight);
+            }
             changed = true;
         }
     }
@@ -1559,6 +3243,70 @@ bool MeshPaintAdapter::updateNormalFromHeightArea(const Vec2& center_uv, float r
             Vec3 combined = combineNormalsPD(base_normal, baked_bump);
 
             normal_tex->pixels[idx] = encodeNormalPixel(combined);
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        if (normal_tex->isUploaded()) normal_tex->upload_region_to_gpu(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
+        else normal_tex->upload_to_gpu();
+    }
+    return changed;
+}
+
+bool MeshPaintAdapter::updateNormalFromHeightRegion(const PaintDirtyRect& dirty, float strength) {
+    if (!isValid() || dirty.empty()) return false;
+    PaintTextureSet* set = getTextureSet();
+    if (!set) return false;
+
+    std::shared_ptr<Texture> height_tex = set->getTexture(PaintChannel::Mask);
+    std::shared_ptr<Texture> normal_tex = set->getTexture(PaintChannel::Normal);
+    if (!height_tex || !normal_tex) return false;
+    if (height_tex->pixels.empty() || normal_tex->pixels.empty()) return false;
+
+    const int width = height_tex->width;
+    const int height = height_tex->height;
+    if (normal_tex->width != width || normal_tex->height != height) return false;
+    const size_t expected_pixels = static_cast<size_t>(width) * static_cast<size_t>(height);
+    if (normal_tex->pixels.size() < expected_pixels || height_tex->pixels.size() < expected_pixels) return false;
+
+    std::shared_ptr<Texture> source_normal = set->getSourceTexture(PaintChannel::Normal);
+    const bool has_source_normal =
+        source_normal &&
+        source_normal->is_loaded() &&
+        source_normal->width > 0 &&
+        source_normal->height > 0 &&
+        !source_normal->pixels.empty();
+    const Vec3 flat_normal(0.0f, 0.0f, 1.0f);
+    const int active_uv_set = getTarget().uv_set;
+
+    const int min_x = std::max(0, dirty.min_x - 1);
+    const int max_x = std::min(width - 1, dirty.max_x + 1);
+    const int min_y = std::max(0, dirty.min_y - 1);
+    const int max_y = std::min(height - 1, dirty.max_y + 1);
+
+    bool changed = false;
+    for (int py = min_y; py <= max_y; ++py) {
+        for (int px = min_x; px <= max_x; ++px) {
+            const size_t idx = static_cast<size_t>(py) * static_cast<size_t>(width) + static_cast<size_t>(px);
+            if (idx >= normal_tex->pixels.size()) continue;
+
+            Vec3 baked_bump = triangle_ ? buildNormalFromHeightGeometryAware(height_tex, *triangle_, active_uv_set, px, py, strength)
+                                        : buildNormalFromHeight(height_tex, px, py, strength);
+
+            Vec3 base_normal = flat_normal;
+            if (has_source_normal) {
+                const float u = width > 1 ? static_cast<float>(px) / static_cast<float>(width - 1) : 0.0f;
+                const float v = height > 1 ? 1.0f - static_cast<float>(py) / static_cast<float>(height - 1) : 0.0f;
+                base_normal = decodeNormalPixel(sampleTexturePixelBilinear(
+                    source_normal->pixels,
+                    source_normal->width,
+                    source_normal->height,
+                    u,
+                    v));
+            }
+
+            normal_tex->pixels[idx] = encodeNormalPixel(combineNormalsPD(base_normal, baked_bump));
             changed = true;
         }
     }
@@ -1701,32 +3449,38 @@ PaintDirtyRect MeshPaintAdapter::paintLayerAtUV(int layer_index, PaintChannel ch
         computeTriangleUvJacobianLengths(*triangle_, uv_set, wpu, wpv);
         computeBrushAxisCorrection(wpu, wpv, width, height, kx, ky);
     }
+    const float extent_scale = std::max(brushShapeAspectScale(brush), 1.0f / brushShapeAspectScale(brush));
     const float radius_x = std::max(0.1f, radius_px * kx);
     const float radius_y = std::max(0.1f, radius_px * ky);
+    const float bound_radius_x = radius_x * extent_scale;
+    const float bound_radius_y = radius_y * extent_scale;
 
-    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - radius_x)));
-    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + radius_x)));
-    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - radius_y)));
-    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + radius_y)));
+    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - bound_radius_x)));
+    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + bound_radius_x)));
+    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - bound_radius_y)));
+    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + bound_radius_y)));
     const float strength = std::clamp(brush.strength * brush.flow * dt * 60.0f, 0.0f, 1.0f);
+    const bool scalar_channel = isScalarMaterialChannel(channel);
 
     bool changed = false;
     for (int py = min_y; py <= max_y; ++py) {
         for (int px = min_x; px <= max_x; ++px) {
             const float dx = (static_cast<float>(px) + 0.5f) - center_x;
             const float dy = (static_cast<float>(py) + 0.5f) - center_y;
+            const BrushFootprintSample fp = sampleBrushFootprint(brush, dx, dy, radius_x, radius_y);
             const float nx = dx / radius_x;
             const float ny = dy / radius_y;
-            const float dist_norm = std::sqrt(nx * nx + ny * ny);
+            const float dist_norm = fp.dist_norm;
             if (dist_norm > 1.0f) continue;
 
             const float alpha_mask = sampleBrushMask(brush, nx, ny);
-            const float texture_alpha = sampleBrushPaintTextureAlpha(brush, nx, ny);
+            const float texture_alpha = sampleBrushPaintTextureAlpha(channel, brush, nx, ny);
             const CompactVec4 brush_pixel = makeBrushTexturePixel(channel, brush, nx, ny);
             const float weight = computeBrushWeightNormalized(dist_norm, radius_px,
                                     std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * texture_alpha * strength;
             if (weight <= 0.001f) continue;
 
+            const size_t idx = static_cast<size_t>(py) * static_cast<size_t>(width) + static_cast<size_t>(px);
             CompactVec4& pixel = pixels[static_cast<size_t>(py) * static_cast<size_t>(width) + static_cast<size_t>(px)];
 
             if (brush.tool == BrushTool::Erase) {
@@ -1757,6 +3511,28 @@ PaintDirtyRect MeshPaintAdapter::paintLayerAtUV(int layer_index, PaintChannel ch
                 pixel.a = static_cast<uint8_t>(std::clamp(
                     static_cast<float>(pixel.a) + (asum * inv - static_cast<float>(pixel.a)) * weight,
                     0.0f, 255.0f));
+            } else if (scalar_channel && layer->meta.blend_mode == LayerBlendMode::Normal) {
+                const float layer_opacity = std::clamp(layer->meta.opacity, 0.0f, 1.0f);
+                const float target_value = static_cast<float>(brush_pixel.r) / 255.0f;
+                const float under_value = compositeScalarBelowLayer(stack, layer_index, channel, idx);
+                const float current_value = compositeScalarLayerValue(under_value, pixel, layer_opacity, LayerBlendMode::Normal);
+                const float next_value = std::clamp(current_value + (target_value - current_value) * weight, 0.0f, 1.0f);
+
+                float desired_alpha = static_cast<float>(pixel.a) / 255.0f;
+                const float denom = target_value - under_value;
+                if (layer_opacity > 1e-6f) {
+                    if (std::abs(denom) > 1e-6f) {
+                        const float desired_sa = std::clamp((next_value - under_value) / denom, 0.0f, layer_opacity);
+                        desired_alpha = std::clamp(desired_sa / layer_opacity, 0.0f, 1.0f);
+                    } else {
+                        desired_alpha = std::clamp(desired_alpha + (1.0f - desired_alpha) * weight, 0.0f, 1.0f);
+                    }
+                }
+
+                pixel.r = brush_pixel.r;
+                pixel.g = brush_pixel.g;
+                pixel.b = brush_pixel.b;
+                pixel.a = static_cast<uint8_t>(std::clamp(desired_alpha * 255.0f, 0.0f, 255.0f));
             } else {
                 // Porter-Duff source-over with straight (un-premultiplied) alpha.
                 // Blending RGB with `weight` directly would store premultiplied
@@ -1828,13 +3604,16 @@ PaintDirtyRect MeshPaintAdapter::cloneLayerAtUV(int layer_index, PaintChannel ch
         computeTriangleUvJacobianLengths(*triangle_, uv_set, wpu, wpv);
         computeBrushAxisCorrection(wpu, wpv, width, height, kx, ky);
     }
+    const float extent_scale = std::max(brushShapeAspectScale(brush), 1.0f / brushShapeAspectScale(brush));
     const float radius_x = std::max(0.1f, radius_px * kx);
     const float radius_y = std::max(0.1f, radius_px * ky);
+    const float bound_radius_x = radius_x * extent_scale;
+    const float bound_radius_y = radius_y * extent_scale;
 
-    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - radius_x)));
-    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + radius_x)));
-    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - radius_y)));
-    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + radius_y)));
+    const int min_x = std::max(0, static_cast<int>(std::floor(center_x - bound_radius_x)));
+    const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + bound_radius_x)));
+    const int min_y = std::max(0, static_cast<int>(std::floor(center_y - bound_radius_y)));
+    const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + bound_radius_y)));
     const float strength = std::clamp(brush.strength * brush.flow * dt * 60.0f, 0.0f, 1.0f);
 
     // Source data: read from the layer's own pixels (clone within layer).
@@ -1845,9 +3624,10 @@ PaintDirtyRect MeshPaintAdapter::cloneLayerAtUV(int layer_index, PaintChannel ch
         for (int px = min_x; px <= max_x; ++px) {
             const float dx = (static_cast<float>(px) + 0.5f) - center_x;
             const float dy = (static_cast<float>(py) + 0.5f) - center_y;
+            const BrushFootprintSample fp = sampleBrushFootprint(brush, dx, dy, radius_x, radius_y);
             const float nx = dx / radius_x;
             const float ny = dy / radius_y;
-            const float dist_norm = std::sqrt(nx * nx + ny * ny);
+            const float dist_norm = fp.dist_norm;
             if (dist_norm > 1.0f) continue;
 
             const float alpha_mask = sampleBrushMask(brush, nx, ny);

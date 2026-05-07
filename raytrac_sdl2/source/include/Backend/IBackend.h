@@ -370,6 +370,8 @@ public:
 
     // Flag bits for MaterialData::flags
     static constexpr uint32_t MAT_FLAG_TERRAIN = (1u << 16); // Splat-blended terrain material
+    static constexpr uint32_t MAT_FLAG_WATER   = (1u << 17); // Explicit water surface material
+    static constexpr uint32_t MAT_FLAG_WATER_FFT_READY = (1u << 18); // Vulkan height/normal slots contain FFT textures
 
     /**
      * @brief Per-terrain layer descriptor for splat-map based blending.

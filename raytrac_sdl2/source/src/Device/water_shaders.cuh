@@ -255,6 +255,79 @@ __device__ inline float3 calculateWaterAbsorption(
     return absorption;
 }
 
+__device__ inline float applyWaterMicroDetail(
+    float3& normal,
+    const float3& position,
+    float micro_detail_strength,
+    float micro_detail_scale,
+    float micro_anim_speed,
+    float micro_morph_speed,
+    float wind_direction,
+    float wind_speed,
+    float time,
+    float domain_coord_scale
+) {
+    if (micro_detail_strength <= 0.001f) {
+        return 0.0f;
+    }
+
+    float micro_slope = 0.0f;
+    float wind_dx = cosf(wind_direction);
+    float wind_dz = sinf(wind_direction);
+    float cross_dx = -wind_dz;
+    float cross_dz = wind_dx;
+    float base_speed = sqrtf(fmaxf(1.0f, wind_speed)) * micro_anim_speed;
+    float morph = micro_morph_speed;
+    (void)domain_coord_scale;
+    float scaled_micro_detail = micro_detail_scale;
+
+    float off1_x = wind_dx * time * base_speed + sinf(time * 0.3f * morph) * 0.5f;
+    float off1_z = wind_dz * time * base_speed + cosf(time * 0.2f * morph) * 0.5f;
+    float2 pos1 = make_float2(position.x * scaled_micro_detail + off1_x,
+                              position.z * scaled_micro_detail + off1_z);
+
+    float off2_x = (wind_dx * 0.7f + cross_dx * 0.3f) * time * base_speed * 0.6f + cosf(time * 0.15f * morph + 1.5f) * 0.8f;
+    float off2_z = (wind_dz * 0.7f + cross_dz * 0.3f) * time * base_speed * 0.6f + sinf(time * 0.25f * morph + 2.0f) * 0.8f;
+    float2 pos2 = make_float2(position.x * scaled_micro_detail * 0.5f + off2_x,
+                              position.z * scaled_micro_detail * 0.5f + off2_z);
+
+    float off3_x = cross_dx * time * base_speed * 0.4f + sinf(time * 0.5f * morph + 3.0f) * 0.3f;
+    float off3_z = cross_dz * time * base_speed * 0.4f + cosf(time * 0.4f * morph + 1.0f) * 0.3f;
+    float2 pos3 = make_float2(position.x * scaled_micro_detail * 2.0f + off3_x,
+                              position.z * scaled_micro_detail * 2.0f + off3_z);
+
+    float d = 0.01f;
+
+    float h1_c = fbm(pos1);
+    float h1_x = fbm(pos1 + make_float2(d, 0.0f));
+    float h1_z = fbm(pos1 + make_float2(0.0f, d));
+
+    float h2_c = fbm(pos2);
+    float h2_x = fbm(pos2 + make_float2(d, 0.0f));
+    float h2_z = fbm(pos2 + make_float2(0.0f, d));
+
+    float h3_c = noise(pos3);
+    float h3_x = noise(pos3 + make_float2(d, 0.0f));
+    float h3_z = noise(pos3 + make_float2(0.0f, d));
+
+    float h_c = h1_c * 0.5f + h2_c * 0.35f + h3_c * 0.15f;
+    float h_x = h1_x * 0.5f + h2_x * 0.35f + h3_x * 0.15f;
+    float h_z = h1_z * 0.5f + h2_z * 0.35f + h3_z * 0.15f;
+
+    float dsdx = (h_x - h_c) / d;
+    float dsdz = (h_z - h_c) / d;
+    micro_slope = (h_c * 0.5f + 0.5f);
+
+    float3 micro_n = normalize(make_float3(
+        -dsdx * micro_detail_strength,
+        1.0f,
+        -dsdz * micro_detail_strength
+    ));
+    normal = normalize(normal + micro_n);
+
+    return micro_slope;
+}
+
 // Advanced Multi-Octave Gerstner Wave
 // Returns world space normal and foam amount
 __device__ inline WaterResult evaluateGerstnerWave(
@@ -263,7 +336,15 @@ __device__ inline WaterResult evaluateGerstnerWave(
     float time,
     float speed_mult, 
     float strength_mult, 
-    float freq_mult
+    float freq_mult,
+    float micro_detail_strength,
+    float micro_detail_scale,
+    float micro_anim_speed,
+    float micro_morph_speed,
+    float foam_noise_scale,
+    float foam_threshold,
+    float wind_direction,
+    float wind_speed
 ) {
     // Parameters
     const int NUM_WAVES = 8;
@@ -320,16 +401,20 @@ __device__ inline WaterResult evaluateGerstnerWave(
         speed *= 1.1f;
     }
     
-    // Add Micro-Noise (Ripples)
-    float t_off = time * 0.2f;
-    float2 noisePos = make_float2(position.x * 4.0f + t_off, position.z * 4.0f + t_off);
-    float microDetail = fbm(noisePos) * 0.05f * strength_mult;
-    
-    dHx += microDetail * 2.0f;
-    dHz += microDetail * 2.0f;
-    
     // Construct Normal
     float3 waveNormal = normalize(make_float3(-dHx, 1.0f, -dHz));
+    float micro_slope = applyWaterMicroDetail(
+        waveNormal,
+        position,
+        micro_detail_strength,
+        micro_detail_scale,
+        micro_anim_speed,
+        micro_morph_speed,
+        wind_direction,
+        wind_speed,
+        time,
+        1.0f
+    );
     
     // Foam calculation
     float foam = 0.0f;
@@ -340,6 +425,19 @@ __device__ inline WaterResult evaluateGerstnerWave(
     float h_foam = (accumulatedHeight - 0.5f * strength_mult);
     if (h_foam > 0.0f) foam += h_foam;
     
+    if (micro_detail_strength > 0.001f) {
+        float scaled_foam_noise = foam_noise_scale;
+        float wind_dx = cosf(wind_direction);
+        float wind_dz = sinf(wind_direction);
+        float base_speed = sqrtf(fmaxf(1.0f, wind_speed)) * micro_anim_speed;
+        float2 f_pos = make_float2(position.x * scaled_foam_noise + wind_dx * time * base_speed * 0.5f,
+                                   position.z * scaled_foam_noise + wind_dz * time * base_speed * 0.5f);
+        float foam_noise = fbm(f_pos);
+        float foam_breakup = foam_noise * 0.5f + 0.5f;
+        float micro_foam = fmaxf(0.0f, (micro_slope + (foam_breakup - 0.5f) * 0.35f - foam_threshold) * 5.0f);
+        foam = fmaxf(foam, micro_foam);
+    }
+
     foam = fmaxf(0.0f, fminf(1.0f, foam));
     
     // Sharpen foam transition
@@ -383,6 +481,25 @@ __device__ inline WaterResult sampleFFTOcean(
     float wind_speed,
     float time
 ) {
+    if (height_tex == 0 || normal_tex == 0 || ocean_size <= 0.001f) {
+        return evaluateGerstnerWave(
+            position,
+            make_float3(0.0f, 1.0f, 0.0f),
+            time,
+            1.0f,
+            0.5f,
+            1.0f,
+            micro_detail_strength,
+            micro_detail_scale,
+            micro_anim_speed,
+            micro_morph_speed,
+            foam_noise_scale,
+            foam_threshold,
+            wind_direction,
+            wind_speed
+        );
+    }
+
     // World position to UV
     float u = position.x / ocean_size;
     float v = position.z / ocean_size;
@@ -406,9 +523,9 @@ __device__ inline WaterResult sampleFFTOcean(
     float base_speed = sqrtf(fmaxf(1.0f, wind_speed)) * micro_anim_speed;
     
     // === MICRO DETAIL (CAPILLARY WAVES) ===
-    // Hybrid drift + morph profile shared with CPU/Vulkan paths
+    // micro_detail_scale is authored in world space. Keep it independent from
+    // the FFT tile size so large oceans do not silently wash out the ripples.
     if (micro_detail_strength > 0.001f) {
-        float domain_coord_scale = 20.0f / fmaxf(ocean_size, 0.001f);
         // Wind direction vectors (main and cross-wind)
         float cross_dx = -wind_dz;  // Perpendicular
         float cross_dz = wind_dx;
@@ -418,7 +535,7 @@ __device__ inline WaterResult sampleFFTOcean(
         // === LAYER 1: Primary ripples (wind direction) ===
         float off1_x = wind_dx * time * base_speed + sinf(time * 0.3f * morph) * 0.5f;
         float off1_z = wind_dz * time * base_speed + cosf(time * 0.2f * morph) * 0.5f;
-        float scaled_micro_detail = micro_detail_scale * domain_coord_scale;
+        float scaled_micro_detail = micro_detail_scale;
         float2 pos1 = make_float2(position.x * scaled_micro_detail + off1_x,
                                   position.z * scaled_micro_detail + off1_z);
         
@@ -465,14 +582,14 @@ __device__ inline WaterResult sampleFFTOcean(
         // This completely eliminates the "accumulating noise" issue from sub-pixel jitter!
         micro_slope = (h_c * 0.5f + 0.5f);
         
-        // Perturb normal
-        float3 noise_n = normalize(make_float3(-dsdx * micro_detail_strength, 1.0f, -dsdz * micro_detail_strength));
-        
-        // Blend normals (whiteout blending or straightforward re-normalization)
+        // Perturb normal. Keep Y from the FFT normal instead of adding another
+        // full up-vector; otherwise OptiX path tracing can visually flatten the
+        // small X/Z capillary slopes.
+        const float micro_normal_gain = 2.0f;
         normal = normalize(make_float3(
-            normal.x + noise_n.x, 
-            normal.y + noise_n.y, // Dominant Y
-            normal.z + noise_n.z
+            normal.x - dsdx * micro_detail_strength * micro_normal_gain,
+            normal.y,
+            normal.z - dsdz * micro_detail_strength * micro_normal_gain
         ));
     }
 
@@ -491,7 +608,7 @@ __device__ inline WaterResult sampleFFTOcean(
     // Scale slope by threshold and intensity
     float base_foam = fmaxf(0.0f, (slope - foam_threshold) * 5.0f);
     
-    float scaled_foam_noise = foam_noise_scale * (20.0f / fmaxf(ocean_size, 0.001f));
+    float scaled_foam_noise = foam_noise_scale;
     float2 f_pos = make_float2(position.x * scaled_foam_noise + wind_dx * time * base_speed * 0.5f,
                                position.z * scaled_foam_noise + wind_dz * time * base_speed * 0.5f);
     float foam_noise = fbm(f_pos);
@@ -522,7 +639,11 @@ __device__ inline WaterResult evaluateWater(
     const WaterParams& params
 ) {
     WaterResult res;
-    if (params.use_fft_ocean && params.fft_height_tex != 0) {
+    // CPU parity mode: shader-space water uses the procedural Gerstner path
+    // across backends. FFT textures can still drive mesh/resource paths, but
+    // texture-normal shading stays disabled until it is matched explicitly.
+    const bool fft_ready = false;
+    if (fft_ready) {
         res = sampleFFTOcean(
             position,
             params.fft_ocean_size,
@@ -545,7 +666,15 @@ __device__ inline WaterResult evaluateWater(
             position, baseNormal, time,
             params.wave_speed,
             params.wave_strength,
-            params.wave_frequency
+            params.wave_frequency,
+            params.micro_detail_strength,
+            params.micro_detail_scale,
+            params.micro_anim_speed,
+            params.micro_morph_speed,
+            params.foam_noise_scale,
+            params.foam_threshold,
+            params.wind_direction,
+            params.wind_speed
         );
     }
 

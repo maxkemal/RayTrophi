@@ -280,12 +280,7 @@ public:
                         uint16_t material_id,
                         const std::shared_ptr<Texture>& texture,
                         std::vector<CompactVec4> before_pixels,
-                        std::vector<CompactVec4> after_pixels)
-        : object_name_(object_name)
-        , material_id_(material_id)
-        , texture_(texture)
-        , before_pixels_(std::move(before_pixels))
-        , after_pixels_(std::move(after_pixels)) {}
+                        std::vector<CompactVec4> after_pixels);
 
     void execute(UIContext& ctx) override;
     void undo(UIContext& ctx) override;
@@ -300,6 +295,13 @@ private:
     std::shared_ptr<Texture> texture_;
     std::vector<CompactVec4> before_pixels_;
     std::vector<CompactVec4> after_pixels_;
+    bool region_mode_ = false;
+    int width_ = 0;
+    int height_ = 0;
+    int region_x_ = 0;
+    int region_y_ = 0;
+    int region_w_ = 0;
+    int region_h_ = 0;
 
     void applyPixels(UIContext& ctx, const std::vector<CompactVec4>& pixels);
 };
@@ -317,14 +319,7 @@ public:
                       uint32_t layer_id,
                       Paint::PaintChannel channel,
                       std::vector<CompactVec4> before_pixels,
-                      std::vector<CompactVec4> after_pixels)
-        : object_name_(object_name)
-        , material_id_(material_id)
-        , layer_stack_key_(layer_stack_key)
-        , layer_id_(layer_id)
-        , channel_(channel)
-        , before_pixels_(std::move(before_pixels))
-        , after_pixels_(std::move(after_pixels)) {}
+                      std::vector<CompactVec4> after_pixels);
 
     void execute(UIContext& ctx) override;
     void undo(UIContext& ctx) override;
@@ -341,8 +336,17 @@ private:
     Paint::PaintChannel channel_;
     std::vector<CompactVec4> before_pixels_;
     std::vector<CompactVec4> after_pixels_;
+    bool region_mode_ = false;
+    bool before_empty_ = false;
+    bool after_empty_ = false;
+    int width_ = 0;
+    int height_ = 0;
+    int region_x_ = 0;
+    int region_y_ = 0;
+    int region_w_ = 0;
+    int region_h_ = 0;
 
-    void applyPixels(UIContext& ctx, const std::vector<CompactVec4>& pixels);
+    void applyPixels(UIContext& ctx, const std::vector<CompactVec4>& pixels, bool empty_state);
 };
 
 struct TriangleUVSetState {

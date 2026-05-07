@@ -140,6 +140,38 @@ void blendPixel(CompactVec4& dst, const CompactVec4& src,
     dst.a = static_cast<uint8_t>(std::clamp(out_a * 255.0f, 0.0f, 255.0f));
 }
 
+void blendHeightMaskPixel(CompactVec4& dst, const CompactVec4& src, float opacity)
+{
+    const float sa = (static_cast<float>(src.a) / 255.0f) * opacity;
+    if (sa <= 0.0f) return;
+
+    const float neutral = 128.0f;
+    const float dst_delta = static_cast<float>(dst.r) - neutral;
+    const float src_delta = static_cast<float>(src.r) - neutral;
+    const float out = neutral + dst_delta + src_delta * sa;
+    const uint8_t value = static_cast<uint8_t>(std::clamp(out, 0.0f, 255.0f));
+    dst.r = value;
+    dst.g = value;
+    dst.b = value;
+
+    const float da = static_cast<float>(dst.a) / 255.0f;
+    const float out_a = sa + da * (1.0f - sa);
+    dst.a = static_cast<uint8_t>(std::clamp(out_a * 255.0f, 0.0f, 255.0f));
+}
+
+void blendChannelPixel(PaintChannel channel,
+                       CompactVec4& dst,
+                       const CompactVec4& src,
+                       float opacity,
+                       LayerBlendMode mode)
+{
+    if (channel == PaintChannel::Mask) {
+        blendHeightMaskPixel(dst, src, opacity);
+        return;
+    }
+    blendPixel(dst, src, opacity, mode);
+}
+
 } // namespace
 
 // ======================== PaintLayerData ========================
@@ -260,7 +292,7 @@ bool PaintLayerStack::mergeDown(int index) {
         const size_t pixel_count = static_cast<size_t>(width_) * static_cast<size_t>(height_);
 
         for (size_t i = 0; i < pixel_count && i < src_buf.size() && i < dst_buf.size(); ++i) {
-            blendPixel(dst_buf[i], src_buf[i], upper.meta.opacity, upper.meta.blend_mode);
+            blendChannelPixel(channel, dst_buf[i], src_buf[i], upper.meta.opacity, upper.meta.blend_mode);
         }
     }
 
@@ -281,7 +313,7 @@ void PaintLayerStack::flattenAll() {
             if (!layer.meta.visible || !layer.hasPixels(channel)) continue;
             const auto& src = layer.getPixels(channel);
             for (size_t i = 0; i < pixel_count && i < src.size(); ++i) {
-                blendPixel(result[i], src[i], layer.meta.opacity, layer.meta.blend_mode);
+                blendChannelPixel(channel, result[i], src[i], layer.meta.opacity, layer.meta.blend_mode);
             }
         }
 
@@ -315,7 +347,7 @@ void PaintLayerStack::compositeChannel(PaintChannel channel,
         const LayerBlendMode mode = layer.meta.blend_mode;
 
         for (size_t i = 0; i < pixel_count && i < src.size(); ++i) {
-            blendPixel(dst_pixels[i], src[i], opacity, mode);
+            blendChannelPixel(channel, dst_pixels[i], src[i], opacity, mode);
         }
     }
 }
@@ -414,7 +446,7 @@ void PaintLayerStack::flattenChannelRegionInto(PaintChannel channel, PaintTextur
                 if (!layer.meta.visible || !layer.hasPixels(channel)) continue;
                 const auto& src = layer.getPixels(channel);
                 if (idx < src.size()) {
-                    blendPixel(result, src[idx], layer.meta.opacity, layer.meta.blend_mode);
+                    blendChannelPixel(channel, result, src[idx], layer.meta.opacity, layer.meta.blend_mode);
                 }
             }
 

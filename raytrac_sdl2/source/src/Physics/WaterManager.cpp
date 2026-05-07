@@ -347,10 +347,10 @@ float WaterManager::resolveWaveDomainSize(const WaterSurface* surf) const {
         return getLegacyDomainReferenceSize();
     }
 
-    float base_size = surf->params.auto_domain_from_mesh
-        ? getSurfaceWorldExtent(surf)
-        : fmaxf(surf->params.fft_ocean_size, 0.001f);
-    return fmaxf(base_size * fmaxf(surf->params.domain_size_multiplier, 0.01f), 0.001f);
+    // Keep water shading and FFT tiling on the authored domain. Coupling this
+    // to mesh/world extent makes OptiX and Vulkan-RT flatten micro ripples on
+    // large scaled water planes.
+    return fmaxf(surf->params.fft_ocean_size, 0.001f);
 }
 
 float WaterManager::resolveSharedAnimationSpeed(const WaterSurface* surf) const {
@@ -383,9 +383,9 @@ void WaterManager::syncSurfaceMaterial(WaterSurface* surf) {
 
     auto pbsdf = dynamic_cast<PrincipledBSDF*>(mat);
     if (pbsdf) {
-        pbsdf->anisotropic = surf->params.use_fft_ocean ? 0.0f : surf->params.wave_speed;
+        pbsdf->anisotropic = surf->params.wave_speed;
         pbsdf->sheen = fmaxf(0.001f, surf->params.wave_strength);
-        pbsdf->sheen_tint = surf->params.use_fft_ocean ? 0.0f : surf->params.wave_frequency;
+        pbsdf->sheen_tint = surf->params.wave_frequency;
         pbsdf->transmission = surf->params.ior > 1.01f ? 1.0f : 0.0f;
         pbsdf->translucent = surf->params.foam_level;
         pbsdf->clearcoat = surf->params.shore_foam_intensity;
@@ -409,9 +409,9 @@ void WaterManager::syncSurfaceMaterial(WaterSurface* surf) {
         const float resolved_domain_size = resolveWaveDomainSize(surf);
         const float resolved_animation_speed = resolveSharedAnimationSpeed(surf);
 
-        gpu->anisotropic = surf->params.use_fft_ocean ? 0.0f : surf->params.wave_speed;
+        gpu->anisotropic = surf->params.wave_speed;
         gpu->sheen = fmaxf(0.001f, surf->params.wave_strength);
-        gpu->sheen_tint = surf->params.use_fft_ocean ? 0.0f : surf->params.wave_frequency;
+        gpu->sheen_tint = surf->params.wave_frequency;
 
         gpu->albedo = make_float3(surf->params.deep_color.x, surf->params.deep_color.y, surf->params.deep_color.z);
         gpu->emission = make_float3(surf->params.shallow_color.x, surf->params.shallow_color.y, surf->params.shallow_color.z);
@@ -435,6 +435,7 @@ void WaterManager::syncSurfaceMaterial(WaterSurface* surf) {
         gpu->transmission = surf->params.ior > 1.01f ? 1.0f : 0.0f;
         gpu->opacity = 1.0f;
         gpu->metallic = 0.0f;
+        gpu->flags |= GPU_MAT_FLAG_WATER;
 
         gpu->micro_detail_strength = surf->params.micro_detail_strength;
         gpu->micro_detail_scale = surf->params.micro_detail_scale;
@@ -442,6 +443,16 @@ void WaterManager::syncSurfaceMaterial(WaterSurface* surf) {
         gpu->micro_morph_speed = surf->params.micro_morph_speed;
         gpu->foam_noise_scale = surf->params.foam_noise_scale;
         gpu->foam_threshold = surf->params.foam_threshold;
+
+        gpu->fft_height_tex = 0;
+        gpu->fft_normal_tex = 0;
+        if (g_hasCUDA && surf->params.use_fft_ocean && surf->fft_state) {
+            FFTOceanState* state = static_cast<FFTOceanState*>(surf->fft_state);
+            if (state && state->initialized && state->tex_height != 0 && state->tex_normal != 0) {
+                gpu->fft_height_tex = state->tex_height;
+                gpu->fft_normal_tex = state->tex_normal;
+            }
+        }
 
         gpu->fft_ocean_size = resolved_domain_size;
         gpu->fft_choppiness = surf->params.fft_choppiness;
@@ -483,6 +494,10 @@ bool WaterManager::syncVulkanFFTTexturesForMaterial(uint16_t material_id, Backen
             return false;
         }
 
+        // FFT images are live descriptor resources in Vulkan. Complete in-flight work
+        // before replacing them so fallback stays safe on slower or discrete GPUs.
+        backend->waitForCompletion();
+
         std::vector<float4> normalData(texelCount);
         for (size_t i = 0; i < texelCount; ++i) {
             const float nx = normalX[i];
@@ -520,9 +535,11 @@ bool WaterManager::syncVulkanFFTTexturesForMaterial(uint16_t material_id, Backen
 
 cudaTextureObject_t WaterManager::getFirstFFTHeightMap() {
     for (const auto& surf : water_surfaces) {
-        if (surf.params.use_fft_ocean && surf.fft_state) {
+        if (g_hasCUDA && surf.params.use_fft_ocean && surf.fft_state) {
             FFTOceanState* state = static_cast<FFTOceanState*>(surf.fft_state);
-            return state->tex_height;
+            if (state && state->initialized && state->tex_height != 0) {
+                return state->tex_height;
+            }
         }
     }
     return 0;
@@ -549,16 +566,15 @@ WaterSurface* WaterManager::createWaterPlane(SceneData& scene, const Vec3& pos, 
     gpu->roughness = surf.params.roughness;
     gpu->ior = surf.params.ior;
     gpu->metallic = 0.0f;
+    gpu->flags |= GPU_MAT_FLAG_WATER;
     
     // === WAVE PARAMS (original packing) ===
-    // anisotropic -> Wave Speed (only used when FFT is disabled)
+    // anisotropic -> Wave Speed
     // sheen -> Wave Strength (Serves as IS_WATER flag if > 0)
-    // sheen_tint -> Wave Frequency (only used when FFT is disabled)
-    // NOTE: When FFT is enabled, these simple wave params are ignored by shader
-    //       because evaluateWater() uses FFT textures instead of Gerstner waves
-    gpu->anisotropic = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_speed;
+    // sheen_tint -> Wave Frequency
+    gpu->anisotropic = surf.params.wave_speed;
     gpu->sheen = fmaxf(0.001f, surf.params.wave_strength);  // >0 = IS_WATER flag (always needed)
-    gpu->sheen_tint = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_frequency;
+    gpu->sheen_tint = surf.params.wave_frequency;
     
     // === ADVANCED WATER PARAMS (new packing) ===
     // clearcoat -> Shore Foam Intensity
@@ -1993,8 +2009,8 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
         surf.params.use_fft_ocean = ws.value("use_fft_ocean", false);
         surf.params.fft_resolution = ws.value("fft_resolution", 256);
         surf.params.fft_ocean_size = ws.value("fft_ocean_size", 100.0f);
-        surf.params.auto_domain_from_mesh = ws.value("auto_domain_from_mesh", true);
-        surf.params.domain_size_multiplier = ws.value("domain_size_multiplier", 1.0f);
+        surf.params.auto_domain_from_mesh = false;
+        surf.params.domain_size_multiplier = 1.0f;
         surf.params.fft_wind_speed = ws.value("fft_wind_speed", 10.0f);
         surf.params.fft_wind_direction = ws.value("fft_wind_direction", 0.0f);
         surf.params.fft_choppiness = ws.value("fft_choppiness", 1.0f);
