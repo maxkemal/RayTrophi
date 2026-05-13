@@ -102,10 +102,9 @@ __device__ bool scatter_volume_step(Ray& ray, float3& throughput, float3& color,
 
         // Gölge kontrolü
         Ray shadow_ray(ray.origin, light_dir);
-        OptixHitResult shadow_payload = {};
-        trace_shadow_ray(shadow_ray, &shadow_payload, 0.01f, distance);
+        unsigned int shadow_hit = trace_shadow_ray(shadow_ray, 0.01f, distance);
 
-        if (!shadow_payload.hit) { // Eğer ışık görünüyorsa
+        if (!shadow_hit) { // Eğer ışık görünüyorsa
             float phase = compute_phase_function(-ray.direction, light_dir, anisotropy);
             scatter_color +=  make_float3(light_intensity * phase, light_intensity * phase,light_intensity * phase); //  Işık rengini ve şiddetini phase ile ağırlıkla
         }

@@ -56,6 +56,9 @@ struct RayPayload {
     vec3  primaryAlbedo;
     vec3  primaryNormal;
     uint  primaryHit;
+    float primaryTransmission;
+    float primaryMetallic;
+    uint  bounceType;
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;

@@ -9,6 +9,7 @@ struct PBRMaterialSnapshot {
     Vec3 albedo = Vec3(0.8f);
     float roughness = 0.5f;
     float metallic = 0.0f;
+    float specular = 0.5f;
     Vec3 emission = Vec3(0.0f);
     float emissionStrength = 0.0f;
     float ior = 1.5f;
@@ -48,6 +49,7 @@ inline PBRMaterialSnapshot capturePBRMaterialSnapshot(const PrincipledBSDF& pbsd
     s.albedo = pbsdf.albedoProperty.color;
     s.roughness = pbsdf.getScalarRoughness();
     s.metallic = pbsdf.getScalarMetallic();
+    s.specular = pbsdf.specularProperty.intensity;
     s.emission = pbsdf.emissionProperty.color;
     s.emissionStrength = pbsdf.emissionProperty.intensity;
     s.ior = pbsdf.ior;
@@ -87,6 +89,7 @@ inline void applyPBRMaterialSnapshotToGpuMaterial(const PBRMaterialSnapshot& s, 
     gpu.albedo = make_float3((float)s.albedo.x, (float)s.albedo.y, (float)s.albedo.z);
     gpu.roughness = s.roughness;
     gpu.metallic = s.metallic;
+    gpu.specular = s.specular;
     gpu.emission = make_float3(
         (float)(s.emission.x * s.emissionStrength),
         (float)(s.emission.y * s.emissionStrength),
@@ -137,6 +140,7 @@ inline Backend::IBackend::MaterialData makeBackendMaterialDataFromSnapshot(const
     data.albedo = s.albedo;
     data.roughness = s.roughness;
     data.metallic = s.metallic;
+    data.specular = s.specular;
     data.emission = s.emission;
     data.emissionStrength = s.emissionStrength;
     data.ior = s.ior;

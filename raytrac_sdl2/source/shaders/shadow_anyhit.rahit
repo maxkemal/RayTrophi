@@ -46,7 +46,11 @@ struct Material {
     float subsurface_ior;
     uint _terrain_layer_idx;
     float normal_strength;
-    uint _reserved_3;
+    float tile_break_strength;
+    float specular;
+    uint specular_tex;
+    uint _pad_specular0;
+    uint _pad_specular1;
 };
 
 struct VkInstanceData {

@@ -80,10 +80,11 @@ inline TextureCompressionPlan buildTextureCompressionPlan(const Texture* tex, Te
             break;
         case TextureType::AO:
         case TextureType::Transmission:
+        case TextureType::Specular:
             plan.semantic = TextureSemantic::Scalar;
             plan.preferredTarget = TextureCompressionTarget::BC4;
             plan.preferSingleChannelFallback = tex->is_gray_scale && !tex->has_alpha;
-            plan.sourceChannel = 0; // AO and transmission are always in R
+            plan.sourceChannel = 0; // AO, transmission and specular are always in R
             break;
         default:
             break;

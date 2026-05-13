@@ -54,6 +54,16 @@ struct BackendInfo {
     uint64_t vramBytes;
 };
 
+struct GpuMemoryStats {
+    uint64_t totalBytes = 0;
+    uint64_t freeBytes = 0;
+    uint64_t usedBytes = 0;
+    uint64_t trackedTextureBytes = 0;
+    uint64_t trackedTextureBytesThisBackend = 0;
+    bool hasDeviceUsage = false;
+    bool hasTrackedTextures = false;
+};
+
 // ============================================================================
 // Common Data Structures
 // ============================================================================
@@ -64,6 +74,8 @@ struct RenderParams {
     int samplesPerPixel;
     int minSamples;
     int maxBounces;
+    int diffuseBounces = 4;
+    int transmissionBounces = 8;
     int currentPass;
     int frameNumber;
     bool useAdaptiveSampling;
@@ -185,6 +197,7 @@ public:
     virtual void shutdown() = 0;
     virtual void loadShaders(const ShaderProgramData& data) = 0;
     virtual BackendInfo getInfo() const = 0;
+    virtual GpuMemoryStats getMemoryStats() const { return {}; }
     
     // ========================================================================
     // Geometry Upload
@@ -304,6 +317,7 @@ public:
         Vec3 albedo = Vec3(0.8f);
         float roughness = 0.5f;
         float metallic = 0.0f;
+        float specular = 0.5f;
         Vec3 emission = Vec3(0.0f);
         float emissionStrength = 0.0f;
         float ior = 1.5f;
@@ -335,6 +349,7 @@ public:
         int64_t normalTexture = 0;
         int64_t roughnessTexture = 0;
         int64_t metallicTexture = 0;
+        int64_t specularTexture = 0;
         int64_t emissionTexture = 0;
         int64_t transmissionTexture = 0;
         int64_t opacityTexture = 0;

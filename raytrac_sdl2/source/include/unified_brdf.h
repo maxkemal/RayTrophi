@@ -136,6 +136,7 @@ UNIFIED_FUNC Vec3f evaluate_brdf_unified(
     const Vec3f& albedo_sampled,
     float roughness_sampled,
     float metallic_sampled,
+    float specular_sampled = 0.5f,
     float transmission = 0.0f,
     float rand_val = 0.5f
 ) {
@@ -157,7 +158,8 @@ UNIFIED_FUNC Vec3f evaluate_brdf_unified(
     
     // F0 - Reflectance at normal incidence
     // Dielectrics have ~0.04, metals use albedo
-    Vec3f F0 = lerp(Vec3f(0.04f), albedo, metallic_sampled);
+    float dielectricF0 = fminf(fmaxf(0.08f * specular_sampled, 0.0f), 0.08f);
+    Vec3f F0 = lerp(Vec3f(dielectricF0), albedo, metallic_sampled);
     
     // Fresnel term
     Vec3f F = F_Schlick(VdotH, F0);

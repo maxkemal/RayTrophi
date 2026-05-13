@@ -454,17 +454,27 @@ extern "C" __global__ void __closesthit__ch() {
     }
 
     // 8. Pack Payload
-    float3 primary_albedo = make_float3(0.8f, 0.8f, 0.8f);
-    if (payload->use_blended_data) {
-        primary_albedo = payload->blended_albedo;
-    } else if (hgd->material_id >= 0 && optixLaunchParams.materials) {
-        const GpuMaterial& mat = optixLaunchParams.materials[hgd->material_id];
-        primary_albedo = mat.albedo;
-        if (hgd->has_albedo_tex) {
-            float2 material_uv = apply_material_uv_transform(mat, uv);
-            float4 c = tex2D<float4>(hgd->albedo_tex, material_uv.x, material_uv.y);
-            primary_albedo = make_float3(c.x, c.y, c.z);
+    // primary_* AOVs are only consumed by raygen for the denoiser at
+    // bounce==0. Skip the albedo texture fetch and 28-byte payload write
+    // block on indirect bounces — ray_color sets bounce_index before
+    // optixTrace so we can branch on it here. Default zero-init of payload
+    // keeps the indirect-bounce values harmless.
+    if (payload->bounce_index == 0) {
+        float3 primary_albedo = make_float3(0.8f, 0.8f, 0.8f);
+        if (payload->use_blended_data) {
+            primary_albedo = payload->blended_albedo;
+        } else if (hgd->material_id >= 0 && optixLaunchParams.materials) {
+            const GpuMaterial& mat = optixLaunchParams.materials[hgd->material_id];
+            primary_albedo = mat.albedo;
+            if (hgd->has_albedo_tex) {
+                float2 material_uv = apply_material_uv_transform(mat, uv);
+                float4 c = tex2D<float4>(hgd->albedo_tex, material_uv.x, material_uv.y);
+                primary_albedo = make_float3(c.x, c.y, c.z);
+            }
         }
+        payload->primary_albedo = primary_albedo;
+        payload->primary_normal = final_normal;
+        payload->primary_hit = hgd->is_volumetric ? 0 : 1;
     }
 
     payload->hit = 1;
@@ -472,48 +482,76 @@ extern "C" __global__ void __closesthit__ch() {
     payload->normal = final_normal;
     payload->geom_normal = world_geo_normal;
     payload->front_face = front_face ? 1 : 0;
-    payload->primary_albedo = primary_albedo;
-    payload->primary_normal = final_normal;
-    payload->primary_hit = hgd->is_volumetric ? 0 : 1;
     payload->material_id = hgd->material_id;
     payload->uv = uv;
     
-    payload->albedo_tex = hgd->albedo_tex;
-    payload->roughness_tex = hgd->roughness_tex;
-    payload->normal_tex = hgd->normal_tex;
-    payload->metallic_tex = hgd->metallic_tex;
-    payload->transmission_tex = hgd->transmission_tex;
-    payload->opacity_tex = hgd->opacity_tex;
-    payload->emission_tex = hgd->emission_tex;
-    
-    payload->has_albedo_tex = hgd->has_albedo_tex;
-    payload->has_roughness_tex = hgd->has_roughness_tex;
-    payload->has_normal_tex = hgd->has_normal_tex;
-    payload->has_metallic_tex = hgd->has_metallic_tex;
-    payload->has_transmission_tex = hgd->has_transmission_tex;
-    payload->has_opacity_tex = hgd->has_opacity_tex;
-    payload->has_emission_tex = hgd->has_emission_tex;
-    payload->opacity_has_alpha = hgd->opacity_has_alpha;
+    // Texture handles + flags: write only when the texture is bound so the
+    // hot path keeps payload stores minimal. material_scatter / ray_color
+    // gate every texture read on the matching has_*_tex flag; opacity reads
+    // the handle directly, but a zero handle is the existing no-texture
+    // sentinel. Payload starts zero-initialized in ray_color, so untouched
+    // fields read back as 0 / null — matching the previous default state.
+    if (hgd->has_albedo_tex) {
+        payload->has_albedo_tex = 1;
+        payload->albedo_tex = hgd->albedo_tex;
+    }
+    if (hgd->has_roughness_tex) {
+        payload->has_roughness_tex = 1;
+        payload->roughness_tex = hgd->roughness_tex;
+    }
+    if (hgd->has_normal_tex) {
+        payload->has_normal_tex = 1;
+        payload->normal_tex = hgd->normal_tex;
+    }
+    if (hgd->has_metallic_tex) {
+        payload->has_metallic_tex = 1;
+        payload->metallic_tex = hgd->metallic_tex;
+    }
+    if (hgd->has_specular_tex) {
+        payload->has_specular_tex = 1;
+        payload->specular_tex = hgd->specular_tex;
+    }
+    if (hgd->has_transmission_tex) {
+        payload->has_transmission_tex = 1;
+        payload->transmission_tex = hgd->transmission_tex;
+    }
+    if (hgd->has_opacity_tex) {
+        payload->has_opacity_tex = 1;
+        payload->opacity_tex = hgd->opacity_tex;
+        payload->opacity_has_alpha = hgd->opacity_has_alpha;
+    }
+    if (hgd->has_emission_tex) {
+        payload->has_emission_tex = 1;
+        payload->emission_tex = hgd->emission_tex;
+    }
     
     payload->is_volumetric = hgd->is_volumetric;
-    payload->vol_density = hgd->vol_density;
-    payload->vol_absorption = hgd->vol_absorption;
-    payload->vol_scattering = hgd->vol_scattering;
-    payload->vol_albedo = hgd->vol_albedo;
-    payload->vol_emission = hgd->vol_emission;
-    payload->vol_g = hgd->vol_g;
-    payload->vol_step_size = hgd->vol_step_size;
-    payload->vol_max_steps = hgd->vol_max_steps;
-    payload->vol_noise_scale = hgd->vol_noise_scale;
-    payload->aabb_min = hgd->aabb_min;
-    payload->aabb_max = hgd->aabb_max;
-    payload->vol_multi_scatter = hgd->vol_multi_scatter;
-    payload->vol_g_back = hgd->vol_g_back;
-    payload->vol_lobe_mix = hgd->vol_lobe_mix;
-    payload->vol_light_steps = hgd->vol_light_steps;
-    payload->vol_shadow_strength = hgd->vol_shadow_strength;
-    payload->nanovdb_grid = hgd->nanovdb_grid;
-    payload->has_nanovdb = hgd->has_nanovdb;
+    // Volumetric fields are only consumed inside ray_color's
+    // `if (payload.is_volumetric)` branch. Skipping these writes on the
+    // hot opaque-surface path drops ~80 bytes of local-memory store
+    // traffic per hit. ray_color allocates payload with `= {}`, so any
+    // field left unwritten reads back as zero (matches the previous
+    // default state for non-volumetric hits).
+    if (hgd->is_volumetric) {
+        payload->vol_density = hgd->vol_density;
+        payload->vol_absorption = hgd->vol_absorption;
+        payload->vol_scattering = hgd->vol_scattering;
+        payload->vol_albedo = hgd->vol_albedo;
+        payload->vol_emission = hgd->vol_emission;
+        payload->vol_g = hgd->vol_g;
+        payload->vol_step_size = hgd->vol_step_size;
+        payload->vol_max_steps = hgd->vol_max_steps;
+        payload->vol_noise_scale = hgd->vol_noise_scale;
+        payload->aabb_min = hgd->aabb_min;
+        payload->aabb_max = hgd->aabb_max;
+        payload->vol_multi_scatter = hgd->vol_multi_scatter;
+        payload->vol_g_back = hgd->vol_g_back;
+        payload->vol_lobe_mix = hgd->vol_lobe_mix;
+        payload->vol_light_steps = hgd->vol_light_steps;
+        payload->vol_shadow_strength = hgd->vol_shadow_strength;
+        payload->nanovdb_grid = hgd->nanovdb_grid;
+        payload->has_nanovdb = hgd->has_nanovdb;
+    }
     payload->object_id = hgd->object_id;
     payload->is_terrain = hgd->is_terrain;
     payload->t = t;
@@ -563,12 +601,11 @@ extern "C" __global__ void __anyhit__ah() {
     }
 }
 
-// Shadow Closest Hit
+// Shadow Closest Hit — paired with the lightweight trace_shadow_ray. The
+// shadow path only needs a hit/miss bit, so we flip payload register 0
+// instead of dereferencing a packed pointer into a 400-byte struct.
 extern "C" __global__ void __closesthit__shadow() {
-    unsigned int p0 = optixGetPayload_0();
-    unsigned int p1 = optixGetPayload_1();
-    OptixHitResult* payload = unpackPayload<OptixHitResult>(p0, p1);
-    payload->hit = 1;
+    optixSetPayload_0(1u);
 }
 
 // Stochastic Hair Shadow (AnyHit)
@@ -761,10 +798,7 @@ extern "C" __global__ void __closesthit__hair() {
             Li = light.color * light.intensity;
         }
 
-        OptixHitResult shadow_payload;
-        shadow_payload.hit = 0;
-        unsigned int sp0, sp1;
-        packPayload(&shadow_payload, sp0, sp1);
+        unsigned int shadow_hit = 0;
 
         float3 shadow_normal = safe_normalize(normal, make_float3(0.0f, 1.0f, 0.0f));
         float3 shadow_origin = hit_point + shadow_normal * 0.001f;
@@ -780,10 +814,10 @@ extern "C" __global__ void __closesthit__hair() {
             SHADOW_RAY_TYPE,
             RAY_TYPE_COUNT,
             SHADOW_RAY_TYPE,
-            sp0, sp1
+            shadow_hit
         );
 
-        if (shadow_payload.hit == 0) {
+        if (shadow_hit == 0) {
             float3 bsdf = HairGPU::hair_bsdf_eval(wo, light_dir, tangent, hair_mat_final, h, vStrand);
             result_color += (bsdf * Li) * (float)light_count; 
         }

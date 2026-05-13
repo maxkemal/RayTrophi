@@ -25,12 +25,13 @@ __device__ void trace_ray(const Ray& ray, OptixHitResult* payload, float tmin, f
     );
 }
 
-// Revert to simple signature without seed
-__device__ void trace_shadow_ray(const Ray& ray, OptixHitResult* payload, float tmin, float tmax) {
-    // Pack pointers to 32-bit registers
-    unsigned int p0, p1;
-    packPayload(payload, p0, p1);
-
+// Lightweight shadow trace: returns 1 if any geometry is hit before tmax,
+// 0 otherwise. Uses a single OptiX payload register (no pointer-pack, no
+// stack-allocated OptixHitResult). __closesthit__shadow only needs to flip
+// a flag, so the previous 400-byte payload was pure overhead — one shadow
+// ray per bounce per surface NEE, this is hot.
+__device__ unsigned int trace_shadow_ray(const Ray& ray, float tmin, float tmax) {
+    unsigned int hit = 0;
     optixTrace(
         optixLaunchParams.handle,
         ray.origin,
@@ -43,6 +44,7 @@ __device__ void trace_shadow_ray(const Ray& ray, OptixHitResult* payload, float 
         1,                 // SBT offset (Shadow = 1)
         0,                 // SBT stride (Must be 0!)
         1,                 // Miss index (SHADOW_RAY_TYPE)
-        p0, p1
+        hit                // payload register 0
     );
+    return hit;
 }

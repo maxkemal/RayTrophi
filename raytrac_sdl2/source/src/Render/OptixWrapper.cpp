@@ -873,6 +873,22 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     log_size = sizeof(log);
     OPTIX_CHECK(optixPipelineCreate(context, &pipeline_options, &link_options, program_groups.data(), static_cast<unsigned int>(program_groups.size()), log, &log_size, &pipeline));
 
+    // Pipeline stack sizes. OptiX's default continuation stack is only
+    // ~1 KB which is tight for our megakernel; once we marked
+    // scatter_material / evaluate_brdf / pdf_brdf __noinline__ the
+    // raygen call graph genuinely uses extra stack frames per bounce.
+    // 16 KB continuation is generous for a max trace depth of 2 and a
+    // TLAS→BLAS depth of 2. No direct callables in this pipeline yet,
+    // so those stack sizes stay at 0. Update this if you ever add
+    // OptixDirectCallable programs.
+    OPTIX_CHECK(optixPipelineSetStackSize(
+        pipeline,
+        /*directCallableStackSizeFromTraversal*/ 0,
+        /*directCallableStackSizeFromState*/     0,
+        /*continuationStackSize*/                16 * 1024,
+        /*maxTraversableGraphDepth*/             2
+    ));
+
     // Manager and SBT initialization (remains similar)
     if (!accel_manager) {
         accel_manager = std::make_unique<OptixAccelManager>();
@@ -925,6 +941,10 @@ void OptixWrapper::destroyTextureObjects() {
         }
         if (data.metallic_tex) { 
             cudaDestroyTextureObject(data.metallic_tex); 
+            texture_obj_count++;
+        }
+        if (data.specular_tex) {
+            cudaDestroyTextureObject(data.specular_tex);
             texture_obj_count++;
         }
         if (data.transmission_tex) { 
@@ -1093,6 +1113,7 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
             rec.data.roughness_tex = tex.roughness_tex;
             rec.data.normal_tex = tex.normal_tex;
             rec.data.metallic_tex = tex.metallic_tex;
+            rec.data.specular_tex = tex.specular_tex;
             rec.data.transmission_tex = tex.transmission_tex;
             rec.data.opacity_tex = tex.opacity_tex;
             rec.data.emission_tex = tex.emission_tex;
@@ -1102,6 +1123,7 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
             rec.data.has_roughness_tex = tex.has_roughness_tex;
             rec.data.has_normal_tex = tex.has_normal_tex;
             rec.data.has_metallic_tex = tex.has_metallic_tex;
+            rec.data.has_specular_tex = tex.has_specular_tex;
             rec.data.has_transmission_tex = tex.has_transmission_tex;
             rec.data.has_opacity_tex = tex.has_opacity_tex;
            
@@ -1427,7 +1449,12 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.min_samples = render_settings.min_samples;
     params.max_samples = render_settings.max_samples;
     params.variance_threshold = render_settings.variance_threshold;
-    params.max_depth = render_settings.max_bounces;
+    // Bounce count semantic: total path bounces, min 1 (slider clamps to
+    // 1..64 in the UI but legacy projects may have saved 0). Defensive
+    // clamp matches the Vulkan path (Renderer.cpp / Main.cpp).
+    params.max_depth = (std::max)(1, render_settings.max_bounces);
+    params.diffuse_depth = std::clamp(render_settings.diffuse_bounces, 1, params.max_depth);
+    params.transmission_depth = std::clamp(render_settings.transmission_bounces, 1, params.max_depth);
     params.use_adaptive_sampling = render_settings.use_adaptive_sampling;
     params.use_denoiser = render_settings.use_denoiser || render_settings.render_use_denoiser;  // OIDN-aware adaptive sampling
     params.variance_buffer = d_variance_buffer;  // Pass variance buffer to GPU

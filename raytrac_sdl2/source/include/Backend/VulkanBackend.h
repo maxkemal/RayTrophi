@@ -93,6 +93,8 @@ struct GPUCapabilities {
     bool supportsInt64Atomics = false;
     bool supportsBufferDeviceAddress = false;
     bool supportsDescriptorIndexing = false;
+    bool supportsSamplerAnisotropy = false;
+    float maxSamplerAnisotropy = 1.0f;
     bool supportsBC4 = false;
     bool supportsBC5 = false;
     bool supportsBC7 = false;
@@ -862,6 +864,7 @@ public:
     void shutdown() override;
     void loadShaders(const ShaderProgramData& data) override;
     BackendInfo getInfo() const override;
+    GpuMemoryStats getMemoryStats() const override;
 
     // ========================================================================
     // IBackend - Geometry Upload
@@ -891,6 +894,7 @@ public:
     int64_t uploadTexture2D(const void* data, uint32_t width, uint32_t height, uint32_t channels, bool sRGB, bool isFloat = false) override;
     int64_t uploadTexture3D(const void* data, uint32_t width, uint32_t height, uint32_t depth, uint32_t channels, bool isFloat = false) override;
     void destroyTexture(int64_t textureHandle) override;
+    void releaseInactiveViewportTextureCache();
     virtual const char* sceneTextureOwnerScope() const { return "VulkanBackendAdapter"; }
     bool tryGetUploadedImageHandle(int64_t textureHandle, VulkanRT::ImageHandle& outImage) const;
     bool buildVulkanBackingRecord(int64_t textureHandle, VulkanBackingRecord& outBacking) const;
@@ -1045,7 +1049,10 @@ protected:
     // Write a single texture slot into the material-preview descriptor set (binding 1).
     // Called from texture-upload paths so the viewport sees textures as they arrive.
     void updateMaterialPreviewTextureDescriptor(uint32_t slot, const VulkanRT::ImageHandle& img) {
-        if (slot == 0 || slot >= 1024) return;
+        const uint32_t textureArrayLen = (m_interactiveViewport.materialPreviewTextureArrayLen > 0u)
+            ? m_interactiveViewport.materialPreviewTextureArrayLen
+            : static_cast<uint32_t>(VULKAN_TEXTURE_CAPACITY);
+        if (slot == 0 || slot >= textureArrayLen) return;
         const bool hasDescIdx = m_device && m_device->getCapabilities().supportsDescriptorIndexing;
         if (!hasDescIdx) return;
 
@@ -1094,6 +1101,7 @@ protected:
         VkDescriptorSetLayout materialPreviewDescLayout = VK_NULL_HANDLE;
         VkDescriptorPool materialPreviewDescPool = VK_NULL_HANDLE;
         VkDescriptorSet materialPreviewDescSet = VK_NULL_HANDLE;
+        uint32_t materialPreviewTextureArrayLen = 0;
         // Baked environment maps for specular reflection (binding 2): [0]=studio, [1]=outdoor
         int64_t envMapStudioID  = 0;
         int64_t envMapOutdoorID = 0;
@@ -1140,6 +1148,8 @@ protected:
     bool m_useAdaptiveSampling = false;
     float m_varianceThreshold = 0.05f;
     int m_maxBounces = 12;
+    int m_diffuseBounces = 4;
+    int m_transmissionBounces = 8;
     ViewportMode m_viewportMode = ViewportMode::Rendered;
     InteractiveViewportState m_interactiveViewport;
     bool m_loggedInteractiveViewportFallback = false;

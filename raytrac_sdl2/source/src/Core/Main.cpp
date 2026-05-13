@@ -1016,6 +1016,8 @@ void reset_render_resolution(int w, int h)
         rp.samplesPerPixel = render_settings.samples_per_pixel;
         rp.minSamples = render_settings.min_samples;
         rp.maxBounces = std::max(1, render_settings.max_bounces); // min 1: sıfır = primary ray only
+        rp.diffuseBounces = std::clamp(render_settings.diffuse_bounces, 1, rp.maxBounces);
+        rp.transmissionBounces = std::clamp(render_settings.transmission_bounces, 1, rp.maxBounces);
         rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
         rp.adaptiveThreshold = render_settings.variance_threshold;
         g_backend->setRenderParams(rp);
@@ -1507,7 +1509,7 @@ int main(int argc, char* argv[]) try {
             did_geometry = true;
         }
 
-        if (forceFullSync || g_materials_dirty || did_geometry) {
+        if (forceFullSync || g_materials_dirty || g_texture_pool_dirty || did_geometry) {
             ray_renderer.updateBackendMaterials(scene);
             syncMaterialBufferToViewportBackend(scene, ray_renderer);
             g_materials_dirty = false;
@@ -3114,6 +3116,26 @@ int main(int argc, char* argv[]) try {
                     const bool vulkanRasterActive = isVulkanInteractiveViewportActive(
                         activeViewportHasRasterBackend,
                         ui.viewport_settings.shading_mode);
+                    const bool pendingBackendSceneSync =
+                        g_geometry_dirty ||
+                        g_materials_dirty ||
+                        g_texture_pool_dirty ||
+                        g_gas_volumes_dirty ||
+                        g_world_dirty ||
+                        g_lights_dirty ||
+                        g_camera_dirty;
+                    // g_needs_optix_sync is also used by lightweight runtime updates
+                    // (timeline/water/wind). Only upgrade it to a full backend scene
+                    // sync when real scene dirty flags are still pending.
+                    if (g_backend &&
+                        g_needs_optix_sync.load(std::memory_order_acquire) &&
+                        pendingBackendSceneSync &&
+                        !render_settings.backend_changed &&
+                        !ui_ctx.render_settings.backend_changed &&
+                        (backendIsOptix || backendIsVulkan) &&
+                        activeViewportBackend == g_backend.get()) {
+                        (void)syncActiveRenderBackendScene();
+                    }
                     if (ui.viewport_settings.shading_mode != 2 &&
                         !vulkanRasterActive &&
                         !backendSupportsRequestedViewport) {
@@ -3158,7 +3180,7 @@ int main(int argc, char* argv[]) try {
                         bool force_bind_pose = (ui.show_hair_tab && ui.active_properties_tab == 8);
                         const bool should_update_animation = has_file_animations ||
                             autonomous_anim_graph_playing ||
-                            ui_ctx.render_settings.animation_is_playing || force_bind_pose;
+                            force_bind_pose;
                         if (should_update_animation) {
                             geometry_updated = ray_renderer.updateAnimationState(scene, time, false, force_bind_pose);
                         }
@@ -3274,7 +3296,7 @@ int main(int argc, char* argv[]) try {
                         auto sample_start = std::chrono::high_resolution_clock::now();
                         if (activeViewportBackend) {
                             static Backend::IBackend* last_backend = nullptr;
-                            static int last_w = -1, last_h = -1, last_max = -1, last_min = -1, last_bounces = -1;
+                            static int last_w = -1, last_h = -1, last_max = -1, last_min = -1, last_bounces = -1, last_diffuse_bounces = -1, last_transmission_bounces = -1;
                             static bool last_adaptive = false;
                             static float last_threshold = -1.0f;
                             int current_max = render_settings.is_final_render_mode ? render_settings.final_render_samples : render_settings.max_samples;
@@ -3284,6 +3306,8 @@ int main(int argc, char* argv[]) try {
                                 current_max != last_max || 
                                 render_settings.min_samples != last_min ||
                                 render_settings.max_bounces != last_bounces ||
+                                render_settings.diffuse_bounces != last_diffuse_bounces ||
+                                render_settings.transmission_bounces != last_transmission_bounces ||
                                 render_settings.use_adaptive_sampling != last_adaptive ||
                                 std::abs(render_settings.variance_threshold - last_threshold) > 0.0001f) 
                             {
@@ -3293,6 +3317,8 @@ int main(int argc, char* argv[]) try {
                                 rp.samplesPerPixel = current_max;
                                 rp.minSamples = render_settings.min_samples;
                                 rp.maxBounces = std::max(1, render_settings.max_bounces);
+                                rp.diffuseBounces = std::clamp(render_settings.diffuse_bounces, 1, rp.maxBounces);
+                                rp.transmissionBounces = std::clamp(render_settings.transmission_bounces, 1, rp.maxBounces);
                                 rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
                                 rp.adaptiveThreshold = render_settings.variance_threshold;
                                 activeViewportBackend->setRenderParams(rp);
@@ -3303,6 +3329,8 @@ int main(int argc, char* argv[]) try {
                                 last_max = current_max;
                                 last_min = render_settings.min_samples;
                                 last_bounces = render_settings.max_bounces;
+                                last_diffuse_bounces = render_settings.diffuse_bounces;
+                                last_transmission_bounces = render_settings.transmission_bounces;
                                 last_adaptive = render_settings.use_adaptive_sampling;
                                 last_threshold = render_settings.variance_threshold;
                             }
@@ -3345,7 +3373,7 @@ int main(int argc, char* argv[]) try {
                                 static uint64_t s_lastRenderedGeometryGen = 0;
                                 const uint64_t currentGen = g_scene_geometry_generation.load(std::memory_order_acquire);
                                 const bool geometryChangedSinceSolid = (currentGen != s_lastRenderedGeometryGen)
-                                    || g_geometry_dirty || g_materials_dirty || g_gas_volumes_dirty;
+                                    || g_geometry_dirty || g_materials_dirty || g_texture_pool_dirty || g_gas_volumes_dirty;
 
                                 auto* vkRenderBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
                                 if (vkRenderBackend != nullptr) {
@@ -3384,8 +3412,11 @@ int main(int argc, char* argv[]) try {
                                     if (geometryChangedSinceSolid) {
                                         g_optix_rebuild_pending = true;
                                         g_geometry_dirty = false;
-                                        g_materials_dirty = false;
                                         g_gas_volumes_dirty = false;
+                                        // Preserve pending material uploads so the post-rebuild
+                                        // g_needs_optix_sync pass refreshes OptiX texture handles.
+                                    } else if (g_needs_optix_sync.load(std::memory_order_acquire)) {
+                                        (void)syncActiveRenderBackendScene();
                                     } else {
                                         // Only lightweight sync needed
                                         g_backend->resetAccumulation();
@@ -4077,10 +4108,14 @@ int main(int argc, char* argv[]) try {
                             ray_renderer.syncCameraToBackend(*scene.camera);
                         }
 
-                        // Update GPU materials for material keyframe animation
-                        if (has_file_animations) {
+                        // Timeline material keys already use per-slot updates.
+                        // Keep the expensive full material sync only for explicit
+                        // dirty-state rebuilds that still need one catch-up upload.
+                        if (g_materials_dirty || g_texture_pool_dirty) {
                             ray_renderer.updateBackendMaterials(scene);
                             syncMaterialBufferToViewportBackend(scene, ray_renderer);
+                            g_materials_dirty = false;
+                            g_texture_pool_dirty = false;
                         }
 
                         if (timeline_has_world_keyframes) {

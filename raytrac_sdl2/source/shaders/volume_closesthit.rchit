@@ -87,6 +87,7 @@ struct RayPayload {
     uint  primaryHit;
     float primaryTransmission;
     float primaryMetallic;
+    uint  bounceType;
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;

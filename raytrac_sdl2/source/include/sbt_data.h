@@ -28,6 +28,7 @@ struct __align__(16) HitGroupData
     int has_roughness_tex = 0;
     int has_normal_tex = 0;
     int has_metallic_tex = 0;
+    int has_specular_tex = 0;
     int has_transmission_tex = 0;
     int has_opacity_tex = 0;
     int has_emission_tex = 0;
@@ -59,6 +60,7 @@ struct __align__(16) HitGroupData
     cudaTextureObject_t roughness_tex = 0;
     cudaTextureObject_t normal_tex = 0;
     cudaTextureObject_t metallic_tex = 0;
+    cudaTextureObject_t specular_tex = 0;
     cudaTextureObject_t transmission_tex = 0;
     cudaTextureObject_t opacity_tex = 0;
     cudaTextureObject_t emission_tex = 0;

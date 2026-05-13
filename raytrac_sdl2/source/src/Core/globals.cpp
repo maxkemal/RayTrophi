@@ -29,6 +29,7 @@ bool g_hasOptix = false;
 bool g_hasVulkan = false;
 bool g_hasVulkanRT = false;
 bool g_hasCUDA = false;
+std::atomic<int> g_cuda_texture_upload_scope_depth{0};
 namespace {
 std::mutex g_sharedSceneTextureManagerMutex;
 std::shared_ptr<Backend::SceneTextureManager> g_sharedSceneTextureManager;

@@ -181,6 +181,24 @@ World::~World() {
 
 WorldData World::getGPUData() const {
     WorldData gpuData = data;
+    if (isCudaTextureUploadAllowed()) {
+        if (hdri_texture && hdri_texture->is_loaded() && !hdri_texture->isUploaded()) {
+            hdri_texture->upload_to_gpu();
+        }
+        if (hdri_texture && hdri_texture->isUploaded()) {
+            gpuData.env_texture = hdri_texture->get_cuda_texture();
+            gpuData.env_width = hdri_texture->width;
+            gpuData.env_height = hdri_texture->height;
+        }
+
+        if (env_overlay_texture && env_overlay_texture->is_loaded() && !env_overlay_texture->isUploaded()) {
+            env_overlay_texture->upload_to_gpu();
+        }
+        if (env_overlay_texture && env_overlay_texture->isUploaded()) {
+            gpuData.advanced.env_overlay_tex = env_overlay_texture->get_cuda_texture();
+            gpuData.advanced.env_overlay_enabled = 1;
+        }
+    }
     if (atmosphere_lut) {
         gpuData.lut = atmosphere_lut->getGPUData();
     }
@@ -274,11 +292,16 @@ void World::setHDRI(const std::string& path) {
         SCENE_LOG_INFO("HDRI loaded: " + path + " | is_hdr=" + (hdri_texture->is_hdr ? "TRUE (float)" : "FALSE (uchar)"));
         
         bool uploaded = hdri_texture->upload_to_gpu();
-        if (uploaded) {
+        if (uploaded && hdri_texture->get_cuda_texture()) {
             data.env_texture = hdri_texture->get_cuda_texture();
             data.env_width = hdri_texture->width;
             data.env_height = hdri_texture->height;
             SCENE_LOG_INFO("HDRI uploaded to GPU: " + std::to_string(data.env_width) + "x" + std::to_string(data.env_height));
+        } else if (uploaded) {
+            data.env_texture = 0;
+            data.env_width = hdri_texture->width;
+            data.env_height = hdri_texture->height;
+            SCENE_LOG_INFO("HDRI loaded; CUDA upload deferred until OptiX render sync.");
         } else {
              SCENE_LOG_ERROR("Failed to upload HDRI to GPU");
              data.env_texture = 0;
@@ -324,10 +347,14 @@ void World::setNishitaEnvOverlay(const std::string& path) {
         SCENE_LOG_INFO("Nishita Env Overlay loaded: " + path + " | is_hdr=" + (env_overlay_texture->is_hdr ? "TRUE" : "FALSE"));
         
         bool uploaded = env_overlay_texture->upload_to_gpu();
-        if (uploaded) {
+        if (uploaded && env_overlay_texture->get_cuda_texture()) {
             data.advanced.env_overlay_tex = env_overlay_texture->get_cuda_texture();
             data.advanced.env_overlay_enabled = 1;
             SCENE_LOG_INFO("Env Overlay uploaded: " + std::to_string(env_overlay_texture->width) + "x" + std::to_string(env_overlay_texture->height));
+        } else if (uploaded) {
+            data.advanced.env_overlay_tex = 0;
+            data.advanced.env_overlay_enabled = 0;
+            SCENE_LOG_INFO("Env Overlay loaded; CUDA upload deferred until OptiX render sync.");
         } else {
             SCENE_LOG_ERROR("Failed to upload Env Overlay to GPU");
             data.advanced.env_overlay_tex = 0;

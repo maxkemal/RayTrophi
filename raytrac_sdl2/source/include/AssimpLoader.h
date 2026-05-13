@@ -1178,7 +1178,7 @@ public:
 
     bool is_texture_bundle_valid(const OptixGeometryData::TextureBundle& tex) {
         return tex.has_albedo_tex || tex.has_roughness_tex || tex.has_normal_tex ||
-            tex.has_metallic_tex || tex.has_transmission_tex ||
+            tex.has_metallic_tex || tex.has_specular_tex || tex.has_transmission_tex ||
             tex.has_opacity_tex || tex.has_emission_tex;
     }
 
@@ -1215,7 +1215,7 @@ public:
                 auto getCudaTex = [](const std::shared_ptr<Texture>& tex) -> cudaTextureObject_t {
                     extern bool g_hasOptix; 
                     if (tex && tex->is_loaded()) {
-                         if (!tex->is_gpu_uploaded && g_hasOptix) {
+                         if (!tex->is_gpu_uploaded && g_hasOptix && isCudaTextureUploadAllowed()) {
                              tex->upload_to_gpu();
                          }
                          return tex->get_cuda_texture();
@@ -1234,6 +1234,7 @@ public:
                     gpuMat.normal_tex      = getCudaTex(pbsdf->normalProperty.texture);
                     gpuMat.roughness_tex   = getCudaTex(pbsdf->roughnessProperty.texture);
                     gpuMat.metallic_tex    = getCudaTex(pbsdf->metallicProperty.texture);
+                    gpuMat.specular_tex    = getCudaTex(pbsdf->specularProperty.texture);
                     gpuMat.emission_tex    = getCudaTex(pbsdf->emissionProperty.texture);
                     gpuMat.opacity_tex     = getCudaTex(pbsdf->opacityProperty.texture);
                     gpuMat.transmission_tex= getCudaTex(pbsdf->transmissionProperty.texture);
@@ -1262,6 +1263,7 @@ public:
                 if (gpuMat.roughness_tex) { texBundle.roughness_tex = gpuMat.roughness_tex; texBundle.has_roughness_tex = true; }
                 if (gpuMat.normal_tex) { texBundle.normal_tex = gpuMat.normal_tex; texBundle.has_normal_tex = true; }
                 if (gpuMat.metallic_tex) { texBundle.metallic_tex = gpuMat.metallic_tex; texBundle.has_metallic_tex = true; }
+                if (gpuMat.specular_tex) { texBundle.specular_tex = gpuMat.specular_tex; texBundle.has_specular_tex = true; }
                 if (gpuMat.emission_tex) { texBundle.emission_tex = gpuMat.emission_tex; texBundle.has_emission_tex = true; }
                 if (gpuMat.opacity_tex) { 
                     texBundle.opacity_tex = gpuMat.opacity_tex;
@@ -1595,7 +1597,7 @@ public:
         size_t uploaded = 0;
         for (size_t i = 0; i < jobCount; ++i) {
             if (!results[i]) continue;
-            if (g_hasOptix) {
+            if (g_hasOptix && isCudaTextureUploadAllowed()) {
                 if (!results[i]->upload_to_gpu()) {
                     // Upload başarısız: cache'e koyma; sequential path yeniden denesin.
                     continue;
@@ -1966,6 +1968,8 @@ private:
                 tri->textureBundle.has_normal_tex = hit_data.has_normal_tex;
                 tri->textureBundle.metallic_tex = hit_data.metallic_tex;
                 tri->textureBundle.has_metallic_tex = hit_data.has_metallic_tex;
+                tri->textureBundle.specular_tex = hit_data.specular_tex;
+                tri->textureBundle.has_specular_tex = hit_data.has_specular_tex;
                 tri->textureBundle.transmission_tex = hit_data.transmission_tex;
                 tri->textureBundle.has_transmission_tex = hit_data.has_transmission_tex;
                 tri->textureBundle.opacity_tex = hit_data.opacity_tex;
@@ -1986,6 +1990,8 @@ private:
                 tex_bundle.has_normal_tex = hit_data.has_normal_tex;
                 tex_bundle.metallic_tex = hit_data.metallic_tex;
                 tex_bundle.has_metallic_tex = hit_data.has_metallic_tex;
+                tex_bundle.specular_tex = hit_data.specular_tex;
+                tex_bundle.has_specular_tex = hit_data.has_specular_tex;
                 tex_bundle.transmission_tex = hit_data.transmission_tex;
                 tex_bundle.has_transmission_tex = hit_data.has_transmission_tex;
                 tex_bundle.opacity_tex = hit_data.opacity_tex;
@@ -2782,7 +2788,7 @@ private:
                // Try GPU upload (only once, skip if already uploaded)
                // GPU yüklemeyi dene (sadece bir kez, zaten is_gpu_uploaded flag'i varsa atla)
                bool gpu_ok = false;
-               if (g_hasOptix && !texture->is_gpu_uploaded) {
+               if (g_hasOptix && isCudaTextureUploadAllowed() && !texture->is_gpu_uploaded) {
                    if (!texture->upload_to_gpu()&& g_hasOptix) {
                      //  SCENE_LOG_ERROR("Texture GPU upload failed: " + texInfo.path);
                        gpu_ok = false;
@@ -2808,8 +2814,8 @@ private:
                                hit_data->has_albedo_tex = 1;
                                break;
                            case aiTextureType_SPECULAR:
-                               hit_data->roughness_tex = cudaTex;
-                               hit_data->has_roughness_tex = 1;
+                               hit_data->specular_tex = cudaTex;
+                               hit_data->has_specular_tex = 1;
                                break;
                            case aiTextureType_NORMALS:
                                hit_data->normal_tex = cudaTex;
@@ -2852,6 +2858,8 @@ private:
                            hit_data->has_albedo_tex = 0;
                            break;
                        case aiTextureType_SPECULAR:
+                           hit_data->has_specular_tex = 0;
+                           break;
                        case aiTextureType_DIFFUSE_ROUGHNESS:
                            hit_data->has_roughness_tex = 0;
                            break;
@@ -2992,6 +3000,9 @@ private:
 
                tex_bundle.metallic_tex = hit_data->metallic_tex;
                tex_bundle.has_metallic_tex = hit_data->has_metallic_tex;
+
+               tex_bundle.specular_tex = hit_data->specular_tex;
+               tex_bundle.has_specular_tex = hit_data->has_specular_tex;
 
                tex_bundle.transmission_tex = hit_data->transmission_tex;
                tex_bundle.has_transmission_tex = hit_data->has_transmission_tex;
@@ -3151,7 +3162,7 @@ public:
             return nullptr;
         }
 
-        if (g_hasOptix) {
+        if (g_hasOptix && isCudaTextureUploadAllowed()) {
             if (!tex->upload_to_gpu()) {
                 // SCENE_LOG_ERROR("Disk texture GPU upload failed: " + finalPath);
                 return nullptr;
@@ -3165,7 +3176,7 @@ public:
         switch (type) {
         case aiTextureType_DIFFUSE: return TextureType::Albedo;
         case 12: /* aiTextureType_BASE_COLOR */ return TextureType::Albedo;
-        case aiTextureType_SPECULAR: return TextureType::Unknown; // genelde linear
+        case aiTextureType_SPECULAR: return TextureType::Specular; // linear scalar
         case aiTextureType_EMISSIVE: return TextureType::Emission;
         case aiTextureType_NORMALS: return TextureType::Normal;
         case aiTextureType_OPACITY: return TextureType::Opacity;

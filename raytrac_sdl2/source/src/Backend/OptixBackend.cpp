@@ -49,6 +49,17 @@ namespace {
         return tex->is_hdr ? pixelCount * 16ull : pixelCount * 4ull;
     }
 
+    cudaTextureObject_t ensureOptixTextureResident(Texture* tex) {
+        if (!tex || !tex->is_loaded()) return 0;
+        if ((!tex->is_gpu_uploaded || tex->get_cuda_texture() == 0) && g_hasOptix) {
+            if (tex->get_cuda_texture() == 0) {
+                tex->is_gpu_uploaded = false;
+            }
+            tex->upload_to_gpu();
+        }
+        return tex->get_cuda_texture();
+    }
+
     cudaTextureObject_t resolveOptixTexture(SceneTextureManager* manager, int64_t rawHandle) {
         if (!rawHandle) return 0;
 
@@ -72,20 +83,23 @@ namespace {
                 static_cast<uint32_t>(std::max(0, tex->height)),
                 estimateOptixTextureBytes(tex),
                 [tex](TextureHandle) -> int64_t {
-                    if (!tex->is_gpu_uploaded) {
-                        tex->upload_to_gpu();
-                    }
-                    return static_cast<int64_t>(tex->get_cuda_texture());
+                    return static_cast<int64_t>(ensureOptixTextureResident(tex));
                 },
                 resolvedTextureId)) {
+                const cudaTextureObject_t currentTexture = ensureOptixTextureResident(tex);
+                if (currentTexture == 0) {
+                    manager->clearOptixTextureId(resolvedTextureId);
+                    return 0;
+                }
+                if (currentTexture != static_cast<cudaTextureObject_t>(resolvedTextureId)) {
+                    manager->clearOptixTextureId(resolvedTextureId);
+                    return currentTexture;
+                }
                 return static_cast<cudaTextureObject_t>(resolvedTextureId);
             }
         }
 
-        if (!tex->is_gpu_uploaded) {
-            tex->upload_to_gpu();
-        }
-        return tex->get_cuda_texture();
+        return ensureOptixTextureResident(tex);
     }
 }
 
@@ -149,6 +163,30 @@ BackendInfo OptixBackend::getInfo() const {
     return info;
 }
 
+GpuMemoryStats OptixBackend::getMemoryStats() const {
+    GpuMemoryStats stats;
+
+    size_t freeBytes = 0;
+    size_t totalBytes = 0;
+    if (cudaMemGetInfo(&freeBytes, &totalBytes) == cudaSuccess && totalBytes > 0) {
+        stats.totalBytes = static_cast<uint64_t>(totalBytes);
+        stats.freeBytes = static_cast<uint64_t>(freeBytes);
+        stats.usedBytes = stats.totalBytes - stats.freeBytes;
+        stats.hasDeviceUsage = true;
+    } else {
+        const BackendInfo info = getInfo();
+        stats.totalBytes = info.vramBytes;
+    }
+
+    if (m_sceneTextureManager) {
+        stats.trackedTextureBytes = m_sceneTextureManager->totalResidentTextureBytes();
+        stats.trackedTextureBytesThisBackend = m_sceneTextureManager->estimatedOptixTextureBytes();
+        stats.hasTrackedTextures = true;
+    }
+
+    return stats;
+}
+
 uint32_t OptixBackend::uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName) {
     return 0; 
 }
@@ -185,6 +223,8 @@ void OptixBackend::updateGeometry(const std::vector<std::shared_ptr<Hittable>>& 
 }
 
 void OptixBackend::uploadMaterials(const std::vector<MaterialData>& materials) {
+    if (!m_optix || !g_hasOptix) return;
+    ScopedCudaTextureUpload allowCudaTextureUpload;
     std::vector<GpuMaterial> gpuMaterials;
     gpuMaterials.reserve(materials.size());
     
@@ -193,6 +233,7 @@ void OptixBackend::uploadMaterials(const std::vector<MaterialData>& materials) {
         gpuMat.albedo = make_float3(mat.albedo.x, mat.albedo.y, mat.albedo.z);
         gpuMat.roughness = mat.roughness;
         gpuMat.metallic = mat.metallic;
+        gpuMat.specular = mat.specular;
         gpuMat.emission = make_float3(mat.emission.x * mat.emissionStrength, mat.emission.y * mat.emissionStrength, mat.emission.z * mat.emissionStrength);
         gpuMat.ior = mat.ior;
         gpuMat.transmission = mat.transmission;
@@ -236,6 +277,7 @@ void OptixBackend::uploadMaterials(const std::vector<MaterialData>& materials) {
         gpuMat.normal_tex = resolveOptixTexture(textureManager, mat.normalTexture);
         gpuMat.roughness_tex = resolveOptixTexture(textureManager, mat.roughnessTexture);
         gpuMat.metallic_tex = resolveOptixTexture(textureManager, mat.metallicTexture);
+        gpuMat.specular_tex = resolveOptixTexture(textureManager, mat.specularTexture);
         gpuMat.emission_tex = resolveOptixTexture(textureManager, mat.emissionTexture);
         gpuMat.transmission_tex = resolveOptixTexture(textureManager, mat.transmissionTexture);
         gpuMat.opacity_tex = resolveOptixTexture(textureManager, mat.opacityTexture);
@@ -248,7 +290,8 @@ void OptixBackend::uploadMaterials(const std::vector<MaterialData>& materials) {
 }
 
 void OptixBackend::uploadHairMaterials(const std::vector<HairMaterialData>& materials) {
-    if (materials.empty()) return;
+    if (materials.empty() || !m_optix || !g_hasOptix) return;
+    ScopedCudaTextureUpload allowCudaTextureUpload;
     const auto& mat = materials[0];
     m_optix->setHairMaterial(
         make_float3(mat.color.x, mat.color.y, mat.color.z),

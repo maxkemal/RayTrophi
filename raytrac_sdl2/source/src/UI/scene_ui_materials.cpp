@@ -369,7 +369,6 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             else {
                 track.addKeyframe(kf);
             }
-
             SCENE_LOG_INFO("Material keyframe inserted for '" + obj_name + "' at frame " + std::to_string(current_frame));
         }
     }
@@ -1822,6 +1821,7 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         }
         DrawTextureSlot("Roughness", pbsdf->roughnessProperty.texture, TextureType::Roughness, Paint::PaintChannel::Roughness);
         DrawTextureSlot("Metallic", pbsdf->metallicProperty.texture, TextureType::Metallic, Paint::PaintChannel::Metallic);
+        DrawTextureSlot("Specular", pbsdf->specularProperty.texture, TextureType::Specular, Paint::PaintChannel::Mask);
         DrawTextureSlot("Emission", pbsdf->emissionProperty.texture, TextureType::Emission, Paint::PaintChannel::Emission);
         DrawTextureSlot("Transmission", pbsdf->transmissionProperty.texture, TextureType::Transmission, Paint::PaintChannel::Transmission);
         DrawTextureSlot("Height", pbsdf->heightProperty.texture, TextureType::Unknown, Paint::PaintChannel::Mask);

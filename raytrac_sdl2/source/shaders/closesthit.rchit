@@ -97,6 +97,7 @@ struct RayPayload {
     uint     primaryHit;
     float    primaryTransmission;
     float    primaryMetallic;
+    uint     bounceType;
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -151,6 +152,11 @@ struct Material {
     uint _terrain_layer_idx; // terrain layer buffer index (valid when FLAG_TERRAIN set)
     float normal_strength;
     float tile_break_strength;  // UV tile-break (independent from dirt/roughness)
+    // Block 16: Specular controls
+    float specular;
+    uint specular_tex;
+    uint _pad_specular0;
+    uint _pad_specular1;
 };
 
 float wrapRepeat(float x) {
@@ -854,7 +860,7 @@ vec3 fresnel_schlick_roughness_gl(float cosTheta, vec3 F0, float roughness) {
 }
 
 // BRDF evaluation (Cook-Torrance simplified port)
-vec3 evaluate_brdf_gl(vec3 N, vec3 V, vec3 L, vec3 albedo, float roughness, float metallic, float transmission) {
+vec3 evaluate_brdf_gl(vec3 N, vec3 V, vec3 L, vec3 albedo, float roughness, float metallic, float specular, float transmission) {
     vec3 VpL = V + L;
     float VpL_len2 = dot(VpL, VpL);
     vec3 H = (VpL_len2 > 1e-12) ? (VpL * inversesqrt(VpL_len2)) : N;
@@ -862,7 +868,8 @@ vec3 evaluate_brdf_gl(vec3 N, vec3 V, vec3 L, vec3 albedo, float roughness, floa
     float NdotL = max(dot(N, L), 1e-4);
     float NdotH = max(dot(N, H), 1e-4);
     float VdotH = max(dot(V, H), 1e-4);
-    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    float dielectricF0 = clamp(0.08 * specular, 0.0, 0.08);
+    vec3 F0 = mix(vec3(dielectricF0), albedo, metallic);
     vec3 F = fresnel_schlick_roughness_gl(VdotH, F0, roughness);
     vec3 F_avg = F0 + (vec3(1.0) - F0) / 21.0;
     // D (GGX)
@@ -1080,6 +1087,11 @@ vec3 schlickFresnelVec(float cosTheta, vec3 f0) {
 // Material Scatter Fonksiyonları
 // ============================================================
 
+const uint BOUNCE_SPECULAR = 0u;
+const uint BOUNCE_DIFFUSE = 1u;
+const uint BOUNCE_TRANSMISSION = 2u;
+const uint BOUNCE_TRANSPARENT = 3u;
+
 // --- Lambertian Diffuse ---
 void scatterDiffuse(vec3 hitPos, vec3 normal, vec3 albedo, inout uint seed) {
     vec3 dir = cosineSampleHemisphere(normal, seed);
@@ -1090,6 +1102,7 @@ void scatterDiffuse(vec3 hitPos, vec3 normal, vec3 albedo, inout uint seed) {
     // Throughput = BRDF * cos / PDF = albedo → direkt albedo
     payload.attenuation  *= albedo;
     payload.scattered     = true;
+    payload.bounceType     = BOUNCE_DIFFUSE;
 }
 
 // --- GGX Metallic Reflection ---
@@ -1105,6 +1118,7 @@ void scatterMetal(vec3 hitPos, vec3 normal, vec3 rayDir, vec3 albedo, float roug
         payload.scatterDir    = mirrorDir;
         payload.attenuation  *= fresnel;
         payload.scattered     = true;
+        payload.bounceType     = BOUNCE_SPECULAR;
         return;
     }
 
@@ -1142,6 +1156,7 @@ void scatterMetal(vec3 hitPos, vec3 normal, vec3 rayDir, vec3 albedo, float roug
     payload.scatterDir    = scatterDir;
     payload.attenuation  *= weight;
     payload.scattered     = true;
+    payload.bounceType     = BOUNCE_SPECULAR;
 }
 
 // --- Dielectric Glass (Fresnel + TIR + Roughness) ---
@@ -1209,6 +1224,7 @@ void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool fr
         payload.attenuation *= transmissionColor;
     }
     payload.scattered     = true;
+    payload.bounceType     = BOUNCE_TRANSMISSION;
 }
 
 // ============================================================
@@ -1279,6 +1295,7 @@ void scatterSSS(vec3 hitPos, vec3 normal, vec3 albedo,
             payload.scatterOrigin = pos + normal * RAY_OFFSET;
             payload.scatterDir = normalize(dir);
             payload.scattered = true;
+            payload.bounceType = BOUNCE_DIFFUSE;
             return;
         }
 
@@ -1292,6 +1309,7 @@ void scatterSSS(vec3 hitPos, vec3 normal, vec3 albedo,
     payload.scatterOrigin = pos + normal * RAY_OFFSET;
     payload.scatterDir = outDir;
     payload.scattered = true;
+    payload.bounceType = BOUNCE_DIFFUSE;
 }
 
 // ============================================================
@@ -1331,6 +1349,7 @@ void scatterClearcoat(vec3 hitPos, vec3 normal, vec3 rayDir,
     payload.scatterOrigin = hitPos + normal * RAY_OFFSET;
     payload.scatterDir    = L;
     payload.scattered     = true;
+    payload.bounceType     = BOUNCE_SPECULAR;
 }
 
 // ============================================================
@@ -1345,6 +1364,7 @@ void scatterTranslucent(vec3 hitPos, vec3 normal, vec3 albedo, inout uint seed) 
     payload.scatterOrigin = hitPos - normal * 0.001;
     payload.scatterDir    = transDir;
     payload.scattered     = true;
+    payload.bounceType     = BOUNCE_DIFFUSE;
 }
 
 // ============================================================
@@ -1857,6 +1877,7 @@ void main() {
     float emStrength  = max(mat.emission_strength, 0.0);
     float roughness   = clamp(mat.roughness, 0.0, 1.0);
     float metallic    = clamp(mat.metallic, 0.0, 1.0);
+    float specular    = clamp(mat.specular, 0.0, 1.0);
     float ior         = (mat.ior > 0.01) ? mat.ior : 1.5;
     float transmission = clamp(mat.transmission, 0.0, 1.0);
     vec2 materialUV = applyMaterialUVTransform(mat, hitUV);
@@ -1925,6 +1946,7 @@ void main() {
             payload.scatterOrigin = offset_ray(hitPos, -geomNormal);
             payload.scatterDir    = rayDir;
             payload.scattered     = true;
+            payload.bounceType     = BOUNCE_TRANSPARENT;
             return;
         }
     }
@@ -1975,6 +1997,11 @@ if (emissionTexID > 0) {
         float m = samplePackedMetallic(
             texture(materialTextures[nonuniformEXT(metallicTexID)], materialUV), mat.flags);
         metallic = clamp(m, 0.0, 1.0);
+    }
+
+    int specularTexID = int(mat.specular_tex);
+    if (specularTexID > 0) {
+        specular = clamp(texture(materialTextures[nonuniformEXT(specularTexID)], materialUV).r * specular, 0.0, 1.0);
     }
 
     // ── Procedural detail: subtle color variation + dirt + roughness ──────────
@@ -2165,7 +2192,7 @@ if (emissionTexID > 0) {
                             // cam.pad0 carries float(volumeCount) from C++ renderProgressive each frame.
                             float volShadowTr = computeVolumeShadowTransmittance(shadowOrigin, wi, tmax);
                             vec3 V = normalize(-rayDir);
-                            vec3 brdf = evaluate_brdf_gl(worldNormal, V, wi, albedo, roughness, metallic, transmission);
+                            vec3 brdf = evaluate_brdf_gl(worldNormal, V, wi, albedo, roughness, metallic, specular, transmission);
                             vec3 Li = lights.l[lightIdx].color.rgb * lights.l[lightIdx].color.a * lightAtten;
 
                             int ltype = int(lights.l[lightIdx].position.w + 0.5);
@@ -2237,7 +2264,7 @@ if (emissionTexID > 0) {
                 float sunVolTr = computeVolumeShadowTransmittance(sunShadowOrigin, sunDir, sunTmax);
                 vec3 V        = normalize(-rayDir);
                 vec3 sunBRDF  = evaluate_brdf_gl(worldNormal, V, sunDir,
-                                                 albedo, roughness, metallic, transmission);
+                                                 albedo, roughness, metallic, specular, transmission);
                 vec3 sunLi    = worldData.w.sunColor * worldData.w.sunIntensity;
                 vec3 sunContrib = sunBRDF * sunLi * NdotSun * sunVolTr * sunShadowVisibility;
                 sunContrib = clamp(sunContrib, vec3(0.0), vec3(1e4));
@@ -2303,7 +2330,7 @@ if (emissionTexID > 0) {
     }
     else if (metallic <= 0.001) {
         // Dielectric Fresnel — F0 = 0.04 (non-metal standart)
-        const float F0_DIELECTRIC = 0.04;
+        float F0_DIELECTRIC = clamp(0.08 * specular, 0.0, 0.08);
         vec3  viewDir  = -rayDir;
         float cosTheta = max(dot(viewDir, worldNormal), 0.0);
 

@@ -15,6 +15,7 @@
 #include <set>
 #include <unordered_set>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <cstdint>
 #include <cstdio>
@@ -127,6 +128,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL vulkanDebugCallback(
 }
 namespace {
     constexpr bool kRasterFrustumCullingEnabled = false;
+    constexpr uint32_t kMaterialPreviewTextureMaxDimension = 2048;
 
     inline bool matchesNodeNameForInstance(const std::string& instanceNodeName, const std::string& queryNodeName) {
         if (queryNodeName.empty() || instanceNodeName.empty()) return false;
@@ -253,6 +255,67 @@ namespace {
         uint32_t levels = 1;
         while (maxDim > 1) { maxDim >>= 1; ++levels; }
         return levels;
+    }
+
+    inline bool isViewportTextureOwner(const char* ownerScope) {
+        return ownerScope && std::strcmp(ownerScope, "VulkanViewportBackend") == 0;
+    }
+
+    inline void fitWithinMaxDimension(uint32_t srcW, uint32_t srcH, uint32_t maxDim,
+                                      uint32_t& outW, uint32_t& outH) {
+        outW = srcW;
+        outH = srcH;
+        if (srcW == 0 || srcH == 0 || maxDim == 0) return;
+        const uint32_t largest = std::max(srcW, srcH);
+        if (largest <= maxDim) return;
+
+        const double scale = static_cast<double>(maxDim) / static_cast<double>(largest);
+        outW = std::max(1u, static_cast<uint32_t>(std::lround(static_cast<double>(srcW) * scale)));
+        outH = std::max(1u, static_cast<uint32_t>(std::lround(static_cast<double>(srcH) * scale)));
+    }
+
+    inline std::vector<uint8_t> resizeLdrBilinear(const std::vector<uint8_t>& src,
+                                                  uint32_t srcW, uint32_t srcH,
+                                                  uint32_t dstW, uint32_t dstH,
+                                                  uint32_t channels) {
+        if (srcW == 0 || srcH == 0 || dstW == 0 || dstH == 0 || channels == 0 ||
+            (srcW == dstW && srcH == dstH)) {
+            return src;
+        }
+        std::vector<uint8_t> dst(static_cast<size_t>(dstW) * dstH * channels);
+        const float scaleX = static_cast<float>(srcW) / static_cast<float>(dstW);
+        const float scaleY = static_cast<float>(srcH) / static_cast<float>(dstH);
+        for (uint32_t y = 0; y < dstH; ++y) {
+            const float srcY = std::clamp((static_cast<float>(y) + 0.5f) * scaleY - 0.5f,
+                                          0.0f,
+                                          static_cast<float>(srcH - 1u));
+            const uint32_t y0 = static_cast<uint32_t>(std::floor(srcY));
+            const uint32_t y1 = std::min(srcH - 1u, y0 + 1u);
+            const float ty = srcY - static_cast<float>(y0);
+            for (uint32_t x = 0; x < dstW; ++x) {
+                const size_t dstIdx = (static_cast<size_t>(y) * dstW + x) * channels;
+                const float srcX = std::clamp((static_cast<float>(x) + 0.5f) * scaleX - 0.5f,
+                                              0.0f,
+                                              static_cast<float>(srcW - 1u));
+                const uint32_t x0 = static_cast<uint32_t>(std::floor(srcX));
+                const uint32_t x1 = std::min(srcW - 1u, x0 + 1u);
+                const float tx = srcX - static_cast<float>(x0);
+
+                const size_t idx00 = (static_cast<size_t>(y0) * srcW + x0) * channels;
+                const size_t idx10 = (static_cast<size_t>(y0) * srcW + x1) * channels;
+                const size_t idx01 = (static_cast<size_t>(y1) * srcW + x0) * channels;
+                const size_t idx11 = (static_cast<size_t>(y1) * srcW + x1) * channels;
+                for (uint32_t c = 0; c < channels; ++c) {
+                    const float top = static_cast<float>(src[idx00 + c]) +
+                                      (static_cast<float>(src[idx10 + c]) - static_cast<float>(src[idx00 + c])) * tx;
+                    const float bottom = static_cast<float>(src[idx01 + c]) +
+                                         (static_cast<float>(src[idx11 + c]) - static_cast<float>(src[idx01 + c])) * tx;
+                    const int value = static_cast<int>(std::lround(top + (bottom - top) * ty));
+                    dst[dstIdx + c] = static_cast<uint8_t>(std::clamp(value, 0, 255));
+                }
+            }
+        }
+        return dst;
     }
 
     #pragma pack(push, 1)
@@ -868,6 +931,7 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         supportedDescIdxFeatures.descriptorBindingPartiallyBound == VK_TRUE;
     const bool canUseAccelStruct = hasAccelStruct && supportedAccelFeatures.accelerationStructure == VK_TRUE;
     const bool canUseRTPipeline = hasRTPipeline && supportedRtPipelineFeatures.rayTracingPipeline == VK_TRUE;
+    const bool canUseSamplerAnisotropy = supportedFeatures.features.samplerAnisotropy == VK_TRUE;
 
     if (hasBDA && !canUseBDA) {
         VK_WARN() << "[VulkanDevice] BDA extension present but bufferDeviceAddress feature is unsupported." << std::endl;
@@ -916,6 +980,7 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     // Features chain
     VkPhysicalDeviceFeatures2 features2{};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2.features.samplerAnisotropy = canUseSamplerAnisotropy ? VK_TRUE : VK_FALSE;
 
     VkPhysicalDeviceBufferDeviceAddressFeatures bdaFeatures{};
     bdaFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
@@ -977,6 +1042,7 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     // that returns the device's "what it could do" not "what we enabled on it",
     // so we latch the real post-create state into capabilities here.
     bool enabledDescIdx = (result == VK_SUCCESS) && canUseDescIdx;
+    bool enabledSamplerAnisotropy = (result == VK_SUCCESS) && canUseSamplerAnisotropy;
     if (result != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] vkCreateDevice failed: " << result << std::endl;
         // Log requested extensions for diagnostics
@@ -1006,11 +1072,13 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         // (observed crash on GTX 850M: fault_addr=0x8 in nvoglv64.dll).
         m_capabilities.rtMode = RayTracingMode::COMPUTE;
         enabledDescIdx = false;
+        enabledSamplerAnisotropy = false;
         VK_INFO() << "[VulkanDevice] Device created with fallback (no HW RT, descriptor indexing disabled). Continuing in compute mode." << std::endl;
     }
     // Latch enabled-at-create descriptor indexing state into capabilities.
     // detectCapabilities() must NOT overwrite this — it now preserves the flag.
     m_capabilities.supportsDescriptorIndexing = enabledDescIdx;
+    m_capabilities.supportsSamplerAnisotropy = enabledSamplerAnisotropy;
 
     vkGetDeviceQueue(m_device, m_computeQueueFamily, 0, &m_computeQueue);
     return true;
@@ -1091,6 +1159,7 @@ void VulkanDevice::detectCapabilities() {
     m_capabilities.apiVersion = props.apiVersion;
     m_capabilities.driverVersion = props.driverVersion;
     m_capabilities.vendor = vendorFromID(props.vendorID);
+    m_capabilities.maxSamplerAnisotropy = props.limits.maxSamplerAnisotropy;
 
     // Device UUID — needed to match the Vulkan physical device to a CUDA device
     // ordinal during external-memory interop (OIDN GPU-direct denoise).
@@ -2985,6 +3054,7 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
         defaultMat.albedo_r = 0.8f; defaultMat.albedo_g = 0.8f; defaultMat.albedo_b = 0.8f; defaultMat.opacity = 1.0f;
         defaultMat.roughness = 0.5f; // roughness
         defaultMat.metallic = 0.0f;
+        defaultMat.specular = 0.5f;
         defaultMat.ior = 1.45f;
         defaultMat.transmission = 0.0f;
         updateMaterialBuffer(&defaultMat, sizeof(VulkanRT::VkGpuMaterial), 1);
@@ -5214,6 +5284,28 @@ void VulkanBackendAdapter::purgeUploadedTextureCacheLocked() {
     }
 }
 
+void VulkanBackendAdapter::releaseInactiveViewportTextureCache() {
+    if (!m_device || !m_device->isInitialized()) return;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    // This is intended for the dedicated viewport backend after leaving
+    // Material Preview or switching to Rendered mode. Tear down interactive
+    // descriptor sets before destroying texture views, so no inactive Material
+    // Preview descriptor keeps stale VkImageView handles around for the next
+    // mode switch.
+    m_device->waitIdle();
+    destroyInteractiveViewportResourcesImpl(false);
+    // Also clear non-Vk handles such as material-preview env texture ids.
+    // They point into m_uploadedImages, which is purged just below; keeping
+    // stale integer ids makes the next Material Preview descriptor rebuild
+    // believe those textures still exist.
+    m_interactiveViewport = {};
+    m_interactiveViewport.dirty = true;
+    purgeUploadedTextureCacheLocked();
+    SCENE_LOG_INFO(std::string("[Vulkan] Released inactive viewport texture cache for owner=") +
+                   sceneTextureOwnerScope());
+}
+
 void VulkanBackendAdapter::setInteractiveViewportMatcap(int64_t textureID) {
     setInteractiveViewportMatcapImpl(textureID);
 }
@@ -5444,6 +5536,26 @@ BackendInfo VulkanBackendAdapter::getInfo() const {
     info.vramBytes = caps.dedicatedVRAM;
     info.driverVersion = std::to_string(caps.driverVersion);
     return info;
+}
+
+GpuMemoryStats VulkanBackendAdapter::getMemoryStats() const {
+    GpuMemoryStats stats;
+    if (!m_device) {
+        return stats;
+    }
+
+    const auto& caps = m_device->getCapabilities();
+    stats.totalBytes = caps.dedicatedVRAM;
+
+    if (m_sceneTextureManager) {
+        stats.trackedTextureBytes = m_sceneTextureManager->totalResidentTextureBytes();
+        stats.trackedTextureBytesThisBackend =
+            m_sceneTextureManager->estimatedTextureBytesForOwner(sceneTextureOwnerScope());
+        stats.usedBytes = stats.trackedTextureBytesThisBackend;
+        stats.hasTrackedTextures = true;
+    }
+
+    return stats;
 }
 
 // Geometry implementation
@@ -6775,7 +6887,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
             // counts CPU-side ghost records (DDS cache, paint history, records
             // whose backings have been torn down), which used to inflate the
             // estimate ~4x and triggered false-positive LRU eviction during
-            // mesh paint, evicting freshly uploaded paint textures before
+          // mesh paint, evicting freshly uploaded paint textures before
             // raster (and the active RT backend) could pick them up.
             const uint64_t textureBytes = m_sceneTextureManager->totalResidentTextureBytes();
             const uint64_t warnThreshold = dedicatedVRAM * 7 / 10;
@@ -6817,6 +6929,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
 
     // ── Parallel pixel staging + batched GPU upload ───────────────────────────
     // Phase 1: collect unique textures not yet uploaded and not dirty
+    const bool limitMaterialPreviewTextures = isViewportTextureOwner(sceneTextureOwnerScope());
     struct TexPrepReq {
         uint64_t    cacheKey;
         Texture*    tex;
@@ -6855,9 +6968,16 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                     m_sceneTextureManager->tryGetVulkanTextureId(sceneHandle, sceneTextureOwnerScope(), existingSceneTextureId) &&
                     existingSceneTextureId != 0 &&
                     tryGetUploadedImageHandle(existingSceneTextureId, existingSceneImage)) {
-                    m_uploadedImageIDs[ck] = existingSceneTextureId;
-                    m_textureIdToCacheKey[existingSceneTextureId] = ck;
-                    return;
+                    uint32_t desiredW = static_cast<uint32_t>(t->width);
+                    uint32_t desiredH = static_cast<uint32_t>(t->height);
+                    if (limitMaterialPreviewTextures) {
+                        fitWithinMaxDimension(desiredW, desiredH, kMaterialPreviewTextureMaxDimension, desiredW, desiredH);
+                    }
+                    if (existingSceneImage.width == desiredW && existingSceneImage.height == desiredH) {
+                        m_uploadedImageIDs[ck] = existingSceneTextureId;
+                        m_textureIdToCacheKey[existingSceneTextureId] = ck;
+                        return;
+                    }
                 }
             }
             seen.insert(ck);
@@ -6868,6 +6988,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
             maybeQueue(m.normalTexture,       TextureType::Normal,       true,  false);
             maybeQueue(m.roughnessTexture,    TextureType::Roughness,    true,  false);
             maybeQueue(m.metallicTexture,     TextureType::Metallic,     true,  false);
+            maybeQueue(m.specularTexture,     TextureType::Specular,     true,  true);
             maybeQueue(m.emissionTexture,     TextureType::Emission,     false, false);
             maybeQueue(m.transmissionTexture, TextureType::Transmission, true,  true);
             maybeQueue(m.opacityTexture,      TextureType::Opacity,      true,  true);
@@ -6926,6 +7047,16 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                     for (size_t j = 0; j < px.size(); ++j) {
                         s.bytes[j*4+0] = px[j].r; s.bytes[j*4+1] = px[j].g;
                         s.bytes[j*4+2] = px[j].b; s.bytes[j*4+3] = px[j].a;
+                    }
+                }
+                if (limitMaterialPreviewTextures) {
+                    uint32_t dstW = s.width;
+                    uint32_t dstH = s.height;
+                    fitWithinMaxDimension(s.width, s.height, kMaterialPreviewTextureMaxDimension, dstW, dstH);
+                    if (dstW != s.width || dstH != s.height) {
+                        s.bytes = resizeLdrBilinear(s.bytes, s.width, s.height, dstW, dstH, s.uploadChannels);
+                        s.width = dstW;
+                        s.height = dstH;
                     }
                 }
             }));
@@ -6999,7 +7130,13 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                 if (resolvedThroughPool && resolvedBacking.textureId != 0) {
                     VulkanRT::ImageHandle localImage{};
                     if (tryGetUploadedImageHandle(resolvedBacking.textureId, localImage)) {
-                        id = resolvedBacking.textureId;
+                        if (localImage.width == s.width && localImage.height == s.height) {
+                            id = resolvedBacking.textureId;
+                        } else {
+                            m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), resolvedBacking.textureId);
+                            resolvedThroughPool = false;
+                            createdByPool = false;
+                        }
                     } else {
                         m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), resolvedBacking.textureId);
                         resolvedThroughPool = false;
@@ -7036,6 +7173,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         // ... (remaining fields)
         gm.roughness = m.roughness;
         gm.metallic = m.metallic;
+        gm.specular = m.specular;
         gm.ior = m.ior;
         gm.transmission = m.transmission;
         gm.emission_r = m.emission.x; gm.emission_g = m.emission.y; gm.emission_b = m.emission.z;
@@ -7125,9 +7263,18 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                     m_sceneTextureManager->tryGetVulkanTextureId(sceneHandle, sceneTextureOwnerScope(), existingSceneTextureId) &&
                     existingSceneTextureId != 0 &&
                     tryGetUploadedImageHandle(existingSceneTextureId, existingUploaded)) {
-                    m_uploadedImageIDs[cacheKey] = existingSceneTextureId;
-                    m_textureIdToCacheKey[existingSceneTextureId] = cacheKey;
-                    return static_cast<uint32_t>(existingSceneTextureId);
+                    uint32_t desiredW = static_cast<uint32_t>(std::max(0, texCheck->width));
+                    uint32_t desiredH = static_cast<uint32_t>(std::max(0, texCheck->height));
+                    if (isViewportTextureOwner(sceneTextureOwnerScope())) {
+                        fitWithinMaxDimension(desiredW, desiredH,
+                                              kMaterialPreviewTextureMaxDimension,
+                                              desiredW, desiredH);
+                    }
+                    if (existingUploaded.width == desiredW && existingUploaded.height == desiredH) {
+                        m_uploadedImageIDs[cacheKey] = existingSceneTextureId;
+                        m_textureIdToCacheKey[existingSceneTextureId] = cacheKey;
+                        return static_cast<uint32_t>(existingSceneTextureId);
+                    }
                 }
             }
             // [FIX] vulkan_dirty: texture content was updated in-place (paint stroke,
@@ -7236,6 +7383,14 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
             if (!tex || !tex->is_loaded()) return 0;
             const bool useSrgb = forceLinear ? false : tex->is_srgb;
             const TextureCompressionPlan compressionPlan = buildTextureCompressionPlan(tex, textureType);
+            const bool limitThisTextureForPreview = isViewportTextureOwner(sceneTextureOwnerScope());
+            uint32_t uploadWidth = static_cast<uint32_t>(std::max(0, tex->width));
+            uint32_t uploadHeight = static_cast<uint32_t>(std::max(0, tex->height));
+            if (limitThisTextureForPreview) {
+                fitWithinMaxDimension(uploadWidth, uploadHeight,
+                                      kMaterialPreviewTextureMaxDimension,
+                                      uploadWidth, uploadHeight);
+            }
             auto uploadTextureNow = [&]() -> int64_t {
                 if (tex->is_hdr) {
                     // HDR path: no in-place fast path yet (rarely painted in practice).
@@ -7282,7 +7437,8 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                     (compressionPlan.preferredTarget == TextureCompressionTarget::BC4 && m_device->getCapabilities().supportsBC4) ||
                     (compressionPlan.preferredTarget == TextureCompressionTarget::BC5 && m_device->getCapabilities().supportsBC5) ||
                     (compressionPlan.preferredTarget == TextureCompressionTarget::BC7 && m_device->getCapabilities().supportsBC7);
-                if (supportsPreferredCompression && !tex->name.empty() && !hasPendingPaintEdits) {
+                if (supportsPreferredCompression && !tex->name.empty() && !hasPendingPaintEdits &&
+                    !limitThisTextureForPreview) {
                     DDSCompressedPayload payload{};
                     if (auto cacheCandidate = findCompressedTextureCacheCandidate(*tex, textureType, useSrgb)) {
                         if (loadCompressedDDSFile(cacheCandidate->ddsPath, cacheCandidate->target, useSrgb, payload) &&
@@ -7316,7 +7472,16 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                         tmp[i*4 + 0] = px[i].r; tmp[i*4 + 1] = px[i].g; tmp[i*4 + 2] = px[i].b; tmp[i*4 + 3] = px[i].a;
                     }
                 }
-                return this->uploadTexture2D(tmp.data(), tex->width, tex->height, uploadChannels, useSrgb, false);
+                if (uploadWidth != static_cast<uint32_t>(tex->width) ||
+                    uploadHeight != static_cast<uint32_t>(tex->height)) {
+                    tmp = resizeLdrBilinear(tmp,
+                                           static_cast<uint32_t>(tex->width),
+                                           static_cast<uint32_t>(tex->height),
+                                           uploadWidth,
+                                           uploadHeight,
+                                           uploadChannels);
+                }
+                return this->uploadTexture2D(tmp.data(), uploadWidth, uploadHeight, uploadChannels, useSrgb, false);
             };
 
             const bool canUseSingleChannel =
@@ -7332,9 +7497,11 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                     buildSceneTextureKey(tex, textureType, forceLinear, preferSingleChannel),
                     sceneTextureOwnerScope(),
                     TextureConsumer::RasterPreview | TextureConsumer::VulkanRT,
-                    static_cast<uint32_t>((std::max)(0, tex->width)),
-                    static_cast<uint32_t>((std::max)(0, tex->height)),
-                    estimateSceneTextureBytes(tex, estimatedUploadChannels),
+                    uploadWidth,
+                    uploadHeight,
+                    tex->is_hdr
+                        ? estimateSceneTextureBytes(tex, estimatedUploadChannels)
+                        : static_cast<uint64_t>(uploadWidth) * uploadHeight * estimatedUploadChannels,
                     [&](TextureHandle, VulkanBackingRecord& outBacking) -> bool {
                         const int64_t uploadedId = uploadTextureNow();
                         if (!uploadedId) {
@@ -7348,7 +7515,13 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                 if (resolvedThroughPool && resolvedBacking.textureId != 0) {
                     VulkanRT::ImageHandle localImage{};
                     if (tryGetUploadedImageHandle(resolvedBacking.textureId, localImage)) {
-                        id = resolvedBacking.textureId;
+                        if (localImage.width == uploadWidth && localImage.height == uploadHeight) {
+                            id = resolvedBacking.textureId;
+                        } else {
+                            m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), resolvedBacking.textureId);
+                            resolvedThroughPool = false;
+                            createdByPool = false;
+                        }
                     } else {
                         m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), resolvedBacking.textureId);
                         resolvedThroughPool = false;
@@ -7374,6 +7547,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         gm.normal_tex = getTexID(m.normalTexture, TextureType::Normal, true);
         gm.roughness_tex = getTexID(m.roughnessTexture, TextureType::Roughness, true, false);
         gm.metallic_tex = getTexID(m.metallicTexture, TextureType::Metallic, true, false);
+        gm.specular_tex = getTexID(m.specularTexture, TextureType::Specular, true, true);
         gm.emission_tex = getTexID(m.emissionTexture, TextureType::Emission, false);
         gm.transmission_tex = getTexID(m.transmissionTexture, TextureType::Transmission, true, true);
         gm.opacity_tex = getTexID(m.opacityTexture, TextureType::Opacity, true, true);
@@ -7452,6 +7626,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         defaultMat.albedo_r = 0.8f; defaultMat.albedo_g = 0.8f; defaultMat.albedo_b = 0.8f;
         defaultMat.opacity = 1.0f;
         defaultMat.roughness = 0.5f;
+        defaultMat.specular = 0.5f;
         gpuMats.push_back(defaultMat);
     }
 
@@ -7651,6 +7826,7 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
     gm.opacity = m.opacity;
     gm.roughness = m.roughness;
     gm.metallic = m.metallic;
+    gm.specular = m.specular;
     gm.ior = m.ior;
     gm.transmission = m.transmission;
     gm.emission_r = m.emission.x;
@@ -7704,6 +7880,7 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
         !syncExistingTexture(m.normalTexture, gm.normal_tex, TextureType::Normal, true) ||
         !syncExistingTexture(m.roughnessTexture, gm.roughness_tex, TextureType::Roughness, true, false) ||
         !syncExistingTexture(m.metallicTexture, gm.metallic_tex, TextureType::Metallic, true, false) ||
+        !syncExistingTexture(m.specularTexture, gm.specular_tex, TextureType::Specular, true, true) ||
         !syncExistingTexture(m.emissionTexture, gm.emission_tex, TextureType::Emission, false) ||
         !syncExistingTexture(m.transmissionTexture, gm.transmission_tex, TextureType::Transmission, true, true) ||
         !syncExistingTexture(m.opacityTexture, gm.opacity_tex, TextureType::Opacity, true, true) ||
@@ -7874,6 +8051,13 @@ void VulkanBackendAdapter::uploadTerrainLayerMaterials(const std::vector<Terrain
                 if (it != m_uploadedImageIDs.end()) {
                     gld.splat_map_tex = (uint32_t)it->second;
                 } else {
+                    uint32_t splatUploadW = static_cast<uint32_t>(std::max(0, splatTex->width));
+                    uint32_t splatUploadH = static_cast<uint32_t>(std::max(0, splatTex->height));
+                    if (isViewportTextureOwner(sceneTextureOwnerScope())) {
+                        fitWithinMaxDimension(splatUploadW, splatUploadH,
+                                              kMaterialPreviewTextureMaxDimension,
+                                              splatUploadW, splatUploadH);
+                    }
                     auto uploadSplatTextureNow = [&]() -> int64_t {
                         const std::vector<CompactVec4>& px = splatTex->pixels;
                         if (px.empty()) return 0;
@@ -7883,7 +8067,16 @@ void VulkanBackendAdapter::uploadTerrainLayerMaterials(const std::vector<Terrain
                             tmp[i*4+0] = px[i].r; tmp[i*4+1] = px[i].g;
                             tmp[i*4+2] = px[i].b; tmp[i*4+3] = px[i].a;
                         }
-                        return this->uploadTexture2D(tmp.data(), splatTex->width, splatTex->height, 4, false, false);
+                        if (splatUploadW != static_cast<uint32_t>(splatTex->width) ||
+                            splatUploadH != static_cast<uint32_t>(splatTex->height)) {
+                            tmp = resizeLdrBilinear(tmp,
+                                                   static_cast<uint32_t>(splatTex->width),
+                                                   static_cast<uint32_t>(splatTex->height),
+                                                   splatUploadW,
+                                                   splatUploadH,
+                                                   4u);
+                        }
+                        return this->uploadTexture2D(tmp.data(), splatUploadW, splatUploadH, 4, false, false);
                     };
 
                     int64_t id = 0;
@@ -7895,9 +8088,9 @@ void VulkanBackendAdapter::uploadTerrainLayerMaterials(const std::vector<Terrain
                             buildSceneTextureKey(splatTex, TextureType::Unknown, true, false),
                             sceneTextureOwnerScope(),
                             TextureConsumer::RasterPreview | TextureConsumer::VulkanRT,
-                            static_cast<uint32_t>((std::max)(0, splatTex->width)),
-                            static_cast<uint32_t>((std::max)(0, splatTex->height)),
-                            estimateSceneTextureBytes(splatTex, 4u),
+                            splatUploadW,
+                            splatUploadH,
+                            static_cast<uint64_t>(splatUploadW) * splatUploadH * 4ull,
                             [&](TextureHandle, VulkanBackingRecord& outBacking) -> bool {
                                 const int64_t uploadedId = uploadSplatTextureNow();
                                 if (!uploadedId) {
@@ -7995,7 +8188,13 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
     if (canGenerateMips) {
         const uint32_t fullMips = calcMipLevels(width, height);
         const uint64_t dedicatedVRAM = m_device->getCapabilities().dedicatedVRAM;
-        if (m_sceneTextureManager && dedicatedVRAM > 0) {
+        if (isViewportTextureOwner(sceneTextureOwnerScope())) {
+            // Material Preview must prioritize stable paint/opacity masks. Camera
+            // movement changes implicit LOD; for layered masks that can expose
+            // lower mip levels that do not match the freshly composited base level.
+            // Keep the viewport preview on mip 0 and let render backends use mips.
+            mipLevels = 1;
+        } else if (m_sceneTextureManager && dedicatedVRAM > 0) {
             const float pressure = static_cast<float>(m_sceneTextureManager->totalEstimatedTextureBytes())
                                  / static_cast<float>(dedicatedVRAM);
             if (pressure < 0.50f) {
@@ -8076,8 +8275,14 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
     sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    sci.anisotropyEnable = VK_FALSE;
-    sci.maxAnisotropy = 1.0f;
+    const auto& caps = m_device->getCapabilities();
+    if (caps.supportsSamplerAnisotropy && mipLevels > 1) {
+        sci.anisotropyEnable = VK_TRUE;
+        sci.maxAnisotropy = std::clamp(caps.maxSamplerAnisotropy, 1.0f, 8.0f);
+    } else {
+        sci.anisotropyEnable = VK_FALSE;
+        sci.maxAnisotropy = 1.0f;
+    }
     sci.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
     sci.unnormalizedCoordinates = VK_FALSE;
     sci.compareEnable = VK_FALSE;
@@ -8246,12 +8451,20 @@ int64_t VulkanBackendAdapter::uploadCompressedTexture2D(
     sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    sci.anisotropyEnable = VK_FALSE;
-    sci.maxAnisotropy = 1.0f;
+    const auto& caps = m_device->getCapabilities();
+    if (caps.supportsSamplerAnisotropy && !isViewportTextureOwner(sceneTextureOwnerScope())) {
+        sci.anisotropyEnable = VK_TRUE;
+        sci.maxAnisotropy = std::clamp(caps.maxSamplerAnisotropy, 1.0f, 8.0f);
+    } else {
+        sci.anisotropyEnable = VK_FALSE;
+        sci.maxAnisotropy = 1.0f;
+    }
     sci.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
     sci.unnormalizedCoordinates = VK_FALSE;
     sci.compareEnable = VK_FALSE;
     sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sci.minLod = 0.0f;
+    sci.maxLod = 0.0f;
 
     VkSampler sampler = VK_NULL_HANDLE;
     vkCreateSampler(m_device->getDevice(), &sci, nullptr, &sampler);
@@ -8816,16 +9029,24 @@ void VulkanBackendAdapter::setRenderParams(const RenderParams& p) {
     // Do NOT update m_imageWidth/Height here, otherwise renderProgressive detects no change
     const float clampedThreshold = std::clamp(p.adaptiveThreshold, 0.0f, 1.0f);
     const int clampedMinSamples = std::clamp(p.minSamples, 1, 4096);
+    const int nextMaxBounces = (p.maxBounces > 0) ? p.maxBounces : m_maxBounces;
+    const int nextDiffuseBounces = std::clamp(p.diffuseBounces, 1, nextMaxBounces);
+    const int nextTransmissionBounces = std::clamp(p.transmissionBounces, 1, nextMaxBounces);
     if (m_targetSamples != p.samplesPerPixel ||
         m_minSamples != clampedMinSamples ||
-        m_useAdaptiveSampling != p.useAdaptiveSampling) {
+        m_useAdaptiveSampling != p.useAdaptiveSampling ||
+        m_maxBounces != nextMaxBounces ||
+        m_diffuseBounces != nextDiffuseBounces ||
+        m_transmissionBounces != nextTransmissionBounces) {
         resetAccumulation();
     }
     m_targetSamples = p.samplesPerPixel; 
     m_minSamples = clampedMinSamples;
     m_useAdaptiveSampling = p.useAdaptiveSampling;
     m_varianceThreshold = clampedThreshold;
-    m_maxBounces = (p.maxBounces > 0) ? p.maxBounces : m_maxBounces; // 0 = UI henüz set etmedi, mevcut değeri koru
+    m_maxBounces = nextMaxBounces; // 0 = UI henüz set etmedi, mevcut değeri koru
+    m_diffuseBounces = nextDiffuseBounces;
+    m_transmissionBounces = nextTransmissionBounces;
 }
 void VulkanBackendAdapter::setCamera(const CameraParams& c) { 
     m_camera = c;
@@ -11061,10 +11282,16 @@ void VulkanBackendAdapter::setViewportMode(ViewportMode mode) {
     if (oldMode != ViewportMode::Rendered && mode == ViewportMode::Rendered) {
         m_topology_dirty = true;
         // Interactive solid/matcap resources must not leak into the RT rendered path.
+        if (m_device && m_device->isInitialized()) {
+            m_device->waitIdle();
+        }
         destroyInteractiveViewportResourcesImpl(false);
         m_interactiveViewport = {};
     } else if (oldMode == ViewportMode::Rendered && mode != ViewportMode::Rendered) {
         // Re-entering interactive modes should rebuild cleanly from scratch.
+        if (m_device && m_device->isInitialized()) {
+            m_device->waitIdle();
+        }
         destroyInteractiveViewportResourcesImpl(false);
         m_interactiveViewport = {};
         m_interactiveViewport.dirty = true;
@@ -11542,19 +11769,36 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                 vkCreateShaderModule(vkDevice, &smci, nullptr, &mpFragModule);
 
                 if (mpVertModule && mpFragModule) {
-                    // Descriptor set layout: binding 0 = material SSBO
-                    VkDescriptorSetLayoutBinding matBufBinding{};
-                    matBufBinding.binding = 0;
-                    matBufBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                    matBufBinding.descriptorCount = 1;
-                    matBufBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    VkPhysicalDeviceProperties mpDevProps{};
+                    vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(), &mpDevProps);
+                    const uint32_t mpTextureArrayLen = (mpDevProps.limits.maxPerStageDescriptorSampledImages > 2u)
+                        ? (std::min)(static_cast<uint32_t>(Backend::VULKAN_TEXTURE_CAPACITY),
+                                     mpDevProps.limits.maxPerStageDescriptorSampledImages - 2u)
+                        : 1u;
+                    m_interactiveViewport.materialPreviewTextureArrayLen = mpTextureArrayLen;
+
+                    VkDescriptorSetLayoutBinding mpDslBindings[4]{};
+                    mpDslBindings[0].binding = 0;
+                    mpDslBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[0].descriptorCount = 1;
+                    mpDslBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[1].binding = 1;
+                    mpDslBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    mpDslBindings[1].descriptorCount = mpTextureArrayLen;
+                    mpDslBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[2].binding = 2;
+                    mpDslBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    mpDslBindings[2].descriptorCount = 2;
+                    mpDslBindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[3].binding = 3;
+                    mpDslBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[3].descriptorCount = 1;
+                    mpDslBindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
                     // Guard: check device push-constant limit before touching descriptor/pipeline layout.
                     // Some older drivers crash inside vkCreateDescriptorSetLayout or vkCreatePipelineLayout
                     // when push constants exceed maxPushConstantsSize, rather than returning an error.
                     constexpr uint32_t kMpPushBytes = sizeof(float) * 48 + sizeof(uint32_t) * 4; // 208 bytes
-                    VkPhysicalDeviceProperties mpDevProps{};
-                    vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(), &mpDevProps);
                     const bool mpPushOk = mpDevProps.limits.maxPushConstantsSize >= kMpPushBytes;
                     if (!mpPushOk) {
                         SCENE_LOG_WARN("[Vulkan] Material preview pipeline skipped: "
@@ -11565,21 +11809,34 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
 
                     VkDescriptorSetLayoutCreateInfo mpDslci{};
                     mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                    mpDslci.bindingCount = 1;
-                    mpDslci.pBindings = &matBufBinding;
+                    mpDslci.bindingCount = 4;
+                    mpDslci.pBindings = mpDslBindings;
+                    VkDescriptorBindingFlags mpBindingFlags[4] = {
+                        0,
+                        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,
+                        0,
+                        0
+                    };
+                    VkDescriptorSetLayoutBindingFlagsCreateInfo mpBindingFlagsCI{};
+                    mpBindingFlagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+                    mpBindingFlagsCI.bindingCount = 4;
+                    mpBindingFlagsCI.pBindingFlags = mpBindingFlags;
+                    mpDslci.pNext = &mpBindingFlagsCI;
                     if (mpPushOk) {
                         vkCreateDescriptorSetLayout(vkDevice, &mpDslci, nullptr,
                                                     &m_interactiveViewport.materialPreviewDescLayout);
                     }
 
                     // Descriptor pool
-                    VkDescriptorPoolSize mpPoolSize{};
-                    mpPoolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                    mpPoolSize.descriptorCount = 1;
+                    VkDescriptorPoolSize mpPoolSizes[2]{};
+                    mpPoolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpPoolSizes[0].descriptorCount = 2;
+                    mpPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    mpPoolSizes[1].descriptorCount = mpTextureArrayLen + 2u;
                     VkDescriptorPoolCreateInfo mpDpci{};
                     mpDpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-                    mpDpci.poolSizeCount = 1;
-                    mpDpci.pPoolSizes = &mpPoolSize;
+                    mpDpci.poolSizeCount = 2;
+                    mpDpci.pPoolSizes = mpPoolSizes;
                     mpDpci.maxSets = 1;
                     vkCreateDescriptorPool(vkDevice, &mpDpci, nullptr,
                                            &m_interactiveViewport.materialPreviewDescPool);
@@ -11733,6 +11990,50 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                             mpWds.pBufferInfo = &matBufInfo;
                             vkUpdateDescriptorSets(vkDevice, 1, &mpWds, 0, nullptr);
 
+                            const VkBuffer terrainOrDummyBuffer = m_device->m_terrainLayerBuffer.buffer
+                                ? m_device->m_terrainLayerBuffer.buffer
+                                : m_device->m_materialBuffer.buffer;
+                            if (terrainOrDummyBuffer) {
+                                VkDescriptorBufferInfo terrainBufInfo{};
+                                terrainBufInfo.buffer = terrainOrDummyBuffer;
+                                terrainBufInfo.offset = 0;
+                                terrainBufInfo.range = VK_WHOLE_SIZE;
+                                VkWriteDescriptorSet terrainWds{};
+                                terrainWds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                                terrainWds.dstSet = m_interactiveViewport.materialPreviewDescSet;
+                                terrainWds.dstBinding = 3;
+                                terrainWds.descriptorCount = 1;
+                                terrainWds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                                terrainWds.pBufferInfo = &terrainBufInfo;
+                                vkUpdateDescriptorSets(vkDevice, 1, &terrainWds, 0, nullptr);
+                            }
+
+                            if (!m_interactiveViewport.matcapImage.image) {
+                                std::vector<uint8_t> white(4 * 2 * 2, 255);
+                                const int64_t id = this->uploadTexture2D(white.data(), 2, 2, 4, false, false);
+                                auto it = m_uploadedImages.find(id);
+                                if (it != m_uploadedImages.end()) {
+                                    m_interactiveViewport.matcapImage = it->second;
+                                }
+                            }
+                            if (m_interactiveViewport.matcapImage.view && m_interactiveViewport.matcapImage.sampler) {
+                                VkDescriptorImageInfo dummyInfo{};
+                                dummyInfo.sampler = m_interactiveViewport.matcapImage.sampler;
+                                dummyInfo.imageView = m_interactiveViewport.matcapImage.view;
+                                dummyInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                                std::vector<VkDescriptorImageInfo> dummyInfos(
+                                    m_interactiveViewport.materialPreviewTextureArrayLen,
+                                    dummyInfo);
+                                VkWriteDescriptorSet dummyWds{};
+                                dummyWds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                                dummyWds.dstSet = m_interactiveViewport.materialPreviewDescSet;
+                                dummyWds.dstBinding = 1;
+                                dummyWds.descriptorCount = m_interactiveViewport.materialPreviewTextureArrayLen;
+                                dummyWds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                                dummyWds.pImageInfo = dummyInfos.data();
+                                vkUpdateDescriptorSets(vkDevice, 1, &dummyWds, 0, nullptr);
+                            }
+
                             // Backfill binding 1 with all textures already uploaded.
                             // Without this, when the Vulkan RT backend serves its own
                             // interactive viewport, Material Preview sees an empty texture
@@ -11740,7 +12041,7 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                             // before the descSet existed never reached binding 1.
                             for (auto& kv : m_uploadedImages) {
                                 const int64_t texID = kv.first;
-                                if (texID <= 0 || texID >= static_cast<int64_t>(Backend::VULKAN_TEXTURE_CAPACITY)) continue;
+                                if (texID <= 0 || static_cast<uint32_t>(texID) >= m_interactiveViewport.materialPreviewTextureArrayLen) continue;
                                 const VulkanRT::ImageHandle& texImg = kv.second;
                                 if (!texImg.view || !texImg.sampler) continue;
                                 VkDescriptorImageInfo tii{};
@@ -11756,6 +12057,23 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                                 twds.descriptorCount = 1;
                                 twds.pImageInfo      = &tii;
                                 vkUpdateDescriptorSets(vkDevice, 1, &twds, 0, nullptr);
+                            }
+
+                            if (m_interactiveViewport.matcapImage.view && m_interactiveViewport.matcapImage.sampler) {
+                                VkDescriptorImageInfo envInfos[2]{};
+                                for (auto& envInfo : envInfos) {
+                                    envInfo.sampler = m_interactiveViewport.matcapImage.sampler;
+                                    envInfo.imageView = m_interactiveViewport.matcapImage.view;
+                                    envInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                                }
+                                VkWriteDescriptorSet envWds{};
+                                envWds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                                envWds.dstSet = m_interactiveViewport.materialPreviewDescSet;
+                                envWds.dstBinding = 2;
+                                envWds.descriptorCount = 2;
+                                envWds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                                envWds.pImageInfo = envInfos;
+                                vkUpdateDescriptorSets(vkDevice, 1, &envWds, 0, nullptr);
                             }
                         }
                         SCENE_LOG_INFO("[Vulkan] Material preview pipeline created successfully.");
@@ -12124,7 +12442,7 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                 mpPush.materialMeta[0] = m_device ? m_device->m_materialCount : 0u;
                 mpPush.materialMeta[1] = previewQuality;
                 mpPush.materialMeta[2] = static_cast<uint32_t>(::render_settings.material_preview_lighting_preset);
-                mpPush.materialMeta[3] = 0;
+                mpPush.materialMeta[3] = m_interactiveViewport.materialPreviewTextureArrayLen;
 
                 vkCmdPushConstants(cmd, m_interactiveViewport.materialPreviewPipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -12861,6 +13179,8 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         float shakeRotZ;
         float waterTime;   // Real wall-clock time in seconds for water animation
         uint32_t maxBounces; // UI'dan gelen toplam bounce limiti
+        uint32_t diffuseBounces;
+        uint32_t transmissionBounces;
     };
 
     CameraPushConstants pushConst{};
@@ -12925,6 +13245,8 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
 
     pushConst.waterTime = (m_currentTime > 0.0f) ? m_currentTime : (float)SDL_GetTicks() / 1000.0f;
     pushConst.maxBounces = (uint32_t)std::max(1, m_maxBounces); // m_maxBounces her zaman UI'dan gelir
+    pushConst.diffuseBounces = (uint32_t)std::clamp(m_diffuseBounces, 1, m_maxBounces);
+    pushConst.transmissionBounces = (uint32_t)std::clamp(m_transmissionBounces, 1, m_maxBounces);
 
     pushConst.shakeEnabled = this->m_camera.shake_enabled ? 1 : 0;
     if (pushConst.shakeEnabled) {

@@ -29,7 +29,7 @@
 #include <cstring>  // std::memcpy for fast pixel copy
 
 enum class TextureType {
-    Unknown, Albedo, Normal, Roughness, Metallic, Emission, AO, Transmission, Opacity
+    Unknown, Albedo, Normal, Roughness, Metallic, Emission, AO, Transmission, Opacity, Specular
 };
 
 // ===== sRGB → Linear Look-up Table (LUT) for FAST conversion =====
@@ -845,6 +845,15 @@ public:
             return false;  // CPU-only mode
         }
 
+        // CUDA texture residency is intentionally lazy. Import, terrain load,
+        // mesh paint, and material preview may call this helper while OptiX is
+        // available but not the active consumer; in that case keep CPU pixels
+        // and dirty flags only. Real OptiX material/SBT sync opens a scoped
+        // upload window before resolving CUDA texture objects.
+        if (!isCudaTextureUploadAllowed()) {
+            return m_is_loaded;
+        }
+
         if (is_gpu_uploaded || !m_is_loaded)
             return false;
 
@@ -949,6 +958,7 @@ public:
         case TextureType::AO: type_str = "AO"; break;
         case TextureType::Transmission: type_str = "Transmission"; break;
         case TextureType::Opacity: type_str = "Opacity"; break;
+        case TextureType::Specular: type_str = "Specular"; break;
         default: break;
         }
 

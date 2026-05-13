@@ -909,6 +909,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                             std::to_string(limit) +
                             " → binding1 descriptorCount=" + std::to_string(mpTextureArrayLen));*/
                     }
+                    m_interactiveViewport.materialPreviewTextureArrayLen = mpTextureArrayLen;
 
                     VkDescriptorSetLayoutBinding mpDslBindings[4]{};
                     mpDslBindings[0].binding = 0;
@@ -1149,10 +1150,34 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                             mpWds.pBufferInfo = &matBufInfo;
                             vkUpdateDescriptorSets(vkDevice, 1, &mpWds, 0, nullptr);
 
+                            if (!m_interactiveViewport.matcapImage.image) {
+                                std::vector<uint8_t> white(4 * 2 * 2, 255);
+                                const int64_t id = this->uploadTexture2D(white.data(), 2, 2, 4, false, false);
+                                auto it = m_uploadedImages.find(id);
+                                if (it != m_uploadedImages.end()) {
+                                    m_interactiveViewport.matcapImage = it->second;
+                                }
+                            }
+                            if (m_interactiveViewport.matcapImage.view && m_interactiveViewport.matcapImage.sampler) {
+                                VkDescriptorImageInfo dummyInfo{};
+                                dummyInfo.sampler = m_interactiveViewport.matcapImage.sampler;
+                                dummyInfo.imageView = m_interactiveViewport.matcapImage.view;
+                                dummyInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                                std::vector<VkDescriptorImageInfo> dummyInfos(mpTextureArrayLen, dummyInfo);
+                                VkWriteDescriptorSet dummyWds{};
+                                dummyWds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                                dummyWds.dstSet = m_interactiveViewport.materialPreviewDescSet;
+                                dummyWds.dstBinding = 1;
+                                dummyWds.descriptorCount = mpTextureArrayLen;
+                                dummyWds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                                dummyWds.pImageInfo = dummyInfos.data();
+                                vkUpdateDescriptorSets(vkDevice, 1, &dummyWds, 0, nullptr);
+                            }
+
                             // Populate binding 1 with all textures already uploaded.
                             // Textures uploaded later are handled by updateMaterialPreviewTextureDescriptor.
                             for (auto& [texID, texImg] : m_uploadedImages) {
-                                if (texID <= 0 || texID >= VULKAN_TEXTURE_CAPACITY) continue;
+                                if (texID <= 0 || static_cast<uint32_t>(texID) >= mpTextureArrayLen) continue;
                                 if (!texImg.view || !texImg.sampler) continue;
                                 VkDescriptorImageInfo tii{};
                                 tii.sampler     = texImg.sampler;
@@ -1758,7 +1783,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                 mpPush.materialMeta[0] = materialCount;
                 mpPush.materialMeta[1] = previewQuality;
                 mpPush.materialMeta[2] = static_cast<uint32_t>(::render_settings.material_preview_lighting_preset);
-                mpPush.materialMeta[3] = 0;
+                mpPush.materialMeta[3] = m_interactiveViewport.materialPreviewTextureArrayLen;
                 vkCmdPushConstants(cmd, m_interactiveViewport.materialPreviewPipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(MaterialPreviewPushConstants), &mpPush);
