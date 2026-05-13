@@ -239,6 +239,8 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
     root["settings"]["quality_preset"] = (int)settings.quality_preset;
     root["settings"]["samples_per_pixel"] = settings.samples_per_pixel;
     root["settings"]["max_bounces"] = settings.max_bounces;
+    root["settings"]["diffuse_bounces"] = settings.diffuse_bounces;
+    root["settings"]["transmission_bounces"] = settings.transmission_bounces;
     root["settings"]["use_adaptive"] = settings.use_adaptive_sampling;
     root["settings"]["use_denoiser"] = settings.use_denoiser;
     root["settings"]["use_optix"] = settings.use_optix;
@@ -434,7 +436,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
     // 5. Render Settings
     simdjson::dom::element s;
     if (!root["settings"].get(s)) {
-        int64_t q = 0, spp = 1, bounces = 10, denoiser_mode = static_cast<int64_t>(DenoiserMode::Quality);
+        int64_t q = 0, spp = 1, bounces = 10, diffuse_bounces = 4, transmission_bounces = 8, denoiser_mode = static_cast<int64_t>(DenoiserMode::Quality);
         bool adaptive = true, denoiser = false, optix = true, vulkan = false, tonemap = false;
         std::string backend_name;
         std::string_view backend_name_sv;
@@ -442,6 +444,8 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         s["quality_preset"].get(q);
         s["samples_per_pixel"].get(spp);
         s["max_bounces"].get(bounces);
+        s["diffuse_bounces"].get(diffuse_bounces);
+        s["transmission_bounces"].get(transmission_bounces);
         s["use_adaptive"].get(adaptive);
         s["use_denoiser"].get(denoiser);
         s["denoiser_mode"].get(denoiser_mode);
@@ -471,7 +475,9 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
 
         settings.quality_preset = (QualityPreset)q;
         settings.samples_per_pixel = (int)spp;
-        settings.max_bounces = (int)bounces;
+        settings.max_bounces = std::max(1, (int)bounces);
+        settings.diffuse_bounces = std::clamp((int)diffuse_bounces, 1, settings.max_bounces);
+        settings.transmission_bounces = std::clamp((int)transmission_bounces, 1, settings.max_bounces);
         settings.use_adaptive_sampling = adaptive;
         settings.use_denoiser = denoiser;
         settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);

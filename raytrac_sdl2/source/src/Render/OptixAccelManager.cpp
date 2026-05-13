@@ -47,8 +47,20 @@ uint64_t estimateOptixTextureBytes(const Texture* tex) {
     return tex->is_hdr ? pixelCount * 16ull : pixelCount * 4ull;
 }
 
+cudaTextureObject_t ensureOptixTextureResident(Texture* tex) {
+    if (!tex || !tex->is_loaded()) return 0;
+    if ((!tex->is_gpu_uploaded || tex->get_cuda_texture() == 0) && g_hasOptix) {
+        if (tex->get_cuda_texture() == 0) {
+            tex->is_gpu_uploaded = false;
+        }
+        tex->upload_to_gpu();
+    }
+    return tex->get_cuda_texture();
+}
+
 cudaTextureObject_t resolveSharedOptixTexture(const std::shared_ptr<Texture>& tex) {
     if (!tex) return 0;
+    ScopedCudaTextureUpload allowCudaTextureUpload;
 
     auto manager = getSharedSceneTextureManager();
     if (manager) {
@@ -60,20 +72,23 @@ cudaTextureObject_t resolveSharedOptixTexture(const std::shared_ptr<Texture>& te
             static_cast<uint32_t>((std::max)(0, tex->height)),
             estimateOptixTextureBytes(tex.get()),
             [&tex](Backend::TextureHandle) -> int64_t {
-                if (!tex->is_gpu_uploaded) {
-                    tex->upload_to_gpu();
-                }
-                return static_cast<int64_t>(tex->get_cuda_texture());
+                return static_cast<int64_t>(ensureOptixTextureResident(tex.get()));
             },
             resolvedTextureId)) {
+            const cudaTextureObject_t currentTexture = ensureOptixTextureResident(tex.get());
+            if (currentTexture == 0) {
+                manager->clearOptixTextureId(resolvedTextureId);
+                return 0;
+            }
+            if (currentTexture != static_cast<cudaTextureObject_t>(resolvedTextureId)) {
+                manager->clearOptixTextureId(resolvedTextureId);
+                return currentTexture;
+            }
             return static_cast<cudaTextureObject_t>(resolvedTextureId);
         }
     }
 
-    if (!tex->is_gpu_uploaded) {
-        tex->upload_to_gpu();
-    }
-    return tex->get_cuda_texture();
+    return ensureOptixTextureResident(tex.get());
 }
 }
 
@@ -1313,7 +1328,17 @@ void OptixAccelManager::buildTLAS() {
         
         if (inst.type == InstanceType::Mesh) {
             // DISABLE CULLING: Essential for double-sided materials and mirrored instances (negative scale)
-            optix_inst.flags = OPTIX_INSTANCE_FLAG_DISABLE_TRIANGLE_FACE_CULLING;
+            unsigned int mesh_flags = OPTIX_INSTANCE_FLAG_DISABLE_TRIANGLE_FACE_CULLING;
+            // Anyhit fast-path: when the BLAS material is fully opaque (no
+            // opacity_tex and opacity >= 1), tell OptiX to skip the anyhit
+            // shader so RT cores can take the hardware triangle path.
+            // Falls back to anyhit automatically for any BLAS not classified
+            // as opaque (default false), preserving alpha cutout behavior.
+            if (inst.blas_id < static_cast<int>(mesh_blas_list.size())
+                && mesh_blas_list[inst.blas_id].is_opaque) {
+                mesh_flags |= OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT;
+            }
+            optix_inst.flags = mesh_flags;
         } else {
             // Curves usually don't need culling flags
             optix_inst.flags = OPTIX_INSTANCE_FLAG_NONE;
@@ -1432,7 +1457,7 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
     }
     
     hitgroup_records.clear();
-    
+
     // One SBT record per mesh (BLAS)
     for (size_t mesh_idx = 0; mesh_idx < mesh_blas_list.size(); ++mesh_idx) {
         MeshBLAS& blas = mesh_blas_list[mesh_idx];
@@ -1552,10 +1577,23 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
         // ═══════════════════════════════════════════════════════════════════════════
         rec.data.object_id = static_cast<int>(mesh_idx);
         
+        // Anyhit fast-path: if this mesh has no per-pixel alpha test and is
+        // fully opaque, mark the BLAS so buildTLAS can set
+        // OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT on its instances. The default
+        // (false) preserves the existing anyhit behavior — only the
+        // safe-opaque case is opted in.
+        {
+            bool opaque = (rec.data.has_opacity_tex == 0);
+            if (opaque && mat_id >= 0 && mat_id < static_cast<int>(materials.size())) {
+                if (materials[mat_id].opacity < 0.999f) opaque = false;
+            }
+            blas.is_opaque = opaque;
+        }
+
         // Record 0: Radiance
         OPTIX_CHECK_ACCEL(optixSbtRecordPackHeader(hit_program_group, &rec));
         hitgroup_records.push_back(rec);
-        
+
         // Record 1: Shadow
         OPTIX_CHECK_ACCEL(optixSbtRecordPackHeader(hit_shadow_program_group, &rec));
         hitgroup_records.push_back(rec);
@@ -1808,6 +1846,27 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
                 
                 modified = true;
             }
+        }
+    }
+
+    // Recompute per-BLAS opacity classification after texture/material sync.
+    // If the result differs from the cached flag, request a TLAS rebuild so
+    // OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT is added/removed consistently.
+    // Conservative on unknown material_id (keeps anyhit enabled).
+    for (size_t i = 0; i < mesh_blas_list.size(); ++i) {
+        MeshBLAS& blas = mesh_blas_list[i];
+        size_t rec_idx_rad = 2 * i;
+        if (rec_idx_rad >= hitgroup_records.size()) continue;
+        int rec_mat_id = hitgroup_records[rec_idx_rad].data.material_id;
+        bool opaque = (hitgroup_records[rec_idx_rad].data.has_opacity_tex == 0);
+        if (rec_mat_id < 0 || rec_mat_id >= static_cast<int>(materials.size())) {
+            opaque = false;
+        } else if (opaque && materials[rec_mat_id].opacity < 0.999f) {
+            opaque = false;
+        }
+        if (blas.is_opaque != opaque) {
+            blas.is_opaque = opaque;
+            tlas_needs_rebuild = true;
         }
     }
 
@@ -2160,7 +2219,18 @@ void OptixAccelManager::updateMeshMaterialBinding(const std::string& node_name, 
             if (blas.material_id == old_mat_id || old_mat_id == -1) {
                 
                 blas.material_id = new_mat_id;
-                
+
+                // Material identity changed — conservatively re-enable anyhit
+                // for this BLAS until the next syncSBTMaterialData verifies the
+                // new material's opacity classification. Without this, a swap
+                // from opaque → alpha-cutout could leave DISABLE_ANYHIT set on
+                // the instance and skip opacity_tex testing. The TLAS rebuild
+                // is requested so the flag change actually propagates.
+                if (blas.is_opaque) {
+                    blas.is_opaque = false;
+                    tlas_needs_rebuild = true;
+                }
+
                 // Update SBT Records directly
                 // Mesh BLAS uses records [2*i] (Radiance) and [2*i+1] (Shadow)
                 size_t rec_idx_rad = 2 * i;

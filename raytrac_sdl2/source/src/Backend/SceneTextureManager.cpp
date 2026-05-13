@@ -700,6 +700,18 @@ uint64_t SceneTextureManager::estimatedTextureBytesForOwner(const std::string& o
     return total;
 }
 
+uint64_t SceneTextureManager::estimatedOptixTextureBytes() const {
+    std::lock_guard<std::mutex> guard(m_mutex);
+    uint64_t total = 0;
+    for (const auto& [key, record] : m_recordsByKey) {
+        (void)key;
+        if (record.optixTextureId != 0) {
+            total += record.estimatedBytes;
+        }
+    }
+    return total;
+}
+
 size_t SceneTextureManager::trimVulkanBackingLRU(const std::string& ownerTag, uint64_t targetBytes) {
     if (ownerTag.empty()) return 0;
 

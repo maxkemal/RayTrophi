@@ -81,6 +81,12 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
     uint32_t _terrain_layer_idx; // terrain layer buffer index (valid when FLAG_TERRAIN set)
     float normal_strength;
     float tile_break_strength;   // UV tile-break strength (0=off, 0.1–0.3 typical)
+
+    // Block 16: Specular controls (16 bytes)
+    float specular;              // Blender-style dielectric F0 = 0.08 * specular
+    VkGpuTextureHandle specular_tex;
+    uint32_t _pad_specular0;
+    uint32_t _pad_specular1;
 };
 
 // Flag bits for VkGpuMaterial::flags

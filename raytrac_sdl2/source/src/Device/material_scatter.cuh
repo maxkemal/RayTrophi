@@ -110,7 +110,7 @@ __device__ float G_Smith(float NdotV, float NdotL, float roughness) {
 
 __device__ float3 fresnel_schlick_roughness(float cosTheta, float3 F0, float roughness);
 
-__device__ float pdf_brdf(const GpuMaterial& mat, const float3& wo, const float3& wi, const float3& N, int bounce_index = 0) {
+__device__ __noinline__ float pdf_brdf(const GpuMaterial& mat, const float3& wo, const float3& wi, const float3& N, int bounce_index = 0) {
     float3 sum = wo + wi;
     float sum_len2 = dot(sum, sum);
     if (sum_len2 < 1e-12f) return 1e-6f;
@@ -159,7 +159,7 @@ __device__ float get_alpha_gpu(const GpuMaterial& material, const OptixHitResult
 }
 
 
-__device__ float3 evaluate_brdf(
+__device__ __noinline__ float3 evaluate_brdf(
     const GpuMaterial& material,
     const OptixHitResult& payload,
     const float3& wo,
@@ -249,6 +249,15 @@ __device__ float3 evaluate_brdf(
         metallic = tex2D<float4>(payload.metallic_tex, uv.x, uv.y).z;
     }
 
+    float specular = material.specular;
+    if (material.specular_tex) {
+        specular = tex2D<float4>(material.specular_tex, uv.x, uv.y).x * material.specular;
+    }
+    else if (payload.has_specular_tex) {
+        specular = tex2D<float4>(payload.specular_tex, uv.x, uv.y).x * material.specular;
+    }
+    specular = fminf(fmaxf(specular, 0.0f), 1.0f);
+
     // ── Procedural detail: subtle color variation + dirt + roughness ──────────
     // micro_detail_strength drives all world-space effects without touching UVs.
     // tile_break_strength (above) is the separate UV-warp control.
@@ -286,7 +295,8 @@ __device__ float3 evaluate_brdf(
     float denom = (NdotH * NdotH) * (alpha2 - 1.0f) + 1.0f;
     float D = alpha2 / (M_PIf * denom * denom);
 
-    float3 F0 = lerp(make_float3(0.04f, 0.04f, 0.04f), albedo, metallic);
+    float dielectricF0 = fminf(fmaxf(0.08f * specular, 0.0f), 0.08f);
+    float3 F0 = lerp(make_float3(dielectricF0, dielectricF0, dielectricF0), albedo, metallic);
     float3 F = fresnel_schlick_roughness(VdotH, F0, roughness);
     float3 F_avg = F0 + (make_float3(1.0f) - F0) / 21.0f;
 
@@ -788,7 +798,19 @@ __device__ bool transmission_scatter(
     return true;
 }
 
-__device__ bool scatter_material(
+// __noinline__: keeps this large BSDF dispatch out of the raygen kernel's
+// register budget. Inlined, it dominated raygen's frame and crushed
+// occupancy on indirect bounces. As a separate device function it gets
+// its own stack frame; the call overhead (~30 cycles) is dwarfed by the
+// occupancy gain on a 1000+ line shader. Same rationale applies to
+// evaluate_brdf / pdf_brdf below.
+enum PathBounceType {
+    PATH_BOUNCE_SPECULAR = 0,
+    PATH_BOUNCE_DIFFUSE = 1,
+    PATH_BOUNCE_TRANSMISSION = 2
+};
+
+__device__ __noinline__ bool scatter_material(
     const GpuMaterial& material,         // dışarıdan gelen materyal
     OptixHitResult& payload,        // payload (normal, uv, textures)
     const Ray& ray_in,
@@ -796,9 +818,11 @@ __device__ bool scatter_material(
     Ray* scattered,
     float3* attenuation,
     float* pdf,
-    bool* is_specular
+    bool* is_specular,
+    int* bounce_type
 )
 {
+    *bounce_type = PATH_BOUNCE_SPECULAR;
     float2 uv = apply_material_uv_transform(material, payload.uv);
     float3 N = payload.normal;
  
@@ -856,6 +880,12 @@ __device__ bool scatter_material(
     else if (payload.has_metallic_tex)
         metallic = tex2D<float4>(payload.metallic_tex, uv.x, uv.y).z;
 
+    float specular = material.specular;
+    if (material.specular_tex)
+        specular = tex2D<float4>(material.specular_tex, uv.x, uv.y).x * material.specular;
+    else if (payload.has_specular_tex)
+        specular = tex2D<float4>(payload.specular_tex, uv.x, uv.y).x * material.specular;
+
     float transmission = material.transmission;
     if (payload.use_blended_data) {
         transmission = payload.blended_transmission;
@@ -865,6 +895,7 @@ __device__ bool scatter_material(
 
     roughness = fminf(fmaxf(roughness, 0.02f), 1.0f);
     metallic = fminf(fmaxf(metallic, 0.0f), 1.0f);
+    specular = fminf(fmaxf(specular, 0.0f), 1.0f);
     transmission = fminf(fmaxf(transmission, 0.0f), 1.0f);
 
     // Path regularization (Müller 2018): indirect bounces use a roughness
@@ -878,7 +909,8 @@ __device__ bool scatter_material(
 
    
    
-    float3 F0 = lerp(make_float3(0.04f, 0.04f, 0.04f), albedo, metallic);   
+    float dielectricF0 = fminf(fmaxf(0.08f * specular, 0.0f), 0.08f);
+    float3 F0 = lerp(make_float3(dielectricF0, dielectricF0, dielectricF0), albedo, metallic);
     
     // ═══════════════════════════════════════════════════════════════════════════
     // LOBE SELECTION (Energy-conserving order)
@@ -900,6 +932,7 @@ __device__ bool scatter_material(
 
         if (random_float(rng) < cc_prob) {
             *is_specular = (clearcoat_roughness < 0.02f);
+            *bounce_type = PATH_BOUNCE_SPECULAR;
             bool got = clearcoat_scatter(material, payload, ray_in, rng, scattered, attenuation, pdf);
             if (got) {
                 // Compensate selection probability (match Vulkan behavior)
@@ -919,6 +952,7 @@ __device__ bool scatter_material(
     if (transmission > 0.01f) {
         if (random_float(rng) < transmission) {
             *is_specular = true;
+            *bounce_type = PATH_BOUNCE_TRANSMISSION;
             return transmission_scatter(material, payload, ray_in, rng, scattered, attenuation);
         }
         albedo *= 1.0f / fmaxf(1.0f - transmission, 0.01f);
@@ -930,6 +964,7 @@ __device__ bool scatter_material(
     if (payload.use_blended_data) sss = payload.blended_subsurface;
     if (sss > 0.01f && random_float(rng) < sss) {
         *is_specular = false;
+        *bounce_type = PATH_BOUNCE_DIFFUSE;
         *pdf = 1.0f;
         return sss_random_walk_scatter(material, payload, ray_in, rng, scattered, attenuation);
     }
@@ -939,6 +974,7 @@ __device__ bool scatter_material(
     if (payload.use_blended_data) translucent = payload.blended_translucent;
     if (translucent > 0.01f && random_float(rng) < translucent) {
         *is_specular = false;
+        *bounce_type = PATH_BOUNCE_DIFFUSE;
         *pdf = 1.0f / M_PIf;  // Cosine-weighted PDF
         return translucent_scatter(material, payload, ray_in, rng, scattered, attenuation);
     }
@@ -968,6 +1004,7 @@ __device__ bool scatter_material(
         *attenuation    = clamp3f(F * G1L * comp, 0.0f, 1e4f);
         *pdf            = pdf_brdf(material, wo, L, N, payload.bounce_index);
         *is_specular    = (roughness < 0.02f);
+        *bounce_type    = PATH_BOUNCE_SPECULAR;
         return true;
     };
 
@@ -981,7 +1018,7 @@ __device__ bool scatter_material(
         // Matches Vulkan: fresnelBase-based rnd; specular uses vec3(1.0) as F0
         // so that Fresnel=1 and attenuation=G1L (≈1) — the 0.04 weight comes
         // from the selection probability itself, not from the F term.
-        float fresnelBase = 0.04f + (1.0f - 0.04f) * powf(1.0f - cosTheta_N, 5.0f);
+        float fresnelBase = dielectricF0 + (1.0f - dielectricF0) * powf(1.0f - cosTheta_N, 5.0f);
         if (random_float(rng) < fresnelBase) {
             // Specular: white F0 → Fresnel=1, weight = G1L (naturally small chance)
             scatter_specular(make_float3(1.0f, 1.0f, 1.0f), 1.0f);
@@ -996,6 +1033,7 @@ __device__ bool scatter_material(
             *attenuation  = clamp3f(albedo, 0.0f, 1e4f);
             *pdf          = fmaxf(dot(N, world_dir), GPU_MIN_DOT) / M_PIf;
             *is_specular  = false;
+            *bounce_type  = PATH_BOUNCE_DIFFUSE;
         }
 
     } else {
@@ -1019,6 +1057,7 @@ __device__ bool scatter_material(
             *attenuation  = clamp3f(albedo, 0.0f, 1e4f);
             *pdf          = fmaxf(dot(N, world_dir), GPU_MIN_DOT) / M_PIf;
             *is_specular  = false;
+            *bounce_type  = PATH_BOUNCE_DIFFUSE;
         }
     }
 

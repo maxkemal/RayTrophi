@@ -1475,15 +1475,19 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
         backend->waitForCompletion();
     }
 
+    const bool had_runtime_scene_content =
+        !scene.world.objects.empty() ||
+        !scene.gas_volumes.empty() ||
+        !scene.vdb_volumes.empty() ||
+        !scene.lights.empty();
+
     {
         ScopedPerfTimer timer("openProject reset scene");
-        // Must NOT pass defer_backend_reset=true here. The empty-scene
-        // rebuildBackendGeometry call inside newProject is what drives
-        // OptixWrapper::clearScene(), which frees the previous project's BLAS,
-        // textures, VDB volumes, hair buffers, and pick buffers. Skipping it
-        // leaks GPU memory across successive large-scene loads and eventually
-        // causes cudaMallocArray to fail with an illegal-memory-access error.
-        newProject(scene, renderer);
+        // When opening a project over an existing runtime scene, keep the
+        // backend reset so old BLAS/textures are freed before the new load.
+        // On first startup the scene is already empty; deferring avoids waking
+        // the render backend during project parsing while the viewport is Solid.
+        newProject(scene, renderer, !had_runtime_scene_content);
     }
     // newProject already called TerrainManager::removeAllTerrains and scene.clear();
     // don't repeat them here.
@@ -2894,6 +2898,8 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["samples_per_pass"] = settings.samples_per_pass;
     j["mouse_sensitivity"] = settings.mouse_sensitivity;
     j["max_bounces"] = settings.max_bounces;
+    j["diffuse_bounces"] = settings.diffuse_bounces;
+    j["transmission_bounces"] = settings.transmission_bounces;
     j["final_render_width"] = settings.final_render_width;
     j["final_render_height"] = settings.final_render_height;
     j["use_embree"] = settings.UI_use_embree;
@@ -2925,6 +2931,9 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     settings.samples_per_pass = j.value("samples_per_pass", 1);
     settings.mouse_sensitivity = j.value("mouse_sensitivity", 0.4f);
     settings.max_bounces = j.value("max_bounces", 10);
+    settings.max_bounces = std::max(1, settings.max_bounces);
+    settings.diffuse_bounces = std::clamp(j.value("diffuse_bounces", 4), 1, settings.max_bounces);
+    settings.transmission_bounces = std::clamp(j.value("transmission_bounces", 8), 1, settings.max_bounces);
     settings.final_render_width = j.value("final_render_width", 1280);
     settings.final_render_height = j.value("final_render_height", 720);
     // Backend/device selection is no longer serialized with project files.
@@ -3470,6 +3479,7 @@ void ProjectManager::deserializeTextures(const json& j, std::ifstream& bin_in, c
                 if (usage == "normal") texType = TextureType::Normal;
                 else if (usage == "roughness") texType = TextureType::Roughness;
                 else if (usage == "metallic") texType = TextureType::Metallic;
+                else if (usage == "specular") texType = TextureType::Specular;
                 else if (usage == "emission") texType = TextureType::Emission;
                 else if (usage == "height") texType = TextureType::Unknown;
                 else if (usage == "opacity") texType = TextureType::Opacity;

@@ -90,6 +90,8 @@ struct RenderSettings {
     int samples_per_pixel = 1;
     int samples_per_pass = 1;
     int max_bounces = 10;
+    int diffuse_bounces = 4;
+    int transmission_bounces = 8;
 
     // Adaptive Sampling
     bool use_adaptive_sampling = true;
@@ -297,6 +299,24 @@ extern bool g_hasOptix ;
 extern bool g_hasVulkan;
 extern bool g_hasVulkanRT;
 extern bool g_hasCUDA; // General CUDA availability (independent of OptiX)
+extern std::atomic<int> g_cuda_texture_upload_scope_depth;
+
+class ScopedCudaTextureUpload {
+public:
+    ScopedCudaTextureUpload() {
+        g_cuda_texture_upload_scope_depth.fetch_add(1, std::memory_order_acq_rel);
+    }
+    ~ScopedCudaTextureUpload() {
+        g_cuda_texture_upload_scope_depth.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    ScopedCudaTextureUpload(const ScopedCudaTextureUpload&) = delete;
+    ScopedCudaTextureUpload& operator=(const ScopedCudaTextureUpload&) = delete;
+};
+
+inline bool isCudaTextureUploadAllowed() {
+    return g_cuda_texture_upload_scope_depth.load(std::memory_order_acquire) > 0;
+}
 Backend::RenderBackendCapabilities captureRuntimeRenderCapabilities();
 std::shared_ptr<Backend::SceneTextureManager> getSharedSceneTextureManager();
 // Clears any cached OptiX textureId entries equal to `textureId` from the shared

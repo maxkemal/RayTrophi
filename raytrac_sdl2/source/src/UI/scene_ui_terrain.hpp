@@ -101,7 +101,16 @@ static void ResetTerrainBackendAccumulation(UIContext& ctx) {
 }
 
 static void SyncTerrainMaterialState(UIContext& ctx) {
-    ctx.renderer.updateBackendMaterials(ctx.scene);
+    Backend::IViewportBackend* viewportBackend = GetTerrainViewportBackend(ctx);
+    Backend::IBackend* renderBackend = GetTerrainRenderBackend(ctx);
+
+    if (viewportBackend) {
+        ctx.renderer.updateBackendMaterials(ctx.scene, viewportBackend);
+    }
+    if (renderBackend &&
+        reinterpret_cast<const void*>(renderBackend) != reinterpret_cast<const void*>(viewportBackend)) {
+        ctx.renderer.updateBackendMaterials(ctx.scene, renderBackend);
+    }
     ResetTerrainBackendAccumulation(ctx);
 }
 
@@ -1822,8 +1831,7 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
         const bool renderedViewportActive = (ctx.backend_ptr == g_backend.get());
 
         if (pending_vulkan_material_sync && hasVulkanViewportPath && ctx.backend_ptr) {
-            ctx.renderer.updateBackendMaterials(ctx.scene);
-            ResetTerrainBackendAccumulation(ctx);
+            SyncTerrainMaterialState(ctx);
         }
 
         if (pending_geometry_commit) {
@@ -2019,8 +2027,7 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                          pending_vulkan_material_sync = true;
                          float now = (float)ImGui::GetTime();
                          if (now - last_vulkan_paint_sync_time > 0.08f) {
-                             ctx.renderer.updateBackendMaterials(ctx.scene);
-                             ResetTerrainBackendAccumulation(ctx);
+                             SyncTerrainMaterialState(ctx);
                              last_vulkan_paint_sync_time = now;
                              pending_vulkan_material_sync = false;
                          }

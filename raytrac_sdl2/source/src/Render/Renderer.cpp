@@ -1876,7 +1876,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
         // OPTIMIZATION: This cache should ideally be built once when scene loads,
         // but for now we only process tracks that have keyframes - much faster than 10M objects
 
-        bool any_material_keyframed = false;
+        std::vector<uint16_t> keyframedMaterialIds;
         for (auto& [track_name, track] : scene.timeline.tracks) {
             // Skip tracks without material keyframes
             if (track.keyframes.empty()) continue;
@@ -1915,20 +1915,22 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                     pbsdf->albedoProperty.color = kf.material.albedo;
                     pbsdf->roughnessProperty.color = Vec3(kf.material.roughness);
                     pbsdf->metallicProperty.intensity = kf.material.metallic;
+                    pbsdf->specularProperty.intensity = kf.material.specular;
                     pbsdf->emissionProperty.color = kf.material.emission;
                     pbsdf->ior = kf.material.ior;
                     pbsdf->transmission = kf.material.transmission;
                     pbsdf->opacityProperty.alpha = kf.material.opacity;
                 }
-                any_material_keyframed = true;
+                if (std::find(keyframedMaterialIds.begin(), keyframedMaterialIds.end(), mat_id) == keyframedMaterialIds.end()) {
+                    keyframedMaterialIds.push_back(mat_id);
+                }
             }
         }
 
-        // Push material changes to all GPU backends now that CPU props are in sync.
-        // updateBackendMaterials reads CPU BSDF props via capturePBRMaterialSnapshot,
-        // which would override gpuMaterial unless we updated the CPU props above first.
-        if (any_material_keyframed) {
-            this->updateBackendMaterials(scene);
+        // Push only the animated material slots instead of re-uploading the full
+        // material buffer every frame during timeline playback.
+        for (uint16_t materialId : keyframedMaterialIds) {
+            this->updateBackendMaterial(scene, materialId);
         }
 
         // --- WORLD KEYFRAME EVALUATION (NEW!) ---
@@ -2322,6 +2324,8 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
                     rp.samplesPerPixel = total_samples_per_pixel;
                     rp.minSamples = render_settings.min_samples;
                     rp.maxBounces = std::max(1, render_settings.max_bounces);
+                    rp.diffuseBounces = std::clamp(render_settings.diffuse_bounces, 1, rp.maxBounces);
+                    rp.transmissionBounces = std::clamp(render_settings.transmission_bounces, 1, rp.maxBounces);
                     rp.useAdaptiveSampling = false;
                     rp.adaptiveThreshold = 0.0f;
                     m_backend->setRenderParams(rp);
@@ -2470,6 +2474,8 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         rp.samplesPerPixel = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
         rp.minSamples = render_settings.min_samples;
         rp.maxBounces = std::max(1, render_settings.max_bounces);
+        rp.diffuseBounces = std::clamp(render_settings.diffuse_bounces, 1, rp.maxBounces);
+        rp.transmissionBounces = std::clamp(render_settings.transmission_bounces, 1, rp.maxBounces);
         rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
         rp.adaptiveThreshold = render_settings.variance_threshold;
         m_backend->setRenderParams(rp);
@@ -2650,16 +2656,18 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
         // ---- 3. CPU Texture Cache'leri temizle ----
         assimpLoader.clearTextureCache();
 
-        // ---- 4. GPU OptiX Texture'lar�n� temizle ----
+        // Reset OptiX scene-owned GPU state for the next project load without touching texture
+        // ownership. Texture residency itself is cleaned by Texture::cleanup_gpu() above.
         if (g_hasOptix && backend) {
             try {
                 Backend::OptixBackend* optixBackend = dynamic_cast<Backend::OptixBackend*>(backend);
                 OptixWrapper* optix_gpu = optixBackend ? optixBackend->getOptixWrapper() : nullptr;
-                if (optix_gpu) optix_gpu->destroyTextureObjects();
-                SCENE_LOG_INFO("[GPU CLEANUP] OptiX texture objects destroyed.");
+                if (optix_gpu) {
+                    optix_gpu->clearScene();
+                }
             }
             catch (std::exception& e) {
-                SCENE_LOG_WARN("[GPU CLEANUP] Exception during texture cleanup: " + std::string(e.what()));
+                SCENE_LOG_WARN("[GPU CLEANUP] Exception during OptiX scene reset: " + std::string(e.what()));
             }
         }
 
@@ -3214,6 +3222,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     Vec3 albedo;
     float metallic;
     float roughness;
+    float specularAmount = 0.5f;
     float clearcoat = 0.0f;
     float clearcoatRoughness = 0.03f;
 
@@ -3232,9 +3241,10 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         if (auto pMat = dynamic_cast<PrincipledBSDF*>(material)) {
             clearcoat = pMat->clearcoat;
             clearcoatRoughness = pMat->clearcoatRoughness;
+            specularAmount = pMat->getSpecularValue(uv);
         }
     }
-    Vec3 F0 = Vec3::lerp(Vec3(0.04f), albedo, metallic);
+    Vec3 F0 = Vec3::lerp(Vec3(std::clamp(0.08f * specularAmount, 0.0f, 0.08f)), albedo, metallic);
 
     Vec3 V = -r_in.direction.normalize();
     Vec3 N = normal;
@@ -3605,7 +3615,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     float G = psdf.GeometrySmith(N, V, L, roughness);
     Vec3 F = psdf.fresnelSchlickRoughness(VdotH, F0, roughness);
 
-    Vec3 specular = psdf.evalSpecular(N, V, L, F0, roughness);
+    Vec3 specularBrdf = psdf.evalSpecular(N, V, L, F0, roughness);
 
     // Diffuse bile�eni - GPU ile uyumlu
     Vec3 F_avg = F0 + (Vec3(1.0f) - F0) / 21.0f;
@@ -3614,7 +3624,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     Vec3 diffuse = k_d * albedo / M_PI;
 
     // Toplam BRDF
-    Vec3 brdf = diffuse + specular;
+    Vec3 brdf = diffuse + specularBrdf;
 
     // Clearcoat Contribution
     if (clearcoat > 0.001f) {
@@ -3684,6 +3694,11 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             unified_lights.push_back(toUnifiedLight(light));
         }
     }
+
+    int diffuse_bounce_count = 0;
+    int transmission_bounce_count = 0;
+    const int max_diffuse_bounces = std::clamp(render_settings.diffuse_bounces, 1, std::max(1, render_settings.max_bounces));
+    const int max_transmission_bounces = std::clamp(render_settings.transmission_bounces, 1, std::max(1, render_settings.max_bounces));
 
     for (int bounce = 0; bounce < render_settings.max_bounces; ++bounce) {
         HitRecord rec;
@@ -4944,6 +4959,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         Vec3f albedo(0.8f);
         float roughness = 0.5f;
         float metallic = 0.0f;
+        float specular = 0.5f;
         float opacity = 1.0f;
         float transmission = 0.0f;
         Vec3f emission(0.0f);
@@ -4979,6 +4995,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     albedo = toVec3f(rec.surface_override.albedo).clamp(0.01f, 1.0f);
                     roughness = std::clamp(rec.surface_override.roughness, 0.01f, 1.0f);
                     metallic = std::clamp(rec.surface_override.metallic, 0.0f, 1.0f);
+                    specular = std::clamp(pbsdf->getSpecularValue(uv), 0.0f, 1.0f);
                     transmission = std::clamp(rec.surface_override.transmission, 0.0f, 1.0f);
                 } else {
                     // Albedo
@@ -4987,6 +5004,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
                     roughness = pbsdf->getRoughnessValue(uv);
                     metallic = pbsdf->getMetallicValue(uv);
+                    specular = pbsdf->getSpecularValue(uv);
                     transmission = pbsdf->getTransmission(uv);
                 }
 
@@ -5334,7 +5352,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             Vec3f Li = light.color * light.intensity * light_attenuation * hairShadowTransmittance * volShadowTransmittance;
 
                             // Evaluate BRDF and PDF for MIS
-                            Vec3f f = evaluate_brdf_unified(N, wo, wi, albedo, roughness, metallic, transmission, Vec3::random_float());
+                            Vec3f f = evaluate_brdf_unified(N, wo, wi, albedo, roughness, metallic, specular, transmission, Vec3::random_float());
                             float pdf_brdf = pdf_brdf_unified(N, wo, wi, roughness);
 
                             // MIS Weight (Currently 1.0 for analytic lights to match GPU, can be enabled for Area lights)
@@ -5378,6 +5396,16 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         // Direct lighting ve emission zaten kendi BRDF değerlendirmesini içerir.
         // Post-scatter throughput kullanmak BRDF'i iki kez uygular (çift-BRDF hatası).
         color += throughput_for_nee * total_contribution;
+
+        if (is_specular && transmission > 0.01f) {
+            if (++transmission_bounce_count > max_transmission_bounces) {
+                break;
+            }
+        } else if (!is_specular) {
+            if (++diffuse_bounce_count > max_diffuse_bounces) {
+                break;
+            }
+        }
 
         current_ray = scattered;
     }
@@ -6589,70 +6617,12 @@ void Renderer::rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<
 // Performance: ~1-5ms vs ~200-500ms for rebuildOptiXGeometry
 // ============================================================================
 void Renderer::updateBackendMaterials(SceneData& scene) {
-    // Snapshot paint-dirty textures before the first uploadMaterials call.
-    // getTexID() inside VulkanBackendAdapter consumes Texture::vulkan_dirty and
-    // clears it after doing the in-place VkImage refresh. With two independent
-    // Vulkan backends (RT render + dedicated raster viewport) each holding its
-    // own m_uploadedImages cache, the first sync would absorb the flag and the
-    // second sync would skip its own in-place refresh — leaving the raster
-    // viewport VkImage stale (mesh paint invisible in Material Preview on
-    // Vulkan RT devices). Re-arming the flag between the two syncs makes both
-    // caches pick up the same paint stroke.
-    struct PaintDirtySnapshot {
-        Texture* tex;
-        bool full;
-        int min_x, min_y, max_x, max_y;
-    };
-    std::vector<PaintDirtySnapshot> dirtySnapshot;
-    {
-        auto& mgr = MaterialManager::getInstance();
-        const auto& all = mgr.getAllMaterials();
-        auto capture = [&](const std::shared_ptr<Texture>& t) {
-            if (!t || !t->vulkan_dirty) return;
-            // Snapshot the rect alongside the flag. The first backend's
-            // getTexID will consume + clear it via clearVulkanDirty(); to make
-            // the second backend take the same partial-upload path we restore
-            // the exact rect (not just re-arm the boolean).
-            dirtySnapshot.push_back({
-                t.get(),
-                t->vulkan_dirty_full,
-                t->vulkan_dirty_min_x,
-                t->vulkan_dirty_min_y,
-                t->vulkan_dirty_max_x,
-                t->vulkan_dirty_max_y
-            });
-        };
-        for (const auto& mat : all) {
-            if (!mat || mat->type() != MaterialType::PrincipledBSDF) continue;
-            auto* p = static_cast<PrincipledBSDF*>(mat.get());
-            capture(p->albedoProperty.texture);
-            capture(p->normalProperty.texture);
-            capture(p->roughnessProperty.texture);
-            capture(p->metallicProperty.texture);
-            capture(p->emissionProperty.texture);
-            capture(p->opacityProperty.texture);
-            capture(p->transmissionProperty.texture);
-            capture(p->heightProperty.texture);
-        }
-    }
-
+    // Only update the active render backend here. The dedicated viewport backend
+    // is synced explicitly by Main.cpp when an interactive viewport mode needs
+    // Material Preview data. Keeping these paths separate prevents startup and
+    // Solid->Rendered transitions from filling both render and raster texture
+    // pools with the same high-resolution material set.
     updateBackendMaterials(scene, m_backend);
-
-    // Keep the dedicated Vulkan viewport backend in sync so Material Preview
-    // reflects live edits from the material UI, modifiers, terrain, water, etc.
-    extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
-    if (g_viewport_backend && g_viewport_backend.get() != m_backend) {
-        for (const auto& s : dirtySnapshot) {
-            if (!s.tex) continue;
-            s.tex->vulkan_dirty       = true;
-            s.tex->vulkan_dirty_full  = s.full;
-            s.tex->vulkan_dirty_min_x = s.min_x;
-            s.tex->vulkan_dirty_min_y = s.min_y;
-            s.tex->vulkan_dirty_max_x = s.max_x;
-            s.tex->vulkan_dirty_max_y = s.max_y;
-        }
-        updateBackendMaterials(scene, g_viewport_backend.get());
-    }
 }
 
 void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targetBackend) {
@@ -6662,8 +6632,10 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
     // Prefer OptiX/CUDA path if available
     Backend::OptixBackend* optixBackend = dynamic_cast<Backend::OptixBackend*>(backend);
     OptixWrapper* optix_gpu_ptr = (optixBackend && g_hasCUDA) ? optixBackend->getOptixWrapper() : nullptr;
+    const bool canUploadOptixTextures = (optix_gpu_ptr != nullptr) && g_hasOptix;
 
-    if (optix_gpu_ptr) {
+    if (canUploadOptixTextures) {
+        ScopedCudaTextureUpload allowCudaTextureUpload;
         try {
             // Existing OptiX-specific material sync (unchanged)
             auto& mgr = MaterialManager::getInstance();
@@ -6710,6 +6682,7 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
                         gpu_mat.albedo = make_float3(1.0f, 1.0f, 1.0f);
                         gpu_mat.roughness = 1.0f;
                         gpu_mat.metallic = 0.0f;
+                        gpu_mat.specular = 0.5f;
                         gpu_mat.emission = make_float3(0.0f, 0.0f, 0.0f);
                         gpu_mat.ior = 1.0f;
                         gpu_mat.transmission = 0.0f;
@@ -6722,10 +6695,14 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
                         }
                     }
                 } else {
-                    auto getCudaTex = [](const std::shared_ptr<Texture>& tex) -> cudaTextureObject_t {
-                        extern bool g_hasOptix;
+                    auto getCudaTex = [canUploadOptixTextures](const std::shared_ptr<Texture>& tex) -> cudaTextureObject_t {
                         if (tex && tex->is_loaded()) {
-                            if (!tex->is_gpu_uploaded && g_hasOptix) tex->upload_to_gpu();
+                            if (canUploadOptixTextures && (!tex->is_gpu_uploaded || tex->get_cuda_texture() == 0)) {
+                                if (tex->get_cuda_texture() == 0) {
+                                    tex->is_gpu_uploaded = false;
+                                }
+                                tex->upload_to_gpu();
+                            }
                             return tex->get_cuda_texture();
                         }
                         return 0;
@@ -6744,6 +6721,7 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
                         gpu_mat.normal_tex      = getCudaTex(pbsdf->normalProperty.texture);
                         gpu_mat.roughness_tex   = getCudaTex(pbsdf->roughnessProperty.texture);
                         gpu_mat.metallic_tex    = getCudaTex(pbsdf->metallicProperty.texture);
+                        gpu_mat.specular_tex    = getCudaTex(pbsdf->specularProperty.texture);
                         gpu_mat.emission_tex    = getCudaTex(pbsdf->emissionProperty.texture);
                         gpu_mat.opacity_tex     = getCudaTex(pbsdf->opacityProperty.texture);
                         gpu_mat.transmission_tex= getCudaTex(pbsdf->transmissionProperty.texture);
@@ -6755,6 +6733,7 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
                         gpu_mat.albedo = make_float3(0.8f, 0.8f, 0.8f);
                         gpu_mat.roughness = 0.5f;
                         gpu_mat.metallic = 0.0f;
+                        gpu_mat.specular = 0.5f;
                         gpu_mat.emission = make_float3(0.0f, 0.0f, 0.0f);
                         gpu_mat.ior = 1.5f;
                         gpu_mat.transmission = 0.0f;
@@ -6844,6 +6823,7 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
                 data.normalTexture = getH(pbsdf->normalProperty.texture);
                 data.roughnessTexture = getH(pbsdf->roughnessProperty.texture);
                 data.metallicTexture = getH(pbsdf->metallicProperty.texture);
+                data.specularTexture = getH(pbsdf->specularProperty.texture);
                 data.emissionTexture = getH(pbsdf->emissionProperty.texture);
                 data.transmissionTexture = getH(pbsdf->transmissionProperty.texture);
                 data.opacityTexture = getH(pbsdf->opacityProperty.texture);
@@ -6982,6 +6962,7 @@ void Renderer::updateBackendMaterial(SceneData& scene, uint16_t material_id, Bac
         data.normalTexture = getH(pbsdf->normalProperty.texture);
         data.roughnessTexture = getH(pbsdf->roughnessProperty.texture);
         data.metallicTexture = getH(pbsdf->metallicProperty.texture);
+        data.specularTexture = getH(pbsdf->specularProperty.texture);
         data.emissionTexture = getH(pbsdf->emissionProperty.texture);
         data.transmissionTexture = getH(pbsdf->transmissionProperty.texture);
         data.opacityTexture = getH(pbsdf->opacityProperty.texture);
@@ -7116,6 +7097,10 @@ void syncViewportMaterialBindingsFromScene(Backend::IBackend* backend,
 // Volumetric Sync - Unified logic for Gas and VDB
 // �����������������������������������������������������������������������������
 void Renderer::updateBackendGasVolumes(SceneData& scene) {
+    std::unique_ptr<ScopedCudaTextureUpload> allowCudaWorldTextureUpload;
+    if (dynamic_cast<Backend::OptixBackend*>(m_backend) != nullptr) {
+        allowCudaWorldTextureUpload = std::make_unique<ScopedCudaTextureUpload>();
+    }
     WorldData wd = world.getGPUData();
     VolumetricRenderer::syncVolumetricData(scene, m_backend, &wd);
 }

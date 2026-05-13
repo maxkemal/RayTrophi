@@ -76,6 +76,14 @@ struct MeshBLAS {
     CUdeviceptr d_boneIndices = 0;          // Bone Indices (int4)
     CUdeviceptr d_boneWeights = 0;          // Bone Weights (float4)
     bool hasSkinningData = false;
+
+    // Anyhit fast-path classification. True when the mesh material has no
+    // opacity texture and scalar opacity >= 1.0 (no per-pixel alpha test
+    // required). When true, buildTLAS sets OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT
+    // on this BLAS's instances so RT cores can use the hardware triangle
+    // path. Recomputed in buildSBT and syncSBTMaterialData; reset to false
+    // on material binding swap until next sync re-evaluates.
+    bool is_opaque = false;
     
     void cleanup() {
         if (d_vertices) { cudaFree(reinterpret_cast<void*>(d_vertices)); d_vertices = 0; }

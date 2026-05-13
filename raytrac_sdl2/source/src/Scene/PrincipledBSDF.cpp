@@ -157,6 +157,7 @@ std::shared_ptr<Texture> PrincipledBSDF::getTexture() const {
     if (albedoProperty.texture) return albedoProperty.texture;
     if (roughnessProperty.texture) return roughnessProperty.texture;
     if (metallicProperty.texture) return metallicProperty.texture;
+    if (specularProperty.texture) return specularProperty.texture;
     if (normalProperty.texture) return normalProperty.texture;
     return nullptr;
 }
@@ -209,6 +210,16 @@ float PrincipledBSDF::getMetallicValue(const Vec2& uv) const {
                metallicProperty.intensity;
     }
     return metallicProperty.intensity;
+}
+
+float PrincipledBSDF::getSpecularValue(const Vec2& uv) const {
+    Vec2 sampleUv = applyTextureTransform(uv.u, uv.v);
+    if (specularProperty.texture) {
+        const Vec3 sample = specularProperty.texture->get_color_bilinear(sampleUv.u, sampleUv.v);
+        return PBRTextureChannelPolicy::sampleScalar(sample, PBRTextureChannelPolicy::SpecularChannel) *
+               specularProperty.intensity;
+    }
+    return specularProperty.intensity;
 }
 
 float PrincipledBSDF::getScalarRoughness() const {
@@ -275,17 +286,20 @@ bool PrincipledBSDF::scatter(
     Vec3 albedo;
     float roughness;
     float metallic;
+    float specular;
     float transmissionValue;
 
     if (rec.surface_override.valid) {
         albedo = rec.surface_override.albedo;
         roughness = rec.surface_override.roughness;
         metallic = rec.surface_override.metallic;
+        specular = specularProperty.intensity;
         transmissionValue = rec.surface_override.transmission;
     } else {
         albedo = getPropertyValue(albedoProperty, Vec2(rec.u, rec.v));
         roughness = getRoughnessValue(Vec2(rec.u, rec.v));
         metallic = getMetallicValue(Vec2(rec.u, rec.v));
+        specular = getSpecularValue(Vec2(rec.u, rec.v));
         transmissionValue = getTransmission(Vec2(rec.u, rec.v));
     }
 
@@ -378,7 +392,8 @@ bool PrincipledBSDF::scatter(
     }
 
     // 5. STANDARD DIFFUSE + SPECULAR (Base layer)
-    Vec3 F0 = Vec3::lerp(Vec3(0.04f), albedo, metallic);
+    const float dielectricF0 = std::clamp(0.08f * specular, 0.0f, 0.08f);
+    Vec3 F0 = Vec3::lerp(Vec3(dielectricF0), albedo, metallic);
     float cosThetaN = std::max(Vec3::dot(V, N), 0.0f);
     float fresnelAtN = F0.x + (1.0f - F0.x) * std::pow(1.0f - cosThetaN, 5.0f);
 

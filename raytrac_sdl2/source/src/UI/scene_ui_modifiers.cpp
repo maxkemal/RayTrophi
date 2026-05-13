@@ -7,6 +7,7 @@
 #include "globals.h"
 #include "Triangle.h"
 #include "Renderer.h"
+#include "Backend/IViewportBackend.h"
 #include "scene_data.h"
 #include <SceneSelection.h>
 #include "Paint/TerrainPaintAdapter.h"
@@ -26,6 +27,8 @@
 #include <cmath>
 #include <filesystem>
 #include <SDL.h>
+
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 
 namespace {
 
@@ -2877,6 +2880,7 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
                     ctx.renderer.updateBackendMaterials(ctx.scene);
                     ctx.backend_ptr->resetAccumulation();
                 }
+                ctx.start_render = true;
             }
         }
     }
@@ -3330,6 +3334,34 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
     if (paint_mode_state.getBoundLayerStack() != &stack)
         paint_mode_state.bindLayerStack(&stack);
 
+    auto markPaintTexturesVulkanDirtyFull = [&]() {
+        if (Paint::PaintTextureSet* texSet = adapter->getTextureSet()) {
+            for (int ch = 0; ch < static_cast<int>(Paint::kPaintChannelCount); ++ch) {
+                if (auto texture = texSet->getTexture(static_cast<Paint::PaintChannel>(ch))) {
+                    texture->markVulkanDirtyFull();
+                }
+            }
+        }
+    };
+
+    auto refreshLayerMaterialPreview = [&]() {
+        ctx.renderer.resetCPUAccumulation();
+
+        auto syncBackend = [&](Backend::IBackend* backend) {
+            if (!backend) return;
+            markPaintTexturesVulkanDirtyFull();
+            ctx.renderer.updateBackendMaterials(ctx.scene, backend);
+            backend->resetAccumulation();
+        };
+
+        syncBackend(ctx.backend_ptr);
+        if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
+            syncBackend(g_viewport_backend.get());
+        }
+
+        ctx.start_render = true;
+    };
+
     const float panel_width = ImGui::GetContentRegionAvail().x;
     const int layer_count = stack.layerCount();
     const ImGuiStyle& style = ImGui::GetStyle();
@@ -3352,11 +3384,7 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
                 active->meta.blend_mode = static_cast<Paint::LayerBlendMode>(blend);
                 paint_mode_state.syncLayersFromStack();
                 adapter->compositeAndUpload();
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
-                }
+                refreshLayerMaterialPreview();
             }
             ImGui::SameLine();
             ImGui::SetNextItemWidth(slider_w);
@@ -3365,11 +3393,7 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
                 active->meta.opacity = opacity;
                 paint_mode_state.syncLayersFromStack();
                 adapter->compositeAndUpload();
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
-                }
+                refreshLayerMaterialPreview();
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Opacity");
         }
@@ -3411,11 +3435,7 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
                 ld->meta.visible = vis;
                 paint_mode_state.syncLayersFromStack();
                 adapter->compositeAndUpload();
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
-                }
+                refreshLayerMaterialPreview();
                 g_ProjectManager.markModified();
             }
             ImGui::PopStyleVar();

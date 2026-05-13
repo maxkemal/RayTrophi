@@ -10,7 +10,7 @@ layout(location = 3) in vec3 vWorldPos;
 
 layout(location = 0) out vec4 outColor;
 
-// Material buffer (matches VkGpuMaterial layout — 15 blocks x 16 bytes = 240 bytes)
+// Material buffer (matches VkGpuMaterial layout)
 struct GpuMaterial {
     // Block 1
     float albedo_r, albedo_g, albedo_b, opacity;
@@ -47,6 +47,10 @@ struct GpuMaterial {
     uint _terrain_layer_idx;
     float normal_strength;
     float tile_break_strength;  // UV tile-break (independent from dirt/roughness)
+    float specular;
+    uint specular_tex;
+    uint _pad_specular0;
+    uint _pad_specular1;
 };
 
 layout(set = 0, binding = 0, std430) readonly buffer MaterialBuffer {
@@ -83,6 +87,11 @@ layout(push_constant) uniform MaterialPreviewPushConstants {
     vec4 lightDir2;   // rim light
     uvec4 materialMeta; // x = material count, y = quality, z = lighting preset
 } pc;
+
+bool validTexture(uint textureId) {
+    uint textureCount = max(pc.materialMeta.w, 1u);
+    return textureId > 0u && textureId < textureCount;
+}
 
 // ── Helpers ──
 
@@ -277,7 +286,7 @@ void main() {
     // Breaks visible UV tiling seams. Separate from dirt/roughness so albedo maps
     // that shouldn't be warped can leave this at 0.
     if (mat.tile_break_strength > 0.0 &&
-        (mat.albedo_tex > 0u || mat.roughness_tex > 0u || mat.normal_tex > 0u)) {
+        (validTexture(mat.albedo_tex) || validTexture(mat.roughness_tex) || validTexture(mat.normal_tex))) {
         uv = pd_tileBreak(uv, vWorldPos, mat.tile_break_strength);
     }
 
@@ -289,7 +298,7 @@ void main() {
     if ((mat.flags & FLAG_TERRAIN) != 0u) {
         uint layerIdx = mat._terrain_layer_idx;
         TerrainLayerData tl = terrainLayers[layerIdx];
-        if (tl.splat_map_tex > 0u && tl.layer_count > 0u) {
+        if (validTexture(tl.splat_map_tex) && tl.layer_count > 0u) {
             // R=layer0, G=layer1, B=layer2, A=layer3
             vec4 splatW = texture(textures[nonuniformEXT(tl.splat_map_tex)], uv);
             float weights[4];
@@ -310,7 +319,7 @@ void main() {
             uint activeCount = min(tl.layer_count, 4u);
             for (uint k = 0u; k < activeCount; k++) {
                 if (weights[k] < 0.001) continue;
-                GpuMaterial lm = materials[tl.layer_mat_id[k]];
+                GpuMaterial lm = materials[min(tl.layer_mat_id[k], materialCount - 1u)];
                 vec2 layerUV = uv * tl.layer_uv_scale[k];
                 // apply per-layer UV transform
                 float lsx = (lm.uv_scale_x != 0.0) ? lm.uv_scale_x : 1.0;
@@ -319,21 +328,21 @@ void main() {
                 layerUV += vec2(lm.uv_offset_x, lm.uv_offset_y);
 
                 vec3 lAlbedo = max(vec3(lm.albedo_r, lm.albedo_g, lm.albedo_b), vec3(0.0));
-                if (lm.albedo_tex > 0u)
+                if (validTexture(lm.albedo_tex))
                     lAlbedo = texture(textures[nonuniformEXT(lm.albedo_tex)], layerUV).rgb;
                 blendAlbedo += weights[k] * lAlbedo;
 
                 float lRough = clamp(lm.roughness, 0.0, 1.0);
-                if (lm.roughness_tex > 0u)
+                if (validTexture(lm.roughness_tex))
                     lRough = texture(textures[nonuniformEXT(lm.roughness_tex)], layerUV).g;
                 blendRoughness += weights[k] * lRough;
 
                 float lMetal = clamp(lm.metallic, 0.0, 1.0);
-                if (lm.metallic_tex > 0u)
+                if (validTexture(lm.metallic_tex))
                     lMetal = texture(textures[nonuniformEXT(lm.metallic_tex)], layerUV).b;
                 blendMetallic += weights[k] * lMetal;
 
-                if (lm.normal_tex > 0u) {
+                if (validTexture(lm.normal_tex)) {
                     vec3 ns = decodeNormalMapSample(
                         texture(textures[nonuniformEXT(lm.normal_tex)], layerUV).rgb,
                         lm.flags);
@@ -364,7 +373,7 @@ void main() {
     // ── Albedo ──
     vec3 albedo = vec3(mat.albedo_r, mat.albedo_g, mat.albedo_b);
     vec4 albedoTexel = vec4(1.0);
-    if (mat.albedo_tex > 0u) {
+    if (validTexture(mat.albedo_tex)) {
         vec4 texAlbedo = texture(textures[nonuniformEXT(mat.albedo_tex)], uv);
         albedoTexel = texAlbedo;
         // Modulate with base color (matches Blender/PBR convention)
@@ -373,13 +382,13 @@ void main() {
     // Only fall back to neutral gray when no albedo source is bound.
     // Previously this fired whenever base color × texture went to ~0, which
     // turned black-paint strokes into gray in the raster material preview.
-    if (mat.albedo_tex == 0u &&
+    if (!validTexture(mat.albedo_tex) &&
         max(albedo.r, max(albedo.g, albedo.b)) < 0.001) {
         albedo = vec3(0.8);
     }
 
     // ── Normal map ──
-    if (mat.normal_tex > 0u) {
+    if (validTexture(mat.normal_tex)) {
         vec3 nmSample = texture(textures[nonuniformEXT(mat.normal_tex)], uv).rgb;
         float strength = (mat.normal_strength > 0.0) ? mat.normal_strength : 1.0;
         N = applyNormalMap(N, vWorldPos, uv, nmSample, strength, mat.flags);
@@ -388,17 +397,21 @@ void main() {
     // ── Roughness / Metallic ──
     float roughness = clamp(mat.roughness, 0.04, 1.0);
     float metallic  = clamp(mat.metallic,  0.0,  1.0);
-    if (mat.roughness_tex > 0u) {
+    float specular  = clamp(mat.specular,  0.0,  1.0);
+    if (validTexture(mat.roughness_tex)) {
         roughness = samplePackedRoughness(
             texture(textures[nonuniformEXT(mat.roughness_tex)], uv), 0.04, mat.flags);
     }
-    if (mat.metallic_tex > 0u) {
+    if (validTexture(mat.metallic_tex)) {
         metallic = samplePackedMetallic(
             texture(textures[nonuniformEXT(mat.metallic_tex)], uv), mat.flags);
     }
+    if (validTexture(mat.specular_tex)) {
+        specular = clamp(texture(textures[nonuniformEXT(mat.specular_tex)], uv).r * specular, 0.0, 1.0);
+    }
 
     float opacity = clamp(mat.opacity, 0.0, 1.0);
-    if (mat.opacity_tex > 0u) {
+    if (validTexture(mat.opacity_tex)) {
         vec4 opacityTexel = texture(textures[nonuniformEXT(mat.opacity_tex)], uv);
         // flags bit 8: RGBA texture (opacity in .a); clear: grayscale mask (opacity in .r)
         // If opacity_tex == albedo_tex the user wired the same RGBA texture to both slots:
@@ -439,7 +452,7 @@ void main() {
 
     // ── Emission ──
     vec3 emission = vec3(mat.emission_r, mat.emission_g, mat.emission_b) * mat.emission_strength;
-    if (mat.emission_tex > 0u) {
+    if (validTexture(mat.emission_tex)) {
         vec3 emitTex = texture(textures[nonuniformEXT(mat.emission_tex)], uv).rgb;
         emission += emitTex * mat.emission_strength;
     }
@@ -447,8 +460,8 @@ void main() {
     // ── PBR-lite lighting (diffuse + Blinn-Phong specular) ──
     vec3 V = normalize(pc.cameraPos.xyz - vWorldPos);
 
-    // F0: dielectric = 0.04, metallic = albedo
-    vec3 F0           = mix(vec3(0.04), albedo, metallic);
+    // F0: dielectric = 0.08 * specular, metallic = albedo
+    vec3 F0           = mix(vec3(clamp(0.08 * specular, 0.0, 0.08)), albedo, metallic);
     vec3 diffuseColor = albedo * (1.0 - metallic);
 
     // Specular exponent from roughness

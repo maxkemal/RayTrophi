@@ -25,6 +25,7 @@
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern std::unique_ptr<Backend::IBackend> g_backend;
+bool g_timeline_selection_sync_pending = false;
 
 namespace {
 bool projectSelectionPointToScreen(const Camera& cam, const ImVec2& displaySize, const Vec3& point, ImVec2& out) {
@@ -526,7 +527,9 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
         // Process lazy sync queue first (objects moved with gizmo).
         ensureCPUSyncForPicking(ctx);
 
-        if (g_bvh_rebuild_pending || !picking_vertices_synced) {
+        const bool pending_timeline_selection_sync = g_timeline_selection_sync_pending;
+
+        if (g_bvh_rebuild_pending || !picking_vertices_synced || pending_timeline_selection_sync) {
             int synced_objects = 0;
             if (mesh_cache_valid) {
                 for (auto& [obj_name, tris] : mesh_cache) {
@@ -583,6 +586,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 }
             }
             picking_vertices_synced = true;
+            g_timeline_selection_sync_pending = false;
             // Don't clear g_bvh_rebuild_pending here. Main.cpp's async BVH builder
             // needs it to reconstruct the acceleration structure with updated positions.
             // We only sync vertices for the linear scan / hit tests on this click.
@@ -792,7 +796,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 // AABB pruning may be slightly stale (local-space) but can still
                 // return valid hits. We try BVH first for O(log N) performance,
                 // then fall back to linear scan if BVH misses or is unavailable.
-                if (ctx.scene.bvh) {
+                if (ctx.scene.bvh && !pending_timeline_selection_sync) {
                     if (ctx.scene.bvh->hit(r, 0.001f, closest_so_far, temp_rec)) {
                         hit = true;
                         closest_so_far = temp_rec.t;
@@ -802,7 +806,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 
                 // Fallback to Linear Scan if BVH missed or missing.
                 // Linear scan always works because we synced vertices above.
-                if (!hit && (ctx.scene.world.objects.size() < 1000 || !ctx.scene.bvh || interactive_selection_fallback)) {
+                if (!hit && (pending_timeline_selection_sync || ctx.scene.world.objects.size() < 1000 || !ctx.scene.bvh || interactive_selection_fallback)) {
                     for (const auto& obj : ctx.scene.world.objects) {
                         if (!obj) continue;
                         if (obj->hit(r, 0.001f, closest_so_far, temp_rec)) {

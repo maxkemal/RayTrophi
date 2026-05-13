@@ -874,11 +874,7 @@ __device__ float calculate_sun_transmittance(
 // Shadow test for god rays - MUST be before calculate_volumetric_god_rays
 __device__ bool trace_shadow_test(float3 origin, float3 direction, float maxDist) {
     Ray shadow_ray(origin, direction);
-    
-    OptixHitResult shadow_payload = {};
-    trace_shadow_ray(shadow_ray, &shadow_payload, SCENE_EPSILON, maxDist);
-    
-    return shadow_payload.hit;
+    return trace_shadow_ray(shadow_ray, SCENE_EPSILON, maxDist) != 0u;
 }
 
 __device__ float3 calculate_volumetric_god_rays(
@@ -1442,10 +1438,9 @@ __device__ float3 calculate_light_contribution(
         : safe_normalize(payload.normal, make_float3(0.0f, 1.0f, 0.0f));
     float3 origin = payload.position + shadow_normal * SCENE_EPSILON;
     Ray shadow_ray(origin, wi);
-    OptixHitResult shadow_payload = {};
-    
-    trace_shadow_ray(shadow_ray, &shadow_payload, SCENE_EPSILON, distance);
-    float shadow_visibility = shadow_payload.hit ? 0.0f : 1.0f;
+
+    unsigned int shadow_hit = trace_shadow_ray(shadow_ray, SCENE_EPSILON, distance);
+    float shadow_visibility = shadow_hit ? 0.0f : 1.0f;
     if (shadow_visibility <= 1e-4f) return make_float3(0.0f, 0.0f, 0.0f);
     
     // Check VDB Occlusion (Volumetric Shadow)
@@ -1561,9 +1556,7 @@ __device__ float3 calculate_direct_lighting(
     float3 origin = payload.position + shadow_normal * shadow_bias;
     Ray shadow_ray(origin, wi);
 
-    OptixHitResult shadow_payload = {};
-    trace_shadow_ray(shadow_ray, &shadow_payload, shadow_bias, distance);
-    if (shadow_payload.hit) return result;
+    if (trace_shadow_ray(shadow_ray, shadow_bias, distance) != 0u) return result;
 
     // ==== BRDF & PDF ====
     float3 f = evaluate_brdf(mat, payload, wo, wi);
@@ -2115,6 +2108,11 @@ __device__ float3 raymarch_gas_volume(
 __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_out = nullptr, float3* primary_normal_out = nullptr, int* primary_hit_out = nullptr) {
     float3 color = make_float3(0.0f, 0.0f, 0.0f);
     float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
+    // max_depth = total path bounces (must be >= 1). bounce=1 ⇒ primary
+    // hit + direct lighting only; bounce=N ⇒ primary + N-1 indirect.
+    // The UI clamps the slider minimum to 1 so this loop always runs at
+    // least once on a hit. Both Vulkan and OptiX backends share this
+    // convention.
     const int max_depth = optixLaunchParams.max_depth;
     int light_count = optixLaunchParams.light_count;
     int light_index = -1;
@@ -2126,6 +2124,10 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
     float vol_trans_accum = 1.0f;
     float3 first_ray_origin = ray.origin;
     float3 first_ray_dir = ray.direction;
+    const int max_diffuse_depth = max(0, optixLaunchParams.diffuse_depth);
+    const int max_transmission_depth = max(0, optixLaunchParams.transmission_depth);
+    int diffuse_depth = 0;
+    int transmission_depth = 0;
     
     // Firefly önleme için maksimum katkı limiti (Vulkan parity: 1e4)
     const float MAX_CONTRIBUTION = 10000.0f;
@@ -2134,13 +2136,16 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         OptixHitResult payload = {};
         float t_min = (bounce == 0) ? optixLaunchParams.clip_near : SCENE_EPSILON;
         float t_max = (bounce == 0) ? optixLaunchParams.clip_far : 1e16f;
-        
-        trace_ray(ray, &payload, t_min, t_max);
 
         // Path regularization hint: scatter_material / evaluate_brdf read this
-        // to clamp roughness on indirect bounces (Müller 2018). Writing it
-        // after trace_ray is safe — closesthit does not touch this field.
+        // to clamp roughness on indirect bounces (Müller 2018). Written BEFORE
+        // trace_ray so closesthit can also see it and skip the primary-ray-only
+        // AOV outputs (primary_albedo / primary_normal / primary_hit + their
+        // albedo texture fetch) on indirect bounces — those values are only
+        // consumed by the denoiser path at bounce==0.
         payload.bounce_index = bounce;
+
+        trace_ray(ray, &payload, t_min, t_max);
 
         // --- 1. HANDLE HAIR (Unified Path) ---
         if (payload.hit && payload.is_hair) {
@@ -2437,6 +2442,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         float3 attenuation;
         float pdf;
         bool is_specular;
+        int bounce_type = PATH_BOUNCE_SPECULAR;
         
         GpuMaterial mat = optixLaunchParams.materials[payload.material_id];
 
@@ -2499,7 +2505,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         }
 
         // --- Scatter başarısızsa: emission'ı ekle ve çık ---
-        if (!scatter_material(mat, payload, ray, rng, &scattered, &attenuation, &pdf, &is_specular)) {
+        if (!scatter_material(mat, payload, ray, rng, &scattered, &attenuation, &pdf, &is_specular, &bounce_type)) {
             // Vulkan parity: emissive-only yüzeyler hala ışık yayar.
             // raygen.rgen payload.radiance'ı payload.scattered kontrolünden ÖNCE toplar.
             color += soft_clip_fireflies(throughput * emission, 64.0f);
@@ -2608,6 +2614,8 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         if (light_count == 0) {
             // Use pre-attenuation throughput: emission is self-emitted, not BRDF-filtered
             color += soft_clip_fireflies(throughput_for_nee * emission, 64.0f);
+            if (bounce_type == PATH_BOUNCE_DIFFUSE && ++diffuse_depth > max_diffuse_depth) break;
+            if (bounce_type == PATH_BOUNCE_TRANSMISSION && ++transmission_depth > max_transmission_depth) break;
             ray = scattered;
             continue;
         }
@@ -2703,6 +2711,9 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
             if (random_float(rng) > p) break;
             throughput /= p;
         }
+
+        if (bounce_type == PATH_BOUNCE_DIFFUSE && ++diffuse_depth > max_diffuse_depth) break;
+        if (bounce_type == PATH_BOUNCE_TRANSMISSION && ++transmission_depth > max_transmission_depth) break;
        
         ray = scattered;
     }

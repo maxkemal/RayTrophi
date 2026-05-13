@@ -75,6 +75,7 @@ namespace {
             addSlot(mat->normalProperty,    TextureType::Normal,    false);
             addSlot(mat->roughnessProperty, TextureType::Roughness, false);
             addSlot(mat->metallicProperty,  TextureType::Metallic,  false);
+            addSlot(mat->specularProperty,  TextureType::Specular,  false);
             addSlot(mat->opacityProperty,   TextureType::Opacity,   false);
             if (mat->emissionProperty.texture && !mat->emissionProperty.texture->is_hdr)
                 addSlot(mat->emissionProperty, TextureType::Emission, false);

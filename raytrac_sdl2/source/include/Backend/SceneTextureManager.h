@@ -126,6 +126,7 @@ public:
     // mesh paint.
     uint64_t totalResidentTextureBytes() const;
     uint64_t estimatedTextureBytesForOwner(const std::string& ownerTag) const;
+    uint64_t estimatedOptixTextureBytes() const;
     void logBudgetSummary(const std::string& context = {}) const;
     // Evict LRU Vulkan backings for ownerTag until estimatedTextureBytesForOwner(ownerTag) <= targetBytes.
     // Calls destroyFn for each evicted backing (removes from backend local maps + destroys VkImage).

@@ -490,6 +490,7 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
                 matJson["albedoProperty"] = serializeProperty(pbsdf->albedoProperty, sceneDir);
                 matJson["roughnessProperty"] = serializeProperty(pbsdf->roughnessProperty, sceneDir);
                 matJson["metallicProperty"] = serializeProperty(pbsdf->metallicProperty, sceneDir);
+                matJson["specularProperty"] = serializeProperty(pbsdf->specularProperty, sceneDir);
                 matJson["normalProperty"] = serializeProperty(pbsdf->normalProperty, sceneDir);
                 matJson["heightProperty"] = serializeProperty(pbsdf->heightProperty, sceneDir);
                 matJson["opacityProperty"] = serializeProperty(pbsdf->opacityProperty, sceneDir);
@@ -587,6 +588,8 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
             collectTextureRequest(matJson["emissionProperty"], sceneDir, TextureType::Emission, preloadRequests);
         if (matJson.contains("transmissionProperty"))
             collectTextureRequest(matJson["transmissionProperty"], sceneDir, TextureType::Transmission, preloadRequests);
+        if (matJson.contains("specularProperty"))
+            collectTextureRequest(matJson["specularProperty"], sceneDir, TextureType::Specular, preloadRequests);
     }
     preloadTexturesParallel(preloadRequests, textureCache, textureStats);
     
@@ -612,6 +615,8 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
                 deserializeProperty(pbsdf->roughnessProperty, matJson["roughnessProperty"], sceneDir, TextureType::Roughness, &textureCache, &textureStats);
             if (matJson.contains("metallicProperty"))
                 deserializeProperty(pbsdf->metallicProperty, matJson["metallicProperty"], sceneDir, TextureType::Metallic, &textureCache, &textureStats);
+            if (matJson.contains("specularProperty"))
+                deserializeProperty(pbsdf->specularProperty, matJson["specularProperty"], sceneDir, TextureType::Specular, &textureCache, &textureStats);
             if (matJson.contains("normalProperty"))
                 deserializeProperty(pbsdf->normalProperty, matJson["normalProperty"], sceneDir, TextureType::Normal, &textureCache, &textureStats);
             if (matJson.contains("heightProperty"))

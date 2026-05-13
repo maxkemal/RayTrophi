@@ -28,6 +28,7 @@ public:
     void shutdown() override;
     void loadShaders(const ShaderProgramData& data) override;
     BackendInfo getInfo() const override;
+    GpuMemoryStats getMemoryStats() const override;
 
     uint32_t uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName) override;
     uint32_t uploadHairStrands(const std::vector<HairStrandData>& strands, const std::string& groomName) override;

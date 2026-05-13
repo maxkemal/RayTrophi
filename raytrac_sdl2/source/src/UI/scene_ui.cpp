@@ -1584,8 +1584,12 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
 
     if (UIWidgets::BeginSection("Light Transport & Denoise", ImVec4(0.95f, 0.68f, 0.34f, 1.0f))) {
         UIWidgets::ColoredHeader("Light Paths", ImVec4(1.0f, 0.88f, 0.54f, 1.0f));
-        ImGui::DragInt("Total Bounces", &ctx.render_settings.max_bounces, 1, 0, 64);
-        UIWidgets::HelpMarker("Higher bounces increase realism for glass and interiors but slow down rendering.");
+        ImGui::DragInt("Total Bounces", &ctx.render_settings.max_bounces, 1, 1, 64);
+        ImGui::DragInt("Diffuse Bounces", &ctx.render_settings.diffuse_bounces, 1, 1, 64);
+        ImGui::DragInt("Transmission Bounces", &ctx.render_settings.transmission_bounces, 1, 1, 64);
+        ctx.render_settings.diffuse_bounces = std::clamp(ctx.render_settings.diffuse_bounces, 1, ctx.render_settings.max_bounces);
+        ctx.render_settings.transmission_bounces = std::clamp(ctx.render_settings.transmission_bounces, 1, ctx.render_settings.max_bounces);
+        UIWidgets::HelpMarker("Total is the global path limit. Diffuse limits indirect diffuse/SSS/translucent paths; Transmission limits glass and water continuation.");
 
         UIWidgets::Divider();
         UIWidgets::ColoredHeader("Viewport Denoise", ImVec4(0.90f, 0.76f, 1.0f, 1.0f));
@@ -2268,9 +2272,13 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     // LIGHT PATHS (Bounces)
                     // ─────────────────────────────────────────────────────────────────────────
                     if (UIWidgets::BeginSection("Light Paths", ImVec4(1.0f, 0.8f, 0.3f, 1.0f))) {
-                        ImGui::DragInt("Total Bounces", &ctx.render_settings.max_bounces, 1, 0, 64);
+                        ImGui::DragInt("Total Bounces", &ctx.render_settings.max_bounces, 1, 1, 64);
+                        ImGui::DragInt("Diffuse Bounces", &ctx.render_settings.diffuse_bounces, 1, 1, 64);
+                        ImGui::DragInt("Transmission Bounces", &ctx.render_settings.transmission_bounces, 1, 1, 64);
+                        ctx.render_settings.diffuse_bounces = std::clamp(ctx.render_settings.diffuse_bounces, 1, ctx.render_settings.max_bounces);
+                        ctx.render_settings.transmission_bounces = std::clamp(ctx.render_settings.transmission_bounces, 1, ctx.render_settings.max_bounces);
                         
-                        UIWidgets::HelpMarker("Higher bounces increase realism for glass and interiors but slow down rendering.");
+                        UIWidgets::HelpMarker("Total is the global path limit. Diffuse limits indirect diffuse/SSS/translucent paths; Transmission limits glass and water continuation.");
                         UIWidgets::EndSection();
                     }
 

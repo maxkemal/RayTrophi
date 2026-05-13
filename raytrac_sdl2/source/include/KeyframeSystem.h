@@ -103,7 +103,7 @@ struct MaterialKeyframe {
         sheen = gpu.sheen;
         sheen_tint = gpu.sheen_tint;
         
-        specular = 0.5f;
+        specular = gpu.specular;
         specular_tint = 0.0f;
         clearcoat_roughness = 0.1f;
         normal_strength = gpu.normal_strength;
@@ -115,6 +115,7 @@ struct MaterialKeyframe {
         gpu.opacity = opacity;
         gpu.roughness = roughness;
         gpu.metallic = metallic;
+        gpu.specular = specular;
         gpu.clearcoat = clearcoat;
         gpu.transmission = transmission;
         gpu.emission = make_float3(emission.x, emission.y, emission.z);
@@ -1561,6 +1562,23 @@ struct ObjectAnimationTrack {
     Keyframe evaluate(int current_frame) const {
         Keyframe result(current_frame);
         if (keyframes.empty()) return result;
+
+        // Start from an unkeyed transform state. TransformKeyframe defaults to all
+        // channels enabled for authoring convenience, but evaluation must rebuild
+        // keyed channels explicitly; otherwise material-only keys look like identity
+        // transform keys and raster playback resets object orientation.
+        result.transform.has_position = false;
+        result.transform.has_rotation = false;
+        result.transform.has_scale = false;
+        result.transform.has_pos_x = false;
+        result.transform.has_pos_y = false;
+        result.transform.has_pos_z = false;
+        result.transform.has_rot_x = false;
+        result.transform.has_rot_y = false;
+        result.transform.has_rot_z = false;
+        result.transform.has_scl_x = false;
+        result.transform.has_scl_y = false;
+        result.transform.has_scl_z = false;
 
         // Lambda to find previous valid keyframe matching a predicate
         auto findPrev = [&](auto predicate) -> const Keyframe* {

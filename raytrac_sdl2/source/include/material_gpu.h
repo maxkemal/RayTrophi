@@ -112,6 +112,13 @@ struct alignas(16) GpuMaterial {
     cudaTextureObject_t height_tex = 0; // Displacement
     cudaTextureObject_t opacity_tex = 0;
     cudaTextureObject_t transmission_tex = 0;
+    cudaTextureObject_t specular_tex = 0;
+
+    // Scalar specular amount. Blender-style dielectric F0 = 0.08 * specular.
+    float specular = 0.5f;
+    float _specular_pad0 = 0.0f;
+    float _specular_pad1 = 0.0f;
+    float _specular_pad2 = 0.0f;
 };  
 
 /**
@@ -189,6 +196,7 @@ inline bool operator==(const GpuMaterial& a, const GpuMaterial& b) {
         fabsf(a.opacity - b.opacity) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.roughness - b.roughness) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.metallic - b.metallic) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.specular - b.specular) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.clearcoat - b.clearcoat) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.transmission - b.transmission) < FLOAT_COMPARE_EPSILON &&
         float3_equal(a.emission, b.emission) &&
@@ -246,6 +254,7 @@ namespace std {
             // PBR block
             hash_combine_f(h, m.roughness);  
             hash_combine_f(h, m.metallic);  
+            hash_combine_f(h, m.specular);
             hash_combine_f(h, m.clearcoat);  
             hash_combine_f(h, m.transmission);  
 
@@ -313,6 +322,7 @@ struct GpuMaterialWithTextures {
     size_t normalTexID = 0;  
     size_t roughnessTexID = 0;  
     size_t metallicTexID = 0;  
+    size_t specularTexID = 0;
     size_t opacityTexID = 0;  
     size_t emissionTexID = 0;  
     size_t subsurfaceTexID = 0;  
@@ -330,6 +340,7 @@ struct GpuMaterialWithTextures {
             normalTexID == other.normalTexID &&
             roughnessTexID == other.roughnessTexID &&
             metallicTexID == other.metallicTexID &&
+            specularTexID == other.specularTexID &&
             opacityTexID == other.opacityTexID &&
             emissionTexID == other.emissionTexID &&
             materialNameHash == other.materialNameHash;
@@ -350,6 +361,7 @@ namespace std {
             hash_combine_s(h, x.normalTexID);  
             hash_combine_s(h, x.roughnessTexID);  
             hash_combine_s(h, x.metallicTexID);  
+            hash_combine_s(h, x.specularTexID);
             hash_combine_s(h, x.opacityTexID);  
             hash_combine_s(h, x.emissionTexID);  
             hash_combine_s(h, x.materialNameHash);

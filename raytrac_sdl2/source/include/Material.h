@@ -124,6 +124,7 @@ public:
     MaterialProperty albedoProperty;
     MaterialProperty roughnessProperty;
     MaterialProperty metallicProperty;
+    MaterialProperty specularProperty;
     MaterialProperty normalProperty;
     MaterialProperty opacityProperty;
     MaterialProperty transmissionProperty;
@@ -136,6 +137,7 @@ public:
         if (albedoProperty.texture) return albedoProperty.texture;
         if (roughnessProperty.texture) return roughnessProperty.texture;
         if (metallicProperty.texture) return metallicProperty.texture;
+        if (specularProperty.texture) return specularProperty.texture;
         if (normalProperty.texture) return normalProperty.texture;
         if (transmissionProperty.texture) return transmissionProperty.texture;
         if (opacityProperty.texture) return opacityProperty.texture;

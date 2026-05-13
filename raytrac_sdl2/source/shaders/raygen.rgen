@@ -75,7 +75,12 @@ struct Material {
     float subsurface_ior;
     uint _terrain_layer_idx;
     float normal_strength;
-    uint _reserved_3;
+    float tile_break_strength;
+    // Block 16: Specular controls
+    float specular;
+    uint specular_tex;
+    uint _pad_specular0;
+    uint _pad_specular1;
 };
 
 struct LightData {
@@ -290,9 +295,16 @@ layout(push_constant) uniform CameraPC {
     float shakeRotZ;
     float waterTime;   // Wall-clock seconds for water animation
     uint  maxBounces;  // UI'dan gelen toplam bounce limiti
+    uint  diffuseBounces;
+    uint  transmissionBounces;
 } cam;
 
 // ============================================================
+const uint BOUNCE_SPECULAR = 0u;
+const uint BOUNCE_DIFFUSE = 1u;
+const uint BOUNCE_TRANSMISSION = 2u;
+const uint BOUNCE_TRANSPARENT = 3u;
+
 struct RayPayload {
     vec3  radiance;
     vec3  attenuation;
@@ -308,6 +320,7 @@ struct RayPayload {
     uint  primaryHit;
     float primaryTransmission;
     float primaryMetallic;
+    uint  bounceType;
 };
 
 layout(location = 0) rayPayloadEXT RayPayload payload;
@@ -607,6 +620,10 @@ void main() {
     payload.skipAABBs = false;
 
     int effectiveBounces = int(cam.maxBounces); // her zaman UI'dan gelir, C++ tarafı min 1 garantiliyor
+    int effectiveDiffuseBounces = int(cam.diffuseBounces);
+    int effectiveTransmissionBounces = int(cam.transmissionBounces);
+    int diffuseBounceCount = 0;
+    int transmissionBounceCount = 0;
     int maxTotalPasses = effectiveBounces + 32; // Allow up to 32 extra passes for transparent/volume skipping
 
     for (int bounce = 0, totalPasses = 0; bounce < effectiveBounces && totalPasses < maxTotalPasses; totalPasses++) {
@@ -627,6 +644,7 @@ void main() {
         payload.primaryHit    = 0u;
         payload.primaryTransmission = 0.0;
         payload.primaryMetallic = 0.0;
+        payload.bounceType = BOUNCE_SPECULAR;
 
         // When the previous bounce was a volume that detected a solid surface inside,
         // skip AABB (procedural) geometry so the solid triangle is hit directly.
@@ -695,6 +713,13 @@ void main() {
         // If the ray passed straight through without altering radiance or attenuation (opacity cutout),
         // do NOT count it as a GI bounce. Keep bounce limit available for actual lighting.
         if (!isTransparentPass && !payload.skipAABBs) {
+            if (payload.bounceType == BOUNCE_DIFFUSE) {
+                diffuseBounceCount++;
+                if (diffuseBounceCount > effectiveDiffuseBounces) break;
+            } else if (payload.bounceType == BOUNCE_TRANSMISSION) {
+                transmissionBounceCount++;
+                if (transmissionBounceCount > effectiveTransmissionBounces) break;
+            }
             bounce++;
         }
 

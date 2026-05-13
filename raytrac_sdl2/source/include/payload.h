@@ -38,6 +38,7 @@ struct OptixHitResult {
     cudaTextureObject_t roughness_tex;
     cudaTextureObject_t normal_tex;
     cudaTextureObject_t metallic_tex;
+    cudaTextureObject_t specular_tex;
     cudaTextureObject_t transmission_tex;
     cudaTextureObject_t opacity_tex;
     cudaTextureObject_t emission_tex;
@@ -46,6 +47,7 @@ struct OptixHitResult {
     int has_roughness_tex;
     int has_normal_tex;
     int has_metallic_tex;
+    int has_specular_tex;
     int has_transmission_tex;
     int has_opacity_tex;
     int has_emission_tex;

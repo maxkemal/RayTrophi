@@ -80,6 +80,7 @@ public:
         roughnessProperty = MaterialProperty(Vec3(roughness), 1.0f, roughnessTexture);
         metallicProperty = MaterialProperty(Vec3(metallic), metallic, metallicTexture);
         normalProperty = MaterialProperty(Vec3(0.5f, 0.5f, 1.0f), 1.0f, normalTexture);
+        specularProperty = MaterialProperty(Vec3(1.0f), 0.5f);
         heightProperty = MaterialProperty(Vec3(0.5f), 1.0f, heightTexture); // 0.5 = mid-gray
         opacityProperty = MaterialProperty(Vec3(1.0f), 1.0f, opacityTexture, 1.0f);
         emissionProperty = MaterialProperty(emission, 0.0f);
@@ -151,12 +152,12 @@ public:
         }
         return emissionProperty.color * emissionProperty.intensity;
     }
-    MaterialProperty specularProperty;
     TextureTransform textureTransform;
     int selected_uv_set = 0;
     // MaterialProperty transmissionProperty; // Shadowing removed
     Vec3 albedoValue;
     Vec3 getPropertyValue(const MaterialProperty& prop, const Vec2& uv) const;
+    float getSpecularValue(const Vec2& uv) const;
     Vec3 computeFresnel(const Vec3& F0, float cosTheta) const;
     Vec3 computeClearcoat(const Vec3& R, const Vec3& L, const Vec3& N) const;
     

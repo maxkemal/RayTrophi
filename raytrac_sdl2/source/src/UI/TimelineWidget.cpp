@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <set>
 #include <map>
+#include <unordered_map>
 #include <cmath>
 #include <limits>
 #include <cstring>
@@ -24,6 +25,8 @@
 #include "world.h"
 #include "OptixWrapper.h"  // For direct instance transform updates
 #include "ui_modern.h"
+
+extern bool g_timeline_selection_sync_pending;
 
 // External rendering state for animation render sync
 extern std::atomic<bool> rendering_in_progress;
@@ -84,18 +87,55 @@ static SceneData::ImportedModelContext* findImportedModelContextByName(SceneData
 
 static std::string resolveCharacterTrackName(SceneData& scene, const std::string& selectionName) {
     if (selectionName.empty()) return selectionName;
-    for (auto& mctx : scene.importedModelContexts) {
-        if (mctx.importName == selectionName) return mctx.importName;
-        // Only remap to importName for SKELETAL models (bone-weighted meshes).
-        // Rigid node animation keeps its own unique node name as the track key.
-        if (!mctx.hasAnimation || mctx.weightedBoneCount == 0) continue;
-        for (const auto& member : mctx.members) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(member);
-            if (tri && tri->getNodeName() == selectionName) {
-                return mctx.importName;
+    struct SelectionTrackResolveCache {
+        const SceneData* scene = nullptr;
+        size_t imported_model_count = 0;
+        size_t total_member_count = 0;
+        std::unordered_map<std::string, std::string> node_to_track;
+    };
+
+    static SelectionTrackResolveCache cache;
+
+    size_t total_member_count = 0;
+    for (const auto& mctx : scene.importedModelContexts) {
+        total_member_count += mctx.members.size();
+    }
+
+    const bool rebuild_cache =
+        cache.scene != &scene ||
+        cache.imported_model_count != scene.importedModelContexts.size() ||
+        cache.total_member_count != total_member_count;
+
+    if (rebuild_cache) {
+        cache.scene = &scene;
+        cache.imported_model_count = scene.importedModelContexts.size();
+        cache.total_member_count = total_member_count;
+        cache.node_to_track.clear();
+
+        for (const auto& mctx : scene.importedModelContexts) {
+            cache.node_to_track[mctx.importName] = mctx.importName;
+
+            // Only remap to importName for skeletal models (bone-weighted meshes).
+            // Rigid node animation keeps its own unique node name as the track key.
+            if (!mctx.hasAnimation || mctx.weightedBoneCount == 0) continue;
+
+            for (const auto& member : mctx.members) {
+                auto tri = std::dynamic_pointer_cast<Triangle>(member);
+                if (!tri) continue;
+
+                const std::string& node_name = tri->getNodeName();
+                if (!node_name.empty()) {
+                    cache.node_to_track.emplace(node_name, mctx.importName);
+                }
             }
         }
     }
+
+    auto it = cache.node_to_track.find(selectionName);
+    if (it != cache.node_to_track.end()) {
+        return it->second;
+    }
+
     return selectionName;
 }
 
@@ -703,9 +743,15 @@ void TimelineWidget::draw(UIContext& ctx) {
                 // scanning every scene object each frame. RT backends rebuild/refit
                 // TLAS per targeted call, so keep the full batch path when several
                 // objects moved in the same frame.
+                // Full-scene instance sync scales with total scene size, so keep
+                // small multi-object timeline edits on the targeted path and only
+                // fall back to the batch sync once enough objects changed that one
+                // TLAS rebuild per object becomes more expensive.
+                constexpr size_t kTargetedTransformUpdateLimit = 8;
                 const bool use_targeted_transform_update =
                     !pending_object_transforms.empty() &&
-                    (!ctx.backend_ptr->isUsingTLAS() || pending_object_transforms.size() == 1);
+                    (!ctx.backend_ptr->isUsingTLAS() ||
+                     pending_object_transforms.size() <= kTargetedTransformUpdateLimit);
 
                 if (use_targeted_transform_update) {
                     for (const auto& [node_name, transform] : pending_object_transforms) {
@@ -716,11 +762,11 @@ void TimelineWidget::draw(UIContext& ctx) {
                     ctx.backend_ptr->updateInstanceTransforms(ctx.scene.world.objects);
                 }
             }
-            // CPU BVH refit needed for CPU rendering and selection picking
-            // Skip in GPU mode to avoid expensive per-frame BVH rebuild during animation
-            if (!ctx.backend_ptr || !ctx.backend_ptr->isUsingTLAS()) {
-                g_cpu_bvh_refit_pending = true;
-            }
+            // CPU picking must not use stale timeline poses, but rebuilding/refitting
+            // the CPU BVH every playback frame is too expensive. Mark selection as
+            // dirty so the next click refreshes CPU-space vertices and bypasses the
+            // stale BVH once.
+            g_timeline_selection_sync_pending = true;
             
             ctx.renderer.resetCPUAccumulation();
             if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
@@ -1912,6 +1958,8 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
             selected_group = TrackGroup::Cameras;
         }
     }
+
+    const bool focus_selected_entity = !selected_entity.empty();
     
     std::set<std::string> added_entities;
     
@@ -1996,9 +2044,8 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
         addSub("Material", ChannelType::Material, 1, IM_COL32(255, 180, 50, 255));
     };
     
-    // --- ADD TRACKS FROM TIMELINE (entities with keyframes) ---
-    for (auto& [entity_name, track] : ctx.scene.timeline.tracks) {
-        if (track.keyframes.empty()) continue;
+    auto appendTimelineEntityTracks = [&](const std::string& entity_name, const auto& track) {
+        if (track.keyframes.empty()) return;
         
         // OPTIMIZATION: Only validate lights/cameras/world (small lists).
         // We skipped object validation because iterating 10M+ objects is too slow.
@@ -2221,6 +2268,18 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
         }
         
         added_entities.insert(entity_name);
+    };
+
+    // --- ADD TRACKS FROM TIMELINE (entities with keyframes) ---
+    if (focus_selected_entity) {
+        auto selected_it = ctx.scene.timeline.tracks.find(selected_entity);
+        if (selected_it != ctx.scene.timeline.tracks.end()) {
+            appendTimelineEntityTracks(selected_it->first, selected_it->second);
+        }
+    } else {
+        for (auto& [entity_name, track] : ctx.scene.timeline.tracks) {
+            appendTimelineEntityTracks(entity_name, track);
+        }
     }
     
     // --- ADD CURRENTLY SELECTED ENTITY (if not already added) ---

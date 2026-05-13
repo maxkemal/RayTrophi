@@ -159,6 +159,29 @@ void blendHeightMaskPixel(CompactVec4& dst, const CompactVec4& src, float opacit
     dst.a = static_cast<uint8_t>(std::clamp(out_a * 255.0f, 0.0f, 255.0f));
 }
 
+void blendOpacityPixel(CompactVec4& dst, const CompactVec4& src, float opacity)
+{
+    const float layer_alpha = std::clamp(opacity, 0.0f, 1.0f);
+    if (layer_alpha <= 0.0f) return;
+
+    const float src_mask = static_cast<float>(src.r) / 255.0f;
+    const float src_coverage = static_cast<float>(src.a) / 255.0f;
+    const float t = src_coverage * layer_alpha;
+    if (t <= 0.0f) return;
+
+    const float dst_mask = static_cast<float>(dst.r) / 255.0f;
+    const uint8_t value = static_cast<uint8_t>(
+        std::clamp((dst_mask + (src_mask - dst_mask) * t) * 255.0f + 0.5f, 0.0f, 255.0f));
+
+    // Opacity is a scalar mask. Keep RGB and alpha identical so both shader
+    // paths (read .r for grayscale or .a for RGBA-alpha textures) see the same
+    // value after layer visibility/opacity changes.
+    dst.r = value;
+    dst.g = value;
+    dst.b = value;
+    dst.a = value;
+}
+
 void blendChannelPixel(PaintChannel channel,
                        CompactVec4& dst,
                        const CompactVec4& src,
@@ -167,6 +190,10 @@ void blendChannelPixel(PaintChannel channel,
 {
     if (channel == PaintChannel::Mask) {
         blendHeightMaskPixel(dst, src, opacity);
+        return;
+    }
+    if (channel == PaintChannel::Opacity) {
+        blendOpacityPixel(dst, src, opacity);
         return;
     }
     blendPixel(dst, src, opacity, mode);

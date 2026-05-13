@@ -340,6 +340,8 @@ struct RayGenParams {
     float variance_threshold;    // Baz varyans eşik değeri
     int frame_number;            // Mevcut frame numarası
 	int max_depth; 		        // Maksimum derinlik
+    int diffuse_depth;
+    int transmission_depth;
 	bool use_adaptive_sampling;   // Adaptif örnekleme kullanılıp kullanılmayacağı
     bool use_denoiser;            // OIDN denoiser aktif mi (adaptive sampling threshold'u etkiler)
     // Uzamsal tutarlılık ve temporal akümülasyon için
