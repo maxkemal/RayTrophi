@@ -17,6 +17,8 @@ struct SurfaceParams {
     float depth_max = 15.0f;
     float absorption_density = 0.5f;
     float clarity = 0.8f;
+    float ior = 1.333f;
+    float roughness = 0.02f;
 
     float foam_level = 0.01f;
     float shore_foam_distance = 1.5f;
@@ -32,6 +34,8 @@ struct SurfaceParams {
     bool use_fft_ocean = false;
     float fft_ocean_size = 100.0f;
     float fft_choppiness = 1.0f;
+    float fft_amplitude = 0.001f;
+    float animation_speed = 1.0f;
 
     float micro_detail_strength = 0.05f;
     float micro_detail_scale = 20.0f;

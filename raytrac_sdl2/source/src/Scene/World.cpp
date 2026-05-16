@@ -128,6 +128,21 @@ World::World() {
     data.advanced.env_overlay_rotation = 0.0f;
     data.advanced.env_overlay_blend_mode = 0;
 
+    data.weather.enabled = 0;
+    data.weather.type = WEATHER_NONE;
+    data.weather.intensity = 0.0f;
+    data.weather.density = 0.0f;
+    data.weather.wind_direction = make_float3(1.0f, 0.0f, 0.0f);
+    data.weather.wind_speed = 0.0f;
+    data.weather.precipitation_scale = 1.0f;
+    data.weather.visibility = 1.0f;
+    data.weather.surface_wetness_output = 0.0f;
+    data.weather.surface_accumulation_output = 0.0f;
+    data.weather.surface_settling_output = 0.0f;
+    data.weather.surface_height_output = 0.0f;
+    data.weather.visual_mode = WEATHER_VISUAL_OVERLAY;
+    data.weather.surface_response_enabled = 1;
+
     // Physical Defaults
     data.nishita.humidity = 0.1f;
     data.nishita.temperature = 15.0f;
@@ -444,11 +459,43 @@ NishitaSkyParams World::getNishitaParams() const {
     return data.nishita;
 }
 
+static Vec3 weatherTintColor(const WeatherParams& w) {
+    switch (w.type) {
+        case WEATHER_RAIN: return Vec3(0.50f, 0.56f, 0.62f);
+        case WEATHER_SNOW: return Vec3(0.86f, 0.90f, 0.96f);
+        case WEATHER_DUST: return Vec3(0.74f, 0.58f, 0.38f);
+        case WEATHER_MIST: return Vec3(0.70f, 0.76f, 0.82f);
+        default: return Vec3(0.0f);
+    }
+}
+
+static Vec3 applyWeatherSkyCPU(const WeatherParams& w, const Vec3& sky, const Vec3& rayDir) {
+    if (w.enabled == 0 || w.type == WEATHER_NONE || w.intensity <= 0.0f || w.density <= 0.0f) {
+        return sky;
+    }
+
+    const float visibilityLoss = std::max(0.0f, std::min(1.0f, 1.0f - w.visibility));
+    const float horizon = std::pow((std::max)(0.0f, 1.0f - std::abs(rayDir.y)), 0.65f);
+    float amount = w.intensity * (0.25f + w.density * 0.75f + visibilityLoss * 0.65f);
+    amount = std::max(0.0f, std::min(0.85f, amount * (0.35f + horizon * 0.65f)));
+
+    Vec3 tint = weatherTintColor(w);
+    Vec3 dimmed = sky;
+    if (w.type == WEATHER_RAIN) {
+        dimmed *= 0.72f;
+    } else if (w.type == WEATHER_DUST) {
+        dimmed *= 0.82f;
+    } else if (w.type == WEATHER_SNOW || w.type == WEATHER_MIST) {
+        dimmed = dimmed * 0.90f + tint * 0.10f;
+    }
+    return dimmed * (1.0f - amount) + tint * amount;
+}
+
 // Simplified Nishita for CPU Preview (Optional, for now returns simple gradient or black if unimplemented)
 // Implementing full Nishita on CPU might be slow for real-time without optimization.
 Vec3 World::evaluate(const Vec3& ray_dir, const Vec3& origin) {
     if (data.mode == WORLD_MODE_COLOR) {
-        return to_vec3(data.color) * data.color_intensity;
+        return applyWeatherSkyCPU(data.weather, to_vec3(data.color) * data.color_intensity, ray_dir);
     }
     else if (data.mode == WORLD_MODE_HDRI) {
         if (hdri_texture && hdri_texture->is_loaded()) {
@@ -465,9 +512,9 @@ Vec3 World::evaluate(const Vec3& ray_dir, const Vec3& origin) {
             
             // get_color internally does y = (1-v)*height, so pass 1-v to cancel the flip
             // This makes CPU match GPU texture sampling
-            return hdri_texture->get_color(u, 1.0f - v) * data.env_intensity;
+            return applyWeatherSkyCPU(data.weather, hdri_texture->get_color(u, 1.0f - v) * data.env_intensity, ray_dir);
         }
-        return to_vec3(data.color); // Fallback
+        return applyWeatherSkyCPU(data.weather, to_vec3(data.color), ray_dir); // Fallback
     }
     else if (data.mode == WORLD_MODE_NISHITA) {
         return calculateNishitaSky(ray_dir, origin);
@@ -562,7 +609,7 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir, const Vec3& origin) {
          L += to_vec3(trans) * data.nishita.sun_intensity * 80000.0f * limbDarkening * edgeSoftness;
     }
 
-    return L;
+    return applyWeatherSkyCPU(data.weather, L, ray_dir);
 }
        
 
@@ -610,6 +657,16 @@ void World::reset() {
     defaults.ozone_absorption_scale = 1.0f;
     
     data.nishita = defaults;
+    data.weather.enabled = 0;
+    data.weather.type = WEATHER_NONE;
+    data.weather.intensity = 0.0f;
+    data.weather.density = 0.0f;
+    data.weather.wind_direction = make_float3(1.0f, 0.0f, 0.0f);
+    data.weather.wind_speed = 0.0f;
+    data.weather.precipitation_scale = 1.0f;
+    data.weather.visibility = 1.0f;
+    data.weather.surface_wetness_output = 0.0f;
+    data.weather.surface_accumulation_output = 0.0f;
     
     // Re-initialize LUT with defaults
     if (atmosphere_lut) {
@@ -625,6 +682,14 @@ AtmosphereAdvanced World::getAdvancedParams() const {
 
 void World::setAdvancedParams(const AtmosphereAdvanced& a) {
     data.advanced = a;
+}
+
+WeatherParams World::getWeatherParams() const {
+    return data.weather;
+}
+
+void World::setWeatherParams(const WeatherParams& params) {
+    data.weather = params;
 }
 
 // Serialization
@@ -738,6 +803,23 @@ void World::serialize(nlohmann::json& j) const {
     adv["env_overlay_rotation"] = data.advanced.env_overlay_rotation;
     adv["env_overlay_blend_mode"] = data.advanced.env_overlay_blend_mode;
     j["advanced"] = adv;
+
+    nlohmann::json weather;
+    weather["enabled"] = data.weather.enabled;
+    weather["type"] = data.weather.type;
+    weather["intensity"] = data.weather.intensity;
+    weather["density"] = data.weather.density;
+    weather["wind_direction"] = { data.weather.wind_direction.x, data.weather.wind_direction.y, data.weather.wind_direction.z };
+    weather["wind_speed"] = data.weather.wind_speed;
+    weather["precipitation_scale"] = data.weather.precipitation_scale;
+    weather["visibility"] = data.weather.visibility;
+    weather["surface_wetness_output"] = data.weather.surface_wetness_output;
+    weather["surface_accumulation_output"] = data.weather.surface_accumulation_output;
+    weather["surface_settling_output"] = data.weather.surface_settling_output;
+    weather["surface_height_output"] = data.weather.surface_height_output;
+    weather["visual_mode"] = data.weather.visual_mode;
+    weather["surface_response_enabled"] = data.weather.surface_response_enabled;
+    j["weather"] = weather;
 }
 
 void World::deserialize(const nlohmann::json& j) {
@@ -904,5 +986,26 @@ void World::deserialize(const nlohmann::json& j) {
         } else {
             initializeLUT();
         }
+    }
+
+    if (j.contains("weather")) {
+        auto w = j["weather"];
+        data.weather.enabled = w.value("enabled", 0);
+        data.weather.type = w.value("type", WEATHER_NONE);
+        data.weather.intensity = w.value("intensity", 0.0f);
+        data.weather.density = w.value("density", 0.0f);
+        if (w.contains("wind_direction")) {
+            auto wd = w["wind_direction"];
+            data.weather.wind_direction = make_float3(wd[0], wd[1], wd[2]);
+        }
+        data.weather.wind_speed = w.value("wind_speed", 0.0f);
+        data.weather.precipitation_scale = w.value("precipitation_scale", 1.0f);
+        data.weather.visibility = w.value("visibility", 1.0f);
+        data.weather.surface_wetness_output = w.value("surface_wetness_output", 0.0f);
+        data.weather.surface_accumulation_output = w.value("surface_accumulation_output", 0.0f);
+        data.weather.surface_settling_output = w.value("surface_settling_output", 0.0f);
+        data.weather.surface_height_output = w.value("surface_height_output", 0.0f);
+        data.weather.visual_mode = w.value("visual_mode", WEATHER_VISUAL_OVERLAY);
+        data.weather.surface_response_enabled = w.value("surface_response_enabled", 1);
     }
 }

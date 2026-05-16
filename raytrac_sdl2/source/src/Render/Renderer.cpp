@@ -58,6 +58,7 @@
 #include "CameraPresets.h"
 #include "TerrainManager.h"
 #include "WaterSystem.h"      // For water/FFT keyframe animation
+#include "WaterMaterialSync.h"
 #include "InstanceManager.h"  // For wind animation in render_Animation
 #include "water_shaders_cpu.h"  // CPU water shader functions
 #include "HittableInstance.h"
@@ -117,6 +118,384 @@ float rt_cloud_fbm(Vec3 p, int octaves) {
         amp *= 0.5f;
     }
     return value;
+}
+
+bool rt_weather_active(const WeatherParams& weather) {
+    return weather.enabled != 0 && weather.type != WEATHER_NONE &&
+           weather.intensity > 0.0f && weather.density > 0.0f;
+}
+
+bool rt_weather_visual_active(const WeatherParams& weather) {
+    return rt_weather_active(weather) && weather.visual_mode != WEATHER_VISUAL_SURFACE_ONLY;
+}
+
+bool rt_weather_surface_active(const WeatherParams& weather) {
+    if (weather.enabled == 0 || weather.type == WEATHER_NONE || weather.surface_response_enabled == 0) {
+        return false;
+    }
+
+    float surfaceSignal = 0.0f;
+    if (weather.type == WEATHER_RAIN) {
+        surfaceSignal = weather.surface_wetness_output;
+    } else if (weather.type == WEATHER_SNOW || weather.type == WEATHER_DUST) {
+        surfaceSignal = weather.surface_accumulation_output;
+    }
+
+    return surfaceSignal > 0.001f || (weather.intensity > 0.0f && weather.density > 0.0f);
+}
+
+float rt_weather_surface_mask(const WeatherParams& weather, const Vec3& pos, const Vec3& normal);
+float rt_weather_surface_geometric_support(const WeatherParams& weather, const Vec3& geomNormal);
+float rt_weather_surface_settling(const WeatherParams& weather, const Vec3& pos, const Vec3& normal, const Vec3& geomNormal);
+
+Vec3 rt_weather_surface_support_normal(const Vec3& normal, const Vec3& geomNormal) {
+    const Vec3 baseNormal = normal.normalize();
+    const Vec3 macroNormal = geomNormal.normalize();
+    return Vec3::lerp(macroNormal, baseNormal, 0.62f).normalize();
+}
+
+float rt_weather_surface_accumulation(const WeatherParams& weather, const Vec3& pos, const Vec3& normal, const Vec3& geomNormal) {
+    if (weather.type != WEATHER_SNOW && weather.type != WEATHER_DUST) {
+        return 0.0f;
+    }
+
+    const float baseAccum = std::clamp(weather.surface_accumulation_output, 0.0f, 1.0f);
+    const float intensity = std::clamp(weather.intensity, 0.0f, 1.0f);
+    const float density = std::clamp(weather.density, 0.0f, 1.0f);
+    const Vec3 supportNormal = rt_weather_surface_support_normal(normal, geomNormal);
+    const float geomSupport = rt_weather_surface_geometric_support(weather, supportNormal);
+    const float intensityResponse = 0.80f + intensity * 0.70f;
+    const float densityResponse = 0.35f + density * 1.15f;
+    const float typeBoost = (weather.type == WEATHER_SNOW) ? 1.10f : 0.90f;
+    const float directAccum = baseAccum * intensityResponse * rt_weather_surface_mask(weather, pos, normal) * densityResponse * typeBoost * geomSupport;
+    const float settling = rt_weather_surface_settling(weather, pos, normal, geomNormal);
+    return std::clamp(directAccum + (1.0f - std::clamp(directAccum, 0.0f, 1.0f)) * settling, 0.0f, 1.0f);
+}
+
+float rt_weather_surface_geometric_support(const WeatherParams& weather, const Vec3& geomNormal) {
+    const Vec3 macroNormal = geomNormal.normalize();
+    float support = 0.0f;
+    if (weather.type == WEATHER_SNOW) {
+        support = std::clamp((static_cast<float>(macroNormal.y) - 0.02f) / 0.72f, 0.0f, 1.0f);
+        support *= support;
+    } else {
+        support = std::clamp((static_cast<float>(macroNormal.y) - 0.02f) / 0.78f, 0.0f, 1.0f);
+    }
+    return support * support * (3.0f - 2.0f * support);
+}
+
+float rt_weather_surface_height(const WeatherParams& weather, const Vec3& pos) {
+    const float scale = std::max(weather.precipitation_scale, 0.1f);
+    const float heightBoost = 0.25f + std::clamp(weather.surface_height_output, 0.0f, 1.0f) * 3.75f;
+    if (weather.type == WEATHER_SNOW) {
+        Vec3 wind(weather.wind_direction.x, weather.wind_direction.y, weather.wind_direction.z);
+        Vec3 windXZ(wind.x, 0.0f, wind.z);
+        Vec3 along = windXZ.length_squared() > 1e-8f ? windXZ.normalize() : Vec3(1.0f, 0.0f, 0.0f);
+        Vec3 across(-along.z, 0.0f, along.x);
+        const float u = pos.x * along.x + pos.z * along.z;
+        const float v = pos.x * across.x + pos.z * across.z;
+        const Vec3 p(u * scale * 0.12f, pos.y * scale * 0.03f, v * scale * 0.12f);
+        const float broad = rt_cloud_noise(p * 0.55f + Vec3(17.3f, 9.1f, 41.7f));
+        float drift = 1.0f - std::abs(rt_cloud_noise(Vec3(p.x * 1.45f, p.y * 0.8f, p.z * 0.58f) + Vec3(3.7f, 29.4f, 11.8f)) * 2.0f - 1.0f);
+        drift *= drift;
+        const float clumps = 1.0f - std::abs(rt_cloud_noise(p * 2.90f + Vec3(61.2f, 7.5f, 18.9f)) * 2.0f - 1.0f);
+        const float micro = rt_cloud_noise(p * 7.40f + Vec3(8.3f, 51.7f, 27.4f));
+        return (broad * 0.22f + drift * 0.36f + clumps * 0.27f + micro * 0.15f) * heightBoost;
+    }
+
+    const Vec3 p = pos * (scale * 0.18f);
+    const float wisps = rt_cloud_noise(p + Vec3(19.7f, 5.3f, 27.1f));
+    const float grain = rt_cloud_noise(p * 2.85f + Vec3(4.1f, 37.8f, 12.4f));
+    const float streak = rt_cloud_noise(p * 1.65f + Vec3(44.5f, 14.2f, 7.6f));
+    return (wisps * 0.30f + grain * 0.45f + streak * 0.25f) * heightBoost;
+}
+
+float rt_weather_surface_settling(const WeatherParams& weather, const Vec3& pos, const Vec3& normal, const Vec3& geomNormal) {
+    if (weather.type != WEATHER_SNOW && weather.type != WEATHER_DUST) {
+        return 0.0f;
+    }
+
+    const float settlingAmount = std::clamp(weather.surface_settling_output, 0.0f, 1.0f);
+    if (settlingAmount <= 1e-4f) {
+        return 0.0f;
+    }
+
+    const Vec3 shadingNormal = normal.normalize();
+    const Vec3 macroNormal = rt_weather_surface_support_normal(normal, geomNormal);
+    const float support = rt_weather_surface_geometric_support(weather, macroNormal);
+    const float supportGate = std::clamp((support - 0.02f) / 0.58f, 0.0f, 1.0f);
+    if (supportGate <= 1e-4f) {
+        return 0.0f;
+    }
+    const float exposure = rt_weather_surface_mask(weather, pos, shadingNormal);
+    const float cavity = std::clamp((1.0f - static_cast<float>(Vec3::dot(shadingNormal, macroNormal))) * 3.8f + (1.0f - support) * 0.10f, 0.0f, 1.0f);
+    const Vec3 wind = Vec3(weather.wind_direction.x, weather.wind_direction.y, weather.wind_direction.z);
+    const Vec3 windFlat(wind.x, 0.0f, wind.z);
+    const Vec3 leeDir = windFlat.length_squared() > 1e-8f ? Vec3(-windFlat.x, 0.28f, -windFlat.z).normalize() : Vec3(0.0f, 1.0f, 0.0f);
+    const float lee = std::clamp(static_cast<float>(Vec3::dot(macroNormal, leeDir)) * 0.85f + cavity * 0.35f, 0.0f, 1.0f);
+    const float shelter = std::clamp((1.0f - exposure) * 0.52f + cavity * 0.26f + (1.0f - support) * 0.22f + lee * 0.42f, 0.0f, 1.0f);
+    const float pocketNoise = rt_cloud_noise(pos * 0.085f + Vec3(31.4f, 9.7f, 54.2f));
+    const float pocketMask = std::clamp(cavity * 0.92f + pocketNoise * 0.26f, 0.0f, 1.0f);
+    const float slopeBase = std::clamp((support - 0.16f) / 0.54f, 0.0f, 1.0f);
+    const float density = std::clamp(weather.density, 0.0f, 1.0f);
+    const float typeBoost = (weather.type == WEATHER_SNOW) ? 1.34f : 1.04f;
+    const float anchor = std::max(pocketMask, slopeBase * 0.30f + cavity * 0.40f + lee * 0.30f);
+    return std::clamp(settlingAmount * supportGate * shelter * anchor * (0.76f + density * 1.10f) * typeBoost, 0.0f, 1.0f);
+}
+
+Vec3 rt_weather_surface_normal(const WeatherParams& weather, const Vec3& pos, const Vec3& normal, const Vec3& geomNormal) {
+    const Vec3 baseNormal = normal.normalize();
+    if (!rt_weather_surface_active(weather)) return baseNormal;
+    if (weather.type != WEATHER_SNOW && weather.type != WEATHER_DUST) return baseNormal;
+
+    const float accumulation = rt_weather_surface_accumulation(weather, pos, baseNormal, geomNormal);
+    if (accumulation <= 1e-4f) return baseNormal;
+
+    const Vec3 supportNormal = rt_weather_surface_support_normal(baseNormal, geomNormal);
+    const float geomSupport = rt_weather_surface_geometric_support(weather, supportNormal);
+    if (geomSupport <= 1e-4f) return baseNormal;
+
+    const float settling = rt_weather_surface_settling(weather, pos, baseNormal, geomNormal);
+    const float detailCapture = 0.45f + 0.55f * std::clamp((static_cast<float>(baseNormal.y) - 0.04f) / 0.82f, 0.0f, 1.0f);
+    const float heightResponse = 0.12f + std::clamp(weather.surface_height_output, 0.0f, 1.0f) * 0.95f;
+    const float buildup = std::clamp(accumulation + settling * 0.85f, 0.0f, 1.0f);
+    const float normalStrength = buildup * detailCapture * heightResponse * (weather.type == WEATHER_SNOW ? 0.42f : 0.15f);
+    if (normalStrength <= 1e-4f) return baseNormal;
+
+    const Vec3 wind = Vec3(weather.wind_direction.x, weather.wind_direction.y, weather.wind_direction.z);
+    Vec3 tangent = wind - baseNormal * Vec3::dot(wind, baseNormal);
+    if (tangent.length_squared() <= 1e-8f) {
+        const Vec3 helper = std::abs(baseNormal.y) < 0.999f ? Vec3(0.0f, 1.0f, 0.0f) : Vec3(1.0f, 0.0f, 0.0f);
+        tangent = Vec3::cross(helper, baseNormal);
+    }
+    tangent = tangent.normalize();
+    Vec3 bitangent = Vec3::cross(baseNormal, tangent).normalize();
+    tangent = Vec3::cross(bitangent, baseNormal).normalize();
+
+    const float sampleStep = (weather.type == WEATHER_SNOW ? 0.62f : 0.90f) / std::max(weather.precipitation_scale, 0.35f);
+    const float heightCenter = rt_weather_surface_height(weather, pos);
+    const float heightT = rt_weather_surface_height(weather, pos + tangent * sampleStep);
+    const float heightB = rt_weather_surface_height(weather, pos + bitangent * sampleStep);
+    const float gradT = std::clamp((heightT - heightCenter) / sampleStep, -0.28f, 0.28f);
+    const float gradB = std::clamp((heightB - heightCenter) / sampleStep, -0.28f, 0.28f);
+
+    Vec3 perturbed = (baseNormal - tangent * (gradT * normalStrength) - bitangent * (gradB * normalStrength)).normalize();
+    if (Vec3::dot(perturbed, baseNormal) < 0.05f) {
+        perturbed = Vec3::lerp(baseNormal, perturbed, 0.35f).normalize();
+    }
+    if (Vec3::dot(perturbed, supportNormal) < 0.55f) {
+        perturbed = Vec3::lerp(supportNormal, perturbed, 0.05f).normalize();
+    }
+    return perturbed;
+}
+
+float rt_weather_surface_mask(const WeatherParams& weather, const Vec3& pos, const Vec3& normal) {
+    float up = std::clamp((static_cast<float>(normal.y) - 0.08f) / 0.82f, 0.0f, 1.0f);
+    up = up * up * (3.0f - 2.0f * up);
+    const Vec3 wind = Vec3(weather.wind_direction.x, weather.wind_direction.y, weather.wind_direction.z);
+    const Vec3 windDir = wind.length_squared() > 1e-8f ? wind.normalize() : Vec3(1.0f, 0.0f, 0.0f);
+    const float windAmount = std::clamp(weather.wind_speed / 35.0f, 0.0f, 1.0f);
+    const Vec3 incoming = (Vec3(0.0f, 1.0f, 0.0f) - windDir * windAmount).normalize();
+    const float windFacing = std::clamp(static_cast<float>(Vec3::dot(normal.normalize(), incoming)), 0.0f, 1.0f);
+    const float exposure = std::clamp(up * (1.0f - windAmount * 0.78f) + windFacing * (0.12f + windAmount * 1.22f), 0.0f, 1.0f);
+    const float scale = std::max(weather.precipitation_scale, 0.1f);
+    const Vec3 p = pos * (scale * 0.22f) + Vec3(13.1f, 47.2f, 5.7f);
+    const float n = rt_cloud_fbm(p, 3);
+    const float breakup = std::clamp(n * 1.45f - 0.15f, 0.0f, 1.0f);
+    return exposure * (0.42f + 0.58f * breakup);
+}
+
+void rt_apply_weather_surface(
+    const WeatherParams& weather,
+    const Vec3& pos,
+    const Vec3& normal,
+    const Vec3& geomNormal,
+    Vec3& albedo,
+    float& roughness,
+    float& metallic,
+    float& clearcoat,
+    float& clearcoatRoughness
+) {
+    if (!rt_weather_surface_active(weather)) return;
+
+    const float exposed = rt_weather_surface_mask(weather, pos, normal);
+    if (weather.type == WEATHER_RAIN) {
+        const float wet = std::clamp(weather.surface_wetness_output, 0.0f, 1.0f) *
+                          (0.35f + 0.65f * exposed);
+        albedo = Vec3::lerp(albedo, albedo * 0.50f, wet * 0.62f);
+        roughness = std::max(0.012f, roughness * (1.0f - wet * 0.78f));
+        metallic = std::max(0.0f, metallic - wet * 0.05f);
+        clearcoat = std::max(clearcoat, wet * 0.72f);
+        clearcoatRoughness = std::min(clearcoatRoughness, std::max(0.006f, 0.045f - wet * 0.030f));
+    } else if (weather.type == WEATHER_SNOW) {
+        const float acc = rt_weather_surface_accumulation(weather, pos, normal, geomNormal);
+        const float settling = rt_weather_surface_settling(weather, pos, normal, geomNormal);
+        const float heightLift = std::clamp(weather.surface_height_output, 0.0f, 1.0f);
+        const float cover = std::clamp(acc + settling * 0.84f + heightLift * (acc * 0.08f + settling * 0.30f), 0.0f, 1.0f);
+        const float sparkle = std::clamp(rt_cloud_noise(pos * 6.5f + Vec3(19.0f, 3.0f, 41.0f)) * acc, 0.0f, 1.0f);
+        albedo = Vec3::lerp(albedo, Vec3(0.88f, 0.91f, 0.96f) + Vec3(0.08f) * sparkle, cover * 0.74f);
+        roughness = std::clamp(roughness + cover * (0.42f + heightLift * 0.10f) - sparkle * 0.10f, 0.02f, 1.0f);
+        metallic *= (1.0f - cover * 0.8f);
+    } else if (weather.type == WEATHER_DUST) {
+        const float acc = rt_weather_surface_accumulation(weather, pos, normal, geomNormal);
+        const float settling = rt_weather_surface_settling(weather, pos, normal, geomNormal);
+        const float heightLift = std::clamp(weather.surface_height_output, 0.0f, 1.0f);
+        const float cover = std::clamp(acc + settling * 0.90f + heightLift * settling * 0.22f, 0.0f, 1.0f);
+        albedo = Vec3::lerp(albedo, Vec3(0.58f, 0.46f, 0.30f), cover * 0.58f);
+        roughness = std::min(1.0f, roughness + cover * (0.38f + heightLift * 0.08f));
+        metallic *= (1.0f - cover * 0.55f);
+    }
+}
+
+Vec3 rt_weather_tint_color(const WeatherParams& weather) {
+    switch (weather.type) {
+        case WEATHER_RAIN: return Vec3(0.50f, 0.56f, 0.62f);
+        case WEATHER_SNOW: return Vec3(0.86f, 0.90f, 0.96f);
+        case WEATHER_DUST: return Vec3(0.74f, 0.58f, 0.38f);
+        case WEATHER_MIST: return Vec3(0.70f, 0.76f, 0.82f);
+        default: return Vec3(0.0f);
+    }
+}
+
+Vec3 rt_apply_weather_atmosphere(const WeatherParams& weather, const Vec3& color, const Vec3& rayDir, float distance) {
+    if (!rt_weather_visual_active(weather)) return color;
+
+    const float vis = std::max(0.02f, std::clamp(weather.visibility, 0.0f, 1.0f));
+    const float sigma = weather.intensity * weather.density * (0.00018f + (1.0f - vis) * 0.00042f);
+    float amount = std::clamp(1.0f - std::exp(-std::max(distance, 0.0f) * sigma), 0.0f, 0.82f);
+
+    Vec3 tint = rt_weather_tint_color(weather);
+    if (weather.type == WEATHER_RAIN) tint *= 0.72f;
+    if (weather.type == WEATHER_DUST) tint *= 1.12f;
+
+    const Vec3 wind = Vec3(weather.wind_direction.x, weather.wind_direction.y, weather.wind_direction.z);
+    const Vec3 windDir = wind.length_squared() > 1e-8 ? wind.normalize() : Vec3(1.0f, 0.0f, 0.0f);
+    const float forward = std::pow(std::max(0.0f, Vec3::dot(rayDir.normalize(), windDir)), 4.0f);
+    amount = std::min(0.90f, amount + forward * weather.intensity * weather.density * 0.08f);
+    return Vec3::lerp(color, tint, amount);
+}
+
+float rt_precip_smoothstep(float edge0, float edge1, float x) {
+    float t = 0.0f;
+    if (edge1 >= edge0) {
+        t = std::clamp((x - edge0) / std::max(edge1 - edge0, 1e-6f), 0.0f, 1.0f);
+    } else {
+        t = std::clamp((edge0 - x) / std::max(edge0 - edge1, 1e-6f), 0.0f, 1.0f);
+    }
+    return t * t * (3.0f - 2.0f * t);
+}
+
+float rt_precip_hash(float x, float y) {
+    const float v = std::sin(x * 127.1f + y * 311.7f) * 43758.5453123f;
+    return v - std::floor(v);
+}
+
+float rt_precip_noise(float x, float y) {
+    const float cell_x = std::floor(x);
+    const float cell_y = std::floor(y);
+    const float frac_x = x - cell_x;
+    const float frac_y = y - cell_y;
+    const float smooth_x = frac_x * frac_x * (3.0f - 2.0f * frac_x);
+    const float smooth_y = frac_y * frac_y * (3.0f - 2.0f * frac_y);
+    const float n00 = rt_precip_hash(cell_x, cell_y);
+    const float n10 = rt_precip_hash(cell_x + 1.0f, cell_y);
+    const float n01 = rt_precip_hash(cell_x, cell_y + 1.0f);
+    const float n11 = rt_precip_hash(cell_x + 1.0f, cell_y + 1.0f);
+    const float nx0 = rt_cloud_lerp(n00, n10, smooth_x);
+    const float nx1 = rt_cloud_lerp(n01, n11, smooth_x);
+    return rt_cloud_lerp(nx0, nx1, smooth_y);
+}
+
+float rt_precip_line(float u, float v, float windX, float windY, float time, float density, float scale) {
+    const float wind_drive = 1.0f + density * 0.85f;
+    const float px = u * 74.0f / scale + windX * time * (6.5f + density * 4.0f);
+    const float py = v * 22.0f / scale - time * (34.0f + density * 10.0f) + windY * time * (7.5f + density * 4.5f);
+    const float cx = std::floor(px);
+    const float cy = std::floor(py);
+    const float fx = px - cx;
+    const float fy = py - cy;
+    const float rnd = rt_precip_hash(cx, cy);
+    const float spawn = rt_precip_smoothstep(0.94f - density * 0.10f, 1.0f, rnd);
+    const float x = std::abs(fx - 0.5f - (rnd - 0.5f) * (0.35f + 0.18f * wind_drive));
+    return spawn * rt_precip_smoothstep(0.055f - density * 0.016f, 0.0f, x) * rt_precip_smoothstep(1.0f, 0.04f, fy);
+}
+
+float rt_precip_flake(float u, float v, float windX, float windY, float time, float density, float scale) {
+    const float px = u * 46.0f / scale + windX * time * (2.6f + density * 2.5f);
+    const float py = v * 30.0f / scale - time * (2.8f + density * 0.9f) + windY * time * (1.1f + density * 0.9f);
+    const float cx = std::floor(px);
+    const float cy = std::floor(py);
+    const float fx = px - cx;
+    const float fy = py - cy;
+    const float rnd = rt_precip_hash(cx, cy);
+    const float spawn = rt_precip_smoothstep(0.84f - density * 0.22f, 1.0f, rnd);
+    const float ox = rt_precip_hash(cx + 13.7f, cy + 13.7f) + std::sin(time * 1.7f + rnd * 6.2831f) * (0.12f + density * 0.08f) + windX * 0.12f;
+    const float oy = rt_precip_hash(cx + 41.3f, cy + 41.3f) + windY * 0.05f;
+    const float radius = rt_cloud_lerp(0.035f, 0.120f + density * 0.025f, rt_precip_hash(cx + 7.1f, cy + 7.1f));
+    const float dx = fx - ox;
+    const float dy = fy - oy;
+    return spawn * rt_precip_smoothstep(radius, 0.0f, std::sqrt(dx * dx + dy * dy));
+}
+
+float rt_precip_dust(float u, float v, float windX, float windY, float time, float density, float scale) {
+    const float advected_u = u / scale + windX * time * (0.24f + density * 0.08f);
+    const float advected_v = v / scale + windY * time * (0.18f + density * 0.10f);
+    const float streaks = rt_precip_noise(advected_u * 18.0f, advected_v * 7.5f);
+    const float wisps = rt_precip_noise(advected_u * 33.0f + 19.4f, advected_v * 12.0f + 7.1f);
+    const float grain = rt_precip_noise(advected_u * 95.0f + 3.7f, advected_v * 42.0f + 17.3f);
+    const float elongated = rt_precip_smoothstep(0.52f, 0.98f, streaks * 0.72f + wisps * 0.28f);
+    const float soft_grain = rt_precip_smoothstep(0.38f, 0.88f, grain);
+    return (elongated * (0.72f + density * 0.28f) + soft_grain * 0.18f) * density;
+}
+
+Vec3 rt_apply_weather_precipitation_overlay(
+    const WeatherParams& weather,
+    const Vec3& color,
+    const Vec3& rayDirIn,
+    float distance,
+    float time
+) {
+    if (!rt_weather_visual_active(weather)) return color;
+
+    const float density = std::clamp(std::pow(std::clamp(weather.intensity, 0.0f, 1.0f), 0.82f) *
+        (0.28f + std::clamp(weather.density, 0.0f, 1.0f) * 1.22f), 0.0f, 1.0f);
+    if (density <= 0.001f) return color;
+
+    const Vec3 rayDir = rayDirIn.normalize();
+    constexpr float kPi = 3.14159265358979323846f;
+    const float u = std::atan2(static_cast<float>(rayDir.z), static_cast<float>(rayDir.x)) / (2.0f * kPi) + 0.5f;
+    const float v = std::acos(std::clamp(static_cast<float>(rayDir.y), -1.0f, 1.0f)) / kPi;
+    const float scale = std::max(weather.precipitation_scale, 0.25f);
+    const float depthFade = rt_precip_smoothstep(0.6f, 18.0f, std::max(distance, 0.0f));
+    const float horizonFade = std::clamp(1.0f - std::max(static_cast<float>(rayDir.y), 0.0f) * 0.35f, 0.35f, 1.0f);
+    const Vec3 wind(weather.wind_direction.x, weather.wind_direction.y, weather.wind_direction.z);
+    const float windLen2 = static_cast<float>(wind.x * wind.x + wind.z * wind.z);
+    const float windAmount = std::clamp(weather.wind_speed / 35.0f, 0.0f, 1.0f);
+    const float invWindLen = windLen2 > 1e-8f ? 1.0f / std::sqrt(windLen2) : 0.0f;
+    const float windX = (windLen2 > 1e-8f ? static_cast<float>(wind.x) * invWindLen : 1.0f) * windAmount;
+    const float windY = (windLen2 > 1e-8f ? static_cast<float>(wind.z) * invWindLen : 0.0f) * windAmount;
+    const float windVisual = 0.65f + windAmount * 0.9f;
+    Vec3 result = color;
+    const Vec3 tint = rt_weather_tint_color(weather);
+
+    if (weather.type == WEATHER_RAIN) {
+        const float amount = std::min(1.0f, rt_precip_line(u, v, windX, windY, time, density, scale) * (0.85f + density * 0.85f + windAmount * 0.35f));
+        result = Vec3::lerp(result, result * 0.84f, amount * density * 0.24f * depthFade);
+        result += Vec3(0.45f, 0.55f, 0.66f) * amount * density * 0.28f * depthFade * horizonFade * windVisual;
+    } else if (weather.type == WEATHER_SNOW) {
+        const float amount = std::min(1.0f, rt_precip_flake(u, v, windX, windY, time, density, scale) * (0.80f + density * 0.95f + windAmount * 0.22f));
+        result = Vec3::lerp(result, tint, amount * density * 0.34f * depthFade * horizonFade);
+        result += Vec3(0.85f, 0.92f, 1.0f) * amount * density * 0.16f * depthFade * windVisual;
+    } else if (weather.type == WEATHER_DUST) {
+        const float amount = std::min(1.0f, rt_precip_dust(u, v, windX, windY, time, density, scale) * (0.75f + density * 1.05f + windAmount * 0.45f));
+        result = Vec3::lerp(result, tint, amount * 0.16f * depthFade * windVisual);
+        result += tint * amount * 0.075f * depthFade * windVisual;
+    } else if (weather.type == WEATHER_MIST) {
+        const float amount = std::min(1.0f, rt_precip_dust(u, v, windX * 0.25f, windY * 0.25f, time * 0.35f, density, scale * 1.4f) * (0.65f + density * 0.85f));
+        result = Vec3::lerp(result, tint, amount * 0.11f * depthFade);
+    }
+
+    return result;
 }
 
 float rt_sample_procedural_cloud_cpu(const Vec3& local_p, const VDBVolume* vdb, const NishitaSkyParams& n) {
@@ -2010,6 +2389,26 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 
                     world.setNishitaParams(np);
                 }
+
+                if (wk.has_weather_params) {
+                    WeatherParams weather = world.getWeatherParams();
+                    weather.enabled = wk.weather_enabled;
+                    weather.type = wk.weather_type;
+                    weather.intensity = wk.weather_intensity;
+                    weather.density = wk.weather_density;
+                    weather.wind_direction = make_float3(
+                        wk.weather_wind_direction.x,
+                        wk.weather_wind_direction.y,
+                        wk.weather_wind_direction.z);
+                    weather.wind_speed = wk.weather_wind_speed;
+                    weather.precipitation_scale = wk.weather_precipitation_scale;
+                    weather.visibility = wk.weather_visibility;
+                    weather.surface_wetness_output = wk.weather_surface_wetness;
+                    weather.surface_accumulation_output = wk.weather_surface_accumulation;
+                    weather.visual_mode = wk.weather_visual_mode;
+                    weather.surface_response_enabled = wk.weather_surface_response_enabled;
+                    world.setWeatherParams(weather);
+                }
             }
         }
     }
@@ -2246,6 +2645,10 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
                     std::string expected_name = "Water_" + std::to_string(water.id);
                     if (track_name == expected_name) {
                         WaterManager::getInstance().updateFromTrack(&water, track, frame);
+                        if (water.material_id != MaterialManager::INVALID_MATERIAL_ID) {
+                            WaterManager::getInstance().syncSurfaceMaterial(&water);
+                            this->updateBackendMaterial(scene, water.material_id);
+                        }
                         // FFT changes don't need geometry rebuild - they're shader-based
                         // But geometric waves do need BVH update
                         if (water.params.use_geometric_waves && water.animate_mesh) {
@@ -2292,8 +2695,14 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
             if (geometry_changed && m_backend) {
                 m_backend->updateSceneGeometry(scene.world.objects, finalBoneMatrices);
             }
-              // 1.5. Update GPU Materials (CRITICAL for material keyframe animations!)
-            this->updateBackendMaterials(scene);
+            if (waterUpdate.material_changed || waterUpdate.mesh_changed) {
+                for (auto& water : WaterManager::getInstance().getWaterSurfaces()) {
+                    if (water.material_id != MaterialManager::INVALID_MATERIAL_ID) {
+                        WaterManager::getInstance().syncSurfaceMaterial(&water);
+                        this->updateBackendMaterial(scene, water.material_id);
+                    }
+                }
+            }
             // 2. Set Scene Params
             if (m_backend) {
                 m_backend->setTime(static_cast<float>(frame) / animFps, frame_delta);
@@ -3962,7 +4371,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     Vec3 Li(0.0f);
 
                     if (auto pl = std::dynamic_pointer_cast<PointLight>(light)) {
-                        lightPos = pl->getPosition();
+                        // Random point on the sphere (radius) → soft shadow parity with OptiX/Vulkan
+                        lightPos = pl->random_point();
                         Vec3 toLight = lightPos - hairHit.position;
                         lightDist = toLight.length();
                         lightDir = toLight / lightDist;
@@ -3980,6 +4390,16 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         lightDist = toLight.length();
                         lightDir = toLight / lightDist;
                         Li = al->getIntensity(hairHit.position, lightPos);
+                    }
+                    else if (auto sl = std::dynamic_pointer_cast<SpotLight>(light)) {
+                        lightPos = sl->position;
+                        Vec3 toLight = lightPos - hairHit.position;
+                        lightDist = toLight.length();
+                        if (lightDist < 1e-4f) continue;
+                        lightDir = toLight / lightDist;
+                        // getIntensity already applies cone falloff; returns zero outside the cone
+                        Li = sl->getIntensity(hairHit.position, lightPos);
+                        if (Li.x <= 0.0f && Li.y <= 0.0f && Li.z <= 0.0f) continue;
                     }
                     else {
                         continue;
@@ -4962,7 +5382,14 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         float specular = 0.5f;
         float opacity = 1.0f;
         float transmission = 0.0f;
+        float clearcoatValue = 0.0f;
+        float clearcoatRoughnessValue = 0.03f;
+        float translucentValue = 0.0f;
+        float subsurfaceValue = 0.0f;
+        Vec3 subsurfaceColorValue(1.0f);
+        float iorValue = 1.45f;
         Vec3f emission(0.0f);
+        bool is_water = false;
 
         if (rec.materialPtr) {
             auto pbsdf = dynamic_cast<PrincipledBSDF*>(rec.materialPtr);
@@ -4997,6 +5424,12 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     metallic = std::clamp(rec.surface_override.metallic, 0.0f, 1.0f);
                     specular = std::clamp(pbsdf->getSpecularValue(uv), 0.0f, 1.0f);
                     transmission = std::clamp(rec.surface_override.transmission, 0.0f, 1.0f);
+                    clearcoatValue = rec.surface_override.clearcoat;
+                    clearcoatRoughnessValue = rec.surface_override.clearcoat_roughness;
+                    translucentValue = rec.surface_override.translucent;
+                    subsurfaceValue = rec.surface_override.subsurface;
+                    subsurfaceColorValue = rec.surface_override.subsurface_color;
+                    iorValue = rec.surface_override.ior;
                 } else {
                     // Albedo
                     Vec3 alb = pbsdf->getPropertyValue(pbsdf->albedoProperty, uv);
@@ -5006,6 +5439,12 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     metallic = pbsdf->getMetallicValue(uv);
                     specular = pbsdf->getSpecularValue(uv);
                     transmission = pbsdf->getTransmission(uv);
+                    clearcoatValue = pbsdf->clearcoat;
+                    clearcoatRoughnessValue = pbsdf->clearcoatRoughness;
+                    translucentValue = pbsdf->translucent;
+                    subsurfaceValue = pbsdf->subsurface;
+                    subsurfaceColorValue = pbsdf->subsurfaceColor;
+                    iorValue = pbsdf->getIOR();
                 }
 
                 // Terrain normal blending still lives here because it needs the
@@ -5046,7 +5485,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
                 // === WATER WAVE SHADER (CPU) ===
                 // Detect water materials using sheen > 0 (IS_WATER flag)
-                bool is_water = WaterShader::isActiveWater(pbsdf->sheen, transmission);
+                is_water = WaterShader::isActiveWater(pbsdf->sheen, transmission);
 
                 if (is_water) {
                     extern RenderSettings render_settings;
@@ -5159,6 +5598,39 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         albedo = albedo * (1.0f - total_foam) + foam_color * total_foam;
                         roughness = roughness * (1.0f - total_foam) + 0.8f * total_foam; // Foam is rough
                     }
+                }
+
+                if (!is_water && rt_weather_active(world.data.weather)) {
+                    Vec3 weatherAlbedo = toVec3(albedo);
+                    rt_apply_weather_surface(
+                        world.data.weather,
+                        rec.point,
+                        rec.interpolated_normal,
+                        rec.normal,
+                        weatherAlbedo,
+                        roughness,
+                        metallic,
+                        clearcoatValue,
+                        clearcoatRoughnessValue);
+                    rec.interpolated_normal = rt_weather_surface_normal(
+                        world.data.weather,
+                        rec.point,
+                        rec.interpolated_normal,
+                        rec.normal);
+                    N = toVec3f(rec.interpolated_normal);
+                    albedo = toVec3f(weatherAlbedo).clamp(0.0f, 1.0f);
+
+                    rec.surface_override.valid = true;
+                    rec.surface_override.albedo = weatherAlbedo;
+                    rec.surface_override.roughness = roughness;
+                    rec.surface_override.metallic = metallic;
+                    rec.surface_override.transmission = transmission;
+                    rec.surface_override.clearcoat = clearcoatValue;
+                    rec.surface_override.clearcoat_roughness = clearcoatRoughnessValue;
+                    rec.surface_override.translucent = translucentValue;
+                    rec.surface_override.subsurface = subsurfaceValue;
+                    rec.surface_override.subsurface_color = subsurfaceColorValue;
+                    rec.surface_override.ior = iorValue;
                 }
 
                 // NOTE: Emission is now retrieved polymorphically for all materials after scatter
@@ -5434,6 +5906,27 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
     else if (world.data.nishita.fog_enabled && world.data.nishita.fog_density > 0.0f) {
         // Fallback for simple height fog on other modes
         // ... (Optional: could add simple fog here too if needed, but Nishita Parity is the main goal)
+    }
+
+    if (rt_weather_active(world.data.weather)) {
+        float weather_dist = first_hit_t > 0.0f ? first_hit_t : 12000.0f;
+        if (first_vol_t > 0.0f) weather_dist = std::min(weather_dist, first_vol_t);
+        weather_dist *= (1.0f - first_hit_transmission);
+        color = toVec3f(rt_apply_weather_atmosphere(
+            world.data.weather,
+            toVec3(color),
+            r.direction,
+            weather_dist));
+        const float fps = static_cast<float>(render_settings.animation_fps > 0 ? render_settings.animation_fps : 24);
+        const float weather_time = render_settings.realtime_weather_preview
+            ? static_cast<float>(SDL_GetTicks()) / 1000.0f
+            : static_cast<float>(render_settings.animation_current_frame) / fps;
+        color = toVec3f(rt_apply_weather_precipitation_overlay(
+            world.data.weather,
+            toVec3(color),
+            r.direction,
+            weather_dist,
+            weather_time));
     }
 
     // --- Final NaN/Inf check and clamp (matching GPU) ---
@@ -6064,34 +6557,35 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
 
             // ===================================================================
             // ADAPTIVE SAMPLING - Early exit for converged pixels
-            // Same logic as GPU: skip if variance is below threshold AND we have enough samples
-            // ===================================================================
-            // ADAPTIVE SAMPLING - Coefficient of Variation (CV = ?/�) based convergence
-            // Industry standard: relative error is consistent across all brightness levels
+            // Welford running M2 in variance_buffer; convergence by relative standard error
+            // rSE = sqrt(variance / n) / mean_lum  with variance = M2 / (n - 1)
+            // Requires a warmup so the estimator isn't fooled by 1-2 correlated samples
+            // (the single-light NEE failure mode that produced false-converged black dots).
             // ===================================================================
             if (render_settings.use_adaptive_sampling) {
                 Vec4& accum_check = cpu_accumulation_buffer[pixel_index];
                 float prev_samples_check = accum_check.w;
-                float current_variance = cpu_variance_buffer[pixel_index];
+                float M2_check = cpu_variance_buffer[pixel_index];
 
-                // Compute mean luminance for CV calculation
                 float mean_lum_check = 0.2126f * accum_check.x + 0.7152f * accum_check.y + 0.0722f * accum_check.z;
 
-                // Coefficient of Variation: CV = ? / � (relative standard deviation)
-                // This gives consistent convergence across dark and bright regions
-                float cv = (mean_lum_check > 0.00001f) ? std::sqrt(current_variance) / mean_lum_check : 1.0f;
+                constexpr int ADAPTIVE_WARMUP = 4;
+                int effective_min = std::max((int)render_settings.min_samples, ADAPTIVE_WARMUP);
 
-                // OIDN-aware threshold: if denoiser is enabled, we can be more aggressive
-                // OIDN handles low-frequency noise well, so we can stop earlier
                 float effective_threshold = render_settings.variance_threshold;
                 if (render_settings.use_denoiser) {
-                    effective_threshold *= 2.0f;  // OIDN will clean up remaining noise
+                    effective_threshold *= 2.0f;
                 }
 
-                // Check convergence: enough samples AND low relative variance (CV)
-                if (prev_samples_check >= render_settings.min_samples &&
-                    current_variance > 0.0f &&  // Variance must be computed
-                    cv < effective_threshold) {
+                float rel_stderr = 1.0f;
+                if (prev_samples_check >= 2.0f && M2_check > 0.0f && mean_lum_check > 1e-5f) {
+                    float variance = M2_check / (prev_samples_check - 1.0f);
+                    rel_stderr = std::sqrt(variance / prev_samples_check) / mean_lum_check;
+                }
+
+                if (prev_samples_check >= float(effective_min) &&
+                    M2_check > 0.0f &&
+                    rel_stderr < effective_threshold) {
                     // Pixel has converged - skip ray tracing but still write existing color to surface
                     // This ensures the display stays updated even when pixels are skipped
                     Vec3 cached_color(accum_check.x, accum_check.y, accum_check.z);
@@ -6124,6 +6618,8 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
             Vec3 albedo_sum(0.0f);
             Vec3 normal_sum(0.0f);
             int primary_hit_count = 0;
+            float batch_lum_sum = 0.0f;
+            float batch_lum_sq_sum = 0.0f;
 
             // Render samples for this pass in 8-wide packets
             for (int s = 0; s < samples_this_pass; ++s) {
@@ -6136,10 +6632,16 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                 Vec3 primary_normal(0.0f);
                 bool primary_hit = false;
 
-                // Scalar path tracing call
-                color_sum = color_sum + ray_color(
+                Vec3 sample_color = ray_color(
                     r, scene.bvh.get(), scene.lights, scene.background_color, max_depth, 0, scene,
                     &primary_albedo, &primary_normal, &primary_hit);
+                color_sum = color_sum + sample_color;
+
+                if (render_settings.use_adaptive_sampling) {
+                    float sl = 0.2126f * sample_color.x + 0.7152f * sample_color.y + 0.0722f * sample_color.z;
+                    batch_lum_sum += sl;
+                    batch_lum_sq_sum += sl * sl;
+                }
 
                 if (primary_hit) {
                     albedo_sum = albedo_sum + primary_albedo;
@@ -6159,6 +6661,7 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
             // Accumulate with previous samples
             Vec4& accum = cpu_accumulation_buffer[pixel_index];
             float prev_samples = accum.w;
+            float prev_mean_lum = 0.2126f * accum.x + 0.7152f * accum.y + 0.0722f * accum.z;
             Vec3 blended_color = new_color;
             float new_total_samples = float(samples_this_pass);
 
@@ -6214,34 +6717,22 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
             }
 
             // ===================================================================
-            // ADAPTIVE SAMPLING - Variance calculation for next pass decision
-            // ===================================================================
-            // ADAPTIVE SAMPLING - Welford's Online Variance Algorithm
-            // More numerically stable than naive variance calculation
-            // Stores variance (?�), CV is computed at check time as ?/�
+            // ADAPTIVE SAMPLING - Welford M2 update (Chan's parallel merge)
+            // variance_buffer stores M2 = sum of squared deviations from running mean.
+            // var = M2 / (n - 1), stderr = sqrt(var / n).
             // ===================================================================
             if (render_settings.use_adaptive_sampling) {
-                // Compute luminance (Rec.709 weights)
-                auto compute_luminance = [](const Vec3& c) {
-                    return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
-                    };
+                float k = float(samples_this_pass);
+                float batch_mean = batch_lum_sum / k;
+                float batch_M2 = batch_lum_sq_sum - batch_lum_sum * batch_mean;  // = sum(x^2) - k*mean^2
 
-                // new_color = this pass's raw result, blended_color = accumulated mean
-                float new_lum = compute_luminance(new_color);
-                float mean_lum = compute_luminance(blended_color);
-
-                // Welford's online algorithm for running variance
-                // More stable than naive E[X] - E[X] approach
-                float diff = new_lum - mean_lum;
-                float prev_variance = cpu_variance_buffer[pixel_index];
-
-                // Incremental variance update: Var_n = Var_{n-1} + (x - mean) / n - Var_{n-1} / n
-                // Simplified: exponential moving average with decreasing alpha
-                float alpha = 1.0f / std::max(new_total_samples, 2.0f);
-                float updated_variance = prev_variance * (1.0f - alpha) + (diff * diff) * alpha;
-
-                // Clamp to prevent numerical issues (very bright fireflies)
-                cpu_variance_buffer[pixel_index] = std::clamp(updated_variance, 0.0f, 100.0f);
+                float prev_M2 = cpu_variance_buffer[pixel_index];
+                float delta = batch_mean - prev_mean_lum;
+                float combined_M2 = prev_M2 + batch_M2;
+                if (prev_samples > 0.0f) {
+                    combined_M2 += delta * delta * (prev_samples * k) / new_total_samples;
+                }
+                cpu_variance_buffer[pixel_index] = std::clamp(combined_M2, 0.0f, 1.0e8f);
             }
 
             // Use blended color for display
@@ -6833,21 +7324,13 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
             // Copy water-specific GPU params (live in GpuMaterial, not duplicated in PrincipledBSDF)
             if (mat->gpuMaterial) {
                 const auto& gm = *mat->gpuMaterial;
-                data.micro_detail_strength = gm.micro_detail_strength;
-                data.micro_detail_scale    = gm.micro_detail_scale;
-                data.tile_break_strength   = gm.tile_break_strength;
-                data.foam_threshold        = gm.foam_threshold;
-                data.fft_ocean_size        = gm.fft_ocean_size;
-                data.fft_choppiness        = gm.fft_choppiness;
-                data.fft_wind_speed        = gm.fft_wind_speed;
-                data.fft_wind_direction    = gm.fft_wind_direction;
-                data.fft_amplitude         = gm.fft_amplitude;
-                data.fft_time_scale        = gm.fft_time_scale;
-                data.micro_anim_speed      = gm.micro_anim_speed;
-                data.micro_morph_speed     = gm.micro_morph_speed;
-                data.foam_noise_scale      = gm.foam_noise_scale;
                 if ((gm.flags & GPU_MAT_FLAG_WATER) != 0 || gm.sheen > 0.0001f) {
-                    data.flags |= Backend::IBackend::MAT_FLAG_WATER;
+                    WaterShader::SurfaceParams surfaceParams = WaterShader::surfaceParamsFromGpuMaterial(gm);
+                    WaterShader::applySurfaceParamsToBackendMaterialData(surfaceParams, data);
+                } else {
+                    data.micro_detail_strength = gm.micro_detail_strength;
+                    data.micro_detail_scale    = gm.micro_detail_scale;
+                    data.tile_break_strength   = gm.tile_break_strength;
                 }
             }
 
@@ -6971,21 +7454,13 @@ void Renderer::updateBackendMaterial(SceneData& scene, uint16_t material_id, Bac
 
     if (mat->gpuMaterial) {
         const auto& gm = *mat->gpuMaterial;
-        data.micro_detail_strength = gm.micro_detail_strength;
-        data.micro_detail_scale    = gm.micro_detail_scale;
-        data.tile_break_strength   = gm.tile_break_strength;
-        data.foam_threshold        = gm.foam_threshold;
-        data.fft_ocean_size        = gm.fft_ocean_size;
-        data.fft_choppiness        = gm.fft_choppiness;
-        data.fft_wind_speed        = gm.fft_wind_speed;
-        data.fft_wind_direction    = gm.fft_wind_direction;
-        data.fft_amplitude         = gm.fft_amplitude;
-        data.fft_time_scale        = gm.fft_time_scale;
-        data.micro_anim_speed      = gm.micro_anim_speed;
-        data.micro_morph_speed     = gm.micro_morph_speed;
-        data.foam_noise_scale      = gm.foam_noise_scale;
         if ((gm.flags & GPU_MAT_FLAG_WATER) != 0 || gm.sheen > 0.0001f) {
-            data.flags |= Backend::IBackend::MAT_FLAG_WATER;
+            WaterShader::SurfaceParams surfaceParams = WaterShader::surfaceParamsFromGpuMaterial(gm);
+            WaterShader::applySurfaceParamsToBackendMaterialData(surfaceParams, data);
+        } else {
+            data.micro_detail_strength = gm.micro_detail_strength;
+            data.micro_detail_scale    = gm.micro_detail_scale;
+            data.tile_break_strength   = gm.tile_break_strength;
         }
     }
 

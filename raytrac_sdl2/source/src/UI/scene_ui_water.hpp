@@ -102,8 +102,6 @@ void rebuildWaterSceneMutation(UIContext& ctx, bool updateMaterials) {
     }
     if (waterRenderBackendIsVulkan(ctx)) {
         g_vulkan_rebuild_pending = true;
-    } else if (getWaterRenderBackend(ctx)) {
-        g_optix_rebuild_pending = true;
     }
     
     // Force global scene geometry updates for Vulkan Raster backend when water is created/updated
@@ -816,6 +814,7 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                         WaterManager::getInstance().cacheOriginalPositions(&surf);
 
                         rebuildWaterSceneMutation(ctx, false);
+                        syncWaterMaterialPreview(ctx, surf);
                     }
                 } else {
                     ImGui::TextDisabled("Enable to use physical mesh displacement");
@@ -849,4 +848,3 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
 }
 
 #endif
-

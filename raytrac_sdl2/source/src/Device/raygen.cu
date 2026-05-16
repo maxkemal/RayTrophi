@@ -40,16 +40,27 @@ extern "C" __global__ void __raygen__rg() {
     if (optixLaunchParams.use_adaptive_sampling && accum_buffer != nullptr && variance_buffer != nullptr) {
         float4 prev = accum_buffer[pixel_index];
         float prev_samples = prev.w;
-        float current_variance = variance_buffer[pixel_index];
+        float M2 = variance_buffer[pixel_index];
         float mean_lum = compute_luminance(make_float3(prev.x, prev.y, prev.z));
-        float cv = (mean_lum > 0.00001f) ? sqrtf(current_variance) / mean_lum : 1.0f;
+
+        const int ADAPTIVE_WARMUP = 4;
+        int effective_min = optixLaunchParams.min_samples > ADAPTIVE_WARMUP
+            ? optixLaunchParams.min_samples : ADAPTIVE_WARMUP;
+
         float effective_threshold = optixLaunchParams.variance_threshold;
         if (optixLaunchParams.use_denoiser) {
             effective_threshold *= 2.0f;
         }
-        if (prev_samples >= optixLaunchParams.min_samples && 
-            current_variance > 0.0f && 
-            cv < effective_threshold) {
+
+        float rel_stderr = 1.0f;
+        if (prev_samples >= 2.0f && M2 > 0.0f && mean_lum > 1e-5f) {
+            float variance = M2 / (prev_samples - 1.0f);
+            rel_stderr = sqrtf(variance / prev_samples) / mean_lum;
+        }
+
+        if (prev_samples >= float(effective_min) &&
+            M2 > 0.0f &&
+            rel_stderr < effective_threshold) {
             float3 prev_color = make_float3(prev.x, prev.y, prev.z);
             // Apply exposure to converged pixels too
             optixLaunchParams.framebuffer[pixel_index] = make_color(prev_color * optixLaunchParams.camera.exposure_factor);
@@ -71,8 +82,11 @@ extern "C" __global__ void __raygen__rg() {
     float3 albedo_sum = make_float3(0.0f, 0.0f, 0.0f);
     float3 normal_sum = make_float3(0.0f, 0.0f, 0.0f);
     int primary_hits = 0;
+    float batch_lum_sum = 0.0f;
+    float batch_lum_sq_sum = 0.0f;
 
     for (int s = 0; s < samples_this_pass; ++s) {
+        float3 prev_color_sum = color_sum;
         float u = (i + pcg_float(&pcg_rng)) / float(optixLaunchParams.image_width);
         float v = (j + pcg_float(&pcg_rng)) / float(optixLaunchParams.image_height);
         float3 primary_albedo = make_float3(0.0f);
@@ -104,15 +118,26 @@ extern "C" __global__ void __raygen__rg() {
             normal_sum += primary_normal * 0.5f + make_float3(0.5f, 0.5f, 0.5f);
             primary_hits++;
         }
+
+        if (optixLaunchParams.use_adaptive_sampling) {
+            float3 this_sample = color_sum - prev_color_sum;
+            float sl = compute_luminance(this_sample);
+            batch_lum_sum += sl;
+            batch_lum_sq_sum += sl * sl;
+        }
     }
 
     float3 new_color = color_sum / float(samples_this_pass);
     float3 blended_color = new_color;
     float new_total_samples = float(samples_this_pass);
-    
+    float prev_samples_for_variance = 0.0f;
+    float prev_mean_lum_for_variance = 0.0f;
+
     if (accum_buffer != nullptr) {
         float4 prev = accum_buffer[pixel_index];
         float prev_samples = prev.w;
+        prev_samples_for_variance = prev_samples;
+        prev_mean_lum_for_variance = compute_luminance(make_float3(prev.x, prev.y, prev.z));
         if (prev_samples > 0.0f) {
             new_total_samples = prev_samples + samples_this_pass;
             float3 prev_color = make_float3(prev.x, prev.y, prev.z);
@@ -148,13 +173,17 @@ extern "C" __global__ void __raygen__rg() {
     }
     
     if (optixLaunchParams.use_adaptive_sampling && variance_buffer != nullptr) {
-        float new_lum = compute_luminance(new_color);
-        float mean_lum = compute_luminance(blended_color);
-        float diff = new_lum - mean_lum;
-        float prev_variance = variance_buffer[pixel_index];
-        float alpha = 1.0f / fmaxf(new_total_samples, 2.0f);
-        float updated_variance = prev_variance * (1.0f - alpha) + (diff * diff) * alpha;
-        variance_buffer[pixel_index] = fminf(fmaxf(updated_variance, 0.0f), 100.0f);
+        float k = float(samples_this_pass);
+        float batch_mean = batch_lum_sum / k;
+        float batch_M2 = batch_lum_sq_sum - batch_lum_sum * batch_mean;
+
+        float prev_M2 = variance_buffer[pixel_index];
+        float delta = batch_mean - prev_mean_lum_for_variance;
+        float combined_M2 = prev_M2 + batch_M2;
+        if (prev_samples_for_variance > 0.0f) {
+            combined_M2 += delta * delta * (prev_samples_for_variance * k) / new_total_samples;
+        }
+        variance_buffer[pixel_index] = fminf(fmaxf(combined_M2, 0.0f), 1.0e8f);
     }
     
     // Apply exposure only for display

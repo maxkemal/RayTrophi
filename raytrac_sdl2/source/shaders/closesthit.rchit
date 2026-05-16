@@ -221,10 +221,12 @@ vec2 applyMaterialUVTransform(Material mat, vec2 originalUV) {
 }
 
 struct LightData {
-    vec4 position;    // xyz + type (0=point, 1=dir)
+    vec4 position;    // xyz + type (0=point, 1=dir, 2=area, 3=spot)
     vec4 color;       // rgb + intensity
     vec4 params;      // radius, width, height, inner_angle
     vec4 direction;   // xyz + outer_angle
+    vec4 area_u;      // xyz: AreaLight u-axis (unit)
+    vec4 area_v;      // xyz: AreaLight v-axis (unit)
 };
 
 struct VkGeometryData {
@@ -312,6 +314,7 @@ struct VkWorldDataExtended {
     float fogDistance;
     float fogSunScatter;
     vec3  fogColor;
+    float _pad4;
     
     // ════════════════════════════ GOD RAYS (16 bytes)
     int   godRaysEnabled;
@@ -320,10 +323,30 @@ struct VkWorldDataExtended {
     int   godRaysSamples;
     
     // ════════════════════════════ ENVIRONMENT & LUT REFS (32 bytes)
+    int   aerialEnabled;
+    float aerialMinDistance;
+    float aerialMaxDistance;
+    float _pad5_aerial;
+
+    int   weatherEnabled;
+    int   weatherType;
+    float weatherIntensity;
+    float weatherDensity;
+    vec3  weatherWindDirection;
+    float weatherWindSpeed;
+    float weatherPrecipitationScale;
+    float weatherVisibility;
+    float weatherSurfaceWetness;
+    float weatherSurfaceAccumulation;
+    float weatherSurfaceSettling;
+    float weatherSurfaceHeight;
+    int   weatherVisualMode;
+    int   weatherSurfaceResponseEnabled;
+
     int   envTexSlot;
     float envIntensity;
     float envRotation;
-    int   _pad5;
+    int   _pad5;                 // nishitaLutReady: Vulkan binding 8 has valid LUT samplers
     uvec2 transmittanceLUT;      // 64-bit handle as uvec2
     uvec2 skyviewLUT;            // 64-bit handle as uvec2
     uvec2 multiScatterLUT;       // 64-bit handle as uvec2
@@ -817,8 +840,13 @@ bool sample_light_direction_gl(const LightData light, vec3 hit_pos, float rand_u
         return true;
     } else if (type == 1) {
         vec3 L = normalize(light.direction.xyz);
-        vec3 tangent = normalize(cross(L, vec3(0.0,1.0,0.0)));
-        if (length(tangent) < 1e-6) tangent = normalize(cross(L, vec3(1.0,0.0,0.0)));
+        // Build tangent frame: check raw cross product BEFORE normalize.
+        // normalize(zero) is undefined (often NaN) and NaN<threshold is false → fallback would never fire.
+        vec3 tangent_raw = cross(L, vec3(0.0, 1.0, 0.0));
+        if (dot(tangent_raw, tangent_raw) < 1e-6) {
+            tangent_raw = cross(L, vec3(1.0, 0.0, 0.0));
+        }
+        vec3 tangent = normalize(tangent_raw);
         vec3 bitangent = normalize(cross(L, tangent));
         float r = sqrt(rand_u) * light.params.x;
         float phi = 2.0 * 3.14159265 * rand_v;
@@ -829,14 +857,15 @@ bool sample_light_direction_gl(const LightData light, vec3 hit_pos, float rand_u
         distance = 1e8;
         return true;
     } else if (type == 2) {
+        // Area: random point on rectangle using AreaLight's true u/v axes (parity with OptiX/CPU)
         float u_off = (rand_u - 0.5) * light.params.y;
         float v_off = (rand_v - 0.5) * light.params.z;
-        vec3 light_sample = light.position.xyz + light.direction.xyz * u_off + vec3(0.0); // area_u/area_v not stored; approximate
+        vec3 light_sample = light.position.xyz + light.area_u.xyz * u_off + light.area_v.xyz * v_off;
         vec3 L = light_sample - hit_pos;
         distance = length(L);
         if (distance < 1e-3) return false;
         wi = L / distance;
-        vec3 light_normal = normalize(cross(light.direction.xyz, vec3(0.0,1.0,0.0)));
+        vec3 light_normal = normalize(cross(light.area_u.xyz, light.area_v.xyz));
         float cos_light = max(dot(-wi, light_normal), 0.0);
         attenuation = cos_light / (distance * distance);
         return true;
@@ -1171,10 +1200,13 @@ void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool fr
     
     vec3 outNormal = shadingNormal;
 
-    // Use GGX microfacet normal if surface is rough
-    if (roughness >= 0.01) {
+    // Fade in GGX microfacet normals instead of switching abruptly at 0.01.
+    if (roughness > 0.0005) {
         vec3 V = -rayDir;
-        outNormal = ggxSampleHemisphere(shadingNormal, V, roughness, seed);
+        float sampleRoughness = max(roughness, 0.02);
+        float roughBlend = smoothstep(0.0, 0.02, roughness);
+        vec3 sampledNormal = ggxSampleHemisphere(shadingNormal, V, sampleRoughness, seed);
+        outNormal = normalize(mix(shadingNormal, sampledNormal, roughBlend));
     }
 
     // Fresnel ve TIR kararı için makro normal kullan (OptiX ile aynı).
@@ -1470,6 +1502,204 @@ bool estimateWaterDepthGL(vec3 hitPos, float maxDepth, out float waterDepth, out
     return found;
 }
 
+bool weatherActive() {
+    return worldData.w.weatherEnabled != 0 && worldData.w.weatherType != 0 &&
+           worldData.w.weatherIntensity > 0.0 && worldData.w.weatherDensity > 0.0;
+}
+
+bool weatherSurfaceActive() {
+    if (worldData.w.weatherEnabled == 0 || worldData.w.weatherType == 0 ||
+        worldData.w.weatherSurfaceResponseEnabled == 0) {
+        return false;
+    }
+
+    float surfaceSignal = 0.0;
+    if (worldData.w.weatherType == 1) {
+        surfaceSignal = worldData.w.weatherSurfaceWetness;
+    } else if (worldData.w.weatherType == 2 || worldData.w.weatherType == 3) {
+        surfaceSignal = worldData.w.weatherSurfaceAccumulation;
+    }
+
+    return surfaceSignal > 0.001 || (worldData.w.weatherIntensity > 0.0 && worldData.w.weatherDensity > 0.0);
+}
+
+float weatherSurfaceGeometricSupport(vec3 supportNormal) {
+    vec3 macroNormal = safeNormalize(supportNormal, vec3(0.0, 1.0, 0.0));
+    float support = 0.0;
+    if (worldData.w.weatherType == 2) {
+        support = clamp((macroNormal.y - 0.02) / 0.72, 0.0, 1.0);
+        support *= support;
+    } else {
+        support = clamp((macroNormal.y - 0.02) / 0.78, 0.0, 1.0);
+    }
+    return support * support * (3.0 - 2.0 * support);
+}
+
+float weatherSurfaceExposure(vec3 hitPos, vec3 normal) {
+    float upMask = smoothstep(0.12, 0.90, normal.y);
+    float windAmount = clamp(worldData.w.weatherWindSpeed / 35.0, 0.0, 1.0);
+    vec3 windRaw = worldData.w.weatherWindDirection;
+    vec3 windDir = (dot(windRaw, windRaw) > 1e-8) ? normalize(windRaw) : vec3(1.0, 0.0, 0.0);
+    vec3 incoming = normalize(vec3(0.0, 1.0, 0.0) - windDir * windAmount);
+    float windFacing = clamp(dot(safeNormalize(normal, vec3(0.0, 1.0, 0.0)), incoming), 0.0, 1.0);
+    float exposure = clamp(upMask * (1.0 - windAmount * 0.78) + windFacing * (0.12 + windAmount * 1.22), 0.0, 1.0);
+    float scale = max(worldData.w.weatherPrecipitationScale, 0.1);
+    float n = water_fbm(hitPos.xz * scale * 0.18 + vec2(13.1, 47.2)) * 0.5 + 0.5;
+    float breakup = clamp(n * 1.35 - 0.18, 0.0, 1.0);
+    return exposure * mix(0.45, 1.0, breakup);
+}
+
+float weatherSurfaceSettling(vec3 hitPos, vec3 normal, vec3 supportNormal);
+
+float weatherSurfaceAccumulation(vec3 hitPos, vec3 normal, vec3 supportNormal) {
+    if (worldData.w.weatherType != 2 && worldData.w.weatherType != 3) {
+        return 0.0;
+    }
+
+    float baseAccum = clamp(worldData.w.weatherSurfaceAccumulation, 0.0, 1.0);
+    float intensity = clamp(worldData.w.weatherIntensity, 0.0, 1.0);
+    float density = clamp(worldData.w.weatherDensity, 0.0, 1.0);
+    float geomSupport = weatherSurfaceGeometricSupport(supportNormal);
+    float intensityResponse = 0.80 + intensity * 0.70;
+    float densityResponse = 0.35 + density * 1.15;
+    float typeBoost = (worldData.w.weatherType == 2) ? 1.10 : 0.90;
+    float directAccum = baseAccum * intensityResponse * weatherSurfaceExposure(hitPos, normal) * densityResponse * typeBoost * geomSupport;
+    float settling = weatherSurfaceSettling(hitPos, normal, supportNormal);
+    return clamp(directAccum + (1.0 - clamp(directAccum, 0.0, 1.0)) * settling, 0.0, 1.0);
+}
+
+float weatherSurfaceSettling(vec3 hitPos, vec3 normal, vec3 supportNormal) {
+    if (worldData.w.weatherType != 2 && worldData.w.weatherType != 3) {
+        return 0.0;
+    }
+
+    float settlingAmount = clamp(worldData.w.weatherSurfaceSettling, 0.0, 1.0);
+    if (settlingAmount <= 1e-4) {
+        return 0.0;
+    }
+
+    vec3 shadingNormal = safeNormalize(normal, vec3(0.0, 1.0, 0.0));
+    vec3 macroNormal = safeNormalize(supportNormal, shadingNormal);
+    float support = weatherSurfaceGeometricSupport(supportNormal);
+    float supportGate = clamp((support - 0.02) / 0.58, 0.0, 1.0);
+    if (supportGate <= 1e-4) {
+        return 0.0;
+    }
+    float exposure = weatherSurfaceExposure(hitPos, shadingNormal);
+    float cavity = clamp((1.0 - dot(shadingNormal, macroNormal)) * 3.8 + (1.0 - support) * 0.10, 0.0, 1.0);
+    vec3 windFlat = vec3(worldData.w.weatherWindDirection.x, 0.0, worldData.w.weatherWindDirection.z);
+    vec3 leeDir = dot(windFlat, windFlat) > 1e-8 ? safeNormalize(vec3(-windFlat.x, 0.28, -windFlat.z), vec3(0.0, 1.0, 0.0)) : vec3(0.0, 1.0, 0.0);
+    float lee = clamp(dot(macroNormal, leeDir) * 0.85 + cavity * 0.35, 0.0, 1.0);
+    float shelter = clamp((1.0 - exposure) * 0.52 + cavity * 0.26 + (1.0 - support) * 0.22 + lee * 0.42, 0.0, 1.0);
+    float pocketNoise = pd_vnoise3(hitPos * 0.085 + vec3(31.4, 9.7, 54.2));
+    float pocketMask = clamp(cavity * 0.92 + pocketNoise * 0.26, 0.0, 1.0);
+    float slopeBase = clamp((support - 0.16) / 0.54, 0.0, 1.0);
+    float density = clamp(worldData.w.weatherDensity, 0.0, 1.0);
+    float typeBoost = (worldData.w.weatherType == 2) ? 1.34 : 1.04;
+    float anchor = max(pocketMask, slopeBase * 0.30 + cavity * 0.40 + lee * 0.30);
+    return clamp(settlingAmount * supportGate * shelter * anchor * (0.76 + density * 1.10) * typeBoost, 0.0, 1.0);
+}
+
+float weatherSurfaceHeight(vec3 hitPos) {
+    float scale = max(worldData.w.weatherPrecipitationScale, 0.1);
+    float heightBoost = 0.25 + clamp(worldData.w.weatherSurfaceHeight, 0.0, 1.0) * 3.75;
+    if (worldData.w.weatherType == 2) {
+        vec2 windXZ = worldData.w.weatherWindDirection.xz;
+        float windLen = length(windXZ);
+        vec2 along = windLen > 1e-4 ? windXZ / windLen : vec2(1.0, 0.0);
+        vec2 across = vec2(-along.y, along.x);
+        vec2 uv = vec2(dot(hitPos.xz, along), dot(hitPos.xz, across));
+        vec3 p = vec3(uv.x * scale * 0.12, hitPos.y * scale * 0.03, uv.y * scale * 0.12);
+        float broad = pd_vnoise3(p * 0.55 + vec3(17.3, 9.1, 41.7));
+        float drift = 1.0 - abs(pd_vnoise3(vec3(p.x * 1.45, p.y * 0.8, p.z * 0.58) + vec3(3.7, 29.4, 11.8)) * 2.0 - 1.0);
+        drift *= drift;
+        float clumps = 1.0 - abs(pd_vnoise3(p * 2.90 + vec3(61.2, 7.5, 18.9)) * 2.0 - 1.0);
+        float micro = pd_vnoise3(p * 7.40 + vec3(8.3, 51.7, 27.4));
+        return (broad * 0.22 + drift * 0.36 + clumps * 0.27 + micro * 0.15) * heightBoost;
+    }
+
+    vec3 p = hitPos * (scale * 0.18);
+    float wisps = pd_vnoise3(p + vec3(19.7, 5.3, 27.1));
+    float grain = pd_vnoise3(p * 2.85 + vec3(4.1, 37.8, 12.4));
+    float streak = pd_vnoise3(p * 1.65 + vec3(44.5, 14.2, 7.6));
+    return (wisps * 0.30 + grain * 0.45 + streak * 0.25) * heightBoost;
+}
+
+vec3 weatherSurfaceNormal(vec3 hitPos, vec3 normal, vec3 supportNormal) {
+    vec3 baseNormal = safeNormalize(normal, vec3(0.0, 1.0, 0.0));
+    if (!weatherSurfaceActive()) return baseNormal;
+    if (worldData.w.weatherType != 2 && worldData.w.weatherType != 3) return baseNormal;
+
+    float accumulation = weatherSurfaceAccumulation(hitPos, baseNormal, supportNormal);
+    if (accumulation <= 1e-4) return baseNormal;
+
+    float geomSupport = weatherSurfaceGeometricSupport(supportNormal);
+    if (geomSupport <= 1e-4) return baseNormal;
+
+    float settling = weatherSurfaceSettling(hitPos, baseNormal, supportNormal);
+    float detailCapture = 0.45 + 0.55 * clamp((baseNormal.y - 0.04) / 0.82, 0.0, 1.0);
+    float heightResponse = 0.12 + clamp(worldData.w.weatherSurfaceHeight, 0.0, 1.0) * 0.95;
+    float buildup = clamp(accumulation + settling * 0.85, 0.0, 1.0);
+    float normalStrength = buildup * detailCapture * heightResponse * (worldData.w.weatherType == 2 ? 0.42 : 0.15);
+    if (normalStrength <= 1e-4) return baseNormal;
+
+    vec3 wind = worldData.w.weatherWindDirection;
+    vec3 tangent = wind - baseNormal * dot(wind, baseNormal);
+    if (dot(tangent, tangent) <= 1e-8) {
+        vec3 helper = abs(baseNormal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        tangent = cross(helper, baseNormal);
+    }
+    tangent = safeNormalize(tangent, vec3(1.0, 0.0, 0.0));
+    vec3 bitangent = safeNormalize(cross(baseNormal, tangent), vec3(0.0, 0.0, 1.0));
+    tangent = safeNormalize(cross(bitangent, baseNormal), tangent);
+
+    float sampleStep = (worldData.w.weatherType == 2 ? 0.62 : 0.90) / max(worldData.w.weatherPrecipitationScale, 0.35);
+    float heightCenter = weatherSurfaceHeight(hitPos);
+    float heightT = weatherSurfaceHeight(hitPos + tangent * sampleStep);
+    float heightB = weatherSurfaceHeight(hitPos + bitangent * sampleStep);
+    float gradT = clamp((heightT - heightCenter) / sampleStep, -0.28, 0.28);
+    float gradB = clamp((heightB - heightCenter) / sampleStep, -0.28, 0.28);
+
+    vec3 perturbed = safeNormalize(baseNormal - tangent * (gradT * normalStrength) - bitangent * (gradB * normalStrength), baseNormal);
+    if (dot(perturbed, baseNormal) < 0.05) {
+        perturbed = safeNormalize(mix(baseNormal, perturbed, 0.35), baseNormal);
+    }
+    if (dot(perturbed, supportNormal) < 0.55) {
+        perturbed = safeNormalize(mix(supportNormal, perturbed, 0.05), supportNormal);
+    }
+    return perturbed;
+}
+
+void applyWeatherSurface(vec3 hitPos, vec3 normal, vec3 supportNormal, inout vec3 albedo, inout float roughness, inout float metallic) {
+    if (!weatherSurfaceActive()) return;
+
+    float exposed = weatherSurfaceExposure(hitPos, normal);
+
+    if (worldData.w.weatherType == 1) {
+        float wet = clamp(worldData.w.weatherSurfaceWetness, 0.0, 1.0) *
+                    mix(0.35, 1.0, exposed);
+        albedo = mix(albedo, albedo * 0.50, wet * 0.62);
+        roughness = max(0.012, roughness * (1.0 - wet * 0.78));
+        metallic = max(0.0, metallic - wet * 0.05);
+    } else if (worldData.w.weatherType == 2) {
+        float acc = weatherSurfaceAccumulation(hitPos, normal, supportNormal);
+        float settling = weatherSurfaceSettling(hitPos, normal, supportNormal);
+        float heightLift = clamp(worldData.w.weatherSurfaceHeight, 0.0, 1.0);
+        float cover = clamp(acc + settling * 0.84 + heightLift * (acc * 0.08 + settling * 0.30), 0.0, 1.0);
+        albedo = mix(albedo, vec3(0.88, 0.91, 0.96), cover * 0.72);
+        roughness = min(1.0, roughness + cover * (0.45 + heightLift * 0.10));
+        metallic *= (1.0 - cover * 0.8);
+    } else if (worldData.w.weatherType == 3) {
+        float acc = weatherSurfaceAccumulation(hitPos, normal, supportNormal);
+        float settling = weatherSurfaceSettling(hitPos, normal, supportNormal);
+        float heightLift = clamp(worldData.w.weatherSurfaceHeight, 0.0, 1.0);
+        float cover = clamp(acc + settling * 0.90 + heightLift * settling * 0.22, 0.0, 1.0);
+        albedo = mix(albedo, vec3(0.58, 0.46, 0.30), cover * 0.55);
+        roughness = min(1.0, roughness + cover * (0.35 + heightLift * 0.08));
+        metallic *= (1.0 - cover * 0.55);
+    }
+}
+
 // --- Multi-octave Gerstner waves (8 waves, matches CPU/CUDA impl) ---
 void evaluateWaterGerstner(vec3 pos, float time,
                            float speed_mult, float strength_mult, float freq_mult,
@@ -1640,13 +1870,10 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
     float tDepth   = 1.0 - cosNV;  // grazing angle → deeper look
 
     // ── Blend foam (white crest) ─────────────────────────────────
-    // CPU parity: foam tint goes only into the glass scatter color (alongside
-    // deep_color), it is NOT multiplied into payload.attenuation.
-    // Previously this multiplied finalAlbedo (depth+foam blended water_color)
-    // into the throughput AND passed vec3(1.0) to scatterGlass — which is the
-    // opposite of CPU PrincipledBSDF::scatter, where Dielectric receives the
-    // constant deep_color as tint and there is no separate throughput modulation.
-    vec3 transmissionTint = mix(deep_color, vec3(0.92, 0.95, 1.0), clamp(totalFoam, 0.0, 0.85));
+    // CPU parity: foam/depth color is for visible BRDF/direct albedo only.
+    // PrincipledBSDF::scatter sends the constant water material albedo
+    // (deep_color) into Dielectric, so refraction tint must not vary with foam.
+    vec3 transmissionTint = deep_color;
     bool waterFrontFace = dot(rayDir, shadingNormal) < 0.0;
     scatterGlass(hitPos, shadingNormal, shadingNormal, waterFrontFace, rayDir, transmissionTint, ior, mix(roughness, 0.8, totalFoam), seed);
 }
@@ -2026,6 +2253,8 @@ if (emissionTexID > 0) {
                           0.0, 1.0);
     }
 
+    vec3 weatherMacroNormal = worldNormal;
+
     // Apply normal map if present (perturb surface normal)
     int normalTexID = int(mat.normal_tex);
     bool isWaterMaterial = ((mat.flags & MAT_FLAG_WATER) != 0u) || mat.sheen > 0.001;
@@ -2073,6 +2302,11 @@ if (emissionTexID > 0) {
         }
     }
 
+    vec3 weatherSupportNormal = safeNormalize(mix(weatherMacroNormal, tangentNormal, 0.85), weatherMacroNormal);
+    applyWeatherSurface(hitPos, tangentNormal, weatherSupportNormal, albedo, roughness, metallic);
+    roughness = clamp(roughness, 0.0, 1.0);
+    metallic = clamp(metallic, 0.0, 1.0);
+
     if (payload.primaryHit == 0u) {
         payload.primaryAlbedo = albedo;
         payload.primaryNormal = worldNormal;
@@ -2081,6 +2315,7 @@ if (emissionTexID > 0) {
         payload.primaryMetallic = metallic;
     }
     worldNormal = tangentNormal;
+    worldNormal = weatherSurfaceNormal(hitPos, worldNormal, weatherSupportNormal);
 
     // ----------------------------------------------------------
     // IS_WATER fast path. Prefer the explicit material flag, keep sheen as legacy fallback.
@@ -2284,6 +2519,11 @@ if (emissionTexID > 0) {
     // ----------------------------------------------------------
     float clearcoat         = clamp(mat.clearcoat, 0.0, 1.0);
     float clearcoatRoughness = clamp(mat.clearcoat_roughness, 0.001, 1.0);
+    if (weatherSurfaceActive() && worldData.w.weatherType == 1) {
+        float wet = clamp(worldData.w.weatherSurfaceWetness, 0.0, 1.0);
+        clearcoat = max(clearcoat, wet * 0.72);
+        clearcoatRoughness = min(clearcoatRoughness, max(0.006, 0.045 - wet * 0.030));
+    }
     float translucent        = clamp(mat.translucent, 0.0, 1.0);
     float subsurfaceAmount   = clamp(mat.subsurface_amount, 0.0, 1.0);
     vec3  subsurfaceColor    = max(vec3(mat.subsurface_r, mat.subsurface_g, mat.subsurface_b), vec3(0.001));

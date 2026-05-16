@@ -514,12 +514,10 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
                 }
             }
             else if (item.type == SelectableType::Light && item.light) {
-                Vec3 lightPos = item.light->position;
-                float boxSize = 0.15f; // K���lt�ld�: 0.5 -> 0.15
-                bb_min = Vec3(lightPos.x - boxSize, lightPos.y - boxSize, lightPos.z - boxSize);
-                bb_max = Vec3(lightPos.x + boxSize, lightPos.y + boxSize, lightPos.z + boxSize);
-                has_bounds = true;
-                color = is_primary ? IM_COL32(255, 255, 100, 255) : IM_COL32(200, 200, 80, 180);
+                // No bbox helper for lights — drawLightGizmos already renders
+                // a type-specific icon (circle/sun/cone/rectangle) that highlights
+                // when selected, so an extra wireframe cube is redundant.
+                has_bounds = false;
             }
             else if (item.type == SelectableType::Camera && item.camera) {
                 Vec3 camPos = item.camera->lookfrom;
@@ -713,6 +711,23 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
             draw_list->AddCircle(center, 12.0f, col, 0, 2.0f);
             // \u0130nce i\u00e7 halka (derinlik etkisi i\u00e7in)
             draw_list->AddCircle(center, 8.0f, IM_COL32(255, 220, 100, 120), 0, 1.0f);
+
+            // World-space radius ring (soft-shadow sphere visualization)
+            if (light->radius > 0.001f) {
+                // Project a screen-aligned circle centered on the light position
+                Vec3 rOffset = cam_right * light->radius;
+                ImVec2 rEdge = Project(pos + rOffset);
+                if (IsOnScreen(rEdge)) {
+                    float px = sqrtf((rEdge.x - center.x) * (rEdge.x - center.x) +
+                                     (rEdge.y - center.y) * (rEdge.y - center.y));
+                    if (px > 4.0f) {
+                        ImU32 ringCol = selected
+                            ? IM_COL32(255, 200, 80, 200)
+                            : IM_COL32(255, 220, 100, 110);
+                        draw_list->AddCircle(center, px, ringCol, 48, 1.5f);
+                    }
+                }
+            }
         }
 
         // ---- DIRECTIONAL (Sun + Arrow) ----

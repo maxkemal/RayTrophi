@@ -515,6 +515,52 @@ void AddLightCommand::undo(UIContext& ctx) {
     SCENE_LOG_INFO("Undo: Removed Light");
 }
 
+// ============================================================================
+// CHANGE LIGHT TYPE COMMAND - Replace a light at index with a different-typed one
+// ============================================================================
+namespace {
+    void applyLightTypeSwap(UIContext& ctx,
+                            size_t index,
+                            const std::shared_ptr<Light>& from,
+                            const std::shared_ptr<Light>& to) {
+        auto& lights = ctx.scene.lights;
+        if (index < lights.size() && lights[index] == from) {
+            lights[index] = to;
+        } else {
+            // Index drifted (light added/removed elsewhere) — fall back to a search
+            for (size_t i = 0; i < lights.size(); ++i) {
+                if (lights[i] == from) { lights[i] = to; break; }
+            }
+        }
+
+        if (ctx.selection.selected.type == SelectableType::Light &&
+            ctx.selection.selected.light == from) {
+            ctx.selection.selected.light = to;
+        }
+
+        if (ctx.backend_ptr) {
+            ctx.backend_ptr->setLights(ctx.scene.lights);
+            ctx.backend_ptr->resetAccumulation();
+        }
+        if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
+            g_viewport_backend->setLights(ctx.scene.lights);
+            g_viewport_backend->resetAccumulation();
+        }
+        ctx.renderer.resetCPUAccumulation();
+        ctx.start_render = true;
+    }
+}
+
+void ChangeLightTypeCommand::execute(UIContext& ctx) {
+    applyLightTypeSwap(ctx, index_, old_light_, new_light_);
+    SCENE_LOG_INFO("Redo: Change Light Type");
+}
+
+void ChangeLightTypeCommand::undo(UIContext& ctx) {
+    applyLightTypeSwap(ctx, index_, new_light_, old_light_);
+    SCENE_LOG_INFO("Undo: Change Light Type");
+}
+
 namespace {
 
 bool inferSquareDimensions(size_t pixel_count, int& width, int& height) {

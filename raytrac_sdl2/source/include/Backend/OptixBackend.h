@@ -41,6 +41,7 @@ public:
     void updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) override;
 
     void uploadMaterials(const std::vector<MaterialData>& materials) override;
+    bool updateMaterial(uint32_t materialIndex, const MaterialData& material) override;
     void uploadHairMaterials(const std::vector<HairMaterialData>& materials) override;
     
     int64_t uploadTexture2D(const void* data, uint32_t width, uint32_t height, uint32_t channels, bool sRGB, bool isFloat = false) override;

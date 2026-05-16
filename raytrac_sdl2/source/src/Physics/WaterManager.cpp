@@ -5,6 +5,7 @@
 #include "Backend/IBackend.h"
 #include "MaterialManager.h"
 #include "PrincipledBSDF.h"
+#include "WaterMaterialSync.h"
 #include "globals.h"
 #include "fft_ocean.cuh"
 #include "perlin.h" // For geometric waves
@@ -381,85 +382,28 @@ void WaterManager::syncSurfaceMaterial(WaterSurface* surf) {
     auto mat = MaterialManager::getInstance().getMaterial(surf->material_id);
     if (!mat) return;
 
+    const float resolved_domain_size = resolveWaveDomainSize(surf);
+    const float resolved_animation_speed = resolveSharedAnimationSpeed(surf);
+    WaterShader::SurfaceParams shader_params = surf->params.toShaderParams(0.0f, resolved_domain_size);
+    shader_params.animation_speed = resolved_animation_speed;
+
     auto pbsdf = dynamic_cast<PrincipledBSDF*>(mat);
     if (pbsdf) {
-        pbsdf->anisotropic = surf->params.wave_speed;
-        pbsdf->sheen = fmaxf(0.001f, surf->params.wave_strength);
-        pbsdf->sheen_tint = surf->params.wave_frequency;
-        pbsdf->transmission = surf->params.ior > 1.01f ? 1.0f : 0.0f;
-        pbsdf->translucent = surf->params.foam_level;
-        pbsdf->clearcoat = surf->params.shore_foam_intensity;
-        pbsdf->clearcoatRoughness = surf->params.caustic_intensity;
-        pbsdf->subsurface = surf->params.depth_max / 100.0f;
-        pbsdf->subsurfaceScale = surf->params.absorption_density;
-        pbsdf->subsurfaceColor = surf->params.absorption_color;
-        pbsdf->subsurfaceRadius = Vec3(surf->params.shore_foam_distance, surf->params.caustic_scale, surf->params.sss_intensity);
-        pbsdf->subsurfaceAnisotropy = surf->params.caustic_speed;
-        pbsdf->roughness = surf->params.roughness;
-        pbsdf->roughnessProperty.color = Vec3(surf->params.roughness);
-        pbsdf->ior = surf->params.ior;
-        pbsdf->opacityProperty.alpha = 1.0f;
-        pbsdf->albedoProperty.color = surf->params.deep_color;
-        pbsdf->emissionProperty.color = surf->params.shallow_color;
-        pbsdf->emissionProperty.intensity = 1.0f;
+        WaterShader::applySurfaceParamsToPrincipledBSDF(shader_params, *pbsdf);
     }
 
     if (mat->gpuMaterial) {
         auto& gpu = mat->gpuMaterial;
-        const float resolved_domain_size = resolveWaveDomainSize(surf);
-        const float resolved_animation_speed = resolveSharedAnimationSpeed(surf);
-
-        gpu->anisotropic = surf->params.wave_speed;
-        gpu->sheen = fmaxf(0.001f, surf->params.wave_strength);
-        gpu->sheen_tint = surf->params.wave_frequency;
-
-        gpu->albedo = make_float3(surf->params.deep_color.x, surf->params.deep_color.y, surf->params.deep_color.z);
-        gpu->emission = make_float3(surf->params.shallow_color.x, surf->params.shallow_color.y, surf->params.shallow_color.z);
-
-        gpu->subsurface = surf->params.depth_max / 100.0f;
-        gpu->subsurface_scale = surf->params.absorption_density;
-        gpu->subsurface_color = make_float3(surf->params.absorption_color.x, surf->params.absorption_color.y, surf->params.absorption_color.z);
-
-        gpu->translucent = surf->params.foam_level;
-        gpu->clearcoat = surf->params.shore_foam_intensity;
-        gpu->clearcoat_roughness = surf->params.caustic_intensity;
-        gpu->subsurface_radius = make_float3(
-            surf->params.shore_foam_distance,
-            surf->params.caustic_scale,
-            surf->params.sss_intensity
-        );
-        gpu->subsurface_anisotropy = surf->params.caustic_speed;
-
-        gpu->ior = surf->params.ior;
-        gpu->roughness = surf->params.roughness;
-        gpu->transmission = surf->params.ior > 1.01f ? 1.0f : 0.0f;
-        gpu->opacity = 1.0f;
-        gpu->metallic = 0.0f;
-        gpu->flags |= GPU_MAT_FLAG_WATER;
-
-        gpu->micro_detail_strength = surf->params.micro_detail_strength;
-        gpu->micro_detail_scale = surf->params.micro_detail_scale;
-        gpu->micro_anim_speed = surf->params.micro_anim_speed;
-        gpu->micro_morph_speed = surf->params.micro_morph_speed;
-        gpu->foam_noise_scale = surf->params.foam_noise_scale;
-        gpu->foam_threshold = surf->params.foam_threshold;
-
-        gpu->fft_height_tex = 0;
-        gpu->fft_normal_tex = 0;
+        cudaTextureObject_t fft_height_tex = 0;
+        cudaTextureObject_t fft_normal_tex = 0;
         if (g_hasCUDA && surf->params.use_fft_ocean && surf->fft_state) {
             FFTOceanState* state = static_cast<FFTOceanState*>(surf->fft_state);
             if (state && state->initialized && state->tex_height != 0 && state->tex_normal != 0) {
-                gpu->fft_height_tex = state->tex_height;
-                gpu->fft_normal_tex = state->tex_normal;
+                fft_height_tex = state->tex_height;
+                fft_normal_tex = state->tex_normal;
             }
         }
-
-        gpu->fft_ocean_size = resolved_domain_size;
-        gpu->fft_choppiness = surf->params.fft_choppiness;
-        gpu->fft_wind_speed = surf->params.fft_wind_speed;
-        gpu->fft_wind_direction = surf->params.fft_wind_direction;
-        gpu->fft_amplitude = surf->params.fft_amplitude;
-        gpu->fft_time_scale = resolved_animation_speed;
+        WaterShader::applySurfaceParamsToGpuMaterial(shader_params, *gpu, fft_height_tex, fft_normal_tex);
     }
 }
 

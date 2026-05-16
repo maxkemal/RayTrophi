@@ -123,6 +123,22 @@ struct VkWorldDataExtended {
     float aerialMinDistance;    // No haze below this (meters, matches aerial_min_distance)
     float aerialMaxDistance;    // Full haze at this (meters, matches aerial_max_distance)
     float _pad5_aerial;         // Padding
+
+    // Weather payload (passive until weather rendering is enabled)
+    int   weatherEnabled;
+    int   weatherType;
+    float weatherIntensity;
+    float weatherDensity;
+    float weatherWindDirection[3];
+    float weatherWindSpeed;
+    float weatherPrecipitationScale;
+    float weatherVisibility;
+    float weatherSurfaceWetness;
+    float weatherSurfaceAccumulation;
+    float weatherSurfaceSettling;
+    float weatherSurfaceHeight;
+    int   weatherVisualMode;
+    int   weatherSurfaceResponseEnabled;
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // ENVIRONMENT & LUT REFERENCES (32 bytes) - Cache Line 8
@@ -130,7 +146,7 @@ struct VkWorldDataExtended {
     int   envTexSlot;       // Environment texture descriptor slot
     float envIntensity;     // Environment map intensity
     float envRotation;      // Rotation in radians
-    int   _pad5;            // repurposed: nishitaLutReady (1 = atmosphereLUTs[4] valid)
+    int   _pad5;            // repurposed: nishitaLutReady (1 = Vulkan binding 8 LUT samplers valid)
     
     // LUT availability flags (0 or 1 for each, or actual descriptor handles in real impl)
     // Note: Using uint64_t for GPU texture object handles (matches CUDA)

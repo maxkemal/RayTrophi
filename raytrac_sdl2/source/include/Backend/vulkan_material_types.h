@@ -116,6 +116,8 @@ struct VK_GPU_ALIGN(16) VkGpuLight {
     float color[4];     // rgb + intensity
     float params[4];    // radius, width, height, inner_angle
     float direction[4]; // xyz + outer_angle
+    float area_u[4];    // xyz: AreaLight u-axis (unit), w: pad
+    float area_v[4];    // xyz: AreaLight v-axis (unit), w: pad
 };
 
 } // namespace VulkanRT

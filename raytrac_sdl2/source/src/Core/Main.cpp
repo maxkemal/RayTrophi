@@ -43,6 +43,7 @@
 #include "SceneSelection.h"   // Added explicit include
 #include "Triangle.h"         // Added for CPU sync
 #include "HittableInstance.h" // Added for instance CPU sync
+#include "MaterialManager.h"
 #include "WaterSystem.h"      // Added for WaterManager
 
 #include <filesystem>
@@ -2464,10 +2465,11 @@ int main(int argc, char* argv[]) try {
         }
 
         bool timeline_drives_water = timeline_has_water_keyframes;
-        if (!timeline_drives_water && WaterManager::getInstance().getPreviewTimeMode() == WaterPreviewTimeMode::Timeline) {
+        if (!timeline_drives_water) {
             for (const auto& surf : WaterManager::getInstance().getWaterSurfaces()) {
-                if (surf.params.use_fft_ocean || surf.params.use_geometric_waves ||
-                    surf.animate_mesh || surf.params.wave_strength > 0.0001f) {
+                const bool geometricMeshAnim = surf.params.use_geometric_waves && surf.animate_mesh;
+                const bool fftMeshAnim = surf.params.use_fft_ocean && surf.params.use_fft_mesh_displacement;
+                if (geometricMeshAnim || fftMeshAnim) {
                     timeline_drives_water = true;
                     break;
                 }
@@ -2602,7 +2604,8 @@ int main(int argc, char* argv[]) try {
 
         if (timeline_playing && timeline_has_runtime_work) {
              // Use frame count from timeline (24 FPS assumption or settings)
-             float time_seconds = current_volume_frame / 24.0f;
+             const float timeline_fps = static_cast<float>(std::max(1, render_settings.animation_fps));
+             float time_seconds = current_volume_frame / timeline_fps;
 
              // Calculate wind transforms on CPU
             FoliageWindUpdateStats wind_stats;
@@ -2613,6 +2616,50 @@ int main(int argc, char* argv[]) try {
              // Update backend time only when something actually consumes timeline time.
              if (g_backend && (timeline_drives_water || timeline_drives_wind || !scene.animationDataList.empty())) {
                  g_backend->setTime(time_seconds, time_seconds);
+             }
+
+             if (timeline_drives_water) {
+                 WaterUpdateResult water_update = WaterManager::getInstance().update(time_seconds);
+                 if (water_update.material_changed || water_update.mesh_changed) {
+                     for (auto& water : WaterManager::getInstance().getWaterSurfaces()) {
+                         if (water.material_id != MaterialManager::INVALID_MATERIAL_ID) {
+                             WaterManager::getInstance().syncSurfaceMaterial(&water);
+                             ray_renderer.updateBackendMaterial(scene, water.material_id);
+                         }
+                     }
+                 }
+                 if (water_update.mesh_changed) {
+                     const bool interactiveViewportActive =
+                         isVulkanInteractiveViewportActive(
+                             getRasterViewportBackend() != nullptr,
+                             ui.viewport_settings.shading_mode);
+
+                     if (g_backend && !interactiveViewportActive) {
+                         if (auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
+                             bool partialUpdated = false;
+                             bool needsFullRefresh = false;
+                             for (const auto& water : WaterManager::getInstance().getWaterSurfaces()) {
+                                 if (water.name.empty() || water.mesh_triangles.empty()) continue;
+                                 const bool updated = vulkanBackend->updateMeshBLASPartial(
+                                     water.name,
+                                     water.mesh_triangles);
+                                 partialUpdated = partialUpdated || updated;
+                                 needsFullRefresh = needsFullRefresh || !updated;
+                             }
+                             if (needsFullRefresh || !partialUpdated) {
+                                 vulkanBackend->rebuildAccelerationStructure();
+                                 vulkanBackend->updateGeometry(scene.world.objects);
+                             }
+                         } else {
+                             g_backend->updateSceneGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
+                         }
+                         g_backend->resetAccumulation();
+                     }
+
+                     g_cpu_bvh_refit_pending = true;
+                     g_mesh_cache_dirty = true;
+                     ray_renderer.resetCPUAccumulation();
+                 }
              }
              
              // Efficiently update instance transforms on GPU (no full rebuild)
@@ -4086,22 +4133,6 @@ int main(int argc, char* argv[]) try {
                             // REMOVED: optix_gpu.rebuildTLAS(); // Already done in TimelineWidget
                         }
                         
-                        // Water timeline deformation needs an explicit OptiX geometry push here.
-                        // Realtime preview already handles this, but timeline playhead changes
-                        // can bypass the generic transform-only paths above.
-                        if (isActiveRenderBackendOptix()) {
-                            bool has_timeline_water_mesh = false;
-                            for (const auto& water : WaterManager::getInstance().getWaterSurfaces()) {
-                                if ((water.params.use_geometric_waves || (water.params.use_fft_ocean && water.params.use_fft_mesh_displacement)) &&
-                                    water.animate_mesh) {
-                                    has_timeline_water_mesh = true;
-                                    break;
-                                }
-                            }
-                            if (has_timeline_water_mesh) {
-                                g_backend->updateSceneGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
-                            }
-                        }
                         // If !has_file_animations && !has_manual_keyframes, we don't reach here
                         
                         if ((has_file_animations || timeline_has_camera_keyframes) && scene.camera) {
@@ -4150,6 +4181,13 @@ int main(int argc, char* argv[]) try {
         bool is_playing = ui_ctx.render_settings.animation_is_playing;
         bool is_paused = ui_ctx.render_settings.is_render_paused;
         const bool in_rendered_mode = (ui.viewport_settings.shading_mode == 2);
+        const WeatherParams preview_weather = ui_ctx.renderer.world.getWeatherParams();
+        const bool realtime_weather_preview_active =
+            ui_ctx.render_settings.realtime_weather_preview &&
+            in_rendered_mode &&
+            preview_weather.enabled != 0 &&
+            preview_weather.type != WEATHER_NONE &&
+            preview_weather.visual_mode != WEATHER_VISUAL_SURFACE_ONLY;
 
         if (scene.initialized &&
             !camera_moved_recently &&
@@ -4159,17 +4197,32 @@ int main(int argc, char* argv[]) try {
             !skip_backend_for_anim) {  // Don't accumulate when animation render owns backend
 
             if (in_rendered_mode) {
-                bool accumulation_complete = false;
-
-                if (isActiveRenderBackendGpu()) {
-                    accumulation_complete = g_backend ? g_backend->isAccumulationComplete() : false;
-                } else {
-                    accumulation_complete = ray_renderer.isCPUAccumulationComplete();
-                }
-
-                if (!accumulation_complete) {
-                    // Automatically trigger next sample pass
+                if (realtime_weather_preview_active) {
+                    const float preview_time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+                    if (g_backend) {
+                        g_backend->setTime(preview_time, preview_time);
+                        g_backend->resetAccumulation();
+                    }
+                    Backend::IBackend* activeViewportBackend =
+                        getActiveViewportBackendForShading(ui.viewport_settings.shading_mode);
+                    if (activeViewportBackend && activeViewportBackend != g_backend.get()) {
+                        activeViewportBackend->resetAccumulation();
+                    }
+                    ray_renderer.resetCPUAccumulation();
                     start_render = true;
+                } else {
+                    bool accumulation_complete = false;
+
+                    if (isActiveRenderBackendGpu()) {
+                        accumulation_complete = g_backend ? g_backend->isAccumulationComplete() : false;
+                    } else {
+                        accumulation_complete = ray_renderer.isCPUAccumulationComplete();
+                    }
+
+                    if (!accumulation_complete) {
+                        // Automatically trigger next sample pass
+                        start_render = true;
+                    }
                 }
             } else {
                 Backend::IBackend* viewportBackend =

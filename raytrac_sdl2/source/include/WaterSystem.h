@@ -137,6 +137,8 @@ struct WaterWaveParams {
         out.depth_max = depth_max;
         out.absorption_density = absorption_density;
         out.clarity = clarity;
+        out.ior = ior;
+        out.roughness = roughness;
         out.foam_level = foam_level;
         out.shore_foam_distance = shore_foam_distance;
         out.shore_foam_intensity = shore_foam_intensity;
@@ -148,6 +150,8 @@ struct WaterWaveParams {
         out.use_fft_ocean = use_fft_ocean;
         out.fft_ocean_size = resolved_domain_size > 0.0f ? resolved_domain_size : fft_ocean_size;
         out.fft_choppiness = fft_choppiness;
+        out.fft_amplitude = fft_amplitude;
+        out.animation_speed = fft_time_scale;
         out.micro_detail_strength = micro_detail_strength;
         out.micro_detail_scale = micro_detail_scale;
         out.micro_anim_speed = micro_anim_speed;

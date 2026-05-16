@@ -89,16 +89,20 @@ void SceneUI::drawLightsContent(UIContext& ctx)
                     }
 
                     if (new_light) {
+                        // Explicitly override common fields — DirectionalLight ctor doesn't init
+                        // position and re-packs color/intensity from input. Keep the swap visually
+                        // consistent across all type combinations.
                         new_light->nodeName = name;
+                        new_light->position = pos;
+                        new_light->color = col;
+                        new_light->intensity = inten;
+                        new_light->direction = dir;
+                        new_light->radius = light->radius;
 
-                        // Update Scene List
-                        ctx.scene.lights[i] = new_light;
-
-                        // Update Selection if necessary
-                        if (ctx.selection.selected.type == SelectableType::Light && ctx.selection.selected.light == light) {
-                            ctx.selection.selected.light = new_light;
-                            // No need to reset index, it's the same i
-                        }
+                        // Route through command pattern for undo/redo
+                        auto cmd = std::make_unique<ChangeLightTypeCommand>(i, light, new_light);
+                        cmd->execute(ctx);
+                        history.record(std::move(cmd));
 
                         light = new_light; // Update local pointer for rest of this frame's UI
                         changed = true;

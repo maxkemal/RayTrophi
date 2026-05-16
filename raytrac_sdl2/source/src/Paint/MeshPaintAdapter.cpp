@@ -152,6 +152,11 @@ float linearToSrgb01(float value) {
         : (1.055f * std::pow(clamped, 1.0f / 2.4f) - 0.055f);
 }
 
+float weatherSpawnHash(float x, float y) {
+    const float v = std::sinf(x * 127.1f + y * 311.7f) * 43758.5453f;
+    return v - std::floor(v);
+}
+
 uint8_t linearToSrgbByte01(float value) {
     return static_cast<uint8_t>(std::clamp(linearToSrgb01(value) * 255.0f + 0.5f, 0.0f, 255.0f));
 }
@@ -1766,6 +1771,153 @@ void MeshPaintAdapter::noteWetDab(int layer_index, const Vec2& uv, const BrushSe
             }
         }
     }
+}
+
+bool MeshPaintAdapter::noteWeatherExposure(int layer_index, const WeatherParams& weather, float dt) {
+    if (!isValid() || dt <= 0.0f) {
+        return false;
+    }
+    if (weather.enabled == 0 ||
+        weather.surface_response_enabled == 0 ||
+        weather.type != WEATHER_RAIN ||
+        weather.intensity <= 0.0f ||
+        weather.density <= 0.0f) {
+        return false;
+    }
+
+    PaintLayerData* layer = nullptr;
+    PaintTextureSet* texture_set = nullptr;
+    std::shared_ptr<Texture> texture;
+    bool uses_layers = false;
+    uint32_t layer_id = 0;
+    int width = 0;
+    int height = 0;
+
+    PaintLayerStack* stack = getLayerStack();
+    if (stack && stack->layerCount() > 0) {
+        const int clamped_layer_index = std::clamp(layer_index, 0, stack->layerCount() - 1);
+        layer = stack->layerAt(clamped_layer_index);
+        if (!layer || layer->meta.locked || !layer->meta.visible) {
+            return false;
+        }
+        layer->ensurePixels(PaintChannel::BaseColor);
+        uses_layers = true;
+        layer_id = layer->id;
+        width = layer->width;
+        height = layer->height;
+    } else {
+        texture_set = getTextureSet();
+        if (!texture_set) {
+            return false;
+        }
+        texture = texture_set->getTexture(PaintChannel::BaseColor);
+        if (!texture || texture->width <= 0 || texture->height <= 0 || texture->pixels.empty()) {
+            return false;
+        }
+        width = texture->width;
+        height = texture->height;
+    }
+
+    if (width <= 0 || height <= 0) {
+        return false;
+    }
+
+    const std::string target_key = getNodeName() + "#" + std::to_string(getMaterialID());
+    WetSimulationState& state = wet_basecolor_state_;
+    const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
+    if (state.target_key != target_key ||
+        state.width != width ||
+        state.height != height ||
+        state.uses_layers != uses_layers ||
+        state.layer_id != layer_id) {
+        state = WetSimulationState{};
+        state.target_key = target_key;
+        state.width = width;
+        state.height = height;
+        state.uses_layers = uses_layers;
+        state.layer_id = layer_id;
+        state.wetness.assign(pixel_count, 0.0f);
+        state.pigment.assign(pixel_count, 0.0f);
+        state.thickness.assign(pixel_count, 0.0f);
+    } else if (state.wetness.size() != pixel_count ||
+               state.pigment.size() != pixel_count ||
+               state.thickness.size() != pixel_count) {
+        state.wetness.assign(pixel_count, 0.0f);
+        state.pigment.assign(pixel_count, 0.0f);
+        state.thickness.assign(pixel_count, 0.0f);
+        state.active_region = PaintDirtyRect{};
+    }
+
+    const float rain_amount = std::clamp(weather.surface_wetness_output, 0.0f, 1.0f) *
+                              (0.30f + std::clamp(weather.density, 0.0f, 1.0f) * 0.70f);
+    if (rain_amount <= 0.001f) {
+        return false;
+    }
+
+    const float resolution_scale = std::sqrt(static_cast<float>(pixel_count)) / 1024.0f;
+    const float spawn_rate = (0.20f + rain_amount * 1.75f) * std::max(0.30f, resolution_scale);
+    state.weather_spawn_accumulator += spawn_rate * dt * 60.0f;
+    const int spawn_count = std::clamp(static_cast<int>(std::floor(state.weather_spawn_accumulator)), 0, 8);
+    if (spawn_count <= 0) {
+        return false;
+    }
+    state.weather_spawn_accumulator -= static_cast<float>(spawn_count);
+
+    state.weather_cluster_refresh_accumulator += dt * (0.25f + rain_amount * 0.55f);
+    if (state.weather_spawn_cursor == 0 || state.weather_cluster_refresh_accumulator >= 1.0f) {
+        const float cluster_seed = static_cast<float>(state.weather_spawn_cursor) + rain_amount * 37.0f + static_cast<float>(width + height);
+        state.weather_cluster_u = weatherSpawnHash(cluster_seed, 17.3f);
+        state.weather_cluster_v = weatherSpawnHash(cluster_seed, 59.9f);
+        state.weather_cluster_refresh_accumulator -= std::floor(state.weather_cluster_refresh_accumulator);
+    }
+
+    const float cluster_spread_u = std::clamp(0.010f + rain_amount * 0.040f, 0.010f, 0.060f);
+    const float cluster_spread_v = std::clamp(0.014f + rain_amount * 0.055f, 0.014f, 0.080f);
+
+    bool changed = false;
+    for (int spawn_index = 0; spawn_index < spawn_count; ++spawn_index) {
+        const uint32_t cursor = ++state.weather_spawn_cursor;
+        const float seed = static_cast<float>(cursor) + rain_amount * 19.0f;
+        const float u = std::clamp(
+            state.weather_cluster_u + (weatherSpawnHash(seed, 11.7f) - 0.5f) * cluster_spread_u,
+            0.0f,
+            1.0f);
+        const float v = std::clamp(
+            state.weather_cluster_v + (weatherSpawnHash(seed, 47.3f) - 0.5f) * cluster_spread_v,
+            0.0f,
+            1.0f);
+        const float radius = 0.55f + weatherSpawnHash(seed, 83.1f) * (0.65f + rain_amount * 1.05f);
+        const float stretch_y = 1.0f + rain_amount * 1.8f;
+        const float wet_add = 0.028f + rain_amount * (0.045f + weatherSpawnHash(seed, 131.9f) * 0.060f);
+        const float thickness_add = rain_amount * (0.003f + weatherSpawnHash(seed, 191.4f) * 0.012f);
+        const float center_x = u * static_cast<float>(width - 1);
+        const float center_y = v * static_cast<float>(height - 1);
+
+        const int min_x = std::max(0, static_cast<int>(std::floor(center_x - radius - 1.0f)));
+        const int max_x = std::min(width - 1, static_cast<int>(std::ceil(center_x + radius + 1.0f)));
+        const int min_y = std::max(0, static_cast<int>(std::floor(center_y - radius * stretch_y - 1.0f)));
+        const int max_y = std::min(height - 1, static_cast<int>(std::ceil(center_y + radius * stretch_y + 1.0f)));
+
+        for (int py = min_y; py <= max_y; ++py) {
+            for (int px = min_x; px <= max_x; ++px) {
+                const float dx = (static_cast<float>(px) + 0.5f) - center_x;
+                const float dy = ((static_cast<float>(py) + 0.5f) - center_y) / stretch_y;
+                const float dist = std::sqrt(dx * dx + dy * dy) / std::max(radius, 0.001f);
+                if (dist > 1.0f) {
+                    continue;
+                }
+
+                const float falloff = 1.0f - dist * dist * (3.0f - 2.0f * dist);
+                const size_t idx = static_cast<size_t>(py) * static_cast<size_t>(width) + static_cast<size_t>(px);
+                state.wetness[idx] = std::clamp(state.wetness[idx] + wet_add * falloff, 0.0f, 1.0f);
+                state.thickness[idx] = std::clamp(state.thickness[idx] + thickness_add * falloff, 0.0f, 1.0f);
+                state.active_region.expand(px, py, px, py);
+                changed = true;
+            }
+        }
+    }
+
+    return changed;
 }
 
 float MeshPaintAdapter::sampleWetPickupReservoir(const Vec2& uv) const {

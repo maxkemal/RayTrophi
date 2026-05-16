@@ -47,6 +47,7 @@
 #include "Camera.h"
 #include "InstanceManager.h"
 #include "DllLoadPolicy.h"
+#include "material_gpu.h"
 
 // Delay-load handler: attempt to LoadLibrary when a delay-loaded DLL fails
 #include <windows.h>
@@ -56,6 +57,16 @@
 // (getDenoiserFrameGPU). Guarded by supportsExternalMemoryWin32 capability.
 #include <cuda_runtime.h>
 #include "oidn_blend_cuda.h"
+
+namespace {
+bool isWaterTriangleMaterial(const std::shared_ptr<Triangle>& tri) {
+    if (!tri) return false;
+    Material* mat = MaterialManager::getInstance().getMaterial(tri->getMaterialID());
+    if (!mat || !mat->gpuMaterial) return false;
+    const GpuMaterial& gpu = *mat->gpuMaterial;
+    return (gpu.flags & GPU_MAT_FLAG_WATER) != 0 || gpu.sheen > 0.0001f;
+}
+}
 
 extern "C" FARPROC WINAPI DelayLoadFailureHook(unsigned int dliNotify, PDelayLoadInfo pdli) {
     if (!pdli) return nullptr;
@@ -108,6 +119,7 @@ ExternC const PfnDliHook __pfnDliFailureHook2 = DelayLoadFailureHook;
 
 #include <sstream>
 #include <SpotLight.h>
+#include <AreaLight.h>
 
 
 
@@ -2061,7 +2073,18 @@ void VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, cons
         uploadBuffer(blasHandle.vertexBuffer, newVertices, (uint64_t)blasHandle.vertexCount * 12);
     }
     if (newNormals && blasHandle.normalBuffer.buffer) {
-        uploadBuffer(blasHandle.normalBuffer, newNormals, (uint64_t)blasHandle.vertexCount * 12);
+        const uint64_t normalByteSize = (uint64_t)blasHandle.vertexCount * 12;
+        const bool normalSharesGeometryBuffer =
+            blasHandle.normalBuffer.buffer == blasHandle.vertexBuffer.buffer &&
+            blasHandle.normalBuffer.deviceAddress >= blasHandle.vertexBuffer.deviceAddress;
+        const uint64_t normalByteOffset = normalSharesGeometryBuffer
+            ? (uint64_t)(blasHandle.normalBuffer.deviceAddress - blasHandle.vertexBuffer.deviceAddress)
+            : 0ull;
+        uploadBuffer(
+            normalSharesGeometryBuffer ? blasHandle.vertexBuffer : blasHandle.normalBuffer,
+            newNormals,
+            normalByteSize,
+            normalByteOffset);
     }
 
     VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
@@ -5775,7 +5798,7 @@ bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, co
             instName = tri->getNodeName();
             if (tri.get() == firstTriangle) {
                 strongMatch = true;
-                targetUsesLocalSpace = (tri->getTransformPtr() != nullptr);
+                targetUsesLocalSpace = (tri->getTransformPtr() != nullptr) && !isWaterTriangleMaterial(tri);
             }
         }
 
@@ -5789,7 +5812,7 @@ bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, co
             if (std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
                 targetUsesLocalSpace = true;
             } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
-                targetUsesLocalSpace = (tri->getTransformPtr() != nullptr);
+                targetUsesLocalSpace = (tri->getTransformPtr() != nullptr) && !isWaterTriangleMaterial(tri);
             }
             break;
         }
@@ -5814,7 +5837,7 @@ bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, co
         if (!tri) continue;
         for (int v = 0; v < 3; ++v) {
             const Vec3 p = targetUsesLocalSpace ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
-            const Vec3 n = targetUsesLocalSpace ? tri->getOriginalVertexNormal(v) : tri->getOriginalVertexNormal(v);
+            const Vec3 n = targetUsesLocalSpace ? tri->getOriginalVertexNormal(v) : tri->getVertexNormal(v);
             positions.push_back(p.x);
             positions.push_back(p.y);
             positions.push_back(p.z);
@@ -6405,7 +6428,8 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
             // Use the live vertex state here so deformed standalone meshes such as
             // animated water surfaces reach Vulkan BLAS rebuilds correctly.
             const bool hasSharedTransform = (tri->getTransformPtr() != nullptr);
-            if (hasSharedTransform) {
+            const bool useLiveVertexState = isWaterTriangleMaterial(tri);
+            if (hasSharedTransform && !useLiveVertexState) {
                 // Static imported meshes keep BLAS geometry in object-local space.
                 // Their world transform is carried by the TLAS instance transform.
                 d.v0 = tri->getOriginalVertexPosition(0);
@@ -6415,7 +6439,8 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
                 d.n1 = tri->getOriginalVertexNormal(1);
                 d.n2 = tri->getOriginalVertexNormal(2);
             } else {
-                // Procedural/deformed standalone triangles may already live in world space.
+                // Procedural/deformed triangles, including animated water with a
+                // shared transform, must upload the current local vertex state.
                 d.v0 = tri->getV0();
                 d.v1 = tri->getV1();
                 d.v2 = tri->getV2();
@@ -8995,8 +9020,24 @@ void VulkanBackendAdapter::setLights(const std::vector<std::shared_ptr<Light>>& 
         const float MIN_LIGHT_RADIUS = 1e-3f; // Avoid too-small radii that lead to sampling/precision issues in shaders
         const float MIN_AREA_DIM = 1e-4f;
         gl.params[0] = (std::max)(l->radius, MIN_LIGHT_RADIUS);
-        gl.params[1] = (std::max)(l->width, MIN_AREA_DIM);
-        gl.params[2] = (std::max)(l->height, MIN_AREA_DIM); // For area lights this is height, for spot lights this will be used for inner cone (overwritten below)
+        // AreaLight has its own width/height that shadow Light:: base members — must access via derived
+        float w = l->width;
+        float h = l->height;
+        // Default u/v axes (overwritten for Area lights)
+        gl.area_u[0] = 1.0f; gl.area_u[1] = 0.0f; gl.area_u[2] = 0.0f; gl.area_u[3] = 0.0f;
+        gl.area_v[0] = 0.0f; gl.area_v[1] = 1.0f; gl.area_v[2] = 0.0f; gl.area_v[3] = 0.0f;
+        if (l->type() == LightType::Area) {
+            if (auto al = std::dynamic_pointer_cast<AreaLight>(l)) {
+                w = al->getWidth();
+                h = al->getHeight();
+                Vec3 au = al->getU();
+                Vec3 av = al->getV();
+                gl.area_u[0] = au.x; gl.area_u[1] = au.y; gl.area_u[2] = au.z;
+                gl.area_v[0] = av.x; gl.area_v[1] = av.y; gl.area_v[2] = av.z;
+            }
+        }
+        gl.params[1] = (std::max)(w, MIN_AREA_DIM);
+        gl.params[2] = (std::max)(h, MIN_AREA_DIM); // For area lights this is height, for spot lights this will be used for inner cone (overwritten below)
 
         // Spot lights require inner/outer cone cosines packed into params/direction.
         if (l->type() == LightType::Spot) {
@@ -13243,7 +13284,10 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     // the VolumeBuffer SSBO (binding 9) for volumetric shadow transmittance computation.
     pushConst.pad0 = float(m_device->m_volumeCount);
 
-    pushConst.waterTime = (m_currentTime > 0.0f) ? m_currentTime : (float)SDL_GetTicks() / 1000.0f;
+    // Keep water time on the same deterministic timeline contract as CPU/OptiX.
+    // Falling back to wall-clock time makes Vulkan RT water drift out of phase
+    // when the timeline is paused or when switching devices on a static frame.
+    pushConst.waterTime = m_currentTime;
     pushConst.maxBounces = (uint32_t)std::max(1, m_maxBounces); // m_maxBounces her zaman UI'dan gelir
     pushConst.diffuseBounces = (uint32_t)std::clamp(m_diffuseBounces, 1, m_maxBounces);
     pushConst.transmissionBounces = (uint32_t)std::clamp(m_transmissionBounces, 1, m_maxBounces);
@@ -13884,6 +13928,8 @@ void VulkanBackendAdapter::uploadAtmosphereLUT(const AtmosphereLUT* lut) {
     if (!lut) {
         VulkanRT::ImageHandle empty[4] = {};
         m_device->updateAtmosphereLUTs(empty);
+        m_atmosphereLutReady = false;
+        setWorldData(&m_cachedWorld);
         return;
     }
 
@@ -13970,8 +14016,8 @@ void VulkanBackendAdapter::uploadAtmosphereLUT(const AtmosphereLUT* lut) {
         }
     }
 
-    // Mark LUT as ready so the GLSL shader's _pad5 check succeeds on next setWorldData call
-    m_atmosphereLutReady = true;
+    // Mark LUT as ready only when the GLSL samplers used by sky/aerial paths are valid.
+    m_atmosphereLutReady = (lutImgs[0].view != VK_NULL_HANDLE && lutImgs[1].view != VK_NULL_HANDLE);
     // Push updated world buffer immediately so GPU sees _pad5 = 1 without waiting for next frame
     setWorldData(&m_cachedWorld);
 }
@@ -14110,12 +14156,34 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
     gw._pad5_aerial      = 0.0f;
 
     // ═════════════════════════════════════════════════════════════════
+    // WEATHER PAYLOAD (passive transport; render paths opt in later)
+    // ═════════════════════════════════════════════════════════════════
+    gw.weatherEnabled = wd->weather.enabled ? 1 : 0;
+    gw.weatherType = wd->weather.type;
+    gw.weatherIntensity = wd->weather.intensity;
+    gw.weatherDensity = wd->weather.density;
+    gw.weatherWindDirection[0] = wd->weather.wind_direction.x;
+    gw.weatherWindDirection[1] = wd->weather.wind_direction.y;
+    gw.weatherWindDirection[2] = wd->weather.wind_direction.z;
+    gw.weatherWindSpeed = wd->weather.wind_speed;
+    gw.weatherPrecipitationScale = wd->weather.precipitation_scale;
+    gw.weatherVisibility = wd->weather.visibility;
+    gw.weatherSurfaceWetness = wd->weather.surface_wetness_output;
+    gw.weatherSurfaceAccumulation = wd->weather.surface_accumulation_output;
+    gw.weatherSurfaceSettling = wd->weather.surface_settling_output;
+    gw.weatherSurfaceHeight = wd->weather.surface_height_output;
+    gw.weatherVisualMode = wd->weather.visual_mode;
+    gw.weatherSurfaceResponseEnabled = wd->weather.surface_response_enabled;
+
+    // ═════════════════════════════════════════════════════════════════
     // ENVIRONMENT & LUT REFERENCES
     // ═════════════════════════════════════════════════════════════════
     gw.envTexSlot = (int)m_envTexID;
     gw.envIntensity = wd->env_intensity;
     gw.envRotation = wd->env_rotation;
-    // _pad5 repurposed as nishitaLutReady: 1 = atmosphereLUTs[4] binding has valid textures
+    // _pad5 repurposed as nishitaLutReady: 1 = Vulkan binding 8 has valid LUT textures.
+    // The uint64 LUT fields below are CUDA texture handles in OptiX/CUDA mode and are
+    // not meaningful as availability checks in GLSL.
     gw._pad5 = m_atmosphereLutReady ? 1 : 0;
     
     // LUT handles - if AtmosphereLUT was precomputed, these will be valid GPU texture objects

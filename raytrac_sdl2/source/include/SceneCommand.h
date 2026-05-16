@@ -264,14 +264,35 @@ private:
 class AddLightCommand : public SceneCommand {
 public:
     AddLightCommand(std::shared_ptr<Light> light) : light_(light) {}
-    
+
     void execute(UIContext& ctx) override;
     void undo(UIContext& ctx) override;
     Type getType() const override { return Type::Heavy; }
     std::string getDescription() const override { return "Add Light"; }
-    
+
 private:
     std::shared_ptr<Light> light_;
+};
+
+// ============================================================================
+// CHANGE LIGHT TYPE COMMAND - Replace a light at index with a different-typed one
+// ============================================================================
+class ChangeLightTypeCommand : public SceneCommand {
+public:
+    ChangeLightTypeCommand(size_t index,
+                           std::shared_ptr<Light> old_light,
+                           std::shared_ptr<Light> new_light)
+        : index_(index), old_light_(old_light), new_light_(new_light) {}
+
+    void execute(UIContext& ctx) override;
+    void undo(UIContext& ctx) override;
+    Type getType() const override { return Type::Generic; }
+    std::string getDescription() const override { return "Change Light Type"; }
+
+private:
+    size_t index_;
+    std::shared_ptr<Light> old_light_;
+    std::shared_ptr<Light> new_light_;
 };
 
 class PaintTextureCommand : public SceneCommand {

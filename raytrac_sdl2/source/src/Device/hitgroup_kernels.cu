@@ -787,16 +787,59 @@ extern "C" __global__ void __closesthit__hair() {
         float3 light_dir;
         float3 Li;
         float light_dist = 1e6f;
-        if (light.type == 0) { // Point/Area Light
-            float3 to_light = light.position - hit_point;
-            light_dist = length(to_light);
-            light_dir = to_light / (light_dist + 1e-4f);
-            float atten = 1.0f / (light_dist * light_dist + 1e-4f);
-            Li = light.color * light.intensity * atten;
-        } else { // Directional Light
-            light_dir = normalize(light.direction); 
+        bool light_skip = false;
+        if (light.type == 1) { // Directional
+            light_dir = normalize(light.direction);
             Li = light.color * light.intensity;
+        } else {
+            // Positional: Point (0), Area (2), Spot (3)
+            float3 sample_pos = light.position;
+            // Stratified samples for soft-shadow jitter / area sampling
+            unsigned int as = light_seed * 1664525u + 1013904223u;
+            as = (as ^ (as >> 16)) * 0x45d9f3b;
+            float ru = (as & 0x00FFFFFF) / 16777216.0f;
+            as = as * 1664525u + 1013904223u;
+            as = (as ^ (as >> 16)) * 0x45d9f3b;
+            float rv = (as & 0x00FFFFFF) / 16777216.0f;
+
+            if (light.type == 0) {
+                // Point: jitter target by sphere radius (soft shadow)
+                if (light.radius > 0.0f) {
+                    float z = ru * 2.0f - 1.0f;
+                    float phi = rv * 2.0f * M_PIf;
+                    float sr = sqrtf(fmaxf(1.0f - z * z, 0.0f));
+                    float3 sphereDir = make_float3(sr * cosf(phi), sr * sinf(phi), z);
+                    sample_pos = light.position + sphereDir * light.radius;
+                }
+            } else if (light.type == 2) {
+                // Area light: random point on rectangle for soft shadow
+                float u_off = (ru - 0.5f) * light.area_width;
+                float v_off = (rv - 0.5f) * light.area_height;
+                sample_pos = light.position + light.area_u * u_off + light.area_v * v_off;
+            }
+            float3 to_light = sample_pos - hit_point;
+            light_dist = length(to_light);
+            if (light_dist < 1e-4f) { light_skip = true; }
+            light_dir = to_light / (light_dist + 1e-4f);
+
+            // Inverse-square falloff (parity with CPU PointLight/AreaLight::getIntensity)
+            float atten = 1.0f / fmaxf(light_dist * light_dist, 1e-4f);
+
+            if (light.type == 3) {
+                float3 spotDir = normalize(light.direction);
+                float cosLight = dot(-light_dir, spotDir);
+                float denom = fmaxf(light.inner_cone_cos - light.outer_cone_cos, 1e-4f);
+                float cone = fminf(fmaxf((cosLight - light.outer_cone_cos) / denom, 0.0f), 1.0f);
+                if (cone <= 0.0f) { light_skip = true; }
+                atten *= cone;
+            }
+            // Point (0) and Area (2) use pure inverse-square. light.intensity already
+            // encodes total energy; no area/sphere weighting (matches CPU getIntensity).
+            Li = light.color * light.intensity * atten;
         }
+        if (light_skip) {
+            // fall through to ambient block below with no direct contribution
+        } else {
 
         unsigned int shadow_hit = 0;
 
@@ -819,8 +862,9 @@ extern "C" __global__ void __closesthit__hair() {
 
         if (shadow_hit == 0) {
             float3 bsdf = HairGPU::hair_bsdf_eval(wo, light_dir, tangent, hair_mat_final, h, vStrand);
-            result_color += (bsdf * Li) * (float)light_count; 
+            result_color += (bsdf * Li) * (float)light_count;
         }
+        } // end else (light not skipped)
     }
     {
         float3 sky_dir = normalize(normal + make_float3(0, 1, 0));

@@ -88,6 +88,8 @@ struct LightData {
     vec4 color;
     vec4 params;
     vec4 direction;
+    vec4 area_u;
+    vec4 area_v;
 };
 
 struct VkGeometryData {
@@ -180,12 +182,28 @@ struct VkWorldDataExtended {
     float aerialMinDistance;    // No haze below this (meters)
     float aerialMaxDistance;    // Full haze at this (meters)
     float _pad5_aerial;
+
+    // Weather payload (passive until weather rendering is enabled)
+    int   weatherEnabled;
+    int   weatherType;
+    float weatherIntensity;
+    float weatherDensity;
+    vec3  weatherWindDirection;
+    float weatherWindSpeed;
+    float weatherPrecipitationScale;
+    float weatherVisibility;
+    float weatherSurfaceWetness;
+    float weatherSurfaceAccumulation;
+    float weatherSurfaceSettling;
+    float weatherSurfaceHeight;
+    int   weatherVisualMode;
+    int   weatherSurfaceResponseEnabled;
     
     // ════════════════════════════ ENVIRONMENT & LUT REFS (32 bytes)
     int   envTexSlot;
     float envIntensity;
     float envRotation;
-    int   _pad5;
+    int   _pad5;                 // nishitaLutReady: Vulkan binding 8 has valid LUT samplers
     uvec2 transmittanceLUT;      // 64-bit handle as uvec2
     uvec2 skyviewLUT;            // 64-bit handle as uvec2
     uvec2 multiScatterLUT;       // 64-bit handle as uvec2
@@ -388,6 +406,148 @@ vec3 sanitizeRadiance(vec3 c) {
     );
 }
 
+vec3 weatherTintColor(int type) {
+    if (type == 1) return vec3(0.50, 0.56, 0.62);
+    if (type == 2) return vec3(0.86, 0.90, 0.96);
+    if (type == 3) return vec3(0.74, 0.58, 0.38);
+    if (type == 4) return vec3(0.70, 0.76, 0.82);
+    return vec3(0.0);
+}
+
+bool weatherActive() {
+    return worldData.w.weatherEnabled != 0 && worldData.w.weatherType != 0 &&
+           worldData.w.weatherIntensity > 0.0 && worldData.w.weatherDensity > 0.0;
+}
+
+bool weatherVisualActive() {
+    return weatherActive() && worldData.w.weatherVisualMode != 1;
+}
+
+vec3 applyWeatherAtmosphere(vec3 color, vec3 rayDir, float distance) {
+    if (!weatherVisualActive()) return color;
+
+    float vis = max(worldData.w.weatherVisibility, 0.02);
+    float sigma = worldData.w.weatherIntensity * worldData.w.weatherDensity *
+                  (0.00016 + (1.0 - clamp(vis, 0.0, 1.0)) * 0.00034);
+    float amount = clamp(1.0 - exp(-max(distance, 0.0) * sigma), 0.0, 0.78);
+
+    vec3 tint = weatherTintColor(worldData.w.weatherType);
+    if (worldData.w.weatherType == 1) tint *= 0.72;
+    if (worldData.w.weatherType == 3) tint *= 1.12;
+
+    vec3 windRaw = worldData.w.weatherWindDirection;
+    vec3 wind = (dot(windRaw, windRaw) > 1e-8) ? normalize(windRaw) : vec3(1.0, 0.0, 0.0);
+    float forward = pow(max(0.0, dot(normalize(rayDir), wind)), 4.0);
+    amount = min(0.90, amount + forward * worldData.w.weatherIntensity * worldData.w.weatherDensity * 0.08);
+    return mix(color, tint, amount);
+}
+
+float weatherPrecipHash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float weatherPrecipNoise(vec2 p) {
+    vec2 cell = floor(p);
+    vec2 f = fract(p);
+    vec2 s = f * f * (3.0 - 2.0 * f);
+    float n00 = weatherPrecipHash(cell);
+    float n10 = weatherPrecipHash(cell + vec2(1.0, 0.0));
+    float n01 = weatherPrecipHash(cell + vec2(0.0, 1.0));
+    float n11 = weatherPrecipHash(cell + vec2(1.0, 1.0));
+    return mix(mix(n00, n10, s.x), mix(n01, n11, s.x), s.y);
+}
+
+float weatherPrecipSmoothstep(float edge0, float edge1, float x) {
+    float t = 0.0;
+    if (edge1 >= edge0) {
+        t = clamp((x - edge0) / max(edge1 - edge0, 1e-6), 0.0, 1.0);
+    } else {
+        t = clamp((edge0 - x) / max(edge0 - edge1, 1e-6), 0.0, 1.0);
+    }
+    return t * t * (3.0 - 2.0 * t);
+}
+
+float weatherPrecipLine(vec2 uv, vec2 wind, float time, float density, float scale) {
+    vec2 p = uv * vec2(74.0, 22.0) / scale;
+    p += vec2(wind.x * time * (6.5 + density * 4.0), -time * (34.0 + density * 10.0) + wind.y * time * (7.5 + density * 4.5));
+    vec2 cell = floor(p);
+    vec2 f = fract(p);
+    float rnd = weatherPrecipHash(cell);
+    float windDrive = 1.0 + density * 0.85;
+    float spawn = weatherPrecipSmoothstep(0.94 - density * 0.10, 1.0, rnd);
+    float x = abs(f.x - 0.5 - (rnd - 0.5) * (0.35 + 0.18 * windDrive));
+    float core = weatherPrecipSmoothstep(0.055 - density * 0.016, 0.0, x);
+    float trail = weatherPrecipSmoothstep(1.0, 0.04, f.y);
+    return spawn * core * trail;
+}
+
+float weatherPrecipFlake(vec2 uv, vec2 wind, float time, float density, float scale) {
+    vec2 p = uv * vec2(46.0, 30.0) / scale;
+    p += vec2(wind.x * time * (2.6 + density * 2.5), -time * (2.8 + density * 0.9) + wind.y * time * (1.1 + density * 0.9));
+    vec2 cell = floor(p);
+    vec2 f = fract(p);
+    float rnd = weatherPrecipHash(cell);
+    float spawn = weatherPrecipSmoothstep(0.84 - density * 0.22, 1.0, rnd);
+    vec2 center = vec2(weatherPrecipHash(cell + 13.7), weatherPrecipHash(cell + 41.3));
+    center.x += sin(time * 1.7 + rnd * 6.2831) * (0.12 + density * 0.08) + wind.x * 0.12;
+    center.y += wind.y * 0.05;
+    float radius = mix(0.035, 0.120 + density * 0.025, weatherPrecipHash(cell + 7.1));
+    return spawn * weatherPrecipSmoothstep(radius, 0.0, length(f - center));
+}
+
+float weatherDustStreak(vec2 uv, vec2 wind, float time, float density, float scale) {
+    vec2 advected = uv / scale + vec2(wind.x * time * (0.24 + density * 0.08), wind.y * time * (0.18 + density * 0.10));
+    float streaks = weatherPrecipNoise(advected * vec2(18.0, 7.5));
+    float wisps = weatherPrecipNoise(advected * vec2(33.0, 12.0) + vec2(19.4, 7.1));
+    float grain = weatherPrecipNoise(advected * vec2(95.0, 42.0) + vec2(3.7, 17.3));
+    float elongated = weatherPrecipSmoothstep(0.52, 0.98, streaks * 0.72 + wisps * 0.28);
+    float softGrain = weatherPrecipSmoothstep(0.38, 0.88, grain);
+    return (elongated * (0.72 + density * 0.28) + softGrain * 0.18) * density;
+}
+
+vec3 applyWeatherPrecipitationOverlay(vec3 color, vec3 rayDir, float distance) {
+    if (!weatherVisualActive()) return color;
+
+    float density = clamp(pow(clamp(worldData.w.weatherIntensity, 0.0, 1.0), 0.82) *
+        (0.28 + clamp(worldData.w.weatherDensity, 0.0, 1.0) * 1.22), 0.0, 1.0);
+    if (density <= 0.001) return color;
+
+    rayDir = normalize(rayDir);
+    float u = atan(rayDir.z, rayDir.x) / 6.28318530718 + 0.5;
+    float v = acos(clamp(rayDir.y, -1.0, 1.0)) / 3.14159265359;
+    float scale = max(worldData.w.weatherPrecipitationScale, 0.25);
+    float depthFade = weatherPrecipSmoothstep(0.6, 18.0, max(distance, 0.0));
+    float horizonFade = clamp(1.0 - max(rayDir.y, 0.0) * 0.35, 0.35, 1.0);
+    vec3 windRaw = worldData.w.weatherWindDirection;
+    vec2 wind = dot(windRaw.xz, windRaw.xz) > 1e-8 ? normalize(windRaw.xz) : vec2(1.0, 0.0);
+    float windAmount = clamp(worldData.w.weatherWindSpeed / 35.0, 0.0, 1.0);
+    wind *= windAmount;
+    float windVisual = 0.65 + windAmount * 0.9;
+
+    float time = cam.waterTime;
+    float amount = 0.0;
+    vec3 tint = weatherTintColor(worldData.w.weatherType);
+
+    if (worldData.w.weatherType == 1) {
+        amount = min(1.0, weatherPrecipLine(vec2(u, v), wind, time, density, scale) * (0.85 + density * 0.85 + windAmount * 0.35));
+        color = mix(color, color * 0.84, amount * density * 0.24 * depthFade);
+        color += vec3(0.45, 0.55, 0.66) * amount * density * 0.28 * depthFade * horizonFade * windVisual;
+    } else if (worldData.w.weatherType == 2) {
+        amount = min(1.0, weatherPrecipFlake(vec2(u, v), wind, time, density, scale) * (0.80 + density * 0.95 + windAmount * 0.22));
+        color = mix(color, tint, amount * density * 0.34 * depthFade * horizonFade);
+        color += vec3(0.85, 0.92, 1.0) * amount * density * 0.16 * depthFade * windVisual;
+    } else if (worldData.w.weatherType == 3) {
+        amount = min(1.0, weatherDustStreak(vec2(u, v), wind, time, density, scale) * (0.75 + density * 1.05 + windAmount * 0.45));
+        color = mix(color, tint, amount * 0.16 * depthFade * windVisual);
+        color += tint * amount * 0.075 * depthFade * windVisual;
+    } else if (worldData.w.weatherType == 4) {
+        amount = min(1.0, weatherDustStreak(vec2(u, v), wind * 0.25, time * 0.35, density, scale * 1.4) * (0.65 + density * 0.85));
+        color = mix(color, tint, amount * 0.11 * depthFade);
+    }
+
+    return color;
+}
+
 vec3 softClipFireflies(vec3 c, float maxLuma) {
     float l = luminance(c);
     if (l <= maxLuma) return c;
@@ -426,7 +586,7 @@ float traceGodRaysSunOcclusion(vec3 origin, vec3 sunDir, float maxDist) {
 }
 
 vec3 sampleGodRaysSunTransmittance(vec3 sunDir) {
-    bool hasAtmosLUTs = (worldData.w.transmittanceLUT.x | worldData.w.transmittanceLUT.y) != 0u;
+    bool hasAtmosLUTs = worldData.w._pad5 != 0;
     if (!hasAtmosLUTs) return vec3(1.0);
 
     float u = (max(0.01, sunDir.y) + 0.2) / 1.2;
@@ -499,16 +659,25 @@ void main() {
     uvec2 screenSize = gl_LaunchSizeEXT.xy;
 
     // Adaptive Sampling Check
-    if (cam.frameCount >= cam.minSamples && cam.varianceThreshold > 0.0) {
+    // variance buffer stores Welford M2; convergence uses relative standard error.
+    // Warmup of 4 samples avoids false convergence from correlated early samples
+    // (notably the single-light NEE case where 2 samples can falsely match).
+    if (cam.varianceThreshold > 0.0) {
         vec4 acc = imageLoad(accumImage, ivec2(pixel));
         float prevSamples = acc.a;
-        float variance = imageLoad(varianceImage, ivec2(pixel)).r;
+        float M2 = imageLoad(varianceImage, ivec2(pixel)).r;
         float mean = dot(acc.rgb, vec3(0.2126, 0.7152, 0.0722));
-        float cv = (mean > 1e-5) ? sqrt(max(variance, 0.0)) / mean : 1.0;
 
-        if (prevSamples >= float(cam.minSamples) &&
-            variance > 0.0 &&
-            cv < cam.varianceThreshold) {
+        uint effectiveMin = max(cam.minSamples, 4u);
+        float relStderr = 1.0;
+        if (prevSamples >= 2.0 && M2 > 0.0 && mean > 1e-5) {
+            float variance = M2 / (prevSamples - 1.0);
+            relStderr = sqrt(variance / prevSamples) / mean;
+        }
+
+        if (prevSamples >= float(effectiveMin) &&
+            M2 > 0.0 &&
+            relStderr < cam.varianceThreshold) {
             return;
         }
     }
@@ -775,7 +944,7 @@ void main() {
     // AERIAL PERSPECTIVE — matches OptiX gpu_get_aerial_perspective() exactly
     // Nishita-based distance haze: uses Transmittance + SkyView LUTs
     // ══════════════════════════════════════════════════════════════════════
-    bool hasAtmosLUTs = (worldData.w.transmittanceLUT.x | worldData.w.transmittanceLUT.y) != 0u;
+    bool hasAtmosLUTs = worldData.w._pad5 != 0;
     if (worldData.w.mode == 2 && worldData.w.aerialEnabled != 0 && hasAtmosLUTs) {
         vec3 primaryOrigin = primaryRayOrigin;
         float hitDist = firstHitValid ? length(firstHitPos - primaryOrigin) : max(worldData.w.aerialMinDistance, 10000.0);
@@ -829,6 +998,13 @@ void main() {
         }
     }
 
+    if (weatherVisualActive()) {
+        float weatherDist = firstHitValid ? length(firstHitPos - primaryRayOrigin) : 12000.0;
+        weatherDist *= (1.0 - clamp(firstHitTransmission, 0.0, 1.0));
+        radiance = applyWeatherAtmosphere(radiance, normalize(primaryRayDir), weatherDist);
+        radiance = applyWeatherPrecipitationOverlay(radiance, normalize(primaryRayDir), weatherDist);
+    }
+
     // Apply exposure factor
     vec3 exposedRadiance = sanitizeRadiance(radiance * cam.exposure_factor);
     // Firefly clamp (luminance-preserving): stabilizes extreme bright outliers
@@ -852,15 +1028,19 @@ void main() {
         ? ((oldAcc.rgb * prevSamples) + exposedRadiance) / newTotalSamples
         : exposedRadiance;
 
-    float newLum = dot(exposedRadiance, vec3(0.2126, 0.7152, 0.0722));
-    float meanLum = dot(newAcc, vec3(0.2126, 0.7152, 0.0722));
-    float diff = newLum - meanLum;
-    float prevVariance = (cam.frameCount > 0u) ? imageLoad(varianceImage, ivec2(pixel)).r : 0.0;
-    float alpha = 1.0 / max(newTotalSamples, 2.0);
-    float updatedVariance = clamp(prevVariance * (1.0 - alpha) + (diff * diff) * alpha, 0.0, 100.0);
+    // Welford M2 update (single-sample-per-pass form of Chan's parallel merge):
+    // delta = x - prev_mean ; M2_new = M2_prev + delta^2 * n_prev / (n_prev + 1)
+    float sampleLum = dot(exposedRadiance, vec3(0.2126, 0.7152, 0.0722));
+    float prevMeanLum = (prevSamples > 0.0) ? dot(oldAcc.rgb, vec3(0.2126, 0.7152, 0.0722)) : 0.0;
+    float delta = sampleLum - prevMeanLum;
+    float prevM2 = (cam.frameCount > 0u) ? imageLoad(varianceImage, ivec2(pixel)).r : 0.0;
+    float combinedM2 = (prevSamples > 0.0)
+        ? prevM2 + delta * delta * prevSamples / newTotalSamples
+        : 0.0;
+    combinedM2 = clamp(combinedM2, 0.0, 1.0e8);
 
     imageStore(accumImage, ivec2(pixel), vec4(newAcc, newTotalSamples));
-    imageStore(varianceImage, ivec2(pixel), vec4(updatedVariance, 0.0, 0.0, 0.0));
+    imageStore(varianceImage, ivec2(pixel), vec4(combinedM2, 0.0, 0.0, 0.0));
 
     vec4 oldDenoiserColor = (cam.frameCount > 0u) ? imageLoad(denoiserColorImage, ivec2(pixel)) : vec4(0.0);
     vec3 newDenoiserColor = (oldDenoiserColor.a > 0.0)

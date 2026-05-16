@@ -135,12 +135,28 @@ struct VkWorldDataExtended {
     float aerialMinDistance;    // No haze below this (meters)
     float aerialMaxDistance;    // Full haze at this (meters)
     float _pad5_aerial;
+
+    // Weather payload (passive until weather rendering is enabled)
+    int   weatherEnabled;
+    int   weatherType;
+    float weatherIntensity;
+    float weatherDensity;
+    vec3  weatherWindDirection;
+    float weatherWindSpeed;
+    float weatherPrecipitationScale;
+    float weatherVisibility;
+    float weatherSurfaceWetness;
+    float weatherSurfaceAccumulation;
+    float weatherSurfaceSettling;
+    float weatherSurfaceHeight;
+    int   weatherVisualMode;
+    int   weatherSurfaceResponseEnabled;
     
     // ════════════════════════════ ENVIRONMENT & LUT REFS (32 bytes)
     int   envTexSlot;
     float envIntensity;
     float envRotation;
-    int   _pad5;
+    int   _pad5;                 // nishitaLutReady: Vulkan binding 8 has valid LUT samplers
     uvec2 transmittanceLUT;      // 64-bit handle as uvec2
     uvec2 skyviewLUT;            // 64-bit handle as uvec2
     uvec2 multiScatterLUT;       // 64-bit handle as uvec2
@@ -180,6 +196,44 @@ float sunContribution(vec3 rayDir, vec3 sunDir) {
     return disk + halo;
 }
 
+vec3 weatherTintColor(int type) {
+    if (type == 1) return vec3(0.50, 0.56, 0.62);
+    if (type == 2) return vec3(0.86, 0.90, 0.96);
+    if (type == 3) return vec3(0.74, 0.58, 0.38);
+    if (type == 4) return vec3(0.70, 0.76, 0.82);
+    return vec3(0.0);
+}
+
+bool weatherActive() {
+    return worldData.w.weatherEnabled != 0 && worldData.w.weatherType != 0 &&
+           worldData.w.weatherIntensity > 0.0 && worldData.w.weatherDensity > 0.0;
+}
+
+bool weatherVisualActive() {
+    return weatherActive() && worldData.w.weatherVisualMode != 1;
+}
+
+vec3 applyWeatherSky(vec3 sky, vec3 dir) {
+    if (!weatherVisualActive()) return sky;
+
+    float visibilityLoss = clamp(1.0 - worldData.w.weatherVisibility, 0.0, 1.0);
+    float horizon = pow(max(0.0, 1.0 - abs(dir.y)), 0.65);
+    float amount = worldData.w.weatherIntensity *
+                   (0.25 + worldData.w.weatherDensity * 0.75 + visibilityLoss * 0.65);
+    amount = clamp(amount * (0.35 + horizon * 0.65), 0.0, 0.85);
+
+    vec3 tint = weatherTintColor(worldData.w.weatherType);
+    vec3 dimmed = sky;
+    if (worldData.w.weatherType == 1) {
+        dimmed *= 0.72;
+    } else if (worldData.w.weatherType == 3) {
+        dimmed *= 0.82;
+    } else if (worldData.w.weatherType == 2 || worldData.w.weatherType == 4) {
+        dimmed = dimmed * 0.90 + tint * 0.10;
+    }
+    return mix(dimmed, tint, amount);
+}
+
 vec3 skyColor(vec3 dir) {
     int   mode   = worldData.w.mode;
     float cosAlt = dir.y;
@@ -206,7 +260,7 @@ vec3 skyColor(vec3 dir) {
 
     vec3 sky;
 
-    bool hasAtmosLUTs = (worldData.w.transmittanceLUT.x | worldData.w.transmittanceLUT.y) != 0u;
+    bool hasAtmosLUTs = worldData.w._pad5 != 0;
     if (hasAtmosLUTs) {
         // Sample the full-sphere LUT (covers cosTheta -1..+1, i.e. below horizon too).
         // This lets the LUT provide natural warm/orange horizon glow just like OptiX ray-sphere
@@ -341,7 +395,7 @@ vec3 skyColor(vec3 dir) {
         // air_density baked in from AtmosphereLUT.cpp precompute.
     }
 
-    return sky;
+    return applyWeatherSky(sky, dir);
 }
 
 // ============================================================

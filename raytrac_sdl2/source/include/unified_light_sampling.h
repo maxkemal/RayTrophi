@@ -150,12 +150,14 @@ UNIFIED_FUNC bool sample_light_direction(
         case 1: // Directional Light
         {
             Vec3f L = normalize(light.direction);
-            
-            // Build tangent frame for disk sampling
-            Vec3f tangent = normalize(cross(L, Vec3f(0.0f, 1.0f, 0.0f)));
-            if (tangent.length_squared() < 1e-6f) {
-                tangent = normalize(cross(L, Vec3f(1.0f, 0.0f, 0.0f)));
+
+            // Build tangent frame: check raw cross BEFORE normalize.
+            // normalize(zero) can produce NaN, and NaN<threshold is false → fallback would never fire.
+            Vec3f tangent_raw = cross(L, Vec3f(0.0f, 1.0f, 0.0f));
+            if (tangent_raw.length_squared() < 1e-6f) {
+                tangent_raw = cross(L, Vec3f(1.0f, 0.0f, 0.0f));
             }
+            Vec3f tangent = normalize(tangent_raw);
             Vec3f bitangent = normalize(cross(L, tangent));
             
             // Disk sample

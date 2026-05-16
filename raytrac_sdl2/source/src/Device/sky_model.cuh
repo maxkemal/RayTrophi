@@ -24,6 +24,37 @@ __device__ inline float3 getOzoneAbsorption() {
 // ═══════════════════════════════════════════════════════════
 // NISHITA SKY MODEL - GPU IMPLEMENTATION
 // ═══════════════════════════════════════════════════════════
+__device__ inline float3 weather_tint_color_gpu(int type) {
+    if (type == WEATHER_RAIN) return make_float3(0.50f, 0.56f, 0.62f);
+    if (type == WEATHER_SNOW) return make_float3(0.86f, 0.90f, 0.96f);
+    if (type == WEATHER_DUST) return make_float3(0.74f, 0.58f, 0.38f);
+    if (type == WEATHER_MIST) return make_float3(0.70f, 0.76f, 0.82f);
+    return make_float3(0.0f);
+}
+
+__device__ inline float3 apply_weather_sky_gpu(const WeatherParams& weather, float3 sky, float3 ray_dir) {
+    if (weather.enabled == 0 || weather.type == WEATHER_NONE ||
+        weather.intensity <= 0.0f || weather.density <= 0.0f) {
+        return sky;
+    }
+
+    float visibilityLoss = fmaxf(0.0f, fminf(1.0f, 1.0f - weather.visibility));
+    float horizon = powf(fmaxf(0.0f, 1.0f - fabsf(ray_dir.y)), 0.65f);
+    float amount = weather.intensity * (0.25f + weather.density * 0.75f + visibilityLoss * 0.65f);
+    amount = fmaxf(0.0f, fminf(0.85f, amount * (0.35f + horizon * 0.65f)));
+
+    float3 tint = weather_tint_color_gpu(weather.type);
+    float3 dimmed = sky;
+    if (weather.type == WEATHER_RAIN) {
+        dimmed *= 0.72f;
+    } else if (weather.type == WEATHER_DUST) {
+        dimmed *= 0.82f;
+    } else if (weather.type == WEATHER_SNOW || weather.type == WEATHER_MIST) {
+        dimmed = dimmed * 0.90f + tint * 0.10f;
+    }
+    return dimmed * (1.0f - amount) + tint * amount;
+}
+
 __device__ inline float3 calculate_nishita_sky_gpu(const float3& ray_dir, const NishitaSkyParams& params) {
     // Setup vectors
     float3 dir = normalize(ray_dir);
