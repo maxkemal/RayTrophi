@@ -36,9 +36,10 @@ namespace {
 
     std::string buildOptixSceneTextureKey(const Texture* tex) {
         if (!tex) return {};
-        std::string key = tex->name.empty()
-            ? "tex_ptr:" + std::to_string(reinterpret_cast<uintptr_t>(tex))
-            : "tex:" + tex->name;
+        std::string key = "tex_ptr:" + std::to_string(reinterpret_cast<uintptr_t>(tex));
+        if (!tex->name.empty()) {
+            key += "|name:" + tex->name;
+        }
         key += (tex->is_hdr ? "|backend=optix|hdr=1" : "|backend=optix|hdr=0");
         return key;
     }
@@ -61,7 +62,7 @@ namespace {
     }
 
     cudaTextureObject_t resolveOptixTexture(SceneTextureManager* manager, int64_t rawHandle) {
-        if (!rawHandle) return 0;
+        if (rawHandle <= 0) return 0;
 
         // Small positive handles are already backend/runtime ids in several
         // transitional paths. Do not reinterpret them as host Texture pointers.
@@ -71,7 +72,7 @@ namespace {
 
         Texture* tex = reinterpret_cast<Texture*>(rawHandle);
         if (!tex || !tex->is_loaded()) {
-            return static_cast<cudaTextureObject_t>(rawHandle);
+            return 0;
         }
 
         if (manager) {
@@ -100,6 +101,63 @@ namespace {
         }
 
         return ensureOptixTextureResident(tex);
+    }
+
+    GpuMaterial makeOptixGpuMaterial(const IBackend::MaterialData& mat, SceneTextureManager* textureManager) {
+        GpuMaterial gpuMat = {};
+        gpuMat.albedo = make_float3(mat.albedo.x, mat.albedo.y, mat.albedo.z);
+        gpuMat.roughness = mat.roughness;
+        gpuMat.metallic = mat.metallic;
+        gpuMat.specular = mat.specular;
+        gpuMat.emission = make_float3(mat.emission.x * mat.emissionStrength, mat.emission.y * mat.emissionStrength, mat.emission.z * mat.emissionStrength);
+        gpuMat.ior = mat.ior;
+        gpuMat.transmission = mat.transmission;
+        gpuMat.opacity = mat.opacity;
+        gpuMat.subsurface = mat.subsurface;
+        gpuMat.subsurface_color = make_float3(mat.subsurfaceColor.x, mat.subsurfaceColor.y, mat.subsurfaceColor.z);
+        gpuMat.subsurface_radius = make_float3(mat.subsurfaceRadius.x, mat.subsurfaceRadius.y, mat.subsurfaceRadius.z);
+        gpuMat.subsurface_scale = mat.subsurfaceScale;
+        gpuMat.subsurface_anisotropy = mat.subsurfaceAnisotropy;
+        gpuMat.clearcoat = mat.clearcoat;
+        gpuMat.clearcoat_roughness = mat.clearcoatRoughness;
+        gpuMat.translucent = mat.translucent;
+        gpuMat.sheen = mat.sheen;
+        gpuMat.sheen_tint = mat.sheenTint;
+        gpuMat.anisotropic = mat.anisotropic;
+        gpuMat.flags = static_cast<int>(mat.flags);
+        gpuMat.tile_break_strength = mat.tile_break_strength;
+        gpuMat.micro_detail_strength = mat.micro_detail_strength;
+        gpuMat.micro_detail_scale = mat.micro_detail_scale;
+        gpuMat.fft_ocean_size = mat.fft_ocean_size;
+        gpuMat.fft_choppiness = mat.fft_choppiness;
+        gpuMat.fft_wind_speed = mat.fft_wind_speed;
+        gpuMat.fft_wind_direction = mat.fft_wind_direction;
+        gpuMat.fft_amplitude = mat.fft_amplitude;
+        gpuMat.fft_time_scale = mat.fft_time_scale;
+        gpuMat.micro_anim_speed = mat.micro_anim_speed;
+        gpuMat.micro_morph_speed = mat.micro_morph_speed;
+        gpuMat.foam_noise_scale = mat.foam_noise_scale;
+        gpuMat.foam_threshold = mat.foam_threshold;
+        gpuMat.normal_strength = mat.normalStrength;
+        gpuMat.uv_scale_x = static_cast<float>(mat.uvScale.x);
+        gpuMat.uv_scale_y = static_cast<float>(mat.uvScale.y);
+        gpuMat.uv_offset_x = static_cast<float>(mat.uvOffset.x);
+        gpuMat.uv_offset_y = static_cast<float>(mat.uvOffset.y);
+        gpuMat.uv_rotation_degrees = mat.uvRotationDegrees;
+        gpuMat.uv_tiling_x = static_cast<float>(mat.uvTiling.x);
+        gpuMat.uv_tiling_y = static_cast<float>(mat.uvTiling.y);
+        gpuMat.uv_wrap_mode = static_cast<int>(mat.uvWrapMode);
+
+        gpuMat.albedo_tex = resolveOptixTexture(textureManager, mat.albedoTexture);
+        gpuMat.normal_tex = resolveOptixTexture(textureManager, mat.normalTexture);
+        gpuMat.roughness_tex = resolveOptixTexture(textureManager, mat.roughnessTexture);
+        gpuMat.metallic_tex = resolveOptixTexture(textureManager, mat.metallicTexture);
+        gpuMat.specular_tex = resolveOptixTexture(textureManager, mat.specularTexture);
+        gpuMat.emission_tex = resolveOptixTexture(textureManager, mat.emissionTexture);
+        gpuMat.transmission_tex = resolveOptixTexture(textureManager, mat.transmissionTexture);
+        gpuMat.opacity_tex = resolveOptixTexture(textureManager, mat.opacityTexture);
+        gpuMat.height_tex = resolveOptixTexture(textureManager, mat.heightTexture);
+        return gpuMat;
     }
 }
 
@@ -228,65 +286,19 @@ void OptixBackend::uploadMaterials(const std::vector<MaterialData>& materials) {
     std::vector<GpuMaterial> gpuMaterials;
     gpuMaterials.reserve(materials.size());
     
+    SceneTextureManager* textureManager = m_sceneTextureManager.get();
     for (const auto& mat : materials) {
-        GpuMaterial gpuMat = {};
-        gpuMat.albedo = make_float3(mat.albedo.x, mat.albedo.y, mat.albedo.z);
-        gpuMat.roughness = mat.roughness;
-        gpuMat.metallic = mat.metallic;
-        gpuMat.specular = mat.specular;
-        gpuMat.emission = make_float3(mat.emission.x * mat.emissionStrength, mat.emission.y * mat.emissionStrength, mat.emission.z * mat.emissionStrength);
-        gpuMat.ior = mat.ior;
-        gpuMat.transmission = mat.transmission;
-        gpuMat.opacity = mat.opacity;
-        gpuMat.subsurface = mat.subsurface;
-        gpuMat.subsurface_color = make_float3(mat.subsurfaceColor.x, mat.subsurfaceColor.y, mat.subsurfaceColor.z);
-        gpuMat.subsurface_radius = make_float3(mat.subsurfaceRadius.x, mat.subsurfaceRadius.y, mat.subsurfaceRadius.z);
-        gpuMat.subsurface_scale = mat.subsurfaceScale;
-        gpuMat.subsurface_anisotropy = mat.subsurfaceAnisotropy;
-        gpuMat.clearcoat = mat.clearcoat;
-        gpuMat.clearcoat_roughness = mat.clearcoatRoughness;
-        gpuMat.sheen = mat.sheen;
-        gpuMat.sheen_tint = mat.sheenTint;
-        gpuMat.anisotropic = mat.anisotropic;
-        gpuMat.flags = static_cast<int>(mat.flags);
-        gpuMat.tile_break_strength = mat.tile_break_strength;
-        gpuMat.micro_detail_strength = mat.micro_detail_strength;
-        gpuMat.micro_detail_scale = mat.micro_detail_scale;
-        gpuMat.fft_ocean_size = mat.fft_ocean_size;
-        gpuMat.fft_choppiness = mat.fft_choppiness;
-        gpuMat.fft_wind_speed = mat.fft_wind_speed;
-        gpuMat.fft_wind_direction = mat.fft_wind_direction;
-        gpuMat.fft_amplitude = mat.fft_amplitude;
-        gpuMat.fft_time_scale = mat.fft_time_scale;
-        gpuMat.micro_anim_speed = mat.micro_anim_speed;
-        gpuMat.micro_morph_speed = mat.micro_morph_speed;
-        gpuMat.foam_noise_scale = mat.foam_noise_scale;
-        gpuMat.foam_threshold = mat.foam_threshold;
-        gpuMat.normal_strength = mat.normalStrength;
-        gpuMat.uv_scale_x = static_cast<float>(mat.uvScale.x);
-        gpuMat.uv_scale_y = static_cast<float>(mat.uvScale.y);
-        gpuMat.uv_offset_x = static_cast<float>(mat.uvOffset.x);
-        gpuMat.uv_offset_y = static_cast<float>(mat.uvOffset.y);
-        gpuMat.uv_rotation_degrees = mat.uvRotationDegrees;
-        gpuMat.uv_tiling_x = static_cast<float>(mat.uvTiling.x);
-        gpuMat.uv_tiling_y = static_cast<float>(mat.uvTiling.y);
-        gpuMat.uv_wrap_mode = static_cast<int>(mat.uvWrapMode);
-        
-        SceneTextureManager* textureManager = m_sceneTextureManager.get();
-        gpuMat.albedo_tex = resolveOptixTexture(textureManager, mat.albedoTexture);
-        gpuMat.normal_tex = resolveOptixTexture(textureManager, mat.normalTexture);
-        gpuMat.roughness_tex = resolveOptixTexture(textureManager, mat.roughnessTexture);
-        gpuMat.metallic_tex = resolveOptixTexture(textureManager, mat.metallicTexture);
-        gpuMat.specular_tex = resolveOptixTexture(textureManager, mat.specularTexture);
-        gpuMat.emission_tex = resolveOptixTexture(textureManager, mat.emissionTexture);
-        gpuMat.transmission_tex = resolveOptixTexture(textureManager, mat.transmissionTexture);
-        gpuMat.opacity_tex = resolveOptixTexture(textureManager, mat.opacityTexture);
-        gpuMat.height_tex = resolveOptixTexture(textureManager, mat.heightTexture);
-        
-        gpuMaterials.push_back(gpuMat);
+        gpuMaterials.push_back(makeOptixGpuMaterial(mat, textureManager));
     }
     
     m_optix->updateMaterialBuffer(gpuMaterials);
+}
+
+bool OptixBackend::updateMaterial(uint32_t materialIndex, const MaterialData& material) {
+    if (!m_optix || !g_hasOptix) return false;
+    ScopedCudaTextureUpload allowCudaTextureUpload;
+    GpuMaterial gpuMat = makeOptixGpuMaterial(material, m_sceneTextureManager.get());
+    return m_optix->updateMaterialAt(materialIndex, gpuMat);
 }
 
 void OptixBackend::uploadHairMaterials(const std::vector<HairMaterialData>& materials) {
@@ -333,6 +345,10 @@ void OptixBackend::destroyTexture(int64_t textureHandle) {
         if (m_sceneTextureManager) {
             m_sceneTextureManager->clearOptixTextureId(textureHandle);
         }
+
+        // Material edits can arrive while the OptiX stream still references the
+        // old texture object from the previous launch/update.
+        waitForCompletion();
         cudaDestroyTextureObject((cudaTextureObject_t)textureHandle);
     }
 }

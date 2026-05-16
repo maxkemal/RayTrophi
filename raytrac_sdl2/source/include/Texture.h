@@ -1088,6 +1088,13 @@ public:
             // CUDA may have just recycled to a different texture — manifesting as
             // wrong textures wrapping wrong meshes after a delete/replace.
             notifyOptixTextureDestroyed(static_cast<int64_t>(tex_obj));
+
+            // Texture slot deletion can race with an in-flight OptiX launch.
+            // Wait for outstanding CUDA work before freeing the texture object.
+            if (g_hasOptix || rendering_in_progress.load(std::memory_order_acquire)) {
+                cudaDeviceSynchronize();
+            }
+
             cudaDestroyTextureObject(tex_obj);
             tex_obj = 0;
         }

@@ -19,6 +19,10 @@ extern "C" __global__ void __miss__ms() {
          float3 ray_dir = optixGetWorldRayDirection();
          current_bg = calculate_nishita_sky_gpu(ray_dir, optixLaunchParams.world.nishita);
     } 
+    current_bg = apply_weather_sky_gpu(
+        optixLaunchParams.world.weather,
+        current_bg,
+        normalize(optixGetWorldRayDirection()));
     
     outColor->emission = current_bg;
 

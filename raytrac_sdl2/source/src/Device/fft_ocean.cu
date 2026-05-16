@@ -664,8 +664,10 @@ __global__ void kernelGeometricWaves(
     if (idx >= vertex_count) return;
     
     float3 orig = d_original[idx];
-    float x = orig.x * params.domain_coord_scale;
-    float z = orig.z * params.domain_coord_scale;
+    float x = orig.x;
+    float z = orig.z;
+    float sample_x = orig.x * params.domain_coord_scale;
+    float sample_z = orig.z * params.domain_coord_scale;
     float base_y = orig.y;
     
     float3 displacement = make_float3(0, 0, 0);
@@ -697,7 +699,7 @@ __global__ void kernelGeometricWaves(
             float dirX = cosf(dir);
             float dirZ = sinf(dir);
             
-            float3 wave = gpuGerstnerWave(x, z, time, wavelength, amplitude, steepness, dirX, dirZ);
+            float3 wave = gpuGerstnerWave(sample_x, sample_z, time, wavelength, amplitude, steepness, dirX, dirZ);
             displacement.x += wave.x;
             displacement.y += wave.y;
             displacement.z += wave.z;
@@ -706,7 +708,7 @@ __global__ void kernelGeometricWaves(
         // Add swell
         if (params.swell_amplitude > 0.0f) {
             float swellDir = params.swell_direction + 3.14159265f * 0.25f;
-            float3 swell = gpuGerstnerWave(x, z, time * 0.5f, scale * 3.0f, 
+            float3 swell = gpuGerstnerWave(sample_x, sample_z, time * 0.5f, scale * 3.0f,
                                            params.wave_height * params.swell_amplitude, 
                                            0.3f, cosf(swellDir), sinf(swellDir));
             displacement.x += swell.x;
@@ -726,11 +728,11 @@ __global__ void kernelGeometricWaves(
         switch (params.noise_type) {
             case 0: // Perlin
             {
-                float nx = x / scale +
+                float nx = sample_x / scale +
                            wind_dx * time * drift_speed * 0.45f +
                            cross_dx * sinf(time * 0.17f) * 0.12f +
                            sinf(time * 0.31f * morph + 1.0f) * 0.22f;
-                float nz = z / scale +
+                float nz = sample_z / scale +
                            wind_dz * time * drift_speed * 0.45f +
                            cross_dz * cosf(time * 0.13f) * 0.12f +
                            cosf(time * 0.23f * morph + 0.7f) * 0.22f;
@@ -739,11 +741,11 @@ __global__ void kernelGeometricWaves(
             }
             case 1: // FBM
             {
-                float nx = x / scale +
+                float nx = sample_x / scale +
                            wind_dx * time * drift_speed * 0.45f +
                            cross_dx * sinf(time * 0.17f) * 0.12f +
                            sinf(time * 0.31f * morph + 1.0f) * 0.22f;
-                float nz = z / scale +
+                float nz = sample_z / scale +
                            wind_dz * time * drift_speed * 0.45f +
                            cross_dz * cosf(time * 0.13f) * 0.12f +
                            cosf(time * 0.23f * morph + 0.7f) * 0.22f;
@@ -752,11 +754,11 @@ __global__ void kernelGeometricWaves(
             }
             case 2: // Ridge
             {
-                float nx = x / scale +
+                float nx = sample_x / scale +
                            wind_dx * time * drift_speed * 0.45f +
                            cross_dx * sinf(time * 0.17f) * 0.12f +
                            sinf(time * 0.31f * morph + 1.0f) * 0.22f;
-                float nz = z / scale +
+                float nz = sample_z / scale +
                            wind_dz * time * drift_speed * 0.45f +
                            cross_dz * cosf(time * 0.13f) * 0.12f +
                            cosf(time * 0.23f * morph + 0.7f) * 0.22f;
@@ -766,11 +768,11 @@ __global__ void kernelGeometricWaves(
             }
             case 3: // Voronoi (simplified)
             {
-                float nx = x / scale +
+                float nx = sample_x / scale +
                            wind_dx * time * drift_speed * 0.45f +
                            cross_dx * sinf(time * 0.17f) * 0.12f +
                            sinf(time * 0.31f * morph + 1.0f) * 0.22f;
-                float nz = z / scale +
+                float nz = sample_z / scale +
                            wind_dz * time * drift_speed * 0.45f +
                            cross_dz * cosf(time * 0.13f) * 0.12f +
                            cosf(time * 0.23f * morph + 0.7f) * 0.22f;
@@ -780,11 +782,11 @@ __global__ void kernelGeometricWaves(
             }
             case 4: // Billow
             {
-                float nx = x / scale +
+                float nx = sample_x / scale +
                            wind_dx * time * drift_speed * 0.45f +
                            cross_dx * sinf(time * 0.17f) * 0.12f +
                            sinf(time * 0.31f * morph + 1.0f) * 0.22f;
-                float nz = z / scale +
+                float nz = sample_z / scale +
                            wind_dz * time * drift_speed * 0.45f +
                            cross_dz * cosf(time * 0.13f) * 0.12f +
                            cosf(time * 0.23f * morph + 0.7f) * 0.22f;

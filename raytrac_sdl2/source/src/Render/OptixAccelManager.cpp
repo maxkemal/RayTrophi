@@ -34,9 +34,10 @@ void computeGeometryBounds(const MeshGeometry& geometry, float3& outMin, float3&
 
 std::string buildOptixSceneTextureKey(const Texture* tex) {
     if (!tex) return {};
-    std::string key = tex->name.empty()
-        ? "tex_ptr:" + std::to_string(reinterpret_cast<uintptr_t>(tex))
-        : "tex:" + tex->name;
+    std::string key = "tex_ptr:" + std::to_string(reinterpret_cast<uintptr_t>(tex));
+    if (!tex->name.empty()) {
+        key += "|name:" + tex->name;
+    }
     key += (tex->is_hdr ? "|backend=optix|hdr=1" : "|backend=optix|hdr=0");
     return key;
 }
@@ -1682,6 +1683,7 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
         cudaTextureObject_t roughness_tex = 0;
         cudaTextureObject_t normal_tex = 0;
         cudaTextureObject_t metallic_tex = 0;
+        cudaTextureObject_t specular_tex = 0;
         cudaTextureObject_t transmission_tex = 0;
         cudaTextureObject_t opacity_tex = 0;
         cudaTextureObject_t emission_tex = 0;
@@ -1689,6 +1691,7 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
         int has_roughness_tex = 0;
         int has_normal_tex = 0;
         int has_metallic_tex = 0;
+        int has_specular_tex = 0;
         int has_transmission_tex = 0;
         int has_opacity_tex = 0;
         int has_emission_tex = 0;
@@ -1724,6 +1727,10 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
             state.metallic_tex = uploadTextureIfNeeded(pbsdf->metallicProperty.texture);
             state.has_metallic_tex = state.metallic_tex ? 1 : 0;
         }
+        if (pbsdf->specularProperty.texture) {
+            state.specular_tex = uploadTextureIfNeeded(pbsdf->specularProperty.texture);
+            state.has_specular_tex = state.specular_tex ? 1 : 0;
+        }
         if (pbsdf->transmissionProperty.texture) {
             state.transmission_tex = uploadTextureIfNeeded(pbsdf->transmissionProperty.texture);
             state.has_transmission_tex = state.transmission_tex ? 1 : 0;
@@ -1742,6 +1749,24 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
     }
 
     auto applyMaterialTextureState = [&](HitGroupData& data, int mat_id) {
+        data.albedo_tex = 0;
+        data.has_albedo_tex = 0;
+        data.roughness_tex = 0;
+        data.has_roughness_tex = 0;
+        data.normal_tex = 0;
+        data.has_normal_tex = 0;
+        data.metallic_tex = 0;
+        data.has_metallic_tex = 0;
+        data.specular_tex = 0;
+        data.has_specular_tex = 0;
+        data.transmission_tex = 0;
+        data.has_transmission_tex = 0;
+        data.opacity_tex = 0;
+        data.has_opacity_tex = 0;
+        data.opacity_has_alpha = 0;
+        data.emission_tex = 0;
+        data.has_emission_tex = 0;
+
         if (mat_id < 0 || mat_id >= static_cast<int>(materialTextureStates.size())) return;
         const auto& state = materialTextureStates[mat_id];
         if (!state.valid) return;
@@ -1754,6 +1779,8 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
         data.has_normal_tex = state.has_normal_tex;
         data.metallic_tex = state.metallic_tex;
         data.has_metallic_tex = state.has_metallic_tex;
+        data.specular_tex = state.specular_tex;
+        data.has_specular_tex = state.has_specular_tex;
         data.transmission_tex = state.transmission_tex;
         data.has_transmission_tex = state.has_transmission_tex;
         data.opacity_tex = state.opacity_tex;

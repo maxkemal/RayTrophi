@@ -2088,6 +2088,15 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
         // ── MAIN CONTENT (Flush Scroll Area) ──
         ImGui::BeginChild("PropScrollArea", ImVec2(0, 0), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+        // Reset scroll-Y when the active properties tab changes so each tab
+        // opens at the top instead of inheriting the previous tab's scroll.
+        {
+            static int s_last_properties_tab = -1;
+            if (s_last_properties_tab != active_properties_tab) {
+                ImGui::SetScrollY(0.0f);
+                s_last_properties_tab = active_properties_tab;
+            }
+        }
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 6));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 14));
         

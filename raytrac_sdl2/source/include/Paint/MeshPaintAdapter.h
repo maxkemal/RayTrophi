@@ -8,6 +8,7 @@
 
 struct SceneData;
 class Triangle;
+struct WeatherParams;
 
 namespace Paint {
 
@@ -81,6 +82,7 @@ public:
 
     void noteWetDab(int layer_index, const Vec2& uv, const BrushSettings& brush,
                     float dt, float deposit_ratio);
+    bool noteWeatherExposure(int layer_index, const WeatherParams& weather, float dt);
     float sampleWetPickupReservoir(const Vec2& uv) const;
     bool tickWetPaint(const BrushSettings& brush, float dt,
                       bool auto_normal_from_height_enabled,
@@ -110,6 +112,11 @@ private:
         std::vector<float> pigment;
         std::vector<float> thickness;
         PaintDirtyRect active_region;
+        float weather_spawn_accumulator = 0.0f;
+        uint32_t weather_spawn_cursor = 0;
+        float weather_cluster_u = 0.5f;
+        float weather_cluster_v = 0.5f;
+        float weather_cluster_refresh_accumulator = 1.0f;
     };
 
     struct WetFlowTriangleInfo {

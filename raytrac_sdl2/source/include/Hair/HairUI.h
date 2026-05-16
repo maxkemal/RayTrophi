@@ -294,6 +294,7 @@ private:
         std::string name;
         HairGenerationParams genParams;
         HairMaterialParams matParams;
+        bool affectsGeometry = true; // false => only material is applied (geometry preserved)
     };
     std::vector<HairPreset> m_presets;
     
@@ -320,7 +321,7 @@ private:
     void drawMaterialPanel(Renderer* renderer = nullptr);
     void drawGroomList(HairSystem& hairSystem, Renderer* renderer = nullptr);
 
-    void drawPresets();
+    void drawPresets(HairSystem& hairSystem, Renderer* renderer);
     void drawPaintPanel(HairSystem& hairSystem);
     void drawStats(const HairSystem& hairSystem);
     
@@ -384,8 +385,7 @@ inline void HairUI::initializePresets() {
     {
         HairPreset preset;
         preset.name = "Blonde Hair";
-        preset.genParams = m_editParams;
-        preset.genParams.length = 0.15f;
+        preset.affectsGeometry = false;
         preset.matParams.colorMode = HairMaterialParams::ColorMode::MELANIN;
         preset.matParams.melanin = 0.15f;
         preset.matParams.melaninRedness = 0.2f;
@@ -395,8 +395,7 @@ inline void HairUI::initializePresets() {
     {
         HairPreset preset;
         preset.name = "Brown Hair";
-        preset.genParams = m_editParams;
-        preset.genParams.length = 0.15f;
+        preset.affectsGeometry = false;
         preset.matParams.colorMode = HairMaterialParams::ColorMode::MELANIN;
         preset.matParams.melanin = 0.55f;
         preset.matParams.melaninRedness = 0.35f;
@@ -406,8 +405,7 @@ inline void HairUI::initializePresets() {
     {
         HairPreset preset;
         preset.name = "Black Hair";
-        preset.genParams = m_editParams;
-        preset.genParams.length = 0.15f;
+        preset.affectsGeometry = false;
         preset.matParams.colorMode = HairMaterialParams::ColorMode::MELANIN;
         preset.matParams.melanin = 0.98f;
         preset.matParams.melaninRedness = 0.05f;
@@ -417,8 +415,7 @@ inline void HairUI::initializePresets() {
     {
         HairPreset preset;
         preset.name = "Red Hair";
-        preset.genParams = m_editParams;
-        preset.genParams.length = 0.15f;
+        preset.affectsGeometry = false;
         preset.matParams.colorMode = HairMaterialParams::ColorMode::MELANIN;
         preset.matParams.melanin = 0.35f;
         preset.matParams.melaninRedness = 0.95f;
@@ -530,7 +527,9 @@ inline void HairUI::initializePresets() {
 }
 
 inline void HairUI::applyPreset(const HairPreset& preset) {
-    m_editParams = preset.genParams;
+    if (preset.affectsGeometry) {
+        m_editParams = preset.genParams;
+    }
     m_currentMaterial = preset.matParams;
     m_needsRebuild = true;
 }
@@ -690,12 +689,21 @@ inline void HairUI::render(
     // Main Content Area
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.10f, 0.14f, 0.56f));
     ImGui::BeginChild("HairContent", ImVec2(0, 0), false);
-    
+    // Reset scroll-Y when the active Hair sub-tab changes so each sub-panel
+    // opens at the top instead of inheriting the previous tab's scroll.
+    {
+        static int s_last_hair_tab = -1;
+        if (s_last_hair_tab != m_currentTab) {
+            ImGui::SetScrollY(0.0f);
+            s_last_hair_tab = m_currentTab;
+        }
+    }
+
     switch (m_currentTab) {
         case 0: drawGenerationPanel(hairSystem, selectedMeshTriangles, renderer, onPreGenerate); break;
         case 1: drawMaterialPanel(renderer); break;
         case 2: drawPaintPanel(hairSystem); break;
-        case 3: drawPresets(); break;
+        case 3: drawPresets(hairSystem, renderer); break;
     }
     
     ImGui::EndChild();
@@ -1444,16 +1452,25 @@ inline void HairUI::drawGroomList(HairSystem& hairSystem, Renderer* renderer) {
 
 
 
-inline void HairUI::drawPresets() {
+inline void HairUI::drawPresets(HairSystem& hairSystem, Renderer* renderer) {
     ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Style Library");
     ImGui::TextDisabled("Select to apply all settings instantly.");
     ImGui::Separator();
-    
+
     // Grouping presets by index (matches initializePresets order)
     auto drawPresetItem = [&](size_t i) {
         bool selected = false; // Could track if current matches this
         if (ImGui::Selectable(m_presets[i].name.c_str(), selected)) {
+            const bool geomChanged = m_presets[i].affectsGeometry;
             applyPreset(m_presets[i]);
+            syncToGroom(hairSystem);
+            if (geomChanged && !m_selectedGroomName.empty()) {
+                hairSystem.restyleGroom(m_selectedGroomName);
+            }
+            if (renderer) {
+                renderer->setHairMaterial(m_currentMaterial);
+                renderer->resetCPUAccumulation();
+            }
             m_needsRebuild = true;
         }
     };

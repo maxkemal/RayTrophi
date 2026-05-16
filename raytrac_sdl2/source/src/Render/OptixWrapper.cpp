@@ -66,6 +66,41 @@
         }                                                                       \
     } while (0)
 
+namespace {
+
+cudaTextureObject_t sanitizeCudaTextureObject(cudaTextureObject_t texture) {
+    if (texture == 0) {
+        return 0;
+    }
+
+    cudaResourceDesc resourceDesc = {};
+    const cudaError_t descErr = cudaGetTextureObjectResourceDesc(&resourceDesc, texture);
+    if (descErr != cudaSuccess) {
+        cudaGetLastError();
+        return 0;
+    }
+
+    return texture;
+}
+
+GpuMaterial sanitizeGpuMaterialTextures(const GpuMaterial& material) {
+    GpuMaterial sanitized = material;
+    sanitized.fft_height_tex = sanitizeCudaTextureObject(sanitized.fft_height_tex);
+    sanitized.fft_normal_tex = sanitizeCudaTextureObject(sanitized.fft_normal_tex);
+    sanitized.albedo_tex = sanitizeCudaTextureObject(sanitized.albedo_tex);
+    sanitized.normal_tex = sanitizeCudaTextureObject(sanitized.normal_tex);
+    sanitized.roughness_tex = sanitizeCudaTextureObject(sanitized.roughness_tex);
+    sanitized.metallic_tex = sanitizeCudaTextureObject(sanitized.metallic_tex);
+    sanitized.emission_tex = sanitizeCudaTextureObject(sanitized.emission_tex);
+    sanitized.height_tex = sanitizeCudaTextureObject(sanitized.height_tex);
+    sanitized.opacity_tex = sanitizeCudaTextureObject(sanitized.opacity_tex);
+    sanitized.transmission_tex = sanitizeCudaTextureObject(sanitized.transmission_tex);
+    sanitized.specular_tex = sanitizeCudaTextureObject(sanitized.specular_tex);
+    return sanitized;
+}
+
+} // namespace
+
 __host__ __device__ inline float optix_length(const float3& v) {
     return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
 }
@@ -1480,7 +1515,9 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     // but ensures water still flows properly when rendering or playing a timeline animation.
     float fps = static_cast<float>(render_settings.animation_fps > 0 ? render_settings.animation_fps : 24);
     float frame_time = static_cast<float>(render_settings.animation_current_frame) / fps;
-    params.water_time = frame_time;
+    params.water_time = render_settings.realtime_weather_preview
+        ? params.time
+        : frame_time;
 
     // Full image tiles
     params.tile_x = 0;
@@ -2374,18 +2411,60 @@ void OptixWrapper::updateMaterialBuffer(const std::vector<GpuMaterial>& material
         SCENE_LOG_INFO("[OptiX] Material buffer allocated. New Count: " + std::to_string(new_count));
     }
 
+    std::vector<GpuMaterial> sanitizedMaterials;
+    sanitizedMaterials.reserve(materials.size());
+    for (const GpuMaterial& material : materials) {
+        sanitizedMaterials.push_back(sanitizeGpuMaterialTextures(material));
+    }
+
     // Upload Data
-    cudaError_t err = cudaMemcpy(d_materials, materials.data(), new_size_bytes, cudaMemcpyHostToDevice);
+    cudaError_t err = cudaMemcpy(d_materials, sanitizedMaterials.data(), new_size_bytes, cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
         SCENE_LOG_ERROR("[OptiX] updateMaterialBuffer failed: " + std::string(cudaGetErrorString(err)));
         return;
     }
     
     m_material_count = static_cast<int>(new_count);
-    m_cached_materials = materials;
+    m_cached_materials = std::move(sanitizedMaterials);
     
     // Reset accumulation to show material buffer change immediately
     resetAccumulation();
+}
+
+bool OptixWrapper::updateMaterialAt(uint32_t material_index, const GpuMaterial& material) {
+    if (!d_materials || material_index >= static_cast<uint32_t>(m_material_count)) {
+        return false;
+    }
+
+    if (m_cached_materials.size() < static_cast<size_t>(m_material_count)) {
+        return false;
+    }
+
+    const GpuMaterial sanitized = sanitizeGpuMaterialTextures(material);
+    cudaError_t err = cudaMemcpy(
+        d_materials + material_index,
+        &sanitized,
+        sizeof(GpuMaterial),
+        cudaMemcpyHostToDevice
+    );
+    if (err != cudaSuccess) {
+        SCENE_LOG_ERROR("[OptiX] updateMaterialAt failed: " + std::string(cudaGetErrorString(err)));
+        return false;
+    }
+
+    m_cached_materials[material_index] = sanitized;
+
+    if (accel_manager) {
+        accel_manager->syncSBTMaterialData(m_cached_materials, true);
+
+        const auto& accel_sbt = accel_manager->getSBT();
+        sbt.hitgroupRecordBase = accel_sbt.hitgroupRecordBase;
+        sbt.hitgroupRecordStrideInBytes = accel_sbt.hitgroupRecordStrideInBytes;
+        sbt.hitgroupRecordCount = accel_sbt.hitgroupRecordCount;
+    }
+
+    resetAccumulation();
+    return true;
 }
 
 void OptixWrapper::syncSBTMaterialData(const std::vector<GpuMaterial>& materials, bool sync_terrain) {

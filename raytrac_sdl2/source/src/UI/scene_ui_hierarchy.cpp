@@ -2548,7 +2548,67 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                 const char* lightTypes[] = { "Point", "Directional", "Spot", "Area" };
                 int typeIdx = (int)light.type();
-                if (typeIdx >= 0 && typeIdx < 4) ImGui::TextDisabled("Type: %s", lightTypes[typeIdx]);
+                int newTypeIdx = typeIdx;
+                if (ImGui::Combo("Type", &newTypeIdx, lightTypes, IM_ARRAYSIZE(lightTypes))) {
+                    if (newTypeIdx != typeIdx && newTypeIdx >= 0 && newTypeIdx < 4) {
+                        // Preserve common properties from the current light
+                        Vec3 pos = light.position;
+                        Vec3 col = light.color;
+                        float inten = light.intensity;
+                        Vec3 dir = light.direction;
+                        if (dir.length_squared() < 0.001f) dir = Vec3(0, -1, 0);
+                        std::string name = light.nodeName;
+                        float radius = light.radius;
+
+                        std::shared_ptr<Light> new_light;
+                        switch (newTypeIdx) {
+                        case 0: // Point
+                            new_light = std::make_shared<PointLight>(pos, col, inten);
+                            new_light->radius = radius;
+                            break;
+                        case 1: // Directional
+                            new_light = std::make_shared<DirectionalLight>(dir, col, inten);
+                            new_light->radius = radius;
+                            break;
+                        case 2: // Spot
+                            new_light = std::make_shared<SpotLight>(pos, dir, col, 45.0f, 10.0f);
+                            new_light->intensity = inten;
+                            break;
+                        case 3: // Area
+                            new_light = std::make_shared<AreaLight>(pos, Vec3(2, 0, 0), Vec3(0, 0, 2), 2.0f, 2.0f, col);
+                            new_light->intensity = inten;
+                            break;
+                        }
+
+                        if (new_light) {
+                            // Explicitly override common fields — DirectionalLight ctor doesn't init
+                            // position and re-packs color/intensity from input. Same for other ctors that
+                            // may take a packed color*intensity. This keeps the swap visually consistent.
+                            new_light->nodeName = name;
+                            new_light->position = pos;
+                            new_light->color = col;
+                            new_light->intensity = inten;
+                            new_light->direction = dir;
+                            new_light->radius = radius;
+
+                            // Resolve scene index (selection.light_index may be stale)
+                            size_t idx = 0;
+                            bool found = false;
+                            for (size_t k = 0; k < ctx.scene.lights.size(); ++k) {
+                                if (ctx.scene.lights[k] == sel.selected.light) { idx = k; found = true; break; }
+                            }
+                            if (found) {
+                                auto cmd = std::make_unique<ChangeLightTypeCommand>(idx, sel.selected.light, new_light);
+                                cmd->execute(ctx);
+                                history.record(std::move(cmd));
+                            }
+                        }
+                        // Skip drawing the rest of the stale light reference this frame;
+                        // next frame redraws from the new light pointer cleanly.
+                        ImGui::TextDisabled("(type changed — refreshing)");
+                        return;
+                    }
+                }
 
                 // Position with ◇ key button
                 bool posKeyed = isLightKeyed(true, false, false, false);

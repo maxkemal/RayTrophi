@@ -13,6 +13,227 @@
 #define GPU_MIN_ALPHA 0.0001f
 #define GPU_MIN_DOT 0.0001f
 
+__device__ inline bool ms_weather_active(const WeatherParams& weather) {
+    return weather.enabled != 0 && weather.type != WEATHER_NONE &&
+           weather.intensity > 0.0f && weather.density > 0.0f;
+}
+
+__device__ inline bool ms_weather_surface_active(const WeatherParams& weather) {
+    if (weather.enabled == 0 || weather.type == WEATHER_NONE || weather.surface_response_enabled == 0) {
+        return false;
+    }
+
+    float surfaceSignal = 0.0f;
+    if (weather.type == WEATHER_RAIN) {
+        surfaceSignal = weather.surface_wetness_output;
+    } else if (weather.type == WEATHER_SNOW || weather.type == WEATHER_DUST) {
+        surfaceSignal = weather.surface_accumulation_output;
+    }
+
+    return surfaceSignal > 0.001f || (weather.intensity > 0.0f && weather.density > 0.0f);
+}
+
+__device__ inline float3 ms_mix3(float3 a, float3 b, float t) {
+    return a * (1.0f - t) + b * t;
+}
+
+__device__ inline float ms_saturate(float v) {
+    return fminf(fmaxf(v, 0.0f), 1.0f);
+}
+
+__device__ inline float3 ms_safe_normalize(const float3& v, const float3& fallback) {
+    float len2 = dot(v, v);
+    if (len2 <= 1e-10f) return fallback;
+    return v * rsqrtf(len2);
+}
+
+__device__ inline float ms_weather_surface_exposure(const WeatherParams& weather, const OptixHitResult& payload) {
+    const float3 baseNormal = ms_safe_normalize(payload.normal, make_float3(0.0f, 1.0f, 0.0f));
+    float upMask = ms_saturate((baseNormal.y - 0.12f) / 0.78f);
+    upMask = upMask * upMask * (3.0f - 2.0f * upMask);
+
+    float windAmount = ms_saturate(weather.wind_speed / 35.0f);
+    float windLen2 = dot(weather.wind_direction, weather.wind_direction);
+    float3 windDir = (windLen2 > 1e-8f) ? normalize(weather.wind_direction) : make_float3(1.0f, 0.0f, 0.0f);
+    float3 incoming = normalize(make_float3(0.0f, 1.0f, 0.0f) - windDir * windAmount);
+    float windFacing = ms_saturate(dot(baseNormal, incoming));
+    float exposure = ms_saturate(upMask * (1.0f - windAmount * 0.78f) + windFacing * (0.12f + windAmount * 1.22f));
+    float n = pd_vnoise3(payload.position * fmaxf(weather.precipitation_scale, 0.1f) * 0.18f +
+                         make_float3(13.1f, 47.2f, 5.7f));
+    float breakup = ms_saturate(n * 1.35f - 0.18f);
+    return exposure * (0.45f + 0.55f * breakup);
+}
+
+__device__ inline float ms_weather_surface_geometric_support(const WeatherParams& weather, const float3& supportNormal) {
+    const float3 macroNormal = ms_safe_normalize(supportNormal, make_float3(0.0f, 1.0f, 0.0f));
+    float support = 0.0f;
+    if (weather.type == WEATHER_SNOW) {
+        support = ms_saturate((macroNormal.y - 0.02f) / 0.72f);
+        support = support * support;
+    } else {
+        support = ms_saturate((macroNormal.y - 0.02f) / 0.78f);
+    }
+    return support * support * (3.0f - 2.0f * support);
+}
+
+__device__ inline float3 ms_weather_surface_support_normal(const OptixHitResult& payload) {
+    const float3 baseNormal = ms_safe_normalize(payload.normal, make_float3(0.0f, 1.0f, 0.0f));
+    const float3 macroNormal = ms_safe_normalize(payload.geom_normal, baseNormal);
+    return ms_safe_normalize(macroNormal * 0.38f + baseNormal * 0.62f, baseNormal);
+}
+
+__device__ inline float ms_weather_surface_settling(const WeatherParams& weather, const OptixHitResult& payload) {
+    if (weather.type != WEATHER_SNOW && weather.type != WEATHER_DUST) return 0.0f;
+
+    const float settlingAmount = ms_saturate(weather.surface_settling_output);
+    if (settlingAmount <= 1e-4f) return 0.0f;
+
+    const float3 shadingNormal = ms_safe_normalize(payload.normal, make_float3(0.0f, 1.0f, 0.0f));
+    const float3 macroNormal = ms_weather_surface_support_normal(payload);
+    const float support = ms_weather_surface_geometric_support(weather, macroNormal);
+    const float supportGate = ms_saturate((support - 0.02f) / 0.58f);
+    if (supportGate <= 1e-4f) return 0.0f;
+    const float exposure = ms_weather_surface_exposure(weather, payload);
+    const float cavity = ms_saturate((1.0f - dot(shadingNormal, macroNormal)) * 3.8f + (1.0f - support) * 0.10f);
+    float3 windFlat = make_float3(weather.wind_direction.x, 0.0f, weather.wind_direction.z);
+    float3 leeDir = dot(windFlat, windFlat) > 1e-8f ? ms_safe_normalize(make_float3(-windFlat.x, 0.28f, -windFlat.z), make_float3(0.0f, 1.0f, 0.0f)) : make_float3(0.0f, 1.0f, 0.0f);
+    const float lee = ms_saturate(dot(macroNormal, leeDir) * 0.85f + cavity * 0.35f);
+    const float shelter = ms_saturate((1.0f - exposure) * 0.52f + cavity * 0.26f + (1.0f - support) * 0.22f + lee * 0.42f);
+    const float pocketNoise = pd_vnoise3(payload.position * 0.085f + make_float3(31.4f, 9.7f, 54.2f));
+    const float pocketMask = ms_saturate(cavity * 0.92f + pocketNoise * 0.26f);
+    const float slopeBase = ms_saturate((support - 0.16f) / 0.54f);
+    const float density = ms_saturate(weather.density);
+    const float typeBoost = (weather.type == WEATHER_SNOW) ? 1.34f : 1.04f;
+    const float anchor = fmaxf(pocketMask, slopeBase * 0.30f + cavity * 0.40f + lee * 0.30f);
+    return ms_saturate(settlingAmount * supportGate * shelter * anchor * (0.76f + density * 1.10f) * typeBoost);
+}
+
+__device__ inline float ms_weather_surface_accumulation(const WeatherParams& weather, const OptixHitResult& payload) {
+    if (weather.type != WEATHER_SNOW && weather.type != WEATHER_DUST) return 0.0f;
+
+    const float baseAccum = ms_saturate(weather.surface_accumulation_output);
+    const float intensity = ms_saturate(weather.intensity);
+    const float density = ms_saturate(weather.density);
+    const float geomSupport = ms_weather_surface_geometric_support(weather, ms_weather_surface_support_normal(payload));
+    const float intensityResponse = 0.80f + intensity * 0.70f;
+    const float densityResponse = 0.35f + density * 1.15f;
+    const float typeBoost = (weather.type == WEATHER_SNOW) ? 1.10f : 0.90f;
+    const float directAccum = baseAccum * intensityResponse * ms_weather_surface_exposure(weather, payload) * densityResponse * typeBoost * geomSupport;
+    const float settling = ms_weather_surface_settling(weather, payload);
+    return ms_saturate(directAccum + (1.0f - ms_saturate(directAccum)) * settling);
+}
+
+__device__ inline float ms_weather_surface_height(const WeatherParams& weather, const float3& pos) {
+    const float scale = fmaxf(weather.precipitation_scale, 0.1f);
+    const float heightBoost = 0.25f + ms_saturate(weather.surface_height_output) * 3.75f;
+    if (weather.type == WEATHER_SNOW) {
+        float2 windXZ = make_float2(weather.wind_direction.x, weather.wind_direction.z);
+        float windLen2 = windXZ.x * windXZ.x + windXZ.y * windXZ.y;
+        float invWindLen = windLen2 > 1e-8f ? rsqrtf(windLen2) : 0.0f;
+        float2 along = windLen2 > 1e-8f ? make_float2(windXZ.x * invWindLen, windXZ.y * invWindLen) : make_float2(1.0f, 0.0f);
+        float2 across = make_float2(-along.y, along.x);
+        float2 uv = make_float2(pos.x * along.x + pos.z * along.y, pos.x * across.x + pos.z * across.y);
+        float3 p = make_float3(uv.x * scale * 0.12f, pos.y * scale * 0.03f, uv.y * scale * 0.12f);
+        float broad = pd_vnoise3(p * 0.55f + make_float3(17.3f, 9.1f, 41.7f));
+        float drift = 1.0f - fabsf(pd_vnoise3(make_float3(p.x * 1.45f, p.y * 0.8f, p.z * 0.58f) + make_float3(3.7f, 29.4f, 11.8f)) * 2.0f - 1.0f);
+        drift *= drift;
+        float clumps = 1.0f - fabsf(pd_vnoise3(p * 2.90f + make_float3(61.2f, 7.5f, 18.9f)) * 2.0f - 1.0f);
+        float micro = pd_vnoise3(p * 7.40f + make_float3(8.3f, 51.7f, 27.4f));
+        return (broad * 0.22f + drift * 0.36f + clumps * 0.27f + micro * 0.15f) * heightBoost;
+    }
+
+    const float3 p = pos * (scale * 0.18f);
+    float wisps = pd_vnoise3(p + make_float3(19.7f, 5.3f, 27.1f));
+    float grain = pd_vnoise3(p * 2.85f + make_float3(4.1f, 37.8f, 12.4f));
+    float streak = pd_vnoise3(p * 1.65f + make_float3(44.5f, 14.2f, 7.6f));
+    return (wisps * 0.30f + grain * 0.45f + streak * 0.25f) * heightBoost;
+}
+
+__device__ inline float3 ms_weather_surface_normal(const WeatherParams& weather, const OptixHitResult& payload) {
+    const float3 baseNormal = ms_safe_normalize(payload.normal, make_float3(0.0f, 1.0f, 0.0f));
+    if (!ms_weather_surface_active(weather)) return baseNormal;
+    if (weather.type != WEATHER_SNOW && weather.type != WEATHER_DUST) return baseNormal;
+
+    const float accumulation = ms_weather_surface_accumulation(weather, payload);
+    if (accumulation <= 1e-4f) return baseNormal;
+
+    const float3 supportNormal = ms_weather_surface_support_normal(payload);
+    const float geomSupport = ms_weather_surface_geometric_support(weather, supportNormal);
+    if (geomSupport <= 1e-4f) return baseNormal;
+
+    const float settling = ms_weather_surface_settling(weather, payload);
+    float detailCapture = ms_saturate((baseNormal.y - 0.04f) / 0.82f);
+    detailCapture = 0.45f + 0.55f * detailCapture;
+    const float heightResponse = 0.12f + ms_saturate(weather.surface_height_output) * 0.95f;
+    const float buildup = ms_saturate(accumulation + settling * 0.85f);
+    float normalStrength = buildup * detailCapture * heightResponse * (weather.type == WEATHER_SNOW ? 0.42f : 0.15f);
+    if (normalStrength <= 1e-4f) return baseNormal;
+
+    float3 windDir = weather.wind_direction;
+    float3 tangent = windDir - baseNormal * dot(windDir, baseNormal);
+    if (dot(tangent, tangent) <= 1e-8f) {
+        tangent = cross(fabsf(baseNormal.y) < 0.999f ? make_float3(0.0f, 1.0f, 0.0f) : make_float3(1.0f, 0.0f, 0.0f), baseNormal);
+    }
+    tangent = ms_safe_normalize(tangent, make_float3(1.0f, 0.0f, 0.0f));
+    float3 bitangent = ms_safe_normalize(cross(baseNormal, tangent), make_float3(0.0f, 0.0f, 1.0f));
+    tangent = ms_safe_normalize(cross(bitangent, baseNormal), tangent);
+
+    float sampleStep = (weather.type == WEATHER_SNOW ? 0.62f : 0.90f) / fmaxf(weather.precipitation_scale, 0.35f);
+    float heightCenter = ms_weather_surface_height(weather, payload.position);
+    float heightT = ms_weather_surface_height(weather, payload.position + tangent * sampleStep);
+    float heightB = ms_weather_surface_height(weather, payload.position + bitangent * sampleStep);
+    float gradT = fminf(fmaxf((heightT - heightCenter) / sampleStep, -0.28f), 0.28f);
+    float gradB = fminf(fmaxf((heightB - heightCenter) / sampleStep, -0.28f), 0.28f);
+
+    float3 perturbed = baseNormal - tangent * (gradT * normalStrength) - bitangent * (gradB * normalStrength);
+    perturbed = ms_safe_normalize(perturbed, baseNormal);
+
+    const float3 geomNormal = ms_safe_normalize(payload.geom_normal, baseNormal);
+    if (dot(perturbed, geomNormal) < 0.05f) {
+        perturbed = ms_safe_normalize(baseNormal + (perturbed - geomNormal) * 0.35f, baseNormal);
+    }
+    if (dot(perturbed, supportNormal) < 0.55f) {
+        perturbed = ms_safe_normalize(supportNormal + (perturbed - supportNormal) * 0.05f, supportNormal);
+    }
+    return perturbed;
+}
+
+__device__ inline void apply_weather_surface_gpu(
+    const WeatherParams& weather,
+    const OptixHitResult& payload,
+    float3& albedo,
+    float& roughness,
+    float& metallic
+) {
+    if (!ms_weather_surface_active(weather)) return;
+
+    float exposed = ms_weather_surface_exposure(weather, payload);
+
+    if (weather.type == WEATHER_RAIN) {
+        float wet = fminf(fmaxf(weather.surface_wetness_output, 0.0f), 1.0f) *
+                    (0.35f + 0.65f * exposed);
+        albedo = ms_mix3(albedo, albedo * 0.50f, wet * 0.62f);
+        roughness = fmaxf(0.012f, roughness * (1.0f - wet * 0.78f));
+        metallic = fmaxf(0.0f, metallic - wet * 0.05f);
+    } else if (weather.type == WEATHER_SNOW) {
+        float acc = ms_weather_surface_accumulation(weather, payload);
+        float settling = ms_weather_surface_settling(weather, payload);
+        float heightLift = ms_saturate(weather.surface_height_output);
+        float cover = ms_saturate(acc + settling * 0.84f + heightLift * (acc * 0.08f + settling * 0.30f));
+        albedo = ms_mix3(albedo, make_float3(0.88f, 0.91f, 0.96f), cover * 0.72f);
+        roughness = fminf(1.0f, roughness + cover * (0.45f + heightLift * 0.10f));
+        metallic *= (1.0f - cover * 0.8f);
+    } else if (weather.type == WEATHER_DUST) {
+        float acc = ms_weather_surface_accumulation(weather, payload);
+        float settling = ms_weather_surface_settling(weather, payload);
+        float heightLift = ms_saturate(weather.surface_height_output);
+        float cover = ms_saturate(acc + settling * 0.90f + heightLift * settling * 0.22f);
+        albedo = ms_mix3(albedo, make_float3(0.58f, 0.46f, 0.30f), cover * 0.55f);
+        roughness = fminf(1.0f, roughness + cover * (0.35f + heightLift * 0.08f));
+        metallic *= (1.0f - cover * 0.55f);
+    }
+}
+
 __device__ __forceinline__ bool finite3(const float3& v) {
     return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
 }
@@ -166,7 +387,7 @@ __device__ __noinline__ float3 evaluate_brdf(
     const float3& wi
 )
 {
-    const float3 N = payload.normal;
+    const float3 N = ms_weather_surface_normal(optixLaunchParams.world.weather, payload);
     float2 uv = apply_material_uv_transform(material, payload.uv);
 
     // Procedural tile-break: independent slider — set to 0 to keep albedo maps clean.
@@ -289,6 +510,10 @@ __device__ __noinline__ float3 evaluate_brdf(
         roughness = fmaxf(0.02f, fminf(1.0f,
             roughness + pd_roughnessVar(payload.position, sc) * str * 0.5f));
     }
+
+    apply_weather_surface_gpu(optixLaunchParams.world.weather, payload, albedo, roughness, metallic);
+    roughness = fminf(fmaxf(roughness, 0.02f), 1.0f);
+    metallic = fminf(fmaxf(metallic, 0.0f), 1.0f);
 
     float alpha = max(roughness * roughness, GPU_MIN_ALPHA);
     float alpha2 = alpha * alpha;
@@ -595,6 +820,12 @@ __device__ bool clearcoat_scatter(
     if (payload.use_blended_data) cc_roughness = payload.blended_clearcoat_roughness;
     float clearcoat_strength = material.clearcoat;
     if (payload.use_blended_data) clearcoat_strength = payload.blended_clearcoat;
+    if (ms_weather_surface_active(optixLaunchParams.world.weather) &&
+        optixLaunchParams.world.weather.type == WEATHER_RAIN) {
+        float wet = fminf(fmaxf(optixLaunchParams.world.weather.surface_wetness_output, 0.0f), 1.0f);
+        clearcoat_strength = fmaxf(clearcoat_strength, wet * 0.72f);
+        cc_roughness = fminf(cc_roughness, fmaxf(0.006f, 0.045f - wet * 0.030f));
+    }
     cc_roughness = fmaxf(cc_roughness, 0.001f);
     float alpha = fmaxf(cc_roughness * cc_roughness, 1e-4f);
 
@@ -724,14 +955,18 @@ __device__ bool transmission_scatter(
     roughness = fminf(fmaxf(roughness, 0.0f), 1.0f);
 
     float3 micro_normal = macro_normal;
-    if (roughness >= 0.01f) {
-        micro_normal = ggx_glass_effective_normal(
+    if (roughness > 0.0005f) {
+        const float sample_roughness = fmaxf(roughness, 0.02f);
+        const float blend = fminf(fmaxf(roughness / 0.02f, 0.0f), 1.0f);
+        const float smooth_blend = blend * blend * (3.0f - 2.0f * blend);
+        const float3 sampled_normal = ggx_glass_effective_normal(
             random_float(rng),
             random_float(rng),
-            roughness,
+            sample_roughness,
             macro_normal,
             -unit_direction
         );
+        micro_normal = normalize(macro_normal * (1.0f - smooth_blend) + sampled_normal * smooth_blend);
     }
 
     float cos_theta = fminf(dot(-unit_direction, macro_normal), 1.0f);
@@ -907,6 +1142,12 @@ __device__ __noinline__ bool scatter_material(
         roughness = fmaxf(roughness, 0.1f);
     }
 
+    apply_weather_surface_gpu(optixLaunchParams.world.weather, payload, albedo, roughness, metallic);
+    roughness = fminf(fmaxf(roughness, 0.02f), 1.0f);
+    metallic = fminf(fmaxf(metallic, 0.0f), 1.0f);
+    payload.normal = ms_weather_surface_normal(optixLaunchParams.world.weather, payload);
+    N = payload.normal;
+
    
    
     float dielectricF0 = fminf(fmaxf(0.08f * specular, 0.0f), 0.08f);
@@ -919,6 +1160,14 @@ __device__ __noinline__ bool scatter_material(
     // 1. CLEAR COAT (Top layer - evaluated first)
     float clearcoat = material.clearcoat;
     if (payload.use_blended_data) clearcoat = payload.blended_clearcoat;
+    float clearcoat_roughness = material.clearcoat_roughness;
+    if (payload.use_blended_data) clearcoat_roughness = payload.blended_clearcoat_roughness;
+    if (ms_weather_surface_active(optixLaunchParams.world.weather) &&
+        optixLaunchParams.world.weather.type == WEATHER_RAIN) {
+        float wet = fminf(fmaxf(optixLaunchParams.world.weather.surface_wetness_output, 0.0f), 1.0f);
+        clearcoat = fmaxf(clearcoat, wet * 0.72f);
+        clearcoat_roughness = fminf(clearcoat_roughness, fmaxf(0.006f, 0.045f - wet * 0.030f));
+    }
     if (clearcoat > 0.01f) {
         // Fresnel for clear coat decides reflection probability
         float cc_ior = 1.5f;
@@ -926,9 +1175,6 @@ __device__ __noinline__ bool scatter_material(
         cc_f0 *= cc_f0;
         float cc_fresnel = cc_f0 + (1.0f - cc_f0) * powf(1.0f - fmaxf(dot(V, N), 0.0f), 5.0f);
         float cc_prob = clearcoat * cc_fresnel;
-
-        float clearcoat_roughness = material.clearcoat_roughness;
-        if (payload.use_blended_data) clearcoat_roughness = payload.blended_clearcoat_roughness;
 
         if (random_float(rng) < cc_prob) {
             *is_specular = (clearcoat_roughness < 0.02f);

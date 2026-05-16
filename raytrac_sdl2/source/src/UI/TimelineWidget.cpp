@@ -418,6 +418,10 @@ void TimelineWidget::draw(UIContext& ctx) {
                     WaterSurface* surf = WaterManager::getInstance().getWaterSurface(water_id);
                     if (surf) {
                         WaterManager::getInstance().updateFromTrack(surf, track, current_frame);
+                        if (surf->material_id != MaterialManager::INVALID_MATERIAL_ID) {
+                            WaterManager::getInstance().syncSurfaceMaterial(surf);
+                            ctx.renderer.updateBackendMaterial(ctx.scene, surf->material_id);
+                        }
                         ctx.renderer.resetCPUAccumulation();
                         g_bvh_rebuild_pending = true;
                         g_optix_rebuild_pending = true;
@@ -652,6 +656,7 @@ void TimelineWidget::draw(UIContext& ctx) {
             if (evaluated.has_world) {
                 NishitaSkyParams nishita = ctx.renderer.world.getNishitaParams();
                 bool changed = false;
+                bool weatherChanged = false;
                 
                 if (evaluated.world.has_sun_elevation) { nishita.sun_elevation = evaluated.world.sun_elevation; changed = true; }
                 if (evaluated.world.has_sun_azimuth) { nishita.sun_azimuth = evaluated.world.sun_azimuth; changed = true; }
@@ -674,6 +679,32 @@ void TimelineWidget::draw(UIContext& ctx) {
                 
                 if (changed) {
                     ctx.renderer.world.setNishitaParams(nishita);
+                }
+
+                if (evaluated.world.has_weather_params) {
+                    WeatherParams weather = ctx.renderer.world.getWeatherParams();
+                    weather.enabled = evaluated.world.weather_enabled;
+                    weather.type = evaluated.world.weather_type;
+                    weather.intensity = evaluated.world.weather_intensity;
+                    weather.density = evaluated.world.weather_density;
+                    weather.wind_direction = make_float3(
+                        evaluated.world.weather_wind_direction.x,
+                        evaluated.world.weather_wind_direction.y,
+                        evaluated.world.weather_wind_direction.z);
+                    weather.wind_speed = evaluated.world.weather_wind_speed;
+                    weather.precipitation_scale = evaluated.world.weather_precipitation_scale;
+                    weather.visibility = evaluated.world.weather_visibility;
+                    weather.surface_wetness_output = evaluated.world.weather_surface_wetness;
+                    weather.surface_accumulation_output = evaluated.world.weather_surface_accumulation;
+                    weather.surface_settling_output = evaluated.world.weather_surface_settling;
+                    weather.surface_height_output = evaluated.world.weather_surface_height;
+                    weather.visual_mode = evaluated.world.weather_visual_mode;
+                    weather.surface_response_enabled = evaluated.world.weather_surface_response_enabled;
+                    ctx.renderer.world.setWeatherParams(weather);
+                    weatherChanged = true;
+                }
+
+                if (changed || weatherChanged) {
                     extern bool g_world_dirty;
                     extern bool g_gas_volumes_dirty;
                     g_world_dirty = true;

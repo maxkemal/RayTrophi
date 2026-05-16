@@ -103,6 +103,8 @@ struct LightData {
     vec4 color;
     vec4 params;
     vec4 direction;
+    vec4 area_u;
+    vec4 area_v;
 };
 
 layout(set = 0, binding = 3, scalar) readonly buffer LightBuffer { LightData l[]; } lights;
@@ -208,9 +210,15 @@ struct VkWorldDataExtended {
     float cloudAnisotropy; float cloudAnisotropyBack; float cloudLobeMix; float cloudEmissiveIntensity;
     vec3  cloudEmissiveColor; float _pad3;
     int   fogEnabled;   float fogDensity; float fogHeight; float fogFalloff;
-    float fogDistance;  float fogSunScatter; vec3 fogColor;
+    float fogDistance;  float fogSunScatter; vec3 fogColor; float _pad4;
     int   godRaysEnabled; float godRaysIntensity; float godRaysDensity; int godRaysSamples;
-    int   envTexSlot;   float envIntensity; float envRotation; int _pad5;
+    int   aerialEnabled; float aerialMinDistance; float aerialMaxDistance; float _pad5_aerial;
+    int   weatherEnabled; int weatherType; float weatherIntensity; float weatherDensity;
+    vec3  weatherWindDirection; float weatherWindSpeed;
+    float weatherPrecipitationScale; float weatherVisibility; float weatherSurfaceWetness; float weatherSurfaceAccumulation;
+    float weatherSurfaceSettling; float weatherSurfaceHeight;
+    int   weatherVisualMode; int weatherSurfaceResponseEnabled;
+    int   envTexSlot;   float envIntensity; float envRotation; int _pad5; // nishitaLutReady
     uvec2 transmittanceLUT; uvec2 skyviewLUT; uvec2 multiScatterLUT; uvec2 aerialPerspectiveLUT;
 };
 
@@ -238,7 +246,7 @@ float rnd(inout uint seed) {
 vec3 sampleTransmittanceLUT(vec3 worldPos, vec3 sunDir) {
     if (worldData.w.mode != 2) return vec3(1.0);
     if (worldData.w.atmosphereHeight <= 0.0) return vec3(1.0);
-    if (worldData.w.transmittanceLUT.x == 0u && worldData.w.transmittanceLUT.y == 0u) return vec3(1.0);
+    if (worldData.w._pad5 == 0) return vec3(1.0);
     float Rg = max(worldData.w.planetRadius, 1.0);
     vec3 p = worldPos + vec3(0.0, Rg, 0.0);
     float altitude = max(length(p) - Rg, 0.0);
@@ -255,8 +263,7 @@ vec3 sampleSkyAmbient(vec3 viewDir) {
     vec3 ambDir = normalize(mix(vec3(0.0, 1.0, 0.0), normalize(viewDir), 0.45));
     ambDir = normalize(ambDir + normalize(worldData.w.sunDir) * 0.15);
 
-    if (worldData.w.mode == 2 &&
-        ((worldData.w.skyviewLUT.x | worldData.w.skyviewLUT.y) != 0u)) {
+    if (worldData.w.mode == 2 && worldData.w._pad5 != 0) {
         float az = atan(ambDir.z, ambDir.x);
         if (az < 0.0) az += TWO_PI;
         float u = az / TWO_PI;

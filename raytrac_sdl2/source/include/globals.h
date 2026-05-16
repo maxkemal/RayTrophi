@@ -129,6 +129,7 @@ struct RenderSettings {
     // Animation playback (timeline icin)
     bool animation_is_playing = false;
     int animation_playback_frame = 0;
+    bool realtime_weather_preview = false;
     
     // Render progress tracking (for UI display)
     int render_current_samples = 0;

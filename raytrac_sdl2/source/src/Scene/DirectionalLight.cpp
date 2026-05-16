@@ -31,11 +31,21 @@ Vec3 DirectionalLight::random_point() const {
 
     double angle = dis_angle(gen);
     double r = dis_radius(gen);
-    double x = r * cos(angle);
-    double y = r * sin(angle);
-    double z = 0;
+    float du = static_cast<float>(r * cos(angle));
+    float dv = static_cast<float>(r * sin(angle));
 
-    last_sampled_point = direction * 1000.0 + Vec3(x, y, z);
+    // Build an orthonormal tangent frame perpendicular to the light direction
+    // so the disk jitter actually spreads samples across the sun disk rather
+    // than along the direction axis (parity with Vulkan/OptiX).
+    Vec3 N = direction.normalize();
+    Vec3 tangent = Vec3::cross(N, Vec3(0.0f, 1.0f, 0.0f));
+    if (tangent.length_squared() < 1e-6f) {
+        tangent = Vec3::cross(N, Vec3(1.0f, 0.0f, 0.0f));
+    }
+    tangent = tangent.normalize();
+    Vec3 bitangent = Vec3::cross(N, tangent).normalize();
+
+    last_sampled_point = N * 1000.0f + tangent * du + bitangent * dv;
     return last_sampled_point;
 }
 

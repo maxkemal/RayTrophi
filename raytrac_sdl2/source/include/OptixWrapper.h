@@ -112,6 +112,7 @@ public:
     
     // Updates d_materials buffer only - for material property changes (color, roughness, etc.)
     void updateMaterialBuffer(const std::vector<GpuMaterial>& materials);
+    bool updateMaterialAt(uint32_t material_index, const GpuMaterial& material);
     
     // Synchronize material properties (emission, textures) into existing SBT
     void syncSBTMaterialData(const std::vector<GpuMaterial>& materials, bool sync_terrain = true);

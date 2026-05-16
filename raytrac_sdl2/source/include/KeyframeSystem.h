@@ -17,6 +17,7 @@
 #include "Vec3.h"
 #include "material_gpu.h"  // For GpuMaterial
 #include "json.hpp"
+#include "world.h"
 using json = nlohmann::json;
 
 // Vec3 Serialization
@@ -447,6 +448,9 @@ struct WorldKeyframe {
     bool has_aerial_params = false; // Min/Max distance
     bool has_overlay = false;
     bool has_overlay_params = false; // Intensity, Rotation, Mode
+
+    // Weather
+    bool has_weather_params = false;
     
     // Property values
     Vec3 background_color = Vec3(0.5, 0.7, 1.0);
@@ -527,6 +531,21 @@ struct WorldKeyframe {
     float env_overlay_intensity = 1.0f;
     float env_overlay_rotation = 0.0f;
     int env_overlay_blend_mode = 0;
+
+    int weather_enabled = 0;
+    int weather_type = 0;
+    float weather_intensity = 0.0f;
+    float weather_density = 0.0f;
+    Vec3 weather_wind_direction = Vec3(1.0f, 0.0f, 0.0f);
+    float weather_wind_speed = 0.0f;
+    float weather_precipitation_scale = 1.0f;
+    float weather_visibility = 1.0f;
+    float weather_surface_wetness = 0.0f;
+    float weather_surface_accumulation = 0.0f;
+    float weather_surface_settling = 0.0f;
+    float weather_surface_height = 0.0f;
+    int weather_visual_mode = 0;
+    int weather_surface_response_enabled = 1;
     
     WorldKeyframe() = default;
     
@@ -862,6 +881,44 @@ struct WorldKeyframe {
             result.env_overlay_intensity = a.env_overlay_intensity; result.env_overlay_rotation = a.env_overlay_rotation;
         } else if (b.has_overlay_params) {
             result.env_overlay_intensity = b.env_overlay_intensity; result.env_overlay_rotation = b.env_overlay_rotation;
+        }
+
+        result.has_weather_params = a.has_weather_params || b.has_weather_params;
+        if (a.has_weather_params && b.has_weather_params) {
+            result.weather_enabled = (t < 0.5f) ? a.weather_enabled : b.weather_enabled;
+            result.weather_type = (t < 0.5f) ? a.weather_type : b.weather_type;
+            result.weather_intensity = a.weather_intensity + (b.weather_intensity - a.weather_intensity) * t;
+            result.weather_density = a.weather_density + (b.weather_density - a.weather_density) * t;
+            result.weather_wind_direction = a.weather_wind_direction + (b.weather_wind_direction - a.weather_wind_direction) * t;
+            result.weather_wind_speed = a.weather_wind_speed + (b.weather_wind_speed - a.weather_wind_speed) * t;
+            result.weather_precipitation_scale = a.weather_precipitation_scale + (b.weather_precipitation_scale - a.weather_precipitation_scale) * t;
+            result.weather_visibility = a.weather_visibility + (b.weather_visibility - a.weather_visibility) * t;
+            result.weather_surface_wetness = a.weather_surface_wetness + (b.weather_surface_wetness - a.weather_surface_wetness) * t;
+            result.weather_surface_accumulation = a.weather_surface_accumulation + (b.weather_surface_accumulation - a.weather_surface_accumulation) * t;
+            result.weather_surface_settling = a.weather_surface_settling + (b.weather_surface_settling - a.weather_surface_settling) * t;
+            result.weather_surface_height = a.weather_surface_height + (b.weather_surface_height - a.weather_surface_height) * t;
+            result.weather_visual_mode = (t < 0.5f) ? a.weather_visual_mode : b.weather_visual_mode;
+            result.weather_surface_response_enabled = (t < 0.5f) ? a.weather_surface_response_enabled : b.weather_surface_response_enabled;
+        } else if (a.has_weather_params) {
+            result.weather_enabled = a.weather_enabled; result.weather_type = a.weather_type;
+            result.weather_intensity = a.weather_intensity; result.weather_density = a.weather_density;
+            result.weather_wind_direction = a.weather_wind_direction; result.weather_wind_speed = a.weather_wind_speed;
+            result.weather_precipitation_scale = a.weather_precipitation_scale; result.weather_visibility = a.weather_visibility;
+            result.weather_surface_wetness = a.weather_surface_wetness; result.weather_surface_accumulation = a.weather_surface_accumulation;
+            result.weather_surface_settling = a.weather_surface_settling;
+            result.weather_surface_height = a.weather_surface_height;
+            result.weather_visual_mode = a.weather_visual_mode;
+            result.weather_surface_response_enabled = a.weather_surface_response_enabled;
+        } else if (b.has_weather_params) {
+            result.weather_enabled = b.weather_enabled; result.weather_type = b.weather_type;
+            result.weather_intensity = b.weather_intensity; result.weather_density = b.weather_density;
+            result.weather_wind_direction = b.weather_wind_direction; result.weather_wind_speed = b.weather_wind_speed;
+            result.weather_precipitation_scale = b.weather_precipitation_scale; result.weather_visibility = b.weather_visibility;
+            result.weather_surface_wetness = b.weather_surface_wetness; result.weather_surface_accumulation = b.weather_surface_accumulation;
+            result.weather_surface_settling = b.weather_surface_settling;
+            result.weather_surface_height = b.weather_surface_height;
+            result.weather_visual_mode = b.weather_visual_mode;
+            result.weather_surface_response_enabled = b.weather_surface_response_enabled;
         }
 
         
@@ -2080,7 +2137,7 @@ inline void to_json(json& j, const WorldKeyframe& w) {
         {"fcll", w.has_cloud_lighting}, {"ffog", w.has_fog}, {"ffogp", w.has_fog_params},
         {"fgr", w.has_godrays}, {"fgrp", w.has_godrays_params},
         {"fms", w.has_multi_scatter}, {"fap", w.has_aerial_perspective}, {"fapp", w.has_aerial_params},
-        {"fovr", w.has_overlay}, {"fovrp", w.has_overlay_params},
+        {"fovr", w.has_overlay}, {"fovrp", w.has_overlay_params}, {"fwth", w.has_weather_params},
 
         {"bgc", w.background_color}, {"bgs", w.background_strength}, {"hr", w.hdri_rotation}, {"hint", w.hdri_intensity},
         {"se", w.sun_elevation}, {"sa", w.sun_azimuth}, {"si", w.sun_intensity}, {"ss", w.sun_size},
@@ -2103,7 +2160,12 @@ inline void to_json(json& j, const WorldKeyframe& w) {
         {"gre", w.godrays_enabled}, {"gri", w.godrays_intensity}, {"grd", w.godrays_density}, {"grs", w.godrays_samples},
 
         {"mse", w.multi_scatter_enabled}, {"msf", w.multi_scatter_factor}, {"ape", w.aerial_perspective}, {"apmin", w.aerial_min_distance}, {"apmax", w.aerial_max_distance},
-        {"ove", w.env_overlay_enabled}, {"ovi", w.env_overlay_intensity}, {"ovr", w.env_overlay_rotation}, {"ovm", w.env_overlay_blend_mode}
+        {"ove", w.env_overlay_enabled}, {"ovi", w.env_overlay_intensity}, {"ovr", w.env_overlay_rotation}, {"ovm", w.env_overlay_blend_mode},
+        {"wte", w.weather_enabled}, {"wtt", w.weather_type}, {"wti", w.weather_intensity}, {"wtd", w.weather_density},
+        {"wtw", w.weather_wind_direction}, {"wtws", w.weather_wind_speed}, {"wtps", w.weather_precipitation_scale},
+        {"wtv", w.weather_visibility}, {"wtwet", w.weather_surface_wetness}, {"wtacc", w.weather_surface_accumulation},
+        {"wtset", w.weather_surface_settling}, {"wthgt", w.weather_surface_height},
+        {"wtvm", w.weather_visual_mode}, {"wtsr", w.weather_surface_response_enabled}
     };
 }
 
@@ -2128,6 +2190,7 @@ inline void from_json(const json& j, WorldKeyframe& w) {
     w.has_multi_scatter = j.value("fms", false); w.has_aerial_perspective = j.value("fap", false);
     w.has_aerial_params = j.value("fapp", false);
     w.has_overlay = j.value("fovr", false); w.has_overlay_params = j.value("fovrp", false);
+    w.has_weather_params = j.value("fwth", false);
 
     if(j.contains("bgc")) j.at("bgc").get_to(w.background_color);
     w.background_strength = j.value("bgs", 1.0f); 
@@ -2176,6 +2239,21 @@ inline void from_json(const json& j, WorldKeyframe& w) {
     w.env_overlay_enabled = j.value("ove", 0);
     w.env_overlay_intensity = j.value("ovi", 1.0f); w.env_overlay_rotation = j.value("ovr", 0.0f);
     w.env_overlay_blend_mode = j.value("ovm", 0);
+
+    w.weather_enabled = j.value("wte", 0);
+    w.weather_type = j.value("wtt", 0);
+    w.weather_intensity = j.value("wti", 0.0f);
+    w.weather_density = j.value("wtd", 0.0f);
+    if(j.contains("wtw")) j.at("wtw").get_to(w.weather_wind_direction);
+    w.weather_wind_speed = j.value("wtws", 0.0f);
+    w.weather_precipitation_scale = j.value("wtps", 1.0f);
+    w.weather_visibility = j.value("wtv", 1.0f);
+    w.weather_surface_wetness = j.value("wtwet", 0.0f);
+    w.weather_surface_accumulation = j.value("wtacc", 0.0f);
+    w.weather_surface_settling = j.value("wtset", 0.0f);
+    w.weather_surface_height = j.value("wthgt", 0.0f);
+    w.weather_visual_mode = j.value("wtvm", WEATHER_VISUAL_OVERLAY);
+    w.weather_surface_response_enabled = j.value("wtsr", 1);
 }
 
 // TerrainKeyframe

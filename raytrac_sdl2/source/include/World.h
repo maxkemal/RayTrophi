@@ -25,6 +25,19 @@ enum WorldMode {
     WORLD_MODE_NISHITA = 2
 };
 
+enum WeatherType {
+    WEATHER_NONE = 0,
+    WEATHER_RAIN = 1,
+    WEATHER_SNOW = 2,
+    WEATHER_DUST = 3,
+    WEATHER_MIST = 4
+};
+
+enum WeatherVisualMode {
+    WEATHER_VISUAL_OVERLAY = 0,
+    WEATHER_VISUAL_SURFACE_ONLY = 1
+};
+
 // GPU-Compatible Structs
 struct AtmosphereLUTData {
     cudaTextureObject_t transmittance_lut;     // 2D (ViewAngle, Altitude)
@@ -150,6 +163,25 @@ struct AtmosphereAdvanced {
     int env_overlay_blend_mode;    // 0 = Mix, 1 = Multiply, 2 = Screen, 3 = Replace
 };
 
+struct WeatherParams {
+    int enabled;                    // 1 = weather system active
+    int type;                       // WeatherType
+    float intensity;                // Artist-facing strength, 0..1
+    float density;                  // Particle/volume density, 0..1
+
+    float3 wind_direction;          // Normalized world-space wind direction
+    float wind_speed;               // Meters/second style scale for animation
+
+    float precipitation_scale;      // Visual streak/flake scale
+    float visibility;               // 1 = clear, lower values reduce distance contrast
+    float surface_wetness_output;   // Output signal for future surface interaction
+    float surface_accumulation_output; // Output signal for snow/dust accumulation
+    float surface_settling_output;  // Extra buildup in cavities, pockets, and slope bases
+    float surface_height_output;    // Additional shading height for deposited material
+    int visual_mode;                // WeatherVisualMode
+    int surface_response_enabled;   // 1 = allow wetness/accumulation on materials
+};
+
 struct WorldData {
     int mode; // WorldMode
     
@@ -167,6 +199,7 @@ struct WorldData {
     // Nishita Mode
     NishitaSkyParams nishita;
     AtmosphereAdvanced advanced;
+    WeatherParams weather;
     
     // Camera position for volumetric clouds (updated every frame)
     float camera_y;  // Camera Y position in world space
@@ -229,6 +262,8 @@ public:
     NishitaSkyParams getNishitaParams() const;
     AtmosphereAdvanced getAdvancedParams() const;
     void setAdvancedParams(const AtmosphereAdvanced& a);
+    WeatherParams getWeatherParams() const;
+    void setWeatherParams(const WeatherParams& params);
     
     // Environment Texture Overlay for Nishita
     void setNishitaEnvOverlay(const std::string& path);

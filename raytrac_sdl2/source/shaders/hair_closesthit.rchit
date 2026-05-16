@@ -71,10 +71,12 @@ hitAttributeEXT vec4 hairAttrib;
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 
 struct LightData {
-    vec4 position;   // xyz=pos/dir, w=type (0=point,1=dir,2=spot)
-    vec4 color;      // rgb=color,   w=intensity
-    vec4 params;     // x=radius,    yzw=...
-    vec4 direction;  // xyz=dir,     w=outerAngle
+    vec4 position;   // xyz=pos, w=type (0=point, 1=directional, 2=area, 3=spot)
+    vec4 color;      // rgb=color, w=intensity
+    vec4 params;     // x=radius (point/sphere), y=width (area), z=height (area)|innerCos (spot)
+    vec4 direction;  // xyz=direction, w=outerCos (spot)
+    vec4 area_u;     // xyz=AreaLight u-axis (unit)
+    vec4 area_v;     // xyz=AreaLight v-axis (unit)
 };
 layout(set = 0, binding = 3, scalar) readonly buffer LightBuffer {
     LightData l[];
@@ -140,10 +142,24 @@ struct VkWorldDataExtended {
     float aerialMinDistance;
     float aerialMaxDistance;
     float _pad5_aerial;
+    int   weatherEnabled;
+    int   weatherType;
+    float weatherIntensity;
+    float weatherDensity;
+    vec3  weatherWindDirection;
+    float weatherWindSpeed;
+    float weatherPrecipitationScale;
+    float weatherVisibility;
+    float weatherSurfaceWetness;
+    float weatherSurfaceAccumulation;
+    float weatherSurfaceSettling;
+    float weatherSurfaceHeight;
+    int   weatherVisualMode;
+    int   weatherSurfaceResponseEnabled;
     int   envTexSlot;
     float envIntensity;
     float envRotation;
-    int   _pad5;
+    int   _pad5;                 // nishitaLutReady: Vulkan binding 8 has valid LUT samplers
 };
 layout(set = 0, binding = 7, scalar) readonly buffer WorldBuffer { VkWorldDataExtended w; } worldData;
 
@@ -547,6 +563,10 @@ void main()
 
     // ─── Light Loop ──────────────────────────────────────────────────────
     uint numLights = cam.lightCount;
+    // Per-pixel seed for soft-shadow jitter / area sampling
+    uvec2 pixel = uvec2(gl_LaunchIDEXT.xy);
+    uint baseSeed = pcg_hash(pixel.x * 1973u + pixel.y * 9277u + cam.frameCount * 26699u);
+
     for (uint li = 0u; li < numLights; li++) {
         LightData light = lights.l[li];
         vec3  lightColor = light.color.rgb * light.color.w;
@@ -554,17 +574,57 @@ void main()
         float lightDist;
         float atten = 1.0;
 
-        int lightType = int(light.position.w);
+        // Two independent stratified samples for this light
+        uint sA = pcg_hash(baseSeed + li * 0x9E3779B9u);
+        uint sB = pcg_hash(sA + 0x68E31DA4u);
+        float ru = float(sA) / 4294967296.0;
+        float rv = float(sB) / 4294967296.0;
+
+        int lightType = int(light.position.w + 0.5);
         if (lightType == 1) {
+            // Directional
             lightDir  = normalize(light.direction.xyz);
             lightDist = 1e6;
         } else {
-            vec3 toLight = light.position.xyz - hitPoint;
+            // Build sample target on the light surface
+            vec3 sampleTarget = light.position.xyz;
+            if (lightType == 0) {
+                // Point: jitter target by sphere radius (soft shadow)
+                float r = max(light.params.x, 0.0);
+                if (r > 0.0) {
+                    float z = ru * 2.0 - 1.0;
+                    float phi = rv * 2.0 * PI;
+                    float sr = sqrt(max(1.0 - z * z, 0.0));
+                    vec3 sphereDir = vec3(sr * cos(phi), sr * sin(phi), z);
+                    sampleTarget += sphereDir * r;
+                }
+            } else if (lightType == 2) {
+                // Area: random point on rectangle using AreaLight's true u/v axes (parity with CPU/OptiX)
+                float u_off = (ru - 0.5) * light.params.y;
+                float v_off = (rv - 0.5) * light.params.z;
+                sampleTarget = light.position.xyz + light.area_u.xyz * u_off + light.area_v.xyz * v_off;
+            }
+
+            vec3 toLight = sampleTarget - hitPoint;
             lightDist = length(toLight);
             if (lightDist < 1e-4) continue;
             lightDir = toLight / lightDist;
-            float r = max(light.params.x, 0.001);
-            atten = 1.0 / (1.0 + (lightDist * lightDist) / (r * r));
+
+            // Inverse-square falloff (parity with CPU getIntensity)
+            atten = 1.0 / max(lightDist * lightDist, 1e-4);
+
+            if (lightType == 3) {
+                // Spot light: cone falloff using inner/outer cosines
+                float innerCos = light.params.z;
+                float outerCos = light.direction.w;
+                vec3 spotDir = normalize(light.direction.xyz);
+                float cosLight = dot(-lightDir, spotDir);
+                float cone = clamp((cosLight - outerCos) / max(innerCos - outerCos, 1e-4), 0.0, 1.0);
+                if (cone <= 0.0) continue;
+                atten *= cone;
+            }
+            // Point (0) and Area (2) use pure inverse-square — intensity already
+            // encodes total energy; matches CPU PointLight/AreaLight::getIntensity.
         }
         if (dot(lightDir, lightDir) < 0.5) continue;
 

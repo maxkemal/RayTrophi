@@ -10,6 +10,8 @@
 #include "ui_modern.h"
 #include "imgui.h"
 #include "scene_data.h"
+#include <algorithm>
+#include <cmath>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -89,7 +91,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         FogParams, GodRaysParams,
         CloudDensity, CloudCoverage, CloudScale, CloudOffset,
         CloudLighting, CloudLayer2, CloudLayer2Params,
-        AerialPerspectiveParams, MultiScatterFactor
+        AerialPerspectiveParams, MultiScatterFactor, WeatherParams
     };
     
     auto isWorldKeyed = [&](WorldProp prop) -> bool {
@@ -124,6 +126,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     case WorldProp::CloudLayer2Params: return kf.world.has_cloud_layer2_params;
                     case WorldProp::AerialPerspectiveParams: return kf.world.has_aerial_params;
                     case WorldProp::MultiScatterFactor: return kf.world.has_multi_scatter;
+                    case WorldProp::WeatherParams: return kf.world.has_weather_params;
                 }
             }
         }
@@ -135,6 +138,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         World& w = ctx.renderer.world;
         NishitaSkyParams np = w.getNishitaParams();
         AtmosphereAdvanced adv = w.getAdvancedParams();
+        WeatherParams weather = w.getWeatherParams();
         
         auto& track = ctx.scene.timeline.tracks["World"];
         bool found = false;
@@ -168,6 +172,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 case WorldProp::CloudLayer2Params: return kf.world.has_cloud_layer2_params;
                 case WorldProp::AerialPerspectiveParams: return kf.world.has_aerial_params;
                 case WorldProp::MultiScatterFactor: return kf.world.has_multi_scatter;
+                case WorldProp::WeatherParams: return kf.world.has_weather_params;
             }
             return false;
         };
@@ -200,6 +205,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 case WorldProp::CloudLayer2Params: kf.world.has_cloud_layer2_params = false; break;
                 case WorldProp::AerialPerspectiveParams: kf.world.has_aerial_params = false; break;
                 case WorldProp::MultiScatterFactor: kf.world.has_multi_scatter = false; break;
+                case WorldProp::WeatherParams: kf.world.has_weather_params = false; break;
             }
         };
         
@@ -220,7 +226,8 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                                       wk.has_cloud_coverage || wk.has_cloud_scale || wk.has_cloud_offset ||
                                       wk.has_humidity || wk.has_temperature || wk.has_ozone_absorption_scale ||
                                       wk.has_fog_params || wk.has_godrays_params || wk.has_cloud_lighting ||
-                                      wk.has_cloud_layer2_params || wk.has_aerial_params || wk.has_multi_scatter;
+                                      wk.has_cloud_layer2_params || wk.has_aerial_params || wk.has_multi_scatter ||
+                                      wk.has_weather_params;
                     
                     if (!hasAnyProp) {
                         it->has_world = false;
@@ -351,6 +358,23 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         it->world.has_multi_scatter = true;
                         it->world.multi_scatter_factor = adv.multi_scatter_factor;
                         break;
+                    case WorldProp::WeatherParams:
+                        it->world.has_weather_params = true;
+                        it->world.weather_enabled = weather.enabled;
+                        it->world.weather_type = weather.type;
+                        it->world.weather_intensity = weather.intensity;
+                        it->world.weather_density = weather.density;
+                        it->world.weather_wind_direction = Vec3(weather.wind_direction.x, weather.wind_direction.y, weather.wind_direction.z);
+                        it->world.weather_wind_speed = weather.wind_speed;
+                        it->world.weather_precipitation_scale = weather.precipitation_scale;
+                        it->world.weather_visibility = weather.visibility;
+                        it->world.weather_surface_wetness = weather.surface_wetness_output;
+                        it->world.weather_surface_accumulation = weather.surface_accumulation_output;
+                        it->world.weather_surface_settling = weather.surface_settling_output;
+                        it->world.weather_surface_height = weather.surface_height_output;
+                        it->world.weather_visual_mode = weather.visual_mode;
+                        it->world.weather_surface_response_enabled = weather.surface_response_enabled;
+                        break;
                 }
                 
                 found = true;
@@ -478,6 +502,23 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 case WorldProp::MultiScatterFactor:
                     wk.has_multi_scatter = true;
                     wk.multi_scatter_factor = adv.multi_scatter_factor;
+                    break;
+                case WorldProp::WeatherParams:
+                    wk.has_weather_params = true;
+                    wk.weather_enabled = weather.enabled;
+                    wk.weather_type = weather.type;
+                    wk.weather_intensity = weather.intensity;
+                    wk.weather_density = weather.density;
+                    wk.weather_wind_direction = Vec3(weather.wind_direction.x, weather.wind_direction.y, weather.wind_direction.z);
+                    wk.weather_wind_speed = weather.wind_speed;
+                    wk.weather_precipitation_scale = weather.precipitation_scale;
+                    wk.weather_visibility = weather.visibility;
+                    wk.weather_surface_wetness = weather.surface_wetness_output;
+                    wk.weather_surface_accumulation = weather.surface_accumulation_output;
+                    wk.weather_surface_settling = weather.surface_settling_output;
+                    wk.weather_surface_height = weather.surface_height_output;
+                    wk.weather_visual_mode = weather.visual_mode;
+                    wk.weather_surface_response_enabled = weather.surface_response_enabled;
                     break;
             }
             
@@ -1023,6 +1064,130 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
 
     }
     
+    // ═══════════════════════════════════════════════════════════
+    // Weather Controls (shared payload for CPU/OptiX/Vulkan)
+    // ═══════════════════════════════════════════════════════════
+    ImGui::Spacing();
+    if (UIWidgets::BeginSection("Weather", ImVec4(0.45f, 0.65f, 0.85f, 1.0f))) {
+        WeatherParams weather = world.getWeatherParams();
+        bool weatherChanged = false;
+        bool weatherKeyed = isWorldKeyed(WorldProp::WeatherParams);
+
+        if (KeyframeButton("##WeatherKey", weatherKeyed, "Weather")) {
+            insertWorldKey("Weather", WorldProp::WeatherParams);
+        }
+        ImGui::SameLine();
+        bool weatherEnabled = weather.enabled != 0;
+        if (ImGui::Checkbox("Enable Weather", &weatherEnabled)) {
+            weather.enabled = weatherEnabled ? 1 : 0;
+            weatherChanged = true;
+        }
+
+        const char* weatherTypes[] = { "None", "Rain", "Snow", "Dust", "Mist" };
+        int weatherType = std::clamp(weather.type, 0, 4);
+        if (ImGui::Combo("Type", &weatherType, weatherTypes, IM_ARRAYSIZE(weatherTypes))) {
+            weather.type = weatherType;
+            weatherChanged = true;
+        }
+
+        if (SceneUI::DrawSmartFloat("wint", "Intensity", &weather.intensity, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
+            weatherChanged = true;
+        }
+        if (SceneUI::DrawSmartFloat("wden", "Density", &weather.density, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
+            weatherChanged = true;
+        }
+        if (SceneUI::DrawSmartFloat("wwsp", "Wind Speed", &weather.wind_speed, 0.0f, 100.0f, "%.1f m/s", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
+            weatherChanged = true;
+        }
+
+        Vec3 wind(weather.wind_direction.x, weather.wind_direction.y, weather.wind_direction.z);
+        if (SceneUI::DrawSmartFloat("wwdx", "Wind X", &wind.x, -1.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) weatherChanged = true;
+        if (SceneUI::DrawSmartFloat("wwdy", "Wind Y", &wind.y, -1.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) weatherChanged = true;
+        if (SceneUI::DrawSmartFloat("wwdz", "Wind Z", &wind.z, -1.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) weatherChanged = true;
+
+        if (SceneUI::DrawSmartFloat("wpsc", "Precip Scale", &weather.precipitation_scale, 0.1f, 10.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
+            weatherChanged = true;
+        }
+        if (SceneUI::DrawSmartFloat("wvis", "Visibility", &weather.visibility, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
+            weatherChanged = true;
+        }
+
+        const char* weatherVisualModes[] = { "Overlay", "Surface Only" };
+        int weatherVisualMode = std::clamp(weather.visual_mode, 0, 1);
+        if (ImGui::Combo("Visual Mode", &weatherVisualMode, weatherVisualModes, IM_ARRAYSIZE(weatherVisualModes))) {
+            weather.visual_mode = weatherVisualMode;
+            weatherChanged = true;
+        }
+
+        bool surfaceResponseEnabled = weather.surface_response_enabled != 0;
+        if (ImGui::Checkbox("Surface Response", &surfaceResponseEnabled)) {
+            weather.surface_response_enabled = surfaceResponseEnabled ? 1 : 0;
+            weatherChanged = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Apply wetness or accumulation to surface shading even if the visual precipitation layer is disabled.");
+        }
+
+        if (weather.type == WEATHER_RAIN) {
+            if (SceneUI::DrawSmartFloat("wswt", "Surface Wetness", &weather.surface_wetness_output, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
+                weatherChanged = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Surface wetness amount. This can stay high even when the atmospheric rain overlay is low or disabled.");
+            }
+        } else if (weather.type == WEATHER_SNOW || weather.type == WEATHER_DUST) {
+            if (SceneUI::DrawSmartFloat("wsac", "Surface Accum", &weather.surface_accumulation_output, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
+                weatherChanged = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Surface buildup amount. Snow or dust can stay on the scene even after the atmospheric effect is reduced or disabled.");
+            }
+            if (SceneUI::DrawSmartFloat("wsst", "Surface Settling", &weather.surface_settling_output, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
+                weatherChanged = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Extra settling into cavities, sheltered pockets, and slope bases.");
+            }
+            if (SceneUI::DrawSmartFloat("wshg", "Surface Height", &weather.surface_height_output, 0.0f, 1.0f, "%.2f", weatherKeyed, [&]{ insertWorldKey("Weather", WorldProp::WeatherParams); }, 16)) {
+                weatherChanged = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Boost deposited thickness in the shading normal so snow and dust read more volumetric.");
+            }
+        }
+
+        bool realtimeWeatherPreview = ctx.render_settings.realtime_weather_preview;
+        if (ImGui::Checkbox("Realtime Weather Preview", &realtimeWeatherPreview)) {
+            ctx.render_settings.realtime_weather_preview = realtimeWeatherPreview;
+            changed = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Continuously resets interactive accumulation so rain, snow, and dust keep moving even without keyframes or camera motion.");
+        }
+
+        if (weatherChanged) {
+            float len = std::sqrt(wind.x * wind.x + wind.y * wind.y + wind.z * wind.z);
+            if (len > 1e-5f) {
+                wind = Vec3(wind.x / len, wind.y / len, wind.z / len);
+            } else {
+                wind = Vec3(1.0f, 0.0f, 0.0f);
+            }
+            weather.wind_direction = make_float3(wind.x, wind.y, wind.z);
+            weather.intensity = std::clamp(weather.intensity, 0.0f, 1.0f);
+            weather.density = std::clamp(weather.density, 0.0f, 1.0f);
+            weather.visibility = std::clamp(weather.visibility, 0.0f, 1.0f);
+            weather.surface_wetness_output = std::clamp(weather.surface_wetness_output, 0.0f, 1.0f);
+            weather.surface_accumulation_output = std::clamp(weather.surface_accumulation_output, 0.0f, 1.0f);
+            weather.surface_settling_output = std::clamp(weather.surface_settling_output, 0.0f, 1.0f);
+            weather.surface_height_output = std::clamp(weather.surface_height_output, 0.0f, 1.0f);
+            weather.visual_mode = std::clamp(weather.visual_mode, static_cast<int>(WEATHER_VISUAL_OVERLAY), static_cast<int>(WEATHER_VISUAL_SURFACE_ONLY));
+            world.setWeatherParams(weather);
+            changed = true;
+        }
+
+        UIWidgets::EndSection();
+    }
+
     // ═══════════════════════════════════════════════════════════
     // Global Atmosphere (Clouds)
     // ═══════════════════════════════════════════════════════════
