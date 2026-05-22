@@ -168,6 +168,7 @@ public:
     
     void initializeSkinData();
     bool hasSkinData() const { return skinData.has_value(); }
+    bool hasAnySkinWeights() const;
     
     void setSkinBoneWeights(int vertexIndex, const std::vector<std::pair<int, float>>& weights);
     const std::vector<std::pair<int, float>>& getSkinBoneWeights(int vertexIndex) const;

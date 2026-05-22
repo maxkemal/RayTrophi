@@ -75,6 +75,29 @@ Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
   - **Işık Senkronizasyonu**: Sahnedeki Directional Light'ı otomatik olarak güneş pozisyonuna kilitler.çılım)
   - ✅ Çoklu önem örneklemesi ile yumuşak gölgeler
 
+  - **Style Layer Sistemi**:
+    - Yakınsamış render ve AOV bufferlarını okuyan, sahne geometrisini, materyalleri, ışıkları veya path-traced temel sonucu değiştirmeyen non-destructive art-direction katmanıdır.
+    - Domain maskeli compositing sky, material, outline ve world-adapter davranışlarını ayırır; brush efekti tüm viewport arka planına taşmaz.
+    - CPU ve GPU display rebuild yolları Stylize pass'i accumulation resetlemeden yeniden uygulayabilir; profil ve slider değişiklikleri mevcut görüntü üzerinde hızlı güncellenir.
+    - **Sky Layer**:
+      - Yalnızca geçerli sky piksellerinde çalışır (`AOV valid && hit == false`).
+      - Küresel view-ray örnekleme kullanır; stilize gradient, cloud bank ve güneş ekran UV'sine değil dünya yönüne kilitlenir.
+      - Nishita güneş yönü, yüksekliği, disk boyutu, cloud coverage, density, scale, offset ve seed değerlerini girdi olarak okur.
+      - Presetler: Painterly Clouds, Cartoon Cel, Sunset Bands, Ink Wash ve Clear Gradient.
+      - Stilize cloud bank yapısı yatay puff grupları, ayrı gölge, highlight ve rim vurguları ile cartoon/gouache görünümü üretir.
+    - **Painterly Material Layer**:
+      - Yalnızca yüzey piksellerinde çalışır (`AOV hit == true`) ve albedo, normal, world position, depth, material id ve türetilmiş edge strength kullanır.
+      - Surface-locked stroke field yapısı screen-space kaymayı azaltır ve büyük brush scale değerlerinin objeler üzerinde okunur kalmasını sağlar.
+      - Palette influence, material color preservation, simplification, edge respect, pigment thickness ve normal softening profil bazlı kontrol edilir.
+      - Wet Oil Model; Body, Load, Pickup, Deposit ve Buildup kontrolleriyle materyal rengi üstünde ucuz painterly paint transport davranışı üretir.
+    - **Outline Layer**:
+      - Depth, normal ve material discontinuity verilerinden stilize kenar çizgileri üretir.
+      - Ink, Oil Paint, Pencil, Dry Brush ve Pressure line type seçenekleri; palette, custom, material-tint, warm-paint ve cool-pencil renk modları ile çalışır.
+    - **World Adapter Kontrolleri**:
+      - Terrain stroke blend, foliage clustering, foliage palette variance, volume grain ve force-field motion response kontrolleri gelecekteki style-aware world efektleri için açılmıştır.
+    - **Profiller**:
+      - Painterly Oil, Gouache, Ink + Wash, Graphic Toon, Clay / Maquette ve Dreamy Sunset; sky, material, outline, palette ve world-adapter ayarlarını birlikte kuran başlangıç profilleridir.
+
 - **Gelişmiş Özellikler**
   - ✅ **Birikimli (Accumulative) Render**: Gürültüsüz, yüksek kaliteli çıktı için zamanla biriken örnekleme
   - ✅ **Adaptif Örnekleme (Adaptive Sampling)**: Gürültülü bölgelere odaklanan akıllı render motoru
@@ -82,10 +105,10 @@ Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
   - ✅ Hareket Bulanıklığı (Motion Blur)
   - ✅ Intel Open Image Denoise (OIDN) entegrasyonu
   - ✅ Ton haritalama & post-processing
-  - 🧪 **[DENEYSEL] Vulkan RT Backend** *(Aktif Geliştirme)*: `VK_KHR_ray_tracing_pipeline` üzerine inşa edilmiş donanım tabanlı ray tracing mimarisi. Compute shader ile GPU hızlandırmalı iskelet animasyonu (skinning), dinamik geometri için TLAS/BLAS refit, kalıcı descriptor set yönetimi ve tek komut tamponu ile trace+readback mimarisi. Vulkan bağımlılıkları (`vulkan-1.dll`) veya desteklenmeyen GPU'larda otomatik olarak OptiX veya CPU moduna geçiş yapar.
+  - ⚡ **[ÖNERİLEN] Vulkan RT Backend** *(Birincil)*: `VK_KHR_ray_tracing_pipeline` üzerine inşa edilmiş donanım tabanlı ray tracing mimarisi. Compute shader ile GPU hızlandırmalı iskelet animasyonu (skinning), dinamik geometri için TLAS/BLAS refit, kalıcı descriptor set yönetimi, async ping-pong frame pipeline + GPU tonemap, analitik LSS hair intersection ve volume için kalıcı NanoVDB accessor içerir. Donanım RT desteği varsa otomatik seçilir; Vulkan bağımlılıkları (`vulkan-1.dll`) veya desteklenmeyen GPU'larda otomatik olarak OptiX veya CPU moduna geçiş yapar.
 
   <details>
-  <summary>🧪 <b>Vulkan Backend — Özellik Uyumluluk Tablosu</b> (genişlet)</summary>
+  <summary>⚡ <b>Vulkan Backend — Özellik Uyumluluk Tablosu</b> (genişlet)</summary>
 
   | Özellik | OptiX | Vulkan RT | Not |
   |---------|:-----:|:---------:|-----|
@@ -93,8 +116,8 @@ Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
   | Lambertian / Metal / Dielektrik | ✅ | ✅ | Tam uyumlu |
   | Subsurface Scattering (SSS) | ✅ | ✅ | Küçük renk tonu farkı |
   | Clearcoat & Anizotropik | ✅ | ✅ | Tam uyumlu |
-  | Volumetrik Render | ✅ | 🧪 | Yoğunluk hesabında ufak farklar |
-  | **Saç Sistemi (Hair)** | ✅ | 🧪 | Shader hesaplama farkları |
+  | Volumetrik Render (NanoVDB) | ✅ | ✅ | Kalıcı leaf-cache accessor; interaktif modlarda OptiX kadar veya daha hızlı |
+  | **Saç Sistemi (Hair)** | ✅ | ✅ | Analitik LSS intersection + sıkı AABB'ler; bu motorda OptiX donanım curve'ünü geçer |
   | HDR / EXR Environment | ✅ | ✅ | Tam uyumlu |
   | Nishita Gökyüzü & Gece/Gündüz | ✅ | ✅ | Tam uyumlu |
   | Volumetrik Bulutlar | ✅ | 🧪 | Saçılım hesabında küçük farklar |
@@ -104,12 +127,42 @@ Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
   | Hareket Bulanıklığı (Motion Blur) | ✅ | ✅ | Tam uyumlu |
   | Yumuşak Gölgeler (MIS) | ✅ | ✅ | Tam uyumlu |
   | Alan Işıkları | ✅ | ✅ | Tam uyumlu |
-  | Ton Haritalama & Post-FX | ✅ | ✅ | Tam uyumlu |
-  | OIDN Denoising | ✅ | ✅ | Tam uyumlu |
+  | Ton Haritalama & Post-FX | ✅ | ✅ | Vulkan'da GPU compute tonemap, trace komut tamponuna fused |
+  | OIDN Denoising | ✅ | ✅ | OptiX daha sıkı CUDA interop yolu sunar |
   | Adaptif Örnekleme | ✅ | ✅ | Tam uyumlu |
-  | Birikimli (Progressive) Render | ✅ | ✅ | Tam uyumlu |
+  | Birikimli (Progressive) Render | ✅ | ✅ | Vulkan daha hızlı yakınsar (daha düşük frame-overhead) |
 
   > **Lejant:** ✅ Tam destek &nbsp;|&nbsp; 🧪 Destekleniyor, küçük çıktı farkları olabilir
+
+  </details>
+
+  <details>
+  <summary>📊 <b>Vulkan RT vs OptiX — Etkileşimli Benchmarklar</b> (genişlet)</summary>
+
+  Aynı sahne, aynı ayarlar, aynı donanım üzerinde ölçüldü. Aşağıdaki fps değerleri
+  etkileşimli viewport (kamera hareket halinde) için temsili. Statik sahnede Vulkan'ın
+  adaptif örneklemesi her iki backend'i de yakınsama sonrası 500+ fps'in üstüne taşır.
+
+  | Sahne | Vulkan RT | OptiX | Oran |
+  |---|:---:|:---:|:---:|
+  | Mesh ağırlıklı + Nishita atmosfer | **600 fps** | 50 fps | **12.0×** |
+  | Hair ağırlıklı (cubic B-spline, LSS intersection) | **300 fps** | 70 fps | **4.3×** |
+  | Volume / VDB bulut (Fast preset) | **300 fps** | 200 fps | **1.5×** |
+  | Volume / VDB bulut (Balanced preset) | benzer | benzer | ≈1.0× |
+  | Volume / VDB bulut (Exact, kamera hareketinde) | 16 fps | 23 fps | 0.7× |
+  | Volume / VDB bulut (yakınsamış, adaptif aktif) | **800 fps** | adaptif sınırlı | — |
+
+  **Vulkan'ın interaktifteki avantajının kaynağı:**
+  - Asenkron fence tabanlı ping-pong frame pipeline (frame başına `vkQueueWaitIdle` yok)
+  - GPU compute tonemap → küçük RGBA8 staging (CPU Reinhard yok, 4× düşük readback bandwidth)
+  - Analitik Linear-Swept-Sphere hair intersection + LSS-sıkı AABB'ler (cubic B-spline Newton yerine)
+  - March adımları arasında kalıcı NanoVDB read-accessor (leaf-cache hit'leri ağaç walk'unu atlatır)
+  - Yalın kernel (sıcak yolda piksel başına accumulation atomic veya vignette compute yok)
+
+  **OptiX'in hâlâ önde olduğu yerler:**
+  - Exact preset + kamera hareketi — fully compute-bound durumda CUDA NanoVDB texture yolu GLSL software sampler'ı geçer
+  - OIDN GPU denoiser interop (CUDA-native zero-copy)
+  - NVIDIA donanım curve primitive'lerine özellikle ihtiyaç duyulan final stills
 
   </details>
 
@@ -133,7 +186,7 @@ Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
   - Embree BVH (Intel, üretim seviyesi)
   - Özel ParallelBVH (SAH tabanlı, OpenMP paralelleştirilmiş)
   - OptiX GPU hızlandırma yapısı
-  - 🧪 Vulkan RT TLAS/BLAS mimarisi — dinamik refit, compute skinning, tek-gönderim pipeline *(Deneysel)*
+  - ⚡ Vulkan RT TLAS/BLAS mimarisi — dinamik refit, compute skinning, async ping-pong frame pipeline *(Önerilen birincil backend)*
 
 - **Optimizasyonlar**
 - **Optimizasyonlar**

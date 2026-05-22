@@ -356,6 +356,8 @@
     <ClInclude Include="source\include\Paint\PaintSurfaceTarget.h" />
     <ClInclude Include="source\include\Paint\PaintTextureSet.h" />
     <ClInclude Include="source\include\Paint\TerrainPaintAdapter.h" />
+    <ClInclude Include="source\include\Stylize\StylizePostProcess.h" />
+    <ClInclude Include="source\include\Stylize\StylizeModeState.h" />
     <ClInclude Include="source\include\Transform.h" />
     <ClInclude Include="source\include\World.h" />
     <ClInclude Include="source\include\TerrainFFT.h" />
@@ -475,6 +477,8 @@
     <ClCompile Include="source\src\Paint\PaintModeState.cpp" />
     <ClCompile Include="source\src\Paint\PaintTextureSet.cpp" />
     <ClCompile Include="source\src\Paint\TerrainPaintAdapter.cpp" />
+    <ClCompile Include="source\src\Stylize\StylizePostProcess.cpp" />
+    <ClCompile Include="source\src\Stylize\StylizeModeState.cpp" />
     <ClCompile Include="source\src\UI\scene_ui.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_animation.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_camera.cpp" />
@@ -486,6 +490,7 @@
     <ClCompile Include="source\src\UI\scene_ui_procamera.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_scatter.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_selection.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_stylize.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_vdb.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_viewport.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_world.cpp" />

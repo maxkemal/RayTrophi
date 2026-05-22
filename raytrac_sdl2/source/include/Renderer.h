@@ -38,6 +38,7 @@
 #include <vector>
 #include <memory>
 #include <thread>
+#include <cstdint>
 #include <chrono>
 #include <iostream>
 #include <iomanip>
@@ -53,6 +54,7 @@
 #include "AssimpLoader.h"
 #include "AnimationController.h"  // New animation management system
 #include "Hair/HairSystem.h"      // Hair/Fur rendering system
+#include "Stylize/StylizeModeState.h"
 
 // Forward Declarations
 class HittableList;
@@ -103,9 +105,22 @@ public:
 
     void applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend);
     bool applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::vector<float>& output);
-    // GPU zero-copy variant — inputs stay on CUDA device; only output is copied back.
-    // Returns false if binding fails (caller must fall back to host path).
-    bool applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame, float blend, std::vector<float>& output);
+    // GPU zero-copy variant with fused on-device tonemap. Inputs stay on CUDA
+    // device; the only host transfer is the tonemapped RGBA8 buffer (4 B/px,
+    // already in SDL_Surface channel layout). Returns false if binding fails;
+    // caller must fall back to the host path.
+    struct OIDNTonemapParams {
+        float    exposure   = 1.0f;
+        uint32_t aMaskOr    = 0u;
+        uint8_t  rShift     = 0;
+        uint8_t  gShift     = 8;
+        uint8_t  bShift     = 16;
+        bool     flipY      = true;
+    };
+    bool applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
+                               float blend,
+                               const OIDNTonemapParams& tm,
+                               std::vector<uint32_t>& packedOutput);
     bool applyOIDNDenoisingToCPUAccumulation(float blend, bool useAuxiliary = true);
     bool hasCPUDenoisedBuffer() const;
     void invalidateCPUDenoisedBuffer();
@@ -185,6 +200,21 @@ public:
    
     void initializeBuffers(int image_width, int image_height);
     World world;
+    Stylize::StylizeModeState stylizeMode;
+
+    // Pull the GPU backend's primary-hit AOVs (albedo/normal/world-position/depth) into the
+    // CPU accumulation buffers so the AOV-driven Stylize post-process produces the same
+    // surface-locked result for Vulkan RT renders as it does on the CPU path. Returns true
+    // when the buffers were populated (backend provided a matching-resolution position AOV).
+    // The position AOV packs the real material id in its .w channel, so Stylize outlines
+    // key off true material boundaries (not texture color). cameraOrigin is used to
+    // reconstruct linear depth from the stored world position.
+    // Cache is keyed on a camera hash (+ sample-reset) so it re-pulls every frame the view
+    // changes — sample count alone is unreliable during continuous motion (it stays low and
+    // never strictly drops, freezing the AOVs and leaving ghost trails). forceRefresh
+    // bypasses the cache entirely — required for sequence/animation renders (static camera
+    // but moving objects) where the camera hash wouldn't change.
+    bool fillStylizeAOVFromBackend(Backend::IBackend* backend, const Camera& camera, bool forceRefresh = false);
     static std::vector<Vec3> normalMapBuffer;
     SDL_PixelFormat* pixelFormat;
 
@@ -261,7 +291,9 @@ private:
     void apply_normal_map( HitRecord& rec);
   
     Vec3 ray_color(const Ray& r, const   Hittable* bvh, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, int depth, int sample_index, const SceneData& scene,
-        Vec3* primary_albedo = nullptr, Vec3* primary_normal = nullptr, bool* primary_hit = nullptr);
+        Vec3* primary_albedo = nullptr, Vec3* primary_normal = nullptr, bool* primary_hit = nullptr,
+        float* primary_depth = nullptr, uint32_t* primary_material_id = nullptr,
+        Vec3* primary_world_position = nullptr);
     float radical_inverse(unsigned int bits);
     // God Rays (CPU) - Moved to VolumetricRenderer
 
@@ -299,6 +331,8 @@ private:
     void* oidnCudaStream = nullptr;          // cudaStream_t as void*
     void* oidnGpuOutputDevPtr = nullptr;     // packed float3 output buffer owned by Renderer
     size_t oidnGpuOutputBytes = 0;
+    void* oidnGpuPackedDevPtr = nullptr;     // uint32-per-pixel tonemapped buffer for the fused-tonemap path
+    size_t oidnGpuPackedBytes = 0;
     void* oidnGpuCachedColor = nullptr;      // last-seen device pointer (to detect OptiX re-alloc)
     void* oidnGpuCachedAlbedo = nullptr;
     void* oidnGpuCachedNormal = nullptr;
@@ -315,9 +349,22 @@ private:
         bool isSkinned;
         std::shared_ptr<Transform> transformHandle;
         std::vector<std::shared_ptr<Triangle>> triangles;
+        // HittableInstance wrappers whose source_triangles share this
+        // transformHandle. Cached at animation_groups build time so the
+        // per-frame keyframe update can sync inst->transform directly,
+        // instead of scanning scene.world.objects (O(N) every frame —
+        // prohibitively expensive on scatter-heavy scenes).
+        std::vector<std::shared_ptr<class HittableInstance>> instances;
     };
     std::vector<AnimatableGroup> animation_groups;
     bool animation_groups_dirty = true;
+
+    // Per-frame collection of (nodeName, worldMatrix) pairs for nodes that
+    // had a keyframe applied. Populated in updateAnimationState; consumed
+    // in render_Animation so a small change set can take a targeted
+    // backend update path (per-node) instead of the full scene scan that
+    // updateInstanceTransforms does.
+    std::vector<std::pair<std::string, Matrix4x4>> pending_anim_transform_updates;
 
 public:
     SDL_Window* window;
@@ -328,11 +375,21 @@ public:
     std::vector<Vec4> cpu_accumulation_buffer;
     std::vector<Vec4> cpu_albedo_accumulation_buffer;
     std::vector<Vec4> cpu_normal_accumulation_buffer;
+    std::vector<Vec4> cpu_world_position_accumulation_buffer;
+    std::vector<float> cpu_depth_accumulation_buffer;
+    std::vector<uint32_t> cpu_material_id_buffer;
     int cpu_accumulated_samples = 0;
     uint64_t cpu_last_camera_hash = 0;
     bool cpu_accumulation_valid = false;
     std::vector<float> cpu_denoised_buffer;   // Top-down linear RGB, optional OIDN output for display
     bool cpu_denoised_valid = false;
+
+    // Stylize AOV cache (GPU path): AOVs are stable across an accumulation cycle, so we
+    // pull them once per cycle and reuse. Re-pull when the backend sample count drops
+    // (camera/scene reset) or resolution changes. -1 = never pulled.
+    int  m_stylizeAOVLastSamples = -1;
+    uint64_t m_stylizeAOVCamHash = 0;
+    bool m_stylizeAOVValid = false;
     
     // Variance buffer for adaptive sampling (tracks per-pixel noise level)
     std::vector<float> cpu_variance_buffer;

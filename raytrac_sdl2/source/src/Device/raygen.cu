@@ -82,6 +82,10 @@ extern "C" __global__ void __raygen__rg() {
     float3 albedo_sum = make_float3(0.0f, 0.0f, 0.0f);
     float3 normal_sum = make_float3(0.0f, 0.0f, 0.0f);
     int primary_hits = 0;
+    // Stylize AOV: last primary hit's world position + material id (geometry is stable,
+    // so last-wins across the sub-sample loop is fine — no averaging needed).
+    float3 stylize_world_pos = make_float3(0.0f, 0.0f, 0.0f);
+    int    stylize_mat_id = -1;
     float batch_lum_sum = 0.0f;
     float batch_lum_sq_sum = 0.0f;
 
@@ -92,6 +96,8 @@ extern "C" __global__ void __raygen__rg() {
         float3 primary_albedo = make_float3(0.0f);
         float3 primary_normal = make_float3(0.0f);
         int primary_hit = 0;
+        float3 primary_world_pos = make_float3(0.0f);
+        int primary_material_id = -1;
 
         if (optixLaunchParams.camera.chromatic_aberration_enabled && 
             optixLaunchParams.camera.chromatic_aberration > 0.0001f) {
@@ -102,14 +108,14 @@ extern "C" __global__ void __raygen__rg() {
             Ray ray_r = get_ray_from_camera(optixLaunchParams.camera, uv_r.x, uv_r.y, &rng);
             float3 color_r = ray_color(ray_r, &rng);
             Ray ray_g = get_ray_from_camera(optixLaunchParams.camera, u, v, &rng);
-            float3 color_g = ray_color(ray_g, &rng, &primary_albedo, &primary_normal, &primary_hit);
+            float3 color_g = ray_color(ray_g, &rng, &primary_albedo, &primary_normal, &primary_hit, &primary_world_pos, &primary_material_id);
             float2 uv_b = apply_chromatic_aberration(u, v, ca_amount, b_scale);
             Ray ray_b = get_ray_from_camera(optixLaunchParams.camera, uv_b.x, uv_b.y, &rng);
             float3 color_b = ray_color(ray_b, &rng);
             color_sum += make_float3(color_r.x, color_g.y, color_b.z);
         } else {
             Ray ray = get_ray_from_camera(optixLaunchParams.camera, u, v, &rng);
-            float3 sample = ray_color(ray, &rng, &primary_albedo, &primary_normal, &primary_hit);
+            float3 sample = ray_color(ray, &rng, &primary_albedo, &primary_normal, &primary_hit, &primary_world_pos, &primary_material_id);
             color_sum += sample;
         }
 
@@ -117,6 +123,8 @@ extern "C" __global__ void __raygen__rg() {
             albedo_sum += primary_albedo;
             normal_sum += primary_normal * 0.5f + make_float3(0.5f, 0.5f, 0.5f);
             primary_hits++;
+            stylize_world_pos = primary_world_pos;   // last-wins
+            stylize_mat_id = primary_material_id;
         }
 
         if (optixLaunchParams.use_adaptive_sampling) {
@@ -171,7 +179,20 @@ extern "C" __global__ void __raygen__rg() {
             optixLaunchParams.denoiser_normal[pixel_index] = make_float4(0.5f, 0.5f, 0.5f, float(samples_this_pass));
         }
     }
-    
+
+    // Stylize AOV: .xyz = world hit position, .w = encoded material id (matches the Vulkan
+    // path so the CPU stylize is backend-agnostic). 0 = miss, 1 = hit/unknown material,
+    // >=2 → material index = w - 2. Last-wins; geometry is stable across accumulation.
+    if (optixLaunchParams.stylize_position != nullptr) {
+        if (primary_hits > 0) {
+            float matEncoded = (stylize_mat_id >= 0) ? float(stylize_mat_id + 2) : 1.0f;
+            optixLaunchParams.stylize_position[pixel_index] =
+                make_float4(stylize_world_pos.x, stylize_world_pos.y, stylize_world_pos.z, matEncoded);
+        } else if (optixLaunchParams.frame_number == 0) {
+            optixLaunchParams.stylize_position[pixel_index] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
+    }
+
     if (optixLaunchParams.use_adaptive_sampling && variance_buffer != nullptr) {
         float k = float(samples_this_pass);
         float batch_mean = batch_lum_sum / k;

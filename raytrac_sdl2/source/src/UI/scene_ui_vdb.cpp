@@ -109,12 +109,15 @@ SceneUI::VDBShaderDefaults SceneUI::estimateVDBShaderDefaults(const VDBVolume& v
         out.scattering_coefficient = (std::max)(0.35f, (std::min)(0.9f, 0.35f + out.density_multiplier * 0.08f));
         out.absorption_coefficient = (std::max)(0.12f, (std::min)(0.35f, 0.12f + out.density_multiplier * 0.03f));
         out.max_steps = 96;
-        out.shadow_steps = 6;
+        // shadow_steps: 6 → 4. OptiX uses 4 by default and visual difference past 4 is
+        // imperceptible for diffuse phase functions; cuts shadow march cost ~33%.
+        out.shadow_steps = 4;
     } else {
         out.scattering_coefficient = (std::max)(0.9f, (std::min)(1.8f, 0.9f + out.density_multiplier * 0.08f));
         out.absorption_coefficient = (std::max)(0.03f, (std::min)(0.12f, 0.03f + out.density_multiplier * 0.005f));
         out.max_steps = 72;
-        out.shadow_steps = 8;
+        // shadow_steps: 8 → 4. Match OptiX default; halves shadow march cost on smoke.
+        out.shadow_steps = 4;
     }
 
     const float voxel_size = vdb.getVoxelSize();
@@ -449,6 +452,10 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
                     selection.clearSelection();
                     ctx.renderer.updateBackendGasVolumes(scene);
                     SceneUI::syncVDBVolumesToGPU(ctx);
+                    if (vdbRenderBackendIsVulkan(ctx)) {
+                        g_vulkan_rebuild_pending = true;
+                    }
+                    if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                 }
                 ImGui::EndPopup();
             }
@@ -482,6 +489,8 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
                         // OptiX: sync SSBO to remove volume.
                         if (vdbRenderBackendIsVulkan(ctx)) {
                             g_vulkan_rebuild_pending = true;
+                            syncVDBVolumesToGPU(ctx);
+                            if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                         } else {
                             syncVDBVolumesToGPU(ctx);
                         }

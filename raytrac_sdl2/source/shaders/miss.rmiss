@@ -51,6 +51,7 @@ struct RayPayload {
     float primaryTransmission;
     float primaryMetallic;
     uint  bounceType;
+    uint  primaryMaterialId;   // Stylize AOV: real material index of the primary hit
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -85,8 +86,8 @@ struct VkWorldDataExtended {
     float altitude;
     float planetRadius;
     float atmosphereHeight;
-    float _pad1;
-    float _pad2;
+    int   multiScatterEnabled;
+    float multiScatterFactor;
     
     // ════════════════════════════ CLOUD LAYER 1 PARAMETERS (64 bytes)
     int   cloudsEnabled;
@@ -134,7 +135,7 @@ struct VkWorldDataExtended {
     int   aerialEnabled;        // 1 = apply aerial perspective
     float aerialMinDistance;    // No haze below this (meters)
     float aerialMaxDistance;    // Full haze at this (meters)
-    float _pad5_aerial;
+    float aerialDensity;        // Independent haze density/strength multiplier
 
     // Weather payload (passive until weather rendering is enabled)
     int   weatherEnabled;
@@ -157,6 +158,10 @@ struct VkWorldDataExtended {
     float envIntensity;
     float envRotation;
     int   _pad5;                 // nishitaLutReady: Vulkan binding 8 has valid LUT samplers
+    int   envOverlayEnabled;
+    int   envOverlayBlendMode;
+    float envOverlayIntensity;
+    float envOverlayRotation;
     uvec2 transmittanceLUT;      // 64-bit handle as uvec2
     uvec2 skyviewLUT;            // 64-bit handle as uvec2
     uvec2 multiScatterLUT;       // 64-bit handle as uvec2
@@ -234,6 +239,30 @@ vec3 applyWeatherSky(vec3 sky, vec3 dir) {
     return mix(dimmed, tint, amount);
 }
 
+vec3 blendEnvironmentOverlay(vec3 base, vec3 sampled, float intensity, int blendMode) {
+    float strength = max(intensity, 0.0);
+    float amount = min(strength, 1.0);
+    vec3 overlay = sampled * strength;
+
+    if (blendMode == 1) {
+        return base * mix(vec3(1.0), sampled, amount);
+    }
+    if (blendMode == 2) {
+        return base + overlay;
+    }
+    if (blendMode == 3) {
+        return overlay;
+    }
+    return mix(base, overlay, amount);
+}
+
+vec3 sampleEnvironmentLatLong(int envSlot, vec3 dir, float rotationRad) {
+    float u = 0.5 + atan(dir.z, dir.x) / TWO_PI;
+    u = fract(u - rotationRad / TWO_PI);
+    float v = 0.5 - asin(clamp(dir.y, -1.0, 1.0)) / PI;
+    return texture(materialTextures[nonuniformEXT(envSlot)], vec2(u, v)).rgb;
+}
+
 vec3 skyColor(vec3 dir) {
     int   mode   = worldData.w.mode;
     float cosAlt = dir.y;
@@ -247,10 +276,8 @@ vec3 skyColor(vec3 dir) {
     if (mode == 1) {
         int envSlot = worldData.w.envTexSlot;
         if (envSlot > 0) {
-            float u = 0.5 + atan(dir.z, dir.x) / TWO_PI;
-            float v = 0.5 - asin(clamp(dir.y, -1.0, 1.0)) / PI;
-            return texture(materialTextures[nonuniformEXT(envSlot)], vec2(u, v)).rgb
-                   * worldData.w.envIntensity;
+            return sampleEnvironmentLatLong(envSlot, dir, worldData.w.envRotation)
+                 * worldData.w.envIntensity;
         }
         return vec3(0.0); // No HDRI loaded → black
     }
@@ -262,26 +289,14 @@ vec3 skyColor(vec3 dir) {
 
     bool hasAtmosLUTs = worldData.w._pad5 != 0;
     if (hasAtmosLUTs) {
-        // Sample the full-sphere LUT (covers cosTheta -1..+1, i.e. below horizon too).
-        // This lets the LUT provide natural warm/orange horizon glow just like OptiX ray-sphere
-        // integration does — no early-return that would create a hard horizon edge.
+        // SkyView LUT — UV matches AtmosphereLUT::sampleSkyView exactly:
+        //   u = azimuth / 2π    (atan2(z, x), wrapped to [0,1])
+        //   v = (1 - dir.y) * 0.5
         float az    = atan(dir.z, dir.x);
         float u_sky = az / TWO_PI;
         if (u_sky < 0.0) u_sky += 1.0;
-        // v_sky: dir.y=+1(up)→0.0, dir.y=0(horizon)→0.5, dir.y=-1(down)→1.0
         float v_sky = (1.0 - clamp(dir.y, -1.0, 1.0)) * 0.5;
         sky = texture(atmosphereLUTs[1], vec2(u_sky, v_sky)).rgb;
-
-        // Blend to dark ground color well below horizon so geometry doesn't show sky on underside.
-        // Use a wide, smooth fade starting from slightly below horizon — matches OptiX behavior
-        // where very steep downward rays get near-zero radiance from the atmosphere.
-        if (cosAlt < 0.0) {
-            // t=0 at horizon, t=1 at cosAlt=-0.15 (≈8.6° below)
-            float t     = clamp(-cosAlt / 0.15, 0.0, 1.0);
-            float blend = smoothstep(0.0, 1.0, t);
-            vec3  ground = vec3(0.02, 0.015, 0.01);
-            sky = mix(sky, ground, blend);
-        }
     } else {
         // LUT not yet uploaded — simple Rayleigh fallback with smooth horizon transition.
         // No hard cutoff at cosAlt=0.
@@ -301,15 +316,29 @@ vec3 skyColor(vec3 dir) {
         }
     }
 
-    // Procedural sun disk — matches OptiX sky_model.cuh exactly
-    // Only when sun is active
+    // Ray-origin altitude (matches CPU calculateNishitaSky):
+    //   p = origin + (0, Rg, 0);  alt = max(0, length(p) - Rg)
+    // Used by transmittance LUT v-coord so high cameras get proper attenuation.
+    float Rg            = worldData.w.planetRadius;
+    vec3  pOrigin       = gl_WorldRayOriginEXT + vec3(0.0, Rg, 0.0);
+    float currentAlt    = max(0.0, length(pOrigin) - Rg);
+    float v_trans       = clamp(currentAlt / max(1.0, worldData.w.atmosphereHeight), 0.0, 1.0);
+
+    // ── Multi-scatter (analytic, matches World::calculateNishitaSky) ──────────
+    // Gated by AtmosphereAdvanced::multi_scatter_enabled (UI checkbox).
+    if (worldData.w.multiScatterEnabled != 0) {
+        vec3  scatteringAlbedo = vec3(0.8, 0.85, 0.9);
+        float mf               = worldData.w.multiScatterFactor;
+        vec3  secondOrder      = sky * scatteringAlbedo * 0.5 * exp(-0.5 * 0.3);
+        vec3  thirdOrder       = secondOrder * scatteringAlbedo * 0.25 * exp(-0.5 * 0.1);
+        sky = sky + secondOrder * mf + thirdOrder * (mf * 0.5);
+    }
+
+    // Procedural sun disk — matches World::calculateNishitaSky exactly
     if (worldData.w.sunIntensity > 0.0) {
-        // ── Sun disk (OptiX-matched) ──────────────────────────────────────────
-        // sunSize is stored as angular diameter (degrees).
-        // OptiX uses * 0.5 to convert to radius before radians → match here.
         float sunSizeDeg = worldData.w.sunSize;
 
-        // Elevation factor: matches OptiX elevation broadening near horizon
+        // Elevation broadening near horizon
         float elevDeg = degrees(asin(clamp(worldData.w.sunDir.y, -1.0, 1.0)));
         float elevFactor = 1.0;
         if (elevDeg < 15.0) {
@@ -317,22 +346,20 @@ vec3 skyColor(vec3 dir) {
         }
         sunSizeDeg *= elevFactor;
 
-        // Angular radius (NOT diameter) — key fix vs old code which used full diameter
         float sunRadius  = radians(sunSizeDeg * 0.5);
         float cosThresh  = cos(sunRadius);
-        float sunCos     = dot(dir, sunDir);
+        float mu         = dot(dir, sunDir);  // also used by excessPhase below
 
-        if (sunCos > cosThresh) {
-            // Radial position on disk: 0 = center, 1 = edge  (matches OptiX)
-            float angDist   = acos(min(1.0, sunCos));
+        // ── Sun disk ─────────────────────────────────────────────────────────
+        if (mu > cosThresh) {
+            float angDist   = acos(min(1.0, mu));
             float radialPos = angDist / sunRadius;
 
-            // Limb darkening (OptiX: u=0.6)
-            float u_limb        = 0.6;
+            // Limb darkening (u = 0.6)
             float cosine_mu     = sqrt(max(0.0, 1.0 - radialPos * radialPos));
-            float limbDarkening = 1.0 - u_limb * (1.0 - cosine_mu);
+            float limbDarkening = 1.0 - 0.6 * (1.0 - cosine_mu);
 
-            // Smooth edge (OptiX: same cubic smoothstep)
+            // Cubic smoothstep edge
             float edge_t    = clamp((radialPos - 0.85) / 0.15, 0.0, 1.0);
             float edgeSoft  = 1.0 - edge_t * edge_t * (3.0 - 2.0 * edge_t);
 
@@ -340,59 +367,45 @@ vec3 skyColor(vec3 dir) {
             if (hasAtmosLUTs) {
                 float cosSun  = max(0.01, worldData.w.sunDir.y);
                 float u_trans = (cosSun + 0.2) / 1.2;
-                float v_trans = clamp(worldData.w.altitude / max(1.0, worldData.w.atmosphereHeight), 0.0, 1.0);
                 transSun = texture(atmosphereLUTs[0], vec2(u_trans, v_trans)).rgb;
             }
 
+            // CPU uses 80000.0; keep until sun-multiplier unification (PR-3).
             sky += transSun * worldData.w.sunIntensity * 80000.0
                  * limbDarkening * edgeSoft;
         }
 
-        // ── Mie phase: full (uncapped) + excess glow ─────────────────────────
-        // The LUT clamps phaseM at 2.0 during precompute (AtmosphereLUT.cpp).
-        // The sharp forward-scatter peak above that cap is the "glow" halo around the sun.
-        // CPU calculateNishitaSky uses: excessPhase = max(0, phaseM - 2.0)
-        // and adds: transmittance * mie_scattering * mie_density * 0.15 * excessPhase * sun_intensity
-        // This is what makes OptiX look softer/fluffier near the disk — we replicate it here.
+        // ── Excess-phase corona (matches CPU verbatim) ────────────────────────
+        // CPU: excessPhase = max(0, phaseM - 2.0)   (LUT clamps phaseM at 2.0)
+        //      mieScat = mie_scattering * (mie_density * 0.15)
+        //      sky += transSun * (mieScat * excessPhase * atmosphere_intensity)
         float g           = clamp(worldData.w.mieAnisotropy, 0.0, 0.99);
-        float mu          = dot(dir, sunDir);
         float phaseM_full = (1.0 - g*g) / (4.0 * PI * pow(max(1.0 + g*g - 2.0*g*mu, 0.0001), 1.5));
-        float excessPhase = max(0.0, phaseM_full - 2.0); // sharp peak removed from LUT
-        float phaseM_cap  = min(phaseM_full, 2.0);       // capped version for background halo
+        float excessPhase = max(0.0, phaseM_full - 2.0);
 
-        // ── Excess phase glow (the missing "fluffy" corona) ──────────────────
         if (excessPhase > 0.0 && hasAtmosLUTs) {
-            // Transmittance LUT [binding 8, slot 0]
-            // UV matches AtmosphereLUT::sampleTransmittance:
-            //   u = (cosTheta + 0.2) / 1.2,  v = altitude / atmosphereHeight
             float cosSun  = max(0.01, worldData.w.sunDir.y);
             float u_trans = (cosSun + 0.2) / 1.2;
-            float v_trans = clamp(worldData.w.altitude / max(1.0, worldData.w.atmosphereHeight), 0.0, 1.0);
             vec3  transSun = texture(atmosphereLUTs[0], vec2(u_trans, v_trans)).rgb;
 
-            // mie_scattering default = vec3(3.996e-6) — physical constant, hardcoded
-            // since it is not stored in VkWorldDataExtended.
-            // mieScat = mie_scattering * mieDensity * 0.15  (matches CPU exactly)
+            // mie_scattering default = vec3(3.996e-6) — physical Mie coefficient,
+            // hardcoded since it is not stored in VkWorldDataExtended yet.
             const float MIE_SCAT = 3.996e-6;
-            vec3 haloTintExcess = mix(vec3(1.0), transSun, 0.65);
-            vec3 mieScat = vec3(MIE_SCAT) * worldData.w.mieDensity * (0.15 * 2.5);
-            sky += haloTintExcess * (mieScat * excessPhase * worldData.w.atmosphereIntensity);
+            vec3 mieScat = vec3(MIE_SCAT) * (worldData.w.mieDensity * 0.15);
+            sky += transSun * (mieScat * excessPhase * worldData.w.atmosphereIntensity);
         }
-
-        // ── Broad Mie background halo (capped, contributes to horizon glow) ──
-        // dustDensity UI range 0-10.  At dust=1 → 0.015, at dust=10 → 0.15
-        float mie_scale = clamp(worldData.w.dustDensity * 0.0225, 0.0, 0.225);
-        vec3 haloTint = worldData.w.sunColor;
-        if (hasAtmosLUTs) {
-            float cosSun  = max(0.01, worldData.w.sunDir.y);
-            float u_trans = (cosSun + 0.2) / 1.2;
-            float v_trans = clamp(worldData.w.altitude / max(1.0, worldData.w.atmosphereHeight), 0.0, 1.0);
-            haloTint = mix(vec3(1.0), texture(atmosphereLUTs[0], vec2(u_trans, v_trans)).rgb, 0.65);
-        }
-        sky += haloTint * worldData.w.atmosphereIntensity * phaseM_cap * mie_scale;
 
         // NOTE: No air/dust post-tint here when LUT is loaded — LUT already has
         // air_density baked in from AtmosphereLUT.cpp precompute.
+    }
+
+    if (worldData.w.envOverlayEnabled != 0 && worldData.w.envTexSlot > 0) {
+        vec3 overlay = sampleEnvironmentLatLong(worldData.w.envTexSlot, dir, worldData.w.envOverlayRotation);
+        sky = blendEnvironmentOverlay(
+            sky,
+            overlay,
+            worldData.w.envOverlayIntensity,
+            worldData.w.envOverlayBlendMode);
     }
 
     return applyWeatherSky(sky, dir);

@@ -262,6 +262,10 @@ public:
     // Download image from GPU to host memory
     void downloadFramebuffer(uchar4* host_ptr, int width, int height);
     bool downloadDenoiserBuffers(std::vector<float>& color, std::vector<float>& albedo, std::vector<float>& normal, bool useAuxiliary = true);
+    // Stylize AOV: downloads the world-position + encoded-material buffer as stride-4
+    // (x,y,z,w). Bottom-up (matches the renderer's GPU buffer convention). Returns false
+    // when the buffer isn't allocated (Stylize/denoiser off).
+    bool downloadStylizePositionBuffer(std::vector<float>& position);
 
 private:
     // Hair rendering members
@@ -397,7 +401,17 @@ private:
     int prev_width = 0;
     int prev_height = 0;
     int frame_counter = 1;
-     uchar4* host_output_buffer = nullptr; // GPU'dan CPU'ya indirilen buffer
+    uchar4* host_output_buffers[2] = { nullptr, nullptr }; // GPU'dan CPU'ya indirilen bufferlar
+    cudaEvent_t host_output_copy_events[2] = { nullptr, nullptr };
+    bool host_output_copy_pending[2] = { false, false };
+    size_t host_output_buffer_capacity = 0;
+    int host_output_display_slot = -1;
+    uint32_t host_output_write_slot = 0;
+    int* host_converged_count_buffers[2] = { nullptr, nullptr };
+    cudaEvent_t host_converged_count_events[2] = { nullptr, nullptr };
+    bool host_converged_count_pending[2] = { false, false };
+    int host_converged_count_latest = 0;
+    uint32_t host_converged_count_write_slot = 0;
     uchar4* d_framebuffer = nullptr;
     // (İleride pipeline ve SBT buraya gelir)
     struct Tile {
@@ -421,6 +435,7 @@ private:
     float4* d_accumulation_float4 = nullptr;  // High precision accumulation buffer (float4)
     float4* d_denoiser_albedo = nullptr;
     float4* d_denoiser_normal = nullptr;
+    float4* d_stylize_position = nullptr;   // Stylize AOV: world pos (.xyz) + encoded matid (.w)
     std::vector<float> host_denoiser_color;
     std::vector<float> host_denoiser_albedo;
     std::vector<float> host_denoiser_normal;

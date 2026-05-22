@@ -244,6 +244,14 @@ void Triangle::initializeSkinData() {
     }
 }
 
+bool Triangle::hasAnySkinWeights() const {
+    if (!skinData.has_value()) return false;
+    for (const auto& weights : skinData->vertexBoneWeights) {
+        if (!weights.empty()) return true;
+    }
+    return false;
+}
+
 void Triangle::setSkinBoneWeights(int vertexIndex, const std::vector<std::pair<int, float>>& weights) {
     initializeSkinData();
     if (vertexIndex >= 0 && vertexIndex < 3) {

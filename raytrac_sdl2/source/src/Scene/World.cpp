@@ -12,6 +12,24 @@
 inline float3 to_float3(const Vec3& v) { return make_float3(v.x, v.y, v.z); }
 inline Vec3 to_vec3(const float3& v) { return Vec3(v.x, v.y, v.z); }
 
+static Vec3 blendEnvironmentOverlayCPU(const Vec3& base, const Vec3& sampled, float intensity, int blendMode) {
+    const float strength = std::max(0.0f, intensity);
+    const float amount = std::min(strength, 1.0f);
+    const Vec3 overlay = sampled * strength;
+
+    switch (blendMode) {
+        case 1:
+            return base * (Vec3(1.0f) * (1.0f - amount) + sampled * amount);
+        case 2:
+            return base + overlay;
+        case 3:
+            return overlay;
+        case 0:
+        default:
+            return base * (1.0f - amount) + overlay * amount;
+    }
+}
+
 World::World() {
     data.mode = WORLD_MODE_NISHITA; // Default to Nishita Sky
     data.color = make_float3(0.05f, 0.05f, 0.05f); 
@@ -57,9 +75,10 @@ World::World() {
     data.nishita.cloud_height_max = 4200.0f;
     data.nishita.cloud_offset_x = 0.0f;
     data.nishita.cloud_offset_z = 0.0f;
+    data.nishita.cloud_seed = 0;
     data.nishita.cloud_quality = 1.0f;     // Normal quality (1.0 = 64-128 steps)
     data.nishita.cloud_detail = 0.55f;     // Normal detail level
-    data.nishita.cloud_base_steps = 48;    // Default base resolution
+    data.nishita.cloud_base_steps = 8;     // Fast default for procedural sky volume
     
     // Cloud Layer 2 defaults (High altitude cirrus-like)
     data.nishita.cloud_layer2_enabled = 0;   // Disabled by default
@@ -121,6 +140,7 @@ World::World() {
     data.advanced.multi_scatter_enabled = 1;
     data.advanced.multi_scatter_factor = 0.3f;
     data.advanced.aerial_perspective = 1;
+    data.advanced.aerial_density = 1.0f;
     data.advanced.aerial_min_distance = 10.0f;    // Minimal haze starts almost immediately (10m)
     data.advanced.aerial_max_distance = 5000.0f;   // Full haze at 5km
     data.advanced.env_overlay_enabled = 0;
@@ -192,6 +212,10 @@ World::~World() {
         delete atmosphere_lut;
         atmosphere_lut = nullptr;
     }
+    if (env_overlay_texture) {
+        delete env_overlay_texture;
+        env_overlay_texture = nullptr;
+    }
 }
 
 WorldData World::getGPUData() const {
@@ -245,6 +269,8 @@ std::string World::getHDRIPath() const {
 void World::setNishitaParams(const NishitaSkyParams& params) {
     // Preserve the loaded env overlay texture - it's set by setNishitaEnvOverlay
     cudaTextureObject_t savedTex = data.advanced.env_overlay_tex;
+
+    const NishitaSkyParams previous = data.nishita;
     
     data.nishita = params;
     
@@ -253,25 +279,64 @@ void World::setNishitaParams(const NishitaSkyParams& params) {
         data.advanced.env_overlay_tex = savedTex;
     }
 
-    // DEFERRED: Mark LUT as needing update instead of computing immediately.
-    // This prevents 50K-pixel ray march from running on every UI slider tick.
-    // Main loop calls flushLUT() once per frame.
-    if (atmosphere_lut) {
+    const bool lutRelevantChanged =
+        previous.atmosphere_intensity != params.atmosphere_intensity ||
+        previous.sun_elevation != params.sun_elevation ||
+        previous.sun_azimuth != params.sun_azimuth ||
+        previous.sun_direction.x != params.sun_direction.x ||
+        previous.sun_direction.y != params.sun_direction.y ||
+        previous.sun_direction.z != params.sun_direction.z ||
+        previous.air_density != params.air_density ||
+        previous.dust_density != params.dust_density ||
+        previous.ozone_density != params.ozone_density ||
+        previous.humidity != params.humidity ||
+        previous.temperature != params.temperature ||
+        previous.ozone_absorption_scale != params.ozone_absorption_scale ||
+        previous.altitude != params.altitude ||
+        previous.mie_anisotropy != params.mie_anisotropy ||
+        previous.planet_radius != params.planet_radius ||
+        previous.atmosphere_height != params.atmosphere_height ||
+        previous.rayleigh_scattering.x != params.rayleigh_scattering.x ||
+        previous.rayleigh_scattering.y != params.rayleigh_scattering.y ||
+        previous.rayleigh_scattering.z != params.rayleigh_scattering.z ||
+        previous.mie_scattering.x != params.mie_scattering.x ||
+        previous.mie_scattering.y != params.mie_scattering.y ||
+        previous.mie_scattering.z != params.mie_scattering.z ||
+        previous.rayleigh_density != params.rayleigh_density ||
+        previous.mie_density != params.mie_density;
+
+    // DEFERRED: skyview LUT bakes sun direction and Mie halo, so sun movement
+    // must also dirty it. Runtime decides whether Vulkan compute or CPU fallback
+    // performs the actual refresh.
+    if (lutRelevantChanged) {
         lut_dirty = true;
     }
 }
 
-void World::flushLUT() {
+bool World::flushLUT() {
     if (!atmosphere_lut) {
         initializeLUT();
         lut_dirty = false;
-        return;
+        return true;
     }
 
-    if (!lut_dirty) return;
+    if (!lut_dirty) return false;
 
     atmosphere_lut->precompute(data.nishita);
     lut_dirty = false;
+    return true;
+}
+
+bool World::rebuildLUT() {
+    if (!atmosphere_lut) {
+        initializeLUT();
+        lut_dirty = false;
+        return true;
+    }
+
+    atmosphere_lut->precompute(data.nishita);
+    lut_dirty = false;
+    return true;
 }
 
 void World::setColor(const Vec3& color) {
@@ -306,20 +371,23 @@ void World::setHDRI(const std::string& path) {
         // Log HDR status
         SCENE_LOG_INFO("HDRI loaded: " + path + " | is_hdr=" + (hdri_texture->is_hdr ? "TRUE (float)" : "FALSE (uchar)"));
         
-        bool uploaded = hdri_texture->upload_to_gpu();
-        if (uploaded && hdri_texture->get_cuda_texture()) {
-            data.env_texture = hdri_texture->get_cuda_texture();
-            data.env_width = hdri_texture->width;
-            data.env_height = hdri_texture->height;
-            SCENE_LOG_INFO("HDRI uploaded to GPU: " + std::to_string(data.env_width) + "x" + std::to_string(data.env_height));
-        } else if (uploaded) {
+        data.env_width = hdri_texture->width;
+        data.env_height = hdri_texture->height;
+        if (!isCudaTextureUploadAllowed()) {
             data.env_texture = 0;
-            data.env_width = hdri_texture->width;
-            data.env_height = hdri_texture->height;
-            SCENE_LOG_INFO("HDRI loaded; CUDA upload deferred until OptiX render sync.");
+            SCENE_LOG_INFO("HDRI loaded; GPU upload deferred until render backend sync.");
         } else {
-             SCENE_LOG_ERROR("Failed to upload HDRI to GPU");
-             data.env_texture = 0;
+            bool uploaded = hdri_texture->upload_to_gpu();
+            if (uploaded && hdri_texture->get_cuda_texture()) {
+                data.env_texture = hdri_texture->get_cuda_texture();
+                SCENE_LOG_INFO("HDRI uploaded to GPU: " + std::to_string(data.env_width) + "x" + std::to_string(data.env_height));
+            } else if (uploaded) {
+                data.env_texture = 0;
+                SCENE_LOG_INFO("HDRI loaded; CUDA upload deferred until OptiX render sync.");
+            } else {
+                 SCENE_LOG_ERROR("Failed to upload HDRI to GPU");
+                 data.env_texture = 0;
+            }
         }
     } else {
         SCENE_LOG_ERROR("Failed to load HDRI texture: " + path);
@@ -360,20 +428,22 @@ void World::setNishitaEnvOverlay(const std::string& path) {
     
     if (env_overlay_texture->is_loaded()) {
         SCENE_LOG_INFO("Nishita Env Overlay loaded: " + path + " | is_hdr=" + (env_overlay_texture->is_hdr ? "TRUE" : "FALSE"));
-        
-        bool uploaded = env_overlay_texture->upload_to_gpu();
-        if (uploaded && env_overlay_texture->get_cuda_texture()) {
-            data.advanced.env_overlay_tex = env_overlay_texture->get_cuda_texture();
-            data.advanced.env_overlay_enabled = 1;
-            SCENE_LOG_INFO("Env Overlay uploaded: " + std::to_string(env_overlay_texture->width) + "x" + std::to_string(env_overlay_texture->height));
-        } else if (uploaded) {
+
+        if (!isCudaTextureUploadAllowed()) {
             data.advanced.env_overlay_tex = 0;
-            data.advanced.env_overlay_enabled = 0;
-            SCENE_LOG_INFO("Env Overlay loaded; CUDA upload deferred until OptiX render sync.");
+            SCENE_LOG_INFO("Env Overlay loaded; GPU upload deferred until render backend sync.");
         } else {
-            SCENE_LOG_ERROR("Failed to upload Env Overlay to GPU");
-            data.advanced.env_overlay_tex = 0;
-            data.advanced.env_overlay_enabled = 0;
+            bool uploaded = env_overlay_texture->upload_to_gpu();
+            if (uploaded && env_overlay_texture->get_cuda_texture()) {
+                data.advanced.env_overlay_tex = env_overlay_texture->get_cuda_texture();
+                SCENE_LOG_INFO("Env Overlay uploaded: " + std::to_string(env_overlay_texture->width) + "x" + std::to_string(env_overlay_texture->height));
+            } else if (uploaded) {
+                data.advanced.env_overlay_tex = 0;
+                SCENE_LOG_INFO("Env Overlay loaded; CUDA upload deferred until OptiX render sync.");
+            } else {
+                SCENE_LOG_ERROR("Failed to upload Env Overlay to GPU");
+                data.advanced.env_overlay_tex = 0;
+            }
         }
     } else {
         SCENE_LOG_ERROR("Failed to load Env Overlay texture: " + path);
@@ -413,9 +483,7 @@ void World::setSunDirection(const Vec3& direction) {
     data.nishita.sun_azimuth = azimDeg;
     
     // DEFERRED: Mark LUT dirty instead of immediate precompute
-    if (atmosphere_lut) {
-        lut_dirty = true;
-    }
+    lut_dirty = true;
 }
 
 void World::setSunIntensity(float intensity) {
@@ -426,9 +494,7 @@ void World::setSunIntensity(float intensity) {
 void World::setAtmosphereIntensity(float intensity) {
     data.nishita.atmosphere_intensity = intensity;
     // atmosphere_intensity is baked into the skyview LUT
-    if (atmosphere_lut) {
-        lut_dirty = true;
-    }
+    lut_dirty = true;
 }
 
 void World::setPlanetRadius(float radius) {
@@ -609,6 +675,23 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir, const Vec3& origin) {
          L += to_vec3(trans) * data.nishita.sun_intensity * 80000.0f * limbDarkening * edgeSoftness;
     }
 
+    if (data.advanced.env_overlay_enabled &&
+        env_overlay_texture &&
+        env_overlay_texture->is_loaded()) {
+        float theta = acosf(std::max(-1.0f, std::min(1.0f, dir.y)));
+        float phi = atan2f(-dir.z, dir.x) + static_cast<float>(M_PI);
+        float u = phi / (2.0f * static_cast<float>(M_PI));
+        float v = theta / static_cast<float>(M_PI);
+        u -= data.advanced.env_overlay_rotation / 360.0f;
+        u = u - floorf(u);
+        Vec3 overlay = env_overlay_texture->get_color_bilinear(u, 1.0f - v);
+        L = blendEnvironmentOverlayCPU(
+            L,
+            overlay,
+            data.advanced.env_overlay_intensity,
+            data.advanced.env_overlay_blend_mode);
+    }
+
     return applyWeatherSkyCPU(data.weather, L, ray_dir);
 }
        
@@ -752,6 +835,7 @@ void World::serialize(nlohmann::json& j) const {
     n["cloud_height_max"] = data.nishita.cloud_height_max;
     n["cloud_offset_x"] = data.nishita.cloud_offset_x;
     n["cloud_offset_z"] = data.nishita.cloud_offset_z;
+    n["cloud_seed"] = data.nishita.cloud_seed;
     n["cloud_quality"] = data.nishita.cloud_quality;
     n["cloud_detail"] = data.nishita.cloud_detail;
     n["cloud_base_steps"] = data.nishita.cloud_base_steps;
@@ -794,6 +878,7 @@ void World::serialize(nlohmann::json& j) const {
     adv["multi_scatter_enabled"] = data.advanced.multi_scatter_enabled;
     adv["multi_scatter_factor"] = data.advanced.multi_scatter_factor;
     adv["aerial_perspective"] = data.advanced.aerial_perspective;
+    adv["aerial_density"] = data.advanced.aerial_density;
     adv["aerial_min_distance"] = data.advanced.aerial_min_distance;
     adv["aerial_max_distance"] = data.advanced.aerial_max_distance;
     
@@ -886,9 +971,10 @@ void World::deserialize(const nlohmann::json& j) {
         data.nishita.cloud_height_max = n.value("cloud_height_max", 4200.0f);
         data.nishita.cloud_offset_x = n.value("cloud_offset_x", 0.0f);
         data.nishita.cloud_offset_z = n.value("cloud_offset_z", 0.0f);
+        data.nishita.cloud_seed = n.value("cloud_seed", 0);
         data.nishita.cloud_quality = n.value("cloud_quality", 1.0f);
         data.nishita.cloud_detail = n.value("cloud_detail", 0.55f);
-        data.nishita.cloud_base_steps = n.value("cloud_base_steps", 48);
+        data.nishita.cloud_base_steps = n.value("cloud_base_steps", 8);
         
         // Cloud Layer 2
         data.nishita.cloud_layer2_enabled = n.value("cloud_layer2_enabled", 0);
@@ -921,7 +1007,7 @@ void World::deserialize(const nlohmann::json& j) {
         data.nishita.cloud_density = (std::max)(0.0f, (std::min)(1.5f, data.nishita.cloud_density));
         data.nishita.cloud_scale = (std::max)(0.1f, (std::min)(1.0f, data.nishita.cloud_scale));
         data.nishita.cloud_detail = (std::max)(0.0f, (std::min)(1.0f, data.nishita.cloud_detail));
-        data.nishita.cloud_base_steps = (std::max)(8, (std::min)(96, data.nishita.cloud_base_steps));
+        data.nishita.cloud_base_steps = (std::max)(4, (std::min)(96, data.nishita.cloud_base_steps));
         data.nishita.cloud2_coverage = (std::max)(0.0f, (std::min)(0.6f, data.nishita.cloud2_coverage));
         data.nishita.cloud2_density = (std::max)(0.0f, (std::min)(1.5f, data.nishita.cloud2_density));
         data.nishita.cloud2_scale = (std::max)(0.1f, (std::min)(1.0f, data.nishita.cloud2_scale));
@@ -956,6 +1042,7 @@ void World::deserialize(const nlohmann::json& j) {
             data.advanced.multi_scatter_enabled = a.value("multi_scatter_enabled", 1);
             data.advanced.multi_scatter_factor = a.value("multi_scatter_factor", 0.3f);
             data.advanced.aerial_perspective = a.value("aerial_perspective", 1);
+            data.advanced.aerial_density = a.value("aerial_density", 1.0f);
             data.advanced.aerial_min_distance = a.value("aerial_min_distance", 10.0f);
             data.advanced.aerial_max_distance = a.value("aerial_max_distance", 5000.0f);
             

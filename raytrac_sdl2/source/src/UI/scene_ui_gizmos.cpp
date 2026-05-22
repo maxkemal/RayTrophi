@@ -1,4 +1,4 @@
-// ===============================================================================
+﻿// ===============================================================================
 // SCENE UI - GIZMOS & TRANSFORM
 // ===============================================================================
 // This file handles 3D Gizmos (Move/Rotate/Scale), Bounding Boxes, and overlays.
@@ -20,6 +20,11 @@
 #include "Backend/IViewportBackend.h"
 #include <Backend/VulkanBackend.h>
 #include <Backend/OptixBackend.h>
+#include <array>
+#include <algorithm>
+#include <cstring>
+#include <unordered_map>
+#include <cstdint>
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern std::unique_ptr<Backend::IBackend> g_backend;
@@ -152,19 +157,10 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
     // FOV calculations
     float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
     float tan_half_fov = tanf(fov_rad * 0.5f);
-    // Helper lambda to draw a bounding box with granular occlusion
-    auto DrawBoundingBox = [&](Vec3 bb_min, Vec3 bb_max, ImU32 color, float thickness) {
-        Vec3 corners[8] = {
-            Vec3(bb_min.x, bb_min.y, bb_min.z),
-            Vec3(bb_max.x, bb_min.y, bb_min.z),
-            Vec3(bb_max.x, bb_max.y, bb_min.z),
-            Vec3(bb_min.x, bb_max.y, bb_min.z),
-            Vec3(bb_min.x, bb_min.y, bb_max.z),
-            Vec3(bb_max.x, bb_min.y, bb_max.z),
-            Vec3(bb_max.x, bb_max.y, bb_max.z),
-            Vec3(bb_min.x, bb_max.y, bb_max.z),
-        };
-
+    // Helper lambda to draw an oriented box from 8 explicit corners with granular occlusion.
+    // Corner order matches axis-aligned convention:
+    //   0:(-,-,-) 1:(+,-,-) 2:(+,+,-) 3:(-,+,-) 4:(-,-,+) 5:(+,-,+) 6:(+,+,+) 7:(-,+,+)
+    auto DrawOrientedBox = [&](const Vec3 corners[8], ImU32 color, float thickness) {
         ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
         auto ProjectPoint = [&](const Vec3& point, ImVec2& out) -> bool {
             Vec3 to_pt = point - cam.lookfrom;
@@ -187,9 +183,9 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         float proj_max_x = 0.0f;
         float proj_max_y = 0.0f;
         bool has_projected_corner = false;
-        for (const Vec3& corner : corners) {
+        for (int i = 0; i < 8; ++i) {
             ImVec2 projected;
-            if (!ProjectPoint(corner, projected)) continue;
+            if (!ProjectPoint(corners[i], projected)) continue;
             has_projected_corner = true;
             proj_min_x = fminf(proj_min_x, projected.x);
             proj_min_y = fminf(proj_min_y, projected.y);
@@ -197,9 +193,16 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
             proj_max_y = fmaxf(proj_max_y, projected.y);
         }
 
-        const Vec3 bb_extent = bb_max - bb_min;
+        // Derive world AABB of the (possibly oriented) corners for occlusion heuristics only.
+        Vec3 wmin(1e10f, 1e10f, 1e10f), wmax(-1e10f, -1e10f, -1e10f);
+        for (int i = 0; i < 8; ++i) {
+            const Vec3& c = corners[i];
+            wmin.x = fminf(wmin.x, c.x); wmin.y = fminf(wmin.y, c.y); wmin.z = fminf(wmin.z, c.z);
+            wmax.x = fmaxf(wmax.x, c.x); wmax.y = fmaxf(wmax.y, c.y); wmax.z = fmaxf(wmax.z, c.z);
+        }
+        const Vec3 bb_extent = wmax - wmin;
         const float bbox_diagonal = bb_extent.length();
-        const Vec3 bb_center = (bb_min + bb_max) * 0.5f;
+        const Vec3 bb_center = (wmin + wmax) * 0.5f;
         const float camera_distance = (bb_center - cam.lookfrom).length();
         const float projected_width = has_projected_corner ? (proj_max_x - proj_min_x) : 0.0f;
         const float projected_height = has_projected_corner ? (proj_max_y - proj_min_y) : 0.0f;
@@ -270,8 +273,17 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
                     Vec3 mid_p = (prev_p + curr_p) * 0.5f;
                     ImU32 segment_color = color;
                     
+                    // [RACE FIX] Animation worker thread mutates HittableInstance
+                    // transforms (and thus bounds / inv_transform) per frame via
+                    // updateAnimationState. CPU BVH hit traverses those same
+                    // hittables and reads transform / inv_transform / bbox during
+                    // ray-object intersection — Embree call backs into user
+                    // geometry. Concurrent read/write on Matrix4x4 produces torn
+                    // matrices that the Embree internals then dereference,
+                    // crashing inside embree4.dll. Skip the occlusion probe while
+                    // the render worker owns the scene.
                     extern bool g_bvh_rebuild_pending;
-                    if (ctx.scene.bvh && !g_bvh_rebuild_pending) {
+                    if (ctx.scene.bvh && !g_bvh_rebuild_pending && !ctx.is_animation_mode) {
                         Vec3 to_mid = mid_p - cam.lookfrom;
                         float dist = to_mid.length();
                         if (dist > 0.1f) {
@@ -279,11 +291,16 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
                             HitRecord rec;
                             // Check occlusion: if hit anything closer than the segment
                             if (ctx.scene.bvh->hit(r, 0.001f, dist - 0.05f, rec, true)) {
-                                // Occluded: Fade out to 20%
-                                int alpha = (color >> 24) & 0xFF;
-                                alpha = alpha / 5;
-                                if (alpha < 30) alpha = 30; // Minimum visibility
-                                segment_color = (color & 0x00FFFFFF) | (alpha << 24);
+                                // Occluded → desaturate toward neutral gray (not just
+                                // fade) so alignment against the occluder reads
+                                // clearly instead of disappearing.
+                                int rr = (color      ) & 0xFF;
+                                int gg = (color >>  8) & 0xFF;
+                                int bb = (color >> 16) & 0xFF;
+                                rr = (rr + 160) >> 1;
+                                gg = (gg + 160) >> 1;
+                                bb = (bb + 160) >> 1;
+                                segment_color = IM_COL32(rr, gg, bb, 120);
                             }
                         }
                     }
@@ -312,6 +329,587 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         DrawSegmentedLine(corners[1], corners[5]);
         DrawSegmentedLine(corners[2], corners[6]);
         DrawSegmentedLine(corners[3], corners[7]);
+    };
+
+    // Axis-aligned wrapper for non-mesh selectables (VDB, camera, force field, etc.)
+    auto DrawBoundingBox = [&](Vec3 bb_min, Vec3 bb_max, ImU32 color, float thickness) {
+        Vec3 corners[8] = {
+            Vec3(bb_min.x, bb_min.y, bb_min.z),
+            Vec3(bb_max.x, bb_min.y, bb_min.z),
+            Vec3(bb_max.x, bb_max.y, bb_min.z),
+            Vec3(bb_min.x, bb_max.y, bb_min.z),
+            Vec3(bb_min.x, bb_min.y, bb_max.z),
+            Vec3(bb_max.x, bb_min.y, bb_max.z),
+            Vec3(bb_max.x, bb_max.y, bb_max.z),
+            Vec3(bb_min.x, bb_max.y, bb_max.z),
+        };
+        DrawOrientedBox(corners, color, thickness);
+    };
+
+    // Inline projection for hull (mirrors DrawOrientedBox::ProjectPoint).
+    auto ProjectWorldPoint = [&](const Vec3& point, ImVec2& out) -> bool {
+        Vec3 to_pt = point - cam.lookfrom;
+        float depth = to_pt.dot(cam_forward);
+        if (depth <= 0.01f) return false;
+        float local_x = to_pt.dot(cam_right);
+        float local_y = to_pt.dot(cam_up);
+        float half_h = depth * tan_half_fov;
+        float half_w = half_h * aspect_ratio;
+        if (fabsf(half_w) <= 1e-6f || fabsf(half_h) <= 1e-6f) return false;
+        out.x = ((local_x / half_w) * 0.5f + 0.5f) * screen_w;
+        out.y = (0.5f - (local_y / half_h) * 0.5f) * screen_h;
+        return true;
+    };
+
+    // Screen-space convex hull of an object's transformed mesh vertices.
+    // Returns true if hull was drawn; false → caller falls back to OBB.
+    // ─── CPU rasterized outline ──────────────────────────────
+    // Per-frame: project mesh, back-face cull, scanline-rasterize into a screen-space
+    // mask covering only the object's projected bbox, then draw the mask boundary.
+    // No cache — selection moves and rotates freely with the object.
+    auto DrawSelectionRaster = [&](const std::string& name, ImU32 color, float thickness) -> bool {
+       
+        auto mit = mesh_cache.find(name);
+        if (mit == mesh_cache.end() || mit->second.empty()) return false;
+        const auto& tris = mit->second;
+
+        // Cost cap. Above this the per-frame projection cost is too high for
+        // a full per-triangle raster, and triangle subsampling (stride) cannot
+        // robustly preserve the silhouette — kept triangles are not spatially
+        // adjacent in mesh order, so screen-space gaps leak through the outer
+        // boundary at close zoom and confuse the flood-fill at far zoom.
+        // Above the cap we fall back to the cached convex hull. A proper fix
+        // for very dense meshes would be a GPU outline pass or a one-time
+        // decimated proxy cached per selection — out of scope here.
+        constexpr size_t MAX_TRIS_FOR_RASTER = 1000000;
+        if (tris.size() > MAX_TRIS_FOR_RASTER) return false;
+        constexpr size_t tri_stride = 1;
+
+        // pose_hash is hoisted to function scope so it can feed the per-frame
+        // drawcall cache below regardless of whether this mesh is skinned.
+        uint64_t pose_hash = 0;
+
+        // Use the fully-composed transform (base * current * pivot) — same matrix the
+        // renderer feeds to updateTransformedVertices. transform->base alone misses
+        // gizmo-driven moves which write to the pivot component.
+        Matrix4x4 m = tris[0].second->getTransformMatrix();
+
+        // "Truly skinned" = has skin data AND at least one non-empty bone weight.
+        // Assimp sometimes attaches empty SkinnedTriangleData to rigid meshes; those
+        // would falsely take the skinned path. The skinned path reads
+        // vertices[i].position which is only refreshed by apply_skinning() —
+        // without that, gizmo drag doesn't update it and the outline freezes.
+        // Treat such "spurious-skin" meshes as rigid (original + M) so gizmo
+        // tracking works without depending on the animation system running.
+        bool mesh_is_skinned = tris[0].second->hasAnySkinWeights();
+        if (mesh_is_skinned && !ctx.renderer.finalBoneMatrices.empty()) {
+            // Pose-hash cache: a CPU skinning pass over a high-poly skinned mesh
+            // costs more than the rest of the outline path combined. Triangle
+            // vertices[i].position persists between frames, so if the bone buffer
+            // hasn't changed since the last raster we can reuse last frame's
+            // skinned positions verbatim. The hash mixes size + a sparse sample of
+            // matrix entries (collisions don't matter — only a held-pose match
+            // matters, and a real pose change shifts dozens of floats).
+            const auto& bones =
+                static_cast<const std::vector<Matrix4x4>&>(ctx.renderer.finalBoneMatrices);
+            pose_hash = 1469598103934665603ull ^ bones.size();
+            const size_t step = (bones.size() > 16) ? (bones.size() / 16) : 1;
+            for (size_t bi = 0; bi < bones.size(); bi += step) {
+                const float* mm = &bones[bi].m[0][0];
+                // Sample translation + a couple of rotation entries — cheap and
+                // changes on any meaningful pose update.
+                uint32_t a, b, c, d;
+                std::memcpy(&a, mm + 3, 4);
+                std::memcpy(&b, mm + 7, 4);
+                std::memcpy(&c, mm + 11, 4);
+                std::memcpy(&d, mm + 0, 4);
+                pose_hash ^= (uint64_t(a) << 32) | b;
+                pose_hash *= 1099511628211ull;
+                pose_hash ^= (uint64_t(c) << 32) | d;
+                pose_hash *= 1099511628211ull;
+            }
+
+            auto pit = selection_skin_pose_hash.find(name);
+            const bool pose_unchanged =
+                (pit != selection_skin_pose_hash.end()) && (pit->second == pose_hash);
+            if (!pose_unchanged) {
+                // Skin only the triangles the projection pass will actually visit
+                // (matches tri_stride below). Triangles in between keep their
+                // previous-frame skinned position — fine for the outline, since
+                // the rasterizer doesn't see them either and the closing pass
+                // below stitches the silhouette back together.
+                for (size_t i = 0; i < tris.size(); i += tri_stride) {
+                    if (tris[i].second->hasSkinData()) {
+                        tris[i].second->apply_skinning(bones);
+                    }
+                }
+                selection_skin_pose_hash[name] = pose_hash;
+            }
+        }
+        // For rigid meshes back-face cull happens in local space (cam→local once).
+        // For skinned meshes vertices are already world-space, so we cull in world.
+        const Vec3 cull_origin = (!mesh_is_skinned)
+            ? m.inverse().transform_point(cam.lookfrom)
+            : cam.lookfrom;
+
+        const int sw = static_cast<int>(screen_w);
+        const int sh = static_cast<int>(screen_h);
+
+        // Per-frame drawcall cache: when camera + transform + pose + screen
+        // + style are all unchanged from last frame, every pixel we'd compute
+        // below is identical. Skip projection, raster, flood-fill, and per-
+        // boundary BVH occlusion entirely — replay the stored pixel list.
+        // Held-camera frames cost a vector walk instead of an O(tris + mask)
+        // CPU pass that was starving the GPU command queue.
+        extern bool g_bvh_rebuild_pending;
+        // Disable CPU BVH occlusion probe during sequence render — the worker
+        // thread mutates HittableInstance transforms / bounds per animation
+        // frame, and Embree's intersection callbacks would otherwise race
+        // those reads and crash inside embree4.dll.
+        const bool can_occlude = (ctx.scene.bvh != nullptr) && !g_bvh_rebuild_pending && !ctx.is_animation_mode;
+
+        uint64_t frame_hash = 1469598103934665603ull;
+        auto mix64 = [&](uint64_t v) { frame_hash ^= v; frame_hash *= 1099511628211ull; };
+        auto mixf  = [&](float f)    { uint32_t x; std::memcpy(&x, &f, 4); mix64(x); };
+        for (int rr = 0; rr < 3; ++rr) for (int cc = 0; cc < 4; ++cc) mixf(m.m[rr][cc]);
+        mixf(cam.lookfrom.x); mixf(cam.lookfrom.y); mixf(cam.lookfrom.z);
+        mixf(cam_forward.x);  mixf(cam_forward.y);  mixf(cam_forward.z);
+        mixf(cam_right.x);    mixf(cam_right.y);    mixf(cam_right.z);
+        mixf(cam_up.x);       mixf(cam_up.y);       mixf(cam_up.z);
+        mixf(tan_half_fov); mixf(aspect_ratio);
+        mix64(static_cast<uint64_t>(sw)); mix64(static_cast<uint64_t>(sh));
+        mixf(thickness); mix64(static_cast<uint64_t>(color));
+        mix64(pose_hash);
+        mix64(can_occlude ? 1ull : 0ull);
+
+        auto cit = selection_outline_frame_cache.find(name);
+        if (cit != selection_outline_frame_cache.end() &&
+            cit->second.hash == frame_hash &&
+            !cit->second.runs.empty()) {
+            ImDrawList* dl = ImGui::GetBackgroundDrawList();
+            const float pix = static_cast<float>(cit->second.scale);
+            const float half = cit->second.thickness * 0.5f;
+            for (const auto& run : cit->second.runs) {
+                const float run_w = static_cast<float>(run.len) * pix;
+                dl->AddRectFilled(
+                    ImVec2(run.sx - half + 0.5f, run.sy - half + 0.5f),
+                    ImVec2(run.sx + half + 0.5f + run_w, run.sy + half + 0.5f + pix),
+                    run.col);
+            }
+            return true;
+        }
+
+        // Cache miss — recompute below and refill.
+        SelectionOutlineFrameCache& cache_entry = selection_outline_frame_cache[name];
+        cache_entry.runs.clear();
+        cache_entry.hash = frame_hash;
+
+        struct ProjTri { float x[3], y[3]; float mean_depth; bool valid; };
+        std::vector<ProjTri> projected(tris.size());
+
+        int min_x = sw, min_y = sh, max_x = -1, max_y = -1;
+        bool has_any = false;
+
+        for (size_t i = 0; i < tris.size(); i += tri_stride) {
+            ProjTri& pt = projected[i];
+            pt.valid = false;
+            const Triangle& T = *tris[i].second;
+            // Pull vertices: skinned → already world; else → local space + M below.
+            const Vec3& a = mesh_is_skinned ? T.getVertexPosition(0) : T.getOriginalVertexPosition(0);
+            const Vec3& b = mesh_is_skinned ? T.getVertexPosition(1) : T.getOriginalVertexPosition(1);
+            const Vec3& c = mesh_is_skinned ? T.getVertexPosition(2) : T.getOriginalVertexPosition(2);
+
+            // Back-face cull (local frame for rigid, world frame for skinned).
+            Vec3 e1(b.x - a.x, b.y - a.y, b.z - a.z);
+            Vec3 e2(c.x - a.x, c.y - a.y, c.z - a.z);
+            Vec3 n(
+                e1.y * e2.z - e1.z * e2.y,
+                e1.z * e2.x - e1.x * e2.z,
+                e1.x * e2.y - e1.y * e2.x
+            );
+            Vec3 view(
+                (a.x + b.x + c.x) * (1.0f / 3.0f) - cull_origin.x,
+                (a.y + b.y + c.y) * (1.0f / 3.0f) - cull_origin.y,
+                (a.z + b.z + c.z) * (1.0f / 3.0f) - cull_origin.z
+            );
+            if (view.x * n.x + view.y * n.y + view.z * n.z >= 0.0f) {
+                continue; // back-facing
+            }
+
+            ImVec2 p0, p1, p2;
+            const Vec3* lv[3] = { &a, &b, &c };
+            bool all_ok = true;
+            ImVec2* outp[3] = { &p0, &p1, &p2 };
+            float depth_sum = 0.0f;
+            for (int v = 0; v < 3; ++v) {
+                const Vec3& vp = *lv[v];
+                Vec3 wp;
+                if (mesh_is_skinned) {
+                    wp = vp; // already world space
+                } else {
+                    wp = Vec3(
+                        m.m[0][0] * vp.x + m.m[0][1] * vp.y + m.m[0][2] * vp.z + m.m[0][3],
+                        m.m[1][0] * vp.x + m.m[1][1] * vp.y + m.m[1][2] * vp.z + m.m[1][3],
+                        m.m[2][0] * vp.x + m.m[2][1] * vp.y + m.m[2][2] * vp.z + m.m[2][3]
+                    );
+                }
+                if (!ProjectWorldPoint(wp, *outp[v])) { all_ok = false; break; }
+                Vec3 to_pt = wp - cam.lookfrom;
+                depth_sum += to_pt.dot(cam_forward);
+            }
+            if (!all_ok) continue;
+
+            pt.x[0] = p0.x; pt.y[0] = p0.y;
+            pt.x[1] = p1.x; pt.y[1] = p1.y;
+            pt.x[2] = p2.x; pt.y[2] = p2.y;
+            pt.mean_depth = depth_sum * (1.0f / 3.0f);
+            pt.valid = true;
+            has_any = true;
+            for (int v = 0; v < 3; ++v) {
+                int xi = static_cast<int>(floorf(pt.x[v]));
+                int yi = static_cast<int>(floorf(pt.y[v]));
+                if (xi < min_x) min_x = xi;
+                if (yi < min_y) min_y = yi;
+                if (xi > max_x) max_x = xi;
+                if (yi > max_y) max_y = yi;
+            }
+        }
+        if (!has_any) return false;
+
+        min_x = std::max(0, min_x - 2);
+        min_y = std::max(0, min_y - 2);
+        max_x = std::min(sw - 1, max_x + 2);
+        max_y = std::min(sh - 1, max_y + 2);
+        int mw = max_x - min_x + 1;
+        int mh = max_y - min_y + 1;
+        if (mw <= 2 || mh <= 2) return false;
+
+        // Cost cap on mask area — half-res when very large.
+        int scale = 1;
+        size_t mask_area = static_cast<size_t>(mw) * static_cast<size_t>(mh);
+        if (mask_area > 2000000) {
+            scale = 2;
+            mw = (mw + 1) / 2;
+            mh = (mh + 1) / 2;
+        }
+
+        // depth_mask: per-pixel min camera-space depth of the rasterized object.
+        // 1e30f → empty. Used both as a fill bit (via < 1e29f) and as the depth
+        // reference for the per-boundary occlusion test below.
+        constexpr float EMPTY_DEPTH = 1e30f;
+        std::vector<float> depth_mask(static_cast<size_t>(mw) * static_cast<size_t>(mh), EMPTY_DEPTH);
+        const float inv_scale = 1.0f / static_cast<float>(scale);
+        const float ox = static_cast<float>(min_x);
+        const float oy = static_cast<float>(min_y);
+
+        // Rasterize each surviving triangle into the mask.
+        for (size_t i = 0; i < tris.size(); i += tri_stride) {
+            const ProjTri& pt = projected[i];
+            if (!pt.valid) continue;
+            // Map to mask space.
+            float x0 = (pt.x[0] - ox) * inv_scale;
+            float y0 = (pt.y[0] - oy) * inv_scale;
+            float x1 = (pt.x[1] - ox) * inv_scale;
+            float y1 = (pt.y[1] - oy) * inv_scale;
+            float x2 = (pt.x[2] - ox) * inv_scale;
+            float y2 = (pt.y[2] - oy) * inv_scale;
+
+            float fminx = std::min(std::min(x0, x1), x2);
+            float fminy = std::min(std::min(y0, y1), y2);
+            float fmaxx = std::max(std::max(x0, x1), x2);
+            float fmaxy = std::max(std::max(y0, y1), y2);
+            int bx0 = std::max(0, static_cast<int>(floorf(fminx)));
+            int by0 = std::max(0, static_cast<int>(floorf(fminy)));
+            int bx1 = std::min(mw - 1, static_cast<int>(ceilf(fmaxx)));
+            int by1 = std::min(mh - 1, static_cast<int>(ceilf(fmaxy)));
+            if (bx1 < bx0 || by1 < by0) continue;
+
+            float area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+            if (fabsf(area) < 1e-6f) continue;
+            const float sign = (area < 0.0f) ? -1.0f : 1.0f;
+
+            const float tri_depth = pt.mean_depth;
+            for (int y = by0; y <= by1; ++y) {
+                const float py = static_cast<float>(y) + 0.5f;
+                float* row = depth_mask.data() + static_cast<size_t>(y) * mw;
+                for (int x = bx0; x <= bx1; ++x) {
+                    const float px = static_cast<float>(x) + 0.5f;
+                    float w0 = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1);
+                    float w1 = (x0 - x2) * (py - y2) - (y0 - y2) * (px - x2);
+                    float w2 = (x1 - x0) * (py - y0) - (y1 - y0) * (px - x0);
+                    if ((w0 * sign) >= 0.0f && (w1 * sign) >= 0.0f && (w2 * sign) >= 0.0f) {
+                        // Keep the closest triangle covering this pixel — depth is
+                        // what the occlusion test below compares against.
+                        if (tri_depth < row[x]) row[x] = tri_depth;
+                    }
+                }
+            }
+        }
+
+        // Flood-fill from the mask border to classify each empty pixel as either
+        // "outside" (reachable from the border through empty space) or "interior
+        // hole" (an unfilled pocket between sampled triangles). The silhouette
+        // is then only filled pixels adjacent to outside-empty — internal stride
+        // holes never bleed through no matter how large they grow at close zoom.
+        // Cost is O(mask_area) regardless of triangle count or hole width.
+        std::vector<uint8_t> outside(static_cast<size_t>(mw) * static_cast<size_t>(mh), 0);
+        {
+            std::vector<int> stack;
+            stack.reserve(4096);
+            auto try_push = [&](int x, int y) {
+                if (x < 0 || x >= mw || y < 0 || y >= mh) return;
+                size_t idx = static_cast<size_t>(y) * mw + x;
+                if (outside[idx]) return;
+                if (depth_mask[idx] < EMPTY_DEPTH * 0.5f) return; // filled
+                outside[idx] = 1;
+                stack.push_back(static_cast<int>(idx));
+            };
+            for (int x = 0; x < mw; ++x) { try_push(x, 0); try_push(x, mh - 1); }
+            for (int y = 0; y < mh; ++y) { try_push(0, y); try_push(mw - 1, y); }
+            while (!stack.empty()) {
+                int idx = stack.back(); stack.pop_back();
+                int y = idx / mw;
+                int x = idx - y * mw;
+                try_push(x - 1, y);
+                try_push(x + 1, y);
+                try_push(x, y - 1);
+                try_push(x, y + 1);
+            }
+        }
+
+        // 4-neighbor boundary: a filled pixel with at least one unfilled neighbor.
+        // For each boundary pixel we also test scene-BVH occlusion: cast a ray
+        // through the pixel and if something else is closer than the stored
+        // object depth, draw that pixel in a desaturated gray-tint so the user
+        // sees exactly which portion of the silhouette is behind another object.
+        ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
+        const float pix = static_cast<float>(scale);
+        const float half = thickness * 0.5f;
+
+        const ImU32 visible_col = color;
+        const int oc_r = ((( color       ) & 0xFF) + 160) >> 1;
+        const int oc_g = ((( color >>  8) & 0xFF) + 160) >> 1;
+        const int oc_b = ((( color >> 16) & 0xFF) + 160) >> 1;
+        const ImU32 occluded_col = IM_COL32(oc_r, oc_g, oc_b, 120);
+
+        // can_occlude hoisted above for the frame-cache key.
+
+        // Camera basis for ray reconstruction at a screen pixel.
+        const float view_h = tan_half_fov;
+        const float view_w = view_h * aspect_ratio;
+        const float inv_sw = 1.0f / static_cast<float>(sw);
+        const float inv_sh = 1.0f / static_cast<float>(sh);
+
+        // Occlusion sample stride: BVH cast is the only meaningful per-pixel
+        // cost and was the dominant gizmo bottleneck on dense meshes — it
+        // serializes the main thread and starves the GPU command queue.
+        // Bucket by triangle count; neighbours inherit the result so the
+        // perceived occlusion edge stays within a few pixels of truth.
+        int oc_stride;
+        if      (tris.size() > 200000) oc_stride = 16;
+        else if (tris.size() >  30000) oc_stride = 10;
+        else                           oc_stride = 6;
+        bool last_occluded = false;
+        int  last_oc_x = -9999, last_oc_y = -9999;
+
+        size_t drawn = 0;
+        for (int y = 0; y < mh; ++y) {
+            const float*   row    = depth_mask.data() + static_cast<size_t>(y) * mw;
+            const uint8_t* o_row  = outside.data()    + static_cast<size_t>(y) * mw;
+            const uint8_t* o_up   = (y > 0)      ? o_row - mw : nullptr;
+            const uint8_t* o_down = (y < mh - 1) ? o_row + mw : nullptr;
+
+            // RLE state for this row: collect consecutive same-colour boundary
+            // pixels into a single wide rect at flush time.
+            int  run_start = -1;
+            ImU32 run_col  = 0;
+            const float sy_row = oy + static_cast<float>(y) * pix;
+
+            auto flush_run = [&](int run_end_exclusive) {
+                if (run_start < 0) return;
+                const float sx0   = ox + static_cast<float>(run_start) * pix;
+                const float run_w = static_cast<float>(run_end_exclusive - run_start) * pix;
+                draw_list->AddRectFilled(
+                    ImVec2(sx0 - half + 0.5f,         sy_row - half + 0.5f),
+                    ImVec2(sx0 + half + 0.5f + run_w, sy_row + half + 0.5f + pix),
+                    run_col);
+                const uint16_t len = static_cast<uint16_t>(
+                    std::min<int>(run_end_exclusive - run_start, 0xFFFF));
+                cache_entry.runs.push_back({ sx0, sy_row, len, static_cast<uint32_t>(run_col) });
+                ++drawn;
+                run_start = -1;
+            };
+
+            for (int x = 0; x < mw; ++x) {
+                const float d_here = row[x];
+                const bool  is_filled = (d_here < EMPTY_DEPTH * 0.5f);
+                const bool  boundary  = is_filled && (
+                    (x == 0) || (x == mw - 1) || (y == 0) || (y == mh - 1) ||
+                    o_row[x - 1] || o_row[x + 1] ||
+                    o_up[x] || o_down[x]);
+                if (!boundary) { flush_run(x); continue; }
+
+                const float sx = ox + static_cast<float>(x) * pix;
+
+                ImU32 px_col = visible_col;
+                if (can_occlude) {
+                    bool occluded;
+                    // Reuse the previous BVH result if we're inside the stride
+                    // window — boundaries change occlusion state slowly.
+                    int dx = x - last_oc_x;
+                    int dy = y - last_oc_y;
+                    if (dx * dx + dy * dy < oc_stride * oc_stride) {
+                        occluded = last_occluded;
+                    } else {
+                        float ndc_x = (sx * inv_sw) * 2.0f - 1.0f;
+                        float ndc_y = 1.0f - (sy_row * inv_sh) * 2.0f;
+                        Vec3 dir = (cam_right * (ndc_x * view_w)
+                                  + cam_up    * (ndc_y * view_h)
+                                  + cam_forward).normalize();
+                        Ray r(cam.lookfrom, dir);
+                        HitRecord rec;
+                        // Convert object depth (along forward) to ray-t along dir.
+                        const float t_obj = d_here / dir.dot(cam_forward);
+                        occluded = ctx.scene.bvh->hit(r, 0.001f, t_obj - 0.05f, rec, true);
+                        last_occluded = occluded;
+                        last_oc_x = x;
+                        last_oc_y = y;
+                    }
+                    if (occluded) px_col = occluded_col;
+                }
+
+                if (run_start < 0) {
+                    run_start = x; run_col = px_col;
+                } else if (px_col != run_col) {
+                    flush_run(x);
+                    run_start = x; run_col = px_col;
+                }
+            }
+            flush_run(mw);
+        }
+        cache_entry.thickness = thickness;
+        cache_entry.scale = scale;
+        return drawn > 0;
+    };
+
+
+    // Build a small set of local-space extremal points for a mesh by argmax-ing
+    // along K well-distributed directions. Result approximates the 3D convex hull
+    // vertex set tightly enough for a screen-space 2D hull to be visually identical.
+    auto ExtractHullCandidates = [&](const std::vector<std::pair<int, std::shared_ptr<Triangle>>>& tris,
+                                     std::vector<Vec3>& out) {
+        // Fibonacci-sphere directions: uniform spherical sampling for tight 3D convex
+        // hull approximation. K=128 gives smooth silhouette on organic shapes with
+        // ~50ms one-time cost on a 150k-vertex mesh.
+        constexpr int K = 128;
+        static std::array<Vec3, K> dirs = [] {
+            std::array<Vec3, K> d{};
+            const float golden = 3.14159265359f * (3.0f - sqrtf(5.0f));
+            for (int i = 0; i < K; ++i) {
+                float y = 1.0f - (float(i) / float(K - 1)) * 2.0f; // [1, -1]
+                float r = sqrtf(fmaxf(0.0f, 1.0f - y * y));
+                float theta = golden * float(i);
+                d[i] = Vec3(cosf(theta) * r, y, sinf(theta) * r);
+            }
+            return d;
+        }();
+
+        std::array<float, K> bestDot;
+        std::array<Vec3, K> bestPt;
+        for (int k = 0; k < K; ++k) bestDot[k] = -1e30f;
+
+        for (const auto& tp : tris) {
+            const Triangle& T = *tp.second;
+            for (int v = 0; v < 3; ++v) {
+                const Vec3& p = T.getOriginalVertexPosition(v);
+                for (int k = 0; k < K; ++k) {
+                    float d = p.x * dirs[k].x + p.y * dirs[k].y + p.z * dirs[k].z;
+                    if (d > bestDot[k]) { bestDot[k] = d; bestPt[k] = p; }
+                }
+            }
+        }
+
+        // Dedupe (different dirs often pick the same vertex on flat regions).
+        out.clear();
+        out.reserve(K);
+        for (int k = 0; k < K; ++k) {
+            if (bestDot[k] <= -1e29f) continue;
+            bool dup = false;
+            for (const Vec3& q : out) {
+                if (fabsf(q.x - bestPt[k].x) < 1e-5f &&
+                    fabsf(q.y - bestPt[k].y) < 1e-5f &&
+                    fabsf(q.z - bestPt[k].z) < 1e-5f) { dup = true; break; }
+            }
+            if (!dup) out.push_back(bestPt[k]);
+        }
+    };
+
+    auto DrawSelectionHull = [&](const std::string& name, ImU32 color, float thickness) -> bool {
+        auto it = mesh_cache.find(name);
+        if (it == mesh_cache.end() || it->second.empty()) return false;
+
+        // Fully composed transform (includes gizmo-driven pivot, not just base).
+        Matrix4x4 m = it->second[0].second->getTransformMatrix();
+
+        // Lazy candidate extraction (one-time per mesh; ~ms even for 500k tris).
+        auto cand_it = hull_candidate_cache.find(name);
+        if (cand_it == hull_candidate_cache.end()) {
+            std::vector<Vec3> candidates;
+            ExtractHullCandidates(it->second, candidates);
+            cand_it = hull_candidate_cache.emplace(name, std::move(candidates)).first;
+        }
+        const std::vector<Vec3>& local_pts = cand_it->second;
+        if (local_pts.size() < 3) return false;
+
+        std::vector<ImVec2> pts;
+        pts.reserve(local_pts.size());
+        for (const Vec3& lp : local_pts) {
+            Vec3 wp(
+                m.m[0][0] * lp.x + m.m[0][1] * lp.y + m.m[0][2] * lp.z + m.m[0][3],
+                m.m[1][0] * lp.x + m.m[1][1] * lp.y + m.m[1][2] * lp.z + m.m[1][3],
+                m.m[2][0] * lp.x + m.m[2][1] * lp.y + m.m[2][2] * lp.z + m.m[2][3]
+            );
+            ImVec2 sp;
+            if (ProjectWorldPoint(wp, sp)) pts.push_back(sp);
+        }
+        if (pts.size() < 3) return false;
+
+        // Andrew monotone chain convex hull.
+        std::sort(pts.begin(), pts.end(), [](const ImVec2& a, const ImVec2& b) {
+            return a.x < b.x || (a.x == b.x && a.y < b.y);
+        });
+        auto cross2d = [](const ImVec2& O, const ImVec2& A, const ImVec2& B) {
+            return (A.x - O.x) * (B.y - O.y) - (A.y - O.y) * (B.x - O.x);
+        };
+        const int n = static_cast<int>(pts.size());
+        std::vector<ImVec2> hull(2 * n);
+        int k = 0;
+        for (int i = 0; i < n; ++i) {
+            while (k >= 2 && cross2d(hull[k - 2], hull[k - 1], pts[i]) <= 0.0f) --k;
+            hull[k++] = pts[i];
+        }
+        for (int i = n - 2, t = k + 1; i >= 0; --i) {
+            while (k >= t && cross2d(hull[k - 2], hull[k - 1], pts[i]) <= 0.0f) --k;
+            hull[k++] = pts[i];
+        }
+        if (k <= 1) return false;
+        hull.resize(k - 1); // drop duplicated closing vertex
+        if (hull.size() < 3) return false;
+
+        // Reject degenerate hulls (sub-pixel): caller falls back to OBB.
+        float hmin_x = hull[0].x, hmax_x = hull[0].x, hmin_y = hull[0].y, hmax_y = hull[0].y;
+        for (const auto& p : hull) {
+            hmin_x = fminf(hmin_x, p.x); hmax_x = fmaxf(hmax_x, p.x);
+            hmin_y = fminf(hmin_y, p.y); hmax_y = fmaxf(hmax_y, p.y);
+        }
+        if ((hmax_x - hmin_x) < 2.0f && (hmax_y - hmin_y) < 2.0f) return false;
+
+        ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
+        const size_t H = hull.size();
+        for (size_t i = 0; i < H; ++i) {
+            draw_list->AddLine(hull[i], hull[(i + 1) % H], color, thickness);
+        }
+        return true;
     };
 
     // �������������������������������������������������������������������������
@@ -455,6 +1053,9 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
 
             Vec3 bb_min, bb_max;
             bool has_bounds = false;
+            // For mesh objects we draw an oriented box (tight to local AABB after transform).
+            Vec3 obb_corners[8];
+            bool has_obb = false;
 
             if (item.type == SelectableType::Object && item.object) {
                 std::string selectedName = item.object->nodeName;
@@ -468,49 +1069,30 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
                     Vec3 cached_min = bbox_it->second.first;
                     Vec3 cached_max = bbox_it->second.second;
 
-                    // TRANSFORM THE BOUNDING BOX by object's current transform matrix
-                    // This ensures bbox follows the object in TLAS mode where CPU vertices aren't updated
-                    Transform* transform = item.object->getTransformPtr();
-                    if (transform) {
-                        Matrix4x4& m = transform->base;
+                    // Build local-space corners.
+                    Vec3 local_corners[8] = {
+                        Vec3(cached_min.x, cached_min.y, cached_min.z),
+                        Vec3(cached_max.x, cached_min.y, cached_min.z),
+                        Vec3(cached_max.x, cached_max.y, cached_min.z),
+                        Vec3(cached_min.x, cached_max.y, cached_min.z),
+                        Vec3(cached_min.x, cached_min.y, cached_max.z),
+                        Vec3(cached_max.x, cached_min.y, cached_max.z),
+                        Vec3(cached_max.x, cached_max.y, cached_max.z),
+                        Vec3(cached_min.x, cached_max.y, cached_max.z),
+                    };
 
-                        // Transform all 8 corners and find new AABB
-                        Vec3 corners[8] = {
-                            Vec3(cached_min.x, cached_min.y, cached_min.z),
-                            Vec3(cached_max.x, cached_min.y, cached_min.z),
-                            Vec3(cached_min.x, cached_max.y, cached_min.z),
-                            Vec3(cached_max.x, cached_max.y, cached_min.z),
-                            Vec3(cached_min.x, cached_min.y, cached_max.z),
-                            Vec3(cached_max.x, cached_min.y, cached_max.z),
-                            Vec3(cached_min.x, cached_max.y, cached_max.z),
-                            Vec3(cached_max.x, cached_max.y, cached_max.z)
-                        };
-
-                        bb_min = Vec3(1e10f, 1e10f, 1e10f);
-                        bb_max = Vec3(-1e10f, -1e10f, -1e10f);
-
-                        for (int c = 0; c < 8; c++) {
-                            Vec3 p = corners[c];
-                            // Apply transform: p' = M * p
-                            Vec3 tp(
-                                m.m[0][0] * p.x + m.m[0][1] * p.y + m.m[0][2] * p.z + m.m[0][3],
-                                m.m[1][0] * p.x + m.m[1][1] * p.y + m.m[1][2] * p.z + m.m[1][3],
-                                m.m[2][0] * p.x + m.m[2][1] * p.y + m.m[2][2] * p.z + m.m[2][3]
-                            );
-                            bb_min.x = fminf(bb_min.x, tp.x);
-                            bb_min.y = fminf(bb_min.y, tp.y);
-                            bb_min.z = fminf(bb_min.z, tp.z);
-                            bb_max.x = fmaxf(bb_max.x, tp.x);
-                            bb_max.y = fmaxf(bb_max.y, tp.y);
-                            bb_max.z = fmaxf(bb_max.z, tp.z);
-                        }
+                    // Fully composed transform — picks up gizmo-driven moves which
+                    // write to the pivot component (transform->base alone is stale).
+                    Matrix4x4 m = item.object->getTransformMatrix();
+                    for (int c = 0; c < 8; ++c) {
+                        const Vec3& p = local_corners[c];
+                        obb_corners[c] = Vec3(
+                            m.m[0][0] * p.x + m.m[0][1] * p.y + m.m[0][2] * p.z + m.m[0][3],
+                            m.m[1][0] * p.x + m.m[1][1] * p.y + m.m[1][2] * p.z + m.m[1][3],
+                            m.m[2][0] * p.x + m.m[2][1] * p.y + m.m[2][2] * p.z + m.m[2][3]
+                        );
                     }
-                    else {
-                        // No transform - use cached values directly
-                        bb_min = cached_min;
-                        bb_max = cached_max;
-                    }
-                    has_bounds = true;
+                    has_obb = true;
                 }
             }
             else if (item.type == SelectableType::Light && item.light) {
@@ -553,8 +1135,31 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
                 color = is_primary ? IM_COL32(255, 0, 255, 255) : IM_COL32(200, 0, 200, 180);
             }
 
-            if (has_bounds) {
-                DrawBoundingBox(bb_min, bb_max, color, thickness);
+            bool drew_outline = false;
+            if (item.type == SelectableType::Object && item.object) {
+                if (viewport_settings.show_selection_outline) {
+                    std::string outlineName = item.object->nodeName;
+                    if (outlineName.empty()) outlineName = "Unnamed";
+                    // Prefer  rasterized outline (concave-tight, occlusion
+                    // free of internal geometry). Falls back to convex hull when the mesh
+                    // is too dense for the raster path's cost cap.
+                    drew_outline = DrawSelectionRaster(outlineName, color, thickness);
+                    if (!drew_outline) {
+                        drew_outline = DrawSelectionHull(outlineName, color, thickness);
+                    }
+                } else {
+                    // Toggle off → suppress raster/hull and bbox fallback alike
+                    // so the user gets a fully clean viewport for the perf win.
+                    drew_outline = true;
+                }
+            }
+            if (!drew_outline) {
+                if (has_obb) {
+                    DrawOrientedBox(obb_corners, color, thickness);
+                }
+                else if (has_bounds) {
+                    DrawBoundingBox(bb_min, bb_max, color, thickness);
+                }
             }
         }
     }
@@ -648,8 +1253,16 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
         Vec3 pos = light->position;
 
         // [FIX] Depth/Occlusion Check for Light Gizmos
+        //
+        // [RACE FIX] Skip during animation render: the worker thread is
+        // mutating HittableInstance transforms / bounds per frame and
+        // Embree's intersection callback reads those concurrently — torn
+        // matrices crash inside embree4.dll. Without this guard the
+        // sequence render reliably crashes mid-render whenever there's a
+        // visible light gizmo in the viewport (stack: drawLightGizmos →
+        // EmbreeBVH::hit → embree4.dll AV).
         extern bool g_bvh_rebuild_pending;
-        if (ctx.scene.bvh && !g_bvh_rebuild_pending) {
+        if (ctx.scene.bvh && !g_bvh_rebuild_pending && !ctx.is_animation_mode) {
             Vec3 to_pos = pos - cam.lookfrom;
             float dist = to_pos.length();
              if (dist > 0.1f) {

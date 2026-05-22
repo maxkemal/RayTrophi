@@ -75,6 +75,7 @@ struct NishitaSkyParams {
     float cloud_offset_x;    // Wind/Seed Offset X
 
     float cloud_offset_z;    // Wind/Seed Offset Z
+    int cloud_seed;          // Procedural cloud pattern seed
     
     // FFT Cloud Modulation
     cudaTextureObject_t cloud_fft_map; // FFT Height Map for Coverage
@@ -91,7 +92,7 @@ struct NishitaSkyParams {
     // Quality and detail settings
     float cloud_quality;     // Quality multiplier for steps
     float cloud_detail;      // Detail level (0.5 = low, 1.0 = normal, 2.0 = high detail noise)
-    int cloud_base_steps;    // Base number of ray marching steps (e.g., 48)
+    int cloud_base_steps;    // Base number of ray marching steps (fast default: 8)
     
     // Cloud Lighting settings
     int cloud_light_steps;        // Number of light marching steps (0 = disabled, 4-8 recommended)
@@ -152,6 +153,7 @@ struct AtmosphereAdvanced {
     int aerial_perspective;        // 1 = Physical haze based on distance
     
     // Aerial Perspective Distance Control (UI adjustable)
+    float aerial_density;         // Independent haze density/strength multiplier
     float aerial_min_distance;     // No haze below this distance (meters, default: 1000)
     float aerial_max_distance;     // Full haze at this distance (meters, default: 5000)
     
@@ -247,6 +249,7 @@ public:
     float getHDRIRotation() const;
     float getHDRIIntensity() const;
     bool hasHDRI() const;
+    const Texture* getHDRITexture() const { return hdri_texture; }
 
     // Nishita Mode
     void setSunDirection(const Vec3& direction);
@@ -268,6 +271,7 @@ public:
     // Environment Texture Overlay for Nishita
     void setNishitaEnvOverlay(const std::string& path);
     std::string getNishitaEnvOverlayPath() const;
+    const Texture* getNishitaEnvOverlayTexture() const { return env_overlay_texture; }
     
     // Camera position for volumetric clouds
     void setCameraY(float y) { data.camera_y = y; }
@@ -277,7 +281,9 @@ public:
 
     // Deferred LUT mechanism: avoids recomputing 50K-pixel LUT on every slider tick
     bool needsLUTUpdate() const { return lut_dirty; }
-    void flushLUT();  // Call once per frame from main loop to apply pending LUT update
+    void clearLUTDirty() { lut_dirty = false; }
+    bool flushLUT();  // Returns true when the LUT was recomputed.
+    bool rebuildLUT(); // Force a LUT rebuild from current parameters.
 
     // CPU Evaluation (for background missing)
     Vec3 evaluate(const Vec3& ray_dir, const Vec3& origin = Vec3(0,0,0));

@@ -104,6 +104,9 @@ struct RenderSettings {
     bool render_use_denoiser = false;  // Final Render Denoiser
     float denoiser_blend_factor = 1.0f;
     DenoiserMode denoiser_mode = DenoiserMode::Quality;
+    // Set per-frame from Renderer::stylizeMode.enabled so the OptiX backend allocates the
+    // albedo/normal/position AOV buffers for Stylize even when the denoiser is off.
+    bool stylize_enabled = false;
 
     // Backend
     bool use_optix = false;
@@ -367,10 +370,21 @@ extern std::atomic<uint64_t> g_scene_geometry_generation;
 extern bool g_bvh_rebuild_pending;      // CPU BVH needs rebuild
 extern bool g_gpu_refit_pending;        // GPU Geometry needs update (Deferred)
 extern bool g_vulkan_rebuild_pending;    // GPU Vulkan geometry needs rebuild
+extern bool g_vulkan_geometry_append_pending; // Additive-only mutation hint — Main loop tries incremental TLAS refit before falling back to full rebuild
 extern bool g_viewport_raster_rebuild_pending; // Interactive raster viewport needs rebuild
 extern bool g_optix_rebuild_pending;
 extern std::atomic<bool> g_optix_rebuild_in_progress; // True while TLAS rebuild is happening - blocks render // GPU OptiX geometry needs rebuild
 extern std::atomic<bool> g_viewport_rebuild_in_progress; // True while viewport backend resources are being torn down/rebuilt - blocks denoiser device access
+// Set by:
+//   (a) animation worker thread's cleanup lambda when the previous animation was aborted
+//       (rendering_stopped_gpu/cpu was true) — the in-flight TLAS/BLAS build may have
+//       left the RT backend in a partial state with no dirty flag raised, so the next
+//       animation start needs a forced full sync to avoid a driver-side crash inside
+//       createTLAS.
+//   (b) backend-swap paths after the previous backend was destroyed and a fresh one
+//       installed — the granular dirty flags may have been cleared during swap.
+// Checked + cleared by the animation start path before launching the worker.
+extern std::atomic<bool> g_anim_backend_needs_full_rebuild;
 extern bool g_mesh_cache_dirty;         // UI mesh cache needs rebuild
 extern bool g_cpu_bvh_refit_pending;    // CPU BVH fast refit (Embree only)
 extern int g_bvh_rebuild_deferred_frames; // Delay CPU BVH rebuild briefly after heavy topology edits in GPU modes

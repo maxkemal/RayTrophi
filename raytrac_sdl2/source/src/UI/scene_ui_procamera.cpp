@@ -323,6 +323,10 @@ void SceneUI::drawAFPointsOverlay(UIContext& ctx) {
     if (!viewport_settings.show_af_points) return;
     if (!viewport_settings.show_camera_hud) return;
     if (!ctx.scene.camera) return;
+    // [RACE FIX] Same Embree race as updateAutofocus — the per-AF-point
+    // BVH probes inside this overlay read HittableInstance transforms
+    // while the render worker is writing them.
+    if (ctx.is_animation_mode) return;
 
     ImGuiIO& io = ImGui::GetIO();
     ImDrawList* draw_list = ImGui::GetForegroundDrawList();
@@ -565,9 +569,18 @@ void SceneUI::drawProCameraPanel(UIContext& ctx) {
 // Continuous Autofocus Update (Called independently of draw)
 void SceneUI::updateAutofocus(UIContext& ctx) {
     if (!ctx.scene.camera || !ctx.scene.bvh) return;
-    
+
     // Only active if Focus Mode is AF-C (Continuous)
     if (viewport_settings.focus_mode != 2) return;
+
+    // [RACE FIX] Skip during sequence render. The worker thread mutates
+    // HittableInstance transforms / bounds per animation frame, and the
+    // CPU BVH ray cast below traverses those hittables — Embree's
+    // intersection callback reads transform/inv_transform concurrently,
+    // crashing inside embree4.dll. Auto-focus is a viewport-interactive
+    // feature; the render worker is already driving the camera per
+    // keyframe.
+    if (ctx.is_animation_mode) return;
 
     Camera& cam = *ctx.scene.camera;
     

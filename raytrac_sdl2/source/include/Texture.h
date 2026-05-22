@@ -840,9 +840,15 @@ public:
 
 
     bool upload_to_gpu() {
-        if (!g_hasOptix) {
-            SCENE_LOG_INFO("OptiX disabled: CPU-only texture mode.");
-            return false;  // CPU-only mode
+        if (!g_hasOptix || !g_hasCUDA) {
+            // CPU-only mode: still mark Vulkan dirty so the Vulkan backend
+            // picks up freshly-created paint textures. Without this, paint
+            // strokes are invisible in Vulkan RT / raster MP after project
+            // load because flattenChannelRegionInto takes this branch when
+            // is_gpu_uploaded=false and never sets vulkan_dirty.
+            if (m_is_loaded) markVulkanDirtyFull();
+            SCENE_LOG_INFO("CUDA/OptiX unavailable: CPU/Vulkan texture mode.");
+            return false;
         }
 
         // CUDA texture residency is intentionally lazy. Import, terrain load,
@@ -850,7 +856,11 @@ public:
         // available but not the active consumer; in that case keep CPU pixels
         // and dirty flags only. Real OptiX material/SBT sync opens a scoped
         // upload window before resolving CUDA texture objects.
+        // Same Vulkan-dirty handoff as the !g_hasOptix branch above — otherwise
+        // paint clones produced before the first CUDA upload window never get
+        // queued for Vulkan re-upload.
         if (!isCudaTextureUploadAllowed()) {
+            if (m_is_loaded) markVulkanDirtyFull();
             return m_is_loaded;
         }
 

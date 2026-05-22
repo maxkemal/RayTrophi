@@ -81,6 +81,29 @@ Full Technical Report: [ARCHITECTURE.md](ARCHITECTURE.md)
   - **Light Sync**: Automatically synchronizes Scene Directional Light with Sky Sun position.)
   - ✅ Soft shadows with multiple importance sampling
 
+  - **Style Layer System**:
+    - A non-destructive art-direction pass that reads the converged render and AOV buffers, then restyles the image without changing scene geometry, materials, lights, or the path-traced base result.
+    - Domain-masked compositing separates sky, material, outline, and world-adapter behavior so a brush effect never spills across the entire viewport.
+    - CPU and GPU display rebuild paths can re-apply Stylize without resetting accumulation, so profile and slider edits update the current image quickly.
+    - **Sky Layer**:
+      - Runs only on valid sky pixels (`AOV valid && hit == false`).
+      - Uses spherical view-ray sampling so stylized gradients, cloud banks, and the sun remain locked to world direction instead of screen UVs.
+      - Reads Nishita sun direction, elevation, disc size, cloud coverage, density, scale, offsets, and seed as inputs.
+      - Presets: Painterly Clouds, Cartoon Cel, Sunset Bands, Ink Wash, and Clear Gradient.
+      - Stylized cloud banks use horizontal puff groups with separate shadow, highlight, and rim accents for cartoon/gouache looks.
+    - **Painterly Material Layer**:
+      - Runs only on surface pixels (`AOV hit == true`) and uses albedo, normal, world position, depth, material id, and derived edge strength.
+      - Surface-locked stroke fields prevent screen-space swimming and keep broad brush scales readable on objects.
+      - Palette influence, material color preservation, simplification, edge respect, pigment thickness, and normal softening are controlled per profile.
+      - Wet Oil Model exposes Body, Load, Pickup, Deposit, and Buildup controls for cheap painterly paint transport on top of material color.
+    - **Outline Layer**:
+      - Uses depth, normal, and material discontinuities to draw stylized edges.
+      - Supports Ink, Oil Paint, Pencil, Dry Brush, and Pressure line types with palette, custom, material-tint, warm-paint, and cool-pencil color modes.
+    - **World Adapter Controls**:
+      - Initial controls expose terrain stroke blend, foliage clustering, foliage palette variance, volume grain, and force-field motion response for future style-aware world effects.
+    - **Profiles**:
+      - Painterly Oil, Gouache, Ink + Wash, Graphic Toon, Clay / Maquette, and Dreamy Sunset provide complete starting points across sky, material, outline, palette, and world-adapter settings.
+
 - **Advanced Features**
   - ✅ **Accumulative Rendering**: Progressive path tracing for noise-free, high-quality output
   - ✅ **Adaptive Sampling**: Intelligent sampling engine focusing on noisy areas
@@ -88,10 +111,10 @@ Full Technical Report: [ARCHITECTURE.md](ARCHITECTURE.md)
   - ✅ Motion Blur
   - ✅ Intel Open Image Denoise (OIDN) integration
   - ✅ Tone mapping & post-processing
-  - 🧪 **[EXPERIMENTAL] Vulkan RT Backend** *(Active Development)*: Hardware ray tracing pipeline built on Vulkan Ray Tracing (`VK_KHR_ray_tracing_pipeline`). Features GPU-accelerated skeletal animation via compute skinning shaders, TLAS/BLAS refit for dynamic geometry, persistent descriptor sets, and a single-submit trace+readback command buffer. Gracefully falls back to OptiX or CPU if Vulkan dependencies (`vulkan-1.dll`) or a compatible GPU are absent.
+  - ⚡ **[RECOMMENDED] Vulkan RT Backend** *(Primary)*: Hardware ray tracing pipeline built on Vulkan Ray Tracing (`VK_KHR_ray_tracing_pipeline`). Features GPU-accelerated skeletal animation via compute skinning shaders, TLAS/BLAS refit for dynamic geometry, persistent descriptor sets, async ping-pong frame pipeline with GPU tonemap, analytical LSS hair intersection, and persistent NanoVDB accessor for volumes. Auto-selected when hardware RT is available; gracefully falls back to OptiX or CPU if Vulkan dependencies (`vulkan-1.dll`) or a compatible GPU are absent.
 
   <details>
-  <summary>🧪 <b>Vulkan Backend — Feature Compatibility</b> (expand)</summary>
+  <summary>⚡ <b>Vulkan Backend — Feature Compatibility</b> (expand)</summary>
 
   | Feature | OptiX | Vulkan RT | Notes |
   |---------|:-----:|:---------:|-------|
@@ -99,8 +122,8 @@ Full Technical Report: [ARCHITECTURE.md](ARCHITECTURE.md)
   | Lambertian / Metal / Dielectric | ✅ | ✅ | Full parity |
   | Subsurface Scattering (SSS) | ✅ | ✅ | Minor colour tint difference |
   | Clearcoat & Anisotropic | ✅ | ✅ | Full parity |
-  | Volumetric Rendering | ✅ | 🧪 | Minor density differences |
-  | **Hair System** | ✅ | 🧪 | Shader computation differences |
+  | Volumetric Rendering (NanoVDB) | ✅ | ✅ | Persistent leaf-cache accessor; equal or faster than OptiX in interactive modes |
+  | **Hair System** | ✅ | ✅ | Analytical LSS intersection + LSS-tight AABBs; outperforms OptiX hardware curves in this engine |
   | HDR / EXR Environment | ✅ | ✅ | Full parity |
   | Nishita Sky & Day/Night Cycle | ✅ | ✅ | Full parity |
   | Volumetric Clouds | ✅ | 🧪 | Minor scattering differences |
@@ -110,12 +133,42 @@ Full Technical Report: [ARCHITECTURE.md](ARCHITECTURE.md)
   | Motion Blur | ✅ | ✅ | Full parity |
   | Soft Shadows (MIS) | ✅ | ✅ | Full parity |
   | Area Lights | ✅ | ✅ | Full parity |
-  | Tone Mapping & Post-FX | ✅ | ✅ | Full parity |
-  | OIDN Denoising | ✅ | ✅ | Full parity |
+  | Tone Mapping & Post-FX | ✅ | ✅ | GPU compute tonemap on Vulkan, fused into trace command buffer |
+  | OIDN Denoising | ✅ | ✅ | OptiX has tighter CUDA interop path |
   | Adaptive Sampling | ✅ | ✅ | Full parity |
-  | Progressive / Accumulative Render | ✅ | ✅ | Full parity |
+  | Progressive / Accumulative Render | ✅ | ✅ | Vulkan converges faster (lower per-frame overhead) |
 
   > **Legend:** ✅ Full support &nbsp;|&nbsp; 🧪 Supported, minor output differences possible
+
+  </details>
+
+  <details>
+  <summary>📊 <b>Vulkan RT vs OptiX — Interactive Benchmarks</b> (expand)</summary>
+
+  Measured on the same scene, same settings, same hardware. Frame times below are
+  representative interactive-viewport rates (camera in motion). For static scenes,
+  Vulkan's adaptive sampling pushes both backends well past 500 fps as pixels converge.
+
+  | Scene | Vulkan RT | OptiX | Ratio |
+  |---|:---:|:---:|:---:|
+  | Mesh-heavy + Nishita atmosphere | **600 fps** | 50 fps | **12.0×** |
+  | Hair-heavy (cubic B-spline strands, LSS intersection) | **300 fps** | 70 fps | **4.3×** |
+  | Volume / VDB cloud (Fast preset) | **300 fps** | 200 fps | **1.5×** |
+  | Volume / VDB cloud (Balanced preset) | comparable | comparable | ≈1.0× |
+  | Volume / VDB cloud (Exact preset, during camera motion) | 16 fps | 23 fps | 0.7× |
+  | Volume / VDB cloud (converged, adaptive sampling active) | **800 fps** | adaptive-bound | — |
+
+  **Why Vulkan wins interactive:**
+  - Async fence-based ping-pong frame pipeline (zero `vkQueueWaitIdle` per frame)
+  - GPU compute tonemap → small RGBA8 staging (no CPU Reinhard loop, 4× lower readback bandwidth)
+  - Analytical Linear-Swept-Sphere hair intersection + LSS-tight AABBs (instead of cubic B-spline Newton)
+  - Persistent NanoVDB read-accessor across march steps (leaf-cache hits skip the tree walk)
+  - Lean kernel (no per-pixel accumulation atomics or vignette compute in the hot path)
+
+  **Where OptiX still wins:**
+  - Exact preset during camera motion — hardware-accelerated CUDA NanoVDB texture path beats the GLSL software sampler when fully compute-bound
+  - OIDN GPU denoiser interop (CUDA-native zero-copy)
+  - Final stills if you specifically need NVIDIA's curve hardware primitives
 
   </details>
 
@@ -154,7 +207,7 @@ Full Technical Report: [ARCHITECTURE.md](ARCHITECTURE.md)
   - Embree BVH (Intel, production-grade)
   - Custom ParallelBVH (SAH-based, OpenMP parallelized)
   - OptiX GPU acceleration structure
-  - 🧪 Vulkan RT TLAS/BLAS architecture — dynamic refit, compute skinning, single-submit pipeline *(Experimental)*
+  - ⚡ Vulkan RT TLAS/BLAS architecture — dynamic refit, compute skinning, async ping-pong frame pipeline *(Recommended primary backend)*
 
 - **Optimizations**
   - SIMD vector operations

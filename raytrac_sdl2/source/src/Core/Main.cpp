@@ -13,6 +13,7 @@
 #include <csignal>
 #include <cstring>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 #include <string_view>
 #include <SDL_image.h>
@@ -36,6 +37,7 @@
 #include "scene_ui_guides.hpp"  // Viewport guides (safe areas, letterbox, grids)
 #include "default_scene_creator.hpp"
 #include "ColorProcessingParams.h"
+#include "Stylize/StylizePostProcess.h"
 #include "CameraPresets.h"
 #include "scene_data.h"       // Added explicit include
 #include "AnimationNodes.h"
@@ -474,6 +476,9 @@ bool start_render = false;
 bool quit = false;
 bool apply_tonemap = false;
 bool reset_tonemap = false;
+// Request a display rebuild + stylize re-apply WITHOUT re-rendering and WITHOUT forcing
+// tonemap on — honors the current persistent_tonemap setting. Set by Stylize param changes.
+bool stylize_redisplay = false;
 bool mouse_control_enabled = true;
 bool camera_moved = false;
 bool use_denoiser = false;
@@ -522,10 +527,12 @@ std::atomic<uint64_t> g_scene_geometry_generation{1};
 bool g_bvh_rebuild_pending = false;      // CPU BVH needs rebuild
 bool g_gpu_refit_pending = false;        // GPU Geometry needs update (Deferred)
 bool g_vulkan_rebuild_pending = false;    // GPU Vulkan geometry needs rebuild
+bool g_vulkan_geometry_append_pending = false; // Additive-only mutation (scatter etc.) — try incremental TLAS refit first
 bool g_viewport_raster_rebuild_pending = false; // Interactive raster viewport needs rebuild
 bool g_optix_rebuild_pending = false;
 std::atomic<bool> g_optix_rebuild_in_progress{false}; // True while TLAS rebuild is happening // GPU OptiX geometry needs rebuild
 std::atomic<bool> g_viewport_rebuild_in_progress{false}; // True while viewport backend resources are being torn down/rebuilt
+std::atomic<bool> g_anim_backend_needs_full_rebuild{false}; // See globals.h — set by aborted-anim cleanup and backend-swap paths
 bool g_mesh_cache_dirty = false;         // UI mesh cache needs rebuild
 bool g_cpu_sync_pending = false;         // CPU data needs sync after TLAS mode changes
 bool g_cpu_bvh_refit_pending = false;    // CPU BVH fast refit (Embree only)
@@ -755,7 +762,7 @@ UIContext ui_ctx{
    reset_tonemap,
    mouse_control_enabled
 };
-void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, ColorProcessor& processor, Renderer* renderer = nullptr) {
+void applyToneMappingToSurfaceWithCamera(SDL_Surface* surface, SDL_Surface* original, ColorProcessor& processor, Renderer* renderer, const Camera* camera) {
     if (!surface || !surface->pixels) return;
     Uint32* pixels = (Uint32*)surface->pixels;
     int width = surface->w;
@@ -794,6 +801,88 @@ void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, Colo
     const bool use_denoised  = use_float_buffer && renderer->hasCPUDenoisedBuffer();
     const bool vignette_on   = processor.params.enable_vignette;
     const float vignette_strength = processor.params.vignette_strength;
+    const Stylize::StylizeModeState* stylize_state = renderer ? &renderer->stylizeMode : nullptr;
+    const int stylize_frame = renderer ? renderer->world.getGPUData().frame_count : 0;
+    const WorldData stylize_world = renderer ? renderer->world.getGPUData() : WorldData{};
+    const bool use_cpu_stylize_aov =
+        stylize_state &&
+        stylize_state->enabled &&
+        use_float_buffer &&
+        renderer->cpu_albedo_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
+        renderer->cpu_normal_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
+        renderer->cpu_world_position_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
+        renderer->cpu_depth_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
+        renderer->cpu_material_id_buffer.size() == static_cast<size_t>(width * height);
+
+    auto makeStylizeAOV = [=](int sx, int sy) -> Stylize::StylizeAOVSample {
+        Stylize::StylizeAOVSample aov;
+        if (!use_cpu_stylize_aov ||
+            sx < 0 || sy < 0 || sx >= width || sy >= height) {
+            return aov;
+        }
+        aov.valid = true;
+        aov.screen_u = (static_cast<float>(sx) + 0.5f) / std::max(1.0f, static_cast<float>(width));
+        aov.screen_v = (static_cast<float>(sy) + 0.5f) / std::max(1.0f, static_cast<float>(height));
+        aov.sun_dir = Vec3(stylize_world.nishita.sun_direction.x, stylize_world.nishita.sun_direction.y, stylize_world.nishita.sun_direction.z);
+        if (aov.sun_dir.length_squared() <= 1e-8f) {
+            aov.sun_dir = Vec3(0.32f, 0.82f, 0.46f);
+        } else {
+            aov.sun_dir = aov.sun_dir.normalize();
+        }
+        aov.sun_size_degrees = std::max(0.01f, stylize_world.nishita.sun_size);
+        aov.sun_elevation_degrees = stylize_world.nishita.sun_elevation;
+        aov.nishita_clouds_enabled = stylize_world.nishita.clouds_enabled != 0;
+        aov.nishita_cloud_coverage = std::clamp(stylize_world.nishita.cloud_coverage, 0.0f, 1.0f);
+        aov.nishita_cloud_density = std::max(0.0f, stylize_world.nishita.cloud_density);
+        aov.nishita_cloud_scale = std::max(0.05f, stylize_world.nishita.cloud_scale);
+        aov.nishita_cloud_offset_x = stylize_world.nishita.cloud_offset_x;
+        aov.nishita_cloud_offset_z = stylize_world.nishita.cloud_offset_z;
+        aov.nishita_cloud_seed = stylize_world.nishita.cloud_seed;
+        if (camera) {
+            Vec3 view_dir = camera->lower_left_corner
+                + aov.screen_u * camera->horizontal
+                + aov.screen_v * camera->vertical
+                - camera->origin;
+            aov.view_dir = view_dir.length_squared() > 1e-8f ? view_dir.normalize() : Vec3(0.0f, 0.0f, -1.0f);
+        }
+        const size_t idx = static_cast<size_t>(sy) * static_cast<size_t>(width) + static_cast<size_t>(sx);
+        const Renderer::Vec4& albedo = renderer->cpu_albedo_accumulation_buffer[idx];
+        const Renderer::Vec4& normal = renderer->cpu_normal_accumulation_buffer[idx];
+        const Renderer::Vec4& world_position = renderer->cpu_world_position_accumulation_buffer[idx];
+        aov.hit = albedo.w > 0.0f && renderer->cpu_depth_accumulation_buffer[idx] > 0.0f;
+        aov.albedo = Vec3(albedo.x, albedo.y, albedo.z);
+        aov.normal = Vec3(normal.x, normal.y, normal.z);
+        aov.world_position = Vec3(world_position.x, world_position.y, world_position.z);
+        aov.depth = renderer->cpu_depth_accumulation_buffer[idx];
+        aov.material_id = renderer->cpu_material_id_buffer[idx];
+        return aov;
+    };
+
+    auto makeStylizeAOVWithEdges = [=](int sx, int sy) -> Stylize::StylizeAOVSample {
+        Stylize::StylizeAOVSample aov = makeStylizeAOV(sx, sy);
+        if (!aov.hit) {
+            return aov;
+        }
+        const Stylize::StylizeAOVSample right = makeStylizeAOV(sx + 1, sy);
+        const Stylize::StylizeAOVSample down = makeStylizeAOV(sx, sy + 1);
+        float edge = 0.0f;
+        auto accumulateEdge = [&](const Stylize::StylizeAOVSample& n) {
+            if (!n.hit) {
+                edge += 1.0f;
+                return;
+            }
+            const float depth_scale = std::max(0.025f, aov.depth * 0.015f);
+            edge += std::min(1.0f, std::abs(aov.depth - n.depth) / depth_scale);
+            edge += std::min(1.0f, (aov.normal - n.normal).length() * 0.75f);
+            if (aov.material_id != n.material_id) {
+                edge += 0.45f;
+            }
+        };
+        accumulateEdge(right);
+        accumulateEdge(down);
+        aov.edge = std::clamp(edge * 0.55f, 0.0f, 1.0f);
+        return aov;
+    };
 
     const float* denoised_ptr = use_denoised ? renderer->cpu_denoised_buffer.data() : nullptr;
     const Renderer::Vec4* accum_ptr = (use_float_buffer && !use_denoised)
@@ -838,6 +927,17 @@ void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, Colo
                 if (vignette_on)
                     final_color = applyVignette(final_color, i, j, width, height, vignette_strength);
 
+                if (stylize_state && stylize_state->enabled) {
+                    if (use_cpu_stylize_aov) {
+                        final_color = Stylize::applyPostProcess(
+                            final_color,
+                            makeStylizeAOVWithEdges(i, buffer_y),
+                            i, j, stylize_frame, *stylize_state);
+                    } else {
+                        final_color = Stylize::applyPostProcess(final_color, i, j, stylize_frame, *stylize_state);
+                    }
+                }
+
                 Uint8 ri, gi, bi;
                 if (use_float_buffer) {
                     float fx = final_color.x; if (fx < 0.0f) fx = 0.0f; else if (fx > 1.0f) fx = 1.0f;
@@ -862,6 +962,135 @@ void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, Colo
                           | ((Uint32)bi << bShift);
             }
         });
+}
+
+void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, ColorProcessor& processor, Renderer* renderer) {
+    applyToneMappingToSurfaceWithCamera(surface, original, processor, renderer, nullptr);
+}
+
+void applyStylizeToSurfaceWithCamera(SDL_Surface* surface, Renderer& renderer, bool use_cpu_aov, const Camera* camera) {
+    if (!surface || !surface->pixels || !renderer.stylizeMode.enabled) return;
+
+    Uint32* pixels = static_cast<Uint32*>(surface->pixels);
+    SDL_PixelFormat* fmt = surface->format;
+    const int width = surface->w;
+    const int height = surface->h;
+
+    const Uint32 rMask = fmt->Rmask, gMask = fmt->Gmask, bMask = fmt->Bmask, aMask = fmt->Amask;
+    const Uint8 rShift = fmt->Rshift, gShift = fmt->Gshift, bShift = fmt->Bshift;
+    const float inv255 = 1.0f / 255.0f;
+    const int stylize_frame = renderer.world.getGPUData().frame_count;
+    const WorldData stylize_world = renderer.world.getGPUData();
+    const bool use_cpu_stylize_aov =
+        use_cpu_aov &&
+        renderer.cpu_albedo_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
+        renderer.cpu_normal_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
+        renderer.cpu_world_position_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
+        renderer.cpu_depth_accumulation_buffer.size() == static_cast<size_t>(width * height) &&
+        renderer.cpu_material_id_buffer.size() == static_cast<size_t>(width * height);
+
+    auto makeStylizeAOV = [&](int sx, int sy) -> Stylize::StylizeAOVSample {
+        Stylize::StylizeAOVSample aov;
+        if (!use_cpu_stylize_aov ||
+            sx < 0 || sy < 0 || sx >= width || sy >= height) {
+            return aov;
+        }
+        aov.valid = true;
+        aov.screen_u = (static_cast<float>(sx) + 0.5f) / std::max(1.0f, static_cast<float>(width));
+        aov.screen_v = (static_cast<float>(sy) + 0.5f) / std::max(1.0f, static_cast<float>(height));
+        aov.sun_dir = Vec3(stylize_world.nishita.sun_direction.x, stylize_world.nishita.sun_direction.y, stylize_world.nishita.sun_direction.z);
+        if (aov.sun_dir.length_squared() <= 1e-8f) {
+            aov.sun_dir = Vec3(0.32f, 0.82f, 0.46f);
+        } else {
+            aov.sun_dir = aov.sun_dir.normalize();
+        }
+        aov.sun_size_degrees = std::max(0.01f, stylize_world.nishita.sun_size);
+        aov.sun_elevation_degrees = stylize_world.nishita.sun_elevation;
+        aov.nishita_clouds_enabled = stylize_world.nishita.clouds_enabled != 0;
+        aov.nishita_cloud_coverage = std::clamp(stylize_world.nishita.cloud_coverage, 0.0f, 1.0f);
+        aov.nishita_cloud_density = std::max(0.0f, stylize_world.nishita.cloud_density);
+        aov.nishita_cloud_scale = std::max(0.05f, stylize_world.nishita.cloud_scale);
+        aov.nishita_cloud_offset_x = stylize_world.nishita.cloud_offset_x;
+        aov.nishita_cloud_offset_z = stylize_world.nishita.cloud_offset_z;
+        aov.nishita_cloud_seed = stylize_world.nishita.cloud_seed;
+        if (camera) {
+            Vec3 view_dir = camera->lower_left_corner
+                + aov.screen_u * camera->horizontal
+                + aov.screen_v * camera->vertical
+                - camera->origin;
+            aov.view_dir = view_dir.length_squared() > 1e-8f ? view_dir.normalize() : Vec3(0.0f, 0.0f, -1.0f);
+        }
+        const size_t idx = static_cast<size_t>(sy) * static_cast<size_t>(width) + static_cast<size_t>(sx);
+        const Renderer::Vec4& albedo = renderer.cpu_albedo_accumulation_buffer[idx];
+        const Renderer::Vec4& normal = renderer.cpu_normal_accumulation_buffer[idx];
+        const Renderer::Vec4& world_position = renderer.cpu_world_position_accumulation_buffer[idx];
+        aov.hit = albedo.w > 0.0f && renderer.cpu_depth_accumulation_buffer[idx] > 0.0f;
+        aov.albedo = Vec3(albedo.x, albedo.y, albedo.z);
+        aov.normal = Vec3(normal.x, normal.y, normal.z);
+        aov.world_position = Vec3(world_position.x, world_position.y, world_position.z);
+        aov.depth = renderer.cpu_depth_accumulation_buffer[idx];
+        aov.material_id = renderer.cpu_material_id_buffer[idx];
+        return aov;
+    };
+
+    auto makeStylizeAOVWithEdges = [&](int sx, int sy) -> Stylize::StylizeAOVSample {
+        Stylize::StylizeAOVSample aov = makeStylizeAOV(sx, sy);
+        if (!aov.hit) return aov;
+        const Stylize::StylizeAOVSample right = makeStylizeAOV(sx + 1, sy);
+        const Stylize::StylizeAOVSample down = makeStylizeAOV(sx, sy + 1);
+        float edge = 0.0f;
+        auto accumulateEdge = [&](const Stylize::StylizeAOVSample& n) {
+            if (!n.hit) {
+                edge += 1.0f;
+                return;
+            }
+            const float depth_scale = std::max(0.025f, aov.depth * 0.015f);
+            edge += std::min(1.0f, std::abs(aov.depth - n.depth) / depth_scale);
+            edge += std::min(1.0f, (aov.normal - n.normal).length() * 0.75f);
+            if (aov.material_id != n.material_id) edge += 0.45f;
+        };
+        accumulateEdge(right);
+        accumulateEdge(down);
+        aov.edge = std::clamp(edge * 0.55f, 0.0f, 1.0f);
+        return aov;
+    };
+
+    std::vector<int> rowIndices(height);
+    std::iota(rowIndices.begin(), rowIndices.end(), 0);
+
+    std::for_each_n(std::execution::par_unseq, rowIndices.data(), static_cast<size_t>(height),
+        [=, &renderer](int y) {
+            Uint32* row = pixels + static_cast<size_t>(y) * static_cast<size_t>(width);
+            for (int x = 0; x < width; ++x) {
+                const Uint32 px = row[x];
+                Vec3 color(
+                    static_cast<float>((px & rMask) >> rShift) * inv255,
+                    static_cast<float>((px & gMask) >> gShift) * inv255,
+                    static_cast<float>((px & bMask) >> bShift) * inv255
+                );
+                if (use_cpu_stylize_aov) {
+                    const int buffer_y = height - 1 - y;
+                    color = Stylize::applyPostProcess(
+                        color,
+                        makeStylizeAOVWithEdges(x, buffer_y),
+                        x, y, stylize_frame, renderer.stylizeMode);
+                } else {
+                    color = Stylize::applyPostProcess(color, x, y, stylize_frame, renderer.stylizeMode);
+                }
+
+                const Uint8 ri = static_cast<Uint8>(std::clamp(color.x, 0.0f, 1.0f) * 255.0f);
+                const Uint8 gi = static_cast<Uint8>(std::clamp(color.y, 0.0f, 1.0f) * 255.0f);
+                const Uint8 bi = static_cast<Uint8>(std::clamp(color.z, 0.0f, 1.0f) * 255.0f);
+                row[x] = (px & aMask)
+                       | (static_cast<Uint32>(ri) << rShift)
+                       | (static_cast<Uint32>(gi) << gShift)
+                       | (static_cast<Uint32>(bi) << bShift);
+            }
+        });
+}
+
+void applyStylizeToSurface(SDL_Surface* surface, Renderer& renderer, bool use_cpu_aov) {
+    applyStylizeToSurfaceWithCamera(surface, renderer, use_cpu_aov, nullptr);
 }
 
 void applyCPUDenoisedPreviewToSurface(SDL_Surface* surface, Renderer& renderer, const Camera* camera) {
@@ -1058,6 +1287,58 @@ static bool isOptixCapable(int major, int minor)
 std::string g_gpu_name = "";
 bool g_has_rt_cores = false;
 
+// ---------------------------------------------------------------------------
+// Async OptiX backend init state (Blender-style non-blocking compile).
+// When user switches to OptiX from the combo, we DON'T call initializeOptixIfAvailable
+// synchronously on the UI thread (it blocks for 1-3 min on cold-cache first launches).
+// Instead a worker thread builds the new OptiX backend while the current backend keeps
+// rendering. Main thread polls the future each frame and hot-swaps when ready.
+// ---------------------------------------------------------------------------
+static std::atomic<bool> g_optix_async_in_progress{false};
+static std::future<std::unique_ptr<Backend::IBackend>> g_optix_async_future;
+static std::chrono::steady_clock::time_point g_optix_async_start_time;
+static bool g_optix_async_cache_likely_warm = false;
+// Pending result stash: once future.get() consumes the worker's output we hold the
+// new backend here until rendering_in_progress is false so we can swap without
+// tearing down GPU resources mid-animation/render frame.
+static std::unique_ptr<Backend::IBackend> g_optix_async_built_pending;
+
+static bool isOptixDiskCacheLikelyWarm()
+{
+#ifdef _WIN32
+    wchar_t exeBufW[MAX_PATH] = {};
+    const DWORD exeLen = GetModuleFileNameW(nullptr, exeBufW, MAX_PATH);
+    if (exeLen == 0 || exeLen >= MAX_PATH) return false;
+
+    std::error_code ec;
+    const std::filesystem::path cacheDir = std::filesystem::path(exeBufW).parent_path() / "optix_cache";
+    if (!std::filesystem::exists(cacheDir, ec) || !std::filesystem::is_directory(cacheDir, ec)) {
+        return false;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(cacheDir, ec)) {
+        if (ec) return false;
+        if (entry.is_regular_file(ec) && entry.file_size(ec) > 0) {
+            return true;
+        }
+    }
+#endif
+    return false;
+}
+
+static const char* optixAsyncHudMessage()
+{
+    return g_optix_async_cache_likely_warm
+        ? "Preparing OptiX backend from shader cache. Renderer keeps running."
+        : "OptiX shaders compiling on GPU (~1-3 min on first launch). Renderer keeps running.";
+}
+
+static float optixAsyncHudDuration(bool stillWantsOptix)
+{
+    if (!stillWantsOptix) return 0.05f;
+    return g_optix_async_cache_likely_warm ? 5.0f : 999.0f;
+}
+
 void detectOptixHardware()
 {
     SCENE_LOG_INFO("--- Hardware Detection ---");
@@ -1240,6 +1521,75 @@ bool initializeOptixIfAvailable() {
         return false;
     }
 
+    return true;
+}
+
+// Worker-thread-safe OptiX backend builder.
+// Returns a fully-initialized OptixBackend with shaders loaded, or nullptr on failure.
+// Does NOT touch g_backend, ray_renderer, ui_ctx, or any other shared globals —
+// installation is the main thread's job (see installPrebuiltOptixBackend below).
+// CUDA/OptiX context creation and module compile on a worker thread is supported
+// by the API; the primary CUDA context is shared across threads in the same process,
+// and OptixDeviceContext is documented as thread-safe.
+std::unique_ptr<Backend::IBackend> buildOptixBackendWorker() {
+    if (!g_hasOptix) return nullptr;
+    try {
+        auto backend = std::make_unique<Backend::OptixBackend>();
+        if (!backend->initialize()) {
+            SCENE_LOG_ERROR("[OptiX async] backend->initialize() returned false on worker thread.");
+            return nullptr;
+        }
+
+        auto load_ptx = [](const std::wstring& filename) -> std::string {
+            std::filesystem::path ptx_path = filename;
+            std::ifstream file(ptx_path, std::ios::binary);
+            if (!file.is_open()) {
+                throw std::runtime_error("Failed to open PTX file: " + WStringToString(ptx_path));
+            }
+            return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        };
+
+        Backend::ShaderProgramData shader_data;
+        shader_data.raygen = load_ptx(L"raygen.ptx");
+        shader_data.miss = load_ptx(L"miss_kernels.ptx");
+        shader_data.hitgroup = load_ptx(L"hitgroup_kernels.ptx");
+        backend->loadShaders(shader_data);
+        return backend;
+    } catch (const std::exception& e) {
+        SCENE_LOG_ERROR(std::string("[OptiX async] worker exception: ") + e.what());
+        return nullptr;
+    } catch (...) {
+        SCENE_LOG_ERROR("[OptiX async] worker unknown exception.");
+        return nullptr;
+    }
+}
+
+// Main-thread installer for a pre-built OptiX backend. Tears down the currently
+// active backend (whatever it is) and swaps in the new one, then wires up the
+// renderer + UI pointers. Must run on the UI/main thread — touches globals.
+// IMPORTANT: caller must guarantee rendering_in_progress is false and detach the
+// renderer before calling. We do the detach defensively here too.
+bool installPrebuiltOptixBackend(std::unique_ptr<Backend::IBackend> new_backend) {
+    if (!new_backend) {
+        g_hasOptix = false;
+        return false;
+    }
+    // Detach the renderer/UI from the live backend before destroying it. The async
+    // path's caller has typically already done this, but redo it as a safety net so
+    // the renderer can't dereference a dangling pointer between shutdown and swap.
+    ray_renderer.setBackend(nullptr);
+    ui_ctx.backend_ptr = nullptr;
+    ui_ctx.optix_gpu_ptr = nullptr;
+
+    shutdownAndResetBackendSafe("optix_async_swap");
+    g_backend = std::move(new_backend);
+    ray_renderer.setBackend(g_backend.get());
+    ui_ctx.backend_ptr = g_backend.get();
+    if (auto* optixBackend = dynamic_cast<Backend::OptixBackend*>(g_backend.get())) {
+        ui_ctx.optix_gpu_ptr = optixBackend->getOptixWrapper();
+    } else {
+        ui_ctx.optix_gpu_ptr = nullptr;
+    }
     return true;
 }
 
@@ -1497,6 +1847,113 @@ int main(int argc, char* argv[]) try {
     // Only re-uploads subsystems whose dirty flag is set. Falls back to full
     // sync when forceFullSync is true (e.g. first sync after backend create).
     // -----------------------------------------------------------------------
+    auto syncVulkanWorldWithAtmosphere = [&](Backend::VulkanBackendAdapter* vulkanBackend, WorldData& wd) {
+        if (!vulkanBackend) {
+            return;
+        }
+
+        if (wd.mode == WORLD_MODE_NISHITA) {
+            if (vulkanBackend->generateAtmosphereLUTGPU(&wd)) {
+                ray_renderer.world.clearLUTDirty();
+                wd = ray_renderer.world.getGPUData();
+                return;
+            }
+
+            if (ray_renderer.world.needsLUTUpdate() && ray_renderer.world.flushLUT()) {
+                wd = ray_renderer.world.getGPUData();
+            }
+            if (auto* al = ray_renderer.world.getLUT()) {
+                if (al->is_initialized()) {
+                    vulkanBackend->uploadAtmosphereLUT(al);
+                    wd = ray_renderer.world.getGPUData();
+                }
+            }
+        }
+
+        vulkanBackend->setWorldData(&wd);
+    };
+
+    auto syncWorldDataToBackend = [&](Backend::IBackend* backend) {
+        if (!backend) {
+            return;
+        }
+
+        std::unique_ptr<ScopedCudaTextureUpload> allowCudaWorldTextureUpload;
+        if (g_hasCUDA && g_hasOptix && dynamic_cast<Backend::OptixBackend*>(backend) != nullptr) {
+            allowCudaWorldTextureUpload = std::make_unique<ScopedCudaTextureUpload>();
+        }
+
+        WorldData wd = ray_renderer.world.getGPUData();
+        if (auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(backend)) {
+            struct VulkanEnvCache {
+                const Texture* texture = nullptr;
+                int64_t handle = 0;
+            };
+            static std::unordered_map<Backend::IBackend*, VulkanEnvCache> s_vulkanEnvCache;
+
+            auto uploadVulkanEnvironmentTexture = [&](const Texture* texture) -> int64_t {
+                if (!texture || !texture->is_loaded() || texture->width <= 0 || texture->height <= 0) {
+                    s_vulkanEnvCache.erase(backend);
+                    return 0;
+                }
+
+                auto& cache = s_vulkanEnvCache[backend];
+                VulkanRT::ImageHandle existingEnvImage{};
+                const bool cacheValid =
+                    cache.texture == texture &&
+                    cache.handle != 0 &&
+                    vulkanBackend->tryGetUploadedImageHandle(cache.handle, existingEnvImage);
+                if (cacheValid) {
+                    return cache.handle;
+                }
+
+                int64_t envHandle = 0;
+                if (texture->is_hdr && !texture->float_pixels.empty()) {
+                    envHandle = vulkanBackend->uploadTexture2D(
+                        texture->float_pixels.data(),
+                        static_cast<uint32_t>(texture->width),
+                        static_cast<uint32_t>(texture->height),
+                        4,
+                        false,
+                        true);
+                } else if (!texture->pixels.empty()) {
+                    envHandle = vulkanBackend->uploadTexture2D(
+                        texture->pixels.data(),
+                        static_cast<uint32_t>(texture->width),
+                        static_cast<uint32_t>(texture->height),
+                        4,
+                        false,
+                        false);
+                }
+                cache.texture = texture;
+                cache.handle = envHandle;
+                return envHandle;
+            };
+
+            if (wd.mode == WORLD_MODE_HDRI) {
+                int64_t envHandle = uploadVulkanEnvironmentTexture(ray_renderer.world.getHDRITexture());
+                if (envHandle != 0) {
+                    vulkanBackend->setEnvironmentMap(envHandle);
+                } else {
+                    vulkanBackend->setEnvironmentMap(0);
+                }
+            } else if (wd.mode == WORLD_MODE_NISHITA && wd.advanced.env_overlay_enabled != 0) {
+                int64_t envHandle = uploadVulkanEnvironmentTexture(ray_renderer.world.getNishitaEnvOverlayTexture());
+                if (envHandle != 0) {
+                    vulkanBackend->setEnvironmentMap(envHandle);
+                } else {
+                    vulkanBackend->setEnvironmentMap(0);
+                }
+            } else {
+                s_vulkanEnvCache.erase(backend);
+                vulkanBackend->setEnvironmentMap(0);
+            }
+            syncVulkanWorldWithAtmosphere(vulkanBackend, wd);
+        } else {
+            backend->setWorldData(&wd);
+        }
+    };
+
     auto syncActiveRenderBackendScene = [&](bool forceFullSync = false) -> bool {
         if (!g_backend) {
             return false;
@@ -1525,24 +1982,20 @@ int main(int argc, char* argv[]) try {
         }
 
         if (forceFullSync || g_world_dirty) {
-            auto wd = ray_renderer.world.getGPUData();
-            g_backend->setWorldData(&wd);
-            if (auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
-                auto* al = ray_renderer.world.getLUT();
-                if (al && al->is_initialized()) {
-                    vulkanBackend->uploadAtmosphereLUT(al);
-                }
-            }
+            syncWorldDataToBackend(g_backend.get());
+            g_world_dirty = false;
         }
 
         if (forceFullSync || g_lights_dirty) {
             g_backend->setLights(scene.lights);
+            g_lights_dirty = false;
         }
 
         if (forceFullSync || g_camera_dirty) {
             if (scene.camera) {
                 ray_renderer.syncCameraToBackend(*scene.camera);
             }
+            g_camera_dirty = false;
         }
 
         g_backend->resetAccumulation();
@@ -1556,8 +2009,18 @@ int main(int argc, char* argv[]) try {
         std::string fallbackMessage;
 
         if (requestedOptix && requestedVulkan) {
-            requestedVulkan = false;
-            SCENE_LOG_WARN("Both OptiX and Vulkan were requested. Preferring OptiX.");
+            // Vulkan RT is the recommended primary backend when hardware RT is
+            // available — it outperforms OptiX in interactive viewport scenarios
+            // across mesh / hair / volume after the async ping-pong + GPU tonemap +
+            // LSS + persistent NanoVDB accessor refactor. Fall back to OptiX only
+            // when Vulkan RT hardware support is absent.
+            if (g_hasVulkanRT) {
+                requestedOptix = false;
+                SCENE_LOG_INFO("Both OptiX and Vulkan requested. Preferring Vulkan RT (recommended primary backend).");
+            } else {
+                requestedVulkan = false;
+                SCENE_LOG_WARN("Both OptiX and Vulkan requested but no hardware Vulkan RT. Preferring OptiX.");
+            }
         }
 
         if (requestedOptix && !g_hasOptix) {
@@ -1582,10 +2045,15 @@ int main(int argc, char* argv[]) try {
         }
 
         if (!requestedOptix && !requestedVulkan && allowAutoSelect) {
-            if (g_hasOptix) {
-                requestedOptix = true;
-            } else if (g_hasVulkan) {
+            // Auto-select priority: Vulkan RT (hardware) → OptiX (CUDA) → CPU (Reference).
+            // RTX / RT-capable cards naturally support Vulkan RT too, so when both are
+            // available Vulkan wins the default slot; OptiX remains available but is
+            // no longer auto-selected. Vulkan without hardware RT is NOT auto-selected
+            // for rendering — it falls through to OptiX or CPU.
+            if (g_hasVulkanRT) {
                 requestedVulkan = true;
+            } else if (g_hasOptix) {
+                requestedOptix = true;
             }
         }
 
@@ -1694,7 +2162,11 @@ int main(int argc, char* argv[]) try {
     ray_renderer.rebuildBVH(scene, UI_use_embree);
     if (g_viewport_backend) {
         WorldData wd = ray_renderer.world.getGPUData();
-        g_viewport_backend->setWorldData(&wd);
+        if (auto* vkViewport = dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get())) {
+            syncVulkanWorldWithAtmosphere(vkViewport, wd);
+        } else {
+            g_viewport_backend->setWorldData(&wd);
+        }
         g_viewport_backend->setLights(scene.lights);
         if (scene.camera) {
             g_viewport_backend->syncCamera(*scene.camera);
@@ -1918,9 +2390,17 @@ int main(int argc, char* argv[]) try {
                 ((!requestedVulkan && !requestedOptix) && !g_backend);
 
             if (sameBackendRequested) {
-                if (g_backend && g_needs_optix_sync.load(std::memory_order_acquire)) {
+                if (g_backend) {
                     attachActiveBackendStatusCallback();
-                    (void)syncActiveRenderBackendScene();
+                    // Re-selecting the active Vulkan backend still needs a full
+                    // scene sync because New Project/initialization paths can mark
+                    // the backend dirty without requiring a teardown/recreate.
+                    const bool forceFull =
+                        currentIsVulkan ||
+                        g_needs_optix_sync.load(std::memory_order_acquire);
+                    if (forceFull) {
+                        (void)syncActiveRenderBackendScene(currentIsVulkan);
+                    }
                 }
                 render_settings.backend_changed = false;
                 ui_ctx.render_settings.backend_changed = false;
@@ -1931,6 +2411,35 @@ int main(int argc, char* argv[]) try {
                 g_deferred_render_backend_prepare_delay_frames = 0;
                 continue;
             }
+
+            // ┌─────────────────────────────────────────────────────────────────────┐
+            // │ Async path: user switching TO OptiX from a different live backend.  │
+            // │ Don't destroy the current backend here — it must keep rendering     │
+            // │ during the 1-3 min JIT compile. Kick off a worker thread to build a │
+            // │ new OptixBackend, then fall through to the end of the switch block. │
+            // │ The polling block below this `if (backend_changed)` hot-swaps when  │
+            // │ the future is ready (typically <5s post-cache, up to 3min on cold). │
+            // └─────────────────────────────────────────────────────────────────────┘
+            bool asyncOptixHandled = false;
+            if (requestedOptix && !currentIsOptix) {
+                if (!g_optix_async_in_progress.load(std::memory_order_acquire)) {
+                    g_optix_async_cache_likely_warm = isOptixDiskCacheLikelyWarm();
+                    g_optix_async_in_progress.store(true, std::memory_order_release);
+                    g_optix_async_start_time = std::chrono::steady_clock::now();
+                    g_optix_async_future = std::async(std::launch::async, &buildOptixBackendWorker);
+                    SCENE_LOG_INFO("[OptiX async] worker launched; current backend keeps rendering.");
+                }
+                ui.addViewportMessage(
+                    optixAsyncHudMessage(),
+                    optixAsyncHudDuration(true), ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+                render_settings.backend_changed = false;
+                ui_ctx.render_settings.backend_changed = false;
+                g_deferred_render_backend_prepare_pending.store(false, std::memory_order_release);
+                g_deferred_render_backend_prepare_delay_frames = 0;
+                asyncOptixHandled = true;
+            }
+
+            if (!asyncOptixHandled) {
 
             bool success = true;
 
@@ -1981,18 +2490,11 @@ int main(int argc, char* argv[]) try {
                     // without restarting the application.
                 }
             } else if (render_settings.use_optix) {
-                success = initializeOptixIfAvailable();
-                if (!success) {
-                    // Mirror Vulkan path: allow one short retry for transient driver/runtime hiccups.
-                    std::this_thread::sleep_for(std::chrono::milliseconds(180));
-                    success = initializeOptixIfAvailable();
-                }
-                if (!success) {
-                    SCENE_LOG_ERROR("Fallback to CPU. OptiX failed.");
-                    render_settings.use_optix = false;
-                    ui_ctx.render_settings.use_optix = false;
-                    ui.addViewportMessage("OptiX not available on this machine. Switched to CPU rendering.", 7.0f, ImVec4(1.0f, 0.5f, 0.2f, 1.0f));
-                }
+                // Async OptiX path is handled by the early-skip block above this big
+                // if/else chain; if we somehow reach here it's a logic error — fall
+                // through with success=true so we don't accidentally drop into CPU.
+                SCENE_LOG_WARN("[OptiX] Sync init path reached unexpectedly; async should have handled the switch.");
+                success = true;
             }
 
             // If Vulkan reported a runtime device loss, ensure the user sees a HUD message
@@ -2045,7 +2547,11 @@ int main(int argc, char* argv[]) try {
             }
             if (g_viewport_backend) {
                 auto wdViewport = ray_renderer.world.getGPUData();
-                g_viewport_backend->setWorldData(&wdViewport);
+                if (auto* vkViewport = dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get())) {
+                    syncVulkanWorldWithAtmosphere(vkViewport, wdViewport);
+                } else {
+                    g_viewport_backend->setWorldData(&wdViewport);
+                }
                 g_viewport_backend->setLights(scene.lights);
                 if (scene.camera) {
                     g_viewport_backend->syncCamera(*scene.camera);
@@ -2066,10 +2572,91 @@ int main(int argc, char* argv[]) try {
             ui_ctx.render_settings.backend_changed = false;
             g_deferred_render_backend_prepare_pending.store(false, std::memory_order_release);
             g_deferred_render_backend_prepare_delay_frames = 0;
+
+            // [ANIM-SWAP FIX] Backend was just torn down and rebuilt. Next animation
+            // start must do a full RT rebuild — the granular sync above with
+            // forceFullSync=true at line 2211 already covered current viewport
+            // needs, but an animation triggered immediately after swap can still
+            // race with the cooldown window. Mark explicitly so the animation
+            // start path doesn't trust stale granular dirty flags.
+            g_anim_backend_needs_full_rebuild.store(true);
+
+            } // end of if (!asyncOptixHandled)
             }
         }
 
-        bool did_render_this_frame = false; 
+        // ─────────────────────────────────────────────────────────────────────────
+        // Async OptiX init poll. Runs every frame regardless of backend_changed.
+        // When the worker thread finishes building the new OptixBackend, we install
+        // it here on the main thread (tear down current backend + assign new).
+        // ─────────────────────────────────────────────────────────────────────────
+        if (g_optix_async_in_progress.load(std::memory_order_acquire)) {
+            const bool stillWantsOptix = render_settings.use_optix;
+            const float hudDuration = optixAsyncHudDuration(stillWantsOptix);
+            ui.addViewportMessage(
+                optixAsyncHudMessage(),
+                hudDuration, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+
+            // Step 1: drain the worker future once it's ready, stash result.
+            if (g_optix_async_future.valid() &&
+                g_optix_async_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                try {
+                    g_optix_async_built_pending = g_optix_async_future.get();
+                } catch (const std::exception& e) {
+                    SCENE_LOG_ERROR(std::string("[OptiX async] future.get() threw: ") + e.what());
+                    g_optix_async_built_pending.reset();
+                } catch (...) {
+                    SCENE_LOG_ERROR("[OptiX async] future.get() threw unknown exception.");
+                    g_optix_async_built_pending.reset();
+                }
+            }
+
+            // Step 2: install (or discard) once the worker has been drained AND no
+            // other render pass is using GPU resources. Otherwise wait next frame.
+            const bool drainedFuture = !g_optix_async_future.valid();
+
+            if (drainedFuture && !rendering_in_progress.load()) {
+                const float elapsed = std::chrono::duration<float>(
+                    std::chrono::steady_clock::now() - g_optix_async_start_time).count();
+
+                // Expire the "compiling" HUD line on next render regardless of branch.
+                ui.addViewportMessage(
+                    optixAsyncHudMessage(),
+                    0.05f, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+
+                if (!stillWantsOptix) {
+                    g_optix_async_built_pending.reset();
+                    SCENE_LOG_INFO("[OptiX async] result discarded (user switched away during compile).");
+                    ui.addViewportMessage(
+                        "OptiX compile cancelled (user switched backend).",
+                        5.0f, ImVec4(0.6f, 0.85f, 1.0f, 1.0f));
+                } else if (g_optix_async_built_pending && installPrebuiltOptixBackend(std::move(g_optix_async_built_pending))) {
+                    SCENE_LOG_INFO("[OptiX async] swap complete (" + std::to_string(elapsed) + "s).");
+                    ui.addViewportMessage(
+                        "OptiX ready (" + std::to_string((int)std::round(elapsed)) + "s).",
+                        5.0f, ImVec4(0.45f, 0.95f, 0.45f, 1.0f));
+                    ui_ctx.render_settings.use_optix = true;
+                    ui_ctx.render_settings.use_vulkan = false;
+                    render_settings.use_optix = true;
+                    render_settings.use_vulkan = false;
+                    attachActiveBackendStatusCallback();
+                    (void)syncActiveRenderBackendScene(true);
+                    g_backend_switch_cooldown_frames = 3;
+                    g_anim_backend_needs_full_rebuild.store(true);
+                } else {
+                    SCENE_LOG_ERROR("[OptiX async] build failed; staying on previous backend.");
+                    ui.addViewportMessage(
+                        "OptiX init failed — staying on previous backend.",
+                        7.0f, ImVec4(1.0f, 0.5f, 0.2f, 1.0f));
+                    render_settings.use_optix = false;
+                    ui_ctx.render_settings.use_optix = false;
+                }
+                g_optix_async_built_pending.reset();
+                g_optix_async_in_progress.store(false, std::memory_order_release);
+            }
+        }
+
+        bool did_render_this_frame = false;
         bool post_processing_happened = false;
         // =========================================================================
         // POWER MANAGEMENT - Prevent sleep during render but allow screen off
@@ -2319,39 +2906,26 @@ int main(int argc, char* argv[]) try {
         }
 
         // --- AUTO RESIZE FOR FINAL RENDER ---
+        // Final render (F12) now uses the current viewport resolution — the
+        // separate final_render_width/height fields and their auto-resize
+        // dance have been retired. Keep the field synced for backward
+        // compatibility with save files / panels that still display it.
+        ui_ctx.render_settings.final_render_width = image_width;
+        ui_ctx.render_settings.final_render_height = image_height;
+        render_settings.final_render_width = image_width;
+        render_settings.final_render_height = image_height;
         bool is_final_mode = ui_ctx.render_settings.is_final_render_mode;
-        
-        if (is_final_mode) {
-             int target_w = ui_ctx.render_settings.final_render_width;
-             int target_h = ui_ctx.render_settings.final_render_height;
-             
-             // Check if resize needed for final render
-             if (image_width != target_w || image_height != target_h) {
-                 if (saved_viewport_width == -1 && !pending_resolution_change) {
-                     // Save current (viewport) state
-                     saved_viewport_width = image_width;
-                     saved_viewport_height = image_height;
-                     saved_window_maximized = (SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED);
-                     
-                     // Trigger resize
-                     pending_width = target_w;
-                     pending_height = target_h;
-                     pending_resolution_change = true;
-                     SCENE_LOG_INFO("Switching to Final Render Resolution.");
-                 }
-             }
-        } 
-        else {
-             // If not final mode, but we have a saved state, it means we must restore
-             if (saved_viewport_width != -1) {
-                  if ((image_width != saved_viewport_width || image_height != saved_viewport_height) && !pending_resolution_change) {
-                      pending_width = saved_viewport_width;
-                      pending_height = saved_viewport_height;
-                      pending_resolution_change = true;
-                      SCENE_LOG_INFO("Restoring Viewport Resolution.");
-                  } else if (image_width == saved_viewport_width && image_height == saved_viewport_height) {
-                      saved_viewport_width = -1; // Restoration done
-                  }
+        (void)is_final_mode; // no longer triggers a resize
+        // If a previous version of this code switched to a separate final
+        // render resolution, restore the saved viewport size on exit.
+        if (saved_viewport_width != -1) {
+             if ((image_width != saved_viewport_width || image_height != saved_viewport_height) && !pending_resolution_change) {
+                 pending_width = saved_viewport_width;
+                 pending_height = saved_viewport_height;
+                 pending_resolution_change = true;
+                 SCENE_LOG_INFO("Restoring Viewport Resolution.");
+             } else if (image_width == saved_viewport_width && image_height == saved_viewport_height) {
+                 saved_viewport_width = -1; // Restoration done
              }
         }
         // ------------------------------------
@@ -2411,21 +2985,57 @@ int main(int argc, char* argv[]) try {
         bool timeline_has_light_keyframes = false;
         bool timeline_has_camera_keyframes = false;
         bool timeline_has_world_keyframes = false;
+        static size_t cached_timeline_track_count = std::numeric_limits<size_t>::max();
+        static size_t cached_timeline_keyframe_count = std::numeric_limits<size_t>::max();
+        static bool cached_has_manual_keyframes = false;
+        static bool cached_has_water_keyframes = false;
+        static bool cached_has_transform_keyframes = false;
+        static bool cached_has_material_keyframes = false;
+        static bool cached_has_light_keyframes = false;
+        static bool cached_has_camera_keyframes = false;
+        static bool cached_has_world_keyframes = false;
+
+        size_t current_timeline_keyframe_count = 0;
         for (const auto& [track_name, track] : scene.timeline.tracks) {
             (void)track_name;
-            if (track.keyframes.empty()) continue;
-            timeline_has_manual_keyframes = true;
-            for (const auto& kf : track.keyframes) {
-                timeline_has_transform_keyframes |= kf.has_transform;
-                timeline_has_material_keyframes |= kf.has_material;
-                timeline_has_light_keyframes |= kf.has_light;
-                timeline_has_camera_keyframes |= kf.has_camera;
-                timeline_has_world_keyframes |= kf.has_world;
-                if (kf.has_water) {
-                    timeline_has_water_keyframes = true;
+            current_timeline_keyframe_count += track.keyframes.size();
+        }
+
+        if (!timeline_playing ||
+            cached_timeline_track_count != scene.timeline.tracks.size() ||
+            cached_timeline_keyframe_count != current_timeline_keyframe_count) {
+            cached_timeline_track_count = scene.timeline.tracks.size();
+            cached_timeline_keyframe_count = current_timeline_keyframe_count;
+            cached_has_manual_keyframes = false;
+            cached_has_water_keyframes = false;
+            cached_has_transform_keyframes = false;
+            cached_has_material_keyframes = false;
+            cached_has_light_keyframes = false;
+            cached_has_camera_keyframes = false;
+            cached_has_world_keyframes = false;
+
+            for (const auto& [track_name, track] : scene.timeline.tracks) {
+                (void)track_name;
+                if (track.keyframes.empty()) continue;
+                cached_has_manual_keyframes = true;
+                for (const auto& kf : track.keyframes) {
+                    cached_has_transform_keyframes |= kf.has_transform;
+                    cached_has_material_keyframes |= kf.has_material;
+                    cached_has_light_keyframes |= kf.has_light;
+                    cached_has_camera_keyframes |= kf.has_camera;
+                    cached_has_world_keyframes |= kf.has_world;
+                    cached_has_water_keyframes |= kf.has_water;
                 }
             }
         }
+
+        timeline_has_manual_keyframes = cached_has_manual_keyframes;
+        timeline_has_water_keyframes = cached_has_water_keyframes;
+        timeline_has_transform_keyframes = cached_has_transform_keyframes;
+        timeline_has_material_keyframes = cached_has_material_keyframes;
+        timeline_has_light_keyframes = cached_has_light_keyframes;
+        timeline_has_camera_keyframes = cached_has_camera_keyframes;
+        timeline_has_world_keyframes = cached_has_world_keyframes;
 
         bool autonomous_anim_graph_playing = false;
         for (const auto& modelCtx : scene.importedModelContexts) {
@@ -2824,25 +3434,38 @@ int main(int argc, char* argv[]) try {
         // ===========================================================================
         // CENTRALIZED CAMERA UPDATE (PHASE 1)
         // Checks if UI changed camera or if continuous effects (Shake/AF-C) are active
+        //
+        // [RENDER-LOCK RACE FIX] During an active sequence render the worker
+        // thread owns scene.camera — Renderer::updateAnimationState writes
+        // lookfrom/lookat/vfov/focus/lens_radius and calls update_camera_vectors
+        // per animation frame (Renderer.cpp ~line 2336), then syncCameraToBackend
+        // uploads the result. If the main thread also calls update_camera_vectors
+        // here (e.g. AF-C mode keeps is_af_c=true and forces the block every
+        // frame), the two threads mutate the same Camera u/v/w basis vectors
+        // concurrently — the GPU reads a torn camera and traceRays hangs inside
+        // the driver. The skip_backend_for_anim gate on syncCameraToBackend was
+        // not enough; the mutation at update_camera_vectors() above the gate is
+        // the actual race source.
         // ===========================================================================
-        if (scene.camera) {
+        const bool anim_owns_camera = rendering_in_progress.load() && ui_ctx.is_animation_mode;
+        if (scene.camera && !anim_owns_camera) {
             bool is_dirty = scene.camera->checkDirty();
-            
+
             // Continuous effects require per-frame updates
             bool is_shaking = scene.camera->enable_camera_shake;
             bool is_af_c = (ui.viewport_settings.focus_mode == 2);
-            
+
             if (is_dirty || is_shaking || is_af_c) {
                  // Ensure vectors are up to date
                  scene.camera->update_camera_vectors();
                  ray_renderer.world.setCameraY(scene.camera->lookfrom.y);
-                 
+
                     if (ui_ctx.backend_ptr && !skip_backend_for_anim) {
                         ui_ctx.renderer.syncCameraToBackend(*scene.camera);
                     }
                  ray_renderer.resetCPUAccumulation();
                  g_camera_dirty = false;
-                 
+
                  start_render = true;
             }
         }
@@ -3018,12 +3641,99 @@ int main(int argc, char* argv[]) try {
             // 1. Handle Animation Render Request
             // Prioritize this over interactive loop
             if (ui_ctx.render_settings.start_animation_render) {
-                
+
                 if (rendering_in_progress) {
                      // Already running something heavy, ignore new request
                      SCENE_LOG_WARN("Cannot start animation: Rendering already in progress.");
                      ui_ctx.render_settings.start_animation_render = false;
                      render_settings.start_animation_render = false;
+                }
+                else if (([&]() -> bool {
+                    // [SOLID-MODE FIX] Switch to Rendered viewport mode FIRST and
+                    // defer the actual animation launch by a few frames. The
+                    // solid→rendered transition block (~line 3760 below) needs to
+                    // run rebuildAccelerationStructure + updateGeometry +
+                    // uploadHairToGPU + materials/world sync on the RT backend
+                    // before the animation worker can safely call
+                    // updateSceneGeometry — otherwise BLASes don't exist yet and
+                    // createTLAS crashes inside the NVIDIA driver.
+                    //
+                    // [FRAME-0 POSE FIX] Also pre-pin the timeline to the
+                    // sequence's start frame here. SceneUI::processAnimations
+                    // reads scene.timeline.current_frame each UI frame and
+                    // applies keyframes via mesh_cache — which correctly
+                    // handles HittableInstance wrappers (calls
+                    // cached.instance->setTransform after setting the
+                    // underlying triangle's TransformHandle). The animation
+                    // worker's updateAnimationState only iterates raw
+                    // Triangle objects in scene.world.objects, so
+                    // HittableInstance wrappers (default scene cube et al)
+                    // are NOT updated by the worker on frame 0 — they keep
+                    // whatever transform they had when the user clicked
+                    // Render. By pinning the timeline to the start frame
+                    // BEFORE the worker spawns, processAnimations evaluates
+                    // and applies the start-frame pose to every object
+                    // (HittableInstance included) during the countdown
+                    // window. By the time the worker takes over, the scene
+                    // is already at the correct pose and Vulkan's frame 0
+                    // matches OptiX.
+                    static int s_anim_mode_switch_countdown = 0;
+                    static bool s_anim_timeline_pinned = false;
+                    const int pin_frame = ui_ctx.render_settings.animation_start_frame;
+                    auto pinTimelineToStart = [&]() {
+                        // Pin BOTH scene.timeline AND TimelineWidget's internal
+                        // current_frame. The widget's draw() writes its own
+                        // current_frame back into scene.timeline.current_frame
+                        // every UI iteration (line ~348), which would otherwise
+                        // immediately overwrite our pin with the user's pre-render
+                        // scrub position.
+                        scene.timeline.current_frame = pin_frame;
+                        ui.timeline.setCurrentFrame(pin_frame);
+                    };
+                    if (ui.viewport_settings.shading_mode != 2) {
+                        SCENE_LOG_INFO("[Anim] Auto-switching viewport from shading_mode=" +
+                                       std::to_string(ui.viewport_settings.shading_mode) +
+                                       " to Rendered (2); deferring sequence launch until RT rebuild settles.");
+                        ui.viewport_settings.shading_mode = 2;
+                        s_anim_mode_switch_countdown = 4; // wait ~4 frames for transition block + rebuild
+                        pinTimelineToStart();
+                        s_anim_timeline_pinned = true;
+                        return true; // hold off launch this frame
+                    }
+                    // Already in Rendered mode — still need to pin the timeline
+                    // to the sequence start frame and give processAnimations one
+                    // UI frame to apply the start-frame pose before the worker
+                    // takes over. Otherwise frame 0's TLAS uses whatever pose the
+                    // scene happened to be in (last user scrub / playback frame),
+                    // because the worker's updateAnimationState misses
+                    // HittableInstance wrappers.
+                    if (!s_anim_timeline_pinned &&
+                        scene.timeline.current_frame != pin_frame) {
+                        SCENE_LOG_INFO("[Anim] Pinning timeline to start frame " +
+                                       std::to_string(pin_frame) +
+                                       " before launch; waiting one frame for processAnimations to settle.");
+                        pinTimelineToStart();
+                        s_anim_timeline_pinned = true;
+                        s_anim_mode_switch_countdown = std::max(s_anim_mode_switch_countdown, 2);
+                        return true; // wait for processAnimations to apply
+                    }
+                    // Re-pin every wait iteration so TimelineWidget's per-frame
+                    // sync-back can't drift us back to the user's scrub position.
+                    if (s_anim_mode_switch_countdown > 0) {
+                        pinTimelineToStart();
+                    }
+                    if (s_anim_mode_switch_countdown > 0) {
+                        s_anim_mode_switch_countdown--;
+                        if (s_anim_mode_switch_countdown == 0) {
+                            SCENE_LOG_INFO("[Anim] Mode-switch settle complete, sequence will launch next frame.");
+                        }
+                        return true; // still waiting
+                    }
+                    // Reset pin flag for next sequence run.
+                    s_anim_timeline_pinned = false;
+                    return false; // good to launch
+                })()) {
+                    // Hold start_animation_render set; re-enter next frame.
                 }
                 else {
                     // Start Animation
@@ -3044,9 +3754,18 @@ int main(int argc, char* argv[]) try {
                     SCENE_LOG_INFO("Output folder set to: " + output_folder);
 
                     // Capture local copies of settings to avoid thread race
-                    // FIX: Use animation_samples_per_frame (UI setting) instead of final_render_samples
-                    int anim_sample_count = ui_ctx.render_settings.animation_samples_per_frame;
+                    // Sequence render uses the SAME sampling controls as the
+                    // interactive viewport: max_samples as the per-frame cap,
+                    // plus the adaptive sampling threshold + min_samples. The
+                    // old "final_render_samples" / "animation_samples_per_frame"
+                    // duplicates have been retired — one set of sliders drives
+                    // viewport, single-frame final, and sequence.
+                    int anim_sample_count = ui_ctx.render_settings.max_samples;
                     if (anim_sample_count <= 0) anim_sample_count = 128; // Fallback
+                    // Keep legacy fields in sync so any save-file / progress UI
+                    // that still references them shows the active value.
+                    ui_ctx.render_settings.animation_samples_per_frame = anim_sample_count;
+                    ui_ctx.render_settings.final_render_samples = anim_sample_count;
                     int anim_sample_per_pass = sample_per_pass;
                     int anim_fps = ui_ctx.render_settings.animation_fps;
                     float anim_duration = ui_ctx.render_settings.animation_duration;
@@ -3079,6 +3798,28 @@ int main(int argc, char* argv[]) try {
                     
                     SCENE_LOG_INFO("Animation render: Frames " + std::to_string(anim_start_frame) + " - " + std::to_string(anim_end_frame) + " (" + std::to_string(ui_ctx.render_settings.animation_total_frames) + " total) @ " + std::to_string(anim_sample_count) + " samples/frame");
 
+                    // [BACKEND-STATE FIX] Force a FULL rebuild only when we have a
+                    // concrete reason — either an aborted previous animation left
+                    // partial TLAS/BLAS state, or a backend swap left dirty flags
+                    // cleared. Forcing a full rebuild unconditionally was destroying
+                    // a healthy already-built RT backend (Vulkan's rebuild is a
+                    // pending operation, and the worker would launch before it
+                    // finished → stuck at 1% with vanished geometry).
+                    //
+                    // For all other cases (user simply pressed Render Sequence
+                    // while in Rendered mode), the granular sync path below
+                    // handles the normal dirty-flag-driven updates without
+                    // touching healthy state.
+                    if (anim_use_gpu && g_backend) {
+                        const bool needs_full = g_anim_backend_needs_full_rebuild.exchange(false);
+                        if (needs_full) {
+                            SCENE_LOG_INFO("[Anim] Forcing full RT backend rebuild (previous animation aborted or backend was swapped).");
+                            (void)syncActiveRenderBackendScene(/*forceFullSync=*/true);
+                        } else {
+                            (void)syncActiveRenderBackendScene(/*forceFullSync=*/false);
+                        }
+                    }
+
                     // Detach thread
                     std::thread anim_thread([=]() {
                         try {
@@ -3108,6 +3849,18 @@ int main(int argc, char* argv[]) try {
                         g_camera_dirty = true;
                         g_lights_dirty = true;
                         g_world_dirty = true;
+
+                        // [STOP-MID-REBUILD FIX] If the animation was aborted, the
+                        // RT backend's TLAS/BLAS may be in a partial state with no
+                        // dirty flag raised. Signal the next animation start to do
+                        // a full rebuild rather than risk a driver crash inside
+                        // createTLAS on stale data. Also broadly invalidate geometry
+                        // so the regular viewport sync flushes cleanly.
+                        if (rendering_stopped_gpu.load() || rendering_stopped_cpu.load()) {
+                            g_anim_backend_needs_full_rebuild.store(true);
+                            g_geometry_dirty = true;
+                            SCENE_LOG_INFO("Animation render stopped — next start will force full RT rebuild.");
+                        }
 
                         SCENE_LOG_INFO("Animation render completed.");
                     });
@@ -3314,20 +4067,31 @@ int main(int argc, char* argv[]) try {
                             g_gas_volumes_dirty = false;
                         }
 
-                        if (g_world_dirty) {
-                            // DEFERRED LUT: Recompute atmosphere LUT at most once per frame
-                            // (Not on every slider tick — prevents 50K-pixel blocking)
-                            ray_renderer.world.flushLUT();
-                            
+                        static int last_timeline_lut_update_frame = std::numeric_limits<int>::min();
+                        const int timeline_lut_interval_frames =
+                            std::max(1, std::max(1, render_settings.animation_fps) / 6);
+                        const bool nishitaWorldActive =
+                            ray_renderer.world.getMode() == WORLD_MODE_NISHITA;
+                        const bool allowTimelineLUTUpdate =
+                            nishitaWorldActive &&
+                            timeline_playing &&
+                            ray_renderer.world.needsLUTUpdate() &&
+                            std::abs(ui.timeline.getCurrentFrame() - last_timeline_lut_update_frame) >= timeline_lut_interval_frames;
+                        const bool allowImmediateVulkanLUTUpdate =
+                            nishitaWorldActive &&
+                            timeline_playing &&
+                            ray_renderer.world.needsLUTUpdate() &&
+                            dynamic_cast<Backend::VulkanBackendAdapter*>(activeViewportBackend) != nullptr;
+
+                        if (g_world_dirty ||
+                            (nishitaWorldActive && !timeline_playing && ray_renderer.world.needsLUTUpdate()) ||
+                            allowTimelineLUTUpdate ||
+                            allowImmediateVulkanLUTUpdate) {
                             if (activeViewportBackend) {
-                                auto worldGPU = ray_renderer.world.getGPUData();
-                                activeViewportBackend->setWorldData(&worldGPU);
-                                // Re-upload Vulkan LUT textures after any nishita param change
-                                // (including sun_intensity=0 — ensures GPU texture goes dark)
-                                auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(activeViewportBackend);
-                                if (vulkanBackend) {
-                                    auto* al = ray_renderer.world.getLUT();
-                                    if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
+                                const bool hadPendingLUT = ray_renderer.world.needsLUTUpdate();
+                                syncWorldDataToBackend(activeViewportBackend);
+                                if (hadPendingLUT && !ray_renderer.world.needsLUTUpdate() && timeline_playing) {
+                                    last_timeline_lut_update_frame = ui.timeline.getCurrentFrame();
                                 }
                             }
                             g_world_dirty = false;
@@ -3444,12 +4208,7 @@ int main(int argc, char* argv[]) try {
                                     }
                                     vkRenderBackend->setLights(scene.lights);
                                     auto wd = ray_renderer.world.getGPUData();
-                                    vkRenderBackend->setWorldData(&wd);
-                                    if (auto* al = ray_renderer.world.getLUT()) {
-                                        if (al->is_initialized()) {
-                                            vkRenderBackend->uploadAtmosphereLUT(al);
-                                        }
-                                    }
+                                    syncVulkanWorldWithAtmosphere(vkRenderBackend, wd);
                                     vkRenderBackend->resetAccumulation();
                                     g_vulkan_rebuild_pending = false;
                                     g_camera_dirty = true;
@@ -3604,23 +4363,99 @@ int main(int argc, char* argv[]) try {
                             allow_vulkan_viewport_denoiser &&
                             !g_viewport_rebuild_in_progress.load(std::memory_order_acquire) &&
                             !g_optix_rebuild_in_progress.load(std::memory_order_acquire)) {
-                            std::vector<float> denoised;
-                            int denoisedW = 0;
-                            int denoisedH = 0;
-                            bool denoisedReady = false;
+                            bool gpuPathSucceeded = false;
+                            bool cpuPathSucceeded = false;
                             bool anyFrameProvided = false;
 
-                            Backend::DenoiserFrameDataGPU gpuFrame;
-                            if (g_backend->getDenoiserFrameGPU(gpuFrame, use_denoiser_aux)) {
-                                anyFrameProvided = true;
-                                if (ray_renderer.applyOIDNDenoisingGPU(gpuFrame, ui_ctx.render_settings.denoiser_blend_factor, denoised)) {
-                                    denoisedW = gpuFrame.width;
-                                    denoisedH = gpuFrame.height;
-                                    denoisedReady = true;
+                            // Exposure factor — hoisted so both the fused-GPU tonemap kernel
+                            // and the CPU fallback loop share the same value.
+                            float exposure_factor = 1.0f;
+                            if (scene.camera) {
+                                if (scene.camera->auto_exposure) {
+                                    exposure_factor = std::pow(2.0f, scene.camera->ev_compensation);
+                                } else if (scene.camera->use_physical_exposure) {
+                                    float iso_mult = 1.0f;
+                                    if (scene.camera->iso_preset_index >= 0 &&
+                                        scene.camera->iso_preset_index < (int)CameraPresets::ISO_PRESET_COUNT) {
+                                        iso_mult = CameraPresets::ISO_PRESETS[scene.camera->iso_preset_index].exposure_multiplier;
+                                    }
+
+                                    float shutter_time = 0.004f;
+                                    if (scene.camera->shutter_preset_index >= 0 &&
+                                        scene.camera->shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT) {
+                                        shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[scene.camera->shutter_preset_index].speed_seconds;
+                                    }
+
+                                    float f_number = 16.0f;
+                                    if (scene.camera->fstop_preset_index > 0 &&
+                                        scene.camera->fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT) {
+                                        f_number = CameraPresets::FSTOP_PRESETS[scene.camera->fstop_preset_index].f_number;
+                                    } else if (scene.camera->aperture > 0.001f) {
+                                        f_number = 0.8f / scene.camera->aperture;
+                                    }
+
+                                    float aperture_sq = f_number * f_number;
+                                    float ev_comp = std::pow(2.0f, scene.camera->ev_compensation);
+                                    float current_val = (iso_mult * shutter_time) / (aperture_sq + 1e-6f);
+                                    float baseline_val = 0.00003125f;
+                                    exposure_factor = (current_val / baseline_val) * ev_comp * 2.0f;
+                                } else {
+                                    exposure_factor = std::pow(2.0f, scene.camera->ev_compensation);
                                 }
                             }
 
-                            if (!denoisedReady) {
+                            SDL_PixelFormat* fmt = original_surface ? original_surface->format : nullptr;
+                            const Uint32 aMask = fmt ? fmt->Amask : 0u;
+                            const Uint8 rShift = fmt ? fmt->Rshift : 0;
+                            const Uint8 gShift = fmt ? fmt->Gshift : 8;
+                            const Uint8 bShift = fmt ? fmt->Bshift : 16;
+
+                            // GPU path — fused on-device tonemap, single 4 B/px D2H copy.
+                            {
+                                Backend::DenoiserFrameDataGPU gpuFrame;
+                                std::vector<uint32_t> packedDenoised;
+                                if (g_backend->getDenoiserFrameGPU(gpuFrame, use_denoiser_aux)) {
+                                    anyFrameProvided = true;
+                                    Renderer::OIDNTonemapParams tm;
+                                    tm.exposure = exposure_factor;
+                                    tm.aMaskOr  = aMask;
+                                    tm.rShift   = rShift;
+                                    tm.gShift   = gShift;
+                                    tm.bShift   = bShift;
+                                    tm.flipY    = true;
+                                    if (ray_renderer.applyOIDNDenoisingGPU(gpuFrame,
+                                                                           ui_ctx.render_settings.denoiser_blend_factor,
+                                                                           tm, packedDenoised)) {
+                                        const int denoisedW = gpuFrame.width;
+                                        const int denoisedH = gpuFrame.height;
+                                        if (original_surface && original_surface->pixels &&
+                                            original_surface->w == denoisedW && original_surface->h == denoisedH) {
+                                            const int row_stride = original_surface->pitch / 4;
+                                            Uint32* dst = static_cast<Uint32*>(original_surface->pixels);
+                                            const uint32_t* src = packedDenoised.data();
+                                            if (row_stride == denoisedW) {
+                                                std::memcpy(dst, src,
+                                                            static_cast<size_t>(denoisedW) *
+                                                                static_cast<size_t>(denoisedH) *
+                                                                sizeof(uint32_t));
+                                            } else {
+                                                for (int y = 0; y < denoisedH; ++y) {
+                                                    std::memcpy(dst + static_cast<size_t>(y) * row_stride,
+                                                                src + static_cast<size_t>(y) * denoisedW,
+                                                                static_cast<size_t>(denoisedW) * sizeof(uint32_t));
+                                                }
+                                            }
+                                        }
+                                        gpuPathSucceeded = true;
+                                    }
+                                }
+                            }
+
+                            // CPU fallback — only if the GPU path didn't land (binding failed,
+                            // shared memory not available, etc.). Keeps the original per-pixel
+                            // tonemap loop for parity.
+                            if (!gpuPathSucceeded) {
+                                std::vector<float> denoised;
                                 Backend::DenoiserFrameData denoiserFrame;
                                 if (g_backend->getDenoiserFrame(denoiserFrame, use_denoiser_aux)) {
                                     anyFrameProvided = true;
@@ -3631,94 +4466,53 @@ int main(int argc, char* argv[]) try {
                                     frame.albedo = use_denoiser_aux ? denoiserFrame.albedo : nullptr;
                                     frame.normal = use_denoiser_aux ? denoiserFrame.normal : nullptr;
                                     if (ray_renderer.applyOIDNDenoising(frame, ui_ctx.render_settings.denoiser_blend_factor, denoised)) {
-                                        denoisedW = frame.width;
-                                        denoisedH = frame.height;
-                                        denoisedReady = true;
+                                        const int denoisedW = frame.width;
+                                        const int denoisedH = frame.height;
+                                        if (original_surface && original_surface->pixels &&
+                                            original_surface->w == denoisedW && original_surface->h == denoisedH) {
+                                            Uint32* pixels = static_cast<Uint32*>(original_surface->pixels);
+                                            const int row_stride = original_surface->pitch / 4;
+                                            const size_t pixelCount = (size_t)denoisedW * (size_t)denoisedH;
+                                            Uint32* __restrict pxBase = pixels;
+                                            const float* __restrict denoisedBase = denoised.data();
+                                            std::for_each_n(std::execution::par_unseq,
+                                                pxBase, pixelCount,
+                                                [=](Uint32& px) {
+                                                    const size_t i = static_cast<size_t>(&px - pxBase);
+                                                    const size_t idx = i * 3;
+                                                    const int x = static_cast<int>(i % (size_t)denoisedW);
+                                                    const int y = static_cast<int>(i / (size_t)denoisedW);
+                                                    const int screen_y = denoisedH - 1 - y;
+                                                    const size_t screen_index = (size_t)screen_y * (size_t)row_stride + (size_t)x;
+
+                                                    float r = std::max(denoisedBase[idx] * exposure_factor, 0.0f);
+                                                    float g = std::max(denoisedBase[idx + 1] * exposure_factor, 0.0f);
+                                                    float b = std::max(denoisedBase[idx + 2] * exposure_factor, 0.0f);
+
+                                                    r = r / (1.0f + r);
+                                                    g = g / (1.0f + g);
+                                                    b = b / (1.0f + b);
+
+                                                    r = std::pow(r, 1.0f / 2.2f);
+                                                    g = std::pow(g, 1.0f / 2.2f);
+                                                    b = std::pow(b, 1.0f / 2.2f);
+
+                                                    const Uint8 ri = static_cast<Uint8>(std::min(r, 1.0f) * 255.0f + 0.5f);
+                                                    const Uint8 gi = static_cast<Uint8>(std::min(g, 1.0f) * 255.0f + 0.5f);
+                                                    const Uint8 bi = static_cast<Uint8>(std::min(b, 1.0f) * 255.0f + 0.5f);
+                                                    const Uint32 alpha = pxBase[screen_index] & aMask;
+                                                    pxBase[screen_index] = alpha
+                                                        | ((Uint32)ri << rShift)
+                                                        | ((Uint32)gi << gShift)
+                                                        | ((Uint32)bi << bShift);
+                                                });
+                                        }
+                                        cpuPathSucceeded = true;
                                     }
                                 }
                             }
 
-                            if (denoisedReady) {
-                                if (original_surface && original_surface->pixels &&
-                                    original_surface->w == denoisedW && original_surface->h == denoisedH) {
-                                    float exposure_factor = 1.0f;
-                                    if (scene.camera) {
-                                        if (scene.camera->auto_exposure) {
-                                            exposure_factor = std::pow(2.0f, scene.camera->ev_compensation);
-                                        } else if (scene.camera->use_physical_exposure) {
-                                            float iso_mult = 1.0f;
-                                            if (scene.camera->iso_preset_index >= 0 &&
-                                                scene.camera->iso_preset_index < (int)CameraPresets::ISO_PRESET_COUNT) {
-                                                iso_mult = CameraPresets::ISO_PRESETS[scene.camera->iso_preset_index].exposure_multiplier;
-                                            }
-
-                                            float shutter_time = 0.004f;
-                                            if (scene.camera->shutter_preset_index >= 0 &&
-                                                scene.camera->shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT) {
-                                                shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[scene.camera->shutter_preset_index].speed_seconds;
-                                            }
-
-                                            float f_number = 16.0f;
-                                            if (scene.camera->fstop_preset_index > 0 &&
-                                                scene.camera->fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT) {
-                                                f_number = CameraPresets::FSTOP_PRESETS[scene.camera->fstop_preset_index].f_number;
-                                            } else if (scene.camera->aperture > 0.001f) {
-                                                f_number = 0.8f / scene.camera->aperture;
-                                            }
-
-                                            float aperture_sq = f_number * f_number;
-                                            float ev_comp = std::pow(2.0f, scene.camera->ev_compensation);
-                                            float current_val = (iso_mult * shutter_time) / (aperture_sq + 1e-6f);
-                                            float baseline_val = 0.00003125f;
-                                            exposure_factor = (current_val / baseline_val) * ev_comp * 2.0f;
-                                        } else {
-                                            exposure_factor = std::pow(2.0f, scene.camera->ev_compensation);
-                                        }
-                                    }
-
-                                    Uint32* pixels = static_cast<Uint32*>(original_surface->pixels);
-                                    SDL_PixelFormat* fmt = original_surface->format;
-                                    const Uint32 aMask = fmt->Amask;
-                                    const Uint8 rShift = fmt->Rshift;
-                                    const Uint8 gShift = fmt->Gshift;
-                                    const Uint8 bShift = fmt->Bshift;
-                                    const int row_stride = original_surface->pitch / 4;
-                                    const size_t pixelCount = (size_t)denoisedW * (size_t)denoisedH;
-                                    Uint32* __restrict pxBase = pixels;
-                                    const float* __restrict denoisedBase = denoised.data();
-                                    std::for_each_n(std::execution::par_unseq,
-                                        pxBase, pixelCount,
-                                        [=](Uint32& px) {
-                                            const size_t i = static_cast<size_t>(&px - pxBase);
-                                            const size_t idx = i * 3;
-                                            const int x = static_cast<int>(i % (size_t)denoisedW);
-                                            const int y = static_cast<int>(i / (size_t)denoisedW);
-                                            const int screen_y = denoisedH - 1 - y;
-                                            const size_t screen_index = (size_t)screen_y * (size_t)row_stride + (size_t)x;
-
-                                            float r = std::max(denoisedBase[idx] * exposure_factor, 0.0f);
-                                            float g = std::max(denoisedBase[idx + 1] * exposure_factor, 0.0f);
-                                            float b = std::max(denoisedBase[idx + 2] * exposure_factor, 0.0f);
-
-                                            r = r / (1.0f + r);
-                                            g = g / (1.0f + g);
-                                            b = b / (1.0f + b);
-
-                                            r = std::pow(r, 1.0f / 2.2f);
-                                            g = std::pow(g, 1.0f / 2.2f);
-                                            b = std::pow(b, 1.0f / 2.2f);
-
-                                            const Uint8 ri = static_cast<Uint8>(std::min(r, 1.0f) * 255.0f + 0.5f);
-                                            const Uint8 gi = static_cast<Uint8>(std::min(g, 1.0f) * 255.0f + 0.5f);
-                                            const Uint8 bi = static_cast<Uint8>(std::min(b, 1.0f) * 255.0f + 0.5f);
-                                            const Uint32 alpha = pxBase[screen_index] & aMask;
-                                            pxBase[screen_index] = alpha
-                                                | ((Uint32)ri << rShift)
-                                                | ((Uint32)gi << gShift)
-                                                | ((Uint32)bi << bShift);
-                                        });
-                                }
-                            } else if (!anyFrameProvided) {
+                            if (!gpuPathSucceeded && !cpuPathSucceeded && !anyFrameProvided) {
                                 // Backend supplied no denoiser frame at all — fall back to SDL surface OIDN.
                                 ray_renderer.applyOIDNDenoising(original_surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
                             }
@@ -3964,21 +4758,35 @@ int main(int argc, char* argv[]) try {
             SCENE_LOG_INFO("Tonemap reset applied.");
         }
 
+        bool stylize_applied_by_tonemap = false;
+        // True when the display surface was (re)built this frame — by a tonemap apply or a
+        // fresh render. Stylize must re-run on any rebuild (e.g. a Stylize param change
+        // requests a redisplay with no new render), not only when a render happened.
+        bool surface_rebuilt = false;
+        // A Stylize param change wants the post pass re-run on the existing render. Treat it
+        // like a render for display purposes so the surface rebuild HONORS the tonemap
+        // on/off setting (don't force tonemap), then the stylize block re-applies on top.
+        const bool needs_redisplay = did_render_this_frame || stylize_redisplay;
+
         // 3. Handle Tonemap Apply OR Display Update
-        if (apply_tonemap || (ui_ctx.render_settings.persistent_tonemap && did_render_this_frame)) {
+        if (apply_tonemap || (ui_ctx.render_settings.persistent_tonemap && needs_redisplay)) {
             if (original_surface && surface) {
+                const bool stylize_active = ray_renderer.stylizeMode.enabled;
                 const bool gpu_noop_post =
                     isActiveRenderBackendGpu() &&
                     ui_ctx.render_settings.persistent_tonemap &&
-                    hasNoOpColorProcessing(color_processor);
+                    hasNoOpColorProcessing(color_processor) &&
+                    !stylize_active;
 
                 if (gpu_noop_post) {
                     copySurfacePixelsOrBlit(surface, original_surface);
                 } else {
                     // Pass renderer to use float buffer if available (prevents quantization artifacts)
                     // Pass nullptr if using OptiX/Vulkan (GPU path already provides display-ready pixels)
-                    applyToneMappingToSurface(surface, original_surface, color_processor,
-                        isActiveRenderBackendGpu() ? nullptr : &ray_renderer);
+                    applyToneMappingToSurfaceWithCamera(surface, original_surface, color_processor,
+                        isActiveRenderBackendGpu() ? nullptr : &ray_renderer,
+                        scene.camera.get());
+                    stylize_applied_by_tonemap = stylize_active && !isActiveRenderBackendGpu();
                 }
             }
             if (apply_tonemap) {
@@ -3986,8 +4794,9 @@ int main(int argc, char* argv[]) try {
                 SCENE_LOG_INFO("Tonemap applied.");
             }
             post_processing_happened = true;
-        } 
-        else if (did_render_this_frame && original_surface && surface) {
+            surface_rebuilt = true;
+        }
+        else if (needs_redisplay && original_surface && surface) {
             // If CPU denoiser produced a float buffer, display it even when persistent tonemap is off.
             // Otherwise denoiser appears to do nothing because original_surface still contains raw pre-denoise pixels.
             if (!isActiveRenderBackendGpu() &&
@@ -3998,7 +4807,26 @@ int main(int argc, char* argv[]) try {
                 // to the Display Surface (surface) so the user sees the output!
                 copySurfacePixelsOrBlit(surface, original_surface);
             }
+            surface_rebuilt = true;
         }
+
+        if (surface_rebuilt &&
+            ray_renderer.stylizeMode.enabled &&
+            !stylize_applied_by_tonemap &&
+            surface) {
+            // GPU render path: the CPU AOV accumulation buffers are empty, so pull the
+            // Vulkan/OptiX primary-hit AOVs (albedo/normal/world-pos/depth) to the host
+            // first. This lets applyStylizeToSurface run the full surface-locked stylize
+            // instead of the flat screen-space fallback. CPU path already fills them.
+            if (isActiveRenderBackendGpu() && g_backend && scene.camera) {
+                // Pass the camera so the AOV cache can key on a camera hash (re-pull on any
+                // view change); depth is reconstructed from world position + camera origin.
+                ray_renderer.fillStylizeAOVFromBackend(g_backend.get(), *scene.camera);
+            }
+            applyStylizeToSurfaceWithCamera(surface, ray_renderer, true, scene.camera.get());
+            post_processing_happened = true;
+        }
+        stylize_redisplay = false;   // one-shot redisplay request consumed
 
         // [DIAG] Log display pipeline state — separate counter for Rendered mode
         {
@@ -4101,8 +4929,7 @@ int main(int argc, char* argv[]) try {
                     
                     if (has_file_animations || timeline_has_camera_keyframes) g_camera_dirty = true;
                     if (has_file_animations || timeline_has_light_keyframes) g_lights_dirty = true;
-                    if (has_file_animations || timeline_has_world_keyframes) g_world_dirty = true;
-                    if (timeline_has_world_keyframes) g_gas_volumes_dirty = true;
+                    if (has_file_animations) g_world_dirty = true;
                     
                     // Update Backend if needed
                         if (has_active_render_gpu_backend) {
@@ -4149,7 +4976,7 @@ int main(int argc, char* argv[]) try {
                             g_texture_pool_dirty = false;
                         }
 
-                        if (timeline_has_world_keyframes) {
+                        if (g_gas_volumes_dirty) {
                             ray_renderer.updateBackendGasVolumes(scene);
                             g_gas_volumes_dirty = false;
                         }
@@ -4319,6 +5146,7 @@ int main(int argc, char* argv[]) try {
             scene_load_active ||
             g_viewport_raster_rebuild_pending ||
             g_vulkan_rebuild_pending ||
+            g_vulkan_geometry_append_pending ||
             g_optix_rebuild_pending ||
             g_bvh_rebuild_pending;
         const bool rendering_active = did_render_this_frame || start_render ||
@@ -4493,7 +5321,7 @@ int main(int argc, char* argv[]) try {
                         if (!obj) return;
 
                         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-                            if (tri->getTransformPtr() && tri->getVertexBoneWeights().empty()) {
+                            if (tri->getTransformPtr() && !tri->hasAnySkinWeights()) {
                                 tri->updateTransformedVertices();
                             }
                             return;
@@ -4506,7 +5334,7 @@ int main(int argc, char* argv[]) try {
 
                             if (inst->source_triangles) {
                                 for (auto& srcTri : *inst->source_triangles) {
-                                    if (srcTri && srcTri->getTransformPtr() && srcTri->getVertexBoneWeights().empty()) {
+                                    if (srcTri && srcTri->getTransformPtr() && !srcTri->hasAnySkinWeights()) {
                                         srcTri->updateTransformedVertices();
                                     }
                                 }
@@ -4675,6 +5503,35 @@ int main(int argc, char* argv[]) try {
                 g_viewport_raster_rebuild_pending = false;
                 start_render = true;
                 g_camera_dirty = true;
+            }
+        }
+
+        // ── Incremental append fast path (scatter / instance-add) ───────────────────
+        // Try the cheap path first: if the only change is appending new HittableInstances
+        // (sharing already-uploaded source BLASes), refit the TLAS in-place. Falling back
+        // to the full destroy+rebuild block below would re-upload every BLAS and texture
+        // in the scene — pure waste when a single asset got scattered.
+        if (g_vulkan_geometry_append_pending && active_vulkan_render_backend && g_hasVulkan && !interactive_viewport_active && !skip_backend_for_anim) {
+            if (g_backend) {
+                auto* vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
+                bool applied = false;
+                if (vkBackend) {
+                    applied = vkBackend->tryAppendGeometryIncremental(scene.world.objects);
+                }
+                if (applied) {
+                    ray_renderer.updateBackendMaterials(scene);
+                    syncMaterialBufferToViewportBackend(scene, ray_renderer);
+                    g_materials_dirty = false;
+                    g_texture_pool_dirty = false;
+                    g_geometry_dirty = false;
+                    g_backend->resetAccumulation();
+                    start_render = true;
+                    g_camera_dirty = true;
+                } else {
+                    // Incremental path declined — promote to full rebuild.
+                    g_vulkan_rebuild_pending = true;
+                }
+                g_vulkan_geometry_append_pending = false;
             }
         }
 

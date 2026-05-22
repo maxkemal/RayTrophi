@@ -1448,7 +1448,7 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
 
     if (UIWidgets::BeginSection("Render Engine & Backend", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
         UIWidgets::ColoredHeader("Execution", ImVec4(0.82f, 0.88f, 1.0f, 1.0f));
-        const char* engines[] = { "CPU", "NVIDIA OptiX (CUDA)", "Vulkan (Experimental)" };
+        const char* engines[] = { "CPU (Reference)", "NVIDIA OptiX (CUDA)", "Vulkan RT (Recommended)" };
         if (ImGui::BeginCombo("Engine", engines[engine_type])) {
             for (int i = 0; i < IM_ARRAYSIZE(engines); i++) {
                 bool is_disabled = false;
@@ -1477,6 +1477,24 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
                         g_cpu_sync_pending = true;
                         ctx.render_settings.backend_changed = true;
                         ctx.start_render = true;
+                        // Surface a HUD message immediately so the user sees status text
+                        // on the LAST rendered frame before the backend switch (which can
+                        // freeze the UI thread for 1-3 min on first OptiX JIT compile).
+                        // ImGui finishes drawing the current frame after this combo handler
+                        // returns, so the message renders before the freeze hits.
+                        if (engine_type == 1) {
+                            addViewportMessage(
+                                "Preparing OptiX backend. Renderer keeps running.",
+                                5.0f, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+                        } else if (engine_type == 2) {
+                            addViewportMessage(
+                                "Switching to Vulkan RT...",
+                                10.0f, ImVec4(0.55f, 0.85f, 1.0f, 1.0f));
+                        } else {
+                            addViewportMessage(
+                                "Switching to CPU renderer...",
+                                10.0f, ImVec4(0.55f, 0.85f, 1.0f, 1.0f));
+                        }
                     } else {
                         deferred_engine_type = engine_type;
                         addViewportMessage("Engine preference saved. It will apply in Rendered mode.",
@@ -1516,7 +1534,7 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
     }
 
     if (UIWidgets::BeginSection("Sampling & Quality", ImVec4(0.5f, 0.9f, 0.6f, 1.0f))) {
-        UIWidgets::ColoredHeader("Viewport Sampling", ImVec4(0.84f, 0.94f, 0.86f, 1.0f));
+        UIWidgets::ColoredHeader("Viewport (Interactive)", ImVec4(0.84f, 0.94f, 0.86f, 1.0f));
         bool sampling_changed = false;
         sampling_changed |= ImGui::Checkbox("Use Adaptive Sampling##view", &ctx.render_settings.use_adaptive_sampling);
         if (ctx.render_settings.use_adaptive_sampling) {
@@ -1564,21 +1582,6 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
             ImGui::TextDisabled("Preview lighting presets are only active in Material Preview mode.");
         }
 
-        UIWidgets::Divider();
-        UIWidgets::ColoredHeader("Final Render Output", ImVec4(0.86f, 0.92f, 1.0f, 1.0f));
-        ImGui::DragInt("Samples##final", &ctx.render_settings.final_render_samples, 1, 1, 100000);
-        ImGui::Checkbox("Apply Denoiser##final", &ctx.render_settings.render_use_denoiser);
-        if (ctx.render_settings.render_use_denoiser) {
-            const char* denoiser_mode_items[] = {
-                "Fast: beauty only",
-                "Quality: beauty + albedo + normal"
-            };
-            int denoiser_mode = static_cast<int>(ctx.render_settings.denoiser_mode);
-            if (ImGui::Combo("Denoiser Mode##final", &denoiser_mode, denoiser_mode_items,
-                IM_ARRAYSIZE(denoiser_mode_items))) {
-                ctx.render_settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);
-            }
-        }
         UIWidgets::EndSection();
     }
 
@@ -1592,8 +1595,16 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
         UIWidgets::HelpMarker("Total is the global path limit. Diffuse limits indirect diffuse/SSS/translucent paths; Transmission limits glass and water continuation.");
 
         UIWidgets::Divider();
-        UIWidgets::ColoredHeader("Viewport Denoise", ImVec4(0.90f, 0.76f, 1.0f, 1.0f));
-        ImGui::Checkbox("Enable Viewport Denoising", &ctx.render_settings.use_denoiser);
+        UIWidgets::ColoredHeader("Denoiser (Viewport + Final + Sequence)", ImVec4(0.90f, 0.76f, 1.0f, 1.0f));
+        if (ImGui::Checkbox("Enable Denoiser", &ctx.render_settings.use_denoiser)) {
+            // Mirror to legacy 'render_use_denoiser' so the final single-frame
+            // render path (Main.cpp ~4049 / 4382) stays in sync without
+            // exposing a separate checkbox.
+            ctx.render_settings.render_use_denoiser = ctx.render_settings.use_denoiser;
+        }
+        UIWidgets::HelpMarker("Applies to interactive viewport, single-frame final render, "
+                              "AND sequence render output. Sequence frames are denoised "
+                              "before being saved to disk.");
         if (ctx.render_settings.use_denoiser) {
             const char* denoiser_mode_items[] = {
                 "Fast: beauty only",
@@ -1605,71 +1616,12 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
             }
             ImGui::SliderFloat("Blend Factor", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f);
         } else {
-            ImGui::TextDisabled("Viewport denoising is disabled.");
+            ImGui::TextDisabled("Denoiser is disabled.");
         }
         UIWidgets::EndSection();
     }
 
-    if (UIWidgets::BeginSection("Resolution & Output", ImVec4(0.9f, 0.4f, 0.5f, 1.0f))) {
-        UIWidgets::ColoredHeader("Frame Size", ImVec4(1.0f, 0.82f, 0.86f, 1.0f));
-        if (ImGui::Combo("Resolution Preset", &preset_index,
-            [](void* data, int idx, const char** out_text) {
-                *out_text = ((ResolutionPreset*)data)[idx].name;
-                return true;
-            }, presets, IM_ARRAYSIZE(presets)))
-        {
-            if (preset_index != 0) {
-                new_width = presets[preset_index].w;
-                new_height = presets[preset_index].h;
-                aspect_w = presets[preset_index].bw;
-                aspect_h = presets[preset_index].bh;
-            }
-        }
-
-        ImGui::DragInt("Width", &new_width, 1, 1, 8192);
-        ImGui::DragInt("Height", &new_height, 1, 1, 8192);
-        ImGui::PushItemWidth(80.0f);
-        ImGui::DragInt("Aspect W", &aspect_w, 1, 1, 100);
-        ImGui::SameLine();
-        ImGui::DragInt("Aspect H", &aspect_h, 1, 1, 100);
-        ImGui::PopItemWidth();
-
-        const bool resolution_changed =
-            (new_width != last_applied_width) ||
-            (new_height != last_applied_height) ||
-            (aspect_w != last_applied_aspect_w) ||
-            (aspect_h != last_applied_aspect_h);
-
-        ImGui::TextDisabled("Current target aspect: %.3f", aspect_h ? float(aspect_w) / float(aspect_h) : 1.0f);
-        if (UIWidgets::PrimaryButton("Apply Output Settings", ImVec2(UIWidgets::GetInspectorActionWidth(), 30), resolution_changed)) {
-            const float ar = aspect_h ? float(aspect_w) / float(aspect_h) : 1.0f;
-            pending_aspect_ratio = ar;
-            pending_width = new_width;
-            pending_height = new_height;
-            aspect_ratio = ar;
-            pending_resolution_change = true;
-            last_applied_width = new_width;
-            last_applied_height = new_height;
-            last_applied_aspect_w = aspect_w;
-            last_applied_aspect_h = aspect_h;
-        }
-
-        UIWidgets::Divider();
-        UIWidgets::ColoredHeader("Quick Actions", ImVec4(0.98f, 0.75f, 0.80f, 1.0f));
-        UIWidgets::PushControlSurfaceStyle(ImVec4(1.0f, 0.58f, 0.50f, 1.0f));
-        if (UIWidgets::IconActionButton("OpenDedicatedRenderWindow", UIWidgets::IconType::Render, "",
-            false, ImVec4(1.0f, 0.58f, 0.50f, 1.0f), ImVec2(44.0f, 42.0f),
-            "Open the dedicated render preview window.")) {
-            extern bool show_render_window;
-            show_render_window = true;
-        }
-        ImGui::SameLine();
-        UIWidgets::IconActionButton("ResolutionHelp", UIWidgets::IconType::Help, "",
-            false, ImVec4(0.92f, 0.72f, 0.48f, 1.0f), ImVec2(44.0f, 42.0f),
-            "Choose a preset or custom size, then apply the output settings to update the render target.");
-        UIWidgets::PopControlSurfaceStyle();
-        UIWidgets::EndSection();
-    }
+    // Resolution & Output controls moved to the System panel (single source of truth).
 
     DrawRenderWindowToneMapControls(ctx);
 
@@ -1731,26 +1683,15 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
 
             UIWidgets::Divider();
             UIWidgets::ColoredHeader("Sequence Quality", ImVec4(1.0f, 0.74f, 0.86f, 1.0f));
-            ImGui::DragInt("Samples Per Frame", &ctx.render_settings.animation_samples_per_frame, 1, 1, 10000);
-            UIWidgets::PushControlSurfaceStyle(ImVec4(1.0f, 0.46f, 0.70f, 1.0f));
-            if (UIWidgets::IconActionButton("AnimPresetDraft", UIWidgets::IconType::Play, "Draft",
-                false, ImVec4(1.0f, 0.46f, 0.70f, 1.0f), ImVec2(82.0f, 38.0f),
-                "Set samples per frame to 16 for quick previews.")) {
-                ctx.render_settings.animation_samples_per_frame = 16;
-            }
-            ImGui::SameLine();
-            if (UIWidgets::IconActionButton("AnimPresetMedium", UIWidgets::IconType::Play, "Medium",
-                false, ImVec4(1.0f, 0.46f, 0.70f, 1.0f), ImVec2(86.0f, 38.0f),
-                "Set samples per frame to 64 for balanced previews.")) {
-                ctx.render_settings.animation_samples_per_frame = 64;
-            }
-            ImGui::SameLine();
-            if (UIWidgets::IconActionButton("AnimPresetHigh", UIWidgets::IconType::Play, "High",
-                false, ImVec4(1.0f, 0.46f, 0.70f, 1.0f), ImVec2(82.0f, 38.0f),
-                "Set samples per frame to 256 for higher quality output.")) {
-                ctx.render_settings.animation_samples_per_frame = 256;
-            }
-            UIWidgets::PopControlSurfaceStyle();
+            // Sequence render now reuses the main "Samples" render-quality control
+            // (final_render_samples). Show a read-only mirror here so users see
+            // which quality their sequence will use without duplicating the
+            // setting in two places.
+            ImGui::TextDisabled("Uses main Samples setting: %d / frame",
+                ctx.render_settings.final_render_samples);
+            UIWidgets::HelpMarker("Sequence render uses the same samples-per-frame value "
+                                  "as the main Render Settings 'Samples' field. Change it "
+                                  "there to adjust sequence quality.");
 
             UIWidgets::Divider();
             UIWidgets::ColoredHeader("Sequence Output", ImVec4(1.0f, 0.78f, 0.82f, 1.0f));
@@ -1786,7 +1727,8 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
                 can_render && valid_range ? "Sequence is ready to render" : "Sequence needs attention before rendering",
                 can_render && valid_range ? UIWidgets::StatusType::Success : UIWidgets::StatusType::Warning);
             ImGui::Text("%d frames x %d spp  |  est. %.1f min", total_frames, samples, est_total_minutes);
-            ImGui::Text("Resolution: %dx%d", ctx.render_settings.final_render_width, ctx.render_settings.final_render_height);
+            // Sequence render uses the active viewport resolution.
+            ImGui::Text("Resolution: %dx%d  (viewport)", image_width, image_height);
             ImGui::EndChild();
             ImGui::PopStyleVar();
             ImGui::PopStyleColor();
@@ -1942,6 +1884,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     case UIWidgets::IconType::Volumetric: return ImVec4(0.82f, 0.92f, 1.00f, 1.0f);
                     case UIWidgets::IconType::Force:      return ImVec4(1.00f, 0.66f, 0.34f, 1.0f);
                     case UIWidgets::IconType::World:      return ImVec4(0.44f, 0.88f, 0.92f, 1.0f);
+                    case UIWidgets::IconType::Brush:      return ImVec4(0.88f, 0.70f, 0.42f, 1.0f);
                     case UIWidgets::IconType::Hair:       return ImVec4(1.00f, 0.73f, 0.42f, 1.0f);
                     case UIWidgets::IconType::SprayTool:  return ImVec4(0.58f, 0.96f, 0.52f, 1.0f);
                     case UIWidgets::IconType::Sculpt:     return ImVec4(1.00f, 0.56f, 0.38f, 1.0f);
@@ -2067,6 +2010,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (show_volumetric_tab) drawTabButton(4, UIWidgets::IconType::Volumetric, "Volumetrics");
         if (show_forcefield_tab) drawTabButton(5, UIWidgets::IconType::Force,      "Force Fields");
         if (show_world_tab)      drawTabButton(6, UIWidgets::IconType::World,      "World & Sky");
+        if (show_stylize_tab)    drawTabButton(12, UIWidgets::IconType::Brush,     "Stylize Mode");
         if (show_hair_tab)       drawTabButton(8, UIWidgets::IconType::Hair,       "Hair & Fur");
         if (show_scatter_tab)    drawTabButton(11, UIWidgets::IconType::SprayTool, "Scatter (Foliage & Mesh)");
         drawTabButton(7, UIWidgets::IconType::Sculpt, "Modeling");
@@ -2178,7 +2122,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                                 engine_type = std::clamp(deferred_engine_type, 0, 2);
                             }
 
-                            const char* engines[] = { "CPU", "NVIDIA OptiX (CUDA)", "Vulkan (Experimental)" };
+                            const char* engines[] = { "CPU (Reference)", "NVIDIA OptiX (CUDA)", "Vulkan RT (Recommended)" };
 
                             if (ImGui::BeginCombo("Engine", engines[engine_type])) {
                                 for (int i = 0; i < IM_ARRAYSIZE(engines); i++) {
@@ -2204,6 +2148,21 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
                                             ctx.render_settings.backend_changed = true;
                                             ctx.start_render = true;
+                                            // See sibling combo above — surface HUD status on the last
+                                            // frame before the (possibly long) backend switch begins.
+                                            if (engine_type == 1) {
+                                                addViewportMessage(
+                                                    "Preparing OptiX backend. Renderer keeps running.",
+                                                    5.0f, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+                                            } else if (engine_type == 2) {
+                                                addViewportMessage(
+                                                    "Switching to Vulkan RT...",
+                                                    10.0f, ImVec4(0.55f, 0.85f, 1.0f, 1.0f));
+                                            } else {
+                                                addViewportMessage(
+                                                    "Switching to CPU renderer...",
+                                                    10.0f, ImVec4(0.55f, 0.85f, 1.0f, 1.0f));
+                                            }
                                         } else {
                                             // In Solid/Matcap/MaterialPreview this is just a preference.
                                             deferred_engine_type = engine_type;
@@ -2258,22 +2217,6 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                             resetSceneUiSamplingAccumulation(ctx);
                         }
                         
-                        UIWidgets::Divider();
-                        UIWidgets::ColoredHeader("Final Render (F12)", ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
-                        ImGui::DragInt("Samples##final", &ctx.render_settings.final_render_samples, 1, 1, 100000);
-                        ImGui::Checkbox("Apply Denoiser##final", &ctx.render_settings.render_use_denoiser);
-                        if (ctx.render_settings.render_use_denoiser) {
-                            const char* denoiser_mode_items[] = {
-                                "Fast: beauty only",
-                                "Quality: beauty + albedo + normal"
-                            };
-                            int denoiser_mode = static_cast<int>(ctx.render_settings.denoiser_mode);
-                            if (ImGui::Combo("Denoiser Mode##final", &denoiser_mode, denoiser_mode_items,
-                                IM_ARRAYSIZE(denoiser_mode_items))) {
-                                ctx.render_settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);
-                            }
-                        }
-                        
                         UIWidgets::EndSection();
                     }
 
@@ -2295,7 +2238,13 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     // DENOISING
                     // ─────────────────────────────────────────────────────────────────────────
                     if (UIWidgets::BeginSection("Denoising", ImVec4(0.8f, 0.5f, 1.0f, 1.0f))) {
-                        ImGui::Checkbox("Enable Viewport Denoising", &ctx.render_settings.use_denoiser);
+                        if (ImGui::Checkbox("Enable Denoiser (Viewport + Final + Sequence)", &ctx.render_settings.use_denoiser)) {
+                            // Mirror to legacy 'render_use_denoiser' so the single-frame final render
+                            // path stays in sync without a separate checkbox.
+                            ctx.render_settings.render_use_denoiser = ctx.render_settings.use_denoiser;
+                        }
+                        UIWidgets::HelpMarker("Applies to interactive viewport, single-frame final render, "
+                                              "AND sequence render output.");
                         if (ctx.render_settings.use_denoiser) {
                             const char* denoiser_mode_items[] = {
                                 "Fast: beauty only",
@@ -2311,52 +2260,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     }
  Broadway:
 
-                    // ─────────────────────────────────────────────────────────────────────────
-                    // FORMAT & OUTPUT
-                    // ─────────────────────────────────────────────────────────────────────────
-                    if (UIWidgets::BeginSection("Resolution & Output", ImVec4(0.9f, 0.4f, 0.5f, 1.0f))) {
-                        // Presets
-                        if (ImGui::Combo("Resolution Preset", &preset_index,
-                            [](void* data, int idx, const char** out_text) {
-                                *out_text = ((ResolutionPreset*)data)[idx].name;
-                                return true;
-                            }, presets, IM_ARRAYSIZE(presets)))
-                        {
-                            if (preset_index != 0) {
-                                new_width = presets[preset_index].w;
-                                new_height = presets[preset_index].h;
-                                aspect_w = presets[preset_index].bw;
-                                aspect_h = presets[preset_index].bh;
-                            }
-                        }
-
-                        ImGui::DragInt("Width", &new_width, 1, 1, 8192);
-                        ImGui::DragInt("Height", &new_height, 1, 1, 8192);
-                        
-                        ImGui::PushItemWidth(80);
-                        ImGui::DragInt("Aspect W", &aspect_w, 1, 1, 100); ImGui::SameLine();
-                        ImGui::DragInt("Aspect H", &aspect_h, 1, 1, 100);
-                        ImGui::PopItemWidth();
-
-                        bool resolution_changed = (new_width != last_applied_width) || (new_height != last_applied_height);
-                        
-                        if (UIWidgets::PrimaryButton("Apply Settings", ImVec2(UIWidgets::GetInspectorActionWidth(), 30), resolution_changed)) {
-                            float ar = aspect_h ? float(aspect_w) / aspect_h : 1.0f;
-                            pending_aspect_ratio = ar;
-                            pending_width = new_width;
-                            pending_height = new_height;
-                            aspect_ratio = ar;
-                            pending_resolution_change = true;
-                            last_applied_width = new_width; last_applied_height = new_height;
-                        }
-
-                        UIWidgets::Divider();
-                        if (UIWidgets::SecondaryButton("Open Dedicated Render Window", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
-                            extern bool show_render_window;
-                            show_render_window = true;
-                        }
-                        UIWidgets::EndSection();
-                    }
+                    // Resolution & Output controls moved to the System panel.
 
                     // ─────────────────────────────────────────────────────────────────────────
                     // POST-PROCESSING & TONEMAPPING
@@ -2436,15 +2340,11 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                             
                             UIWidgets::Divider();
                             UIWidgets::ColoredHeader("Quality", ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
-                            ImGui::DragInt("Samples Per Frame", &ctx.render_settings.animation_samples_per_frame, 1, 1, 10000);
-                            
-                            // Quick presets
-                            ImGui::SameLine();
-                            if (ImGui::SmallButton("Draft")) ctx.render_settings.animation_samples_per_frame = 16;
-                            ImGui::SameLine();
-                            if (ImGui::SmallButton("Medium")) ctx.render_settings.animation_samples_per_frame = 64;
-                            ImGui::SameLine();
-                            if (ImGui::SmallButton("High")) ctx.render_settings.animation_samples_per_frame = 256;
+                            // Sequence render shares the main render-quality setting.
+                            ImGui::TextDisabled("Uses main Samples setting: %d / frame",
+                                ctx.render_settings.final_render_samples);
+                            UIWidgets::HelpMarker("Sequence render uses the same samples-per-frame value "
+                                                  "as the main Render Settings 'Samples' field.");
                             
                             UIWidgets::Divider();
                             UIWidgets::ColoredHeader("Output (PNG Sequence)", ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
@@ -2476,9 +2376,8 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                             ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Summary:");
                             ImGui::SameLine();
                             ImGui::Text("%d frames x %d samples = ~%.1f min (estimated)", total_frames, samples, est_total_minutes);
-                            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Resolution: %dx%d", 
-                                ctx.render_settings.final_render_width, 
-                                ctx.render_settings.final_render_height);
+                            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Resolution: %dx%d (viewport)",
+                                image_width, image_height);
                             ImGui::EndChild();
                             ImGui::PopStyleColor();
                             
@@ -2523,6 +2422,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             case 4: if (show_volumetric_tab) drawVolumetricPanel(ctx); break;
             case 5: if (show_forcefield_tab) ForceFieldUI::drawForceFieldPanel(ctx, ctx.scene); break;
             case 6: if (show_world_tab) drawWorldContent(ctx); break;
+            case 12: if (show_stylize_tab) drawStylizePanel(ctx); break;
             case 7: drawModifiersPanel(ctx); break;
             case 11: if (show_scatter_tab) drawScatterBrushPanel(ctx); break;
             case 9: drawThemeSelector(); drawResolutionPanel(ctx); break;
@@ -4221,7 +4121,12 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
     ctx.renderer.resetCPUAccumulation();
 
     if (g_backend) {
-        ctx.renderer.rebuildBackendGeometry(ctx.scene);
+        if (sceneUiRenderBackendIsVulkan(ctx)) {
+            extern bool g_vulkan_geometry_append_pending;
+            g_vulkan_geometry_append_pending = true;
+        } else {
+            ctx.renderer.rebuildBackendGeometry(ctx.scene);
+        }
         applySceneUiPendingDeleteVisibility(ctx, g_backend.get());
         g_backend->setLights(ctx.scene.lights);
         if (ctx.scene.camera) {
@@ -4233,14 +4138,17 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
     // Always signal raster viewport rebuild so new objects appear in Solid/Matcap mode
     // (rebuildBackendGeometry only updates the render backend, not the raster viewport)
     extern bool g_vulkan_rebuild_pending;
+    extern bool g_vulkan_geometry_append_pending;
     extern bool g_viewport_raster_rebuild_pending;
     g_viewport_raster_rebuild_pending = true;
     // Increment geometry generation so raster viewport rebuilds mesh list
     extern bool g_geometry_dirty;
+    extern bool g_materials_dirty;
     extern std::atomic<uint64_t> g_scene_geometry_generation;
     g_geometry_dirty = true;
+    g_materials_dirty = true;
     g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
-    if (sceneUiRenderBackendIsVulkan(ctx)) {
+    if (sceneUiRenderBackendIsVulkan(ctx) && !g_vulkan_geometry_append_pending) {
         g_vulkan_rebuild_pending = true;
     }
 
@@ -5468,7 +5376,10 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
     this->tri_to_index.clear(); // Clear the lookup map
     cached_triangle_count_by_object.clear();
     cached_scene_triangle_count = 0;
-    bbox_cache.clear();  
+    bbox_cache.clear();
+    hull_candidate_cache.clear();
+    selection_skin_pose_hash.clear();
+    selection_outline_frame_cache.clear();
     material_slots_cache.clear();
     
     tri_to_index.reserve(selectable_count);
@@ -5614,6 +5525,7 @@ void SceneUI::updateBBoxCache(const std::string& objectName) {
     }
     
     bbox_cache[objectName] = {bb_min, bb_max};
+    hull_candidate_cache.erase(objectName); // Force re-extraction on next selection
 }
 
 // Lazy CPU Sync - called before mouse picking to ensure vertices are up to date
@@ -5885,8 +5797,8 @@ void SceneUI::drawRenderWindow(UIContext& ctx) {
             ImGui::Separator();
             ImGui::TextDisabled("Stats:");
             ImGui::Text("Samples: %d", current_samples);
-            ImGui::Text("Resolution: %dx%d", ctx.render_settings.final_render_width, ctx.render_settings.final_render_height);
-            
+            ImGui::Text("Resolution: %dx%d", image_width, image_height);
+
             ImGui::EndChild();
         }
     }
@@ -5980,6 +5892,7 @@ void SceneUI::drawExitConfirmation(UIContext& ctx) {
                     rootJson["terrain_graph"] = terrainNodeGraph.toJson();
                      rootJson["viewport_settings"] = {
                         {"show_gizmos", viewport_settings.show_gizmos},
+                        {"show_selection_outline", viewport_settings.show_selection_outline},
                         {"show_camera_hud", viewport_settings.show_camera_hud},
                         {"show_focus_ring", viewport_settings.show_focus_ring},
                         {"show_zoom_ring", viewport_settings.show_zoom_ring}
@@ -6160,7 +6073,13 @@ void SceneUI::performNewProject(UIContext& ctx) {
      g_gas_volumes_dirty = true;
      g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
      g_needs_optix_sync.store(true);
-     
+
+     // Route New Project through the canonical backend switch path for Vulkan RT,
+     // matching the project-open path and forcing a complete render-backend sync.
+     if (sceneUiRenderBackendIsVulkan(ctx)) {
+         ctx.render_settings.backend_changed = true;
+     }
+
      active_model_path = "Untitled";
      ctx.active_model_path = "Untitled";
      ctx.start_render = true;
@@ -6285,6 +6204,7 @@ void SceneUI::performOpenProject(UIContext& ctx) {
                                     if (rootJson.contains("viewport_settings")) {
                                         auto& vs = rootJson["viewport_settings"];
                                         viewport_settings.show_gizmos = vs.value("show_gizmos", true);
+                                        viewport_settings.show_selection_outline = vs.value("show_selection_outline", true);
                                         viewport_settings.show_camera_hud = vs.value("show_camera_hud", true);
                                         viewport_settings.show_focus_ring = vs.value("show_focus_ring", true);
                                         viewport_settings.show_zoom_ring = vs.value("show_zoom_ring", true);
@@ -6614,22 +6534,28 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             changed = true;
         }
         if (ImGui::Combo("Quality Preset", &qualityPreset, qualityPresetNames, IM_ARRAYSIZE(qualityPresetNames))) {
+            // Preset value rationale (post Aşama-2/3 + accessor cache + Aşama A shadow_steps cut):
+            //   - OptiX hardcoded fallback uses step=0.1, max=100, shadow=4.
+            //   - Old presets were 5-10× OptiX's values — preview burning GPU cycles for
+            //     imperceptible quality past shadow=4 / max=192 on diffuse media.
+            //   - New presets give clear tiers: Fast = fluid editing, Balanced ≈ OptiX
+            //     parity, Exact = converged stills / blackbody fire detail.
             if (qualityPreset == VolQualityFast) {
-                shader->quality.step_size = 0.20f;
-                shader->quality.max_steps = 256;
-                shader->quality.shadow_steps = 8;
+                shader->quality.step_size = 0.15f;
+                shader->quality.max_steps = 128;
+                shader->quality.shadow_steps = 2;
                 shader->quality.quality_preset = VolQualityFast;
                 changed = true;
             } else if (qualityPreset == VolQualityBalanced) {
                 shader->quality.step_size = 0.08f;
-                shader->quality.max_steps = 512;
-                shader->quality.shadow_steps = 12;
+                shader->quality.max_steps = 192;
+                shader->quality.shadow_steps = 4;
                 shader->quality.quality_preset = VolQualityBalanced;
                 changed = true;
             } else if (qualityPreset == VolQualityExact) {
                 shader->quality.step_size = 0.04f;
-                shader->quality.max_steps = 1024;
-                shader->quality.shadow_steps = 20;
+                shader->quality.max_steps = 512;
+                shader->quality.shadow_steps = 8;
                 shader->quality.quality_preset = VolQualityExact;
                 changed = true;
             } else {
@@ -7127,6 +7053,7 @@ std::string SceneUI::serialize() {
     j["show_volumetric_tab"] = show_volumetric_tab;
     j["show_forcefield_tab"] = show_forcefield_tab;
     j["show_world_tab"] = show_world_tab;
+    j["show_stylize_tab"] = show_stylize_tab;
     j["show_hair_tab"] = show_hair_tab;
     j["show_modifiers_tab"] = show_modifiers_tab;
     j["show_scatter_tab"] = show_scatter_tab;
@@ -7228,6 +7155,7 @@ void SceneUI::deserialize(const std::string& data) {
         if (j.contains("show_volumetric_tab")) show_volumetric_tab = j["show_volumetric_tab"];
         if (j.contains("show_forcefield_tab")) show_forcefield_tab = j["show_forcefield_tab"];
         if (j.contains("show_world_tab")) show_world_tab = j["show_world_tab"];
+        if (j.contains("show_stylize_tab")) show_stylize_tab = j["show_stylize_tab"];
         if (j.contains("show_hair_tab")) show_hair_tab = j["show_hair_tab"];
         if (j.contains("show_modifiers_tab")) show_modifiers_tab = j["show_modifiers_tab"];
         if (j.contains("show_scatter_tab")) show_scatter_tab = j["show_scatter_tab"];

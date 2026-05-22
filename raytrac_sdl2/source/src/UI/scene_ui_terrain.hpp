@@ -104,12 +104,48 @@ static void SyncTerrainMaterialState(UIContext& ctx) {
     Backend::IViewportBackend* viewportBackend = GetTerrainViewportBackend(ctx);
     Backend::IBackend* renderBackend = GetTerrainRenderBackend(ctx);
 
-    if (viewportBackend) {
-        ctx.renderer.updateBackendMaterials(ctx.scene, viewportBackend);
+    struct TerrainSplatDirtySnapshot {
+        Texture* tex = nullptr;
+        bool full = false;
+        int min_x = 0;
+        int min_y = 0;
+        int max_x = -1;
+        int max_y = -1;
+    };
+
+    std::vector<TerrainSplatDirtySnapshot> dirtySnapshots;
+    for (auto& terrain : TerrainManager::getInstance().getTerrains()) {
+        Texture* tex = terrain.splatMap.get();
+        if (!tex || !tex->vulkan_dirty) continue;
+        dirtySnapshots.push_back({
+            tex,
+            tex->vulkan_dirty_full,
+            tex->vulkan_dirty_min_x,
+            tex->vulkan_dirty_min_y,
+            tex->vulkan_dirty_max_x,
+            tex->vulkan_dirty_max_y
+        });
     }
-    if (renderBackend &&
-        reinterpret_cast<const void*>(renderBackend) != reinterpret_cast<const void*>(viewportBackend)) {
+
+    auto restoreDirtySnapshots = [&]() {
+        for (const auto& snapshot : dirtySnapshots) {
+            if (!snapshot.tex) continue;
+            snapshot.tex->vulkan_dirty = true;
+            snapshot.tex->vulkan_dirty_full = snapshot.full;
+            snapshot.tex->vulkan_dirty_min_x = snapshot.min_x;
+            snapshot.tex->vulkan_dirty_min_y = snapshot.min_y;
+            snapshot.tex->vulkan_dirty_max_x = snapshot.max_x;
+            snapshot.tex->vulkan_dirty_max_y = snapshot.max_y;
+        }
+    };
+
+    if (renderBackend) {
         ctx.renderer.updateBackendMaterials(ctx.scene, renderBackend);
+    }
+    if (viewportBackend &&
+        reinterpret_cast<const void*>(viewportBackend) != reinterpret_cast<const void*>(renderBackend)) {
+        restoreDirtySnapshots();
+        ctx.renderer.updateBackendMaterials(ctx.scene, viewportBackend);
     }
     ResetTerrainBackendAccumulation(ctx);
 }
@@ -1579,6 +1615,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     riverMgr.generateMesh(selectedRiver, ctx.scene);
                     g_bvh_rebuild_pending = true;
                     g_optix_rebuild_pending = true;
+                    g_vulkan_rebuild_pending = true;
                     ctx.renderer.resetCPUAccumulation();
                     ProjectManager::getInstance().markModified();
                 };
@@ -1652,6 +1689,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                 tm.updateTerrainMesh(&terrainRef);
                                 g_bvh_rebuild_pending = true;
                                 g_optix_rebuild_pending = true;
+                                g_vulkan_rebuild_pending = true;
                                 ctx.renderer.resetCPUAccumulation();
                                 ProjectManager::getInstance().markModified();
                                 SCENE_LOG_INFO("Terrain restored from backup.");
@@ -2023,10 +2061,13 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                      const bool hasVulkanViewportPath =
                          TerrainRenderBackendIsVulkan(ctx) ||
                          (g_viewport_backend != nullptr);
-                     if (hasVulkanViewportPath && ctx.backend_ptr) {
+                     if (hasVulkanViewportPath) {
                          pending_vulkan_material_sync = true;
                          float now = (float)ImGui::GetTime();
-                         if (now - last_vulkan_paint_sync_time > 0.08f) {
+                         const bool renderedVulkanRtActive =
+                             TerrainRenderBackendIsVulkan(ctx) &&
+                             dynamic_cast<Backend::VulkanBackendAdapter*>(GetTerrainRenderBackend(ctx)) != nullptr;
+                         if (renderedVulkanRtActive || now - last_vulkan_paint_sync_time > 0.08f) {
                              SyncTerrainMaterialState(ctx);
                              last_vulkan_paint_sync_time = now;
                              pending_vulkan_material_sync = false;

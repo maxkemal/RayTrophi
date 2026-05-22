@@ -19,6 +19,16 @@
 #include "WaterSystem.h"
 
 namespace {
+bool triangleHasEffectiveSkinData(const Triangle& tri) {
+    if (!tri.hasSkinData()) return false;
+    for (int v = 0; v < 3; ++v) {
+        for (const auto& [boneIndex, weight] : tri.getSkinBoneWeights(v)) {
+            if (boneIndex >= 0 && weight > 0.0f) return true;
+        }
+    }
+    return false;
+}
+
 void computeGeometryBounds(const MeshGeometry& geometry, float3& outMin, float3& outMax) {
     outMin = make_float3(1e20f, 1e20f, 1e20f);
     outMax = make_float3(-1e20f, -1e20f, -1e20f);
@@ -166,7 +176,7 @@ std::vector<MeshData> OptixAccelManager::groupTrianglesByMesh(
         // Critical Fix: Group by Name, Material ID AND Skinning Status
         // This prevents "disappearing static meshes" when lumped with skinned ones.
         // Also helps with "structure added to other meshes" issue.
-        bool hasSkin = tri->hasSkinData();
+        bool hasSkin = triangleHasEffectiveSkinData(*tri);
         std::string unique_key = base_name + "_mat_" + std::to_string(mat_id) + 
                                 (hasSkin ? "_skinned" : "_static");
         

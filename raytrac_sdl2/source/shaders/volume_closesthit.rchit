@@ -88,6 +88,7 @@ struct RayPayload {
     float primaryTransmission;
     float primaryMetallic;
     uint  bounceType;
+    uint  primaryMaterialId;   // Stylize AOV: real material index of the primary hit
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -184,7 +185,8 @@ struct VkVolumeInstance {
     float cloud_edge_fade;
     float cloud_offset_x;
     float cloud_offset_z;
-    float _ext_reserved[13];
+    float cloud_seed;
+    float _ext_reserved[12];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
@@ -202,7 +204,7 @@ struct VkWorldDataExtended {
     float airDensity;   float dustDensity;
     float ozoneDensity; float altitude;
     float planetRadius; float atmosphereHeight;
-    float _pad1; float _pad2;
+    int   multiScatterEnabled; float multiScatterFactor;
     int   cloudsEnabled; float cloudCoverage; float cloudDensity; float cloudScale;
     float cloudHeightMin; float cloudHeightMax; float cloudOffsetX; float cloudOffsetZ;
     float cloudQuality; float cloudDetail; int cloudBaseSteps; int cloudLightSteps;
@@ -212,13 +214,14 @@ struct VkWorldDataExtended {
     int   fogEnabled;   float fogDensity; float fogHeight; float fogFalloff;
     float fogDistance;  float fogSunScatter; vec3 fogColor; float _pad4;
     int   godRaysEnabled; float godRaysIntensity; float godRaysDensity; int godRaysSamples;
-    int   aerialEnabled; float aerialMinDistance; float aerialMaxDistance; float _pad5_aerial;
+    int   aerialEnabled; float aerialMinDistance; float aerialMaxDistance; float aerialDensity;
     int   weatherEnabled; int weatherType; float weatherIntensity; float weatherDensity;
     vec3  weatherWindDirection; float weatherWindSpeed;
     float weatherPrecipitationScale; float weatherVisibility; float weatherSurfaceWetness; float weatherSurfaceAccumulation;
     float weatherSurfaceSettling; float weatherSurfaceHeight;
     int   weatherVisualMode; int weatherSurfaceResponseEnabled;
     int   envTexSlot;   float envIntensity; float envRotation; int _pad5; // nishitaLutReady
+    int   envOverlayEnabled; int envOverlayBlendMode; float envOverlayIntensity; float envOverlayRotation;
     uvec2 transmittanceLUT; uvec2 skyviewLUT; uvec2 multiScatterLUT; uvec2 aerialPerspectiveLUT;
 };
 
@@ -393,6 +396,8 @@ float proceduralCloudDensity(VkVolumeInstance vol, vec3 localPos) {
         normPos.x * baseScale + vol.cloud_offset_x,
         normPos.y * 1.35,
         normPos.z * baseScale + vol.cloud_offset_z);
+    vec3 seedOffset = vec3(vol.cloud_seed * 0.137, vol.cloud_seed * 0.317, vol.cloud_seed * 0.719);
+    cloudCoord += seedOffset;
 
     float coverage = clamp(vol.cloud_coverage, 0.0, 1.0);
     float detail = clamp(vol.cloud_detail, 0.0, 1.0);
@@ -407,19 +412,21 @@ float proceduralCloudDensity(VkVolumeInstance vol, vec3 localPos) {
     float detailNoise = fbmNoise(warped * mix(2.8, 7.0, detail) + vec3(31.0, 7.0, 19.0), 2);
 
     float puffy = smoothstep(0.32, 0.88, billow);
-    float shape = mix(base, base * 0.45 + puffy * 0.75, 0.72);
+    float cumulus = clamp((vol.density_multiplier - 0.38) / 0.85, 0.0, 1.0);
+    float shape = mix(base, base * 0.45 + puffy * 0.75, mix(0.55, 0.9, cumulus));
     shape -= detailNoise * mix(0.06, 0.28, erosion);
 
-    float threshold = mix(0.78, 0.30, coverage);
+    float threshold = mix(0.80, 0.26, coverage) - cumulus * 0.08;
     float density = max((shape - threshold) / max(1.0 - threshold, 1e-4), 0.0);
 
-    float bottom = smoothstep(0.12, 0.42, normPos.y);
-    float top = 1.0 - smoothstep(0.72, 1.02, normPos.y);
-    float heightProfile = bottom * top;
+    float bottom = smoothstep(mix(0.12, 0.04, cumulus), mix(0.42, 0.24, cumulus), normPos.y);
+    float top = 1.0 - smoothstep(mix(0.72, 0.82, cumulus), 1.02, normPos.y);
+    float dome = mix(1.0, smoothstep(0.08, 0.58, normPos.y) * (1.0 - smoothstep(0.88, 1.04, normPos.y)) + 0.25, cumulus);
+    float heightProfile = bottom * top * dome;
 
     vec3 edge = vec3(0.5) - abs(normPos - vec3(0.5));
     float edgeFalloff = smoothstep(0.0, max(vol.cloud_edge_fade, 0.02), min(edge.x, edge.z));
-    return density * density * heightProfile * edgeFalloff * 4.6;
+    return density * mix(density, sqrt(max(density, 0.0)), cumulus * 0.55) * heightProfile * edgeFalloff * mix(4.6, 3.4, cumulus);
 }
 
 // ============================================================
@@ -452,6 +459,45 @@ void pnanovdb_buf_write_uint32(pnanovdb_buf_t buf, uint byte_offset, uint value)
 void pnanovdb_buf_write_uint64(pnanovdb_buf_t buf, uint byte_offset, uvec2 value) {}
 
 #include "PNanoVDB.h"
+
+// ── Persistent-accessor trilinear sampler ─────────────────────────────────
+// Caller must have pre-fetched buf/mapH/rootH and called pnanovdb_readaccessor_init
+// once. The accessor caches the last walked root→internal→leaf path; reusing it
+// across spatially-coherent march steps (typical step ≪ leaf size = 8 voxels)
+// skips the tree walk on cache hits. This collapses NanoVDB sampling cost in the
+// hot loop from O(tree-depth) to O(1) for the common case.
+float sampleNanoVDBFloatTrilinearAcc(
+    pnanovdb_buf_t buf,
+    pnanovdb_map_handle_t mapH,
+    inout pnanovdb_readaccessor_t acc,
+    vec3 worldPos)
+{
+    pnanovdb_vec3_t wPos = pnanovdb_vec3_uniform(0.0);
+    wPos.x = worldPos.x; wPos.y = worldPos.y; wPos.z = worldPos.z;
+    pnanovdb_vec3_t iPos = pnanovdb_map_apply_inverse(buf, mapH, wPos);
+
+    vec3 idxPos = vec3(iPos.x, iPos.y, iPos.z);
+    vec3 p0 = floor(idxPos - 0.5);
+    vec3 frac = fract(idxPos - 0.5);
+
+    float d[8];
+    for (int i = 0; i < 8; ++i) {
+        pnanovdb_coord_t coord;
+        coord.x = int(p0.x) + ((i & 1) != 0 ? 1 : 0);
+        coord.y = int(p0.y) + ((i & 2) != 0 ? 1 : 0);
+        coord.z = int(p0.z) + ((i & 4) != 0 ? 1 : 0);
+        pnanovdb_address_t addr = pnanovdb_readaccessor_get_value_address(PNANOVDB_GRID_TYPE_FLOAT, buf, acc, coord);
+        d[i] = pnanovdb_read_float(buf, addr);
+    }
+
+    float dx00 = mix(d[0], d[1], frac.x);
+    float dx10 = mix(d[2], d[3], frac.x);
+    float dx01 = mix(d[4], d[5], frac.x);
+    float dx11 = mix(d[6], d[7], frac.x);
+    float dxy0 = mix(dx00, dx10, frac.y);
+    float dxy1 = mix(dx01, dx11, frac.y);
+    return mix(dxy0, dxy1, frac.z);
+}
 
 // Trilinear interpolation of a FloatGrid
 float sampleNanoVDBFloatTrilinear(uint64_t gridAddr, vec3 worldPos) {
@@ -569,6 +615,65 @@ float sampleTemperature(VkVolumeInstance vol, vec3 worldPos) {
     return sampleNanoVDBFloatTrilinear(vol.vdb_temp_address, localPos);
 }
 
+// ── Persistent-accessor density sampler ───────────────────────────────────
+// Same dispatch as sampleDensity but routes volume_type==2 NanoVDB reads through
+// the caller's pre-initialized accessor. Other volume types (homogeneous, procedural,
+// cloud) ignore the accessor params. Caller must guarantee buf/mapH are valid when
+// vol.volume_type == 2 && vol.vdb_grid_address != 0; otherwise the accessor args are
+// untouched.
+float sampleDensityAcc(
+    VkVolumeInstance vol,
+    vec3 worldPos,
+    pnanovdb_buf_t buf,
+    pnanovdb_map_handle_t mapH,
+    inout pnanovdb_readaccessor_t acc)
+{
+    vec3 localPos;
+    localPos.x = vol.inv_transform[0] * worldPos.x + vol.inv_transform[1] * worldPos.y
+               + vol.inv_transform[2] * worldPos.z + vol.inv_transform[3];
+    localPos.y = vol.inv_transform[4] * worldPos.x + vol.inv_transform[5] * worldPos.y
+               + vol.inv_transform[6] * worldPos.z + vol.inv_transform[7];
+    localPos.z = vol.inv_transform[8] * worldPos.x + vol.inv_transform[9] * worldPos.y
+               + vol.inv_transform[10] * worldPos.z + vol.inv_transform[11];
+
+    if (any(lessThan(localPos, vol.aabb_min)) || any(greaterThan(localPos, vol.aabb_max))) {
+        return 0.0;
+    }
+
+    float density = 1.0;
+
+    if (vol.volume_type == 0) {
+        density = 1.0;
+    } else if (vol.volume_type == 1) {
+        vec3 normPos = (localPos - vol.aabb_min) / max(vol.aabb_max - vol.aabb_min, vec3(1e-5));
+        vec3 noiseCoord = normPos * vol.noise_scale;
+        density = fbmNoise(noiseCoord, 4);
+        vec3 edgeDist = vec3(0.5) - abs(normPos - vec3(0.5));
+        float edgeFalloff = min(min(edgeDist.x, edgeDist.y), edgeDist.z);
+        density *= smoothstep(0.0, 0.1, edgeFalloff);
+    } else if (vol.volume_type == 2) {
+        if (vol.vdb_grid_address != 0) {
+            vec3 vdbWorldPos = localPos;
+            vdbWorldPos.x -= vol.pivot_offset[0];
+            vdbWorldPos.y -= vol.pivot_offset[1];
+            vdbWorldPos.z -= vol.pivot_offset[2];
+            density = sampleNanoVDBFloatTrilinearAcc(buf, mapH, acc, vdbWorldPos);
+        } else {
+            vec3 normPos = (localPos - vol.aabb_min) / max(vol.aabb_max - vol.aabb_min, vec3(1e-5));
+            vec3 noiseCoord = normPos * max(vol.noise_scale, 1.0);
+            density = fbmNoise(noiseCoord, 4);
+            vec3 edgeDist = vec3(0.5) - abs(normPos - vec3(0.5));
+            density *= smoothstep(0.0, 0.1, min(min(edgeDist.x, edgeDist.y), edgeDist.z));
+        }
+    } else if (vol.volume_type == 3 || vol.source_type == 3) {
+        density = proceduralCloudDensity(vol, localPos);
+    }
+
+    density = max((density - vol.density_remap_low) / max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
+    density *= vol.density_multiplier;
+    return density;
+}
+
 // ============================================================
 // Density Sampling — supports homogeneous and procedural noise
 // ============================================================
@@ -634,6 +739,56 @@ float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
     density *= vol.density_multiplier;
     
     return density;
+}
+
+// Accessor-aware lightMarch. Reuses the caller's density-grid accessor so the
+// shadow-march inner loop also benefits from leaf-level cache hits.
+float lightMarchAcc(
+    VkVolumeInstance vol,
+    vec3 pos,
+    vec3 lightDir,
+    float maxDist,
+    pnanovdb_buf_t buf,
+    pnanovdb_map_handle_t mapH,
+    inout pnanovdb_readaccessor_t acc)
+{
+    if (vol.shadow_steps <= 0) return 1.0;
+    if (maxDist <= 1e-4) return 1.0;
+
+    float sigma_t = vol.scatter_coefficient + vol.absorption_coefficient;
+    if (sigma_t <= EPSILON) return 1.0;
+
+    int reqSteps = clamp(vol.shadow_steps, 1, 64);
+    float dMid = sampleDensityAcc(vol, pos + lightDir * (0.5 * maxDist), buf, mapH, acc);
+    float tauHint = max(0.0, dMid) * sigma_t * maxDist;
+    if (tauHint <= 0.02) return 1.0;
+    float stepScale = clamp(sqrt(tauHint), 0.25, 1.0);
+    int steps = int(ceil(float(reqSteps) * stepScale));
+    steps = clamp(steps, 3, min(reqSteps, 16));
+
+    float stepSize = maxDist / (float(steps) * 2.0);
+    stepSize = max(stepSize, 1e-5);
+    float jitter = fract(sin(dot(pos, vec3(12.9898, 78.233, 37.719)) +
+                             dot(lightDir, vec3(39.346, 11.135, 83.155))) * 43758.5453);
+
+    float s_trans = 0.0;
+    for (int i = 0; i < steps; i++) {
+        vec3 samplePos = pos + lightDir * (float(i) + jitter + 0.5) * stepSize;
+        float d = sampleDensityAcc(vol, samplePos, buf, mapH, acc);
+        s_trans += d * sigma_t * stepSize;
+        if (s_trans > 10.0) break;
+    }
+
+    float beers = exp(-s_trans);
+    float phys_trans = beers;
+    if (vol.scatter_multi > 0.0) {
+        float albedo_lum = dot(vol.scatter_color, vec3(0.2126, 0.7152, 0.0722));
+        float beers_soft = exp(-s_trans * 0.25);
+        phys_trans = beers * (1.0 - vol.scatter_multi * albedo_lum)
+                   + beers_soft * (vol.scatter_multi * albedo_lum);
+    }
+
+    return 1.0 - vol.shadow_strength * (1.0 - phys_trans);
 }
 
 // ============================================================
@@ -728,6 +883,32 @@ void main() {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // Persistent NanoVDB accessor — initialized ONCE per ray, reused across all
+    // density samples in the main march, solid probe, and lightMarch inner loops.
+    // For typical step_size ≪ 8 voxels (leaf size), most consecutive samples land
+    // in the same leaf and the accessor's cached path skips the tree walk entirely.
+    // Non-NanoVDB volumes (homogeneous, procedural, cloud) ignore these handles.
+    // ══════════════════════════════════════════════════════════════════════════
+    pnanovdb_buf_t        vdbBuf;
+    pnanovdb_map_handle_t vdbMapH;
+    pnanovdb_readaccessor_t vdbAcc;
+    {
+        vdbBuf.address = (vol.volume_type == 2 && vol.vdb_grid_address != 0) ? vol.vdb_grid_address : uint64_t(0);
+        if (vdbBuf.address != 0) {
+            pnanovdb_grid_handle_t gridH; gridH.address.byte_offset = 0u;
+            pnanovdb_tree_handle_t treeH = pnanovdb_grid_get_tree(vdbBuf, gridH);
+            pnanovdb_root_handle_t rootH = pnanovdb_tree_get_root(vdbBuf, treeH);
+            vdbMapH = pnanovdb_grid_get_map(vdbBuf, gridH);
+            pnanovdb_readaccessor_init(vdbAcc, rootH);
+        } else {
+            // Dummy zero-init so unrelated reads through Acc variants are well-defined.
+            vdbMapH.address.byte_offset = 0u;
+            pnanovdb_root_handle_t dummyRoot; dummyRoot.address.byte_offset = 0u;
+            pnanovdb_readaccessor_init(vdbAcc, dummyRoot);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // SOLID SURFACE DETECTION inside the volume AABB
     // If a solid triangle exists between tNear and tFar, we must stop the march
     // just before it and signal raygen to fire the next bounce with
@@ -748,8 +929,8 @@ void main() {
         if (sigmaTCoeff > EPSILON && marchDistProbe > 1e-4) {
             float tA = tNear + min(0.05 * marchDistProbe, 0.25);
             float tB = tNear + 0.5 * marchDistProbe;
-            float dA = sampleDensity(vol, rayOrigin + rayDir * tA);
-            float dB = sampleDensity(vol, rayOrigin + rayDir * tB);
+            float dA = sampleDensityAcc(vol, rayOrigin + rayDir * tA, vdbBuf, vdbMapH, vdbAcc);
+            float dB = sampleDensityAcc(vol, rayOrigin + rayDir * tB, vdbBuf, vdbMapH, vdbAcc);
             float dAvg = max(0.0, 0.4 * dA + 0.6 * dB);
             float tauEst = dAvg * sigmaTCoeff * marchDistProbe;
             float transEst = exp(-tauEst);
@@ -826,7 +1007,7 @@ void main() {
     while (t < tFar && step < maxSteps) {
         vec3  samplePos = rayOrigin + rayDir * t;
         
-        float density = sampleDensity(vol, samplePos);
+        float density = sampleDensityAcc(vol, samplePos, vdbBuf, vdbMapH, vdbAcc);
         // Stochastic cutoff for sparse boundaries (OptiX Parity)
         if (density <= rnd(payload.seed) * 0.01) {
             t += baseStep;
@@ -899,8 +1080,12 @@ void main() {
         if (sigma_s_local > 0.0) {
             vec3 inscatter = vec3(0.0);
             
-            // Sample lights for in-scattering
-            if (cam.lightCount > 0u) {
+            // Sample scene lights for object volumes. For the procedural sky cloud,
+            // Nishita already provides the sun/sky block below; sampling the default
+            // directional light here doubles the light march cost and shifts parity
+            // away from the OptiX sky-cloud path.
+            bool useSceneLights = !(worldData.w.mode == 2 && (vol.volume_type == 3 || vol.source_type == 3));
+            if (useSceneLights && cam.lightCount > 0u) {
                 int maxLightsToSample = min(int(cam.lightCount), 2);
                 float lightWeight = float(cam.lightCount) / float(maxLightsToSample);
                 for (int ls = 0; ls < maxLightsToSample; ls++) {
@@ -940,7 +1125,7 @@ void main() {
                     float shadowTr = 1.0;
                     if (sigma_t_local * dt > 0.02) {
                         float shadowMaxDist = min(lightDist, max(8.0 * baseStep, marchDist * 0.35));
-                        shadowTr = lightMarch(vol, samplePos, lightDir, shadowMaxDist);
+                        shadowTr = lightMarchAcc(vol, samplePos, lightDir, shadowMaxDist, vdbBuf, vdbMapH, vdbAcc);
                     }
                     
                     vec3 lightColor = light.color.rgb * light.color.a;
@@ -961,7 +1146,7 @@ void main() {
                 float sunShadowTr = 1.0;
                 if (sigma_t_local * dt > 0.02) {
                     float sunShadowMaxDist = max(12.0 * baseStep, marchDist * 0.45);
-                    sunShadowTr = lightMarch(vol, samplePos, sunDir, sunShadowMaxDist);
+                    sunShadowTr = lightMarchAcc(vol, samplePos, sunDir, sunShadowMaxDist, vdbBuf, vdbMapH, vdbAcc);
                 }
                 
                 vec3 sunLi = sampleTransmittanceLUT(samplePos, sunDir) * worldData.w.sunColor * worldData.w.sunIntensity;

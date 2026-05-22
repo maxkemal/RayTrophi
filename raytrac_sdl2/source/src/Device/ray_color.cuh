@@ -457,6 +457,7 @@ __device__ float sample_procedural_cloud_density(const GpuVDBVolume& vol, const 
         norm_pos.x * base_scale + vol.cloud_offset_x,
         norm_pos.y * 1.35f,
         norm_pos.z * base_scale + vol.cloud_offset_z);
+    cloud_pos += make_float3(vol.cloud_seed * 0.137f, vol.cloud_seed * 0.317f, vol.cloud_seed * 0.719f);
 
     float coverage = fmaxf(0.0f, fminf(1.0f, vol.cloud_coverage));
     float detail = fmaxf(0.0f, fminf(1.0f, vol.cloud_detail));
@@ -1226,17 +1227,14 @@ __device__ float3 gpu_get_aerial_perspective(const WorldData& world, float3 colo
     float4 trans4 = tex2D<float4>(world.lut.transmittance_lut, u, v);
     float3 transmittance = make_float3(trans4.x, trans4.y, trans4.z);
     
-    // INCREASED FOG IMPACT (100 -> 300) - Toned down from 1000 to prevent whitening
-    float densityFactor = 1.0f + world.nishita.fog_density * 300.0f;
-    float effectiveDist = dist * densityFactor;
-    
     const float min_dist = world.advanced.aerial_min_distance;
     const float max_dist = world.advanced.aerial_max_distance;
     float ramp = (dist < min_dist) ? 0.0f : fminf(1.0f, (dist - min_dist) / fmaxf(1.0f, max_dist - min_dist));
     
-    // Adjusted horizon scaling (20km -> 10km) to make haze more apparent
-    float distFactor = fminf(1.0f, effectiveDist / 10000.0f);
-    distFactor *= (ramp * ramp); 
+    float aerialDensity = fmaxf(0.0f, world.advanced.aerial_density);
+    float atmosphereDensity = fmaxf(0.001f, world.nishita.air_density * 0.60f + world.nishita.dust_density * 0.40f);
+    float densityFactor = aerialDensity * atmosphereDensity * (1.0f + world.nishita.fog_density * 120.0f);
+    float distFactor = (1.0f - expf(-(dist / 10000.0f) * densityFactor)) * (ramp * ramp);
     
     float3 finalTrans = make_float3(powf(transmittance.x, distFactor), powf(transmittance.y, distFactor), powf(transmittance.z, distFactor));
     
@@ -1263,6 +1261,44 @@ __device__ float3 gpu_get_aerial_perspective(const WorldData& world, float3 colo
     }
 
     return res;
+}
+
+__device__ float3 rc_blend_environment_overlay(const float3& base, const float3& sampled, float intensity, int blendMode) {
+    float strength = fmaxf(0.0f, intensity);
+    float amount = fminf(strength, 1.0f);
+    float3 overlay = sampled * strength;
+
+    if (blendMode == 1) {
+        return base * (make_float3(1.0f) * (1.0f - amount) + sampled * amount);
+    }
+    if (blendMode == 2) {
+        return base + overlay;
+    }
+    if (blendMode == 3) {
+        return overlay;
+    }
+    return base * (1.0f - amount) + overlay * amount;
+}
+
+__device__ float3 rc_apply_nishita_environment_overlay(const WorldData& world, const float3& base, const float3& dir) {
+    if (!world.advanced.env_overlay_enabled || !world.advanced.env_overlay_tex) {
+        return base;
+    }
+
+    float theta = acosf(fminf(fmaxf(dir.y, -1.0f), 1.0f));
+    float phi = atan2f(-dir.z, dir.x) + M_PIf;
+    float u = phi * (0.5f * M_1_PIf);
+    float v = theta * M_1_PIf;
+    u -= world.advanced.env_overlay_rotation / 360.0f;
+    u -= floorf(u);
+
+    float4 tex = tex2D<float4>(world.advanced.env_overlay_tex, u, v);
+    float3 sampled = make_float3(tex.x, tex.y, tex.z);
+    return rc_blend_environment_overlay(
+        base,
+        sampled,
+        world.advanced.env_overlay_intensity,
+        world.advanced.env_overlay_blend_mode);
 }
 
 __device__ float3 evaluate_background(const WorldData& world, const float3& origin, const float3& dir, curandState* rng, bool skip_cloud_overlay = false) {
@@ -1367,6 +1403,7 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
         // Clouds are a direct background layer.  For glass/refraction paths they
         // can read like dirt painted onto the material, while Vulkan's miss shader
         // returns only sky radiance here.
+        radiance = rc_apply_nishita_environment_overlay(world, radiance, dir);
         return rc_apply_weather_sky(world.weather, radiance, dir);
     }
 
@@ -2296,7 +2333,8 @@ __device__ float3 raymarch_gas_volume(
     return accumulated_color;
 }
 
-__device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_out = nullptr, float3* primary_normal_out = nullptr, int* primary_hit_out = nullptr) {
+__device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_out = nullptr, float3* primary_normal_out = nullptr, int* primary_hit_out = nullptr,
+                            float3* primary_world_pos_out = nullptr, int* primary_material_id_out = nullptr) {
     float3 color = make_float3(0.0f, 0.0f, 0.0f);
     float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
     // max_depth = total path bounces (must be >= 1). bounce=1 ⇒ primary
@@ -2344,6 +2382,9 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
                 if (primary_albedo_out) *primary_albedo_out = payload.primary_albedo;
                 if (primary_normal_out) *primary_normal_out = payload.primary_normal;
                 if (primary_hit_out) *primary_hit_out = payload.primary_hit;
+                // Stylize AOV: world hit position; hair has no material index → leave -1 (unknown)
+                if (primary_world_pos_out) *primary_world_pos_out = ray.origin + ray.direction * payload.t;
+                if (primary_material_id_out) *primary_material_id_out = -1;
             }
             color += throughput * payload.color;
             
@@ -2384,6 +2425,8 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
             if (primary_albedo_out) *primary_albedo_out = make_float3(0.0f);
             if (primary_normal_out) *primary_normal_out = make_float3(0.0f);
             if (primary_hit_out) *primary_hit_out = 0;
+            if (primary_world_pos_out) *primary_world_pos_out = make_float3(0.0f);
+            if (primary_material_id_out) *primary_material_id_out = -1;
             // Miss on primary ray - write -1 to pick buffer (no object)
             if (optixLaunchParams.pick_buffer != nullptr && optixLaunchParams.frame_number == 0) {
                 const uint3 launch_idx = optixGetLaunchIndex();
@@ -2671,10 +2714,15 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
                 if (primary_albedo_out) *primary_albedo_out = payload.primary_albedo;
                 if (primary_normal_out) *primary_normal_out = payload.primary_normal;
                 if (primary_hit_out) *primary_hit_out = payload.primary_hit;
+                // Stylize AOV: world hit position + real material id (for outline boundaries)
+                if (primary_world_pos_out) *primary_world_pos_out = ray.origin + ray.direction * payload.t;
+                if (primary_material_id_out) *primary_material_id_out = payload.material_id;
             } else {
                 if (primary_albedo_out) *primary_albedo_out = make_float3(0.0f);
                 if (primary_normal_out) *primary_normal_out = make_float3(0.0f);
                 if (primary_hit_out) *primary_hit_out = 0;
+                if (primary_world_pos_out) *primary_world_pos_out = make_float3(0.0f);
+                if (primary_material_id_out) *primary_material_id_out = -1;
             }
         }
 

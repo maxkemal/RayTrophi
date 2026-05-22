@@ -98,6 +98,7 @@ struct RayPayload {
     float    primaryTransmission;
     float    primaryMetallic;
     uint     bounceType;
+    uint     primaryMaterialId;   // Stylize AOV: real material index of the primary hit
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -277,8 +278,8 @@ struct VkWorldDataExtended {
     float altitude;
     float planetRadius;
     float atmosphereHeight;
-    float _pad1;
-    float _pad2;
+    int   multiScatterEnabled;
+    float multiScatterFactor;
     
     // ════════════════════════════ CLOUD LAYER 1 PARAMETERS (64 bytes)
     int   cloudsEnabled;
@@ -326,7 +327,7 @@ struct VkWorldDataExtended {
     int   aerialEnabled;
     float aerialMinDistance;
     float aerialMaxDistance;
-    float _pad5_aerial;
+    float aerialDensity;
 
     int   weatherEnabled;
     int   weatherType;
@@ -347,6 +348,10 @@ struct VkWorldDataExtended {
     float envIntensity;
     float envRotation;
     int   _pad5;                 // nishitaLutReady: Vulkan binding 8 has valid LUT samplers
+    int   envOverlayEnabled;
+    int   envOverlayBlendMode;
+    float envOverlayIntensity;
+    float envOverlayRotation;
     uvec2 transmittanceLUT;      // 64-bit handle as uvec2
     uvec2 skyviewLUT;            // 64-bit handle as uvec2
     uvec2 multiScatterLUT;       // 64-bit handle as uvec2
@@ -410,7 +415,8 @@ struct VkVolumeInstance {
     float cloud_edge_fade;
     float cloud_offset_x;
     float cloud_offset_z;
-    float _ext_reserved[13];
+    float cloud_seed;
+    float _ext_reserved[12];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
@@ -510,6 +516,7 @@ float ch_proceduralCloudDensity(VkVolumeInstance vol, vec3 lp, vec3 bmin, vec3 b
         norm.x * baseScale + vol.cloud_offset_x,
         norm.y * 1.35,
         norm.z * baseScale + vol.cloud_offset_z);
+    cloudCoord += vec3(vol.cloud_seed * 0.137, vol.cloud_seed * 0.317, vol.cloud_seed * 0.719);
 
     float coverage = clamp(vol.cloud_coverage, 0.0, 1.0);
     float detail = clamp(vol.cloud_detail, 0.0, 1.0);
@@ -1480,8 +1487,7 @@ bool estimateWaterDepthGL(vec3 hitPos, float maxDepth, out float waterDepth, out
     vec3 probeOrigin = hitPos - vec3(0.0, 0.05, 0.0);
     vec3 probeDir = vec3(0.0, -1.0, 0.0);
     uint probeFlags = gl_RayFlagsTerminateOnFirstHitEXT
-                    | gl_RayFlagsSkipClosestHitShaderEXT
-                    | gl_RayFlagsNoOpaqueEXT;
+                    | gl_RayFlagsSkipClosestHitShaderEXT;
 
     for (int i = 0; i < 7; ++i) {
         float mid = mix(low, high, 0.5);
@@ -2313,6 +2319,7 @@ if (emissionTexID > 0) {
         payload.primaryHit = 1u;
         payload.primaryTransmission = transmission;
         payload.primaryMetallic = metallic;
+        payload.primaryMaterialId = matIndex;   // Stylize AOV: real material boundary for outlines
     }
     worldNormal = tangentNormal;
     worldNormal = weatherSurfaceNormal(hitPos, worldNormal, weatherSupportNormal);
@@ -2415,8 +2422,7 @@ if (emissionTexID > 0) {
                             // SkipClosestHit → no closest-hit overhead; shadow value set by any-hit/miss only
                             // missIndex=1 → shadow_miss.rmiss sets shadowOccluded=false when ray escapes
                             uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
-                                             | gl_RayFlagsSkipClosestHitShaderEXT
-                                             | gl_RayFlagsNoOpaqueEXT; // force anyhit even on OPAQUE geometry
+                                             | gl_RayFlagsSkipClosestHitShaderEXT;
                             // mask 0x01 = triangles only — volume AABBs have mask 0x02 so
                             // they are invisible to shadow rays and cannot cast hard shadows.
                             traceRayEXT(topLevelAS, shadowFlags, 0x01, 0, 1, 1, shadowOrigin, tmin, wi, tmax, 1);
@@ -2489,8 +2495,7 @@ if (emissionTexID > 0) {
             float sunTmin = SHADOW_TMIN;
             float sunTmax = 1e8;
             uint sunShadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
-                                | gl_RayFlagsSkipClosestHitShaderEXT
-                                | gl_RayFlagsNoOpaqueEXT; // force anyhit even on OPAQUE geometry
+                                | gl_RayFlagsSkipClosestHitShaderEXT;
             // mask 0x01 = triangles only — volume AABBs skipped (handled by volumetric transmittance)
             traceRayEXT(topLevelAS, sunShadowFlags, 0x01, 0, 1, 1,
                         sunShadowOrigin, sunTmin, sunDir, sunTmax, 1);

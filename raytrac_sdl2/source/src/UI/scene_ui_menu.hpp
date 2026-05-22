@@ -332,6 +332,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                                  rootJson["viewport_settings"] = {
                                      {"shading_mode", viewport_settings.shading_mode},
                                      {"show_gizmos", viewport_settings.show_gizmos},
+                                     {"show_selection_outline", viewport_settings.show_selection_outline},
                                      {"show_camera_hud", viewport_settings.show_camera_hud},
                                      {"show_focus_ring", viewport_settings.show_focus_ring},
                                      {"show_zoom_ring", viewport_settings.show_zoom_ring}
@@ -393,6 +394,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                                      rootJson["viewport_settings"] = {
                                          {"shading_mode", viewport_settings.shading_mode},
                                          {"show_gizmos", viewport_settings.show_gizmos},
+                                     {"show_selection_outline", viewport_settings.show_selection_outline},
                                          {"show_camera_hud", viewport_settings.show_camera_hud},
                                          {"show_focus_ring", viewport_settings.show_focus_ring},
                                          {"show_zoom_ring", viewport_settings.show_zoom_ring}
@@ -464,6 +466,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                                  rootJson["viewport_settings"] = {
                                      {"shading_mode", viewport_settings.shading_mode},
                                      {"show_gizmos", viewport_settings.show_gizmos},
+                                     {"show_selection_outline", viewport_settings.show_selection_outline},
                                      {"show_camera_hud", viewport_settings.show_camera_hud},
                                      {"show_focus_ring", viewport_settings.show_focus_ring},
                                      {"show_zoom_ring", viewport_settings.show_zoom_ring}
@@ -835,6 +838,9 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             }
             if (ImGui::MenuItem("World Tab", nullptr, &show_world_tab)) { 
                 if (show_world_tab) { tab_to_focus = "World"; focus_properties_panel_next_frame = true; }
+            }
+            if (ImGui::MenuItem("Stylize Tab", nullptr, &show_stylize_tab)) {
+                if (show_stylize_tab) { active_properties_tab = 12; focus_properties_panel_next_frame = true; }
             }
             if (ImGui::MenuItem("Hair & Fur Tab", nullptr, &show_hair_tab)) {
                 if (show_hair_tab) { active_properties_tab = 8; focus_properties_panel_next_frame = true; }

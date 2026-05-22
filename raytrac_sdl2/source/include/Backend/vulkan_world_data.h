@@ -59,7 +59,8 @@ struct VkWorldDataExtended {
     
     float planetRadius;     // Earth radius (meters, ~6371000)
     float atmosphereHeight; // Atmosphere thickness (meters, ~100000)
-    float _pad1, _pad2;     // Padding
+    int   multiScatterEnabled;  // 1 = apply analytic 2nd/3rd-order scatter (matches CPU AtmosphereAdvanced::multi_scatter_enabled)
+    float multiScatterFactor;   // Strength multiplier for multi-scatter (matches AtmosphereAdvanced::multi_scatter_factor)
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // CLOUD LAYER 1 PARAMETERS (64 bytes) - Cache Line 3-5
@@ -122,7 +123,7 @@ struct VkWorldDataExtended {
     int   aerialEnabled;        // 1 = enable aerial perspective (matches AtmosphereAdvanced::aerial_perspective)
     float aerialMinDistance;    // No haze below this (meters, matches aerial_min_distance)
     float aerialMaxDistance;    // Full haze at this (meters, matches aerial_max_distance)
-    float _pad5_aerial;         // Padding
+    float aerialDensity;        // Independent haze density/strength multiplier
 
     // Weather payload (passive until weather rendering is enabled)
     int   weatherEnabled;
@@ -147,6 +148,10 @@ struct VkWorldDataExtended {
     float envIntensity;     // Environment map intensity
     float envRotation;      // Rotation in radians
     int   _pad5;            // repurposed: nishitaLutReady (1 = Vulkan binding 8 LUT samplers valid)
+    int   envOverlayEnabled;
+    int   envOverlayBlendMode;
+    float envOverlayIntensity;
+    float envOverlayRotation; // Rotation in radians
     
     // LUT availability flags (0 or 1 for each, or actual descriptor handles in real impl)
     // Note: Using uint64_t for GPU texture object handles (matches CUDA)

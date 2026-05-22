@@ -624,6 +624,54 @@ bool isMeshPaintTargetHit(const HitRecord& rec, const Paint::MeshPaintAdapter& a
            rec.triangle->getMaterialID() == adapter.getMaterialID();
 }
 
+bool raycastMeshPaintTargetFallback(UIContext& ctx,
+                                    const ImVec2& screen_pos,
+                                    const std::vector<std::pair<int, std::shared_ptr<Triangle>>>& mesh_entries,
+                                    const Paint::MeshPaintAdapter& adapter,
+                                    HitRecord& hit_record) {
+    if (!ctx.scene.camera) {
+        return false;
+    }
+
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    if (display.x <= 1.0f || display.y <= 1.0f) {
+        return false;
+    }
+
+    if (mesh_entries.empty()) {
+        return false;
+    }
+
+    const float u = std::clamp(screen_pos.x / display.x, 0.0f, 1.0f);
+    const float v = std::clamp(1.0f - (screen_pos.y / display.y), 0.0f, 1.0f);
+    Ray ray = ctx.scene.camera->get_ray(u, v);
+
+    bool hit = false;
+    float closest = 1e30f;
+    HitRecord best;
+    for (const auto& entry : mesh_entries) {
+        const auto& tri = entry.second;
+        if (!tri || !tri->visible || tri->getMaterialID() != adapter.getMaterialID()) {
+            continue;
+        }
+        if (tri->getTransformPtr() && !tri->hasAnySkinWeights()) {
+            tri->updateTransformedVertices();
+        }
+
+        HitRecord candidate;
+        if (tri->hit(ray, 0.001f, closest, candidate, true)) {
+            closest = candidate.t;
+            best = candidate;
+            hit = true;
+        }
+    }
+
+    if (hit) {
+        hit_record = best;
+    }
+    return hit;
+}
+
 Vec3 closestPointOnTriangle(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, float& out_u, float& out_v, float& out_w) {
     const Vec3 ab = b - a;
     const Vec3 ac = c - a;
@@ -2795,6 +2843,24 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
         return;
     }
 
+    // Paint-mode material sync: the single-arg updateBackendMaterials only
+    // touches m_backend by design, leaving g_viewport_backend (the dedicated
+    // raster MP viewport, which is also live in Vulkan RT mode) out of sync.
+    // After auto-restore / channel-create / resize / generate-normal etc.
+    // freshly cloned paint Texture* pointers were never uploaded to the
+    // viewport backend, so paint strokes were invisible in Vulkan RT and
+    // Vulkan raster MP until a backend swap forced a full resync.
+    auto syncPaintMaterials = [&]() {
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.renderer.updateBackendMaterials(ctx.scene, ctx.backend_ptr);
+            ctx.backend_ptr->resetAccumulation();
+        }
+        if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
+            ctx.renderer.updateBackendMaterials(ctx.scene, g_viewport_backend.get());
+        }
+    };
+
     const Paint::PaintSurfaceTarget target = adapter->getTarget();
     ImGui::Text("Target: %s", target.display_name.empty() ? "(unknown)" : target.display_name.c_str());
     ImGui::Text("Material: %s", adapter->getMaterialName().empty() ? "(unnamed)" : adapter->getMaterialName().c_str());
@@ -2875,11 +2941,15 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
             if (texture_set && texture_set->initialized) {
                 loaded_stack->flattenInto(*texture_set);
                 adapter->bindTextureSetToMaterial();
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
+                // flattenInto's first-time upload_to_gpu path does not mark
+                // vulkan_dirty (CUDA-only); without explicit dirty the viewport
+                // backend never sees the freshly cloned paint Texture*s.
+                for (int ch = 0; ch < static_cast<int>(Paint::kPaintChannelCount); ++ch) {
+                    if (auto texture = texture_set->getTexture(static_cast<Paint::PaintChannel>(ch))) {
+                        texture->markVulkanDirtyFull();
+                    }
                 }
+                syncPaintMaterials();
                 ctx.start_render = true;
             }
         }
@@ -2982,11 +3052,7 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
                 paint_mode_state.setAdapter(std::make_shared<Paint::MeshPaintAdapter>(&ctx.scene, slot_triangle));
                 adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
             }
-            ctx.renderer.resetCPUAccumulation();
-            if (ctx.backend_ptr) {
-                ctx.renderer.updateBackendMaterials(ctx.scene);
-                ctx.backend_ptr->resetAccumulation();
-            }
+            syncPaintMaterials();
             g_ProjectManager.markModified();
         }
     }
@@ -3023,11 +3089,7 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
         for (Paint::PaintChannel channel : channels_to_create) {
             adapter->assignTextureToChannel(channel);
         }
-        ctx.renderer.resetCPUAccumulation();
-        if (ctx.backend_ptr) {
-            ctx.renderer.updateBackendMaterials(ctx.scene);
-            ctx.backend_ptr->resetAccumulation();
-        }
+        syncPaintMaterials();
         g_ProjectManager.markModified();
     }
 
@@ -3040,11 +3102,7 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
                 if (UIWidgets::SecondaryButton("Resize Texture Set", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
                     if (adapter->resizeTextureSet(paint_mode_state.requested_texture_resolution)) {
                         texture_set = adapter->getTextureSet();
-                        ctx.renderer.resetCPUAccumulation();
-                        if (ctx.backend_ptr) {
-                            ctx.renderer.updateBackendMaterials(ctx.scene);
-                            ctx.backend_ptr->resetAccumulation();
-                        }
+                        syncPaintMaterials();
                         g_ProjectManager.markModified();
                     }
                 }
@@ -3106,11 +3164,7 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
                 paint_mode_state.active_layer_id = 0;
                 releaseLayerThumbnails();
                 texture_set = adapter->getTextureSet();
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
-                }
+                syncPaintMaterials();
                 g_ProjectManager.markModified();
             }
         }
@@ -3137,11 +3191,7 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
                         before_pixels,
                         normal_texture->pixels));
                 }
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
-                }
+                syncPaintMaterials();
                 g_ProjectManager.markModified();
             }
         }
@@ -3180,11 +3230,7 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
                 if (!composite->empty()) {
                     history.record(std::move(composite));
                 }
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
-                }
+                syncPaintMaterials();
                 g_ProjectManager.markModified();
             }
         }
@@ -3545,11 +3591,7 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
         if (ImGui::Button("D##dup", ImVec2(btn_w, btn_h))) {
             if (paint_mode_state.duplicateCurrentLayer() >= 0) {
                 adapter->compositeAndUpload();
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
-                }
+                refreshLayerMaterialPreview();
                 g_ProjectManager.markModified();
             }
         }
@@ -3560,11 +3602,7 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
         if (ImGui::Button("^##up", ImVec2(btn_w, btn_h))) {
             if (paint_mode_state.moveCurrentLayer(1)) {
                 adapter->compositeAndUpload();
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
-                }
+                refreshLayerMaterialPreview();
                 g_ProjectManager.markModified();
             }
         }
@@ -3576,11 +3614,7 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
         if (ImGui::Button("v##dn", ImVec2(btn_w, btn_h))) {
             if (paint_mode_state.moveCurrentLayer(-1)) {
                 adapter->compositeAndUpload();
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
-                }
+                refreshLayerMaterialPreview();
                 g_ProjectManager.markModified();
             }
         }
@@ -3592,11 +3626,7 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
         if (ImGui::Button("M##mrg", ImVec2(btn_w, btn_h))) {
             if (paint_mode_state.mergeCurrentLayerDown()) {
                 adapter->compositeAndUpload();
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
-                }
+                refreshLayerMaterialPreview();
                 g_ProjectManager.markModified();
             }
         }
@@ -3608,11 +3638,7 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
         if (ImGui::Button("F##flat", ImVec2(btn_w, btn_h))) {
             paint_mode_state.flattenAllLayers();
             adapter->compositeAndUpload();
-            ctx.renderer.resetCPUAccumulation();
-            if (ctx.backend_ptr) {
-                ctx.renderer.updateBackendMaterials(ctx.scene);
-                ctx.backend_ptr->resetAccumulation();
-            }
+            refreshLayerMaterialPreview();
             g_ProjectManager.markModified();
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Flatten All");
@@ -3623,11 +3649,7 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
         if (ImGui::Button("X##del", ImVec2(btn_w, btn_h))) {
             if (paint_mode_state.removeCurrentLayer()) {
                 adapter->compositeAndUpload();
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
-                }
+                refreshLayerMaterialPreview();
                 g_ProjectManager.markModified();
             }
         }
@@ -3766,8 +3788,11 @@ void SceneUI::drawPaintChannelTextureSlots(UIContext& ctx, Paint::MeshPaintAdapt
 
                 ctx.renderer.resetCPUAccumulation();
                 if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.renderer.updateBackendMaterials(ctx.scene, ctx.backend_ptr);
                     ctx.backend_ptr->resetAccumulation();
+                }
+                if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene, g_viewport_backend.get());
                 }
                 g_ProjectManager.markModified();
             }
@@ -4320,8 +4345,11 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
             if (any_changed) {
                 ctx.renderer.resetCPUAccumulation();
                 if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.renderer.updateBackendMaterials(ctx.scene, ctx.backend_ptr);
                     ctx.backend_ptr->resetAccumulation();
+                }
+                if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene, g_viewport_backend.get());
                 }
                 if (!composite->empty()) {
                     history.record(std::move(composite));
@@ -4829,11 +4857,15 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         }
         // Final backend sync so the painted texture is fully up-to-date after
         // the throttled mid-stroke updates. Paired with the 220 ms throttle in
-        // the per-dab loop below.
+        // the per-dab loop below. Both backends sync'd because g_viewport_backend
+        // is the live raster MP viewport even when m_backend is Vulkan RT/OptiX.
         if (ctx.backend_ptr) {
-            ctx.renderer.updateBackendMaterials(ctx.scene);
+            ctx.renderer.updateBackendMaterials(ctx.scene, ctx.backend_ptr);
             ctx.backend_ptr->resetAccumulation();
             last_vulkan_paint_sync_time = static_cast<float>(ImGui::GetTime());
+        }
+        if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
+            ctx.renderer.updateBackendMaterials(ctx.scene, g_viewport_backend.get());
         }
     };
 
@@ -4872,8 +4904,20 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
 
     const ImVec2 paint_mouse_pos = alpha_rotate_drag_active ? alpha_rotate_anchor : ImGui::GetMousePos();
     HitRecord rec;
-    const bool has_hit = raycastViewportHit(ctx, paint_mouse_pos, rec);
-    const bool is_target_hit = has_hit && isMeshPaintTargetHit(rec, *adapter);
+    bool has_hit = raycastViewportHit(ctx, paint_mouse_pos, rec);
+    bool is_target_hit = has_hit && isMeshPaintTargetHit(rec, *adapter);
+    if (!is_target_hit &&
+        (!has_hit || (rec.triangle && rec.triangle->getNodeName() == adapter->getNodeName()))) {
+        auto mesh_it = mesh_cache.find(adapter->getNodeName());
+        if (mesh_it != mesh_cache.end()) {
+            HitRecord fallback_rec;
+            if (raycastMeshPaintTargetFallback(ctx, paint_mouse_pos, mesh_it->second, *adapter, fallback_rec)) {
+                rec = fallback_rec;
+                has_hit = true;
+                is_target_hit = true;
+            }
+        }
+    }
 
     if (alpha_rotate_shortcut) {
         const float delta = io.MouseDelta.x + io.MouseDelta.y;

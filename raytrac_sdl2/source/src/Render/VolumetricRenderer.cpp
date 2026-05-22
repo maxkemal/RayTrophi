@@ -131,7 +131,10 @@ bool ensureInternalSkyCloudVolume(SceneData& scene, const WorldData& worldData) 
 
     volume->setProceduralVolumeBounds(boundsMin, boundsMax);
     volume->setTransform(Matrix4x4::identity());
-    volume->density_scale = (std::max)(0.0f, density);
+    // The procedural sky cloud already applies the UI density through the
+    // volume shader below. Keep the VDB instance scale neutral so Vulkan/OptiX
+    // upload does not square the density multiplier.
+    volume->density_scale = 1.0f;
     volume->voxel_size = (std::max)(1.0f, 24.0f / (std::max)(0.1f, scale));
 
     auto shader = volume->getOrCreateShader();
@@ -142,13 +145,15 @@ bool ensureInternalSkyCloudVolume(SceneData& scene, const WorldData& worldData) 
     shader->density.remap_low = 0.0f;
     shader->density.remap_high = 1.0f;
     shader->scattering.color = Vec3(1.0f);
-    shader->scattering.coefficient = 0.0045f;
+    const float ambientStrength = (std::max)(0.55f, n.cloud_ambient_strength);
+    const float densityClass = clamp01((density - 0.25f) / 1.0f);
+    shader->scattering.coefficient = 0.042f * (0.75f + ambientStrength * 0.25f);
     shader->scattering.anisotropy = clamp01(n.cloud_anisotropy);
     shader->scattering.anisotropy_back = (std::max)(-0.99f, (std::min)(0.0f, n.cloud_anisotropy_back));
     shader->scattering.lobe_mix = clamp01(n.cloud_lobe_mix);
-    shader->scattering.multi_scatter = clamp01(n.cloud_silver_intensity * 0.35f);
-    shader->absorption.color = Vec3(0.85f, 0.9f, 1.0f);
-    shader->absorption.coefficient = 0.00008f * (std::max)(0.2f, absorption);
+    shader->scattering.multi_scatter = clamp01(0.45f + n.cloud_silver_intensity * 0.35f + densityClass * 0.15f);
+    shader->absorption.color = Vec3(1.0f);
+    shader->absorption.coefficient = 0.000075f * (std::max)(0.2f, absorption) * (1.0f - densityClass * 0.25f);
     shader->emission.mode = n.cloud_emissive_intensity > 0.001f ? VolumeEmissionMode::Constant : VolumeEmissionMode::None;
     shader->emission.color = Vec3(n.cloud_emissive_color.x, n.cloud_emissive_color.y, n.cloud_emissive_color.z);
     shader->emission.intensity = n.cloud_emissive_intensity * 4.0f;
@@ -290,6 +295,10 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
     // Allow sync for both OptiX (CUDA) and Vulkan backends.
     // Legacy CUDA texture gas volumes are still guarded by g_hasCUDA below.
     const bool skyCloudVolumeChanged = world_data && ensureInternalSkyCloudVolume(scene, *world_data);
+    if (skyCloudVolumeChanged) {
+        g_geometry_dirty = true;
+        g_gas_volumes_dirty = true;
+    }
     if (!backend) return;
 
     if (skyCloudVolumeChanged) {
@@ -339,6 +348,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         gv.cloud_edge_fade = 0.08f;
         gv.cloud_offset_x = 0.0f;
         gv.cloud_offset_z = 0.0f;
+        gv.cloud_seed = 0.0f;
 
         if (proceduralVolume && world_data) {
             const auto& n = world_data->nishita;
@@ -357,6 +367,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.cloud_edge_fade = 0.08f;
             gv.cloud_offset_x = n.cloud_offset_x * 0.00002f;
             gv.cloud_offset_z = n.cloud_offset_z * 0.00002f;
+            gv.cloud_seed = static_cast<float>(n.cloud_seed);
         }
 
         // Shader
@@ -587,18 +598,16 @@ Vec3 VolumetricRenderer::applyAerialPerspective(const SceneData& scene, const Wo
     float3 trans3 = lut->sampleTransmittance(cosTheta, current_altitude, world_data.nishita.atmosphere_height);
     Vec3 transmittance(trans3.x, trans3.y, trans3.z);
     
-    // Matched to GPU density scaling
-    float densityFactor = 1.0f + world_data.nishita.fog_density * 300.0f;
     float clampedDist = (std::min)(dist, 1000000.0f);
-    float effectiveDist = clampedDist * densityFactor;
     
     const float min_dist = world_data.advanced.aerial_min_distance;
     const float max_dist = world_data.advanced.aerial_max_distance;
     float ramp = (clampedDist < min_dist) ? 0.0f : (std::min)(1.0f, (clampedDist - min_dist) / (std::max)(1.0f, max_dist - min_dist));
     
-    // 20km -> 10km scale matched to GPU
-    float distFactor = (std::min)(1.0f, effectiveDist / 10000.0f);
-    distFactor *= (ramp * ramp);
+    float aerialDensity = (std::max)(0.0f, world_data.advanced.aerial_density);
+    float atmosphereDensity = (std::max)(0.001f, world_data.nishita.air_density * 0.60f + world_data.nishita.dust_density * 0.40f);
+    float densityFactor = aerialDensity * atmosphereDensity * (1.0f + world_data.nishita.fog_density * 120.0f);
+    float distFactor = (1.0f - expf(-(clampedDist / 10000.0f) * densityFactor)) * (ramp * ramp);
 
     Vec3 finalTrans(
         powf(transmittance.x, distFactor),

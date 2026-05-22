@@ -1,4 +1,4 @@
-﻿/*
+/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          VulkanBackend.h
@@ -247,6 +247,7 @@ struct BLASCreateInfo {
     uint32_t curveCount = 0;
     
     bool allowUpdate = false;               // For dynamic geometry
+    bool opaqueGeometry = false;            // True when every primitive can skip opacity any-hit
 };
 
 struct VkGeometryData {
@@ -525,7 +526,8 @@ public:
                            const ImageHandle* denoiserColorImage = nullptr,
                            const ImageHandle* denoiserAlbedoImage = nullptr,
                            const ImageHandle* denoiserNormalImage = nullptr,
-                           const ImageHandle* varianceImage = nullptr);
+                           const ImageHandle* varianceImage = nullptr,
+                           const ImageHandle* denoiserPositionImage = nullptr);
     void updateRTTextureDescriptor(uint32_t slot, const ImageHandle& image);
     void clearImage(const ImageHandle& image, float r, float g, float b, float a);
 
@@ -596,6 +598,27 @@ public:
     void destroyImage(ImageHandle& image);
 
     void copyImageToBuffer(const ImageHandle& src, const BufferHandle& dst);
+    // Batched variant — issues N image-to-buffer copies in a single command
+    // buffer with one fence wait. Replaces the N×submit+wait pattern (3× for
+    // the denoiser AOV path), removing per-copy submit/wait overhead which is
+    // the dominant cost on the OIDN frame path.
+    void copyImagesToBuffersBatched(const ImageHandle* srcs, const BufferHandle* dsts, size_t count);
+
+    // Async batched variant for the denoiser path. Records into a persistent
+    // command buffer + signals a persistent fence. Does NOT wait — the caller
+    // calls waitDenoiserCopy() the *next* frame, by which time the fence is
+    // already signaled at steady state. This is the fence-deferred copy that
+    // replaces the per-frame submit+wait stall (~18 ms at 720p aux=1) with a
+    // near-zero wait, while CUDA OIDN work overlaps with the next frame's RT.
+    bool submitDenoiserCopyAsync(const ImageHandle* srcs, const BufferHandle* dsts, size_t count);
+    // Wait for the previously-submitted async denoiser copy. Returns false if
+    // there has been no submit yet (first call) or if the wait failed.
+    bool waitDenoiserCopy(uint64_t timeoutNs = UINT64_MAX);
+    bool hasDenoiserCopyEverSubmitted() const { return m_denoiserCopySlot.everSubmitted; }
+    // Force a drain — used by resize/destroy paths before tearing down staging
+    // buffers or the cmd pool. Safe to call when nothing is in flight.
+    void drainDenoiserCopy();
+
     void copyBufferToImage(const BufferHandle& src, const ImageHandle& dst);
     // Copies a sub-rectangle from `src` into the existing `dst` VkImage. Used
     // by the paint pipeline so that a brush-sized dab does not need a full
@@ -634,6 +657,7 @@ public:
     void updateVolumeBuffer(const void* data, uint64_t size, uint32_t count);
     void updateTerrainLayerBuffer(const void* data, uint64_t size, uint32_t count);
     void updateAtmosphereLUTs(const ImageHandle* lutImages);  // uint256_t array of 4 LUT textures
+    bool generateAtmosphereLUTGPU(const WorldData& world);
     void clearPendingRTTextureDescriptors();
     void removePendingRTTextureDescriptor(const ImageHandle& image);
     
@@ -714,7 +738,76 @@ public:
     VkPipelineLayout m_sculptPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_sculptDescLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_sculptDescPool = VK_NULL_HANDLE;
-    
+
+    // Tonemap Compute Pipeline (GPU HDR -> LDR sRGB pack; removes per-frame CPU tonemap loop)
+    bool createTonemapPipeline(const std::vector<uint32_t>& computeSPV);
+    // Legacy synchronous path — kept as fallback. Submits + waits inside the call.
+    bool traceRaysTonemapAndReadback(uint32_t w, uint32_t h,
+                                     const ImageHandle& hdrImage,
+                                     const ImageHandle& ldrImage,
+                                     const BufferHandle& ldrStaging);
+    // Async path — records into persistent cmd buffer for the given slot and submits
+    // signaling that slot's fence. Does NOT wait. Adapter must call waitFrameSlot()
+    // before reading the staging buffer or reusing the same slot.
+    bool submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h,
+                                 const ImageHandle& hdrImage,
+                                 const ImageHandle& ldrImage,
+                                 const BufferHandle& ldrStaging);
+    bool waitFrameSlot(uint32_t slot, uint64_t timeoutNs = UINT64_MAX);
+    // Updates the persistent tonemap descriptor set with new image views. Caller MUST
+    // ensure no in-flight submission references the previous binding (drain fences first).
+    bool updateTonemapDescriptors(const ImageHandle& hdrImage, const ImageHandle& ldrImage);
+    bool hasTonemapPipeline() const { return m_tonemapPipeline != VK_NULL_HANDLE; }
+    static constexpr uint32_t kFrameSlotCount = 2;
+
+    VkPipeline m_tonemapPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_tonemapPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_tonemapDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_tonemapDescPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_tonemapDescSet = VK_NULL_HANDLE; // persistent, single set, rewritten on image change
+
+    // Atmosphere LUT Compute Pipeline (Nishita LUT generation on Vulkan GPU)
+    bool createAtmosphereLUTPipeline(const std::vector<uint32_t>& computeSPV);
+    bool hasAtmosphereLUTPipeline() const { return m_atmosphereLutPipeline != VK_NULL_HANDLE; }
+    bool updateAtmosphereLUTComputeDescriptors(const ImageHandle* lutImages);
+
+    VkPipeline m_atmosphereLutPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_atmosphereLutPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_atmosphereLutDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_atmosphereLutDescPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_atmosphereLutDescSet = VK_NULL_HANDLE;
+    BufferHandle m_atmosphereLutParamsBuffer;
+
+    // Per-slot persistent command buffer + fence for async submit. Lazy-init on first
+    // submitTraceTonemapAsync. Cmd buffers are allocated from m_commandPool with
+    // RESET_COMMAND_BUFFER semantics (vkBeginCommandBuffer implicitly resets a primary
+    // cmd buf when the pool is not RESET_COMMAND_BUFFER_BIT capable, but here we
+    // call vkResetCommandBuffer explicitly which requires the pool flag — see
+    // createFrameSlots()).
+    struct FrameSlot {
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        bool everSubmitted = false;
+    };
+    FrameSlot m_frameSlots[kFrameSlotCount];
+    VkCommandPool m_frameSlotCommandPool = VK_NULL_HANDLE; // RESET_COMMAND_BUFFER_BIT capable
+    bool ensureFrameSlotsCreated();
+    void destroyFrameSlots();
+
+    // Single-slot persistent cmd buffer + fence for the fence-deferred denoiser
+    // copy. One slot is sufficient: CUDA fully consumes staging before we submit
+    // the next copy (see submitDenoiserCopyAsync notes). Uses the same RESET_-
+    // COMMAND_BUFFER pool as the RT path.
+    struct DenoiserCopySlot {
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        bool everSubmitted = false;
+    };
+    DenoiserCopySlot m_denoiserCopySlot;
+    VkCommandPool    m_denoiserCopyCommandPool = VK_NULL_HANDLE; // RESET_COMMAND_BUFFER_BIT
+    bool ensureDenoiserCopySlotCreated();
+    void destroyDenoiserCopySlot();
+
 private:
     // Core Vulkan handles
     VkInstance m_instance = VK_NULL_HANDLE;
@@ -883,6 +976,12 @@ public:
     void updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) override;
     bool updateTerrainBLASPartial(const std::string& nodeName, const TerrainObject* terrain);
     bool updateMeshBLASPartial(const std::string& nodeName, const std::vector<std::shared_ptr<Triangle>>& triangles);
+    // Append-only fast path for scatter/instance-add mutations: reuses existing BLASes and
+    // only refits the TLAS + appends new HittableInstance TLAS records. Falls back to false
+    // when topology shape changes in a way the incremental path cannot safely diff (removal,
+    // solo-triangle / VDB structure churn, hair-only state, etc.) — caller must then run the
+    // full updateGeometry path.
+    bool tryAppendGeometryIncremental(const std::vector<std::shared_ptr<Hittable>>& objects);
 
     // ========================================================================
     // IBackend - Materials & Textures
@@ -977,7 +1076,7 @@ public:
     void renderProgressive(void* outSurface, void* outWindow, void* outRenderer,
                            int width, int height, void* outFramebuffer, void* outTexture) override;
     void downloadImage(void* outPixels) override;
-    bool getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary = true) override;
+    bool getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary = true, bool includeColor = true) override;
     bool getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool useAuxiliary = true) override;
     int getCurrentSampleCount() const override;
     bool isAccumulationComplete() const override;
@@ -1018,6 +1117,7 @@ public:
      * @param lut Pointer to AtmosphereLUT (may be nullptr)
      */
     void uploadAtmosphereLUT(const AtmosphereLUT* lut);
+    bool generateAtmosphereLUTGPU(const WorldData* worldData);
     void setInteractiveViewportMatcap(int64_t textureID);
     void setInteractiveViewportMatcapPreset(int preset);
 
@@ -1160,9 +1260,19 @@ protected:
     std::vector<float> m_denoiserColorPixels;
     std::vector<float> m_denoiserAlbedoPixels;
     std::vector<float> m_denoiserNormalPixels;
+    std::vector<float> m_denoiserPositionPixels;   // Stylize AOV: stride 4 (x,y,z,encoded matid), bottom-up
     // Output resources
     VulkanRT::ImageHandle m_outputImage;
     VulkanRT::BufferHandle m_stagingBuffer;
+    // GPU-tonemapped LDR target: RGBA8 storage image + small staging.
+    // When valid, render path skips the per-frame CPU Reinhard+sRGB loop.
+    // Two stagings + the device's two frame slots implement frames-in-flight pipelining:
+    // CPU consumes slot[(N-1)%2] while GPU writes slot[N%2]. Single shared LDR image
+    // is safe because both submissions go to the same queue in order.
+    VulkanRT::ImageHandle m_tonemappedImage;
+    VulkanRT::BufferHandle m_tonemappedStagings[2];
+    bool m_tonemappedSlotInFlight[2] = {false, false};
+    uint32_t m_tonemappedFrameSlot = 0;
     VulkanRT::ImageHandle m_denoiserColorImage;
     VulkanRT::ImageHandle m_denoiserAlbedoImage;
     VulkanRT::ImageHandle m_denoiserNormalImage;
@@ -1170,6 +1280,10 @@ protected:
     VulkanRT::BufferHandle m_denoiserColorStagingBuffer;
     VulkanRT::BufferHandle m_denoiserAlbedoStagingBuffer;
     VulkanRT::BufferHandle m_denoiserNormalStagingBuffer;
+    // Stylize AOV: primary-hit world position + depth (rgba32f). Host-readback only;
+    // no CUDA interop needed since stylize is a CPU post pass.
+    VulkanRT::ImageHandle m_denoiserPositionImage;
+    VulkanRT::BufferHandle m_denoiserPositionStagingBuffer;
 
     // ---- GPU-direct denoiser interop (Vulkan→CUDA for OIDN) ----
     // Parallel set of staging buffers whose VkDeviceMemory is exportable to
@@ -1232,6 +1346,7 @@ protected:
     uint32_t m_textureUploadR8Count = 0;
     uint32_t m_textureUploadRGBA8Count = 0;
     uint32_t m_textureUploadFloatCount = 0;
+    uint32_t m_textureUploadRG8Count = 0;
     bool m_textureUploadSummaryDirty = false;
     
     // NanoVDB grid device buffers mapped by vdb_id
@@ -1248,6 +1363,7 @@ protected:
     int64_t m_envTexID = 0;
     // Set to true after uploadAtmosphereLUT() succeeds — used to set _pad5 (nishitaLutReady) in world buffer
     bool m_atmosphereLutReady = false;
+    bool m_atmosphereLutGenerationInProgress = false;
     uint64_t m_lastCameraHash = 0;
     Vec3 m_prevViewDir;
     bool  m_hasPrevView = false;

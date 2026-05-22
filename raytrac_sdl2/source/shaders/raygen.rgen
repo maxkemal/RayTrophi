@@ -132,8 +132,8 @@ struct VkWorldDataExtended {
     float altitude;
     float planetRadius;
     float atmosphereHeight;
-    float _pad1;
-    float _pad2;
+    int   multiScatterEnabled;
+    float multiScatterFactor;
     
     // ════════════════════════════ CLOUD LAYER 1 PARAMETERS (64 bytes)
     int   cloudsEnabled;
@@ -181,7 +181,7 @@ struct VkWorldDataExtended {
     int   aerialEnabled;        // 1 = apply aerial perspective
     float aerialMinDistance;    // No haze below this (meters)
     float aerialMaxDistance;    // Full haze at this (meters)
-    float _pad5_aerial;
+    float aerialDensity;        // Independent haze density/strength multiplier
 
     // Weather payload (passive until weather rendering is enabled)
     int   weatherEnabled;
@@ -204,6 +204,10 @@ struct VkWorldDataExtended {
     float envIntensity;
     float envRotation;
     int   _pad5;                 // nishitaLutReady: Vulkan binding 8 has valid LUT samplers
+    int   envOverlayEnabled;
+    int   envOverlayBlendMode;
+    float envOverlayIntensity;
+    float envOverlayRotation;
     uvec2 transmittanceLUT;      // 64-bit handle as uvec2
     uvec2 skyviewLUT;            // 64-bit handle as uvec2
     uvec2 multiScatterLUT;       // 64-bit handle as uvec2
@@ -221,6 +225,10 @@ layout(set = 0, binding = 13, rgba32f) uniform image2D denoiserColorImage;
 layout(set = 0, binding = 14, rgba32f) uniform image2D denoiserAlbedoImage;
 layout(set = 0, binding = 15, rgba32f) uniform image2D denoiserNormalImage;
 layout(set = 0, binding = 16, r32f) uniform image2D varianceImage;
+// Stylize AOV: .rgb = primary-hit world position, .a = linear depth (distance from camera).
+// Written last-wins per sample (geometry is stable); CPU stylize reconstructs surface-
+// locked strokes / depth scaling from it. Always rgba32f — half-float can't hold world coords.
+layout(set = 0, binding = 17, rgba32f) uniform image2D denoiserPositionImage;
 
 // ════════════════════════════════════════════════════════════════════════════════
 // Binding 9: Volume Instances SSBO (OptiX-compatible volumetric data)
@@ -339,6 +347,7 @@ struct RayPayload {
     float primaryTransmission;
     float primaryMetallic;
     uint  bounceType;
+    uint  primaryMaterialId;   // Stylize AOV: real material index of the primary hit
 };
 
 layout(location = 0) rayPayloadEXT RayPayload payload;
@@ -579,8 +588,7 @@ float godRaysSolarCoreFade(float sunDot, float sunSizeDeg) {
 float traceGodRaysSunOcclusion(vec3 origin, vec3 sunDir, float maxDist) {
     shadowOccluded = true;
     uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
-                     | gl_RayFlagsSkipClosestHitShaderEXT
-                     | gl_RayFlagsNoOpaqueEXT;
+                     | gl_RayFlagsSkipClosestHitShaderEXT;
     traceRayEXT(topLevelAS, shadowFlags, 0x01, 0, 1, 1, origin, T_MIN, sunDir, maxDist, 1);
     return shadowOccluded ? 0.0 : 1.0;
 }
@@ -778,6 +786,7 @@ void main() {
     vec3 primaryRayDir    = rayDir;
     vec3 primaryAlbedo    = vec3(0.0);
     vec3 primaryNormal    = vec3(0.0);
+    uint primaryMaterialId = 0xFFFFFFFFu;
     bool primaryHitValid  = false;
     float firstHitTransmission = 0.0;
     float firstHitMetallic = 0.0;
@@ -814,6 +823,7 @@ void main() {
         payload.primaryTransmission = 0.0;
         payload.primaryMetallic = 0.0;
         payload.bounceType = BOUNCE_SPECULAR;
+        payload.primaryMaterialId = 0xFFFFFFFFu;
 
         // When the previous bounce was a volume that detected a solid surface inside,
         // skip AABB (procedural) geometry so the solid triangle is hit directly.
@@ -838,6 +848,7 @@ void main() {
         if (bounce == 0 && !primaryHitValid && payload.primaryHit != 0u) {
             primaryAlbedo = payload.primaryAlbedo;
             primaryNormal = payload.primaryNormal;
+            primaryMaterialId = payload.primaryMaterialId;
             firstHitTransmission = payload.primaryTransmission;
             firstHitMetallic = payload.primaryMetallic;
             primaryHitValid = true;
@@ -968,10 +979,10 @@ void main() {
             float maxD   = worldData.w.aerialMaxDistance;
             float ramp   = (hitDist < minD) ? 0.0 : clamp((hitDist - minD) / max(1.0, maxD - minD), 0.0, 1.0);
             
-            // INCREASED FOG IMPACT matches OptiX (300x, then /10000)
-            float densityFactor = 1.0 + worldData.w.fogDensity * 300.0;
-            float effectiveDist = hitDist * densityFactor;
-            float distFactor    = clamp(effectiveDist / 10000.0, 0.0, 1.0) * (ramp * ramp);
+            float aerialDensity = max(worldData.w.aerialDensity, 0.0);
+            float atmosphereDensity = max(worldData.w.airDensity * 0.60 + worldData.w.dustDensity * 0.40, 0.001);
+            float densityFactor = aerialDensity * atmosphereDensity * (1.0 + worldData.w.fogDensity * 120.0);
+            float distFactor = (1.0 - exp(-(hitDist / 10000.0) * densityFactor)) * (ramp * ramp);
 
             vec3 finalTrans = pow(transmittance, vec3(distFactor));
 
@@ -993,8 +1004,14 @@ void main() {
             float uS       = az / 6.2831853;
             float vS       = (1.0 - lookupDir.y) * 0.5;
             vec3  skyRad   = texture(atmosphereLUTs[1], vec2(uS, vS)).rgb;
+            float uMS      = clamp((worldData.w.sunDir.y + 0.1) / 1.1, 0.0, 1.0);
+            float vMS      = clamp(altitude / max(1.0, worldData.w.atmosphereHeight), 0.0, 1.0);
+            vec3  msRad    = texture(atmosphereLUTs[2], vec2(uMS, vMS)).rgb;
+            float msWeight = clamp(worldData.w.airDensity * 0.035 + worldData.w.dustDensity * 0.025, 0.0, 0.28)
+                           * ramp;
+            vec3  aerialScatter = skyRad + msRad * worldData.w.atmosphereIntensity * msWeight;
 
-            radiance = radiance * finalTrans + skyRad * (vec3(1.0) - finalTrans);
+            radiance = radiance * finalTrans + aerialScatter * (vec3(1.0) - finalTrans);
         }
     }
 
@@ -1063,5 +1080,20 @@ void main() {
     } else if (cam.frameCount == 0u) {
         imageStore(denoiserAlbedoImage, ivec2(pixel), vec4(0.0, 0.0, 0.0, newTotalSamples));
         imageStore(denoiserNormalImage, ivec2(pixel), vec4(0.5, 0.5, 0.5, newTotalSamples));
+    }
+
+    // Stylize AOV: .rgb = first substantive (non-transparent) world hit position,
+    // .a = material id encoded so outlines key off real material boundaries (not texture
+    // color, which the old albedo proxy did). Encoding: 0 = miss, 1 = hit with unknown
+    // material (hair/volume), >=2 → real material index = a - 2. The CPU reconstructs
+    // linear depth from world position + camera origin, so no separate depth channel needed.
+    // Last-wins is fine — geometry/material are stable across accumulation passes.
+    if (firstHitValid) {
+        float matEncoded = (primaryHitValid && primaryMaterialId != 0xFFFFFFFFu)
+            ? float(primaryMaterialId + 2u)
+            : 1.0;
+        imageStore(denoiserPositionImage, ivec2(pixel), vec4(firstHitPos, matEncoded));
+    } else if (cam.frameCount == 0u) {
+        imageStore(denoiserPositionImage, ivec2(pixel), vec4(0.0, 0.0, 0.0, 0.0));
     }
 }
