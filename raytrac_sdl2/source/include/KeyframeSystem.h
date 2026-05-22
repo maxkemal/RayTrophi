@@ -481,7 +481,7 @@ struct WorldKeyframe {
     float cloud_offset_z = 0.0f;
     float cloud_quality = 1.0f;
     float cloud_detail = 1.0f;
-    int cloud_base_steps = 48;
+    int cloud_base_steps = 8;
     float cloud_height_min = 500.0f;
     float cloud_height_max = 2000.0f;
 
@@ -525,6 +525,7 @@ struct WorldKeyframe {
     int multi_scatter_enabled = 1;
     float multi_scatter_factor = 0.3f;
     int aerial_perspective = 1;
+    float aerial_density = 1.0f;
     float aerial_min_distance = 10.0f;
     float aerial_max_distance = 5000.0f;
     int env_overlay_enabled = 0;
@@ -852,12 +853,13 @@ struct WorldKeyframe {
         }
         result.has_aerial_params = a.has_aerial_params || b.has_aerial_params;
         if (a.has_aerial_params && b.has_aerial_params) {
+            result.aerial_density = a.aerial_density + (b.aerial_density - a.aerial_density) * t;
             result.aerial_min_distance = a.aerial_min_distance + (b.aerial_min_distance - a.aerial_min_distance) * t;
             result.aerial_max_distance = a.aerial_max_distance + (b.aerial_max_distance - a.aerial_max_distance) * t;
         } else if (a.has_aerial_params) {
-            result.aerial_min_distance = a.aerial_min_distance; result.aerial_max_distance = a.aerial_max_distance;
+            result.aerial_density = a.aerial_density; result.aerial_min_distance = a.aerial_min_distance; result.aerial_max_distance = a.aerial_max_distance;
         } else if (b.has_aerial_params) {
-            result.aerial_min_distance = b.aerial_min_distance; result.aerial_max_distance = b.aerial_max_distance;
+            result.aerial_density = b.aerial_density; result.aerial_min_distance = b.aerial_min_distance; result.aerial_max_distance = b.aerial_max_distance;
         }
 
         result.has_multi_scatter = a.has_multi_scatter || b.has_multi_scatter;
@@ -1834,18 +1836,328 @@ struct ObjectAnimationTrack {
 
         // --- WORLD CHANNEL ---
         {
-            auto has = [](const Keyframe& k) { return k.has_world; };
-            const Keyframe* p_world = findPrev(has);
-            const Keyframe* n_world = findNext(has);
-            if (p_world && n_world) {
-                float range = (float)(n_world->frame - p_world->frame);
-                float t = (range > 0) ? (float)(current_frame - p_world->frame) / range : 0.0f;
-                result.world = WorldKeyframe::lerp(p_world->world, n_world->world, t);
-                result.has_world = true;
-            } else if (p_world) {
-                result.world = p_world->world; result.has_world = true;
-            } else if (n_world) {
-                result.world = n_world->world; result.has_world = true;
+            auto interpolateT = [&](const Keyframe* p, const Keyframe* n) {
+                if (!p || !n || p == n) return 0.0f;
+                const float range = float(n->frame - p->frame);
+                return (range > 0.0f) ? float(current_frame - p->frame) / range : 0.0f;
+            };
+
+            auto evalWorldFloat = [&](bool WorldKeyframe::*flag, float WorldKeyframe::*value) {
+                auto has = [&](const Keyframe& k) { return k.has_world && (k.world.*flag); };
+                const Keyframe* p = findPrev(has);
+                const Keyframe* n = findNext(has);
+                if (p && n) {
+                    const float t = interpolateT(p, n);
+                    result.world.*value = (p->world.*value) + ((n->world.*value) - (p->world.*value)) * t;
+                    result.world.*flag = true;
+                    result.has_world = true;
+                } else if (p) {
+                    result.world.*value = p->world.*value;
+                    result.world.*flag = true;
+                    result.has_world = true;
+                } else if (n && n->frame == current_frame) {
+                    result.world.*value = n->world.*value;
+                    result.world.*flag = true;
+                    result.has_world = true;
+                }
+            };
+
+            auto evalWorldInt = [&](bool WorldKeyframe::*flag, int WorldKeyframe::*value) {
+                auto has = [&](const Keyframe& k) { return k.has_world && (k.world.*flag); };
+                const Keyframe* p = findPrev(has);
+                const Keyframe* n = findNext(has);
+                if (p && n) {
+                    const float t = interpolateT(p, n);
+                    result.world.*value = (t < 0.5f) ? (p->world.*value) : (n->world.*value);
+                    result.world.*flag = true;
+                    result.has_world = true;
+                } else if (p) {
+                    result.world.*value = p->world.*value;
+                    result.world.*flag = true;
+                    result.has_world = true;
+                } else if (n && n->frame == current_frame) {
+                    result.world.*value = n->world.*value;
+                    result.world.*flag = true;
+                    result.has_world = true;
+                }
+            };
+
+            auto evalWorldVec3 = [&](bool WorldKeyframe::*flag, Vec3 WorldKeyframe::*value) {
+                auto has = [&](const Keyframe& k) { return k.has_world && (k.world.*flag); };
+                const Keyframe* p = findPrev(has);
+                const Keyframe* n = findNext(has);
+                if (p && n) {
+                    const float t = interpolateT(p, n);
+                    result.world.*value = (p->world.*value) + ((n->world.*value) - (p->world.*value)) * t;
+                    result.world.*flag = true;
+                    result.has_world = true;
+                } else if (p) {
+                    result.world.*value = p->world.*value;
+                    result.world.*flag = true;
+                    result.has_world = true;
+                } else if (n && n->frame == current_frame) {
+                    result.world.*value = n->world.*value;
+                    result.world.*flag = true;
+                    result.has_world = true;
+                }
+            };
+
+            evalWorldVec3(&WorldKeyframe::has_background_color, &WorldKeyframe::background_color);
+            evalWorldFloat(&WorldKeyframe::has_background_strength, &WorldKeyframe::background_strength);
+            evalWorldFloat(&WorldKeyframe::has_hdri_rotation, &WorldKeyframe::hdri_rotation);
+
+            evalWorldFloat(&WorldKeyframe::has_sun_elevation, &WorldKeyframe::sun_elevation);
+            evalWorldFloat(&WorldKeyframe::has_sun_azimuth, &WorldKeyframe::sun_azimuth);
+            evalWorldFloat(&WorldKeyframe::has_sun_intensity, &WorldKeyframe::sun_intensity);
+            evalWorldFloat(&WorldKeyframe::has_sun_size, &WorldKeyframe::sun_size);
+
+            evalWorldFloat(&WorldKeyframe::has_atmosphere_intensity, &WorldKeyframe::atmosphere_intensity);
+            evalWorldFloat(&WorldKeyframe::has_air_density, &WorldKeyframe::air_density);
+            evalWorldFloat(&WorldKeyframe::has_dust_density, &WorldKeyframe::dust_density);
+            evalWorldFloat(&WorldKeyframe::has_ozone_density, &WorldKeyframe::ozone_density);
+            evalWorldFloat(&WorldKeyframe::has_humidity, &WorldKeyframe::humidity);
+            evalWorldFloat(&WorldKeyframe::has_temperature, &WorldKeyframe::temperature);
+            evalWorldFloat(&WorldKeyframe::has_ozone_absorption_scale, &WorldKeyframe::ozone_absorption_scale);
+            evalWorldFloat(&WorldKeyframe::has_altitude, &WorldKeyframe::altitude);
+            evalWorldFloat(&WorldKeyframe::has_mie_anisotropy, &WorldKeyframe::mie_anisotropy);
+
+            evalWorldFloat(&WorldKeyframe::has_cloud_density, &WorldKeyframe::cloud_density);
+            evalWorldFloat(&WorldKeyframe::has_cloud_coverage, &WorldKeyframe::cloud_coverage);
+            evalWorldFloat(&WorldKeyframe::has_cloud_scale, &WorldKeyframe::cloud_scale);
+
+            {
+                auto has = [](const Keyframe& k) { return k.has_world && k.world.has_cloud_offset; };
+                const Keyframe* p = findPrev(has);
+                const Keyframe* n = findNext(has);
+                if (p && n) {
+                    const float t = interpolateT(p, n);
+                    result.world.cloud_offset_x = p->world.cloud_offset_x + (n->world.cloud_offset_x - p->world.cloud_offset_x) * t;
+                    result.world.cloud_offset_z = p->world.cloud_offset_z + (n->world.cloud_offset_z - p->world.cloud_offset_z) * t;
+                    result.world.has_cloud_offset = true;
+                    result.has_world = true;
+                } else if (p) {
+                    result.world.cloud_offset_x = p->world.cloud_offset_x;
+                    result.world.cloud_offset_z = p->world.cloud_offset_z;
+                    result.world.has_cloud_offset = true;
+                    result.has_world = true;
+                } else if (n && n->frame == current_frame) {
+                    result.world.cloud_offset_x = n->world.cloud_offset_x;
+                    result.world.cloud_offset_z = n->world.cloud_offset_z;
+                    result.world.has_cloud_offset = true;
+                    result.has_world = true;
+                }
+            }
+
+            evalWorldFloat(&WorldKeyframe::has_cloud_quality, &WorldKeyframe::cloud_quality);
+            evalWorldInt(&WorldKeyframe::has_cloud_quality, &WorldKeyframe::cloud_base_steps);
+            evalWorldFloat(&WorldKeyframe::has_cloud_detail, &WorldKeyframe::cloud_detail);
+            evalWorldInt(&WorldKeyframe::has_cloud_layer2, &WorldKeyframe::cloud_layer2_enabled);
+
+            {
+                auto has = [](const Keyframe& k) { return k.has_world && k.world.has_cloud_lighting; };
+                const Keyframe* p = findPrev(has);
+                const Keyframe* n = findNext(has);
+                if (p && n) {
+                    const float t = interpolateT(p, n);
+                    result.world.cloud_light_steps = (t < 0.5f) ? p->world.cloud_light_steps : n->world.cloud_light_steps;
+                    result.world.cloud_shadow_strength = p->world.cloud_shadow_strength + (n->world.cloud_shadow_strength - p->world.cloud_shadow_strength) * t;
+                    result.world.cloud_ambient_strength = p->world.cloud_ambient_strength + (n->world.cloud_ambient_strength - p->world.cloud_ambient_strength) * t;
+                    result.world.cloud_silver_intensity = p->world.cloud_silver_intensity + (n->world.cloud_silver_intensity - p->world.cloud_silver_intensity) * t;
+                    result.world.cloud_absorption = p->world.cloud_absorption + (n->world.cloud_absorption - p->world.cloud_absorption) * t;
+                    result.world.cloud_anisotropy = p->world.cloud_anisotropy + (n->world.cloud_anisotropy - p->world.cloud_anisotropy) * t;
+                    result.world.cloud_anisotropy_back = p->world.cloud_anisotropy_back + (n->world.cloud_anisotropy_back - p->world.cloud_anisotropy_back) * t;
+                    result.world.cloud_lobe_mix = p->world.cloud_lobe_mix + (n->world.cloud_lobe_mix - p->world.cloud_lobe_mix) * t;
+                    result.world.cloud_emissive_intensity = p->world.cloud_emissive_intensity + (n->world.cloud_emissive_intensity - p->world.cloud_emissive_intensity) * t;
+                    result.world.cloud_emissive_color = p->world.cloud_emissive_color + (n->world.cloud_emissive_color - p->world.cloud_emissive_color) * t;
+                    result.world.has_cloud_lighting = true;
+                    result.has_world = true;
+                } else if (p) {
+                    result.world.cloud_light_steps = p->world.cloud_light_steps;
+                    result.world.cloud_shadow_strength = p->world.cloud_shadow_strength;
+                    result.world.cloud_ambient_strength = p->world.cloud_ambient_strength;
+                    result.world.cloud_silver_intensity = p->world.cloud_silver_intensity;
+                    result.world.cloud_absorption = p->world.cloud_absorption;
+                    result.world.cloud_anisotropy = p->world.cloud_anisotropy;
+                    result.world.cloud_anisotropy_back = p->world.cloud_anisotropy_back;
+                    result.world.cloud_lobe_mix = p->world.cloud_lobe_mix;
+                    result.world.cloud_emissive_intensity = p->world.cloud_emissive_intensity;
+                    result.world.cloud_emissive_color = p->world.cloud_emissive_color;
+                    result.world.has_cloud_lighting = true;
+                    result.has_world = true;
+                } else if (n && n->frame == current_frame) {
+                    result.world.cloud_light_steps = n->world.cloud_light_steps;
+                    result.world.cloud_shadow_strength = n->world.cloud_shadow_strength;
+                    result.world.cloud_ambient_strength = n->world.cloud_ambient_strength;
+                    result.world.cloud_silver_intensity = n->world.cloud_silver_intensity;
+                    result.world.cloud_absorption = n->world.cloud_absorption;
+                    result.world.cloud_anisotropy = n->world.cloud_anisotropy;
+                    result.world.cloud_anisotropy_back = n->world.cloud_anisotropy_back;
+                    result.world.cloud_lobe_mix = n->world.cloud_lobe_mix;
+                    result.world.cloud_emissive_intensity = n->world.cloud_emissive_intensity;
+                    result.world.cloud_emissive_color = n->world.cloud_emissive_color;
+                    result.world.has_cloud_lighting = true;
+                    result.has_world = true;
+                }
+            }
+
+            {
+                auto has = [](const Keyframe& k) { return k.has_world && k.world.has_cloud_layer2_params; };
+                const Keyframe* p = findPrev(has);
+                const Keyframe* n = findNext(has);
+                if (p && n) {
+                    const float t = interpolateT(p, n);
+                    result.world.cloud2_coverage = p->world.cloud2_coverage + (n->world.cloud2_coverage - p->world.cloud2_coverage) * t;
+                    result.world.cloud2_density = p->world.cloud2_density + (n->world.cloud2_density - p->world.cloud2_density) * t;
+                    result.world.cloud2_scale = p->world.cloud2_scale + (n->world.cloud2_scale - p->world.cloud2_scale) * t;
+                    result.world.has_cloud_layer2_params = true;
+                    result.has_world = true;
+                } else if (p) {
+                    result.world.cloud2_coverage = p->world.cloud2_coverage;
+                    result.world.cloud2_density = p->world.cloud2_density;
+                    result.world.cloud2_scale = p->world.cloud2_scale;
+                    result.world.has_cloud_layer2_params = true;
+                    result.has_world = true;
+                } else if (n && n->frame == current_frame) {
+                    result.world.cloud2_coverage = n->world.cloud2_coverage;
+                    result.world.cloud2_density = n->world.cloud2_density;
+                    result.world.cloud2_scale = n->world.cloud2_scale;
+                    result.world.has_cloud_layer2_params = true;
+                    result.has_world = true;
+                }
+            }
+
+            {
+                auto has = [](const Keyframe& k) { return k.has_world && k.world.has_cloud_layer2_heights; };
+                const Keyframe* p = findPrev(has);
+                const Keyframe* n = findNext(has);
+                if (p && n) {
+                    const float t = interpolateT(p, n);
+                    result.world.cloud2_height_min = p->world.cloud2_height_min + (n->world.cloud2_height_min - p->world.cloud2_height_min) * t;
+                    result.world.cloud2_height_max = p->world.cloud2_height_max + (n->world.cloud2_height_max - p->world.cloud2_height_max) * t;
+                    result.world.has_cloud_layer2_heights = true;
+                    result.has_world = true;
+                } else if (p) {
+                    result.world.cloud2_height_min = p->world.cloud2_height_min;
+                    result.world.cloud2_height_max = p->world.cloud2_height_max;
+                    result.world.has_cloud_layer2_heights = true;
+                    result.has_world = true;
+                } else if (n && n->frame == current_frame) {
+                    result.world.cloud2_height_min = n->world.cloud2_height_min;
+                    result.world.cloud2_height_max = n->world.cloud2_height_max;
+                    result.world.has_cloud_layer2_heights = true;
+                    result.has_world = true;
+                }
+            }
+
+            evalWorldInt(&WorldKeyframe::has_fog, &WorldKeyframe::fog_enabled);
+            {
+                auto has = [](const Keyframe& k) { return k.has_world && k.world.has_fog_params; };
+                const Keyframe* p = findPrev(has);
+                const Keyframe* n = findNext(has);
+                if (p && n) {
+                    const float t = interpolateT(p, n);
+                    result.world.fog_density = p->world.fog_density + (n->world.fog_density - p->world.fog_density) * t;
+                    result.world.fog_height = p->world.fog_height + (n->world.fog_height - p->world.fog_height) * t;
+                    result.world.fog_falloff = p->world.fog_falloff + (n->world.fog_falloff - p->world.fog_falloff) * t;
+                    result.world.fog_distance = p->world.fog_distance + (n->world.fog_distance - p->world.fog_distance) * t;
+                    result.world.fog_color = p->world.fog_color + (n->world.fog_color - p->world.fog_color) * t;
+                    result.world.fog_sun_scatter = p->world.fog_sun_scatter + (n->world.fog_sun_scatter - p->world.fog_sun_scatter) * t;
+                    result.world.has_fog_params = true;
+                    result.has_world = true;
+                } else if (p) {
+                    result.world.fog_density = p->world.fog_density;
+                    result.world.fog_height = p->world.fog_height;
+                    result.world.fog_falloff = p->world.fog_falloff;
+                    result.world.fog_distance = p->world.fog_distance;
+                    result.world.fog_color = p->world.fog_color;
+                    result.world.fog_sun_scatter = p->world.fog_sun_scatter;
+                    result.world.has_fog_params = true;
+                    result.has_world = true;
+                } else if (n && n->frame == current_frame) {
+                    result.world.fog_density = n->world.fog_density;
+                    result.world.fog_height = n->world.fog_height;
+                    result.world.fog_falloff = n->world.fog_falloff;
+                    result.world.fog_distance = n->world.fog_distance;
+                    result.world.fog_color = n->world.fog_color;
+                    result.world.fog_sun_scatter = n->world.fog_sun_scatter;
+                    result.world.has_fog_params = true;
+                    result.has_world = true;
+                }
+            }
+
+            evalWorldInt(&WorldKeyframe::has_godrays, &WorldKeyframe::godrays_enabled);
+            evalWorldFloat(&WorldKeyframe::has_godrays_params, &WorldKeyframe::godrays_intensity);
+            evalWorldFloat(&WorldKeyframe::has_godrays_params, &WorldKeyframe::godrays_density);
+            evalWorldInt(&WorldKeyframe::has_godrays_params, &WorldKeyframe::godrays_samples);
+
+            evalWorldInt(&WorldKeyframe::has_multi_scatter, &WorldKeyframe::multi_scatter_enabled);
+            evalWorldFloat(&WorldKeyframe::has_multi_scatter, &WorldKeyframe::multi_scatter_factor);
+            evalWorldInt(&WorldKeyframe::has_aerial_perspective, &WorldKeyframe::aerial_perspective);
+            evalWorldFloat(&WorldKeyframe::has_aerial_params, &WorldKeyframe::aerial_density);
+            evalWorldFloat(&WorldKeyframe::has_aerial_params, &WorldKeyframe::aerial_min_distance);
+            evalWorldFloat(&WorldKeyframe::has_aerial_params, &WorldKeyframe::aerial_max_distance);
+            evalWorldInt(&WorldKeyframe::has_overlay, &WorldKeyframe::env_overlay_enabled);
+            evalWorldFloat(&WorldKeyframe::has_overlay_params, &WorldKeyframe::env_overlay_intensity);
+            evalWorldFloat(&WorldKeyframe::has_overlay_params, &WorldKeyframe::env_overlay_rotation);
+            evalWorldInt(&WorldKeyframe::has_overlay_params, &WorldKeyframe::env_overlay_blend_mode);
+
+            {
+                auto has = [](const Keyframe& k) { return k.has_world && k.world.has_weather_params; };
+                const Keyframe* p = findPrev(has);
+                const Keyframe* n = findNext(has);
+                if (p && n) {
+                    const float t = interpolateT(p, n);
+                    result.world.weather_enabled = (t < 0.5f) ? p->world.weather_enabled : n->world.weather_enabled;
+                    result.world.weather_type = (t < 0.5f) ? p->world.weather_type : n->world.weather_type;
+                    result.world.weather_intensity = p->world.weather_intensity + (n->world.weather_intensity - p->world.weather_intensity) * t;
+                    result.world.weather_density = p->world.weather_density + (n->world.weather_density - p->world.weather_density) * t;
+                    result.world.weather_wind_direction = p->world.weather_wind_direction + (n->world.weather_wind_direction - p->world.weather_wind_direction) * t;
+                    result.world.weather_wind_speed = p->world.weather_wind_speed + (n->world.weather_wind_speed - p->world.weather_wind_speed) * t;
+                    result.world.weather_precipitation_scale = p->world.weather_precipitation_scale + (n->world.weather_precipitation_scale - p->world.weather_precipitation_scale) * t;
+                    result.world.weather_visibility = p->world.weather_visibility + (n->world.weather_visibility - p->world.weather_visibility) * t;
+                    result.world.weather_surface_wetness = p->world.weather_surface_wetness + (n->world.weather_surface_wetness - p->world.weather_surface_wetness) * t;
+                    result.world.weather_surface_accumulation = p->world.weather_surface_accumulation + (n->world.weather_surface_accumulation - p->world.weather_surface_accumulation) * t;
+                    result.world.weather_surface_settling = p->world.weather_surface_settling + (n->world.weather_surface_settling - p->world.weather_surface_settling) * t;
+                    result.world.weather_surface_height = p->world.weather_surface_height + (n->world.weather_surface_height - p->world.weather_surface_height) * t;
+                    result.world.weather_visual_mode = (t < 0.5f) ? p->world.weather_visual_mode : n->world.weather_visual_mode;
+                    result.world.weather_surface_response_enabled = (t < 0.5f) ? p->world.weather_surface_response_enabled : n->world.weather_surface_response_enabled;
+                    result.world.has_weather_params = true;
+                    result.has_world = true;
+                } else if (p) {
+                    result.world.weather_enabled = p->world.weather_enabled;
+                    result.world.weather_type = p->world.weather_type;
+                    result.world.weather_intensity = p->world.weather_intensity;
+                    result.world.weather_density = p->world.weather_density;
+                    result.world.weather_wind_direction = p->world.weather_wind_direction;
+                    result.world.weather_wind_speed = p->world.weather_wind_speed;
+                    result.world.weather_precipitation_scale = p->world.weather_precipitation_scale;
+                    result.world.weather_visibility = p->world.weather_visibility;
+                    result.world.weather_surface_wetness = p->world.weather_surface_wetness;
+                    result.world.weather_surface_accumulation = p->world.weather_surface_accumulation;
+                    result.world.weather_surface_settling = p->world.weather_surface_settling;
+                    result.world.weather_surface_height = p->world.weather_surface_height;
+                    result.world.weather_visual_mode = p->world.weather_visual_mode;
+                    result.world.weather_surface_response_enabled = p->world.weather_surface_response_enabled;
+                    result.world.has_weather_params = true;
+                    result.has_world = true;
+                } else if (n && n->frame == current_frame) {
+                    result.world.weather_enabled = n->world.weather_enabled;
+                    result.world.weather_type = n->world.weather_type;
+                    result.world.weather_intensity = n->world.weather_intensity;
+                    result.world.weather_density = n->world.weather_density;
+                    result.world.weather_wind_direction = n->world.weather_wind_direction;
+                    result.world.weather_wind_speed = n->world.weather_wind_speed;
+                    result.world.weather_precipitation_scale = n->world.weather_precipitation_scale;
+                    result.world.weather_visibility = n->world.weather_visibility;
+                    result.world.weather_surface_wetness = n->world.weather_surface_wetness;
+                    result.world.weather_surface_accumulation = n->world.weather_surface_accumulation;
+                    result.world.weather_surface_settling = n->world.weather_surface_settling;
+                    result.world.weather_surface_height = n->world.weather_surface_height;
+                    result.world.weather_visual_mode = n->world.weather_visual_mode;
+                    result.world.weather_surface_response_enabled = n->world.weather_surface_response_enabled;
+                    result.world.has_weather_params = true;
+                    result.has_world = true;
+                }
             }
         }
 
@@ -2159,7 +2471,7 @@ inline void to_json(json& j, const WorldKeyframe& w) {
 
         {"gre", w.godrays_enabled}, {"gri", w.godrays_intensity}, {"grd", w.godrays_density}, {"grs", w.godrays_samples},
 
-        {"mse", w.multi_scatter_enabled}, {"msf", w.multi_scatter_factor}, {"ape", w.aerial_perspective}, {"apmin", w.aerial_min_distance}, {"apmax", w.aerial_max_distance},
+        {"mse", w.multi_scatter_enabled}, {"msf", w.multi_scatter_factor}, {"ape", w.aerial_perspective}, {"apden", w.aerial_density}, {"apmin", w.aerial_min_distance}, {"apmax", w.aerial_max_distance},
         {"ove", w.env_overlay_enabled}, {"ovi", w.env_overlay_intensity}, {"ovr", w.env_overlay_rotation}, {"ovm", w.env_overlay_blend_mode},
         {"wte", w.weather_enabled}, {"wtt", w.weather_type}, {"wti", w.weather_intensity}, {"wtd", w.weather_density},
         {"wtw", w.weather_wind_direction}, {"wtws", w.weather_wind_speed}, {"wtps", w.weather_precipitation_scale},
@@ -2207,7 +2519,7 @@ inline void from_json(const json& j, WorldKeyframe& w) {
     w.cloud_scale = j.value("cs", 1.0f);
     w.cloud_offset_x = j.value("cox", 0.0f); w.cloud_offset_z = j.value("coz", 0.0f);
     w.cloud_quality = j.value("cq", 1.0f); w.cloud_detail = j.value("cdt", 1.0f);
-    w.cloud_base_steps = j.value("cbs", 48);
+    w.cloud_base_steps = j.value("cbs", 8);
     w.cloud_height_min = j.value("cmn", 500.0f); w.cloud_height_max = j.value("cmx", 2000.0f);
 
     w.cloud_layer2_enabled = j.value("cl2e", 0);
@@ -2234,6 +2546,7 @@ inline void from_json(const json& j, WorldKeyframe& w) {
 
     w.multi_scatter_enabled = j.value("mse", 1); w.multi_scatter_factor = j.value("msf", 0.3f);
     w.aerial_perspective = j.value("ape", 1);
+    w.aerial_density = j.value("apden", 1.0f);
     w.aerial_min_distance = j.value("apmin", 10.0f); w.aerial_max_distance = j.value("apmax", 5000.0f);
 
     w.env_overlay_enabled = j.value("ove", 0);

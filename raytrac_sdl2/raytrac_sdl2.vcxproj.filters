@@ -58,6 +58,9 @@
     <Filter Include="Kaynak Dosyalar\paint">
       <UniqueIdentifier>{4ec93cdd-736d-4b6d-b4fa-41cfc31719e0}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Kaynak Dosyalar\Stylize">
+      <UniqueIdentifier>{d7f32e31-77d7-4cd0-a104-1a07c6c31447}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h">
@@ -245,6 +248,12 @@
     </ClInclude>
     <ClInclude Include="source\include\Paint\TerrainPaintAdapter.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Stylize\StylizeModeState.h">
+      <Filter>Kaynak Dosyalar\Stylize</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Stylize\StylizePostProcess.h">
+      <Filter>Kaynak Dosyalar\Stylize</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Transform.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
@@ -508,6 +517,12 @@
     <ClCompile Include="source\src\Paint\TerrainPaintAdapter.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Stylize\StylizeModeState.cpp">
+      <Filter>Kaynak Dosyalar\Stylize</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Stylize\StylizePostProcess.cpp">
+      <Filter>Kaynak Dosyalar\Stylize</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Utils\MeshModifiers.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
@@ -614,6 +629,9 @@
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_selection.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_stylize.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_vdb.cpp">

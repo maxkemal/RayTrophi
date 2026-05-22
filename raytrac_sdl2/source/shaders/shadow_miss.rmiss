@@ -34,6 +34,7 @@ struct RayPayload {
     float    primaryTransmission;
     float    primaryMetallic;
     uint     bounceType;
+    uint     primaryMaterialId;   // Stylize AOV: real material index of the primary hit
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;

@@ -486,21 +486,30 @@ void OptixBackend::downloadImage(void* outPixels) {
     m_optix->downloadFramebuffer(static_cast<uchar4*>(outPixels), m_optix->getImageWidth(), m_optix->getImageHeight());
 }
 
-bool OptixBackend::getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary) {
+bool OptixBackend::getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary, bool includeColor) {
     if (!m_optix) return false;
 
     static std::vector<float> color;
     static std::vector<float> albedo;
     static std::vector<float> normal;
+    static std::vector<float> position;   // Stylize AOV: stride 4 (x,y,z, encoded matid)
     if (!m_optix->downloadDenoiserBuffers(color, albedo, normal, useAuxiliary)) {
         return false;
     }
 
     frame.width = m_optix->getImageWidth();
     frame.height = m_optix->getImageHeight();
-    frame.color = color.data();
+    frame.color = includeColor ? color.data() : nullptr;
     frame.albedo = useAuxiliary ? albedo.data() : nullptr;
     frame.normal = useAuxiliary ? normal.data() : nullptr;
+
+    // Stylize position AOV (world pos + encoded material id), bottom-up. Only available
+    // when the OptiX wrapper produced it this frame.
+    if (useAuxiliary && m_optix->downloadStylizePositionBuffer(position)) {
+        frame.position = position.data();
+    } else {
+        frame.position = nullptr;
+    }
     return true;
 }
 

@@ -13,6 +13,26 @@
 #include <algorithm>
 #include <cmath>
 
+namespace {
+bool timelineHasAnimatedWorldSun(const TimelineManager& timeline) {
+    auto it = timeline.tracks.find("World");
+    if (it == timeline.tracks.end()) return false;
+
+    for (const auto& kf : it->second.keyframes) {
+        if (!kf.has_world) continue;
+        const WorldKeyframe& world = kf.world;
+        if (world.has_sun_elevation ||
+            world.has_sun_azimuth ||
+            world.has_sun_intensity ||
+            world.has_sun_size) {
+            return true;
+        }
+    }
+
+    return false;
+}
+}
+
 #ifdef _WIN32
 #include <windows.h>
 #include <commdlg.h>
@@ -351,6 +371,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         break;
                     case WorldProp::AerialPerspectiveParams:
                         it->world.has_aerial_params = true;
+                        it->world.aerial_density = adv.aerial_density;
                         it->world.aerial_min_distance = adv.aerial_min_distance;
                         it->world.aerial_max_distance = adv.aerial_max_distance;
                         break;
@@ -496,6 +517,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     break;
                 case WorldProp::AerialPerspectiveParams:
                     wk.has_aerial_params = true;
+                    wk.aerial_density = adv.aerial_density;
                     wk.aerial_min_distance = adv.aerial_min_distance;
                     wk.aerial_max_distance = adv.aerial_max_distance;
                     break;
@@ -624,6 +646,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
     else if (current_mode == WORLD_MODE_NISHITA) {
         NishitaSkyParams params = world.getNishitaParams();
         AtmosphereAdvanced adv = world.getAdvancedParams();
+        const bool worldSunDrivenByTimeline = timelineHasAnimatedWorldSun(ctx.scene.timeline);
         // static bool syncWithDirectionalLight replaced by member
         
         // Sync with Directional Light Section
@@ -635,7 +658,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             
 
             
-            if (sync_sun_with_light) {
+            if (sync_sun_with_light && !worldSunDrivenByTimeline) {
                 // Find first directional light
                 bool foundDirLight = false;
                 for (const auto& light : ctx.scene.lights) {
@@ -677,6 +700,8 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 if (!foundDirLight) {
                     ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "No directional light found");
                 }
+            } else if (sync_sun_with_light && worldSunDrivenByTimeline) {
+                ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Timeline controls sun");
             }
             UIWidgets::EndSection();
         }
@@ -1005,6 +1030,12 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 ImGui::Indent();
                 
                 bool apKeyed = isWorldKeyed(WorldProp::AerialPerspectiveParams);
+                if (SceneUI::DrawSmartFloat("apden", "Density", &adv.aerial_density, 0.0f, 10.0f, "%.2f", apKeyed, [&]{ insertWorldKey("Aerial Persp", WorldProp::AerialPerspectiveParams); }, 16)) {
+                    adv.aerial_density = std::clamp(adv.aerial_density, 0.0f, 10.0f);
+                    changed = true;
+                }
+                UIWidgets::HelpMarker("Independent aerial haze density.\nDistance controls where haze ramps; density controls how strongly it accumulates.");
+
                 // Min Distance (km) - Flexible range for different scene scales
                 float minDistKm = adv.aerial_min_distance / 1000.0f;
                 if (SceneUI::DrawSmartFloat("apmin", "Min Distance", &minDistKm, 0.0f, 5.0f, "%.2f km", apKeyed, [&]{ insertWorldKey("Aerial Persp", WorldProp::AerialPerspectiveParams); }, 16)) {
@@ -1261,12 +1292,15 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     case 2: // Cumulus (Classic puffy clouds)
                         cloudParams.clouds_enabled = 1;
                         cloudParams.cloud_height_min = 1000.0f;
-                        cloudParams.cloud_height_max = 2800.0f;
-                        cloudParams.cloud_scale = 0.55f;
-                        cloudParams.cloud_coverage = 0.32f;
-                        cloudParams.cloud_density = 0.75f;
-                        cloudParams.cloud_detail = 0.55f;
-                        cloudParams.cloud_shadow_strength = 0.45f;
+                        cloudParams.cloud_height_max = 3600.0f;
+                        cloudParams.cloud_scale = 0.48f;
+                        cloudParams.cloud_coverage = 0.28f;
+                        cloudParams.cloud_density = 0.82f;
+                        cloudParams.cloud_detail = 0.42f;
+                        cloudParams.cloud_shadow_strength = 0.28f;
+                        cloudParams.cloud_absorption = 0.75f;
+                        cloudParams.cloud_ambient_strength = 1.2f;
+                        cloudParams.cloud_silver_intensity = 0.35f;
                         cloudParamsChanged = true;
                         break;
                     case 3: // Stratocumulus (Layered puffy)
@@ -1275,8 +1309,11 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         cloudParams.cloud_height_max = 1800.0f;
                         cloudParams.cloud_scale = 0.42f;
                         cloudParams.cloud_coverage = 0.42f;
-                        cloudParams.cloud_density = 0.95f;
+                        cloudParams.cloud_density = 0.85f;
                         cloudParams.cloud_detail = 0.45f;
+                        cloudParams.cloud_shadow_strength = 0.32f;
+                        cloudParams.cloud_absorption = 0.85f;
+                        cloudParams.cloud_ambient_strength = 1.15f;
                         cloudParamsChanged = true;
                         break;
                     case 4: // Overcast (Stratus)
@@ -1285,8 +1322,11 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         cloudParams.cloud_height_max = 1000.0f;
                         cloudParams.cloud_scale = 0.28f;
                         cloudParams.cloud_coverage = 0.58f;
-                        cloudParams.cloud_density = 1.15f;
+                        cloudParams.cloud_density = 0.92f;
                         cloudParams.cloud_detail = 0.35f;
+                        cloudParams.cloud_shadow_strength = 0.38f;
+                        cloudParams.cloud_absorption = 0.9f;
+                        cloudParams.cloud_ambient_strength = 1.1f;
                         cloudParamsChanged = true;
                         break;
                     case 5: // Cumulonimbus (Storm/Rain clouds)
@@ -1295,10 +1335,12 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         cloudParams.cloud_height_max = 12000.0f;
                         cloudParams.cloud_scale = 0.65f;
                         cloudParams.cloud_coverage = 0.52f;
-                        cloudParams.cloud_density = 1.5f;
-                        cloudParams.cloud_detail = 0.9f;
-                        cloudParams.cloud_shadow_strength = 0.85f;
-                        cloudParams.cloud_absorption = 2.0f;
+                        cloudParams.cloud_density = 1.2f;
+                        cloudParams.cloud_detail = 0.72f;
+                        cloudParams.cloud_shadow_strength = 0.55f;
+                        cloudParams.cloud_absorption = 1.2f;
+                        cloudParams.cloud_ambient_strength = 0.95f;
+                        cloudParams.cloud_silver_intensity = 0.45f;
                         cloudParamsChanged = true;
                         break;
                     case 6: // Fog/Low Clouds
@@ -1363,7 +1405,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 UIWidgets::HelpMarker("Richness of high-frequency noise.");
 
                 // Base Steps
-                if (ImGui::SliderInt("Base Steps", &cloudParams.cloud_base_steps, 8, 96)) {
+                if (ImGui::SliderInt("Base Steps", &cloudParams.cloud_base_steps, 4, 96)) {
                     cloudParamsChanged = true;
                     weather_preset_index = 7;
                 }
@@ -1387,6 +1429,14 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     cloudParamsChanged = true;
                 }
                 ImGui::SameLine(); UIWidgets::HelpMarker("Wind animation");
+
+                int cloudSeed = cloudParams.cloud_seed;
+                if (ImGui::DragInt("Seed", &cloudSeed, 1.0f, 0, 1000000)) {
+                    cloudParams.cloud_seed = cloudSeed;
+                    cloudParamsChanged = true;
+                    weather_preset_index = 7;
+                }
+                UIWidgets::HelpMarker("Changes the procedural cloud pattern while keeping coverage, scale, and wind offsets intact.");
             }
             
             // ═══════════════════════════════════════════════════════════
@@ -1580,8 +1630,9 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             cloudParams.cloud_coverage = (std::max)(0.0f, (std::min)(0.6f, cloudParams.cloud_coverage));
             cloudParams.cloud_density = (std::max)(0.0f, (std::min)(1.5f, cloudParams.cloud_density));
             cloudParams.cloud_scale = (std::max)(0.1f, (std::min)(1.0f, cloudParams.cloud_scale));
+            cloudParams.cloud_seed = (std::max)(0, (std::min)(1000000, cloudParams.cloud_seed));
             cloudParams.cloud_detail = (std::max)(0.0f, (std::min)(1.0f, cloudParams.cloud_detail));
-            cloudParams.cloud_base_steps = (std::max)(8, (std::min)(96, cloudParams.cloud_base_steps));
+            cloudParams.cloud_base_steps = (std::max)(4, (std::min)(96, cloudParams.cloud_base_steps));
             cloudParams.cloud2_coverage = (std::max)(0.0f, (std::min)(0.6f, cloudParams.cloud2_coverage));
             cloudParams.cloud2_density = (std::max)(0.0f, (std::min)(1.5f, cloudParams.cloud2_density));
             cloudParams.cloud2_scale = (std::max)(0.1f, (std::min)(1.0f, cloudParams.cloud2_scale));
@@ -1620,8 +1671,56 @@ void SceneUI::processSunSync(UIContext& ctx) {
     if (!sync_sun_with_light) return;
     if (world_params_changed_this_frame) return; // User is modifying sliders, skip sync to avoid fighting
 
+    // [RENDER-LOCK RACE FIX] During an active sequence render the worker thread
+    // owns scene.lights and ctx.renderer.world — Renderer::updateAnimationState
+    // writes light->direction/intensity for animated directional lights and
+    // calls world.setSunDirection/setSunIntensity each frame, then uploads the
+    // result via m_backend->setWorldData(world.getGPUData()).
+    // This function runs every UI frame on the main thread and mutates the
+    // SAME state in both directions (Forward: writes light->direction,
+    // light->intensity; Reverse: reads light->direction, writes
+    // world.setNishitaParams). Concurrent host-side struct mutation produces
+    // a torn world payload that the worker then uploads to the GPU. The
+    // resulting NaN / garbage sun direction makes shaders take infinite /
+    // divergent paths, and Vulkan setLights() waitIdle never returns →
+    // application freeze. OptiX is unaffected because CUDA stream
+    // serialization happens to mask the host-side race. The worker keeps
+    // light + world fully in sync on its own during render, so we skip the
+    // UI-thread sync entirely while it is active.
+    if (ctx.render_settings.animation_render_locked && rendering_in_progress.load()) {
+        return;
+    }
+
     World& world = ctx.renderer.world;
     if (world.getMode() != WORLD_MODE_NISHITA) return;
+
+    if (timelineHasAnimatedWorldSun(ctx.scene.timeline)) {
+        const NishitaSkyParams params = world.getNishitaParams();
+        const Vec3 lightDirection(
+            -params.sun_direction.x,
+            -params.sun_direction.y,
+            -params.sun_direction.z);
+
+        for (auto& light : ctx.scene.lights) {
+            if (light && light->type() == LightType::Directional) {
+                const bool directionChanged =
+                    fabsf(light->direction.x - lightDirection.x) > 0.001f ||
+                    fabsf(light->direction.y - lightDirection.y) > 0.001f ||
+                    fabsf(light->direction.z - lightDirection.z) > 0.001f;
+                const bool intensityChanged = fabsf(light->intensity - params.sun_intensity) > 0.001f;
+
+                if (directionChanged || intensityChanged) {
+                    light->direction = lightDirection;
+                    light->intensity = params.sun_intensity;
+
+                    extern bool g_lights_dirty;
+                    g_lights_dirty = true;
+                }
+                break;
+            }
+        }
+        return;
+    }
 
     // Reverse Sync: Directional Light -> Nishita Params
     for (const auto& light : ctx.scene.lights) {

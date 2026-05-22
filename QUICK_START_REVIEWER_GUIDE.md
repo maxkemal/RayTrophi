@@ -28,9 +28,9 @@ This guide provides a quick overview of how to navigate the portable executable 
 RayTrophi is completely hardware-agnostic. You can switch rendering modes seamlessly in real-time:
 1. In the **Properties Panel** (right side), expand the **Render Settings** section.
 2. Look for the **Engine** dropdown:
-   - **OptiX (GPU):** Fastest. Selected automatically if an NVIDIA RTX/GTX card is detected.
-   - **Vulkan RT (GPU):** Experimental. Selected if you want cross-vendor hardware RT.
-   - **CPU (Embree):** High-quality path tracing used as a smart fallback if no GPU is found.
+   - **Vulkan RT (GPU):** Recommended primary backend. Selected automatically when hardware ray tracing is available. Highest interactive performance across mesh / hair / volume.
+   - **NVIDIA OptiX (CUDA):** Selected automatically when hardware RT is unavailable but a CUDA-capable card is present. Strong for offline-quality stills and OIDN denoiser interop.
+   - **CPU (Reference):** High-quality path tracing used as a smart fallback if no GPU is found.
 
 *Note: Switching engines reconstructs the BVH (Bounding Volume Hierarchy) dynamically.*
 

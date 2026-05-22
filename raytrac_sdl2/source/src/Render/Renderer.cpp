@@ -517,6 +517,7 @@ float rt_sample_procedural_cloud_cpu(const Vec3& local_p, const VDBVolume* vdb, 
 
     const float base_scale = std::max(8.0f, std::min(72.0f, 10.0f / std::max(0.1f, scale)));
     Vec3 cloud_pos(norm.x * base_scale + n.cloud_offset_x * 0.00002f, norm.y * 1.35f, norm.z * base_scale + n.cloud_offset_z * 0.00002f);
+    cloud_pos = cloud_pos + Vec3(n.cloud_seed * 0.137f, n.cloud_seed * 0.317f, n.cloud_seed * 0.719f);
     const float detail = std::clamp(n.cloud_detail, 0.0f, 1.0f);
     const float erosion = std::clamp(1.0f - coverage, 0.0f, 1.0f);
 
@@ -528,16 +529,18 @@ float rt_sample_procedural_cloud_cpu(const Vec3& local_p, const VDBVolume* vdb, 
     const float billow = 1.0f - std::abs(rt_cloud_fbm(Vec3(warped.x * 1.15f, warped.y * 0.5f, warped.z * 1.15f) + Vec3(17, 3, 11), 4) * 2.0f - 1.0f);
     const float detail_noise = rt_cloud_fbm(warped * rt_cloud_lerp(2.8f, 7.0f, detail) + Vec3(31, 7, 19), 2);
     const float puffy = rt_cloud_smoothstep(0.32f, 0.88f, billow);
-    float shape = rt_cloud_lerp(base, base * 0.45f + puffy * 0.75f, 0.72f);
+    const float cumulus = std::clamp((density_ref - 0.38f) / 0.85f, 0.0f, 1.0f);
+    float shape = rt_cloud_lerp(base, base * 0.45f + puffy * 0.75f, rt_cloud_lerp(0.55f, 0.9f, cumulus));
     shape -= detail_noise * rt_cloud_lerp(0.06f, 0.28f, erosion);
 
-    const float threshold = rt_cloud_lerp(0.78f, 0.30f, std::clamp(coverage, 0.0f, 1.0f));
+    const float threshold = rt_cloud_lerp(0.80f, 0.26f, std::clamp(coverage, 0.0f, 1.0f)) - cumulus * 0.08f;
     float d = std::max((shape - threshold) / std::max(1.0f - threshold, 1e-4f), 0.0f);
-    const float bottom = rt_cloud_smoothstep(0.12f, 0.42f, norm.y);
-    const float top = 1.0f - rt_cloud_smoothstep(0.72f, 1.02f, norm.y);
+    const float bottom = rt_cloud_smoothstep(rt_cloud_lerp(0.12f, 0.04f, cumulus), rt_cloud_lerp(0.42f, 0.24f, cumulus), norm.y);
+    const float top = 1.0f - rt_cloud_smoothstep(rt_cloud_lerp(0.72f, 0.82f, cumulus), 1.02f, norm.y);
+    const float dome = rt_cloud_lerp(1.0f, rt_cloud_smoothstep(0.08f, 0.58f, norm.y) * (1.0f - rt_cloud_smoothstep(0.88f, 1.04f, norm.y)) + 0.25f, cumulus);
     const Vec3 edge(0.5f - std::abs(norm.x - 0.5f), 0.5f - std::abs(norm.y - 0.5f), 0.5f - std::abs(norm.z - 0.5f));
     const float edge_falloff = rt_cloud_smoothstep(0.0f, 0.08f, std::min(edge.x, edge.z));
-    return d * d * bottom * top * edge_falloff * 4.6f;
+    return d * rt_cloud_lerp(d, std::sqrt(std::max(d, 0.0f)), cumulus * 0.55f) * bottom * top * dome * edge_falloff * rt_cloud_lerp(4.6f, 3.4f, cumulus);
 }
 }
 
@@ -621,6 +624,15 @@ void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool den
     }
 
     // Parallel linear→sRGB encode + pack back into SDL surface
+    //
+    // [GAMMA FIX] The decode block above used r = (x/255)^2 (gamma-2
+    // approximation of sRGB→linear). The original encode here clamped+
+    // packed the *linear* value straight into the 8-bit pixel WITHOUT
+    // applying the inverse — so the saved PNG (and viewport display) was
+    // treated as sRGB while actually carrying linear values, causing the
+    // entire image to read significantly darker than the pre-denoise
+    // surface. Apply the matching inverse sqrt so the roundtrip is
+    // gamma-neutral.
     {
         const float* __restrict src = denoised.data();
         Uint32* __restrict pxBase = pixels;
@@ -633,9 +645,16 @@ void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool den
                 float g = std::max(src[idx + 1], 0.0f);
                 float b = std::max(src[idx + 2], 0.0f);
 
-                Uint8 ri = static_cast<Uint8>(std::min(r, 1.0f) * 255.0f + 0.5f);
-                Uint8 gi = static_cast<Uint8>(std::min(g, 1.0f) * 255.0f + 0.5f);
-                Uint8 bi = static_cast<Uint8>(std::min(b, 1.0f) * 255.0f + 0.5f);
+                // Inverse of the gamma-2 decode (r = x*x). Matches the
+                // approximation used at line 607 so denoiser-on output
+                // visually matches denoiser-off.
+                r = std::sqrt(std::min(r, 1.0f));
+                g = std::sqrt(std::min(g, 1.0f));
+                b = std::sqrt(std::min(b, 1.0f));
+
+                Uint8 ri = static_cast<Uint8>(r * 255.0f + 0.5f);
+                Uint8 gi = static_cast<Uint8>(g * 255.0f + 0.5f);
+                Uint8 bi = static_cast<Uint8>(b * 255.0f + 0.5f);
 
                 Uint32 alpha = px & aMask;
                 px = alpha
@@ -670,6 +689,11 @@ bool Renderer::applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::
             oidnGpuOutputDevPtr = nullptr;
         }
         oidnGpuOutputBytes = 0;
+        if (oidnGpuPackedDevPtr) {
+            cudaFree(oidnGpuPackedDevPtr);
+            oidnGpuPackedDevPtr = nullptr;
+        }
+        oidnGpuPackedBytes = 0;
         oidnCachedWidth = 0;
         oidnCachedHeight = 0;
         oidnUsingAlbedo = false;
@@ -835,8 +859,103 @@ bool Renderer::applyOIDNDenoisingToCPUAccumulation(float blend, bool useAuxiliar
     return cpu_denoised_valid;
 }
 
-bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame, float blend,
-                                     std::vector<float>& output) {
+bool Renderer::fillStylizeAOVFromBackend(Backend::IBackend* backend, const Camera& camera, bool forceRefresh) {
+    if (!backend || !stylizeMode.enabled) {
+        // Invalidate so a later re-enable re-pulls — the scene/camera may have changed
+        // (and reset accumulation) while stylize was off and we weren't tracking it.
+        m_stylizeAOVValid = false;
+        return false;
+    }
+
+    const size_t pixel_count = static_cast<size_t>(image_width) * static_cast<size_t>(image_height);
+    const Vec3 cameraOrigin = camera.lookfrom;   // GPU ray origin (see syncCameraToBackend)
+
+    // Cache invalidation keyed on a camera hash. Camera motion changes the hash every
+    // frame → AOVs re-pull every frame → no lag/ghost trails. When the view is static the
+    // hash is stable and the cached cpu_* buffers are reused (skipping the readback). The
+    // sample-reset check is a secondary trigger for scene edits with a static camera.
+    auto hashFloat = [](uint64_t h, float f) -> uint64_t {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &f, sizeof(bits));
+        return (h ^ static_cast<uint64_t>(bits)) * 1099511628211ull;
+    };
+    uint64_t cam_hash = 1469598103934665603ull;
+    cam_hash = hashFloat(cam_hash, camera.lookfrom.x); cam_hash = hashFloat(cam_hash, camera.lookfrom.y); cam_hash = hashFloat(cam_hash, camera.lookfrom.z);
+    cam_hash = hashFloat(cam_hash, camera.lookat.x);   cam_hash = hashFloat(cam_hash, camera.lookat.y);   cam_hash = hashFloat(cam_hash, camera.lookat.z);
+    cam_hash = hashFloat(cam_hash, camera.vup.x);      cam_hash = hashFloat(cam_hash, camera.vup.y);      cam_hash = hashFloat(cam_hash, camera.vup.z);
+    cam_hash = hashFloat(cam_hash, camera.vfov);
+
+    const int cur_samples = backend->getCurrentSampleCount();
+    const bool size_changed =
+        cpu_albedo_accumulation_buffer.size() != pixel_count ||
+        cpu_world_position_accumulation_buffer.size() != pixel_count ||
+        cpu_material_id_buffer.size() != pixel_count;
+    if (forceRefresh || size_changed || cam_hash != m_stylizeAOVCamHash ||
+        (cur_samples >= 0 && cur_samples < m_stylizeAOVLastSamples)) {
+        m_stylizeAOVValid = false;
+    }
+    m_stylizeAOVCamHash = cam_hash;
+    m_stylizeAOVLastSamples = cur_samples;
+
+    if (m_stylizeAOVValid) return true;          // view unchanged → cached AOVs still valid
+    if (cur_samples < 1) return false;           // images cleared at sample 0 — nothing to read yet
+
+    // Pull the backend's accumulated primary-hit AOVs to the host. useAuxiliary=true is
+    // required (albedo/normal/position only exist in that mode); includeColor=false skips
+    // the wasted full-res color copy — stylize reads color from the display surface.
+    Backend::DenoiserFrameData frame;
+    if (!backend->getDenoiserFrame(frame, /*useAuxiliary=*/true, /*includeColor=*/false)) return false;
+    if (frame.width != image_width || frame.height != image_height) return false;
+    if (!frame.albedo || !frame.normal || !frame.position) return false;  // position AOV absent → skip
+
+    if (cpu_albedo_accumulation_buffer.size() != pixel_count)        cpu_albedo_accumulation_buffer.resize(pixel_count);
+    if (cpu_normal_accumulation_buffer.size() != pixel_count)        cpu_normal_accumulation_buffer.resize(pixel_count);
+    if (cpu_world_position_accumulation_buffer.size() != pixel_count) cpu_world_position_accumulation_buffer.resize(pixel_count);
+    if (cpu_depth_accumulation_buffer.size() != pixel_count)         cpu_depth_accumulation_buffer.resize(pixel_count);
+    if (cpu_material_id_buffer.size() != pixel_count)                cpu_material_id_buffer.resize(pixel_count);
+
+    const float* __restrict alb = frame.albedo;   // stride 3, bottom-up (matches CPU AOV layout)
+    const float* __restrict nrm = frame.normal;   // stride 3, bottom-up (already decoded to [-1,1])
+    const float* __restrict pos = frame.position; // stride 4: x,y,z = world pos, w = encoded material
+
+    // Per-pixel decode is independent → run it parallel/vectorized. Iterate over the depth
+    // buffer and recover the linear index from the element address (same trick as the
+    // OIDN blend loop above), so no index vector is needed.
+    float* __restrict depthBase = cpu_depth_accumulation_buffer.data();
+    std::for_each_n(std::execution::par_unseq, depthBase, pixel_count,
+        [this, pos, alb, nrm, cameraOrigin, depthBase](float& depthRef) {
+            const size_t i = static_cast<size_t>(&depthRef - depthBase);
+            const float wx = pos[i*4+0], wy = pos[i*4+1], wz = pos[i*4+2];
+            const float matEncoded = pos[i*4+3];   // 0 = miss, 1 = hit/unknown mat, >=2 → matid = w-2
+            const bool hit = matEncoded >= 0.5f;
+
+            // Reconstruct linear depth from world position (the shader stores material id in
+            // the .w channel instead of depth, so outlines key off real material boundaries).
+            float depth = 0.0f;
+            if (hit) {
+                const float dx = wx - cameraOrigin.x, dy = wy - cameraOrigin.y, dz = wz - cameraOrigin.z;
+                depth = std::sqrt(dx*dx + dy*dy + dz*dz);
+            }
+
+            uint32_t material_id = 0xFFFFFFFFu;
+            if (matEncoded >= 1.5f) {
+                material_id = static_cast<uint32_t>(matEncoded + 0.5f) - 2u;
+            }
+
+            cpu_albedo_accumulation_buffer[i] = Vec4{ alb[i*3+0], alb[i*3+1], alb[i*3+2], hit ? 1.0f : 0.0f };
+            cpu_normal_accumulation_buffer[i] = Vec4{ nrm[i*3+0], nrm[i*3+1], nrm[i*3+2], 0.0f };
+            cpu_world_position_accumulation_buffer[i] = Vec4{ wx, wy, wz, 0.0f };
+            depthRef = depth;
+            cpu_material_id_buffer[i] = material_id;
+        });
+    m_stylizeAOVValid = true;
+    return true;
+}
+
+bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
+                                     float blend,
+                                     const OIDNTonemapParams& tm,
+                                     std::vector<uint32_t>& packedOutput) {
     if (!frame.colorDevPtr || frame.width <= 0 || frame.height <= 0) return false;
 
     // Skip while the viewport backend is tearing down/rebuilding its CUDA-imported
@@ -892,6 +1011,11 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
                     oidnGpuOutputDevPtr = nullptr;
                 }
                 oidnGpuOutputBytes = 0;
+                if (oidnGpuPackedDevPtr) {
+                    cudaFree(oidnGpuPackedDevPtr);
+                    oidnGpuPackedDevPtr = nullptr;
+                }
+                oidnGpuPackedBytes = 0;
                 oidnCachedWidth = 0;
                 oidnCachedHeight = 0;
                 oidnUsingAlbedo = false;
@@ -991,6 +1115,26 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
                     return false;
                 }
                 oidnGpuOutputBytes = outBufferSize * sizeof(float);
+
+                // Packed RGBA8 output buffer (one uint32 per pixel). Tracks the
+                // same lifetime as the float3 OIDN output so a single size gate
+                // governs both.
+                if (oidnGpuPackedDevPtr) {
+                    cudaFree(oidnGpuPackedDevPtr);
+                    oidnGpuPackedDevPtr = nullptr;
+                }
+                const size_t packedBytes = pixelCount * sizeof(uint32_t);
+                if (cudaMalloc(&oidnGpuPackedDevPtr, packedBytes) != cudaSuccess) {
+                    cudaGetLastError();
+                    oidnGpuPackedDevPtr = nullptr;
+                    oidnGpuPackedBytes = 0;
+                    // Free the float3 buffer we just allocated to keep state consistent.
+                    cudaFree(oidnGpuOutputDevPtr);
+                    oidnGpuOutputDevPtr = nullptr;
+                    oidnGpuOutputBytes = 0;
+                    return false;
+                }
+                oidnGpuPackedBytes = packedBytes;
             }
 
             oidnFilter = oidnDevice.newFilter("RT");
@@ -1033,7 +1177,22 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
         }
     }
 
-    output.resize(outBufferSize);
+    packedOutput.resize(pixelCount);
+
+    // ── [PROFILE] CUDA-event timestamps around each GPU stage. Events live on
+    // the desiredStream; elapsed time is in float ms (cudaEventElapsedTime).
+    // Lazily created and reused across calls; recreated if the stream changes.
+    static thread_local cudaEvent_t profEvBeforeExec = nullptr;
+    static thread_local cudaEvent_t profEvAfterExec  = nullptr;
+    static thread_local cudaEvent_t profEvAfterTm    = nullptr;
+    static thread_local cudaEvent_t profEvAfterCopy  = nullptr;
+    auto ensureProfEvents = [&]() {
+        if (!profEvBeforeExec) cudaEventCreate(&profEvBeforeExec);
+        if (!profEvAfterExec)  cudaEventCreate(&profEvAfterExec);
+        if (!profEvAfterTm)    cudaEventCreate(&profEvAfterTm);
+        if (!profEvAfterCopy)  cudaEventCreate(&profEvAfterCopy);
+    };
+    ensureProfEvents();
 
     try {
         // Ensure OptiX writes on its stream are visible before OIDN reads shared memory.
@@ -1045,7 +1204,9 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
             }
         }
 
+        cudaEventRecord(profEvBeforeExec, desiredStream);
         oidnFilter.execute();
+        cudaEventRecord(profEvAfterExec, desiredStream);
 
         const char* errMsg = nullptr;
         if (oidnDevice.getError(errMsg) != oidn::Error::None) {
@@ -1072,10 +1233,30 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
             }
         }
 
+        // Fused tonemap + sRGB + pack-to-uint32. Replaces the per-pixel CPU
+        // std::pow loop and shrinks the D2H transfer by 3×.
+        if (!launchOidnTonemapKernel(static_cast<const float*>(oidnGpuOutputDevPtr),
+                                     oidnGpuPackedDevPtr,
+                                     width, height,
+                                     tm.exposure,
+                                     tm.aMaskOr,
+                                     tm.rShift, tm.gShift, tm.bShift,
+                                     tm.flipY,
+                                     desiredStream)) {
+            cudaError_t le = cudaGetLastError();
+            SCENE_LOG_ERROR(std::string("[OIDN GPU] tonemap kernel launch failed: ") + std::to_string(static_cast<int>(le)));
+            if (le == cudaErrorIllegalAddress) {
+                cudaGetLastError();
+                oidnCudaInitialized = false;
+            }
+            return false;
+        }
+        cudaEventRecord(profEvAfterTm, desiredStream);
+
         if (desiredStream) {
             if (cudaStreamSynchronize(desiredStream) != cudaSuccess) {
                 cudaError_t se = cudaGetLastError();
-                SCENE_LOG_ERROR(std::string("[OIDN GPU] cudaStreamSynchronize failed after blend: ") + std::to_string(static_cast<int>(se)));
+                SCENE_LOG_ERROR(std::string("[OIDN GPU] cudaStreamSynchronize failed after tonemap: ") + std::to_string(static_cast<int>(se)));
                 // Same recovery: drain sticky error and force device rebind.
                 if (se == cudaErrorIllegalAddress) {
                     cudaGetLastError();
@@ -1085,12 +1266,32 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
             }
         }
 
-        // Only unavoidable transfer on this path: final denoised output → host for display.
-        if (cudaMemcpy(output.data(), oidnGpuOutputDevPtr,
-                       outBufferSize * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+        // Final transfer: tonemapped RGBA8 → host. 4 B/px vs the original 12 B/px.
+        if (cudaMemcpy(packedOutput.data(), oidnGpuPackedDevPtr,
+                       pixelCount * sizeof(uint32_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
             cudaError_t me = cudaGetLastError();
             SCENE_LOG_ERROR(std::string("[OIDN GPU] final cudaMemcpy failed: ") + std::to_string(static_cast<int>(me)));
             return false;
+        }
+        cudaEventRecord(profEvAfterCopy, desiredStream);
+
+        // ── [PROFILE] Elapsed times between events. cudaEventSynchronize on the
+        // last event ensures all the intermediate events have valid timing.
+        cudaEventSynchronize(profEvAfterCopy);
+        float msExec = 0.0f, msTm = 0.0f, msCopy = 0.0f;
+        cudaEventElapsedTime(&msExec, profEvBeforeExec, profEvAfterExec);
+        cudaEventElapsedTime(&msTm,   profEvAfterExec,  profEvAfterTm);
+        cudaEventElapsedTime(&msCopy, profEvAfterTm,    profEvAfterCopy);
+        static thread_local int   profCounter = 0;
+        static thread_local float profExecAvg = 0.0f, profTmAvg = 0.0f, profCopyAvg = 0.0f;
+        profExecAvg = profExecAvg * 0.95f + msExec * 0.05f;
+        profTmAvg   = profTmAvg   * 0.95f + msTm   * 0.05f;
+        profCopyAvg = profCopyAvg * 0.95f + msCopy * 0.05f;
+        if (++profCounter % 300 == 0) {
+            SCENE_LOG_INFO(std::string("[OIDN][CUDA] oidn=")
+                           + std::to_string(profExecAvg)
+                           + "ms tonemap+blend=" + std::to_string(profTmAvg)
+                           + "ms d2h=" + std::to_string(profCopyAvg) + "ms");
         }
     } catch (const std::exception& e) {
         SCENE_LOG_ERROR(std::string("[OIDN GPU] execute failed: ") + e.what());
@@ -1159,6 +1360,11 @@ Renderer::~Renderer()
         oidnGpuOutputDevPtr = nullptr;
     }
     oidnGpuOutputBytes = 0;
+    if (oidnGpuPackedDevPtr) {
+        cudaFree(oidnGpuPackedDevPtr);
+        oidnGpuPackedDevPtr = nullptr;
+    }
+    oidnGpuPackedBytes = 0;
     frame_buffer.clear();
     sample_counts.clear();
     variance_map.clear();
@@ -1718,6 +1924,11 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
     // Return false for camera-only or material-only animations to avoid unnecessary BVH rebuilds.
     bool geometry_changed = false;
 
+    // Reset the per-frame "what moved this frame" list. Filled below by the
+    // group update loop; consumed by render_Animation to drive a targeted
+    // backend update path on small change sets.
+    pending_anim_transform_updates.clear();
+
     static bool was_in_bind_pose = false;
     if (force_bind_pose) {
         if (!was_in_bind_pose) {
@@ -1999,20 +2210,92 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
         animation_groups.clear();
         std::unordered_map<void*, size_t> transformToGroup;
 
-        for (auto& obj : scene.world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (!tri) continue;
+        // [PERF] Pre-flight filter: only add a triangle to animation_groups
+        // if the object it represents actually has keyframe data (timeline
+        // track OR file animation track). Without this, scatter-dense scenes
+        // with thousands of static HittableInstance wrappers turn the
+        // per-frame group loop into O(scene-size). With it, the loop only
+        // visits truly animated nodes — which matches what processAnimations
+        // does in Play mode (iterates timeline.tracks, not the full scene).
+        auto isNodeAnimated = [&](const std::string& nodeName) -> bool {
+            if (nodeName.empty()) return false;
+            if (!scene.timeline.tracks.empty() &&
+                scene.timeline.tracks.find(nodeName) != scene.timeline.tracks.end()) {
+                return true;
+            }
+            for (const auto& anim : scene.animationDataList) {
+                if (!anim) continue;
+                if (anim->positionKeys.count(nodeName) > 0 ||
+                    anim->rotationKeys.count(nodeName) > 0 ||
+                    anim->scalingKeys.count(nodeName) > 0) {
+                    return true;
+                }
+            }
+            return false;
+        };
 
-                    void* transformKey = tri->getTransformPtr();
-            if (transformToGroup.find(transformKey) == transformToGroup.end()) {
-                transformToGroup[transformKey] = animation_groups.size();
+        // Local helper: add a triangle to its appropriate animation group.
+        // Returns the group index (or SIZE_MAX if rejected). Skinned meshes
+        // are always added (bone transforms drive vertex updates regardless
+        // of keyframe presence).
+        auto addTriangleToGroups = [&](const std::shared_ptr<Triangle>& tri,
+                                       const std::string& overrideName = std::string()) -> size_t {
+            if (!tri) return SIZE_MAX;
+            void* transformKey = tri->getTransformPtr();
+            if (!transformKey) return SIZE_MAX;
+
+            const bool isSkinned = tri->hasSkinData();
+            const std::string& nameForKeyCheck = overrideName.empty() ? tri->getNodeName() : overrideName;
+            if (!isSkinned && !isNodeAnimated(nameForKeyCheck)) {
+                return SIZE_MAX; // static — no group needed
+            }
+
+            auto it = transformToGroup.find(transformKey);
+            size_t idx;
+            if (it == transformToGroup.end()) {
+                idx = animation_groups.size();
+                transformToGroup[transformKey] = idx;
                 AnimatableGroup newGroup;
-                newGroup.nodeName = tri->getNodeName();
-                newGroup.isSkinned = tri->hasSkinData();
+                newGroup.nodeName = nameForKeyCheck;
+                newGroup.isSkinned = isSkinned;
                 newGroup.transformHandle = tri->getTransformHandle();
                 animation_groups.push_back(newGroup);
+            } else {
+                idx = it->second;
             }
-            animation_groups[transformToGroup[transformKey]].triangles.push_back(tri);
+            animation_groups[idx].triangles.push_back(tri);
+            return idx;
+        };
+
+        for (auto& obj : scene.world.objects) {
+            if (!obj) continue;
+
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                addTriangleToGroups(tri);
+                continue;
+            }
+
+            // [HITTABLEINSTANCE FIX] HittableInstance wrappers hide their
+            // triangles inside source_triangles. We still need to drive
+            // their TransformHandle from keyframes, but match the track by
+            // the wrapper's node_name (which is what the user sees / keys
+            // in the timeline), not the inner triangle's name — those can
+            // differ for instanced meshes.
+            if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                if (inst->source_triangles && !inst->source_triangles->empty()) {
+                    const std::string& instName = inst->node_name;
+                    size_t group_idx = SIZE_MAX;
+                    for (auto& src_tri : *inst->source_triangles) {
+                        size_t idx = addTriangleToGroups(src_tri, instName);
+                        if (idx != SIZE_MAX && group_idx == SIZE_MAX) {
+                            group_idx = idx;
+                        }
+                    }
+                    if (group_idx != SIZE_MAX) {
+                        animation_groups[group_idx].instances.push_back(inst);
+                    }
+                }
+            }
         }
         animation_groups_dirty = false;
         //SCENE_LOG_INFO("Animation groups rebuilt: " + std::to_string(animation_groups.size()) + " groups.");
@@ -2095,6 +2378,29 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                         }
                     }
                 }
+            }
+        }
+
+        // [HITTABLEINSTANCE SYNC] If this group's transform handle was just
+        // updated AND it is shared with one or more HittableInstance wrappers
+        // (cached at build time), propagate the new world matrix into each
+        // wrapper's own `transform` field. Vulkan's updateInstanceTransforms
+        // reads inst->transform directly when refitting the TLAS, so without
+        // this propagation HittableInstance-wrapped meshes stay frozen at
+        // their pre-render pose.
+        if (group.transformHandle &&
+            (!group.instances.empty() || !group.isSkinned)) {
+            const Matrix4x4& worldMatrix = group.transformHandle->getMatrix();
+            for (auto& inst : group.instances) {
+                if (inst) inst->setTransform(worldMatrix);
+            }
+            // [PERF] Record this node's new transform so the worker thread
+            // can drive a targeted backend update for the few nodes that
+            // actually moved this frame, instead of scanning every instance
+            // in the scene. Skinned groups update via dispatchSkinning, so
+            // their transform isn't pushed here.
+            if (!group.isSkinned && !group.nodeName.empty()) {
+                pending_anim_transform_updates.emplace_back(group.nodeName, worldMatrix);
             }
         }
     }
@@ -2452,6 +2758,15 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
     rendering_in_progress = true;
     rendering_stopped_cpu = false;
     rendering_stopped_gpu = false;
+
+    // [HITTABLEINSTANCE FIX] Force animation_groups rebuild at render start.
+    // The new building logic includes HittableInstance source_triangles
+    // (which the old Triangle-only logic missed), but the cache is sticky
+    // — once built (e.g. during a prior viewport playback), the rebuild
+    // branch is skipped on subsequent calls. Without invalidating here,
+    // the worker re-uses an older Triangle-only cache and the cube stays
+    // frozen at its pre-render pose. Cheap: rebuild costs one O(N) pass.
+    animation_groups_dirty = true;
     
     // Reset pause state at start of new animation render
     extern std::atomic<bool> rendering_paused;
@@ -2477,6 +2792,21 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
     bool original_render_mode = render_settings.is_final_render_mode;
     render_settings.is_final_render_mode = true;
 
+    // [SAMPLE COUNT FIX] OptixWrapper::isAccumulationComplete reads the
+    // GLOBAL render_settings.max_samples — NOT the per-frame target we
+    // pass via setRenderParams (OptixBackend::setRenderParams ignores
+    // samplesPerPixel entirely). If the user has the viewport's
+    // max_samples set low (e.g. 1 for fast interactive editing), OptiX
+    // declares accumulation complete after one sample, the worker exits
+    // the inner loop, and what gets denoised+saved is essentially a
+    // single noisy sample (denoiser ghosting around moving objects is
+    // the giveaway). Override the global for the duration of the
+    // animation render and restore it on exit. Vulkan also reads this
+    // field for some shader-side limits; aligning it avoids divergent
+    // behavior between the two backends.
+    const int original_max_samples = render_settings.max_samples;
+    render_settings.max_samples = total_samples_per_pixel;
+
     // Frame range is validated in Main.cpp before calling this function
     // We trust the values passed as parameters
     SCENE_LOG_INFO("render_Animation: Frame range " + std::to_string(start_frame) + " - " + std::to_string(end_frame) + 
@@ -2491,6 +2821,7 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         rendering_complete = true;
         rendering_in_progress = false;
         render_settings.is_final_render_mode = original_render_mode;
+        render_settings.max_samples = original_max_samples;
         return;
     }
 
@@ -2518,18 +2849,15 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         SCENE_LOG_WARN("GPU backend requested but not available/valid. Falling back to CPU.");
     }
 
-    // For CPU animation rendering, sync image dimensions to final render resolution
-    // so render_progressive_pass uses the correct pixel grid.
+    // Sequence render now uses the active viewport resolution — one resolution
+    // setting drives everything (viewport, single-frame final, sequence). The
+    // user adjusts resolution via the System panel before starting the render.
+    // Keep the legacy final_render_width/height fields synced for project
+    // save/load + any other code paths still reading them.
+    render_settings.final_render_width = image_width;
+    render_settings.final_render_height = image_height;
     int saved_image_width = image_width;
     int saved_image_height = image_height;
-    if (!run_gpu) {
-        int rw = render_settings.final_render_width;
-        int rh = render_settings.final_render_height;
-        if (rw > 0 && rh > 0) {
-            resetResolution(rw, rh);
-            SCENE_LOG_INFO("CPU animation render: resolution set to " + std::to_string(rw) + "x" + std::to_string(rh));
-        }
-    }
 
     for (int frame = start_frame; frame <= end_frame; ++frame) {
 
@@ -2672,13 +3000,14 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         }
 
         // --- RENDER BUFFER SETUP ---
-        // Use a dedicated off-screen surface for BOTH CPU and OptiX to prevent 
+        // Use a dedicated off-screen surface for BOTH CPU and OptiX to prevent
         // access violations when render resolution != window size.
         SDL_Surface* target_surface = surface; // Default fallback
         SDL_Surface* render_surface = nullptr;
 
-        int rw = render_settings.final_render_width;
-        int rh = render_settings.final_render_height;
+        // Sequence render mirrors the active viewport resolution.
+        int rw = image_width;
+        int rh = image_height;
 
         // Always create off-screen surface for animation
         render_surface = SDL_CreateRGBSurfaceWithFormat(0, rw, rh, 32, SDL_PIXELFORMAT_RGBA32);
@@ -2692,8 +3021,72 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
             // 1. Update Geometry if needed (skinning + topology changes)
             // Use updateSceneGeometry for both OptiX and Vulkan — it handles
             // bone matrix dispatch (GPU skinning) and TLAS refit/rebuild.
-            if (geometry_changed && m_backend) {
-                m_backend->updateSceneGeometry(scene.world.objects, finalBoneMatrices);
+            //
+            // [PATH SELECTION] Pick exactly ONE GPU sync path per animation
+            // frame based on whether this frame involves skinning. Calling
+            // both (as a previous iteration did) does the TLAS rebuild twice
+            // — wasted GPU work plus a transient window between the two
+            // rebuilds where descriptor sets can briefly reference an
+            // about-to-be-replaced AS handle. On Vulkan that occasionally
+            // shows up as a silent driver hang mid-render.
+            //
+            //   • Skinned frame  (finalBoneMatrices non-empty)  →
+            //         updateSceneGeometry: dispatches GPU skinning into
+            //         BLAS vertex buffers, then refits TLAS. m_vkInstances
+            //         transforms stay correct (skin moves vertices, not
+            //         instance matrices).
+            //   • Rigid keyframe frame  (no bone matrices)     →
+            //         updateInstanceTransforms: refreshes m_vkInstances
+            //         from scene.world.objects transforms (the
+            //         updateSceneGeometry fast-path cannot do this — it
+            //         uses the cached values and would refit TLAS with a
+            //         frame-0 transform), then refits TLAS once.
+            // [FRAME 0 FIX] On the very first iteration of the sequence
+            // render we MUST force a full sync regardless of whether
+            // updateAnimationState reported a change. The pre-render
+            // backend state (uploaded by syncActiveRenderBackendScene or
+            // by processAnimations during the launch countdown) may not
+            // match what the worker's updateAnimationState computes for
+            // start_frame — the worker iterates a different code path
+            // (animation_groups, raw Triangles only) than processAnimations
+            // (mesh_cache, including HittableInstance wrappers). If
+            // geometry_changed is false on the first frame, the unforced
+            // path would skip the TLAS refit and the first 1–2 rendered
+            // frames render with the stale pre-render transform.
+            const bool first_anim_frame = (frame == start_frame);
+            const bool needs_geometry_sync = geometry_changed || first_anim_frame;
+            if (needs_geometry_sync && m_backend) {
+                // HittableInstance wrappers are now synced inside
+                // updateAnimationState per-group (see "HITTABLEINSTANCE
+                // SYNC" block), so the per-frame scene.world.objects scan
+                // that used to live here is no longer needed.
+                if (!finalBoneMatrices.empty()) {
+                    // Skinned mesh path: GPU skinning + full TLAS refit.
+                    m_backend->updateSceneGeometry(scene.world.objects, finalBoneMatrices);
+                } else {
+                    // [PERF] Pick targeted vs full TLAS sync based on how many
+                    // nodes actually moved this frame. This mirrors what
+                    // Play-mode's processAnimations does (≤8 changed →
+                    // per-node updateObjectTransform; otherwise full scan).
+                    // On scatter-dense scenes where only a few cubes / lights
+                    // are keyed, the targeted path skips the full
+                    // syncInstanceTransforms(force=true) rebuild that scans
+                    // every instance + does a dynamic_cast per source — that
+                    // scan was the cost gap between Play mode and sequence
+                    // render reported earlier.
+                    constexpr size_t kTargetedTransformUpdateLimit = 8;
+                    const bool use_targeted = !first_anim_frame &&
+                        !pending_anim_transform_updates.empty() &&
+                        pending_anim_transform_updates.size() <= kTargetedTransformUpdateLimit;
+
+                    if (use_targeted) {
+                        for (const auto& [node_name, m] : pending_anim_transform_updates) {
+                            m_backend->updateObjectTransform(node_name, m);
+                        }
+                    } else {
+                        m_backend->updateInstanceTransforms(scene.world.objects);
+                    }
+                }
             }
             if (waterUpdate.material_changed || waterUpdate.mesh_changed) {
                 for (auto& water : WaterManager::getInstance().getWaterSurfaces()) {
@@ -2735,8 +3128,12 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
                     rp.maxBounces = std::max(1, render_settings.max_bounces);
                     rp.diffuseBounces = std::clamp(render_settings.diffuse_bounces, 1, rp.maxBounces);
                     rp.transmissionBounces = std::clamp(render_settings.transmission_bounces, 1, rp.maxBounces);
-                    rp.useAdaptiveSampling = false;
-                    rp.adaptiveThreshold = 0.0f;
+                    // Inherit viewport's adaptive sampling toggle + threshold so a
+                    // sequence render can converge early on smooth frames instead
+                    // of always burning the full max_samples budget. Disabling
+                    // the toggle in the UI still gives fixed-count behavior.
+                    rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
+                    rp.adaptiveThreshold = render_settings.variance_threshold;
                     m_backend->setRenderParams(rp);
                 }
             }
@@ -2753,14 +3150,17 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
                 
                 // Launch progressive render
                 // Pass nullptr for window to disable title bar updates (headless).
-                // raytrace_texture is still passed because Vulkan renderProgressiveImpl
-                // returns early if tex==nullptr.  The anim_owns_backend guard in Main.cpp
-                // ensures the main thread is not using the texture concurrently.
+                // [THREAD-SAFETY FIX] Pass nullptr for tex too — SDL_Texture is not
+                // thread-safe. The worker thread calling SDL_UpdateTexture concurrently
+                // with the main thread's SDL_RenderCopy on the same raytrace_texture
+                // wedges the main thread inside the SDL2/D3D driver, freezing the UI
+                // (frames still save because the worker is alive). Vulkan early-out
+                // was relaxed to allow tex==nullptr; pixel data still flows via fb.
                  if (m_backend) {
                      void* framebuffer_ptr = (void*)&temp_framebuffer;
-                     m_backend->renderProgressive(target_surface, nullptr, renderer, 
-                                                 target_surface->w, target_surface->h, 
-                                                 framebuffer_ptr, raytrace_texture);
+                     m_backend->renderProgressive(target_surface, nullptr, renderer,
+                                                 target_surface->w, target_surface->h,
+                                                 framebuffer_ptr, nullptr);
                  }
             }
             
@@ -2812,6 +3212,34 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
             // So we call it here too.
             // Note: Renderer::applyOIDNDenoising works on SDL Surface
             applyOIDNDenoising(target_surface, 0, true, denoiser_blend);
+        }
+
+        // [POST-PROCESS] Apply the same viewport color processing (tonemap,
+        // exposure, white balance, saturation, vignette) the user has dialed
+        // in to the rendered surface before saving — so the disk output
+        // matches what they see in the viewport. Previously sequence frames
+        // bypassed this entirely and only got the backend's internal raw
+        // tonemap. applyToneMappingToSurface is defined in Main.cpp and
+        // forward-declared below; passing the destination surface as both
+        // source and destination tells it to read 8-bit pixels in place
+        // (the GPU backend already produced display-ready pixels — we just
+        // re-grade them).
+        if (ui_ctx) {
+            extern void applyToneMappingToSurface(SDL_Surface*, SDL_Surface*, ColorProcessor&, Renderer*);
+            extern void applyStylizeToSurface(SDL_Surface*, Renderer&, bool);
+            applyToneMappingToSurface(target_surface, target_surface, ui_ctx->color_processor, run_gpu ? nullptr : this);
+            if (run_gpu && stylizeMode.enabled) {
+                // Pull the GPU backend's primary-hit AOVs so the sequence frame gets the
+                // full surface-locked stylize (same as the CPU path), not the flat
+                // screen-space fallback. Falls back to screen-space if the AOV pull fails.
+                // cameraOrigin = lookfrom, matching what syncCameraToBackend pushes as the
+                // GPU ray origin (depth is reconstructed from world position).
+                // forceRefresh: this fires once per finished frame, and a sequence may keep
+                // the camera static while objects move — so always re-pull regardless of hash.
+                const bool aov_ready = scene.camera &&
+                    fillStylizeAOVFromBackend(m_backend, *scene.camera, /*forceRefresh=*/true);
+                applyStylizeToSurface(target_surface, *this, aov_ready);
+            }
         }
 
         if (!output_folder.empty()) {
@@ -2871,6 +3299,11 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
     
     // RESTORE RENDER MODE
     render_settings.is_final_render_mode = original_render_mode;
+
+    // [SAMPLE COUNT FIX] Restore the global max_samples we overrode at the
+    // top so the viewport's interactive accumulation goes back to whatever
+    // the user had configured.
+    render_settings.max_samples = original_max_samples;
 
     // [FIX] Restore GPU backend to viewport settings so the viewport can resume
     // normal progressive rendering. Without this, the backend stays at the
@@ -2935,7 +3368,7 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync) {
                 if (!obj) return;
 
                 if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-                    if (tri->getTransformPtr() && tri->getVertexBoneWeights().empty()) {
+                    if (tri->getTransformPtr() && !tri->hasAnySkinWeights()) {
                         tri->updateTransformedVertices();
                     }
                     return;
@@ -2947,7 +3380,7 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync) {
                     }
                     if (inst->source_triangles) {
                         for (auto& srcTri : *inst->source_triangles) {
-                            if (srcTri && srcTri->getTransformPtr() && srcTri->getVertexBoneWeights().empty()) {
+                            if (srcTri && srcTri->getTransformPtr() && !srcTri->hasAnySkinWeights()) {
                                 srcTri->updateTransformedVertices();
                             }
                         }
@@ -4064,7 +4497,9 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
 Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
     const std::vector<std::shared_ptr<Light>>& lights,
     const Vec3& background_color, int depth, int sample_index, const SceneData& scene,
-    Vec3* primary_albedo, Vec3* primary_normal, bool* primary_hit) {
+    Vec3* primary_albedo, Vec3* primary_normal, bool* primary_hit,
+    float* primary_depth, uint32_t* primary_material_id,
+    Vec3* primary_world_position) {
 
     // =========================================================================
     // UNIFIED RAY COLOR - Matches GPU ray_color.cuh exactly
@@ -4082,6 +4517,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
     if (primary_hit) *primary_hit = false;
     if (primary_albedo) *primary_albedo = Vec3(0.0f);
     if (primary_normal) *primary_normal = Vec3(0.0f);
+    if (primary_depth) *primary_depth = 0.0f;
+    if (primary_material_id) *primary_material_id = 0xFFFFFFFFu;
+    if (primary_world_position) *primary_world_position = Vec3(0.0f);
 
     if (world.data.mode == WORLD_MODE_NISHITA) {
         if (!world.getLUT()) {
@@ -5641,6 +6079,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             *primary_hit = true;
             if (primary_albedo) *primary_albedo = toVec3(albedo);
             if (primary_normal) *primary_normal = toVec3(N.normalize());
+            if (primary_depth) *primary_depth = rec.t;
+            if (primary_material_id) *primary_material_id = static_cast<uint32_t>(rec.materialID);
+            if (primary_world_position) *primary_world_position = rec.point;
         }
 
         // --- Add Emission (Volumetric & Surface) ---
@@ -5981,6 +6422,15 @@ void Renderer::resetCPUAccumulation() {
     }
     if (!cpu_normal_accumulation_buffer.empty()) {
         std::fill(cpu_normal_accumulation_buffer.begin(), cpu_normal_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
+    }
+    if (!cpu_world_position_accumulation_buffer.empty()) {
+        std::fill(cpu_world_position_accumulation_buffer.begin(), cpu_world_position_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
+    }
+    if (!cpu_depth_accumulation_buffer.empty()) {
+        std::fill(cpu_depth_accumulation_buffer.begin(), cpu_depth_accumulation_buffer.end(), 0.0f);
+    }
+    if (!cpu_material_id_buffer.empty()) {
+        std::fill(cpu_material_id_buffer.begin(), cpu_material_id_buffer.end(), 0xFFFFFFFFu);
     }
     // Reset variance buffer for adaptive sampling
     if (!cpu_variance_buffer.empty()) {
@@ -6422,6 +6872,15 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
     if (cpu_normal_accumulation_buffer.size() != pixel_count) {
         cpu_normal_accumulation_buffer.resize(pixel_count, Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
     }
+    if (cpu_world_position_accumulation_buffer.size() != pixel_count) {
+        cpu_world_position_accumulation_buffer.resize(pixel_count, Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
+    }
+    if (cpu_depth_accumulation_buffer.size() != pixel_count) {
+        cpu_depth_accumulation_buffer.resize(pixel_count, 0.0f);
+    }
+    if (cpu_material_id_buffer.size() != pixel_count) {
+        cpu_material_id_buffer.resize(pixel_count, 0xFFFFFFFFu);
+    }
     cpu_accumulation_valid = true;
 
     // Ensure variance buffer is allocated for adaptive sampling
@@ -6439,6 +6898,9 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
             std::fill(cpu_accumulation_buffer.begin(), cpu_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
             std::fill(cpu_albedo_accumulation_buffer.begin(), cpu_albedo_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
             std::fill(cpu_normal_accumulation_buffer.begin(), cpu_normal_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
+            std::fill(cpu_world_position_accumulation_buffer.begin(), cpu_world_position_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
+            std::fill(cpu_depth_accumulation_buffer.begin(), cpu_depth_accumulation_buffer.end(), 0.0f);
+            std::fill(cpu_material_id_buffer.begin(), cpu_material_id_buffer.end(), 0xFFFFFFFFu);
             std::fill(cpu_variance_buffer.begin(), cpu_variance_buffer.end(), 0.0f);
             cpu_accumulated_samples = 0;
             cpu_pixel_list_valid = false;  // Force pixel list rebuild + shuffle
@@ -6617,6 +7079,9 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
             Vec3 color_sum(0.0f);
             Vec3 albedo_sum(0.0f);
             Vec3 normal_sum(0.0f);
+            Vec3 world_position_sum(0.0f);
+            float depth_sum = 0.0f;
+            uint32_t first_material_id = 0xFFFFFFFFu;
             int primary_hit_count = 0;
             float batch_lum_sum = 0.0f;
             float batch_lum_sq_sum = 0.0f;
@@ -6630,11 +7095,15 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
 
                 Vec3 primary_albedo(0.0f);
                 Vec3 primary_normal(0.0f);
+                Vec3 primary_world_position(0.0f);
+                float primary_depth = 0.0f;
+                uint32_t primary_material_id = 0xFFFFFFFFu;
                 bool primary_hit = false;
 
                 Vec3 sample_color = ray_color(
                     r, scene.bvh.get(), scene.lights, scene.background_color, max_depth, 0, scene,
-                    &primary_albedo, &primary_normal, &primary_hit);
+                    &primary_albedo, &primary_normal, &primary_hit, &primary_depth, &primary_material_id,
+                    &primary_world_position);
                 color_sum = color_sum + sample_color;
 
                 if (render_settings.use_adaptive_sampling) {
@@ -6646,6 +7115,11 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                 if (primary_hit) {
                     albedo_sum = albedo_sum + primary_albedo;
                     normal_sum = normal_sum + primary_normal;
+                    world_position_sum = world_position_sum + primary_world_position;
+                    depth_sum += primary_depth;
+                    if (first_material_id == 0xFFFFFFFFu) {
+                        first_material_id = primary_material_id;
+                    }
                     primary_hit_count++;
                 }
             }
@@ -6653,9 +7127,13 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
             Vec3 new_color = color_sum / float(samples_this_pass);
             Vec3 new_albedo(0.0f);
             Vec3 new_normal(0.0f);
+            Vec3 new_world_position(0.0f);
+            float new_depth = 0.0f;
             if (primary_hit_count > 0) {
                 new_albedo = albedo_sum / float(primary_hit_count);
                 new_normal = (normal_sum / float(primary_hit_count)).normalize();
+                new_world_position = world_position_sum / float(primary_hit_count);
+                new_depth = depth_sum / float(primary_hit_count);
             }
 
             // Accumulate with previous samples
@@ -6686,13 +7164,19 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
 
             Vec4& accum_albedo = cpu_albedo_accumulation_buffer[pixel_index];
             Vec4& accum_normal = cpu_normal_accumulation_buffer[pixel_index];
+            Vec4& accum_world_position = cpu_world_position_accumulation_buffer[pixel_index];
+            float& accum_depth = cpu_depth_accumulation_buffer[pixel_index];
+            uint32_t& accum_material_id = cpu_material_id_buffer[pixel_index];
             if (primary_hit_count > 0) {
                 if (prev_samples > 0.0f) {
                     Vec3 prev_albedo(accum_albedo.x, accum_albedo.y, accum_albedo.z);
                     Vec3 prev_normal(accum_normal.x, accum_normal.y, accum_normal.z);
+                    Vec3 prev_world_position(accum_world_position.x, accum_world_position.y, accum_world_position.z);
                     Vec3 blended_albedo = (prev_albedo * prev_samples + new_albedo * samples_this_pass) / new_total_samples;
                     Vec3 blended_normal = (prev_normal * prev_samples + new_normal * samples_this_pass) / new_total_samples;
+                    Vec3 blended_world_position = (prev_world_position * prev_samples + new_world_position * samples_this_pass) / new_total_samples;
                     blended_normal = blended_normal.normalize();
+                    accum_depth = (accum_depth * prev_samples + new_depth * samples_this_pass) / new_total_samples;
                     accum_albedo.x = blended_albedo.x;
                     accum_albedo.y = blended_albedo.y;
                     accum_albedo.z = blended_albedo.z;
@@ -6701,6 +7185,13 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                     accum_normal.y = blended_normal.y;
                     accum_normal.z = blended_normal.z;
                     accum_normal.w = new_total_samples;
+                    accum_world_position.x = blended_world_position.x;
+                    accum_world_position.y = blended_world_position.y;
+                    accum_world_position.z = blended_world_position.z;
+                    accum_world_position.w = new_total_samples;
+                    if (accum_material_id == 0xFFFFFFFFu) {
+                        accum_material_id = first_material_id;
+                    }
                 } else {
                     accum_albedo.x = new_albedo.x;
                     accum_albedo.y = new_albedo.y;
@@ -6710,10 +7201,19 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                     accum_normal.y = new_normal.y;
                     accum_normal.z = new_normal.z;
                     accum_normal.w = float(samples_this_pass);
+                    accum_world_position.x = new_world_position.x;
+                    accum_world_position.y = new_world_position.y;
+                    accum_world_position.z = new_world_position.z;
+                    accum_world_position.w = float(samples_this_pass);
+                    accum_depth = new_depth;
+                    accum_material_id = first_material_id;
                 }
             } else if (prev_samples <= 0.0f) {
                 accum_albedo = Vec4{ 0.0f, 0.0f, 0.0f, float(samples_this_pass) };
                 accum_normal = Vec4{ 0.0f, 0.0f, 0.0f, float(samples_this_pass) };
+                accum_world_position = Vec4{ 0.0f, 0.0f, 0.0f, float(samples_this_pass) };
+                accum_depth = 0.0f;
+                accum_material_id = 0xFFFFFFFFu;
             }
 
             // ===================================================================
@@ -7593,6 +8093,13 @@ void Renderer::updateMeshMaterialBinding(SceneData& scene, const std::string& no
 
 void Renderer::syncCameraToBackend(const Camera& cam) {
     if (!m_backend) return;
+    // Publish Stylize state to the global render settings before the backend launch so the
+    // OptiX wrapper allocates its AOV buffers (albedo/normal/position) when Stylize is on,
+    // independent of the denoiser. Harmless for Vulkan (always allocates its AOV images).
+    {
+        extern RenderSettings render_settings;
+        render_settings.stylize_enabled = stylizeMode.enabled;
+    }
     Backend::CameraParams cp;
     cp.origin = cam.lookfrom;
     cp.lookAt = cam.lookat;

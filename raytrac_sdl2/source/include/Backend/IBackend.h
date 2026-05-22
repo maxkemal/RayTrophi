@@ -88,6 +88,12 @@ struct DenoiserFrameData {
     const float* color = nullptr;
     const float* albedo = nullptr;
     const float* normal = nullptr;
+    // Stylize AOV (optional): stride 4 — x,y,z = primary-hit world position, w = encoded
+    // material id (0 = miss, 1 = hit/unknown material, >=2 → material index = w - 2).
+    // Linear depth is reconstructed host-side from world position + camera origin.
+    // Bottom-up layout, matching color/albedo/normal. Non-null only when the backend
+    // produces it (Vulkan RT with the position image).
+    const float* position = nullptr;
 };
 
 // GPU-side denoiser input. Pointers are device memory on the backend's CUDA device.
@@ -577,9 +583,12 @@ public:
      * @param outPixels Output buffer (RGBA float or uint8 depending on format)
      */
     virtual void downloadImage(void* outPixels) = 0;
-    virtual bool getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary = true) {
+    // includeColor=false skips the (full-res) color image copy/download for callers that
+    // only need the AOVs (e.g. the Stylize position/albedo/normal pull).
+    virtual bool getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary = true, bool includeColor = true) {
         (void)frame;
         (void)useAuxiliary;
+        (void)includeColor;
         return false;
     }
 

@@ -109,7 +109,8 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     float cloud_edge_fade;
     float cloud_offset_x;
     float cloud_offset_z;
-    float _ext_reserved[13];      // padding to reach 512 total bytes
+    float cloud_seed;
+    float _ext_reserved[12];      // padding to reach 512 total bytes
 };
 
 // Compile-time size check (512 bytes = 8 cache lines)

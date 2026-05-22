@@ -602,7 +602,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             bool synced_any = false;
             for (auto& obj : ctx.scene.world.objects) {
                 auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                if (tri && !tri->getVertexBoneWeights().empty()) {
+                if (tri && tri->hasAnySkinWeights()) {
                     // This is a skinned triangle - apply current bone matrices
                     if (!ctx.renderer.finalBoneMatrices.empty()) {
                         tri->apply_skinning(ctx.renderer.finalBoneMatrices);
@@ -1244,12 +1244,6 @@ void SceneUI::triggerDelete(UIContext& ctx) {
     }
 
     if (vdb_deleted) {
-        // Sync empty/reduced list to GPU immediately to prevent invalid memory access
-        if (ctx.backend_ptr) {
-            syncVDBVolumesToGPU(ctx);
-            // Also reset accumulation as scene changed
-            ctx.backend_ptr->resetAccumulation();
-        }
         ctx.renderer.resetCPUAccumulation();
     }
 
@@ -1274,10 +1268,6 @@ void SceneUI::triggerDelete(UIContext& ctx) {
     }
 
     if (gas_deleted) {
-        if (ctx.backend_ptr) {
-            ctx.renderer.updateBackendGasVolumes(ctx.scene);
-            ctx.backend_ptr->resetAccumulation();
-        }
         ctx.renderer.resetCPUAccumulation();
     }
 
@@ -1339,6 +1329,31 @@ void SceneUI::triggerDelete(UIContext& ctx) {
                 }),
             objs.end()
         );
+    }
+
+    if (vdb_deleted || gas_deleted) {
+        ctx.selection.clearSelection();
+        const bool activeVulkanRT =
+            (g_backend && dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr) ||
+            (ctx.backend_ptr && dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr) != nullptr);
+
+        // Now that world.objects no longer contains the deleted volume, sync the
+        // volume SSBO and force Vulkan TLAS rebuild. Syncing before the erase left
+        // the stale AABB instance alive until a backend switch rebuilt everything.
+        if (ctx.backend_ptr) {
+            syncVDBVolumesToGPU(ctx);
+            if (gas_deleted) {
+                ctx.renderer.updateBackendGasVolumes(ctx.scene);
+            }
+            ctx.backend_ptr->resetAccumulation();
+        }
+        if (activeVulkanRT) {
+            extern bool g_vulkan_rebuild_pending;
+            g_vulkan_rebuild_pending = true;
+        }
+        ctx.renderer.resetCPUAccumulation();
+        ctx.start_render = true;
+        g_ProjectManager.markModified();
     }
 
     // Track deletions in ProjectManager (batch update)

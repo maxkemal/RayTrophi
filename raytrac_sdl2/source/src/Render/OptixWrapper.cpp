@@ -67,6 +67,15 @@
     } while (0)
 
 namespace {
+bool triangleHasEffectiveSkinData(const Triangle* tri) {
+    if (!tri || !tri->hasSkinData()) return false;
+    for (int v = 0; v < 3; ++v) {
+        for (const auto& [boneIndex, weight] : tri->getSkinBoneWeights(v)) {
+            if (boneIndex >= 0 && weight > 0.0f) return true;
+        }
+    }
+    return false;
+}
 
 cudaTextureObject_t sanitizeCudaTextureObject(cudaTextureObject_t texture) {
     if (texture == 0) {
@@ -242,6 +251,35 @@ void OptixWrapper::partialCleanup() {
         d_framebuffer = nullptr;
         freedAny = true;
     }
+    for (int slot = 0; slot < 2; ++slot) {
+        if (host_output_buffers[slot]) {
+            cudaFreeHost(host_output_buffers[slot]);
+            host_output_buffers[slot] = nullptr;
+            freedAny = true;
+        }
+        if (host_output_copy_events[slot]) {
+            cudaEventDestroy(host_output_copy_events[slot]);
+            host_output_copy_events[slot] = nullptr;
+            freedAny = true;
+        }
+        host_output_copy_pending[slot] = false;
+        if (host_converged_count_buffers[slot]) {
+            cudaFreeHost(host_converged_count_buffers[slot]);
+            host_converged_count_buffers[slot] = nullptr;
+            freedAny = true;
+        }
+        if (host_converged_count_events[slot]) {
+            cudaEventDestroy(host_converged_count_events[slot]);
+            host_converged_count_events[slot] = nullptr;
+            freedAny = true;
+        }
+        host_converged_count_pending[slot] = false;
+    }
+    host_output_buffer_capacity = 0;
+    host_output_display_slot = -1;
+    host_output_write_slot = 0;
+    host_converged_count_latest = 0;
+    host_converged_count_write_slot = 0;
     if (d_accumulation_float4) {
         cudaFree(reinterpret_cast<void*>(d_accumulation_float4));
         d_accumulation_float4 = nullptr;
@@ -257,6 +295,11 @@ void OptixWrapper::partialCleanup() {
     if (d_denoiser_normal) {
         cudaFree(reinterpret_cast<void*>(d_denoiser_normal));
         d_denoiser_normal = nullptr;
+        freedAny = true;
+    }
+    if (d_stylize_position) {
+        cudaFree(reinterpret_cast<void*>(d_stylize_position));
+        d_stylize_position = nullptr;
         freedAny = true;
     }
     host_denoiser_color.clear();
@@ -491,6 +534,36 @@ bool OptixWrapper::downloadDenoiserBuffers(std::vector<float>& color, std::vecto
     return true;
 }
 
+bool OptixWrapper::downloadStylizePositionBuffer(std::vector<float>& position) {
+    // Snapshot pointer + size locally (resetBuffers may run on another thread).
+    float4* src = reinterpret_cast<float4*>(d_stylize_position);
+    const int snap_w = prev_width;
+    const int snap_h = prev_height;
+    if (!src || snap_w <= 0 || snap_h <= 0) {
+        position.clear();
+        return false;
+    }
+    const size_t pixelCount = (size_t)snap_w * (size_t)snap_h;
+    std::vector<float4> pos(pixelCount);
+    // Raw cudaMemcpy (not CUDA_CHECK): on a resize race we'd rather return false and
+    // retry next frame than terminate. No Y-flip — the OptiX GPU buffer is already
+    // bottom-up (see getPickedObjectId), matching the CPU AOV layout.
+    const cudaError_t e = cudaMemcpy(pos.data(), src, pixelCount * sizeof(float4), cudaMemcpyDeviceToHost);
+    if (e != cudaSuccess) {
+        cudaGetLastError();
+        position.clear();
+        return false;
+    }
+    position.resize(pixelCount * 4);
+    for (size_t i = 0; i < pixelCount; ++i) {
+        position[i * 4 + 0] = pos[i].x;
+        position[i * 4 + 1] = pos[i].y;
+        position[i * 4 + 2] = pos[i].z;
+        position[i * 4 + 3] = pos[i].w;
+    }
+    return true;
+}
+
 void OptixWrapper::cleanup() {
     if (stream) {
         cudaStreamSynchronize(stream);
@@ -533,6 +606,19 @@ void OptixWrapper::cleanup() {
         cudaFree(d_converged_count);
         d_converged_count = nullptr;
     }
+    for (int slot = 0; slot < 2; ++slot) {
+        if (host_converged_count_events[slot]) {
+            cudaEventDestroy(host_converged_count_events[slot]);
+            host_converged_count_events[slot] = nullptr;
+        }
+        if (host_converged_count_buffers[slot]) {
+            cudaFreeHost(host_converged_count_buffers[slot]);
+            host_converged_count_buffers[slot] = nullptr;
+        }
+        host_converged_count_pending[slot] = false;
+    }
+    host_converged_count_latest = 0;
+    host_converged_count_write_slot = 0;
 
     // Persistent buffers
     if (d_params_persistent) {
@@ -797,6 +883,12 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     size_t log_size = sizeof(log);
 
     auto start_jit = std::chrono::high_resolution_clock::now();
+    // Progressive logging: on cold-cache first launch each optixModuleCreate can take
+    // 30-90 seconds and the UI thread blocks. Without per-stage log lines, the log
+    // file looks frozen between "Disk cache: …" and "JIT … took N seconds" with
+    // nothing in between for 1-3 minutes. Now each stage flushes its own line so
+    // a user tailing the log can see real progress during the wait.
+    SCENE_LOG_INFO("[OptiX] JIT stage 1/4 — compiling raygen module (cache miss = 30-90s on first launch)...");
 
     // 2. Create Raygen Module
     OPTIX_CHECK(optixModuleCreate(
@@ -804,26 +896,32 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
         ptx_data.raygen_ptx, strlen(ptx_data.raygen_ptx),
         log, &log_size, &raygen_module
     ));
+    SCENE_LOG_INFO("[OptiX] JIT stage 1/4 — raygen module ready.");
 
     // 3. Create Miss Module
     log_size = sizeof(log);
+    SCENE_LOG_INFO("[OptiX] JIT stage 2/4 — compiling miss module...");
     OPTIX_CHECK(optixModuleCreate(
         context, &module_options, &pipeline_options,
         ptx_data.miss_ptx, strlen(ptx_data.miss_ptx),
         log, &log_size, &miss_module
     ));
+    SCENE_LOG_INFO("[OptiX] JIT stage 2/4 — miss module ready.");
 
     // 4. Create HitGroup Module
     log_size = sizeof(log);
+    SCENE_LOG_INFO("[OptiX] JIT stage 3/4 — compiling hitgroup module (heaviest stage)...");
     OPTIX_CHECK(optixModuleCreate(
         context, &module_options, &pipeline_options,
         ptx_data.hitgroup_ptx, strlen(ptx_data.hitgroup_ptx),
         log, &log_size, &hitgroup_module
     ));
+    SCENE_LOG_INFO("[OptiX] JIT stage 3/4 — hitgroup module ready.");
 
     auto end_jit = std::chrono::high_resolution_clock::now();
     float jit_time = std::chrono::duration<float>(end_jit - start_jit).count();
     SCENE_LOG_INFO("[OptiX] JIT Multi-Module Creation took " + std::to_string(jit_time) + " seconds");
+    SCENE_LOG_INFO("[OptiX] JIT stage 4/4 — linking program groups + pipeline...");
 
     // 5. Program groups
     OptixProgramGroupOptions pg_options = {};
@@ -907,6 +1005,7 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     link_options.maxTraceDepth = 2;
     log_size = sizeof(log);
     OPTIX_CHECK(optixPipelineCreate(context, &pipeline_options, &link_options, program_groups.data(), static_cast<unsigned int>(program_groups.size()), log, &log_size, &pipeline));
+    SCENE_LOG_INFO("[OptiX] JIT stage 4/4 — pipeline linked. JIT phase complete.");
 
     // Pipeline stack sizes. OptiX's default continuation stack is only
     // ~1 KB which is tight for our megakernel; once we marked
@@ -1377,6 +1476,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     rendering_in_progress = true;
 
     const int pixel_count = width * height;
+    const size_t pixel_bytes = static_cast<size_t>(pixel_count) * sizeof(uchar4);
 
     // ------------------ BUFFER ALLOCATION -----------------------
     // Framebuffer for display (uchar4)
@@ -1384,9 +1484,39 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     if (!d_framebuffer || resolution_changed) {
         if (d_framebuffer) cudaFree(d_framebuffer);
         cudaMalloc(&d_framebuffer, pixel_count * sizeof(uchar4));
+        for (int slot = 0; slot < 2; ++slot) {
+            if (host_output_buffers[slot]) {
+                cudaFreeHost(host_output_buffers[slot]);
+                host_output_buffers[slot] = nullptr;
+            }
+            host_output_copy_pending[slot] = false;
+        }
+        host_output_buffer_capacity = 0;
+        host_output_display_slot = -1;
+        host_output_write_slot = 0;
         prev_width = width;
         prev_height = height;
         accumulation_valid = false; // Force reset on resolution change
+    }
+
+    for (int slot = 0; slot < 2; ++slot) {
+        if (!host_output_copy_events[slot]) {
+            CUDA_CHECK(cudaEventCreateWithFlags(&host_output_copy_events[slot], cudaEventDisableTiming));
+        }
+    }
+
+    if (!host_output_buffers[0] || !host_output_buffers[1] || host_output_buffer_capacity < pixel_bytes) {
+        for (int slot = 0; slot < 2; ++slot) {
+            if (host_output_buffers[slot]) {
+                cudaFreeHost(host_output_buffers[slot]);
+                host_output_buffers[slot] = nullptr;
+            }
+            CUDA_CHECK(cudaMallocHost(reinterpret_cast<void**>(&host_output_buffers[slot]), pixel_bytes));
+            host_output_copy_pending[slot] = false;
+        }
+        host_output_buffer_capacity = pixel_bytes;
+        host_output_display_slot = -1;
+        host_output_write_slot = 0;
     }
 
     // High-precision accumulation buffer (float4: RGB + sample count)
@@ -1396,13 +1526,35 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
         cudaMemset(d_accumulation_float4, 0, pixel_count * sizeof(float4));
         accumulation_valid = true;
     }
-    if (!d_denoiser_albedo || !d_denoiser_normal || !accumulation_valid || resolution_changed) {
-        if (d_denoiser_albedo) cudaFree(d_denoiser_albedo);
-        if (d_denoiser_normal) cudaFree(d_denoiser_normal);
-        cudaMalloc(&d_denoiser_albedo, pixel_count * sizeof(float4));
-        cudaMalloc(&d_denoiser_normal, pixel_count * sizeof(float4));
-        cudaMemset(d_denoiser_albedo, 0, pixel_count * sizeof(float4));
-        cudaMemset(d_denoiser_normal, 0, pixel_count * sizeof(float4));
+    // Denoiser aux history (albedo + normal accumulation) — only useful when denoiser
+    // is actually consuming them. Previously these were allocated unconditionally, and
+    // raygen wrote both float4 reads + writes per pixel every frame (~133 MB/frame extra
+    // bandwidth at 1080p), starving the kernel even with denoiser off. Now lazy:
+    //   - Allocate only when denoiser_needs_aux true.
+    //   - Free when denoiser is turned off, so params pointers fall to nullptr and the
+    //     raygen gate skips both the BSDF albedo/normal accumulation and the buffer I/O.
+    //   - Turning denoiser back on starts aux history fresh (acceptable for progressive).
+    // Stylize also consumes the albedo/normal AOVs (plus its own world-position AOV), so
+    // allocate the aux set when the denoiser OR Stylize mode is on — Stylize no longer
+    // requires the denoiser to be enabled on the OptiX backend.
+    const bool denoiser_needs_aux = render_settings.use_denoiser || render_settings.render_use_denoiser;
+    const bool aux_needed = denoiser_needs_aux || render_settings.stylize_enabled;
+    if (aux_needed) {
+        if (!d_denoiser_albedo || !d_denoiser_normal || !d_stylize_position || !accumulation_valid || resolution_changed) {
+            if (d_denoiser_albedo) cudaFree(d_denoiser_albedo);
+            if (d_denoiser_normal) cudaFree(d_denoiser_normal);
+            if (d_stylize_position) cudaFree(d_stylize_position);
+            cudaMalloc(&d_denoiser_albedo, pixel_count * sizeof(float4));
+            cudaMalloc(&d_denoiser_normal, pixel_count * sizeof(float4));
+            cudaMalloc(&d_stylize_position, pixel_count * sizeof(float4));
+            cudaMemset(d_denoiser_albedo, 0, pixel_count * sizeof(float4));
+            cudaMemset(d_denoiser_normal, 0, pixel_count * sizeof(float4));
+            cudaMemset(d_stylize_position, 0, pixel_count * sizeof(float4));
+        }
+    } else {
+        if (d_denoiser_albedo) { cudaFree(d_denoiser_albedo); d_denoiser_albedo = nullptr; }
+        if (d_denoiser_normal) { cudaFree(d_denoiser_normal); d_denoiser_normal = nullptr; }
+        if (d_stylize_position) { cudaFree(d_stylize_position); d_stylize_position = nullptr; }
     }
 
     // Variance buffer for adaptive sampling (float: per-pixel noise estimate)
@@ -1428,6 +1580,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
         cudaMemset(d_accumulation_float4, 0, pixel_count * sizeof(float4));
         if (d_denoiser_albedo) cudaMemset(d_denoiser_albedo, 0, pixel_count * sizeof(float4));
         if (d_denoiser_normal) cudaMemset(d_denoiser_normal, 0, pixel_count * sizeof(float4));
+        if (d_stylize_position) cudaMemset(d_stylize_position, 0, pixel_count * sizeof(float4));
         if (d_variance_buffer) {
             cudaMemset(d_variance_buffer, 0, pixel_count * sizeof(float));
         }
@@ -1464,6 +1617,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.framebuffer = d_framebuffer;
     params.denoiser_albedo = d_denoiser_albedo;
     params.denoiser_normal = d_denoiser_normal;
+    params.stylize_position = d_stylize_position;
     params.accumulation_buffer = reinterpret_cast<float*>(d_accumulation_float4);
     params.image_width = width;
     params.image_height = height;
@@ -1633,9 +1787,6 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
             }
         }
     }
-
-    cudaStreamSynchronize(stream);
-
     auto pass_end = high_resolution_clock::now();
     float pass_ms = duration<float, std::milli>(pass_end - pass_start).count();
 
@@ -1646,31 +1797,90 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     // ADAPTIVE SAMPLING DEBUG - Read converged pixel count
     // ═══════════════════════════════════════════════════════════════════════════
     if (render_settings.use_adaptive_sampling && d_converged_count) {
-        int converged_count = 0;
-        cudaMemcpy(&converged_count, d_converged_count, sizeof(int), cudaMemcpyDeviceToHost);
-        
-        float converged_percent = (float)converged_count / (float)pixel_count * 100.0f;
+        const uint32_t converged_slot = host_converged_count_write_slot & 1u;
+        if (!host_converged_count_buffers[converged_slot]) {
+            CUDA_CHECK(cudaMallocHost(reinterpret_cast<void**>(&host_converged_count_buffers[converged_slot]), sizeof(int)));
+            *host_converged_count_buffers[converged_slot] = 0;
+        }
+        if (!host_converged_count_events[converged_slot]) {
+            CUDA_CHECK(cudaEventCreateWithFlags(&host_converged_count_events[converged_slot], cudaEventDisableTiming));
+        }
+        if (host_converged_count_pending[converged_slot]) {
+            CUDA_CHECK(cudaEventSynchronize(host_converged_count_events[converged_slot]));
+            host_converged_count_pending[converged_slot] = false;
+            host_converged_count_latest = *host_converged_count_buffers[converged_slot];
+        }
+
+        CUDA_CHECK(cudaMemcpyAsync(host_converged_count_buffers[converged_slot],
+            d_converged_count,
+            sizeof(int),
+            cudaMemcpyDeviceToHost,
+            stream));
+        CUDA_CHECK(cudaEventRecord(host_converged_count_events[converged_slot], stream));
+        host_converged_count_pending[converged_slot] = true;
+        host_converged_count_write_slot = (converged_slot + 1u) & 1u;
+
+        for (int slot = 0; slot < 2; ++slot) {
+            if (!host_converged_count_pending[slot]) continue;
+            const cudaError_t queryErr = cudaEventQuery(host_converged_count_events[slot]);
+            if (queryErr == cudaSuccess) {
+                host_converged_count_pending[slot] = false;
+                host_converged_count_latest = *host_converged_count_buffers[slot];
+            } else if (queryErr != cudaErrorNotReady) {
+                CUDA_CHECK(queryErr);
+            }
+        }
+
+        float converged_percent = (float)host_converged_count_latest / (float)pixel_count * 100.0f;
         
         // Log only occasionally to avoid spam (every 4 samples)
         if (accumulated_samples % 4 == 0 || converged_percent > 50.0f) {
           /*  SCENE_LOG_INFO("[Adaptive] Sample " + std::to_string(accumulated_samples) + 
-                          ": " + std::to_string(converged_count) + "/" + std::to_string(pixel_count) +
+                          ": " + std::to_string(host_converged_count_latest) + "/" + std::to_string(pixel_count) +
                           " pixels converged (" + std::to_string((int)converged_percent) + "%)");*/
         }
     }
 
     // ------------------ COPY BACK & DISPLAY -----------------------
     if (has_geometry && has_sbt) {
-        partial_framebuffer.resize(pixel_count);
+        const uint32_t copy_slot = host_output_write_slot & 1u;
+        if (host_output_copy_pending[copy_slot]) {
+            CUDA_CHECK(cudaEventSynchronize(host_output_copy_events[copy_slot]));
+            host_output_copy_pending[copy_slot] = false;
+            host_output_display_slot = static_cast<int>(copy_slot);
+        }
 
-        cudaMemcpyAsync(partial_framebuffer.data(),
+        CUDA_CHECK(cudaMemcpyAsync(host_output_buffers[copy_slot],
             d_framebuffer,
-            pixel_count * sizeof(uchar4),
+            pixel_bytes,
             cudaMemcpyDeviceToHost,
-            stream);
+            stream));
+        CUDA_CHECK(cudaEventRecord(host_output_copy_events[copy_slot], stream));
+        host_output_copy_pending[copy_slot] = true;
+        host_output_write_slot = (copy_slot + 1u) & 1u;
 
-        cudaStreamSynchronize(stream);
+        for (int slot = 0; slot < 2; ++slot) {
+            if (!host_output_copy_pending[slot]) continue;
+            const cudaError_t queryErr = cudaEventQuery(host_output_copy_events[slot]);
+            if (queryErr == cudaSuccess) {
+                host_output_copy_pending[slot] = false;
+                host_output_display_slot = slot;
+            } else if (queryErr != cudaErrorNotReady) {
+                CUDA_CHECK(queryErr);
+            }
+        }
+
+        if (host_output_display_slot < 0) {
+            CUDA_CHECK(cudaEventSynchronize(host_output_copy_events[copy_slot]));
+            host_output_copy_pending[copy_slot] = false;
+            host_output_display_slot = static_cast<int>(copy_slot);
+        }
     }
+
+    const uchar4* display_framebuffer =
+        (has_geometry && has_sbt && host_output_display_slot >= 0)
+            ? host_output_buffers[host_output_display_slot]
+            : partial_framebuffer.data();
 
     // Update SDL Surface
     Uint32* pixels = (Uint32*)surface->pixels;
@@ -1683,7 +1893,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     for (int j = 0; j < safe_h; ++j) {
         for (int i = 0; i < safe_w; ++i) {
             int fb_index = j * width + i;
-            const uchar4& c = partial_framebuffer[fb_index];
+            const uchar4& c = display_framebuffer[fb_index];
             
             // Flip Y for screen (using surface height)
             int screen_y = surface->h - 1 - j;
@@ -2055,9 +2265,15 @@ void OptixWrapper::resetBuffers(int width, int height) {
         if (d_accumulation_float4) { cudaFree(d_accumulation_float4); d_accumulation_float4 = nullptr; }
         if (d_denoiser_albedo) { cudaFree(d_denoiser_albedo); d_denoiser_albedo = nullptr; }
         if (d_denoiser_normal) { cudaFree(d_denoiser_normal); d_denoiser_normal = nullptr; }
+        if (d_stylize_position) { cudaFree(d_stylize_position); d_stylize_position = nullptr; }
 
         // Also invalidate framebuffer so launch functions re-allocate
         if (d_framebuffer) { cudaFree(d_framebuffer); d_framebuffer = nullptr; }
+        for (int slot = 0; slot < 2; ++slot) {
+            host_converged_count_pending[slot] = false;
+        }
+        host_converged_count_latest = 0;
+        host_converged_count_write_slot = 0;
 
         // Update the published dimensions BEFORE re-allocating so that any
         // concurrent reader (e.g. downloadDenoiserBuffers on the UI thread)
@@ -2078,6 +2294,7 @@ void OptixWrapper::resetBuffers(int width, int height) {
         cudaMalloc(&d_accumulation_float4, sizeof(float4) * width * height);
         cudaMalloc(&d_denoiser_albedo, sizeof(float4) * width * height);
         cudaMalloc(&d_denoiser_normal, sizeof(float4) * width * height);
+        cudaMalloc(&d_stylize_position, sizeof(float4) * width * height);
 
         accumulated_samples = 0;
         accumulation_valid = false;
@@ -2099,7 +2316,10 @@ void OptixWrapper::resetBuffers(int width, int height) {
     if (d_denoiser_normal) {
         cudaMemset(d_denoiser_normal, 0, sizeof(float4) * width * height);
     }
-    
+    if (d_stylize_position) {
+        cudaMemset(d_stylize_position, 0, sizeof(float4) * width * height);
+    }
+
     frame_counter = 1;
     Image_width = width;
     Image_height = height;
@@ -2120,6 +2340,9 @@ void OptixWrapper::resetAccumulation() {
     }
     if (d_denoiser_normal && prev_width > 0 && prev_height > 0) {
         cudaMemset(d_denoiser_normal, 0, prev_width * prev_height * sizeof(float4));
+    }
+    if (d_stylize_position && prev_width > 0 && prev_height > 0) {
+        cudaMemset(d_stylize_position, 0, prev_width * prev_height * sizeof(float4));
     }
     // Reset variance buffer for adaptive sampling
     if (d_variance_buffer && prev_width > 0 && prev_height > 0) {
@@ -2876,10 +3099,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
         
         for (const auto& mesh : mesh_groups) {
             // Determine if this mesh part is skinned
-            bool isSkinned = false;
-            if (!mesh.triangle_indices.empty()) {
-                isSkinned = static_triangles[mesh.triangle_indices[0]]->hasSkinData();
-            }
+            bool isSkinned = mesh.has_skinning;
 
             // Extract geometry (WORLD SPACE - using getVertexPosition)
             // This ensures static geometry matches exactly what is on CPU
@@ -2932,7 +3152,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                                                  static_cast<uint32_t>(base + 1),
                                                  static_cast<uint32_t>(base + 2));
 
-                    if (!isSkinned || !tri->hasSkinData()) continue;
+                    if (!isSkinned || !triangleHasEffectiveSkinData(tri)) continue;
                     for (int k = 0; k < 3; ++k) {
                         const auto& weights = tri->getSkinBoneWeights(k);
                         int4 bi = make_int4(-1, -1, -1, -1);
@@ -3028,7 +3248,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                 std::string base = tri->getNodeName();
                 if (base.empty()) base = "inst_source";
                 int mat = tri->getMaterialID();
-                bool hasSkin = tri->hasSkinData();
+                bool hasSkin = triangleHasEffectiveSkinData(tri);
                 
                 // Unique key for this part (matches OptixAccelManager logic)
                 std::string key = base + "_mat_" + std::to_string(mat) + 
@@ -3088,7 +3308,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
 
                         // SKINNING DATA: Ensure we always push data if the group is skinned to maintain buffer alignment
                         if (isSkinned) {
-                            if (tri->hasSkinData()) {
+                            if (triangleHasEffectiveSkinData(tri)) {
                                 for (int k = 0; k < 3; ++k) {
                                     const auto& weights = tri->getSkinBoneWeights(k);
                                     int4 bi = make_int4(-1, -1, -1, -1);
@@ -3175,7 +3395,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                 if (base.empty()) base = "inst_group_source";
                 int mat = tri->getMaterialID();
                 if (mat == MaterialManager::INVALID_MATERIAL_ID) mat = 0;
-                bool hasSkin = tri->hasSkinData();
+                bool hasSkin = triangleHasEffectiveSkinData(tri);
                 std::string key = base + "_mat_" + std::to_string(mat) +
                                   (hasSkin ? "_skinned" : "_static");
 
@@ -3233,7 +3453,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                     geom.colors.push_back(toFloat3(tri->getVertexColor(2)));
 
                     if (isSkinned) {
-                        if (tri->hasSkinData()) {
+                        if (triangleHasEffectiveSkinData(tri)) {
                             for (int k = 0; k < 3; ++k) {
                                 const auto& weights = tri->getSkinBoneWeights(k);
                                 int4 bi = make_int4(-1, -1, -1, -1);

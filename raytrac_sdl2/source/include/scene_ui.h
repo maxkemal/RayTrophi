@@ -128,6 +128,7 @@ public:
     bool show_volumetric_tab = true;  // Unified Volumetrics tab (VDB + Gas)
     bool show_forcefield_tab = true;   // Force Field tab (Default open)
     bool show_world_tab = true;        // World & Sky tab (Default open)
+    bool show_stylize_tab = true;      // Stylize art-direction layer
     bool show_hair_tab = true;         // Hair & Fur tab (Default open)
     bool show_modifiers_tab = true;    // Modifiers & Sculpt tab (Default open)
     bool show_paint_tab = true;        // Paint Mode tab (Default open)
@@ -209,6 +210,7 @@ public:
      void drawMainMenuBar(UIContext& ctx); // New Main Menu Bar
      void drawControlsContent(); // New method for controls/help tab
      void drawWorldContent(UIContext& ctx);
+     void drawStylizePanel(UIContext& ctx);
      void drawSceneHierarchy(UIContext& ctx);  // Scene hierarchy / outliner panel
      void drawModifiersPanel(UIContext& ctx);  // Modifiers & Sculpting panel
      void drawPaintPanel(UIContext& ctx);      // Lightweight paint workflow panel
@@ -345,7 +347,12 @@ public:
          int shading_mode = 0;  // 0=Solid, 1=Material, 2=Rendered, 3=Matcap
             int matcap_preset = 0; // 0..9 allowed: 0=Solid clay, 1=User texture, 2..9=procedural presets
          bool show_gizmos = true;
-         
+         // Per-object silhouette outline drawn around the selected mesh. The
+         // CPU raster path is cheap, but boundary pixels emit thousands of
+         // ImGui rects per frame and that serializes with the raytrace on the
+         // GPU queue — costs ~half the framerate on dense selections.
+         bool show_selection_outline = true;
+
          // Camera HUD (viewport lens controls)
          bool show_camera_hud = false;      // Master toggle for camera HUD
          bool show_focus_ring = true;      // Focus ring (DOF control)
@@ -901,7 +908,37 @@ private:
     // Bounding Box Cache - avoids recalculating bounds every frame (HUGE perf win for large objects)
     // Key: nodeName, Value: {bb_min, bb_max}
     std::map<std::string, std::pair<Vec3, Vec3>> bbox_cache;
-    
+
+    // Selection-outline hull candidate cache: local-space extremal points per object.
+    // Populated lazily on first selection; invalidated when mesh geometry changes.
+    // Per-frame outline only projects these (~64 pts) instead of all triangle vertices.
+    std::map<std::string, std::vector<Vec3>> hull_candidate_cache;
+
+    // Selection-outline skinned-pose cache. Key: object name. Value: hash of the
+    // bone-matrix buffer the last time we ran apply_skinning() for the selection
+    // raster. If the hash matches we reuse the cached vertices[i].position the
+    // triangles already hold — skipping a full CPU skinning pass per frame.
+    std::map<std::string, uint64_t> selection_skin_pose_hash;
+
+    // Selection-outline drawcall cache. When camera + transform + pose + screen
+    // + style are unchanged frame-to-frame, replay the prior frame's boundary
+    // pixels straight into ImGui instead of re-running projection, raster,
+    // flood-fill and per-boundary BVH occlusion. Cuts the gizmo's main-thread
+    // cost to a memcpy-ish replay on held-camera frames.
+    struct SelectionOutlineFrameCache {
+        uint64_t hash = 0;
+        // Run-length encoded: a row of consecutive same-colour boundary
+        // pixels is emitted as one wide rect instead of N per-pixel rects.
+        // ImGui's vertex buffer (and the GPU draw it produces) shrinks ~5-10x
+        // on typical silhouettes — that was the real per-frame bottleneck.
+        struct Run { float sx, sy; uint16_t len; uint32_t col; };
+        std::vector<Run> runs;
+        float thickness = 0.0f;
+        int scale = 1;
+    };
+    std::map<std::string, SelectionOutlineFrameCache> selection_outline_frame_cache;
+
+
     // Material Slots Cache - avoids scanning all triangles every frame to get unique material IDs
     // Key: nodeName, Value: list of unique material IDs used by that object
     std::map<std::string, std::vector<uint16_t>> material_slots_cache;

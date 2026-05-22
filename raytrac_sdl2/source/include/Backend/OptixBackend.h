@@ -65,7 +65,7 @@ public:
     bool updateInteractiveMesh(const std::string& nodeName,
                                const std::vector<std::shared_ptr<Triangle>>& triangles) override;
     void downloadImage(void* outPixels) override;
-    bool getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary = true) override;
+    bool getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary = true, bool includeColor = true) override;
     bool getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool useAuxiliary = true) override;
     int getCurrentSampleCount() const override;
     bool isAccumulationComplete() const override;

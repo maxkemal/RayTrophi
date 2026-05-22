@@ -250,8 +250,12 @@ void TimelineWidget::draw(UIContext& ctx) {
     UIWidgets::PushControlSurfaceStyle(ImVec4(0.46f, 0.86f, 0.92f, 1.0f));
     // ANIMATION RENDER SYNC: When animation render is active, 
     // timeline should FOLLOW the render frame, not control it
-    if (ctx.render_settings.animation_render_locked && rendering_in_progress) {
-        // Read current frame FROM render_settings (set by Renderer thread)
+    if (ctx.is_animation_mode && rendering_in_progress) {
+        // Read current frame FROM render_settings (set by Renderer thread
+        // during render, or by the Main.cpp pre-render pin during the
+        // deferred-launch countdown). is_animation_mode covers both the
+        // countdown window AND the active worker run, so the widget
+        // never overwrites the pinned/worker frame with stale UI state.
         current_frame = ctx.render_settings.animation_current_frame;
         // Disable playback during render
         is_playing = false;
@@ -341,12 +345,41 @@ void TimelineWidget::draw(UIContext& ctx) {
         }
     }
     
-    // Sync to render settings
-    ctx.render_settings.animation_is_playing = is_playing;
-    ctx.render_settings.animation_current_frame = current_frame;
-    ctx.render_settings.animation_playback_frame = current_frame;
-    ctx.scene.timeline.current_frame = current_frame;
-    
+    // [RENDER-LOCK RACE FIX] During an active sequence render, the worker
+    // thread owns ALL keyframe evaluation + transform application + backend
+    // material updates — see Renderer::render_Animation. If we re-apply
+    // keyframes on the main thread here we get concurrent writes to the
+    // same Transform objects, HittableInstance::setTransform, and backend
+    // resetAccumulation/updateBackendMaterial calls — manifesting as a
+    // silent NVIDIA driver hang inside traceRays once the TLAS is touched
+    // mid-trace (no AV, no exception; classic symptom of mutating an AS
+    // while the GPU still references it). Setting g_optix_rebuild_pending
+    // from here would also race with the worker. Skip the worker-owned
+    // writes below while the render thread is authoritative; the worker
+    // keeps render_settings.animation_current_frame updated for the UI.
+    // [GUARD WINDOW FIX] Use is_animation_mode (set by Main.cpp BEFORE the
+    // worker thread is detached) rather than animation_render_locked (set
+    // by the worker thread AFTER it starts running inside
+    // Renderer::render_Animation — tens of ms later for a detached thread).
+    // Otherwise the first 1–2 rendered frames pick up the user's pre-render
+    // scrub pose because this widget's draw() writes its own current_frame
+    // back into scene.timeline.current_frame in the gap window.
+    const bool render_owns_timeline =
+        ctx.is_animation_mode && rendering_in_progress.load();
+
+    if (!render_owns_timeline) {
+        // Sync to render settings (only when worker isn't authoritative —
+        // otherwise these writes race with Renderer::render_Animation).
+        ctx.render_settings.animation_is_playing = is_playing;
+        ctx.render_settings.animation_current_frame = current_frame;
+        ctx.render_settings.animation_playback_frame = current_frame;
+        ctx.scene.timeline.current_frame = current_frame;
+    } else {
+        // Pull worker-set frame so UI scrub indicator tracks the render.
+        current_frame = ctx.render_settings.animation_current_frame;
+        return;
+    }
+
     // --- APPLY TERRAIN ANIMATIONS ---
     // PERFORMANCE: Skip if no timeline tracks exist at all
     if (!ctx.scene.timeline.tracks.empty()) {
@@ -655,17 +688,31 @@ void TimelineWidget::draw(UIContext& ctx) {
             // Apply world keyframes
             if (evaluated.has_world) {
                 NishitaSkyParams nishita = ctx.renderer.world.getNishitaParams();
+                AtmosphereAdvanced advanced = ctx.renderer.world.getAdvancedParams();
+                WeatherParams weather = ctx.renderer.world.getWeatherParams();
+                const NishitaSkyParams originalNishita = nishita;
+                const AtmosphereAdvanced originalAdvanced = advanced;
+                const WeatherParams originalWeather = weather;
+                const Vec3 originalBackgroundColor = ctx.renderer.world.getColor();
+                const float originalBackgroundStrength = ctx.renderer.world.getColorIntensity();
+                const float originalHDRIRotation = ctx.renderer.world.getHDRIRotation();
                 bool changed = false;
+                bool advancedChanged = false;
+                bool environmentChanged = false;
                 bool weatherChanged = false;
+                bool sunAnglesChanged = false;
                 
-                if (evaluated.world.has_sun_elevation) { nishita.sun_elevation = evaluated.world.sun_elevation; changed = true; }
-                if (evaluated.world.has_sun_azimuth) { nishita.sun_azimuth = evaluated.world.sun_azimuth; changed = true; }
+                if (evaluated.world.has_sun_elevation) { nishita.sun_elevation = evaluated.world.sun_elevation; changed = true; sunAnglesChanged = true; }
+                if (evaluated.world.has_sun_azimuth) { nishita.sun_azimuth = evaluated.world.sun_azimuth; changed = true; sunAnglesChanged = true; }
                 if (evaluated.world.has_sun_intensity) { nishita.sun_intensity = evaluated.world.sun_intensity; changed = true; }
                 if (evaluated.world.has_sun_size) { nishita.sun_size = evaluated.world.sun_size; changed = true; }
                 if (evaluated.world.has_atmosphere_intensity) { nishita.atmosphere_intensity = evaluated.world.atmosphere_intensity; changed = true; }
                 if (evaluated.world.has_air_density) { nishita.air_density = evaluated.world.air_density; changed = true; }
                 if (evaluated.world.has_dust_density) { nishita.dust_density = evaluated.world.dust_density; changed = true; }
                 if (evaluated.world.has_ozone_density) { nishita.ozone_density = evaluated.world.ozone_density; changed = true; }
+                if (evaluated.world.has_humidity) { nishita.humidity = evaluated.world.humidity; changed = true; }
+                if (evaluated.world.has_temperature) { nishita.temperature = evaluated.world.temperature; changed = true; }
+                if (evaluated.world.has_ozone_absorption_scale) { nishita.ozone_absorption_scale = evaluated.world.ozone_absorption_scale; changed = true; }
                 if (evaluated.world.has_altitude) { nishita.altitude = evaluated.world.altitude; changed = true; }
                 if (evaluated.world.has_mie_anisotropy) { nishita.mie_anisotropy = evaluated.world.mie_anisotropy; changed = true; }
                 if (evaluated.world.has_cloud_density) { nishita.cloud_density = evaluated.world.cloud_density; changed = true; }
@@ -676,13 +723,97 @@ void TimelineWidget::draw(UIContext& ctx) {
                     nishita.cloud_offset_z = evaluated.world.cloud_offset_z; 
                     changed = true; 
                 }
+                if (evaluated.world.has_cloud_lighting) {
+                    nishita.cloud_light_steps = evaluated.world.cloud_light_steps;
+                    nishita.cloud_shadow_strength = evaluated.world.cloud_shadow_strength;
+                    nishita.cloud_ambient_strength = evaluated.world.cloud_ambient_strength;
+                    nishita.cloud_silver_intensity = evaluated.world.cloud_silver_intensity;
+                    nishita.cloud_absorption = evaluated.world.cloud_absorption;
+                    nishita.cloud_anisotropy = evaluated.world.cloud_anisotropy;
+                    nishita.cloud_anisotropy_back = evaluated.world.cloud_anisotropy_back;
+                    nishita.cloud_lobe_mix = evaluated.world.cloud_lobe_mix;
+                    nishita.cloud_emissive_intensity = evaluated.world.cloud_emissive_intensity;
+                    nishita.cloud_emissive_color = make_float3(
+                        evaluated.world.cloud_emissive_color.x,
+                        evaluated.world.cloud_emissive_color.y,
+                        evaluated.world.cloud_emissive_color.z);
+                    changed = true;
+                }
+                if (evaluated.world.has_cloud_layer2) {
+                    nishita.cloud_layer2_enabled = evaluated.world.cloud_layer2_enabled;
+                    changed = true;
+                }
+                if (evaluated.world.has_cloud_layer2_params) {
+                    nishita.cloud2_coverage = evaluated.world.cloud2_coverage;
+                    nishita.cloud2_density = evaluated.world.cloud2_density;
+                    nishita.cloud2_scale = evaluated.world.cloud2_scale;
+                    changed = true;
+                }
+                if (evaluated.world.has_cloud_layer2_heights) {
+                    nishita.cloud2_height_min = evaluated.world.cloud2_height_min;
+                    nishita.cloud2_height_max = evaluated.world.cloud2_height_max;
+                    changed = true;
+                }
+                if (evaluated.world.has_fog) { nishita.fog_enabled = evaluated.world.fog_enabled; changed = true; }
+                if (evaluated.world.has_fog_params) {
+                    nishita.fog_density = evaluated.world.fog_density;
+                    nishita.fog_height = evaluated.world.fog_height;
+                    nishita.fog_falloff = evaluated.world.fog_falloff;
+                    nishita.fog_distance = evaluated.world.fog_distance;
+                    nishita.fog_color = make_float3(
+                        evaluated.world.fog_color.x,
+                        evaluated.world.fog_color.y,
+                        evaluated.world.fog_color.z);
+                    nishita.fog_sun_scatter = evaluated.world.fog_sun_scatter;
+                    changed = true;
+                }
+                if (evaluated.world.has_godrays) { nishita.godrays_enabled = evaluated.world.godrays_enabled; changed = true; }
+                if (evaluated.world.has_godrays_params) {
+                    nishita.godrays_intensity = evaluated.world.godrays_intensity;
+                    nishita.godrays_density = evaluated.world.godrays_density;
+                    nishita.godrays_samples = evaluated.world.godrays_samples;
+                    changed = true;
+                }
+
+                if (evaluated.world.has_multi_scatter) {
+                    advanced.multi_scatter_enabled = evaluated.world.multi_scatter_enabled;
+                    advanced.multi_scatter_factor = evaluated.world.multi_scatter_factor;
+                    advancedChanged = true;
+                }
+                if (evaluated.world.has_aerial_perspective) {
+                    advanced.aerial_perspective = evaluated.world.aerial_perspective;
+                    advancedChanged = true;
+                }
+                if (evaluated.world.has_aerial_params) {
+                    advanced.aerial_density = evaluated.world.aerial_density;
+                    advanced.aerial_min_distance = evaluated.world.aerial_min_distance;
+                    advanced.aerial_max_distance = evaluated.world.aerial_max_distance;
+                    advancedChanged = true;
+                }
+                if (evaluated.world.has_overlay) {
+                    advanced.env_overlay_enabled = evaluated.world.env_overlay_enabled;
+                    advancedChanged = true;
+                }
+                if (evaluated.world.has_overlay_params) {
+                    advanced.env_overlay_intensity = evaluated.world.env_overlay_intensity;
+                    advanced.env_overlay_rotation = evaluated.world.env_overlay_rotation;
+                    advanced.env_overlay_blend_mode = evaluated.world.env_overlay_blend_mode;
+                    advancedChanged = true;
+                }
                 
                 if (changed) {
-                    ctx.renderer.world.setNishitaParams(nishita);
+                    if (sunAnglesChanged) {
+                        constexpr float kPi = 3.14159265358979323846f;
+                        const float elevationRad = nishita.sun_elevation * kPi / 180.0f;
+                        const float azimuthRad = nishita.sun_azimuth * kPi / 180.0f;
+                        nishita.sun_direction = make_float3(
+                            cosf(elevationRad) * sinf(azimuthRad),
+                            sinf(elevationRad),
+                            cosf(elevationRad) * cosf(azimuthRad));
+                    }
                 }
 
                 if (evaluated.world.has_weather_params) {
-                    WeatherParams weather = ctx.renderer.world.getWeatherParams();
                     weather.enabled = evaluated.world.weather_enabled;
                     weather.type = evaluated.world.weather_type;
                     weather.intensity = evaluated.world.weather_intensity;
@@ -700,37 +831,61 @@ void TimelineWidget::draw(UIContext& ctx) {
                     weather.surface_height_output = evaluated.world.weather_surface_height;
                     weather.visual_mode = evaluated.world.weather_visual_mode;
                     weather.surface_response_enabled = evaluated.world.weather_surface_response_enabled;
-                    ctx.renderer.world.setWeatherParams(weather);
                     weatherChanged = true;
                 }
 
-                if (changed || weatherChanged) {
-                    extern bool g_world_dirty;
-                    extern bool g_gas_volumes_dirty;
-                    g_world_dirty = true;
-                    g_gas_volumes_dirty = true;
-                    if (ctx.backend_ptr) {
-                        WorldData wd = ctx.renderer.world.getGPUData();
-                        ctx.backend_ptr->setWorldData(&wd);
-                        ctx.renderer.updateBackendGasVolumes(ctx.scene);
-                    }
-                }
-                
                 // Background color (not in Nishita, stored in scene)
                 if (evaluated.world.has_background_color) {
                     ctx.scene.background_color = evaluated.world.background_color;
+                    ctx.renderer.world.setColor(evaluated.world.background_color);
+                    environmentChanged = true;
                 }
                 // Background strength - Color mode intensity
                 if (evaluated.world.has_background_strength) {
                     ctx.renderer.world.setColorIntensity(evaluated.world.background_strength);
+                    environmentChanged = true;
                 }
                 // HDRI rotation
                 if (evaluated.world.has_hdri_rotation) {
                     ctx.renderer.world.setHDRIRotation(evaluated.world.hdri_rotation);
+                    environmentChanged = true;
                 }
-                
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+
+                changed = changed && (std::memcmp(&nishita, &originalNishita, sizeof(NishitaSkyParams)) != 0);
+                advancedChanged = advancedChanged && (std::memcmp(&advanced, &originalAdvanced, sizeof(AtmosphereAdvanced)) != 0);
+                weatherChanged = weatherChanged && (std::memcmp(&weather, &originalWeather, sizeof(WeatherParams)) != 0);
+                environmentChanged =
+                    environmentChanged &&
+                    (ctx.renderer.world.getColor().x != originalBackgroundColor.x ||
+                     ctx.renderer.world.getColor().y != originalBackgroundColor.y ||
+                     ctx.renderer.world.getColor().z != originalBackgroundColor.z ||
+                     ctx.renderer.world.getColorIntensity() != originalBackgroundStrength ||
+                     ctx.renderer.world.getHDRIRotation() != originalHDRIRotation);
+
+                if (changed) {
+                    ctx.renderer.world.setNishitaParams(nishita);
+                }
+                if (advancedChanged) {
+                    ctx.renderer.world.setAdvancedParams(advanced);
+                }
+                if (weatherChanged) {
+                    ctx.renderer.world.setWeatherParams(weather);
+                }
+
+                if (changed || advancedChanged || environmentChanged || weatherChanged) {
+                    extern bool g_world_dirty;
+                    extern bool g_gas_volumes_dirty;
+                    g_world_dirty = true;
+                    const bool volumeLightingChanged = changed || advancedChanged || weatherChanged;
+                    if (volumeLightingChanged) {
+                        g_gas_volumes_dirty = true;
+                    }
+                    if (ctx.backend_ptr) {
+                        ctx.backend_ptr->resetAccumulation();
+                    } else {
+                        ctx.renderer.resetCPUAccumulation();
+                    }
+                }
             }
             
             // Apply material keyframes
@@ -2697,46 +2852,58 @@ void TimelineWidget::insertKeyframeForTrack(UIContext& ctx, const std::string& t
         if (sel_name == entity_name) {
             Keyframe kf(frame);
             kf.has_camera = true;
-            
-            // Capture Camera Data
+
+            // Capture Camera Data — values are always captured; the has_* flags
+            // below decide which channels actually participate in evaluation.
             kf.camera.position = cam->lookfrom;
-            kf.camera.has_position = true;
-            
             kf.camera.target = cam->lookat;
-            kf.camera.has_target = true;
-            
             kf.camera.fov = cam->vfov;
-            kf.camera.has_fov = true;
-            
-            kf.camera.has_aperture = cam->aperture;
-            kf.camera.has_aperture = true;
-            
             kf.camera.focus_distance = cam->focus_dist;
-            kf.camera.has_focus = true;
-            
-            // Set specific channel flags if needed
+            kf.camera.lens_radius = cam->aperture;
+
+            // Default keyframe channels by selector:
+            //   None     → "Key All Camera Props" but EXCLUDE DOF (focus/aperture)
+            //              so adding a routine camera key doesn't suddenly animate
+            //              depth-of-field on top of pose/fov. Users who want to
+            //              animate DOF should pick the Material channel explicitly.
+            //   Location → position only
+            //   Rotation → target (lookAt) only
+            //   Scale    → fov only
+            //   Material → DOF only (focus + aperture)
             if (channel == ChannelType::None) {
-                // Key All Camera Props
+                kf.camera.has_position = true;
+                kf.camera.has_target = true;
+                kf.camera.has_fov = true;
+                kf.camera.has_focus = false;
+                kf.camera.has_aperture = false;
             }
             else if (channel == ChannelType::Location) {
-                // Only Position
-                kf.camera.has_target = false; kf.camera.has_fov = false;
-                kf.camera.has_aperture = false; kf.camera.has_focus = false;
+                kf.camera.has_position = true;
+                kf.camera.has_target = false;
+                kf.camera.has_fov = false;
+                kf.camera.has_focus = false;
+                kf.camera.has_aperture = false;
             }
             else if (channel == ChannelType::Rotation) {
-                // Map Rotation to Target (LookAt)
-                kf.camera.has_position = false; kf.camera.has_fov = false;
-                kf.camera.has_aperture = false; kf.camera.has_focus = false;
+                kf.camera.has_position = false;
+                kf.camera.has_target = true;
+                kf.camera.has_fov = false;
+                kf.camera.has_focus = false;
+                kf.camera.has_aperture = false;
             }
             else if (channel == ChannelType::Scale) {
-                // Map Scale to FOV
-                kf.camera.has_position = false; kf.camera.has_target = false;
-                kf.camera.has_aperture = false; kf.camera.has_focus = false;
+                kf.camera.has_position = false;
+                kf.camera.has_target = false;
+                kf.camera.has_fov = true;
+                kf.camera.has_focus = false;
+                kf.camera.has_aperture = false;
             }
             else if (channel == ChannelType::Material) {
-                // Map Material to DOF (Aperture/Focus)
-                kf.camera.has_position = false; kf.camera.has_target = false;
+                kf.camera.has_position = false;
+                kf.camera.has_target = false;
                 kf.camera.has_fov = false;
+                kf.camera.has_focus = true;
+                kf.camera.has_aperture = true;
             }
             
             ctx.scene.timeline.insertKeyframe(entity_name, kf);

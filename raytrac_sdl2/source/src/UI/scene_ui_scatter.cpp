@@ -30,6 +30,7 @@ extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern bool g_viewport_raster_rebuild_pending;
 extern bool g_optix_rebuild_pending;
 extern bool g_vulkan_rebuild_pending;
+extern bool g_vulkan_geometry_append_pending;
 extern bool g_geometry_dirty;
 extern std::atomic<uint64_t> g_scene_geometry_generation;
 
@@ -51,12 +52,22 @@ bool scatterRenderBackendIsVulkan(UIContext& ctx) {
     return dynamic_cast<Backend::VulkanBackendAdapter*>(getScatterRenderBackend(ctx)) != nullptr;
 }
 
-void rebuildScatterSceneMutation(UIContext& ctx) {
+void rebuildScatterSceneMutation(UIContext& ctx, bool additive_only = false) {
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
 
-    if (Backend::IBackend* renderBackend = getScatterRenderBackend(ctx)) {
-        ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    Backend::IBackend* renderBackend = getScatterRenderBackend(ctx);
+    const bool is_vulkan = dynamic_cast<Backend::VulkanBackendAdapter*>(renderBackend) != nullptr;
+
+    if (renderBackend) {
+        if (is_vulkan && additive_only) {
+            // Defer to incremental TLAS append. Skip rebuildBackendGeometry — it would
+            // set g_vulkan_rebuild_pending and force the full destroy+rebuild path,
+            // erasing the win.
+            g_vulkan_geometry_append_pending = true;
+        } else {
+            ctx.renderer.rebuildBackendGeometry(ctx.scene);
+        }
         renderBackend->resetAccumulation();
     }
 
@@ -67,9 +78,9 @@ void rebuildScatterSceneMutation(UIContext& ctx) {
     // Increment geometry generation so raster viewport rebuilds mesh list
     g_geometry_dirty = true;
     g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
-    if (scatterRenderBackendIsVulkan(ctx)) {
-        g_vulkan_rebuild_pending = true;
-    } else if (getScatterRenderBackend(ctx)) {
+    if (is_vulkan) {
+        if (!additive_only) g_vulkan_rebuild_pending = true;
+    } else if (renderBackend) {
         g_optix_rebuild_pending = true;
     }
 }
@@ -813,13 +824,14 @@ void SceneUI::handleTerrainFoliageBrush(UIContext& ctx) {
              size_t added = foliage_brush.pending_instances.size();
              size_t start_idx = (total >= added) ? (total - added) : 0;
              
-             if (foliage_brush.mode == 0) { // ADD
+             const bool stroke_was_add = (foliage_brush.mode == 0);
+             if (stroke_was_add) { // ADD
                  appendInstancesToScene(ctx, *group, start_idx);
              } else { // REMOVE (Full sync required)
                  syncInstancesToScene(ctx, *group, false);
              }
 
-             rebuildScatterSceneMutation(ctx);
+             rebuildScatterSceneMutation(ctx, /*additive_only=*/stroke_was_add);
              SCENE_LOG_INFO("[Foliage] Committed stroke.");
         }
         foliage_brush.pending_group_id = -1;
@@ -957,9 +969,11 @@ void SceneUI::handleTerrainFoliageBrush(UIContext& ctx) {
             }
         }
 
-        // Trigger Rebuild if modified (Real-time mode)
+        // Trigger Rebuild if modified (Real-time mode). ADD strokes only append
+        // instances → use the incremental TLAS path; REMOVE rewrites the whole layer.
         if (modified && !foliage_brush.lazy_update) {
-             rebuildScatterSceneMutation(ctx);
+             const bool stroke_was_add = (foliage_brush.mode == 0);
+             rebuildScatterSceneMutation(ctx, /*additive_only=*/stroke_was_add);
         }
         
         hud_captured_mouse = true;
@@ -1036,15 +1050,16 @@ void SceneUI::handleScatterBrush(UIContext& ctx) {
             size_t added_count = scatter_brush.pending_instances.size();
             start_idx = (total_count >= added_count) ? (total_count - added_count) : 0;
             
-            if (scatter_brush.brush_mode == 0) { // Add Mode
+            const bool stroke_was_add = (scatter_brush.brush_mode == 0);
+            if (stroke_was_add) { // Add Mode
                  appendInstancesToScene(ctx, *group, start_idx);
             } else {
                  // Remove mode needs full sync usually
                  syncInstancesToScene(ctx, *group, false);
             }
-            
-            rebuildScatterSceneMutation(ctx);
-            
+
+            rebuildScatterSceneMutation(ctx, /*additive_only=*/stroke_was_add);
+
             SCENE_LOG_INFO("[Scatter] Committed stroke: " + std::to_string(added_count) + " instances.");
         }
         

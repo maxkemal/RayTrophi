@@ -19,6 +19,8 @@
 #include "imgui.h"
 #include "CameraPresets.h"
 #include "Backend/IViewportBackend.h"
+#include "Backend/OptixBackend.h"
+#include "Backend/VulkanBackend.h"
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
@@ -165,7 +167,17 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
         viewport_settings.show_gizmos = !viewport_settings.show_gizmos;
         ProjectManager::getInstance().markModified();
     }
-    viewportTooltip("Gizmos", "Show or hide transform gizmos in the viewport.", ImVec4(0.57f, 0.71f, 1.0f, 1.0f));
+    viewportTooltip("Gizmos", "Show or hide transform gizmos in the viewport.\nRight-click for outline options.", ImVec4(0.57f, 0.71f, 1.0f, 1.0f));
+    if (ImGui::BeginPopupContextItem("##gizmo_opts")) {
+        if (ImGui::MenuItem("Selection Outline", nullptr, viewport_settings.show_selection_outline)) {
+            viewport_settings.show_selection_outline = !viewport_settings.show_selection_outline;
+            ProjectManager::getInstance().markModified();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Per-mesh silhouette around the selected object.\nDisable for a large viewport perf win on dense selections.");
+        }
+        ImGui::EndPopup();
+    }
 
     // ── Separator ──
     ImGui::SameLine(0, 6.0f);
@@ -1437,8 +1449,13 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                 bool is_paused = ctx.render_settings.is_render_paused;
 
                 std::string mode_tag = "[CPU]";
-                if (ctx.render_settings.use_optix) mode_tag = "[OptiX]";
-                else if (ctx.render_settings.use_vulkan) mode_tag = "[Vulkan]";
+                if (ctx.backend_ptr) {
+                    if (dynamic_cast<Backend::OptixBackend*>(ctx.backend_ptr) != nullptr) {
+                        mode_tag = "[OptiX]";
+                    } else if (dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr) != nullptr) {
+                        mode_tag = "[Vulkan]";
+                    }
+                }
 
                 if (current >= target && target > 0) {
                      status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples (Done)";
@@ -1681,16 +1698,21 @@ void SceneUI::drawLensInfoHUD(UIContext& ctx) {
     draw_list->AddRectFilled(ImVec2(x, y), ImVec2(x + 50, y + 14), mode_color, 3.0f);
     draw_list->AddText(ImVec2(x + 4, y), IM_COL32(0, 0, 0, 255), mode_label);
     
-    // Backend Badge
+    // Backend Badge — reads the LIVE backend pointer (ctx.backend_ptr) rather than
+    // the requested-engine flags. During async OptiX compile the flags flip the moment
+    // the user picks OptiX in the combo, but the live backend is still Vulkan until
+    // the worker thread finishes and the main loop swaps. Badge follows reality.
     const char* backend_label = "CPU";
     ImU32 backend_color = IM_COL32(150, 150, 150, 255);
-    
-    if (render_settings.use_optix) {
-        backend_label = "OptiX";
-        backend_color = IM_COL32(118, 185, 0, 255); // NVIDIA Green
-    } else if (render_settings.use_vulkan) {
-        backend_label = "Vulkan";
-        backend_color = IM_COL32(230, 25, 35, 255); // Vulkan Red
+
+    if (ctx.backend_ptr) {
+        if (dynamic_cast<Backend::OptixBackend*>(ctx.backend_ptr) != nullptr) {
+            backend_label = "OptiX";
+            backend_color = IM_COL32(118, 185, 0, 255); // NVIDIA Green
+        } else if (dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr) != nullptr) {
+            backend_label = "Vulkan";
+            backend_color = IM_COL32(230, 25, 35, 255); // Vulkan Red
+        }
     }
     
     float bx = x + 55.0f;

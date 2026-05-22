@@ -229,6 +229,7 @@ struct GpuVDBVolume {
     float cloud_edge_fade;
     float cloud_offset_x;
     float cloud_offset_z;
+    float cloud_seed;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -306,6 +307,7 @@ struct RayGenParams {
     uchar4* framebuffer;
     float4* denoiser_albedo;
     float4* denoiser_normal;
+    float4* stylize_position;   // Stylize AOV: .xyz world pos, .w encoded material id (0=miss,1=unknown,>=2 matid+2)
     int image_width;
     int image_height;
     int launch_offset_x;

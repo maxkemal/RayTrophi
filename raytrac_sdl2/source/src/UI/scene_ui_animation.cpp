@@ -16,16 +16,55 @@
 
 void SceneUI::processAnimations(UIContext& ctx) {
     if (!ctx.scene.initialized) return;
-    
+
+    // [RENDER-LOCK RACE FIX — root cause of "render hangs sometimes when
+    // timeline is not at frame 0"] During an active sequence render the
+    // worker thread (Renderer::render_Animation) is the sole owner of
+    // animation state. It writes scene.timeline.current_frame each frame,
+    // re-evaluates ALL keyframes, mutates Transform handles / lights /
+    // camera, and submits backend AS rebuilds.
+    //
+    // This function used to use `force_update = ctx.is_animation_mode`
+    // which is ALSO true during sequence render, so it ran every UI frame,
+    // re-read the worker-written scene.timeline.current_frame, re-applied
+    // every keyframe on the main thread, AND called
+    // ctx.backend_ptr->rebuildAccelerationStructure() / setLights /
+    // syncCamera against the same backend the worker was actively tracing
+    // through. Destroying an AS while the GPU is mid-traceRays is
+    // undefined behavior on Vulkan — the typical NVIDIA symptom is a
+    // silent driver hang (no AV, no exception). The race window only
+    // closes on frames where the AS rebuild happens to land between trace
+    // submissions, which is why the render sometimes finishes and
+    // sometimes locks up. OptiX is masked from this by CUDA stream
+    // serialization.
+    //
+    // Skip entirely while the render thread owns the scene; the worker
+    // handles all keyframe application internally and already keeps the
+    // backend up to date.
+    //
+    // [GUARD WINDOW FIX] Check ui_ctx flags BEFORE animation_render_locked
+    // — Main.cpp sets rendering_in_progress + is_animation_mode immediately
+    // before std::thread().detach(), but animation_render_locked is set
+    // INSIDE render_Animation on the worker thread, which can be tens of
+    // milliseconds later (detached threads have no scheduler guarantee).
+    // In that window the main thread may run processAnimations and race
+    // the worker — the symptom is the FIRST FEW rendered frames using the
+    // pre-render scrub pose because the main thread's keyframe apply +
+    // updateInstanceTransforms runs concurrently with the worker's TLAS
+    // refit.
+    if (ctx.is_animation_mode && rendering_in_progress.load()) {
+        return;
+    }
+
     // 1. Check if we need to update
     // Update if playing OR if timeline frame changed manually
     // We store the 'last processed frame' to avoid redundant updates when paused
     static int last_processed_frame = -1;
     static float last_processed_time = -1.0f;
-    
+
     // Force update if rendering animation (batch mode)
     bool force_update = ctx.is_animation_mode || ctx.render_settings.start_animation_render;
-    
+
     if (!timeline.isPlaying() && ctx.scene.timeline.current_frame == last_processed_frame && !force_update) {
         return;
     }
@@ -217,13 +256,27 @@ void SceneUI::processAnimations(UIContext& ctx) {
         // GPU Updates
         if (ctx.backend_ptr) {
              // If TLAS was marked dirty (Object Transforms)
+             //
+             // [VULKAN GEOMETRY-LOSS FIX] Don't call rebuildAccelerationStructure
+             // here — on the Vulkan adapter it destroys all BLAS / TLAS /
+             // m_vkInstances and DOES NOT rebuild (rebuild is deferred to
+             // Main.cpp's pending block, which only fires when
+             // g_vulkan_rebuild_pending is set). The result is a viewport
+             // with zero geometry until something else triggers a full
+             // rebuild. OptiX's same-named call does the rebuild inline,
+             // masking the bug.
+             //
+             // Keyframe transform changes only need a TLAS refit — the
+             // BLASes themselves are unchanged. updateInstanceTransforms
+             // rebuilds m_vkInstances from scene.world.objects (current
+             // transforms), waitIdles, then refits the TLAS in place.
              if (tlas_dirty) {
-                 ctx.backend_ptr->rebuildAccelerationStructure();
+                 ctx.backend_ptr->updateInstanceTransforms(ctx.scene.world.objects);
              }
-             
+
              // Update Lights if needed (we don't track specifically, just safe update)
              ctx.backend_ptr->setLights(ctx.scene.lights);
-             
+
              // Update Camera
              if (ctx.scene.camera) {
                  ctx.backend_ptr->syncCamera(*ctx.scene.camera);

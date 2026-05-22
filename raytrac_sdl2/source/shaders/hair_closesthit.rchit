@@ -59,6 +59,7 @@ struct RayPayload {
     float primaryTransmission;
     float primaryMetallic;
     uint  bounceType;
+    uint  primaryMaterialId;   // Stylize AOV: real material index of the primary hit
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -102,8 +103,8 @@ struct VkWorldDataExtended {
     float altitude;
     float planetRadius;
     float atmosphereHeight;
-    float _pad1;
-    float _pad2;
+    int   multiScatterEnabled;
+    float multiScatterFactor;
     int   cloudsEnabled;
     float cloudCoverage;
     float cloudDensity;
@@ -141,7 +142,7 @@ struct VkWorldDataExtended {
     int   aerialEnabled;
     float aerialMinDistance;
     float aerialMaxDistance;
-    float _pad5_aerial;
+    float aerialDensity;
     int   weatherEnabled;
     int   weatherType;
     float weatherIntensity;
@@ -160,6 +161,10 @@ struct VkWorldDataExtended {
     float envIntensity;
     float envRotation;
     int   _pad5;                 // nishitaLutReady: Vulkan binding 8 has valid LUT samplers
+    int   envOverlayEnabled;
+    int   envOverlayBlendMode;
+    float envOverlayIntensity;
+    float envOverlayRotation;
 };
 layout(set = 0, binding = 7, scalar) readonly buffer WorldBuffer { VkWorldDataExtended w; } worldData;
 
@@ -272,15 +277,30 @@ vec3 offset_ray(vec3 p, vec3 n) {
 
 const float HAIR_SHADOW_TMIN = 1e-3;
 
+vec3 blendEnvironmentOverlay(vec3 base, vec3 sampled, float intensity, int blendMode) {
+    float strength = max(intensity, 0.0);
+    float amount = min(strength, 1.0);
+    vec3 overlay = sampled * strength;
+    if (blendMode == 1) return base * mix(vec3(1.0), sampled, amount);
+    if (blendMode == 2) return base + overlay;
+    if (blendMode == 3) return overlay;
+    return mix(base, overlay, amount);
+}
+
+vec3 sampleEnvironmentLatLong(int envSlot, vec3 dir, float rotationRad) {
+    float u = 0.5 + atan(dir.z, dir.x) / (2.0 * PI);
+    u = fract(u - rotationRad / (2.0 * PI));
+    float v = 0.5 - asin(clamp(dir.y, -1.0, 1.0)) / PI;
+    return texture(materialTextures[nonuniformEXT(envSlot)], vec2(u, v)).rgb;
+}
+
 // Simplified sky lookup for ambient matching
 vec3 get_ambient_sky(vec3 dir) {
     if (worldData.w.mode == 0) return worldData.w.sunColor * worldData.w.envIntensity;
     if (worldData.w.mode == 1) {
         int envSlot = worldData.w.envTexSlot;
         if (envSlot > 0) {
-            float u = 0.5 + atan(dir.z, dir.x) / (2.0 * PI);
-            float v = 0.5 - asin(clamp(dir.y, -1.0, 1.0)) / PI;
-            return texture(materialTextures[nonuniformEXT(envSlot)], vec2(u, v)).rgb * worldData.w.envIntensity;
+            return sampleEnvironmentLatLong(envSlot, dir, worldData.w.envRotation) * worldData.w.envIntensity;
         }
     }
     // Mode 2: Nishita (simplified directional gradient for ambient)
@@ -289,6 +309,10 @@ vec3 get_ambient_sky(vec3 dir) {
     vec3 zenith = vec3(0.1, 0.3, 0.9);
     vec3 sky = mix(horizon, zenith, pow(clamp(cosAlt, 0.0, 1.0), 0.6)) * (worldData.w.atmosphereIntensity / 10.0);
     if (cosAlt < 0.0) sky = mix(sky, vec3(0.02, 0.015, 0.01), smoothstep(0.0, -0.15, cosAlt));
+    if (worldData.w.mode == 2 && worldData.w.envOverlayEnabled != 0 && worldData.w.envTexSlot > 0) {
+        vec3 overlay = sampleEnvironmentLatLong(worldData.w.envTexSlot, dir, worldData.w.envOverlayRotation);
+        sky = blendEnvironmentOverlay(sky, overlay, worldData.w.envOverlayIntensity, worldData.w.envOverlayBlendMode);
+    }
     return sky;
 }
 

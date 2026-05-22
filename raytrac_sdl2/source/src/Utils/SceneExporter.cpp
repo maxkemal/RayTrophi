@@ -881,7 +881,7 @@ bool SceneExporter::exportScene(const std::string& filepath, SceneData& scene, c
              mesh->mFaces[i].mIndices[1] = baseIdx + 1;
              mesh->mFaces[i].mIndices[2] = baseIdx + 2;
 
-             if (settings.export_skinning) {
+             if (settings.export_skinning && t->hasAnySkinWeights()) {
                  auto& weights = t->getVertexBoneWeights(); 
                  if (!weights.empty()) {
                      for (int v = 0; v < 3; v++) {
