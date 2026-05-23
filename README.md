@@ -34,15 +34,18 @@
 
 ---
 
-## 📊 Project Statistics
+## 📊 Project Statistics (Verified)
 <!-- STATS_START -->
 | Metric | Value |
 | :--- | :--- |
-| **Files (Source)** | 249 |
-| **Lines of Code** | 136,184 |
-| **UI Control Points** | 1,015+ |
-| **Last Updated** | 2026-03-10 |
+| **Project Code/Shader Files** | 327 |
+| **Project Code/Shader Lines** | 207,957 |
+| **Source Tree Code/Shader Lines** | 467,165 |
+| **UI Control Points** | 1,278+ |
+| **Last Verified** | 2026-05-23 |
 <!-- STATS_END -->
+
+Counts cover `raytrac_sdl2/source`. Project lines exclude vendored single-file libraries (`simdjson`, `stb`, `json.hpp`, `tinyexr`); source tree lines include them.
 
 Full Technical Report: [ARCHITECTURE.md](ARCHITECTURE.md)
 
@@ -418,13 +421,11 @@ cd RayTrophi/raytrac_sdl2
 #### **Method 2: CMake**
 
 ```bash
-mkdir build
-cd build
-cmake .. -G "Visual Studio 17 2022" -A x64
-cmake --build . --config Release -j 12
+cmake -S raytrac_sdl2 -B raytrac_sdl2/build -G "Visual Studio 17 2022" -A x64
+cmake --build raytrac_sdl2/build --config Release -j 12
 ```
 
-*(Note: CMake build is fully supported and equivalent to the VS2022 project.)*
+*(Note: CMake build is fully supported and keeps its executable, PTX files, Vulkan shaders, and runtime DLLs isolated under `raytrac_sdl2/build/bin/<CONFIG>` so it does not overwrite the VS2022 `x64` output.)*
 
 ### ▶️ Running
 
@@ -436,8 +437,8 @@ raytracing_render_code.exe
 
 If built with CMake:
 ```bash
-cd build/Release
-RayTrophi.exe
+cd raytrac_sdl2/build/bin/RELEASE
+"RayTrophi Studio.exe"
 ```
 
 The UI will appear. Use File > Load Scene to import models (GLTF recommended).
@@ -638,8 +639,8 @@ mat->metallicProperty.constant_value = Vec3(1.0, 1.0, 1.0); // Metallic
 ## 🐛 Known Issues & Limitations
 
 ### Build System
-- ⚠️ **CMake build has SDL screen update bug in CPU rendering** → Use VS2022 instead
-- DLL dependencies must be in same folder as .exe
+- CMake and VS2022 use separate output folders; keep them separate to avoid mixing old PTX/DLL files.
+- DLL dependencies must be in same folder as .exe; CMake copies the known SDL2, Assimp, OIDN, vcpkg, shader, and PTX runtime files after build.
 
 ### Rendering
 - OptiX requires NVIDIA GPU with SM 5.0+ (GTX 9xx or newer)

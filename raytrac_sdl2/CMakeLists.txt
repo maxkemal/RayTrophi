@@ -18,6 +18,13 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_ARCHITECTURES 50)  # SM 5.0 for broad GPU support
 
+# Keep CMake artifacts isolated from the checked-in VS2022 x64 output folders.
+# Each generator/config gets a self-contained runtime directory under build/bin.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+foreach(CONFIG DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${CONFIG} "${CMAKE_BINARY_DIR}/bin/${CONFIG}")
+endforeach()
+
 # --- WINDOWS SETTINGS (Match VS2022 Project) ---
 if(WIN32)
     add_compile_definitions(
@@ -59,14 +66,43 @@ endif()
 set(SDL2_ROOT "$ENV{SDL2_ROOT}" CACHE PATH "Path to SDL2 root directory")
 set(SDL2_IMAGE_ROOT "$ENV{SDL2_IMAGE_ROOT}" CACHE PATH "Path to SDL2 Image root directory")
 set(OPTIX_ROOT "$ENV{OPTIX_ROOT}" CACHE PATH "Path to OptiX SDK")
+set(RAYTROPHI_EXTERNAL_DEPS "${CMAKE_CURRENT_SOURCE_DIR}/../../external_dependencies" CACHE PATH "Path to RayTrophi external_dependencies directory")
+if(NOT EXISTS "${RAYTROPHI_EXTERNAL_DEPS}")
+    set(RAYTROPHI_EXTERNAL_DEPS "${CMAKE_CURRENT_SOURCE_DIR}/../external_dependencies" CACHE PATH "Path to RayTrophi external_dependencies directory" FORCE)
+endif()
+
+function(raytrophi_set_path_if_valid VAR VALUE)
+    if(NOT "${VALUE}" STREQUAL "" AND EXISTS "${VALUE}")
+        set(${VAR} "${VALUE}" CACHE PATH "" FORCE)
+    endif()
+endfunction()
+
+if(NOT EXISTS "${SDL2_ROOT}/include/SDL.h")
+    raytrophi_set_path_if_valid(SDL2_ROOT "${RAYTROPHI_EXTERNAL_DEPS}/SDL2-2.30.4")
+endif()
+if(NOT EXISTS "${SDL2_IMAGE_ROOT}/include/SDL_image.h")
+    raytrophi_set_path_if_valid(SDL2_IMAGE_ROOT "${RAYTROPHI_EXTERNAL_DEPS}/SDL2-2.30.4/SDL2_image-2.8.2")
+endif()
 if(NOT OPTIX_ROOT AND EXISTS "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0")
     # Fallback to standard NVIDIA OptiX installation path if environment variable is not set
     set(OPTIX_ROOT "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0" CACHE PATH "Path to OptiX SDK" FORCE)
+endif()
+if(NOT EXISTS "${OPTIX_ROOT}/include/optix.h" AND EXISTS "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0")
+    set(OPTIX_ROOT "C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0" CACHE PATH "Path to OptiX SDK" FORCE)
 endif()
 set(EMBREE_ROOT "$ENV{EMBREE_ROOT}" CACHE PATH "Path to Embree root")
 set(OIDN_ROOT "$ENV{OIDN_ROOT}" CACHE PATH "Path to OIDN root")
 set(ASSIMP_ROOT "$ENV{ASSIMP_ROOT}" CACHE PATH "Path to Assimp root")
 set(VULKAN_SDK "$ENV{VULKAN_SDK}" CACHE PATH "Path to Vulkan SDK")
+if(NOT EXISTS "${EMBREE_ROOT}/include/embree4/rtcore.h")
+    raytrophi_set_path_if_valid(EMBREE_ROOT "${RAYTROPHI_EXTERNAL_DEPS}/embree-4.4.0.x64.windows")
+endif()
+if(NOT EXISTS "${OIDN_ROOT}/include/OpenImageDenoise/oidn.hpp")
+    raytrophi_set_path_if_valid(OIDN_ROOT "${RAYTROPHI_EXTERNAL_DEPS}/oidn-2.3.0.x64.windows")
+endif()
+if(NOT EXISTS "${ASSIMP_ROOT}/include/assimp/Importer.hpp")
+    raytrophi_set_path_if_valid(ASSIMP_ROOT "${RAYTROPHI_EXTERNAL_DEPS}/Assimp")
+endif()
 
 # --- SOURCE FILES (Refactored Structure) ---
 # Automatically collect source files from new subdirectories to avoid manual maintenance
@@ -83,6 +119,7 @@ file(GLOB_RECURSE SOURCES_CPP
     "source/src/Hair/*.cpp"
     "source/src/Backend/*.cpp"
     "source/src/Paint/*.cpp"
+    "source/src/Stylize/*.cpp"
     "source/src/Viewport/*.cpp"
 )
 list(APPEND SOURCES_CPP ${SOURCES_CPP_ROOT})
@@ -107,6 +144,7 @@ set(CUDA_SOURCES_OBJ
     "source/src/Device/gas_kernels.cu"
     "source/src/Device/gas_fft_solver.cu"
     "source/src/Device/oidn_blend.cu"
+    "source/src/Stylize/StylizeKernel.cu"
 )
 
 set(OZZ_RUNTIME_SOURCES
@@ -163,6 +201,8 @@ find_package(Vulkan REQUIRED)
 # Updated Path for Device Code
 set(CUDA_SOURCE "source/src/Device/raygen.cu")
 set(PTX_OUTPUT "${CMAKE_BINARY_DIR}/raygen.ptx")
+set(PTX_OUTPUT_miss "${CMAKE_BINARY_DIR}/miss_kernels.ptx")
+set(PTX_OUTPUT_hitgroup "${CMAKE_BINARY_DIR}/hitgroup_kernels.ptx")
 
 # Updated Paths for PTX dependencies
 set(PTX_HEADER_DEPS
@@ -191,29 +231,43 @@ set(PTX_OUTPUT_foliage "${CMAKE_BINARY_DIR}/foliage_deform.ptx")
 set(CUDA_KERNEL_fft "source/src/Device/gas_fft_solver.cu")
 set(PTX_OUTPUT_fft "${CMAKE_BINARY_DIR}/gas_fft_solver.ptx")
 
+function(raytrophi_add_ptx OUTPUT SOURCE)
+    add_custom_command(
+        OUTPUT "${OUTPUT}"
+        COMMAND ${CMAKE_CUDA_COMPILER}
+        -ptx "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE}"
+        -o "${OUTPUT}"
+        -I"${OPTIX_ROOT}/include"
+        -I"${CMAKE_CURRENT_SOURCE_DIR}/source/include"
+        -I"${CMAKE_CURRENT_SOURCE_DIR}/libs"
+        -I"${CMAKE_CURRENT_SOURCE_DIR}/source/src"
+        -I"${CMAKE_CURRENT_SOURCE_DIR}/source/src/Device"
+        --use_fast_math
+        --maxrregcount=64
+        -gencode=arch=compute_50,code=compute_50
+        -allow-unsupported-compiler
+        DEPENDS "${SOURCE}" ${PTX_HEADER_DEPS}
+        COMMENT "Compiling CUDA to PTX: ${SOURCE}"
+        VERBATIM
+    )
+endfunction()
 
-# Custom command to generate PTX (RayGen)
-add_custom_command(
-    OUTPUT ${PTX_OUTPUT}
-    COMMAND ${CMAKE_CUDA_COMPILER}
-    -ptx "${CMAKE_CURRENT_SOURCE_DIR}/${CUDA_SOURCE}"
-    -o "${PTX_OUTPUT}"
-    -I"${OPTIX_ROOT}/include"
-    -I"${CMAKE_CURRENT_SOURCE_DIR}/source/include"
-    -I"${CMAKE_CURRENT_SOURCE_DIR}/libs"
-    -I"${CMAKE_CURRENT_SOURCE_DIR}/source/src"
-    -I"${CMAKE_CURRENT_SOURCE_DIR}/source/src/Device"
-    --use_fast_math
-    --maxrregcount=64
-    -gencode=arch=compute_50,code=compute_50
-    -allow-unsupported-compiler
-    DEPENDS ${CUDA_SOURCE} ${PTX_HEADER_DEPS}
-    COMMENT "Compiling CUDA to PTX: ${CUDA_SOURCE}"
-)
+raytrophi_add_ptx("${PTX_OUTPUT}" "${CUDA_SOURCE}")
+raytrophi_add_ptx("${PTX_OUTPUT_miss}" "source/src/Device/miss_kernels.cu")
+raytrophi_add_ptx("${PTX_OUTPUT_hitgroup}" "source/src/Device/hitgroup_kernels.cu")
+raytrophi_add_ptx("${PTX_OUTPUT_erosion}" "${CUDA_KERNEL_erosion}")
+raytrophi_add_ptx("${PTX_OUTPUT_foliage}" "${CUDA_KERNEL_foliage}")
 
 # --- EXECUTABLE ---
-# Add only raygen.ptx to executable (others are likely loaded dynamically or need separate rules)
-add_executable(${PROJECT_NAME} ${ALL_SOURCES} ${PTX_OUTPUT})
+# Runtime-loaded PTX files are part of the target so CMake generates/copies them with the exe.
+set(PTX_OUTPUTS
+    "${PTX_OUTPUT}"
+    "${PTX_OUTPUT_miss}"
+    "${PTX_OUTPUT_hitgroup}"
+    "${PTX_OUTPUT_erosion}"
+    "${PTX_OUTPUT_foliage}"
+)
+add_executable(${PROJECT_NAME} ${ALL_SOURCES} ${PTX_OUTPUTS})
 set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "RayTrophi Studio")
 
 if(RAYTROPHI_ENABLE_OZZ)
@@ -241,6 +295,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Hair"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Viewport"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Device"
+    "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Stylize"
     "${CMAKE_CURRENT_SOURCE_DIR}/external"
     "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui"
     "${CMAKE_CURRENT_SOURCE_DIR}/external/ozz-animation/include"
@@ -283,7 +338,7 @@ set(LIB_ASSIMP "${ASSIMP_ROOT}/lib/x64/assimp-vc143-mt.lib")
 # VCPKG Libraries
 file(GLOB VCPKG_LIBS "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/lib/*.lib")
 set(ADDITIONAL_LIBS
-    openvdb.lib Imath-3_1.lib Iex-3_3.lib IlmThread-3_3.lib OpenEXR-3_3.lib OpenEXRCore-3_3.lib blosc.lib zlib.lib lz4.lib zstd.lib
+    openvdb.lib Imath-3_1.lib Iex-3_3.lib IlmThread-3_3.lib OpenEXR-3_3.lib OpenEXRCore-3_3.lib blosc.lib zlib.lib lz4.lib zstd.lib DirectXTex.lib
 )
 
 # Link Libraries
@@ -314,13 +369,15 @@ if(MSVC)
 endif()
 
 # --- POST BUILD COPY ---
-# Copy .ptx to executable directory
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${PTX_OUTPUT}"
-    "$<TARGET_FILE_DIR:${PROJECT_NAME}>/raygen.ptx"
-    COMMENT "Copying raygen.ptx to output directory"
-)
+# Copy runtime-loaded PTX files next to the executable.
+foreach(PTX_FILE IN LISTS PTX_OUTPUTS)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${PTX_FILE}"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+        COMMENT "Copying ${PTX_FILE} to output directory"
+    )
+endforeach()
 
 # Copy Vulkan shaders to executable directory/shaders
 # Compiled .spv files live under source/shaders/ (produced by compile_shaders.bat)
@@ -330,5 +387,40 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     "$<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders"
     COMMENT "Copying Vulkan shaders to output directory/shaders"
 )
+
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+    "$<TARGET_FILE_DIR:${PROJECT_NAME}>/assets"
+    COMMENT "Copying runtime assets to output directory/assets"
+)
+
+function(raytrophi_copy_runtime_dll DLL_PATH)
+    if(EXISTS "${DLL_PATH}")
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${DLL_PATH}"
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+            COMMENT "Copying runtime DLL: ${DLL_PATH}"
+        )
+    endif()
+endfunction()
+
+raytrophi_copy_runtime_dll("${SDL2_ROOT}/lib/x64/SDL2.dll")
+raytrophi_copy_runtime_dll("${SDL2_IMAGE_ROOT}/lib/x64/SDL2_image.dll")
+raytrophi_copy_runtime_dll("${EMBREE_ROOT}/bin/embree4.dll")
+raytrophi_copy_runtime_dll("${CMAKE_CURRENT_SOURCE_DIR}/../x64/Release/embree4.dll")
+raytrophi_copy_runtime_dll("${EMBREE_ROOT}/bin/tbb12.dll")
+raytrophi_copy_runtime_dll("${OIDN_ROOT}/bin/OpenImageDenoise.dll")
+raytrophi_copy_runtime_dll("${OIDN_ROOT}/bin/OpenImageDenoise_core.dll")
+raytrophi_copy_runtime_dll("${OIDN_ROOT}/bin/OpenImageDenoise_device_cpu.dll")
+raytrophi_copy_runtime_dll("${OIDN_ROOT}/bin/OpenImageDenoise_device_cuda.dll")
+raytrophi_copy_runtime_dll("${OIDN_ROOT}/bin/OpenImageDenoise_device_hip.dll")
+raytrophi_copy_runtime_dll("${ASSIMP_ROOT}/bin/x64/assimp-vc143-mt.dll")
+
+file(GLOB RAYTROPHI_VCPKG_RUNTIME_DLLS "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/bin/*.dll")
+foreach(RUNTIME_DLL IN LISTS RAYTROPHI_VCPKG_RUNTIME_DLLS)
+    raytrophi_copy_runtime_dll("${RUNTIME_DLL}")
+endforeach()
 
 message(STATUS "Build setup complete for RayTrophi (Refactored)")

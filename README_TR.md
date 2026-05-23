@@ -34,15 +34,18 @@
 
 ---
 
-## 📊 Proje İstatistikleri
+## 📊 Proje İstatistikleri (Doğrulanmış)
 <!-- STATS_START -->
-| Metric | Value |
+| Metrik | Değer |
 | :--- | :--- |
-| **Files (Source)** | 249 |
-| **Lines of Code** | 136,184 |
-| **UI Control Points** | 1,015+ |
-| **Last Updated** | 2026-03-10 |
+| **Proje Kod/Shader Dosyaları** | 327 |
+| **Proje Kod/Shader Satırları** | 207,957 |
+| **Source Tree Kod/Shader Satırları** | 467,165 |
+| **UI Kontrol Noktaları** | 1,278+ |
+| **Son Doğrulama** | 2026-05-23 |
 <!-- STATS_END -->
+
+Sayımlar `raytrac_sdl2/source` ağacını kapsar. Proje satırları vendored tek-dosya kütüphaneleri (`simdjson`, `stb`, `json.hpp`, `tinyexr`) hariç tutar; source tree satırları bunları da içerir.
 
 Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
 
@@ -382,21 +385,27 @@ cd RayTrophi/raytrac_sdl2
 
 **Not**: Tüm bağımlılıklar (DLL'ler, kaynaklar) derleme sistemi tarafından otomatik olarak çıktı dizinine kopyalanır.
 
-#### **Yöntem 2: CMake (Bilinen Sorunlar - Aşağıya bakın)**
+#### **Yöntem 2: CMake**
 
 ```bash
-mkdir build && cd build
-cmake .. -G "Visual Studio 17 2022" -A x64
-cmake --build . --config Release
+cmake -S raytrac_sdl2 -B raytrac_sdl2/build -G "Visual Studio 17 2022" -A x64
+cmake --build raytrac_sdl2/build --config Release -j 12
 ```
 
-⚠️ **CMake Bilinen Sorun**: SDL ile CPU rendering'de ekran güncelleme hatası var. Kararlı CPU rendering için VS2022 .vcxproj derlemesini kullanın.
+*(Not: CMake derlemesi desteklenir; exe, PTX dosyaları, Vulkan shaderları ve runtime DLL'leri `raytrac_sdl2/build/bin/<CONFIG>` altında ayrı tutulur, bu yüzden VS2022 `x64` çıktısının üstüne yazmaz.)*
 
 ### ▶️ Çalıştırma
 
+Visual Studio ile derlediyseniz:
 ```bash
 cd x64/Release
 raytracing_render_code.exe
+```
+
+CMake ile derlediyseniz:
+```bash
+cd raytrac_sdl2/build/bin/RELEASE
+"RayTrophi Studio.exe"
 ```
 
 UI açılacaktır. Model içe aktarmak için File > Load Scene kullanın (GLTF önerilir).
@@ -597,8 +606,8 @@ mat->metallicProperty.constant_value = Vec3(1.0, 1.0, 1.0); // Metalik
 ## 🐛 Bilinen Sorunlar & Sınırlamalar
 
 ### Derleme Sistemi
-- ⚠️ **CMake derlemesinde CPU rendering'de SDL ekran güncelleme hatası var** → Bunun yerine VS2022 kullanın
-- DLL bağımlılıkları .exe ile aynı klasörde olmalı
+- CMake ve VS2022 ayrı çıktı klasörleri kullanır; eski PTX/DLL dosyalarının karışmaması için bu ayrımı koruyun.
+- DLL bağımlılıkları .exe ile aynı klasörde olmalı; CMake bilinen SDL2, Assimp, OIDN, vcpkg, shader ve PTX runtime dosyalarını build sonunda kopyalar.
 
 ### Rendering
 - OptiX, SM 5.0+ NVIDIA GPU gerektirir (GTX 9xx veya daha yeni)
