@@ -152,6 +152,20 @@ void markStylizeChanged(UIContext& ctx) {
     stylize_redisplay = true;
 }
 
+void prepareStylizeAOVsAfterEnable(UIContext& ctx) {
+    ctx.render_settings.stylize_enabled = ctx.renderer.stylizeMode.enabled;
+
+    if (ctx.backend_ptr) {
+        if (ctx.scene.camera) {
+            ctx.backend_ptr->syncCamera(*ctx.scene.camera);
+        }
+        ctx.backend_ptr->resetAccumulation();
+    }
+
+    ctx.renderer.resetCPUAccumulation();
+    ctx.start_render = true;
+}
+
 } // namespace
 
 void SceneUI::drawStylizePanel(UIContext& ctx) {
@@ -162,6 +176,7 @@ void SceneUI::drawStylizePanel(UIContext& ctx) {
     UIWidgets::Divider();
 
     bool changed = false;
+    const bool was_enabled = state.enabled;
     changed |= ImGui::Checkbox("Enable Stylize Layer", &state.enabled);
 
     const auto& presets = Stylize::StylizeModeState::presets();
@@ -306,18 +321,13 @@ void SceneUI::drawStylizePanel(UIContext& ctx) {
         UIWidgets::EndSection();
     }
 
-    if (UIWidgets::BeginSection("World Adapters", ImVec4(0.58f, 0.92f, 0.58f, 1.0f), true)) {
-        changed |= drawStrength("world_terrain", "Terrain Stroke", profile.world_adapters.terrain_stroke_blend);
-        changed |= drawStrength("world_foliage_cluster", "Foliage Cluster", profile.world_adapters.foliage_cluster_simplification);
-        changed |= drawStrength("world_foliage_palette", "Foliage Var", profile.world_adapters.foliage_palette_variance);
-        changed |= drawStrength("world_volume_grain", "Volume Grain", profile.world_adapters.volume_grain);
-        changed |= drawStrength("world_force_motion", "Force Motion", profile.world_adapters.force_field_motion_response);
-        UIWidgets::EndSection();
-    }
-
     if (changed) {
         profile.global_strength = std::clamp(profile.global_strength, 0.0f, 1.0f);
         profile.temporal_coherence = std::clamp(profile.temporal_coherence, 0.0f, 1.0f);
+        ctx.render_settings.stylize_enabled = state.enabled;
+        if (!was_enabled && state.enabled) {
+            prepareStylizeAOVsAfterEnable(ctx);
+        }
         markStylizeChanged(ctx);
     }
 }

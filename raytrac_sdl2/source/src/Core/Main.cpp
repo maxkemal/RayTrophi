@@ -3426,6 +3426,8 @@ int main(int argc, char* argv[]) try {
         
         ui_ctx.backend_ptr = getActiveViewportBackendForShading(ui.viewport_settings.shading_mode);
         ui.draw(ui_ctx);
+        render_settings.stylize_enabled =
+            ray_renderer.stylizeMode.enabled && ui.viewport_settings.shading_mode == 2;
         const bool viewport_transform_dragging = ui.is_dragging;
 
         if (viewport_transform_dragging) {
@@ -4789,6 +4791,8 @@ int main(int argc, char* argv[]) try {
         // fresh render. Stylize must re-run on any rebuild (e.g. a Stylize param change
         // requests a redisplay with no new render), not only when a render happened.
         bool surface_rebuilt = false;
+        const bool stylize_post_active =
+            ray_renderer.stylizeMode.enabled && ui.viewport_settings.shading_mode == 2;
         // A Stylize param change wants the post pass re-run on the existing render. Treat it
         // like a render for display purposes so the surface rebuild HONORS the tonemap
         // on/off setting (don't force tonemap), then the stylize block re-applies on top.
@@ -4797,12 +4801,11 @@ int main(int argc, char* argv[]) try {
         // 3. Handle Tonemap Apply OR Display Update
         if (apply_tonemap || (ui_ctx.render_settings.persistent_tonemap && needs_redisplay)) {
             if (original_surface && surface) {
-                const bool stylize_active = ray_renderer.stylizeMode.enabled;
                 const bool gpu_noop_post =
                     isActiveRenderBackendGpu() &&
                     ui_ctx.render_settings.persistent_tonemap &&
                     hasNoOpColorProcessing(color_processor) &&
-                    !stylize_active;
+                    !stylize_post_active;
 
                 if (gpu_noop_post) {
                     copySurfacePixelsOrBlit(surface, original_surface);
@@ -4812,7 +4815,7 @@ int main(int argc, char* argv[]) try {
                     applyToneMappingToSurfaceWithCamera(surface, original_surface, color_processor,
                         isActiveRenderBackendGpu() ? nullptr : &ray_renderer,
                         scene.camera.get());
-                    stylize_applied_by_tonemap = stylize_active && !isActiveRenderBackendGpu();
+                    stylize_applied_by_tonemap = stylize_post_active && !isActiveRenderBackendGpu();
                 }
             }
             if (apply_tonemap) {
@@ -4837,7 +4840,7 @@ int main(int argc, char* argv[]) try {
         }
 
         if (surface_rebuilt &&
-            ray_renderer.stylizeMode.enabled &&
+            stylize_post_active &&
             !stylize_applied_by_tonemap &&
             surface) {
             bool stylized_on_gpu = false;
