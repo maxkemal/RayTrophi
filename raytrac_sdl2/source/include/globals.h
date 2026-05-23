@@ -72,9 +72,28 @@ enum class ResolutionSource {
     FromAspect = 2    // Calculate from aspect ratio + base height
 };
 
+// Per-frame OIDN timing telemetry ([OIDN][CUDA] / [OIDN][Vulkan] log lines plus
+// the chrono/CUDA-event timers that feed them). Off by default — measurement is
+// done; leaving the timers in costs CPU + a CUDA event sync every frame. Flip to
+// 1 to bring the instrumentation back when investigating a denoiser regression.
+#ifndef RT_OIDN_PROFILING
+#define RT_OIDN_PROFILING 0
+#endif
+
 enum class DenoiserMode {
     Fast = 0,         // beauty only
     Quality = 1       // beauty + albedo + normal
+};
+
+// OIDN model/quality tier (orthogonal to DenoiserMode, which selects AOV usage).
+// Maps to OIDN_QUALITY_FAST/BALANCED/HIGH. The viewport path uses this; final
+// renders are forced to High regardless. Fast is the cheapest model (~half the
+// GPU cost of Balanced on a mid-range card) and is the right default for an
+// interactive, still-converging preview.
+enum class DenoiserQuality {
+    Fast = 0,
+    Balanced = 1,
+    High = 2
 };
 
 struct RenderSettings {
@@ -104,6 +123,7 @@ struct RenderSettings {
     bool render_use_denoiser = false;  // Final Render Denoiser
     float denoiser_blend_factor = 1.0f;
     DenoiserMode denoiser_mode = DenoiserMode::Quality;
+    DenoiserQuality denoiser_quality = DenoiserQuality::Fast; // Viewport OIDN model tier; final render forced to High
     // Set per-frame from Renderer::stylizeMode.enabled so the OptiX backend allocates the
     // albedo/normal/position AOV buffers for Stylize even when the denoiser is off.
     bool stylize_enabled = false;

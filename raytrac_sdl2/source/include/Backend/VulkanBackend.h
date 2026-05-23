@@ -766,6 +766,20 @@ public:
     VkDescriptorPool m_tonemapDescPool = VK_NULL_HANDLE;
     VkDescriptorSet m_tonemapDescSet = VK_NULL_HANDLE; // persistent, single set, rewritten on image change
 
+    // Stylize compute pipeline (Vulkan-native GPU stylize, no CUDA). bindings:
+    // 0=color SSBO (in/out), 1/2/3=position/albedo/normal AOV storage images,
+    // 4=params SSBO. Descriptors rewritten per frame by the adapter.
+    bool createStylizePipeline(const std::vector<uint32_t>& computeSPV);
+    bool hasStylizePipeline() const { return m_stylizePipeline != VK_NULL_HANDLE; }
+    bool updateStylizeDescriptors(const BufferHandle& colorBuf, const BufferHandle& paramsBuf,
+                                  VkImageView posView, VkImageView albView, VkImageView nrmView);
+    bool dispatchStylizeCompute(uint32_t w, uint32_t h, VkImage posImg, VkImage albImg, VkImage nrmImg);
+    VkPipeline m_stylizePipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_stylizePipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_stylizeDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_stylizeDescPool = VK_NULL_HANDLE;
+    VkDescriptorSet m_stylizeDescSet = VK_NULL_HANDLE;
+
     // Atmosphere LUT Compute Pipeline (Nishita LUT generation on Vulkan GPU)
     bool createAtmosphereLUTPipeline(const std::vector<uint32_t>& computeSPV);
     bool hasAtmosphereLUTPipeline() const { return m_atmosphereLutPipeline != VK_NULL_HANDLE; }
@@ -1078,6 +1092,11 @@ public:
     void downloadImage(void* outPixels) override;
     bool getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary = true, bool includeColor = true) override;
     bool getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool useAuxiliary = true) override;
+    // GPU-native stylize (no CUDA): upload the graded surface to an SSBO, run the
+    // stylize compute over the resident AOV images, download. Returns false → CPU fallback.
+    bool applyStylizeGPU(void* surface,
+                         const StylizeGPU::KernelParams& params,
+                         const StylizeCore::StyleProfileCore& profile) override;
     int getCurrentSampleCount() const override;
     bool isAccumulationComplete() const override;
     bool needsViewportRender() const override {
@@ -1284,6 +1303,13 @@ protected:
     // no CUDA interop needed since stylize is a CPU post pass.
     VulkanRT::ImageHandle m_denoiserPositionImage;
     VulkanRT::BufferHandle m_denoiserPositionStagingBuffer;
+
+    // GPU stylize: host-visible color SSBO (graded surface round-trip) + params SSBO.
+    // Persistent; color buffer reallocated on resolution change.
+    VulkanRT::BufferHandle m_stylizeColorBuf;
+    VulkanRT::BufferHandle m_stylizeParamsBuf;
+    int m_stylizeColorW = 0;
+    int m_stylizeColorH = 0;
 
     // ---- GPU-direct denoiser interop (Vulkan→CUDA for OIDN) ----
     // Parallel set of staging buffers whose VkDeviceMemory is exportable to

@@ -458,6 +458,13 @@ void OptixBackend::renderProgressive(void* outSurface, void* outWindow, void* ou
     );
 }
 
+bool OptixBackend::applyStylizeGPU(void* surface,
+                                   const StylizeGPU::KernelParams& params,
+                                   const StylizeCore::StyleProfileCore& profile) {
+    if (!m_optix || !surface) return false;
+    return m_optix->applyStylizeGPU(static_cast<SDL_Surface*>(surface), params, profile);
+}
+
 void OptixBackend::setViewportMode(ViewportMode mode) {
     if (m_viewportMode == mode) return;
     m_viewportMode = mode;

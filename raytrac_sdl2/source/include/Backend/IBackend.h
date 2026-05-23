@@ -22,6 +22,12 @@ class Camera;  // Forward declaration for syncCamera
 struct GpuVDBVolume;
 struct GpuGasVolume;
 
+// GPU stylize request types (StylizeKernel.h / StylizeCore.h). Forward declared
+// so this widely-included interface does not pull CUDA headers; the OptiX
+// backend includes the full definitions in its .cpp.
+namespace StylizeGPU { struct KernelParams; }
+namespace StylizeCore { struct StyleProfileCore; }
+
 namespace Backend {
 
 // ============================================================================
@@ -597,6 +603,19 @@ public:
     virtual bool getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool useAuxiliary = true) {
         (void)frame;
         (void)useAuxiliary;
+        return false;
+    }
+
+    // GPU stylize: run the stylize post-process on device (AOVs already resident,
+    // graded color uploaded/downloaded), in place on the SDL surface (passed as
+    // void* to keep SDL out of this header). Return false → caller falls back to
+    // the CPU stylize path. Default no-op until a backend implements it.
+    virtual bool applyStylizeGPU(void* surface,
+                                 const StylizeGPU::KernelParams& params,
+                                 const StylizeCore::StyleProfileCore& profile) {
+        (void)surface;
+        (void)params;
+        (void)profile;
         return false;
     }
     

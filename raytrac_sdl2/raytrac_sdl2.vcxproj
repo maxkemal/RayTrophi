@@ -357,6 +357,8 @@
     <ClInclude Include="source\include\Paint\PaintTextureSet.h" />
     <ClInclude Include="source\include\Paint\TerrainPaintAdapter.h" />
     <ClInclude Include="source\include\Stylize\StylizePostProcess.h" />
+    <ClInclude Include="source\include\Stylize\StylizeCore.h" />
+    <ClInclude Include="source\include\Stylize\StylizeKernel.h" />
     <ClInclude Include="source\include\Stylize\StylizeModeState.h" />
     <ClInclude Include="source\include\Transform.h" />
     <ClInclude Include="source\include\World.h" />
@@ -547,6 +549,7 @@
     <CudaCompile Include="source\src\Device\skinning_kernels.cu" />
     <CudaCompile Include="source\src\Device\gas_kernels.cu" />
     <CudaCompile Include="source\src\Device\gas_fft_solver.cu" />
+    <CudaCompile Include="source\src\Stylize\StylizeKernel.cu" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -9,7 +9,9 @@
 #include "Backend/VulkanBackend.h"
 #include "Backend/vulkan_world_data.h"
 #include "Core/RenderStateManager.h"
+#include "Stylize/StylizeKernel.h"
 #include "globals.h"
+#include <SDL_surface.h>
 #include <iostream>
 #include <fstream>
 #include <set>
@@ -747,6 +749,11 @@ void VulkanDevice::shutdown() {
         if (m_tonemapPipelineLayout) { vkDestroyPipelineLayout(m_device, m_tonemapPipelineLayout, nullptr); m_tonemapPipelineLayout = VK_NULL_HANDLE; }
         if (m_tonemapDescLayout)     { vkDestroyDescriptorSetLayout(m_device, m_tonemapDescLayout, nullptr); m_tonemapDescLayout = VK_NULL_HANDLE; }
         if (m_tonemapDescPool)       { vkDestroyDescriptorPool(m_device, m_tonemapDescPool, nullptr); m_tonemapDescPool = VK_NULL_HANDLE; }
+
+        if (m_stylizePipeline)       { vkDestroyPipeline(m_device, m_stylizePipeline, nullptr); m_stylizePipeline = VK_NULL_HANDLE; }
+        if (m_stylizePipelineLayout) { vkDestroyPipelineLayout(m_device, m_stylizePipelineLayout, nullptr); m_stylizePipelineLayout = VK_NULL_HANDLE; }
+        if (m_stylizeDescLayout)     { vkDestroyDescriptorSetLayout(m_device, m_stylizeDescLayout, nullptr); m_stylizeDescLayout = VK_NULL_HANDLE; }
+        if (m_stylizeDescPool)       { vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE; }
         m_tonemapDescSet = VK_NULL_HANDLE;
 
         // Destroy atmosphere LUT compute resources.
@@ -5477,6 +5484,173 @@ bool VulkanDevice::updateTonemapDescriptors(const VulkanRT::ImageHandle& hdrImag
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[1].pImageInfo = &outInfo;
     vkUpdateDescriptorSets(m_device, 2, writes, 0, nullptr);
+    return true;
+}
+
+bool VulkanDevice::createStylizePipeline(const std::vector<uint32_t>& computeSPV) {
+    if (computeSPV.empty()) return false;
+
+    if (m_stylizePipeline)       { vkDestroyPipeline(m_device, m_stylizePipeline, nullptr); m_stylizePipeline = VK_NULL_HANDLE; }
+    if (m_stylizePipelineLayout) { vkDestroyPipelineLayout(m_device, m_stylizePipelineLayout, nullptr); m_stylizePipelineLayout = VK_NULL_HANDLE; }
+    if (m_stylizeDescLayout)     { vkDestroyDescriptorSetLayout(m_device, m_stylizeDescLayout, nullptr); m_stylizeDescLayout = VK_NULL_HANDLE; }
+    if (m_stylizeDescPool)       { vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE; }
+    m_stylizeDescSet = VK_NULL_HANDLE;
+
+    // Pool: one persistent set with 2 storage buffers (color + params) and 3 storage images (AOVs).
+    const uint32_t kMaxSets = 1;
+    VkDescriptorPoolSize poolSizes[] = {
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxSets * 2 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  kMaxSets * 3 },
+    };
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = 2;
+    poolInfo.pPoolSizes = poolSizes;
+    poolInfo.maxSets = kMaxSets;
+    if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_stylizeDescPool) != VK_SUCCESS) return false;
+
+    // Layout: 0=color SSBO, 1=position img, 2=albedo img, 3=normal img, 4=params SSBO.
+    VkDescriptorSetLayoutBinding bindings[5]{};
+    auto setBinding = [](VkDescriptorSetLayoutBinding& b, uint32_t idx, VkDescriptorType type) {
+        b.binding = idx; b.descriptorType = type; b.descriptorCount = 1;
+        b.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    };
+    setBinding(bindings[0], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    setBinding(bindings[1], 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    setBinding(bindings[2], 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    setBinding(bindings[3], 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    setBinding(bindings[4], 4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 5;
+    layoutInfo.pBindings = bindings;
+    if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_stylizeDescLayout) != VK_SUCCESS) {
+        vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkPipelineLayoutCreateInfo plInfo{};
+    plInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plInfo.setLayoutCount = 1;
+    plInfo.pSetLayouts = &m_stylizeDescLayout;
+    if (vkCreatePipelineLayout(m_device, &plInfo, nullptr, &m_stylizePipelineLayout) != VK_SUCCESS) {
+        vkDestroyDescriptorSetLayout(m_device, m_stylizeDescLayout, nullptr); m_stylizeDescLayout = VK_NULL_HANDLE;
+        vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkShaderModuleCreateInfo smInfo{};
+    smInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smInfo.codeSize = computeSPV.size() * sizeof(uint32_t);
+    smInfo.pCode = computeSPV.data();
+    VkShaderModule compModule;
+    if (vkCreateShaderModule(m_device, &smInfo, nullptr, &compModule) != VK_SUCCESS) {
+        vkDestroyPipelineLayout(m_device, m_stylizePipelineLayout, nullptr); m_stylizePipelineLayout = VK_NULL_HANDLE;
+        vkDestroyDescriptorSetLayout(m_device, m_stylizeDescLayout, nullptr); m_stylizeDescLayout = VK_NULL_HANDLE;
+        vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkComputePipelineCreateInfo cpInfo{};
+    cpInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpInfo.layout = m_stylizePipelineLayout;
+    cpInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpInfo.stage.module = compModule;
+    cpInfo.stage.pName = "main";
+    if (vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpInfo, nullptr, &m_stylizePipeline) != VK_SUCCESS) {
+        vkDestroyShaderModule(m_device, compModule, nullptr);
+        vkDestroyPipelineLayout(m_device, m_stylizePipelineLayout, nullptr); m_stylizePipelineLayout = VK_NULL_HANDLE;
+        vkDestroyDescriptorSetLayout(m_device, m_stylizeDescLayout, nullptr); m_stylizeDescLayout = VK_NULL_HANDLE;
+        vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE;
+        return false;
+    }
+    vkDestroyShaderModule(m_device, compModule, nullptr);
+
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = m_stylizeDescPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &m_stylizeDescLayout;
+    if (vkAllocateDescriptorSets(m_device, &allocInfo, &m_stylizeDescSet) != VK_SUCCESS) {
+        vkDestroyPipeline(m_device, m_stylizePipeline, nullptr); m_stylizePipeline = VK_NULL_HANDLE;
+        vkDestroyPipelineLayout(m_device, m_stylizePipelineLayout, nullptr); m_stylizePipelineLayout = VK_NULL_HANDLE;
+        vkDestroyDescriptorSetLayout(m_device, m_stylizeDescLayout, nullptr); m_stylizeDescLayout = VK_NULL_HANDLE;
+        vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
+}
+
+bool VulkanDevice::updateStylizeDescriptors(const VulkanRT::BufferHandle& colorBuf,
+                                            const VulkanRT::BufferHandle& paramsBuf,
+                                            VkImageView posView, VkImageView albView, VkImageView nrmView) {
+    if (m_stylizeDescSet == VK_NULL_HANDLE) return false;
+    if (!colorBuf.buffer || !paramsBuf.buffer || !posView || !albView || !nrmView) return false;
+
+    VkDescriptorBufferInfo colorInfo{ colorBuf.buffer, 0, VK_WHOLE_SIZE };
+    VkDescriptorBufferInfo paramsInfo{ paramsBuf.buffer, 0, VK_WHOLE_SIZE };
+    VkDescriptorImageInfo posInfo{}; posInfo.imageView = posView; posInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkDescriptorImageInfo albInfo{}; albInfo.imageView = albView; albInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkDescriptorImageInfo nrmInfo{}; nrmInfo.imageView = nrmView; nrmInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkWriteDescriptorSet w[5]{};
+    for (int i = 0; i < 5; ++i) {
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[i].dstSet = m_stylizeDescSet;
+        w[i].dstBinding = (uint32_t)i;
+        w[i].descriptorCount = 1;
+    }
+    w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[0].pBufferInfo = &colorInfo;
+    w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;  w[1].pImageInfo  = &posInfo;
+    w[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;  w[2].pImageInfo  = &albInfo;
+    w[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;  w[3].pImageInfo  = &nrmInfo;
+    w[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[4].pBufferInfo = &paramsInfo;
+    vkUpdateDescriptorSets(m_device, 5, w, 0, nullptr);
+    return true;
+}
+
+bool VulkanDevice::dispatchStylizeCompute(uint32_t w, uint32_t h, VkImage posImg, VkImage albImg, VkImage nrmImg) {
+    if (m_stylizePipeline == VK_NULL_HANDLE || m_stylizeDescSet == VK_NULL_HANDLE) return false;
+
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) return false;
+
+    // Make the RT-frame AOV writes available to the compute read. Images stay in
+    // GENERAL (they are storage images written by raygen). Coarse but safe.
+    VkImageMemoryBarrier barriers[3]{};
+    VkImage imgs[3] = { posImg, albImg, nrmImg };
+    uint32_t bcount = 0;
+    for (int i = 0; i < 3; ++i) {
+        if (!imgs[i]) continue;
+        VkImageMemoryBarrier& b = barriers[bcount++];
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = imgs[i];
+        b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b.subresourceRange.levelCount = 1;
+        b.subresourceRange.layerCount = 1;
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    }
+    if (bcount > 0) {
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, bcount, barriers);
+    }
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_stylizePipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+        m_stylizePipelineLayout, 0, 1, &m_stylizeDescSet, 0, nullptr);
+    const uint32_t gx = (w + 7) / 8;
+    const uint32_t gy = (h + 7) / 8;
+    vkCmdDispatch(cmd, gx, gy, 1);
+
+    endSingleTimeCommands(cmd);   // submits + waits
     return true;
 }
 
@@ -14809,6 +14983,20 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             SCENE_LOG_INFO("[Vulkan] tonemap.spv not found — using CPU tonemap fallback.");
         }
 
+        // Load Stylize Compute Shader (optional; CPU stylize remains fallback). Descriptors
+        // are bound lazily in VulkanBackendAdapter::applyStylizeGPU once the per-frame color
+        // SSBO + params buffer + AOV image views exist.
+        if (std::filesystem::exists(shaderDir + "/stylize.spv")) {
+            std::vector<std::uint32_t> stylizeSPV = loadSPV(shaderDir + "/stylize.spv");
+            if (m_device->createStylizePipeline(stylizeSPV)) {
+                SCENE_LOG_INFO("[Vulkan] Stylize compute pipeline created — GPU stylize path enabled.");
+            } else {
+                SCENE_LOG_ERROR("[Vulkan] Failed to create Stylize compute pipeline; falling back to CPU stylize.");
+            }
+        } else {
+            SCENE_LOG_INFO("[Vulkan] stylize.spv not found — using CPU stylize fallback.");
+        }
+
         // Load Atmosphere LUT Compute Shader (optional; CPU LUT path remains fallback).
         if (std::filesystem::exists(shaderDir + "/atmosphere_lut.spv")) {
             std::vector<std::uint32_t> atmosphereSPV = loadSPV(shaderDir + "/atmosphere_lut.spv");
@@ -15441,6 +15629,167 @@ bool VulkanBackendAdapter::getDenoiserFrame(DenoiserFrameData& frame, bool useAu
 }
 
 // ============================================================================
+// GPU-native stylize (no CUDA) — std430 params block matching stylize.comp.
+// All members are 16 bytes so std430 == std140 (no padding); keep in lockstep
+// with StylizeParams in shaders/stylize.comp.
+// ============================================================================
+namespace {
+struct StylizeParamsStd430 {
+    float    cam_lower_left[4];
+    float    cam_horizontal[4];
+    float    cam_vertical[4];
+    float    cam_origin[4];
+    float    ray_origin[4];
+    float    sun_direction[4];
+    float    misc0[4];   // sun_size, sun_elevation, cloud_coverage, cloud_density
+    float    misc1[4];   // cloud_scale, cloud_offset_x, cloud_offset_z, global_strength
+    float    misc2[4];   // temporal_coherence
+    int32_t  idims[4];   // width, height, frame_index
+    int32_t  iflags[4];  // clouds_enabled, cloud_seed
+    uint32_t color_mask[4];  // R, G, B, A
+    int32_t  color_shift[4]; // R, G, B
+    float    palette_shadow[4];
+    float    palette_mid[4];
+    float    palette_highlight[4];
+    float    sky_horizon[4];
+    float    sky_zenith[4];
+    float    sky_sunglow[4];
+    float    sky0[4];    // gradient_strength, cloud_brush_scale, cloud_brush_strength, wind_smear
+    float    sky1[4];    // horizon_haze, sun_disc_scale, cloud_roundness
+    int32_t  sky_flags[4];   // enabled, style
+    float    mtl0[4];    // brush_strength, brush_scale, pigment_thickness, dry_brush
+    float    mtl1[4];    // oil_body, paint_load, pickup_rate, deposit_rate
+    float    mtl2[4];    // bristle_buildup, surface_adherence, depth_scale_response, edge_respect
+    float    mtl3[4];    // palette_influence, material_color_preservation, color_simplification
+    int32_t  mat_flags[4];   // enabled, stroke_direction, wet_oil_model
+    float    out_custom[4];  // custom_color
+    float    out0[4];    // strength, width, taper, break_up
+    float    out1[4];    // color_bleed, distance_thinning, detail_protection
+    int32_t  out_flags[4];   // enabled, line_type, color_mode
+};
+static_assert(sizeof(StylizeParamsStd430) == 31 * 16, "StylizeParamsStd430 layout mismatch with stylize.comp");
+}  // namespace
+
+bool VulkanBackendAdapter::applyStylizeGPU(void* surfacePtr,
+                                           const StylizeGPU::KernelParams& params,
+                                           const StylizeCore::StyleProfileCore& profile) {
+    SDL_Surface* surf = static_cast<SDL_Surface*>(surfacePtr);
+    if (!surf || !surf->pixels) return false;
+
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_device || !m_device->isInitialized() || !m_device->hasStylizePipeline()) return false;
+
+    // Skip while viewport tears down/rebuilds (same hazard class as the denoiser).
+    extern std::atomic<bool> g_viewport_rebuild_in_progress;
+    if (g_viewport_rebuild_in_progress.load(std::memory_order_acquire)) return false;
+
+    const int w = m_imageWidth, h = m_imageHeight;
+    if (w <= 0 || h <= 0) return false;
+    if (surf->w != w || surf->h != h) return false;
+    if (!surf->format || surf->format->BytesPerPixel != 4) return false;
+    // Resident AOV images + views are required (surface-locked stylize parity with CPU).
+    if (!m_denoiserPositionImage.image || !m_denoiserPositionImage.view) return false;
+    if (!m_denoiserAlbedoImage.image   || !m_denoiserAlbedoImage.view)   return false;
+    if (!m_denoiserNormalImage.image   || !m_denoiserNormalImage.view)   return false;
+
+    const size_t colorBytes = (size_t)w * (size_t)h * sizeof(uint32_t);
+
+    // Persistent host-visible color SSBO (reallocated on resize) + params SSBO.
+    if (!m_stylizeColorBuf.buffer || m_stylizeColorW != w || m_stylizeColorH != h) {
+        if (m_stylizeColorBuf.buffer) m_device->destroyBuffer(m_stylizeColorBuf);
+        VulkanRT::BufferCreateInfo ci;
+        ci.size = colorBytes;
+        ci.usage = VulkanRT::BufferUsage::STORAGE;
+        ci.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
+        m_stylizeColorBuf = m_device->createBuffer(ci);
+        if (!m_stylizeColorBuf.buffer) return false;
+        m_stylizeColorW = w; m_stylizeColorH = h;
+    }
+    if (!m_stylizeParamsBuf.buffer) {
+        VulkanRT::BufferCreateInfo ci;
+        ci.size = sizeof(StylizeParamsStd430);
+        ci.usage = VulkanRT::BufferUsage::STORAGE;
+        ci.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
+        m_stylizeParamsBuf = m_device->createBuffer(ci);
+        if (!m_stylizeParamsBuf.buffer) return false;
+    }
+
+    // Upload the graded surface into the color SSBO (handle row pitch).
+    const bool packed = ((size_t)surf->pitch == (size_t)w * sizeof(uint32_t));
+    std::vector<uint32_t> rowtmp;
+    if (packed) {
+        m_device->uploadBuffer(m_stylizeColorBuf, surf->pixels, colorBytes);
+    } else {
+        rowtmp.resize((size_t)w * (size_t)h);
+        for (int y = 0; y < h; ++y)
+            std::memcpy(&rowtmp[(size_t)y * w],
+                        (const uint8_t*)surf->pixels + (size_t)y * surf->pitch,
+                        (size_t)w * sizeof(uint32_t));
+        m_device->uploadBuffer(m_stylizeColorBuf, rowtmp.data(), colorBytes);
+    }
+
+    // Build the std430 params block from KernelParams + StyleProfileCore + surface format.
+    StylizeParamsStd430 p{};
+    auto set4 = [](float d[4], float a, float b, float c, float e) { d[0]=a; d[1]=b; d[2]=c; d[3]=e; };
+    auto set4i = [](int32_t d[4], int a, int b, int c, int e) { d[0]=a; d[1]=b; d[2]=c; d[3]=e; };
+    set4(p.cam_lower_left, params.cam_lower_left.x, params.cam_lower_left.y, params.cam_lower_left.z, 0.0f);
+    set4(p.cam_horizontal, params.cam_horizontal.x, params.cam_horizontal.y, params.cam_horizontal.z, 0.0f);
+    set4(p.cam_vertical,   params.cam_vertical.x,   params.cam_vertical.y,   params.cam_vertical.z,   0.0f);
+    set4(p.cam_origin,     params.cam_origin.x,     params.cam_origin.y,     params.cam_origin.z,     0.0f);
+    set4(p.ray_origin,     params.ray_origin.x,     params.ray_origin.y,     params.ray_origin.z,     0.0f);
+    set4(p.sun_direction,  params.sun_direction.x,  params.sun_direction.y,  params.sun_direction.z,  0.0f);
+    set4(p.misc0, params.sun_size, params.sun_elevation, params.cloud_coverage, params.cloud_density);
+    set4(p.misc1, params.cloud_scale, params.cloud_offset_x, params.cloud_offset_z, profile.global_strength);
+    set4(p.misc2, profile.temporal_coherence, 0.0f, 0.0f, 0.0f);
+    set4i(p.idims, w, h, params.frame_index, 0);
+    set4i(p.iflags, params.clouds_enabled, params.cloud_seed, 0, 0);
+    p.color_mask[0] = surf->format->Rmask; p.color_mask[1] = surf->format->Gmask;
+    p.color_mask[2] = surf->format->Bmask; p.color_mask[3] = surf->format->Amask;
+    set4i(p.color_shift, surf->format->Rshift, surf->format->Gshift, surf->format->Bshift, 0);
+    set4(p.palette_shadow,    profile.palette_shadow.x,    profile.palette_shadow.y,    profile.palette_shadow.z,    0.0f);
+    set4(p.palette_mid,       profile.palette_mid.x,       profile.palette_mid.y,       profile.palette_mid.z,       0.0f);
+    set4(p.palette_highlight, profile.palette_highlight.x, profile.palette_highlight.y, profile.palette_highlight.z, 0.0f);
+    set4(p.sky_horizon,  profile.sky.horizon_color.x,  profile.sky.horizon_color.y,  profile.sky.horizon_color.z,  0.0f);
+    set4(p.sky_zenith,   profile.sky.zenith_color.x,   profile.sky.zenith_color.y,   profile.sky.zenith_color.z,   0.0f);
+    set4(p.sky_sunglow,  profile.sky.sun_glow_color.x, profile.sky.sun_glow_color.y, profile.sky.sun_glow_color.z, 0.0f);
+    set4(p.sky0, profile.sky.gradient_strength, profile.sky.cloud_brush_scale, profile.sky.cloud_brush_strength, profile.sky.wind_smear);
+    set4(p.sky1, profile.sky.horizon_haze, profile.sky.sun_disc_scale, profile.sky.cloud_roundness, 0.0f);
+    set4i(p.sky_flags, profile.sky.enabled, profile.sky.style, 0, 0);
+    set4(p.mtl0, profile.material.brush_strength, profile.material.brush_scale, profile.material.pigment_thickness, profile.material.dry_brush);
+    set4(p.mtl1, profile.material.oil_body, profile.material.paint_load, profile.material.pickup_rate, profile.material.deposit_rate);
+    set4(p.mtl2, profile.material.bristle_buildup, profile.material.surface_adherence, profile.material.depth_scale_response, profile.material.edge_respect);
+    set4(p.mtl3, profile.material.palette_influence, profile.material.material_color_preservation, profile.material.color_simplification, 0.0f);
+    set4i(p.mat_flags, profile.material.enabled, profile.material.stroke_direction, profile.material.wet_oil_model, 0);
+    set4(p.out_custom, profile.outline.custom_color.x, profile.outline.custom_color.y, profile.outline.custom_color.z, 0.0f);
+    set4(p.out0, profile.outline.strength, profile.outline.width, profile.outline.taper, profile.outline.break_up);
+    set4(p.out1, profile.outline.color_bleed, profile.outline.distance_thinning, profile.outline.detail_protection, 0.0f);
+    set4i(p.out_flags, profile.outline.enabled, profile.outline.line_type, profile.outline.color_mode, 0);
+    m_device->uploadBuffer(m_stylizeParamsBuf, &p, sizeof(p));
+
+    if (!m_device->updateStylizeDescriptors(m_stylizeColorBuf, m_stylizeParamsBuf,
+            m_denoiserPositionImage.view, m_denoiserAlbedoImage.view, m_denoiserNormalImage.view)) {
+        return false;
+    }
+    if (!m_device->dispatchStylizeCompute((uint32_t)w, (uint32_t)h,
+            m_denoiserPositionImage.image, m_denoiserAlbedoImage.image, m_denoiserNormalImage.image)) {
+        return false;
+    }
+
+    // Download the stylized color back into the surface.
+    if (packed) {
+        m_device->downloadBuffer(m_stylizeColorBuf, surf->pixels, colorBytes);
+    } else {
+        if (rowtmp.size() != (size_t)w * (size_t)h) rowtmp.resize((size_t)w * (size_t)h);
+        m_device->downloadBuffer(m_stylizeColorBuf, rowtmp.data(), colorBytes);
+        for (int y = 0; y < h; ++y)
+            std::memcpy((uint8_t*)surf->pixels + (size_t)y * surf->pitch,
+                        &rowtmp[(size_t)y * w],
+                        (size_t)w * sizeof(uint32_t));
+    }
+    return true;
+}
+
+// ============================================================================
 // GPU-direct denoiser interop (Vulkan → CUDA → OIDN)
 // ============================================================================
 
@@ -15692,7 +16041,9 @@ bool VulkanBackendAdapter::getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool
     // Submit the seed copy and bail with `false`; the caller falls back to last
     // frame's display. From the second call on, the pipeline is filled.
 
+#if RT_OIDN_PROFILING
     const auto profStartTotal = std::chrono::high_resolution_clock::now();
+#endif
 
     const bool firstCall = !m_device->hasDenoiserCopyEverSubmitted();
 
@@ -15718,21 +16069,27 @@ bool VulkanBackendAdapter::getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool
     }
 
     // Wait on the previously-submitted copy (signaled at steady state).
+#if RT_OIDN_PROFILING
     const auto profWaitStart = std::chrono::high_resolution_clock::now();
+#endif
     if (!m_device->waitDenoiserCopy()) {
         // First-call path with no prior submit must have happened above; if we
         // still see no submit, something is wrong. Bail.
         return false;
     }
+#if RT_OIDN_PROFILING
     const auto profWaitEnd = std::chrono::high_resolution_clock::now();
     const float profWaitMs = std::chrono::duration<float, std::milli>(profWaitEnd - profWaitStart).count();
+#endif
 
     int prevDevice = 0;
     cudaGetDevice(&prevDevice);
     cudaSetDevice(s->cudaOrdinal);
 
     // CUDA prep kernel: staging → dst buffers (Y-flip + normal-decode).
+#if RT_OIDN_PROFILING
     const auto profPrepStart = std::chrono::high_resolution_clock::now();
+#endif
     bool kernelOK = launchVulkanDenoiserPrepKernel(
         s->colorDstDev, s->colorSrcDev, m_imageWidth, m_imageHeight,
         /*decodeNormal=*/false, s->stream);
@@ -15746,8 +16103,10 @@ bool VulkanBackendAdapter::getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool
     }
     // Sync so staging is fully consumed before we submit the next overwrite.
     cudaStreamSynchronize(s->stream);
+#if RT_OIDN_PROFILING
     const auto profPrepEnd = std::chrono::high_resolution_clock::now();
     const float profPrepMs = std::chrono::duration<float, std::milli>(profPrepEnd - profPrepStart).count();
+#endif
 
     if (!kernelOK) {
         cudaGetLastError();
@@ -15757,8 +16116,11 @@ bool VulkanBackendAdapter::getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool
 
     // Submit the NEXT copy asynchronously. Vulkan queues this after RT(N) is
     // already in flight; the fence will be checked next call.
+#if RT_OIDN_PROFILING
     const auto profSubmitStart = std::chrono::high_resolution_clock::now();
+#endif
     m_device->submitDenoiserCopyAsync(srcsPtr, dstsPtr, copyCount);
+#if RT_OIDN_PROFILING
     const auto profSubmitEnd = std::chrono::high_resolution_clock::now();
     const float profSubmitMs = std::chrono::duration<float, std::milli>(profSubmitEnd - profSubmitStart).count();
 
@@ -15788,6 +16150,7 @@ bool VulkanBackendAdapter::getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool
                            + "ms (aux=" + std::to_string((int)useAuxiliary) + ")");
         }
     }
+#endif
 
     frame.width = m_imageWidth;
     frame.height = m_imageHeight;

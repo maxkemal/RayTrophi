@@ -1,5 +1,6 @@
 ﻿#include "OptixWrapper.h"
 #include "fft_ocean.cuh"
+#include "Stylize/StylizeKernel.h"
 #include "OptixAccelManager.h"
 #include <optix_stubs.h>
 #include <optix_function_table_definition.h>
@@ -302,6 +303,13 @@ void OptixWrapper::partialCleanup() {
         d_stylize_position = nullptr;
         freedAny = true;
     }
+    if (d_stylize_color) {
+        cudaFree(d_stylize_color);
+        d_stylize_color = nullptr;
+        stylize_color_w = 0;
+        stylize_color_h = 0;
+        freedAny = true;
+    }
     host_denoiser_color.clear();
     host_denoiser_albedo.clear();
     host_denoiser_normal.clear();
@@ -561,6 +569,84 @@ bool OptixWrapper::downloadStylizePositionBuffer(std::vector<float>& position) {
         position[i * 4 + 2] = pos[i].z;
         position[i * 4 + 3] = pos[i].w;
     }
+    return true;
+}
+
+bool OptixWrapper::applyStylizeGPU(SDL_Surface* surface,
+                                   const StylizeGPU::KernelParams& params,
+                                   const StylizeCore::StyleProfileCore& profile) {
+    if (!surface || !surface->pixels) return false;
+
+    // Skip while geometry/viewport is rebuilding — touching the device AOV
+    // buffers during a teardown hits cudaErrorIllegalAddress (700) and poisons
+    // the context (same hazard as applyOIDNDenoisingGPU).
+    extern std::atomic<bool> g_optix_rebuild_in_progress;
+    extern std::atomic<bool> g_viewport_rebuild_in_progress;
+    if (g_optix_rebuild_in_progress.load(std::memory_order_acquire) ||
+        g_viewport_rebuild_in_progress.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    // Snapshot device AOV pointers + dims locally (resetBuffers may run on
+    // another thread). The position AOV is required; albedo/normal are optional
+    // but needed for the surface-locked stylize parity with the CPU path.
+    float4* pos = d_stylize_position;
+    float4* alb = d_denoiser_albedo;
+    float4* nrm = d_denoiser_normal;
+    const int w = prev_width;
+    const int h = prev_height;
+    if (!pos || w <= 0 || h <= 0) return false;
+    if (surface->w != w || surface->h != h) return false;        // dims must match the AOVs
+    if (surface->format->BytesPerPixel != 4) return false;       // kernel decodes 32-bit pixels
+
+    const size_t pixelCount = (size_t)w * (size_t)h;
+    const size_t colorBytes = pixelCount * sizeof(uint32_t);
+
+    // Reuse a persistent uint32 staging buffer; (re)allocate only on size change.
+    if (!d_stylize_color || stylize_color_w != w || stylize_color_h != h) {
+        if (d_stylize_color) { cudaFree(d_stylize_color); d_stylize_color = nullptr; }
+        if (cudaMalloc(&d_stylize_color, colorBytes) != cudaSuccess) {
+            cudaGetLastError();
+            d_stylize_color = nullptr;
+            return false;
+        }
+        stylize_color_w = w;
+        stylize_color_h = h;
+    }
+
+    // Upload the graded surface (handles surface pitch via 2D copy → packed device
+    // rows), run the kernel on the same stream, download. All raw cuda calls: on a
+    // resize race we consume the error and fall back to the CPU stylize path.
+    const cudaError_t up = cudaMemcpy2DAsync(
+        d_stylize_color, (size_t)w * sizeof(uint32_t),
+        surface->pixels, (size_t)surface->pitch,
+        (size_t)w * sizeof(uint32_t), (size_t)h,
+        cudaMemcpyHostToDevice, stream);
+    if (up != cudaSuccess) { cudaGetLastError(); return false; }
+
+    StylizeGPU::KernelParams kp = params;
+    kp.width = w;
+    kp.height = h;
+    kp.rMask = surface->format->Rmask; kp.gMask = surface->format->Gmask;
+    kp.bMask = surface->format->Bmask; kp.aMask = surface->format->Amask;
+    kp.rShift = surface->format->Rshift; kp.gShift = surface->format->Gshift;
+    kp.bShift = surface->format->Bshift;
+
+    if (!StylizeGPU::launchStylize(reinterpret_cast<uint32_t*>(d_stylize_color),
+                                   pos, alb, nrm, kp, profile, stream)) {
+        cudaGetLastError();
+        return false;
+    }
+
+    const cudaError_t down = cudaMemcpy2DAsync(
+        surface->pixels, (size_t)surface->pitch,
+        d_stylize_color, (size_t)w * sizeof(uint32_t),
+        (size_t)w * sizeof(uint32_t), (size_t)h,
+        cudaMemcpyDeviceToHost, stream);
+    if (down != cudaSuccess) { cudaGetLastError(); return false; }
+
+    // The download must complete before the caller reads surface->pixels.
+    if (cudaStreamSynchronize(stream) != cudaSuccess) { cudaGetLastError(); return false; }
     return true;
 }
 

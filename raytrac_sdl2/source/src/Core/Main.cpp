@@ -38,6 +38,7 @@
 #include "default_scene_creator.hpp"
 #include "ColorProcessingParams.h"
 #include "Stylize/StylizePostProcess.h"
+#include "Stylize/StylizeKernel.h"
 #include "CameraPresets.h"
 #include "scene_data.h"       // Added explicit include
 #include "AnimationNodes.h"
@@ -4423,6 +4424,18 @@ int main(int argc, char* argv[]) try {
                                     tm.gShift   = gShift;
                                     tm.bShift   = bShift;
                                     tm.flipY    = true;
+                                    // OIDN model tier: user setting in the viewport,
+                                    // forced to High for final renders.
+                                    if (render_settings.is_final_render_mode) {
+                                        tm.quality = OIDN_QUALITY_HIGH;
+                                    } else {
+                                        switch (ui_ctx.render_settings.denoiser_quality) {
+                                            case DenoiserQuality::Balanced: tm.quality = OIDN_QUALITY_BALANCED; break;
+                                            case DenoiserQuality::High:     tm.quality = OIDN_QUALITY_HIGH; break;
+                                            case DenoiserQuality::Fast:
+                                            default:                        tm.quality = OIDN_QUALITY_FAST; break;
+                                        }
+                                    }
                                     if (ray_renderer.applyOIDNDenoisingGPU(gpuFrame,
                                                                            ui_ctx.render_settings.denoiser_blend_factor,
                                                                            tm, packedDenoised)) {
@@ -4465,7 +4478,20 @@ int main(int argc, char* argv[]) try {
                                     frame.color = denoiserFrame.color;
                                     frame.albedo = use_denoiser_aux ? denoiserFrame.albedo : nullptr;
                                     frame.normal = use_denoiser_aux ? denoiserFrame.normal : nullptr;
-                                    if (ray_renderer.applyOIDNDenoising(frame, ui_ctx.render_settings.denoiser_blend_factor, denoised)) {
+                                    // Same tier mapping as the GPU path so AMD/Intel (host
+                                    // fallback) honor the viewport quality setting too.
+                                    int host_quality = OIDN_QUALITY_FAST;
+                                    if (render_settings.is_final_render_mode) {
+                                        host_quality = OIDN_QUALITY_HIGH;
+                                    } else {
+                                        switch (ui_ctx.render_settings.denoiser_quality) {
+                                            case DenoiserQuality::Balanced: host_quality = OIDN_QUALITY_BALANCED; break;
+                                            case DenoiserQuality::High:     host_quality = OIDN_QUALITY_HIGH; break;
+                                            case DenoiserQuality::Fast:
+                                            default:                        host_quality = OIDN_QUALITY_FAST; break;
+                                        }
+                                    }
+                                    if (ray_renderer.applyOIDNDenoising(frame, ui_ctx.render_settings.denoiser_blend_factor, denoised, host_quality)) {
                                         const int denoisedW = frame.width;
                                         const int denoisedH = frame.height;
                                         if (original_surface && original_surface->pixels &&
@@ -4814,16 +4840,59 @@ int main(int argc, char* argv[]) try {
             ray_renderer.stylizeMode.enabled &&
             !stylize_applied_by_tonemap &&
             surface) {
-            // GPU render path: the CPU AOV accumulation buffers are empty, so pull the
-            // Vulkan/OptiX primary-hit AOVs (albedo/normal/world-pos/depth) to the host
-            // first. This lets applyStylizeToSurface run the full surface-locked stylize
-            // instead of the flat screen-space fallback. CPU path already fills them.
-            if (isActiveRenderBackendGpu() && g_backend && scene.camera) {
-                // Pass the camera so the AOV cache can key on a camera hash (re-pull on any
-                // view change); depth is reconstructed from world position + camera origin.
-                ray_renderer.fillStylizeAOVFromBackend(g_backend.get(), *scene.camera);
+            bool stylized_on_gpu = false;
+
+            // GPU-direct path (OptiX): run the stylize on-device using the resident
+            // AOV buffers (no readback) + the already-graded surface, exactly the
+            // same StylizeCore math as the CPU path. Falls back to CPU on any
+            // failure (size mismatch, missing AOVs, rebuild in progress, sample 0).
+            if (isActiveRenderBackendGpu() && g_backend && scene.camera &&
+                g_backend->getCurrentSampleCount() >= 1) {
+                const Camera& cam = *scene.camera;
+                const WorldData gw = ray_renderer.world.getGPUData();
+
+                StylizeGPU::KernelParams kp;
+                kp.frame_index = gw.frame_count;
+                kp.cam_lower_left = float3{ cam.lower_left_corner.x, cam.lower_left_corner.y, cam.lower_left_corner.z };
+                kp.cam_horizontal = float3{ cam.horizontal.x, cam.horizontal.y, cam.horizontal.z };
+                kp.cam_vertical   = float3{ cam.vertical.x, cam.vertical.y, cam.vertical.z };
+                kp.cam_origin     = float3{ cam.origin.x, cam.origin.y, cam.origin.z };
+                kp.ray_origin     = float3{ cam.lookfrom.x, cam.lookfrom.y, cam.lookfrom.z };
+                // Raw nishita values — the kernel applies the same clamps as makeStylizeAOV.
+                kp.sun_direction  = float3{ gw.nishita.sun_direction.x, gw.nishita.sun_direction.y, gw.nishita.sun_direction.z };
+                kp.sun_size       = gw.nishita.sun_size;
+                kp.sun_elevation  = gw.nishita.sun_elevation;
+                kp.clouds_enabled = gw.nishita.clouds_enabled != 0 ? 1 : 0;
+                kp.cloud_coverage = gw.nishita.cloud_coverage;
+                kp.cloud_density  = gw.nishita.cloud_density;
+                kp.cloud_scale    = gw.nishita.cloud_scale;
+                kp.cloud_offset_x = gw.nishita.cloud_offset_x;
+                kp.cloud_offset_z = gw.nishita.cloud_offset_z;
+                kp.cloud_seed     = gw.nishita.cloud_seed;
+
+                const StylizeCore::StyleProfileCore profile =
+                    Stylize::makeCoreProfile(ray_renderer.stylizeMode.profile);
+                stylized_on_gpu = g_backend->applyStylizeGPU(surface, kp, profile);
             }
-            applyStylizeToSurfaceWithCamera(surface, ray_renderer, true, scene.camera.get());
+
+            if (!stylized_on_gpu) {
+                // CPU fallback: the CPU AOV accumulation buffers are empty on the GPU
+                // render path, so pull the primary-hit AOVs to the host first, then run
+                // the full surface-locked stylize (CPU path already fills them).
+                if (isActiveRenderBackendGpu() && g_backend && scene.camera) {
+                    ray_renderer.fillStylizeAOVFromBackend(g_backend.get(), *scene.camera);
+                }
+                applyStylizeToSurfaceWithCamera(surface, ray_renderer, true, scene.camera.get());
+            }
+            // Log only when the active stylize path changes, so it confirms which
+            // backend ran without spamming every frame.
+            static int s_lastStylizePath = -1;   // -1 unknown, 0 CPU, 1 GPU
+            const int curStylizePath = stylized_on_gpu ? 1 : 0;
+            if (curStylizePath != s_lastStylizePath) {
+                s_lastStylizePath = curStylizePath;
+                SCENE_LOG_INFO(std::string("Stylize path: ") +
+                    (stylized_on_gpu ? "GPU (CUDA/OptiX)" : "CPU"));
+            }
             post_processing_happened = true;
         }
         stylize_redisplay = false;   // one-shot redisplay request consumed

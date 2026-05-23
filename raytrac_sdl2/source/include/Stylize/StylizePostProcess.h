@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Stylize/StylizeModeState.h"
+#include "Stylize/StylizeCore.h"
 #include "Vec3.h"
 
 #include <cstdint>
@@ -43,5 +44,10 @@ Vec3 applyPostProcess(const Vec3& input_color,
                       int y,
                       int frame_index,
                       const StylizeModeState& state);
+
+// Convert the project StyleProfile into the device-copyable POD the shared core
+// (and the GPU kernel) consume. Used by the GPU stylize path to upload the
+// active profile.
+StylizeCore::StyleProfileCore makeCoreProfile(const StyleProfile& profile);
 
 } // namespace Stylize

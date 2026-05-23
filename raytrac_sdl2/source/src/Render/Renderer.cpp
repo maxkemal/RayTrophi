@@ -558,28 +558,45 @@ bool Renderer::isCudaAvailable() {
 void Renderer::initOIDN() {
     if (oidnInitialized) return;
 
-    if (g_hasOptix) {
+    // Device-selection cascade for the host (CPU-visible buffer) denoise path.
+    // The denoise itself runs on whichever device we bind here; for a GPU device
+    // OIDN handles the host<->device buffer copies internally, so AMD/Intel cards
+    // with Vulkan-RT but no CUDA still get a GPU-accelerated denoise instead of
+    // the much slower CPU path. Priority:
+    //   1. CUDA — NVIDIA (the only backend that also feeds the zero-copy interop)
+    //   2. HIP  — AMD GPUs
+    //   3. SYCL — Intel Arc / Xe GPUs
+    //   4. CPU  — universal fallback
+    // OIDN ships a separate device DLL per backend; a missing DLL (or absent
+    // runtime, e.g. cudart on an AMD box) just makes newDevice()/commit() fail,
+    // so each attempt is wrapped and we fall through to the next.
+    auto tryDevice = [this](oidn::DeviceType type, const char* label) -> bool {
         try {
-            oidnDevice = oidn::newDevice(oidn::DeviceType::CUDA);
-            oidnDevice.commit();
+            oidn::DeviceRef dev = oidn::newDevice(type);
+            dev.commit();
+            const char* errMsg = nullptr;
+            if (dev.getError(errMsg) != oidn::Error::None) {
+                SCENE_LOG_WARN(std::string("[OIDN] ") + label + " commit failed: "
+                               + (errMsg ? errMsg : "unknown error"));
+                return false;
+            }
+            oidnDevice = dev;
             oidnInitialized = true;
-            SCENE_LOG_INFO("[OIDN] Initialized with CUDA.");
-            return;
+            SCENE_LOG_INFO(std::string("[OIDN] Initialized with ") + label + ".");
+            return true;
         }
         catch (const std::exception& e) {
-            SCENE_LOG_WARN(std::string("[OIDN] CUDA initialization failed, falling back to CPU: ") + e.what());
+            SCENE_LOG_WARN(std::string("[OIDN] ") + label + " unavailable: " + e.what());
+            return false;
         }
-    }
+    };
 
-    try {
-        oidnDevice = oidn::newDevice(oidn::DeviceType::CPU);
-        oidnDevice.commit();
-        oidnInitialized = true;
-        SCENE_LOG_INFO("[OIDN] Initialized with CPU.");
-    }
-    catch (const std::exception& e) {
-        SCENE_LOG_ERROR(std::string("[OIDN] CPU initialization failed: ") + e.what());
-    }
+    if (tryDevice(oidn::DeviceType::CUDA, "CUDA")) return;
+    if (tryDevice(oidn::DeviceType::HIP,  "HIP (AMD)")) return;
+    if (tryDevice(oidn::DeviceType::SYCL, "SYCL (Intel)")) return;
+    if (tryDevice(oidn::DeviceType::CPU,  "CPU")) return;
+
+    SCENE_LOG_ERROR("[OIDN] No usable denoiser device (CUDA/HIP/SYCL/CPU all failed).");
 }
 
 void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend) {
@@ -665,7 +682,8 @@ void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool den
     }
 }
 
-bool Renderer::applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::vector<float>& output) {
+bool Renderer::applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::vector<float>& output,
+                                  int quality) {
     if (!frame.color || frame.width <= 0 || frame.height <= 0) return false;
     std::lock_guard<std::mutex> lock(oidnMutex);
 
@@ -718,7 +736,8 @@ bool Renderer::applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::
         (useAlbedo != oidnUsingAlbedo) ||
         (useNormal != oidnUsingNormal);
     bool sizeChanged = (width != oidnCachedWidth || height != oidnCachedHeight);
-    if (sizeChanged || filterLayoutChanged) {
+    const bool qualityChanged = (quality != oidnGpuCachedQuality);
+    if (sizeChanged || filterLayoutChanged || qualityChanged) {
         try {
             oidnColorBuffer = oidnDevice.newBuffer(bufferSize * sizeof(float));
             oidnAlbedoBuffer = useAlbedo ? oidnDevice.newBuffer(bufferSize * sizeof(float)) : oidn::BufferRef();
@@ -740,8 +759,10 @@ bool Renderer::applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::
                 oidn::Format::Float3, width, height);
             oidnFilter.set("hdr", true);
             oidnFilter.set("srgb", false);
+            oidnFilter.set("quality", quality);
             oidnFilter.commit();
 
+            oidnGpuCachedQuality = quality;
             oidnCachedWidth = width;
             oidnCachedHeight = height;
             oidnUsingAlbedo = useAlbedo;
@@ -1070,7 +1091,8 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
         (frame.albedoDevPtr != oidnGpuCachedAlbedo) ||
         (frame.normalDevPtr != oidnGpuCachedNormal);
     const bool outputSizeChanged = oidnGpuOutputBytes != outBufferSize * sizeof(float);
-    const bool rebuildFilter = sizeChanged || layoutChanged || ptrsChanged || outputSizeChanged || !oidnFilter;
+    const bool qualityChanged = (tm.quality != oidnGpuCachedQuality);
+    const bool rebuildFilter = sizeChanged || layoutChanged || ptrsChanged || outputSizeChanged || qualityChanged || !oidnFilter;
 
     if (rebuildFilter) {
         try {
@@ -1162,6 +1184,12 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
                                 static_cast<size_t>(width) * sizeof(float) * 3);
             oidnFilter.set("hdr", true);
             oidnFilter.set("srgb", false);
+            // OIDN model tier, user-selectable (RenderSettings::denoiser_quality).
+            // Default Fast is the cheapest model — on a mid-range GPU OIDN execute
+            // dominates the denoise cost (~14-30ms profiled at 720p+aux), so the
+            // tier is the single highest-leverage knob. Final renders pass High
+            // here via OIDNTonemapParams::quality.
+            oidnFilter.set("quality", tm.quality);
             oidnFilter.commit();
 
             oidnCachedWidth  = width;
@@ -1171,6 +1199,7 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
             oidnGpuCachedColor  = frame.colorDevPtr;
             oidnGpuCachedAlbedo = frame.albedoDevPtr;
             oidnGpuCachedNormal = frame.normalDevPtr;
+            oidnGpuCachedQuality = tm.quality;
         } catch (const std::exception& e) {
             SCENE_LOG_ERROR(std::string("[OIDN GPU] filter setup failed: ") + e.what());
             return false;
@@ -1179,6 +1208,7 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
 
     packedOutput.resize(pixelCount);
 
+#if RT_OIDN_PROFILING
     // ── [PROFILE] CUDA-event timestamps around each GPU stage. Events live on
     // the desiredStream; elapsed time is in float ms (cudaEventElapsedTime).
     // Lazily created and reused across calls; recreated if the stream changes.
@@ -1193,6 +1223,7 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
         if (!profEvAfterCopy)  cudaEventCreate(&profEvAfterCopy);
     };
     ensureProfEvents();
+#endif
 
     try {
         // Ensure OptiX writes on its stream are visible before OIDN reads shared memory.
@@ -1204,9 +1235,13 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
             }
         }
 
+#if RT_OIDN_PROFILING
         cudaEventRecord(profEvBeforeExec, desiredStream);
+#endif
         oidnFilter.execute();
+#if RT_OIDN_PROFILING
         cudaEventRecord(profEvAfterExec, desiredStream);
+#endif
 
         const char* errMsg = nullptr;
         if (oidnDevice.getError(errMsg) != oidn::Error::None) {
@@ -1251,7 +1286,9 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
             }
             return false;
         }
+#if RT_OIDN_PROFILING
         cudaEventRecord(profEvAfterTm, desiredStream);
+#endif
 
         if (desiredStream) {
             if (cudaStreamSynchronize(desiredStream) != cudaSuccess) {
@@ -1273,6 +1310,7 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
             SCENE_LOG_ERROR(std::string("[OIDN GPU] final cudaMemcpy failed: ") + std::to_string(static_cast<int>(me)));
             return false;
         }
+#if RT_OIDN_PROFILING
         cudaEventRecord(profEvAfterCopy, desiredStream);
 
         // ── [PROFILE] Elapsed times between events. cudaEventSynchronize on the
@@ -1293,6 +1331,7 @@ bool Renderer::applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
                            + "ms tonemap+blend=" + std::to_string(profTmAvg)
                            + "ms d2h=" + std::to_string(profCopyAvg) + "ms");
         }
+#endif
     } catch (const std::exception& e) {
         SCENE_LOG_ERROR(std::string("[OIDN GPU] execute failed: ") + e.what());
         return false;

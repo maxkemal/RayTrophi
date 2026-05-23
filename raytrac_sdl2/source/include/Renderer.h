@@ -104,7 +104,11 @@ public:
     static bool isCudaAvailable();
 
     void applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend);
-    bool applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::vector<float>& output);
+    // quality maps to OIDN_QUALITY_* (default keeps OIDN's High RT model, used by
+    // final-render saves). The viewport CPU-fallback (AMD/Intel without CUDA interop)
+    // passes the user's tier so the host path isn't stuck on the slow High model.
+    bool applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::vector<float>& output,
+                            int quality = OIDN_QUALITY_DEFAULT);
     // GPU zero-copy variant with fused on-device tonemap. Inputs stay on CUDA
     // device; the only host transfer is the tonemapped RGBA8 buffer (4 B/px,
     // already in SDL_Surface channel layout). Returns false if binding fails;
@@ -116,6 +120,9 @@ public:
         uint8_t  gShift     = 8;
         uint8_t  bShift     = 16;
         bool     flipY      = true;
+        // OIDN model tier (OIDN_QUALITY_FAST/BALANCED/HIGH). Caller maps the
+        // user setting; viewport defaults to Fast, final render forces High.
+        int      quality    = OIDN_QUALITY_FAST;
     };
     bool applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
                                float blend,
@@ -341,6 +348,7 @@ private:
     int oidnCachedHeight = 0;
     bool oidnUsingAlbedo = false;
     bool oidnUsingNormal = false;
+    int oidnGpuCachedQuality = -1; // last OIDN_QUALITY_* applied to the GPU filter; -1 forces rebuild
 
     void initOIDN(); // Helper to init device
     float lastAnimationUpdateTime = -1.0f; // Track animation time

@@ -85,6 +85,13 @@ Full Technical Report: [ARCHITECTURE.md](ARCHITECTURE.md)
     - A non-destructive art-direction pass that reads the converged render and AOV buffers, then restyles the image without changing scene geometry, materials, lights, or the path-traced base result.
     - Domain-masked compositing separates sky, material, outline, and world-adapter behavior so a brush effect never spills across the entire viewport.
     - CPU and GPU display rebuild paths can re-apply Stylize without resetting accumulation, so profile and slider edits update the current image quickly.
+    - **Backend parity**: CPU, Vulkan RT GPU compute (`stylize.comp`), and OptiX CUDA (`StylizeKernel.cu`) now share the same Stylize layer model and produce bit-identical output for matched presets while keeping the GPU paths fast and stable.
+    - **Backend support matrix**:
+      | Path | Acceleration | Output |
+      |------|--------------|--------|
+      | CPU display rebuild | Scalar/SIMD CPU fallback | Reference result |
+      | Vulkan RT | GPU compute shader | Matches CPU/OptiX |
+      | OptiX | CUDA post kernel | Matches CPU/Vulkan |
     - **Sky Layer**:
       - Runs only on valid sky pixels (`AOV valid && hit == false`).
       - Uses spherical view-ray sampling so stylized gradients, cloud banks, and the sun remain locked to world direction instead of screen UVs.
@@ -570,6 +577,7 @@ The Visual Studio project manages dependencies via vcpkg or manual paths.
 | CPU Rendering (SDL)      | ✅ Working      | ✅ Working     |
 | GPU Rendering (OptiX)    | ✅ Working      | ✅ Working     |
 | Vulkan Rendering (RT)    | ✅ Working      | ✅ Working     |
+| Stylize Layer Parity     | ✅ CPU/Vulkan/OptiX | ✅ CPU/Vulkan/OptiX |
 | Dependency Management    | ✅ Excellent    | ⚠️ Manual     |
 | Build Speed              | Fast            | Slower        |
 | **Recommendation**       | **USE THIS**    | Experimental  |

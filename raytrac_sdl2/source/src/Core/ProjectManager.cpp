@@ -2908,6 +2908,7 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     // the OptiX path-trace GPU transition before the denoiser is ready.
     j["render_use_denoiser"] = settings.render_use_denoiser;
     j["denoiser_mode"] = static_cast<int>(settings.denoiser_mode);
+    j["denoiser_quality"] = static_cast<int>(settings.denoiser_quality);
     j["max_samples"] = settings.max_samples;
     j["min_samples"] = settings.min_samples;
     j["use_adaptive_sampling"] = settings.use_adaptive_sampling;
@@ -2943,6 +2944,7 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     // GPU transition races before the denoiser pipeline is initialized.
     settings.render_use_denoiser = j.value("render_use_denoiser", true);
     settings.denoiser_mode = static_cast<DenoiserMode>(j.value("denoiser_mode", static_cast<int>(DenoiserMode::Quality)));
+    settings.denoiser_quality = static_cast<DenoiserQuality>(j.value("denoiser_quality", static_cast<int>(DenoiserQuality::Fast)));
     settings.max_samples = j.value("max_samples", 32);
     settings.min_samples = j.value("min_samples", 1);
     settings.use_adaptive_sampling = j.value("use_adaptive_sampling", true);
