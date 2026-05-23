@@ -213,8 +213,8 @@ bool surfaceStrokeCoordinates(float screen_u, float screen_v, AOV a, float v_sca
     float mat_v = (hashNoise(mat_seed, 97, 3) - 0.5) * 4.0;
     float world_u = dot(a.world_position, tangent) / world_scale + mat_u;
     float world_v = dot(a.world_position, bitangent) / (world_scale * v_scale) + mat_v;
-    u = screen_u * (1.0 - surface_lock) + world_u * surface_lock;
-    v = screen_v * (1.0 - surface_lock) + world_v * surface_lock;
+    u = world_u;
+    v = world_v;
     return true;
 }
 float strokeField(int x, int y, AOV a, int frame_index) {

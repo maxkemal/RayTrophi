@@ -344,10 +344,12 @@ STYLIZE_HD inline bool surfaceStrokeCoordinates(float screen_u,
     const float mat_u = (hashNoise(mat_seed, 71, 2) - 0.5f) * 4.0f;
     const float mat_v = (hashNoise(mat_seed, 97, 3) - 0.5f) * 4.0f;
 
+    (void)screen_u;
+    (void)screen_v;
     const float world_u = dot3(aov.world_position, tangent) / world_scale + mat_u;
     const float world_v = dot3(aov.world_position, bitangent) / (world_scale * v_scale) + mat_v;
-    u = screen_u * (1.0f - surface_lock) + world_u * surface_lock;
-    v = screen_v * (1.0f - surface_lock) + world_v * surface_lock;
+    u = world_u;
+    v = world_v;
     return true;
 }
 
