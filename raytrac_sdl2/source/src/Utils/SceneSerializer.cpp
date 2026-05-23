@@ -243,6 +243,8 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
     root["settings"]["transmission_bounces"] = settings.transmission_bounces;
     root["settings"]["use_adaptive"] = settings.use_adaptive_sampling;
     root["settings"]["use_denoiser"] = settings.use_denoiser;
+    root["settings"]["denoiser_mode"] = static_cast<int64_t>(settings.denoiser_mode);
+    root["settings"]["denoiser_quality"] = static_cast<int64_t>(settings.denoiser_quality);
     root["settings"]["use_optix"] = settings.use_optix;
     root["settings"]["use_vulkan"] = settings.use_vulkan;
     root["settings"]["backend"] = settings.use_vulkan ? "vulkan" : (settings.use_optix ? "optix" : "cpu");
@@ -437,6 +439,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
     simdjson::dom::element s;
     if (!root["settings"].get(s)) {
         int64_t q = 0, spp = 1, bounces = 10, diffuse_bounces = 4, transmission_bounces = 8, denoiser_mode = static_cast<int64_t>(DenoiserMode::Quality);
+        int64_t denoiser_quality = static_cast<int64_t>(DenoiserQuality::Fast);
         bool adaptive = true, denoiser = false, optix = true, vulkan = false, tonemap = false;
         std::string backend_name;
         std::string_view backend_name_sv;
@@ -449,6 +452,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         s["use_adaptive"].get(adaptive);
         s["use_denoiser"].get(denoiser);
         s["denoiser_mode"].get(denoiser_mode);
+        s["denoiser_quality"].get(denoiser_quality);
         s["use_optix"].get(optix);
         s["use_vulkan"].get(vulkan);
         if (!s["backend"].get(backend_name_sv)) {
@@ -481,6 +485,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         settings.use_adaptive_sampling = adaptive;
         settings.use_denoiser = denoiser;
         settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);
+        settings.denoiser_quality = static_cast<DenoiserQuality>(denoiser_quality);
         settings.use_optix = optix;
         settings.use_vulkan = vulkan;
         settings.persistent_tonemap = tonemap;

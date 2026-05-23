@@ -67,6 +67,9 @@ public:
     void downloadImage(void* outPixels) override;
     bool getDenoiserFrame(DenoiserFrameData& frame, bool useAuxiliary = true, bool includeColor = true) override;
     bool getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool useAuxiliary = true) override;
+    bool applyStylizeGPU(void* surface,
+                         const StylizeGPU::KernelParams& params,
+                         const StylizeCore::StyleProfileCore& profile) override;
     int getCurrentSampleCount() const override;
     bool isAccumulationComplete() const override;
 

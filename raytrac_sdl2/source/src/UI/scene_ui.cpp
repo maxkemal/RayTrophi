@@ -1607,12 +1607,24 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
                               "before being saved to disk.");
         if (ctx.render_settings.use_denoiser) {
             const char* denoiser_mode_items[] = {
-                "Fast: beauty only",
-                "Quality: beauty + albedo + normal"
+                "Beauty only",
+                "Beauty + Albedo + Normal"
             };
             int denoiser_mode = static_cast<int>(ctx.render_settings.denoiser_mode);
-            if (ImGui::Combo("Denoiser Mode", &denoiser_mode, denoiser_mode_items, IM_ARRAYSIZE(denoiser_mode_items))) {
+            if (ImGui::Combo("Input Buffers", &denoiser_mode, denoiser_mode_items, IM_ARRAYSIZE(denoiser_mode_items))) {
                 ctx.render_settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);
+            }
+            const char* denoiser_quality_items[] = {
+                "Fast (viewport)",
+                "Balanced",
+                "High (final)"
+            };
+            int denoiser_quality = static_cast<int>(ctx.render_settings.denoiser_quality);
+            if (ImGui::Combo("Denoiser Quality", &denoiser_quality, denoiser_quality_items, IM_ARRAYSIZE(denoiser_quality_items))) {
+                ctx.render_settings.denoiser_quality = static_cast<DenoiserQuality>(denoiser_quality);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("OIDN model tier for the viewport. Fast is the cheapest\n(dominant cost on the GPU). Final renders always use High.");
             }
             ImGui::SliderFloat("Blend Factor", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f);
         } else {
@@ -2247,12 +2259,24 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                                               "AND sequence render output.");
                         if (ctx.render_settings.use_denoiser) {
                             const char* denoiser_mode_items[] = {
-                                "Fast: beauty only",
-                                "Quality: beauty + albedo + normal"
+                                "Beauty only",
+                                "Beauty + Albedo + Normal"
                             };
                             int denoiser_mode = static_cast<int>(ctx.render_settings.denoiser_mode);
-                            if (ImGui::Combo("Denoiser Mode", &denoiser_mode, denoiser_mode_items, IM_ARRAYSIZE(denoiser_mode_items))) {
+                            if (ImGui::Combo("Input Buffers", &denoiser_mode, denoiser_mode_items, IM_ARRAYSIZE(denoiser_mode_items))) {
                                 ctx.render_settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);
+                            }
+                            const char* denoiser_quality_items[] = {
+                                "Fast (viewport)",
+                                "Balanced",
+                                "High (final)"
+                            };
+                            int denoiser_quality = static_cast<int>(ctx.render_settings.denoiser_quality);
+                            if (ImGui::Combo("Denoiser Quality", &denoiser_quality, denoiser_quality_items, IM_ARRAYSIZE(denoiser_quality_items))) {
+                                ctx.render_settings.denoiser_quality = static_cast<DenoiserQuality>(denoiser_quality);
+                            }
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("OIDN model tier for the viewport. Fast is the cheapest\n(dominant cost on the GPU). Final renders always use High.");
                             }
                             ImGui::SliderFloat("Blend Factor", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f);
                         }

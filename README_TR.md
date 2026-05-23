@@ -79,6 +79,13 @@ Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
     - Yakınsamış render ve AOV bufferlarını okuyan, sahne geometrisini, materyalleri, ışıkları veya path-traced temel sonucu değiştirmeyen non-destructive art-direction katmanıdır.
     - Domain maskeli compositing sky, material, outline ve world-adapter davranışlarını ayırır; brush efekti tüm viewport arka planına taşmaz.
     - CPU ve GPU display rebuild yolları Stylize pass'i accumulation resetlemeden yeniden uygulayabilir; profil ve slider değişiklikleri mevcut görüntü üzerinde hızlı güncellenir.
+    - **Backend eşitliği**: CPU, Vulkan RT GPU compute (`stylize.comp`) ve OptiX CUDA (`StylizeKernel.cu`) artık aynı Stylize layer modelini paylaşır; eşleşen presetlerde birebir aynı çıktı üretirken GPU yolları hızlı ve stabil kalır.
+    - **Backend destek matrisi**:
+      | Yol | Hızlandırma | Çıktı |
+      |-----|-------------|-------|
+      | CPU display rebuild | Scalar/SIMD CPU fallback | Referans sonuç |
+      | Vulkan RT | GPU compute shader | CPU/OptiX ile eşleşir |
+      | OptiX | CUDA post kernel | CPU/Vulkan ile eşleşir |
     - **Sky Layer**:
       - Yalnızca geçerli sky piksellerinde çalışır (`AOV valid && hit == false`).
       - Küresel view-ray örnekleme kullanır; stilize gradient, cloud bank ve güneş ekran UV'sine değil dünya yönüne kilitlenir.
@@ -529,6 +536,7 @@ Visual Studio projesi bağımlılıkları vcpkg veya manuel yollar ile yönetir.
 | CPU Rendering (SDL)      | ✅ Çalışıyor    | ✅ Çalışıyor     |
 | GPU Rendering (OptiX)    | ✅ Çalışıyor    | ✅ Çalışıyor  |
 | Vulkan Rendering (RT)    | ✅ Çalışıyor    | ✅ Çalışıyor  |
+| Stylize Layer Eşitliği   | ✅ CPU/Vulkan/OptiX | ✅ CPU/Vulkan/OptiX |
 | Bağımlılık Yönetimi      | ✅ Mükemmel     | ⚠️ Manuel     |
 | Derleme Hızı             | Hızlı           | Daha yavaş    |
 | **Öneri**                | **BUNU KULLAN** | Deneysel      |

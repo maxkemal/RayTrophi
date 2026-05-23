@@ -255,6 +255,12 @@
     <ClInclude Include="source\include\Stylize\StylizePostProcess.h">
       <Filter>Kaynak Dosyalar\Stylize</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Stylize\StylizeCore.h">
+      <Filter>Kaynak Dosyalar\Stylize</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Stylize\StylizeKernel.h">
+      <Filter>Kaynak Dosyalar\Stylize</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Transform.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
@@ -523,6 +529,9 @@
     <ClCompile Include="source\src\Stylize\StylizePostProcess.cpp">
       <Filter>Kaynak Dosyalar\Stylize</Filter>
     </ClCompile>
+    <CudaCompile Include="source\src\Stylize\StylizeKernel.cu">
+      <Filter>Kaynak Dosyalar\Stylize</Filter>
+    </CudaCompile>
     <ClCompile Include="source\src\Utils\MeshModifiers.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>

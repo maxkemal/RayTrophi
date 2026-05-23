@@ -42,6 +42,11 @@ class Triangle;
 class OptixAccelManager;
 namespace Hair { class HairSystem; }
 
+// GPU stylize (StylizeKernel.h / StylizeCore.h) — forward declared to keep this
+// widely-included header light; the full headers are pulled in OptixWrapper.cpp.
+namespace StylizeGPU { struct KernelParams; }
+namespace StylizeCore { struct StyleProfileCore; }
+
 
 class OptixWrapper {
 public:
@@ -153,9 +158,19 @@ public:
     float4* getAccumulationDevicePtr() const { return d_accumulation_float4; }
     float4* getDenoiserAlbedoDevicePtr() const { return d_denoiser_albedo; }
     float4* getDenoiserNormalDevicePtr() const { return d_denoiser_normal; }
+    float4* getStylizePositionDevicePtr() const { return d_stylize_position; }
     void* getParamsDevicePtr() const { return (void*)d_params; }
     int getImageWidth() const { return Image_width; }
     int getImageHeight() const { return Image_height; }
+
+    // GPU stylize — runs StylizeCore on the device AOV buffers + the already-graded
+    // SDL surface (uploaded, stylized, downloaded). AOVs stay on device (no
+    // readback) and the costly per-pixel CPU compute moves to the GPU. Returns
+    // false when unavailable (size mismatch, missing AOVs, rebuild in progress, or
+    // a CUDA error) so the caller can fall back to the CPU stylize path.
+    bool applyStylizeGPU(SDL_Surface* surface,
+                         const StylizeGPU::KernelParams& params,
+                         const StylizeCore::StyleProfileCore& profile);
 
     
     // Set visibility by node name (uses OptiX visibility masks)
@@ -436,6 +451,9 @@ private:
     float4* d_denoiser_albedo = nullptr;
     float4* d_denoiser_normal = nullptr;
     float4* d_stylize_position = nullptr;   // Stylize AOV: world pos (.xyz) + encoded matid (.w)
+    void* d_stylize_color = nullptr;        // uint32 staging buffer for the GPU stylize round-trip
+    int   stylize_color_w = 0;
+    int   stylize_color_h = 0;
     std::vector<float> host_denoiser_color;
     std::vector<float> host_denoiser_albedo;
     std::vector<float> host_denoiser_normal;
