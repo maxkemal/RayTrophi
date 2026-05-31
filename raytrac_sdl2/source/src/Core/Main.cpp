@@ -1,4 +1,4 @@
-﻿#include <SDL_main.h> 
+#include <SDL_main.h> 
 #include <fstream>
 #include <locale>
 #include <chrono>
@@ -48,6 +48,7 @@
 #include "HittableInstance.h" // Added for instance CPU sync
 #include "MaterialManager.h"
 #include "WaterSystem.h"      // Added for WaterManager
+#include "VDBVolumeManager.h"
 
 #include <filesystem>
 #include <windows.h>
@@ -531,6 +532,14 @@ bool g_vulkan_rebuild_pending = false;    // GPU Vulkan geometry needs rebuild
 bool g_vulkan_geometry_append_pending = false; // Additive-only mutation (scatter etc.) — try incremental TLAS refit first
 bool g_viewport_raster_rebuild_pending = false; // Interactive raster viewport needs rebuild
 bool g_optix_rebuild_pending = false;
+// True while the active viewport is an interactive shading mode (Solid/Matcap),
+// i.e. NOT Rendered. The fluid particle bridge reads this to render a cheap splat-
+// sphere proxy in Solid mode even when the fluid's render_mode is SurfaceSDF (the
+// raster viewport cannot draw the NanoVDB surface). Updated once per frame.
+bool g_solid_viewport_active = false;
+bool g_sim_timeline_mode = true;  // true = timeline-driven (bake/scrub, idle when stopped); false = live free-run preview
+bool g_sim_use_gpu_solver = false; // experimental GPU simulation compute (CUDA today): grid solver + APIC fluid + NanoVDB bridge
+RayTrophiSim::SimulationComputeVulkanContext g_vulkan_sim_compute_ctx{};
 std::atomic<bool> g_optix_rebuild_in_progress{false}; // True while TLAS rebuild is happening // GPU OptiX geometry needs rebuild
 std::atomic<bool> g_viewport_rebuild_in_progress{false}; // True while viewport backend resources are being torn down/rebuilt
 std::atomic<bool> g_anim_backend_needs_full_rebuild{false}; // See globals.h — set by aborted-anim cleanup and backend-swap paths
@@ -650,6 +659,16 @@ static void syncMaterialBufferToViewportBackend(SceneData& scene, Renderer& rend
 static void shutdownAndResetBackendSafe(const char* reason) {
     if (!g_backend) return;
     try {
+        scene.simulation_world.compute().synchronize();
+    } catch (const std::exception& e) {
+        SCENE_LOG_WARN(std::string("[Backend] simulation compute synchronize failed during reset (") +
+                       (reason ? reason : "unknown") + "): " + e.what());
+    } catch (...) {
+        SCENE_LOG_WARN(std::string("[Backend] simulation compute synchronize failed during reset (") +
+                       (reason ? reason : "unknown") + ").");
+    }
+
+    try {
         g_backend->waitForCompletion();
     } catch (const std::exception& e) {
         SCENE_LOG_WARN(std::string("[Backend] waitForCompletion failed during reset (") +
@@ -670,6 +689,12 @@ static void shutdownAndResetBackendSafe(const char* reason) {
     }
 
     g_backend.reset();
+
+    // Release all VDB CUDA memory immediately when tearing down the backend.
+    // This prevents VRAM double allocation leaks when switching to Vulkan or CPU rendering.
+    if (g_hasCUDA) {
+        VDBVolumeManager::getInstance().freeAllGPU();
+    }
 
 #ifdef _WIN32
     // Heavy Vulkan scene rebuild/switch patterns can leave large freed pages in
@@ -2475,11 +2500,19 @@ int main(int argc, char* argv[]) try {
             shutdownAndResetBackendSafe("backend_switch");
 
             if (render_settings.use_vulkan) {
+                if (g_hasCUDA) {
+                    cudaDeviceSynchronize();
+                    cudaGetLastError();
+                }
                 success = initializeVulkanIfAvailable();
                 if (!success) {
                     // After OptiX shutdown, WDDM/driver residency updates may lag briefly.
                     // Retry once after a short settle delay before CPU fallback.
-                    std::this_thread::sleep_for(std::chrono::milliseconds(180));
+                    if (g_hasCUDA) {
+                        cudaDeviceSynchronize();
+                        cudaGetLastError();
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(350));
                     success = initializeVulkanIfAvailable();
                 }
                 if (!success) {
@@ -3425,6 +3458,9 @@ int main(int argc, char* argv[]) try {
         ui_ctx.ray_texture = raytrace_texture;
         
         ui_ctx.backend_ptr = getActiveViewportBackendForShading(ui.viewport_settings.shading_mode);
+        // Solid/Matcap (not Rendered=2): fluid bridge renders a splat-sphere proxy
+        // even for SurfaceSDF fluids, since the raster viewport can't draw the volume.
+        g_solid_viewport_active = isInteractiveViewportShadingMode(ui.viewport_settings.shading_mode);
         ui.draw(ui_ctx);
         render_settings.stylize_enabled =
             ray_renderer.stylizeMode.enabled && ui.viewport_settings.shading_mode == 2;

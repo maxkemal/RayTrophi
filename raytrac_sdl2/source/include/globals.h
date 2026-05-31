@@ -19,8 +19,10 @@
 #include <memory>
 #include "Vec3.h"
 #include "Backend/RenderCapabilities.h"
+#include "SimulationComputeVulkanContext.h"
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 
 namespace Backend {
 class SceneTextureManager;
@@ -251,8 +253,11 @@ public:
             logFile.flush();
         }
 
-        // Konsola (Geliştirici takibi için)
-        std::cout << "[" << prefix << "] " << msg << std::endl;
+        // Konsola (Gelistirici takibi icin). Sim compute telemetry stays in
+        // the UI/file log only; the app may run with its console hidden/closed.
+        if (msg.rfind("[SimCompute]", 0) != 0) {
+            std::cout << "[" << prefix << "] " << msg << std::endl;
+        }
     }
 
     void clear() {
@@ -323,6 +328,7 @@ extern bool g_hasOptix ;
 extern bool g_hasVulkan;
 extern bool g_hasVulkanRT;
 extern bool g_hasCUDA; // General CUDA availability (independent of OptiX)
+extern bool g_hasVulkanComputeSim; // Vulkan sim compute backend initialized successfully
 extern std::atomic<int> g_cuda_texture_upload_scope_depth;
 
 class ScopedCudaTextureUpload {
@@ -393,6 +399,19 @@ extern bool g_vulkan_rebuild_pending;    // GPU Vulkan geometry needs rebuild
 extern bool g_vulkan_geometry_append_pending; // Additive-only mutation hint — Main loop tries incremental TLAS refit before falling back to full rebuild
 extern bool g_viewport_raster_rebuild_pending; // Interactive raster viewport needs rebuild
 extern bool g_optix_rebuild_pending;
+extern bool g_solid_viewport_active; // true in Solid/Matcap shading (not Rendered); fluid bridge shows splat-sphere proxy
+// Simulation drive mode for grid-domain gas. true = Timeline (default): the sim
+// is driven by the timeline (play bakes into the memory cache, scrub restores,
+// stopped = frozen/idle → cheap). false = Live Update: continuous free-run
+// interactive preview (always simulating + resetting accumulation; heavier).
+extern bool g_sim_timeline_mode;
+// Experimental: route all simulation compute (grid solver, APIC fluid forces/P2G,
+// NanoVDB density bridge, ...) through the GPU backend. CUDA today, additional
+// backends later. Default off; CPU is the reference path.
+extern bool g_sim_use_gpu_solver;
+// Populated by VulkanBackend when the Vulkan device is initialized.
+// Used by scene_data::syncSimulationWorld to create the Vulkan sim compute backend.
+extern RayTrophiSim::SimulationComputeVulkanContext g_vulkan_sim_compute_ctx;
 extern std::atomic<bool> g_optix_rebuild_in_progress; // True while TLAS rebuild is happening - blocks render // GPU OptiX geometry needs rebuild
 extern std::atomic<bool> g_viewport_rebuild_in_progress; // True while viewport backend resources are being torn down/rebuilt - blocks denoiser device access
 // Set by:

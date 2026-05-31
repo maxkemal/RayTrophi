@@ -23,6 +23,9 @@
 #include "WaterSystem.h"
 #include "TerrainManager.h"
 
+#include <algorithm>
+#include <functional>
+
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern std::unique_ptr<Backend::IBackend> g_backend;
 bool g_timeline_selection_sync_pending = false;
@@ -744,6 +747,109 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 }
             }
 
+            int closest_domain_system_index = -1;
+            int closest_domain_index = -1;
+            float closest_domain_t = closest_force_field_t;
+
+            auto isNearProjectedDomainEdge = [&](const Vec3& in_min, const Vec3& in_max) -> bool {
+                const Vec3 mn = Vec3::min(in_min, in_max);
+                const Vec3 mx = Vec3::max(in_min, in_max);
+                const Vec3 corners[8] = {
+                    Vec3(mn.x, mn.y, mn.z), Vec3(mx.x, mn.y, mn.z),
+                    Vec3(mx.x, mx.y, mn.z), Vec3(mn.x, mx.y, mn.z),
+                    Vec3(mn.x, mn.y, mx.z), Vec3(mx.x, mn.y, mx.z),
+                    Vec3(mx.x, mx.y, mx.z), Vec3(mn.x, mx.y, mx.z)
+                };
+                const int edges[12][2] = {
+                    {0, 1}, {1, 2}, {2, 3}, {3, 0},
+                    {4, 5}, {5, 6}, {6, 7}, {7, 4},
+                    {0, 4}, {1, 5}, {2, 6}, {3, 7}
+                };
+
+                const ImVec2 mouse_pos(static_cast<float>(x), static_cast<float>(y));
+                const ImVec2 display_size(win_w, win_h);
+                auto distanceToSegment = [](const ImVec2& p, const ImVec2& a, const ImVec2& b) {
+                    const float abx = b.x - a.x;
+                    const float aby = b.y - a.y;
+                    const float apx = p.x - a.x;
+                    const float apy = p.y - a.y;
+                    const float ab_len_sq = abx * abx + aby * aby;
+                    const float t = ab_len_sq > 1e-5f
+                        ? std::clamp((apx * abx + apy * aby) / ab_len_sq, 0.0f, 1.0f)
+                        : 0.0f;
+                    const float cx = a.x + abx * t;
+                    const float cy = a.y + aby * t;
+                    const float dx = p.x - cx;
+                    const float dy = p.y - cy;
+                    return std::sqrt(dx * dx + dy * dy);
+                };
+
+                float closest_screen_distance = 1e9f;
+                for (const auto& edge : edges) {
+                    ImVec2 a, b;
+                    if (!projectSelectionPointToScreen(*ctx.scene.camera, display_size, corners[edge[0]], a) ||
+                        !projectSelectionPointToScreen(*ctx.scene.camera, display_size, corners[edge[1]], b)) {
+                        continue;
+                    }
+                    closest_screen_distance = std::min(closest_screen_distance, distanceToSegment(mouse_pos, a, b));
+                }
+                return closest_screen_distance <= 10.0f;
+            };
+
+            auto intersectDomainAABB = [&](const Vec3& in_min, const Vec3& in_max, float& out_t) -> bool {
+                const Vec3 mn = Vec3::min(in_min, in_max);
+                const Vec3 mx = Vec3::max(in_min, in_max);
+                float tmin = 0.001f;
+                float tmax = 1e9f;
+
+                auto testAxis = [&](float origin, float direction, float min_bound, float max_bound) -> bool {
+                    if (std::abs(direction) < 1e-8f) {
+                        return origin >= min_bound && origin <= max_bound;
+                    }
+                    float t1 = (min_bound - origin) / direction;
+                    float t2 = (max_bound - origin) / direction;
+                    if (t1 > t2) std::swap(t1, t2);
+                    tmin = std::max(tmin, t1);
+                    tmax = std::min(tmax, t2);
+                    return tmin <= tmax;
+                };
+
+                if (!testAxis(r.origin.x, r.direction.x, mn.x, mx.x)) return false;
+                if (!testAxis(r.origin.y, r.direction.y, mn.y, mx.y)) return false;
+                if (!testAxis(r.origin.z, r.direction.z, mn.z, mx.z)) return false;
+                out_t = tmin;
+                return out_t >= 0.001f;
+            };
+
+            for (int system_i = 0; system_i < static_cast<int>(ctx.scene.particle_systems.size()); ++system_i) {
+                auto& system = ctx.scene.particle_systems[static_cast<std::size_t>(system_i)];
+                if (!system.visible || !system.runtime) continue;
+
+                auto& domains = system.runtime->gridDomains();
+                for (int domain_i = 0; domain_i < static_cast<int>(domains.size()); ++domain_i) {
+                    auto& domain = domains[static_cast<std::size_t>(domain_i)];
+                    if (!domain.enabled) continue;
+
+                    Vec3 min_bound = domain.bounds_min;
+                    Vec3 max_bound = domain.bounds_max;
+                    if (domain.source_mode == RayTrophiSim::SimulationGridDomainSourceMode::ObjectBounds &&
+                        !ctx.scene.resolveObjectBoundsForSimulation(domain.source_name, min_bound, max_bound)) {
+                        continue;
+                    }
+                    const Vec3 pad(std::max(0.0f, domain.padding));
+                    float domain_t = 0.0f;
+                    const Vec3 pick_min = min_bound - pad;
+                    const Vec3 pick_max = max_bound + pad;
+                    if (isNearProjectedDomainEdge(pick_min, pick_max) &&
+                        intersectDomainAABB(pick_min, pick_max, domain_t) &&
+                        domain_t < closest_domain_t) {
+                        closest_domain_t = domain_t;
+                        closest_domain_system_index = system_i;
+                        closest_domain_index = domain_i;
+                    }
+                }
+            }
+
             // ===========================================================================
             // SMART SELECTION: GPU picking (O(1)) with CPU fallback
             // GPU mode: Try pick buffer first, fall back to CPU linear scan
@@ -871,6 +977,11 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     min_dist = closest_force_field_t;
                     found_hit = true;
                 }
+                // Check Simulation Domain Hit
+                if (closest_domain_index >= 0 && closest_domain_t < min_dist) {
+                    min_dist = closest_domain_t;
+                    found_hit = true;
+                }
 
                 if (found_hit) {
                     min_dist = std::max(min_dist, 0.05f);
@@ -901,6 +1012,38 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 } else {
                     ctx.selection.selectForceField(closest_force_field);
                 }
+                return;
+            }
+
+            if (closest_domain_index >= 0 &&
+                closest_domain_t < closest_so_far &&
+                closest_domain_t < closest_camera_t &&
+                closest_domain_t < closest_t &&
+                closest_domain_t < closest_force_field_t) {
+                auto& system = ctx.scene.particle_systems[static_cast<std::size_t>(closest_domain_system_index)];
+                auto& domain = system.runtime->gridDomains()[static_cast<std::size_t>(closest_domain_index)];
+                const Vec3 mn = Vec3::min(domain.bounds_min, domain.bounds_max);
+                const Vec3 mx = Vec3::max(domain.bounds_min, domain.bounds_max);
+
+                SelectableItem item;
+                item.type = SelectableType::SimulationDomain;
+                item.particle_system_index = closest_domain_system_index;
+                item.simulation_domain_index = closest_domain_index;
+                item.name = domain.name;
+                item.position = (mn + mx) * 0.5f;
+                item.scale = mx - mn;
+
+                ctx.scene.setActiveParticleSystemObject(static_cast<std::size_t>(closest_domain_system_index));
+                if (ctrl_held) {
+                    if (ctx.selection.isSelected(item)) ctx.selection.removeFromSelection(item);
+                    else ctx.selection.addToSelection(item);
+                } else {
+                    ctx.selection.selectSimulationDomain(closest_domain_system_index, closest_domain_index, domain.name);
+                    ctx.selection.selected.position = item.position;
+                    ctx.selection.selected.scale = item.scale;
+                }
+                show_forcefield_tab = true;
+                tab_to_focus = "Simulation";
                 return;
             }
 
@@ -1290,6 +1433,69 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
     }
 
+    std::vector<int> particle_system_indices_to_delete;
+    for (const auto& item : items_to_delete) {
+        if (item.type == SelectableType::ParticleSystem && item.particle_system_index >= 0) {
+            particle_system_indices_to_delete.push_back(item.particle_system_index);
+        }
+    }
+    std::sort(particle_system_indices_to_delete.begin(), particle_system_indices_to_delete.end(), std::greater<int>());
+    particle_system_indices_to_delete.erase(
+        std::unique(particle_system_indices_to_delete.begin(), particle_system_indices_to_delete.end()),
+        particle_system_indices_to_delete.end());
+
+    int particle_system_deleted_count = 0;
+    for (int index : particle_system_indices_to_delete) {
+        if (ctx.scene.removeParticleSystemObject(static_cast<std::size_t>(index))) {
+            ++particle_system_deleted_count;
+            SCENE_LOG_INFO("Deleted Particle System #" + std::to_string(index));
+        }
+    }
+
+    if (particle_system_deleted_count > 0) {
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+    }
+
+    std::vector<std::pair<int, int>> simulation_domains_to_delete;
+    for (const auto& item : items_to_delete) {
+        if (item.type == SelectableType::SimulationDomain &&
+            item.particle_system_index >= 0 &&
+            item.simulation_domain_index >= 0) {
+            simulation_domains_to_delete.emplace_back(item.particle_system_index, item.simulation_domain_index);
+        }
+    }
+    std::sort(simulation_domains_to_delete.begin(), simulation_domains_to_delete.end(),
+        [](const auto& a, const auto& b) {
+            if (a.first != b.first) return a.first > b.first;
+            return a.second > b.second;
+        });
+    simulation_domains_to_delete.erase(
+        std::unique(simulation_domains_to_delete.begin(), simulation_domains_to_delete.end()),
+        simulation_domains_to_delete.end());
+
+    int simulation_domain_deleted_count = 0;
+    for (const auto& [system_index, domain_index] : simulation_domains_to_delete) {
+        if (system_index < 0 || system_index >= static_cast<int>(ctx.scene.particle_systems.size())) {
+            continue;
+        }
+        auto& system = ctx.scene.particle_systems[static_cast<std::size_t>(system_index)];
+        if (!system.runtime ||
+            domain_index < 0 ||
+            domain_index >= static_cast<int>(system.runtime->gridDomains().size())) {
+            continue;
+        }
+        const std::string domain_name = system.runtime->gridDomains()[static_cast<std::size_t>(domain_index)].name;
+        system.runtime->removeGridDomain(static_cast<std::size_t>(domain_index));
+        ++simulation_domain_deleted_count;
+        SCENE_LOG_INFO("Deleted Simulation Domain: " + domain_name);
+    }
+
+    if (simulation_domain_deleted_count > 0) {
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+    }
+
     // Build mesh cache once if needed
     if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
 
@@ -1452,7 +1658,8 @@ void SceneUI::triggerDelete(UIContext& ctx) {
 
     // Only rebuild once after all deletions are done
     int deleted_objects = static_cast<int>(deleted_names.size());
-    if (deleted_objects > 0 || deleted_lights > 0 || deleted_cameras > 0) {
+    if (deleted_objects > 0 || deleted_lights > 0 || deleted_cameras > 0 ||
+        particle_system_deleted_count > 0 || simulation_domain_deleted_count > 0) {
         ctx.selection.clearSelection();
         g_ProjectManager.markModified();
 

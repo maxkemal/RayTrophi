@@ -197,6 +197,160 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
     ImGui::Separator();
 
+    // PARTICLE SYSTEMS
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.95f, 1.0f, 1.0f));
+        bool particles_expanded = ImGui::TreeNode("Particle Systems");
+        ImGui::PopStyleColor();
+
+        if (particles_expanded) {
+            if (ImGui::Button("+ Particle System", ImVec2(-1, 0))) {
+                auto& system = ctx.scene.addParticleSystemObject();
+                const int index = static_cast<int>(ctx.scene.particle_systems.size()) - 1;
+                ctx.selection.selectParticleSystem(index, system.name);
+                ProjectManager::getInstance().markModified();
+            }
+
+            int particle_system_delete_index = -1;
+            for (int i = 0; i < static_cast<int>(ctx.scene.particle_systems.size()); ++i) {
+                auto& system = ctx.scene.particle_systems[static_cast<std::size_t>(i)];
+                ImGui::PushID(70000 + i);
+
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+                if (ImGui::Button(system.visible ? "(o)" : "( )")) {
+                    system.visible = !system.visible;
+                    SceneData::applyParticleSystemEnabledState(system);
+                    ProjectManager::getInstance().markModified();
+                    ctx.renderer.resetCPUAccumulation();
+                }
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+
+                SelectableItem particle_item;
+                particle_item.type = SelectableType::ParticleSystem;
+                particle_item.particle_system_index = i;
+                particle_item.name = system.name;
+                const bool is_selected = sel.isSelected(particle_item);
+                const bool is_active = ctx.scene.active_particle_system_index == i;
+
+                ImGuiTreeNodeFlags flags =
+                    ImGuiTreeNodeFlags_Leaf |
+                    ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                    ImGuiTreeNodeFlags_SpanAvailWidth;
+                if (is_selected || is_active) flags |= ImGuiTreeNodeFlags_Selected;
+
+                ImVec4 color = system.visible ? ImVec4(0.45f, 0.95f, 1.0f, 1.0f)
+                                              : ImVec4(0.35f, 0.55f, 0.58f, 0.65f);
+                ImVec2 pos = ImGui::GetCursorScreenPos();
+                UIWidgets::DrawIcon(UIWidgets::IconType::Physics, pos, 16, ImGui::ColorConvertFloat4ToU32(color));
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20);
+
+                std::string label = system.name;
+                if (is_active) label += " (Active)";
+                ImGui::PushStyleColor(ImGuiCol_Text, color);
+                ImGui::TreeNodeEx(label.c_str(), flags);
+                ImGui::PopStyleColor();
+
+                if (ImGui::IsItemClicked()) {
+                    ctx.scene.setActiveParticleSystemObject(static_cast<std::size_t>(i));
+                    sel.selectParticleSystem(i, system.name);
+                    show_forcefield_tab = true;
+                    tab_to_focus = "Simulation";
+                }
+
+                if (ImGui::BeginPopupContextItem()) {
+                    if (ImGui::MenuItem("Set Active", nullptr, is_active)) {
+                        ctx.scene.setActiveParticleSystemObject(static_cast<std::size_t>(i));
+                        sel.selectParticleSystem(i, system.name);
+                    }
+                    if (ImGui::MenuItem("Toggle Visibility", nullptr, system.visible)) {
+                        system.visible = !system.visible;
+                        SceneData::applyParticleSystemEnabledState(system);
+                        ProjectManager::getInstance().markModified();
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Delete", "Del")) {
+                        particle_system_delete_index = i;
+                    }
+                    ImGui::EndPopup();
+                }
+
+                if (system.runtime && !system.runtime->gridDomains().empty()) {
+                    ImGui::Indent(20.0f);
+                    const auto& domains = system.runtime->gridDomains();
+                    for (int domain_i = 0; domain_i < static_cast<int>(domains.size()); ++domain_i) {
+                        const auto& domain = domains[static_cast<std::size_t>(domain_i)];
+                        SelectableItem domain_item;
+                        domain_item.type = SelectableType::SimulationDomain;
+                        domain_item.particle_system_index = i;
+                        domain_item.simulation_domain_index = domain_i;
+                        domain_item.name = domain.name;
+
+                        ImGui::PushID(71000 + i * 1000 + domain_i);
+                        ImGuiTreeNodeFlags domain_flags =
+                            ImGuiTreeNodeFlags_Leaf |
+                            ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                            ImGuiTreeNodeFlags_SpanAvailWidth;
+                        if (sel.isSelected(domain_item)) {
+                            domain_flags |= ImGuiTreeNodeFlags_Selected;
+                        }
+
+                        const ImVec4 domain_color = domain.enabled
+                            ? ImVec4(0.50f, 0.78f, 1.0f, 1.0f)
+                            : ImVec4(0.35f, 0.45f, 0.55f, 0.65f);
+                        ImVec2 domain_pos = ImGui::GetCursorScreenPos();
+                        UIWidgets::DrawIcon(UIWidgets::IconType::Physics, domain_pos, 14, ImGui::ColorConvertFloat4ToU32(domain_color));
+                        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 18);
+                        ImGui::PushStyleColor(ImGuiCol_Text, domain_color);
+                        ImGui::TreeNodeEx(domain.name.c_str(), domain_flags);
+                        ImGui::PopStyleColor();
+
+                        if (ImGui::IsItemClicked()) {
+                            ctx.scene.setActiveParticleSystemObject(static_cast<std::size_t>(i));
+                            sel.selectSimulationDomain(i, domain_i, domain.name);
+                            const Vec3 mn = Vec3::min(domain.bounds_min, domain.bounds_max);
+                            const Vec3 mx = Vec3::max(domain.bounds_min, domain.bounds_max);
+                            sel.selected.position = (mn + mx) * 0.5f;
+                            sel.selected.scale = mx - mn;
+                            show_forcefield_tab = true;
+                            tab_to_focus = "Simulation";
+                        }
+
+                        if (ImGui::BeginPopupContextItem()) {
+                            if (ImGui::MenuItem("Set Active")) {
+                                ctx.scene.setActiveParticleSystemObject(static_cast<std::size_t>(i));
+                                sel.selectSimulationDomain(i, domain_i, domain.name);
+                                const Vec3 mn = Vec3::min(domain.bounds_min, domain.bounds_max);
+                                const Vec3 mx = Vec3::max(domain.bounds_min, domain.bounds_max);
+                                sel.selected.position = (mn + mx) * 0.5f;
+                                sel.selected.scale = mx - mn;
+                            }
+                            if (ImGui::MenuItem("Delete", "Del")) {
+                                if (!sel.isSelected(domain_item)) {
+                                    sel.selectSimulationDomain(i, domain_i, domain.name);
+                                }
+                                triggerDelete(ctx);
+                            }
+                            ImGui::EndPopup();
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::Unindent(20.0f);
+                }
+
+                ImGui::PopID();
+            }
+            if (particle_system_delete_index >= 0) {
+                ctx.selection.selectParticleSystem(
+                    particle_system_delete_index,
+                    ctx.scene.particle_systems[static_cast<std::size_t>(particle_system_delete_index)].name);
+                triggerDelete(ctx);
+            }
+            ImGui::TreePop();
+        }
+        ImGui::Separator();
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // CHARACTERS / MODELS (Multi-Model Management)
     // ─────────────────────────────────────────────────────────────────────────
@@ -495,7 +649,8 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
         for (size_t i = 0; i < ctx.scene.vdb_volumes.size(); ++i) {
             auto vdb = ctx.scene.vdb_volumes[i]; // Local copy to avoid invalidation on resize
             if (!vdb) continue;
-            
+            if (vdb->transient) continue; // simulation-owned live volumes are not user objects
+
             ImGui::PushID((int)i);
 
             // Visibility Toggle
@@ -1231,6 +1386,8 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
             case SelectableType::Object: typeIcon = "[M]"; typeColor = ImVec4(0.7f, 0.8f, 0.9f, 1.0f); break;
             case SelectableType::VDBVolume: typeIcon = "[VOL]"; typeColor = ImVec4(1.0f, 0.5f, 0.0f, 1.0f); break;
             case SelectableType::GasVolume: typeIcon = "[GAS]"; typeColor = ImVec4(0.0f, 1.0f, 1.0f, 1.0f); break;
+            case SelectableType::ParticleSystem: typeIcon = "[PART]"; typeColor = ImVec4(0.45f, 0.95f, 1.0f, 1.0f); break;
+            case SelectableType::SimulationDomain: typeIcon = "[DOM]"; typeColor = ImVec4(0.50f, 0.78f, 1.0f, 1.0f); break;
             case SelectableType::World: typeIcon = "[W]"; typeColor = ImVec4(1.0f, 0.7f, 1.0f, 1.0f); break;
             default: break;
             }
@@ -1257,7 +1414,8 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 (sel.selected.type == SelectableType::Object || sel.selected.type == SelectableType::Light ||
                  sel.selected.type == SelectableType::Camera || sel.selected.type == SelectableType::VDBVolume ||
                  sel.selected.type == SelectableType::GasVolume || sel.selected.type == SelectableType::ForceField ||
-                 sel.selected.type == SelectableType::CameraTarget))
+                 sel.selected.type == SelectableType::CameraTarget ||
+                 sel.selected.type == SelectableType::SimulationDomain))
             {
                     ImGui::Separator();
                     ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Transform");
@@ -1348,6 +1506,21 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                                 item.force_field->position = item.position;
                                 item.force_field->rotation = item.rotation;
                                 item.force_field->scale = item.scale;
+                            } else if (item.type == SelectableType::SimulationDomain &&
+                                       item.particle_system_index >= 0 &&
+                                       item.particle_system_index < static_cast<int>(ctx.scene.particle_systems.size())) {
+                                auto& system = ctx.scene.particle_systems[static_cast<std::size_t>(item.particle_system_index)];
+                                if (system.runtime &&
+                                    item.simulation_domain_index >= 0 &&
+                                    item.simulation_domain_index < static_cast<int>(system.runtime->gridDomains().size())) {
+                                    auto& domain = system.runtime->gridDomains()[static_cast<std::size_t>(item.simulation_domain_index)];
+                                    const Vec3 half_extent = Vec3::max(item.scale * 0.5f, Vec3(0.001f));
+                                    domain.source_mode = RayTrophiSim::SimulationGridDomainSourceMode::ManualBox;
+                                    domain.source_name.clear();
+                                    domain.bounds_min = item.position - half_extent;
+                                    domain.bounds_max = item.position + half_extent;
+                                    domain.name = item.name.empty() ? domain.name : item.name;
+                                }
                             }
                         }
 

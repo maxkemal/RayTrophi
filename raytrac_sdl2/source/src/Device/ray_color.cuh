@@ -439,6 +439,14 @@ __device__ float3 sample_color_ramp_gas(const GpuGasVolume& vol, float t) {
     return vol.ramp_colors[vol.ramp_stop_count - 1];
 }
 
+__device__ float3 clamp_volume_radiance(const float3& c, float max_luma) {
+    float l = c.x * 0.2126f + c.y * 0.7152f + c.z * 0.0722f;
+    if (l > max_luma && l > 1e-6f) {
+        return c * (max_luma / l);
+    }
+    return c;
+}
+
 __device__ float sample_procedural_cloud_density(const GpuVDBVolume& vol, const float3& local_pos) {
     float3 extent = vol.local_bbox_max - vol.local_bbox_min;
     float3 norm_pos = (local_pos - vol.local_bbox_min) / make_float3(
@@ -502,8 +510,19 @@ __device__ float3 raymarch_vdb_volume(
     float sun_intensity,
     float& out_transmittance,
     float max_t,
-    curandState* rng
+    curandState* rng,
+    // Fluid-surface (source_type==4) dielectric redirect. When the function
+    // hits an isosurface it fills these so the bounce loop can continue the
+    // path along the REFRACTED ray (true through-water distortion) instead of
+    // treating the surface as opaque. Returned colour is the reflection lobe
+    // (sky * Fresnel) to add immediately; out_surface_throughput is the
+    // (1-Fresnel)*depth-tint multiplier for the refracted continuation.
+    bool*   out_surface_redirect = nullptr,
+    float3* out_surface_origin   = nullptr,
+    float3* out_surface_dir      = nullptr,
+    float3* out_surface_throughput = nullptr
 ) {
+    if (out_surface_redirect) *out_surface_redirect = false;
     const bool use_procedural_cloud = (vol.source_type == 3);
     if (!use_procedural_cloud && vol.density_grid == nullptr) {
         out_transmittance = 1.0f;
@@ -537,7 +556,281 @@ __device__ float3 raymarch_vdb_volume(
         out_transmittance = 1.0f;
         return make_float3(0.0f);
     }
-    
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // FLUID SURFACE (source_type == 4) — simplified isosurface mode
+    // ══════════════════════════════════════════════════════════════════════════
+    // The density channel is the SDF proxy band (0..1). Walk for the first
+    // iso=0.5 crossing, build a Fresnel-tinted opaque surface colour. True
+    // Snell refraction lives in the Vulkan path (closesthit can redirect the
+    // payload); this OptiX path accumulates along a single ray so we model
+    // the surface as an opaque-with-fresnel boundary. Visually the fluid
+    // reads as a solid volume; through-glass distortion is a follow-up that
+    // needs the bounce loop to be restructured (memory: optix-perf-ceiling).
+    if (vol.source_type == 4 && !use_procedural_cloud && vol.density_grid != nullptr) {
+        // The main raymarch creates its own `grid` variable later; we need our
+        // own here (iso branch returns before reaching it).
+        const nanovdb::FloatGrid* iso_grid =
+            reinterpret_cast<const nanovdb::FloatGrid*>(vol.density_grid);
+        const float ISO_THRESH = 0.5f;
+        // Walk quality: step = max(fine, cover) so max_steps always reach
+        // t_exit — a fixed fine step + low cap truncates the walk and skips the
+        // far side of the fluid. Mirrors the Vulkan iso path.
+        const float local_extent = t_exit - t_enter;
+        int   iso_cap = vol.max_steps;
+        if (iso_cap < 32) iso_cap = 32; else if (iso_cap > 2048) iso_cap = 2048;
+        float qlo = vol.voxel_size * 0.1f, qhi = vol.voxel_size * 0.5f;
+        float fine_step = fminf(fmaxf(vol.step_size, qlo), qhi);
+        float cover_step = local_extent / (float)iso_cap;
+        const float local_step = fmaxf(0.001f, fmaxf(fine_step, cover_step));
+        int   max_steps_iso = (int)(local_extent / local_step) + 2;
+        if (max_steps_iso > iso_cap + 2) max_steps_iso = iso_cap + 2;
+
+        using AccTIso = nanovdb::FloatGrid::AccessorType;
+        AccTIso accIso = iso_grid->getAccessor();
+        nanovdb::math::SampleFromVoxels<AccTIso, 1, false> samplerIso(accIso);
+
+        // Apply the same density remap + multiplier the Vulkan iso path uses
+        // (sampleDensityAcc returns remapped*multiplier), so the UI density
+        // value moves the iso=0.5 crossing identically on both backends. Without
+        // this OptiX sampled the raw 0..1 proxy and ignored the density slider.
+        const float iso_remap_range = vol.density_remap_high - vol.density_remap_low + 1e-6f;
+        const float iso_mult = (vol.density_multiplier > 0.0f) ? vol.density_multiplier : 1.0f;
+        auto sample_at_local = [&](const float3& lp) -> float {
+            float3 pp = lp;
+            pp.x -= vol.pivot_offset[0];
+            pp.y -= vol.pivot_offset[1];
+            pp.z -= vol.pivot_offset[2];
+            nanovdb::Vec3f idx = iso_grid->worldToIndexF(nanovdb::Vec3f(pp.x, pp.y, pp.z));
+            float v = samplerIso(idx);
+            if (!isfinite(v)) return 0.0f;
+            float remapped = fmaxf((v - vol.density_remap_low) / iso_remap_range, 0.0f);
+            return remapped * iso_mult;
+        };
+
+        float t_iso = t_enter;
+        float3 p0 = local_origin + local_dir * t_iso;
+        float start_d = sample_at_local(p0);
+        bool  start_inside = start_d > ISO_THRESH;   // ray began inside the fluid
+        float prev_d = start_d;
+        float hit_t = -1.0f;
+        for (int s = 0; s < max_steps_iso; ++s) {
+            float next_t = fminf(t_iso + local_step, t_exit);
+            float3 pn = local_origin + local_dir * next_t;
+            float cur_d = sample_at_local(pn);
+            bool crossed = start_inside
+                ? (prev_d >= ISO_THRESH && cur_d < ISO_THRESH)   // exit
+                : (prev_d <  ISO_THRESH && cur_d >= ISO_THRESH);  // enter
+            if (crossed) {
+                float denom = cur_d - prev_d;
+                float frac = (fabsf(denom) > 1e-6f) ? ((ISO_THRESH - prev_d) / denom) : 0.5f;
+                if (frac < 0.0f) frac = 0.0f;
+                if (frac > 1.0f) frac = 1.0f;
+                hit_t = t_iso + frac * (next_t - t_iso);
+                break;
+            }
+            prev_d = cur_d;
+            t_iso = next_t;
+            if (t_iso >= t_exit) break;
+        }
+
+        // ── Whitewater foam composited in FRONT of the surface ──────────────
+        // Foam rides this same volume's TEMPERATURE channel (scaled by
+        // FOAM_TEMP_SCALE on upload; see SceneData::syncSimulationRenderVolumes),
+        // so there is exactly ONE volume on the domain AABB — no coincident-
+        // volume sort, correct on both backends. March it as a bright white
+        // single-scatter medium over the span in front of the iso surface and
+        // pre-multiply everything behind it by the foam transmittance. NO self-
+        // shadow term: foam is bright, and self-shadowing is exactly what turned
+        // the old separate fog volume into a black cube on Vulkan.
+        float3 foam_inscatter = make_float3(0.0f);
+        float  foam_T = 1.0f;
+        const nanovdb::FloatGrid* foam_grid =
+            reinterpret_cast<const nanovdb::FloatGrid*>(vol.temperature_grid);
+        if (foam_grid != nullptr) {
+            const float FOAM_TEMP_SCALE = 10000.0f;
+            // Extinction multiplier + tint ride the volume (set from the domain
+            // foam shader at sync) so the "Foam Volume Shader" panel drives the
+            // look; fall back to sane defaults when unset.
+            const float FOAM_OPTICAL = (vol.foam_opacity > 1e-3f) ? vol.foam_opacity : 8.0f;
+            float3 foam_albedo = (vol.foam_color.x + vol.foam_color.y + vol.foam_color.z > 1e-3f)
+                ? vol.foam_color : make_float3(0.95f, 0.97f, 1.0f);
+            using AccTF = nanovdb::FloatGrid::AccessorType;
+            AccTF accF = foam_grid->getAccessor();
+            nanovdb::math::SampleFromVoxels<AccTF, 1, false> samplerF(accF);
+            auto sample_foam = [&](const float3& lp) -> float {
+                float3 pp = lp;
+                pp.x -= vol.pivot_offset[0];
+                pp.y -= vol.pivot_offset[1];
+                pp.z -= vol.pivot_offset[2];
+                nanovdb::Vec3f fidx = foam_grid->worldToIndexF(nanovdb::Vec3f(pp.x, pp.y, pp.z));
+                float v = samplerF(fidx);
+                if (!isfinite(v) || v <= 0.0f) return 0.0f;
+                return v * (1.0f / FOAM_TEMP_SCALE);
+            };
+            const float foam_end = (hit_t < 0.0f) ? t_exit : hit_t;
+            const float foam_len = foam_end - t_enter;
+            if (foam_len > 1e-5f) {
+                int fsteps = (int)(foam_len / fmaxf(vol.voxel_size, foam_len / 48.0f)) + 1;
+                if (fsteps > 64) fsteps = 64;
+                const float fstep = foam_len / (float)fsteps;
+                const float3 up = make_float3(0.0f, 1.0f, 0.0f);
+                const float3 sky_amb = gpu_get_sky_radiance(optixLaunchParams.world, up);
+                const float jitf = curand_uniform(rng);
+                for (int fs = 0; fs < fsteps && foam_T > 0.01f; ++fs) {
+                    float ft = t_enter + ((float)fs + jitf) * fstep;
+                    float fd = sample_foam(local_origin + local_dir * ft);
+                    if (fd <= 1e-4f) continue;
+                    float a = 1.0f - expf(-fd * FOAM_OPTICAL * (fstep / fmaxf(dir_length, 1e-6f)));
+                    float3 wp = ray_origin + ray_dir * (ft / fmaxf(dir_length, 1e-6f));
+                    float3 sun_tr = gpu_get_transmittance(
+                        optixLaunchParams.world, wp, optixLaunchParams.world.nishita.sun_direction);
+                    float3 Li = make_float3(
+                        foam_albedo.x * (sky_amb.x + sun_tr.x * sun_intensity * 0.5f),
+                        foam_albedo.y * (sky_amb.y + sun_tr.y * sun_intensity * 0.5f),
+                        foam_albedo.z * (sky_amb.z + sun_tr.z * sun_intensity * 0.5f));
+                    foam_inscatter.x += foam_T * a * Li.x;
+                    foam_inscatter.y += foam_T * a * Li.y;
+                    foam_inscatter.z += foam_T * a * Li.z;
+                    foam_T *= (1.0f - a);
+                }
+            }
+        }
+
+        if (hit_t < 0.0f) {
+            // No surface, but airborne foam/spray in this segment still shows.
+            out_transmittance = foam_T;
+            return foam_inscatter;
+        }
+
+        // Central-difference gradient -> surface normal in local space.
+        float h_iso = fmaxf(0.001f, vol.voxel_size);
+        float3 hit_local = local_origin + local_dir * hit_t;
+        float sxp = sample_at_local(make_float3(hit_local.x + h_iso, hit_local.y, hit_local.z));
+        float sxm = sample_at_local(make_float3(hit_local.x - h_iso, hit_local.y, hit_local.z));
+        float syp = sample_at_local(make_float3(hit_local.x, hit_local.y + h_iso, hit_local.z));
+        float sym = sample_at_local(make_float3(hit_local.x, hit_local.y - h_iso, hit_local.z));
+        float szp = sample_at_local(make_float3(hit_local.x, hit_local.y, hit_local.z + h_iso));
+        float szm = sample_at_local(make_float3(hit_local.x, hit_local.y, hit_local.z - h_iso));
+        float gx = sxp - sxm, gy = syp - sym, gz = szp - szm;
+        float glen = sqrtf(gx * gx + gy * gy + gz * gz);
+        float3 N_local;
+        if (glen > 1e-6f) {
+            float inv = -1.0f / glen;   // -gradient points OUT of denser interior
+            N_local = make_float3(gx * inv, gy * inv, gz * inv);
+        } else {
+            N_local = make_float3(-local_dir.x, -local_dir.y, -local_dir.z);
+        }
+
+        // Foam / whitewater from SDF curvature (Laplacian). White light added
+        // immediately (not redirected). Reuses the 6 gradient samples + centre.
+        float3 foam_add = make_float3(0.0f, 0.0f, 0.0f);
+        {
+            float foam_strength = vol.surface_foam;
+            if (foam_strength < 0.0f) foam_strength = 0.0f;
+            else if (foam_strength > 1.0f) foam_strength = 1.0f;
+            if (foam_strength > 1e-3f) {
+                float dc = sample_at_local(hit_local);
+                float lap = fabsf((sxp + sxm + syp + sym + szp + szm) - 6.0f * dc);
+                float ft = (lap - 0.15f) / (0.7f - 0.15f);
+                ft = fminf(fmaxf(ft, 0.0f), 1.0f);
+                ft = ft * ft * (3.0f - 2.0f * ft);   // smoothstep
+                float foam = foam_strength * ft * 0.9f;
+                foam_add = make_float3(foam, foam, foam);
+            }
+        }
+
+        const float ior_w = (vol.ior > 1.0f) ? vol.ior : 1.33f;
+
+        // World-space surface normal (vol.transform is rigid/uniform-scale for
+        // fluid domains), oriented against the incoming ray.
+        float3 N_world = normalize(transform_vector_affine(N_local, vol.transform));
+        if (dot(N_world, ray_dir) > 0.0f) N_world = make_float3(-N_world.x, -N_world.y, -N_world.z);
+
+        // GGX roughness perturbation (vol.surface_roughness). Jitter the normal
+        // inside a microfacet lobe so reflection AND refraction blur. 0 = mirror.
+        float rough = vol.surface_roughness;
+        if (rough < 0.0f) rough = 0.0f; else if (rough > 1.0f) rough = 1.0f;
+        if (rough > 1e-3f) {
+            float a = rough * rough;
+            float u1 = curand_uniform(rng);
+            float u2 = curand_uniform(rng);
+            float phi = 6.2831853f * u1;
+            float cosT = sqrtf(fmaxf(0.0f, (1.0f - u2) / (1.0f + (a * a - 1.0f) * u2)));
+            float sinT = sqrtf(fmaxf(0.0f, 1.0f - cosT * cosT));
+            float3 hT = make_float3(sinT * cosf(phi), sinT * sinf(phi), cosT);
+            float3 up = (fabsf(N_world.z) < 0.999f) ? make_float3(0.0f, 0.0f, 1.0f)
+                                                    : make_float3(1.0f, 0.0f, 0.0f);
+            float3 T = normalize(cross(up, N_world));
+            float3 B = cross(N_world, T);
+            float3 Np = normalize(make_float3(hT.x * T.x + hT.y * B.x + hT.z * N_world.x,
+                                              hT.x * T.y + hT.y * B.y + hT.z * N_world.y,
+                                              hT.x * T.z + hT.y * B.z + hT.z * N_world.z));
+            if (dot(ray_dir, Np) < 0.0f) N_world = Np;
+        }
+
+        // Schlick Fresnel with the (possibly perturbed) normal.
+        float cos_t = fabsf(dot(ray_dir, N_world));
+        if (cos_t > 1.0f) cos_t = 1.0f;
+        float r0 = (1.0f - ior_w) / (1.0f + ior_w);
+        r0 = r0 * r0;
+        float fres = r0 + (1.0f - r0) * powf(1.0f - cos_t, 5.0f);
+
+        // Beer-Lambert over the segment just traversed inside the fluid (only
+        // when the ray started inside — exit / internal event).
+        float3 seg_tp = make_float3(1.0f, 1.0f, 1.0f);
+        if (start_inside) {
+            float depth_world = (hit_t - t_enter) / fmaxf(dir_length, 1e-6f);
+            seg_tp = make_float3(
+                expf(-vol.absorption_color.x * vol.absorption_coefficient * depth_world),
+                expf(-vol.absorption_color.y * vol.absorption_coefficient * depth_world),
+                expf(-vol.absorption_color.z * vol.absorption_coefficient * depth_world));
+        }
+
+        // Fresnel importance-sampled dielectric: reflect (scene/sky) vs refract
+        // (through). The chosen branch is redirected through the bounce loop, so
+        // reflection traces the real scene — not just the sky — exactly like the
+        // Vulkan path. Per-branch weight is 1 (probability cancels Fresnel).
+        if (out_surface_redirect && out_surface_origin && out_surface_dir && out_surface_throughput) {
+            float eta = start_inside ? ior_w : (1.0f / ior_w);
+            float3 refr_dir;
+            bool ok = refract(ray_dir, N_world, eta, &refr_dir);
+            float3 cont_dir;
+            float3 branch_tp;
+            if (!ok || curand_uniform(rng) < fres) {
+                cont_dir = reflect(ray_dir, N_world);     // scene/sky reflection
+                branch_tp = make_float3(1.0f, 1.0f, 1.0f);
+            } else {
+                cont_dir = normalize(refr_dir);            // through the water
+                branch_tp = vol.scatter_color;             // mild surface cast
+            }
+            float hit_world_t = hit_t / fmaxf(dir_length, 1e-6f);
+            float3 hit_world = ray_origin + ray_dir * hit_world_t;
+            *out_surface_origin = hit_world + cont_dir * 1e-3f;
+            *out_surface_dir = cont_dir;
+            // Foam in front dims whatever the redirected lobe brings back.
+            *out_surface_throughput = make_float3(seg_tp.x * branch_tp.x * foam_T,
+                                                  seg_tp.y * branch_tp.y * foam_T,
+                                                  seg_tp.z * branch_tp.z * foam_T);
+            *out_surface_redirect = true;
+            out_transmittance = 1.0f;          // throughput handled by the caller
+            return foam_add + foam_inscatter;   // surface sheen + particle whitewater
+        }
+
+        // Fallback (no redirect out-params): opaque Fresnel + sky reflection.
+        float3 refl_dir = reflect(ray_dir, N_world);
+        float3 sky_refl = gpu_get_sky_radiance(optixLaunchParams.world, refl_dir);
+        float3 depth_tint = make_float3(vol.scatter_color.x * seg_tp.x,
+                                        vol.scatter_color.y * seg_tp.y,
+                                        vol.scatter_color.z * seg_tp.z);
+        float3 result;
+        result.x = (depth_tint.x * (1.0f - fres) + sky_refl.x * fres) * foam_T + foam_add.x + foam_inscatter.x;
+        result.y = (depth_tint.y * (1.0f - fres) + sky_refl.y * fres) * foam_T + foam_add.y + foam_inscatter.y;
+        result.z = (depth_tint.z * (1.0f - fres) + sky_refl.z * fres) * foam_T + foam_add.z + foam_inscatter.z;
+        out_transmittance = 0.05f;
+        return result;
+    }
+
     // Step size - ADAPTIVE PRECISION
     float world_t_enter = t_enter / dir_length;
     float world_t_exit = t_exit / dir_length;
@@ -570,7 +863,7 @@ __device__ float3 raymarch_vdb_volume(
     float3 local_sun_dir = normalize(transform_vector_affine(sun_dir, vol.inv_transform));
     float3 local_ray_dir = normalize(transform_vector_affine(ray_dir, vol.inv_transform));
     
-    const nanovdb::FloatGrid* temp_grid = (vol.temperature_grid && vol.emission_mode == 2) ? 
+    const nanovdb::FloatGrid* temp_grid = (vol.temperature_grid && vol.emission_mode >= 2) ? 
         reinterpret_cast<const nanovdb::FloatGrid*>(vol.temperature_grid) : nullptr;
     
     int steps = 0;
@@ -596,11 +889,12 @@ __device__ float3 raymarch_vdb_volume(
         if (!isfinite(raw_density)) raw_density = 0.0f;
         
         float density = fmaxf((raw_density - vol.density_remap_low) / remap_range, 0.0f) * vol.density_multiplier;
-        
-        if (density > curand_uniform(rng) * 0.01f) {
-            float sigma_a = density * vol.absorption_coefficient;
-            float sigma_s = density * vol.scatter_coefficient;
-            float sigma_t = sigma_a + sigma_s;
+        float sigma_a = density * vol.absorption_coefficient;
+        float sigma_s = density * vol.scatter_coefficient;
+        float sigma_t = sigma_a + sigma_s;
+        float sparse_cutoff = (vol.density_pad > 0.0f) ? vol.density_pad : 0.04f;
+        float scatter_keep = fminf(1.0f, fmaxf(0.0f, (sigma_s * base_step) / sparse_cutoff));
+        if (curand_uniform(rng) <= scatter_keep) {
             if (sigma_t <= 1e-8f) { t += base_step; steps++; continue; }
             float step = fminf(base_step, tau_max / sigma_t);
             step = fmaxf(step, min_step);
@@ -622,18 +916,30 @@ __device__ float3 raymarch_vdb_volume(
             // Emission
             float3 emission = make_float3(0.0f);
             if (vol.emission_mode == 1) emission = vol.emission_color * vol.emission_intensity * density;
-            else if (vol.emission_mode == 2 && temp_grid) {
-                nanovdb::FloatGrid::AccessorType temp_acc = temp_grid->getAccessor();
-                nanovdb::math::SampleFromVoxels<nanovdb::FloatGrid::AccessorType, 1, false> temp_sampler(temp_acc);
-                nanovdb::Vec3f temp_idx = temp_grid->worldToIndexF(nanovdb::Vec3f(local_pos.x, local_pos.y, local_pos.z));
-                float temperature = temp_sampler(temp_idx);
-                if (!isfinite(temperature)) temperature = 293.0f;
+            else if (vol.emission_mode >= 2) {
+                float temperature = density;
+                if (temp_grid) {
+                    nanovdb::FloatGrid::AccessorType temp_acc = temp_grid->getAccessor();
+                    nanovdb::math::SampleFromVoxels<nanovdb::FloatGrid::AccessorType, 1, false> temp_sampler(temp_acc);
+                    nanovdb::Vec3f temp_idx = temp_grid->worldToIndexF(nanovdb::Vec3f(local_pos.x, local_pos.y, local_pos.z));
+                    temperature = temp_sampler(temp_idx);
+                }
+                if (!isfinite(temperature)) temperature = density;
                 
                 float kelvin = (temperature > 20.0f) ? (temperature * vol.temperature_scale) : ((temperature * 3000.0f + 1000.0f) * vol.temperature_scale);
-                float t_ramp = (temperature > 20.0f) ? ((vol.max_temperature > 20.0f) ? (temperature/vol.max_temperature) : (temperature/6000.0f)) : temperature;
+                float t_ramp;
+                if (temperature > 20.0f) {
+                    float ramp_min = (vol.emission_pad > 20.0f) ? vol.emission_pad : 0.0f;
+                    float ramp_max = (vol.max_temperature > ramp_min + 1.0f) ? vol.max_temperature : 6000.0f;
+                    t_ramp = (temperature - ramp_min) / fmaxf(ramp_max - ramp_min, 1.0f);
+                } else {
+                    t_ramp = temperature;
+                }
                 
-                float3 e_color = vol.color_ramp_enabled ? sample_color_ramp(vol, t_ramp * vol.temperature_scale) : blackbody_to_rgb(kelvin);
-                emission = e_color * (density * vol.blackbody_intensity);
+                float ramp_t_clamped = fminf(fmaxf(t_ramp, 0.0f), 1.0f);
+                float3 e_color = vol.color_ramp_enabled ? sample_color_ramp(vol, ramp_t_clamped) : blackbody_to_rgb(kelvin);
+                float emit_gate = (vol.color_ramp_enabled && temperature > 20.0f && t_ramp <= 0.0f) ? 0.0f : 1.0f;
+                emission = clamp_volume_radiance(e_color * (density * vol.blackbody_intensity * emit_gate), 64.0f);
             }
             
             // Lighting (Sun + Scene)
@@ -655,14 +961,15 @@ __device__ float3 raymarch_vdb_volume(
                     int s_steps = max(1, vol.shadow_steps);
                     float tau_hint = fmaxf(density, 0.0f) * (vol.absorption_coefficient + vol.scatter_coefficient) * world_vol_extent;
                     if (s_steps > 8) {
-                        float step_scale = fminf(1.0f, fmaxf(0.35f, tau_hint * 0.5f));
-                        s_steps = max(4, (int)ceilf((float)s_steps * step_scale));
+                        float step_scale = fminf(1.0f, fmaxf(0.25f, sqrtf(fmaxf(tau_hint, 0.0f))));
+                        s_steps = (int)ceilf((float)s_steps * step_scale);
+                        s_steps = max(3, min(s_steps, min(vol.shadow_steps, 16)));
                     }
-                    float s_step_world = world_vol_extent / (float)(s_steps * 2);
+                    float s_step_world = world_vol_extent / (float)max(1, s_steps);
                     float s_jitter = curand_uniform(rng);
 
                     float s_trans = 0.0f;
-                    for (int ls = 0; ls < s_steps && s_trans < 5.0f; ++ls) {
+                    for (int ls = 0; ls < s_steps && s_trans < 10.0f; ++ls) {
                         float sw = ((float)ls + s_jitter + 0.5f) * s_step_world;
                         float3 curr_local_s_pos = local_pos + local_sun_dir * (sw * dir_length);
                         if (curr_local_s_pos.x < vol.local_bbox_min.x || curr_local_s_pos.x > vol.local_bbox_max.x || 
@@ -689,7 +996,8 @@ __device__ float3 raymarch_vdb_volume(
                     float beers_soft = expf(-s_trans * 0.25f);
                     float albedo_lum = vol.scatter_color.x * 0.2126f + vol.scatter_color.y * 0.7152f + vol.scatter_color.z * 0.0722f;
                     float phys_trans = beers * (1.0f - vol.scatter_multi * albedo_lum) + beers_soft * (vol.scatter_multi * albedo_lum);
-                    shadow = 1.0f - vol.shadow_strength * (1.0f - phys_trans);
+                    float shadow_strength = fminf(fmaxf(vol.shadow_strength * 1.08f, 0.0f), 1.0f);
+                    shadow = 1.0f - shadow_strength * (1.0f - phys_trans);
                 }
                 total_light += sun_color * shadow * phase;
             }
@@ -706,11 +1014,16 @@ __device__ float3 raymarch_vdb_volume(
                 }
             }
             
-            // 3. Sky/Ambient Lighting (CPU Parity)
-            total_light += gpu_get_ambient_radiance_volume(optixLaunchParams.world, ambient_dir) * 0.15f * optixLaunchParams.world.nishita.atmosphere_intensity;
+            // 3. Sky/Ambient Lighting (CPU Parity). Gated by
+            // volume_atmosphere_ambient (default OFF) — the raw Nishita sky
+            // over-lights the volume vs Vulkan's LUT ambient.
+            float thin_scatter = scatter_keep * scatter_keep;
+            if (optixLaunchParams.world.volume_atmosphere_ambient != 0) {
+                total_light += gpu_get_ambient_radiance_volume(optixLaunchParams.world, ambient_dir) * (0.15f * thin_scatter) * optixLaunchParams.world.nishita.atmosphere_intensity;
+            }
 
             float3 albedo = vol.scatter_color;
-            float3 ms_boost = make_float3(1.0f) + albedo * vol.scatter_multi * 2.0f;
+            float3 ms_boost = make_float3(1.0f) + albedo * vol.scatter_multi * (2.0f * thin_scatter);
             float3 inscatter = (albedo * total_light * sigma_s * ms_boost);
             
             // CPU/Vulkan parity integration
@@ -2119,8 +2432,12 @@ __device__ float3 raymarch_volumetric_object(
             float3 sun_color = sun_trans * sun_intensity;
             float3 shadow_radiance = sun_color * shadow_trans * phase;
             
-            // Physical Parity: Ambient sky light should scale with atmosphere intensity
-            float3 ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, ambient_dir) * 0.15f * optixLaunchParams.world.nishita.atmosphere_intensity;
+            // Physical Parity: Ambient sky light should scale with atmosphere intensity.
+            // Gated by volume_atmosphere_ambient (default OFF, Vulkan parity).
+            float3 ambient = make_float3(0.0f, 0.0f, 0.0f);
+            if (optixLaunchParams.world.volume_atmosphere_ambient != 0) {
+                ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, ambient_dir) * 0.15f * optixLaunchParams.world.nishita.atmosphere_intensity;
+            }
             float3 total_light = shadow_radiance + ambient;
 
             float3 ms_boost = make_float3(1.0f) + vol_albedo * multi_scatter * 2.0f;
@@ -2223,10 +2540,12 @@ __device__ float3 raymarch_gas_volume(
         density = (density - vol.density_remap_low) / remap_range;
         density = fmaxf(density, 0.0f) * vol.density_multiplier;
         
-        if (density > threshold) {
-            float sigma_a = density * vol.absorption_coefficient;
-            float sigma_s = density * vol.scatter_coefficient;
-            float sigma_t = sigma_a + sigma_s;
+        float sigma_a = density * vol.absorption_coefficient;
+        float sigma_s = density * vol.scatter_coefficient;
+        float sigma_t = sigma_a + sigma_s;
+        float sparse_cutoff = (vol.density_pad > 0.0f) ? vol.density_pad : 0.04f;
+        float scatter_keep = fminf(1.0f, fmaxf(0.0f, (sigma_s * base_step) / sparse_cutoff));
+        if (curand_uniform(rng) <= scatter_keep) {
             if (sigma_t <= 1e-8f) { t += base_step; steps++; continue; }
             float step = fminf(base_step, tau_max / sigma_t);
             step = fmaxf(step, min_step);
@@ -2247,12 +2566,13 @@ __device__ float3 raymarch_gas_volume(
             float shadow_trans = 1.0f;
             if (vol.shadow_steps > 0) {
                  int s_steps = max(1, vol.shadow_steps);
-                 float tau_hint = fmaxf(density, 0.0f) * (vol.absorption_coefficient + vol.scatter_coefficient) * (vol.step_size * (float)s_steps);
+                 float tau_hint = fmaxf(density, 0.0f) * (vol.absorption_coefficient + vol.scatter_coefficient) * volume_extent;
                  if (s_steps > 8) {
-                     float step_scale = fminf(1.0f, fmaxf(0.35f, tau_hint * 0.5f));
-                     s_steps = max(4, (int)ceilf((float)s_steps * step_scale));
+                     float step_scale = fminf(1.0f, fmaxf(0.25f, sqrtf(fmaxf(tau_hint, 0.0f))));
+                     s_steps = (int)ceilf((float)s_steps * step_scale);
+                     s_steps = max(3, min(s_steps, min(vol.shadow_steps, 16)));
                  }
-                 float shadow_step = vol.step_size * 2.0f; 
+                 float shadow_step = volume_extent / (float)max(1, s_steps);
                  float s_jitter = curand_uniform(rng);
                  float shadow_density_sum = 0.0f;
                  for(int ls=0; ls < s_steps; ++ls) {
@@ -2277,7 +2597,8 @@ __device__ float3 raymarch_gas_volume(
                      float albedo_lum = vol.scatter_color.x * 0.2126f + vol.scatter_color.y * 0.7152f + vol.scatter_color.z * 0.0722f;
                      phys_trans = beers * (1.0f - vol.scatter_multi * albedo_lum) + beers_soft * (vol.scatter_multi * albedo_lum);
                  }
-                 shadow_trans = 1.0f - vol.shadow_strength * (1.0f - phys_trans);
+                 float shadow_strength = fminf(fmaxf(vol.shadow_strength * 1.08f, 0.0f), 1.0f);
+                 shadow_trans = 1.0f - shadow_strength * (1.0f - phys_trans);
             }
             float3 sun_trans = gpu_get_transmittance(optixLaunchParams.world, world_pos, sun_dir);
             float3 sun_color = sun_trans * sun_intensity;
@@ -2287,14 +2608,18 @@ __device__ float3 raymarch_gas_volume(
             float powder = gpu_powder_effect(density, cos_theta);
             total_radiance = total_radiance * (1.0f + powder * 0.5f);
             
-            float3 ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, ambient_dir) * 0.15f * optixLaunchParams.world.nishita.atmosphere_intensity;
-            total_radiance += ambient;
+            float thin_scatter = scatter_keep * scatter_keep;
+            // Gated by volume_atmosphere_ambient (default OFF, Vulkan parity).
+            if (optixLaunchParams.world.volume_atmosphere_ambient != 0) {
+                float3 ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, ambient_dir) * (0.15f * thin_scatter) * optixLaunchParams.world.nishita.atmosphere_intensity;
+                total_radiance += ambient;
+            }
             
             float3 emission = make_float3(0.0f);
             if (vol.emission_mode == 1) { // Constant
                 emission = vol.emission_color * vol.emission_intensity * density;
             }
-            else if (vol.emission_mode == 2) { // Blackbody / Color Ramp
+            else if (vol.emission_mode >= 2) { // Blackbody / Color Ramp / Channel-driven
                 float temperature = density; 
                 if (vol.temperature_texture) {
                     temperature = tex3D<float>(vol.temperature_texture, tex_coord.x, tex_coord.y, tex_coord.z);
@@ -2304,17 +2629,21 @@ __device__ float3 raymarch_gas_volume(
                 float3 e_color; float kelvin; float t_ramp_val;
                 if (temperature > 20.0f) { // Likely physical Kelvin
                     kelvin = temperature * vol.temperature_scale;
-                    t_ramp_val = (vol.max_temperature > 20.0f) ? (temperature / vol.max_temperature) : (temperature / 6000.0f);
+                    float ramp_min = (vol.emission_pad > 20.0f) ? vol.emission_pad : 0.0f;
+                    float ramp_max = (vol.max_temperature > ramp_min + 1.0f) ? vol.max_temperature : 6000.0f;
+                    t_ramp_val = (temperature - ramp_min) / fmaxf(ramp_max - ramp_min, 1.0f);
                 } else { // Likely normalized 0-1
                     kelvin = (temperature * 3000.0f + 1000.0f) * vol.temperature_scale;
                     t_ramp_val = temperature;
                 }
-                if (vol.color_ramp_enabled) e_color = sample_color_ramp_gas(vol, t_ramp_val * vol.temperature_scale);
+                float ramp_t_clamped = fminf(fmaxf(t_ramp_val, 0.0f), 1.0f);
+                if (vol.color_ramp_enabled) e_color = sample_color_ramp_gas(vol, ramp_t_clamped);
                 else e_color = blackbody_to_rgb(kelvin);
-                emission = e_color * density * vol.blackbody_intensity;
+                float emit_gate = (vol.color_ramp_enabled && temperature > 20.0f && t_ramp_val <= 0.0f) ? 0.0f : 1.0f;
+                emission = clamp_volume_radiance(e_color * density * vol.blackbody_intensity * emit_gate, 64.0f);
             }
 
-            float3 ms_boost = make_float3(1.0f) + vol.scatter_color * vol.scatter_multi * 2.0f;
+            float3 ms_boost = make_float3(1.0f) + vol.scatter_color * vol.scatter_multi * (2.0f * thin_scatter);
             float3 source = (vol.scatter_color * total_radiance * sigma_s * ms_boost + emission);
             
             // CPU/Vulkan parity integration
@@ -2472,6 +2801,13 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
                     float world_t_enter = t_enter / dir_len;
                     if (world_t_enter < 0.0f) world_t_enter = 0.0f;
 
+                    // Bias iso-surface (source_type==4) volumes slightly back so a
+                    // COINCIDENT fog volume (e.g. whitewater foam sharing the fluid
+                    // domain AABB) is marched FIRST — its scattering is added before
+                    // the surface redirect breaks the volume loop. Without this the
+                    // foam only contributes a shadow on the water (no white showing).
+                    if (vdb.source_type == 4) world_t_enter += 1e-3f;
+
                     sorted_indices[valid_count] = v;
                     entry_distances[valid_count] = world_t_enter;
                     valid_count++;
@@ -2493,6 +2829,9 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
             }
 
             // Step 3: Render in sorted order (front-to-back)
+            bool fluid_redirect = false;
+            float3 fluid_new_origin = make_float3(0.0f);
+            float3 fluid_new_dir = make_float3(0.0f);
             for (int i = 0; i < valid_count; ++i) {
                 const GpuVDBVolume& vdb = optixLaunchParams.vdb_volumes[sorted_indices[i]];
 
@@ -2501,6 +2840,8 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
                 if (bounce == 0 && max_dist > optixLaunchParams.clip_far) max_dist = optixLaunchParams.clip_far;
 
                 float vol_transmittance = 1.0f;
+                bool   surf_redirect = false;
+                float3 surf_o = make_float3(0.0f), surf_d = make_float3(0.0f), surf_tp = make_float3(1.0f);
                 float3 vol_color = raymarch_vdb_volume(
                     vdb,
                     ray.origin,
@@ -2509,11 +2850,30 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
                     sun_intensity,
                     vol_transmittance,
                     max_dist,
-                    rng
+                    rng,
+                    &surf_redirect, &surf_o, &surf_d, &surf_tp
                 );
 
-                // Accumulate volume contribution
+                // Accumulate volume contribution (reflection lobe for a fluid
+                // surface; participating-media colour otherwise).
                 color += throughput * vol_color;
+
+                // Fluid surface in front of the geometry hit: redirect the path
+                // along the refracted ray and continue the bounce (true through-
+                // water distortion). Only when the surface is actually the
+                // nearest thing — otherwise geometry in front would be skipped.
+                if (surf_redirect && entry_distances[i] <= (payload.hit ? payload.t : 1e16f)) {
+                    throughput *= surf_tp;
+                    fluid_new_origin = surf_o;
+                    fluid_new_dir = surf_d;
+                    fluid_redirect = true;
+                    if (bounce == 0) {
+                        if (vol_depth < 0.0f || entry_distances[i] < vol_depth)
+                            vol_depth = entry_distances[i];
+                    }
+                    break;  // stop processing further volumes this bounce
+                }
+
                 throughput *= vol_transmittance;
 
                 // NEW: Update depth for fogging calculation
@@ -2531,6 +2891,19 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
                 if (throughput.x < 0.001f && throughput.y < 0.001f && throughput.z < 0.001f) {
                     return color;
                 }
+            }
+
+            // Continue the path along the refracted ray: skip the geometry
+            // shading + remaining volume passes for this bounce and re-trace
+            // from the bent ray next iteration. This is what makes the
+            // background visibly refract through the water on OptiX.
+            if (fluid_redirect) {
+                if (throughput.x < 0.001f && throughput.y < 0.001f && throughput.z < 0.001f) {
+                    return color;
+                }
+                ray.origin = fluid_new_origin;
+                ray.direction = fluid_new_dir;
+                continue;
             }
         }
         // ═══════════════════════════════════════════════════════════

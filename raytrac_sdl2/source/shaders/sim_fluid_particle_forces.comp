@@ -1,0 +1,36 @@
+// sim_fluid_particle_forces.comp — gravity + container motion integration.
+// Velocities: 3 tightly-packed floats per particle (stride 12, NOT vec4/16).
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   particle_count;
+    float dt;
+    float gravity_x; float gravity_y; float gravity_z;
+    float container_velocity_x; float container_velocity_y; float container_velocity_z;
+    float max_velocity;
+} pc;
+
+layout(set = 0, binding = 0) buffer Velocities { float vel_data[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= pc.particle_count) return;
+
+    // Read velocity (3 floats, stride 12)
+    vec3 v = vec3(vel_data[id*3], vel_data[id*3+1], vel_data[id*3+2]);
+
+    v += vec3(pc.gravity_x, pc.gravity_y, pc.gravity_z) * pc.dt;
+    v += vec3(pc.container_velocity_x, pc.container_velocity_y, pc.container_velocity_z);
+
+    if (pc.max_velocity > 1e-6) {
+        float sp2 = dot(v,v);
+        if (sp2 > pc.max_velocity * pc.max_velocity)
+            v *= pc.max_velocity * inversesqrt(sp2);
+    }
+
+    // Write velocity (3 floats, stride 12)
+    vel_data[id*3]   = v.x;
+    vel_data[id*3+1] = v.y;
+    vel_data[id*3+2] = v.z;
+}

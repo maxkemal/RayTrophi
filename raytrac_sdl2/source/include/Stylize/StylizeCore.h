@@ -266,6 +266,39 @@ STYLIZE_HD inline SV3 preserveMaterialHue(const SV3& style_color, const SV3& mat
     return lerp3(style_color, hue_preserved, amount);
 }
 
+STYLIZE_HD inline SV3 dominantPigmentTint(const SV3& color, float amount) {
+    amount = saturate(amount);
+    const float mx = fmaxf(color.x, fmaxf(color.y, color.z));
+    const float mn = fminf(color.x, fminf(color.y, color.z));
+    const float chroma = saturate((mx - mn) / fmaxf(0.08f, mx));
+    if (amount <= 0.001f || chroma <= 0.001f) {
+        return color;
+    }
+
+    SV3 target = color;
+    const float lift = 0.025f * amount;
+    const float dom_boost = 1.0f + 0.16f * amount;
+    const float sub_pull = 1.0f - 0.18f * amount;
+    if (color.x >= color.y && color.x >= color.z) {
+        target.x = fminf(1.0f, color.x * dom_boost + lift);
+        target.y = color.y * sub_pull;
+        target.z = color.z * sub_pull;
+    } else if (color.y >= color.x && color.y >= color.z) {
+        target.x = color.x * sub_pull;
+        target.y = fminf(1.0f, color.y * dom_boost + lift);
+        target.z = color.z * sub_pull;
+    } else {
+        target.x = color.x * sub_pull;
+        target.y = color.y * sub_pull;
+        target.z = fminf(1.0f, color.z * dom_boost + lift);
+    }
+
+    const float src_luma = fmaxf(0.025f, luminance(color));
+    const float dst_luma = fmaxf(0.025f, luminance(target));
+    target = clamp01(target * clampf(src_luma / dst_luma, 0.72f, 1.28f));
+    return lerp3(color, target, amount * (0.35f + chroma * 0.65f));
+}
+
 STYLIZE_HD inline SV3 simplifyColor(const SV3& color, float amount) {
     amount = saturate(amount);
     const float levels = fmaxf(2.0f, 16.0f - amount * 12.0f);
@@ -752,39 +785,44 @@ STYLIZE_HD inline SV3 applyPostProcess(const SV3& input_color,
 
         if (profile.material.enabled && profile.material.brush_strength > 0.001f) {
             const float stroke = strokeField(x, y, aov, profile, frame_index);
-            const float brush_amount = profile.material.brush_strength * strength * edge_guard;
+            const float lit_luma = luminance(color);
+            const float shadow_boost = 1.0f + (1.0f - smoothstepf(0.08f, 0.48f, lit_luma)) * 0.22f;
+            const float highlight_thin = 1.0f - smoothstepf(0.62f, 0.96f, lit_luma) * 0.42f;
+            const float brush_amount = profile.material.brush_strength * strength * edge_guard * shadow_boost * highlight_thin;
             const float dry_mask = smoothstepf(0.12f, 0.62f, fabsf(stroke) + profile.material.dry_brush * 0.35f);
+            const SV3 paint_color = dominantPigmentTint(color, 0.42f + palette_influence * 0.18f);
             SV3 palette_tint = lerp3(profile.palette_shadow, profile.palette_highlight, saturate(albedo_luma + stroke * 0.28f));
             if (aov.hit) {
                 palette_tint = preserveMaterialHue(
                     palette_tint,
-                    base_albedo,
+                    paint_color,
                     profile.material.material_color_preservation);
             }
-            const SV3 stroke_tint = lerp3(base_albedo, palette_tint, palette_influence);
+            const SV3 stroke_tint = lerp3(paint_color, palette_tint, palette_influence * 0.18f);
             if (profile.material.wet_oil_model) {
                 const WetOilStroke oil = wetOilStrokeModel(x, y, aov, profile, frame_index, stroke);
                 const float oil_body = saturate(profile.material.oil_body);
                 const float paint_load = saturate(profile.material.paint_load);
                 const float pickup = saturate(profile.material.pickup_rate);
                 const float deposit = saturate(profile.material.deposit_rate);
-                const float wet_visibility = 0.85f + oil_body * 1.25f + paint_load * 0.45f;
-                const float wet_mask = saturate(brush_amount * wet_visibility * (0.14f + oil_body * 0.24f + oil.drag * 0.34f));
-                const float deposit_mask = saturate(brush_amount * paint_load * deposit * wet_visibility * (0.18f + oil.ridge * 0.34f));
-                const float bristle_mask = saturate(brush_amount * (0.22f + oil_body * 0.34f + profile.material.bristle_buildup * 0.22f));
-                const SV3 picked_color = lerp3(base_albedo, color, pickup * (0.35f + oil_body * 0.65f));
-                const SV3 carried_color = lerp3(picked_color, stroke_tint, saturate(deposit * paint_load));
-                const float body_luma = (oil.body - 0.5f) * (0.12f + oil_body * 0.18f);
-                const float bristle_luma = (stroke + oil.bristle) * (0.18f + oil_body * 0.24f);
-                SV3 material_stroke = clamp01(base_albedo * (1.0f + body_luma + bristle_luma));
-                material_stroke = lerp3(material_stroke, carried_color, saturate(palette_influence * 0.55f + deposit * 0.25f));
+                const float wet_visibility = 0.55f + oil_body * 0.62f + paint_load * 0.20f;
+                const float wet_mask = saturate(brush_amount * wet_visibility * (0.08f + oil_body * 0.12f + oil.drag * 0.18f));
+                const float deposit_mask = saturate(brush_amount * paint_load * deposit * wet_visibility * (0.05f + oil.ridge * 0.10f));
+                const float bristle_mask = saturate(brush_amount * (0.10f + oil_body * 0.12f + profile.material.bristle_buildup * 0.10f));
+                const SV3 picked_color = lerp3(color, paint_color, 0.28f + pickup * 0.22f);
+                const SV3 carried_color = lerp3(picked_color, stroke_tint, saturate(deposit * paint_load * palette_influence * 0.22f));
+                const float body_luma = (oil.body - 0.5f) * (0.045f + oil_body * 0.055f);
+                const float bristle_luma = (stroke + oil.bristle) * (0.055f + oil_body * 0.065f);
+                SV3 material_stroke = clamp01(paint_color * (1.0f + body_luma + bristle_luma));
+                material_stroke = lerp3(material_stroke, carried_color, saturate(palette_influence * 0.18f + deposit * 0.08f));
                 color = lerp3(color, material_stroke, wet_mask);
                 color = lerp3(color, carried_color, deposit_mask);
-                color = color * (1.0f + (stroke + oil.bristle) * bristle_mask);
-                color = lerp3(color, color + profile.palette_highlight * (0.035f + 0.035f * palette_influence), oil.ridge * brush_amount * oil_body);
-                color = lerp3(color, color * (0.92f - oil.ridge * 0.08f), profile.material.dry_brush * brush_amount * (1.0f - oil.drag));
+                color = color * (1.0f + (stroke + oil.bristle) * bristle_mask * 0.42f);
+                color = lerp3(color, color * (1.0f + 0.045f * oil.ridge), oil.ridge * brush_amount * oil_body * 0.35f);
+                color = lerp3(color, color * (0.985f - oil.ridge * 0.015f), profile.material.dry_brush * brush_amount * (1.0f - oil.drag) * 0.32f);
             } else {
-                color = color * (1.0f + stroke * brush_amount * 0.16f);
+                color = lerp3(color, clamp01(paint_color * (1.0f + stroke * 0.10f)), brush_amount * 0.18f);
+                color = color * (1.0f + stroke * brush_amount * 0.12f);
                 color = lerp3(color, stroke_tint, brush_amount * dry_mask * profile.material.dry_brush * 0.18f);
             }
         }

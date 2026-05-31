@@ -12,7 +12,10 @@
 
 /**
  * @file GasSimulator.h
- * @brief Gas/Smoke simulation engine with CPU and CUDA backends
+ * @brief [DEPRECATED] Gas/Smoke simulation engine with CPU and CUDA backends
+ * @note This legacy simulator engine is DEPRECATED. All modern gas/fluid solver logic
+ * is now implemented inside GridFluidSolver.h and ParticleSimulation.cpp.
+ * This class will be completely removed in a future version.
  * 
  * Features:
  * - Semi-Lagrangian advection for stable large timesteps
@@ -46,6 +49,7 @@ namespace FluidSim {
 // Forward declarations
 namespace openvdb { template<typename T> class Grid; }
 namespace Physics { class ForceFieldManager; }
+namespace RayTrophiSim { class SimulationForceFieldSnapshot; }
 
 namespace FluidSim {
 
@@ -59,8 +63,9 @@ enum class SimulationMode {
 };
 
 enum class SolverBackend {
-    CPU,        // Multi-threaded CPU solver
-    CUDA        // GPU-accelerated solver
+    CPU,            // Multi-threaded CPU solver
+    CUDA,           // GPU-accelerated solver
+    CPU_SparseVDB   // OpenVDB-based sparse CPU solver
 };
 
 enum class EmitterShape {
@@ -346,6 +351,11 @@ public:
         external_force_field_manager = manager;
     }
     
+    /// @brief Set shared simulation force-field snapshot
+    void setExternalForceFieldSnapshot(const RayTrophiSim::SimulationForceFieldSnapshot* snapshot) {
+        external_force_field_snapshot = snapshot;
+    }
+    
     /// @brief Get external force field manager
     const Physics::ForceFieldManager* getExternalForceFieldManager() const {
         return external_force_field_manager;
@@ -465,6 +475,7 @@ private:
    
     
     void stepCUDA(float dt, const Matrix4x4& world_matrix);
+    void stepSparseVDB(float dt, const Matrix4x4& world_matrix);
     void initCUDA();
     void freeCUDA();
     void clearGPU();  // Clear GPU buffers without reallocating
@@ -477,6 +488,7 @@ private:
     
     // External force fields (scene-level)
     const Physics::ForceFieldManager* external_force_field_manager = nullptr;
+    const RayTrophiSim::SimulationForceFieldSnapshot* external_force_field_snapshot = nullptr;
     
     // State
     int current_frame = 0;

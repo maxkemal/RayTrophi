@@ -1,10 +1,12 @@
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include "Paint/IPaintSurfaceAdapter.h"
 #include "Paint/PaintTextureSet.h"
 #include "Paint/PaintLayerStack.h"
+#include "SurfaceFlowField.h"
 
 struct SceneData;
 class Triangle;
@@ -121,14 +123,11 @@ private:
 
     struct WetFlowTriangleInfo {
         std::array<Vec2, 3> uvs{};
+        RayTrophiSim::SurfaceFlowSample flow;
         float min_u = 0.0f;
         float max_u = 0.0f;
         float min_v = 0.0f;
         float max_v = 0.0f;
-        float flow_x = 0.0f;
-        float flow_y = 0.0f;
-        float flow_length = 0.0f;
-        float slope = 0.0f;
     };
 
     struct WetFlowFieldCache {
@@ -137,6 +136,7 @@ private:
         int height = 0;
         int uv_set = 0;
         int lookup_resolution = 0;
+        uint64_t force_snapshot_version = 0;
         float max_slope = 0.0f;
         float max_flow_length = 0.0f;
         std::vector<WetFlowTriangleInfo> infos;

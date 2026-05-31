@@ -220,6 +220,7 @@ public:
     bool affects_particles = true;         ///< Affect particle systems
     bool affects_cloth = true;             ///< Affect cloth simulations
     bool affects_rigidbody = true;         ///< Affect rigid bodies
+    bool affects_fluid = true;             ///< Affect APIC liquid simulations
     
     // ─────────────────────────────────────────────────────────────────────────
     // Cached transform handle (for gizmo integration)

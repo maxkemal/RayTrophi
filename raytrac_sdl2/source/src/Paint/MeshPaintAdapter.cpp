@@ -5,6 +5,8 @@
 #include "Material.h"
 #include "MaterialManager.h"
 #include "PrincipledBSDF.h"
+#include "SurfaceFlowField.h"
+#include "SimulationWorld.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -77,6 +79,14 @@ CompactVec4 defaultChannelPixel(PaintChannel channel) {
             return CompactVec4(255, 255, 255, 255);
     }
     return CompactVec4(255, 255, 255, 255);
+}
+
+Vec3 triangleCentroid(const Triangle& tri) {
+    return (tri.getVertexPosition(0) + tri.getVertexPosition(1) + tri.getVertexPosition(2)) / 3.0f;
+}
+
+bool isFiniteVec3(const Vec3& v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
 std::shared_ptr<Texture> createBlankTexture(const std::string& name, int resolution, TextureType type) {
@@ -562,88 +572,6 @@ void computeBrushAxisCorrection(float world_per_u, float world_per_v,
     if (ky < kMinAnisotropy) ky = kMinAnisotropy;
     out_kx = kx;
     out_ky = ky;
-}
-
-bool computeTriangleDownhillPixelFlow(const Triangle& tri, int uv_set, int width, int height,
-                                      float& out_flow_x, float& out_flow_y, float& out_slope) {
-    out_flow_x = 0.0f;
-    out_flow_y = 0.0f;
-    out_slope = 0.0f;
-    if (width <= 1 || height <= 1) {
-        return false;
-    }
-
-    Vec2 uv0, uv1, uv2;
-    if (uv_set > 0 && static_cast<size_t>(uv_set) < tri.getUVSetCount()) {
-        std::tie(uv0, uv1, uv2) = tri.getUVSetCoordinates(static_cast<size_t>(uv_set));
-    } else {
-        std::tie(uv0, uv1, uv2) = tri.getUVCoordinates();
-    }
-
-    const Vec3 p0 = tri.getVertexPosition(0);
-    const Vec3 e1 = tri.getVertexPosition(1) - p0;
-    const Vec3 e2 = tri.getVertexPosition(2) - p0;
-    const Vec3 raw_normal = e1.cross(e2);
-    const float raw_len_sq = raw_normal.length_squared();
-    // Vec3::normalize()'ın 1e-6 eşiği alt-mm üçgenleri sıfırlıyor; yüz gibi
-    // yoğun mesh'lerde geçerli kalmak için kendi normalize'ımızı yapıyoruz.
-    if (raw_len_sq <= 1e-20f) {
-        return false;
-    }
-    const float raw_len = std::sqrt(raw_len_sq);
-    const Vec3 geom_normal(raw_normal.x / raw_len, raw_normal.y / raw_len, raw_normal.z / raw_len);
-
-    const float du1 = uv1.u - uv0.u;
-    const float dv1 = uv1.v - uv0.v;
-    const float du2 = uv2.u - uv0.u;
-    const float dv2 = uv2.v - uv0.v;
-    const float det = du1 * dv2 - du2 * dv1;
-    if (std::abs(det) < 1e-10f) {
-        return false;
-    }
-
-    const float inv = 1.0f / det;
-    const Vec3 dPdU = (e1 * dv2 - e2 * dv1) * inv;
-    const Vec3 dPdV = (e2 * du1 - e1 * du2) * inv;
-
-    const Vec3 gravity(0.0f, -1.0f, 0.0f);
-    const Vec3 downhill_tangent = gravity - geom_normal * gravity.dot(geom_normal);
-    const float tangent_len = downhill_tangent.length();
-    if (tangent_len <= 1e-5f) {
-        return false;
-    }
-    const Vec3 downhill_dir = downhill_tangent / tangent_len;
-    out_slope = tangent_len;
-
-    const float a = dPdU.dot(dPdU);
-    const float b = dPdU.dot(dPdV);
-    const float c = dPdV.dot(dPdV);
-    const float rhs_u = dPdU.dot(downhill_dir);
-    const float rhs_v = dPdV.dot(downhill_dir);
-    const float metric_det = a * c - b * b;
-    if (std::abs(metric_det) < 1e-10f) {
-        return false;
-    }
-
-    float flow_u = (c * rhs_u - b * rhs_v) / metric_det;
-    float flow_v = (a * rhs_v - b * rhs_u) / metric_det;
-    const float flow_len = std::sqrt(flow_u * flow_u + flow_v * flow_v);
-    if (flow_len <= 1e-8f) {
-        return false;
-    }
-    flow_u /= flow_len;
-    flow_v /= flow_len;
-
-    const float pixel_flow_x = flow_u * static_cast<float>(width - 1);
-    const float pixel_flow_y = -flow_v * static_cast<float>(height - 1);
-    const float pixel_flow_len = std::sqrt(pixel_flow_x * pixel_flow_x + pixel_flow_y * pixel_flow_y);
-    if (pixel_flow_len <= 1e-6f) {
-        return false;
-    }
-
-    out_flow_x = pixel_flow_x;
-    out_flow_y = pixel_flow_y;
-    return std::isfinite(out_flow_x) && std::isfinite(out_flow_y);
 }
 
 std::array<Vec2, 3> getTriangleUvArray(const Triangle& tri, int uv_set) {
@@ -1245,24 +1173,50 @@ void MeshPaintAdapter::rebuildWetFlowField(int width, int height) {
         }
     }
 
+    const RayTrophiSim::SimulationForceFieldSnapshot* force_snapshot = nullptr;
+    if (scene_) {
+        force_snapshot = &scene_->getSimulationWorld().getForceFieldSnapshot();
+        if (force_snapshot->empty()) {
+            force_snapshot = nullptr;
+        }
+    }
+    cache.force_snapshot_version = force_snapshot ? force_snapshot->version() : 0;
+
     cache.infos.reserve(candidates.size() + 1);
     auto add_flow_info = [&](const std::shared_ptr<Triangle>& tri) {
         if (!tri || tri->getNodeName() != getNodeName() || tri->getMaterialID() != getMaterialID()) {
             return;
         }
 
+        Vec3 driving_acceleration(0.0f, -1.0f, 0.0f);
+        if (force_snapshot) {
+            const Vec3 field_force = force_snapshot->evaluateAt(
+                triangleCentroid(*tri),
+                0.0f,
+                Vec3(0.0f, 0.0f, 0.0f),
+                RayTrophiSim::SimulationSystemKind::WetSurface);
+            if (isFiniteVec3(field_force)) {
+                driving_acceleration = driving_acceleration + field_force * (1.0f / 9.81f);
+            }
+        }
+
         WetFlowTriangleInfo info;
-        if (!computeTriangleDownhillPixelFlow(*tri, cache.uv_set, width, height, info.flow_x, info.flow_y, info.slope)) {
+        if (!RayTrophiSim::SurfaceFlowField::computeTrianglePixelFlow(
+                *tri,
+                cache.uv_set,
+                width,
+                height,
+                info.flow,
+                driving_acceleration)) {
             return;
         }
-        info.flow_length = std::sqrt(info.flow_x * info.flow_x + info.flow_y * info.flow_y);
         info.uvs = getTriangleUvArray(*tri, cache.uv_set);
         info.min_u = std::min({ info.uvs[0].u, info.uvs[1].u, info.uvs[2].u });
         info.max_u = std::max({ info.uvs[0].u, info.uvs[1].u, info.uvs[2].u });
         info.min_v = std::min({ info.uvs[0].v, info.uvs[1].v, info.uvs[2].v });
         info.max_v = std::max({ info.uvs[0].v, info.uvs[1].v, info.uvs[2].v });
-        cache.max_slope = std::max(cache.max_slope, info.slope);
-        cache.max_flow_length = std::max(cache.max_flow_length, info.flow_length);
+        cache.max_slope = std::max(cache.max_slope, info.flow.slope);
+        cache.max_flow_length = std::max(cache.max_flow_length, info.flow.flow_length);
         cache.infos.push_back(info);
     };
 
@@ -2060,10 +2014,20 @@ bool MeshPaintAdapter::tickWetPaint(const BrushSettings& brush, float dt,
     const float terminal_softness = std::clamp(brush.wet_terminal_softness, 0.1f, 1.0f);
 
     const std::string target_key = getNodeName() + "#" + std::to_string(getMaterialID());
+    uint64_t force_snapshot_version = 0;
+    if (scene_) {
+        scene_->refreshSimulationForceFieldSnapshot();
+        const auto& force_snapshot = scene_->getSimulationWorld().getForceFieldSnapshot();
+        if (!force_snapshot.empty()) {
+            force_snapshot_version = force_snapshot.version();
+        }
+    }
+
     if (wet_flow_field_cache_.target_key != target_key ||
         wet_flow_field_cache_.width != state.width ||
         wet_flow_field_cache_.height != state.height ||
-        wet_flow_field_cache_.uv_set != getTarget().uv_set) {
+        wet_flow_field_cache_.uv_set != getTarget().uv_set ||
+        wet_flow_field_cache_.force_snapshot_version != force_snapshot_version) {
         rebuildWetFlowField(state.width, state.height);
     }
 
@@ -2192,9 +2156,9 @@ bool MeshPaintAdapter::tickWetPaint(const BrushSettings& brush, float dt,
                 const int matched_index = findWetFlowTriangleIndex(pixel_uv, last_flow_info_index);
                 if (matched_index >= 0) {
                     const WetFlowTriangleInfo& info = flow_cache.infos[matched_index];
-                    downhill_px_x = info.flow_x;
-                    downhill_px_y = info.flow_y;
-                    local_slope = info.slope;
+                    downhill_px_x = info.flow.flow_x;
+                    downhill_px_y = info.flow.flow_y;
+                    local_slope = info.flow.slope;
                     pixel_has_downhill = true;
                     last_flow_info_index = matched_index;
                 }

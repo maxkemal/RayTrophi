@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -297,13 +297,11 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
     const bool skyCloudVolumeChanged = world_data && ensureInternalSkyCloudVolume(scene, *world_data);
     if (skyCloudVolumeChanged) {
         g_geometry_dirty = true;
+        g_vulkan_rebuild_pending = true;
+        g_optix_rebuild_pending = true;
         g_gas_volumes_dirty = true;
     }
     if (!backend) return;
-
-    if (skyCloudVolumeChanged) {
-        backend->updateGeometry(scene.world.objects);
-    }
 
     // 1. Prepare VDB Volumes (Unified for VDB and Unified-Path Gas)
     std::vector<GpuVDBVolume> gpu_vdb_volumes;
@@ -316,6 +314,16 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         GpuVDBVolume gv = {};
         gv.vdb_id = vdb->getVDBVolumeID();
         const bool proceduralVolume = vdb->isProceduralVolume();
+        
+        // PROACTIVE CUDA UPLOAD ON BACKEND SWITCH:
+        // If we are in OptiX/CUDA path, and the CUDA grid is not yet uploaded,
+        // but the host grid exists (e.g. loaded under Vulkan mode), trigger CUDA upload.
+        if (render_settings.use_optix && g_hasCUDA && !proceduralVolume) {
+            if (!mgr.getGPUGrid(gv.vdb_id) && mgr.getHostGrid(gv.vdb_id)) {
+                mgr.uploadToGPU(gv.vdb_id, true);
+            }
+        }
+
         gv.density_grid = proceduralVolume ? nullptr : mgr.getGPUGrid(gv.vdb_id);
         gv.temperature_grid = proceduralVolume ? nullptr : mgr.getGPUTemperatureGrid(gv.vdb_id);
 
@@ -340,7 +348,27 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         gv.pivot_offset[0] = 0.0f;
         gv.pivot_offset[1] = 0.0f;
         gv.pivot_offset[2] = 0.0f;
-        gv.source_type = proceduralVolume ? 3 : 0;
+        // source_type encoding: 0 = NanoVDB/default, 3 = procedural cloud,
+        // 4 = fluid surface SDF (isosurface raymarch + refraction in shaders).
+        // The isosurface route also rides the NanoVDB density path (its
+        // density channel is the SDF proxy band), so vdb_grid_address etc.
+        // remain valid — the shader picks the branch from source_type.
+        if (vdb->render_as_isosurface) {
+            gv.source_type = 4;
+        } else {
+            gv.source_type = proceduralVolume ? 3 : 0;
+        }
+        gv.ior = (vdb->render_isosurface_ior > 1.0f) ? vdb->render_isosurface_ior : 1.33f;
+        gv.surface_roughness = (vdb->render_isosurface_roughness > 0.0f)
+            ? ((vdb->render_isosurface_roughness < 1.0f) ? vdb->render_isosurface_roughness : 1.0f)
+            : 0.0f;
+        gv.surface_foam = (vdb->render_isosurface_foam > 0.0f)
+            ? ((vdb->render_isosurface_foam < 1.0f) ? vdb->render_isosurface_foam : 1.0f)
+            : 0.0f;
+        gv.foam_color = make_float3(vdb->render_isosurface_foam_color.x,
+                                    vdb->render_isosurface_foam_color.y,
+                                    vdb->render_isosurface_foam_color.z);
+        gv.foam_opacity = vdb->render_isosurface_foam_opacity;
         gv.cloud_coverage = 1.0f;
         gv.cloud_detail = 1.0f;
         gv.cloud_erosion = 0.5f;
@@ -377,6 +405,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.density_multiplier = gs.density_multiplier * vdb->density_scale;
             gv.density_remap_low = gs.density_remap_low;
             gv.density_remap_high = gs.density_remap_high;
+            gv.density_pad = gs.density_pad;
             gv.scatter_color = make_float3(gs.scatter_color_r, gs.scatter_color_g, gs.scatter_color_b);
             gv.scatter_coefficient = gs.scatter_coefficient;
             gv.scatter_anisotropy = gs.scatter_anisotropy;
@@ -405,8 +434,8 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
                 gv.ramp_colors[i] = make_float3(gs.ramp_colors_r[i], gs.ramp_colors_g[i], gs.ramp_colors_b[i]);
             }
 
-            // Temperature fallback
-            if (!gv.temperature_grid && gv.density_grid && gs.emission_mode == 2) { // 2 = Blackbody
+            // Temperature fallback for live/domain VDBs that only carry density.
+            if (!gv.temperature_grid && gv.density_grid && gs.emission_mode >= 2) {
                 gv.temperature_grid = gv.density_grid;
             }
         } else {
@@ -429,6 +458,16 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
 
         GpuVDBVolume gv = {};
         gv.vdb_id = gas->live_vdb_id;
+
+        // PROACTIVE CUDA UPLOAD ON BACKEND SWITCH:
+        // If we are in OptiX/CUDA path, and the CUDA grid is not yet uploaded,
+        // but the host grid exists (e.g. loaded under Vulkan mode), trigger CUDA upload.
+        if (render_settings.use_optix && g_hasCUDA) {
+            if (!mgr.getGPUGrid(gv.vdb_id) && mgr.getHostGrid(gv.vdb_id)) {
+                mgr.uploadToGPU(gv.vdb_id, true);
+            }
+        }
+
         gv.density_grid = mgr.getGPUGrid(gv.vdb_id);
         gv.temperature_grid = mgr.getGPUTemperatureGrid(gv.vdb_id);
 
@@ -463,6 +502,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.density_multiplier = shader->density.multiplier;
             gv.density_remap_low = shader->density.remap_low;
             gv.density_remap_high = shader->density.remap_high;
+            gv.density_pad = shader->density.cutoff_threshold;
             gv.scatter_color = make_float3(shader->scattering.color.x, shader->scattering.color.y, shader->scattering.color.z);
             gv.scatter_coefficient = shader->scattering.coefficient;
             gv.scatter_anisotropy = shader->scattering.anisotropy;
@@ -481,7 +521,9 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.shadow_steps = shader->quality.shadow_steps;
             gv.shadow_strength = shader->quality.shadow_strength;
             gv.voxel_size = gas->getSettings().voxel_size;
-            gv.max_temperature = gas->getSettings().max_temperature;
+            const float ambientKelvin = gas->getSettings().ambient_temperature;
+            gv.emission_pad = ambientKelvin + shader->emission.temperature_min;
+            gv.max_temperature = ambientKelvin + (std::max)(shader->emission.temperature_max, shader->emission.temperature_min + 1.0f);
 
             // Color Ramp
             gv.color_ramp_enabled = shader->emission.color_ramp.enabled ? 1 : 0;
@@ -497,7 +539,8 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
 
             if (!gv.temperature_grid && gv.density_grid &&
                 (shader->emission.mode == VolumeEmissionMode::Blackbody ||
-                 shader->emission.mode == VolumeEmissionMode::ChannelDriven)) {
+                 shader->emission.mode == VolumeEmissionMode::ChannelDriven ||
+                 shader->emission.color_ramp.enabled)) {
                 gv.temperature_grid = gv.density_grid;
             }
         }
@@ -535,6 +578,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.density_multiplier = shader->density.multiplier;
             gv.density_remap_low = shader->density.remap_low;
             gv.density_remap_high = shader->density.remap_high;
+            gv.density_pad = shader->density.cutoff_threshold;
             gv.scatter_color = make_float3(shader->scattering.color.x, shader->scattering.color.y, shader->scattering.color.z);
             gv.scatter_coefficient = shader->scattering.coefficient;
             gv.absorption_color = make_float3(shader->absorption.color.x, shader->absorption.color.y, shader->absorption.color.z);
@@ -551,7 +595,9 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.max_steps = shader->quality.max_steps;
             gv.shadow_strength = shader->quality.shadow_strength;
             gv.shadow_steps = shader->quality.shadow_steps;
-            gv.max_temperature = gas->getSettings().max_temperature;
+            const float ambientKelvin = gas->getSettings().ambient_temperature;
+            gv.emission_pad = ambientKelvin + shader->emission.temperature_min;
+            gv.max_temperature = ambientKelvin + (std::max)(shader->emission.temperature_max, shader->emission.temperature_min + 1.0f);
 
             // Color Ramp (Legacy)
             gv.color_ramp_enabled = shader->emission.color_ramp.enabled ? 1 : 0;

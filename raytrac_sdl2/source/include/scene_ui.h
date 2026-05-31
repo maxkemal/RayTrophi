@@ -100,6 +100,9 @@ struct UIContext {
     int animation_preview_height = 0;
     SDL_Texture* animation_preview_texture = nullptr;
     bool show_animation_preview = false;
+    // Particle viewport display mode: 0=Solid (Vulkan billboards), 1=Debug (ImGui
+    // overlay dots, drawn on top), 2=Render (path-traced; previews as Solid for now).
+    int particle_display_mode = 0;
     bool is_animation_mode = false; // NEW: For Unified Render Window
     struct SDL_Texture* ray_texture; // Forward decl or void* if header dependency issues, but SDL.h is included in Renderer.h
     
@@ -126,7 +129,7 @@ public:
     bool show_terrain_graph = false;  // Terrain node editor panel
     bool show_anim_graph = false;     // Animation node editor panel
     bool show_volumetric_tab = true;  // Unified Volumetrics tab (VDB + Gas)
-    bool show_forcefield_tab = true;   // Force Field tab (Default open)
+    bool show_forcefield_tab = true;   // Simulation tab (Default open)
     bool show_world_tab = true;        // World & Sky tab (Default open)
     bool show_stylize_tab = true;      // Stylize art-direction layer
     bool show_hair_tab = true;         // Hair & Fur tab (Default open)
@@ -800,6 +803,10 @@ private:
     bool drawOverlays(UIContext& ctx);
     void drawLightGizmos(UIContext& ctx, bool& gizmo_hit);
     void drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit);
+    void drawParticleDebugOverlay(UIContext& ctx);
+    // Build camera-facing billboards from all visible particle systems and upload
+    // them to the Vulkan viewport backend for real (depth-tested) solid-mode render.
+    void uploadParticleBillboards(UIContext& ctx);
     void drawSelectionGizmos(UIContext& ctx);
     void drawOverlayGrid(UIContext& ctx);
     void drawFocusIndicator(UIContext& ctx);  // Split-prism focus aid

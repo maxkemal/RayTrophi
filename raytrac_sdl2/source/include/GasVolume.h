@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -12,7 +12,10 @@
 
 /**
  * @file GasVolume.h
- * @brief Gas/Smoke volume scene object for RayTrophi
+ * @brief [DEPRECATED] Gas/Smoke volume scene object for RayTrophi
+ * @note This legacy class is DEPRECATED. All modern gas/fluid simulations
+ * are handled by the new unified Simulation Grid Domains under ParticleSimulation.h.
+ * This class will be completely removed in a future version.
  * 
  * This class wraps GasSimulator and integrates it with the scene system,
  * providing transform, rendering, and serialization support.

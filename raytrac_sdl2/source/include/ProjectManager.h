@@ -173,6 +173,10 @@ private:
     // Serialize Force Fields
     nlohmann::json serializeForceFields(const Physics::ForceFieldManager& ffm);
     void deserializeForceFields(const nlohmann::json& j, SceneData& scene);
+
+    // Serialize particle simulation descriptors
+    nlohmann::json serializeParticleSimulation(const SceneData& scene);
+    void deserializeParticleSimulation(const nlohmann::json& j, SceneData& scene);
     
     // Temporary storage for package contents during editing
     struct PackageFile {

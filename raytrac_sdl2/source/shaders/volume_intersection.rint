@@ -12,9 +12,67 @@
 
 #version 460
 #extension GL_EXT_ray_tracing : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 // Hit attributes — tNear and tFar passed to closest-hit for ray marching range
 hitAttributeEXT vec2 volumeHitAttrib; // .x = tNear, .y = tFar
+
+struct VkVolumeInstance {
+    float transform[12];
+    vec3  aabb_min;
+    vec3  aabb_max;
+    float density_multiplier;
+    float density_remap_low;
+    float density_remap_high;
+    float noise_scale;
+    vec3  scatter_color;
+    float scatter_coefficient;
+    float scatter_anisotropy;
+    float scatter_anisotropy_back;
+    float scatter_lobe_mix;
+    float scatter_multi;
+    vec3  absorption_color;
+    float absorption_coefficient;
+    vec3  emission_color;
+    float emission_intensity;
+    float step_size;
+    int   max_steps;
+    int   shadow_steps;
+    float shadow_strength;
+    int   volume_type;
+    int   is_active;
+    float voxel_size;
+    int   _pad0;
+    float inv_transform[12];
+    uint64_t vdb_grid_address;
+    uint64_t vdb_temp_address;
+    float    _reserved[2];
+    int   emission_mode;
+    float temperature_scale;
+    float blackbody_intensity;
+    float max_temperature;
+    int   color_ramp_enabled;
+    int   ramp_stop_count;
+    int   _ramp_pad[2];
+    float ramp_positions[8];
+    float ramp_colors_r[8];
+    float ramp_colors_g[8];
+    float ramp_colors_b[8];
+    float pivot_offset[3];
+    int   source_type;
+    float cloud_coverage;
+    float cloud_detail;
+    float cloud_erosion;
+    float cloud_base_scale;
+    float cloud_edge_fade;
+    float cloud_offset_x;
+    float cloud_offset_z;
+    float cloud_seed;
+    float _ext_reserved[12];
+};
+
+layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
 
 void main() {
     // AABB is implicitly defined by the procedural geometry bounds
@@ -36,7 +94,8 @@ void main() {
     vec3 tSmaller = min(t0s, t1s);
     vec3 tLarger  = max(t0s, t1s);
     
-    float tNear = max(max(tSmaller.x, tSmaller.y), tSmaller.z);
+    float rawTNear = max(max(tSmaller.x, tSmaller.y), tSmaller.z);
+    float tNear = rawTNear;
     float tFar  = min(min(tLarger.x,  tLarger.y),  tLarger.z);
     
     // Clamp to valid ray range
@@ -46,8 +105,31 @@ void main() {
     // Report hit if we have a valid intersection interval
     if (tNear < tFar && tFar > 0.0) {
         volumeHitAttrib = vec2(tNear, tFar);
-        // Report the near intersection point so that it participates in 
-        // closest-hit ordering with other geometry (triangles, etc.)
-        reportIntersectionEXT(tNear, 0u); // hitKind = 0 (volume type)
+        float reportT = tNear;
+
+        // Internal Nishita cloud can contain the camera. Reporting its entry
+        // at ray tmin lets the sky volume win closest-hit ordering and skip
+        // smaller domain volumes inside it. Only push that procedural source
+        // toward its exit surface; normal domain volumes keep near hits.
+        uint volIdx = gl_InstanceCustomIndexEXT;
+        bool proceduralSkyCloud = volumes.v[volIdx].source_type == 3 ||
+                                  volumes.v[volIdx].volume_type == 3;
+        if (proceduralSkyCloud && rawTNear <= gl_RayTminEXT) {
+            float exitBias = max(0.001, 0.0001 * max(tFar, 1.0));
+            reportT = max(tNear, tFar - exitBias);
+        }
+
+        // Bias iso-surface (source_type==4) volumes slightly back so a COINCIDENT
+        // fog volume (whitewater foam sharing the fluid domain AABB) is hit and
+        // marched FIRST — its white scattering is added before the surface
+        // refraction redirect. Without this the foam only casts a shadow on the
+        // water and never shows. The iso march range (volumeHitAttrib) is the
+        // unbiased tNear/tFar, so the surface still renders at the right place.
+        if (volumes.v[volIdx].source_type == 4) {
+            float isoBias = max(0.001, 0.0001 * max(tFar, 1.0));
+            reportT = tNear + isoBias;
+        }
+
+        reportIntersectionEXT(reportT, 0u); // hitKind = 0 (volume type)
     }
 }

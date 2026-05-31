@@ -84,7 +84,7 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     // ═══════════════════════════ RESERVED (24 bytes) ════════════════════════
     uint64_t vdb_grid_address;   // NanoVDB density grid device address
     uint64_t vdb_temp_address;   // NanoVDB temperature grid device address (fire/blackbody)
-    float    _reserved[2];       // padding
+    float    _reserved[2];       // [0] density cutoff, [1] reserved
 
     // ═══════════════════════════ EMISSION EXTENSION (256 bytes) ═════════════
     // Blackbody / color-ramp emission — matches GpuVDBVolume fields.
@@ -92,7 +92,7 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     int   emission_mode;
     float temperature_scale;      // temperature multiplier for blackbody
     float blackbody_intensity;    // emission strength for blackbody mode
-    float max_temperature;        // reference max temperature (unused in shader, kept for parity)
+    float max_temperature;        // reference max temperature
     int   color_ramp_enabled;     // 1 = use color ramp instead of pure blackbody
     int   ramp_stop_count;        // active stops in ramp (0..8)
     int   _ramp_pad[2];           // alignment
@@ -110,7 +110,10 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     float cloud_offset_x;
     float cloud_offset_z;
     float cloud_seed;
-    float _ext_reserved[12];      // padding to reach 512 total bytes
+    // _ext_reserved[0] = isosurface IOR, [1] = isosurface roughness,
+    // [2] = isosurface foam strength (source_type==4 fluid surface). The rest
+    // is padding to 512 total bytes.
+    float _ext_reserved[12];
 };
 
 // Compile-time size check (512 bytes = 8 cache lines)

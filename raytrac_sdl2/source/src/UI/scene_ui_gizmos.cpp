@@ -1,4 +1,4 @@
-﻿// ===============================================================================
+// ===============================================================================
 // SCENE UI - GIZMOS & TRANSFORM
 // ===============================================================================
 // This file handles 3D Gizmos (Move/Rotate/Scale), Bounding Boxes, and overlays.
@@ -12,6 +12,7 @@
 #include "imgui.h"
 #include "ImGuizmo.h"
 #include "scene_data.h"
+#include "ParticleSimulation.h"
 #include "ProjectManager.h"
 #include "VDBVolumeManager.h"
 #include "GasVolume.h"  // For gas simulation gizmos
@@ -22,7 +23,9 @@
 #include <Backend/OptixBackend.h>
 #include <array>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <unordered_map>
 #include <cstdint>
 
@@ -62,6 +65,812 @@ void updateGizmoObjectTransformOnActiveBackends(UIContext& ctx, const std::strin
         }
     }
 }
+}
+
+void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
+    auto particles = ctx.scene.getParticleSimulationSystem();
+    if (!ctx.scene.camera || !viewport_settings.show_gizmos) {
+        return;
+    }
+    if (particles) {
+        ctx.scene.pruneInvalidParticleObjectBindings();
+    }
+
+    const Camera& cam = *ctx.scene.camera;
+    ImGuiIO& io = ImGui::GetIO();
+    const float screen_w = io.DisplaySize.x;
+    const float screen_h = io.DisplaySize.y;
+    const float aspect_ratio = (image_height > 0)
+        ? (static_cast<float>(image_width) / static_cast<float>(image_height))
+        : (screen_w / std::max(1.0f, screen_h));
+
+    const Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
+    const Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
+    const Vec3 cam_up = cam_right.cross(cam_forward).normalize();
+    const float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
+    const float tan_half_fov = tanf(fov_rad * 0.5f);
+
+    auto projectPoint = [&](const Vec3& point, ImVec2& out, float& depth) -> bool {
+        const Vec3 to_pt = point - cam.lookfrom;
+        depth = to_pt.dot(cam_forward);
+        if (depth <= 0.01f) {
+            return false;
+        }
+
+        const float local_x = to_pt.dot(cam_right);
+        const float local_y = to_pt.dot(cam_up);
+        const float half_h = depth * tan_half_fov;
+        const float half_w = half_h * aspect_ratio;
+        if (fabsf(half_w) <= 1e-6f || fabsf(half_h) <= 1e-6f) {
+            return false;
+        }
+
+        out.x = ((local_x / half_w) * 0.5f + 0.5f) * screen_w;
+        out.y = (0.5f - (local_y / half_h) * 0.5f) * screen_h;
+        return out.x >= -32.0f && out.x <= screen_w + 32.0f &&
+               out.y >= -32.0f && out.y <= screen_h + 32.0f;
+    };
+
+    ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
+
+    auto selectedSourceName = [&]() -> std::string {
+        if (ctx.selection.selected.type == SelectableType::Object &&
+            ctx.selection.selected.object &&
+            !ctx.selection.selected.object->getNodeName().empty()) {
+            return ctx.selection.selected.object->getNodeName();
+        }
+        if (ctx.selection.selected.type == SelectableType::ForceField &&
+            ctx.selection.selected.force_field) {
+            return ctx.selection.selected.force_field->name;
+        }
+        return std::string();
+    };
+
+    const std::string selected_source_name = selectedSourceName();
+    const int selected_domain_index =
+        (ctx.selection.selected.type == SelectableType::SimulationDomain &&
+         ctx.selection.selected.particle_system_index == ctx.scene.active_particle_system_index)
+            ? ctx.selection.selected.simulation_domain_index
+            : -1;
+
+    auto drawAABB = [&](const Vec3& min_bound, const Vec3& max_bound, ImU32 color, float thickness) {
+        const Vec3 mn = Vec3::min(min_bound, max_bound);
+        const Vec3 mx = Vec3::max(min_bound, max_bound);
+        const Vec3 c[8] = {
+            Vec3(mn.x, mn.y, mn.z), Vec3(mx.x, mn.y, mn.z),
+            Vec3(mx.x, mx.y, mn.z), Vec3(mn.x, mx.y, mn.z),
+            Vec3(mn.x, mn.y, mx.z), Vec3(mx.x, mn.y, mx.z),
+            Vec3(mx.x, mx.y, mx.z), Vec3(mn.x, mx.y, mx.z)
+        };
+        const int edges[12][2] = {
+            {0, 1}, {1, 2}, {2, 3}, {3, 0},
+            {4, 5}, {5, 6}, {6, 7}, {7, 4},
+            {0, 4}, {1, 5}, {2, 6}, {3, 7}
+        };
+        for (const auto& edge : edges) {
+            ImVec2 a, b;
+            float da = 0.0f;
+            float db = 0.0f;
+            if (projectPoint(c[edge[0]], a, da) && projectPoint(c[edge[1]], b, db)) {
+                draw_list->AddLine(a, b, color, thickness);
+            }
+        }
+    };
+
+    auto resolveObjectOBBCorners = [&](const std::string& object_name, float padding, Vec3 corners[8]) -> bool {
+        if (object_name.empty()) {
+            return false;
+        }
+        RayTrophiSim::ParticleColliderOBB obb;
+        if (!ctx.scene.resolveObjectOBBForSimulation(object_name, obb)) {
+            return false;
+        }
+
+        const Vec3 pad(std::max(0.0f, padding));
+        const Vec3 local_min = obb.local_bounds_min - pad;
+        const Vec3 local_max = obb.local_bounds_max + pad;
+        const Vec3 local_corners[8] = {
+            Vec3(local_min.x, local_min.y, local_min.z),
+            Vec3(local_max.x, local_min.y, local_min.z),
+            Vec3(local_max.x, local_max.y, local_min.z),
+            Vec3(local_min.x, local_max.y, local_min.z),
+            Vec3(local_min.x, local_min.y, local_max.z),
+            Vec3(local_max.x, local_min.y, local_max.z),
+            Vec3(local_max.x, local_max.y, local_max.z),
+            Vec3(local_min.x, local_max.y, local_max.z)
+        };
+
+        for (int i = 0; i < 8; ++i) {
+            corners[i] = obb.local_to_world.transform_point(local_corners[i]);
+        }
+        return true;
+    };
+
+    auto drawOBB = [&](const Vec3 corners[8], ImU32 color, float thickness) {
+        const int edges[12][2] = {
+            {0, 1}, {1, 2}, {2, 3}, {3, 0},
+            {4, 5}, {5, 6}, {6, 7}, {7, 4},
+            {0, 4}, {1, 5}, {2, 6}, {3, 7}
+        };
+        for (const auto& edge : edges) {
+            ImVec2 a, b;
+            float da = 0.0f;
+            float db = 0.0f;
+            if (projectPoint(corners[edge[0]], a, da) && projectPoint(corners[edge[1]], b, db)) {
+                draw_list->AddLine(a, b, color, thickness);
+            }
+        }
+    };
+
+    auto drawPlaneY = [&](float y, ImU32 color, float thickness) {
+        const Vec3 center = ctx.scene.camera ? ctx.scene.camera->lookat : Vec3(0.0f);
+        const float size = 8.0f;
+        const Vec3 min_bound(center.x - size, y, center.z - size);
+        const Vec3 max_bound(center.x + size, y, center.z + size);
+        const Vec3 corners[4] = {
+            Vec3(min_bound.x, y, min_bound.z),
+            Vec3(max_bound.x, y, min_bound.z),
+            Vec3(max_bound.x, y, max_bound.z),
+            Vec3(min_bound.x, y, max_bound.z)
+        };
+        for (int i = 0; i < 4; ++i) {
+            ImVec2 a, b;
+            float da = 0.0f;
+            float db = 0.0f;
+            if (projectPoint(corners[i], a, da) && projectPoint(corners[(i + 1) % 4], b, db)) {
+                draw_list->AddLine(a, b, color, thickness);
+            }
+        }
+    };
+
+    auto drawSphere = [&](const Vec3& center, float radius, ImU32 color, float thickness) {
+        const float r = std::max(0.001f, radius);
+        constexpr int segments = 48;
+        auto drawCircle = [&](const Vec3& axis_a, const Vec3& axis_b) {
+            ImVec2 previous_screen;
+            float previous_depth = 0.0f;
+            bool has_previous = false;
+            for (int i = 0; i <= segments; ++i) {
+                const float t = (static_cast<float>(i) / static_cast<float>(segments)) * 6.28318530718f;
+                const Vec3 p = center + axis_a * (std::cos(t) * r) + axis_b * (std::sin(t) * r);
+                ImVec2 screen;
+                float depth = 0.0f;
+                if (projectPoint(p, screen, depth)) {
+                    if (has_previous) {
+                        draw_list->AddLine(previous_screen, screen, color, thickness);
+                    }
+                    previous_screen = screen;
+                    previous_depth = depth;
+                    has_previous = true;
+                } else {
+                    has_previous = false;
+                }
+            }
+            (void)previous_depth;
+        };
+        drawCircle(Vec3(1.0f, 0.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        drawCircle(Vec3(1.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 1.0f));
+        drawCircle(Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 0.0f, 1.0f));
+    };
+
+    auto drawCapsule = [&](const Vec3& a, const Vec3& b, float radius, ImU32 color, float thickness) {
+        const float r = std::max(0.001f, radius);
+        Vec3 axis = b - a;
+        const float axis_length = axis.length();
+        if (axis_length <= 1e-6f) {
+            drawSphere(a, r, color, thickness);
+            return;
+        }
+        axis = axis * (1.0f / axis_length);
+        Vec3 side = Vec3::cross(axis, Vec3(0.0f, 1.0f, 0.0f));
+        if (side.length() <= 1e-6f) {
+            side = Vec3::cross(axis, Vec3(1.0f, 0.0f, 0.0f));
+        }
+        side = side * (1.0f / std::max(side.length(), 1e-6f));
+        const Vec3 side_b = Vec3::cross(axis, side);
+
+        drawSphere(a, r, color, thickness);
+        drawSphere(b, r, color, thickness);
+        const Vec3 offsets[4] = { side * r, side * -r, side_b * r, side_b * -r };
+        for (const auto& offset : offsets) {
+            ImVec2 pa, pb;
+            float da = 0.0f;
+            float db = 0.0f;
+            if (projectPoint(a + offset, pa, da) && projectPoint(b + offset, pb, db)) {
+                draw_list->AddLine(pa, pb, color, thickness);
+            }
+        }
+    };
+
+    // Legacy FluidObject overlay is suppressed once the user has any new
+    // grid-domain Fluid in the active particle system — they've migrated and
+    // the leftover legacy gizmos (plus their particles ticked by the old
+    // FluidSimulationSystem) just create confusing duplicates. Faz 2 will
+    // remove the FluidObject path entirely; this is the bridge.
+    bool legacy_fluid_overlay_suppressed = false;
+    if (particles) {
+        for (const auto& gd : particles->gridDomains()) {
+            if (gd.enabled && gd.type == RayTrophiSim::SimulationDomainType::Fluid) {
+                legacy_fluid_overlay_suppressed = true;
+                break;
+            }
+        }
+        if (!legacy_fluid_overlay_suppressed) {
+            for (const auto& gd_state : particles->gridDomainStates()) {
+                if (gd_state.type == RayTrophiSim::SimulationDomainType::Fluid) {
+                    legacy_fluid_overlay_suppressed = true;
+                    break;
+                }
+            }
+        }
+    }
+    for (const auto& fluid : ctx.scene.fluid_objects) {
+        if (!fluid.visible || legacy_fluid_overlay_suppressed) {
+            continue;
+        }
+
+        const ImU32 box_color = fluid.enabled ? IM_COL32(70, 190, 255, 160) : IM_COL32(70, 120, 150, 80);
+        drawAABB(fluid.domain_min, fluid.domain_max, box_color, fluid.enabled ? 1.6f : 1.0f);
+        drawAABB(fluid.seed_min, fluid.seed_max, IM_COL32(80, 235, 255, 120), 1.1f);
+
+        if (fluid.particles.empty()) {
+            continue;
+        }
+
+        ImDrawList* fluid_draw_list = ImGui::GetForegroundDrawList();
+        const std::size_t count = fluid.particles.size();
+        const std::size_t stride = count > 6000 ? (count / 6000 + 1) : 1;
+        const float focal_px = screen_h / (2.0f * std::max(tan_half_fov, 1e-4f));
+        const float world_radius = std::max(0.006f, fluid.voxel_size * 0.22f);
+
+        for (std::size_t i = 0; i < count; i += stride) {
+            ImVec2 screen_pos;
+            float depth = 0.0f;
+            if (!projectPoint(fluid.particles.position[i], screen_pos, depth)) {
+                continue;
+            }
+            const float radius = std::clamp(world_radius * focal_px / std::max(depth, 0.05f), 1.1f, 18.0f);
+            fluid_draw_list->AddCircleFilled(screen_pos, radius * 1.8f, IM_COL32(40, 170, 255, 70), 12);
+            fluid_draw_list->AddCircleFilled(screen_pos, radius, IM_COL32(95, 225, 255, 210), 12);
+        }
+    }
+
+    if (!particles) {
+        return;
+    }
+
+    const auto& grid_domains = particles->gridDomains();
+    const auto& grid_domain_states = particles->gridDomainStates();
+    for (std::size_t domain_index = 0; domain_index < grid_domains.size(); ++domain_index) {
+        const auto& domain = grid_domains[domain_index];
+        if (!domain.enabled) {
+            continue;
+        }
+        const bool selected =
+            static_cast<int>(domain_index) == selected_domain_index ||
+            (!domain.source_name.empty() && domain.source_name == selected_source_name);
+        Vec3 min_bound = domain.bounds_min;
+        Vec3 max_bound = domain.bounds_max;
+        bool using_runtime_bounds = false;
+        if (domain.source_mode == RayTrophiSim::SimulationGridDomainSourceMode::ManualBox &&
+            !selected &&
+            domain_index < grid_domain_states.size() &&
+            grid_domain_states[domain_index].valid) {
+            min_bound = grid_domain_states[domain_index].bounds_min;
+            max_bound = grid_domain_states[domain_index].bounds_max;
+            using_runtime_bounds = true;
+        }
+        const Vec3 pad(using_runtime_bounds ? 0.0f : std::max(0.0f, domain.padding));
+        if (domain.source_mode == RayTrophiSim::SimulationGridDomainSourceMode::ObjectBounds &&
+            !domain.source_name.empty()) {
+            if (!ctx.scene.resolveObjectBoundsForSimulation(domain.source_name, min_bound, max_bound)) {
+                continue;
+            }
+        }
+        const Vec3 draw_min = Vec3::min(min_bound, max_bound);
+        const Vec3 draw_max = Vec3::max(min_bound, max_bound);
+        const Vec3 draw_extent = draw_max - draw_min;
+        if (!std::isfinite(draw_extent.x) || !std::isfinite(draw_extent.y) || !std::isfinite(draw_extent.z) ||
+            draw_extent.length() > 100000.0f) {
+            continue;
+        }
+        const ImU32 color = selected ? IM_COL32(130, 220, 255, 245) : IM_COL32(105, 190, 255, 170);
+        const float thickness = selected ? 2.2f : 1.35f;
+        if (domain.source_mode == RayTrophiSim::SimulationGridDomainSourceMode::ObjectBounds &&
+            !domain.source_name.empty()) {
+            Vec3 corners[8];
+            if (resolveObjectOBBCorners(domain.source_name, domain.padding, corners)) {
+                Vec3 corner_min(std::numeric_limits<float>::max());
+                Vec3 corner_max(-std::numeric_limits<float>::max());
+                bool valid_corners = true;
+                for (const auto& corner : corners) {
+                    valid_corners = valid_corners &&
+                        std::isfinite(corner.x) &&
+                        std::isfinite(corner.y) &&
+                        std::isfinite(corner.z);
+                    corner_min = Vec3::min(corner_min, corner);
+                    corner_max = Vec3::max(corner_max, corner);
+                }
+                if (valid_corners && (corner_max - corner_min).length() <= 100000.0f) {
+                    drawOBB(corners, color, thickness);
+                }
+            } else {
+                drawAABB(Vec3::min(min_bound, max_bound) - pad, Vec3::max(min_bound, max_bound) + pad, color, thickness);
+            }
+        } else {
+            drawAABB(Vec3::min(min_bound, max_bound) - pad, Vec3::max(min_bound, max_bound) + pad, color, thickness);
+        }
+    }
+
+    // Fluid-type grid-domain particles + seed AABB as ImGui overlay. The dot
+    // splat is gated by the per-domain `fluid_debug_overlay` toggle (default
+    // OFF — the Particles render mode draws real RT instances now, so the
+    // overlay would double-paint on top of them). The Seed AABB outline is
+    // separate and always drawn for authoring feedback.
+    for (std::size_t domain_index = 0; domain_index < grid_domain_states.size(); ++domain_index) {
+        const auto& state = grid_domain_states[domain_index];
+        if (!state.valid || state.type != RayTrophiSim::SimulationDomainType::Fluid) {
+            continue;
+        }
+        bool draw_particle_dots = false;
+        if (domain_index < grid_domains.size()) {
+            const auto& fluid_domain = grid_domains[domain_index];
+            // Seed AABB — cyan tint, distinguishes it from the domain box. Lets
+            // the user see where Seed Fluid will deposit particles before they
+            // press the button.
+            drawAABB(fluid_domain.fluid_seed_min,
+                     fluid_domain.fluid_seed_max,
+                     IM_COL32(80, 235, 255, 130),
+                     1.1f);
+            draw_particle_dots = fluid_domain.fluid_debug_overlay;
+        }
+        if (!draw_particle_dots || state.particles.empty()) {
+            continue;
+        }
+        ImDrawList* fluid_draw_list = ImGui::GetForegroundDrawList();
+        const std::size_t count = state.particles.size();
+        const std::size_t stride = count > 6000 ? (count / 6000 + 1) : 1;
+        const float focal_px = screen_h / (2.0f * std::max(tan_half_fov, 1e-4f));
+        const float world_radius = std::max(0.006f, state.voxel_size * 0.22f);
+        for (std::size_t i = 0; i < count; i += stride) {
+            ImVec2 screen_pos;
+            float depth = 0.0f;
+            if (!projectPoint(state.particles.position[i], screen_pos, depth)) {
+                continue;
+            }
+            const float radius = std::clamp(world_radius * focal_px / std::max(depth, 0.05f), 1.1f, 18.0f);
+            fluid_draw_list->AddCircleFilled(screen_pos, radius * 1.8f, IM_COL32(40, 170, 255, 70), 12);
+            fluid_draw_list->AddCircleFilled(screen_pos, radius,       IM_COL32(95, 225, 255, 210), 12);
+        }
+    }
+
+    for (const auto& emitter : particles->emitters()) {
+        if ((emitter.spawn_mode != RayTrophiSim::ParticleEmitterSpawnMode::ObjectAABBSurface &&
+             emitter.spawn_mode != RayTrophiSim::ParticleEmitterSpawnMode::MeshSurface) ||
+            emitter.source_name.empty()) {
+            continue;
+        }
+        Vec3 min_bound;
+        Vec3 max_bound;
+        if (!ctx.scene.resolveObjectBoundsForSimulation(emitter.source_name, min_bound, max_bound)) {
+            continue;
+        }
+        const bool selected = emitter.source_name == selected_source_name;
+        const ImU32 color = emitter.enabled
+            ? (selected ? IM_COL32(80, 240, 255, 245) : IM_COL32(80, 220, 255, 150))
+            : IM_COL32(80, 150, 170, 70);
+        Vec3 corners[8];
+        if (resolveObjectOBBCorners(emitter.source_name, 0.0f, corners)) {
+            drawOBB(corners, color, selected ? 2.2f : 1.3f);
+        } else {
+            drawAABB(min_bound, max_bound, color, selected ? 2.2f : 1.3f);
+        }
+    }
+
+    for (const auto& collider : particles->colliders()) {
+        const bool selected = collider.source_name == selected_source_name;
+        const ImU32 color = collider.enabled
+            ? (selected ? IM_COL32(255, 185, 70, 250) : IM_COL32(255, 150, 60, 150))
+            : IM_COL32(150, 105, 70, 70);
+        const float thickness = selected ? 2.4f : 1.4f;
+        if (collider.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectAABB ||
+            collider.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectOBB) {
+            Vec3 min_bound;
+            Vec3 max_bound;
+            if (ctx.scene.resolveObjectBoundsForSimulation(collider.source_name, min_bound, max_bound)) {
+                const Vec3 pad(std::max(0.0f, collider.thickness));
+                if (collider.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectOBB) {
+                    Vec3 corners[8];
+                    if (resolveObjectOBBCorners(collider.source_name, collider.thickness, corners)) {
+                        drawOBB(corners, color, thickness);
+                    } else {
+                        drawAABB(min_bound - pad, max_bound + pad, color, thickness);
+                    }
+                } else {
+                    drawAABB(min_bound - pad, max_bound + pad, color, thickness);
+                }
+            }
+        } else if (collider.source_mode == RayTrophiSim::ParticleColliderSourceMode::PlaneY) {
+            drawPlaneY(collider.plane_y, color, thickness);
+        } else if (collider.source_mode == RayTrophiSim::ParticleColliderSourceMode::Sphere) {
+            Vec3 center = collider.sphere_center;
+            float radius = collider.sphere_radius;
+            if (!collider.source_name.empty()) {
+                Vec3 min_bound;
+                Vec3 max_bound;
+                if (ctx.scene.resolveObjectBoundsForSimulation(collider.source_name, min_bound, max_bound)) {
+                    const Vec3 mn = Vec3::min(min_bound, max_bound);
+                    const Vec3 mx = Vec3::max(min_bound, max_bound);
+                    center = (mn + mx) * 0.5f;
+                    radius = (mx - mn).length() * 0.5f;
+                }
+            }
+            drawSphere(center, radius + std::max(0.0f, collider.thickness), color, thickness);
+        } else if (collider.source_mode == RayTrophiSim::ParticleColliderSourceMode::Capsule) {
+            Vec3 start = collider.capsule_start;
+            Vec3 end = collider.capsule_end;
+            float radius = collider.capsule_radius;
+            if (!collider.source_name.empty()) {
+                Vec3 min_bound;
+                Vec3 max_bound;
+                if (ctx.scene.resolveObjectBoundsForSimulation(collider.source_name, min_bound, max_bound)) {
+                    const Vec3 mn = Vec3::min(min_bound, max_bound);
+                    const Vec3 mx = Vec3::max(min_bound, max_bound);
+                    const Vec3 center = (mn + mx) * 0.5f;
+                    const Vec3 extent = mx - mn;
+                    const float min_side = std::min({ extent.x, extent.y, extent.z });
+                    radius = std::max(0.001f, min_side * 0.5f);
+                    if (extent.x >= extent.y && extent.x >= extent.z) {
+                        start = Vec3(mn.x, center.y, center.z);
+                        end = Vec3(mx.x, center.y, center.z);
+                    } else if (extent.y >= extent.x && extent.y >= extent.z) {
+                        start = Vec3(center.x, mn.y, center.z);
+                        end = Vec3(center.x, mx.y, center.z);
+                    } else {
+                        start = Vec3(center.x, center.y, mn.z);
+                        end = Vec3(center.x, center.y, mx.z);
+                    }
+                }
+            }
+            drawCapsule(start, end, radius + std::max(0.0f, collider.thickness), color, thickness);
+        } else if (collider.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF) {
+            RayTrophiSim::ParticleColliderOBB obb;
+            if (!ctx.scene.resolveObjectOBBForSimulation(collider.source_name, obb)) {
+                // Static AABB fallback if no OBB is resolved
+                const float thick = std::max(0.0f, collider.thickness);
+                drawAABB(collider.sdf_origin, collider.sdf_origin + collider.sdf_extents, color, thickness);
+                if (thick > 0.0f) {
+                    drawAABB(collider.sdf_origin - Vec3(thick), collider.sdf_origin + collider.sdf_extents + Vec3(thick), IM_COL32(255, 185, 70, 90), 1.0f);
+                }
+                continue;
+            }
+
+            const float thick = std::max(0.0f, collider.thickness);
+            
+            // Draw OBB bounding box of the compiled SDF
+            const Vec3 local_mn = collider.sdf_origin;
+            const Vec3 local_mx = collider.sdf_origin + collider.sdf_extents;
+            const Vec3 local_corners[8] = {
+                Vec3(local_mn.x, local_mn.y, local_mn.z),
+                Vec3(local_mx.x, local_mn.y, local_mn.z),
+                Vec3(local_mx.x, local_mx.y, local_mn.z),
+                Vec3(local_mn.x, local_mx.y, local_mn.z),
+                Vec3(local_mn.x, local_mn.y, local_mx.z),
+                Vec3(local_mx.x, local_mn.y, local_mx.z),
+                Vec3(local_mx.x, local_mx.y, local_mx.z),
+                Vec3(local_mn.x, local_mx.y, local_mx.z)
+            };
+            Vec3 world_corners[8];
+            for (int i = 0; i < 8; ++i) {
+                world_corners[i] = obb.local_to_world.transform_point(local_corners[i]);
+            }
+            drawOBB(world_corners, color, thickness);
+
+            // Draw thickness contour OBB
+            if (thick > 0.0f) {
+                const Vec3 local_mn_thick = local_mn - Vec3(thick);
+                const Vec3 local_mx_thick = local_mx + Vec3(thick);
+                const Vec3 local_corners_thick[8] = {
+                    Vec3(local_mn_thick.x, local_mn_thick.y, local_mn_thick.z),
+                    Vec3(local_mx_thick.x, local_mn_thick.y, local_mn_thick.z),
+                    Vec3(local_mx_thick.x, local_mx_thick.y, local_mn_thick.z),
+                    Vec3(local_mn_thick.x, local_mx_thick.y, local_mn_thick.z),
+                    Vec3(local_mn_thick.x, local_mn_thick.y, local_mx_thick.z),
+                    Vec3(local_mx_thick.x, local_mn_thick.y, local_mx_thick.z),
+                    Vec3(local_mx_thick.x, local_mx_thick.y, local_mx_thick.z),
+                    Vec3(local_mn_thick.x, local_mx_thick.y, local_mx_thick.z)
+                };
+                Vec3 world_corners_thick[8];
+                for (int i = 0; i < 8; ++i) {
+                    world_corners_thick[i] = obb.local_to_world.transform_point(local_corners_thick[i]);
+                }
+                drawOBB(world_corners_thick, IM_COL32(255, 185, 70, 90), 1.0f);
+            }
+
+            // Draw wireframe isosurface zero-crossings in world coordinates (mapped from local space)
+            if (collider.draw_wireframe && collider.sdf_grid_data && !collider.sdf_grid_data->empty()) {
+                int nx = collider.sdf_nx;
+                int ny = collider.sdf_ny;
+                int nz = collider.sdf_nz;
+                int stride = nx > 32 ? (nx / 32) : 1;
+                
+                const auto sampleSDF = [&](int x, int y, int z) -> float {
+                    std::size_t idx = static_cast<std::size_t>(z * (nx * ny) + y * nx + x);
+                    return idx < collider.sdf_grid_data->size() ? (*collider.sdf_grid_data)[idx] : 1.0f;
+                };
+                
+                auto getCellPos = [&](int x, int y, int z) {
+                    return collider.sdf_origin + Vec3(
+                        (x + 0.5f) * (collider.sdf_extents.x / nx),
+                        (y + 0.5f) * (collider.sdf_extents.y / ny),
+                        (z + 0.5f) * (collider.sdf_extents.z / nz)
+                    );
+                };
+
+                int count = 0;
+                for (int k = 0; k < nz && count < 2000; k += stride)
+                for (int j = 0; j < ny && count < 2000; j += stride)
+                for (int i = 0; i < nx && count < 2000; i += stride) {
+                    float v0 = sampleSDF(i, j, k);
+                    
+                    if (i + 1 < nx) {
+                        float v1 = sampleSDF(i + 1, j, k);
+                        if ((v0 <= 0.0f && v1 > 0.0f) || (v0 > 0.0f && v1 <= 0.0f)) {
+                            ImVec2 a, b;
+                            float da = 0.0f, db = 0.0f;
+                            Vec3 wp0 = obb.local_to_world.transform_point(getCellPos(i, j, k));
+                            Vec3 wp1 = obb.local_to_world.transform_point(getCellPos(i + 1, j, k));
+                            if (projectPoint(wp0, a, da) && projectPoint(wp1, b, db)) {
+                                draw_list->AddLine(a, b, color, 1.0f);
+                                count++;
+                            }
+                        }
+                    }
+                    if (j + 1 < ny) {
+                        float v1 = sampleSDF(i, j + 1, k);
+                        if ((v0 <= 0.0f && v1 > 0.0f) || (v0 > 0.0f && v1 <= 0.0f)) {
+                            ImVec2 a, b;
+                            float da = 0.0f, db = 0.0f;
+                            Vec3 wp0 = obb.local_to_world.transform_point(getCellPos(i, j, k));
+                            Vec3 wp1 = obb.local_to_world.transform_point(getCellPos(i, j + 1, k));
+                            if (projectPoint(wp0, a, da) && projectPoint(wp1, b, db)) {
+                                draw_list->AddLine(a, b, color, 1.0f);
+                                count++;
+                            }
+                        }
+                    }
+                    if (k + 1 < nz) {
+                        float v1 = sampleSDF(i, j, k + 1);
+                        if ((v0 <= 0.0f && v1 > 0.0f) || (v0 > 0.0f && v1 <= 0.0f)) {
+                            ImVec2 a, b;
+                            float da = 0.0f, db = 0.0f;
+                            Vec3 wp0 = obb.local_to_world.transform_point(getCellPos(i, j, k));
+                            Vec3 wp1 = obb.local_to_world.transform_point(getCellPos(i, j, k + 1));
+                            if (projectPoint(wp0, a, da) && projectPoint(wp1, b, db)) {
+                                draw_list->AddLine(a, b, color, 1.0f);
+                                count++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Draw 2D Kesit Grid Slice Preview
+            if (collider.draw_slice_preview && collider.sdf_grid_data && !collider.sdf_grid_data->empty()) {
+                int nx = collider.sdf_nx;
+                int ny = collider.sdf_ny;
+                int nz = collider.sdf_nz;
+                
+                const auto sampleSDF = [&](int x, int y, int z) -> float {
+                    std::size_t idx = static_cast<std::size_t>(z * (nx * ny) + y * nx + x);
+                    return idx < collider.sdf_grid_data->size() ? (*collider.sdf_grid_data)[idx] : 1.0f;
+                };
+                
+                auto getCellPos = [&](int x, int y, int z) {
+                    return collider.sdf_origin + Vec3(
+                        (x + 0.5f) * (collider.sdf_extents.x / nx),
+                        (y + 0.5f) * (collider.sdf_extents.y / ny),
+                        (z + 0.5f) * (collider.sdf_extents.z / nz)
+                    );
+                };
+
+                int axis = collider.slice_axis;
+                float t_slice = collider.slice_plane_distance;
+                
+                if (axis == 1) { // Y Axis
+                    int j = std::clamp(static_cast<int>(t_slice * (ny - 1)), 0, ny - 1);
+                    for (int k = 0; k < nz; k += 2)
+                    for (int i = 0; i < nx; i += 2) {
+                        float dist = sampleSDF(i, j, k);
+                        if (dist <= std::max(0.0f, collider.thickness)) {
+                            Vec3 cp = getCellPos(i, j, k);
+                            Vec3 wcp = obb.local_to_world.transform_point(cp);
+                            ImVec2 scr;
+                            float depth = 0.0f;
+                            if (projectPoint(wcp, scr, depth)) {
+                                draw_list->AddCircleFilled(scr, 2.5f, IM_COL32(255, 120, 30, 180));
+                            }
+                        }
+                    }
+                } else if (axis == 0) { // X Axis
+                    int i = std::clamp(static_cast<int>(t_slice * (nx - 1)), 0, nx - 1);
+                    for (int k = 0; k < nz; k += 2)
+                    for (int j = 0; j < ny; j += 2) {
+                        float dist = sampleSDF(i, j, k);
+                        if (dist <= std::max(0.0f, collider.thickness)) {
+                            Vec3 cp = getCellPos(i, j, k);
+                            Vec3 wcp = obb.local_to_world.transform_point(cp);
+                            ImVec2 scr;
+                            float depth = 0.0f;
+                            if (projectPoint(wcp, scr, depth)) {
+                                draw_list->AddCircleFilled(scr, 2.5f, IM_COL32(255, 120, 30, 180));
+                            }
+                        }
+                    }
+                } else { // Z Axis
+                    int k = std::clamp(static_cast<int>(t_slice * (nz - 1)), 0, nz - 1);
+                    for (int j = 0; j < ny; j += 2)
+                    for (int i = 0; i < nx; i += 2) {
+                        float dist = sampleSDF(i, j, k);
+                        if (dist <= std::max(0.0f, collider.thickness)) {
+                            Vec3 cp = getCellPos(i, j, k);
+                            Vec3 wcp = obb.local_to_world.transform_point(cp);
+                            ImVec2 scr;
+                            float depth = 0.0f;
+                            if (projectPoint(wcp, scr, depth)) {
+                                draw_list->AddCircleFilled(scr, 2.5f, IM_COL32(255, 120, 30, 180));
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (collider.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp ||
+                   collider.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH) {
+            Vec3 min_bound;
+            Vec3 max_bound;
+            if (ctx.scene.resolveObjectBoundsForSimulation(collider.source_name, min_bound, max_bound)) {
+                const Vec3 pad(std::max(0.0f, collider.thickness));
+                Vec3 corners[8];
+                if (resolveObjectOBBCorners(collider.source_name, collider.thickness, corners)) {
+                    drawOBB(corners, color, thickness);
+                    if (collider.draw_wireframe) {
+                        drawOBB(corners, IM_COL32(255, 185, 70, 80), 1.0f);
+                    }
+                } else {
+                    drawAABB(min_bound - pad, max_bound + pad, color, thickness);
+                }
+            }
+        }
+    }
+
+    // Particle dots only in Debug display mode. Solid/Render render the particles
+    // for real via the Vulkan billboard pass (uploadParticleBillboards). These
+    // ImGui foreground dots draw on top of everything (including UI panels), so
+    // they are an opt-in debug aid, not the default.
+    if (ctx.particle_display_mode != 1) {
+        return;
+    }
+    if (particles->aliveCount() == 0) {
+        return;
+    }
+    draw_list = ImGui::GetForegroundDrawList();
+
+    const auto& buffers = particles->buffers();
+    const std::size_t capacity = particles->capacity();
+    const std::size_t stride = capacity > 4000 ? (capacity / 4000 + 1) : 1;
+    const float focal_px = screen_h / (2.0f * std::max(tan_half_fov, 1e-4f));
+
+    const auto hasAttr = [](const std::vector<float>& v, std::size_t i) {
+        return i < v.size();
+    };
+    const auto channel = [](float c) {
+        return static_cast<int>(std::clamp(c, 0.0f, 1.0f) * 255.0f + 0.5f);
+    };
+
+    for (std::size_t i = 0; i < capacity; i += stride) {
+        if (i >= buffers.alive.size() || buffers.alive[i] == 0u) {
+            continue;
+        }
+        const Vec3 pos(buffers.position_x[i], buffers.position_y[i], buffers.position_z[i]);
+        ImVec2 screen_pos;
+        float depth = 0.0f;
+        if (!projectPoint(pos, screen_pos, depth)) {
+            continue;
+        }
+        const float opacity = hasAttr(buffers.opacity, i) ? std::clamp(buffers.opacity[i], 0.0f, 1.0f) : 1.0f;
+        if (opacity <= 0.002f) {
+            continue;
+        }
+        const float world_size = hasAttr(buffers.size, i) ? buffers.size[i] : 0.05f;
+        const float radius = std::clamp((world_size * 0.5f) * focal_px / std::max(depth, 0.05f), 1.0f, 320.0f);
+        const int cr = hasAttr(buffers.color_r, i) ? channel(buffers.color_r[i]) : 255;
+        const int cg = hasAttr(buffers.color_g, i) ? channel(buffers.color_g[i]) : 255;
+        const int cb = hasAttr(buffers.color_b, i) ? channel(buffers.color_b[i]) : 255;
+        const ImU32 halo_col = IM_COL32(cr, cg, cb, static_cast<int>(opacity * 70.0f));
+        const ImU32 core_col = IM_COL32(cr, cg, cb, static_cast<int>(opacity * 205.0f));
+        draw_list->AddCircleFilled(screen_pos, radius * 1.9f, halo_col, 14);
+        draw_list->AddCircleFilled(screen_pos, radius, core_col, 14);
+    }
+}
+
+void SceneUI::uploadParticleBillboards(UIContext& ctx) {
+    auto* vpb = dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get());
+    if (!vpb) {
+        return;
+    }
+    // Debug display mode uses the ImGui overlay instead; clear any billboards so we
+    // don't render both. Solid (0) and Render (2) draw real billboards.
+    if (ctx.particle_display_mode == 1 || !ctx.scene.camera) {
+        vpb->uploadParticleBillboards({}, 0, {}, 0);
+        return;
+    }
+
+    const Camera& cam = *ctx.scene.camera;
+    // Hand-rolled normalize: Vec3::normalize() zeroes sub-mm vectors.
+    auto unit = [](const Vec3& v, const Vec3& fb) {
+        const float l = v.length();
+        return l > 1e-8f ? v * (1.0f / l) : fb;
+    };
+    const Vec3 fwd   = unit(cam.lookat - cam.lookfrom, Vec3(0.0f, 0.0f, -1.0f));
+    const Vec3 right = unit(Vec3::cross(fwd, cam.vup), Vec3(1.0f, 0.0f, 0.0f));
+    const Vec3 up    = unit(Vec3::cross(right, fwd), Vec3(0.0f, 1.0f, 0.0f));
+
+    std::vector<float> addData;
+    std::vector<float> alphaData;
+    constexpr std::size_t kMaxBillboards = 60000; // safety cap across all systems
+    std::size_t drawn = 0;
+
+    auto pushVertex = [](std::vector<float>& out, const Vec3& p, float u, float v,
+                         float r, float g, float b, float a) {
+        out.push_back(p.x); out.push_back(p.y); out.push_back(p.z);
+        out.push_back(u);   out.push_back(v);
+        out.push_back(r);   out.push_back(g); out.push_back(b); out.push_back(a);
+    };
+
+    for (const auto& system : ctx.scene.particle_systems) {
+        if (!system.visible || !system.runtime) {
+            continue;
+        }
+        std::vector<float>& out = (system.blend_mode == SceneData::ParticleBlendMode::Alpha)
+            ? alphaData : addData;
+
+        const auto& buf = system.runtime->buffers();
+        const std::size_t cap = buf.alive.size();
+        for (std::size_t i = 0; i < cap && drawn < kMaxBillboards; ++i) {
+            if (buf.alive[i] == 0u) continue;
+
+            const float a = (i < buf.opacity.size()) ? buf.opacity[i] : 1.0f;
+            if (a <= 0.002f) continue;
+            const float sz = (i < buf.size.size()) ? buf.size[i] : 0.05f;
+            const float h = sz * 0.5f;
+            if (h <= 1e-5f) continue;
+
+            const Vec3 c(buf.position_x[i], buf.position_y[i], buf.position_z[i]);
+            const float r = (i < buf.color_r.size()) ? buf.color_r[i] : 1.0f;
+            const float g = (i < buf.color_g.size()) ? buf.color_g[i] : 1.0f;
+            const float bcol = (i < buf.color_b.size()) ? buf.color_b[i] : 1.0f;
+
+            const Vec3 rh = right * h;
+            const Vec3 uh = up * h;
+            const Vec3 c00 = c - rh - uh;
+            const Vec3 c10 = c + rh - uh;
+            const Vec3 c11 = c + rh + uh;
+            const Vec3 c01 = c - rh + uh;
+
+            pushVertex(out, c00, -1.f, -1.f, r, g, bcol, a);
+            pushVertex(out, c10,  1.f, -1.f, r, g, bcol, a);
+            pushVertex(out, c11,  1.f,  1.f, r, g, bcol, a);
+            pushVertex(out, c00, -1.f, -1.f, r, g, bcol, a);
+            pushVertex(out, c11,  1.f,  1.f, r, g, bcol, a);
+            pushVertex(out, c01, -1.f,  1.f, r, g, bcol, a);
+            ++drawn;
+        }
+        if (drawn >= kMaxBillboards) break;
+    }
+
+    const uint32_t addCount   = static_cast<uint32_t>(addData.size() / 9);
+    const uint32_t alphaCount = static_cast<uint32_t>(alphaData.size() / 9);
+    vpb->uploadParticleBillboards(addData, addCount, alphaData, alphaCount);
 }
 
 void SceneUI::moveObjectPivot(UIContext& ctx, const std::string& objectName, const Vec3& worldDelta) {
@@ -452,6 +1261,9 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
             ? m.inverse().transform_point(cam.lookfrom)
             : cam.lookfrom;
 
+        if (!std::isfinite(screen_w) || !std::isfinite(screen_h) || screen_w < 2.0f || screen_h < 2.0f) {
+            return false;
+        }
         const int sw = static_cast<int>(screen_w);
         const int sh = static_cast<int>(screen_h);
 
@@ -584,13 +1396,19 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         int mh = max_y - min_y + 1;
         if (mw <= 2 || mh <= 2) return false;
 
-        // Cost cap on mask area — half-res when very large.
+        // Cost cap on mask area. Very large projected selections fall back to
+        // hull/bbox instead of trying to allocate a huge per-pixel mask.
         int scale = 1;
+        constexpr size_t MAX_SELECTION_MASK_CELLS = 2000000;
         size_t mask_area = static_cast<size_t>(mw) * static_cast<size_t>(mh);
-        if (mask_area > 2000000) {
-            scale = 2;
+        while (mask_area > MAX_SELECTION_MASK_CELLS && scale < 8) {
+            scale *= 2;
             mw = (mw + 1) / 2;
             mh = (mh + 1) / 2;
+            mask_area = static_cast<size_t>(mw) * static_cast<size_t>(mh);
+        }
+        if (mask_area > MAX_SELECTION_MASK_CELLS) {
+            return false;
         }
 
         // depth_mask: per-pixel min camera-space depth of the rasterized object.
@@ -1454,7 +2272,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
 
     // Check visibility of selected item
     bool is_visible = true;
-    if (sel.selected.type == SelectableType::Object && sel.selected.object) is_visible = sel.selected.object->visible;
+    if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+        is_visible = sel.selected.object->visible;
+    }
     else if (sel.selected.type == SelectableType::Light && sel.selected.light) is_visible = sel.selected.light->visible;
     else if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) is_visible = sel.selected.vdb_volume->visible;
     else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) is_visible = sel.selected.gas_volume->visible;
@@ -1668,6 +2488,22 @@ mesh_edit_changed_confirmed:
         return;
     }
 
+    auto* selected_domain = static_cast<RayTrophiSim::SimulationGridDomainDesc*>(nullptr);
+    if (sel.selected.type == SelectableType::SimulationDomain &&
+        sel.selected.particle_system_index >= 0 &&
+        sel.selected.particle_system_index < static_cast<int>(ctx.scene.particle_systems.size())) {
+        auto& system = ctx.scene.particle_systems[static_cast<std::size_t>(sel.selected.particle_system_index)];
+        if (system.runtime &&
+            sel.selected.simulation_domain_index >= 0 &&
+            sel.selected.simulation_domain_index < static_cast<int>(system.runtime->gridDomains().size())) {
+            selected_domain = &system.runtime->gridDomains()[static_cast<std::size_t>(sel.selected.simulation_domain_index)];
+            const Vec3 mn = Vec3::min(selected_domain->bounds_min, selected_domain->bounds_max);
+            const Vec3 mx = Vec3::max(selected_domain->bounds_min, selected_domain->bounds_max);
+            sel.selected.position = (mn + mx) * 0.5f;
+            sel.selected.scale = mx - mn;
+        }
+    }
+
     float objectMatrix[16];
     Vec3 pos = sel.selected.position;
 
@@ -1678,6 +2514,12 @@ mesh_edit_changed_confirmed:
     startMat.m[0][3] = pos.x;
     startMat.m[1][3] = pos.y;
     startMat.m[2][3] = pos.z;
+    if (selected_domain) {
+        const Vec3 extent = Vec3::max(sel.selected.scale, Vec3(0.001f));
+        startMat.m[0][0] = extent.x;
+        startMat.m[1][1] = extent.y;
+        startMat.m[2][2] = extent.z;
+    }
 
     // Handle Light Rotation (Directional/Spot)
     if (sel.selected.type == SelectableType::Light && sel.selected.light) {
@@ -1888,6 +2730,12 @@ mesh_edit_changed_confirmed:
         objectMatrix[4] = mat.m[0][1]; objectMatrix[5] = mat.m[1][1]; objectMatrix[6] = mat.m[2][1]; objectMatrix[7] = mat.m[3][1];
         objectMatrix[8] = mat.m[0][2]; objectMatrix[9] = mat.m[1][2]; objectMatrix[10] = mat.m[2][2]; objectMatrix[11] = mat.m[3][2];
         objectMatrix[12] = mat.m[0][3]; objectMatrix[13] = mat.m[1][3]; objectMatrix[14] = mat.m[2][3]; objectMatrix[15] = mat.m[3][3];
+    }
+    else if (selected_domain) {
+        objectMatrix[0] = startMat.m[0][0]; objectMatrix[1] = startMat.m[1][0]; objectMatrix[2] = startMat.m[2][0]; objectMatrix[3] = startMat.m[3][0];
+        objectMatrix[4] = startMat.m[0][1]; objectMatrix[5] = startMat.m[1][1]; objectMatrix[6] = startMat.m[2][1]; objectMatrix[7] = startMat.m[3][1];
+        objectMatrix[8] = startMat.m[0][2]; objectMatrix[9] = startMat.m[1][2]; objectMatrix[10] = startMat.m[2][2]; objectMatrix[11] = startMat.m[3][2];
+        objectMatrix[12] = startMat.m[0][3]; objectMatrix[13] = startMat.m[1][3]; objectMatrix[14] = startMat.m[2][3]; objectMatrix[15] = startMat.m[3][3];
     }
 
     // �������������������������������������������������������������������������
@@ -2601,6 +3449,26 @@ mesh_edit_changed_confirmed:
             if (ctx.backend_ptr) {
                 ctx.backend_ptr->resetAccumulation();
             }
+        }
+        else if (selected_domain) {
+            const Vec3 extent(
+                std::max(0.001f, Vec3(objectMatrix[0], objectMatrix[1], objectMatrix[2]).length()),
+                std::max(0.001f, Vec3(objectMatrix[4], objectMatrix[5], objectMatrix[6]).length()),
+                std::max(0.001f, Vec3(objectMatrix[8], objectMatrix[9], objectMatrix[10]).length()));
+            const Vec3 half_extent = extent * 0.5f;
+            selected_domain->source_mode = RayTrophiSim::SimulationGridDomainSourceMode::ManualBox;
+            selected_domain->source_name.clear();
+            selected_domain->bounds_min = newPos - half_extent;
+            selected_domain->bounds_max = newPos + half_extent;
+            sel.selected.position = newPos;
+            sel.selected.rotation = Vec3(0.0f);
+            sel.selected.scale = extent;
+
+            if (ctx.backend_ptr) {
+                ctx.backend_ptr->resetAccumulation();
+            }
+            ctx.renderer.resetCPUAccumulation();
+            ProjectManager::getInstance().markModified();
         }
         else if (sel.selected.type == SelectableType::Camera && sel.selected.camera) {
             // Skip active camera - moving it would affect viewport directly

@@ -230,6 +230,18 @@ struct GpuVDBVolume {
     float cloud_offset_x;
     float cloud_offset_z;
     float cloud_seed;
+    // Isosurface dielectric IOR (source_type==4 fluid surface). Default water.
+    float ior;
+    // Isosurface surface roughness 0..1 (GGX). 0 = mirror-smooth.
+    float surface_roughness;
+    // Isosurface whitewater/foam strength 0..1 (curvature-driven).
+    float surface_foam;
+    // Particle-foam (whitewater) appearance for the SurfaceSDF single-volume
+    // path: foam rides this volume's temperature channel and the iso shader
+    // marches it. foam_color = scattering tint, foam_opacity = extinction
+    // multiplier (foam_shader density × scatter). 0 → shader defaults.
+    float3 foam_color;
+    float  foam_opacity;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════

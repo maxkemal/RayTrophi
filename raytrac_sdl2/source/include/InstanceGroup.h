@@ -131,6 +131,13 @@ struct InstanceGroup {
     // Identity
     std::string name;                               // Group name (e.g., "Forest_01")
     int id = -1;                                    // Unique group ID
+
+    // Transient groups are runtime-only render bridges (e.g. particle systems
+    // mirroring their live SoA into instances each step). They are consumed by
+    // the RT backends exactly like foliage groups, but are NEVER serialized and
+    // are hidden from the foliage UI / brush tools. The owning system rebuilds
+    // their instances every frame, so persisting them would be meaningless.
+    bool transient = false;
     
     // Multi-Source Meshes (NEW)
     std::vector<ScatterSource> sources;             // Multiple source meshes with weights

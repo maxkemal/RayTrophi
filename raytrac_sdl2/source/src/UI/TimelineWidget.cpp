@@ -22,9 +22,12 @@
 #include "MaterialManager.h"
 #include "PrincipledBSDF.h"
 #include "Matrix4x4.h"
+#include "Backend/IViewportBackend.h"
 #include "world.h"
 #include "OptixWrapper.h"  // For direct instance transform updates
 #include "ui_modern.h"
+
+#include <thread>
 
 extern bool g_timeline_selection_sync_pending;
 
@@ -33,6 +36,33 @@ extern std::atomic<bool> rendering_in_progress;
 extern std::atomic<bool> rendering_stopped_cpu;
 extern std::atomic<bool> rendering_stopped_gpu;
 extern std::atomic<bool> rendering_paused;
+extern std::unique_ptr<Backend::IBackend> g_backend;
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+namespace {
+void drainTimelineMutationBackends(UIContext& ctx) {
+    int wait_count = 0;
+    while (rendering_in_progress.load() && wait_count < 200) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        ++wait_count;
+    }
+
+    Backend::IBackend* renderBackend = g_backend
+        ? g_backend.get()
+        : ((ctx.backend_ptr && dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) == nullptr)
+            ? ctx.backend_ptr
+            : nullptr);
+    Backend::IViewportBackend* viewportBackend = g_viewport_backend
+        ? g_viewport_backend.get()
+        : dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr);
+
+    if (renderBackend) {
+        renderBackend->waitForCompletion();
+    }
+    if (viewportBackend && static_cast<Backend::IBackend*>(viewportBackend) != renderBackend) {
+        viewportBackend->waitForCompletion();
+    }
+}
+}
 
 // Helper to parse entity name and channel from track name
 // Returns { "Cube_1", ChannelType::Location } if input is "Cube_1.Location"
@@ -1186,6 +1216,10 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     if (UIWidgets::IconActionButton("TimelineStop", UIWidgets::IconType::Stop, "",
                                     false, ImVec4(1.0f, 0.46f, 0.46f, 1.0f), ImVec2(34.0f, 28.0f),
                                     "Stop")) {
+        if (ctx.scene.anySimulationRuntimeEnabled()) {
+            drainTimelineMutationBackends(ctx);
+            ctx.scene.requestSimulationTimelineRenderResync();
+        }
         is_playing = false;
         current_frame = start_frame;
         // Force animation re-evaluation at start_frame and backend update.
@@ -1199,6 +1233,10 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
         // so use the ctx.scene.timeline.current_frame sentinel trick:
         ctx.scene.timeline.current_frame = -1; // force frame mismatch next draw
         ctx.renderer.resetCPUAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.backend_ptr->resetAccumulation();
+        }
+        ctx.start_render = true;
     }
     
     ImGui::SameLine();
@@ -1690,15 +1728,28 @@ void TimelineWidget::drawTimelineCanvas(UIContext& ctx, float canvas_width, floa
                          }
 
                         bool is_sel = (full_track_name == selected_track && kf.frame == selected_keyframe_frame);
-                        bool is_hov = ImGui::IsMouseHoveringRect(ImVec2(x - 5, base_y - 5), ImVec2(x + 5, base_y + 5));
+                        // Guard hover check with ImGui::IsWindowHovered() to prevent clicks/hover behind overlapping windows
+                        bool is_hov = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(ImVec2(x - 5, base_y - 5), ImVec2(x + 5, base_y + 5));
                         
                         drawKeyframeDiamond(draw_list, x, base_y, is_hov ? IM_COL32_WHITE : track.color, is_sel);
                         
-                        if (ImGui::IsMouseClicked(0) && is_hov) {
-                            selected_track = full_track_name;
-                            selected_keyframe_frame = kf.frame;
-                            is_dragging_keyframe = true;
-                            drag_start_frame = kf.frame;
+                        if (is_hov) {
+                            any_keyframe_hovered = true;
+                            
+                            // Left click to select and drag keyframe
+                            if (ImGui::IsMouseClicked(0)) {
+                                selected_track = full_track_name;
+                                selected_keyframe_frame = kf.frame;
+                                is_dragging_keyframe = true;
+                                drag_start_frame = kf.frame;
+                            }
+                            
+                            // Right click to open context menu for keyframe
+                            if (ImGui::IsMouseClicked(1)) {
+                                selected_track = full_track_name;
+                                selected_keyframe_frame = kf.frame;
+                                ImGui::OpenPopup("KeyframeContextMenu");
+                            }
                         }
                     }
                 }
@@ -2052,8 +2103,8 @@ void TimelineWidget::drawCurrentFrameIndicator(ImDrawList* draw_list, ImVec2 can
 void TimelineWidget::handleZoomPan(ImVec2 canvas_pos, ImVec2 canvas_size) {
     ImGuiIO& io = ImGui::GetIO();
     
-    // Check if mouse is over canvas
-    bool hovered = ImGui::IsMouseHoveringRect(canvas_pos, 
+    // Check if mouse is over canvas and the window itself is hovered (not covered/blocked by other windows)
+    bool hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(canvas_pos, 
         ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y));
     
     if (hovered) {
@@ -2062,12 +2113,22 @@ void TimelineWidget::handleZoomPan(ImVec2 canvas_pos, ImVec2 canvas_size) {
             float zoom_factor = (io.MouseWheel > 0) ? 1.1f : 0.9f;
             zoom = std::clamp(zoom * zoom_factor, 0.1f, 10.0f);
         }
-        
-        // Pan with middle mouse button
-        if (io.MouseDown[2]) {
-            pan_offset -= io.MouseDelta.x / (zoom * 10.0f);
-            pan_offset = std::clamp(pan_offset, 0.0f, (float)(end_frame - start_frame));
+    }
+    
+    // Pan with middle mouse button (allow drag continuation outside)
+    static bool is_panning = false;
+    if (ImGui::IsMouseClicked(2)) {
+        if (hovered) {
+            is_panning = true;
         }
+    }
+    if (!io.MouseDown[2]) {
+        is_panning = false;
+    }
+    
+    if (is_panning) {
+        pan_offset -= io.MouseDelta.x / (zoom * 10.0f);
+        pan_offset = std::clamp(pan_offset, 0.0f, (float)(end_frame - start_frame));
     }
 }
 
@@ -2088,14 +2149,27 @@ void TimelineWidget::handleScrubbing(ImVec2 canvas_pos, float canvas_width) {
         return;
     }
     
-    // Left click in header area to scrub
-    if (io.MouseDown[0]) {
+    // Left click in header area to scrub (allow drag continuation outside)
+    static bool is_scrubbing = false;
+    
+    if (ImGui::IsMouseClicked(0)) {
         ImVec2 mouse = io.MousePos;
-        if (mouse.x >= canvas_pos.x && mouse.x <= canvas_pos.x + canvas_width &&
+        // Only start scrubbing if the timeline window is hovered and click is inside the header area
+        if (ImGui::IsWindowHovered() &&
+            mouse.x >= canvas_pos.x && mouse.x <= canvas_pos.x + canvas_width &&
             mouse.y >= canvas_pos.y && mouse.y <= canvas_pos.y + header_height) {
-            current_frame = pixelXToFrame(mouse.x - canvas_pos.x, canvas_width);
-            current_frame = std::clamp(current_frame, start_frame, end_frame);
+            is_scrubbing = true;
         }
+    }
+    
+    if (!io.MouseDown[0]) {
+        is_scrubbing = false;
+    }
+    
+    if (is_scrubbing) {
+        ImVec2 mouse = io.MousePos;
+        current_frame = pixelXToFrame(mouse.x - canvas_pos.x, canvas_width);
+        current_frame = std::clamp(current_frame, start_frame, end_frame);
     }
 }
 

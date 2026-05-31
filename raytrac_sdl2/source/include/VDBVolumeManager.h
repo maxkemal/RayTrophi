@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -51,6 +51,7 @@ struct VDBVolumeData {
     size_t gpu_buffer_size = 0;
     size_t gpu_temp_buffer_size = 0;
     bool gpu_uploaded = false;
+    uint32_t content_version = 1;
     
     // Grid type info
     bool has_density = false;
@@ -102,6 +103,14 @@ public:
     bool updateVolume(int volume_id, const std::string& filepath, void* stream = nullptr);
 
     int registerOrUpdateLiveVolume(int existing_id, const std::string& name, int res_x, int res_y, int res_z, float voxel_size, const float* density_ptr, const float* temp_ptr, void* stream = nullptr);
+
+    // Write a dense float simulation grid to a .vdb file. Any channel pointer may
+    // be null to omit that grid. Used to export grid-domain gas/fire.
+    static bool exportDenseGridToVDB(const std::string& filepath,
+                                     int res_x, int res_y, int res_z, float voxel_size,
+                                     float origin_x, float origin_y, float origin_z,
+                                     const float* density, const float* temperature,
+                                     const float* fuel, const float* flame);
     
     // Access
     VDBVolumeData* getVolume(int volume_id);
@@ -119,6 +128,7 @@ public:
     size_t getHostGridSize(int volume_id) const;
     void* getHostTemperatureGrid(int volume_id) const;
     size_t getHostTemperatureGridSize(int volume_id) const;
+    uint32_t getContentVersion(int volume_id) const;
     
     // CPU Sampling (for CPU renderer)
     float sampleDensityCPU(int volume_id, float x, float y, float z) const;

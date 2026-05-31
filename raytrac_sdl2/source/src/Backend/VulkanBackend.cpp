@@ -1082,6 +1082,15 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     bool hasDescIdx = hasExtension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
     if (hasDescIdx) deviceExtensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
 
+    // Shader float atomics (VK_EXT_shader_atomic_float). The fluid P2G scatter
+    // and density splat compute kernels do atomicAdd() on float SSBOs; without
+    // ENABLING this at device creation that atomicAdd is undefined behaviour →
+    // garbage grid accumulation → wrong velocity field (the CPU-vs-Vulkan solve
+    // divergence). Push the extension when the device exposes it; the matching
+    // feature bit is verified below before it is actually enabled.
+    bool hasAtomicFloat = hasExtension(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
+    if (hasAtomicFloat) deviceExtensions.push_back(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
+
     // External-memory interop (Vulkan→CUDA for OIDN GPU-direct denoise).
     // Requires VK_KHR_external_memory (core in 1.1, but still named) +
     // VK_KHR_external_memory_win32 on Windows. Both are optional; capability
@@ -1137,10 +1146,14 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     VkPhysicalDeviceDescriptorIndexingFeatures supportedDescIdxFeatures{};
     supportedDescIdxFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
 
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT supportedAtomicFloatFeatures{};
+    supportedAtomicFloatFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
+
     supportedFeatures.pNext = &supportedBdaFeatures;
     supportedBdaFeatures.pNext = &supportedAccelFeatures;
     supportedAccelFeatures.pNext = &supportedRtPipelineFeatures;
     supportedRtPipelineFeatures.pNext = &supportedDescIdxFeatures;
+    supportedDescIdxFeatures.pNext = &supportedAtomicFloatFeatures;
     vkGetPhysicalDeviceFeatures2(m_physicalDevice, &supportedFeatures);
 
     const bool canUseBDA = hasBDA && supportedBdaFeatures.bufferDeviceAddress == VK_TRUE;
@@ -1159,6 +1172,18 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     const bool canUseAccelStruct = hasAccelStruct && supportedAccelFeatures.accelerationStructure == VK_TRUE;
     const bool canUseRTPipeline = hasRTPipeline && supportedRtPipelineFeatures.rayTracingPipeline == VK_TRUE;
     const bool canUseSamplerAnisotropy = supportedFeatures.features.samplerAnisotropy == VK_TRUE;
+    // Only the buffer (SSBO) float-atomic-add variant is needed by the fluid
+    // kernels — they do not use shared-memory float atomics.
+    const bool canUseAtomicFloat = hasAtomicFloat &&
+        supportedAtomicFloatFeatures.shaderBufferFloat32AtomicAdd == VK_TRUE;
+    if (hasAtomicFloat && !canUseAtomicFloat) {
+        VK_WARN() << "[VulkanDevice] shader_atomic_float extension present but shaderBufferFloat32AtomicAdd is unsupported; fluid P2G stays on CPU." << std::endl;
+    }
+    if (!canUseAtomicFloat) {
+        deviceExtensions.erase(
+            std::remove(deviceExtensions.begin(), deviceExtensions.end(), VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME),
+            deviceExtensions.end());
+    }
 
     if (hasBDA && !canUseBDA) {
         VK_WARN() << "[VulkanDevice] BDA extension present but bufferDeviceAddress feature is unsupported." << std::endl;
@@ -1235,6 +1260,10 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
             supportedDescIdxFeatures.descriptorBindingSampledImageUpdateAfterBind;
     }
 
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomicFloatFeatures{};
+    atomicFloatFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
+    atomicFloatFeatures.shaderBufferFloat32AtomicAdd = canUseAtomicFloat ? VK_TRUE : VK_FALSE;
+
     // Build pNext chain conservatively.
     void** nextLink = &features2.pNext;
     if (canUseBDA) {
@@ -1253,6 +1282,10 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         *nextLink = &descIdxFeatures;
         nextLink = &descIdxFeatures.pNext;
     }
+    if (canUseAtomicFloat) {
+        *nextLink = &atomicFloatFeatures;
+        nextLink = &atomicFloatFeatures.pNext;
+    }
     *nextLink = nullptr;
 
     VkDeviceCreateInfo deviceCreateInfo{};
@@ -1270,6 +1303,7 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     // so we latch the real post-create state into capabilities here.
     bool enabledDescIdx = (result == VK_SUCCESS) && canUseDescIdx;
     bool enabledSamplerAnisotropy = (result == VK_SUCCESS) && canUseSamplerAnisotropy;
+    bool enabledAtomicFloat = (result == VK_SUCCESS) && canUseAtomicFloat;
     if (result != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] vkCreateDevice failed: " << result << std::endl;
         // Log requested extensions for diagnostics
@@ -1300,6 +1334,10 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         m_capabilities.rtMode = RayTracingMode::COMPUTE;
         enabledDescIdx = false;
         enabledSamplerAnisotropy = false;
+        // Fallback passes nullptr pNext → no atomic-float feature enabled either.
+        // Must latch false so the sim compute backend keeps fluid P2G on CPU
+        // instead of invoking undefined float-atomic behaviour.
+        enabledAtomicFloat = false;
         VK_INFO() << "[VulkanDevice] Device created with fallback (no HW RT, descriptor indexing disabled). Continuing in compute mode." << std::endl;
     }
     // Latch enabled-at-create descriptor indexing state into capabilities.
@@ -1308,6 +1346,20 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     m_capabilities.supportsSamplerAnisotropy = enabledSamplerAnisotropy;
 
     vkGetDeviceQueue(m_device, m_computeQueueFamily, 0, &m_computeQueue);
+
+    // Expose device handles for the Vulkan simulation compute backend.
+    g_vulkan_sim_compute_ctx.device           = static_cast<void*>(m_device);
+    g_vulkan_sim_compute_ctx.physical_device  = static_cast<void*>(m_physicalDevice);
+    g_vulkan_sim_compute_ctx.compute_queue    = static_cast<void*>(m_computeQueue);
+    g_vulkan_sim_compute_ctx.queue_family_index = m_computeQueueFamily;
+    // Latch whether float SSBO atomics were actually enabled (not just supported)
+    // so the sim compute backend can safely run fluid P2G scatter / density splat
+    // on the GPU. False on the fallback path → those kernels stay on CPU.
+    g_vulkan_sim_compute_ctx.shader_atomic_float_enabled = enabledAtomicFloat;
+    if (enabledAtomicFloat) {
+        VK_INFO() << "[VulkanDevice] VK_EXT_shader_atomic_float enabled; fluid P2G/density can run on Vulkan GPU." << std::endl;
+    }
+
     return true;
 }
 
@@ -3900,7 +3952,7 @@ void VulkanDevice::updateVolumeBuffer(const void* data, uint64_t size, uint32_t 
     }
     uploadBuffer(m_volumeBuffer, data, size);
     m_volumeCount = count;
-    VK_INFO() << "[VulkanDevice] updateVolumeBuffer - " << count << " volume instances uploaded (" << size << " bytes)" << std::endl;
+    // VK_INFO() << "[VulkanDevice] updateVolumeBuffer - " << count << " volume instances uploaded (" << size << " bytes)" << std::endl;
 }
 
 void VulkanDevice::updateTerrainLayerBuffer(const void* data, uint64_t size, uint32_t count) {
@@ -16521,29 +16573,51 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
     if (!m_device) return;
     if (vols.empty()) {
         // No active volumes: release any stale cached VDB buffers immediately.
+        if (!m_vdbBuffers.empty() || !m_vdbTempBuffers.empty()) {
+            m_device->waitIdle();
+        }
         for (auto& [id, buf] : m_vdbBuffers) {
             (void)id;
             if (buf.buffer) m_device->destroyBuffer(buf);
         }
         m_vdbBuffers.clear();
+        m_vdbUploadedVersions.clear();
         for (auto& [id, buf] : m_vdbTempBuffers) {
             (void)id;
             if (buf.buffer) m_device->destroyBuffer(buf);
         }
         m_vdbTempBuffers.clear();
+        m_vdbTempUploadedVersions.clear();
         m_orderedVDBInstances.clear();
         m_device->updateVolumeBuffer(nullptr, 0, 0);
         return;
     }
 
-    // Build id→source map for fast O(1) lookup
+    // Build id->source map for fast O(1) lookup. Procedural volumes do not have
+    // stable VDB ids (sky cloud uses -1), so keep them out of the id map; a
+    // shared -1 key can corrupt the TLAS customIndex -> SSBO slot mapping when
+    // Nishita sky clouds coexist with live grid-domain volumes.
     std::unordered_map<int, const GpuVDBVolume*> volByID;
-    for (const auto& v : vols) volByID[v.vdb_id] = &v;
+    std::vector<const GpuVDBVolume*> proceduralVols;
+    proceduralVols.reserve(vols.size());
+    for (const auto& v : vols) {
+        if (v.vdb_id >= 0) {
+            volByID[v.vdb_id] = &v;
+        } else if (v.source_type == 3) {
+            proceduralVols.push_back(&v);
+        }
+    }
 
     // Release cached buffers for volumes that no longer exist in the scene.
+    bool destroyedAny = false;
     for (auto it = m_vdbBuffers.begin(); it != m_vdbBuffers.end(); ) {
         if (volByID.find(it->first) == volByID.end()) {
+            if (!destroyedAny) {
+                m_device->waitIdle();
+                destroyedAny = true;
+            }
             if (it->second.buffer) m_device->destroyBuffer(it->second);
+            m_vdbUploadedVersions.erase(it->first);
             it = m_vdbBuffers.erase(it);
         } else {
             ++it;
@@ -16551,7 +16625,12 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
     }
     for (auto it = m_vdbTempBuffers.begin(); it != m_vdbTempBuffers.end(); ) {
         if (volByID.find(it->first) == volByID.end()) {
+            if (!destroyedAny) {
+                m_device->waitIdle();
+                destroyedAny = true;
+            }
             if (it->second.buffer) m_device->destroyBuffer(it->second);
+            m_vdbTempUploadedVersions.erase(it->first);
             it = m_vdbTempBuffers.erase(it);
         } else {
             ++it;
@@ -16563,13 +16642,17 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
     // If BVH reorders them vs. scene.vdb_volumes, this ensures shader lookups are correct.
     std::vector<const GpuVDBVolume*> orderedVols;
     if (!m_orderedVDBInstances.empty()) {
+        std::size_t proceduralIndex = 0;
         for (const auto& hittable : m_orderedVDBInstances) {
             auto vdb = std::dynamic_pointer_cast<VDBVolume>(hittable);
             int volume_id = -1;
             if (vdb) {
                 volume_id = vdb->getVDBVolumeID();
                 if (volume_id < 0 && vdb->isProceduralVolume()) {
-                    volume_id = -1;
+                    orderedVols.push_back(proceduralIndex < proceduralVols.size()
+                        ? proceduralVols[proceduralIndex++]
+                        : nullptr);
+                    continue;
                 }
             } else if (auto gas = std::dynamic_pointer_cast<GasVolume>(hittable)) {
                 volume_id = gas->live_vdb_id;
@@ -16604,6 +16687,18 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.pivot_offset[1] = src.pivot_offset[1];
         dst.pivot_offset[2] = src.pivot_offset[2];
         dst.source_type = src.source_type;
+        // Isosurface IOR (source_type==4) rides _ext_reserved[0], roughness
+        // rides _ext_reserved[1] — keeps the 512-byte VkVolumeInstance layout
+        // unchanged (reserved tail slots).
+        dst._ext_reserved[0] = (src.ior > 1.0f) ? src.ior : 1.33f;
+        dst._ext_reserved[1] = src.surface_roughness;
+        dst._ext_reserved[2] = src.surface_foam;
+        // Particle-foam look for the SurfaceSDF single-volume path (temperature
+        // channel): tint in [3..5], extinction multiplier in [6].
+        dst._ext_reserved[3] = src.foam_color.x;
+        dst._ext_reserved[4] = src.foam_color.y;
+        dst._ext_reserved[5] = src.foam_color.z;
+        dst._ext_reserved[6] = src.foam_opacity;
         dst.cloud_coverage = src.cloud_coverage;
         dst.cloud_detail = src.cloud_detail;
         dst.cloud_erosion = src.cloud_erosion;
@@ -16623,7 +16718,9 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.density_multiplier = src.density_multiplier;
         dst.density_remap_low = src.density_remap_low;
         dst.density_remap_high = src.density_remap_high;
-        dst.noise_scale = (std::max)(src.voxel_size, 1.0f);
+        dst.noise_scale = 1.0f;
+        dst._reserved[0] = (src.density_pad > 0.0f) ? src.density_pad : 0.04f;
+        dst._reserved[1] = src.emission_pad;
         
         // Sync NanoVDB Host Buffer to Vulkan Device Buffer
         dst.volume_type = 2; // 2 = NanoVDB
@@ -16635,26 +16732,48 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
             auto& mgr = VDBVolumeManager::getInstance();
             void* hostGrid = mgr.getHostGrid(vdb_id);
             size_t gridSize = mgr.getHostGridSize(vdb_id);
+            uint32_t currentVersion = mgr.getContentVersion(vdb_id);
+            
             if (hostGrid && gridSize > 0) {
                 auto it = m_vdbBuffers.find(vdb_id);
-                // Simple reallocation if size differs (could optimize to only check once)
+                bool needsUpload = false;
+                
+                // Over-allocate by 50% to absorb frame-to-frame NanoVDB growth.
+                // CPU_TO_GPU (host-visible, device-local BAR) memory lets uploadBuffer
+                // use vkMapMemory + memcpy directly — no staging buffer, no command
+                // buffer submit, no vkWaitForFences. This eliminates the per-frame
+                // GPU stall that was blocking fluid sim playback. NanoVDB data changes
+                // every frame anyway, so device-local-only has no advantage here.
+                const size_t allocSize = gridSize + (gridSize / 2);
                 if (it == m_vdbBuffers.end() || it->second.size < gridSize) {
                     if (it != m_vdbBuffers.end()) {
+                        m_device->waitIdle();
                         m_device->destroyBuffer(it->second);
                     }
                     VulkanRT::BufferCreateInfo ci;
-                    ci.size = gridSize;
+                    ci.size = allocSize;
                     ci.usage = (VulkanRT::BufferUsage)(
-                        (uint32_t)VulkanRT::BufferUsage::STORAGE | 
+                        (uint32_t)VulkanRT::BufferUsage::STORAGE |
                         (uint32_t)VulkanRT::BufferUsage::TRANSFER_DST |
                         0x0100 /* VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT - custom */);
-                    ci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+                    ci.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
                     VulkanRT::BufferHandle buf = m_device->createBuffer(ci);
                     m_vdbBuffers[vdb_id] = buf;
                     it = m_vdbBuffers.find(vdb_id);
+                    needsUpload = true;
                 }
+                
+                // Check version
+                auto versionIt = m_vdbUploadedVersions.find(vdb_id);
+                if (versionIt == m_vdbUploadedVersions.end() || versionIt->second != currentVersion) {
+                    needsUpload = true;
+                }
+                
                 if (it != m_vdbBuffers.end() && it->second.buffer) {
-                    m_device->uploadBuffer(it->second, hostGrid, gridSize);
+                    if (needsUpload) {
+                        m_device->uploadBuffer(it->second, hostGrid, gridSize);
+                        m_vdbUploadedVersions[vdb_id] = currentVersion;
+                    }
                     dst.vdb_grid_address = it->second.deviceAddress;
                 }
             }
@@ -16664,20 +16783,37 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
             size_t tempGridSize = mgr.getHostTemperatureGridSize(vdb_id);
             if (hostTempGrid && tempGridSize > 0) {
                 auto it2 = m_vdbTempBuffers.find(vdb_id);
+                bool needsTempUpload = false;
+                
+                const size_t allocTempSize = tempGridSize + (tempGridSize / 2);
                 if (it2 == m_vdbTempBuffers.end() || it2->second.size < tempGridSize) {
-                    if (it2 != m_vdbTempBuffers.end()) m_device->destroyBuffer(it2->second);
+                    if (it2 != m_vdbTempBuffers.end()) {
+                        m_device->waitIdle();
+                        m_device->destroyBuffer(it2->second);
+                    }
                     VulkanRT::BufferCreateInfo ci2;
-                    ci2.size = tempGridSize;
+                    ci2.size = allocTempSize;
                     ci2.usage = (VulkanRT::BufferUsage)(
                         (uint32_t)VulkanRT::BufferUsage::STORAGE |
                         (uint32_t)VulkanRT::BufferUsage::TRANSFER_DST |
                         0x0100);
-                    ci2.location = VulkanRT::MemoryLocation::GPU_ONLY;
+                    ci2.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
                     m_vdbTempBuffers[vdb_id] = m_device->createBuffer(ci2);
                     it2 = m_vdbTempBuffers.find(vdb_id);
+                    needsTempUpload = true;
                 }
+                
+                // Check temperature version
+                auto tempVersionIt = m_vdbTempUploadedVersions.find(vdb_id);
+                if (tempVersionIt == m_vdbTempUploadedVersions.end() || tempVersionIt->second != currentVersion) {
+                    needsTempUpload = true;
+                }
+                
                 if (it2 != m_vdbTempBuffers.end() && it2->second.buffer) {
-                    m_device->uploadBuffer(it2->second, hostTempGrid, tempGridSize);
+                    if (needsTempUpload) {
+                        m_device->uploadBuffer(it2->second, hostTempGrid, tempGridSize);
+                        m_vdbTempUploadedVersions[vdb_id] = currentVersion;
+                    }
                     dst.vdb_temp_address = it2->second.deviceAddress;
                 }
             }
@@ -16780,7 +16916,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         }
     }
 
-    VK_INFO() << "[VulkanBackendAdapter] Uploaded " << instances.size() << " VDB volume(s) to Vulkan SSBO." << std::endl;
+    // VK_INFO() << "[VulkanBackendAdapter] Uploaded " << instances.size() << " VDB volume(s) to Vulkan SSBO." << std::endl;
     resetAccumulation();
 }
 
@@ -16811,6 +16947,9 @@ void VulkanBackendAdapter::updateGasVolumes(const std::vector<GpuGasVolume>& vol
         dst.density_multiplier = src.density_multiplier;
         dst.density_remap_low = src.density_remap_low;
         dst.density_remap_high = src.density_remap_high;
+        dst.noise_scale = 1.0f;
+        dst._reserved[0] = (src.density_pad > 0.0f) ? src.density_pad : 0.04f;
+        dst._reserved[1] = src.emission_pad;
 
         dst.scatter_color[0] = src.scatter_color.x;
         dst.scatter_color[1] = src.scatter_color.y;

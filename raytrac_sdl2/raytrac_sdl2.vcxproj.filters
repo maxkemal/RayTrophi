@@ -17,6 +17,9 @@
     <Filter Include="Kaynak Dosyalar\Physics">
       <UniqueIdentifier>322ce010-14c4-451d-9f71-a8f4daa4fc48</UniqueIdentifier>
     </Filter>
+    <Filter Include="Kaynak Dosyalar\Physics\Fluid">
+      <UniqueIdentifier>{7b1c2a4e-9f33-4d61-8e22-1c5a7d4f9a10}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Kaynak Dosyalar\Utils">
       <UniqueIdentifier>4e535095-0350-48c9-a049-68105869e98a</UniqueIdentifier>
     </Filter>
@@ -137,6 +140,45 @@
     </ClInclude>
     <ClInclude Include="source\include\SpotLight.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\SimulationCompute.h">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\SimulationWorld.h">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\SimulationSystems.h">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\ParticleSimulation.h">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\GridFluidSolver.h">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidParticles.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\APICFluidSolver.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidObject.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidSimulationSystem.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidLevelSet.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidFoam.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FoamSurface.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\SurfaceFlowField.h">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Texture.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
@@ -461,6 +503,9 @@
     <CudaCompile Include="source\src\Device\gas_kernels.cu">
       <Filter>Kaynak Dosyalar\Device</Filter>
     </CudaCompile>
+    <CudaCompile Include="source\src\Device\SimulationComputeCuda.cu">
+      <Filter>Kaynak Dosyalar\Device</Filter>
+    </CudaCompile>
     <CudaCompile Include="source\src\Device\gas_fft_solver.cu">
       <Filter>Kaynak Dosyalar\Device</Filter>
     </CudaCompile>
@@ -503,6 +548,42 @@
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\VDBVolumeManager.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ParticleSimulation.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ParticleRenderBridge.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\GridFluidSolver.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidSimulationSystem.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidLevelSet.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidFoam.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FoamSurface.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SimulationCompute.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SimulationWorld.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SimulationSystems.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SurfaceFlowField.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Utils\AssimpLoader.cpp">

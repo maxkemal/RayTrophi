@@ -151,6 +151,11 @@ public:
      * @brief Get VDBVolumeManager volume ID
      */
     int getVDBVolumeID() const { return vdb_volume_id; }
+
+    /**
+     * @brief Override the bound manager volume ID for transient live-volume invalidation.
+     */
+    void setVDBVolumeID(int id) { vdb_volume_id = id; }
     
     /**
      * @brief Get sequence ID (if animated)
@@ -168,6 +173,24 @@ public:
         vdb_sequence_id = -1;
         filepath.clear();
         setLocalBounds(min, max);
+    }
+
+    /**
+     * @brief Bind to a live (manager-owned) VDB id produced by grid simulation.
+     *
+     * The live volume's index space maps to world via voxel_size, so its local
+     * box is [0, world_max - world_min]; placement is a pure translation to
+     * world_min. Used by the simulation render bridge (transient volumes).
+     */
+    void bindLiveVolume(int manager_id, float voxel, const Vec3& world_min, const Vec3& world_max) {
+        procedural_volume = false;
+        vdb_volume_id = manager_id;
+        vdb_sequence_id = -1;
+        voxel_size = voxel;
+        setLocalBounds(Vec3(0.0f), world_max - world_min);
+        setScale(Vec3(1.0f, 1.0f, 1.0f));
+        setRotation(Vec3(0.0f, 0.0f, 0.0f));
+        setPosition(world_min);
     }
     
     /**
@@ -283,8 +306,26 @@ public:
     
     std::string name = "VDB Volume";
     std::string filepath;  ///< Original file path for reload/export
+    bool transient = false; ///< Simulation-owned live volume: excluded from save/hierarchy
     int sequence_digits = 4; // Number of digits in sequence (e.g. 4 for 0001, 1 for 0)
-    
+    // When true, the volume backend renders this as a refractive isosurface
+    // (SDF density-proxy band -> implicit surface + Snell refraction) instead
+    // of as fog. Set by the SurfaceSDF render route. Maps to source_type=4 in
+    // GpuVDBVolume / VkVolumeInstance; shaders branch on it.
+    bool render_as_isosurface = false;
+    // IOR for the isosurface dielectric boundary (water 1.33, glass 1.5).
+    // Carried into GpuVDBVolume.ior / VkVolumeInstance ior reserved slot.
+    float render_isosurface_ior = 1.33f;
+    // Surface roughness 0..1 (GGX) for the isosurface dielectric.
+    float render_isosurface_roughness = 0.0f;
+    // Whitewater/foam strength 0..1 (curvature-driven) for the isosurface.
+    float render_isosurface_foam = 0.0f;
+    // Particle-foam (whitewater) look for the SurfaceSDF single-volume path:
+    // foam rides this volume's temperature channel and the iso shader marches
+    // it. Set from the domain foam_shader at sync. Tint + extinction multiplier.
+    Vec3  render_isosurface_foam_color = Vec3(0.95f, 0.97f, 1.0f);
+    float render_isosurface_foam_opacity = 0.0f;  // 0 → shader default
+
     /**
      * @brief Get object type identifier
      */

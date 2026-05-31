@@ -531,6 +531,7 @@ public:
         gpu.density_multiplier = density.multiplier;
         gpu.density_remap_low = density.remap_low;
         gpu.density_remap_high = density.remap_high;
+        gpu.density_pad = density.cutoff_threshold;
         
         // Scattering
         gpu.scatter_color_r = static_cast<float>(scattering.color.x);

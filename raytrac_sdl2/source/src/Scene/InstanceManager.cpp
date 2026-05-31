@@ -321,8 +321,15 @@ void InstanceManager::markAllDirty() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 size_t InstanceManager::getTotalInstanceCount() const {
+    // NOTE: every caller uses this as the "foliage tail" length appended to
+    // SceneData::world.objects (to skip it during picking / selection / save).
+    // Transient groups (particle render bridges) are batched scatter that is
+    // NEVER added to world.objects, so counting them here would make callers skip
+    // that many *real* scene objects -> they become unselectable / vanish from the
+    // hierarchy whenever particles exist. Exclude transient groups.
     size_t total = 0;
     for (const auto& group : groups) {
+        if (group.transient) continue;
         total += group.instances.size();
     }
     return total;
@@ -331,6 +338,7 @@ size_t InstanceManager::getTotalInstanceCount() const {
 size_t InstanceManager::getTotalTriangleCount() const {
     size_t total = 0;
     for (const auto& group : groups) {
+        if (group.transient) continue;
         total += group.getTriangleCount();
     }
     return total;
@@ -618,6 +626,7 @@ json InstanceManager::serialize(std::ostream* binaryOut) {
         std::vector<std::future<PreparedInstanceBlob>> futures;
         futures.reserve(groups.size());
         for (const auto& group : groups) {
+            if (group.transient) continue;  // particle render bridges are never saved
             const InstanceGroup* group_ptr = &group;
             futures.push_back(std::async(std::launch::async, [group_ptr]() {
                 return prepareInstanceBlob(*group_ptr);
@@ -630,8 +639,12 @@ json InstanceManager::serialize(std::ostream* binaryOut) {
         }
     }
     
+    size_t blob_idx = 0;  // index into prepared_blobs (skips transient groups)
     for (size_t group_idx = 0; group_idx < groups.size(); ++group_idx) {
         const auto& group = groups[group_idx];
+        // Transient groups (e.g. particle render bridges) are runtime-only and
+        // rebuilt every frame; never persist them.
+        if (group.transient) continue;
         json j_group;
         j_group["id"] = group.id;
         j_group["name"] = group.name;
@@ -712,7 +725,7 @@ json InstanceManager::serialize(std::ostream* binaryOut) {
             j_group["instances_storage"] = "binary";
             const std::streampos startPos = binaryOut->tellp();
             j_group["instances_binary_offset"] = static_cast<long long>(startPos);
-            const auto& blob = prepared_blobs[group_idx];
+            const auto& blob = prepared_blobs[blob_idx++];
             j_group["instances_count"] = blob.count;
             j_group["instances_binary_codec"] = blob.codec;
             if (blob.codec == kInstanceBinaryCodecPacked16) {
@@ -1133,8 +1146,13 @@ void InstanceManager::rebuildSceneObjects(SceneData& scene) {
     size_t total_instances_requested = 0;
     
     std::string instance_prefix = "_inst_"; // Prefix to identify instances
-    
+
     for (auto& group : groups) {
+        // Transient groups (particle render bridges) are GPU-batched scatter owned
+        // by the runtime; they must NOT be CPU-expanded into world.objects or have
+        // their source triangles re-centered/baked here. Doing so would shift the
+        // selection list and corrupt their live geometry.
+        if (group.transient) continue;
         const auto group_bvh_start = std::chrono::steady_clock::now();
         // 1. Ensure BVHs are built for all sources
         //

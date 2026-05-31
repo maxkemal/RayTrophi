@@ -2618,6 +2618,243 @@ void GasSimulator::clearGPU() {
     gpu_data_valid = true;
 }
 
+void GasSimulator::stepSparseVDB(float dt, const Matrix4x4& world_matrix) {
+#ifdef OPENVDB_ENABLED
+    // 1. Inject emitters and run combustion on the dense grid first
+    // to utilize all existing advanced features (keyframe lerps, noise, spray).
+    float substep_dt = dt / std::max(1, settings.substeps);
+    for (int sub = 0; sub < settings.substeps; ++sub) {
+        applyEmitters(substep_dt);
+        processCombustion(substep_dt);
+        
+        // 2. Create sparse OpenVDB grids
+        openvdb::FloatGrid::Ptr density_vdb = openvdb::FloatGrid::create(0.0f);
+        openvdb::FloatGrid::Ptr temp_vdb = openvdb::FloatGrid::create(settings.ambient_temperature);
+        openvdb::FloatGrid::Ptr fuel_vdb = openvdb::FloatGrid::create(0.0f);
+        openvdb::FloatGrid::Ptr velx_vdb = openvdb::FloatGrid::create(0.0f);
+        openvdb::FloatGrid::Ptr vely_vdb = openvdb::FloatGrid::create(0.0f);
+        openvdb::FloatGrid::Ptr velz_vdb = openvdb::FloatGrid::create(0.0f);
+
+        openvdb::FloatGrid::Accessor density_acc = density_vdb->getAccessor();
+        openvdb::FloatGrid::Accessor temp_acc = temp_vdb->getAccessor();
+        openvdb::FloatGrid::Accessor fuel_acc = fuel_vdb->getAccessor();
+        openvdb::FloatGrid::Accessor velx_acc = velx_vdb->getAccessor();
+        openvdb::FloatGrid::Accessor vely_acc = vely_vdb->getAccessor();
+        openvdb::FloatGrid::Accessor velz_acc = velz_vdb->getAccessor();
+
+        // Populate VDB grids from the dense grid
+        for (int k = 0; k < grid.nz; ++k) {
+            for (int j = 0; j < grid.ny; ++j) {
+                for (int i = 0; i < grid.nx; ++i) {
+                    size_t idx = grid.cellIndex(i, j, k);
+                    float d = grid.density[idx];
+                    float t = grid.temperature[idx];
+                    float f = grid.fuel[idx];
+                    float vx = grid.vel_x[grid.velXIndex(i, j, k)];
+                    float vy = grid.vel_y[grid.velYIndex(i, j, k)];
+                    float vz = grid.vel_z[grid.velZIndex(i, j, k)];
+
+                    openvdb::Coord coord(i, j, k);
+                    if (d > 0.0001f) density_acc.setValue(coord, d);
+                    if (std::abs(t - settings.ambient_temperature) > 0.1f) temp_acc.setValue(coord, t);
+                    if (f > 0.0001f) fuel_acc.setValue(coord, f);
+                    if (std::abs(vx) > 0.0001f) velx_acc.setValue(coord, vx);
+                    if (std::abs(vy) > 0.0001f) vely_acc.setValue(coord, vy);
+                    if (std::abs(vz) > 0.0001f) velz_acc.setValue(coord, vz);
+                }
+            }
+        }
+
+        // 3. Apply Buoyancy and Gravity sparsely inside VDB grids
+        // Buoyancy = settings.buoyancy_temperature * (T - T_ambient) + settings.buoyancy_density * D
+        // Gravity = settings.gravity
+        openvdb::CoordBBox bbox = density_vdb->evalActiveVoxelBoundingBox();
+        if (!bbox.empty()) {
+            for (int k = bbox.min().z(); k <= bbox.max().z(); ++k) {
+                for (int j = std::max(1, bbox.min().y()); j <= bbox.max().y(); ++j) {
+                    for (int i = bbox.min().x(); i <= bbox.max().x(); ++i) {
+                        openvdb::Coord coord(i, j, k);
+                        float d = density_acc.getValue(coord);
+                        float t = temp_acc.getValue(coord);
+                        float temp_diff = t - settings.ambient_temperature;
+                        float buoyancy_force = settings.buoyancy_temperature * temp_diff + settings.buoyancy_density * d;
+                        
+                        // Apply buoyancy and gravity to velocity Y
+                        float vy = vely_acc.getValue(coord);
+                        vy += (buoyancy_force + settings.gravity.y) * substep_dt;
+                        vely_acc.setValue(coord, vy);
+
+                        // Apply gravity to X and Z
+                        if (settings.gravity.x != 0.0f) {
+                            float vx = velx_acc.getValue(coord) + settings.gravity.x * substep_dt;
+                            velx_acc.setValue(coord, vx);
+                        }
+                        if (settings.gravity.z != 0.0f) {
+                            float vz = velz_acc.getValue(coord) + settings.gravity.z * substep_dt;
+                            velz_acc.setValue(coord, vz);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Sparse Semi-Lagrangian Advection
+        // Create duplicate grids to serve as previous state source
+        openvdb::FloatGrid::Ptr prev_density = density_vdb->deepCopy();
+        openvdb::FloatGrid::Ptr prev_temp = temp_vdb->deepCopy();
+        openvdb::FloatGrid::Ptr prev_fuel = fuel_vdb->deepCopy();
+        openvdb::FloatGrid::Ptr prev_velx = velx_vdb->deepCopy();
+        openvdb::FloatGrid::Ptr prev_vely = vely_vdb->deepCopy();
+        openvdb::FloatGrid::Ptr prev_velz = velz_vdb->deepCopy();
+
+        openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> sampler_d(*prev_density);
+        openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> sampler_t(*prev_temp);
+        openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> sampler_f(*prev_fuel);
+        openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> sampler_vx(*prev_velx);
+        openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> sampler_vy(*prev_vely);
+        openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> sampler_vz(*prev_velz);
+
+        density_vdb->clear();
+        temp_vdb->clear();
+        fuel_vdb->clear();
+        velx_vdb->clear();
+        vely_vdb->clear();
+        velz_vdb->clear();
+
+        // Advect active voxels
+        openvdb::CoordBBox active_bbox = prev_density->evalActiveVoxelBoundingBox();
+        if (!active_bbox.empty()) {
+            // Dilate the active bounds by 1 voxel to allow expansion
+            active_bbox.expand(1);
+            // Clamp to grid limits
+            active_bbox.min().setX(std::max(0, active_bbox.min().x()));
+            active_bbox.min().setY(std::max(0, active_bbox.min().y()));
+            active_bbox.min().setZ(std::max(0, active_bbox.min().z()));
+            active_bbox.max().setX(std::min(grid.nx - 1, active_bbox.max().x()));
+            active_bbox.max().setY(std::min(grid.ny - 1, active_bbox.max().y()));
+            active_bbox.max().setZ(std::min(grid.nz - 1, active_bbox.max().z()));
+
+            for (int k = active_bbox.min().z(); k <= active_bbox.max().z(); ++k) {
+                for (int j = active_bbox.min().y(); j <= active_bbox.max().y(); ++j) {
+                    for (int i = active_bbox.min().x(); i <= active_bbox.max().x(); ++i) {
+                        openvdb::Coord coord(i, j, k);
+
+                        // Fetch local velocity (interpolate if needed)
+                        float vx = sampler_vx.isSample(openvdb::Vec3R(i, j, k));
+                        float vy = sampler_vy.isSample(openvdb::Vec3R(i, j, k));
+                        float vz = sampler_vz.isSample(openvdb::Vec3R(i, j, k));
+
+                        // Backtrace
+                        openvdb::Vec3R back_pos(
+                            i - vx * (substep_dt / grid.voxel_size),
+                            j - vy * (substep_dt / grid.voxel_size),
+                            k - vz * (substep_dt / grid.voxel_size)
+                        );
+
+                        // Clamp backtrace to grid bounds
+                        back_pos.x() = std::clamp(back_pos.x(), 0.0, double(grid.nx - 1));
+                        back_pos.y() = std::clamp(back_pos.y(), 0.0, double(grid.ny - 1));
+                        back_pos.z() = std::clamp(back_pos.z(), 0.0, double(grid.nz - 1));
+
+                        // Interpolate and write advected values
+                        float advected_d = sampler_d.isSample(back_pos);
+                        float advected_t = sampler_t.isSample(back_pos);
+                        float advected_f = sampler_f.isSample(back_pos);
+                        float advected_vx = sampler_vx.isSample(back_pos);
+                        float advected_vy = sampler_vy.isSample(back_pos);
+                        float advected_vz = sampler_vz.isSample(back_pos);
+
+                        if (advected_d > 0.0001f) density_acc.setValue(coord, advected_d);
+                        if (std::abs(advected_t - settings.ambient_temperature) > 0.1f) temp_acc.setValue(coord, advected_t);
+                        if (advected_f > 0.0001f) fuel_acc.setValue(coord, advected_f);
+                        if (std::abs(advected_vx) > 0.0001f) velx_acc.setValue(coord, advected_vx);
+                        if (std::abs(advected_vy) > 0.0001f) vely_acc.setValue(coord, advected_vy);
+                        if (std::abs(advected_vz) > 0.0001f) velz_acc.setValue(coord, advected_vz);
+                    }
+                }
+            }
+        }
+
+        // 5. Apply physical dissipation
+        // Scale down active voxels of density, temperature, and fuel based on dissipation settings
+        float d_mult = std::pow(settings.density_dissipation, substep_dt);
+        float t_mult = std::pow(settings.temperature_dissipation, substep_dt);
+        float f_mult = std::pow(settings.fuel_dissipation, substep_dt);
+        float v_mult = std::pow(settings.velocity_dissipation, substep_dt);
+
+        for (openvdb::FloatGrid::ValueOnIter iter = density_vdb->beginValueOn(); iter; ++iter) {
+            iter.setValue(*iter * d_mult);
+        }
+        for (openvdb::FloatGrid::ValueOnIter iter = temp_vdb->beginValueOn(); iter; ++iter) {
+            float current_t = *iter;
+            float new_t = settings.ambient_temperature + (current_t - settings.ambient_temperature) * t_mult;
+            iter.setValue(new_t);
+        }
+        for (openvdb::FloatGrid::ValueOnIter iter = fuel_vdb->beginValueOn(); iter; ++iter) {
+            iter.setValue(*iter * f_mult);
+        }
+        for (openvdb::FloatGrid::ValueOnIter iter = velx_vdb->beginValueOn(); iter; ++iter) {
+            iter.setValue(*iter * v_mult);
+        }
+        for (openvdb::FloatGrid::ValueOnIter iter = vely_vdb->beginValueOn(); iter; ++iter) {
+            iter.setValue(*iter * v_mult);
+        }
+        for (openvdb::FloatGrid::ValueOnIter iter = velz_vdb->beginValueOn(); iter; ++iter) {
+            iter.setValue(*iter * v_mult);
+        }
+
+        // 6. Write back active voxels from VDB grids to the dense FluidGrid vectors
+        grid.clear();
+        std::fill(grid.temperature.begin(), grid.temperature.end(), settings.ambient_temperature);
+
+        for (int k = 0; k < grid.nz; ++k) {
+            for (int j = 0; j < grid.ny; ++j) {
+                for (int i = 0; i < grid.nx; ++i) {
+                    openvdb::Coord coord(i, j, k);
+                    size_t idx = grid.cellIndex(i, j, k);
+
+                    float d = density_acc.getValue(coord);
+                    float t = temp_acc.getValue(coord);
+                    float f = fuel_acc.getValue(coord);
+                    float vx = velx_acc.getValue(coord);
+                    float vy = vely_acc.getValue(coord);
+                    float vz = velz_acc.getValue(coord);
+
+                    if (d > 0.0001f) grid.density[idx] = std::min(d, settings.max_density);
+                    if (t > 0.001f) grid.temperature[idx] = std::min(t, settings.max_temperature);
+                    if (f > 0.0001f) grid.fuel[idx] = std::min(f, 12.0f);
+                    
+                    if (std::abs(vx) > 0.0001f) grid.vel_x[grid.velXIndex(i, j, k)] = std::clamp(vx, -settings.max_velocity, settings.max_velocity);
+                    if (std::abs(vy) > 0.0001f) grid.vel_y[grid.velYIndex(i, j, k)] = std::clamp(vy, -settings.max_velocity, settings.max_velocity);
+                    if (std::abs(vz) > 0.0001f) grid.vel_z[grid.velZIndex(i, j, k)] = std::clamp(vz, -settings.max_velocity, settings.max_velocity);
+                }
+            }
+        }
+
+        // 7. Divergence-Free Projection / SOR Pressure Solver on the synced grid
+        // to maintain perfect mass conservation and divergence-free velocity.
+        solvePressure();
+        project();
+        enforceBoundaries();
+    }
+#else
+    // Fallback if OpenVDB not enabled
+    SCENE_LOG_WARN("[GasSimulator::stepSparseVDB] Called but OPENVDB_ENABLED is not defined! Falling back to CPU Dense.");
+    float substep_dt = dt / std::max(1, settings.substeps);
+    for (int sub = 0; sub < settings.substeps; ++sub) {
+        applyEmitters(substep_dt);
+        processCombustion(substep_dt);
+        applyForces(substep_dt, world_matrix);
+        advectVelocity(substep_dt);
+        solvePressure();
+        project();
+        advectScalars(substep_dt);
+        applyDissipation(substep_dt);
+        enforceBoundaries();
+    }
+#endif
+}
+
 void GasSimulator::stepCUDA(float dt, const Matrix4x4& world_matrix) {
     if (!cuda_initialized) {
         SCENE_LOG_WARN("[GasSimulator::stepCUDA] Called but cuda_initialized=false!");
