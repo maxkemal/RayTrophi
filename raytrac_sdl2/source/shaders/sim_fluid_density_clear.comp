@@ -1,0 +1,20 @@
+// sim_fluid_density_clear.comp — zero a cell-count float buffer.
+// Uses FluidDensitySplatGpuConstants layout; only nx/ny/nz are needed.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    int particle_count; // unused
+    float origin_x; float origin_y; float origin_z;
+    float voxel_size;
+    float particle_density; // unused
+} pc;
+
+layout(set = 0, binding = 0) buffer Buf { float data[]; };
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (int(id) >= pc.nx * pc.ny * pc.nz) return;
+    data[id] = 0.0;
+}

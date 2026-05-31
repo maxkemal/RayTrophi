@@ -177,6 +177,8 @@ World::World() {
     // Future volume params
     data.volume_density = 0.0f;
     data.volume_anisotropy = 0.0f;
+    // Off by default — Nishita sky ambient over-lights OptiX volumes vs Vulkan.
+    data.volume_atmosphere_ambient = 0;
 
     // Initialize LUT handles to zero
     data.lut.transmittance_lut = 0;
@@ -234,8 +236,11 @@ WorldData World::getGPUData() const {
             env_overlay_texture->upload_to_gpu();
         }
         if (env_overlay_texture && env_overlay_texture->isUploaded()) {
+            // Bind the handle, but DO NOT force-enable — respect the user's
+            // env_overlay_enabled flag (already copied from `data`). Forcing it
+            // on meant a loaded overlay showed even when the checkbox was off,
+            // and leaked across project loads.
             gpuData.advanced.env_overlay_tex = env_overlay_texture->get_cuda_texture();
-            gpuData.advanced.env_overlay_enabled = 1;
         }
     }
     if (atmosphere_lut) {
@@ -740,6 +745,21 @@ void World::reset() {
     defaults.ozone_absorption_scale = 1.0f;
     
     data.nishita = defaults;
+
+    // Clear the Nishita env-overlay HDR — without this it survived reset() and
+    // leaked into the next project (and showed even with the overlay disabled,
+    // due to the old force-enable in getGPUData).
+    if (env_overlay_texture) {
+        delete env_overlay_texture;
+        env_overlay_texture = nullptr;
+    }
+    env_overlay_path.clear();
+    data.advanced.env_overlay_enabled = 0;
+    data.advanced.env_overlay_tex = 0;
+    data.advanced.env_overlay_intensity = 1.0f;
+    data.advanced.env_overlay_rotation = 0.0f;
+    data.advanced.env_overlay_blend_mode = 0;
+
     data.weather.enabled = 0;
     data.weather.type = WEATHER_NONE;
     data.weather.intensity = 0.0f;

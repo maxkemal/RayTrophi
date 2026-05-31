@@ -861,8 +861,12 @@ void main() {
         bool isTransparentPass =
             payload.scattered &&
             (dot(payload.scatterDir, rayDir) > 0.9999) &&
-            (luminance(abs(payload.radiance)) < 1e-6) &&
-            all(greaterThanEqual(payload.attenuation, vec3(0.9999)));
+            (
+                (luminance(abs(payload.radiance)) < 1e-6 &&
+                 all(greaterThanEqual(payload.attenuation, vec3(0.9999)))) ||
+                (payload.bounceType == BOUNCE_TRANSPARENT &&
+                 luminance(abs(payload.radiance)) < 5e-4)
+            );
 
         // Record first substantive interaction even if this bounce terminates.
         float hitPosLen2 = dot(payload.scatterOrigin, payload.scatterOrigin);

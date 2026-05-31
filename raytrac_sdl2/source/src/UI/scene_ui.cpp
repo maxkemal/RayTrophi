@@ -1,4 +1,4 @@
-﻿// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
 // NOTE: This file has been split into multiple modules for better maintainability.
@@ -75,6 +75,7 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <shlobj.h>  // SHBrowseForFolder için
+#include <shobjidl.h>
 #include <chrono>  // Playback timing için
 #include <filesystem>  // Frame dosyalarını kontrol için
 #include <unordered_map>
@@ -800,30 +801,50 @@ std::string SceneUI::saveFileDialogW(const wchar_t* filter, const wchar_t* defEx
 }
 
 std::string SceneUI::selectFolderDialogW(const wchar_t* title) {
-    BROWSEINFOW bi = { 0 };
-    bi.lpszTitle = title;
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_USENEWUI;
-    bi.hwndOwner = GetActiveWindow();
+    auto wideToUtf8 = [](const wchar_t* path) -> std::string {
+        if (!path || path[0] == L'\0') return {};
+        const int size_needed = WideCharToMultiByte(CP_UTF8, 0, path, -1, nullptr, 0, nullptr, nullptr);
+        if (size_needed <= 1) return {};
+        std::string utf8_path(static_cast<std::size_t>(size_needed), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, path, -1, utf8_path.data(), size_needed, nullptr, nullptr);
+        utf8_path.resize(static_cast<std::size_t>(size_needed - 1));
+        return utf8_path;
+    };
 
-    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
-    if (pidl != nullptr) {
-        wchar_t path[MAX_PATH];
-        if (SHGetPathFromIDListW(pidl, path)) {
-            int size_needed = WideCharToMultiByte(CP_UTF8, 0, path, -1, nullptr, 0, nullptr, nullptr);
-            std::string utf8_path(size_needed, 0);
-            WideCharToMultiByte(CP_UTF8, 0, path, -1, utf8_path.data(), size_needed, nullptr, nullptr);
-            utf8_path.resize(size_needed - 1);
+    const HRESULT co_init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const bool should_uninit = SUCCEEDED(co_init);
 
-            // Free pidl
-            IMalloc* imalloc = nullptr;
-            if (SUCCEEDED(SHGetMalloc(&imalloc))) {
-                imalloc->Free(pidl);
-                imalloc->Release();
-            }
-
-            return utf8_path;
+    IFileDialog* dialog = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
+    if (SUCCEEDED(hr) && dialog) {
+        DWORD options = 0;
+        if (SUCCEEDED(dialog->GetOptions(&options))) {
+            dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
         }
+        if (title) {
+            dialog->SetTitle(title);
+        }
+
+        hr = dialog->Show(GetActiveWindow());
+        if (SUCCEEDED(hr)) {
+            IShellItem* item = nullptr;
+            if (SUCCEEDED(dialog->GetResult(&item)) && item) {
+                PWSTR path = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                    std::string result = wideToUtf8(path);
+                    CoTaskMemFree(path);
+                    item->Release();
+                    dialog->Release();
+                    if (should_uninit) CoUninitialize();
+                    return result;
+                }
+                item->Release();
+            }
+        }
+        dialog->Release();
     }
+
+    if (should_uninit) CoUninitialize();
     return "";
 }
 
@@ -1832,7 +1853,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (tab_to_focus == "Scatter")    { active_properties_tab = 11; tab_to_focus = ""; }
         if (tab_to_focus == "Water")      { active_properties_tab = 3; tab_to_focus = ""; }
         if (tab_to_focus == "Volumetric" || tab_to_focus == "VDB" || tab_to_focus == "Gas") { active_properties_tab = 4; tab_to_focus = ""; }
-        if (tab_to_focus == "Force Field"){ active_properties_tab = 5; tab_to_focus = ""; }
+        if (tab_to_focus == "Force Field" || tab_to_focus == "Simulation"){ active_properties_tab = 5; tab_to_focus = ""; }
         if (tab_to_focus == "World")      { active_properties_tab = 6; tab_to_focus = ""; }
         if (tab_to_focus == "Modifiers" || tab_to_focus == "Modeling")  { active_properties_tab = 7; tab_to_focus = ""; }
         if (tab_to_focus == "Paint")      { active_properties_tab = 10; tab_to_focus = ""; }
@@ -2020,7 +2041,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (show_terrain_tab)    drawTabButton(2, UIWidgets::IconType::Terrain,    "Terrain Editor");
         if (show_water_tab)      drawTabButton(3, UIWidgets::IconType::Water,      active_water_subtab == 0 ? "Water" : "River Spline");
         if (show_volumetric_tab) drawTabButton(4, UIWidgets::IconType::Volumetric, "Volumetrics");
-        if (show_forcefield_tab) drawTabButton(5, UIWidgets::IconType::Force,      "Force Fields");
+        if (show_forcefield_tab) drawTabButton(5, UIWidgets::IconType::Force,      "Simulation");
         if (show_world_tab)      drawTabButton(6, UIWidgets::IconType::World,      "World & Sky");
         if (show_stylize_tab)    drawTabButton(12, UIWidgets::IconType::Brush,     "Stylize Mode");
         if (show_hair_tab)       drawTabButton(8, UIWidgets::IconType::Hair,       "Hair & Fur");
@@ -2282,7 +2303,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                         }
                         UIWidgets::EndSection();
                     }
- Broadway:
+
 
                     // Resolution & Output controls moved to the System panel.
 
@@ -2444,7 +2465,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                 }
                 break;
             case 4: if (show_volumetric_tab) drawVolumetricPanel(ctx); break;
-            case 5: if (show_forcefield_tab) ForceFieldUI::drawForceFieldPanel(ctx, ctx.scene); break;
+            case 5: if (show_forcefield_tab) ForceFieldUI::drawForceFieldPanel(ctx, ctx.scene, &timeline); break;
             case 6: if (show_world_tab) drawWorldContent(ctx); break;
             case 12: if (show_stylize_tab) drawStylizePanel(ctx); break;
             case 7: drawModifiersPanel(ctx); break;
@@ -2653,6 +2674,21 @@ void SceneUI::validateSelectionAgainstScene(UIContext& ctx) {
                 return selectionContainsGas(ctx.scene, item.gas_volume);
             case SelectableType::ForceField:
                 return selectionContainsForceField(ctx.scene, item.force_field);
+            case SelectableType::ParticleSystem:
+                return item.particle_system_index >= 0 &&
+                       item.particle_system_index < static_cast<int>(ctx.scene.particle_systems.size());
+            case SelectableType::SimulationDomain:
+                if (item.particle_system_index < 0 ||
+                    item.particle_system_index >= static_cast<int>(ctx.scene.particle_systems.size())) {
+                    return false;
+                }
+                if (!ctx.scene.particle_systems[static_cast<std::size_t>(item.particle_system_index)].runtime) {
+                    return false;
+                }
+                return item.simulation_domain_index >= 0 &&
+                       item.simulation_domain_index < static_cast<int>(
+                           ctx.scene.particle_systems[static_cast<std::size_t>(item.particle_system_index)]
+                               .runtime->gridDomains().size());
             case SelectableType::World:
                 return true;
             case SelectableType::None:
@@ -2690,6 +2726,8 @@ void SceneUI::validateSelectionAgainstScene(UIContext& ctx) {
                    rebound_primary.gas_volume != ctx.selection.selected.gas_volume ||
                    rebound_primary.force_field != ctx.selection.selected.force_field ||
                    rebound_primary.object_index != ctx.selection.selected.object_index ||
+                   rebound_primary.particle_system_index != ctx.selection.selected.particle_system_index ||
+                   rebound_primary.simulation_domain_index != ctx.selection.selected.simulation_domain_index ||
                    rebound_primary.name != ctx.selection.selected.name) {
             ctx.selection.selected = rebound_primary;
             ctx.selection.updatePositionFromSelection();
@@ -2854,12 +2892,15 @@ void SceneUI::draw(UIContext& ctx)
         bool timeChanged = (currentTime != lastHairForceTime);
         
         // Only update if: timeline is playing OR time changed (scrubbing)
-        if (ctx.scene.force_field_manager.getActiveCount() > 0 && 
+        ctx.scene.refreshSimulationForceFieldSnapshot();
+        const auto& forceSnapshot = ctx.scene.getSimulationWorld().getForceFieldSnapshot();
+
+        if (!forceSnapshot.empty() &&
             ctx.renderer.getHairSystem().getGroomNames().size() > 0 &&
             (isPlaying || timeChanged)) {
             
             for (const auto& groomName : ctx.renderer.getHairSystem().getGroomNames()) {
-                ctx.renderer.getHairSystem().restyleGroom(groomName, &ctx.scene.force_field_manager, currentTime);
+                ctx.renderer.getHairSystem().restyleGroom(groomName, &forceSnapshot, currentTime);
             }
             lastHairForceTime = currentTime;
             
@@ -2881,7 +2922,34 @@ void SceneUI::draw(UIContext& ctx)
     drawCameraGizmos(ctx);  // Draw camera frustum icons
     drawRiverGizmos(ctx, gizmo_hit);  // Draw river spline control points
     drawViewportControls(ctx);  // Blender-style viewport overlay
-    
+
+    if (ctx.scene.anySimulationRuntimeEnabled()) {
+        const float rt_dt = std::clamp(io.DeltaTime, 0.0f, 1.0f / 30.0f);
+        const bool live_mode = !g_sim_timeline_mode;
+        // Timeline mode (default): play bakes into the cache, scrub restores, a
+        // stopped timeline stays frozen. Live mode: continuous free-run preview.
+        ctx.scene.updateSimulationTimeline(timeline.getCurrentFrame(), timeline.isPlaying(), rt_dt, 24.0f, live_mode);
+        // Keep rendering / reset accumulation only while the gas is actually
+        // changing (live mode, or a baked/scrubbed frame). A frozen timeline lets
+        // the render converge and the loop go idle — the cheap default.
+        if (live_mode || ctx.scene.simulation_render_updated) {
+            ctx.start_render = true;
+            resetSceneUiSamplingAccumulation(ctx);
+        }
+    }
+    // Feed camera-facing billboards to the Vulkan viewport every frame so particles
+    // render (depth-tested) in Solid mode and re-face the camera as it moves.
+    uploadParticleBillboards(ctx);
+
+    // Mirror discrete particles into the ray-traced render every frame, driven
+    // independently of the timeline sim driver (just like the billboard upload
+    // above). It reads the live SoA and self-flags a cheap TLAS refit on motion;
+    // a settled/frozen SoA is skipped (hash). This decouples particle RT render
+    // from the timeline bake/scrub/cache, which only manages grid domains.
+    // Debug display mode (1) uses the lightweight ImGui overlay, so the instanced
+    // geometry is suppressed there (Solid/Render show it).
+    ctx.scene.syncParticleRenderInstances(ctx.particle_display_mode != 1);
+
     // --- HAIR TRANSFORM SYNC (Global) ---
     // Skinned groom updates are handled in Renderer::updateAnimationWithGraph (after skinning).
     // Here we only handle:
@@ -3569,6 +3637,7 @@ bool SceneUI::drawOverlays(UIContext& ctx)
         drawLightGizmos(ctx, gizmo_hit);
         drawForceFieldGizmos(ctx, gizmo_hit);
     }
+    drawParticleDebugOverlay(ctx);
 
     // === PRO CAMERA HUD OVERLAYS ===
     // These are drawn on top of everything else
@@ -6382,6 +6451,7 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
         
         if (ImGui::SliderFloat("Multiplier", &shader->density.multiplier, 0.0f, 100.0f)) changed = true;
         if (ImGui::DragFloatRange2("Remap", &shader->density.remap_low, &shader->density.remap_high, 0.01f, 0.0f, 1.0f)) changed = true;
+        if (ImGui::SliderFloat("Edge Cutoff", &shader->density.cutoff_threshold, 0.0f, 0.5f)) changed = true;
         if (ImGui::SliderFloat("Edge Falloff", &shader->density.edge_falloff, 0.0f, 2.0f)) changed = true;
         
         ImGui::Unindent();

@@ -981,6 +981,11 @@ public:
     void clearHairGeometry(bool rebuild_tlas = true);
     // Upload flat LINE_LIST vertex data {x,y,z,v_coord} x vertexCount for the raster viewport hair overlay
     void uploadHairViewportLines(const std::vector<float>& vertexData, uint32_t vertexCount);
+    // Upload camera-facing particle billboards for the raster viewport overlay.
+    // Vertex layout: {pos.xyz, uv.xy, rgba} = 9 floats; TRIANGLE_LIST (6 verts/quad).
+    // Two groups by blend mode: additive and alpha.
+    void uploadParticleBillboards(const std::vector<float>& addData, uint32_t addVertexCount,
+                                  const std::vector<float>& alphaData, uint32_t alphaVertexCount);
     void updateMeshTransform(uint32_t meshHandle, const Matrix4x4& transform) override;
     void rebuildAccelerationStructure() override;
     void showAllInstances() override;
@@ -1244,6 +1249,16 @@ protected:
         VkPipeline hairLinePipeline = VK_NULL_HANDLE;
         VulkanRT::BufferHandle hairLineVertexBuffer;
         uint32_t hairLineVertexCount = 0;
+
+        // Particle billboard overlay (Solid/Matcap viewport). Two pipelines share
+        // the same shaders/layout and differ only in blend state; particles are
+        // grouped into the matching vertex buffer by their system's blend mode.
+        VkPipeline particleAddPipeline = VK_NULL_HANDLE;    // additive (fire/spark)
+        VkPipeline particleAlphaPipeline = VK_NULL_HANDLE;  // alpha (smoke/dust)
+        VulkanRT::BufferHandle particleAddVertexBuffer;
+        uint32_t particleAddVertexCount = 0;
+        VulkanRT::BufferHandle particleAlphaVertexBuffer;
+        uint32_t particleAlphaVertexCount = 0;
     };
 
     bool shouldUseInteractiveViewport() const;
@@ -1379,6 +1394,9 @@ protected:
     std::unordered_map<int, VulkanRT::BufferHandle> m_vdbBuffers;
     // NanoVDB temperature grid device buffers mapped by vdb_id (fire/blackbody)
     std::unordered_map<int, VulkanRT::BufferHandle> m_vdbTempBuffers;
+    // Mapped content versions for NanoVDB grids to prevent redundant CPU-to-GPU kopyalama
+    std::unordered_map<int, uint32_t> m_vdbUploadedVersions;
+    std::unordered_map<int, uint32_t> m_vdbTempUploadedVersions;
     // VDB volumes in the ORDER they were added to the TLAS (customIndex 0,1,2...)
     // Guarantees SSBO layout matches gl_InstanceCustomIndexEXT lookups in the shader.
     std::vector<std::shared_ptr<Hittable>> m_orderedVDBInstances;

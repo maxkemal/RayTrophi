@@ -91,6 +91,8 @@ struct RayPayload {
     uint  primaryMaterialId;   // Stylize AOV: real material index of the primary hit
 };
 
+const uint BOUNCE_TRANSPARENT = 3u;
+
 layout(location = 0) rayPayloadInEXT RayPayload payload;
 layout(location = 1) rayPayloadEXT bool shadowOccluded;
 
@@ -162,7 +164,7 @@ struct VkVolumeInstance {
     // Reserved (24 bytes) — matches VkVolumeInstance C++ layout
     uint64_t vdb_grid_address;   // NanoVDB grid device address (or 0)
     uint64_t vdb_temp_address;   // secondary grid (temperature etc.)
-    float    _reserved[2];       // padding to complete 24 bytes
+    float    _reserved[2];       // [0] density cutoff, [1] reserved
 
     // Emission extension (256 bytes) — blackbody / color-ramp
     int   emission_mode;         // 0=off, 1=plain color, 2=blackbody/color-ramp
@@ -477,8 +479,8 @@ float sampleNanoVDBFloatTrilinearAcc(
     pnanovdb_vec3_t iPos = pnanovdb_map_apply_inverse(buf, mapH, wPos);
 
     vec3 idxPos = vec3(iPos.x, iPos.y, iPos.z);
-    vec3 p0 = floor(idxPos - 0.5);
-    vec3 frac = fract(idxPos - 0.5);
+    vec3 p0 = floor(idxPos);
+    vec3 frac = fract(idxPos);
 
     float d[8];
     for (int i = 0; i < 8; ++i) {
@@ -523,9 +525,8 @@ float sampleNanoVDBFloatTrilinear(uint64_t gridAddr, vec3 worldPos) {
     
     vec3 idxPos = vec3(iPos.x, iPos.y, iPos.z);
     
-    // Shift by -0.5 to get the voxel corner for interpolation
-    vec3 p0 = floor(idxPos - 0.5);
-    vec3 frac = fract(idxPos - 0.5);
+    vec3 p0 = floor(idxPos);
+    vec3 frac = fract(idxPos);
     
     float d[8];
     for (int i = 0; i < 8; ++i) {
@@ -669,9 +670,12 @@ float sampleDensityAcc(
         density = proceduralCloudDensity(vol, localPos);
     }
 
-    density = max((density - vol.density_remap_low) / max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
-    density *= vol.density_multiplier;
-    return density;
+    float remappedDensity = max((density - vol.density_remap_low) / max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
+    float densityCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
+    if (remappedDensity <= densityCutoff) {
+        return 0.0;
+    }
+    return remappedDensity * vol.density_multiplier;
 }
 
 // ============================================================
@@ -733,12 +737,13 @@ float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
     }
     
     // Apply density remap (No upper clamp, matches OptiX fmaxf)
-    density = max((density - vol.density_remap_low) / max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
+    float remappedDensity = max((density - vol.density_remap_low) / max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
+    float densityCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
+    if (remappedDensity <= densityCutoff) {
+        return 0.0;
+    }
     
-    // Apply multiplier
-    density *= vol.density_multiplier;
-    
-    return density;
+    return remappedDensity * vol.density_multiplier;
 }
 
 // Accessor-aware lightMarch. Reuses the caller's density-grid accessor so the
@@ -788,7 +793,8 @@ float lightMarchAcc(
                    + beers_soft * (vol.scatter_multi * albedo_lum);
     }
 
-    return 1.0 - vol.shadow_strength * (1.0 - phys_trans);
+    float shadowStrength = clamp(vol.shadow_strength * 0.92, 0.0, 1.0);
+    return 1.0 - shadowStrength * (1.0 - phys_trans);
 }
 
 // ============================================================
@@ -842,7 +848,8 @@ float lightMarch(VkVolumeInstance vol, vec3 pos, vec3 lightDir, float maxDist) {
                    + beers_soft * (vol.scatter_multi * albedo_lum);
     }
     
-    return 1.0 - vol.shadow_strength * (1.0 - phys_trans);
+    float shadowStrength = clamp(vol.shadow_strength * 0.92, 0.0, 1.0);
+    return 1.0 - shadowStrength * (1.0 - phys_trans);
 }
 
 // ============================================================
@@ -906,6 +913,312 @@ void main() {
             pnanovdb_root_handle_t dummyRoot; dummyRoot.address.byte_offset = 0u;
             pnanovdb_readaccessor_init(vdbAcc, dummyRoot);
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // FLUID SURFACE (source_type == 4): isosurface raymarch + Snell refraction
+    // ══════════════════════════════════════════════════════════════════════════
+    // The volume's density channel is a SDF-derived proxy band: 0 outside the
+    // fluid, 1 inside, with a smooth ~surface_band_voxels-wide transition at
+    // the surface. We walk the ray, find the first iso=0.5 crossing, compute
+    // the surface normal from the gradient, and refract through with the
+    // water IOR. No volumetric scatter — the surface is treated as a
+    // dielectric boundary. Subsequent entries (second hit = exit) attenuate
+    // by Beer-Lambert through the absorption channel for distance traversed.
+    if (vol.source_type == 4) {
+        const float ISO_THRESH = 0.5;
+        // IOR comes from the bound fluid material (_ext_reserved[0]); fall back
+        // to water if unset. Drives both refraction bending and Fresnel.
+        float IOR_WATER = (vol._ext_reserved[0] > 1.0) ? vol._ext_reserved[0] : 1.33;
+
+        // Walk quality. The step must satisfy TWO constraints:
+        //   1. fine enough for surface accuracy (voxel-relative, step_size),
+        //   2. coarse enough that `max_steps` actually reach tFar — otherwise
+        //      the walk stops partway and the far side of the fluid is skipped
+        //      (back cells "pass"). We take the MAX of the fine step and the
+        //      cover step (marchLen / cap), so a large domain coarsens
+        //      gracefully instead of being truncated. Raise max_steps for both
+        //      fine AND complete on big domains.
+        float marchLen = max(0.0, tFar - tNear);
+        int   isoCap = clamp(vol.max_steps, 32, 2048);
+        float fineStep = clamp(vol.step_size, vol.voxel_size * 0.1, vol.voxel_size * 0.5);
+        float coverStep = marchLen / float(isoCap);
+        float step = max(0.001, max(fineStep, coverStep));
+        int   maxSteps = min(int(marchLen / step) + 2, isoCap + 2);
+
+        float t      = tNear;
+        float startD = sampleDensityAcc(vol, rayOrigin + rayDir * t, vdbBuf, vdbMapH, vdbAcc);
+        bool  startInside = startD > ISO_THRESH;
+        float prevD  = startD;
+        float hitT   = -1.0;
+
+        for (int s = 0; s < maxSteps; ++s) {
+            float nextT = min(t + step, tFar);
+            float curD = sampleDensityAcc(vol, rayOrigin + rayDir * nextT, vdbBuf, vdbMapH, vdbAcc);
+            bool crossed = startInside
+                ? (prevD >= ISO_THRESH && curD < ISO_THRESH)   // exit
+                : (prevD <  ISO_THRESH && curD >= ISO_THRESH); // enter
+            if (crossed) {
+                // Precise binary search (bisection) refinement to find the exact isosurface intersection.
+                // Eliminates sawtooth / staircasing / wood-grain aliasing artifacts completely!
+                float t0 = t;
+                float t1 = nextT;
+                float d0 = prevD;
+                float d1 = curD;
+                for (int it = 0; it < 4; ++it) {
+                    float tMid = 0.5 * (t0 + t1);
+                    float dMid = sampleDensityAcc(vol, rayOrigin + rayDir * tMid, vdbBuf, vdbMapH, vdbAcc);
+                    bool midInside = dMid > ISO_THRESH;
+                    if (startInside == midInside) {
+                        t0 = tMid;
+                        d0 = dMid;
+                    } else {
+                        t1 = tMid;
+                        d1 = dMid;
+                    }
+                }
+                float denom = d1 - d0;
+                float frac = (ISO_THRESH - d0) / ((abs(denom) > EPSILON) ? denom : EPSILON);
+                frac = clamp(frac, 0.0, 1.0);
+                hitT = t0 + frac * (t1 - t0);
+                break;
+            }
+            prevD = curD;
+            t = nextT;
+            if (t >= tFar) break;
+        }
+
+        // ── Whitewater foam composited in FRONT of the surface ──────────────
+        // Foam rides this same volume's TEMPERATURE channel (scaled by
+        // FOAM_TEMP_SCALE = 10000 on upload; see
+        // SceneData::syncSimulationRenderVolumes). One volume on the domain AABB
+        // means no coincident-volume case for the integrator to drop — this is
+        // the fix for the SDF+foam black cube. March it as bright white single-
+        // scatter in front of the iso surface; everything behind is dimmed by
+        // the foam transmittance. NO self-shadow: self-shadowing is what blacked
+        // out the old separate fog volume.
+        vec3  foam_inscatter = vec3(0.0);
+        float foam_T = 1.0;
+        if (vol.vdb_temp_address != 0) {
+            const float FOAM_TEMP_SCALE = 10000.0;
+            // Opacity rides _ext_reserved[6] (foam_shader density × scatter,
+            // packed at sync); fall back to a sane default if unset.
+            float foamOptical = vol._ext_reserved[6] > 1e-3 ? vol._ext_reserved[6] : 8.0;
+            // Foam tint rides _ext_reserved[3..5] (foam_shader scattering colour);
+            // default to a faint cool white.
+            vec3 foamAlbedo = vec3(vol._ext_reserved[3], vol._ext_reserved[4], vol._ext_reserved[5]);
+            if (dot(foamAlbedo, vec3(1.0)) < 1e-3) foamAlbedo = vec3(0.95, 0.97, 1.0);
+
+            float foamEnd = (hitT < 0.0) ? tFar : hitT;
+            float foamLen = foamEnd - tNear;
+            if (foamLen > 1e-5) {
+                int fsteps = int(foamLen / max(vol.voxel_size, foamLen / 48.0)) + 1;
+                fsteps = min(fsteps, 64);
+                float fstep = foamLen / float(fsteps);
+                vec3  skyAmb  = sampleSkyAmbient(rayDir);
+                vec3  sunDirF = normalize(worldData.w.sunDir);
+                float jitf    = rnd(payload.seed);
+                for (int fs = 0; fs < fsteps && foam_T > 0.01; ++fs) {
+                    float ft   = tNear + (float(fs) + jitf) * fstep;
+                    vec3  fpos = rayOrigin + rayDir * ft;
+                    float fd   = sampleTemperature(vol, fpos) * (1.0 / FOAM_TEMP_SCALE);
+                    if (fd <= 1e-4) continue;
+                    float a    = 1.0 - exp(-fd * foamOptical * fstep);
+
+                    // Light the foam the SAME way the fog raymarch does — scene
+                    // lights[] + nishita sun + sky ambient. Lighting it with ONLY
+                    // the sun made foam BLACK in scene-light-lit setups (the sun
+                    // term is ~0 there), and a dark in-scatter under a dimming
+                    // foam_T is exactly the black-on-water the user reported.
+                    // Foam is diffuse white → isotropic, NO self-shadow (bright).
+                    vec3 Lf = vec3(0.0);
+                    if (cam.lightCount > 0u) {
+                        int li = clamp(int(floor(rnd(payload.seed) * float(cam.lightCount))),
+                                       0, int(cam.lightCount) - 1);
+                        LightData lt = lights.l[li];
+                        int   lty = int(lt.position.w + 0.5);
+                        vec3  ldir; float latten = 1.0;
+                        if (lty == 1) {
+                            ldir = normalize(lt.direction.xyz);
+                        } else {
+                            vec3 toL = lt.position.xyz - fpos;
+                            float dL = length(toL);
+                            ldir = (dL > EPSILON) ? (toL / dL) : vec3(0.0, 1.0, 0.0);
+                            if (dL > EPSILON) latten = 1.0 / (dL * dL);
+                        }
+                        Lf += float(cam.lightCount) * lt.color.rgb * lt.color.a * latten;
+                    }
+                    if (worldData.w.mode == 2) {
+                        Lf += sampleTransmittanceLUT(fpos, sunDirF)
+                            * worldData.w.sunColor * worldData.w.sunIntensity;
+                    }
+                    Lf += skyAmb;                       // ambient fill (never fully dark)
+
+                    foam_inscatter += foam_T * a * (foamAlbedo * Lf);
+                    foam_T *= (1.0 - a);
+                }
+            }
+        }
+
+        // ── Solid geometry inside the domain ────────────────────────────────
+        // The volume AABB is hit immediately when the ray is inside it, so the
+        // iso branch would refract straight to the water surface and SKIP any
+        // solid triangle sitting between the ray origin and that surface (or,
+        // on a miss, anywhere in the domain). Probe for a solid in the relevant
+        // span; if one is closer, stop and let it render (skipAABBs) instead of
+        // refracting past it. Tints by the water depth in front of it.
+        {
+            float probeFar = (hitT < 0.0) ? tFar : hitT;
+            const uint SOLID_FLAGS = gl_RayFlagsTerminateOnFirstHitEXT
+                                   | gl_RayFlagsSkipClosestHitShaderEXT
+                                   | gl_RayFlagsOpaqueEXT;
+            const uint SOLID_MASK  = 0xFD;  // all solids, ignore other volume AABBs
+            shadowOccluded = true;
+            traceRayEXT(topLevelAS, SOLID_FLAGS, SOLID_MASK, 0, 1, 1,
+                        rayOrigin, max(1e-4, tNear - 0.002), rayDir, probeFar + 0.002, 1);
+            if (shadowOccluded) {
+                float lo = max(tNear, 1e-4), hi = probeFar;
+                for (int it = 0; it < 6; ++it) {
+                    float mid = (lo + hi) * 0.5;
+                    shadowOccluded = true;
+                    traceRayEXT(topLevelAS, SOLID_FLAGS, SOLID_MASK, 0, 1, 1,
+                                rayOrigin, max(1e-4, lo - 0.002), rayDir, mid + 0.002, 1);
+                    if (shadowOccluded) hi = mid; else lo = mid;
+                }
+                float solidT = lo;
+                // Absorption for the water the ray crossed before the solid.
+                if (startInside) {
+                    float depth = max(0.0, solidT - tNear);
+                    payload.attenuation *= exp(-vol.absorption_color * vol.absorption_coefficient * depth);
+                    payload.attenuation *= vol.scatter_color;
+                }
+                // Foam floating in front of the solid still shows; dim the solid
+                // behind it by the foam transmittance.
+                payload.radiance    += foam_inscatter;
+                payload.attenuation *= foam_T;
+                // Continue straight to the solid; skip volume AABBs so the
+                // triangle closesthit fires on the next trace.
+                payload.scatterOrigin = rayOrigin + rayDir * max(solidT - 0.01, tNear);
+                payload.scatterDir    = rayDir;
+                payload.skipAABBs     = true;
+                payload.scattered     = true;
+                payload.hitEmissive   = false;
+                payload.bounceType    = 0u;
+                return;
+            }
+        }
+
+        if (hitT < 0.0) {
+            // Ray missed the iso-surface AND no solid — pass through, but any
+            // airborne foam/spray in this segment still adds light + occlusion.
+            payload.radiance    += foam_inscatter;
+            payload.attenuation *= foam_T;
+            payload.scatterOrigin = rayOrigin + rayDir * (tFar + 0.002);
+            payload.scatterDir    = rayDir;
+            payload.scattered     = true;
+            payload.hitEmissive   = false;
+            payload.bounceType    = BOUNCE_TRANSPARENT;
+            return;
+        }
+
+        vec3 hitPos = rayOrigin + rayDir * hitT;
+
+        // Central-difference gradient on the density field for the surface
+        // normal. h = voxel_size keeps the stencil aligned with the proxy
+        // band thickness (band ≈ 0.5*voxel by default), so the gradient is
+        // numerically well-conditioned.
+        float h = max(0.001, vol.voxel_size);
+        float sxp = sampleDensityAcc(vol, hitPos + vec3(h, 0.0, 0.0), vdbBuf, vdbMapH, vdbAcc);
+        float sxm = sampleDensityAcc(vol, hitPos - vec3(h, 0.0, 0.0), vdbBuf, vdbMapH, vdbAcc);
+        float syp = sampleDensityAcc(vol, hitPos + vec3(0.0, h, 0.0), vdbBuf, vdbMapH, vdbAcc);
+        float sym = sampleDensityAcc(vol, hitPos - vec3(0.0, h, 0.0), vdbBuf, vdbMapH, vdbAcc);
+        float szp = sampleDensityAcc(vol, hitPos + vec3(0.0, 0.0, h), vdbBuf, vdbMapH, vdbAcc);
+        float szm = sampleDensityAcc(vol, hitPos - vec3(0.0, 0.0, h), vdbBuf, vdbMapH, vdbAcc);
+        vec3 grad = vec3(sxp - sxm, syp - sym, szp - szm);
+        float gradLen = length(grad);
+
+        // Foam / whitewater: SDF Laplacian = surface curvature. High |curvature|
+        // = wave crest / breaking edge / splash -> whiten. Reuses the 6 gradient
+        // samples + the centre (≈iso), so it's nearly free.
+        float foam_strength = clamp(vol._ext_reserved[2], 0.0, 1.0);
+        if (foam_strength > 1e-3) {
+            float dc = sampleDensityAcc(vol, hitPos, vdbBuf, vdbMapH, vdbAcc);
+            float lap = abs((sxp + sxm + syp + sym + szp + szm) - 6.0 * dc);
+            float foam = foam_strength * smoothstep(0.15, 0.7, lap);
+            // Bright white whitewater, lit by the current throughput.
+            payload.radiance += payload.attenuation * foam * vec3(0.9);
+        }
+        // Density increases TOWARD fluid interior, so -gradient points OUT of
+        // the surface (toward the less-dense / air side).
+        vec3 N = (gradLen > 1e-6) ? normalize(-grad) : -rayDir;
+
+        // ── Rough dielectric event (Fresnel importance-sampled). ────────────
+        // Orient the geometric normal against the incoming ray.
+        if (dot(rayDir, N) > 0.0) N = -N;
+
+        // GGX roughness: jitter the normal inside a microfacet lobe so both the
+        // reflection AND the refraction blur with surface_roughness
+        // (_ext_reserved[1]). 0 = mirror-smooth still water.
+        float roughness = clamp(vol._ext_reserved[1], 0.0, 1.0);
+        if (roughness > 1e-3) {
+            float a = roughness * roughness;
+            float u1 = rnd(payload.seed);
+            float u2 = rnd(payload.seed);
+            float phi = TWO_PI * u1;
+            float cosT = sqrt(max(0.0, (1.0 - u2) / (1.0 + (a * a - 1.0) * u2)));
+            float sinT = sqrt(max(0.0, 1.0 - cosT * cosT));
+            vec3 hT = vec3(sinT * cos(phi), sinT * sin(phi), cosT);
+            vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+            vec3 T = normalize(cross(up, N));
+            vec3 B = cross(N, T);
+            vec3 Np = normalize(hT.x * T + hT.y * B + hT.z * N);
+            if (dot(rayDir, Np) < 0.0) N = Np;  // keep facing the ray
+        }
+
+        // Beer-Lambert over the segment the ray just traversed INSIDE the fluid
+        // (only when it started inside — i.e. this is an exit / internal event).
+        // Pure water is clear; the blue comes from this depth absorption.
+        if (startInside) {
+            float depth = max(0.0, hitT - tNear);
+            vec3 sigmaA = vol.absorption_color * vol.absorption_coefficient;
+            payload.attenuation *= exp(-sigmaA * depth);
+        }
+
+        // Fresnel, importance-sampled: reflect (scene/sky) vs refract (through).
+        // Picking the branch by Fresnel probability means the per-branch weight
+        // is 1 — no (1-fresnel)/fresnel multiply, far less noise than splitting.
+        float eta = startInside ? IOR_WATER : (1.0 / IOR_WATER);
+        float cosTheta = clamp(abs(dot(rayDir, N)), 0.0, 1.0);
+        float r0 = (1.0 - IOR_WATER) / (1.0 + IOR_WATER);
+        r0 = r0 * r0;
+        float fresnel = r0 + (1.0 - r0) * pow(1.0 - cosTheta, 5.0);
+
+        vec3 refrDir = refract(rayDir, N, eta);
+        bool tir = dot(refrDir, refrDir) < 1e-6;
+        vec3 outDir;
+        if (tir || rnd(payload.seed) < fresnel) {
+            // Reflection — traces the scene/sky next bounce. No water cast.
+            outDir = reflect(rayDir, N);
+        } else {
+            // Refraction — through the water; mild surface cast.
+            outDir = normalize(refrDir);
+            payload.attenuation *= vol.scatter_color;
+        }
+
+        // Whitewater foam in front of the surface: add its in-scatter now and
+        // dim the redirected lobe (water/sky behind) by the foam transmittance.
+        payload.radiance    += foam_inscatter;
+        payload.attenuation *= foam_T;
+
+        payload.scatterOrigin       = hitPos + outDir * 0.003;
+        payload.scatterDir          = outDir;
+        payload.scattered           = true;
+        payload.hitEmissive         = false;
+        payload.primaryAlbedo       = vol.scatter_color;
+        payload.primaryNormal       = N;
+        payload.primaryTransmission = 1.0;
+        payload.bounceType          = 0u;
+        return;
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -1008,16 +1321,19 @@ void main() {
         vec3  samplePos = rayOrigin + rayDir * t;
         
         float density = sampleDensityAcc(vol, samplePos, vdbBuf, vdbMapH, vdbAcc);
-        // Stochastic cutoff for sparse boundaries (OptiX Parity)
-        if (density <= rnd(payload.seed) * 0.01) {
+        float sigma_s_local = density * sigma_s_coeff;
+        float sigma_a_local = density * sigma_a_coeff;
+        float sigma_t_local = sigma_s_local + sigma_a_local;
+        // Let low-density regions survive based on scattering optical depth, not
+        // raw density alone. This means increasing scatter can actually keep thin
+        // edges visible instead of them being discarded by a fixed density gate.
+        float sparseCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.04;
+        float scatter_keep = clamp((sigma_s_local * baseStep) / sparseCutoff, 0.0, 1.0);
+        if (rnd(payload.seed) > scatter_keep) {
             t += baseStep;
             step++;
             continue;
         }
-
-        float sigma_s_local = density * sigma_s_coeff;
-        float sigma_a_local = density * sigma_a_coeff;
-        float sigma_t_local = sigma_s_local + sigma_a_local;
         if (sigma_t_local <= EPSILON) {
             t += baseStep;
             step++;
@@ -1154,10 +1470,11 @@ void main() {
             }
             
             // 3. Sky/Ambient lighting (closer to CPU world.evaluate(up) behavior)
-            inscatter += ambientSky * vol.scatter_color * sigma_s_local;
+            float thin_scatter = scatter_keep * scatter_keep;
+            inscatter += ambientSky * vol.scatter_color * sigma_s_local * thin_scatter;
             
             // Multi-scatter ambient + source boost (matches OptiX ms_boost)
-            vec3 ms_boost = vec3(1.0) + vol.scatter_color * vol.scatter_multi * 2.0;
+            vec3 ms_boost = vec3(1.0) + vol.scatter_color * vol.scatter_multi * (2.0 * thin_scatter);
             inscatter *= ms_boost;
             
             // CPU parity integration:
@@ -1194,6 +1511,15 @@ void main() {
     // OUTPUT — Set payload for path tracer integration
     // ══════════════════════════════════════════════════════════════════════════
     
+    // Sanitize against NaN/Inf. A single non-finite sample (e.g. a degenerate
+    // ray when two coincident volumes — foam fog + fluid iso surface — share the
+    // domain AABB) otherwise poisons the accumulation buffer permanently → the
+    // whole domain goes black until accumulation resets. Drop the bad sample.
+    if (any(isnan(accumulated_radiance)) || any(isinf(accumulated_radiance)))
+        accumulated_radiance = vec3(0.0);
+    if (isnan(transmittance) || isinf(transmittance) || transmittance < 0.0)
+        transmittance = 1.0;
+
     // Accumulated in-scattered radiance
     payload.radiance  = accumulated_radiance;
     payload.skipAABBs = false; // default; overridden below if solid found
@@ -1212,7 +1538,11 @@ void main() {
     }
 
     float volumeContribution = max(max(accumulated_radiance.r, accumulated_radiance.g), accumulated_radiance.b);
-    bool primaryVolumeInteraction = didScatter || (1.0 - transmittance) > 0.01 || volumeContribution > 1e-5;
+    float volumeOpacity = 1.0 - transmittance;
+    // Keep ultra-thin fog tails out of the primary auxiliary buffers. They were
+    // being treated as first-hit geometry, which overemphasized weak density
+    // regions in Vulkan RT denoiser output compared to OptiX.
+    bool primaryVolumeInteraction = didScatter || volumeOpacity > 0.04 || volumeContribution > 5e-4;
     if (payload.primaryHit == 0u && primaryVolumeInteraction) {
         payload.primaryAlbedo = vol.scatter_color;
         payload.primaryNormal = -rayDir;
@@ -1246,5 +1576,8 @@ void main() {
         payload.scatterDir    = rayDir;
         payload.scattered     = (transmittance > 0.01); // Stop if fully absorbed
         payload.hitEmissive   = (vol.emission_mode >= 1 && transmittance < 0.99);
+        if (volumeOpacity <= 0.04 && volumeContribution <= 5e-4) {
+            payload.bounceType = BOUNCE_TRANSPARENT;
+        }
     }
 }

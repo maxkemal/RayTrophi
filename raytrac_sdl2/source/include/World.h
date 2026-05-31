@@ -213,6 +213,14 @@ struct WorldData {
     // Volume (Placeholder for later)
     float volume_density;
     float volume_anisotropy;
+
+    // Gate the Nishita-sky AMBIENT contribution to volume render (OptiX). The
+    // OptiX volume in-scatter ambient samples the raw Nishita sky, which reads
+    // much brighter than the Vulkan LUT-based ambient — breaking backend parity
+    // (the sky over-lights the volume). Default 0 = OFF (volumes lit by sun +
+    // scene lights only, matching Vulkan more closely). 1 = re-enable. The
+    // underlying base-radiance parity (raw sky vs LUT) is the deeper fix.
+    int volume_atmosphere_ambient;
 };
 
 #ifndef __CUDACC__
@@ -276,6 +284,11 @@ public:
     // Camera position for volumetric clouds
     void setCameraY(float y) { data.camera_y = y; }
     float getCameraY() const { return data.camera_y; }
+
+    // Nishita sky ambient -> volume render gate (OptiX). Default off for
+    // Vulkan parity; see WorldData::volume_atmosphere_ambient.
+    void setVolumeAtmosphereAmbient(bool on) { data.volume_atmosphere_ambient = on ? 1 : 0; }
+    bool getVolumeAtmosphereAmbient() const { return data.volume_atmosphere_ambient != 0; }
 
     AtmosphereLUT* getLUT() const { return atmosphere_lut; }
 

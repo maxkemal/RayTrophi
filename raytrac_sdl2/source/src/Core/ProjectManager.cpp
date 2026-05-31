@@ -1,4 +1,4 @@
-﻿#include "ProjectManager.h"
+#include "ProjectManager.h"
 #include "globals.h"
 #include "Renderer.h"
 #include "OptixWrapper.h"
@@ -607,6 +607,117 @@ static Vec3 jsonToVec3(const json& j) {
     return Vec3(0, 0, 0);
 }
 
+static const char* particleEmitterSourceModeToString(RayTrophiSim::ParticleEmitterSourceMode mode) {
+    switch (mode) {
+        case RayTrophiSim::ParticleEmitterSourceMode::ObjectOrigin: return "ObjectOrigin";
+        case RayTrophiSim::ParticleEmitterSourceMode::ForceFieldOrigin: return "ForceFieldOrigin";
+        case RayTrophiSim::ParticleEmitterSourceMode::Point:
+        default: return "Point";
+    }
+}
+
+static RayTrophiSim::ParticleEmitterSourceMode particleEmitterSourceModeFromString(const std::string& value) {
+    if (value == "ObjectOrigin") return RayTrophiSim::ParticleEmitterSourceMode::ObjectOrigin;
+    if (value == "ForceFieldOrigin") return RayTrophiSim::ParticleEmitterSourceMode::ForceFieldOrigin;
+    return RayTrophiSim::ParticleEmitterSourceMode::Point;
+}
+
+static const char* particleEmitterSpawnModeToString(RayTrophiSim::ParticleEmitterSpawnMode mode) {
+    switch (mode) {
+        case RayTrophiSim::ParticleEmitterSpawnMode::ObjectAABBSurface: return "ObjectAABBSurface";
+        case RayTrophiSim::ParticleEmitterSpawnMode::MeshSurface: return "MeshSurface";
+        case RayTrophiSim::ParticleEmitterSpawnMode::Center:
+        default: return "Center";
+    }
+}
+
+static RayTrophiSim::ParticleEmitterSpawnMode particleEmitterSpawnModeFromString(const std::string& value) {
+    if (value == "ObjectAABBSurface") return RayTrophiSim::ParticleEmitterSpawnMode::ObjectAABBSurface;
+    if (value == "MeshSurface") return RayTrophiSim::ParticleEmitterSpawnMode::MeshSurface;
+    return RayTrophiSim::ParticleEmitterSpawnMode::Center;
+}
+
+static const char* particleColliderSourceModeToString(RayTrophiSim::ParticleColliderSourceMode mode) {
+    switch (mode) {
+        case RayTrophiSim::ParticleColliderSourceMode::ObjectAABB: return "ObjectAABB";
+        case RayTrophiSim::ParticleColliderSourceMode::ObjectOBB: return "ObjectOBB";
+        case RayTrophiSim::ParticleColliderSourceMode::Sphere: return "Sphere";
+        case RayTrophiSim::ParticleColliderSourceMode::Capsule: return "Capsule";
+        case RayTrophiSim::ParticleColliderSourceMode::PlaneY:
+        default: return "PlaneY";
+    }
+}
+
+static RayTrophiSim::ParticleColliderSourceMode particleColliderSourceModeFromString(const std::string& value) {
+    if (value == "ObjectAABB") return RayTrophiSim::ParticleColliderSourceMode::ObjectAABB;
+    if (value == "ObjectOBB") return RayTrophiSim::ParticleColliderSourceMode::ObjectOBB;
+    if (value == "Sphere") return RayTrophiSim::ParticleColliderSourceMode::Sphere;
+    if (value == "Capsule") return RayTrophiSim::ParticleColliderSourceMode::Capsule;
+    return RayTrophiSim::ParticleColliderSourceMode::PlaneY;
+}
+
+static const char* simulationGridDomainSourceModeToString(RayTrophiSim::SimulationGridDomainSourceMode mode) {
+    switch (mode) {
+        case RayTrophiSim::SimulationGridDomainSourceMode::ObjectBounds: return "ObjectBounds";
+        case RayTrophiSim::SimulationGridDomainSourceMode::Adaptive: return "Adaptive";
+        case RayTrophiSim::SimulationGridDomainSourceMode::ManualBox:
+        default: return "ManualBox";
+    }
+}
+
+static RayTrophiSim::SimulationGridDomainSourceMode simulationGridDomainSourceModeFromString(const std::string& value) {
+    if (value == "ObjectBounds") return RayTrophiSim::SimulationGridDomainSourceMode::ObjectBounds;
+    if (value == "Adaptive") return RayTrophiSim::SimulationGridDomainSourceMode::Adaptive;
+    return RayTrophiSim::SimulationGridDomainSourceMode::ManualBox;
+}
+
+static const char* simulationGridDomainBoundaryModeToString(RayTrophiSim::SimulationGridDomainBoundaryMode mode) {
+    switch (mode) {
+        case RayTrophiSim::SimulationGridDomainBoundaryMode::Closed: return "Closed";
+        case RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic: return "Periodic";
+        case RayTrophiSim::SimulationGridDomainBoundaryMode::Open:
+        default: return "Open";
+    }
+}
+
+static RayTrophiSim::SimulationGridDomainBoundaryMode simulationGridDomainBoundaryModeFromString(const std::string& value) {
+    if (value == "Closed") return RayTrophiSim::SimulationGridDomainBoundaryMode::Closed;
+    if (value == "Periodic") return RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic;
+    return RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
+}
+
+static const char* particlePhysicsModeToString(RayTrophiSim::ParticlePhysicsMode mode) {
+    switch (mode) {
+        case RayTrophiSim::ParticlePhysicsMode::Granular: return "Granular";
+        case RayTrophiSim::ParticlePhysicsMode::Fluid: return "Fluid";
+        case RayTrophiSim::ParticlePhysicsMode::Gas: return "Gas";
+        case RayTrophiSim::ParticlePhysicsMode::Spark:
+        default: return "Spark";
+    }
+}
+
+static RayTrophiSim::ParticlePhysicsMode particlePhysicsModeFromString(const std::string& value) {
+    if (value == "Granular") return RayTrophiSim::ParticlePhysicsMode::Granular;
+    if (value == "Fluid") return RayTrophiSim::ParticlePhysicsMode::Fluid;
+    if (value == "Gas") return RayTrophiSim::ParticlePhysicsMode::Gas;
+    return RayTrophiSim::ParticlePhysicsMode::Spark;
+}
+
+static const char* particleQualityModeToString(RayTrophiSim::ParticleQualityMode quality) {
+    switch (quality) {
+        case RayTrophiSim::ParticleQualityMode::Preview: return "Preview";
+        case RayTrophiSim::ParticleQualityMode::Offline: return "Offline";
+        case RayTrophiSim::ParticleQualityMode::Realtime:
+        default: return "Realtime";
+    }
+}
+
+static RayTrophiSim::ParticleQualityMode particleQualityModeFromString(const std::string& value) {
+    if (value == "Preview") return RayTrophiSim::ParticleQualityMode::Preview;
+    if (value == "Offline") return RayTrophiSim::ParticleQualityMode::Offline;
+    return RayTrophiSim::ParticleQualityMode::Realtime;
+}
+
 static json mat4ToJson(const Matrix4x4& m) {
     json j = json::array();
     for(int i = 0; i < 4; ++i)
@@ -805,9 +916,17 @@ void ProjectManager::syncProjectToScene(SceneData& scene) {
 // ============================================================================
 
 void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer_backend_reset) {
-    // 1. Ensure GPU is idle before clearing resources
+    // 1. Ensure GPU and active backends are completely idle before clearing resources
+    extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+    extern std::unique_ptr<Backend::IBackend> g_backend;
+    if (g_viewport_backend) {
+        try { g_viewport_backend->waitForCompletion(); } catch (...) {}
+    }
+    if (g_backend) {
+        try { g_backend->waitForCompletion(); } catch (...) {}
+    }
     if (render_settings.use_optix) {
-        cudaDeviceSynchronize();
+        try { cudaDeviceSynchronize(); } catch (...) {}
     }
 
     g_project.clear();
@@ -1330,6 +1449,19 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         if (progress_callback) progress_callback(84, "Saving Force Fields...");
         root["force_fields"] = serializeForceFields(scene.force_field_manager);
         SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.force_field_manager.force_fields.size()) + " Force Fields.");
+
+        // Particle Simulation
+        if (progress_callback) progress_callback(84, "Saving particle simulation...");
+        scene.pruneInvalidParticleObjectBindings();
+        scene.syncActiveParticleSystemObjectFromRuntime();
+        root["particle_simulation"] = serializeParticleSimulation(scene);
+        if (auto particles = scene.getParticleSimulationSystem()) {
+            SCENE_LOG_INFO("[ProjectManager] Saved particle simulation with " +
+                           std::to_string(particles->emitters().size()) + " emitters and " +
+                           std::to_string(particles->colliders().size()) + " colliders.");
+        } else {
+            SCENE_LOG_INFO("[ProjectManager] Saved empty particle simulation.");
+        }
         
         // Hair System
         if (progress_callback) progress_callback(84, "Saving hair system...");
@@ -1802,11 +1934,12 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.mesh_paint_layer_stacks.size()) + " paint layer stacks.");
             }
 
-            // VDB / Gas / Force Fields
-            simdjson::dom::element vdb_el, gas_el, ff_el;
+            // VDB / Gas / Force Fields / Particle Simulation
+            simdjson::dom::element vdb_el, gas_el, ff_el, particles_el;
             if (!root["vdb_volumes"].get(vdb_el)) deserializeVDBVolumes(sjsonToNlohmann(vdb_el), scene);
             if (!root["gas_volumes"].get(gas_el)) deserializeGasVolumes(sjsonToNlohmann(gas_el), scene);
             if (!root["force_fields"].get(ff_el)) deserializeForceFields(sjsonToNlohmann(ff_el), scene);
+            if (!root["particle_simulation"].get(particles_el)) deserializeParticleSimulation(sjsonToNlohmann(particles_el), scene);
 
             // Hair System
             // newProject already cleared HairSystem + uploaded empty hair to GPU.
@@ -3523,8 +3656,11 @@ json ProjectManager::serializeVDBVolumes(const std::vector<std::shared_ptr<VDBVo
     
     for (size_t i = 0; i < vdb_volumes.size(); ++i) {
         const auto& vdb = vdb_volumes[i];
+        if (!vdb || vdb->transient) {
+            continue; // simulation-owned live volumes are rebuilt at runtime, never saved
+        }
         json j;
-        
+
         j["id"] = i;
         j["name"] = vdb->name;
         j["filepath"] = vdb->getFilePath();
@@ -3537,6 +3673,12 @@ json ProjectManager::serializeVDBVolumes(const std::vector<std::shared_ptr<VDBVo
         j["current_frame"] = vdb->getCurrentFrame();
         j["timeline_linked"] = vdb->isLinkedToTimeline();
         j["frame_offset"] = vdb->getFrameOffset();
+
+        // Fluid Surface
+        j["render_as_isosurface"] = vdb->render_as_isosurface;
+        j["render_isosurface_ior"] = vdb->render_isosurface_ior;
+        j["render_isosurface_roughness"] = vdb->render_isosurface_roughness;
+        j["render_isosurface_foam"] = vdb->render_isosurface_foam;
         
         // Shader
         if (auto shader = vdb->volume_shader) {
@@ -3559,9 +3701,9 @@ json ProjectManager::serializeVDBVolumes(const std::vector<std::shared_ptr<VDBVo
         }
         
         arr.push_back(j);
-    }
+     }
     
-    return arr;
+     return arr;
 }
 
 void ProjectManager::deserializeVDBVolumes(const json& j_arr, SceneData& scene) {
@@ -3606,6 +3748,12 @@ void ProjectManager::deserializeVDBVolumes(const json& j_arr, SceneData& scene) 
         vdb->setCurrentFrame(j.value("current_frame", 0));
         vdb->setLinkedToTimeline(j.value("timeline_linked", true));
         vdb->setFrameOffset(j.value("frame_offset", 0));
+
+        // Fluid Surface
+        vdb->render_as_isosurface = j.value("render_as_isosurface", false);
+        vdb->render_isosurface_ior = j.value("render_isosurface_ior", 1.33f);
+        vdb->render_isosurface_roughness = j.value("render_isosurface_roughness", 0.0f);
+        vdb->render_isosurface_foam = j.value("render_isosurface_foam", 0.0f);
         
         // Shader
         if (j.contains("shader")) {
@@ -3679,4 +3827,543 @@ json ProjectManager::serializeForceFields(const Physics::ForceFieldManager& ffm)
 
 void ProjectManager::deserializeForceFields(const json& j, SceneData& scene) {
     scene.force_field_manager.fromJson(j);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PARTICLE SIMULATION SERIALIZATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
+    json root;
+    root["version"] = 2;
+    root["active_system_index"] = scene.active_particle_system_index;
+    root["next_system_id"] = scene.next_particle_system_id;
+    root["systems"] = json::array();
+    root["emitters"] = json::array();
+    root["colliders"] = json::array();
+
+    auto serializeEmitter = [](const RayTrophiSim::ParticleEmitterDesc& emitter) {
+        json e;
+        e["name"] = emitter.name;
+        e["source_mode"] = particleEmitterSourceModeToString(emitter.source_mode);
+        e["spawn_mode"] = particleEmitterSpawnModeToString(emitter.spawn_mode);
+        e["source_name"] = emitter.source_name;
+        e["point"] = vec3ToJson(emitter.point);
+        e["local_offset"] = vec3ToJson(emitter.local_offset);
+        e["direction"] = vec3ToJson(emitter.direction);
+        e["surface_offset"] = emitter.surface_offset;
+        e["rate_per_second"] = emitter.rate_per_second;
+        e["speed"] = emitter.speed;
+        e["spread"] = emitter.spread;
+        e["lifetime_seconds"] = emitter.lifetime_seconds;
+        e["mass"] = emitter.mass;
+        e["start_size"] = emitter.start_size;
+        e["end_size"] = emitter.end_size;
+        e["size_jitter"] = emitter.size_jitter;
+        e["start_opacity"] = emitter.start_opacity;
+        e["end_opacity"] = emitter.end_opacity;
+        e["start_color"] = vec3ToJson(emitter.start_color);
+        e["end_color"] = vec3ToJson(emitter.end_color);
+        e["angular_velocity"] = emitter.angular_velocity;
+        e["angular_jitter"] = emitter.angular_jitter;
+        e["enabled"] = emitter.enabled;
+        e["seed"] = emitter.seed;
+        return e;
+    };
+
+    auto serializeCollider = [](const RayTrophiSim::ParticleColliderDesc& collider) {
+        json c;
+        c["name"] = collider.name;
+        c["source_mode"] = particleColliderSourceModeToString(collider.source_mode);
+        c["source_name"] = collider.source_name;
+        c["enabled"] = collider.enabled;
+        c["plane_y"] = collider.plane_y;
+        c["sphere_center"] = vec3ToJson(collider.sphere_center);
+        c["sphere_radius"] = collider.sphere_radius;
+        c["capsule_start"] = vec3ToJson(collider.capsule_start);
+        c["capsule_end"] = vec3ToJson(collider.capsule_end);
+        c["capsule_radius"] = collider.capsule_radius;
+        c["bounds_min"] = vec3ToJson(collider.bounds_min);
+        c["bounds_max"] = vec3ToJson(collider.bounds_max);
+        c["restitution"] = collider.restitution;
+        c["friction"] = collider.friction;
+        c["thickness"] = collider.thickness;
+        return c;
+    };
+
+    auto serializeFlowSource = [](const RayTrophiSim::SimulationFlowSourceDesc& source) {
+        json f;
+        f["name"] = source.name;
+        f["source_mode"] = static_cast<int>(source.source_mode);
+        f["source_name"] = source.source_name;
+        f["domain_index"] = source.domain_index;
+        f["enabled"] = source.enabled;
+        f["position"] = vec3ToJson(source.position);
+        f["velocity"] = vec3ToJson(source.velocity);
+        f["radius"] = source.radius;
+        f["density"] = source.density;
+        f["temperature"] = source.temperature;
+        f["fuel"] = source.fuel;
+        f["falloff"] = source.falloff;
+        f["fluid_particles_per_second"] = source.fluid_particles_per_second;
+        f["use_time_limit"] = source.use_time_limit;
+        f["start_time"] = source.start_time;
+        f["end_time"] = source.end_time;
+        f["use_particle_limit"] = source.use_particle_limit;
+        f["max_emitted_particles"] = source.max_emitted_particles;
+        return f;
+    };
+
+    auto serializeDomain = [](const RayTrophiSim::SimulationGridDomainDesc& domain) {
+        json d;
+        d["name"] = domain.name;
+        d["backend"] = static_cast<int>(domain.backend);
+        d["source_mode"] = simulationGridDomainSourceModeToString(domain.source_mode);
+        d["boundary_mode"] = simulationGridDomainBoundaryModeToString(domain.boundary_mode);
+        d["source_name"] = domain.source_name;
+        d["enabled"] = domain.enabled;
+        d["preserve_voxel_size_on_resize"] = domain.preserve_voxel_size_on_resize;
+        d["adaptive_lock_floor"] = domain.adaptive_lock_floor;
+        d["adaptive_floor_y"] = domain.adaptive_floor_y;
+        d["use_sparse_tiles"] = domain.use_sparse_tiles;
+        d["render_to_nanovdb"] = domain.render_to_nanovdb;
+        d["bounds_min"] = vec3ToJson(domain.bounds_min);
+        d["bounds_max"] = vec3ToJson(domain.bounds_max);
+        d["resolution"] = { domain.resolution_x, domain.resolution_y, domain.resolution_z };
+        d["max_auto_resolution"] = domain.max_auto_resolution;
+        d["voxel_size"] = domain.voxel_size;
+        d["padding"] = domain.padding;
+        d["channels"] = domain.channels;
+        d["fluid"] = {
+            {"seed_min", vec3ToJson(domain.fluid_seed_min)},
+            {"seed_max", vec3ToJson(domain.fluid_seed_max)},
+            {"seed_particles_per_cell", domain.fluid_seed_particles_per_cell},
+            {"max_particles", domain.fluid_max_particles},
+            {"replace_on_seed", domain.fluid_replace_on_seed},
+            {"gravity", vec3ToJson(domain.fluid_params.gravity)},
+            {"particles_per_cell", domain.fluid_params.particles_per_cell},
+            {"cfl", domain.fluid_params.cfl},
+            {"max_substeps", domain.fluid_params.max_substeps},
+            {"pressure_iterations", domain.fluid_params.pressure_iterations},
+            {"sor_omega", domain.fluid_params.sor_omega},
+            {"apic_blend", domain.fluid_params.apic_blend},
+            {"max_velocity", domain.fluid_params.max_velocity},
+            {"velocity_damping", domain.fluid_params.velocity_damping},
+            {"wall_damping", domain.fluid_params.wall_damping},
+            {"domain_motion_coupling", domain.fluid_params.domain_motion_coupling},
+            {"viscosity", domain.fluid_params.viscosity},
+            {"viscosity_iterations", domain.fluid_params.viscosity_iterations},
+            {"affine_damping", domain.fluid_params.affine_damping},
+            {"max_affine", domain.fluid_params.max_affine},
+            {"cpu_threads", domain.fluid_params.cpu_threads},
+            {"parallel_particle_threshold", domain.fluid_params.parallel_particle_threshold},
+            {"free_surface", domain.fluid_params.free_surface},
+            {"flip_blend", domain.fluid_params.flip_blend},
+            {"reseed_enabled", domain.fluid_params.reseed_enabled},
+            {"reseed_target_per_cell", domain.fluid_params.reseed_target_per_cell},
+            {"reseed_min_per_cell", domain.fluid_params.reseed_min_per_cell},
+            {"reseed_max_per_cell", domain.fluid_params.reseed_max_per_cell},
+            {"internal_friction", domain.fluid_params.internal_friction},
+            {"air_drag", domain.fluid_params.air_drag},
+            {"density_correction", domain.fluid_params.density_correction}
+        };
+        d["fire_enabled"] = domain.fire_enabled;
+        d["ignition_temperature"] = domain.ignition_temperature;
+        d["burn_rate"] = domain.burn_rate;
+        d["heat_release"] = domain.heat_release;
+        d["smoke_generation"] = domain.smoke_generation;
+        d["flame_dissipation"] = domain.flame_dissipation;
+        d["fire_max_temperature"] = domain.fire_max_temperature;
+        if (domain.shader) {
+            json s;
+            s["name"] = domain.shader->name;
+            s["density"] = domain.shader->density.toJson();
+            s["scattering"] = domain.shader->scattering.toJson();
+            s["absorption"] = domain.shader->absorption.toJson();
+            s["emission"] = domain.shader->emission.toJson();
+            s["quality"] = domain.shader->quality.toJson();
+            s["motion_blur"] = {
+                {"enabled", domain.shader->motion_blur.enabled},
+                {"velocity_channel", domain.shader->motion_blur.velocity_channel},
+                {"scale", domain.shader->motion_blur.scale}
+            };
+            d["shader"] = s;
+        }
+        return d;
+    };
+
+    auto serializeRuntimeSettings = [](const RayTrophiSim::ParticleSimulationSystem& runtime) {
+        const auto& physics = runtime.physicsSettings();
+        return json{
+            {"gravity", vec3ToJson(runtime.gravity())},
+            {"linear_drag", runtime.linearDrag()},
+            {"collision_plane_enabled", runtime.collisionPlaneEnabled()},
+            {"collision_plane_y", runtime.collisionPlaneY()},
+            {"collision_restitution", runtime.collisionRestitution()},
+            {"physics", {
+                {"mode", particlePhysicsModeToString(physics.mode)},
+                {"quality", particleQualityModeToString(physics.quality)},
+                {"particle_radius", physics.particle_radius},
+                {"self_collision_enabled", physics.self_collision_enabled},
+                {"solver_iterations", physics.solver_iterations},
+                {"max_neighbors_per_particle", physics.max_neighbors_per_particle},
+                {"viscosity", physics.viscosity},
+                {"cohesion", physics.cohesion},
+                {"pressure_stiffness", physics.pressure_stiffness},
+                {"rest_density", physics.rest_density},
+                {"buoyancy", physics.buoyancy},
+                {"gravity_scale", physics.gravity_scale},
+                {"vorticity", physics.vorticity}
+            }}
+        };
+    };
+
+    for (const auto& system : scene.particle_systems) {
+        json s;
+        s["id"] = system.id;
+        s["name"] = system.name;
+        s["visible"] = system.visible;
+        s["enabled"] = system.enabled;
+        s["blend_mode"] = static_cast<int>(system.blend_mode);
+        s["emitters"] = json::array();
+        s["colliders"] = json::array();
+        s["domains"] = json::array();
+        s["flow_sources"] = json::array();
+        if (system.runtime) {
+            s["settings"] = serializeRuntimeSettings(*system.runtime);
+            for (const auto& emitter : system.runtime->emitters()) {
+                s["emitters"].push_back(serializeEmitter(emitter));
+            }
+            for (const auto& collider : system.runtime->colliders()) {
+                s["colliders"].push_back(serializeCollider(collider));
+            }
+            for (const auto& domain : system.runtime->gridDomains()) {
+                s["domains"].push_back(serializeDomain(domain));
+            }
+            for (const auto& source : system.runtime->flowSources()) {
+                s["flow_sources"].push_back(serializeFlowSource(source));
+            }
+        }
+        root["systems"].push_back(std::move(s));
+    }
+
+    // Legacy top-level duplicate (active system) for backward-compatible readers.
+    if (auto active_runtime = scene.activeParticleRuntime()) {
+        root["settings"] = serializeRuntimeSettings(*active_runtime);
+        for (const auto& emitter : active_runtime->emitters()) {
+            root["emitters"].push_back(serializeEmitter(emitter));
+        }
+        for (const auto& collider : active_runtime->colliders()) {
+            root["colliders"].push_back(serializeCollider(collider));
+        }
+        root["domains"] = json::array();
+        for (const auto& domain : active_runtime->gridDomains()) {
+            root["domains"].push_back(serializeDomain(domain));
+        }
+        root["flow_sources"] = json::array();
+        for (const auto& source : active_runtime->flowSources()) {
+            root["flow_sources"].push_back(serializeFlowSource(source));
+        }
+    }
+
+    return root;
+}
+
+void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& scene) {
+    if (!j.is_object()) {
+        return;
+    }
+
+    auto parseEmitter = [](const json& item) {
+        RayTrophiSim::ParticleEmitterDesc emitter;
+        if (!item.is_object()) {
+            return emitter;
+        }
+        emitter.name = item.value("name", emitter.name);
+        emitter.source_mode = particleEmitterSourceModeFromString(item.value("source_mode", std::string("Point")));
+        emitter.spawn_mode = particleEmitterSpawnModeFromString(item.value("spawn_mode", std::string("Center")));
+        emitter.source_name = item.value("source_name", emitter.source_name);
+        if (item.contains("point")) emitter.point = jsonToVec3(item["point"]);
+        if (item.contains("local_offset")) emitter.local_offset = jsonToVec3(item["local_offset"]);
+        if (item.contains("direction")) emitter.direction = jsonToVec3(item["direction"]);
+        emitter.surface_offset = item.value("surface_offset", emitter.surface_offset);
+        emitter.rate_per_second = item.value("rate_per_second", emitter.rate_per_second);
+        emitter.speed = item.value("speed", emitter.speed);
+        emitter.spread = item.value("spread", emitter.spread);
+        emitter.lifetime_seconds = item.value("lifetime_seconds", emitter.lifetime_seconds);
+        emitter.mass = item.value("mass", emitter.mass);
+        emitter.start_size = item.value("start_size", emitter.start_size);
+        emitter.end_size = item.value("end_size", emitter.end_size);
+        emitter.size_jitter = item.value("size_jitter", emitter.size_jitter);
+        emitter.start_opacity = item.value("start_opacity", emitter.start_opacity);
+        emitter.end_opacity = item.value("end_opacity", emitter.end_opacity);
+        if (item.contains("start_color")) emitter.start_color = jsonToVec3(item["start_color"]);
+        if (item.contains("end_color")) emitter.end_color = jsonToVec3(item["end_color"]);
+        emitter.angular_velocity = item.value("angular_velocity", emitter.angular_velocity);
+        emitter.angular_jitter = item.value("angular_jitter", emitter.angular_jitter);
+        emitter.enabled = item.value("enabled", emitter.enabled);
+        emitter.seed = item.value("seed", emitter.seed);
+        emitter.accumulator = 0.0f;
+        emitter.burst_count = 0;
+        return emitter;
+    };
+
+    auto parseCollider = [](const json& item) {
+        RayTrophiSim::ParticleColliderDesc collider;
+        if (!item.is_object()) {
+            return collider;
+        }
+        collider.name = item.value("name", collider.name);
+        collider.source_mode = particleColliderSourceModeFromString(item.value("source_mode", std::string("PlaneY")));
+        collider.source_name = item.value("source_name", collider.source_name);
+        collider.enabled = item.value("enabled", collider.enabled);
+        collider.plane_y = item.value("plane_y", collider.plane_y);
+        if (item.contains("sphere_center")) collider.sphere_center = jsonToVec3(item["sphere_center"]);
+        collider.sphere_radius = item.value("sphere_radius", collider.sphere_radius);
+        if (item.contains("capsule_start")) collider.capsule_start = jsonToVec3(item["capsule_start"]);
+        if (item.contains("capsule_end")) collider.capsule_end = jsonToVec3(item["capsule_end"]);
+        collider.capsule_radius = item.value("capsule_radius", collider.capsule_radius);
+        if (item.contains("bounds_min")) collider.bounds_min = jsonToVec3(item["bounds_min"]);
+        if (item.contains("bounds_max")) collider.bounds_max = jsonToVec3(item["bounds_max"]);
+        collider.restitution = item.value("restitution", collider.restitution);
+        collider.friction = item.value("friction", collider.friction);
+        collider.thickness = item.value("thickness", collider.thickness);
+        return collider;
+    };
+
+    auto parseFlowSource = [](const json& item) {
+        RayTrophiSim::SimulationFlowSourceDesc source;
+        if (!item.is_object()) {
+            return source;
+        }
+        source.name = item.value("name", source.name);
+        source.source_mode = static_cast<RayTrophiSim::SimulationFlowSourceMode>(item.value("source_mode", static_cast<int>(source.source_mode)));
+        source.source_name = item.value("source_name", source.source_name);
+        source.domain_index = item.value("domain_index", source.domain_index);
+        source.enabled = item.value("enabled", source.enabled);
+        if (item.contains("position")) source.position = jsonToVec3(item["position"]);
+        if (item.contains("velocity")) source.velocity = jsonToVec3(item["velocity"]);
+        source.radius = item.value("radius", source.radius);
+        source.density = item.value("density", source.density);
+        source.temperature = item.value("temperature", source.temperature);
+        source.fuel = item.value("fuel", source.fuel);
+        source.falloff = item.value("falloff", source.falloff);
+        source.fluid_particles_per_second = item.value("fluid_particles_per_second", source.fluid_particles_per_second);
+        source.use_time_limit = item.value("use_time_limit", source.use_time_limit);
+        source.start_time = item.value("start_time", source.start_time);
+        source.end_time = item.value("end_time", source.end_time);
+        source.use_particle_limit = item.value("use_particle_limit", source.use_particle_limit);
+        source.max_emitted_particles = item.value("max_emitted_particles", source.max_emitted_particles);
+        source.fluid_emit_accumulator = 0.0f;
+        source.total_emitted_particles = 0;
+        return source;
+    };
+
+    auto parseDomain = [](const json& item) {
+        RayTrophiSim::SimulationGridDomainDesc domain;
+        if (!item.is_object()) {
+            return domain;
+        }
+        domain.name = item.value("name", domain.name);
+        domain.backend = static_cast<RayTrophiSim::SimulationDomainBackend>(item.value("backend", static_cast<int>(domain.backend)));
+        domain.source_mode = simulationGridDomainSourceModeFromString(item.value("source_mode", std::string("ManualBox")));
+        domain.boundary_mode = simulationGridDomainBoundaryModeFromString(item.value("boundary_mode", std::string("Open")));
+        domain.source_name = item.value("source_name", domain.source_name);
+        domain.enabled = item.value("enabled", domain.enabled);
+        domain.preserve_voxel_size_on_resize = item.value("preserve_voxel_size_on_resize", domain.preserve_voxel_size_on_resize);
+        domain.adaptive_lock_floor = item.value("adaptive_lock_floor", domain.adaptive_lock_floor);
+        domain.adaptive_floor_y = item.value("adaptive_floor_y", domain.adaptive_floor_y);
+        domain.use_sparse_tiles = item.value("use_sparse_tiles", domain.use_sparse_tiles);
+        domain.render_to_nanovdb = item.value("render_to_nanovdb", domain.render_to_nanovdb);
+        if (item.contains("bounds_min")) domain.bounds_min = jsonToVec3(item["bounds_min"]);
+        if (item.contains("bounds_max")) domain.bounds_max = jsonToVec3(item["bounds_max"]);
+        if (item.contains("resolution") && item["resolution"].is_array() && item["resolution"].size() >= 3) {
+            domain.resolution_x = item["resolution"][0].get<int>();
+            domain.resolution_y = item["resolution"][1].get<int>();
+            domain.resolution_z = item["resolution"][2].get<int>();
+        }
+        domain.max_auto_resolution = item.value("max_auto_resolution", domain.max_auto_resolution);
+        domain.voxel_size = item.value("voxel_size", domain.voxel_size);
+        domain.padding = item.value("padding", domain.padding);
+        domain.channels = item.value("channels", domain.channels);
+        if (item.contains("fluid") && item["fluid"].is_object()) {
+            const auto& f = item["fluid"];
+            if (f.contains("seed_min")) domain.fluid_seed_min = jsonToVec3(f["seed_min"]);
+            if (f.contains("seed_max")) domain.fluid_seed_max = jsonToVec3(f["seed_max"]);
+            domain.fluid_seed_particles_per_cell = f.value("seed_particles_per_cell", domain.fluid_seed_particles_per_cell);
+            domain.fluid_max_particles = f.value("max_particles", domain.fluid_max_particles);
+            domain.fluid_replace_on_seed = f.value("replace_on_seed", domain.fluid_replace_on_seed);
+            if (f.contains("gravity")) domain.fluid_params.gravity = jsonToVec3(f["gravity"]);
+            domain.fluid_params.particles_per_cell = f.value("particles_per_cell", domain.fluid_params.particles_per_cell);
+            domain.fluid_params.cfl = f.value("cfl", domain.fluid_params.cfl);
+            domain.fluid_params.max_substeps = f.value("max_substeps", domain.fluid_params.max_substeps);
+            domain.fluid_params.pressure_iterations = f.value("pressure_iterations", domain.fluid_params.pressure_iterations);
+            domain.fluid_params.sor_omega = f.value("sor_omega", domain.fluid_params.sor_omega);
+            domain.fluid_params.apic_blend = f.value("apic_blend", domain.fluid_params.apic_blend);
+            domain.fluid_params.max_velocity = f.value("max_velocity", domain.fluid_params.max_velocity);
+            domain.fluid_params.velocity_damping = f.value("velocity_damping", domain.fluid_params.velocity_damping);
+            domain.fluid_params.wall_damping = f.value("wall_damping", domain.fluid_params.wall_damping);
+            domain.fluid_params.domain_motion_coupling = f.value("domain_motion_coupling", domain.fluid_params.domain_motion_coupling);
+            domain.fluid_params.viscosity = f.value("viscosity", domain.fluid_params.viscosity);
+            domain.fluid_params.viscosity_iterations = f.value("viscosity_iterations", domain.fluid_params.viscosity_iterations);
+            domain.fluid_params.affine_damping = f.value("affine_damping", domain.fluid_params.affine_damping);
+            domain.fluid_params.max_affine = f.value("max_affine", domain.fluid_params.max_affine);
+            domain.fluid_params.cpu_threads = f.value("cpu_threads", domain.fluid_params.cpu_threads);
+            domain.fluid_params.parallel_particle_threshold = f.value("parallel_particle_threshold", domain.fluid_params.parallel_particle_threshold);
+            domain.fluid_params.free_surface = f.value("free_surface", domain.fluid_params.free_surface);
+            // New params (added with FLIP + reseed). value() falls back to the
+            // struct default if the project file predates them — old projects
+            // load with sane defaults, no migration step needed.
+            domain.fluid_params.flip_blend = f.value("flip_blend", domain.fluid_params.flip_blend);
+            domain.fluid_params.reseed_enabled = f.value("reseed_enabled", domain.fluid_params.reseed_enabled);
+            domain.fluid_params.reseed_target_per_cell = f.value("reseed_target_per_cell", domain.fluid_params.reseed_target_per_cell);
+            domain.fluid_params.reseed_min_per_cell = f.value("reseed_min_per_cell", domain.fluid_params.reseed_min_per_cell);
+            domain.fluid_params.reseed_max_per_cell = f.value("reseed_max_per_cell", domain.fluid_params.reseed_max_per_cell);
+            domain.fluid_params.internal_friction = f.value("internal_friction", domain.fluid_params.internal_friction);
+            domain.fluid_params.air_drag = f.value("air_drag", domain.fluid_params.air_drag);
+            domain.fluid_params.density_correction = f.value("density_correction", domain.fluid_params.density_correction);
+        }
+        domain.fire_enabled = item.value("fire_enabled", domain.fire_enabled);
+        domain.ignition_temperature = item.value("ignition_temperature", domain.ignition_temperature);
+        domain.burn_rate = item.value("burn_rate", domain.burn_rate);
+        domain.heat_release = item.value("heat_release", domain.heat_release);
+        domain.smoke_generation = item.value("smoke_generation", domain.smoke_generation);
+        domain.flame_dissipation = item.value("flame_dissipation", domain.flame_dissipation);
+        domain.fire_max_temperature = item.value("fire_max_temperature", domain.fire_max_temperature);
+        if (item.contains("shader")) {
+            const auto& js = item["shader"];
+            auto shader = std::make_shared<VolumeShader>();
+            shader->name = js.value("name", std::string("Volume Shader"));
+            if (js.contains("density")) shader->density.fromJson(js["density"]);
+            if (js.contains("scattering")) shader->scattering.fromJson(js["scattering"]);
+            if (js.contains("absorption")) shader->absorption.fromJson(js["absorption"]);
+            if (js.contains("emission")) shader->emission.fromJson(js["emission"]);
+            if (js.contains("quality")) shader->quality.fromJson(js["quality"]);
+            if (js.contains("motion_blur")) {
+                shader->motion_blur.enabled = js["motion_blur"].value("enabled", false);
+                shader->motion_blur.velocity_channel = js["motion_blur"].value("velocity_channel", std::string("vel"));
+                shader->motion_blur.scale = js["motion_blur"].value("scale", 1.0f);
+            }
+            domain.shader = shader;
+        }
+        return domain;
+    };
+
+    auto parseSettingsInto = [](const json& settings, RayTrophiSim::ParticleSimulationSystem& runtime) {
+        if (!settings.is_object()) {
+            return;
+        }
+        if (settings.contains("gravity")) runtime.setGravity(jsonToVec3(settings["gravity"]));
+        runtime.setLinearDrag(settings.value("linear_drag", runtime.linearDrag()));
+        const bool plane_enabled = settings.value("collision_plane_enabled", runtime.collisionPlaneEnabled());
+        const float plane_y = settings.value("collision_plane_y", runtime.collisionPlaneY());
+        const float restitution = settings.value("collision_restitution", runtime.collisionRestitution());
+        runtime.setCollisionPlane(plane_y, plane_enabled, restitution);
+        if (settings.contains("physics") && settings["physics"].is_object()) {
+            const auto& p = settings["physics"];
+            auto& physics = runtime.physicsSettings();
+            physics.mode = particlePhysicsModeFromString(p.value("mode", std::string("Spark")));
+            physics.quality = particleQualityModeFromString(p.value("quality", std::string("Realtime")));
+            physics.particle_radius = p.value("particle_radius", physics.particle_radius);
+            physics.self_collision_enabled = p.value("self_collision_enabled", physics.self_collision_enabled);
+            physics.solver_iterations = p.value("solver_iterations", physics.solver_iterations);
+            physics.max_neighbors_per_particle = p.value("max_neighbors_per_particle", physics.max_neighbors_per_particle);
+            physics.viscosity = p.value("viscosity", physics.viscosity);
+            physics.cohesion = p.value("cohesion", physics.cohesion);
+            physics.pressure_stiffness = p.value("pressure_stiffness", physics.pressure_stiffness);
+            physics.rest_density = p.value("rest_density", physics.rest_density);
+            physics.buoyancy = p.value("buoyancy", physics.buoyancy);
+            physics.gravity_scale = p.value("gravity_scale", physics.gravity_scale);
+            physics.vorticity = p.value("vorticity", physics.vorticity);
+        }
+    };
+
+    // Build one ParticleSystemObject with its own registered runtime, populated
+    // straight from JSON (runtime is the source of truth — no descriptor staging).
+    auto adoptSystem = [&](uint32_t id, const std::string& name, bool visible, bool enabled,
+                           int blend_mode, const json* settings, const json* emitters, const json* colliders, const json* domains, const json* flow_sources) {
+        SceneData::ParticleSystemObject system;
+        system.id = id;
+        system.name = name;
+        system.visible = visible;
+        system.enabled = enabled;
+        system.blend_mode = static_cast<SceneData::ParticleBlendMode>(blend_mode == 1 ? 1 : 0);
+        system.runtime = scene.createParticleRuntime();
+        if (settings) parseSettingsInto(*settings, *system.runtime);
+        if (emitters && emitters->is_array()) {
+            for (const auto& emitter_item : *emitters) {
+                if (emitter_item.is_object()) system.runtime->addEmitter(parseEmitter(emitter_item));
+            }
+        }
+        if (colliders && colliders->is_array()) {
+            for (const auto& collider_item : *colliders) {
+                if (collider_item.is_object()) system.runtime->addCollider(parseCollider(collider_item));
+            }
+        }
+        if (domains && domains->is_array()) {
+            for (const auto& domain_item : *domains) {
+                if (domain_item.is_object()) system.runtime->addGridDomain(parseDomain(domain_item));
+            }
+        }
+        if (flow_sources && flow_sources->is_array()) {
+            for (const auto& flow_item : *flow_sources) {
+                if (flow_item.is_object()) system.runtime->addFlowSource(parseFlowSource(flow_item));
+            }
+        }
+        SceneData::applyParticleSystemEnabledState(system);
+        scene.particle_systems.push_back(std::move(system));
+    };
+
+    scene.clearParticleSystemObjects();
+
+    if (j.contains("systems") && j["systems"].is_array()) {
+        uint32_t max_id = 0;
+        for (const auto& item : j["systems"]) {
+            if (!item.is_object()) {
+                continue;
+            }
+
+            SceneData::ParticleSystemObject defaults;
+            const uint32_t id = item.value("id", defaults.id);
+            const std::string name = item.value("name", defaults.name);
+            const bool visible = item.value("visible", defaults.visible);
+            const bool enabled = item.value("enabled", defaults.enabled);
+            const int blend_mode = item.value("blend_mode", static_cast<int>(defaults.blend_mode));
+            const json* settings = item.contains("settings") ? &item["settings"] : nullptr;
+            const json* emitters = item.contains("emitters") ? &item["emitters"] : nullptr;
+            const json* colliders = item.contains("colliders") ? &item["colliders"] : nullptr;
+            const json* domains = item.contains("domains") ? &item["domains"] : nullptr;
+            const json* flow_sources = item.contains("flow_sources") ? &item["flow_sources"] : nullptr;
+            adoptSystem(id, name, visible, enabled, blend_mode, settings, emitters, colliders, domains, flow_sources);
+            max_id = std::max(max_id, id);
+        }
+
+        scene.next_particle_system_id = std::max(j.value("next_system_id", max_id + 1u), max_id + 1u);
+        scene.active_particle_system_index = j.value("active_system_index", 0);
+        if (scene.active_particle_system_index < 0 ||
+            scene.active_particle_system_index >= static_cast<int>(scene.particle_systems.size())) {
+            scene.active_particle_system_index = scene.particle_systems.empty() ? -1 : 0;
+        }
+    } else {
+        // Legacy single-system project file.
+        const json* settings = j.contains("settings") ? &j["settings"] : nullptr;
+        const json* emitters = j.contains("emitters") ? &j["emitters"] : nullptr;
+        const json* colliders = j.contains("colliders") ? &j["colliders"] : nullptr;
+        const json* domains = j.contains("domains") ? &j["domains"] : nullptr;
+        const json* flow_sources = j.contains("flow_sources") ? &j["flow_sources"] : nullptr;
+        adoptSystem(1u, "Particle System 1", true, true, 0, settings, emitters, colliders, domains, flow_sources);
+        scene.next_particle_system_id = 2u;
+        scene.active_particle_system_index = scene.particle_systems.empty() ? -1 : 0;
+    }
+
+    scene.pruneInvalidParticleObjectBindings();
+
+    if (auto particles = scene.getParticleSimulationSystem()) {
+        SCENE_LOG_INFO("[ProjectManager] Loaded " +
+                       std::to_string(scene.particle_systems.size()) + " particle system(s); active has " +
+                       std::to_string(particles->emitters().size()) + " emitters and " +
+                       std::to_string(particles->colliders().size()) + " colliders.");
+    } else {
+        SCENE_LOG_INFO("[ProjectManager] Loaded empty particle simulation.");
+    }
 }

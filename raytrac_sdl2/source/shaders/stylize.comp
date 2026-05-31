@@ -164,6 +164,36 @@ vec3 preserveMaterialHue(vec3 style_color, vec3 material_color, float amount) {
     vec3 hue_preserved = clamp01(hue * style_luma);
     return lerp3(style_color, hue_preserved, amount);
 }
+vec3 dominantPigmentTint(vec3 color, float amount) {
+    amount = saturatef(amount);
+    float mx = max(color.x, max(color.y, color.z));
+    float mn = min(color.x, min(color.y, color.z));
+    float chroma = saturatef((mx - mn) / max(0.08, mx));
+    if (amount <= 0.001 || chroma <= 0.001) return color;
+
+    vec3 target = color;
+    float lift = 0.025 * amount;
+    float dom_boost = 1.0 + 0.16 * amount;
+    float sub_pull = 1.0 - 0.18 * amount;
+    if (color.x >= color.y && color.x >= color.z) {
+        target.x = min(1.0, color.x * dom_boost + lift);
+        target.y = color.y * sub_pull;
+        target.z = color.z * sub_pull;
+    } else if (color.y >= color.x && color.y >= color.z) {
+        target.x = color.x * sub_pull;
+        target.y = min(1.0, color.y * dom_boost + lift);
+        target.z = color.z * sub_pull;
+    } else {
+        target.x = color.x * sub_pull;
+        target.y = color.y * sub_pull;
+        target.z = min(1.0, color.z * dom_boost + lift);
+    }
+
+    float src_luma = max(0.025, luminance(color));
+    float dst_luma = max(0.025, luminance(target));
+    target = clamp01(target * clamp(src_luma / dst_luma, 0.72, 1.28));
+    return lerp3(color, target, amount * (0.35 + chroma * 0.65));
+}
 vec3 simplifyColor(vec3 col, float amount) {
     amount = saturatef(amount);
     float levels = max(2.0, 16.0 - amount * 12.0);
@@ -521,34 +551,39 @@ vec3 applyPostProcess(vec3 input_color, AOV a, int x, int y, int frame_index) {
         float brush_strength = mtl0.x, dry_brush = mtl0.w;
         if (mat_flags.x != 0 && brush_strength > 0.001) {
             float stroke = strokeField(x, y, a, frame_index);
-            float brush_amount = brush_strength * strength * edge_guard;
+            float lit_luma = luminance(color);
+            float shadow_boost = 1.0 + (1.0 - smoothstepf(0.08, 0.48, lit_luma)) * 0.22;
+            float highlight_thin = 1.0 - smoothstepf(0.62, 0.96, lit_luma) * 0.42;
+            float brush_amount = brush_strength * strength * edge_guard * shadow_boost * highlight_thin;
             float dry_mask = smoothstepf(0.12, 0.62, abs(stroke) + dry_brush * 0.35);
+            vec3 paint_color = dominantPigmentTint(color, 0.42 + palette_influence * 0.18);
             vec3 palette_tint = lerp3(palette_shadow.xyz, palette_highlight.xyz, saturatef(albedo_luma + stroke * 0.28));
-            palette_tint = preserveMaterialHue(palette_tint, base_albedo, material_color_preservation);
-            vec3 stroke_tint = lerp3(base_albedo, palette_tint, palette_influence);
+            palette_tint = preserveMaterialHue(palette_tint, paint_color, material_color_preservation);
+            vec3 stroke_tint = lerp3(paint_color, palette_tint, palette_influence * 0.18);
             if (mat_flags.z != 0) { // wet_oil_model
                 WetOil oil = wetOilStrokeModel(x, y, a, frame_index, stroke);
                 float oil_body = saturatef(mtl1.x);
                 float paint_load = saturatef(mtl1.y);
                 float pickup = saturatef(mtl1.z);
                 float deposit = saturatef(mtl1.w);
-                float wet_visibility = 0.85 + oil_body * 1.25 + paint_load * 0.45;
-                float wet_mask = saturatef(brush_amount * wet_visibility * (0.14 + oil_body * 0.24 + oil.drag * 0.34));
-                float deposit_mask = saturatef(brush_amount * paint_load * deposit * wet_visibility * (0.18 + oil.ridge * 0.34));
-                float bristle_mask = saturatef(brush_amount * (0.22 + oil_body * 0.34 + saturatef(mtl2.x) * 0.22));
-                vec3 picked_color = lerp3(base_albedo, color, pickup * (0.35 + oil_body * 0.65));
-                vec3 carried_color = lerp3(picked_color, stroke_tint, saturatef(deposit * paint_load));
-                float body_luma = (oil.body - 0.5) * (0.12 + oil_body * 0.18);
-                float bristle_luma = (stroke + oil.bristle) * (0.18 + oil_body * 0.24);
-                vec3 material_stroke = clamp01(base_albedo * (1.0 + body_luma + bristle_luma));
-                material_stroke = lerp3(material_stroke, carried_color, saturatef(palette_influence * 0.55 + deposit * 0.25));
+                float wet_visibility = 0.55 + oil_body * 0.62 + paint_load * 0.20;
+                float wet_mask = saturatef(brush_amount * wet_visibility * (0.08 + oil_body * 0.12 + oil.drag * 0.18));
+                float deposit_mask = saturatef(brush_amount * paint_load * deposit * wet_visibility * (0.05 + oil.ridge * 0.10));
+                float bristle_mask = saturatef(brush_amount * (0.10 + oil_body * 0.12 + saturatef(mtl2.x) * 0.10));
+                vec3 picked_color = lerp3(color, paint_color, 0.28 + pickup * 0.22);
+                vec3 carried_color = lerp3(picked_color, stroke_tint, saturatef(deposit * paint_load * palette_influence * 0.22));
+                float body_luma = (oil.body - 0.5) * (0.045 + oil_body * 0.055);
+                float bristle_luma = (stroke + oil.bristle) * (0.055 + oil_body * 0.065);
+                vec3 material_stroke = clamp01(paint_color * (1.0 + body_luma + bristle_luma));
+                material_stroke = lerp3(material_stroke, carried_color, saturatef(palette_influence * 0.18 + deposit * 0.08));
                 color = lerp3(color, material_stroke, wet_mask);
                 color = lerp3(color, carried_color, deposit_mask);
-                color = color * (1.0 + (stroke + oil.bristle) * bristle_mask);
-                color = lerp3(color, color + palette_highlight.xyz * (0.035 + 0.035 * palette_influence), oil.ridge * brush_amount * oil_body);
-                color = lerp3(color, color * (0.92 - oil.ridge * 0.08), dry_brush * brush_amount * (1.0 - oil.drag));
+                color = color * (1.0 + (stroke + oil.bristle) * bristle_mask * 0.42);
+                color = lerp3(color, color * (1.0 + 0.045 * oil.ridge), oil.ridge * brush_amount * oil_body * 0.35);
+                color = lerp3(color, color * (0.985 - oil.ridge * 0.015), dry_brush * brush_amount * (1.0 - oil.drag) * 0.32);
             } else {
-                color = color * (1.0 + stroke * brush_amount * 0.16);
+                color = lerp3(color, clamp01(paint_color * (1.0 + stroke * 0.10)), brush_amount * 0.18);
+                color = color * (1.0 + stroke * brush_amount * 0.12);
                 color = lerp3(color, stroke_tint, brush_amount * dry_mask * dry_brush * 0.18);
             }
         }

@@ -1,4 +1,4 @@
-﻿// Suppress C4146 warning globally for this file (OpenVDB/NanoVDB compatibility)
+// Suppress C4146 warning globally for this file (OpenVDB/NanoVDB compatibility)
 #pragma warning(disable: 4146)
 
 #ifndef NOMINMAX
@@ -17,6 +17,7 @@
 // Explicitly include openvdb first
 #include <openvdb/openvdb.h>
 #include <openvdb/io/File.h>
+#include <openvdb/tools/Dense.h>
 #include <openvdb/tools/Interpolation.h>
 
 // Undefine min and max macros that might have been brought in by Windows headers
@@ -194,6 +195,7 @@ int VDBVolumeManager::loadVDB(const std::string& filepath) {
         vol.name = std::filesystem::path(filepath).stem().string();
         vol.has_density = true;
         vol.has_temperature = (temp_grid != nullptr);
+        vol.content_version = 1;
 
         // Store OpenVDB grid (heap allocated to avoid copy)
         auto* grid_ptr = new openvdb::FloatGrid::Ptr(density_grid);
@@ -429,6 +431,7 @@ bool VDBVolumeManager::updateVolume(int volume_id, const std::string& filepath, 
         vol.internal_nano_temperature_handle = new_nano_temp_handle;
         
         vol.has_temperature = (temp_grid != nullptr);
+        vol.content_version++;
         
         // UPDATE BOUNDING BOX from new frame's density grid
         openvdb::CoordBBox bbox = density_grid->evalActiveVoxelBoundingBox();
@@ -450,11 +453,11 @@ bool VDBVolumeManager::updateVolume(int volume_id, const std::string& filepath, 
         
         // SMART GPU SYNC: Only re-allocate if existing buffer is too small.
         // This prevents flickering caused by constant cudaFree/cudaMalloc during simulation.
-        if (vol.d_nano_grid && vol.gpu_buffer_size < new_gpu_size) {
+        if (g_hasCUDA && vol.d_nano_grid && vol.gpu_buffer_size < new_gpu_size) {
              cudaFree(vol.d_nano_grid);
              vol.d_nano_grid = nullptr;
         }
-        if (vol.d_nano_temperature && vol.gpu_temp_buffer_size < new_gpu_temp_size) {
+        if (g_hasCUDA && vol.d_nano_temperature && vol.gpu_temp_buffer_size < new_gpu_temp_size) {
              cudaFree(vol.d_nano_temperature);
              vol.d_nano_temperature = nullptr;
         }
@@ -502,53 +505,51 @@ int VDBVolumeManager::registerOrUpdateLiveVolume(int existing_id, const std::str
     vol.voxel_size = voxel_size;
     
     try {
-        // 1. Create OpenVDB FloatGrid from raw array
-        // We use a dense pointer but OpenVDB handles it as a coordinate mapping
+        // Dense → sparse population via openvdb::tools::copyFromDense. Internally
+        // parallel (TBB) and replaces a host-side O(nx*ny*nz) accessor.setValue
+        // hot loop — the prior bottleneck of the live fluid/gas NanoVDB bridge.
+        // Layout matches the dense pointer indexing: density[i + nx*(j + ny*k)],
+        // i.e. X fastest → openvdb::tools::LayoutXYZ. NOTE: LayoutXYZ is an enum
+        // *value* in openvdb::tools::MemoryLayout, not a type — pass it directly
+        // as the non-type template argument, do not try to alias it via `using`.
+        using DenseFloat = openvdb::tools::Dense<float, openvdb::tools::LayoutXYZ>;
+        const openvdb::CoordBBox dense_bbox(
+            openvdb::Coord(0, 0, 0),
+            openvdb::Coord(res_x - 1, res_y - 1, res_z - 1));
+
+        // 1. Density grid
         openvdb::FloatGrid::Ptr density_grid = openvdb::FloatGrid::create(0.0f);
-        auto accessor = density_grid->getAccessor();
-        
-        // Populate grid - Optimized loop
-        for (int k = 0; k < res_z; ++k) {
-            for (int j = 0; j < res_y; ++j) {
-                for (int i = 0; i < res_x; ++i) {
-                    float d = density_ptr[i + res_x * (j + res_y * k)];
-                    if (d > 0.0001f) {
-                        accessor.setValue(openvdb::Coord(i, j, k), d);
-                    }
-                }
-            }
+        {
+            // copyFromDense reads-only from the dense buffer; const_cast is safe.
+            DenseFloat dense(dense_bbox, const_cast<float*>(density_ptr));
+            openvdb::tools::copyFromDense(dense, *density_grid, /*tolerance*/ 0.0001f);
         }
-        
         density_grid->setTransform(openvdb::math::Transform::createLinearTransform(voxel_size));
-        
-        // 2. NanoVDB Conversion for Density
+
+        // 2. NanoVDB conversion for density
         auto temp_handle = nanovdb::tools::createNanoGrid(*density_grid);
         auto* new_nano_handle = new nanovdb::GridHandle<nanovdb::HostBuffer>(std::move(temp_handle.buffer()));
-        
-        // Assign & Free old
+
+        // Assign & free old
         if (vol.internal_nano_handle) delete static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol.internal_nano_handle);
         vol.internal_nano_handle = new_nano_handle;
 
-        // 3. Handle Temperature if provided
+        // 3. Temperature grid (optional)
         if (temp_ptr) {
-             openvdb::FloatGrid::Ptr temp_grid = openvdb::FloatGrid::create(0.0f);
-             auto t_accessor = temp_grid->getAccessor();
-             for (int k = 0; k < res_z; ++k) {
-                 for (int j = 0; j < res_y; ++j) {
-                     for (int i = 0; i < res_x; ++i) {
-                         float t = temp_ptr[i + res_x * (j + res_y * k)];
-                         if (t > 300.0f) { // Threshold for temp
-                             t_accessor.setValue(openvdb::Coord(i, j, k), t);
-                         }
-                     }
-                 }
-             }
-             temp_grid->setTransform(density_grid->transform().copy());
-             auto t_handle = nanovdb::tools::createNanoGrid(*temp_grid);
-             auto* new_t_nano_handle = new nanovdb::GridHandle<nanovdb::HostBuffer>(std::move(t_handle.buffer()));
-             
-             if (vol.internal_nano_temperature_handle) delete static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol.internal_nano_temperature_handle);
-             vol.internal_nano_temperature_handle = new_t_nano_handle;
+            openvdb::FloatGrid::Ptr temp_grid = openvdb::FloatGrid::create(0.0f);
+            {
+                DenseFloat dense(dense_bbox, const_cast<float*>(temp_ptr));
+                // Threshold matches the old loop's `t > 300.0f` Kelvin floor:
+                // values within 300 of the background (0) are dropped, keeping
+                // only voxels hotter than ~300K.
+                openvdb::tools::copyFromDense(dense, *temp_grid, /*tolerance*/ 300.0f);
+            }
+            temp_grid->setTransform(density_grid->transform().copy());
+            auto t_handle = nanovdb::tools::createNanoGrid(*temp_grid);
+            auto* new_t_nano_handle = new nanovdb::GridHandle<nanovdb::HostBuffer>(std::move(t_handle.buffer()));
+
+            if (vol.internal_nano_temperature_handle) delete static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol.internal_nano_temperature_handle);
+            vol.internal_nano_temperature_handle = new_t_nano_handle;
         }
 
         // Update bounds
@@ -556,6 +557,7 @@ int VDBVolumeManager::registerOrUpdateLiveVolume(int existing_id, const std::str
         vol.bbox_max[0] = res_x * voxel_size; 
         vol.bbox_max[1] = res_y * voxel_size; 
         vol.bbox_max[2] = res_z * voxel_size;
+        vol.content_version++;
 
         // SEAMLESS UPDATE: Do NOT set gpu_uploaded = false here.
         // uploadToGPU will perform the copy and only update flags when ready.
@@ -566,6 +568,63 @@ int VDBVolumeManager::registerOrUpdateLiveVolume(int existing_id, const std::str
     } catch (const std::exception& e) {
         SCENE_LOG_ERROR("registerOrUpdateLiveVolume failed: " + std::string(e.what()));
         return -1;
+    }
+}
+
+bool VDBVolumeManager::exportDenseGridToVDB(const std::string& filepath,
+                                            int res_x, int res_y, int res_z, float voxel_size,
+                                            float origin_x, float origin_y, float origin_z,
+                                            const float* density, const float* temperature,
+                                            const float* fuel, const float* flame) {
+    if (res_x <= 0 || res_y <= 0 || res_z <= 0) {
+        return false;
+    }
+    auto cellIndex = [res_x, res_y](int i, int j, int k) -> std::size_t {
+        return static_cast<std::size_t>(i) +
+               static_cast<std::size_t>(res_x) * (static_cast<std::size_t>(j) +
+               static_cast<std::size_t>(res_y) * static_cast<std::size_t>(k));
+    };
+
+    auto buildGrid = [&](const float* data, const char* name, float threshold) -> openvdb::FloatGrid::Ptr {
+        if (!data) return nullptr;
+        openvdb::FloatGrid::Ptr grid = openvdb::FloatGrid::create();
+        grid->setName(name);
+        grid->setGridClass(openvdb::GRID_FOG_VOLUME);
+        auto accessor = grid->getAccessor();
+        for (int k = 0; k < res_z; ++k)
+            for (int j = 0; j < res_y; ++j)
+                for (int i = 0; i < res_x; ++i) {
+                    const float v = data[cellIndex(i, j, k)];
+                    if (v > threshold) {
+                        accessor.setValue(openvdb::Coord(i, j, k), v);
+                    }
+                }
+        return grid;
+    };
+
+    try {
+        openvdb::GridPtrVec grids;
+        openvdb::math::Transform::Ptr xform =
+            openvdb::math::Transform::createLinearTransform(voxel_size);
+        xform->postTranslate(openvdb::Vec3d(origin_x, origin_y, origin_z));
+
+        if (auto g = buildGrid(density, "density", 1e-6f)) { g->setTransform(xform); grids.push_back(g); }
+        if (auto g = buildGrid(temperature, "temperature", 1e-4f)) { g->setTransform(xform); grids.push_back(g); }
+        if (auto g = buildGrid(fuel, "fuel", 1e-4f)) { g->setTransform(xform); grids.push_back(g); }
+        if (auto g = buildGrid(flame, "flame", 1e-4f)) { g->setTransform(xform); grids.push_back(g); }
+
+        if (grids.empty()) {
+            return false;
+        }
+        openvdb::io::File file(filepath);
+        file.write(grids);
+        file.close();
+        return true;
+    } catch (const std::exception& e) {
+        SCENE_LOG_ERROR("exportDenseGridToVDB failed: " + std::string(e.what()));
+        return false;
+    } catch (...) {
+        return false;
     }
 }
 
@@ -607,7 +666,7 @@ void VDBVolumeManager::unloadVDB(int volume_id) {
     // Remove from list
     volumes.erase(volumes.begin() + idx);
     
-    SCENE_LOG_INFO("VDB unloaded: ID " + std::to_string(volume_id));
+    //SCENE_LOG_INFO("VDB unloaded: ID " + std::to_string(volume_id));
 }
 
 void VDBVolumeManager::unloadAll() {
@@ -641,6 +700,20 @@ const VDBVolumeData* VDBVolumeManager::getVolume(int volume_id) const {
 
 bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr) {
     if (!g_hasCUDA) return false;
+
+    // Check if the OptiX backend is actually active.
+    // If not active, bypass CUDA allocations to avoid double allocation/redundant copying.
+    if (!render_settings.use_optix) {
+        // Release any existing CUDA VRAM allocations for this volume to prevent leaks
+        freeGPU(volume_id);
+        
+        // Mark uploaded status as true because host grid buffer is fully processed & ready for Vulkan RT
+        int idx = findVolumeIndex(volume_id);
+        if (idx >= 0) {
+            volumes[idx].gpu_uploaded = true;
+        }
+        return true;
+    }
 
     cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
     cudaGetLastError(); // Clear sticky error flag without forcing a global stall
@@ -680,9 +753,14 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
     // SMART REALLOC: Allocate GPU memory only if needed or if existing buffer is too small
     cudaError_t err = cudaSuccess;
     if (vol.d_nano_grid == nullptr || vol.gpu_buffer_size < required_size) {
-        // CRITICAL: Synchronize stream before freeing memory!
-        // This prevents 'invalid argument' or 'illegal memory access' if OptiX/GPU is using the pointer.
-        if (stream) cudaStreamSynchronize((cudaStream_t)stream);
+        // CRITICAL: synchronize before freeing memory. Live grid resets can
+        // replace the NanoVDB buffer while OptiX still has the old pointer in
+        // its launch params / volume table from the previous frame.
+        if (stream) {
+            cudaStreamSynchronize(stream);
+        } else {
+            cudaDeviceSynchronize();
+        }
         
         if (vol.d_nano_grid) {
             cudaFree(vol.d_nano_grid);
@@ -743,7 +821,11 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
         
         if (temp_required_size > 0) {
             if (vol.d_nano_temperature == nullptr || vol.gpu_temp_buffer_size < temp_required_size) {
-                if (stream) cudaStreamSynchronize((cudaStream_t)stream);
+                if (stream) {
+                    cudaStreamSynchronize(stream);
+                } else {
+                    cudaDeviceSynchronize();
+                }
                 if (vol.d_nano_temperature) cudaFree(vol.d_nano_temperature);
                 cudaError_t tempAllocErr = cudaMalloc(&vol.d_nano_temperature, temp_required_size);
                 if (tempAllocErr != cudaSuccess) {
@@ -837,11 +919,7 @@ void VDBVolumeManager::freeAllGPU() {
     if (!g_hasCUDA) return;
 
     for (auto& vol : volumes) {
-        if (vol.d_nano_grid) {
-            cudaFree(vol.d_nano_grid);
-            vol.d_nano_grid = nullptr;
-            vol.gpu_uploaded = false;
-        }
+        freeGPU(vol.id);
     }
 }
 
@@ -883,6 +961,12 @@ size_t VDBVolumeManager::getHostTemperatureGridSize(int volume_id) const {
     if (!vol || !vol->internal_nano_temperature_handle) return 0;
     auto* handle = static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol->internal_nano_temperature_handle);
     return handle->bufferSize();
+}
+
+uint32_t VDBVolumeManager::getContentVersion(int volume_id) const {
+    int idx = findVolumeIndex(volume_id);
+    if (idx < 0) return 0;
+    return volumes[idx].content_version;
 }
 
 float VDBVolumeManager::sampleDensityCPU(int volume_id, float x, float y, float z) const {

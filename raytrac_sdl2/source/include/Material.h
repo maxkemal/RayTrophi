@@ -214,6 +214,7 @@ public:
     float ior = 1.5f; // Yeni: Varsayılan kırılma indeksi
     float normalStrength = 1.0f;
     float roughness = 0.0f;
+    void setRoughness(float r) { roughness = r; }
 protected:   
    
   
@@ -224,7 +225,7 @@ protected:
     // Yeni: Malzeme özelliklerini ayarlamak için yardımcı metotlar
     void setAlbedo(const Vec3& a) { albedo = a; }
    // void setMetallic(float m) { metallic = m; }
-    void setRoughness(float r) { roughness = r; }
+   
     void setIOR(float i) { ior = i; }
     void setF0(const Vec3& f) { f0 = f; }
 };

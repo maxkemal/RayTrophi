@@ -1016,9 +1016,19 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             ImGui::Separator();
             ImGui::Spacing();
             
+            // --- VOLUME ATMOSPHERE AMBIENT (OptiX parity gate) ---
+            {
+                bool volAtmo = world.getVolumeAtmosphereAmbient();
+                if (ImGui::Checkbox("Atmosphere Lights Volumes", &volAtmo)) {
+                    world.setVolumeAtmosphereAmbient(volAtmo);
+                    changed = true;
+                }
+                UIWidgets::HelpMarker("Let the Nishita sky ambient light VDB/fluid volumes (OptiX).\nOFF by default: the raw sky over-lights volumes vs the Vulkan\nLUT ambient, breaking backend parity. Turn on once the\nbase-radiance parity is sorted.");
+            }
+
             // --- AERIAL PERSPECTIVE ---
             ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Aerial Perspective:");
-            
+
             bool apEnabled = adv.aerial_perspective != 0;
             if (ImGui::Checkbox("Enable Aerial Perspective", &apEnabled)) {
                 adv.aerial_perspective = apEnabled ? 1 : 0;

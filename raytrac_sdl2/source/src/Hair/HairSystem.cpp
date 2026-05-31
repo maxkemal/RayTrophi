@@ -9,6 +9,7 @@
  */
 
 #include "Hair/HairSystem.h"
+#include "SimulationWorld.h"
 #include "Triangle.h"
 #include "Vec3.h"
 #include "Vec2.h"
@@ -1537,6 +1538,31 @@ void HairSystem::removeStrandsAtPosition(const std::string& groomName, const Vec
 }
 
 void HairSystem::restyleGroom(const std::string& name, const Physics::ForceFieldManager* forceManager, float time) {
+    auto sampler = [forceManager, time](const Vec3& worldPos, const Vec3& velocity) -> Vec3 {
+        if (!forceManager) {
+            return Vec3(0, 0, 0);
+        }
+        return forceManager->evaluateAtFiltered(worldPos, time, velocity, false, true, true, false);
+    };
+    restyleGroomImpl(name, sampler, time);
+}
+
+void HairSystem::restyleGroom(const std::string& name,
+                              const RayTrophiSim::SimulationForceFieldSnapshot* forceSnapshot,
+                              float time) {
+    auto sampler = [forceSnapshot, time](const Vec3& worldPos, const Vec3& velocity) -> Vec3 {
+        if (!forceSnapshot) {
+            return Vec3(0, 0, 0);
+        }
+        return forceSnapshot->evaluateAt(worldPos, time, velocity, RayTrophiSim::SimulationSystemKind::Hair);
+    };
+    restyleGroomImpl(name, sampler, time);
+}
+
+void HairSystem::restyleGroomImpl(const std::string& name,
+                                  const std::function<Vec3(const Vec3&, const Vec3&)>& forceSampler,
+                                  float time) {
+    (void)time;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
     auto it = m_grooms.find(name);
@@ -1621,9 +1647,9 @@ void HairSystem::restyleGroom(const std::string& name, const Physics::ForceField
                     goalPos.y -= t * t * params.gravity * strandLength;
                 }
 
-                if (forceManager && params.forceInfluence > 0.0f) {
+                if (forceSampler && params.forceInfluence > 0.0f) {
                     Vec3 currentWorldPos = groom.transform.transform_point(goalPos);
-                    Vec3 force = forceManager->evaluateAtFiltered(currentWorldPos, time, Vec3(0,0,0), false, true, true, false);
+                    Vec3 force = forceSampler(currentWorldPos, Vec3(0,0,0));
                     goalPos = goalPos + force * (params.forceInfluence * t * t * 0.1f);
                 }
                 point.position = goalPos;
@@ -1646,10 +1672,10 @@ void HairSystem::restyleGroom(const std::string& name, const Physics::ForceField
                     }
 
                     // External Forces
-                    if (forceManager && params.forceInfluence > 0.0f) {
+                    if (forceSampler && params.forceInfluence > 0.0f) {
                         Vec3 currentWorldPos = groom.transform.transform_point(current);
                         Vec3 vel = (current - prev) / dt;
-                        Vec3 force = forceManager->evaluateAtFiltered(currentWorldPos, time, vel, false, true, true, false);
+                        Vec3 force = forceSampler(currentWorldPos, vel);
                         totalForce = totalForce + force * (params.forceInfluence * 5.0f); // Scaled for dynamics
                     }
 

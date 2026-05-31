@@ -436,6 +436,14 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
         vkDestroyPipeline(vkDevice, m_interactiveViewport.hairLinePipeline, nullptr);
         m_interactiveViewport.hairLinePipeline = VK_NULL_HANDLE;
     }
+    if (m_interactiveViewport.particleAddPipeline != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyPipeline(vkDevice, m_interactiveViewport.particleAddPipeline, nullptr);
+        m_interactiveViewport.particleAddPipeline = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.particleAlphaPipeline != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyPipeline(vkDevice, m_interactiveViewport.particleAlphaPipeline, nullptr);
+        m_interactiveViewport.particleAlphaPipeline = VK_NULL_HANDLE;
+    }
     if (m_interactiveViewport.materialPreviewPipeline != VK_NULL_HANDLE && !keepPipeline) {
         vkDestroyPipeline(vkDevice, m_interactiveViewport.materialPreviewPipeline, nullptr);
         m_interactiveViewport.materialPreviewPipeline = VK_NULL_HANDLE;
@@ -456,6 +464,14 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
     if (m_interactiveViewport.hairLineVertexBuffer.buffer) {
         m_device->destroyBuffer(m_interactiveViewport.hairLineVertexBuffer);
         m_interactiveViewport.hairLineVertexCount = 0;
+    }
+    if (m_interactiveViewport.particleAddVertexBuffer.buffer) {
+        m_device->destroyBuffer(m_interactiveViewport.particleAddVertexBuffer);
+        m_interactiveViewport.particleAddVertexCount = 0;
+    }
+    if (m_interactiveViewport.particleAlphaVertexBuffer.buffer) {
+        m_device->destroyBuffer(m_interactiveViewport.particleAlphaVertexBuffer);
+        m_interactiveViewport.particleAlphaVertexCount = 0;
     }
     if (m_interactiveViewport.pipelineLayout != VK_NULL_HANDLE && !keepPipeline) {
         vkDestroyPipelineLayout(vkDevice, m_interactiveViewport.pipelineLayout, nullptr);
@@ -1378,6 +1394,140 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         }
     }
 
+    // --- Particle Billboard Pipelines (additive + alpha) ---
+    if (m_interactiveViewport.particleAddPipeline == VK_NULL_HANDLE) {
+        const std::string pVertPath = shaderDir + "/particle_viewport.spv";
+        const std::string pFragPath = shaderDir + "/particle_viewport_frag.spv";
+        if (std::filesystem::exists(pVertPath) && std::filesystem::exists(pFragPath)) {
+            std::vector<uint32_t> pvSPV = loadViewportSPV(pVertPath);
+            std::vector<uint32_t> pfSPV = loadViewportSPV(pFragPath);
+            if (!pvSPV.empty() && !pfSPV.empty()) {
+                VkShaderModuleCreateInfo smci{};
+                smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+
+                smci.codeSize = pvSPV.size() * sizeof(uint32_t);
+                smci.pCode = pvSPV.data();
+                VkShaderModule pVert = VK_NULL_HANDLE;
+                vkCreateShaderModule(vkDevice, &smci, nullptr, &pVert);
+
+                smci.codeSize = pfSPV.size() * sizeof(uint32_t);
+                smci.pCode = pfSPV.data();
+                VkShaderModule pFrag = VK_NULL_HANDLE;
+                vkCreateShaderModule(vkDevice, &smci, nullptr, &pFrag);
+
+                if (pVert && pFrag) {
+                    VkPipelineShaderStageCreateInfo pStages[2]{};
+                    pStages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                    pStages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+                    pStages[0].module = pVert;
+                    pStages[0].pName  = "main";
+                    pStages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                    pStages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    pStages[1].module = pFrag;
+                    pStages[1].pName  = "main";
+
+                    // Vertex: {vec3 position, vec2 uv, vec4 rgba} = 36 bytes
+                    VkVertexInputBindingDescription pBinding{};
+                    pBinding.binding   = 0;
+                    pBinding.stride    = sizeof(float) * 9;
+                    pBinding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+                    VkVertexInputAttributeDescription pAttribs[3]{};
+                    pAttribs[0].location = 0; pAttribs[0].binding = 0;
+                    pAttribs[0].format   = VK_FORMAT_R32G32B32_SFLOAT;    pAttribs[0].offset = 0;
+                    pAttribs[1].location = 1; pAttribs[1].binding = 0;
+                    pAttribs[1].format   = VK_FORMAT_R32G32_SFLOAT;       pAttribs[1].offset = sizeof(float) * 3;
+                    pAttribs[2].location = 2; pAttribs[2].binding = 0;
+                    pAttribs[2].format   = VK_FORMAT_R32G32B32A32_SFLOAT; pAttribs[2].offset = sizeof(float) * 5;
+
+                    VkPipelineVertexInputStateCreateInfo pVI{};
+                    pVI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+                    pVI.vertexBindingDescriptionCount   = 1;
+                    pVI.pVertexBindingDescriptions      = &pBinding;
+                    pVI.vertexAttributeDescriptionCount = 3;
+                    pVI.pVertexAttributeDescriptions    = pAttribs;
+
+                    VkPipelineInputAssemblyStateCreateInfo pIA{};
+                    pIA.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+                    pIA.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+                    VkPipelineViewportStateCreateInfo pVP{};
+                    pVP.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+                    pVP.viewportCount = 1;
+                    pVP.scissorCount  = 1;
+
+                    VkPipelineRasterizationStateCreateInfo pRas{};
+                    pRas.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+                    pRas.polygonMode = VK_POLYGON_MODE_FILL;
+                    pRas.lineWidth   = 1.0f;
+                    pRas.cullMode    = VK_CULL_MODE_NONE;
+                    pRas.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+                    VkPipelineMultisampleStateCreateInfo pMS{};
+                    pMS.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+                    pMS.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+                    VkPipelineDepthStencilStateCreateInfo pDS{};
+                    pDS.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+                    pDS.depthTestEnable  = VK_TRUE;
+                    pDS.depthWriteEnable = VK_FALSE; // transparent: test against scene, don't occlude
+                    pDS.depthCompareOp   = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+                    // Common blend skeleton; src = SRC_ALPHA. dst differs per mode.
+                    VkPipelineColorBlendAttachmentState pCBA{};
+                    pCBA.blendEnable         = VK_TRUE;
+                    pCBA.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+                    pCBA.colorBlendOp        = VK_BLEND_OP_ADD;
+                    pCBA.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+                    pCBA.alphaBlendOp        = VK_BLEND_OP_ADD;
+                    pCBA.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+                    VkPipelineColorBlendStateCreateInfo pCB{};
+                    pCB.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+                    pCB.attachmentCount = 1;
+                    pCB.pAttachments    = &pCBA;
+
+                    VkDynamicState pDyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+                    VkPipelineDynamicStateCreateInfo pDynState{};
+                    pDynState.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+                    pDynState.dynamicStateCount = 2;
+                    pDynState.pDynamicStates    = pDyn;
+
+                    VkGraphicsPipelineCreateInfo pPI{};
+                    pPI.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+                    pPI.stageCount          = 2;
+                    pPI.pStages             = pStages;
+                    pPI.pVertexInputState   = &pVI;
+                    pPI.pInputAssemblyState = &pIA;
+                    pPI.pViewportState      = &pVP;
+                    pPI.pRasterizationState = &pRas;
+                    pPI.pMultisampleState   = &pMS;
+                    pPI.pDepthStencilState  = &pDS;
+                    pPI.pColorBlendState    = &pCB;
+                    pPI.pDynamicState       = &pDynState;
+                    pPI.layout              = m_interactiveViewport.pipelineLayout;
+                    pPI.renderPass          = m_interactiveViewport.renderPass;
+                    pPI.subpass             = 0;
+
+                    // Additive: dst = ONE (colors accumulate -> glow).
+                    pCBA.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+                    pCBA.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+                    vkCreateGraphicsPipelines(vkDevice, VK_NULL_HANDLE, 1, &pPI, nullptr,
+                                              &m_interactiveViewport.particleAddPipeline);
+
+                    // Alpha: dst = ONE_MINUS_SRC_ALPHA (standard transparency).
+                    pCBA.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                    pCBA.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                    vkCreateGraphicsPipelines(vkDevice, VK_NULL_HANDLE, 1, &pPI, nullptr,
+                                              &m_interactiveViewport.particleAlphaPipeline);
+                }
+                if (pVert) vkDestroyShaderModule(vkDevice, pVert, nullptr);
+                if (pFrag) vkDestroyShaderModule(vkDevice, pFrag, nullptr);
+            }
+        }
+    }
+
    // SCENE_LOG_INFO("[MP-init] step=postAllPipelines");
     if (m_interactiveViewport.width == width &&
         m_interactiveViewport.height == height &&
@@ -2005,6 +2155,37 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         VkDeviceSize hOff = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &hb, &hOff);
         vkCmdDraw(cmd, m_interactiveViewport.hairLineVertexCount, 1, 0, 0);
+    }
+
+    // --- Particle billboard overlay (alpha first, then additive on top) ---
+    {
+        SolidPushConstants pp{};
+        matrixToGL(viewProj, pp.viewProj);
+        matrixToGL(view, pp.view);
+        pp.useMatcap = 0;
+
+        auto drawParticleGroup = [&](VkPipeline pipeline,
+                                     const VulkanRT::BufferHandle& vbuf,
+                                     uint32_t vcount) {
+            if (pipeline == VK_NULL_HANDLE || !vbuf.buffer || vcount == 0) {
+                return;
+            }
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            vkCmdPushConstants(cmd, m_interactiveViewport.pipelineLayout,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(SolidPushConstants), &pp);
+            VkBuffer pb = vbuf.buffer;
+            VkDeviceSize pOff = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &pb, &pOff);
+            vkCmdDraw(cmd, vcount, 1, 0, 0);
+        };
+
+        drawParticleGroup(m_interactiveViewport.particleAlphaPipeline,
+                          m_interactiveViewport.particleAlphaVertexBuffer,
+                          m_interactiveViewport.particleAlphaVertexCount);
+        drawParticleGroup(m_interactiveViewport.particleAddPipeline,
+                          m_interactiveViewport.particleAddVertexBuffer,
+                          m_interactiveViewport.particleAddVertexCount);
     }
 
     vkCmdEndRenderPass(cmd);
@@ -3866,6 +4047,55 @@ void VulkanBackendAdapter::uploadHairViewportLines(const std::vector<float>& ver
         m_interactiveViewport.hairLineVertexCount = vertexCount;
         m_interactiveViewport.dirty = true;
         m_currentSamples = 0; // Allow render loop to re-render the viewport
+    }
+}
+
+void VulkanBackendAdapter::uploadParticleBillboards(const std::vector<float>& addData, uint32_t addVertexCount,
+                                                    const std::vector<float>& alphaData, uint32_t alphaVertexCount) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_device) return;
+
+    auto uploadGroup = [&](const std::vector<float>& data, uint32_t vertexCount,
+                           VulkanRT::BufferHandle& buffer, uint32_t& countOut) {
+        if (data.empty() || vertexCount == 0) {
+            countOut = 0;
+            return;
+        }
+        const uint64_t byteSize = data.size() * sizeof(float);
+        // Reallocate only when current buffer is too small.
+        if (!buffer.buffer || buffer.size < byteSize) {
+            if (buffer.buffer) {
+                m_device->destroyBuffer(buffer);
+            }
+            VulkanRT::BufferCreateInfo bci{};
+            bci.size     = byteSize;
+            bci.usage    = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            bci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            buffer = m_device->createBuffer(bci);
+        }
+        if (buffer.buffer) {
+            m_device->uploadBuffer(buffer, data.data(), byteSize, 0);
+            countOut = vertexCount;
+        } else {
+            countOut = 0;
+        }
+    };
+
+    const uint32_t prevAdd = m_interactiveViewport.particleAddVertexCount;
+    const uint32_t prevAlpha = m_interactiveViewport.particleAlphaVertexCount;
+
+    uploadGroup(addData, addVertexCount,
+                m_interactiveViewport.particleAddVertexBuffer,
+                m_interactiveViewport.particleAddVertexCount);
+    uploadGroup(alphaData, alphaVertexCount,
+                m_interactiveViewport.particleAlphaVertexBuffer,
+                m_interactiveViewport.particleAlphaVertexCount);
+
+    // Re-render only when there is something to show or something just cleared.
+    if (m_interactiveViewport.particleAddVertexCount || m_interactiveViewport.particleAlphaVertexCount ||
+        prevAdd || prevAlpha) {
+        m_interactiveViewport.dirty = true;
+        m_currentSamples = 0;
     }
 }
 

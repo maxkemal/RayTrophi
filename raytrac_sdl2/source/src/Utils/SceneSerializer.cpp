@@ -1,4 +1,4 @@
-﻿#include "SceneSerializer.h"
+#include "SceneSerializer.h"
 #include "globals.h"
 #include "Renderer.h"
 #include "OptixWrapper.h"
@@ -170,6 +170,423 @@ Matrix4x4 jsonToMat4(const json& j) {
     return m;
 }
 
+// Helpers for Particle Emitter serialization
+json emitterToJson(const RayTrophiSim::ParticleEmitterDesc& e) {
+    json j;
+    j["name"] = e.name;
+    j["source_mode"] = (int)e.source_mode;
+    j["spawn_mode"] = (int)e.spawn_mode;
+    j["source_name"] = e.source_name;
+    j["point"] = vec3ToJson(e.point);
+    j["local_offset"] = vec3ToJson(e.local_offset);
+    j["direction"] = vec3ToJson(e.direction);
+    j["surface_offset"] = e.surface_offset;
+    j["rate_per_second"] = e.rate_per_second;
+    j["burst_count"] = e.burst_count;
+    j["speed"] = e.speed;
+    j["spread"] = e.spread;
+    j["lifetime_seconds"] = e.lifetime_seconds;
+    j["mass"] = e.mass;
+    j["start_size"] = e.start_size;
+    j["end_size"] = e.end_size;
+    j["size_jitter"] = e.size_jitter;
+    j["start_opacity"] = e.start_opacity;
+    j["end_opacity"] = e.end_opacity;
+    j["start_color"] = vec3ToJson(e.start_color);
+    j["end_color"] = vec3ToJson(e.end_color);
+    j["angular_velocity"] = e.angular_velocity;
+    j["angular_jitter"] = e.angular_jitter;
+    j["enabled"] = e.enabled;
+    j["seed"] = e.seed;
+    return j;
+}
+
+RayTrophiSim::ParticleEmitterDesc jsonToEmitter(const json& j) {
+    RayTrophiSim::ParticleEmitterDesc e;
+    if (j.contains("name")) e.name = j["name"];
+    if (j.contains("source_mode")) e.source_mode = (RayTrophiSim::ParticleEmitterSourceMode)j["source_mode"];
+    if (j.contains("spawn_mode")) e.spawn_mode = (RayTrophiSim::ParticleEmitterSpawnMode)j["spawn_mode"];
+    if (j.contains("source_name")) e.source_name = j["source_name"];
+    if (j.contains("point")) e.point = jsonToVec3(j["point"]);
+    if (j.contains("local_offset")) e.local_offset = jsonToVec3(j["local_offset"]);
+    if (j.contains("direction")) e.direction = jsonToVec3(j["direction"]);
+    if (j.contains("surface_offset")) e.surface_offset = j["surface_offset"];
+    if (j.contains("rate_per_second")) e.rate_per_second = j["rate_per_second"];
+    if (j.contains("burst_count")) e.burst_count = j["burst_count"];
+    if (j.contains("speed")) e.speed = j["speed"];
+    if (j.contains("spread")) e.spread = j["spread"];
+    if (j.contains("lifetime_seconds")) e.lifetime_seconds = j["lifetime_seconds"];
+    if (j.contains("mass")) e.mass = j["mass"];
+    if (j.contains("start_size")) e.start_size = j["start_size"];
+    if (j.contains("end_size")) e.end_size = j["end_size"];
+    if (j.contains("size_jitter")) e.size_jitter = j["size_jitter"];
+    if (j.contains("start_opacity")) e.start_opacity = j["start_opacity"];
+    if (j.contains("end_opacity")) e.end_opacity = j["end_opacity"];
+    if (j.contains("start_color")) e.start_color = jsonToVec3(j["start_color"]);
+    if (j.contains("end_color")) e.end_color = jsonToVec3(j["end_color"]);
+    if (j.contains("angular_velocity")) e.angular_velocity = j["angular_velocity"];
+    if (j.contains("angular_jitter")) e.angular_jitter = j["angular_jitter"];
+    if (j.contains("enabled")) e.enabled = j["enabled"];
+    if (j.contains("seed")) e.seed = j["seed"];
+    return e;
+}
+
+// Helpers for Particle Collider serialization
+json colliderToJson(const RayTrophiSim::ParticleColliderDesc& c) {
+    json j;
+    j["name"] = c.name;
+    j["source_mode"] = (int)c.source_mode;
+    j["source_name"] = c.source_name;
+    j["enabled"] = c.enabled;
+    j["plane_y"] = c.plane_y;
+    j["sphere_center"] = vec3ToJson(c.sphere_center);
+    j["sphere_radius"] = c.sphere_radius;
+    j["capsule_start"] = vec3ToJson(c.capsule_start);
+    j["capsule_end"] = vec3ToJson(c.capsule_end);
+    j["capsule_radius"] = c.capsule_radius;
+    j["bounds_min"] = vec3ToJson(c.bounds_min);
+    j["bounds_max"] = vec3ToJson(c.bounds_max);
+    j["restitution"] = c.restitution;
+    j["friction"] = c.friction;
+    j["thickness"] = c.thickness;
+    j["sdf_resolution_mode"] = c.sdf_resolution_mode;
+    j["decimation_ratio"] = c.decimation_ratio;
+    j["draw_wireframe"] = c.draw_wireframe;
+    j["draw_slice_preview"] = c.draw_slice_preview;
+    j["slice_plane_distance"] = c.slice_plane_distance;
+    j["slice_axis"] = c.slice_axis;
+    return j;
+}
+
+RayTrophiSim::ParticleColliderDesc jsonToCollider(const json& j) {
+    RayTrophiSim::ParticleColliderDesc c;
+    if (j.contains("name")) c.name = j["name"];
+    if (j.contains("source_mode")) c.source_mode = (RayTrophiSim::ParticleColliderSourceMode)j["source_mode"];
+    if (j.contains("source_name")) c.source_name = j["source_name"];
+    if (j.contains("enabled")) c.enabled = j["enabled"];
+    if (j.contains("plane_y")) c.plane_y = j["plane_y"];
+    if (j.contains("sphere_center")) c.sphere_center = jsonToVec3(j["sphere_center"]);
+    if (j.contains("sphere_radius")) c.sphere_radius = j["sphere_radius"];
+    if (j.contains("capsule_start")) c.capsule_start = jsonToVec3(j["capsule_start"]);
+    if (j.contains("capsule_end")) c.capsule_end = jsonToVec3(j["capsule_end"]);
+    if (j.contains("capsule_radius")) c.capsule_radius = j["capsule_radius"];
+    if (j.contains("bounds_min")) c.bounds_min = jsonToVec3(j["bounds_min"]);
+    if (j.contains("bounds_max")) c.bounds_max = jsonToVec3(j["bounds_max"]);
+    if (j.contains("restitution")) c.restitution = j["restitution"];
+    if (j.contains("friction")) c.friction = j["friction"];
+    if (j.contains("thickness")) c.thickness = j["thickness"];
+    if (j.contains("sdf_resolution_mode")) c.sdf_resolution_mode = j["sdf_resolution_mode"];
+    if (j.contains("decimation_ratio")) c.decimation_ratio = j["decimation_ratio"];
+    if (j.contains("draw_wireframe")) c.draw_wireframe = j["draw_wireframe"];
+    if (j.contains("draw_slice_preview")) c.draw_slice_preview = j["draw_slice_preview"];
+    if (j.contains("slice_plane_distance")) c.slice_plane_distance = j["slice_plane_distance"];
+    if (j.contains("slice_axis")) c.slice_axis = j["slice_axis"];
+    return c;
+}
+
+// Helpers for Grid Domain serialization
+json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
+    json j;
+    j["name"] = d.name;
+    j["type"] = (int)d.type;
+    j["backend"] = (int)d.backend;
+    j["source_mode"] = (int)d.source_mode;
+    j["boundary_mode"] = (int)d.boundary_mode;
+    j["source_name"] = d.source_name;
+    j["enabled"] = d.enabled;
+    j["preserve_voxel_size_on_resize"] = d.preserve_voxel_size_on_resize;
+    j["use_sparse_tiles"] = d.use_sparse_tiles;
+    j["render_to_nanovdb"] = d.render_to_nanovdb;
+    j["bounds_min"] = vec3ToJson(d.bounds_min);
+    j["bounds_max"] = vec3ToJson(d.bounds_max);
+    j["resolution_x"] = d.resolution_x;
+    j["resolution_y"] = d.resolution_y;
+    j["resolution_z"] = d.resolution_z;
+    j["max_auto_resolution"] = d.max_auto_resolution;
+    j["voxel_size"] = d.voxel_size;
+    j["padding"] = d.padding;
+    j["adaptive_lock_floor"] = d.adaptive_lock_floor;
+    j["adaptive_floor_y"] = d.adaptive_floor_y;
+    j["channels"] = d.channels;
+
+    // APICSolverParams
+    j["fluid_params"]["gravity"] = vec3ToJson(d.fluid_params.gravity);
+    j["fluid_params"]["viscosity"] = d.fluid_params.viscosity;
+    j["fluid_params"]["particles_per_cell"] = d.fluid_params.particles_per_cell;
+    j["fluid_params"]["cfl"] = d.fluid_params.cfl;
+    j["fluid_params"]["max_substeps"] = d.fluid_params.max_substeps;
+    j["fluid_params"]["pressure_iterations"] = d.fluid_params.pressure_iterations;
+    j["fluid_params"]["apic_blend"] = d.fluid_params.apic_blend;
+    j["fluid_params"]["flip_blend"] = d.fluid_params.flip_blend;
+    j["fluid_params"]["internal_friction"] = d.fluid_params.internal_friction;
+    j["fluid_params"]["air_drag"] = d.fluid_params.air_drag;
+    j["fluid_params"]["reseed_enabled"] = d.fluid_params.reseed_enabled;
+    // Remaining preset-driven rheology so a material preset round-trips fully
+    // (these were previously dropped, resetting Honey/Lava/Sand on reload).
+    j["fluid_params"]["velocity_damping"] = d.fluid_params.velocity_damping;
+    j["fluid_params"]["wall_damping"] = d.fluid_params.wall_damping;
+    j["fluid_params"]["density_correction"] = d.fluid_params.density_correction;
+    j["fluid_params"]["affine_damping"] = d.fluid_params.affine_damping;
+    j["fluid_params"]["max_velocity"] = d.fluid_params.max_velocity;
+    j["fluid_params"]["viscosity_iterations"] = d.fluid_params.viscosity_iterations;
+    j["fluid_params"]["current_preset"] = static_cast<int>(d.fluid_params.current_preset);
+
+    j["fluid_seed_min"] = vec3ToJson(d.fluid_seed_min);
+    j["fluid_seed_max"] = vec3ToJson(d.fluid_seed_max);
+    j["fluid_seed_particles_per_cell"] = d.fluid_seed_particles_per_cell;
+    j["fluid_max_particles"] = (int)d.fluid_max_particles;
+    j["fluid_replace_on_seed"] = d.fluid_replace_on_seed;
+    j["fluid_pending_seed"] = d.fluid_pending_seed;
+    j["fluid_render_mode"] = (int)d.fluid_render_mode;
+    j["fluid_particle_color"] = vec3ToJson(d.fluid_particle_color);
+    j["fluid_particle_radius_factor"] = d.fluid_particle_radius_factor;
+    j["fluid_particle_size_multiplier"] = d.fluid_particle_size_multiplier;
+    j["fluid_particle_subdivisions"] = d.fluid_particle_subdivisions;
+    j["fluid_particle_emissive"] = d.fluid_particle_emissive;
+    j["fluid_particle_emission"] = d.fluid_particle_emission;
+    j["fluid_particle_material_id"] = d.fluid_particle_material_id;
+
+    // LevelSetParams
+    j["fluid_level_set_params"]["narrow_band_voxels"] = d.fluid_level_set_params.narrow_band_voxels;
+    j["fluid_level_set_params"]["kernel_radius_voxels"] = d.fluid_level_set_params.kernel_radius_voxels;
+    j["fluid_level_set_params"]["particle_radius_voxels"] = d.fluid_level_set_params.particle_radius_voxels;
+    j["fluid_level_set_params"]["smoothing_iterations"] = d.fluid_level_set_params.smoothing_iterations;
+    j["fluid_level_set_params"]["surface_resolution_multiplier"] = d.fluid_level_set_params.surface_resolution_multiplier;
+    j["fluid_level_set_params"]["anisotropy_enabled"] = d.fluid_level_set_params.anisotropy_enabled;
+    j["fluid_level_set_params"]["anisotropy_radius_voxels"] = d.fluid_level_set_params.anisotropy_radius_voxels;
+    j["fluid_level_set_params"]["anisotropy_max_stretch"] = d.fluid_level_set_params.anisotropy_max_stretch;
+    j["fluid_level_set_params"]["anisotropy_neighbor_min"] = d.fluid_level_set_params.anisotropy_neighbor_min;
+    j["fluid_level_set_params"]["position_smoothing"] = d.fluid_level_set_params.position_smoothing;
+
+    j["fluid_surface_band_voxels"] = d.fluid_surface_band_voxels;
+    j["fluid_surface_ior"] = d.fluid_surface_ior;
+    j["fluid_surface_roughness"] = d.fluid_surface_roughness;
+    j["fluid_surface_foam"] = d.fluid_surface_foam;
+    j["fluid_debug_overlay"] = d.fluid_debug_overlay;
+
+    // Whitewater (foam/spray/bubbles) — Ihmsen 2012.
+    {
+        const auto& fo = d.fluid_foam_params;
+        auto& fj = j["fluid_foam_params"];
+        fj["enabled"] = fo.enabled;
+        fj["trapped_air_rate"] = fo.trapped_air_rate;
+        fj["wave_crest_rate"] = fo.wave_crest_rate;
+        fj["ta_min"] = fo.ta_min; fj["ta_max"] = fo.ta_max;
+        fj["wc_min"] = fo.wc_min; fj["wc_max"] = fo.wc_max;
+        fj["ke_min"] = fo.ke_min; fj["ke_max"] = fo.ke_max;
+        fj["crest_cos"] = fo.crest_cos;
+        fj["neighbor_radius_voxels"] = fo.neighbor_radius_voxels;
+        fj["spray_max_neighbors"] = fo.spray_max_neighbors;
+        fj["bubble_min_neighbors"] = fo.bubble_min_neighbors;
+        fj["lifetime"] = fo.lifetime;
+        fj["buoyancy"] = fo.buoyancy;
+        fj["fluid_drag"] = fo.fluid_drag;
+        fj["spray_drag"] = fo.spray_drag;
+        fj["spawn_jitter_voxels"] = fo.spawn_jitter_voxels;
+        fj["max_foam"] = static_cast<uint64_t>(fo.max_foam);
+        fj["render_radius_voxels"] = fo.render_radius_voxels;
+        fj["render_mode"] = static_cast<int>(fo.render_mode);
+        fj["volume_density"] = fo.volume_density;
+        fj["foam_material_id"] = fo.foam_material_id;
+        fj["surface_kernel_radius_voxels"]   = fo.surface_kernel_radius_voxels;
+        fj["surface_particle_radius_voxels"] = fo.surface_particle_radius_voxels;
+        fj["surface_band_voxels"]            = fo.surface_band_voxels;
+        fj["surface_smoothing_iterations"]   = fo.surface_smoothing_iterations;
+        fj["surface_resolution_multiplier"]  = fo.surface_resolution_multiplier;
+    }
+
+    // Fire settings
+    j["fire_enabled"] = d.fire_enabled;
+    j["ignition_temperature"] = d.ignition_temperature;
+    j["burn_rate"] = d.burn_rate;
+    j["heat_release"] = d.heat_release;
+    j["smoke_generation"] = d.smoke_generation;
+    j["flame_dissipation"] = d.flame_dissipation;
+    j["fire_max_temperature"] = d.fire_max_temperature;
+    return j;
+}
+
+RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
+    RayTrophiSim::SimulationGridDomainDesc d;
+    if (j.contains("name")) d.name = j["name"];
+    if (j.contains("type")) d.type = (RayTrophiSim::SimulationDomainType)j["type"];
+    if (j.contains("backend")) d.backend = (RayTrophiSim::SimulationDomainBackend)j["backend"];
+    if (j.contains("source_mode")) d.source_mode = (RayTrophiSim::SimulationGridDomainSourceMode)j["source_mode"];
+    if (j.contains("boundary_mode")) d.boundary_mode = (RayTrophiSim::SimulationGridDomainBoundaryMode)j["boundary_mode"];
+    if (j.contains("source_name")) d.source_name = j["source_name"];
+    if (j.contains("enabled")) d.enabled = j["enabled"];
+    if (j.contains("preserve_voxel_size_on_resize")) d.preserve_voxel_size_on_resize = j["preserve_voxel_size_on_resize"];
+    if (j.contains("use_sparse_tiles")) d.use_sparse_tiles = j["use_sparse_tiles"];
+    if (j.contains("render_to_nanovdb")) d.render_to_nanovdb = j["render_to_nanovdb"];
+    if (j.contains("bounds_min")) d.bounds_min = jsonToVec3(j["bounds_min"]);
+    if (j.contains("bounds_max")) d.bounds_max = jsonToVec3(j["bounds_max"]);
+    if (j.contains("resolution_x")) d.resolution_x = j["resolution_x"];
+    if (j.contains("resolution_y")) d.resolution_y = j["resolution_y"];
+    if (j.contains("resolution_z")) d.resolution_z = j["resolution_z"];
+    if (j.contains("max_auto_resolution")) d.max_auto_resolution = j["max_auto_resolution"];
+    if (j.contains("voxel_size")) d.voxel_size = j["voxel_size"];
+    if (j.contains("padding")) d.padding = j["padding"];
+    if (j.contains("adaptive_lock_floor")) d.adaptive_lock_floor = j["adaptive_lock_floor"];
+    if (j.contains("adaptive_floor_y")) d.adaptive_floor_y = j["adaptive_floor_y"];
+    if (j.contains("channels")) d.channels = j["channels"];
+
+    // APICSolverParams
+    if (j.contains("fluid_params")) {
+        const auto& fp = j["fluid_params"];
+        if (fp.contains("gravity")) d.fluid_params.gravity = jsonToVec3(fp["gravity"]);
+        if (fp.contains("viscosity")) d.fluid_params.viscosity = fp["viscosity"];
+        if (fp.contains("particles_per_cell")) d.fluid_params.particles_per_cell = fp["particles_per_cell"];
+        if (fp.contains("cfl")) d.fluid_params.cfl = fp["cfl"];
+        if (fp.contains("max_substeps")) d.fluid_params.max_substeps = fp["max_substeps"];
+        if (fp.contains("pressure_iterations")) d.fluid_params.pressure_iterations = fp["pressure_iterations"];
+        if (fp.contains("apic_blend")) d.fluid_params.apic_blend = fp["apic_blend"];
+        if (fp.contains("flip_blend")) d.fluid_params.flip_blend = fp["flip_blend"];
+        if (fp.contains("internal_friction")) d.fluid_params.internal_friction = fp["internal_friction"];
+        if (fp.contains("air_drag")) d.fluid_params.air_drag = fp["air_drag"];
+        if (fp.contains("reseed_enabled")) d.fluid_params.reseed_enabled = fp["reseed_enabled"];
+        if (fp.contains("velocity_damping")) d.fluid_params.velocity_damping = fp["velocity_damping"];
+        if (fp.contains("wall_damping")) d.fluid_params.wall_damping = fp["wall_damping"];
+        if (fp.contains("density_correction")) d.fluid_params.density_correction = fp["density_correction"];
+        if (fp.contains("affine_damping")) d.fluid_params.affine_damping = fp["affine_damping"];
+        if (fp.contains("max_velocity")) d.fluid_params.max_velocity = fp["max_velocity"];
+        if (fp.contains("viscosity_iterations")) d.fluid_params.viscosity_iterations = fp["viscosity_iterations"];
+        if (fp.contains("current_preset"))
+            d.fluid_params.current_preset =
+                static_cast<RayTrophiSim::Fluid::APICSolverParams::FluidPreset>(fp["current_preset"].get<int>());
+    }
+
+    if (j.contains("fluid_seed_min")) d.fluid_seed_min = jsonToVec3(j["fluid_seed_min"]);
+    if (j.contains("fluid_seed_max")) d.fluid_seed_max = jsonToVec3(j["fluid_seed_max"]);
+    if (j.contains("fluid_seed_particles_per_cell")) d.fluid_seed_particles_per_cell = j["fluid_seed_particles_per_cell"];
+    if (j.contains("fluid_max_particles")) d.fluid_max_particles = j["fluid_max_particles"];
+    if (j.contains("fluid_replace_on_seed")) d.fluid_replace_on_seed = j["fluid_replace_on_seed"];
+    if (j.contains("fluid_pending_seed")) d.fluid_pending_seed = j["fluid_pending_seed"];
+    if (j.contains("fluid_render_mode")) d.fluid_render_mode = (RayTrophiSim::Fluid::FluidRenderMode)j["fluid_render_mode"];
+    if (j.contains("fluid_particle_color")) d.fluid_particle_color = jsonToVec3(j["fluid_particle_color"]);
+    if (j.contains("fluid_particle_radius_factor")) d.fluid_particle_radius_factor = j["fluid_particle_radius_factor"];
+    if (j.contains("fluid_particle_size_multiplier")) d.fluid_particle_size_multiplier = j["fluid_particle_size_multiplier"];
+    if (j.contains("fluid_particle_subdivisions")) d.fluid_particle_subdivisions = j["fluid_particle_subdivisions"];
+    if (j.contains("fluid_particle_emissive")) d.fluid_particle_emissive = j["fluid_particle_emissive"];
+    if (j.contains("fluid_particle_emission")) d.fluid_particle_emission = j["fluid_particle_emission"];
+    if (j.contains("fluid_particle_material_id")) d.fluid_particle_material_id = j["fluid_particle_material_id"];
+
+    // LevelSetParams
+    if (j.contains("fluid_level_set_params")) {
+        const auto& lsp = j["fluid_level_set_params"];
+        if (lsp.contains("narrow_band_voxels")) d.fluid_level_set_params.narrow_band_voxels = lsp["narrow_band_voxels"];
+        if (lsp.contains("kernel_radius_voxels")) d.fluid_level_set_params.kernel_radius_voxels = lsp["kernel_radius_voxels"];
+        if (lsp.contains("particle_radius_voxels")) d.fluid_level_set_params.particle_radius_voxels = lsp["particle_radius_voxels"];
+        if (lsp.contains("smoothing_iterations")) d.fluid_level_set_params.smoothing_iterations = lsp["smoothing_iterations"];
+        if (lsp.contains("surface_resolution_multiplier")) d.fluid_level_set_params.surface_resolution_multiplier = lsp["surface_resolution_multiplier"];
+        if (lsp.contains("anisotropy_enabled")) d.fluid_level_set_params.anisotropy_enabled = lsp["anisotropy_enabled"];
+        if (lsp.contains("anisotropy_radius_voxels")) d.fluid_level_set_params.anisotropy_radius_voxels = lsp["anisotropy_radius_voxels"];
+        if (lsp.contains("anisotropy_max_stretch")) d.fluid_level_set_params.anisotropy_max_stretch = lsp["anisotropy_max_stretch"];
+        if (lsp.contains("anisotropy_neighbor_min")) d.fluid_level_set_params.anisotropy_neighbor_min = lsp["anisotropy_neighbor_min"];
+        if (lsp.contains("position_smoothing")) d.fluid_level_set_params.position_smoothing = lsp["position_smoothing"];
+    }
+
+    if (j.contains("fluid_surface_band_voxels")) d.fluid_surface_band_voxels = j["fluid_surface_band_voxels"];
+    if (j.contains("fluid_surface_ior")) d.fluid_surface_ior = j["fluid_surface_ior"];
+    if (j.contains("fluid_surface_roughness")) d.fluid_surface_roughness = j["fluid_surface_roughness"];
+    if (j.contains("fluid_surface_foam")) d.fluid_surface_foam = j["fluid_surface_foam"];
+    if (j.contains("fluid_debug_overlay")) d.fluid_debug_overlay = j["fluid_debug_overlay"];
+
+    if (j.contains("fluid_foam_params")) {
+        const auto& fj = j["fluid_foam_params"];
+        auto& fo = d.fluid_foam_params;
+        if (fj.contains("enabled")) fo.enabled = fj["enabled"];
+        if (fj.contains("trapped_air_rate")) fo.trapped_air_rate = fj["trapped_air_rate"];
+        if (fj.contains("wave_crest_rate")) fo.wave_crest_rate = fj["wave_crest_rate"];
+        if (fj.contains("ta_min")) fo.ta_min = fj["ta_min"];
+        if (fj.contains("ta_max")) fo.ta_max = fj["ta_max"];
+        if (fj.contains("wc_min")) fo.wc_min = fj["wc_min"];
+        if (fj.contains("wc_max")) fo.wc_max = fj["wc_max"];
+        if (fj.contains("ke_min")) fo.ke_min = fj["ke_min"];
+        if (fj.contains("ke_max")) fo.ke_max = fj["ke_max"];
+        if (fj.contains("crest_cos")) fo.crest_cos = fj["crest_cos"];
+        if (fj.contains("neighbor_radius_voxels")) fo.neighbor_radius_voxels = fj["neighbor_radius_voxels"];
+        if (fj.contains("spray_max_neighbors")) fo.spray_max_neighbors = fj["spray_max_neighbors"];
+        if (fj.contains("bubble_min_neighbors")) fo.bubble_min_neighbors = fj["bubble_min_neighbors"];
+        if (fj.contains("lifetime")) fo.lifetime = fj["lifetime"];
+        if (fj.contains("buoyancy")) fo.buoyancy = fj["buoyancy"];
+        if (fj.contains("fluid_drag")) fo.fluid_drag = fj["fluid_drag"];
+        if (fj.contains("spray_drag")) fo.spray_drag = fj["spray_drag"];
+        if (fj.contains("spawn_jitter_voxels")) fo.spawn_jitter_voxels = fj["spawn_jitter_voxels"];
+        if (fj.contains("max_foam")) fo.max_foam = static_cast<std::size_t>(fj["max_foam"].get<uint64_t>());
+        if (fj.contains("render_radius_voxels")) fo.render_radius_voxels = fj["render_radius_voxels"];
+        if (fj.contains("render_mode")) {
+            // Enum changed: old {Volume=0, Spheres=1} → new {Surface=0, Spheres=1}.
+            // An old Volume(0) save loads as Surface — the new metaball default.
+            int rm = fj["render_mode"].get<int>();
+            if (rm < 0 || rm > 1) rm = 0;
+            fo.render_mode = static_cast<RayTrophiSim::Fluid::FoamRenderMode>(rm);
+        }
+        if (fj.contains("volume_density")) fo.volume_density = fj["volume_density"];
+        if (fj.contains("foam_material_id")) fo.foam_material_id = fj["foam_material_id"].get<int>();
+        if (fj.contains("surface_kernel_radius_voxels")) fo.surface_kernel_radius_voxels = fj["surface_kernel_radius_voxels"];
+        if (fj.contains("surface_particle_radius_voxels")) fo.surface_particle_radius_voxels = fj["surface_particle_radius_voxels"];
+        if (fj.contains("surface_band_voxels")) fo.surface_band_voxels = fj["surface_band_voxels"];
+        if (fj.contains("surface_smoothing_iterations")) fo.surface_smoothing_iterations = fj["surface_smoothing_iterations"];
+        if (fj.contains("surface_resolution_multiplier")) fo.surface_resolution_multiplier = fj["surface_resolution_multiplier"];
+    }
+
+    if (j.contains("fire_enabled")) d.fire_enabled = j["fire_enabled"];
+    if (j.contains("ignition_temperature")) d.ignition_temperature = j["ignition_temperature"];
+    if (j.contains("burn_rate")) d.burn_rate = j["burn_rate"];
+    if (j.contains("heat_release")) d.heat_release = j["heat_release"];
+    if (j.contains("smoke_generation")) d.smoke_generation = j["smoke_generation"];
+    if (j.contains("flame_dissipation")) d.flame_dissipation = j["flame_dissipation"];
+    if (j.contains("fire_max_temperature")) d.fire_max_temperature = j["fire_max_temperature"];
+    return d;
+}
+
+// Helpers for Flow Source serialization
+json flowSourceToJson(const RayTrophiSim::SimulationFlowSourceDesc& fs) {
+    json j;
+    j["name"] = fs.name;
+    j["source_mode"] = (int)fs.source_mode;
+    j["source_name"] = fs.source_name;
+    j["domain_index"] = fs.domain_index;
+    j["enabled"] = fs.enabled;
+    j["position"] = vec3ToJson(fs.position);
+    j["velocity"] = vec3ToJson(fs.velocity);
+    j["radius"] = fs.radius;
+    j["density"] = fs.density;
+    j["temperature"] = fs.temperature;
+    j["fuel"] = fs.fuel;
+    j["falloff"] = fs.falloff;
+    j["fluid_particles_per_second"] = fs.fluid_particles_per_second;
+    j["use_time_limit"] = fs.use_time_limit;
+    j["start_time"] = fs.start_time;
+    j["end_time"] = fs.end_time;
+    j["use_particle_limit"] = fs.use_particle_limit;
+    j["max_emitted_particles"] = fs.max_emitted_particles;
+    return j;
+}
+
+RayTrophiSim::SimulationFlowSourceDesc jsonToFlowSource(const json& j) {
+    RayTrophiSim::SimulationFlowSourceDesc fs;
+    if (j.contains("name")) fs.name = j["name"];
+    if (j.contains("source_mode")) fs.source_mode = (RayTrophiSim::SimulationFlowSourceMode)j["source_mode"];
+    if (j.contains("source_name")) fs.source_name = j["source_name"];
+    if (j.contains("domain_index")) fs.domain_index = j["domain_index"];
+    if (j.contains("enabled")) fs.enabled = j["enabled"];
+    if (j.contains("position")) fs.position = jsonToVec3(j["position"]);
+    if (j.contains("velocity")) fs.velocity = jsonToVec3(j["velocity"]);
+    if (j.contains("radius")) fs.radius = j["radius"];
+    if (j.contains("density")) fs.density = j["density"];
+    if (j.contains("temperature")) fs.temperature = j["temperature"];
+    if (j.contains("fuel")) fs.fuel = j["fuel"];
+    if (j.contains("falloff")) fs.falloff = j["falloff"];
+    if (j.contains("fluid_particles_per_second")) fs.fluid_particles_per_second = j["fluid_particles_per_second"];
+    if (j.contains("use_time_limit")) fs.use_time_limit = j["use_time_limit"];
+    if (j.contains("start_time")) fs.start_time = j["start_time"];
+    if (j.contains("end_time")) fs.end_time = j["end_time"];
+    if (j.contains("use_particle_limit")) fs.use_particle_limit = j["use_particle_limit"];
+    if (j.contains("max_emitted_particles")) fs.max_emitted_particles = j["max_emitted_particles"];
+    return fs;
+}
+
 void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& settings, const std::string& filepath) {
     json root;
 
@@ -276,6 +693,90 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
             stack.serialize(stackJson);
             root["mesh_modifiers"][nodeName] = stackJson;
         }
+    }
+
+    // 9.6 Particle Systems
+    root["active_particle_system_index"] = scene.active_particle_system_index;
+    root["particle_systems"] = json::array();
+    for (const auto& system : scene.particle_systems) {
+        json sj;
+        sj["id"] = system.id;
+        sj["name"] = system.name;
+        sj["visible"] = system.visible;
+        sj["enabled"] = system.enabled;
+        sj["blend_mode"] = (int)system.blend_mode;
+
+        // Render Settings
+        sj["render"]["render_in_raytrace"] = system.render.render_in_raytrace;
+        sj["render"]["shape"] = (int)system.render.shape;
+        sj["render"]["size_multiplier"] = system.render.size_multiplier;
+        sj["render"]["sphere_subdivisions"] = system.render.sphere_subdivisions;
+        sj["render"]["emissive"] = system.render.emissive;
+        sj["render"]["inherit_color_from_emitter"] = system.render.inherit_color_from_emitter;
+        sj["render"]["base_color"] = vec3ToJson(system.render.base_color);
+        sj["render"]["color_end"] = vec3ToJson(system.render.color_end);
+        sj["render"]["color_buckets"] = system.render.color_buckets;
+        sj["render"]["over_life_color"] = system.render.over_life_color;
+        sj["render"]["emission_strength"] = system.render.emission_strength;
+        sj["render"]["roughness"] = system.render.roughness;
+
+        sj["render"]["mesh_sources"] = json::array();
+        for (const auto& ms : system.render.mesh_sources) {
+            json msj;
+            msj["node_name"] = ms.node_name;
+            msj["weight"] = ms.weight;
+            sj["render"]["mesh_sources"].push_back(msj);
+        }
+
+        // Solver Runtime Settings
+        if (system.runtime) {
+            sj["runtime"]["gravity"] = vec3ToJson(system.runtime->gravity());
+            sj["runtime"]["linear_drag"] = system.runtime->linearDrag();
+            sj["runtime"]["collision_plane_y"] = system.runtime->collisionPlaneY();
+            sj["runtime"]["collision_plane_enabled"] = system.runtime->collisionPlaneEnabled();
+            sj["runtime"]["collision_restitution"] = system.runtime->collisionRestitution();
+
+            // Physics Settings
+            const auto& ps = system.runtime->physicsSettings();
+            sj["runtime"]["physics_settings"]["mode"] = (int)ps.mode;
+            sj["runtime"]["physics_settings"]["quality"] = (int)ps.quality;
+            sj["runtime"]["physics_settings"]["particle_radius"] = ps.particle_radius;
+            sj["runtime"]["physics_settings"]["self_collision_enabled"] = ps.self_collision_enabled;
+            sj["runtime"]["physics_settings"]["solver_iterations"] = ps.solver_iterations;
+            sj["runtime"]["physics_settings"]["max_neighbors_per_particle"] = ps.max_neighbors_per_particle;
+            sj["runtime"]["physics_settings"]["viscosity"] = ps.viscosity;
+            sj["runtime"]["physics_settings"]["cohesion"] = ps.cohesion;
+            sj["runtime"]["physics_settings"]["pressure_stiffness"] = ps.pressure_stiffness;
+            sj["runtime"]["physics_settings"]["rest_density"] = ps.rest_density;
+            sj["runtime"]["physics_settings"]["buoyancy"] = ps.buoyancy;
+            sj["runtime"]["physics_settings"]["gravity_scale"] = ps.gravity_scale;
+            sj["runtime"]["physics_settings"]["vorticity"] = ps.vorticity;
+
+            // Emitters
+            sj["runtime"]["emitters"] = json::array();
+            for (const auto& em : system.runtime->emitters()) {
+                sj["runtime"]["emitters"].push_back(emitterToJson(em));
+            }
+
+            // Colliders
+            sj["runtime"]["colliders"] = json::array();
+            for (const auto& col : system.runtime->colliders()) {
+                sj["runtime"]["colliders"].push_back(colliderToJson(col));
+            }
+
+            // Grid Domains
+            sj["runtime"]["grid_domains"] = json::array();
+            for (const auto& dom : system.runtime->gridDomains()) {
+                sj["runtime"]["grid_domains"].push_back(domainToJson(dom));
+            }
+
+            // Flow Sources
+            sj["runtime"]["flow_sources"] = json::array();
+            for (const auto& fs : system.runtime->flowSources()) {
+                sj["runtime"]["flow_sources"].push_back(flowSourceToJson(fs));
+            }
+        }
+        root["particle_systems"].push_back(sj);
     }
 
     // 9. Terrains
@@ -593,6 +1094,156 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                 scene.world.objects = remainingObjects;
             }
         }
+    }
+
+    // 9.6 Particle Systems
+    simdjson::dom::element psRoot;
+    if (!root["particle_systems"].get(psRoot)) {
+        nlohmann::json particleSystemsJson = sjsonToNlohmann(psRoot);
+        for (const auto& sj : particleSystemsJson) {
+            SceneData::ParticleSystemObject system;
+            if (sj.contains("id")) system.id = sj["id"];
+            if (sj.contains("name")) system.name = sj["name"];
+            if (sj.contains("visible")) system.visible = sj["visible"];
+            if (sj.contains("enabled")) system.enabled = sj["enabled"];
+            if (sj.contains("blend_mode")) system.blend_mode = (SceneData::ParticleBlendMode)sj["blend_mode"];
+
+            // Deserialise Render Settings
+            if (sj.contains("render")) {
+                const auto& rj = sj["render"];
+                if (rj.contains("render_in_raytrace")) system.render.render_in_raytrace = rj["render_in_raytrace"];
+                if (rj.contains("shape")) system.render.shape = (SceneData::ParticleRenderShape)rj["shape"];
+                if (rj.contains("size_multiplier")) system.render.size_multiplier = rj["size_multiplier"];
+                if (rj.contains("sphere_subdivisions")) system.render.sphere_subdivisions = rj["sphere_subdivisions"];
+                if (rj.contains("emissive")) system.render.emissive = rj["emissive"];
+                if (rj.contains("inherit_color_from_emitter")) system.render.inherit_color_from_emitter = rj["inherit_color_from_emitter"];
+                if (rj.contains("base_color")) system.render.base_color = jsonToVec3(rj["base_color"]);
+                if (rj.contains("color_end")) system.render.color_end = jsonToVec3(rj["color_end"]);
+                if (rj.contains("color_buckets")) system.render.color_buckets = rj["color_buckets"];
+                if (rj.contains("over_life_color")) system.render.over_life_color = rj["over_life_color"];
+                if (rj.contains("emission_strength")) system.render.emission_strength = rj["emission_strength"];
+                if (rj.contains("roughness")) system.render.roughness = rj["roughness"];
+
+                if (rj.contains("mesh_sources")) {
+                    system.render.mesh_sources.clear();
+                    for (const auto& msj : rj["mesh_sources"]) {
+                        SceneData::ParticleRenderMeshSource ms;
+                        if (msj.contains("node_name")) ms.node_name = msj["node_name"];
+                        if (msj.contains("weight")) ms.weight = msj["weight"];
+                        system.render.mesh_sources.push_back(ms);
+                    }
+                }
+            }
+
+            // Deserialise Runtime Settings
+            if (sj.contains("runtime")) {
+                const auto& rtj = sj["runtime"];
+                // Create runtime
+                system.runtime = scene.createParticleRuntime();
+
+                // Set runtime parameters
+                if (rtj.contains("gravity")) system.runtime->setGravity(jsonToVec3(rtj["gravity"]));
+                if (rtj.contains("linear_drag")) system.runtime->setLinearDrag(rtj["linear_drag"]);
+                
+                float plane_y = 0.0f;
+                bool plane_enabled = false;
+                float plane_restitution = 0.35f;
+                if (rtj.contains("collision_plane_y")) plane_y = rtj["collision_plane_y"];
+                if (rtj.contains("collision_plane_enabled")) plane_enabled = rtj["collision_plane_enabled"];
+                if (rtj.contains("collision_restitution")) plane_restitution = rtj["collision_restitution"];
+                system.runtime->setCollisionPlane(plane_y, plane_enabled, plane_restitution);
+
+                // Physics Settings
+                if (rtj.contains("physics_settings")) {
+                    const auto& psj = rtj["physics_settings"];
+                    auto& ps = system.runtime->physicsSettings();
+                    if (psj.contains("mode")) ps.mode = (RayTrophiSim::ParticlePhysicsMode)psj["mode"];
+                    if (psj.contains("quality")) ps.quality = (RayTrophiSim::ParticleQualityMode)psj["quality"];
+                    if (psj.contains("particle_radius")) ps.particle_radius = psj["particle_radius"];
+                    if (psj.contains("self_collision_enabled")) ps.self_collision_enabled = psj["self_collision_enabled"];
+                    if (psj.contains("solver_iterations")) ps.solver_iterations = psj["solver_iterations"];
+                    if (psj.contains("max_neighbors_per_particle")) ps.max_neighbors_per_particle = psj["max_neighbors_per_particle"];
+                    if (psj.contains("viscosity")) ps.viscosity = psj["viscosity"];
+                    if (psj.contains("cohesion")) ps.cohesion = psj["cohesion"];
+                    if (psj.contains("pressure_stiffness")) ps.pressure_stiffness = psj["pressure_stiffness"];
+                    if (psj.contains("rest_density")) ps.rest_density = psj["rest_density"];
+                    if (psj.contains("buoyancy")) ps.buoyancy = psj["buoyancy"];
+                    if (psj.contains("gravity_scale")) ps.gravity_scale = psj["gravity_scale"];
+                    if (psj.contains("vorticity")) ps.vorticity = psj["vorticity"];
+                }
+
+                // Emitters
+                if (rtj.contains("emitters")) {
+                    system.runtime->clearEmitters();
+                    for (const auto& ej : rtj["emitters"]) {
+                        system.runtime->addEmitter(jsonToEmitter(ej));
+                    }
+                }
+
+                // Colliders
+                if (rtj.contains("colliders")) {
+                    system.runtime->clearColliders();
+                    for (const auto& cj : rtj["colliders"]) {
+                        auto col_desc = jsonToCollider(cj);
+                        auto& added_col = system.runtime->addCollider(col_desc);
+                        
+                        // If it's ObjectMeshSDF and has a valid source_name, trigger rebuild
+                        if (added_col.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF && !added_col.source_name.empty()) {
+                            scene.rebuildSDFColliderAsync(added_col);
+                        }
+                    }
+                }
+
+                // Grid Domains
+                if (rtj.contains("grid_domains")) {
+                    system.runtime->clearGridDomains();
+                    for (const auto& dj : rtj["grid_domains"]) {
+                        system.runtime->addGridDomain(jsonToDomain(dj));
+                    }
+                    system.runtime->synchronizeGridDomainsNow(); // Force initial state synchronization
+                }
+
+                // Flow Sources
+                if (rtj.contains("flow_sources")) {
+                    system.runtime->clearFlowSources();
+                    for (const auto& fsj : rtj["flow_sources"]) {
+                        system.runtime->addFlowSource(jsonToFlowSource(fsj));
+                    }
+                }
+            }
+
+            // Sync other run-time domain containers parallel lists to match grid domains count
+            if (system.runtime) {
+                size_t num_domains = system.runtime->gridDomains().size();
+                system.domain_vdb_ids.assign(num_domains, -1);
+                system.domain_volumes.assign(num_domains, nullptr);
+                system.domain_particle_render_group_ids.assign(num_domains, -1);
+                system.domain_particle_pool_capacities.assign(num_domains, 0);
+                system.domain_sdf_buffers.resize(num_domains);
+                system.domain_sdf_stats.resize(num_domains);
+                system.domain_last_fluid_render_mode.assign(num_domains, -1);
+            }
+
+            scene.particle_systems.push_back(system);
+        }
+
+        // Restore next_particle_system_id so newly added systems have safe IDs
+        uint32_t max_id = 0;
+        for (const auto& sys : scene.particle_systems) {
+            if (sys.id > max_id) max_id = sys.id;
+        }
+        scene.next_particle_system_id = max_id + 1;
+    }
+
+    // Restore active_particle_system_index if present
+    int64_t active_sys_idx = -1;
+    if (!root["active_particle_system_index"].get(active_sys_idx)) {
+        scene.active_particle_system_index = (int)active_sys_idx;
+        if (scene.active_particle_system_index >= (int)scene.particle_systems.size()) {
+            scene.active_particle_system_index = (int)scene.particle_systems.size() - 1;
+        }
+    } else {
+        scene.active_particle_system_index = scene.particle_systems.empty() ? -1 : 0;
     }
 
     // 10. Rebuild All

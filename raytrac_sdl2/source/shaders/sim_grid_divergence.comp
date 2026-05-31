@@ -1,0 +1,39 @@
+// sim_grid_divergence.comp
+// Computes velocity divergence for each cell: div = (du+dv+dw) / h.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    int boundary;
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int iterations;
+    int parity;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer VelX      { float vel_x[];     };
+layout(set = 0, binding = 1) readonly buffer VelY      { float vel_y[];     };
+layout(set = 0, binding = 2) readonly buffer VelZ      { float vel_z[];     };
+layout(set = 0, binding = 3) buffer          Pressure  { float pressure[];  };
+layout(set = 0, binding = 4) buffer          Divergence{ float divergence[];};
+
+int vx_idx(int i,int j,int k){ return i + j*(pc.nx+1) + k*(pc.nx+1)*pc.ny; }
+int vy_idx(int i,int j,int k){ return i + j*pc.nx     + k*pc.nx*(pc.ny+1); }
+int vz_idx(int i,int j,int k){ return i + j*pc.nx     + k*pc.nx*pc.ny;     }
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= pc.nx*pc.ny*pc.nz) return;
+
+    int i = id % pc.nx;
+    int j = (id/pc.nx) % pc.ny;
+    int k = id / (pc.nx*pc.ny);
+
+    float inv_h = pc.voxel_size > 1e-6 ? 1.0/pc.voxel_size : 1.0;
+    float du = vel_x[vx_idx(i+1,j,k)] - vel_x[vx_idx(i,j,k)];
+    float dv = vel_y[vy_idx(i,j+1,k)] - vel_y[vy_idx(i,j,k)];
+    float dw = vel_z[vz_idx(i,j,k+1)] - vel_z[vz_idx(i,j,k)];
+    divergence[id] = (du+dv+dw) * inv_h;
+}

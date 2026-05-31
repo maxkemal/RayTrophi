@@ -1,4 +1,4 @@
-﻿#include "renderer.h"
+#include "renderer.h"
 #include <SDL_image.h>
 #include <filesystem>
 #include <chrono>      // For wall-clock deltaTime in animation fallback
@@ -5382,14 +5382,17 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     }
 
                     float d_remapped = std::max(0.0f, (density - remap_low) / remap_range);
-                    float d = d_remapped * density_scale; 
+                    float d = d_remapped * density_scale;
+                    float sigma_s = d * scattering_intensity;
+                    float cutoff_threshold = shader ? shader->density.cutoff_threshold : 0.04f;
+                    if (cutoff_threshold <= 0.0f) cutoff_threshold = 0.04f;
+                    float scatter_keep = std::clamp((sigma_s * actual_step_size) / cutoff_threshold, 0.0f, 1.0f);
 
-                    if (d > threshold) {
+                    if (((float)rand() / RAND_MAX) <= scatter_keep) {
                         if (bounce == 0 && first_vol_t < 0.0f && d > 0.05f) {
                             first_vol_t = t;
                         }
 
-                        float sigma_s = d * scattering_intensity;
                         float sigma_a = d * absorption_coeff;
                         float sigma_t = sigma_s + sigma_a;
 
@@ -7719,7 +7722,17 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
                         gpu_mat.opacity = 1.0f;
 
                         if (vol_mat->hasVDBVolume()) {
-                            void* grid_ptr = VDBVolumeManager::getInstance().getGPUGrid(vol_mat->getVDBVolumeID());
+                            int vdb_id = vol_mat->getVDBVolumeID();
+                            auto& vdb_mgr = VDBVolumeManager::getInstance();
+                            
+                            // PROACTIVE CUDA UPLOAD ON BACKEND SWITCH:
+                            // If we are in OptiX/CUDA path, and the CUDA grid is not yet uploaded,
+                            // but the host grid exists (e.g. loaded under Vulkan mode), trigger CUDA upload.
+                            if (!vdb_mgr.getGPUGrid(vdb_id) && vdb_mgr.getHostGrid(vdb_id)) {
+                                vdb_mgr.uploadToGPU(vdb_id, true);
+                            }
+                            
+                            void* grid_ptr = vdb_mgr.getGPUGrid(vdb_id);
                             vol_info.nanovdb_grid = grid_ptr;
                             vol_info.has_nanovdb = (grid_ptr != nullptr) ? 1 : 0;
                         }

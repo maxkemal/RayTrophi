@@ -1813,6 +1813,16 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     bool has_geometry = (traversable_handle != 0);
     bool has_sbt = (sbt.raygenRecord && sbt.missRecordBase && sbt.hitgroupRecordBase);
     
+    // Live gas/grid-domain VDB updates can reallocate NanoVDB CUDA buffers. If
+    // the global dirty bit is still set here, the uploaded OptiX volume table may
+    // still contain stale device pointers. Skip this launch; Main will refresh
+    // the volume buffers and reset accumulation before the next rendered frame.
+    extern bool g_gas_volumes_dirty;
+    if (g_gas_volumes_dirty && (params.vdb_volume_count > 0 || params.gas_volume_count > 0)) {
+        rendering_in_progress = false;
+        params_dirty = true;
+        return;
+    }
 
     if (has_geometry && has_sbt) {
         OPTIX_CHECK(optixLaunch(

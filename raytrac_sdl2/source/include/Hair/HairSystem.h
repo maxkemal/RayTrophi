@@ -18,6 +18,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <functional>
 #include <embree4/rtcore.h>
 #include "json.hpp"
 #include "ForceField.h" // Add ForceField support
@@ -28,6 +29,10 @@ class Triangle;
 class Mesh;
 class Hittable;
 class Renderer;
+
+namespace RayTrophiSim {
+class SimulationForceFieldSnapshot;
+}
 
 namespace Hair {
 
@@ -290,6 +295,7 @@ public:
     void setGravity(const std::string& groomName, float gravity);
     void setClumpiness(const std::string& groomName, float clump);
     void restyleGroom(const std::string& name, const Physics::ForceFieldManager* forceManager = nullptr, float time = 0.0f);
+    void restyleGroom(const std::string& name, const RayTrophiSim::SimulationForceFieldSnapshot* forceSnapshot, float time);
     void regenerateInterpolated(const std::string& groomName);
     
     /**
@@ -401,6 +407,9 @@ private:
     );
     
     void interpolateChildren(HairGroom& groom);
+    void restyleGroomImpl(const std::string& name,
+                          const std::function<Vec3(const Vec3&, const Vec3&)>& forceSampler,
+                          float time);
     
     Vec3 sampleTriangleSurface(
         const Triangle& tri,

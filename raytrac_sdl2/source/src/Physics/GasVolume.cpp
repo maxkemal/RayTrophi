@@ -379,7 +379,10 @@ void GasVolume::uploadToGPU(void* stream_ptr) {
         };
 
         uploadTexture(simulator.getGPUDensityPtr(), grid.density.data(), &density_array, density_texture);
-        if (shader && shader->emission.mode == VolumeEmissionMode::Blackbody) {
+        if (shader &&
+            (shader->emission.mode == VolumeEmissionMode::Blackbody ||
+             shader->emission.mode == VolumeEmissionMode::ChannelDriven ||
+             shader->emission.color_ramp.enabled)) {
             uploadTexture(simulator.getGPUTemperaturePtr(), grid.temperature.data(), &temperature_array, temperature_texture);
         }
 
@@ -426,20 +429,30 @@ void GasVolume::uploadToGPU(void* stream_ptr) {
                 grid.nx, grid.ny, grid.nz,
                 grid.voxel_size,
                 grid.density.data(),
-                (shader && shader->emission.mode == VolumeEmissionMode::Blackbody) ? grid.temperature.data() : nullptr,
+                (shader &&
+                 (shader->emission.mode == VolumeEmissionMode::Blackbody ||
+                  shader->emission.mode == VolumeEmissionMode::ChannelDriven ||
+                  shader->emission.color_ramp.enabled)) ? grid.temperature.data() : nullptr,
                 nullptr // Use synchronous host copy on default stream to avoid racing OptiX stream
             );
             last_live_vdb_frame = sim_frame;
             last_live_vdb_upload_frame = sim_frame;
             live_vdb_dirty = false;
+            // OptiX stores NanoVDB device pointers inside its uploaded volume
+            // table. Any live VDB upload can reallocate those pointers, so the
+            // backend volume buffer must be refreshed before the next launch.
+            if (live_vdb_id >= 0) {
+                g_gas_volumes_dirty = true;
+            }
         }
 
         // Unified gas only becomes ray-traceable after it has a registered live VDB id.
         // Without this rebuild request, Vulkan/OptiX can still read the volume buffer for
         // soft shadows while the TLAS lacks the procedural volume instance for primary hits.
+        // Only rebuild on first registration (previous_live_vdb_id < 0). The volume stays
+        // in the TLAS on subsequent frames — no rebuild needed when sim resets to frame 0.
         const bool needs_unified_volume_rebuild =
-            live_vdb_id >= 0 &&
-            ((previous_live_vdb_id < 0) || (sim_frame <= 0 && needs_live_vdb_upload));
+            live_vdb_id >= 0 && (previous_live_vdb_id < 0);
         if (needs_unified_volume_rebuild) {
             if (gasRenderBackendIsVulkan()) {
                 g_vulkan_rebuild_pending = true;
@@ -704,7 +717,8 @@ void GasVolume::updateFromTimeline(int timeline_frame, void* stream) {
                 live_vdb_dirty = true;
             } else {
                 simulator.reset();
-                clearTimelineSnapshotCache();
+                // Keep existing cache — simulation is deterministic, cached snapshots
+                // at frames > 0 remain valid after reset and can speed up the next scrub.
                 cacheTimelineSnapshot(0);
                 current = 0;
                 last_timeline_sim_frame = 0;
@@ -717,7 +731,8 @@ void GasVolume::updateFromTimeline(int timeline_frame, void* stream) {
         if (target_frame == 0) {
             if (current != 0) {
                 simulator.reset();
-                clearTimelineSnapshotCache();
+                // Keep existing cache — simulation is deterministic, cached snapshots
+                // remain valid after loop and can be reused on the next playthrough.
                 previous_timeline_snapshot = simulator.captureState();
                 cacheTimelineSnapshot(0);
                 last_live_vdb_frame = simulator.getCurrentFrame();
@@ -894,8 +909,11 @@ void GasVolume::updateBounds() const {
     Vec3 local_max = Vec3(1, 1, 1);
 
     if (transform) {
-        transform->updateMatrix();
-        const Matrix4x4& m = transform->base;
+        // Compute matrix from components without calling updateMatrix(), which sets
+        // transform->dirty = true as a side effect. That flag causes GasVolume::update()
+        // to re-enter the transform-sync block every frame, setting bounds_dirty=true again,
+        // and triggering a spurious getWorldBounds() recompute + TLAS AABB comparison.
+        const Matrix4x4 m = transform->getPivotMatrix() * Matrix4x4::translation(-transform->pivot_offset);
         
         Vec3 corners[8] = {
             Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0), Vec3(1,1,0),

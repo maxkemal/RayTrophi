@@ -102,6 +102,16 @@ void SceneSelection::updatePositionFromSelection() {
                 selected.scale = selected.force_field->scale;
             }
             break;
+
+        case SelectableType::ParticleSystem:
+            selected.position = Vec3(0, 0, 0);
+            selected.rotation = Vec3(0, 0, 0);
+            selected.scale = Vec3(1, 1, 1);
+            break;
+
+        case SelectableType::SimulationDomain:
+            selected.rotation = Vec3(0, 0, 0);
+            break;
             
         default:
             break;
@@ -199,6 +209,12 @@ static void ApplyTransformToItem(SelectableItem& item, const Matrix4x4& delta_tr
                 item.position = p;
             }
             break;
+
+        case SelectableType::ParticleSystem:
+            break;
+
+        case SelectableType::SimulationDomain:
+            break;
             
         default:
             break;
@@ -277,6 +293,15 @@ Matrix4x4 SceneSelection::getSelectionMatrix() const {
                          Matrix4x4::scaling(selected.force_field->scale);
             }
             break;
+
+        case SelectableType::ParticleSystem:
+            break;
+
+        case SelectableType::SimulationDomain:
+            result.m[0][3] = selected.position.x;
+            result.m[1][3] = selected.position.y;
+            result.m[2][3] = selected.position.z;
+            break;
             
         default:
             break;
@@ -326,6 +351,16 @@ bool SceneSelection::isSelected(const SelectableItem& item) const {
         else if (s.type == SelectableType::GasVolume) {
             if (s.gas_volume == item.gas_volume) return true;
         }
+        else if (s.type == SelectableType::ForceField) {
+            if (s.force_field == item.force_field) return true;
+        }
+        else if (s.type == SelectableType::ParticleSystem) {
+            if (s.particle_system_index == item.particle_system_index) return true;
+        }
+        else if (s.type == SelectableType::SimulationDomain) {
+            if (s.particle_system_index == item.particle_system_index &&
+                s.simulation_domain_index == item.simulation_domain_index) return true;
+        }
     }
     return false;
 }
@@ -365,6 +400,16 @@ void SceneSelection::removeFromSelection(const SelectableItem& item) {
             }
             else if (s.type == SelectableType::GasVolume) {
                 return s.gas_volume == item.gas_volume;
+            }
+            else if (s.type == SelectableType::ForceField) {
+                return s.force_field == item.force_field;
+            }
+            else if (s.type == SelectableType::ParticleSystem) {
+                return s.particle_system_index == item.particle_system_index;
+            }
+            else if (s.type == SelectableType::SimulationDomain) {
+                return s.particle_system_index == item.particle_system_index &&
+                       s.simulation_domain_index == item.simulation_domain_index;
             }
             return false;
         });
@@ -462,6 +507,25 @@ void SceneSelection::selectForceField(std::shared_ptr<Physics::ForceField> field
     item.type = SelectableType::ForceField;
     item.force_field = field;
     item.force_field_index = index;
+    item.name = name;
+    addToSelection(item);
+}
+
+void SceneSelection::selectParticleSystem(int index, const std::string& name) {
+    clearSelection();
+    SelectableItem item;
+    item.type = SelectableType::ParticleSystem;
+    item.particle_system_index = index;
+    item.name = name;
+    addToSelection(item);
+}
+
+void SceneSelection::selectSimulationDomain(int particle_system_index, int domain_index, const std::string& name) {
+    clearSelection();
+    SelectableItem item;
+    item.type = SelectableType::SimulationDomain;
+    item.particle_system_index = particle_system_index;
+    item.simulation_domain_index = domain_index;
     item.name = name;
     addToSelection(item);
 }
