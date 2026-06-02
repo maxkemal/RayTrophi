@@ -151,12 +151,40 @@ void stepFoam(const FluidParticles& fluid,
         const float drag_s   = std::max(0.0f, params.spray_drag);
         const float buoy     = std::max(0.0f, params.buoyancy);
 
+        // Interior solid (collider) collision — foam advects in the grid velocity
+        // field, but like the liquid particles it carries its own momentum and
+        // would otherwise tunnel through / sit inside a voxelized collider. Mirror
+        // the liquid advect's eject + separated-axis slide so foam respects the
+        // collider too (and a MOVING collider shoves it via solid_vel).
+        const bool foam_has_solid = !grid.solid.empty();
+        const bool foam_has_svel  = grid.solid_vel.size() == grid.solid.size();
+        auto solidCellAt = [&](int i, int j, int k) -> bool {
+            if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return false;
+            return grid.solid[cellIndex(i, j, k)] != 0u;
+        };
+        auto solidAtPos = [&](const Vec3& p) -> bool {
+            const Vec3 g = (p - origin) * inv_h;
+            return solidCellAt(static_cast<int>(std::floor(g.x)),
+                               static_cast<int>(std::floor(g.y)),
+                               static_cast<int>(std::floor(g.z)));
+        };
+        auto solidVelAtPos = [&](const Vec3& p) -> Vec3 {
+            if (!foam_has_svel) return Vec3(0.0f, 0.0f, 0.0f);
+            const Vec3 g = (p - origin) * inv_h;
+            const int i = static_cast<int>(std::floor(g.x));
+            const int j = static_cast<int>(std::floor(g.y));
+            const int k = static_cast<int>(std::floor(g.z));
+            if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return Vec3(0.0f, 0.0f, 0.0f);
+            return grid.solid_vel[cellIndex(i, j, k)];
+        };
+
 #ifdef _OPENMP
         #pragma omp parallel for schedule(dynamic, 512) num_threads(thread_cap)
 #endif
         for (int64_t f = 0; f < static_cast<int64_t>(foam_count); ++f) {
             const std::size_t fi = static_cast<std::size_t>(f);
             Vec3 x = foam.position[fi];
+            const Vec3 p0 = x;
             Vec3 v = foam.velocity[fi];
 
             const int neigh = countFluidNeighbours(x);
@@ -184,6 +212,49 @@ void stepFoam(const FluidParticles& fluid,
             }
 
             x = x + v * dt;
+
+            // Solid (collider) collision — same two cases as the liquid advect.
+            if (foam_has_solid) {
+                if (solidAtPos(p0)) {
+                    // Collider swept over the foam particle → eject to nearest free cell.
+                    const Vec3 g0 = (p0 - origin) * inv_h;
+                    const int ci = static_cast<int>(std::floor(g0.x));
+                    const int cj = static_cast<int>(std::floor(g0.y));
+                    const int ck = static_cast<int>(std::floor(g0.z));
+                    bool found = false; int ffi = ci, ffj = cj, ffk = ck;
+                    for (int r = 1; r <= 3 && !found; ++r) {
+                        for (int dk = -r; dk <= r && !found; ++dk)
+                        for (int dj = -r; dj <= r && !found; ++dj)
+                        for (int di = -r; di <= r && !found; ++di) {
+                            if (std::max(std::abs(di), std::max(std::abs(dj), std::abs(dk))) != r) continue;
+                            if (!solidCellAt(ci + di, cj + dj, ck + dk)) { ffi = ci + di; ffj = cj + dj; ffk = ck + dk; found = true; }
+                        }
+                    }
+                    if (found) {
+                        x = origin + Vec3((ffi + 0.5f) * voxel, (ffj + 0.5f) * voxel, (ffk + 0.5f) * voxel);
+                        Vec3 nrm((float)(ffi - ci), (float)(ffj - cj), (float)(ffk - ck));
+                        const float nl = nrm.length();
+                        if (nl > 1e-6f) {
+                            nrm = nrm * (1.0f / nl);
+                            const Vec3 sv = solidVelAtPos(p0);
+                            Vec3 rel = v - sv;
+                            const float rn = rel.x * nrm.x + rel.y * nrm.y + rel.z * nrm.z;
+                            if (rn < 0.0f) rel = rel - nrm * rn;
+                            v = sv + rel;
+                        }
+                    }
+                } else if (solidAtPos(x)) {
+                    Vec3 resolved = p0;
+                    Vec3 tx = resolved; tx.x = x.x;
+                    if (!solidAtPos(tx)) resolved.x = x.x; else v.x = solidVelAtPos(tx).x;
+                    Vec3 ty = resolved; ty.y = x.y;
+                    if (!solidAtPos(ty)) resolved.y = x.y; else v.y = solidVelAtPos(ty).y;
+                    Vec3 tz = resolved; tz.z = x.z;
+                    if (!solidAtPos(tz)) resolved.z = x.z; else v.z = solidVelAtPos(tz).z;
+                    x = resolved;
+                }
+            }
+
             float life = foam.lifetime[fi] - dt;
             const bool oob = (x.x < dom_min.x || x.x > dom_max.x ||
                               x.y < dom_min.y || x.y > dom_max.y ||

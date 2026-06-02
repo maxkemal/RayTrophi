@@ -17,6 +17,7 @@
 #include "GasVolume.h"
 #include "ForceField.h"
 #include "ParticleSimulation.h"
+#include "SimCache.h"
 #include "SimulationSystems.h"
 #include "SimulationWorld.h"
 #include "SimulationComputeVulkanContext.h"
@@ -40,6 +41,7 @@
 #include <unordered_map>
 #include <map>
 #include <unordered_set>
+#include <filesystem>
 
 namespace AnimationGraph {
     class AnimationNodeGraph;
@@ -710,6 +712,13 @@ struct SceneData {
         // SurfaceSDF render route. Transient; not serialized.
         std::vector<std::vector<float>>        domain_sdf_buffers;
         std::vector<RayTrophiSim::Fluid::LevelSetStats> domain_sdf_stats;
+        // SurfaceSDF rebuild gates. The first signature tracks particle +
+        // surfacing params, so buildLevelSet is skipped when the generated SDF
+        // would be identical. The second tracks the already-converted density
+        // proxy upload, so NanoVDB conversion/upload is not repeated just
+        // because syncSimulationRenderVolumes was called again.
+        std::vector<uint64_t> domain_sdf_signatures;
+        std::vector<uint64_t> domain_vdb_upload_signatures;
         // Last mode the bridge re-tuned the per-domain shader for. -1 = uninit;
         // any change vs current desc.fluid_render_mode triggers a one-shot
         // preset re-apply so the bridge never stomps on the user's live shader
@@ -742,6 +751,16 @@ struct SceneData {
     int sim_timeline_frame_ = -1;
     static constexpr int kMaxCachedSimFrames = 600;
 
+    // ── On-disk bake cache (render-only point cache; see SimCache.h) ──────────
+    // When a project is loaded with a valid <project>.simcache/ folder, the
+    // baked sim is streamed from disk instead of re-simulated: restoreSimFrame
+    // falls back to SimCache::readSystemFrame when the in-RAM cache misses. Set
+    // by the loader (setSimDiskCache) after validating per-system config hashes.
+    std::string sim_cache_dir_;
+    bool        sim_cache_valid_ = false;
+    int         sim_cache_start_frame_ = 0;
+    int         sim_cache_end_frame_ = 0;
+
     void syncSimulationRenderVolumes() {
         // The bridge does CUDA work (registerOrUpdateLiveVolume -> uploadToGPU) and
         // mutates world.objects. Doing either while a backend is tearing down /
@@ -772,6 +791,8 @@ struct SceneData {
             system.domain_volumes.resize(states.size());
             system.domain_sdf_buffers.resize(states.size());
             system.domain_sdf_stats.resize(states.size());
+            system.domain_sdf_signatures.resize(states.size(), 0);
+            system.domain_vdb_upload_signatures.resize(states.size(), 0);
             system.domain_last_fluid_render_mode.resize(states.size(), -1);
             // Reused below to carry foam into the fluid-surface volume's
             // temperature channel (single-volume whitewater compositing).
@@ -856,6 +877,12 @@ struct SceneData {
                                 system.domain_sdf_buffers[d].clear();
                                 system.domain_sdf_buffers[d].shrink_to_fit();
                             }
+                            if (d < system.domain_sdf_signatures.size()) {
+                                system.domain_sdf_signatures[d] = 0;
+                            }
+                            if (d < system.domain_vdb_upload_signatures.size()) {
+                                system.domain_vdb_upload_signatures[d] = 0;
+                            }
                         }
                         switch (fluid_mode) {
                             case RayTrophiSim::Fluid::FluidRenderMode::Volume:
@@ -918,17 +945,63 @@ struct SceneData {
                 // can swap density_ptr without mutating the const sim state's
                 // own density (which the splat pass owns).
                 const float* density_ptr_override = nullptr;
+                bool surface_sdf_changed = false;
+                auto hash_combine_local = [](uint64_t h, uint64_t v) {
+                    h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+                    return h;
+                };
+                auto quantize_local = [](float v) {
+                    return static_cast<uint64_t>(static_cast<int64_t>(std::lround(v * 1000.0f)));
+                };
                 if (fluid_surface_route && d < system.domain_sdf_buffers.size()) {
                     auto& sdf_buf = system.domain_sdf_buffers[d];
                     auto& sdf_stats = system.domain_sdf_stats[d];
-                    RayTrophiSim::Fluid::buildLevelSet(
-                        state.particles, state.grid,
-                        domains[d].fluid_level_set_params, sdf_buf, &sdf_stats);
+                    const auto& lsp = domains[d].fluid_level_set_params;
+                    uint64_t sdf_sig = 1469598103934665603ull;
+                    sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(state.particles.size()));
+                    sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(state.grid.nx));
+                    sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(state.grid.ny));
+                    sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(state.grid.nz));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(state.grid.voxel_size));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(state.grid.origin.x));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(state.grid.origin.y));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(state.grid.origin.z));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(domains[d].fluid_surface_band_voxels));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.kernel_radius_voxels));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.particle_radius_voxels));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.narrow_band_voxels));
+                    sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(lsp.smoothing_iterations));
+                    sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(lsp.surface_resolution_multiplier));
+                    sdf_sig = hash_combine_local(sdf_sig, lsp.anisotropy_enabled ? 1ull : 0ull);
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.anisotropy_radius_voxels));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.anisotropy_max_stretch));
+                    sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(lsp.anisotropy_neighbor_min));
+                    sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.position_smoothing));
+                    for (const auto& p : state.particles.position) {
+                        sdf_sig = hash_combine_local(sdf_sig, quantize_local(p.x));
+                        sdf_sig = hash_combine_local(sdf_sig, quantize_local(p.y));
+                        sdf_sig = hash_combine_local(sdf_sig, quantize_local(p.z));
+                    }
+
+                    const bool needs_sdf_rebuild =
+                        force_sync ||
+                        d >= system.domain_sdf_signatures.size() ||
+                        system.domain_sdf_signatures[d] != sdf_sig ||
+                        sdf_buf.empty();
+                    if (needs_sdf_rebuild) {
+                        RayTrophiSim::Fluid::buildLevelSet(
+                            state.particles, state.grid,
+                            lsp, sdf_buf, &sdf_stats);
+                        if (d < system.domain_sdf_signatures.size()) {
+                            system.domain_sdf_signatures[d] = sdf_sig;
+                        }
+                        surface_sdf_changed = true;
+                    }
                     // SDF may be refined above the sim grid (surface_resolution_
                     // multiplier), so size the proxy loop from the buffer itself,
                     // not the sim grid cell count.
                     const std::size_t cells = sdf_buf.size();
-                    if (cells > 0) {
+                    if (cells > 0 && needs_sdf_rebuild) {
                         // Reuse the buffer in-place as a density proxy centred
                         // on the surface:
                         //   density = clamp(0.5 - 0.5 * phi / grad_width, 0, 1)
@@ -953,6 +1026,8 @@ struct SceneData {
                             if (dval > 1.0f) dval = 1.0f;
                             sdf_buf[ci] = dval;
                         }
+                    }
+                    if (cells > 0) {
                         density_ptr_override = sdf_buf.data();
                     }
                     // Shader tuning happens above on mode-change only — don't
@@ -963,6 +1038,12 @@ struct SceneData {
                     // memory footprint honest with the current route.
                     system.domain_sdf_buffers[d].clear();
                     system.domain_sdf_buffers[d].shrink_to_fit();
+                    if (d < system.domain_sdf_signatures.size()) {
+                        system.domain_sdf_signatures[d] = 0;
+                    }
+                    if (d < system.domain_vdb_upload_signatures.size()) {
+                        system.domain_vdb_upload_signatures[d] = 0;
+                    }
                 }
                 const std::string volume_name =
                     system.name + " Domain " + std::to_string(d) +
@@ -983,7 +1064,25 @@ struct SceneData {
                 // (prev_id < 0) so a frozen domain still shows a static frame.
                 // The driver only calls the bridge when the grid actually changed
                 // (bake/scrub/free-run step), so upload on first sight + stride.
-                const bool do_update = force_sync || (prev_id < 0) || ((frame % stride) == 0);
+                uint64_t upload_sig = 0;
+                if (density_ptr_override) {
+                    const auto& up_stats = system.domain_sdf_stats[d];
+                    upload_sig = 1469598103934665603ull;
+                    upload_sig = hash_combine_local(upload_sig, system.domain_sdf_signatures[d]);
+                    upload_sig = hash_combine_local(upload_sig, static_cast<uint64_t>(up_stats.eff_nx));
+                    upload_sig = hash_combine_local(upload_sig, static_cast<uint64_t>(up_stats.eff_ny));
+                    upload_sig = hash_combine_local(upload_sig, static_cast<uint64_t>(up_stats.eff_nz));
+                    upload_sig = hash_combine_local(upload_sig, quantize_local(up_stats.eff_voxel));
+                }
+                const bool upload_changed =
+                    density_ptr_override &&
+                    (d >= system.domain_vdb_upload_signatures.size() ||
+                     system.domain_vdb_upload_signatures[d] != upload_sig ||
+                     surface_sdf_changed);
+                const bool do_update = force_sync || (prev_id < 0) ||
+                    (density_ptr_override
+                        ? (upload_changed && ((frame % stride) == 0))
+                        : ((frame % stride) == 0));
                 if (do_update) {
                     // Upload temperature too when the shader maps it to emission
                     // (blackbody / channel-driven fire). registerOrUpdateLiveVolume
@@ -1032,6 +1131,11 @@ struct SceneData {
                         density_ptr,
                         up_temp,
                         nullptr);
+                    if (density_ptr_override &&
+                        d < system.domain_vdb_upload_signatures.size() &&
+                        system.domain_vdb_ids[d] >= 0) {
+                        system.domain_vdb_upload_signatures[d] = upload_sig;
+                    }
                     simulation_render_updated = true;
                     // The host/GPU NanoVDB grid changed: force the backend volume
                     // table re-sync. OptiX stores device pointers in that table,
@@ -1193,6 +1297,75 @@ struct SceneData {
         sim_frame_cache_.clear();
     }
 
+    // Apply the keyframed transform of every object bound as a simulation source
+    // (collider / emitter / grid domain / flow source) for an ARBITRARY timeline
+    // frame, so the sim sees its animated pose at that exact frame.
+    //
+    // Why this is needed: the per-tick UI driver (TimelineWidget) and the
+    // sequence-render worker (updateAnimationState) only ever apply the SINGLE
+    // currently-displayed frame's pose. A sim bake, however, advances many
+    // sub-steps per applied pose — a scrub catch-up (capped resim loop), a fresh
+    // 0..N bake, or the sequence-render first frame (0..start_frame). Without
+    // re-posing the source objects per sub-step, every step of that bake sees the
+    // collider/emitter frozen at one pose, so a keyframed collider only interacts
+    // with the fluid at that single position (the reported bug).
+    //
+    // Mirrors TimelineWidget's transform-apply: setPivotMatrix on the shared
+    // transform handle. The SurfaceMeshCache the voxelizer reads computes world
+    // verts as getTransformMatrix()*original, so updating the handle is enough for
+    // moved geometry to reach the solid mask — no CPU vertex bake required.
+    void applySimSourceObjectPosesForFrame(int frame) {
+        if (timeline.tracks.empty() || particle_systems.empty()) return;
+
+        // Unique node names referenced by any sim source across all systems.
+        std::vector<std::string> source_names;
+        auto addName = [&](const std::string& n) {
+            if (n.empty()) return;
+            if (std::find(source_names.begin(), source_names.end(), n) == source_names.end())
+                source_names.push_back(n);
+        };
+        for (auto& system : particle_systems) {
+            if (!system.runtime) continue;
+            for (const auto& c : system.runtime->colliders())  addName(c.source_name);
+            for (const auto& e : system.runtime->emitters())   addName(e.source_name);
+            for (const auto& d : system.runtime->gridDomains()) addName(d.source_name);
+            for (const auto& f : system.runtime->flowSources()) addName(f.source_name);
+        }
+        if (source_names.empty()) return;
+
+        // Evaluate each source's transform track ONCE for this frame; drop names
+        // with no transform track so the world.objects pass below stays cheap.
+        std::vector<std::string> posed_names;
+        std::vector<Matrix4x4> posed_mats;
+        posed_names.reserve(source_names.size());
+        posed_mats.reserve(source_names.size());
+        for (const auto& name : source_names) {
+            auto track_it = timeline.tracks.find(name);
+            if (track_it == timeline.tracks.end() || track_it->second.keyframes.empty()) continue;
+            Keyframe kf = track_it->second.evaluate(frame);
+            if (!kf.has_transform) continue;
+            posed_names.push_back(name);
+            posed_mats.push_back(Matrix4x4::fromTRS(kf.transform.position,
+                                                    kf.transform.rotation,
+                                                    kf.transform.scale));
+        }
+        if (posed_names.empty()) return;
+
+        // Single pass over world.objects; transform handles are shared per mesh,
+        // but set on every matching triangle to stay correct if they aren't.
+        for (auto& obj : world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (!tri) continue;
+            const std::string& nn = tri->getNodeName();
+            if (nn.empty()) continue;
+            for (std::size_t i = 0; i < posed_names.size(); ++i) {
+                if (posed_names[i] != nn) continue;
+                if (Transform* th = tri->getTransformPtr()) th->setPivotMatrix(posed_mats[i]);
+                break;
+            }
+        }
+    }
+
     bool hasSimFrame(int frame) const {
         return sim_frame_cache_.find(frame) != sim_frame_cache_.end();
     }
@@ -1221,12 +1394,44 @@ struct SceneData {
 
     bool restoreSimFrame(int frame, float fixed_dt = 1.0f / 24.0f) {
         auto it = sim_frame_cache_.find(frame);
-        if (it == sim_frame_cache_.end() || it->second.size() != particle_systems.size()) {
-            return false;
+        if (it != sim_frame_cache_.end() && it->second.size() == particle_systems.size()) {
+            for (std::size_t i = 0; i < particle_systems.size(); ++i) {
+                if (particle_systems[i].runtime) {
+                    particle_systems[i].runtime->setGridDomainStates(it->second[i]);
+                    invalidateSimulationRenderBindings(particle_systems[i]);
+                }
+            }
+            simulation_world.resetTime(static_cast<float>(frame) * fixed_dt, frame);
+            return true;
+        }
+        // Disk fallback: stream the frame from the on-disk bake cache (render-only).
+        if (restoreSimFrameFromDisk(frame, fixed_dt)) {
+            return true;
+        }
+        return false;
+    }
+
+    // Read every system's domain states for `frame` from the on-disk bake cache
+    // and install them. Returns false (silently) when no valid disk cache is
+    // bound, the frame is out of the baked range, or any system file is missing/
+    // corrupt — callers then fall back to resimulation as before.
+    bool restoreSimFrameFromDisk(int frame, float fixed_dt = 1.0f / 24.0f) {
+        if (!sim_cache_valid_ || sim_cache_dir_.empty()) return false;
+        if (frame < sim_cache_start_frame_ || frame > sim_cache_end_frame_) return false;
+
+        // Read all systems first; only commit if every one succeeds so we never
+        // leave the sim in a half-restored state.
+        std::vector<std::vector<RayTrophiSim::SimulationGridDomainState>> loaded(particle_systems.size());
+        for (std::size_t i = 0; i < particle_systems.size(); ++i) {
+            if (!particle_systems[i].runtime) continue;
+            if (!RayTrophiSim::SimCache::readSystemFrame(
+                    sim_cache_dir_, particle_systems[i].id, frame, loaded[i])) {
+                return false;
+            }
         }
         for (std::size_t i = 0; i < particle_systems.size(); ++i) {
             if (particle_systems[i].runtime) {
-                particle_systems[i].runtime->setGridDomainStates(it->second[i]);
+                particle_systems[i].runtime->setGridDomainStates(loaded[i]);
                 invalidateSimulationRenderBindings(particle_systems[i]);
             }
         }
@@ -1244,6 +1449,7 @@ struct SceneData {
             }
         }
         simulation_world.resetTime(0.0f, 0);
+        applySimSourceObjectPosesForFrame(0);
         captureSimFrame(0);
     }
 
@@ -1316,16 +1522,49 @@ struct SceneData {
         constexpr int kMaxStepsPerTick = 8;  // spread big jumps across UI ticks
         bool changed = false;
 
+        // Disk-cache fast path: a project loaded with a valid bake never
+        // resimulates — every frame (including 0 and loop-backs) is streamed from
+        // disk. Clamp the request into the baked range so scrubbing past the ends
+        // holds the first/last baked frame instead of falling through to a live
+        // resim that would fight the cache.
+        if (sim_cache_valid_) {
+            int want = tl_frame;
+            if (want < sim_cache_start_frame_) want = sim_cache_start_frame_;
+            if (want > sim_cache_end_frame_)   want = sim_cache_end_frame_;
+            if (want != sim_timeline_frame_ || force_resync) {
+                if (restoreSimFrameFromDisk(want, fixed_dt)) {
+                    sim_timeline_frame_ = want;
+                    changed = true;
+                }
+            }
+            if (changed) syncSimulationRenderVolumes();
+            return;
+        }
+
         if (force_resync && !playing && restoreSimFrame(tl_frame, fixed_dt)) {
             sim_timeline_frame_ = tl_frame;
             changed = true;
         }
 
-        // Fresh bake on first entry, or when playback loops back before our frame.
-        if (sim_timeline_frame_ < 0 || (playing && tl_frame < sim_timeline_frame_)) {
+        // Fresh bake on first entry. On a playback loop-back (tl_frame jumps
+        // below our baked frame), do NOT re-bake from scratch — resetSimulation
+        // ToStart() wipes the whole sim frame cache, which thrashed memory on
+        // every wrap. Instead replay the cached loop-start frame; only fall back
+        // to a fresh bake if that frame isn't cached. The (tl_frame !=
+        // sim_timeline_frame_) block below then replays the rest from cache too.
+        if (sim_timeline_frame_ < 0) {
             resetSimulationToStart();
             sim_timeline_frame_ = 0;
             changed = true;
+        } else if (playing && tl_frame < sim_timeline_frame_) {
+            if (restoreSimFrame(tl_frame, fixed_dt)) {
+                sim_timeline_frame_ = tl_frame;
+                changed = true;
+            } else {
+                resetSimulationToStart();
+                sim_timeline_frame_ = 0;
+                changed = true;
+            }
         }
 
         if (tl_frame != sim_timeline_frame_) {
@@ -1346,12 +1585,22 @@ struct SceneData {
                 }
                 int steps = 0;
                 while (sim_timeline_frame_ < tl_frame && steps < kMaxStepsPerTick) {
+                    // Re-pose keyframed sim-source objects (e.g. moving colliders)
+                    // for the frame we are about to step INTO, so the solid mask
+                    // tracks the animated geometry instead of freezing at one pose.
+                    applySimSourceObjectPosesForFrame(sim_timeline_frame_ + 1);
                     syncSimulationWorld();
                     simulation_world.stepOnce(fixed_dt);
                     ++sim_timeline_frame_;
                     captureSimFrame(sim_timeline_frame_);
                     ++steps;
                     changed = true;
+                }
+                // If the bake hasn't caught up to the displayed frame this tick,
+                // restore the playhead pose so the viewport collider doesn't lag
+                // behind the timeline while the remaining frames bake.
+                if (sim_timeline_frame_ != tl_frame) {
+                    applySimSourceObjectPosesForFrame(tl_frame);
                 }
             }
         }
@@ -1361,6 +1610,82 @@ struct SceneData {
         if (changed) {
             syncSimulationRenderVolumes();
         }
+    }
+
+    // Deterministic per-frame simulation driver for the SEQUENCE RENDER worker.
+    // Unlike updateSimulationTimeline (capped at kMaxStepsPerTick to keep the UI
+    // responsive across ticks), this drives the sim to EXACTLY tl_frame in one
+    // blocking call — during a sequence render the worker owns the timeline and
+    // there is no UI tick to spread the work across, so the first rendered frame
+    // may need an unbounded bake from 0..start_frame. After stepping it rebuilds
+    // the SurfaceSDF volumes AND the discrete particle / foam render instances so
+    // splat / foam / SurfaceSDF all appear in the rendered frame (the viewport
+    // gets these for free from updateSimulationTimeline + syncParticleRenderInstances;
+    // render_Animation previously did neither).
+    //
+    // MUST be called on the render worker thread ONLY. While a sequence render is
+    // active the UI's updateSimulationTimeline + syncParticleRenderInstances are
+    // gated off (render_owns_timeline / skip_backend_for_anim), so the worker is
+    // the single owner of sim state + the render bridge groups — no concurrent
+    // writes. The particle/foam bridge self-flags g_scene_geometry_generation /
+    // g_optix_rebuild_pending / g_gpu_refit_pending on structural / motion change;
+    // the caller consumes those to drive the backend AS rebuild before tracing.
+    //
+    // cache_frames=false (the sequence-render default): do NOT accumulate the
+    // per-frame snapshot cache. A sequence walks frames forward exactly once and
+    // never scrubs back, but captureSimFrame deep-copies the FULL grid + the
+    // entire FluidParticles / FoamParticles SoA for every frame — O(N) per frame
+    // in copy cost and O(N × frames) in resident memory. On a long filling fluid
+    // that ballooning cache is what makes the sequence "start fast then crawl".
+    // Forward stepping works straight off the LIVE sim state, so the cache buys
+    // nothing here; we drop it and only fall back to a reset+resim when the
+    // target is BEHIND the live frame (which a forward sequence never hits).
+    void bakeSimulationForRenderFrame(int tl_frame, float fps, bool enable_rt_geometry = true,
+                                      bool cache_frames = false) {
+        if (tl_frame < 0) tl_frame = 0;
+        const float fixed_dt = (fps > 1.0f) ? (1.0f / fps) : (1.0f / 24.0f);
+
+        // Release any cache the viewport left behind so a long sequence doesn't
+        // sit on (and keep growing) hundreds of full-state snapshots.
+        if (!cache_frames) {
+            clearSimFrameCache();
+        } else if (restoreSimFrame(tl_frame, fixed_dt)) {
+            // Exact cached frame → restore and done.
+            sim_timeline_frame_ = tl_frame;
+            syncSimulationRenderVolumes();
+            syncParticleRenderInstances(enable_rt_geometry);
+            return;
+        }
+
+        // Rewind to the nearest cached frame <= target (or reset to 0), then
+        // resimulate forward UNCAPPED to the exact target frame. With caching
+        // off the live state is already correct for forward steps, so the rewind
+        // only triggers on a genuine backward jump (reset + resim from 0).
+        if (sim_timeline_frame_ < 0 || tl_frame < sim_timeline_frame_) {
+            const int nearest = cache_frames ? nearestCachedSimFrameAtOrBelow(tl_frame) : -1;
+            if (nearest >= 0 && restoreSimFrame(nearest, fixed_dt)) {
+                sim_timeline_frame_ = nearest;
+            } else {
+                resetSimulationToStart();
+                sim_timeline_frame_ = 0;
+            }
+        }
+        while (sim_timeline_frame_ < tl_frame) {
+            // Re-pose keyframed sim-source objects for the frame being stepped
+            // into. Matters for the first rendered frame (bakes 0..start_frame in
+            // one call) and any backward-jump reset+resim — without it a moving
+            // collider stays frozen at the render frame's pose for the whole bake.
+            applySimSourceObjectPosesForFrame(sim_timeline_frame_ + 1);
+            syncSimulationWorld();
+            simulation_world.stepOnce(fixed_dt);
+            ++sim_timeline_frame_;
+            if (cache_frames) captureSimFrame(sim_timeline_frame_);
+        }
+
+        // SurfaceSDF volumes (level-set → NanoVDB) + discrete particle / foam
+        // render instances. Order matches the viewport's per-tick drive.
+        syncSimulationRenderVolumes();
+        syncParticleRenderInstances(enable_rt_geometry);
     }
 
     // ── VDB export ───────────────────────────────────────────────────────────
@@ -1412,6 +1737,182 @@ struct SceneData {
         return written;
     }
 
+    // ── On-disk bake (render-only point cache) ───────────────────────────────
+    // Deterministic config-signature of a system, used to detect a stale bake on
+    // load. Intentionally hashes only AUTHORED, stable fields (source identity,
+    // counts, resolution, physics, emitter params, collider material). Resolved
+    // geometry (object-bound bounds / OBB / sphere / capsule) is EXCLUDED — it is
+    // re-derived live from the source object each step, so it drifts between save
+    // and load and would otherwise cause false "bake outdated" invalidations.
+    uint64_t computeSystemConfigHash(const ParticleSystemObject& sys) const {
+        uint64_t h = 1469598103934665603ull; // FNV-1a offset basis
+        auto B = [&h](const void* d, size_t n) {
+            const uint8_t* p = static_cast<const uint8_t*>(d);
+            for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+        };
+        auto I = [&](int64_t v) { B(&v, sizeof(v)); };
+        auto S = [&](const std::string& s) { B(s.data(), s.size()); uint32_t n = (uint32_t)s.size(); B(&n, sizeof(n)); };
+
+        if (!sys.runtime) return h;
+        auto& rt = *sys.runtime;
+        // STRUCTURAL IDENTITY ONLY. The hash must match between bake time (live
+        // config) and load time (config parsed back from the project file), so it
+        // hashes ONLY fields that the project serializer round-trips losslessly:
+        // enum modes, source names, and counts. Floats (gravity, viscosity, …),
+        // emitter seeds, and resolution are deliberately EXCLUDED — they are
+        // either not all serialized or drift (Adaptive auto-resize), which would
+        // make the hash mismatch and the cache silently never bind on reload.
+        // This still catches the meaningful changes (Gas↔Fluid, collider type,
+        // physics mode, add/remove of any domain/emitter/collider/flow source).
+        // A pure parameter tweak won't invalidate — acceptable; the user re-bakes.
+        I((int64_t)rt.physicsSettings().mode);
+        const auto& doms = rt.gridDomains();
+        I((int64_t)doms.size());
+        for (const auto& d : doms) {
+            I((int64_t)d.type); I((int64_t)d.source_mode); I((int64_t)d.boundary_mode);
+            S(d.source_name);
+        }
+        const auto& ems = rt.emitters();
+        I((int64_t)ems.size());
+        for (const auto& e : ems) {
+            I((int64_t)e.source_mode); S(e.source_name);
+        }
+        const auto& cols = rt.colliders();
+        I((int64_t)cols.size());
+        for (const auto& c : cols) {
+            I((int64_t)c.source_mode); S(c.source_name);
+        }
+        const auto& fss = rt.flowSources();
+        I((int64_t)fss.size());
+        for (const auto& fsd : fss) {
+            I((int64_t)fsd.source_mode); S(fsd.source_name);
+        }
+        return h;
+    }
+
+    // Deterministically bake frames [start,end] (re-simulated from 0) to a disk
+    // point cache: one binary file per (system, frame) + a manifest carrying the
+    // per-system config signatures. Render-only — see SimCache.h. BLOCKING: walks
+    // the whole sim on the calling thread (an explicit user action; the UI should
+    // run it on a worker). Binds the cache so scrubbing serves from disk at once.
+    bool bakeSimulationToDisk(const std::string& cache_dir, int start_frame, int end_frame, float fps) {
+        if (cache_dir.empty() || end_frame < start_frame || particle_systems.empty()) return false;
+        const float dt = (fps > 1.0f) ? (1.0f / fps) : (1.0f / 24.0f);
+
+        RayTrophiSim::SimCache::clearCache(cache_dir);  // fresh folder for this bake
+
+        // Snapshot config hashes from the AUTHORED config BEFORE simulating.
+        // Adaptive domains auto-resize their resolution while the sim runs, and
+        // bounds get resolved live — computing the hash post-bake would capture
+        // those derived values and never match the freshly-loaded (authored) hash
+        // on reload, so the cache would silently never bind. (computeSystemConfigHash
+        // already excludes resolution/bounds, but snapshotting here is the robust
+        // belt-and-braces: the manifest reflects exactly the authored state.)
+        std::vector<std::pair<uint32_t, uint64_t>> system_hashes;
+        system_hashes.reserve(particle_systems.size());
+        for (const auto& sys : particle_systems) {
+            system_hashes.emplace_back(sys.id, computeSystemConfigHash(sys));
+        }
+
+        resetSimulationToStart();
+        // resetGridDomainStates() leaves states DEFAULT-constructed (type = Gas,
+        // empty grid). Synchronize now so frame 0 carries the correct domain type
+        // + grid metadata — otherwise a reloaded bake restores a "gas" frame 0 and
+        // the sim appears to run in gas mode until the user scrubs forward.
+        for (auto& sys : particle_systems) {
+            if (sys.runtime) sys.runtime->synchronizeGridDomainsNow();
+        }
+        sim_timeline_frame_ = 0;
+        bool ok = true;
+        for (int f = 0; f <= end_frame; ++f) {
+            if (f > 0) {
+                syncSimulationWorld();
+                simulation_world.stepOnce(dt);
+                sim_timeline_frame_ = f;
+            }
+            if (f >= start_frame) {
+                for (auto& sys : particle_systems) {
+                    if (!sys.runtime) continue;
+                    if (!RayTrophiSim::SimCache::writeSystemFrame(
+                            cache_dir, sys.id, f, sys.runtime->gridDomainStates())) {
+                        ok = false;
+                    }
+                }
+            }
+        }
+
+        RayTrophiSim::SimCache::Manifest m;
+        m.version = RayTrophiSim::SimCache::kVersion;
+        m.start_frame = start_frame;
+        m.end_frame = end_frame;
+        m.fps = fps;
+        for (const auto& sys : particle_systems) {
+            RayTrophiSim::SimCache::SystemManifest sm;
+            sm.id = sys.id;
+            sm.config_hash = 0;
+            for (const auto& kv : system_hashes) {
+                if (kv.first == sys.id) { sm.config_hash = kv.second; break; }
+            }
+            sm.domain_count = sys.runtime ? (int)sys.runtime->gridDomainStates().size() : 0;
+            m.systems.push_back(sm);
+        }
+        if (!RayTrophiSim::SimCache::writeManifest(cache_dir, m)) ok = false;
+
+        sim_cache_dir_ = cache_dir;
+        sim_cache_valid_ = ok;
+        sim_cache_start_frame_ = start_frame;
+        sim_cache_end_frame_ = end_frame;
+
+        sim_timeline_frame_ = -1;       // back to free-run; disk now serves restores
+        syncSimulationRenderVolumes();
+        return ok;
+    }
+
+    // Validate a cache folder against the CURRENT systems' config and bind it so
+    // restoreSimFrame streams from disk. Returns false (and leaves the cache
+    // unbound) on missing/old manifest or any per-system config-hash mismatch —
+    // the caller can then surface a "bake outdated, re-bake" hint. Called by the
+    // project loader after particle_systems are restored.
+    bool setSimDiskCache(const std::string& cache_dir) {
+        sim_cache_valid_ = false;
+        sim_cache_dir_.clear();
+
+        RayTrophiSim::SimCache::Manifest m;
+        if (!RayTrophiSim::SimCache::readManifest(cache_dir, m)) return false;
+        if (m.version != RayTrophiSim::SimCache::kVersion) return false;
+
+        for (const auto& sys : particle_systems) {
+            const uint64_t want = computeSystemConfigHash(sys);
+            bool matched = false;
+            for (const auto& sm : m.systems) {
+                if (sm.id == sys.id) { matched = (sm.config_hash == want); break; }
+            }
+            if (!matched) return false;
+        }
+
+        sim_cache_dir_ = cache_dir;
+        sim_cache_start_frame_ = m.start_frame;
+        sim_cache_end_frame_ = m.end_frame;
+        sim_cache_valid_ = true;
+        return true;
+    }
+
+    void clearSimDiskCacheBinding() {
+        sim_cache_valid_ = false;
+        sim_cache_dir_.clear();
+    }
+
+    bool hasValidSimDiskCache() const { return sim_cache_valid_; }
+    const std::string& simDiskCacheDir() const { return sim_cache_dir_; }
+
+    // Canonical cache-folder location for a project file: "<dir>/<stem>.simcache"
+    // (project name without extension), e.g. scene.rtproj → scene.simcache.
+    static std::string simCacheDirForProject(const std::string& project_path) {
+        if (project_path.empty()) return std::string();
+        std::filesystem::path p(project_path);
+        return (p.parent_path() / (p.stem().string() + ".simcache")).string();
+    }
+
 private:
     void invalidateSimulationRenderBindings(ParticleSystemObject& system) {
         // Invalidates NanoVDB host/GPU bindings so the next syncSimulationRenderVolumes
@@ -1434,6 +1935,9 @@ private:
                 // Keep visible=true so the TLAS customIndex→SSBO slot mapping stays
                 // intact. The volume will re-upload density on next sync without
                 // triggering a became_visible rebuild cycle.
+            }
+            if (d < system.domain_vdb_upload_signatures.size()) {
+                system.domain_vdb_upload_signatures[d] = 0;
             }
         }
         g_gas_volumes_dirty = true;
@@ -1458,6 +1962,12 @@ private:
             g_vulkan_rebuild_pending = true;
             g_optix_rebuild_pending = true;
             g_gas_volumes_dirty = true;
+        }
+        if (d < system.domain_sdf_signatures.size()) {
+            system.domain_sdf_signatures[d] = 0;
+        }
+        if (d < system.domain_vdb_upload_signatures.size()) {
+            system.domain_vdb_upload_signatures[d] = 0;
         }
     }
 
@@ -1496,6 +2006,8 @@ private:
         // Surface-route render artifacts share the per-domain lifetime.
         system.domain_sdf_buffers.clear();
         system.domain_sdf_stats.clear();
+        system.domain_sdf_signatures.clear();
+        system.domain_vdb_upload_signatures.clear();
         system.domain_last_fluid_render_mode.clear();
     }
 
@@ -2583,7 +3095,17 @@ public:
         return false;
     }
 
-    void rebuildSDFColliderAsync(RayTrophiSim::ParticleColliderDesc& desc) {
+    // target_runtime: which system's collider receives the rebuilt SDF. Defaults
+    // to the ACTIVE system (correct for UI edits, where the edited system is the
+    // active one). The LOAD path MUST pass the specific system being deserialized:
+    // during load the loaded system is neither active nor pushed into
+    // particle_systems yet (active_particle_system_index is assigned only after
+    // every system is read), so an active-system lookup would attach the voxel
+    // SDF to the wrong system — or none — and the collider would silently fail to
+    // block fluid after reload. (The SDF voxel grid itself is intentionally not
+    // serialized; it is deterministically rebuilt here from the source mesh.)
+    void rebuildSDFColliderAsync(RayTrophiSim::ParticleColliderDesc& desc,
+                                 std::shared_ptr<RayTrophiSim::ParticleSimulationSystem> target_runtime = nullptr) {
         if (desc.source_mode != RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF ||
             desc.source_name.empty()) {
             return;
@@ -2633,7 +3155,7 @@ public:
 
         auto result_vec = std::make_shared<std::vector<float>>();
 
-        std::thread([this, node_name, triangles, bmin, bmax, N, result_vec]() {
+        std::thread([this, node_name, triangles, bmin, bmax, N, result_vec, target_runtime]() {
             Vec3 size = bmax - bmin;
             Vec3 pad = size * 0.15f;
             Vec3 origin = bmin - pad;
@@ -2727,7 +3249,7 @@ public:
                 result_vec->at(static_cast<std::size_t>(k * (nx * ny) + j * nx + i)) = dist;
             }
 
-            auto p_sys = this->getParticleSimulationSystem();
+            auto p_sys = target_runtime ? target_runtime : this->getParticleSimulationSystem();
             if (p_sys) {
                 auto& list = p_sys->colliders();
                 for (auto& coll : list) {
@@ -3116,6 +3638,10 @@ public:
         releaseSimulationRenderVolumes();
         clearSimFrameCache();
         sim_timeline_frame_ = -1;
+        // Drop any disk bake-cache binding from the previous project so a freshly
+        // loaded scene without a cache doesn't keep streaming the old one.
+        sim_cache_valid_ = false;
+        sim_cache_dir_.clear();
 
         // Detach the FluidSimulationSystem's raw pointer to fluid_objects
         // BEFORE clearing the vector. This prevents any stale-pointer access

@@ -532,6 +532,19 @@ bool g_vulkan_rebuild_pending = false;    // GPU Vulkan geometry needs rebuild
 bool g_vulkan_geometry_append_pending = false; // Additive-only mutation (scatter etc.) — try incremental TLAS refit first
 bool g_viewport_raster_rebuild_pending = false; // Interactive raster viewport needs rebuild
 bool g_optix_rebuild_pending = false;
+
+// ── Viewport-driven sequence save ───────────────────────────────────────────
+// Renders an animation to disk through the SAME fast interactive viewport path
+// (scrub each frame → converge to the interactive quality → save) instead of the
+// separate render_Animation worker, which ran slower than and diverged from the
+// viewport (foam/TLAS/rebuild differences). Quality + denoiser come from the
+// interactive render-panel settings. Driven by a state machine in the main loop.
+bool        g_seq_save_active = false;
+int         g_seq_save_frame = 0;
+int         g_seq_save_end = 0;
+std::string g_seq_save_dir;
+bool        g_seq_save_denoise = false;
+
 // True while the active viewport is an interactive shading mode (Solid/Matcap),
 // i.e. NOT Rendered. The fluid particle bridge reads this to render a cheap splat-
 // sphere proxy in Solid mode even when the fluid's render_mode is SurfaceSDF (the
@@ -1914,6 +1927,7 @@ int main(int argc, char* argv[]) try {
             struct VulkanEnvCache {
                 const Texture* texture = nullptr;
                 int64_t handle = 0;
+                uint64_t textureCacheGeneration = 0;
             };
             static std::unordered_map<Backend::IBackend*, VulkanEnvCache> s_vulkanEnvCache;
 
@@ -1925,10 +1939,17 @@ int main(int argc, char* argv[]) try {
 
                 auto& cache = s_vulkanEnvCache[backend];
                 VulkanRT::ImageHandle existingEnvImage{};
+                const VkFormat expectedFormat = (texture->is_hdr && !texture->float_pixels.empty())
+                    ? VK_FORMAT_R32G32B32A32_SFLOAT
+                    : VK_FORMAT_R8G8B8A8_UNORM;
                 const bool cacheValid =
                     cache.texture == texture &&
                     cache.handle != 0 &&
-                    vulkanBackend->tryGetUploadedImageHandle(cache.handle, existingEnvImage);
+                    cache.textureCacheGeneration == vulkanBackend->textureCacheGeneration() &&
+                    vulkanBackend->tryGetUploadedImageHandle(cache.handle, existingEnvImage) &&
+                    existingEnvImage.width == static_cast<uint32_t>(texture->width) &&
+                    existingEnvImage.height == static_cast<uint32_t>(texture->height) &&
+                    existingEnvImage.format == expectedFormat;
                 if (cacheValid) {
                     return cache.handle;
                 }
@@ -1953,6 +1974,7 @@ int main(int argc, char* argv[]) try {
                 }
                 cache.texture = texture;
                 cache.handle = envHandle;
+                cache.textureCacheGeneration = vulkanBackend->textureCacheGeneration();
                 return envHandle;
             };
 
@@ -2718,7 +2740,10 @@ int main(int argc, char* argv[]) try {
         // methods acquire m_mutex — if the main thread calls any of them while
         // renderProgressiveImpl holds the mutex, the main thread blocks for the
         // entire GPU trace duration, freezing the UI.
-        const bool skip_backend_for_anim = rendering_in_progress.load() && ui_ctx.is_animation_mode;
+        // !g_seq_save_active: a viewport-driven sequence save keeps both flags set
+        // for the UI, but it RENDERS through the live backend, so it must NOT skip it.
+        const bool skip_backend_for_anim =
+            rendering_in_progress.load() && ui_ctx.is_animation_mode && !g_seq_save_active;
 
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL2_ProcessEvent(&e);
@@ -3837,6 +3862,29 @@ int main(int argc, char* argv[]) try {
                     
                     SCENE_LOG_INFO("Animation render: Frames " + std::to_string(anim_start_frame) + " - " + std::to_string(anim_end_frame) + " (" + std::to_string(ui_ctx.render_settings.animation_total_frames) + " total) @ " + std::to_string(anim_sample_count) + " samples/frame");
 
+                    // [SIM PRE-BAKE] If the scene has a live simulation, bake it to
+                    // the sequence START frame on the MAIN thread, BEFORE the backend
+                    // sync below, and force that sync to be a FULL rebuild. The
+                    // worker would otherwise discover a structural mismatch on its
+                    // very first frame (the viewport was parked on a DIFFERENT frame,
+                    // so the InstanceManager particle/foam pools + SurfaceSDF volume
+                    // were sized for that frame) and fire a destructive Vulkan
+                    // rebuildAccelerationStructure — which tears down every BLAS and
+                    // sets m_rtPipelineReady=false — at the exact moment the viewport→
+                    // render transition is still settling, so the RT geometry briefly
+                    // (sometimes persistently) vanishes. Doing the structural rebuild
+                    // here, where the main thread is the sole backend owner, removes
+                    // the race; the worker then finds start_frame already cached
+                    // (restoreSimFrame hit) and its first frame is a no-op refit.
+                    bool sim_prebaked = false;
+                    if (anim_use_gpu && g_backend && scene.anySimulationRuntimeEnabled()) {
+                        scene.bakeSimulationForRenderFrame(
+                            anim_start_frame,
+                            static_cast<float>(std::max(1, anim_fps)),
+                            /*enable_rt_geometry*/ true);
+                        sim_prebaked = true;
+                    }
+
                     // [BACKEND-STATE FIX] Force a FULL rebuild only when we have a
                     // concrete reason — either an aborted previous animation left
                     // partial TLAS/BLAS state, or a backend swap left dirty flags
@@ -3850,60 +3898,69 @@ int main(int argc, char* argv[]) try {
                     // handles the normal dirty-flag-driven updates without
                     // touching healthy state.
                     if (anim_use_gpu && g_backend) {
-                        const bool needs_full = g_anim_backend_needs_full_rebuild.exchange(false);
+                        const bool needs_full =
+                            sim_prebaked || g_anim_backend_needs_full_rebuild.exchange(false);
                         if (needs_full) {
-                            SCENE_LOG_INFO("[Anim] Forcing full RT backend rebuild (previous animation aborted or backend was swapped).");
+                            SCENE_LOG_INFO("[Anim] Forcing full RT backend rebuild (sim pre-bake / previous animation aborted or backend was swapped).");
                             (void)syncActiveRenderBackendScene(/*forceFullSync=*/true);
                         } else {
                             (void)syncActiveRenderBackendScene(/*forceFullSync=*/false);
                         }
+                        // The pre-bake + full sync above already pushed the start-frame
+                        // sim geometry to the backend. Clear the bridge's rebuild-pending
+                        // flags so the worker's first frame doesn't redundantly tear the
+                        // freshly-built AS down again.
+                        if (sim_prebaked) {
+                            extern bool g_optix_rebuild_pending;
+                            extern bool g_vulkan_rebuild_pending;
+                            extern bool g_gpu_refit_pending;
+                            g_optix_rebuild_pending = false;
+                            g_vulkan_rebuild_pending = false;
+                            g_gpu_refit_pending = false;
+                        }
                     }
 
-                    // Detach thread
-                    std::thread anim_thread([=]() {
-                        try {
-                            ray_renderer.render_Animation(surface, window, raytrace_texture, renderer,
-                                anim_sample_count, anim_sample_per_pass,
-                                anim_fps, anim_duration, anim_start_frame, anim_end_frame,
-                                scene,
-                                output_folder,
-                                anim_use_denoiser,
-                                anim_denoiser_blend,
-                                g_backend.get(),
-                                anim_use_gpu,
-                                &ui_ctx);
-                        } catch (const std::exception& ex) {
-                            SCENE_LOG_ERROR(std::string("Animation render EXCEPTION: ") + ex.what());
-                        } catch (...) {
-                            SCENE_LOG_ERROR("Animation render UNKNOWN EXCEPTION");
-                        }
+                    // [VIEWPORT-DRIVEN SEQUENCE SAVE] Instead of the separate
+                    // render_Animation worker (which ran slower than and diverged
+                    // from the interactive viewport — foam/TLAS/rebuild differences),
+                    // drive the sequence through the SAME fast interactive viewport
+                    // render. The main-loop state machine (g_seq_save_*) scrubs each
+                    // frame, lets it converge to the interactive render-panel quality
+                    // (max_samples + adaptive noise threshold), saves it, then
+                    // advances. Quality + denoiser come from the interactive settings.
+                    g_seq_save_active = true;
+                    g_seq_save_frame = anim_start_frame;
+                    g_seq_save_end = anim_end_frame;
+                    g_seq_save_dir = output_folder;
+                    g_seq_save_denoise = anim_use_denoiser;
 
-                        // GUARANTEE cleanup even if render_Animation threw
-                        rendering_in_progress = false;
-                        ui_ctx.is_animation_mode = false;
-                        ui_ctx.render_settings.animation_render_locked = false;
+                    // Keep BOTH rendering_in_progress and is_animation_mode true so
+                    // the existing UI shows the render status + the "Stop Anim"
+                    // button (no new UI needed). The worker-path gates that normally
+                    // key off (rendering_in_progress && is_animation_mode) —
+                    // skip_backend_for_anim, render_owns_sim, render_owns_timeline,
+                    // and the interactive-render block — are each additionally guarded
+                    // with `&& !g_seq_save_active`, so during a viewport-driven save
+                    // the backend stays live and the UI keeps driving the per-frame
+                    // sim/animation scrub.
+                    rendering_in_progress = true;
+                    ui_ctx.is_animation_mode = true;
+                    ui_ctx.render_settings.animation_render_locked = true;
+                    rendering_stopped_gpu = false;
+                    rendering_stopped_cpu = false;
 
-                        // [FIX] Force viewport to re-sync all state after animation.
-                        // Without these, viewport stays on stale animation data.
-                        g_camera_dirty = true;
-                        g_lights_dirty = true;
-                        g_world_dirty = true;
-
-                        // [STOP-MID-REBUILD FIX] If the animation was aborted, the
-                        // RT backend's TLAS/BLAS may be in a partial state with no
-                        // dirty flag raised. Signal the next animation start to do
-                        // a full rebuild rather than risk a driver crash inside
-                        // createTLAS on stale data. Also broadly invalidate geometry
-                        // so the regular viewport sync flushes cleanly.
-                        if (rendering_stopped_gpu.load() || rendering_stopped_cpu.load()) {
-                            g_anim_backend_needs_full_rebuild.store(true);
-                            g_geometry_dirty = true;
-                            SCENE_LOG_INFO("Animation render stopped — next start will force full RT rebuild.");
-                        }
-
-                        SCENE_LOG_INFO("Animation render completed.");
-                    });
-                    anim_thread.detach();
+                    // Timeline is already pinned to the start frame (pinTimelineToStart
+                    // above). Mirror it into the progress fields and reset accumulation
+                    // so frame one renders clean.
+                    ui.timeline.setCurrentFrame(anim_start_frame);
+                    scene.timeline.current_frame = anim_start_frame;
+                    render_settings.animation_current_frame = anim_start_frame;
+                    ui_ctx.render_settings.animation_current_frame = anim_start_frame;
+                    if (g_backend) g_backend->resetAccumulation();
+                    start_render = true;
+                    SCENE_LOG_INFO("[SeqSave] Viewport-driven sequence save started: frames " +
+                                   std::to_string(anim_start_frame) + " - " +
+                                   std::to_string(anim_end_frame) + " -> " + output_folder);
                 }
             }
 
@@ -3913,8 +3970,10 @@ int main(int argc, char* argv[]) try {
             if (start_render) {
                  // CRITICAL INVARIANT:
                  // rendering_in_progress may remain true in some non-animation GPU flows.
-                 // Only block interactive rendering while animation mode is actively running.
-                 if (rendering_in_progress && ui_ctx.is_animation_mode) {
+                 // Only block interactive rendering while a WORKER animation render is
+                 // active. A viewport-driven sequence save (g_seq_save_active) renders
+                 // THROUGH this exact path, so it must NOT be blocked here.
+                 if (rendering_in_progress && ui_ctx.is_animation_mode && !g_seq_save_active) {
                      // Block interactive render only while animation render thread is active
                      start_render = false;
                  }
@@ -3923,9 +3982,14 @@ int main(int argc, char* argv[]) try {
                      did_render_this_frame = true;
                      start_render = false;
 
-                     // Reset stop flags for new render
-                     rendering_stopped_cpu = false;
-                     rendering_stopped_gpu = false;// --- Animation State Update ---
+                     // Reset stop flags for new render — but NOT during a viewport
+                     // driven sequence save: its "Stop Anim" sets these and the
+                     // sequence state machine consumes them to cancel; resetting here
+                     // every render iteration would swallow the cancel.
+                     if (!g_seq_save_active) {
+                         rendering_stopped_cpu = false;
+                         rendering_stopped_gpu = false;
+                     }// --- Animation State Update ---
                     float fps = ui_ctx.render_settings.animation_fps;
                     if (fps <= 0.0f) fps = 24.0f;
                     int start_f = ui_ctx.render_settings.animation_start_frame;
@@ -4005,7 +4069,12 @@ int main(int argc, char* argv[]) try {
                         // [FIX] Skip ALL GPU state updates and rendering when animation render
                         // thread is using the same backend — concurrent Vulkan/GPU access causes
                         // contention, freezes, and T-pose artifacts.
+                        // !g_seq_save_active: a viewport-driven sequence save keeps
+                        // both anim flags set for the UI but renders THROUGH this very
+                        // viewport path — it must NOT be treated as a worker owning
+                        // the backend (that skipped the render → CPU spin, no output).
                         const bool anim_owns_backend = rendering_in_progress && ui_ctx.is_animation_mode
+                            && !g_seq_save_active
                             && g_backend && (activeViewportBackend == g_backend.get());
                         if (anim_owns_backend) {
                             // Animation thread owns the GPU backend — skip viewport render this frame.
@@ -5197,7 +5266,73 @@ int main(int argc, char* argv[]) try {
                 render_settings.is_rendering_active = false;
             }
         }
-        
+
+        // ── VIEWPORT-DRIVEN SEQUENCE SAVE STATE MACHINE ──────────────────────
+        // Renders an animation to disk through the interactive viewport itself.
+        // Each frame accumulates to the interactive quality (max_samples / adaptive
+        // noise); when it converges we save EXACTLY what the viewport shows — the
+        // display `surface` already carries the viewport's tonemap + stylize +
+        // denoise (produced just above at the display/post block) — then advance the
+        // timeline one frame and let the UI's normal per-frame sim/animation scrub +
+        // render drive the next one. No separate render path, so the sequence output
+        // is identical to (and as fast as) what the user sees while scrubbing.
+        if (g_seq_save_active) {
+            if (rendering_stopped_gpu.load() || rendering_stopped_cpu.load()) {
+                g_seq_save_active = false;
+                rendering_in_progress = false;
+                ui_ctx.is_animation_mode = false;
+                ui_ctx.render_settings.animation_render_locked = false;
+                g_camera_dirty = g_lights_dirty = g_world_dirty = true;
+                SCENE_LOG_INFO("[SeqSave] Cancelled at frame " + std::to_string(g_seq_save_frame));
+            } else if (in_rendered_mode && isActiveRenderBackendGpu() && g_backend) {
+                if (accumulation_done_for_display) {
+                    if (!g_seq_save_dir.empty() && surface) {
+                        char fn[512];
+                        std::snprintf(fn, sizeof(fn), "%s/frame_%04d.png",
+                                      g_seq_save_dir.c_str(), g_seq_save_frame);
+                        if (SaveSurface(surface, fn))
+                            SCENE_LOG_INFO("[SeqSave] Saved " + std::string(fn));
+                        else
+                            SCENE_LOG_ERROR("[SeqSave] Failed to save " + std::string(fn));
+
+                        // Mirror to the animation preview panel.
+                        {
+                            std::lock_guard<std::mutex> lock(ui_ctx.animation_preview_mutex);
+                            const size_t pc = (size_t)surface->w * surface->h;
+                            if (ui_ctx.animation_preview_buffer.size() != pc) {
+                                ui_ctx.animation_preview_buffer.resize(pc);
+                                ui_ctx.animation_preview_width = surface->w;
+                                ui_ctx.animation_preview_height = surface->h;
+                            }
+                            std::memcpy(ui_ctx.animation_preview_buffer.data(),
+                                        surface->pixels, pc * sizeof(uint32_t));
+                            ui_ctx.animation_preview_ready = true;
+                        }
+                    }
+
+                    if (g_seq_save_frame >= g_seq_save_end) {
+                        g_seq_save_active = false;
+                        rendering_in_progress = false;
+                        ui_ctx.is_animation_mode = false;
+                        ui_ctx.render_settings.animation_render_locked = false;
+                        g_camera_dirty = g_lights_dirty = g_world_dirty = true;
+                        SCENE_LOG_INFO("[SeqSave] Sequence complete (last frame " +
+                                       std::to_string(g_seq_save_frame) + ").");
+                    } else {
+                        ++g_seq_save_frame;
+                        ui.timeline.setCurrentFrame(g_seq_save_frame);
+                        scene.timeline.current_frame = g_seq_save_frame;
+                        render_settings.animation_current_frame = g_seq_save_frame;
+                        ui_ctx.render_settings.animation_current_frame = g_seq_save_frame;
+                        if (g_backend) g_backend->resetAccumulation();
+                        start_render = true;   // render the next frame
+                    }
+                } else {
+                    start_render = true;       // keep accumulating this frame
+                }
+            }
+        }
+
         // Only update texture if rendering is active, if we just applied a tonemap, or if UI needs it
         static bool last_texture_updated = false;
         
@@ -5658,6 +5793,7 @@ int main(int argc, char* argv[]) try {
                 // Upload material SSBO after geometry rebuild
                 ray_renderer.updateBackendMaterials(scene);
                 syncMaterialBufferToViewportBackend(scene, ray_renderer);
+                syncWorldDataToBackend(g_backend.get());
                 applyPendingDeleteVisibilityToBackend(scene, g_backend.get());
                 g_backend->resetAccumulation();
                 g_vulkan_rebuild_pending = false;
@@ -5665,7 +5801,7 @@ int main(int argc, char* argv[]) try {
 
                 g_camera_dirty = true;
                 g_lights_dirty = true;
-                g_world_dirty = true;
+                g_world_dirty = false;
             }
         }
 

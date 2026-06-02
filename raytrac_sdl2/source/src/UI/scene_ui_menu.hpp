@@ -748,41 +748,14 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
              }
              
              ImGui::Separator();
-             
-             if (ImGui::MenuItem("Gas Volume")) {
-                 auto gas = std::make_shared<GasVolume>("Gas Volume " + std::to_string(ctx.scene.gas_volumes.size() + 1));
-                 gas->initialize();
-                 
-                 // Add default emitter
-                 FluidSim::Emitter emitter;
-                 emitter.shape = FluidSim::EmitterShape::Sphere;
-                 emitter.position = Vec3(
-                     gas->getSettings().resolution_x * gas->getSettings().voxel_size * 0.5f,
-                     gas->getSettings().voxel_size * 2.0f,
-                     gas->getSettings().resolution_z * gas->getSettings().voxel_size * 0.5f
-                 );
-                 emitter.radius = 0.5f;
-                 emitter.density_rate = 20.0f;
-                 emitter.temperature = 500.0f;
-                 emitter.name = "Default Emitter";
-                 gas->addEmitter(emitter);
-                 
-                 ctx.scene.addGasVolume(gas);
-                 GasUI::selected_gas_volume = gas;  // Select the new volume
-                 g_ProjectManager.markModified();
-                 
-                 // Update Renderer & GPU
-                 ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                 ctx.renderer.resetCPUAccumulation();
-                 if (ctx.optix_gpu_ptr) {
-                     syncVDBVolumesToGPU(ctx);
-                     ctx.optix_gpu_ptr->resetAccumulation();
-                 }
 
-                 SCENE_LOG_INFO("Added Gas Volume: " + gas->name);
-                 addViewportMessage("Added Gas Volume");
-             }
-             
+             // NOTE: "Add > Gas Volume" was removed. The legacy GasVolume/GasSimulator
+             // path is deprecated and its editing UI is gone, so creating one here only
+             // produced an object that could no longer be configured. Author gas/smoke/
+             // fire via the Simulations panel (grid domains + flow sources) instead.
+             // GasVolume load/serialize/render is still kept for backward compatibility
+             // with old projects.
+
              if (ImGui::MenuItem("Force Field")) {
                  auto ff = std::make_shared<Physics::ForceField>("Force Field " + std::to_string(ctx.scene.force_field_manager.force_fields.size() + 1));
                  ctx.scene.addForceField(ff);

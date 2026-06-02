@@ -24,7 +24,6 @@
 #include <filesystem>
 #include <algorithm>
 #include <cctype>
-#include "scene_ui_gas.hpp"
 #include <VolumetricRenderer.h>
 
 // External GPU availability flag
@@ -384,7 +383,7 @@ void SceneUI::importVDBSequence(UIContext& ctx) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// VOLUMETRIC PROPERTIES PANEL (UNIFIED VDB & GAS)
+// VOLUMETRIC PROPERTIES PANEL (VDB IMPORT / RENDER)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void SceneUI::drawVolumetricPanel(UIContext& ctx) {
@@ -397,23 +396,10 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
     // -------------------------------------------------------------
     // TOP SECTION: CREATION & IMPORT
     // -------------------------------------------------------------
-    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Add / Import Volumetrics");
-    if (UIWidgets::IconActionButton("VolumeNewGas", UIWidgets::IconType::Volumetric, "New Gas", false,
-        ImVec4(0.62f, 0.90f, 1.0f, 1.0f), ImVec2(128, 30), "Create a new gas simulation domain.")) {
-        auto gas = std::make_shared<GasVolume>("Gas Sim " + std::to_string(scene.gas_volumes.size() + 1));
-        gas->initialize();
-        
-        // Add default emitter
-        FluidSim::Emitter emitter;
-        emitter.position = Vec3(2.5f, 0.5f, 2.5f);
-        emitter.radius = 0.4f;
-        emitter.density_rate = 15.0f;
-        gas->addEmitter(emitter);
-        
-        scene.addGasVolume(gas);
-        selection.selectGasVolume(gas, -1, gas->name);
-    }
-    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Import VDB Volumes");
+    ImGui::TextDisabled("Legacy GasVolume UI moved to Simulations > Domains; this panel keeps VDB import/render only.");
+    // Legacy GasVolume creation/listing is intentionally retired from this panel.
+    // Keep the GasVolume runtime code for old scene compatibility and Simulation UI ownership.
     if (UIWidgets::IconActionButton("VolumeImportVDB", UIWidgets::IconType::Assets, "Import VDB", false,
         ImVec4(0.82f, 0.70f, 1.0f, 1.0f), ImVec2(132, 30), "Import a single VDB volume file.")) {
         importVDBVolume(ctx);
@@ -430,38 +416,12 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
     ImGui::Separator();
     
     // -------------------------------------------------------------
-    // MIDDLE SECTION: COMBINED OBJECT LIST
+    // MIDDLE SECTION: VDB OBJECT LIST
     // -------------------------------------------------------------
-    size_t total_vols = scene.vdb_volumes.size() + scene.gas_volumes.size();
-    ImGui::Text("Scene Volumes (%zu)", total_vols);
+    size_t total_vols = scene.vdb_volumes.size();
+    ImGui::Text("VDB Volumes (%zu)", total_vols);
     
     if (ImGui::BeginListBox("##volume_list", ImVec2(-FLT_MIN, 150))) {
-        // List Gas Simulations
-        for (size_t i = 0; i < scene.gas_volumes.size(); ++i) {
-            auto& gas = scene.gas_volumes[i];
-            bool is_selected = (selection.selected.type == SelectableType::GasVolume && selection.selected.gas_volume == gas);
-            
-            ImGui::PushID(("gas_" + std::to_string(i)).c_str());
-            if (ImGui::Selectable(("[Sim] " + gas->name).c_str(), is_selected)) {
-                selection.selectGasVolume(gas, static_cast<int>(i), gas->name);
-            }
-            
-            if (ImGui::BeginPopupContextItem()) {
-                if (ImGui::MenuItem("Delete")) {
-                    scene.removeGasVolume(gas);
-                    selection.clearSelection();
-                    ctx.renderer.updateBackendGasVolumes(scene);
-                    SceneUI::syncVDBVolumesToGPU(ctx);
-                    if (vdbRenderBackendIsVulkan(ctx)) {
-                        g_vulkan_rebuild_pending = true;
-                    }
-                    if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
-                }
-                ImGui::EndPopup();
-            }
-            ImGui::PopID();
-        }
-        
         // List VDB Volumes
         for (size_t i = 0; i < scene.vdb_volumes.size(); ++i) {
             auto& vdb = scene.vdb_volumes[i];
@@ -510,7 +470,7 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
     // BOTTOM SECTION: CONTEXTUAL PROPERTIES
     // -------------------------------------------------------------
     if (selection.selected.type == SelectableType::GasVolume && selection.selected.gas_volume) {
-        GasUI::drawGasSimulationProperties(ctx, selection.selected.gas_volume);
+        ImGui::TextDisabled("Legacy GasVolume properties are no longer edited here. Use Simulations > Domains.");
     }
     else if (selection.selected.type == SelectableType::VDBVolume && selection.selected.vdb_volume) {
         drawVDBVolumeProperties(ctx, selection.selected.vdb_volume.get());

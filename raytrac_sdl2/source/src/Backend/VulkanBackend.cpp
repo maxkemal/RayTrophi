@@ -6675,6 +6675,7 @@ void VulkanBackendAdapter::purgeUploadedTextureCacheLocked() {
     m_uploadedImageIDs.clear();
     m_textureIdToCacheKey.clear();
     m_nextTextureID = 1;
+    ++m_textureCacheGeneration;
     if (m_sceneTextureManager) {
         m_sceneTextureManager->logBudgetSummary("after-purge");
     }

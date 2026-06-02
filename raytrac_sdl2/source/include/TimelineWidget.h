@@ -135,6 +135,10 @@ private:
     
     // Playback
     bool is_playing = false;
+    // Loop playback. Default OFF: playback stops at end_frame. When the timeline
+    // drives a simulation, looping forced a full re-bake + sim-cache wipe every
+    // wrap (memory thrash), so looping is opt-in via the timeline toolbar.
+    bool loop_enabled = false;
     float last_frame_time = 0.0f;
     
     // View controls

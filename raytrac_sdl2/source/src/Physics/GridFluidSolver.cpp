@@ -10,6 +10,7 @@
 #include "GridFluidSolver.h"
 
 #include "SimulationWorld.h" // SimulationForceFieldSnapshot, SimulationSystemKind
+#include "CurlNoise.h"       // Physics::Noise::curlFBM_animated
 
 #include <algorithm>
 #include <cmath>
@@ -211,6 +212,68 @@ void vorticityConfinement(FluidGrid& grid, const SolverParams& params, float dt)
                     eps * (nx_ * w.y - ny_ * w.x));
                 addToFaces(grid, i, j, k, force * dt);
             }
+}
+
+// Divergence-free curl-noise turbulence. Adds animated FBM swirl modulated by
+// local activity (density / heat / density-edge) so still air stays still.
+// Ported from the legacy GasSimulator; uses the same Physics::Noise field but
+// reads parameters from SolverParams and deposits onto MAC faces.
+void curlNoiseTurbulence(FluidGrid& grid, const SolverParams& params, float dt, float time_seconds) {
+    if (params.turbulence_strength < 1e-3f || grid.nx < 3 || grid.ny < 3 || grid.nz < 3) {
+        return;
+    }
+    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
+    const float h = grid.voxel_size;
+    const float inv2h = h > 1e-6f ? 1.0f / (2.0f * h) : 0.0f;
+    const float strength = params.turbulence_strength;
+    const float freq = params.turbulence_scale;
+    const int octaves = std::clamp(params.turbulence_octaves, 1, 8);
+    const float lacunarity = params.turbulence_lacunarity;
+    const float persistence = params.turbulence_persistence;
+    const float anim_speed = params.turbulence_speed;
+    const int seed = params.turbulence_seed;
+    const bool has_density = params.channel_density && !grid.density.empty();
+    const bool has_temp = params.channel_temperature && !grid.temperature.empty();
+    const float heat_range = std::max(params.ignition_temperature - params.ambient_temperature, 1.0f);
+
+    #pragma omp parallel for collapse(2)
+    for (int k = 1; k < nz - 1; ++k) {
+        for (int j = 1; j < ny - 1; ++j) {
+            for (int i = 1; i < nx - 1; ++i) {
+                const std::size_t c = grid.cellIndex(i, j, k);
+                const float density = has_density ? grid.density[c] : 0.0f;
+                const float temperature = has_temp ? grid.temperature[c] : 0.0f;
+                const float heat_norm = std::clamp((temperature - params.ambient_temperature) / heat_range, 0.0f, 3.0f);
+                const float flame_norm = std::clamp(grid.interaction[c] * 0.05f, 0.0f, 2.0f);
+
+                float edge_norm = 0.0f;
+                if (has_density) {
+                    const float gx = (grid.densityAt(i + 1, j, k) - grid.densityAt(i - 1, j, k)) * inv2h;
+                    const float gy = (grid.densityAt(i, j + 1, k) - grid.densityAt(i, j - 1, k)) * inv2h;
+                    const float gz = (grid.densityAt(i, j, k + 1) - grid.densityAt(i, j, k - 1)) * inv2h;
+                    edge_norm = std::clamp(std::sqrt(gx * gx + gy * gy + gz * gz) * 0.08f, 0.0f, 2.0f);
+                }
+                const float activity = std::max({ density, heat_norm * 0.35f, flame_norm * 0.5f, edge_norm * 0.25f });
+                if (activity < 0.01f) {
+                    continue;
+                }
+
+                // Push more breakup into hot cores and density edges, not just bulk smoke.
+                const float local_strength = strength * std::clamp(
+                    0.18f + 0.45f * std::sqrt(std::max(density, 0.0f)) +
+                    0.40f * std::min(heat_norm, 1.5f) +
+                    0.30f * std::min(flame_norm, 1.5f) +
+                    0.35f * std::min(edge_norm, 1.0f),
+                    0.0f, 2.5f);
+
+                const Vec3 wp = grid.gridToWorld(i, j, k);
+                const Vec3 curl = Physics::Noise::curlFBM_animated(
+                    wp, time_seconds, octaves, freq, lacunarity, persistence, anim_speed, seed);
+
+                addToFaces(grid, i, j, k, curl * (local_strength * dt));
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -504,6 +567,7 @@ void step(FluidGrid& grid,
         addBuoyancy(grid, params, dt);
         addForceFields(grid, dt, forces, time_seconds);
         vorticityConfinement(grid, params, dt);
+        curlNoiseTurbulence(grid, params, dt, time_seconds);
     }
 
     // 4) Dissipation.

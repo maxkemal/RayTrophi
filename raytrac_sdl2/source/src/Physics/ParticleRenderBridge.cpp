@@ -722,6 +722,7 @@ namespace {
 struct FluidSourceState {
     uint64_t signature = 0;
     uint64_t content_hash = 1;
+    std::size_t drawn_count = 0;
 };
 std::unordered_map<int, FluidSourceState> g_fluid_source_state;
 
@@ -790,30 +791,68 @@ uint16_t ensureFluidParticleMaterial(const std::string& name,
 // bubbles in water, so it reads white and very rough. A distinct material
 // instance keeps the renderer treating whitewater separately from the
 // refractive liquid surface (the "separate material" the foam layer needs).
-uint16_t ensureFoamParticleMaterial(const std::string& name) {
+uint16_t ensureFoamParticleMaterial(RayTrophiSim::Fluid::FoamType type, const std::string& name) {
     auto& mgr = MaterialManager::getInstance();
-    const uint16_t existing_id = mgr.getMaterialID(name);
+    std::string typed_name = name;
+    if (type == RayTrophiSim::Fluid::FoamType::Spray) typed_name += "_Spray";
+    else if (type == RayTrophiSim::Fluid::FoamType::Bubble) typed_name += "_Bubble";
+    else typed_name += "_Foam";
+
+    const uint16_t existing_id = mgr.getMaterialID(typed_name);
     std::shared_ptr<PrincipledBSDF> pbsdf;
     if (existing_id != MaterialManager::INVALID_MATERIAL_ID)
         pbsdf = std::dynamic_pointer_cast<PrincipledBSDF>(mgr.getMaterialShared(existing_id));
     const bool fresh = !pbsdf;
     if (fresh) pbsdf = std::make_shared<PrincipledBSDF>();
 
-    const Vec3 white(0.93f, 0.95f, 0.98f);
-    const float rough = 0.85f;
-    pbsdf->albedoProperty = MaterialProperty(white, 1.0f);
-    pbsdf->roughnessProperty = MaterialProperty(Vec3(rough), rough);
-    pbsdf->metallicProperty = MaterialProperty(Vec3(0.0f), 0.0f);
-    pbsdf->specularProperty = MaterialProperty(Vec3(0.2f), 0.2f);
-    pbsdf->opacityProperty.alpha = 1.0f;
-    pbsdf->setRoughness(rough);
-    pbsdf->emissionProperty = MaterialProperty(Vec3(0.0f), 0.0f);
+    if (type == RayTrophiSim::Fluid::FoamType::Spray) {
+        // Spray: Water droplets (fully transmissive, refractive, smooth, sparkling)
+        const Vec3 water_color(1.0f, 1.0f, 1.0f);
+        const float rough = 0.02f;
+        pbsdf->albedoProperty = MaterialProperty(water_color, 1.0f);
+        pbsdf->roughnessProperty = MaterialProperty(Vec3(rough), rough);
+        pbsdf->metallicProperty = MaterialProperty(Vec3(0.0f), 0.0f);
+        pbsdf->specularProperty = MaterialProperty(Vec3(1.0f), 1.0f);
+        pbsdf->opacityProperty.alpha = 1.0f;
+        pbsdf->setRoughness(rough);
+        pbsdf->setTransmission(1.0f, 1.333f); // 100% transmissive, water refractive index (1.333)
+        pbsdf->emissionProperty = MaterialProperty(Vec3(0.0f), 0.0f);
+    } else if (type == RayTrophiSim::Fluid::FoamType::Bubble) {
+        // Bubble: Air bubbles (bright, semi-transmissive, low IOR, slight emission)
+        const Vec3 bubble_color(0.95f, 0.98f, 1.0f);
+        const float rough = 0.02f;
+        pbsdf->albedoProperty = MaterialProperty(bubble_color, 1.0f);
+        pbsdf->roughnessProperty = MaterialProperty(Vec3(rough), rough);
+        pbsdf->metallicProperty = MaterialProperty(Vec3(0.0f), 0.0f);
+        pbsdf->specularProperty = MaterialProperty(Vec3(1.0f), 1.0f); // High specularity for silver border
+        pbsdf->opacityProperty.alpha = 1.0f;
+        pbsdf->setRoughness(rough);
+        // Reduce transmission to 0.65 to allow 35% specular/diffuse reflection of the bright color,
+        // and set IOR to 1.1 to prevent TIR ray-trapping.
+        pbsdf->setTransmission(0.65f, 1.1f);
+        // Add a small emission to simulate light scattering inside the bubble
+        // and prevent it from looking completely dark/black under water.
+        pbsdf->emissionProperty = MaterialProperty(bubble_color * 0.12f, 0.12f);
+    } else {
+        // Foam: Scattering surface foam (diffuse, rough white)
+        const Vec3 white(0.93f, 0.95f, 0.98f);
+        const float rough = 0.85f;
+        pbsdf->albedoProperty = MaterialProperty(white, 1.0f);
+        pbsdf->roughnessProperty = MaterialProperty(Vec3(rough), rough);
+        pbsdf->metallicProperty = MaterialProperty(Vec3(0.0f), 0.0f);
+        pbsdf->specularProperty = MaterialProperty(Vec3(0.2f), 0.2f);
+        pbsdf->opacityProperty.alpha = 1.0f;
+        pbsdf->setRoughness(rough);
+        pbsdf->setTransmission(0.0f, 1.5f);
+        pbsdf->emissionProperty = MaterialProperty(Vec3(0.0f), 0.0f);
+    }
+
     if (!pbsdf->gpuMaterial) pbsdf->gpuMaterial = std::make_shared<GpuMaterial>();
     applyPBRMaterialSnapshotToGpuMaterial(capturePBRMaterialSnapshot(*pbsdf), *pbsdf->gpuMaterial);
 
     if (fresh) {
-        pbsdf->materialName = name;
-        const uint16_t new_id = mgr.getOrCreateMaterialID(name, pbsdf);
+        pbsdf->materialName = typed_name;
+        const uint16_t new_id = mgr.getOrCreateMaterialID(typed_name, pbsdf);
         ::g_materials_dirty = true;
         return new_id;
     }
@@ -821,8 +860,8 @@ uint16_t ensureFoamParticleMaterial(const std::string& name) {
 }
 
 // Resolve the foam material: a user-picked scene material id when valid,
-// otherwise the built-in white foam fallback.
-uint16_t resolveFoamMaterial(int foam_material_id, const std::string& default_name) {
+// otherwise the built-in physical presets.
+uint16_t resolveFoamMaterial(int foam_material_id, RayTrophiSim::Fluid::FoamType type, const std::string& default_name) {
     if (foam_material_id >= 0) {
         auto& mm = MaterialManager::getInstance();
         if (static_cast<size_t>(foam_material_id) < mm.getMaterialCount() &&
@@ -830,7 +869,7 @@ uint16_t resolveFoamMaterial(int foam_material_id, const std::string& default_na
             return static_cast<uint16_t>(foam_material_id);
         }
     }
-    return ensureFoamParticleMaterial(default_name);
+    return ensureFoamParticleMaterial(type, default_name);
 }
 
 } // namespace
@@ -1150,7 +1189,15 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             const std::size_t draw_count = std::min(live_count, budget);
             const std::size_t want_cap = fluidPoolCapacityFor(live_count, budget);
             std::size_t& cap = system.domain_particle_pool_capacities[d];
-            if (want_cap > cap) cap = want_cap;   // grow only
+            // Grow immediately; shrink once well below (4x hysteresis). Same reason
+            // as the foam pool: every surplus slot is a scale-0 instance that still
+            // sits in the TLAS, so a pool that only ever grew left a draining/
+            // settling fluid tracing against a giant stale instance set.
+            if (want_cap > cap) {
+                cap = want_cap;
+            } else if (cap > kFluidPoolChunk && want_cap * 4 <= cap) {
+                cap = want_cap;
+            }
 
             std::vector<InstanceTransform>& inst = group->instances;
             const bool pool_grew = inst.size() != cap;
@@ -1266,11 +1313,30 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
         for (std::size_t d = 0; d < states.size(); ++d) {
             const auto& state   = states[d];
             const bool is_fluid = state.type == RayTrophiSim::SimulationDomainType::Fluid;
+            // NOTE: do NOT gate on `!state.foam.empty()`. Foam is volatile — it is
+            // culled by lifetime and re-spawned constantly, so its count oscillates
+            // through 0 every few frames. Gating on non-empty here tore the group
+            // DOWN on an empty frame and rebuilt it on the next non-empty one, and
+            // each create/destroy is a STRUCTURAL change → a full backend AS
+            // rebuild. During a sequence render (which rebuilds synchronously,
+            // per frame) that thrashed into a render⇄rebuild loop. Keep the group
+            // alive for the whole life of a foam-enabled domain; a transiently
+            // empty frame just draws 0 instances (cheap motion refit, pool only
+            // grows). The group is torn down only when foam is actually disabled.
+            const auto& dconfig = domains[d];
+            const auto& fparams = dconfig.fluid_foam_params;
+            const std::string mat_name = "[FluidDomFoamMat] " + system.name + " D" + std::to_string(d);
+            
+            // Build the materials for all three FoamTypes.
+            uint16_t mats[3];
+            mats[0] = resolveFoamMaterial(fparams.spray_material_id, RayTrophiSim::Fluid::FoamType::Spray, mat_name);
+            mats[1] = resolveFoamMaterial(fparams.foam_material_id, RayTrophiSim::Fluid::FoamType::Foam, mat_name);
+            mats[2] = resolveFoamMaterial(fparams.bubble_material_id, RayTrophiSim::Fluid::FoamType::Bubble, mat_name);
+
             const bool base_ok  = enable_rt_geometry &&
                 system.visible && system.enabled && state.valid && is_fluid &&
                 d < domains.size() &&
-                domains[d].fluid_foam_params.enabled &&
-                !state.foam.empty();
+                domains[d].fluid_foam_params.enabled;
             // Foam ALWAYS renders as instanced spheres (render_mode is ignored).
             // The marching-cubes "Surface" mode was removed — see the SPHERES
             // note below for why.
@@ -1291,11 +1357,6 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
                 continue;
             }
 
-            const auto& dconfig = domains[d];
-            const auto& fparams = dconfig.fluid_foam_params;
-            const std::string mat_name = "[FluidDomFoamMat] " + system.name + " D" + std::to_string(d);
-            const uint16_t mat = resolveFoamMaterial(fparams.foam_material_id, mat_name);
-
             InstanceGroup* group = (group_id >= 0) ? im.getGroup(group_id) : nullptr;
             if (!group) {
                 const std::string gname = "[FluidDomFoam] " + system.name + " D" + std::to_string(d);
@@ -1310,24 +1371,29 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
             group->transient = true;
             FluidSourceState& st = g_fluid_source_state[group_id];
 
-            // ── SPHERES: one instanced icosphere per foam particle. ──
-            // The marching-cubes "Surface" foam mode was removed: it rebuilt a
-            // fresh deforming mesh under a new node name every frame, forcing a
-            // full-scene BLAS/TLAS/SBT rebuild each frame (OptiX went unresponsive
-            // within a few frames). Whitewater is particulate — instanced spheres
-            // are far cheaper (pool-grow only) and the more faithful look.
-            const uint64_t sig = hashCombine(hashCombine(1469598103934665603ull, 0xF0A1Bull),
-                                             static_cast<uint64_t>(mat));
+            // ── SPHERES: three instanced sources per foam type. ──
+            const int subdiv = std::max(0, std::min(fparams.foam_sphere_subdivisions, 3));
+            uint64_t sig = hashCombine(1469598103934665603ull, 0xF0A1Bull);
+            sig = hashCombine(sig, static_cast<uint64_t>(subdiv));
+            sig = hashCombine(sig, static_cast<uint64_t>(mats[0]));
+            sig = hashCombine(sig, static_cast<uint64_t>(mats[1]));
+            sig = hashCombine(sig, static_cast<uint64_t>(mats[2]));
+
             if (group->sources.empty() || st.signature != sig) {
                 group->sources.clear();
-                const std::string geo_node = "[FluidDomFoamGeo] " + system.name + " D" + std::to_string(d);
-                ScatterSource src;
-                src.name = geo_node;
-                src.weight = 1.0f;
-                buildIcosphere(0, mat, geo_node, src.triangles);
-                for (auto& tri : src.triangles) if (tri) tri->setMaterialID(mat);
-                src.computeCenter();
-                group->sources.push_back(std::move(src));
+                group->sources.resize(3);
+                
+                const std::string type_names[3] = { "Spray", "Foam", "Bubble" };
+                for (int t = 0; t < 3; ++t) {
+                    const std::string geo_node = "[FluidDomFoamGeo_" + type_names[t] + "] " + system.name + " D" + std::to_string(d);
+                    ScatterSource src;
+                    src.name = geo_node;
+                    src.weight = 1.0f;
+                    buildIcosphere(subdiv, mats[t], geo_node, src.triangles);
+                    for (auto& tri : src.triangles) if (tri) tri->setMaterialID(mats[t]);
+                    src.computeCenter();
+                    group->sources[t] = std::move(src);
+                }
                 st.signature = sig;
                 structural_change = true;
             }
@@ -1337,7 +1403,20 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
             const std::size_t draw_count = std::min(live_count, budget);
             const std::size_t want_cap   = fluidPoolCapacityFor(live_count, budget);
             std::size_t& cap = system.domain_foam_pool_capacities[d];
-            if (want_cap > cap) cap = want_cap;
+            // Grow immediately when foam exceeds the pool; SHRINK once foam has
+            // dropped well below it (4x hysteresis to avoid grow/shrink thrash at a
+            // doubling boundary). Foam is volatile — it spikes during a splash then
+            // dissipates. A grows-only pool kept the post-spike peak forever, and
+            // EVERY surplus slot is a scale-0 instance that still lands in the TLAS
+            // (the backends don't cull degenerate instances), so the whole sequence
+            // traced against a giant TLAS long after the foam was gone — the
+            // "13 frames in it jumps to 15-20s and never recovers" cliff, and the
+            // reason a scrubbed viewport frame (pool sized to THAT frame) was fast.
+            if (want_cap > cap) {
+                cap = want_cap;
+            } else if (cap > kFluidPoolChunk && want_cap * 4 <= cap) {
+                cap = want_cap;
+            }
 
             std::vector<InstanceTransform>& inst = group->instances;
             if (inst.size() != cap) { inst.resize(cap); structural_change = true; }
@@ -1345,42 +1424,152 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
             const float voxel  = std::max(1e-4f, state.grid.voxel_size);
             const float radius = std::max(1e-4f, voxel * fparams.render_radius_voxels);
             const float diam   = radius * 2.0f;
+            uint64_t content = 1469598103934665603ull;
+            content = hashCombine(content, state.version);
+            content = hashCombine(content, static_cast<uint64_t>(draw_count));
+            content = hashCombine(content, quantize(diam));
 
-            uint64_t sph_content = 1469598103934665603ull;
+            const std::vector<float>& sdf_buf = system.domain_sdf_buffers[d];
+            const auto& lsp = dconfig.fluid_level_set_params;
+            const int m = std::clamp(lsp.surface_resolution_multiplier, 1, 4);
+            const int nx = state.grid.nx * m;
+            const int ny = state.grid.ny * m;
+            const int nz = state.grid.nz * m;
+            const float sdf_voxel = (m > 1) ? (state.grid.voxel_size / static_cast<float>(m)) : state.grid.voxel_size;
+            const Vec3 origin = state.grid.origin;
+            const bool has_sdf = !sdf_buf.empty() && sdf_buf.size() == static_cast<size_t>(nx) * ny * nz;
+
+            auto sampleSdfDensity = [&](const Vec3& pos) -> float {
+                if (!has_sdf) return 0.0f;
+                const Vec3 local = (pos - origin) / sdf_voxel - Vec3(0.5f, 0.5f, 0.5f);
+                const int i0 = static_cast<int>(std::floor(local.x));
+                const int j0 = static_cast<int>(std::floor(local.y));
+                const int k0 = static_cast<int>(std::floor(local.z));
+                const float fx = local.x - i0;
+                const float fy = local.y - j0;
+                const float fz = local.z - k0;
+                
+                auto valAt = [&](int idx_i, int idx_j, int idx_k) -> float {
+                    idx_i = std::max(0, std::min(nx - 1, idx_i));
+                    idx_j = std::max(0, std::min(ny - 1, idx_j));
+                    idx_k = std::max(0, std::min(nz - 1, idx_k));
+                    return sdf_buf[static_cast<size_t>(idx_i) + static_cast<size_t>(idx_j) * nx + static_cast<size_t>(idx_k) * nx * ny];
+                };
+
+                const float c000 = valAt(i0, j0, k0);
+                const float c100 = valAt(i0 + 1, j0, k0);
+                const float c010 = valAt(i0, j0 + 1, k0);
+                const float c110 = valAt(i0 + 1, j0 + 1, k0);
+                const float c001 = valAt(i0, j0, k0 + 1);
+                const float c101 = valAt(i0 + 1, j0, k0 + 1);
+                const float c011 = valAt(i0, j0 + 1, k0 + 1);
+                const float c111 = valAt(i0 + 1, j0 + 1, k0 + 1);
+
+                const float c00 = c000 * (1.0f - fx) + c100 * fx;
+                const float c10 = c010 * (1.0f - fx) + c110 * fx;
+                const float c01 = c001 * (1.0f - fx) + c101 * fx;
+                const float c11 = c011 * (1.0f - fx) + c111 * fx;
+
+                const float c0 = c00 * (1.0f - fy) + c10 * fy;
+                const float c1 = c01 * (1.0f - fy) + c11 * fy;
+
+                return c0 * (1.0f - fz) + c1 * fz;
+            };
+
+            auto sampleSdfGradient = [&](const Vec3& pos) -> Vec3 {
+                const float eps = sdf_voxel * 0.25f;
+                const float dx = sampleSdfDensity(pos + Vec3(eps, 0.0f, 0.0f)) - sampleSdfDensity(pos - Vec3(eps, 0.0f, 0.0f));
+                const float dy = sampleSdfDensity(pos + Vec3(0.0f, eps, 0.0f)) - sampleSdfDensity(pos - Vec3(0.0f, eps, 0.0f));
+                const float dz = sampleSdfDensity(pos + Vec3(0.0f, 0.0f, eps)) - sampleSdfDensity(pos - Vec3(0.0f, 0.0f, eps));
+                return Vec3(dx, dy, dz) * (0.5f / eps);
+            };
+
             std::size_t drawn = 0;
-            for (std::size_t i = 0; i < cap; ++i) {
+            for (std::size_t i = 0; i < draw_count; ++i) {
                 InstanceTransform& tr = inst[i];
                 tr.rotation = Vec3(0.0f, 0.0f, 0.0f);
-                tr.source_index = 0;
-                if (i < draw_count) {
-                    const Vec3& p = state.foam.position[i];
-                    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
-                        tr.position = Vec3(0.0f, 0.0f, 0.0f);
-                        tr.scale = Vec3(0.0f, 0.0f, 0.0f);
-                        continue;
-                    }
-                    tr.position = p;
-                    tr.scale = Vec3(diam, diam, diam);
-                    sph_content = hashCombine(sph_content, quantize(p.x));
-                    sph_content = hashCombine(sph_content, quantize(p.y));
-                    sph_content = hashCombine(sph_content, quantize(p.z));
-                    ++drawn;
-                } else {
+                
+                const uint8_t foam_type = state.foam.type[i];
+                tr.source_index = std::min(2, static_cast<int>(foam_type));
+                
+                Vec3 p = state.foam.position[i];
+                if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
                     tr.position = Vec3(0.0f, 0.0f, 0.0f);
                     tr.scale = Vec3(0.0f, 0.0f, 0.0f);
+                    continue;
                 }
+                
+                // Snap Foam (surface foam) particles to the reconstructed liquid surface
+                if (has_sdf && foam_type == static_cast<uint8_t>(RayTrophiSim::Fluid::FoamType::Foam)) {
+                    const float D = sampleSdfDensity(p);
+                    // The liquid surface boundary is at D = 0.5f.
+                    // Only perform projection if the particle is near the narrow band (D > 0.01f && D < 0.99f).
+                    if (D > 0.01f && D < 0.99f) {
+                        const Vec3 grad = sampleSdfGradient(p);
+                        const float lenSq = grad.x * grad.x + grad.y * grad.y + grad.z * grad.z;
+                        if (lenSq > 1e-5f) {
+                            Vec3 corr = grad * (-(D - 0.5f) / lenSq);
+                            const float max_corr = sdf_voxel * 2.0f; // maximum 2 voxels correction
+                            const float corr_len = corr.length();
+                            if (corr_len > max_corr) {
+                                corr = corr * (max_corr / corr_len);
+                            }
+                            p = p + corr;
+                        }
+                    }
+                }
+                
+                tr.position = p;
+                
+                // Stable per-slot hash for size variation (0.6 to 1.4)
+                const uint64_t slot_hash = hashCombine(static_cast<uint64_t>(i) + 1469u,
+                                                       static_cast<uint64_t>(system.id) + 7919u);
+                const float size_var = 0.6f + 0.8f * (static_cast<float>(slot_hash % 1000ull) / 1000.0f);
+                
+                // Type specific scale: Spray = 0.5, Foam = 0.8, Bubble = 1.0
+                float type_scale = 1.0f;
+                if (foam_type == static_cast<uint8_t>(RayTrophiSim::Fluid::FoamType::Spray)) {
+                    type_scale = 0.5f;
+                } else if (foam_type == static_cast<uint8_t>(RayTrophiSim::Fluid::FoamType::Foam)) {
+                    type_scale = 0.8f;
+                }
+                
+                // Dissolving/Popping scale: if lifetime < 0.5s, shrink to zero
+                float dissolve_scale = 1.0f;
+                const float life = state.foam.lifetime[i];
+                if (life < 0.5f && life > 0.0f) {
+                    dissolve_scale = life / 0.5f;
+                } else if (life <= 0.0f) {
+                    dissolve_scale = 0.0f;
+                }
+                
+                const float p_diam = diam * size_var * type_scale * dissolve_scale;
+                tr.scale = Vec3(p_diam, p_diam, p_diam);
+                ++drawn;
             }
-            sph_content = hashCombine(sph_content, quantize(diam));
-            sph_content = hashCombine(sph_content, static_cast<uint64_t>(drawn));
+            const std::size_t clear_begin = structural_change
+                ? draw_count
+                : std::min(draw_count, st.drawn_count);
+            const std::size_t clear_end = structural_change
+                ? cap
+                : std::min(cap, std::max(draw_count, st.drawn_count));
+            for (std::size_t i = clear_begin; i < clear_end; ++i) {
+                InstanceTransform& tr = inst[i];
+                tr.position = Vec3(0.0f, 0.0f, 0.0f);
+                tr.rotation = Vec3(0.0f, 0.0f, 0.0f);
+                tr.scale = Vec3(0.0f, 0.0f, 0.0f);
+                tr.source_index = 0;
+            }
 
             if (structural_change) {
-                st.content_hash = sph_content;
+                st.content_hash = content;
                 group->gpu_dirty = true;
-            } else if (sph_content != st.content_hash) {
-                st.content_hash = sph_content;
+            } else if (content != st.content_hash || drawn != st.drawn_count) {
+                st.content_hash = content;
                 group->gpu_dirty = true;
                 motion_change = true;
             }
+            st.drawn_count = drawn;
         }
     }
 

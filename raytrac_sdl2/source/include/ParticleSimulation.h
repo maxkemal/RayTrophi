@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "Matrix4x4.h"
 #include "FluidGrid.h"
@@ -136,6 +136,10 @@ struct SimulationGridDomainDesc {
     SimulationDomainType type = SimulationDomainType::Gas;
     SimulationDomainBackend backend = SimulationDomainBackend::CPU_Dense;
     SimulationGridDomainSourceMode source_mode = SimulationGridDomainSourceMode::ManualBox;
+    // Struct default stays Open so gas/smoke domains (the default type) let
+    // their medium leave the box and existing projects deserialize unchanged.
+    // Fluid domains are switched to Closed at creation/type-conversion in the UI
+    // so liquid pools instead of silently draining through the walls.
     SimulationGridDomainBoundaryMode boundary_mode = SimulationGridDomainBoundaryMode::Open;
     std::string source_name;
     bool enabled = true;
@@ -180,6 +184,15 @@ struct SimulationGridDomainDesc {
     float smoke_generation = 0.6f;
     float flame_dissipation = 3.0f;
     float fire_max_temperature = 10.0f;
+    // Procedural curl-noise turbulence (Gas domains, dense CPU/GPU path). Adds
+    // divergence-free FBM swirl modulated by local activity. 0 strength = off.
+    // Not applied on the CPU_SparseVDB backend (which also skips vorticity).
+    float turbulence_strength = 0.0f;
+    float turbulence_scale = 1.2f;
+    int   turbulence_octaves = 3;
+    float turbulence_lacunarity = 2.0f;
+    float turbulence_persistence = 0.5f;
+    float turbulence_speed = 0.5f;
     // Per-domain volume render shader (host material data; created lazily by the
     // render bridge / UI). Travels with the domain for serialization and is
     // bound to the domain's live VDB volume. Not used by the solver.
@@ -262,6 +275,28 @@ struct SimulationGridDomainState {
     Vec3 domain_motion_delta = Vec3(0.0f, 0.0f, 0.0f);
 };
 
+struct SimulationGridDomainMGLevelBuffers {
+    ComputeBufferHandle mask; // >0.5 fluid, 0 air, <-0.5 solid
+    ComputeBufferHandle rhs;
+    ComputeBufferHandle z;
+    ComputeBufferHandle diag;
+    int nx = 0;
+    int ny = 0;
+    int nz = 0;
+};
+
+struct SimulationGpuFoamRenderBuffer {
+    // Packed float4 spheres: xyz = world-space centre, w = sphere radius.
+    // Produced by simulation compute and intended for render-backend interop.
+    ComputeBufferHandle spheres;
+    std::size_t count = 0;
+    std::size_t capacity = 0;
+    uint64_t version = 0;
+    float radius = 0.0f;
+
+    bool valid() const { return spheres.valid() && count > 0; }
+};
+
 struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle vel_x;
     ComputeBufferHandle vel_y;
@@ -278,6 +313,8 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle fluid_positions;
     ComputeBufferHandle fluid_velocities;
     ComputeBufferHandle fluid_affine;
+    ComputeBufferHandle foam_positions;
+    SimulationGpuFoamRenderBuffer foam_render;
     // Float buffer (0.0f = air, 1.0f = fluid cell). Rebuilt from particle
     // positions every step before GPU pressure projection.
     ComputeBufferHandle fluid_mask;
@@ -291,6 +328,19 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle cg_As;         // As = A*s
     ComputeBufferHandle cg_diag;       // diagonal (in-bounds neighbour count)
     ComputeBufferHandle cg_partials;   // double[] block partial sums
+    // Variational solid coupling (GPU Stage 1): MAC-face fractional open weights
+    // (uint8_t->float conversion happens on upload) and per-cell solid velocity.
+    ComputeBufferHandle var_u_weight;   // float[(nx+1)*ny*nz]
+    ComputeBufferHandle var_v_weight;   // float[nx*(ny+1)*nz]
+    ComputeBufferHandle var_w_weight;   // float[nx*ny*(nz+1)]
+    ComputeBufferHandle var_svx;        // float[nx*ny*nz]
+    ComputeBufferHandle var_svy;        // float[nx*ny*nz]
+    ComputeBufferHandle var_svz;        // float[nx*ny*nz]
+    ComputeBufferHandle var_fluid_phi;  // float[nx*ny*nz] (GFM level-set narrow-band)
+    // MGPCG Layer B: geometric multigrid V-cycle coarse levels used as the
+    // pressure preconditioner on CUDA. Empty or partially invalid => Layer A
+    // Jacobi preconditioner remains the fallback.
+    std::vector<SimulationGridDomainMGLevelBuffers> mg_levels;
     std::size_t fluid_particle_capacity = 0;
     int resolution_x = 0;
     int resolution_y = 0;
@@ -318,6 +368,20 @@ struct SimulationFlowSourceDesc {
     // position; ObjectBounds → resolved AABB; MeshSurface → sampled points
     // on the source mesh). Initial particle velocity = `velocity` above.
     float fluid_particles_per_second = 1000.0f;
+    // Emission velocity spread (fluid only). All particles otherwise inherit the
+    // single `velocity` above verbatim, so an APIC liquid — which has no surface
+    // tension or turbulence to break a laminar stream apart — keeps the emitted
+    // mass in perfect formation: it falls as a coherent slab/sheet and only
+    // scatters once it slams into a collider. This fraction adds a per-particle
+    // random velocity perturbation of magnitude (spread * |velocity|), breaking
+    // that symmetry at the source so the stream looks like flowing water rather
+    // than a falling plate. 0 = laminar (old behaviour), ~0.1-0.3 = natural.
+    float fluid_velocity_spread = 0.15f;
+    // MeshSurface mode only: when true the emission velocity is redirected
+    // along each spawn point's surface normal (magnitude = |velocity|), so the
+    // liquid sprays outward off the geometry like a hose/fountain following the
+    // shape. When false every particle uses the single `velocity` vector above.
+    bool  fluid_emit_along_normal = false;
     // Per-source accumulator for fractional emit counts (kept in the desc so
     // it survives step boundaries; reset on disable).
     float fluid_emit_accumulator = 0.0f;
@@ -528,6 +592,7 @@ public:
     std::vector<SimulationGridDomainDesc>& gridDomains();
     const std::vector<SimulationGridDomainDesc>& gridDomains() const;
     const std::vector<SimulationGridDomainState>& gridDomainStates() const;
+    const SimulationGpuFoamRenderBuffer* gridDomainFoamRenderBuffer(std::size_t domain_index) const;
     void setGridDomainStates(const std::vector<SimulationGridDomainState>& states); // timeline cache restore
     SimulationGridDomainDesc& addGridDomain(const SimulationGridDomainDesc& desc);
     bool removeGridDomain(std::size_t index);
@@ -538,6 +603,13 @@ public:
     /// seeds, etc.) without waiting for the next sim tick. Needed when the
     /// timeline is stopped so UI actions like "Seed Fluid" apply right away.
     void synchronizeGridDomainsNow();
+
+    /// @brief Export a Gas grid domain's live fields to an OpenVDB (.vdb) file.
+    /// Writes density / temperature / fuel / flame FloatGrids (channel-aware)
+    /// with a world-space linear transform. Returns false for an out-of-range
+    /// or non-Gas domain, an invalid state, or on I/O error. Without
+    /// OPENVDB_ENABLED a raw binary fallback is written instead.
+    bool exportGridDomainToVDB(std::size_t domain_index, const std::string& filepath) const;
 
     std::vector<SimulationFlowSourceDesc>& flowSources();
     const std::vector<SimulationFlowSourceDesc>& flowSources() const;
@@ -618,6 +690,12 @@ private:
     std::vector<ParticleEmitterDesc> emitters_;
     std::vector<ParticleColliderDesc> colliders_;
     std::vector<ResolvedCollider> resolved_colliders_;
+    // Moving-collider momentum transfer (grid-domain fluid). Per-collider linear
+    // velocity = (resolved centre this step - last step) / dt, recomputed once
+    // per stepGridDomains and stamped into FluidGrid::solid_vel by voxelization.
+    std::vector<Vec3>    collider_velocities_;
+    std::vector<Vec3>    prev_collider_centers_;
+    std::vector<uint8_t> prev_collider_center_valid_;
     std::vector<SimulationGridDomainDesc> grid_domains_;
     std::vector<SimulationGridDomainState> grid_domain_states_;
     std::vector<SimulationGridDomainComputeBuffers> grid_domain_compute_buffers_;

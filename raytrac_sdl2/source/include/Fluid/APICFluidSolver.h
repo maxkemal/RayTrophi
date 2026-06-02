@@ -55,6 +55,14 @@ struct APICSolverParams {
     // residual drops below tolerance. 24 is plenty for typical liquid frames;
     // bump for high-resolution / heavy-collision setups.
     int   pressure_iterations = 24;
+    // Relative pressure residual target. 1e-5 preserves the current solver
+    // behavior; relaxing toward 1e-4 often reduces GPU MGPCG sync cost on
+    // dense preview scenes.
+    float pressure_relative_residual = 1.0e-5f;
+    // Experimental CUDA MGPCG Layer B. Uses a geometric V-cycle as the CG
+    // preconditioner; keep optional because it trades extra dispatch work for
+    // lower iteration count on large grids.
+    bool  pressure_multigrid_preconditioner = false;
     // Legacy SOR relaxation factor. Retained only so older project files load
     // without losing the field; the PCG path ignores it. Hidden in UI.
     float sor_omega = 1.25f;
@@ -155,6 +163,36 @@ struct APICSolverParams {
     // liquid behavior — without it the fluid acts like a sealed container.
     bool  free_surface = true;
 
+    // Domain-wall behaviour for the PARTICLES (mirrors the domain's boundary
+    // mode). Without this the advection step always clamps + bounces particles
+    // back inside, so a domain reads as a sealed box even when the UI says
+    // "Open (Outflow)". Closed = clamp + bounce; Open = particles crossing a
+    // wall flow out (deleted); Periodic = wrap to the opposite wall.
+    enum class BoundaryMode : int { Closed = 0, Open = 1, Periodic = 2 };
+    BoundaryMode boundary = BoundaryMode::Closed;
+
+    // Variational solid coupling (Batty/Bridson 2007). When true, the pressure
+    // projection uses the fractional MAC-face open weights (FluidGrid::u/v/w_weight,
+    // filled by the collider voxelizer's analytic super-sampling) instead of a
+    // binary solid-cell test. Gives sub-grid-accurate collisions (no blocky
+    // leaking) AND lets a MOVING collider's face velocity enter the divergence
+    // RHS, so the solid actually pushes/splashes the fluid through the pressure
+    // solve rather than only via particle ejection. Falls back to the binary
+    // path when false or when the weight arrays aren't present. CPU path.
+    bool  variational_solids = true;
+
+    // Ghost-fluid free surface (Gibou/Enright). The default free-surface
+    // projection puts the p=0 Dirichlet boundary at the AIR cell centre (1st
+    // order → the surface snaps to cell centres, visible voxel staircase). With
+    // this on, a cheap per-step particle-ball level set places the zero-pressure
+    // boundary at the actual sub-cell surface position: the fluid-air face's
+    // diagonal coefficient is scaled by 1/theta (theta = fluid fraction along the
+    // face from the level set) and the velocity update uses the matching ghost
+    // pressure. Smooth, second-order surface; theta is clamped for stability.
+    // Falls back to the p=0 boundary when false / no level set. CPU path.
+    bool  ghost_fluid_surface = true;
+    float surface_ball_radius = 0.9f;  // particle level-set ball radius (× voxel)
+
     // ── Material presets ───────────────────────────────────────────────────
     // Physically-motivated rheology presets for the common materials artists
     // reach for. Mirrors WaterWaveParams::WaterPreset: `current_preset` is a
@@ -253,8 +291,14 @@ struct APICSolverStats {
     float g2p_ms = 0.0f;
     float advect_ms = 0.0f;
     float density_ms = 0.0f;
+    float pressure_cg_dot_ms = 0.0f;
+    double pressure_cg_final_relative_residual = 0.0;
     int   cpu_threads = 1;
     int   advect_substeps = 1;
+    int   pressure_cg_iterations = 0;
+    int   pressure_cg_max_iterations = 0;
+    int   pressure_cg_dot_count = 0;
+    bool  pressure_cg_multigrid = false;
     size_t particle_count = 0;
     size_t grid_cell_count = 0;
     size_t active_fluid_cells = 0;

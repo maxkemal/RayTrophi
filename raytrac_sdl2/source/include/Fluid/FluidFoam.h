@@ -126,9 +126,14 @@ struct FoamParams {
     // -1 → a built-in default white foam material is created/used. Otherwise a
     // MaterialManager id the user picked in the foam panel.
     int   foam_material_id = -1;
+    int   spray_material_id = -1;
+    int   bubble_material_id = -1;
 
     // Spheres mode: sphere radius (sim voxels).
     float render_radius_voxels = 0.3f;
+
+    // Spheres mode: icosphere subdivision level (0..3).
+    int   foam_sphere_subdivisions = 1;
 
     // ── Surface (metaball) mode ───────────────────────────────────────────────
     // Foam SDF reconstruction (Zhu-Bridson). Radii are in SIM voxels so the

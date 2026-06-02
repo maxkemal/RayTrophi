@@ -1015,6 +1015,7 @@ public:
     void releaseInactiveViewportTextureCache();
     virtual const char* sceneTextureOwnerScope() const { return "VulkanBackendAdapter"; }
     bool tryGetUploadedImageHandle(int64_t textureHandle, VulkanRT::ImageHandle& outImage) const;
+    uint64_t textureCacheGeneration() const { return m_textureCacheGeneration; }
     bool buildVulkanBackingRecord(int64_t textureHandle, VulkanBackingRecord& outBacking) const;
     void registerSceneTextureUpload(TextureHandle sceneHandle, int64_t textureHandle);
 
@@ -1378,6 +1379,7 @@ protected:
     std::unordered_map<uint64_t, int64_t> m_uploadedImageIDs;     // cacheKey (pointer+flags) -> textureId
     std::unordered_map<int64_t, uint64_t> m_textureIdToCacheKey;  // reverse: textureId -> cacheKey (O(1) eviction cleanup)
     int64_t m_nextTextureID = 1;
+    uint64_t m_textureCacheGeneration = 1;
     std::shared_ptr<SceneTextureManager> m_sceneTextureManager;
     uint64_t m_textureUploadBytes = 0;
     uint32_t m_textureUploadCount = 0;

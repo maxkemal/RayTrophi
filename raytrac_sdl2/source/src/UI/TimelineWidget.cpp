@@ -366,8 +366,17 @@ void TimelineWidget::draw(UIContext& ctx) {
 
             current_frame += frames_to_advance;
             int range = end_frame - start_frame + 1;
-            if (range > 0 && current_frame > end_frame)
-                current_frame = start_frame + (current_frame - start_frame) % range;
+            if (range > 0 && current_frame > end_frame) {
+                if (loop_enabled) {
+                    // Wrap back to start (only when the user opted into looping).
+                    current_frame = start_frame + (current_frame - start_frame) % range;
+                } else {
+                    // Default: stop at the last frame. Avoids the per-loop sim
+                    // re-bake / cache wipe that thrashes memory.
+                    current_frame = end_frame;
+                    is_playing = false;
+                }
+            }
 
             // Carry over the fractional remainder so timing stays accurate
             last_time += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -394,8 +403,12 @@ void TimelineWidget::draw(UIContext& ctx) {
     // Otherwise the first 1–2 rendered frames pick up the user's pre-render
     // scrub pose because this widget's draw() writes its own current_frame
     // back into scene.timeline.current_frame in the gap window.
+    // A viewport-driven sequence save (g_seq_save_active) advances the timeline
+    // itself (Main.cpp state machine via setCurrentFrame) and needs keyframes to
+    // keep being applied here, so it is NOT a worker-owned timeline.
+    extern bool g_seq_save_active;
     const bool render_owns_timeline =
-        ctx.is_animation_mode && rendering_in_progress.load();
+        ctx.is_animation_mode && rendering_in_progress.load() && !g_seq_save_active;
 
     if (!render_owns_timeline) {
         // Sync to render settings (only when worker isn't authoritative —
@@ -1208,6 +1221,10 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
                                     ImVec2(34.0f, 28.0f),
                                     is_playing ? "Pause" : "Play")) {
         is_playing = !is_playing;
+        // Pressing Play at the last frame (loop off) restarts from the start —
+        // the backward jump replays from the sim cache, it does not re-bake.
+        if (is_playing && !loop_enabled && current_frame >= end_frame)
+            current_frame = start_frame;
     }
     
     ImGui::SameLine();
@@ -1238,11 +1255,24 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
         }
         ctx.start_render = true;
     }
-    
+
+    // Loop toggle. Default OFF — looping a simulation re-bakes from frame 0 and
+    // wipes the sim frame cache on every wrap (memory thrash), so it is opt-in.
+    ImGui::SameLine();
+    {
+        const bool loop_on = loop_enabled;
+        if (loop_on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.46f, 0.86f, 0.92f, 1.0f));
+        if (ImGui::Button(loop_on ? "Loop: On" : "Loop: Off", ImVec2(72.0f, 28.0f)))
+            loop_enabled = !loop_enabled;
+        if (loop_on) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Loop playback.\nOff: stop at the last frame (recommended for simulations —\nlooping replays from the sim cache instead of re-baking).");
+    }
+
     ImGui::SameLine();
     ImGui::TextDisabled("|");
     ImGui::SameLine();
-    
+
     // FPS
     ImGui::PushItemWidth(60);
     ImGui::SliderInt("FPS", &ctx.render_settings.animation_fps, 1, 60);

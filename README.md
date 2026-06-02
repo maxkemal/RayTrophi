@@ -291,6 +291,22 @@ Full Technical Report: [ARCHITECTURE.md](ARCHITECTURE.md)
 - **Physics Integration**: Hair strands collide with character meshes and respond to gravity/forces.
 - **Material Support**: Melanin-based hair BSDF for realistic rendering.
 
+### 🌀 Physics & Particle Simulation Suite (New!)
+<img src="docs/images/simulation_header.jpg" width="100%" alt="Simulation Suite System">
+
+A high-performance, multi-threaded grid and particle-based simulation engine powered by CUDA and CPU backends, seamlessly integrated with the path-tracing render pipeline:
+- **Unified Particle Systems**: Add and manage multiple simulation domains, custom emitters, colliders, and force fields within a unified workspace.
+- **APIC / FLIP Liquid Solver**: High-fidelity hybrid fluid simulator preserving angular momentum and minimizing numerical dissipation. Features adjustable APIC/FLIP blending, adaptive resolution, closed/open boundary modes, dynamic particle reseeding to prevent leaks, and fluid material presets (Water, Oil, Custom).
+- **Combustible Gas & Smoke Solver**: Multi-threaded dense grid solver for temperature, soot, and fuel density. Features realistic combustion dynamics (fire/smoke generation, ignition, heat release, flame dissipation) and procedural FBM curl-noise turbulence.
+- **Physically-Based Whitewater (Ihmsen et al. 2012)**: Dynamically simulates secondary spray (airborne), foam (surface), and bubbles (submerged) based on trapped-air and wave-crest potentials:
+  - **Dynamic PBR Material Routing**: Automatically routes particles to physical presets—transmissive water droplets for Spray, scattering rough white PBR for Foam, and silvery semi-transmissive bubbles for Bubble. Features a *Custom Material Overrides* toggle to bind any scene PBR material independently.
+  - **Underwater Bubble TIR Correction**: Reduces Total Internal Reflection (TIR) dark-circle artifacts by tuning bubble IOR to 1.1, setting transmission to 0.65 (allowing 35% specular/diffuse highlights), and adding soft light-scattering emission (0.12).
+  - **Newton-Raphson Wave Snapping**: Projects surface foam particles onto the smoothed level-set water mesh boundary, eliminating floating foam artifacts on wavy water.
+  - **Stable Scale Variation & Dissolution**: Deterministic hash-based non-flickering size variation ($0.6\times$ to $1.4\times$) and smooth shrinking/dissolving animations near the end of particle lifetimes.
+  - **Icosphere Subdivisions**: Adjustable rendering resolution (subdivision level 0 to 3) for smooth close-up details.
+- **SimCache Disk Baking**: Bake heavy simulation frames (liquid, foam, gas) directly to binary `.simcache` files next to the project file. Scrub the timeline in real-time without re-simulating.
+- **Seamless Serialization**: Entire simulation state, domain settings, custom materials, timeline caches, and presets are fully saved and restored in the `.rtp` / `.rts` project files.
+
 ### 🌊 Realistic Water & Ocean
 <img src="docs/images/water_header.jpg" width="100%" alt="Ocean Simulation">
 
