@@ -2923,7 +2923,24 @@ void SceneUI::draw(UIContext& ctx)
     drawRiverGizmos(ctx, gizmo_hit);  // Draw river spline control points
     drawViewportControls(ctx);  // Blender-style viewport overlay
 
-    if (ctx.scene.anySimulationRuntimeEnabled()) {
+    // [SEQUENCE-RENDER OWNERSHIP] While a sequence render is active the worker
+    // thread (Renderer::render_Animation) is the SOLE driver of the sim timeline
+    // + the particle/foam render bridge — it bakes each frame deterministically
+    // and rebuilds the backend AS itself (the main loop's rebuild handlers are
+    // gated by skip_backend_for_anim). If the UI thread ALSO stepped the sim or
+    // re-wrote the InstanceManager bridge groups here, the two threads would
+    // race on sim state + the shared TLAS/InstanceManager (silent NVIDIA hang,
+    // same hazard as render_owns_timeline in TimelineWidget). Skip both writes
+    // while the worker is authoritative.
+    extern std::atomic<bool> rendering_in_progress;
+    // A viewport-driven sequence save keeps both anim flags set for the UI but the
+    // UI MUST keep driving the per-frame sim scrub (the save reads what the viewport
+    // renders), so it is NOT a worker-owned render.
+    extern bool g_seq_save_active;
+    const bool render_owns_sim =
+        ctx.is_animation_mode && rendering_in_progress.load() && !g_seq_save_active;
+
+    if (!render_owns_sim && ctx.scene.anySimulationRuntimeEnabled()) {
         const float rt_dt = std::clamp(io.DeltaTime, 0.0f, 1.0f / 30.0f);
         const bool live_mode = !g_sim_timeline_mode;
         // Timeline mode (default): play bakes into the cache, scrub restores, a
@@ -2939,7 +2956,15 @@ void SceneUI::draw(UIContext& ctx)
     }
     // Feed camera-facing billboards to the Vulkan viewport every frame so particles
     // render (depth-tested) in Solid mode and re-face the camera as it moves.
-    uploadParticleBillboards(ctx);
+    // GATED during a sequence render: this reads the live particle/foam SoA on the
+    // MAIN thread while the render WORKER is stepping + mutating that exact SoA —
+    // a data race plus competing viewport-backend GPU work ("two jobs at once").
+    // As foam grows the main-thread billboard rebuild gets heavier and starves the
+    // worker, which showed up as a ~10x slowdown ~10-15 frames in. The viewport
+    // isn't interactively shown during the render anyway, so skip it entirely.
+    if (!render_owns_sim) {
+        uploadParticleBillboards(ctx);
+    }
 
     // Mirror discrete particles into the ray-traced render every frame, driven
     // independently of the timeline sim driver (just like the billboard upload
@@ -2948,7 +2973,10 @@ void SceneUI::draw(UIContext& ctx)
     // from the timeline bake/scrub/cache, which only manages grid domains.
     // Debug display mode (1) uses the lightweight ImGui overlay, so the instanced
     // geometry is suppressed there (Solid/Render show it).
-    ctx.scene.syncParticleRenderInstances(ctx.particle_display_mode != 1);
+    // Skipped while the sequence-render worker owns the bridge (see above).
+    if (!render_owns_sim) {
+        ctx.scene.syncParticleRenderInstances(ctx.particle_display_mode != 1);
+    }
 
     // --- HAIR TRANSFORM SYNC (Global) ---
     // Skinned groom updates are handled in Renderer::updateAnimationWithGraph (after skinning).

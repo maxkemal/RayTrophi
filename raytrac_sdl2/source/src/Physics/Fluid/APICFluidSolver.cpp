@@ -799,13 +799,107 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
     std::fill(p.begin(),   p.end(),   0.0f);
     std::fill(div.begin(), div.end(), 0.0f);
 
+    // Open domains let fluid drain through the bounding walls: an out-of-grid
+    // neighbour is then treated as AIR (Dirichlet p=0 → outflow) instead of a
+    // SOLID wall, so the projection no longer cancels wall-normal velocity and
+    // the liquid actually leaves (paired with the advection-step outflow cull).
+    // Closed/Periodic keep the sealed-wall behaviour here; Periodic's seam
+    // coupling is handled by the advection wrap, not the pressure solve.
+    const bool open_walls = (params.boundary == APICSolverParams::BoundaryMode::Open);
     auto isFluid = [&](int i, int j, int k) {
         if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return false;
         return cell[grid.cellIndex(i, j, k)] == CELL_FLUID;
     };
-    auto isSolid = [&](int i, int j, int k) {
-        if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return true;
-        return cell[grid.cellIndex(i, j, k)] == CELL_SOLID;
+    // ── Variational solid coupling ───────────────────────────────────────────
+    // Unified MAC-face open weight in [0,1]. With variational_solids on it reads
+    // the analytic fractional weights (sub-grid solid boundary); otherwise it
+    // reduces EXACTLY to the binary "blocked if an adjacent cell is solid" test,
+    // so the flag-off path is bit-identical to the old projection. Domain-boundary
+    // faces follow the wall mode (closed = 0, open = 1 Dirichlet). svX/Y/Z give the
+    // solid's normal velocity at a face so a MOVING collider enters the divergence
+    // RHS (real splash); 0 in binary mode and for static colliders.
+    const bool use_var = params.variational_solids &&
+        grid.u_weight.size() == grid.vel_x.size() &&
+        grid.v_weight.size() == grid.vel_y.size() &&
+        grid.w_weight.size() == grid.vel_z.size();
+    const bool has_svel = grid.solid_vel.size() == grid.solid.size();
+    auto fWx = [&](int i, int j, int k) -> float {
+        if (i <= 0 || i >= nx) return open_walls ? 1.0f : 0.0f;
+        if (use_var) return FluidSim::FluidGrid::weightToFloat(grid.u_weight[grid.velXIndex(i, j, k)]);
+        return (grid.solid[grid.cellIndex(i - 1, j, k)] || grid.solid[grid.cellIndex(i, j, k)]) ? 0.0f : 1.0f;
+    };
+    auto fWy = [&](int i, int j, int k) -> float {
+        if (j <= 0 || j >= ny) return open_walls ? 1.0f : 0.0f;
+        if (use_var) return FluidSim::FluidGrid::weightToFloat(grid.v_weight[grid.velYIndex(i, j, k)]);
+        return (grid.solid[grid.cellIndex(i, j - 1, k)] || grid.solid[grid.cellIndex(i, j, k)]) ? 0.0f : 1.0f;
+    };
+    auto fWz = [&](int i, int j, int k) -> float {
+        if (k <= 0 || k >= nz) return open_walls ? 1.0f : 0.0f;
+        if (use_var) return FluidSim::FluidGrid::weightToFloat(grid.w_weight[grid.velZIndex(i, j, k)]);
+        return (grid.solid[grid.cellIndex(i, j, k - 1)] || grid.solid[grid.cellIndex(i, j, k)]) ? 0.0f : 1.0f;
+    };
+    auto svX = [&](int i, int j, int k) -> float {
+        if (!use_var || !has_svel) return 0.0f;
+        if (i - 1 >= 0 && grid.solid[grid.cellIndex(i - 1, j, k)]) return grid.solid_vel[grid.cellIndex(i - 1, j, k)].x;
+        if (i < nx && grid.solid[grid.cellIndex(i, j, k)])         return grid.solid_vel[grid.cellIndex(i, j, k)].x;
+        return 0.0f;
+    };
+    auto svY = [&](int i, int j, int k) -> float {
+        if (!use_var || !has_svel) return 0.0f;
+        if (j - 1 >= 0 && grid.solid[grid.cellIndex(i, j - 1, k)]) return grid.solid_vel[grid.cellIndex(i, j - 1, k)].y;
+        if (j < ny && grid.solid[grid.cellIndex(i, j, k)])         return grid.solid_vel[grid.cellIndex(i, j, k)].y;
+        return 0.0f;
+    };
+    auto svZ = [&](int i, int j, int k) -> float {
+        if (!use_var || !has_svel) return 0.0f;
+        if (k - 1 >= 0 && grid.solid[grid.cellIndex(i, j, k - 1)]) return grid.solid_vel[grid.cellIndex(i, j, k - 1)].z;
+        if (k < nz && grid.solid[grid.cellIndex(i, j, k)])         return grid.solid_vel[grid.cellIndex(i, j, k)].z;
+        return 0.0f;
+    };
+
+    // ── Ghost-fluid free surface ─────────────────────────────────────────────
+    // Cheap per-step liquid level set (union of particle balls). phi < 0 inside
+    // the fluid, > 0 in air; the zero-crossing is the sub-cell surface. Used to
+    // place the p=0 boundary at the real surface instead of the air cell centre.
+    const float gfm_big = 3.0f * h;
+    const bool use_gfm = params.ghost_fluid_surface;
+    if (use_gfm) {
+        if (grid.fluid_phi.size() != total) grid.fluid_phi.assign(total, gfm_big);
+        std::fill(grid.fluid_phi.begin(), grid.fluid_phi.begin() + total, gfm_big);
+        const float rball = std::max(0.1f * h, params.surface_ball_radius * h);
+        // Serial scatter (3x3x3 per particle): write-conflicting min, cheap vs PCG.
+        for (size_t pi = 0; pi < parts.size(); ++pi) {
+            const Vec3 pos = parts.position[pi];
+            const Vec3 gp = (pos - grid.origin) * invH;
+            const int ci = static_cast<int>(std::floor(gp.x));
+            const int cj = static_cast<int>(std::floor(gp.y));
+            const int ck = static_cast<int>(std::floor(gp.z));
+            for (int dk = -1; dk <= 1; ++dk)
+            for (int dj = -1; dj <= 1; ++dj)
+            for (int di = -1; di <= 1; ++di) {
+                const int ni = ci + di, nj = cj + dj, nk = ck + dk;
+                if (ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz) continue;
+                const Vec3 cc = grid.origin + Vec3((ni + 0.5f) * h, (nj + 0.5f) * h, (nk + 0.5f) * h);
+                const Vec3 d = cc - pos;
+                const float dist = std::sqrt(d.x*d.x + d.y*d.y + d.z*d.z) - rball;
+                float& ph = grid.fluid_phi[grid.cellIndex(ni, nj, nk)];
+                if (dist < ph) ph = dist;
+            }
+        }
+    }
+    const bool gfm_active = use_gfm && grid.fluid_phi.size() == total;
+    // Sub-cell fluid fraction along a fluid→air face (1 = surface at air centre).
+    // theta = phi_f / (phi_f - phi_a), valid only when phi_f < 0 < phi_a; clamped
+    // for stability. Returns 1 (= plain p=0 Dirichlet) when GFM can't apply.
+    auto airTheta = [&](size_t c_fluid, int ni, int nj, int nk) -> float {
+        if (!gfm_active) return 1.0f;
+        if (ni < 0 || ni >= nx || nj < 0 || nj >= ny || nk < 0 || nk >= nz) return 1.0f;
+        const size_t n = grid.cellIndex(ni, nj, nk);
+        if (grid.solid[n]) return 1.0f;
+        const float pf = grid.fluid_phi[c_fluid], pa = grid.fluid_phi[n];
+        if (!(pf < 0.0f && pa > 0.0f)) return 1.0f;
+        const float t = pf / (pf - pa);
+        return t < 0.1f ? 0.1f : (t > 1.0f ? 1.0f : t);
     };
 
 #ifdef _OPENMP
@@ -823,16 +917,22 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         float vz_lo = grid.vel_z[grid.velZIndex(i, j, k)];
         float vz_hi = grid.vel_z[grid.velZIndex(i, j, k + 1)];
 
-        // Cancel divergence across solid faces (their velocity is treated as 0).
-        if (isSolid(i - 1, j, k)) vx_lo = 0.0f;
-        if (isSolid(i + 1, j, k)) vx_hi = 0.0f;
-        if (isSolid(i, j - 1, k)) vy_lo = 0.0f;
-        if (isSolid(i, j + 1, k)) vy_hi = 0.0f;
-        if (isSolid(i, j, k - 1)) vz_lo = 0.0f;
-        if (isSolid(i, j, k + 1)) vz_hi = 0.0f;
+        // Weighted face velocities: the open fraction carries the fluid velocity,
+        // the closed fraction carries the solid's velocity (0 for a static wall →
+        // identical to the old "zero the solid face" behaviour; non-zero for a
+        // MOVING collider → the wall pushes the fluid through the pressure solve).
+        const float wxl = fWx(i,     j, k), wxh = fWx(i + 1, j, k);
+        const float wyl = fWy(i, j,     k), wyh = fWy(i, j + 1, k);
+        const float wzl = fWz(i, j, k),     wzh = fWz(i, j, k + 1);
+        const float Uxl = wxl * vx_lo + (1.0f - wxl) * svX(i,     j, k);
+        const float Uxh = wxh * vx_hi + (1.0f - wxh) * svX(i + 1, j, k);
+        const float Uyl = wyl * vy_lo + (1.0f - wyl) * svY(i, j,     k);
+        const float Uyh = wyh * vy_hi + (1.0f - wyh) * svY(i, j + 1, k);
+        const float Uzl = wzl * vz_lo + (1.0f - wzl) * svZ(i, j, k);
+        const float Uzh = wzh * vz_hi + (1.0f - wzh) * svZ(i, j, k + 1);
 
         float div_val = -scale_div *
-            ((vx_hi - vx_lo) + (vy_hi - vy_lo) + (vz_hi - vz_lo));
+            ((Uxh - Uxl) + (Uyh - Uyl) + (Uzh - Uzl));
 
         // Bridson density-targeted projection. Over-populated cells get a
         // positive contribution to the RHS, which the PCG converts to a
@@ -920,13 +1020,28 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         if (cell[c] != CELL_FLUID) continue;
         is_fluid[c] = 1u;
 
+        // Variational Laplacian: each face contributes its open weight to the
+        // diagonal; the +i/+j/+k off-diagonals carry -weight to FLUID neighbours
+        // (symmetric, so the -i/-j/-k coupling is the neighbour's +coefficient).
+        // AIR neighbours add weight to the diagonal but no off-diagonal → the
+        // Dirichlet p=0 free surface. Reduces to the old integer counts when the
+        // weights are binary. (fWx/fWy/fWz already fold in the domain-wall mode.)
+        // Each face adds its open weight to the diagonal. FLUID neighbours also
+        // get the -weight off-diagonal. AIR neighbours instead add weight/theta —
+        // the ghost-fluid surface scaling that moves the p=0 boundary to the real
+        // sub-cell surface (theta=1 → ordinary Dirichlet at the air centre, i.e.
+        // GFM off). SOLID/closed-wall faces have weight ~0 so they drop out.
         float diag = 0.0f;
-        if (!isSolid(i - 1, j, k)) diag += 1.0f;
-        if (!isSolid(i + 1, j, k)) { diag += 1.0f; if (isFluid(i + 1, j, k)) Aplusi[c] = -1.0f; }
-        if (!isSolid(i, j - 1, k)) diag += 1.0f;
-        if (!isSolid(i, j + 1, k)) { diag += 1.0f; if (isFluid(i, j + 1, k)) Aplusj[c] = -1.0f; }
-        if (!isSolid(i, j, k - 1)) diag += 1.0f;
-        if (!isSolid(i, j, k + 1)) { diag += 1.0f; if (isFluid(i, j, k + 1)) Aplusk[c] = -1.0f; }
+        float w;
+        w = fWx(i,     j, k); if (isFluid(i - 1, j, k)) diag += w;                         else diag += w / airTheta(c, i - 1, j, k);
+        w = fWx(i + 1, j, k); if (isFluid(i + 1, j, k)) { diag += w; Aplusi[c] = -w; }     else diag += w / airTheta(c, i + 1, j, k);
+        w = fWy(i, j,     k); if (isFluid(i, j - 1, k)) diag += w;                         else diag += w / airTheta(c, i, j - 1, k);
+        w = fWy(i, j + 1, k); if (isFluid(i, j + 1, k)) { diag += w; Aplusj[c] = -w; }     else diag += w / airTheta(c, i, j + 1, k);
+        w = fWz(i, j, k);     if (isFluid(i, j, k - 1)) diag += w;                         else diag += w / airTheta(c, i, j, k - 1);
+        w = fWz(i, j, k + 1); if (isFluid(i, j, k + 1)) { diag += w; Aplusk[c] = -w; }     else diag += w / airTheta(c, i, j, k + 1);
+        // A fluid cell hemmed in by solid (all weights ~0) would give a singular
+        // row → NaN in PCG. Floor it; an isolated cell just holds p≈0.
+        if (diag < 1e-6f) diag = 1.0f;
         Adiag[c] = diag;
     }
 
@@ -1004,7 +1119,8 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         // Already divergence-free (e.g. fresh seed before any forces). Skip
         // straight to gradient subtraction — pressure remains zero.
     } else {
-        const float tolerance = std::max(abs_tol, 1e-5f * r_inf);
+        const float rel_tol = std::clamp(params.pressure_relative_residual, 1.0e-8f, 1.0e-2f);
+        const float tolerance = std::max(abs_tol, rel_tol * r_inf);
 
         auto applyPreconditioner = [&]() {
             // Forward substitution: solve (L) q = r, where L is the lower
@@ -1194,10 +1310,12 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         const int i = min_i + static_cast<int>(raw % (active_nx + 1));
         const int j = min_j + static_cast<int>((raw / (active_nx + 1)) % active_ny);
         const int k = min_k + static_cast<int>(raw / (static_cast<int64_t>(active_nx + 1) * active_ny));
-        bool lo_solid = isSolid(i - 1, j, k);
-        bool hi_solid = isSolid(i,     j, k);
-        if (lo_solid || hi_solid) {
-            grid.vel_x[grid.velXIndex(i, j, k)] = 0.0f;
+        // Fully-closed face → take the solid's normal velocity (moving wall);
+        // open/partial face → subtract the pressure gradient (the weight already
+        // lives in the matrix, so the update itself is the plain MAC gradient).
+        const float wf = fWx(i, j, k);
+        if (wf <= 0.0f) {
+            grid.vel_x[grid.velXIndex(i, j, k)] = svX(i, j, k);
             continue;
         }
         bool lo_fluid = isFluid(i - 1, j, k);
@@ -1205,6 +1323,12 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         if (!lo_fluid && !hi_fluid) continue;
         float p_lo = lo_fluid ? p[grid.cellIndex(i - 1, j, k)] : 0.0f;
         float p_hi = hi_fluid ? p[grid.cellIndex(i,     j, k)] : 0.0f;
+        // Ghost-fluid: the air-side pressure is the extrapolated p that puts p=0
+        // at the sub-cell surface (p_ghost = p_fluid*(1 - 1/theta)) instead of 0.
+        if (gfm_active) {
+            if (lo_fluid && !hi_fluid)      p_hi = p_lo * (1.0f - 1.0f / airTheta(grid.cellIndex(i - 1, j, k), i,     j, k));
+            else if (hi_fluid && !lo_fluid) p_lo = p_hi * (1.0f - 1.0f / airTheta(grid.cellIndex(i,     j, k), i - 1, j, k));
+        }
         grid.vel_x[grid.velXIndex(i, j, k)] -= grad_scale * (p_hi - p_lo);
     }
 #ifdef _OPENMP
@@ -1214,10 +1338,9 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         const int i = min_i + static_cast<int>(raw % active_nx);
         const int j = min_j + static_cast<int>((raw / active_nx) % (active_ny + 1));
         const int k = min_k + static_cast<int>(raw / (static_cast<int64_t>(active_nx) * (active_ny + 1)));
-        bool lo_solid = isSolid(i, j - 1, k);
-        bool hi_solid = isSolid(i, j,     k);
-        if (lo_solid || hi_solid) {
-            grid.vel_y[grid.velYIndex(i, j, k)] = 0.0f;
+        const float wf = fWy(i, j, k);
+        if (wf <= 0.0f) {
+            grid.vel_y[grid.velYIndex(i, j, k)] = svY(i, j, k);
             continue;
         }
         bool lo_fluid = isFluid(i, j - 1, k);
@@ -1225,6 +1348,10 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         if (!lo_fluid && !hi_fluid) continue;
         float p_lo = lo_fluid ? p[grid.cellIndex(i, j - 1, k)] : 0.0f;
         float p_hi = hi_fluid ? p[grid.cellIndex(i, j,     k)] : 0.0f;
+        if (gfm_active) {
+            if (lo_fluid && !hi_fluid)      p_hi = p_lo * (1.0f - 1.0f / airTheta(grid.cellIndex(i, j - 1, k), i, j,     k));
+            else if (hi_fluid && !lo_fluid) p_lo = p_hi * (1.0f - 1.0f / airTheta(grid.cellIndex(i, j,     k), i, j - 1, k));
+        }
         grid.vel_y[grid.velYIndex(i, j, k)] -= grad_scale * (p_hi - p_lo);
     }
 #ifdef _OPENMP
@@ -1234,10 +1361,9 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         const int i = min_i + static_cast<int>(raw % active_nx);
         const int j = min_j + static_cast<int>((raw / active_nx) % active_ny);
         const int k = min_k + static_cast<int>(raw / (static_cast<int64_t>(active_nx) * active_ny));
-        bool lo_solid = isSolid(i, j, k - 1);
-        bool hi_solid = isSolid(i, j, k);
-        if (lo_solid || hi_solid) {
-            grid.vel_z[grid.velZIndex(i, j, k)] = 0.0f;
+        const float wf = fWz(i, j, k);
+        if (wf <= 0.0f) {
+            grid.vel_z[grid.velZIndex(i, j, k)] = svZ(i, j, k);
             continue;
         }
         bool lo_fluid = isFluid(i, j, k - 1);
@@ -1245,6 +1371,10 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         if (!lo_fluid && !hi_fluid) continue;
         float p_lo = lo_fluid ? p[grid.cellIndex(i, j, k - 1)] : 0.0f;
         float p_hi = hi_fluid ? p[grid.cellIndex(i, j, k)]     : 0.0f;
+        if (gfm_active) {
+            if (lo_fluid && !hi_fluid)      p_hi = p_lo * (1.0f - 1.0f / airTheta(grid.cellIndex(i, j, k - 1), i, j, k));
+            else if (hi_fluid && !lo_fluid) p_lo = p_hi * (1.0f - 1.0f / airTheta(grid.cellIndex(i, j, k),     i, j, k - 1));
+        }
         grid.vel_z[grid.velZIndex(i, j, k)] -= grad_scale * (p_hi - p_lo);
     }
 
@@ -1355,6 +1485,37 @@ static int advectParticles(FluidParticles& parts,
     const float h    = grid.voxel_size;
     const float invH = 1.0f / h;
 
+    const int snx = grid.nx, sny = grid.ny, snz = grid.nz;
+    const bool has_solid = !grid.solid.empty();
+    const bool track_solid_vel = has_solid && grid.solid_vel.size() == grid.solid.size();
+
+    // Interior solid (collider) collision helpers. advectParticles only clamps
+    // to the DOMAIN walls; voxelized colliders are enforced on the GRID velocity
+    // by the pressure projection, but FLIP/APIC particles carry their own
+    // velocity and will tunnel through a thin solid band or get swept into a
+    // MOVING collider's cells. These resolve penetration at the particle level.
+    auto solidCellAt = [&](int i, int j, int k) -> bool {
+        if (i < 0 || i >= snx || j < 0 || j >= sny || k < 0 || k >= snz) return false;
+        return grid.solid[grid.cellIndex(i, j, k)] != 0u;
+    };
+    auto solidAtPos = [&](const Vec3& p) -> bool {
+        const Vec3 g = (p - grid.origin) * invH;
+        return solidCellAt(static_cast<int>(std::floor(g.x)),
+                           static_cast<int>(std::floor(g.y)),
+                           static_cast<int>(std::floor(g.z)));
+    };
+    // Linear velocity of the solid at a world position (0 if not solid / not
+    // tracked). Lets a MOVING collider hand its momentum to the fluid.
+    auto solidVelAtPos = [&](const Vec3& p) -> Vec3 {
+        if (!track_solid_vel) return Vec3(0.0f, 0.0f, 0.0f);
+        const Vec3 g = (p - grid.origin) * invH;
+        const int i = static_cast<int>(std::floor(g.x));
+        const int j = static_cast<int>(std::floor(g.y));
+        const int k = static_cast<int>(std::floor(g.z));
+        if (i < 0 || i >= snx || j < 0 || j >= sny || k < 0 || k >= snz) return Vec3(0.0f, 0.0f, 0.0f);
+        return grid.solid_vel[grid.cellIndex(i, j, k)];
+    };
+
     const int thread_count = solverThreadCount(params);
     const bool parallel = shouldParallelParticles(params, parts.size());
 
@@ -1384,12 +1545,23 @@ static int advectParticles(FluidParticles& parts,
     Vec3 lo = gmin + Vec3(pad, pad, pad);
     Vec3 hi = gmax - Vec3(pad, pad, pad);
 
+    // Wall behaviour. Closed clamps + bounces (sealed box). Open lets particles
+    // leave through the walls (flagged here, culled after the substep loop) so
+    // an "Open (Outflow)" domain actually drains. Periodic wraps to the far
+    // wall. Bit 1 of `flags` marks a particle as having flowed out.
+    const APICSolverParams::BoundaryMode boundary = params.boundary;
+    const Vec3 span = gmax - gmin;
+    constexpr uint32_t FLAG_OUTFLOW = 1u << 1;
+
     for (int s = 0; s < substeps; ++s) {
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(thread_count) if(parallel)
 #endif
         for (int64_t raw_pi = 0; raw_pi < static_cast<int64_t>(parts.size()); ++raw_pi) {
             const size_t pi = static_cast<size_t>(raw_pi);
+            // A particle that already flowed out this frame is frozen until the
+            // post-loop cull removes it — skip so it never samples outside.
+            if (parts.flags[pi] & FLAG_OUTFLOW) continue;
             // RK2 midpoint using grid velocity (more stable than forward Euler
             // for free-surface flow, negligible cost on CPU).
             Vec3 p0 = parts.position[pi];
@@ -1404,18 +1576,107 @@ static int advectParticles(FluidParticles& parts,
                     sampleMACComponent(grid, 2, gm));
             Vec3 pn = p0 + vm * sub_dt;
 
-            // Clamp to domain and dissipate wall-normal velocity. Without this
-            // early preview guard, particles stuck at the floor can feed energy
-            // back into the next pressure solve and explode outward.
-            Vec3& pv = parts.velocity[pi];
-            if (pn.x < lo.x) { pn.x = lo.x; pv.x = std::abs(pv.x) * wall_damping; }
-            if (pn.x > hi.x) { pn.x = hi.x; pv.x = -std::abs(pv.x) * wall_damping; }
-            if (pn.y < lo.y) { pn.y = lo.y; pv.y = std::abs(pv.y) * wall_damping; }
-            if (pn.y > hi.y) { pn.y = hi.y; pv.y = -std::abs(pv.y) * wall_damping; }
-            if (pn.z < lo.z) { pn.z = lo.z; pv.z = std::abs(pv.z) * wall_damping; }
-            if (pn.z > hi.z) { pn.z = hi.z; pv.z = -std::abs(pv.z) * wall_damping; }
+            // ── Interior solid (collider) collision ──────────────────────────
+            // Resolve BEFORE the domain-wall handling so a particle never slides
+            // into a voxelized collider. Two cases:
+            //   (a) the origin is already solid — a MOVING collider swept its
+            //       cells over the particle this step; eject to the nearest free
+            //       cell so the collider shoves the fluid instead of swallowing
+            //       it (the reported "particles aren't stopped" case).
+            //   (b) the destination is solid — separated-axis slide from p0 so
+            //       the blocked component stops while motion along the surface is
+            //       preserved (water slides along the box face, no tunneling).
+            if (has_solid) {
+                Vec3& pv = parts.velocity[pi];
+                if (solidAtPos(p0)) {
+                    const Vec3 g0c = (p0 - grid.origin) * invH;
+                    const int ci = static_cast<int>(std::floor(g0c.x));
+                    const int cj = static_cast<int>(std::floor(g0c.y));
+                    const int ck = static_cast<int>(std::floor(g0c.z));
+                    bool found = false;
+                    int fi = ci, fj = cj, fk = ck;
+                    for (int r = 1; r <= 3 && !found; ++r) {
+                        for (int dk = -r; dk <= r && !found; ++dk)
+                        for (int dj = -r; dj <= r && !found; ++dj)
+                        for (int di = -r; di <= r && !found; ++di) {
+                            if (std::max(std::abs(di), std::max(std::abs(dj), std::abs(dk))) != r) continue;
+                            if (!solidCellAt(ci + di, cj + dj, ck + dk)) {
+                                fi = ci + di; fj = cj + dj; fk = ck + dk;
+                                found = true;
+                            }
+                        }
+                    }
+                    if (found) {
+                        pn = grid.origin + Vec3((fi + 0.5f) * h, (fj + 0.5f) * h, (fk + 0.5f) * h);
+                        Vec3 nrm((float)(fi - ci), (float)(fj - cj), (float)(fk - ck));
+                        const float nl = nrm.length();
+                        if (nl > 1e-6f) {
+                            nrm = nrm * (1.0f / nl);
+                            // Carry the collider's momentum: give the particle the
+                            // solid velocity plus its own tangential slip, with no
+                            // velocity going back INTO the solid (relative frame).
+                            const Vec3 sv = solidVelAtPos(p0);
+                            Vec3 rel = pv - sv;
+                            const float rn = rel.x * nrm.x + rel.y * nrm.y + rel.z * nrm.z;
+                            if (rn < 0.0f) rel = rel - nrm * rn;
+                            pv = sv + rel;
+                        }
+                    }
+                } else if (solidAtPos(pn)) {
+                    // Separated-axis slide. A blocked axis takes the solid's
+                    // velocity (a MOVING wall drags the fluid along) instead of a
+                    // dead stop; a static collider's solid_vel is 0 → stop.
+                    Vec3 resolved = p0;
+                    Vec3 tx = resolved; tx.x = pn.x;
+                    if (!solidAtPos(tx)) resolved.x = pn.x; else pv.x = solidVelAtPos(tx).x;
+                    Vec3 ty = resolved; ty.y = pn.y;
+                    if (!solidAtPos(ty)) resolved.y = pn.y; else pv.y = solidVelAtPos(ty).y;
+                    Vec3 tz = resolved; tz.z = pn.z;
+                    if (!solidAtPos(tz)) resolved.z = pn.z; else pv.z = solidVelAtPos(tz).z;
+                    pn = resolved;
+                }
+            }
 
-            parts.position[pi] = pn;
+            if (boundary == APICSolverParams::BoundaryMode::Open) {
+                // Crossed any wall → flow out. Leave the position untouched (it
+                // is still in-bounds, so sampling stays safe) and flag for cull.
+                if (pn.x < gmin.x || pn.x > gmax.x ||
+                    pn.y < gmin.y || pn.y > gmax.y ||
+                    pn.z < gmin.z || pn.z > gmax.z) {
+                    parts.flags[pi] |= FLAG_OUTFLOW;
+                    continue;
+                }
+                parts.position[pi] = pn;
+            } else if (boundary == APICSolverParams::BoundaryMode::Periodic) {
+                // Wrap to the opposite wall so the particle re-enters in-bounds.
+                if (span.x > 1e-6f) { while (pn.x < gmin.x) pn.x += span.x; while (pn.x > gmax.x) pn.x -= span.x; }
+                if (span.y > 1e-6f) { while (pn.y < gmin.y) pn.y += span.y; while (pn.y > gmax.y) pn.y -= span.y; }
+                if (span.z > 1e-6f) { while (pn.z < gmin.z) pn.z += span.z; while (pn.z > gmax.z) pn.z -= span.z; }
+                parts.position[pi] = pn;
+            } else {
+                // Closed: clamp to domain and dissipate wall-normal velocity.
+                // Without this guard, particles stuck at the floor can feed
+                // energy back into the next pressure solve and explode outward.
+                Vec3& pv = parts.velocity[pi];
+                if (pn.x < lo.x) { pn.x = lo.x; pv.x = std::abs(pv.x) * wall_damping; }
+                if (pn.x > hi.x) { pn.x = hi.x; pv.x = -std::abs(pv.x) * wall_damping; }
+                if (pn.y < lo.y) { pn.y = lo.y; pv.y = std::abs(pv.y) * wall_damping; }
+                if (pn.y > hi.y) { pn.y = hi.y; pv.y = -std::abs(pv.y) * wall_damping; }
+                if (pn.z < lo.z) { pn.z = lo.z; pv.z = std::abs(pv.z) * wall_damping; }
+                if (pn.z > hi.z) { pn.z = hi.z; pv.z = -std::abs(pv.z) * wall_damping; }
+                parts.position[pi] = pn;
+            }
+        }
+    }
+
+    // Cull particles that flowed out of an open domain (serial swap-remove;
+    // order is irrelevant to the solver). Iterate backwards so swapped-in
+    // survivors are not skipped.
+    if (boundary == APICSolverParams::BoundaryMode::Open && !parts.empty()) {
+        for (int64_t pi = static_cast<int64_t>(parts.size()) - 1; pi >= 0; --pi) {
+            if (parts.flags[static_cast<size_t>(pi)] & FLAG_OUTFLOW) {
+                parts.removeSwap(static_cast<size_t>(pi));
+            }
         }
     }
 

@@ -56,6 +56,20 @@ struct SolverParams {
 
     float vorticity = 0.0f;          // vorticity confinement strength (0 = off)
 
+    // ── Procedural curl-noise turbulence (divergence-free FBM) ───────────────
+    // Adds natural swirling detail on top of the solved velocity field. The
+    // injected field is the curl of an animated FBM potential, so it is
+    // divergence-free by construction and does not fight the pressure solve.
+    // Modulated by local activity (density / heat / density-edge) so empty air
+    // stays still. 0 strength = off (the whole stage early-outs).
+    float turbulence_strength = 0.0f;
+    float turbulence_scale = 1.2f;       // base spatial frequency
+    int   turbulence_octaves = 3;        // FBM octaves (1-8)
+    float turbulence_lacunarity = 2.0f;  // frequency multiplier per octave
+    float turbulence_persistence = 0.5f; // amplitude decay per octave
+    float turbulence_speed = 0.5f;       // animation evolution speed
+    int   turbulence_seed = 42;
+
     int pressure_iterations = 40;
     float sor_omega = 1.7f;          // 1.0 = Gauss-Seidel, ~1.7 optimal for 3D
 

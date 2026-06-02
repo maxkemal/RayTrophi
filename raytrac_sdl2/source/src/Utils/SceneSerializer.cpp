@@ -316,6 +316,8 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["cfl"] = d.fluid_params.cfl;
     j["fluid_params"]["max_substeps"] = d.fluid_params.max_substeps;
     j["fluid_params"]["pressure_iterations"] = d.fluid_params.pressure_iterations;
+    j["fluid_params"]["pressure_relative_residual"] = d.fluid_params.pressure_relative_residual;
+    j["fluid_params"]["pressure_multigrid_preconditioner"] = d.fluid_params.pressure_multigrid_preconditioner;
     j["fluid_params"]["apic_blend"] = d.fluid_params.apic_blend;
     j["fluid_params"]["flip_blend"] = d.fluid_params.flip_blend;
     j["fluid_params"]["internal_friction"] = d.fluid_params.internal_friction;
@@ -385,9 +387,12 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
         fj["spawn_jitter_voxels"] = fo.spawn_jitter_voxels;
         fj["max_foam"] = static_cast<uint64_t>(fo.max_foam);
         fj["render_radius_voxels"] = fo.render_radius_voxels;
+        fj["foam_sphere_subdivisions"] = fo.foam_sphere_subdivisions;
         fj["render_mode"] = static_cast<int>(fo.render_mode);
         fj["volume_density"] = fo.volume_density;
         fj["foam_material_id"] = fo.foam_material_id;
+        fj["spray_material_id"] = fo.spray_material_id;
+        fj["bubble_material_id"] = fo.bubble_material_id;
         fj["surface_kernel_radius_voxels"]   = fo.surface_kernel_radius_voxels;
         fj["surface_particle_radius_voxels"] = fo.surface_particle_radius_voxels;
         fj["surface_band_voxels"]            = fo.surface_band_voxels;
@@ -403,6 +408,12 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["smoke_generation"] = d.smoke_generation;
     j["flame_dissipation"] = d.flame_dissipation;
     j["fire_max_temperature"] = d.fire_max_temperature;
+    j["turbulence_strength"] = d.turbulence_strength;
+    j["turbulence_scale"] = d.turbulence_scale;
+    j["turbulence_octaves"] = d.turbulence_octaves;
+    j["turbulence_lacunarity"] = d.turbulence_lacunarity;
+    j["turbulence_persistence"] = d.turbulence_persistence;
+    j["turbulence_speed"] = d.turbulence_speed;
     return j;
 }
 
@@ -439,6 +450,8 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("cfl")) d.fluid_params.cfl = fp["cfl"];
         if (fp.contains("max_substeps")) d.fluid_params.max_substeps = fp["max_substeps"];
         if (fp.contains("pressure_iterations")) d.fluid_params.pressure_iterations = fp["pressure_iterations"];
+        if (fp.contains("pressure_relative_residual")) d.fluid_params.pressure_relative_residual = fp["pressure_relative_residual"];
+        if (fp.contains("pressure_multigrid_preconditioner")) d.fluid_params.pressure_multigrid_preconditioner = fp["pressure_multigrid_preconditioner"];
         if (fp.contains("apic_blend")) d.fluid_params.apic_blend = fp["apic_blend"];
         if (fp.contains("flip_blend")) d.fluid_params.flip_blend = fp["flip_blend"];
         if (fp.contains("internal_friction")) d.fluid_params.internal_friction = fp["internal_friction"];
@@ -514,6 +527,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fj.contains("spawn_jitter_voxels")) fo.spawn_jitter_voxels = fj["spawn_jitter_voxels"];
         if (fj.contains("max_foam")) fo.max_foam = static_cast<std::size_t>(fj["max_foam"].get<uint64_t>());
         if (fj.contains("render_radius_voxels")) fo.render_radius_voxels = fj["render_radius_voxels"];
+        if (fj.contains("foam_sphere_subdivisions")) fo.foam_sphere_subdivisions = fj["foam_sphere_subdivisions"].get<int>();
         if (fj.contains("render_mode")) {
             // Enum changed: old {Volume=0, Spheres=1} → new {Surface=0, Spheres=1}.
             // An old Volume(0) save loads as Surface — the new metaball default.
@@ -523,6 +537,8 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         }
         if (fj.contains("volume_density")) fo.volume_density = fj["volume_density"];
         if (fj.contains("foam_material_id")) fo.foam_material_id = fj["foam_material_id"].get<int>();
+        if (fj.contains("spray_material_id")) fo.spray_material_id = fj["spray_material_id"].get<int>();
+        if (fj.contains("bubble_material_id")) fo.bubble_material_id = fj["bubble_material_id"].get<int>();
         if (fj.contains("surface_kernel_radius_voxels")) fo.surface_kernel_radius_voxels = fj["surface_kernel_radius_voxels"];
         if (fj.contains("surface_particle_radius_voxels")) fo.surface_particle_radius_voxels = fj["surface_particle_radius_voxels"];
         if (fj.contains("surface_band_voxels")) fo.surface_band_voxels = fj["surface_band_voxels"];
@@ -537,6 +553,12 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("smoke_generation")) d.smoke_generation = j["smoke_generation"];
     if (j.contains("flame_dissipation")) d.flame_dissipation = j["flame_dissipation"];
     if (j.contains("fire_max_temperature")) d.fire_max_temperature = j["fire_max_temperature"];
+    if (j.contains("turbulence_strength")) d.turbulence_strength = j["turbulence_strength"];
+    if (j.contains("turbulence_scale")) d.turbulence_scale = j["turbulence_scale"];
+    if (j.contains("turbulence_octaves")) d.turbulence_octaves = j["turbulence_octaves"];
+    if (j.contains("turbulence_lacunarity")) d.turbulence_lacunarity = j["turbulence_lacunarity"];
+    if (j.contains("turbulence_persistence")) d.turbulence_persistence = j["turbulence_persistence"];
+    if (j.contains("turbulence_speed")) d.turbulence_speed = j["turbulence_speed"];
     return d;
 }
 
@@ -556,6 +578,8 @@ json flowSourceToJson(const RayTrophiSim::SimulationFlowSourceDesc& fs) {
     j["fuel"] = fs.fuel;
     j["falloff"] = fs.falloff;
     j["fluid_particles_per_second"] = fs.fluid_particles_per_second;
+    j["fluid_velocity_spread"] = fs.fluid_velocity_spread;
+    j["fluid_emit_along_normal"] = fs.fluid_emit_along_normal;
     j["use_time_limit"] = fs.use_time_limit;
     j["start_time"] = fs.start_time;
     j["end_time"] = fs.end_time;
@@ -579,6 +603,8 @@ RayTrophiSim::SimulationFlowSourceDesc jsonToFlowSource(const json& j) {
     if (j.contains("fuel")) fs.fuel = j["fuel"];
     if (j.contains("falloff")) fs.falloff = j["falloff"];
     if (j.contains("fluid_particles_per_second")) fs.fluid_particles_per_second = j["fluid_particles_per_second"];
+    if (j.contains("fluid_velocity_spread")) fs.fluid_velocity_spread = j["fluid_velocity_spread"];
+    if (j.contains("fluid_emit_along_normal")) fs.fluid_emit_along_normal = j["fluid_emit_along_normal"];
     if (j.contains("use_time_limit")) fs.use_time_limit = j["use_time_limit"];
     if (j.contains("start_time")) fs.start_time = j["start_time"];
     if (j.contains("end_time")) fs.end_time = j["end_time"];
@@ -1187,9 +1213,13 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                         auto col_desc = jsonToCollider(cj);
                         auto& added_col = system.runtime->addCollider(col_desc);
                         
-                        // If it's ObjectMeshSDF and has a valid source_name, trigger rebuild
+                        // If it's ObjectMeshSDF and has a valid source_name, trigger rebuild.
+                        // Pass THIS system's runtime explicitly: during load it is not the
+                        // active system yet (active index is set after all systems are read),
+                        // so the default active-system lookup would attach the voxel SDF to
+                        // the wrong system and the collider would not block fluid on reload.
                         if (added_col.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF && !added_col.source_name.empty()) {
-                            scene.rebuildSDFColliderAsync(added_col);
+                            scene.rebuildSDFColliderAsync(added_col, system.runtime);
                         }
                     }
                 }
@@ -1244,6 +1274,18 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         }
     } else {
         scene.active_particle_system_index = scene.particle_systems.empty() ? -1 : 0;
+    }
+
+    // 9.7 Simulation bake cache (render-only on-disk point cache)
+    // If a "<project>.simcache" folder sits next to the project and its manifest
+    // matches the just-loaded systems' config, bind it so the timeline scrubs the
+    // baked sim straight from disk (no re-simulation). A config mismatch leaves it
+    // unbound — the sim falls back to live resimulation (Phase 2 UI flags it stale).
+    {
+        const std::string cache_dir = SceneData::simCacheDirForProject(filepath);
+        if (!cache_dir.empty() && scene.setSimDiskCache(cache_dir)) {
+            SCENE_LOG_INFO("Simulation bake cache bound from: " + cache_dir);
+        }
     }
 
     // 10. Rebuild All

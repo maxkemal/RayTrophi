@@ -643,6 +643,11 @@ static const char* particleColliderSourceModeToString(RayTrophiSim::ParticleColl
         case RayTrophiSim::ParticleColliderSourceMode::ObjectOBB: return "ObjectOBB";
         case RayTrophiSim::ParticleColliderSourceMode::Sphere: return "Sphere";
         case RayTrophiSim::ParticleColliderSourceMode::Capsule: return "Capsule";
+        // These were MISSING — an ObjectMeshSDF (voxel) / ConvexDecomp / MeshBVH
+        // collider fell through to "PlaneY", so it reloaded as a flat ground plane.
+        case RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF: return "ObjectMeshSDF";
+        case RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp: return "ObjectConvexDecomp";
+        case RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH: return "ObjectMeshBVH";
         case RayTrophiSim::ParticleColliderSourceMode::PlaneY:
         default: return "PlaneY";
     }
@@ -653,6 +658,9 @@ static RayTrophiSim::ParticleColliderSourceMode particleColliderSourceModeFromSt
     if (value == "ObjectOBB") return RayTrophiSim::ParticleColliderSourceMode::ObjectOBB;
     if (value == "Sphere") return RayTrophiSim::ParticleColliderSourceMode::Sphere;
     if (value == "Capsule") return RayTrophiSim::ParticleColliderSourceMode::Capsule;
+    if (value == "ObjectMeshSDF") return RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF;
+    if (value == "ObjectConvexDecomp") return RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp;
+    if (value == "ObjectMeshBVH") return RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH;
     return RayTrophiSim::ParticleColliderSourceMode::PlaneY;
 }
 
@@ -684,6 +692,19 @@ static RayTrophiSim::SimulationGridDomainBoundaryMode simulationGridDomainBounda
     if (value == "Closed") return RayTrophiSim::SimulationGridDomainBoundaryMode::Closed;
     if (value == "Periodic") return RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic;
     return RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
+}
+
+static const char* simulationDomainTypeToString(RayTrophiSim::SimulationDomainType type) {
+    switch (type) {
+        case RayTrophiSim::SimulationDomainType::Fluid: return "Fluid";
+        case RayTrophiSim::SimulationDomainType::Gas:
+        default: return "Gas";
+    }
+}
+
+static RayTrophiSim::SimulationDomainType simulationDomainTypeFromString(const std::string& value) {
+    if (value == "Fluid") return RayTrophiSim::SimulationDomainType::Fluid;
+    return RayTrophiSim::SimulationDomainType::Gas;
 }
 
 static const char* particlePhysicsModeToString(RayTrophiSim::ParticlePhysicsMode mode) {
@@ -2150,7 +2171,24 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     
     g_project.current_file_path = filepath;
     g_project.is_modified = false;
-    
+
+    // Bind an existing on-disk bake cache (render-only point cache) now that the
+    // project path is known AND particle systems are loaded (deserializeParticle
+    // Simulation ran earlier at the "particle_simulation" step). MUST be here, not
+    // inside deserializeParticleSimulation — current_file_path is only assigned on
+    // THIS line, i.e. AFTER that deserialize call, so doing it there saw an empty/
+    // stale path and the cache never bound. A config mismatch leaves it unbound
+    // (the sim falls back to live resimulation).
+    {
+        const std::string cache_dir = SceneData::simCacheDirForProject(filepath);
+        if (!cache_dir.empty() && scene.setSimDiskCache(cache_dir)) {
+            SCENE_LOG_INFO("[ProjectManager] Simulation bake cache bound from: " + cache_dir);
+        } else if (!cache_dir.empty()) {
+            SCENE_LOG_INFO("[ProjectManager] No matching sim bake cache at: " + cache_dir +
+                           " (none baked, or config changed since bake).");
+        }
+    }
+
     if (progress_callback) progress_callback(88, "Rebuilding model contexts...");
 
     scene.initialized = true;
@@ -3906,6 +3944,8 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["fuel"] = source.fuel;
         f["falloff"] = source.falloff;
         f["fluid_particles_per_second"] = source.fluid_particles_per_second;
+        f["fluid_velocity_spread"] = source.fluid_velocity_spread;
+        f["fluid_emit_along_normal"] = source.fluid_emit_along_normal;
         f["use_time_limit"] = source.use_time_limit;
         f["start_time"] = source.start_time;
         f["end_time"] = source.end_time;
@@ -3917,6 +3957,9 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
     auto serializeDomain = [](const RayTrophiSim::SimulationGridDomainDesc& domain) {
         json d;
         d["name"] = domain.name;
+        // Gas vs Fluid — was NOT serialized, so every domain reloaded as the
+        // default (Gas), losing fluid sims entirely. THIS is the fluid→gas bug.
+        d["type"] = simulationDomainTypeToString(domain.type);
         d["backend"] = static_cast<int>(domain.backend);
         d["source_mode"] = simulationGridDomainSourceModeToString(domain.source_mode);
         d["boundary_mode"] = simulationGridDomainBoundaryModeToString(domain.boundary_mode);
@@ -3945,6 +3988,8 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"cfl", domain.fluid_params.cfl},
             {"max_substeps", domain.fluid_params.max_substeps},
             {"pressure_iterations", domain.fluid_params.pressure_iterations},
+            {"pressure_relative_residual", domain.fluid_params.pressure_relative_residual},
+            {"pressure_multigrid_preconditioner", domain.fluid_params.pressure_multigrid_preconditioner},
             {"sor_omega", domain.fluid_params.sor_omega},
             {"apic_blend", domain.fluid_params.apic_blend},
             {"max_velocity", domain.fluid_params.max_velocity},
@@ -3967,6 +4012,69 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"air_drag", domain.fluid_params.air_drag},
             {"density_correction", domain.fluid_params.density_correction}
         };
+
+        d["fluid_render_mode"] = static_cast<int>(domain.fluid_render_mode);
+        d["fluid_particle_color"] = vec3ToJson(domain.fluid_particle_color);
+        d["fluid_particle_radius_factor"] = domain.fluid_particle_radius_factor;
+        d["fluid_particle_size_multiplier"] = domain.fluid_particle_size_multiplier;
+        d["fluid_particle_subdivisions"] = domain.fluid_particle_subdivisions;
+        d["fluid_particle_emissive"] = domain.fluid_particle_emissive;
+        d["fluid_particle_emission"] = domain.fluid_particle_emission;
+        d["fluid_particle_material_id"] = domain.fluid_particle_material_id;
+
+        d["fluid_level_set_params"] = {
+            {"narrow_band_voxels", domain.fluid_level_set_params.narrow_band_voxels},
+            {"kernel_radius_voxels", domain.fluid_level_set_params.kernel_radius_voxels},
+            {"particle_radius_voxels", domain.fluid_level_set_params.particle_radius_voxels},
+            {"smoothing_iterations", domain.fluid_level_set_params.smoothing_iterations},
+            {"surface_resolution_multiplier", domain.fluid_level_set_params.surface_resolution_multiplier},
+            {"anisotropy_enabled", domain.fluid_level_set_params.anisotropy_enabled},
+            {"anisotropy_radius_voxels", domain.fluid_level_set_params.anisotropy_radius_voxels},
+            {"anisotropy_max_stretch", domain.fluid_level_set_params.anisotropy_max_stretch},
+            {"anisotropy_neighbor_min", domain.fluid_level_set_params.anisotropy_neighbor_min},
+            {"position_smoothing", domain.fluid_level_set_params.position_smoothing}
+        };
+
+        d["fluid_surface_band_voxels"] = domain.fluid_surface_band_voxels;
+        d["fluid_surface_ior"] = domain.fluid_surface_ior;
+        d["fluid_surface_roughness"] = domain.fluid_surface_roughness;
+        d["fluid_surface_foam"] = domain.fluid_surface_foam;
+        d["fluid_debug_overlay"] = domain.fluid_debug_overlay;
+
+        const auto& fo = domain.fluid_foam_params;
+        d["foam"] = {
+            {"enabled", fo.enabled},
+            {"trapped_air_rate", fo.trapped_air_rate},
+            {"wave_crest_rate", fo.wave_crest_rate},
+            {"ta_min", fo.ta_min},
+            {"ta_max", fo.ta_max},
+            {"wc_min", fo.wc_min},
+            {"wc_max", fo.wc_max},
+            {"ke_min", fo.ke_min},
+            {"ke_max", fo.ke_max},
+            {"crest_cos", fo.crest_cos},
+            {"neighbor_radius_voxels", fo.neighbor_radius_voxels},
+            {"spray_max_neighbors", fo.spray_max_neighbors},
+            {"bubble_min_neighbors", fo.bubble_min_neighbors},
+            {"lifetime", fo.lifetime},
+            {"buoyancy", fo.buoyancy},
+            {"fluid_drag", fo.fluid_drag},
+            {"spray_drag", fo.spray_drag},
+            {"spawn_jitter_voxels", fo.spawn_jitter_voxels},
+            {"max_foam", static_cast<uint64_t>(fo.max_foam)},
+            {"render_radius_voxels", fo.render_radius_voxels},
+            {"foam_sphere_subdivisions", fo.foam_sphere_subdivisions},
+            {"render_mode", static_cast<int>(fo.render_mode)},
+            {"volume_density", fo.volume_density},
+            {"foam_material_id", fo.foam_material_id},
+            {"spray_material_id", fo.spray_material_id},
+            {"bubble_material_id", fo.bubble_material_id},
+            {"surface_kernel_radius_voxels", fo.surface_kernel_radius_voxels},
+            {"surface_particle_radius_voxels", fo.surface_particle_radius_voxels},
+            {"surface_band_voxels", fo.surface_band_voxels},
+            {"surface_smoothing_iterations", fo.surface_smoothing_iterations},
+            {"surface_resolution_multiplier", fo.surface_resolution_multiplier}
+        };
         d["fire_enabled"] = domain.fire_enabled;
         d["ignition_temperature"] = domain.ignition_temperature;
         d["burn_rate"] = domain.burn_rate;
@@ -3974,6 +4082,12 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["smoke_generation"] = domain.smoke_generation;
         d["flame_dissipation"] = domain.flame_dissipation;
         d["fire_max_temperature"] = domain.fire_max_temperature;
+        d["turbulence_strength"] = domain.turbulence_strength;
+        d["turbulence_scale"] = domain.turbulence_scale;
+        d["turbulence_octaves"] = domain.turbulence_octaves;
+        d["turbulence_lacunarity"] = domain.turbulence_lacunarity;
+        d["turbulence_persistence"] = domain.turbulence_persistence;
+        d["turbulence_speed"] = domain.turbulence_speed;
         if (domain.shader) {
             json s;
             s["name"] = domain.shader->name;
@@ -4149,6 +4263,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         source.fuel = item.value("fuel", source.fuel);
         source.falloff = item.value("falloff", source.falloff);
         source.fluid_particles_per_second = item.value("fluid_particles_per_second", source.fluid_particles_per_second);
+        source.fluid_velocity_spread = item.value("fluid_velocity_spread", source.fluid_velocity_spread);
+        source.fluid_emit_along_normal = item.value("fluid_emit_along_normal", source.fluid_emit_along_normal);
         source.use_time_limit = item.value("use_time_limit", source.use_time_limit);
         source.start_time = item.value("start_time", source.start_time);
         source.end_time = item.value("end_time", source.end_time);
@@ -4165,6 +4281,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             return domain;
         }
         domain.name = item.value("name", domain.name);
+        // Restore Gas/Fluid type (default Gas for pre-fix projects that lack it).
+        domain.type = simulationDomainTypeFromString(item.value("type", std::string("Gas")));
         domain.backend = static_cast<RayTrophiSim::SimulationDomainBackend>(item.value("backend", static_cast<int>(domain.backend)));
         domain.source_mode = simulationGridDomainSourceModeFromString(item.value("source_mode", std::string("ManualBox")));
         domain.boundary_mode = simulationGridDomainBoundaryModeFromString(item.value("boundary_mode", std::string("Open")));
@@ -4198,6 +4316,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.cfl = f.value("cfl", domain.fluid_params.cfl);
             domain.fluid_params.max_substeps = f.value("max_substeps", domain.fluid_params.max_substeps);
             domain.fluid_params.pressure_iterations = f.value("pressure_iterations", domain.fluid_params.pressure_iterations);
+            domain.fluid_params.pressure_relative_residual = f.value("pressure_relative_residual", domain.fluid_params.pressure_relative_residual);
+            domain.fluid_params.pressure_multigrid_preconditioner = f.value("pressure_multigrid_preconditioner", domain.fluid_params.pressure_multigrid_preconditioner);
             domain.fluid_params.sor_omega = f.value("sor_omega", domain.fluid_params.sor_omega);
             domain.fluid_params.apic_blend = f.value("apic_blend", domain.fluid_params.apic_blend);
             domain.fluid_params.max_velocity = f.value("max_velocity", domain.fluid_params.max_velocity);
@@ -4223,6 +4343,71 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.air_drag = f.value("air_drag", domain.fluid_params.air_drag);
             domain.fluid_params.density_correction = f.value("density_correction", domain.fluid_params.density_correction);
         }
+
+        if (item.contains("fluid_render_mode")) domain.fluid_render_mode = static_cast<RayTrophiSim::Fluid::FluidRenderMode>(item["fluid_render_mode"].get<int>());
+        if (item.contains("fluid_particle_color")) domain.fluid_particle_color = jsonToVec3(item["fluid_particle_color"]);
+        domain.fluid_particle_radius_factor = item.value("fluid_particle_radius_factor", domain.fluid_particle_radius_factor);
+        domain.fluid_particle_size_multiplier = item.value("fluid_particle_size_multiplier", domain.fluid_particle_size_multiplier);
+        domain.fluid_particle_subdivisions = item.value("fluid_particle_subdivisions", domain.fluid_particle_subdivisions);
+        domain.fluid_particle_emissive = item.value("fluid_particle_emissive", domain.fluid_particle_emissive);
+        domain.fluid_particle_emission = item.value("fluid_particle_emission", domain.fluid_particle_emission);
+        domain.fluid_particle_material_id = item.value("fluid_particle_material_id", domain.fluid_particle_material_id);
+
+        if (item.contains("fluid_level_set_params") && item["fluid_level_set_params"].is_object()) {
+            const auto& lsp = item["fluid_level_set_params"];
+            domain.fluid_level_set_params.narrow_band_voxels = lsp.value("narrow_band_voxels", domain.fluid_level_set_params.narrow_band_voxels);
+            domain.fluid_level_set_params.kernel_radius_voxels = lsp.value("kernel_radius_voxels", domain.fluid_level_set_params.kernel_radius_voxels);
+            domain.fluid_level_set_params.particle_radius_voxels = lsp.value("particle_radius_voxels", domain.fluid_level_set_params.particle_radius_voxels);
+            domain.fluid_level_set_params.smoothing_iterations = lsp.value("smoothing_iterations", domain.fluid_level_set_params.smoothing_iterations);
+            domain.fluid_level_set_params.surface_resolution_multiplier = lsp.value("surface_resolution_multiplier", domain.fluid_level_set_params.surface_resolution_multiplier);
+            domain.fluid_level_set_params.anisotropy_enabled = lsp.value("anisotropy_enabled", domain.fluid_level_set_params.anisotropy_enabled);
+            domain.fluid_level_set_params.anisotropy_radius_voxels = lsp.value("anisotropy_radius_voxels", domain.fluid_level_set_params.anisotropy_radius_voxels);
+            domain.fluid_level_set_params.anisotropy_max_stretch = lsp.value("anisotropy_max_stretch", domain.fluid_level_set_params.anisotropy_max_stretch);
+            domain.fluid_level_set_params.anisotropy_neighbor_min = lsp.value("anisotropy_neighbor_min", domain.fluid_level_set_params.anisotropy_neighbor_min);
+            domain.fluid_level_set_params.position_smoothing = lsp.value("position_smoothing", domain.fluid_level_set_params.position_smoothing);
+        }
+
+        domain.fluid_surface_band_voxels = item.value("fluid_surface_band_voxels", domain.fluid_surface_band_voxels);
+        domain.fluid_surface_ior = item.value("fluid_surface_ior", domain.fluid_surface_ior);
+        domain.fluid_surface_roughness = item.value("fluid_surface_roughness", domain.fluid_surface_roughness);
+        domain.fluid_surface_foam = item.value("fluid_surface_foam", domain.fluid_surface_foam);
+        domain.fluid_debug_overlay = item.value("fluid_debug_overlay", domain.fluid_debug_overlay);
+
+        if (item.contains("foam") && item["foam"].is_object()) {
+            const auto& fo_js = item["foam"];
+            auto& fo = domain.fluid_foam_params;
+            fo.enabled = fo_js.value("enabled", fo.enabled);
+            fo.trapped_air_rate = fo_js.value("trapped_air_rate", fo.trapped_air_rate);
+            fo.wave_crest_rate = fo_js.value("wave_crest_rate", fo.wave_crest_rate);
+            fo.ta_min = fo_js.value("ta_min", fo.ta_min);
+            fo.ta_max = fo_js.value("ta_max", fo.ta_max);
+            fo.wc_min = fo_js.value("wc_min", fo.wc_min);
+            fo.wc_max = fo_js.value("wc_max", fo.wc_max);
+            fo.ke_min = fo_js.value("ke_min", fo.ke_min);
+            fo.ke_max = fo_js.value("ke_max", fo.ke_max);
+            fo.crest_cos = fo_js.value("crest_cos", fo.crest_cos);
+            fo.neighbor_radius_voxels = fo_js.value("neighbor_radius_voxels", fo.neighbor_radius_voxels);
+            fo.spray_max_neighbors = fo_js.value("spray_max_neighbors", fo.spray_max_neighbors);
+            fo.bubble_min_neighbors = fo_js.value("bubble_min_neighbors", fo.bubble_min_neighbors);
+            fo.lifetime = fo_js.value("lifetime", fo.lifetime);
+            fo.buoyancy = fo_js.value("buoyancy", fo.buoyancy);
+            fo.fluid_drag = fo_js.value("fluid_drag", fo.fluid_drag);
+            fo.spray_drag = fo_js.value("spray_drag", fo.spray_drag);
+            fo.spawn_jitter_voxels = fo_js.value("spawn_jitter_voxels", fo.spawn_jitter_voxels);
+            fo.max_foam = fo_js.value("max_foam", fo.max_foam);
+            fo.render_radius_voxels = fo_js.value("render_radius_voxels", fo.render_radius_voxels);
+            fo.foam_sphere_subdivisions = fo_js.value("foam_sphere_subdivisions", fo.foam_sphere_subdivisions);
+            fo.render_mode = static_cast<RayTrophiSim::Fluid::FoamRenderMode>(fo_js.value("render_mode", static_cast<int>(fo.render_mode)));
+            fo.volume_density = fo_js.value("volume_density", fo.volume_density);
+            fo.foam_material_id = fo_js.value("foam_material_id", fo.foam_material_id);
+            fo.spray_material_id = fo_js.value("spray_material_id", fo.spray_material_id);
+            fo.bubble_material_id = fo_js.value("bubble_material_id", fo.bubble_material_id);
+            fo.surface_kernel_radius_voxels = fo_js.value("surface_kernel_radius_voxels", fo.surface_kernel_radius_voxels);
+            fo.surface_particle_radius_voxels = fo_js.value("surface_particle_radius_voxels", fo.surface_particle_radius_voxels);
+            fo.surface_band_voxels = fo_js.value("surface_band_voxels", fo.surface_band_voxels);
+            fo.surface_smoothing_iterations = fo_js.value("surface_smoothing_iterations", fo.surface_smoothing_iterations);
+            fo.surface_resolution_multiplier = fo_js.value("surface_resolution_multiplier", fo.surface_resolution_multiplier);
+        }
         domain.fire_enabled = item.value("fire_enabled", domain.fire_enabled);
         domain.ignition_temperature = item.value("ignition_temperature", domain.ignition_temperature);
         domain.burn_rate = item.value("burn_rate", domain.burn_rate);
@@ -4230,6 +4415,12 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         domain.smoke_generation = item.value("smoke_generation", domain.smoke_generation);
         domain.flame_dissipation = item.value("flame_dissipation", domain.flame_dissipation);
         domain.fire_max_temperature = item.value("fire_max_temperature", domain.fire_max_temperature);
+        domain.turbulence_strength = item.value("turbulence_strength", domain.turbulence_strength);
+        domain.turbulence_scale = item.value("turbulence_scale", domain.turbulence_scale);
+        domain.turbulence_octaves = item.value("turbulence_octaves", domain.turbulence_octaves);
+        domain.turbulence_lacunarity = item.value("turbulence_lacunarity", domain.turbulence_lacunarity);
+        domain.turbulence_persistence = item.value("turbulence_persistence", domain.turbulence_persistence);
+        domain.turbulence_speed = item.value("turbulence_speed", domain.turbulence_speed);
         if (item.contains("shader")) {
             const auto& js = item["shader"];
             auto shader = std::make_shared<VolumeShader>();
@@ -4297,13 +4488,24 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         }
         if (colliders && colliders->is_array()) {
             for (const auto& collider_item : *colliders) {
-                if (collider_item.is_object()) system.runtime->addCollider(parseCollider(collider_item));
+                if (!collider_item.is_object()) continue;
+                auto& added_col = system.runtime->addCollider(parseCollider(collider_item));
+                // Voxel colliders don't serialize their SDF grid — rebuild it from
+                // the source mesh on load. Pass THIS system's runtime explicitly
+                // (it is not the active system yet during load).
+                if (added_col.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF &&
+                    !added_col.source_name.empty()) {
+                    scene.rebuildSDFColliderAsync(added_col, system.runtime);
+                }
             }
         }
         if (domains && domains->is_array()) {
             for (const auto& domain_item : *domains) {
                 if (domain_item.is_object()) system.runtime->addGridDomain(parseDomain(domain_item));
             }
+            // Sync states from descs so each domain's STATE carries its restored
+            // type (Gas/Fluid) + grid metadata immediately (default states are Gas).
+            system.runtime->synchronizeGridDomainsNow();
         }
         if (flow_sources && flow_sources->is_array()) {
             for (const auto& flow_item : *flow_sources) {
@@ -4366,4 +4568,6 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
     } else {
         SCENE_LOG_INFO("[ProjectManager] Loaded empty particle simulation.");
     }
+    // NOTE: the on-disk bake cache is bound in loadProject AFTER
+    // g_project.current_file_path is assigned (it is still empty/stale here).
 }

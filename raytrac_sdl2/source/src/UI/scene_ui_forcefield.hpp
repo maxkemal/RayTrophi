@@ -967,6 +967,8 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         bool solver_edited = false;
         ImGui::DragFloat3("Gravity", &fluid->params.gravity.x, 0.05f, -100.0f, 100.0f, "%.2f");
         ImGui::SliderInt("Pressure Iterations", &fluid->params.pressure_iterations, 1, 120);
+        ImGui::DragFloat("Pressure Residual Target", &fluid->params.pressure_relative_residual, 1.0e-6f, 1.0e-8f, 1.0e-2f, "%.1e");
+        ImGui::Checkbox("Pressure Layer B V-cycle", &fluid->params.pressure_multigrid_preconditioner);
         solver_edited |= ImGui::DragFloat("Density Correction", &fluid->params.density_correction, 0.05f, 0.0f, 10.0f, "%.2f");
         // SOR Omega is dead with PCG+MIC(0); kept in the struct for project
         // file backward compat, hidden here.
@@ -985,6 +987,10 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             fluid->params.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
         }
         ImGui::Checkbox("Free Surface", &fluid->params.free_surface);
+        ImGui::Checkbox("Ghost Fluid Method (GFM) Surface", &fluid->params.ghost_fluid_surface);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Ghost Fluid Method (GFM) models sub-cell pressure extrapolation at the air-fluid boundary to eliminate staircasing/aliasing.");
+        }
         ImGui::Checkbox("Reseed Enabled", &fluid->params.reseed_enabled);
         if (fluid->params.reseed_enabled) {
             ImGui::DragInt("Reseed Target/Cell", &fluid->params.reseed_target_per_cell, 0.1f, 0, 64);
@@ -1152,10 +1158,13 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         const int domain_count = particles ? static_cast<int>(particles->gridDomains().size()) : 0;
         ImGui::Text("Domains: %d", domain_count);
 
+        // With no object selected, spawn the domain centred on the world origin
+        // (a predictable, reproducible spot) rather than wherever the camera
+        // happens to be looking — camera->lookat drifts as the user orbits, so
+        // a "default" domain would otherwise land at an arbitrary off-centre
+        // coordinate. Y stays slightly above the origin so the box straddles
+        // the ground plane the same way it always has.
         Vec3 center(0.0f, 1.0f, 0.0f);
-        if (ui_ctx.scene.camera) {
-            center = ui_ctx.scene.camera->lookat;
-        }
 
         const bool has_object_selection =
             ui_ctx.selection.selected.type == SelectableType::Object &&
@@ -1171,7 +1180,11 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
 
         if (ImGui::Button("Add Grid Domain##SimulationPanel", ImVec2(-1, 0))) {
             RayTrophiSim::SimulationGridDomainDesc desc;
-            desc.name = "Grid Domain";
+            // Unique default name so the list is distinguishable at a glance
+            // (the [Gas]/[Fluid] tag in the list is derived from .type, not the
+            // name, so it stays correct after a type switch).
+            const std::size_t domain_count = particles ? particles->gridDomains().size() : 0;
+            desc.name = "Grid Domain " + std::to_string(domain_count + 1);
             desc.source_mode = RayTrophiSim::SimulationGridDomainSourceMode::ManualBox;
             desc.bounds_min = center + Vec3(-2.5f, -2.5f, -2.5f);
             desc.bounds_max = center + Vec3(2.5f, 2.5f, 2.5f);
@@ -1289,7 +1302,13 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         if (ImGui::BeginListBox("##SimulationGridDomainListStandalone", ImVec2(-1, 110))) {
             for (int i = 0; i < static_cast<int>(domains.size()); ++i) {
                 char label[256];
-                std::snprintf(label, sizeof(label), "%s##domain_standalone%d", domains[i].name.c_str(), i);
+                // Type tag is DERIVED from the live domain type, not stored in
+                // the name — so it follows a Gas<->Fluid switch automatically and
+                // the user can still rename the domain freely.
+                const char* type_tag =
+                    (domains[i].type == RayTrophiSim::SimulationDomainType::Fluid) ? "Fluid" : "Gas";
+                std::snprintf(label, sizeof(label), "%s  [%s]##domain_standalone%d",
+                              domains[i].name.c_str(), type_tag, i);
                 if (ImGui::Selectable(label, selected_domain_index == i)) {
                     selected_domain_index = i;
                     clearForceFieldSelection();
@@ -1360,6 +1379,12 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             if (ImGui::Button("Fluid (Liquid)##TypeFluid", ImVec2(button_width, 30))) {
                 if (!is_fluid) {
                     domain.type = RayTrophiSim::SimulationDomainType::Fluid;
+                    // Liquid wants a sealed box by default so it pools/settles;
+                    // open walls would silently drain it. Only override the
+                    // gas-default Open — leave an already-chosen Closed/Periodic.
+                    if (domain.boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Open) {
+                        domain.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Closed;
+                    }
                     ui_ctx.start_render = true;
                     if (scene.active_particle_system_index >= 0 &&
                         scene.active_particle_system_index < static_cast<int>(scene.particle_systems.size())) {
@@ -1812,6 +1837,69 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                         ImGui::TextDisabled("Combustion is disabled. Simulating smoke (Density) only.");
                     }
                     }
+
+                    // Procedural turbulence (divergence-free curl-noise detail).
+                    if (ImGui::CollapsingHeader("Turbulence (Procedural Detail)")) {
+                        ImGui::Spacing();
+                        ImGui::DragFloat("Turbulence Strength", &domain.turbulence_strength, 0.01f, 0.0f, 50.0f, "%.3f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Adds divergence-free swirling detail on top of the solved motion.\n"
+                                              "0 = off. Modulated by local density/heat/edges so still air stays calm.\n"
+                                              "Not applied on the Sparse VDB backend.");
+                        }
+                        if (domain.turbulence_strength > 0.0f) {
+                            ImGui::DragFloat("Noise Scale", &domain.turbulence_scale, 0.02f, 0.05f, 20.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Base spatial frequency of the noise. Higher = finer, busier swirls.");
+                            ImGui::DragInt("Octaves", &domain.turbulence_octaves, 1, 1, 8);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("FBM octaves. More octaves add finer layered detail at higher cost.");
+                            ImGui::DragFloat("Lacunarity", &domain.turbulence_lacunarity, 0.02f, 1.0f, 4.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Frequency multiplier per octave (typical ~2.0).");
+                            ImGui::DragFloat("Persistence", &domain.turbulence_persistence, 0.02f, 0.0f, 1.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Amplitude decay per octave (typical ~0.5).");
+                            ImGui::DragFloat("Evolution Speed", &domain.turbulence_speed, 0.02f, 0.0f, 5.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How fast the turbulence field animates over time.");
+                        }
+                    }
+
+                    // Export the current live frame to an OpenVDB file (density /
+                    // temperature / fuel / flame, channel-aware) for DCC interchange.
+                    if (ImGui::CollapsingHeader("VDB Export")) {
+                        ImGui::Spacing();
+                        static char gas_vdb_export_dir[512] = "";
+                        static std::string gas_vdb_export_message;
+                        static bool gas_vdb_export_ok = false;
+                        ImGui::InputText("Export Folder", gas_vdb_export_dir, sizeof(gas_vdb_export_dir));
+                        ImGui::SameLine();
+                        if (ImGui::Button("Browse##GasVdbExport")) {
+                            std::string path = SceneUI::selectFolderDialogW(L"Select VDB Export Directory");
+                            if (!path.empty()) {
+                                strncpy_s(gas_vdb_export_dir, path.c_str(), sizeof(gas_vdb_export_dir) - 1);
+                            }
+                        }
+                        if (ImGui::Button("Export Current Frame (.vdb)", ImVec2(-1, 0))) {
+                            if (strlen(gas_vdb_export_dir) == 0) {
+                                gas_vdb_export_ok = false;
+                                gas_vdb_export_message = "Please choose an export folder first.";
+                            } else {
+                                std::string full_path = std::string(gas_vdb_export_dir) + "/" +
+                                                        domain.name + ".vdb";
+                                gas_vdb_export_ok = particles->exportGridDomainToVDB(
+                                    static_cast<std::size_t>(selected_domain_index), full_path);
+                                gas_vdb_export_message = gas_vdb_export_ok
+                                    ? ("Saved: " + full_path)
+                                    : "Export failed (empty/invalid domain or I/O error).";
+                            }
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Writes the domain's current voxel fields to a single .vdb.\n"
+                                              "Run the simulation to the desired frame first.");
+                        }
+                        if (!gas_vdb_export_message.empty()) {
+                            ImGui::TextColored(gas_vdb_export_ok ? ImVec4(0.4f, 1.0f, 0.4f, 1.0f)
+                                                                 : ImVec4(1.0f, 0.5f, 0.5f, 1.0f),
+                                               "%s", gas_vdb_export_message.c_str());
+                        }
+                    }
                 } else {
                     auto& fp = domain.fluid_params;
                     // Fluid Seeding & Limits
@@ -1929,6 +2017,10 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                         ImGui::SetTooltip("ON: Sets pressure to zero at surface air boundaries, creating natural free-surface waves.\n"
                                           "OFF: Simulates enclosed pressurized fluid flow.");
                     }
+                    ImGui::Checkbox("Ghost Fluid Method (GFM) Surface", &fp.ghost_fluid_surface);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Ghost Fluid Method (GFM) models sub-cell pressure extrapolation at the air-fluid boundary to eliminate staircasing/aliasing.");
+                    }
 
                     ImGui::DragFloat("CFL Stability Factor", &fp.cfl,              0.01f,  0.05f, 1.0f, "%.2f");
                     if (ImGui::IsItemHovered()) {
@@ -1941,6 +2033,16 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                     ImGui::DragInt("Poisson Pressure Iterations", &fp.pressure_iterations, 1.0f, 0, 200);
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Iterations for solving incompressibility (Poisson equation). Higher values prevent compression.");
+                    }
+                    ImGui::DragFloat("Pressure Residual Target", &fp.pressure_relative_residual, 1.0e-6f, 1.0e-8f, 1.0e-2f, "%.1e");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Relative residual target for CPU PCG / GPU MGPCG pressure solve.\n"
+                                          "1e-5 matches the current high-accuracy default; 1e-4 can reduce GPU dot-sync cost in heavy previews.");
+                    }
+                    ImGui::Checkbox("Pressure Layer B V-cycle", &fp.pressure_multigrid_preconditioner);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Experimental CUDA MGPCG multigrid preconditioner.\n"
+                                          "Can cut iteration count on large grids, but adds extra dispatch work per iteration.");
                     }
                     if (fp_edited) {
                         fp.current_preset = RayTrophiSim::Fluid::APICSolverParams::FluidPreset::Custom;
@@ -1989,9 +2091,35 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                 
                 if (!can_add_object_flow) ImGui::BeginDisabled();
                 if (ImGui::Button("Add Flow Source From Selection##DomainFlow", ImVec2(-1, 28))) {
-                    scene.addSimulationFlowSourceFromObject(
-                        ui_ctx.selection.selected.object->getNodeName(),
-                        selected_domain_index);
+                    // Mirror the Point-source path exactly: build the desc inline
+                    // and add it straight to THIS panel's runtime with the
+                    // currently-selected domain_index. The old scene-level helper
+                    // hard-coded gas channels (density/temperature) and an upward
+                    // velocity, so a source dropped on a FLUID domain carried gas
+                    // parameters — it read as if it were emitting into the gas
+                    // system too. Now the defaults follow the selected domain's
+                    // type, and only one source is created, on that one domain.
+                    RayTrophiSim::SimulationFlowSourceDesc desc;
+                    const std::string node = ui_ctx.selection.selected.object->getNodeName();
+                    desc.name = node.empty() ? "Object Flow Source" : node + " Flow";
+                    desc.source_mode = RayTrophiSim::SimulationFlowSourceMode::ObjectBounds;
+                    desc.source_name = node;
+                    desc.domain_index = selected_domain_index;
+                    if (is_fluid_domain) {
+                        desc.velocity = Vec3(0.0f, -1.0f, 0.0f); // pour down
+                        desc.density = 0.0f; desc.temperature = 0.0f; desc.fuel = 0.0f;
+                    } else {
+                        desc.velocity = Vec3(0.0f, 1.0f, 0.0f);  // plume up
+                        desc.density = 2.0f; desc.temperature = 0.6f; desc.fuel = 0.0f;
+                    }
+                    Vec3 mn_b, mx_b;
+                    if (scene.resolveObjectBoundsForSimulation(node, mn_b, mx_b)) {
+                        const Vec3 lo = Vec3::min(mn_b, mx_b);
+                        const Vec3 hi = Vec3::max(mn_b, mx_b);
+                        desc.position = (lo + hi) * 0.5f;
+                        desc.radius = std::max(0.05f, (hi - lo).length() * 0.25f);
+                    }
+                    particles->addFlowSource(desc);
                 }
                 if (ImGui::IsItemHovered() && can_add_object_flow) {
                     ImGui::SetTooltip("Injects a dynamic flow source emitting smoke or liquid utilizing the volume or surface shell of the selected 3D mesh.");
@@ -2005,6 +2133,11 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                     desc.domain_index = selected_domain_index;
                     desc.position = (Vec3::min(domain.bounds_min, domain.bounds_max) +
                                      Vec3::max(domain.bounds_min, domain.bounds_max)) * 0.5f;
+                    // A liquid source pours DOWN (gravity + emission agree); a gas
+                    // source blasts UP (smoke/fire rises). The old shared (0,1,0)
+                    // default made liquids shoot upward and bunch into a falling
+                    // plate at the trajectory apex.
+                    desc.velocity = is_fluid_domain ? Vec3(0.0f, -1.0f, 0.0f) : Vec3(0.0f, 1.0f, 0.0f);
                     particles->addFlowSource(desc);
                 }
                 if (ImGui::IsItemHovered()) {
@@ -2042,7 +2175,19 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
 
                     ImGui::DragFloat("Source Radius", &source.radius, 0.01f, 0.001f, 1000.0f, "%.3f");
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Physical radius of the point flow injection sphere.");
+                        switch (source.source_mode) {
+                            case RayTrophiSim::SimulationFlowSourceMode::Point:
+                                ImGui::SetTooltip("Radius of the spherical spawn volume around the source position.");
+                                break;
+                            case RayTrophiSim::SimulationFlowSourceMode::MeshSurface:
+                                ImGui::SetTooltip("Distance particles spawn off the mesh surface along its normal\n"
+                                                  "(prevents embedding the spawn inside the geometry).");
+                                break;
+                            default:
+                                ImGui::SetTooltip("Spawn-volume radius. For Object Bounding Box mode the box itself\n"
+                                                  "defines the volume; radius only widens the gas injection falloff.");
+                                break;
+                        }
                     }
                     source.radius = std::max(0.001f, source.radius);
 
@@ -2071,9 +2216,31 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                         }
                         source.falloff = std::max(0.0f, source.falloff);
                     }
-                    ImGui::DragFloat3("Initial Blast Velocity", &source.velocity.x, 0.05f, -10000.0f, 10000.0f, "%.2f");
+                    ImGui::DragFloat3("Emission Velocity", &source.velocity.x, 0.05f, -10000.0f, 10000.0f, "%.2f");
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Directional force vector applied to injected fluid/smoke.");
+                        ImGui::SetTooltip("Initial velocity (m/s) given to each emitted particle / injected cell.\n"
+                                          "This is a one-time launch velocity, NOT a continuous force — gravity and\n"
+                                          "buoyancy take over afterwards. Liquid: point it down to pour; gas: up to plume.");
+                    }
+
+                    if (is_fluid_domain) {
+                        ImGui::DragFloat("Velocity Spread", &source.fluid_velocity_spread, 0.01f, 0.0f, 2.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Per-particle random velocity jitter, as a fraction of the emission speed.\n"
+                                              "0 = laminar (all particles share one velocity) — the stream stays a\n"
+                                              "coherent sheet that falls as a slab and only breaks up on impact.\n"
+                                              "0.1-0.3 disperses the stream at the source so it flows like water.");
+                        }
+                        source.fluid_velocity_spread = std::max(0.0f, source.fluid_velocity_spread);
+
+                        if (source.source_mode == RayTrophiSim::SimulationFlowSourceMode::MeshSurface) {
+                            ImGui::Checkbox("Emit Along Surface Normal", &source.fluid_emit_along_normal);
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("Spray particles outward along each surface point's normal\n"
+                                                  "(speed = the Emission Velocity magnitude) instead of using the\n"
+                                                  "single velocity vector. Makes liquid follow the mesh shape.");
+                            }
+                        }
                     }
 
                     if (source.source_mode == RayTrophiSim::SimulationFlowSourceMode::Point) {
@@ -2440,33 +2607,76 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                             // frame -> OptiX unresponsive). Whitewater is particulate,
                             // so spheres are both cheaper and the more faithful look.
 
-                            // ── Foam material picker (assign any scene material) ──
+                            // ── Foam material pickers (with custom overrides) ──
                             {
-                                auto& mm = MaterialManager::getInstance();
-                                const size_t mcount = mm.getMaterialCount();
-                                std::string cur_label = (fo.foam_material_id < 0)
-                                    ? std::string("Default (white foam)")
-                                    : mm.getMaterialName(static_cast<uint16_t>(fo.foam_material_id));
-                                if (cur_label.empty()) cur_label = "Default (white foam)";
-                                if (ImGui::BeginCombo("Foam Material", cur_label.c_str())) {
-                                    if (ImGui::Selectable("Default (white foam)", fo.foam_material_id < 0)) {
-                                        fo.foam_material_id = -1; foam_changed = true;
-                                    }
-                                    for (size_t i = 0; i < mcount; ++i) {
-                                        const std::string nm = mm.getMaterialName(static_cast<uint16_t>(i));
-                                        const bool sel = (fo.foam_material_id == static_cast<int>(i));
-                                        const std::string lbl = nm.empty() ? ("Material " + std::to_string(i)) : nm;
-                                        if (ImGui::Selectable(lbl.c_str(), sel)) {
-                                            fo.foam_material_id = static_cast<int>(i); foam_changed = true;
-                                        }
-                                    }
-                                    ImGui::EndCombo();
+                                static bool show_material_overrides = false;
+                                static int last_domain_id = -1;
+                                if (last_domain_id != selected_domain_index) {
+                                    show_material_overrides = (fo.spray_material_id >= 0 || fo.bubble_material_id >= 0);
+                                    last_domain_id = selected_domain_index;
                                 }
-                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scene material applied to the foam geometry. Edit it in the Materials panel like any PBR material.");
+
+                                ImGui::Checkbox("Custom Material Overrides", &show_material_overrides);
+                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Assign distinct scene materials to Spray, Foam, and Bubble independently.");
+
+                                auto drawMaterialCombo = [&](const char* label, int& mat_id_ref, const char* default_label) {
+                                    auto& mm = MaterialManager::getInstance();
+                                    const size_t mcount = mm.getMaterialCount();
+                                    std::string cur_label = (mat_id_ref < 0)
+                                        ? std::string(default_label)
+                                        : mm.getMaterialName(static_cast<uint16_t>(mat_id_ref));
+                                    if (cur_label.empty()) cur_label = default_label;
+                                    
+                                    bool changed = false;
+                                    if (ImGui::BeginCombo(label, cur_label.c_str())) {
+                                        if (ImGui::Selectable(default_label, mat_id_ref < 0)) {
+                                            mat_id_ref = -1; changed = true;
+                                        }
+                                        for (size_t i = 0; i < mcount; ++i) {
+                                            const std::string nm = mm.getMaterialName(static_cast<uint16_t>(i));
+                                            const bool sel = (mat_id_ref == static_cast<int>(i));
+                                            const std::string lbl = nm.empty() ? ("Material " + std::to_string(i)) : nm;
+                                            if (ImGui::Selectable(lbl.c_str(), sel)) {
+                                                mat_id_ref = static_cast<int>(i); changed = true;
+                                            }
+                                        }
+                                        ImGui::EndCombo();
+                                    }
+                                    return changed;
+                                };
+
+                                if (show_material_overrides) {
+                                    ImGui::Indent();
+                                    if (drawMaterialCombo("Spray Material", fo.spray_material_id, "Default (water droplet)")) {
+                                        foam_changed = true;
+                                    }
+                                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("PBR material for airborne water droplets (Spray).");
+
+                                    if (drawMaterialCombo("Foam Material", fo.foam_material_id, "Default (white foam)")) {
+                                        foam_changed = true;
+                                    }
+                                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("PBR material for surface foam clusters (Foam).");
+
+                                    if (drawMaterialCombo("Bubble Material", fo.bubble_material_id, "Default (air bubble)")) {
+                                        foam_changed = true;
+                                    }
+                                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("PBR material for submerged air bubbles (Bubble).");
+                                    ImGui::Unindent();
+                                } else {
+                                    if (drawMaterialCombo("Foam Material", fo.foam_material_id, "Default (white foam)")) {
+                                        foam_changed = true;
+                                        fo.spray_material_id = -1;
+                                        fo.bubble_material_id = -1;
+                                    }
+                                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scene material applied to all foam components. Enable Custom Material Overrides to assign them separately.");
+                                }
                             }
 
                             foam_changed |= ImGui::DragFloat("Foam Sphere Radius (vx)", &fo.render_radius_voxels, 0.01f, 0.05f, 2.0f, "%.2f");
                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Render size of each foam sphere (sim voxels). Small = fine spray/foam.");
+
+                            foam_changed |= ImGui::SliderInt("Foam Subdivisions", &fo.foam_sphere_subdivisions, 0, 3);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mesh subdivision level for rendering foam spheres. Higher = smoother close-up but slightly slower BVH rebuild.");
 
                             int maxf = static_cast<int>(std::min<std::size_t>(fo.max_foam, 20000000u));
                             if (ImGui::DragInt("Max Foam Particles", &maxf, 1000.0f, 1000, 20000000)) {
@@ -2545,6 +2755,16 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                     ImGui::TextDisabled("%.2f ms (%s)", fs.p2g_ms, fs.p2g_on_gpu ? "GPU" : "CPU"); ImGui::NextColumn();
                     ImGui::TextDisabled("  Pressure");       ImGui::NextColumn();
                     ImGui::TextDisabled("%.2f ms (%s)", fs.pressure_ms, fs.pressure_on_gpu ? "GPU" : "CPU"); ImGui::NextColumn();
+                    if (fs.pressure_on_gpu && fs.pressure_cg_max_iterations > 0) {
+                        ImGui::TextDisabled("    MGPCG precond"); ImGui::NextColumn();
+                        ImGui::TextDisabled("%s", fs.pressure_cg_multigrid ? "Layer B V-cycle" : "Layer A Jacobi"); ImGui::NextColumn();
+                        ImGui::TextDisabled("    MGPCG iters"); ImGui::NextColumn();
+                        ImGui::TextDisabled("%d / %d", fs.pressure_cg_iterations, fs.pressure_cg_max_iterations); ImGui::NextColumn();
+                        ImGui::TextDisabled("    MGPCG residual"); ImGui::NextColumn();
+                        ImGui::TextDisabled("%.2e", fs.pressure_cg_final_relative_residual); ImGui::NextColumn();
+                        ImGui::TextDisabled("    MGPCG dot sync"); ImGui::NextColumn();
+                        ImGui::TextDisabled("%.2f ms (%d)", fs.pressure_cg_dot_ms, fs.pressure_cg_dot_count); ImGui::NextColumn();
+                    }
                     ImGui::TextDisabled("  Viscosity");      ImGui::NextColumn();
                     ImGui::TextDisabled("%.2f ms", fs.viscosity_ms); ImGui::NextColumn();
                     ImGui::TextDisabled("  G2P");            ImGui::NextColumn();
@@ -2767,6 +2987,54 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Clear the bake cache and return to live free-run preview.\nPlay the timeline to bake each frame; scrub to replay cached frames.");
+        }
+
+        // ── Render-only point cache: persist the bake across reloads ──────────
+        // Writes every particle system (fluid particles + foam + gas grids) for
+        // the timeline range to "<project>.simcache" next to the project file.
+        // Reloading restores the bake without re-simulating (SimCache).
+        {
+            const std::string proj_path = ProjectManager::getInstance().getCurrentFilePath();
+            const bool has_project = !proj_path.empty();
+            const bool has_systems = !scene.particle_systems.empty();
+            const bool can_bake = has_project && has_systems;
+
+            if (!can_bake) ImGui::BeginDisabled();
+            if (ImGui::Button("Bake Simulation to Disk (point cache)##SimPointBake", ImVec2(-1, 30))) {
+                const std::string dir = SceneData::simCacheDirForProject(proj_path);
+                int s = std::min(ui_ctx.render_settings.animation_start_frame,
+                                 ui_ctx.render_settings.animation_end_frame);
+                int e = std::max(ui_ctx.render_settings.animation_start_frame,
+                                 ui_ctx.render_settings.animation_end_frame);
+                if (e <= s) { s = 0; e = 100; }  // sane default if no range set
+                const float fps = static_cast<float>(std::max(1, ui_ctx.render_settings.animation_fps));
+
+                drainSimulationMutationBackends();
+                const bool ok = scene.bakeSimulationToDisk(dir, s, e, fps);
+                SCENE_LOG_INFO(ok ? ("Simulation point cache baked to: " + dir)
+                                  : std::string("Simulation point cache bake FAILED."));
+
+                ui_ctx.renderer.resetCPUAccumulation();
+                if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
+                ui_ctx.start_render = true;
+            }
+            if (!can_bake) ImGui::EndDisabled();
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(has_project
+                    ? "Re-simulates the timeline range and writes ALL particle systems\n"
+                      "(fluid particles + foam + gas grids) to <project>.simcache.\n"
+                      "Reloading the project restores the bake without re-simulating.\n"
+                      "Blocks the UI during the bake."
+                    : "Save the project first — the cache is written next to the project file.");
+            }
+            if (scene.hasValidSimDiskCache()) {
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Bake cache active (scrub reads from disk).");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Clear Bake##SimPointBakeClear")) {
+                    RayTrophiSim::SimCache::clearCache(scene.simDiskCacheDir());
+                    scene.clearSimDiskCacheBinding();
+                }
+            }
         }
 
         if (ImGui::Button("Remove Domain##SimulationPanel", ImVec2(-1, 0))) {

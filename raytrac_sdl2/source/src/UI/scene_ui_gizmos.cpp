@@ -402,6 +402,52 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
         }
     }
 
+    // Flow-source authoring overlay: spawn region (Point sphere) + an arrow
+    // showing the emission velocity direction so the user is not setting the
+    // launch vector blind. Per-point normal emission (MeshSurface) has no single
+    // direction, so its arrow is omitted.
+    {
+        const auto& flow_sources = particles->flowSources();
+        for (const auto& src : flow_sources) {
+            if (!src.enabled) continue;
+            if (src.domain_index < 0 || src.domain_index >= static_cast<int>(grid_domains.size())) continue;
+            if (!grid_domains[static_cast<std::size_t>(src.domain_index)].enabled) continue;
+
+            const bool src_selected = (src.domain_index == selected_domain_index);
+            const ImU32 src_col = src_selected ? IM_COL32(255, 180, 60, 245) : IM_COL32(255, 160, 40, 165);
+            const float src_thick = src_selected ? 2.2f : 1.4f;
+
+            if (src.source_mode == RayTrophiSim::SimulationFlowSourceMode::Point) {
+                drawSphere(src.position, src.radius, src_col, src_selected ? 1.5f : 1.0f);
+            }
+
+            const float speed = src.velocity.length();
+            const bool per_point = src.fluid_emit_along_normal &&
+                src.source_mode == RayTrophiSim::SimulationFlowSourceMode::MeshSurface;
+            if (speed > 1e-4f && !per_point) {
+                const Vec3 dir = src.velocity * (1.0f / speed);
+                const float len = std::clamp(speed * 0.25f, 0.3f, 5.0f);
+                ImVec2 a, b;
+                float da = 0.0f, db = 0.0f;
+                if (projectPoint(src.position, a, da) &&
+                    projectPoint(src.position + dir * len, b, db)) {
+                    draw_list->AddLine(a, b, src_col, src_thick);
+                    ImVec2 d(b.x - a.x, b.y - a.y);
+                    const float dl = std::sqrt(d.x * d.x + d.y * d.y);
+                    if (dl > 1e-3f) {
+                        d.x /= dl; d.y /= dl;
+                        const float hs = 11.0f; // arrowhead length (px)
+                        const ImVec2 n(-d.y, d.x);
+                        const ImVec2 h1(b.x - d.x * hs + n.x * hs * 0.5f, b.y - d.y * hs + n.y * hs * 0.5f);
+                        const ImVec2 h2(b.x - d.x * hs - n.x * hs * 0.5f, b.y - d.y * hs - n.y * hs * 0.5f);
+                        draw_list->AddLine(b, h1, src_col, src_thick);
+                        draw_list->AddLine(b, h2, src_col, src_thick);
+                    }
+                }
+            }
+        }
+    }
+
     // Fluid-type grid-domain particles + seed AABB as ImGui overlay. The dot
     // splat is gated by the per-domain `fluid_debug_overlay` toggle (default
     // OFF — the Particles render mode draws real RT instances now, so the

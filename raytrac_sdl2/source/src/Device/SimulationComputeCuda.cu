@@ -19,6 +19,32 @@
 #include <unordered_map>
 #include <string>
 
+// Visual Studio's active-error parser can treat .cu files as plain C++ and
+// miss CUDA's built-in launch variables. NVCC defines __CUDACC__, so this shim
+// is editor-only and stays out of the real CUDA compilation.
+#ifndef __CUDACC__
+#ifndef __global__
+#define __global__
+#endif
+#ifndef __device__
+#define __device__
+#endif
+#ifndef __host__
+#define __host__
+#endif
+#ifndef __forceinline__
+#define __forceinline__ inline
+#endif
+struct CudaIntelliSenseDim3 {
+    unsigned int x;
+    unsigned int y;
+    unsigned int z;
+};
+extern const CudaIntelliSenseDim3 blockIdx;
+extern const CudaIntelliSenseDim3 blockDim;
+extern const CudaIntelliSenseDim3 threadIdx;
+#endif
+
 namespace RayTrophiSim {
 
 namespace {
@@ -44,6 +70,24 @@ struct GridProjectionConstants {
     // count for density correction); 0 = air; <-0.5 = solid (Neumann wall).
     float density_correction; // Bridson density-targeted projection gain (0=off)
     int   particles_per_cell; // target count per cell for the over-pack term
+    // Variational solid coupling (mirrors the CPU path). 0 = binary solid faces
+    // (old behaviour); 1 = use the fractional MAC-face open weights + solid
+    // velocity passed as extra buffers. Kernels fall back to binary when the
+    // weight pointers are null (e.g. multigrid coarse levels), so this only
+    // changes the fine-level Jacobi-PCG operators.
+    int   variational;        // 0/1
+    int   gfm_active;         // 0/1 (Ghost Fluid Method surface toggle)
+};
+
+struct GridMGConstants {
+    int fine_nx;
+    int fine_ny;
+    int fine_nz;
+    int coarse_nx;
+    int coarse_ny;
+    int coarse_nz;
+    float omega;
+    int parity;
 };
 
 struct GridScalarAdvectionConstants {
@@ -84,6 +128,11 @@ struct FluidParticleIntegrateConstants {
     float container_velocity_y;
     float container_velocity_z;
     float max_velocity;
+};
+
+struct FluidFoamRenderPackConstants {
+    int foam_count;
+    float radius;
 };
 
 struct FluidP2GConstants {
@@ -146,6 +195,19 @@ __global__ void fluid_particle_integrate_forces_kernel(DeviceVec3* velocities,
     }
 
     velocities[id] = v;
+}
+
+__global__ void fluid_foam_pack_render_spheres_kernel(const DeviceVec3* positions,
+                                                      float4* spheres,
+                                                      FluidFoamRenderPackConstants c) {
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= c.foam_count) return;
+
+    const DeviceVec3 p = positions[id];
+    const bool finite = isfinite(p.x) && isfinite(p.y) && isfinite(p.z);
+    spheres[id] = finite
+        ? make_float4(p.x, p.y, p.z, c.radius)
+        : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
 }
 
 __device__ __forceinline__ void quadratic_weights_cuda(float fx, int& base, float w[3]) {
@@ -430,6 +492,166 @@ __global__ void grid_divergence_kernel(float* vel_x,
     divergence[id] = (du + dv + dw) * inv_h;
 }
 
+__device__ __forceinline__ float fluid_mask_at(const float* fluid_mask,
+                                               int i,
+                                               int j,
+                                               int k,
+                                               const GridProjectionConstants& c) {
+    if (i < 0 || i >= c.nx || j < 0 || j >= c.ny || k < 0 || k >= c.nz) {
+        // Domain wall: closed/periodic => solid (-1, no-flux); open => air
+        // (0, Dirichlet p=0 outflow). Mirrors the CPU free-surface isSolid()
+        // so an Open domain actually drains on the GPU. c.boundary: 0=open.
+        return (c.boundary == 0) ? 0.0f : -1.0f;
+    }
+    return fluid_mask[cell_index(i, j, k, c.nx, c.ny)];
+}
+
+__device__ __forceinline__ bool fluid_mask_is_solid(const float* fluid_mask,
+                                                    int i,
+                                                    int j,
+                                                    int k,
+                                                    const GridProjectionConstants& c) {
+    return fluid_mask_at(fluid_mask, i, j, k, c) < -0.5f;
+}
+
+__device__ __forceinline__ bool fluid_mask_is_fluid(const float* fluid_mask,
+                                                    int i,
+                                                    int j,
+                                                    int k,
+                                                    const GridProjectionConstants& c) {
+    return fluid_mask_at(fluid_mask, i, j, k, c) > 0.5f;
+}
+
+__device__ __forceinline__ float airTheta(
+    const float* fluid_phi, const float* fluid_mask, size_t c_fluid, int ni, int nj, int nk, const GridProjectionConstants& c) {
+    if (ni < 0 || ni >= c.nx || nj < 0 || nj >= c.ny || nk < 0 || nk >= c.nz) return 1.0f;
+    if (fluid_mask_is_solid(fluid_mask, ni, nj, nk, c)) return 1.0f;
+    const size_t n = cell_index(ni, nj, nk, c.nx, c.ny);
+    const float pf = fluid_phi[c_fluid];
+    const float pa = fluid_phi[n];
+    if (!(pf < 0.0f && pa > 0.0f)) return 1.0f;
+    const float t = pf / (pf - pa);
+    return t < 0.1f ? 0.1f : (t > 1.0f ? 1.0f : t);
+}
+
+__device__ __forceinline__ float get_open_weight_x(const float* uw, const float* fluid_mask, int i, int j, int k,
+                                                    const GridProjectionConstants& c) {
+    if (i <= 0 || i >= c.nx) return (c.boundary == 0) ? 1.0f : 0.0f;
+    if (c.variational && uw) return uw[vel_x_index(i, j, k, c.nx, c.ny)];
+    return (fluid_mask_is_solid(fluid_mask, i - 1, j, k, c) || fluid_mask_is_solid(fluid_mask, i, j, k, c)) ? 0.0f : 1.0f;
+}
+__device__ __forceinline__ float get_open_weight_y(const float* vw, const float* fluid_mask, int i, int j, int k,
+                                                    const GridProjectionConstants& c) {
+    if (j <= 0 || j >= c.ny) return (c.boundary == 0) ? 1.0f : 0.0f;
+    if (c.variational && vw) return vw[vel_y_index(i, j, k, c.nx, c.ny)];
+    return (fluid_mask_is_solid(fluid_mask, i, j - 1, k, c) || fluid_mask_is_solid(fluid_mask, i, j, k, c)) ? 0.0f : 1.0f;
+}
+__device__ __forceinline__ float get_open_weight_z(const float* ww, const float* fluid_mask, int i, int j, int k,
+                                                    const GridProjectionConstants& c) {
+    if (k <= 0 || k >= c.nz) return (c.boundary == 0) ? 1.0f : 0.0f;
+    if (c.variational && ww) return ww[vel_z_index(i, j, k, c.nx, c.ny)];
+    return (fluid_mask_is_solid(fluid_mask, i, j, k - 1, c) || fluid_mask_is_solid(fluid_mask, i, j, k, c)) ? 0.0f : 1.0f;
+}
+
+// ── Variational solid coupling (Stage 1) ─────────────────────────────────────
+// Fractional MAC-face open weight, mirroring the CPU fWx/fWy/fWz. Interior faces
+// read the uploaded weight array (values in [0,1]); domain-boundary faces follow
+// the wall mode (open=1 Dirichlet, closed/periodic=0 wall). The caller only uses
+// these when c.variational && weight pointer != null.
+__device__ __forceinline__ float face_weight_x(const float* uw, int i, int j, int k,
+                                                const GridProjectionConstants& c) {
+    if (i <= 0 || i >= c.nx) return (c.boundary == 0) ? 1.0f : 0.0f;
+    return uw[vel_x_index(i, j, k, c.nx, c.ny)];
+}
+__device__ __forceinline__ float face_weight_y(const float* vw, int i, int j, int k,
+                                                const GridProjectionConstants& c) {
+    if (j <= 0 || j >= c.ny) return (c.boundary == 0) ? 1.0f : 0.0f;
+    return vw[vel_y_index(i, j, k, c.nx, c.ny)];
+}
+__device__ __forceinline__ float face_weight_z(const float* ww, int i, int j, int k,
+                                                const GridProjectionConstants& c) {
+    if (k <= 0 || k >= c.nz) return (c.boundary == 0) ? 1.0f : 0.0f;
+    return ww[vel_z_index(i, j, k, c.nx, c.ny)];
+}
+// Solid normal velocity at a face: the solid-side cell's component (0 if neither
+// adjacent cell is solid). Mirrors the CPU svX/svY/svZ.
+__device__ __forceinline__ float solid_vel_face_x(const float* svx, const float* fluid_mask,
+                                                  int i, int j, int k, const GridProjectionConstants& c) {
+    if (i - 1 >= 0 && fluid_mask_is_solid(fluid_mask, i - 1, j, k, c)) return svx[(i - 1) + j * c.nx + k * c.nx * c.ny];
+    if (i < c.nx && fluid_mask_is_solid(fluid_mask, i, j, k, c))       return svx[i + j * c.nx + k * c.nx * c.ny];
+    return 0.0f;
+}
+__device__ __forceinline__ float solid_vel_face_y(const float* svy, const float* fluid_mask,
+                                                  int i, int j, int k, const GridProjectionConstants& c) {
+    if (j - 1 >= 0 && fluid_mask_is_solid(fluid_mask, i, j - 1, k, c)) return svy[i + (j - 1) * c.nx + k * c.nx * c.ny];
+    if (j < c.ny && fluid_mask_is_solid(fluid_mask, i, j, k, c))       return svy[i + j * c.nx + k * c.nx * c.ny];
+    return 0.0f;
+}
+__device__ __forceinline__ float solid_vel_face_z(const float* svz, const float* fluid_mask,
+                                                  int i, int j, int k, const GridProjectionConstants& c) {
+    if (k - 1 >= 0 && fluid_mask_is_solid(fluid_mask, i, j, k - 1, c)) return svz[i + j * c.nx + (k - 1) * c.nx * c.ny];
+    if (k < c.nz && fluid_mask_is_solid(fluid_mask, i, j, k, c))       return svz[i + j * c.nx + k * c.nx * c.ny];
+    return 0.0f;
+}
+
+__global__ void fluid_divergence_kernel(float* vel_x,
+                                        float* vel_y,
+                                        float* vel_z,
+                                        const float* fluid_mask,
+                                        float* divergence,
+                                        GridProjectionConstants c,
+                                        const float* uw  = nullptr,
+                                        const float* vw  = nullptr,
+                                        const float* ww  = nullptr,
+                                        const float* svx = nullptr,
+                                        const float* svy = nullptr,
+                                        const float* svz = nullptr) {
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    const int cell_count = c.nx * c.ny * c.nz;
+    if (id >= cell_count) return;
+
+    if (fluid_mask[id] < 0.5f) {
+        divergence[id] = 0.0f;
+        return;
+    }
+
+    const int i = id % c.nx;
+    const int j = (id / c.nx) % c.ny;
+    const int k = id / (c.nx * c.ny);
+    const float inv_h = c.voxel_size > 1e-6f ? 1.0f / c.voxel_size : 1.0f;
+
+    float vx_lo = vel_x[vel_x_index(i,     j, k, c.nx, c.ny)];
+    float vx_hi = vel_x[vel_x_index(i + 1, j, k, c.nx, c.ny)];
+    float vy_lo = vel_y[vel_y_index(i, j,     k, c.nx, c.ny)];
+    float vy_hi = vel_y[vel_y_index(i, j + 1, k, c.nx, c.ny)];
+    float vz_lo = vel_z[vel_z_index(i, j, k,     c.nx, c.ny)];
+    float vz_hi = vel_z[vel_z_index(i, j, k + 1, c.nx, c.ny)];
+
+    if (c.variational && uw) {
+        // Weighted face velocities: open fraction carries the fluid velocity, the
+        // closed fraction carries the solid's velocity (0 for a static wall →
+        // identical to the binary zeroing below; non-zero for a moving collider).
+        const float wxl = face_weight_x(uw, i,     j, k, c), wxh = face_weight_x(uw, i + 1, j, k, c);
+        const float wyl = face_weight_y(vw, i, j,     k, c), wyh = face_weight_y(vw, i, j + 1, k, c);
+        const float wzl = face_weight_z(ww, i, j, k,     c), wzh = face_weight_z(ww, i, j, k + 1, c);
+        vx_lo = wxl * vx_lo + (1.0f - wxl) * solid_vel_face_x(svx, fluid_mask, i,     j, k, c);
+        vx_hi = wxh * vx_hi + (1.0f - wxh) * solid_vel_face_x(svx, fluid_mask, i + 1, j, k, c);
+        vy_lo = wyl * vy_lo + (1.0f - wyl) * solid_vel_face_y(svy, fluid_mask, i, j,     k, c);
+        vy_hi = wyh * vy_hi + (1.0f - wyh) * solid_vel_face_y(svy, fluid_mask, i, j + 1, k, c);
+        vz_lo = wzl * vz_lo + (1.0f - wzl) * solid_vel_face_z(svz, fluid_mask, i, j, k,     c);
+        vz_hi = wzh * vz_hi + (1.0f - wzh) * solid_vel_face_z(svz, fluid_mask, i, j, k + 1, c);
+    } else {
+        if (fluid_mask_is_solid(fluid_mask, i - 1, j,     k,     c)) vx_lo = 0.0f;
+        if (fluid_mask_is_solid(fluid_mask, i + 1, j,     k,     c)) vx_hi = 0.0f;
+        if (fluid_mask_is_solid(fluid_mask, i,     j - 1, k,     c)) vy_lo = 0.0f;
+        if (fluid_mask_is_solid(fluid_mask, i,     j + 1, k,     c)) vy_hi = 0.0f;
+        if (fluid_mask_is_solid(fluid_mask, i,     j,     k - 1, c)) vz_lo = 0.0f;
+        if (fluid_mask_is_solid(fluid_mask, i,     j,     k + 1, c)) vz_hi = 0.0f;
+    }
+
+    divergence[id] = ((vx_hi - vx_lo) + (vy_hi - vy_lo) + (vz_hi - vz_lo)) * inv_h;
+}
+
 __global__ void grid_advect_scalar_kernel(float* vel_x,
                                           float* vel_y,
                                           float* vel_z,
@@ -628,6 +850,127 @@ __global__ void grid_subtract_gradient_kernel(float* vel_x,
     }
 }
 
+__global__ void fluid_subtract_gradient_kernel(float* vel_x,
+                                               float* vel_y,
+                                               float* vel_z,
+                                               const float* pressure,
+                                               const float* fluid_mask,
+                                               GridProjectionConstants c,
+                                               const float* uw  = nullptr,
+                                               const float* vw  = nullptr,
+                                               const float* ww  = nullptr,
+                                               const float* svx = nullptr,
+                                               const float* svy = nullptr,
+                                               const float* svz = nullptr,
+                                               const float* fluid_phi = nullptr) {
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    const int vx_count = (c.nx + 1) * c.ny * c.nz;
+    const int vy_count = c.nx * (c.ny + 1) * c.nz;
+    const int vz_count = c.nx * c.ny * (c.nz + 1);
+    const float h = c.voxel_size > 1e-6f ? c.voxel_size : 1.0f;
+    const float scale = c.dt / h;
+
+    if (id < vx_count) {
+        const int plane = (c.nx + 1) * c.ny;
+        const int k = id / plane;
+        const int rem = id - k * plane;
+        const int j = rem / (c.nx + 1);
+        const int i = rem - j * (c.nx + 1);
+
+        const float w = get_open_weight_x(uw, fluid_mask, i, j, k, c);
+        if (w < 1e-6f) {
+            vel_x[id] = solid_vel_face_x(svx, fluid_mask, i, j, k, c);
+        } else if (c.gfm_active && fluid_phi) {
+            const bool lo_fluid = fluid_mask_is_fluid(fluid_mask, i - 1, j, k, c);
+            const bool hi_fluid = fluid_mask_is_fluid(fluid_mask, i,     j, k, c);
+            if (lo_fluid || hi_fluid) {
+                float p_lo = lo_fluid ? pressure[cell_index(i - 1, j, k, c.nx, c.ny)] : 0.0f;
+                float p_hi = hi_fluid ? pressure[cell_index(i,     j, k, c.nx, c.ny)] : 0.0f;
+                if (lo_fluid && !hi_fluid) {
+                    p_hi = p_lo * (1.0f - 1.0f / airTheta(fluid_phi, fluid_mask, cell_index(i - 1, j, k, c.nx, c.ny), i, j, k, c));
+                } else if (hi_fluid && !lo_fluid) {
+                    p_lo = p_hi * (1.0f - 1.0f / airTheta(fluid_phi, fluid_mask, cell_index(i, j, k, c.nx, c.ny), i - 1, j, k, c));
+                }
+                vel_x[id] -= scale * (p_hi - p_lo);
+            }
+        } else {
+            const bool lo_fluid = fluid_mask_is_fluid(fluid_mask, i - 1, j, k, c);
+            const bool hi_fluid = fluid_mask_is_fluid(fluid_mask, i,     j, k, c);
+            if (lo_fluid || hi_fluid) {
+                const float p_lo = lo_fluid ? pressure[cell_index(i - 1, j, k, c.nx, c.ny)] : 0.0f;
+                const float p_hi = hi_fluid ? pressure[cell_index(i,     j, k, c.nx, c.ny)] : 0.0f;
+                vel_x[id] -= scale * (p_hi - p_lo);
+            }
+        }
+    }
+    if (id < vy_count) {
+        const int plane = c.nx * (c.ny + 1);
+        const int k = id / plane;
+        const int rem = id - k * plane;
+        const int j = rem / c.nx;
+        const int i = rem - j * c.nx;
+
+        const float w = get_open_weight_y(vw, fluid_mask, i, j, k, c);
+        if (w < 1e-6f) {
+            vel_y[id] = solid_vel_face_y(svy, fluid_mask, i, j, k, c);
+        } else if (c.gfm_active && fluid_phi) {
+            const bool lo_fluid = fluid_mask_is_fluid(fluid_mask, i, j - 1, k, c);
+            const bool hi_fluid = fluid_mask_is_fluid(fluid_mask, i, j,     k, c);
+            if (lo_fluid || hi_fluid) {
+                float p_lo = lo_fluid ? pressure[cell_index(i, j - 1, k, c.nx, c.ny)] : 0.0f;
+                float p_hi = hi_fluid ? pressure[cell_index(i, j,     k, c.nx, c.ny)] : 0.0f;
+                if (lo_fluid && !hi_fluid) {
+                    p_hi = p_lo * (1.0f - 1.0f / airTheta(fluid_phi, fluid_mask, cell_index(i, j - 1, k, c.nx, c.ny), i, j, k, c));
+                } else if (hi_fluid && !lo_fluid) {
+                    p_lo = p_hi * (1.0f - 1.0f / airTheta(fluid_phi, fluid_mask, cell_index(i, j, k, c.nx, c.ny), i, j - 1, k, c));
+                }
+                vel_y[id] -= scale * (p_hi - p_lo);
+            }
+        } else {
+            const bool lo_fluid = fluid_mask_is_fluid(fluid_mask, i, j - 1, k, c);
+            const bool hi_fluid = fluid_mask_is_fluid(fluid_mask, i, j,     k, c);
+            if (lo_fluid || hi_fluid) {
+                const float p_lo = lo_fluid ? pressure[cell_index(i, j - 1, k, c.nx, c.ny)] : 0.0f;
+                const float p_hi = hi_fluid ? pressure[cell_index(i, j,     k, c.nx, c.ny)] : 0.0f;
+                vel_y[id] -= scale * (p_hi - p_lo);
+            }
+        }
+    }
+    if (id < vz_count) {
+        const int plane = c.nx * c.ny;
+        const int k = id / plane;
+        const int rem = id - k * plane;
+        const int j = rem / c.nx;
+        const int i = rem - j * c.nx;
+
+        const float w = get_open_weight_z(ww, fluid_mask, i, j, k, c);
+        if (w < 1e-6f) {
+            vel_z[id] = solid_vel_face_z(svz, fluid_mask, i, j, k, c);
+        } else if (c.gfm_active && fluid_phi) {
+            const bool lo_fluid = fluid_mask_is_fluid(fluid_mask, i, j, k - 1, c);
+            const bool hi_fluid = fluid_mask_is_fluid(fluid_mask, i, j, k,     c);
+            if (lo_fluid || hi_fluid) {
+                float p_lo = lo_fluid ? pressure[cell_index(i, j, k - 1, c.nx, c.ny)] : 0.0f;
+                float p_hi = hi_fluid ? pressure[cell_index(i, j, k,     c.nx, c.ny)] : 0.0f;
+                if (lo_fluid && !hi_fluid) {
+                    p_hi = p_lo * (1.0f - 1.0f / airTheta(fluid_phi, fluid_mask, cell_index(i, j, k - 1, c.nx, c.ny), i, j, k, c));
+                } else if (hi_fluid && !lo_fluid) {
+                    p_lo = p_hi * (1.0f - 1.0f / airTheta(fluid_phi, fluid_mask, cell_index(i, j, k, c.nx, c.ny), i, j, k - 1, c));
+                }
+                vel_z[id] -= scale * (p_hi - p_lo);
+            }
+        } else {
+            const bool lo_fluid = fluid_mask_is_fluid(fluid_mask, i, j, k - 1, c);
+            const bool hi_fluid = fluid_mask_is_fluid(fluid_mask, i, j, k,     c);
+            if (lo_fluid || hi_fluid) {
+                const float p_lo = lo_fluid ? pressure[cell_index(i, j, k - 1, c.nx, c.ny)] : 0.0f;
+                const float p_hi = hi_fluid ? pressure[cell_index(i, j, k,     c.nx, c.ny)] : 0.0f;
+                vel_z[id] -= scale * (p_hi - p_lo);
+            }
+        }
+    }
+}
+
 // ── APIC G2P gather ──────────────────────────────────────────────────────────
 // One thread per particle. Gathers velocity + APIC affine C from the MAC grid.
 // Supports FLIP blend via optional pre-projection velocity snapshot (buffers 6-8).
@@ -642,11 +985,31 @@ struct FluidG2PConstants {
     float max_velocity;
     float dt;
     int has_flip_snapshot; // 1 = scratch_vel_x/y/z contain pre-projection velocities
+    int use_solid_flip_limiter; // 1 = damp FLIP impulse next to solid collider cells
     // Must mirror host FluidG2PGpuConstants (ParticleSimulation.cpp) field order
     // — cmd.constants is reinterpret_cast to this struct.
     float affine_damping;
     float max_affine;
 };
+
+__device__ __forceinline__ float fluid_g2p_mask_at(const float* fluid_mask,
+                                                   int i,
+                                                   int j,
+                                                   int k,
+                                                   const FluidG2PConstants& c) {
+    if (i < 0 || i >= c.nx || j < 0 || j >= c.ny || k < 0 || k >= c.nz) {
+        return -1.0f;
+    }
+    return fluid_mask[cell_index(i, j, k, c.nx, c.ny)];
+}
+
+__device__ __forceinline__ bool fluid_g2p_mask_is_solid(const float* fluid_mask,
+                                                        int i,
+                                                        int j,
+                                                        int k,
+                                                        const FluidG2PConstants& c) {
+    return fluid_g2p_mask_at(fluid_mask, i, j, k, c) < -0.5f;
+}
 
 __global__ void fluid_g2p_gather_kernel(const DeviceVec3* positions,
                                          DeviceVec3* velocities,
@@ -657,6 +1020,7 @@ __global__ void fluid_g2p_gather_kernel(const DeviceVec3* positions,
                                          const float* vel_x_pre,
                                          const float* vel_y_pre,
                                          const float* vel_z_pre,
+                                         const float* fluid_mask,
                                          FluidG2PConstants c) {
     const int id = blockIdx.x * blockDim.x + threadIdx.x;
     if (id >= c.particle_count || c.voxel_size <= 1e-6f) return;
@@ -747,14 +1111,45 @@ __global__ void fluid_g2p_gather_kernel(const DeviceVec3* positions,
         }
     }
 
-    // FLIP/PIC blend
-    const float flip = c.has_flip_snapshot ? c.flip_blend : 0.0f;
+    // FLIP/PIC blend. CPU uses the same scalar flip_ratio everywhere. CUDA adds
+    // a collider-adjacent limiter, but only on the axis that sees the wall:
+    // damping every component made wall-hugging liquid lose too much tangential
+    // and rebound energy compared with the CPU reference path.
+    float flip = c.has_flip_snapshot ? c.flip_blend : 0.0f;
+    float flip_x = flip;
+    float flip_y = flip;
+    float flip_z = flip;
+    if (flip > 0.0f && c.use_solid_flip_limiter && fluid_mask) {
+        const int ci = static_cast<int>(floorf((p.x - c.origin_x) * invH));
+        const int cj = static_cast<int>(floorf((p.y - c.origin_y) * invH));
+        const int ck = static_cast<int>(floorf((p.z - c.origin_z) * invH));
+        if (ci >= 0 && ci < c.nx && cj >= 0 && cj < c.ny && ck >= 0 && ck < c.nz) {
+            const bool in_solid = fluid_g2p_mask_at(fluid_mask, ci, cj, ck, c) < -0.5f;
+            if (in_solid) {
+                flip_x = flip_y = flip_z = 0.0f;
+            } else {
+                const bool solid_x =
+                    fluid_g2p_mask_is_solid(fluid_mask, ci - 1, cj,     ck,     c) ||
+                    fluid_g2p_mask_is_solid(fluid_mask, ci + 1, cj,     ck,     c);
+                const bool solid_y =
+                    fluid_g2p_mask_is_solid(fluid_mask, ci,     cj - 1, ck,     c) ||
+                    fluid_g2p_mask_is_solid(fluid_mask, ci,     cj + 1, ck,     c);
+                const bool solid_z =
+                    fluid_g2p_mask_is_solid(fluid_mask, ci,     cj,     ck - 1, c) ||
+                    fluid_g2p_mask_is_solid(fluid_mask, ci,     cj,     ck + 1, c);
+                const float wall_axis_scale = 0.65f;
+                if (solid_x) flip_x *= wall_axis_scale;
+                if (solid_y) flip_y *= wall_axis_scale;
+                if (solid_z) flip_z *= wall_axis_scale;
+            }
+        }
+    }
     DeviceVec3 v_out = v_new;
-    if (flip > 0.0f) {
+    if (flip_x > 0.0f || flip_y > 0.0f || flip_z > 0.0f) {
         const DeviceVec3 v_old = velocities[id];
-        v_out.x += flip * (v_old.x - v_pre_g.x);
-        v_out.y += flip * (v_old.y - v_pre_g.y);
-        v_out.z += flip * (v_old.z - v_pre_g.z);
+        v_out.x += flip_x * (v_old.x - v_pre_g.x);
+        v_out.y += flip_y * (v_old.y - v_pre_g.y);
+        v_out.z += flip_z * (v_old.z - v_pre_g.z);
     }
 
     // Internal friction: v *= exp(-friction * dt)
@@ -815,12 +1210,15 @@ __global__ void fluid_free_surface_sor_kernel(float* pressure,
     int diagonal = 0;
     float sum = 0.0f;
 
+    // Out-of-grid neighbour = wall: an AIR (Dirichlet p=0) ghost that raises the
+    // diagonal when the domain is open (c.boundary==0), or a SOLID no-flux wall
+    // (skipped) when closed/periodic. Matches fluid_cg_build_diag_kernel.
 #define FS_NEIGHBOR(ni, nj, nk) \
     if ((ni) >= 0 && (ni) < c.nx && (nj) >= 0 && (nj) < c.ny && (nk) >= 0 && (nk) < c.nz) { \
         ++diagonal; \
         const int _nid = (ni) + (nj)*c.nx + (nk)*c.nx*c.ny; \
         if (fluid_mask[_nid] > 0.5f) sum += pressure[_nid]; \
-    }
+    } else if (c.boundary == 0) { ++diagonal; }
     FS_NEIGHBOR(i-1, j,   k  )
     FS_NEIGHBOR(i+1, j,   k  )
     FS_NEIGHBOR(i,   j-1, k  )
@@ -866,7 +1264,11 @@ __device__ __forceinline__ int fs_inbounds_neighbor_count(
 // (handled in spmv via mask > 0.5).
 __global__ void fluid_cg_build_diag_kernel(const float* fluid_mask,
                                            float* diag,
-                                           GridProjectionConstants c) {
+                                           GridProjectionConstants c,
+                                           const float* uw = nullptr,
+                                           const float* vw = nullptr,
+                                           const float* ww = nullptr,
+                                           const float* fluid_phi = nullptr) {
     const int cell_count = c.nx * c.ny * c.nz;
     const int id = blockIdx.x * blockDim.x + threadIdx.x;
     if (id >= cell_count) return;
@@ -874,11 +1276,61 @@ __global__ void fluid_cg_build_diag_kernel(const float* fluid_mask,
     const int i = id % c.nx;
     const int j = (id / c.nx) % c.ny;
     const int k = id / (c.nx * c.ny);
+
+    if (c.gfm_active && fluid_phi) {
+        float dg = 0.0f;
+        float w;
+        w = get_open_weight_x(uw, fluid_mask, i, j, k, c);
+        if (fluid_mask_is_fluid(fluid_mask, i - 1, j, k, c)) dg += w;
+        else dg += w / airTheta(fluid_phi, fluid_mask, id, i - 1, j, k, c);
+
+        w = get_open_weight_x(uw, fluid_mask, i + 1, j, k, c);
+        if (fluid_mask_is_fluid(fluid_mask, i + 1, j, k, c)) dg += w;
+        else dg += w / airTheta(fluid_phi, fluid_mask, id, i + 1, j, k, c);
+
+        w = get_open_weight_y(vw, fluid_mask, i, j, k, c);
+        if (fluid_mask_is_fluid(fluid_mask, i, j - 1, k, c)) dg += w;
+        else dg += w / airTheta(fluid_phi, fluid_mask, id, i, j - 1, k, c);
+
+        w = get_open_weight_y(vw, fluid_mask, i, j + 1, k, c);
+        if (fluid_mask_is_fluid(fluid_mask, i, j + 1, k, c)) dg += w;
+        else dg += w / airTheta(fluid_phi, fluid_mask, id, i, j + 1, k, c);
+
+        w = get_open_weight_z(ww, fluid_mask, i, j, k, c);
+        if (fluid_mask_is_fluid(fluid_mask, i, j, k - 1, c)) dg += w;
+        else dg += w / airTheta(fluid_phi, fluid_mask, id, i, j, k - 1, c);
+
+        w = get_open_weight_z(ww, fluid_mask, i, j, k + 1, c);
+        if (fluid_mask_is_fluid(fluid_mask, i, j, k + 1, c)) dg += w;
+        else dg += w / airTheta(fluid_phi, fluid_mask, id, i, j, k + 1, c);
+
+        diag[id] = dg < 1e-6f ? 1.0f : dg;
+        return;
+    }
+
+    // Variational: diagonal = sum of the 6 face open weights (solid faces ~0 drop
+    // out; air faces ~1 are the Dirichlet ghosts; fluid faces ~1 also get the
+    // -weight off-diagonal in spmv). Floored so a fully-enclosed cell isn't
+    // singular. Only used when weights are present (null at MG coarse levels →
+    // binary count fallback below).
+    if (c.variational && uw) {
+        float dg = face_weight_x(uw, i,     j, k, c) + face_weight_x(uw, i + 1, j, k, c)
+                 + face_weight_y(vw, i, j,     k, c) + face_weight_y(vw, i, j + 1, k, c)
+                 + face_weight_z(ww, i, j, k,     c) + face_weight_z(ww, i, j, k + 1, c);
+        diag[id] = dg < 1e-6f ? 1.0f : dg;
+        return;
+    }
+
     int d = 0;
+    // A cell's diagonal = count of non-SOLID neighbours (FLUID + AIR raise it;
+    // AIR are the Dirichlet p=0 ghosts of the free surface). An out-of-grid
+    // neighbour is a wall: counted as an AIR ghost when the domain is open
+    // (c.boundary==0), skipped (treated SOLID) when closed/periodic — matching
+    // both fluid_mask_at() and the CPU free-surface matrix build.
 #define CG_DIAG_N(ni, nj, nk) \
     if ((ni) >= 0 && (ni) < c.nx && (nj) >= 0 && (nj) < c.ny && (nk) >= 0 && (nk) < c.nz) { \
         if (fluid_mask[(ni) + (nj) * c.nx + (nk) * c.nx * c.ny] > -0.5f) ++d; \
-    }
+    } else if (c.boundary == 0) { ++d; }
     CG_DIAG_N(i - 1, j,     k    )
     CG_DIAG_N(i + 1, j,     k    )
     CG_DIAG_N(i,     j - 1, k    )
@@ -926,7 +1378,10 @@ __global__ void fluid_cg_spmv_kernel(const float* s,
                                      const float* fluid_mask,
                                      const float* diag,
                                      float* As,
-                                     GridProjectionConstants c) {
+                                     GridProjectionConstants c,
+                                     const float* uw = nullptr,
+                                     const float* vw = nullptr,
+                                     const float* ww = nullptr) {
     const int cell_count = c.nx * c.ny * c.nz;
     const int id = blockIdx.x * blockDim.x + threadIdx.x;
     if (id >= cell_count) return;
@@ -935,19 +1390,100 @@ __global__ void fluid_cg_spmv_kernel(const float* s,
     const int j = (id / c.nx) % c.ny;
     const int k = id / (c.nx * c.ny);
     float nsum = 0.0f;
+    if (c.variational && uw) {
+        // Variational: off-diagonal coefficient = face weight (not -1).
+        // nsum = Σ face_weight * s[fluid_neighbour]
+#define CG_SPMV_VAR(ni, nj, nk, fw) \
+        if ((ni) >= 0 && (ni) < c.nx && (nj) >= 0 && (nj) < c.ny && (nk) >= 0 && (nk) < c.nz) { \
+            const int _n = (ni) + (nj) * c.nx + (nk) * c.nx * c.ny; \
+            if (fluid_mask[_n] > 0.5f) nsum += (fw) * s[_n]; \
+        }
+        CG_SPMV_VAR(i - 1, j,     k,     face_weight_x(uw, i,     j, k, c))
+        CG_SPMV_VAR(i + 1, j,     k,     face_weight_x(uw, i + 1, j, k, c))
+        CG_SPMV_VAR(i,     j - 1, k,     face_weight_y(vw, i, j,     k, c))
+        CG_SPMV_VAR(i,     j + 1, k,     face_weight_y(vw, i, j + 1, k, c))
+        CG_SPMV_VAR(i,     j,     k - 1, face_weight_z(ww, i, j, k,     c))
+        CG_SPMV_VAR(i,     j,     k + 1, face_weight_z(ww, i, j, k + 1, c))
+#undef CG_SPMV_VAR
+    } else {
 #define CG_SPMV_N(ni, nj, nk) \
-    if ((ni) >= 0 && (ni) < c.nx && (nj) >= 0 && (nj) < c.ny && (nk) >= 0 && (nk) < c.nz) { \
-        const int _n = (ni) + (nj) * c.nx + (nk) * c.nx * c.ny; \
-        if (fluid_mask[_n] > 0.5f) nsum += s[_n]; \
-    }
-    CG_SPMV_N(i - 1, j,     k    )
-    CG_SPMV_N(i + 1, j,     k    )
-    CG_SPMV_N(i,     j - 1, k    )
-    CG_SPMV_N(i,     j + 1, k    )
-    CG_SPMV_N(i,     j,     k - 1)
-    CG_SPMV_N(i,     j,     k + 1)
+        if ((ni) >= 0 && (ni) < c.nx && (nj) >= 0 && (nj) < c.ny && (nk) >= 0 && (nk) < c.nz) { \
+            const int _n = (ni) + (nj) * c.nx + (nk) * c.nx * c.ny; \
+            if (fluid_mask[_n] > 0.5f) nsum += s[_n]; \
+        }
+        CG_SPMV_N(i - 1, j,     k    )
+        CG_SPMV_N(i + 1, j,     k    )
+        CG_SPMV_N(i,     j - 1, k    )
+        CG_SPMV_N(i,     j + 1, k    )
+        CG_SPMV_N(i,     j,     k - 1)
+        CG_SPMV_N(i,     j,     k + 1)
 #undef CG_SPMV_N
+    }
     As[id] = diag[id] * s[id] - nsum;
+}
+
+// As = A*s and partials[blockIdx] = sum_block(s*As). This fuses the SpMV
+// pass with the following CG dot product to remove one grid-wide dispatch.
+__global__ void fluid_cg_spmv_dot_kernel(const float* s,
+                                         const float* fluid_mask,
+                                         const float* diag,
+                                         float* As,
+                                         double* partials,
+                                         GridProjectionConstants c,
+                                         const float* uw = nullptr,
+                                         const float* vw = nullptr,
+                                         const float* ww = nullptr) {
+    extern __shared__ double sdata[];
+    const int cell_count = c.nx * c.ny * c.nz;
+    const int tid = threadIdx.x;
+    const int id  = blockIdx.x * blockDim.x + threadIdx.x;
+    double product = 0.0;
+    if (id < cell_count) {
+        float as_value = 0.0f;
+        if (fluid_mask[id] >= 0.5f) {
+            const int i = id % c.nx;
+            const int j = (id / c.nx) % c.ny;
+            const int k = id / (c.nx * c.ny);
+            float nsum = 0.0f;
+            if (c.variational && uw) {
+#define CG_SPMV_DOT_VAR(ni, nj, nk, fw) \
+                if ((ni) >= 0 && (ni) < c.nx && (nj) >= 0 && (nj) < c.ny && (nk) >= 0 && (nk) < c.nz) { \
+                    const int _n = (ni) + (nj) * c.nx + (nk) * c.nx * c.ny; \
+                    if (fluid_mask[_n] > 0.5f) nsum += (fw) * s[_n]; \
+                }
+                CG_SPMV_DOT_VAR(i - 1, j,     k,     face_weight_x(uw, i,     j, k, c))
+                CG_SPMV_DOT_VAR(i + 1, j,     k,     face_weight_x(uw, i + 1, j, k, c))
+                CG_SPMV_DOT_VAR(i,     j - 1, k,     face_weight_y(vw, i, j,     k, c))
+                CG_SPMV_DOT_VAR(i,     j + 1, k,     face_weight_y(vw, i, j + 1, k, c))
+                CG_SPMV_DOT_VAR(i,     j,     k - 1, face_weight_z(ww, i, j, k,     c))
+                CG_SPMV_DOT_VAR(i,     j,     k + 1, face_weight_z(ww, i, j, k + 1, c))
+#undef CG_SPMV_DOT_VAR
+            } else {
+#define CG_SPMV_DOT_N(ni, nj, nk) \
+                if ((ni) >= 0 && (ni) < c.nx && (nj) >= 0 && (nj) < c.ny && (nk) >= 0 && (nk) < c.nz) { \
+                    const int _n = (ni) + (nj) * c.nx + (nk) * c.nx * c.ny; \
+                    if (fluid_mask[_n] > 0.5f) nsum += s[_n]; \
+                }
+                CG_SPMV_DOT_N(i - 1, j,     k    )
+                CG_SPMV_DOT_N(i + 1, j,     k    )
+                CG_SPMV_DOT_N(i,     j - 1, k    )
+                CG_SPMV_DOT_N(i,     j + 1, k    )
+                CG_SPMV_DOT_N(i,     j,     k - 1)
+                CG_SPMV_DOT_N(i,     j,     k + 1)
+#undef CG_SPMV_DOT_N
+            }
+            as_value = diag[id] * s[id] - nsum;
+            product = static_cast<double>(s[id]) * static_cast<double>(as_value);
+        }
+        As[id] = as_value;
+    }
+    sdata[tid] = product;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) sdata[tid] += sdata[tid + stride];
+        __syncthreads();
+    }
+    if (tid == 0) partials[blockIdx.x] = sdata[0];
 }
 
 // z = M^{-1} r  (Jacobi: z = r/diag; non-fluid diag==0 -> z=0).
@@ -959,6 +1495,125 @@ __global__ void fluid_cg_jacobi_precon_kernel(const float* r,
     if (id >= cell_count) return;
     const float d = diag[id];
     z[id] = (d > 0.5f) ? (r[id] / d) : 0.0f;
+}
+
+// z = M^-1*r and partials[blockIdx] = sum_block(r*z). This removes the
+// standalone Jacobi pass before each preconditioned residual dot product.
+__global__ void fluid_cg_jacobi_dot_kernel(const float* r,
+                                           const float* diag,
+                                           float* z,
+                                           double* partials,
+                                           int cell_count) {
+    extern __shared__ double sdata[];
+    const int tid = threadIdx.x;
+    const int id  = blockIdx.x * blockDim.x + threadIdx.x;
+    double product = 0.0;
+    if (id < cell_count) {
+        const float d = diag[id];
+        const float z_value = (d > 0.5f) ? (r[id] / d) : 0.0f;
+        z[id] = z_value;
+        product = static_cast<double>(r[id]) * static_cast<double>(z_value);
+    }
+    sdata[tid] = product;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) sdata[tid] += sdata[tid + stride];
+        __syncthreads();
+    }
+    if (tid == 0) partials[blockIdx.x] = sdata[0];
+}
+
+__global__ void fluid_mg_zero_kernel(float* values, int cell_count) {
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id < cell_count) values[id] = 0.0f;
+}
+
+__global__ void fluid_mg_restrict_kernel(const float* fine_rhs,
+                                         const float* fine_mask,
+                                         float* coarse_rhs,
+                                         float* coarse_mask,
+                                         GridMGConstants c) {
+    const int coarse_count = c.coarse_nx * c.coarse_ny * c.coarse_nz;
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= coarse_count) return;
+    const int ci = id % c.coarse_nx;
+    const int cj = (id / c.coarse_nx) % c.coarse_ny;
+    const int ck = id / (c.coarse_nx * c.coarse_ny);
+
+    float rhs_sum = 0.0f;
+    float fluid_count = 0.0f;
+    bool any_solid = false;
+    bool any_fluid = false;
+    for (int dz = 0; dz < 2; ++dz) {
+        const int fk = ck * 2 + dz;
+        if (fk >= c.fine_nz) continue;
+        for (int dy = 0; dy < 2; ++dy) {
+            const int fj = cj * 2 + dy;
+            if (fj >= c.fine_ny) continue;
+            for (int dx = 0; dx < 2; ++dx) {
+                const int fi = ci * 2 + dx;
+                if (fi >= c.fine_nx) continue;
+                const int fine_id = fi + fj * c.fine_nx + fk * c.fine_nx * c.fine_ny;
+                const float mask = fine_mask[fine_id];
+                if (mask < -0.5f) any_solid = true;
+                if (mask > 0.5f) {
+                    any_fluid = true;
+                    rhs_sum += fine_rhs[fine_id];
+                    fluid_count += 1.0f;
+                }
+            }
+        }
+    }
+
+    coarse_mask[id] = any_fluid ? 1.0f : (any_solid ? -1.0f : 0.0f);
+    coarse_rhs[id] = fluid_count > 0.0f ? rhs_sum / fluid_count : 0.0f;
+}
+
+__global__ void fluid_mg_rbgs_kernel(const float* rhs,
+                                     const float* mask,
+                                     const float* diag,
+                                     float* z,
+                                     GridProjectionConstants c) {
+    const int cell_count = c.nx * c.ny * c.nz;
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= cell_count || mask[id] < 0.5f) return;
+    const int i = id % c.nx;
+    const int j = (id / c.nx) % c.ny;
+    const int k = id / (c.nx * c.ny);
+    if (((i + j + k) & 1) != c.parity) return;
+    const float d = diag[id];
+    if (d <= 0.5f) { z[id] = 0.0f; return; }
+    float nsum = 0.0f;
+#define MG_RBGS_N(ni, nj, nk) \
+    if ((ni) >= 0 && (ni) < c.nx && (nj) >= 0 && (nj) < c.ny && (nk) >= 0 && (nk) < c.nz) { \
+        const int _n = (ni) + (nj) * c.nx + (nk) * c.nx * c.ny; \
+        if (mask[_n] > 0.5f) nsum += z[_n]; \
+    }
+    MG_RBGS_N(i - 1, j,     k    )
+    MG_RBGS_N(i + 1, j,     k    )
+    MG_RBGS_N(i,     j - 1, k    )
+    MG_RBGS_N(i,     j + 1, k    )
+    MG_RBGS_N(i,     j,     k - 1)
+    MG_RBGS_N(i,     j,     k + 1)
+#undef MG_RBGS_N
+    const float gs = (rhs[id] + nsum) / d;
+    z[id] += c.sor_omega * (gs - z[id]);
+}
+
+__global__ void fluid_mg_prolongate_add_kernel(const float* coarse_z,
+                                               const float* fine_mask,
+                                               float* fine_z,
+                                               GridMGConstants c) {
+    const int fine_count = c.fine_nx * c.fine_ny * c.fine_nz;
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= fine_count || fine_mask[id] < 0.5f) return;
+    const int i = id % c.fine_nx;
+    const int j = (id / c.fine_nx) % c.fine_ny;
+    const int k = id / (c.fine_nx * c.fine_ny);
+    const int ci = (i / 2 < c.coarse_nx - 1) ? i / 2 : c.coarse_nx - 1;
+    const int cj = (j / 2 < c.coarse_ny - 1) ? j / 2 : c.coarse_ny - 1;
+    const int ck = (k / 2 < c.coarse_nz - 1) ? k / 2 : c.coarse_nz - 1;
+    fine_z[id] += coarse_z[ci + cj * c.coarse_nx + ck * c.coarse_nx * c.coarse_ny];
 }
 
 __global__ void fluid_cg_copy_kernel(float* dst, const float* src, int cell_count) {
@@ -1236,6 +1891,76 @@ public:
             return cudaGetLastError() == cudaSuccess;
         }
 
+        if (kernel == "sim_fluid_mg_zero" ||
+            kernel == "sim_fluid_mg_restrict" ||
+            kernel == "sim_fluid_mg_rbgs" ||
+            kernel == "sim_fluid_mg_prolongate_add") {
+            if (!cmd.constants) return false;
+            const dim3 block(256);
+            const dim3 grid(cmd.groups.groups_x > 0 ? cmd.groups.groups_x : 1,
+                            cmd.groups.groups_y > 0 ? cmd.groups.groups_y : 1,
+                            cmd.groups.groups_z > 0 ? cmd.groups.groups_z : 1);
+            if (kernel == "sim_fluid_mg_zero") {
+                if (cmd.buffer_count < 1 || cmd.constants_size < sizeof(GridProjectionConstants)) return false;
+                const GridProjectionConstants c = *static_cast<const GridProjectionConstants*>(cmd.constants);
+                float* values = static_cast<float*>(nativeBufferPtr(cmd.buffers[0]));
+                if (!values || c.nx <= 0 || c.ny <= 0 || c.nz <= 0) return false;
+                fluid_mg_zero_kernel<<<grid, block>>>(values, c.nx * c.ny * c.nz);
+            } else if (kernel == "sim_fluid_mg_restrict") {
+                if (cmd.buffer_count < 4 || cmd.constants_size < sizeof(GridMGConstants)) return false;
+                const GridMGConstants c = *static_cast<const GridMGConstants*>(cmd.constants);
+                const float* fine_rhs  = static_cast<const float*>(nativeBufferPtr(cmd.buffers[0]));
+                const float* fine_mask = static_cast<const float*>(nativeBufferPtr(cmd.buffers[1]));
+                float* coarse_rhs      = static_cast<float*>(nativeBufferPtr(cmd.buffers[2]));
+                float* coarse_mask     = static_cast<float*>(nativeBufferPtr(cmd.buffers[3]));
+                if (!fine_rhs || !fine_mask || !coarse_rhs || !coarse_mask ||
+                    c.fine_nx <= 0 || c.fine_ny <= 0 || c.fine_nz <= 0 ||
+                    c.coarse_nx <= 0 || c.coarse_ny <= 0 || c.coarse_nz <= 0) return false;
+                fluid_mg_restrict_kernel<<<grid, block>>>(fine_rhs, fine_mask, coarse_rhs, coarse_mask, c);
+            } else if (kernel == "sim_fluid_mg_rbgs") {
+                if (cmd.buffer_count < 4 || cmd.constants_size < sizeof(GridProjectionConstants)) return false;
+                const GridProjectionConstants c = *static_cast<const GridProjectionConstants*>(cmd.constants);
+                const float* rhs  = static_cast<const float*>(nativeBufferPtr(cmd.buffers[0]));
+                const float* mask = static_cast<const float*>(nativeBufferPtr(cmd.buffers[1]));
+                const float* diag = static_cast<const float*>(nativeBufferPtr(cmd.buffers[2]));
+                float* z          = static_cast<float*>(nativeBufferPtr(cmd.buffers[3]));
+                if (!rhs || !mask || !diag || !z || c.nx <= 0 || c.ny <= 0 || c.nz <= 0) return false;
+                fluid_mg_rbgs_kernel<<<grid, block>>>(rhs, mask, diag, z, c);
+            } else {
+                if (cmd.buffer_count < 3 || cmd.constants_size < sizeof(GridMGConstants)) return false;
+                const GridMGConstants c = *static_cast<const GridMGConstants*>(cmd.constants);
+                const float* coarse_z  = static_cast<const float*>(nativeBufferPtr(cmd.buffers[0]));
+                const float* fine_mask = static_cast<const float*>(nativeBufferPtr(cmd.buffers[1]));
+                float* fine_z          = static_cast<float*>(nativeBufferPtr(cmd.buffers[2]));
+                if (!coarse_z || !fine_mask || !fine_z ||
+                    c.fine_nx <= 0 || c.fine_ny <= 0 || c.fine_nz <= 0 ||
+                    c.coarse_nx <= 0 || c.coarse_ny <= 0 || c.coarse_nz <= 0) return false;
+                fluid_mg_prolongate_add_kernel<<<grid, block>>>(coarse_z, fine_mask, fine_z, c);
+            }
+            return cudaGetLastError() == cudaSuccess;
+        }
+
+        if (kernel == "sim_fluid_foam_pack_render_spheres") {
+            if (cmd.buffer_count < 2 || !cmd.constants ||
+                cmd.constants_size < sizeof(FluidFoamRenderPackConstants)) {
+                return false;
+            }
+            const DeviceVec3* positions = static_cast<const DeviceVec3*>(nativeBufferPtr(cmd.buffers[0]));
+            float4* spheres = static_cast<float4*>(nativeBufferPtr(cmd.buffers[1]));
+            if (!positions || !spheres) {
+                return false;
+            }
+            const FluidFoamRenderPackConstants c =
+                *static_cast<const FluidFoamRenderPackConstants*>(cmd.constants);
+            if (c.foam_count <= 0 || c.radius <= 0.0f) {
+                return false;
+            }
+            const dim3 block(256);
+            const dim3 grid(cmd.groups.groups_x > 0 ? cmd.groups.groups_x : 1, 1, 1);
+            fluid_foam_pack_render_spheres_kernel<<<grid, block>>>(positions, spheres, c);
+            return cudaGetLastError() == cudaSuccess;
+        }
+
         if (kernel == "sim_fluid_p2g_scatter" || kernel == "sim_fluid_p2g_normalize") {
             if (cmd.buffer_count < 5 || !cmd.constants || cmd.constants_size < sizeof(FluidP2GConstants)) {
                 return false;
@@ -1342,10 +2067,67 @@ public:
         }
 
         // ── MGPCG (Layer A: Jacobi-preconditioned CG) pressure kernels ────────
+        if (kernel == "sim_fluid_divergence" ||
+            kernel == "sim_fluid_subtract_gradient") {
+            if (cmd.buffer_count < 5 || !cmd.constants || cmd.constants_size < sizeof(GridProjectionConstants)) {
+                return false;
+            }
+            float* vel_x = static_cast<float*>(nativeBufferPtr(cmd.buffers[0]));
+            float* vel_y = static_cast<float*>(nativeBufferPtr(cmd.buffers[1]));
+            float* vel_z = static_cast<float*>(nativeBufferPtr(cmd.buffers[2]));
+            const float* aux = static_cast<const float*>(nativeBufferPtr(cmd.buffers[3]));
+            float* out = static_cast<float*>(nativeBufferPtr(cmd.buffers[4]));
+            if (!vel_x || !vel_y || !vel_z || !aux || !out) {
+                return false;
+            }
+            const GridProjectionConstants c = *static_cast<const GridProjectionConstants*>(cmd.constants);
+            if (c.nx <= 0 || c.ny <= 0 || c.nz <= 0) {
+                return false;
+            }
+            const dim3 block(256);
+            const dim3 grid(cmd.groups.groups_x > 0 ? cmd.groups.groups_x : 1,
+                            cmd.groups.groups_y > 0 ? cmd.groups.groups_y : 1,
+                            cmd.groups.groups_z > 0 ? cmd.groups.groups_z : 1);
+
+            const float* uw = nullptr;
+            const float* vw = nullptr;
+            const float* ww = nullptr;
+            const float* svx = nullptr;
+            const float* svy = nullptr;
+            const float* svz = nullptr;
+            if (c.variational && cmd.buffer_count >= 11) {
+                uw  = static_cast<const float*>(nativeBufferPtr(cmd.buffers[5]));
+                vw  = static_cast<const float*>(nativeBufferPtr(cmd.buffers[6]));
+                ww  = static_cast<const float*>(nativeBufferPtr(cmd.buffers[7]));
+                svx = static_cast<const float*>(nativeBufferPtr(cmd.buffers[8]));
+                svy = static_cast<const float*>(nativeBufferPtr(cmd.buffers[9]));
+                svz = static_cast<const float*>(nativeBufferPtr(cmd.buffers[10]));
+            }
+
+            const float* fluid_phi = nullptr;
+            if (c.gfm_active) {
+                int phi_idx = c.variational ? 11 : 5;
+                if (cmd.buffer_count > phi_idx) {
+                    fluid_phi = static_cast<const float*>(nativeBufferPtr(cmd.buffers[phi_idx]));
+                }
+            }
+
+            if (kernel == "sim_fluid_divergence") {
+                // buffers: [vel_x, vel_y, vel_z, fluid_mask, divergence] (+ [uw, vw, ww, svx, svy, svz])
+                fluid_divergence_kernel<<<grid, block>>>(vel_x, vel_y, vel_z, aux, out, c, uw, vw, ww, svx, svy, svz);
+            } else {
+                // buffers: [vel_x, vel_y, vel_z, pressure, fluid_mask] (+ [uw, vw, ww, svx, svy, svz]) (+ [fluid_phi])
+                fluid_subtract_gradient_kernel<<<grid, block>>>(vel_x, vel_y, vel_z, aux, out, c, uw, vw, ww, svx, svy, svz, fluid_phi);
+            }
+            return cudaGetLastError() == cudaSuccess;
+        }
+
         if (kernel == "sim_fluid_cg_build_diag" ||
             kernel == "sim_fluid_cg_residual_init" ||
             kernel == "sim_fluid_cg_spmv" ||
+            kernel == "sim_fluid_cg_spmv_dot" ||
             kernel == "sim_fluid_cg_jacobi" ||
+            kernel == "sim_fluid_cg_jacobi_dot" ||
             kernel == "sim_fluid_cg_copy" ||
             kernel == "sim_fluid_cg_axpy" ||
             kernel == "sim_fluid_cg_zpby" ||
@@ -1361,11 +2143,26 @@ public:
                             cmd.groups.groups_z > 0 ? cmd.groups.groups_z : 1);
 
             if (kernel == "sim_fluid_cg_build_diag") {
-                if (cmd.buffer_count < 2) return false;          // [mask, diag]
+                if (cmd.buffer_count < 2) return false;          // [mask, diag] (+ [uw, vw, ww])
                 const float* mask = static_cast<const float*>(nativeBufferPtr(cmd.buffers[0]));
                 float* diag       = static_cast<float*>(nativeBufferPtr(cmd.buffers[1]));
                 if (!mask || !diag) return false;
-                fluid_cg_build_diag_kernel<<<grid, block>>>(mask, diag, c);
+                const float* uw = nullptr;
+                const float* vw = nullptr;
+                const float* ww = nullptr;
+                if (c.variational && cmd.buffer_count >= 5) {
+                    uw = static_cast<const float*>(nativeBufferPtr(cmd.buffers[2]));
+                    vw = static_cast<const float*>(nativeBufferPtr(cmd.buffers[3]));
+                    ww = static_cast<const float*>(nativeBufferPtr(cmd.buffers[4]));
+                }
+                const float* fluid_phi = nullptr;
+                if (c.gfm_active) {
+                    int phi_idx = c.variational ? 5 : 2;
+                    if (cmd.buffer_count > phi_idx) {
+                        fluid_phi = static_cast<const float*>(nativeBufferPtr(cmd.buffers[phi_idx]));
+                    }
+                }
+                fluid_cg_build_diag_kernel<<<grid, block>>>(mask, diag, c, uw, vw, ww, fluid_phi);
             } else if (kernel == "sim_fluid_cg_residual_init") {
                 if (cmd.buffer_count < 4) return false;          // [div, mask, r, pressure]
                 const float* div  = static_cast<const float*>(nativeBufferPtr(cmd.buffers[0]));
@@ -1375,13 +2172,38 @@ public:
                 if (!div || !mask || !r || !pressure) return false;
                 fluid_cg_residual_init_kernel<<<grid, block>>>(div, mask, r, pressure, c);
             } else if (kernel == "sim_fluid_cg_spmv") {
-                if (cmd.buffer_count < 4) return false;          // [s, mask, diag, As]
+                if (cmd.buffer_count < 4) return false;          // [s, mask, diag, As] (+ [uw, vw, ww])
                 const float* s    = static_cast<const float*>(nativeBufferPtr(cmd.buffers[0]));
                 const float* mask = static_cast<const float*>(nativeBufferPtr(cmd.buffers[1]));
                 const float* diag = static_cast<const float*>(nativeBufferPtr(cmd.buffers[2]));
                 float* As         = static_cast<float*>(nativeBufferPtr(cmd.buffers[3]));
                 if (!s || !mask || !diag || !As) return false;
-                fluid_cg_spmv_kernel<<<grid, block>>>(s, mask, diag, As, c);
+                const float* uw = nullptr;
+                const float* vw = nullptr;
+                const float* ww = nullptr;
+                if (c.variational && cmd.buffer_count >= 7) {
+                    uw = static_cast<const float*>(nativeBufferPtr(cmd.buffers[4]));
+                    vw = static_cast<const float*>(nativeBufferPtr(cmd.buffers[5]));
+                    ww = static_cast<const float*>(nativeBufferPtr(cmd.buffers[6]));
+                }
+                fluid_cg_spmv_kernel<<<grid, block>>>(s, mask, diag, As, c, uw, vw, ww);
+            } else if (kernel == "sim_fluid_cg_spmv_dot") {
+                if (cmd.buffer_count < 5) return false;          // [s, mask, diag, As, partials] (+ [uw, vw, ww])
+                const float* s    = static_cast<const float*>(nativeBufferPtr(cmd.buffers[0]));
+                const float* mask = static_cast<const float*>(nativeBufferPtr(cmd.buffers[1]));
+                const float* diag = static_cast<const float*>(nativeBufferPtr(cmd.buffers[2]));
+                float* As         = static_cast<float*>(nativeBufferPtr(cmd.buffers[3]));
+                double* partials  = static_cast<double*>(nativeBufferPtr(cmd.buffers[4]));
+                if (!s || !mask || !diag || !As || !partials) return false;
+                const float* uw = nullptr;
+                const float* vw = nullptr;
+                const float* ww = nullptr;
+                if (c.variational && cmd.buffer_count >= 8) {
+                    uw = static_cast<const float*>(nativeBufferPtr(cmd.buffers[5]));
+                    vw = static_cast<const float*>(nativeBufferPtr(cmd.buffers[6]));
+                    ww = static_cast<const float*>(nativeBufferPtr(cmd.buffers[7]));
+                }
+                fluid_cg_spmv_dot_kernel<<<grid, block, block.x * sizeof(double)>>>(s, mask, diag, As, partials, c, uw, vw, ww);
             } else if (kernel == "sim_fluid_cg_jacobi") {
                 if (cmd.buffer_count < 3) return false;          // [r, diag, z]
                 const float* r    = static_cast<const float*>(nativeBufferPtr(cmd.buffers[0]));
@@ -1389,6 +2211,14 @@ public:
                 float* z          = static_cast<float*>(nativeBufferPtr(cmd.buffers[2]));
                 if (!r || !diag || !z) return false;
                 fluid_cg_jacobi_precon_kernel<<<grid, block>>>(r, diag, z, cell_count);
+            } else if (kernel == "sim_fluid_cg_jacobi_dot") {
+                if (cmd.buffer_count < 4) return false;          // [r, diag, z, partials]
+                const float* r    = static_cast<const float*>(nativeBufferPtr(cmd.buffers[0]));
+                const float* diag = static_cast<const float*>(nativeBufferPtr(cmd.buffers[1]));
+                float* z          = static_cast<float*>(nativeBufferPtr(cmd.buffers[2]));
+                double* partials  = static_cast<double*>(nativeBufferPtr(cmd.buffers[3]));
+                if (!r || !diag || !z || !partials) return false;
+                fluid_cg_jacobi_dot_kernel<<<grid, block, block.x * sizeof(double)>>>(r, diag, z, partials, cell_count);
             } else if (kernel == "sim_fluid_cg_copy") {
                 if (cmd.buffer_count < 2) return false;          // [dst, src]
                 float* dst        = static_cast<float*>(nativeBufferPtr(cmd.buffers[0]));
@@ -1419,7 +2249,7 @@ public:
         }
 
         if (kernel == "sim_fluid_g2p") {
-            if (cmd.buffer_count < 9 || !cmd.constants || cmd.constants_size < sizeof(FluidG2PConstants)) {
+            if (cmd.buffer_count < 10 || !cmd.constants || cmd.constants_size < sizeof(FluidG2PConstants)) {
                 return false;
             }
             const DeviceVec3*  positions  = static_cast<const DeviceVec3*> (nativeBufferPtr(cmd.buffers[0]));
@@ -1431,6 +2261,7 @@ public:
             const float*       vx_pre     = static_cast<const float*>      (nativeBufferPtr(cmd.buffers[6]));
             const float*       vy_pre     = static_cast<const float*>      (nativeBufferPtr(cmd.buffers[7]));
             const float*       vz_pre     = static_cast<const float*>      (nativeBufferPtr(cmd.buffers[8]));
+            const float*       fluid_mask = static_cast<const float*>      (nativeBufferPtr(cmd.buffers[9]));
             if (!positions || !velocities || !aff || !vx_post || !vy_post || !vz_post) return false;
             const FluidG2PConstants c = *static_cast<const FluidG2PConstants*>(cmd.constants);
             if (c.particle_count <= 0 || c.nx <= 0 || c.ny <= 0 || c.nz <= 0) return false;
@@ -1438,7 +2269,8 @@ public:
             const dim3 grid(cmd.groups.groups_x > 0 ? cmd.groups.groups_x : 1, 1, 1);
             fluid_g2p_gather_kernel<<<grid, block>>>(positions, velocities, aff,
                                                      vx_post, vy_post, vz_post,
-                                                     vx_pre,  vy_pre,  vz_pre, c);
+                                                     vx_pre,  vy_pre,  vz_pre,
+                                                     fluid_mask, c);
             return cudaGetLastError() == cudaSuccess;
         }
 

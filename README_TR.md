@@ -262,6 +262,22 @@ Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
 - **Fizik Entegrasyonu**: Saç telleri karakter ağlarıyla (mesh) çarpışır ve yerçekimine/kuvvetlere tepki verir.
 - **Materyal Desteği**: Gerçekçi renderlama için Melanin tabanlı saç BSDF materyali.
 
+### 🌀 Fizik & Parçacık Simülasyon Sistemi (Yeni!)
+<img src="docs/images/simulation_header.jpg" width="100%" alt="Simulation Suite System">
+
+Path-tracing render hattı ile tam entegre, CUDA ve CPU backend'leri tarafından desteklenen yüksek performanslı, çok iş parçacıklı grid ve parçacık tabanlı simülasyon motoru:
+- **Birleşik Parçacık Sistemleri**: Tek bir çalışma alanında birden fazla simülasyon domain'i, özel emitter'lar, çarpıştırıcılar (colliders) ve kuvvet alanları ekleyin ve yönetin.
+- **APIC / FLIP Sıvı Çözücü**: Açısal momentumu koruyan ve sayısal enerji kaybını minimize eden yüksek kaliteli hibrit sıvı simülatörü. Ayarlanabilir APIC/FLIP karışımı, adaptif çözünürlük, kapalı/açık sınır modları, sızıntıları önlemek için dinamik parçacık yeniden örneklemesi (reseeding) ve hazır sıvı materyal presetleri (Su, Yağ, Özel) içerir.
+- **Yanıcı Gaz & Duman Çözücü**: Sıcaklık, kurum (soot) ve yakıt yoğunluğu için çok iş parçacıklı yoğun grid çözücü. Gerçekçi yanma dinamikleri (yangın/duman oluşumu, tutuşma, ısı yayılımı, alev sönümlenmesi) ve prosedürel FBM curl-noise türbülansı sunar.
+- **Fiziksel Tabanlı Whitewater (Ihmsen et al. 2012)**: Hapsedilmiş hava (trapped-air) ve dalga tepesi (wave-crest) potansiyellerine dayalı olarak ikincil sprey (havada), köpük (yüzeyde) ve kabarcık (su altında) parçacıklarını dinamik olarak simüle eder:
+  - **Dinamik PBR Materyal Yönlendirme**: Parçacıkları otomatik olarak fiziksel presetlere yönlendirir—Sprey için geçirgen su damlaları, Köpük için saçılımlı pürüzlü beyaz PBR ve Kabarcık için gümüşi yarı geçirgen baloncuklar. Herhangi bir sahne PBR materyalini bağımsız olarak atamak için *Custom Material Overrides* seçeneği içerir.
+  - **Su Altı Kabarcık TIR Düzeltmesi**: Kabarcık IOR değerini 1.1'e çekerek, geçirgenliği 0.65 yaparak (%35 oranında speküler/diffuse yansıma payı bırakarak) ve yumuşak bir ışık saçılım emisyonu (0.12) ekleyerek su altı kabarcıklarındaki yansıma kararmalarını (TIR) önler.
+  - **Newton-Raphson Dalga Snapping**: Yüzey köpüğü parçacıklarını pürüzsüzleştirilmiş su yüzeyi (Level-Set) sınırına projekte ederek dalgalı sularda havada uçan köpük hatalarını giderir.
+  - **Kararlı Boyut Varyasyonu & Sönümleme**: Parçacık başına titremesiz kararlı boyut dağılımı ($0.6\times$ ila $1.4\times$) ve ömür sonuna yaklaşan parçacıklar için yumuşak küçülerek yok olma (dissolve) animasyonları sunar.
+  - **İkosahedron Alt Bölümleme (Subdivisions)**: Yakın çekim detayları için ayarlanabilir küre çözünürlüğü (subdivision 0..3) seçeneği.
+- **SimCache Disk Baking**: Ağır simülasyon karelerini (sıvı, köpük, gaz) doğrudan proje dosyasının yanındaki ikili `.simcache` dosyalarına kaydeder. Simülasyonu yeniden hesaplamadan timeline'da gerçek zamanlı gezinme imkanı sunar.
+- **Sorunsuz Serialization**: Aktif sistemler, domain tipleri, parametreler, özel materyaller ve timeline önbellekleri dahil olmak üzere tüm simülasyon durumu `.rtp` / `.rts` proje dosyalarında eksiksiz olarak kaydedilir ve geri yüklenir.
+
 ### 🌊 Gerçekçi Su & Okyanus
 <img src="docs/images/water_header.jpg" width="100%" alt="Okyanus Simülasyonu">
 

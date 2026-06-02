@@ -2937,6 +2937,28 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         // We only need CPU skinning for CPU rendering or if we need to update CPU BVH
         bool geometry_changed = this->updateAnimationState(scene, current_time, !run_gpu);
 
+        // --- SIMULATION (fluid / gas / particles) PER-FRAME DRIVE ---
+        // The sequence-render worker is the SOLE owner of the sim timeline here
+        // (the UI driver is gated off by render_owns_sim in SceneUI::draw).
+        // render_Animation historically drove only wind / FFT ocean / animator,
+        // so fluid splat, foam and the SurfaceSDF surface were ABSENT from
+        // sequence output. Deterministically bake the sim to this frame and
+        // rebuild the SurfaceSDF volume + particle/foam render instances. The
+        // particle/foam bridge self-flags the backend-rebuild globals
+        // (g_scene_geometry_generation / g_*_rebuild_pending / g_gpu_refit_pending),
+        // which the GPU geometry-sync block below consumes BEFORE traceRays.
+        const bool sim_active = scene.anySimulationRuntimeEnabled();
+        bool sim_structural_change = false;
+        if (sim_active) {
+            extern std::atomic<uint64_t> g_scene_geometry_generation;
+            const float seq_fps = static_cast<float>(std::max(1, render_settings.animation_fps));
+            const uint64_t gen_before = g_scene_geometry_generation.load(std::memory_order_acquire);
+            scene.bakeSimulationForRenderFrame(frame, seq_fps, /*enable_rt_geometry*/ true,
+                                               /*cache_frames*/ false);
+            sim_structural_change =
+                g_scene_geometry_generation.load(std::memory_order_acquire) != gen_before;
+        }
+
         // --- WIND ANIMATION ---
         // Apply wind simulation for this frame
         // FIX: Use same pattern as Play Mode (Main.cpp line 691-697) for consistent behavior
@@ -3135,6 +3157,61 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
                     }
                 }
             }
+
+            // --- SIMULATION GEOMETRY → BACKEND ---
+            // The particle/foam bridge + SurfaceSDF volume were (re)built by the
+            // sim drive above. During a sequence render the main loop's rebuild
+            // handlers are gated off (skip_backend_for_anim), so the worker must
+            // push the sim geometry to the backend itself — and it MUST complete
+            // before traceRays: a concurrent / last-minute AS mutation mid-trace
+            // is a silent NVIDIA hang (see render_warmup_sequencing).
+            if (sim_active && m_backend) {
+                extern bool g_optix_rebuild_pending;
+                extern bool g_vulkan_rebuild_pending;
+                extern bool g_gpu_refit_pending;
+                if (sim_structural_change) {
+                    // Pool grew / new bridge group: rebuild the TLAS so it
+                    // incorporates the InstanceManager particle/foam groups plus
+                    // the SurfaceSDF volume. Synchronous — the worker is the sole
+                    // backend owner here, so there is no concurrent AS mutation.
+                    if (is_vulkan) {
+                        // updateGeometry alone is the LIGHT path: it reads the
+                        // InstanceManager groups (so it picks up the grown foam /
+                        // particle pool) and REUSES cached BLAS via m_meshRegistry,
+                        // rebuilding only the TLAS (+ any genuinely new source BLAS,
+                        // e.g. the foam icosphere the first time it appears).
+                        // We must NOT call rebuildAccelerationStructure() here — it
+                        // DESTROYS every BLAS + texture + VDB buffer and clears the
+                        // registry, forcing a full scene re-upload. Doing that on
+                        // every foam pool-growth frame (foam is volatile) was the
+                        // "sık rebuild / render waits rebuild" storm on Vulkan.
+                        m_backend->updateGeometry(scene.world.objects);
+                        // updateGeometry rebuilt m_orderedVDBInstances → re-sync the
+                        // VDB SSBO so volume customIndex matches the new TLAS order.
+                        if (ui_ctx) SceneUI::syncVDBVolumesToGPU(*ui_ctx);
+                    } else {
+                        // OptiX: rebuildBackendGeometry rebuilds the TLAS (incl.
+                        // instance groups) + syncs volumetric data + hair, all
+                        // synchronously on this thread.
+                        this->rebuildBackendGeometry(scene);
+                        // Re-apply GPU skinning if this is also a skinned frame —
+                        // the full rebuild rebuilt BLAS from base triangles and
+                        // dropped the bone deformation updateSceneGeometry applied.
+                        if (!finalBoneMatrices.empty()) {
+                            m_backend->updateSceneGeometry(scene.world.objects, finalBoneMatrices);
+                        }
+                    }
+                } else if (g_gpu_refit_pending) {
+                    // Particle motion only: cheap TLAS refit (no BLAS rebuild).
+                    m_backend->updateInstanceTransforms(scene.world.objects);
+                }
+                // The worker consumed these flags; clear them so the post-render
+                // UI loop doesn't re-process a stale pending rebuild.
+                g_optix_rebuild_pending = false;
+                g_vulkan_rebuild_pending = false;
+                g_gpu_refit_pending = false;
+            }
+
             // 2. Set Scene Params
             if (m_backend) {
                 m_backend->setTime(static_cast<float>(frame) / animFps, frame_delta);
@@ -3201,6 +3278,16 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
                                                  target_surface->w, target_surface->h,
                                                  framebuffer_ptr, nullptr);
                  }
+            }
+
+            // Vulkan's rendered viewport path overlaps trace + tonemap/readback with
+            // ping-pong frame slots. Sequence rendering owns the backend on this
+            // worker thread, so drain the tail once per completed frame before the
+            // next frame mutates TLAS/camera/world state. Without this, the viewport
+            // can inherit a backlog after the sequence and feel dramatically slower
+            // until a Solid<->Rendered mode switch forces a device idle.
+            if (is_vulkan && m_backend) {
+                m_backend->waitForCompletion();
             }
             
             // IMMEDIATE EXIT CHECK after GPU render loop
@@ -3349,6 +3436,9 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
     // animation's target sample count with accumulation "complete", causing the
     // viewport to show a stale cached frame indefinitely.
     if (run_gpu && m_backend) {
+        if (is_vulkan) {
+            m_backend->waitForCompletion();
+        }
         Backend::RenderParams rp = {};
         rp.imageWidth = image_width;
         rp.imageHeight = image_height;
@@ -3361,6 +3451,15 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         rp.adaptiveThreshold = render_settings.variance_threshold;
         m_backend->setRenderParams(rp);
         m_backend->resetAccumulation();
+    }
+
+    if (rendering_stopped_cpu.load() || rendering_stopped_gpu.load()) {
+        extern bool g_optix_rebuild_pending;
+        extern bool g_vulkan_rebuild_pending;
+        extern bool g_gpu_refit_pending;
+        g_optix_rebuild_pending = false;
+        g_vulkan_rebuild_pending = false;
+        g_gpu_refit_pending = false;
     }
 
     // Restore viewport resolution for CPU path

@@ -153,6 +153,9 @@
     <ClInclude Include="source\include\ParticleSimulation.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\SimCache.h">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\GridFluidSolver.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
@@ -554,6 +557,9 @@
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\ParticleRenderBridge.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SimCache.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\GridFluidSolver.cpp">

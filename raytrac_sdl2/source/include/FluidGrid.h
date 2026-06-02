@@ -124,7 +124,26 @@ public:
     // SOLID/BOUNDARY FIELD
     // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     std::vector<uint8_t> solid;     // 0 = fluid, 1 = solid boundary
-    
+    std::vector<Vec3>    solid_vel; // linear velocity of the solid in each solid cell
+                                    // (moving colliders); 0 elsewhere. Cell-centered,
+                                    // size == solid. Read by advect for momentum transfer.
+
+    // Variational solid coupling: fractional MAC-FACE open weights (Batty 2007),
+    // quantized 0..255 (255 = fully open to fluid, 0 = fully blocked by a solid).
+    // Sized like the staggered velocity arrays. Default 255 (no collider). Filled
+    // by the collider voxelizer's analytic super-sampling; read by the pressure
+    // projection for sub-grid-accurate solid boundaries.
+    std::vector<uint8_t> u_weight;  // X-faces, size == vel_x
+    std::vector<uint8_t> v_weight;  // Y-faces, size == vel_y
+    std::vector<uint8_t> w_weight;  // Z-faces, size == vel_z
+
+    // Ghost-fluid free surface: cell-centered liquid level set (signed distance,
+    // negative inside fluid). Lazy (sized by the projection only when ghost-fluid
+    // is enabled). Rebuilt each step from the particle positions.
+    std::vector<float> fluid_phi;
+
+    static constexpr float weightToFloat(uint8_t w) { return static_cast<float>(w) * (1.0f / 255.0f); }
+
     // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     // CONSTRUCTION
     // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -158,7 +177,12 @@ public:
         pressure.resize(cell_count, 0.0f);
         divergence.resize(cell_count, 0.0f);
         solid.resize(cell_count, 0);
-        
+        // solid_vel + u/v/w_weight are LAZY: sized on demand by the collider
+        // voxelizer only when a moving collider / variational solids are actually
+        // in use, so no-collider / gas / static domains pay zero extra memory
+        // (and the per-frame snapshot cache stays lean). The solver falls back to
+        // the binary solid path whenever these are not sized to match.
+
         // Initialize tile system
         tiles_x = (nx + TILE_SIZE - 1) / TILE_SIZE;
         tiles_y = (ny + TILE_SIZE - 1) / TILE_SIZE;
