@@ -1,742 +1,444 @@
-# 🌟 RayTrophi - Advanced Real-Time Ray Tracing Engine
+# RayTrophi Studio
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-Alpha-orange.svg)
+![Version](https://img.shields.io/badge/status-active%20development-orange.svg)
 ![C++](https://img.shields.io/badge/C++-20-00599C.svg?logo=c%2B%2B)
-![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows)
-![CUDA](https://img.shields.io/badge/CUDA-12.0-76B900.svg?logo=nvidia)
+![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D6.svg?logo=windows)
+![Backends](https://img.shields.io/badge/render-CPU%20%7C%20OptiX%20%7C%20Vulkan%20RT-76B900.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-**A high-performance, production-ready ray tracing renderer with hybrid CPU/GPU rendering**
+**An open-source 3D content-creation suite built around a hybrid CPU/GPU path tracer.**
+
+Model, sculpt, paint, groom, simulate, light, animate, and render — in one application.
 
 [![RayTrophi Showcase](https://img.youtube.com/vi/-xRiPhc-p6k/maxresdefault.jpg)](https://www.youtube.com/watch?v=-xRiPhc-p6k)
-**[▶️ Watch Showcase on YouTube](https://www.youtube.com/watch?v=-xRiPhc-p6k)**
+**[▶️ Watch the showcase on YouTube](https://www.youtube.com/watch?v=-xRiPhc-p6k)**
 
-[Features](#-features) • [Quick Start](#-quick-start) • [Architecture](#-architecture) • [Performance](#-performance) • [Gallery](#-gallery)
+[What it is](#-what-it-is) • [Workspaces](#-workspaces) • [Rendering](#-rendering--backends) • [Simulation](#-physics--simulation-suite) • [Quick Start](#-quick-start) • [Architecture](#-architecture) • [Gallery](#-gallery)
 
 </div>
 
 ---
 
-## 📖 Overview
+## 📖 What it is
 
-**RayTrophi** is a state-of-the-art physically-based ray tracing engine designed for architectural visualization, product rendering, and real-time graphics. It combines the flexibility of CPU rendering with the raw power of GPU acceleration through NVIDIA OptiX.
+**RayTrophi Studio** began as a path-tracing renderer and has grown into a full **digital-content-creation (DCC) application**. It is a single desktop program where you can build a scene from scratch — polygon modeling and sculpting, texture painting, hair grooming, terrain and vegetation, fluid/gas/whitewater simulation, ocean and rivers — and render it with a physically-based path tracer that runs on three interchangeable backends (CPU, NVIDIA OptiX, and Vulkan Ray Tracing).
 
-### 🎯 Key Highlights
+It is not a render farm plugin or a library. It is an interactive editor with a modern docked UI, an animation timeline, undo/redo across every tool, project save/load, and a non-destructive art-direction (Stylize) layer on top of the converged image.
 
-- **Hybrid Rendering**: Seamlessly switch between CPU (Embree/Custom BVH) and GPU (OptiX & Vulkan) acceleration
+### Design goals
 
-- **Production-Ready**: Principled BSDF, advanced materials, volumetrics, subsurface scattering
-- **High Performance**: Optimized BVH construction (<1s for 3.3M triangles), 75% memory-optimized triangle structure
-- **Real-time Preview**: Modern interactive UI with ImGui, animation timeline
-- **Industry Standard**: AssImp loader supports 40+ 3D formats (GLTF, FBX, OBJ, etc.)
+- **One application, full pipeline.** Geometry authoring, look-dev, FX, animation, and final-frame rendering live in the same scene, the same `.rtp`/`.rts` project, the same undo stack.
+- **Three render backends, one feature set.** Switch between CPU (Embree), OptiX, and Vulkan RT without changing the scene. The Vulkan path is the recommended interactive backend; OptiX and CPU remain first-class.
+- **Physically-based, but art-directable.** Principled BSDF + spectral hair + volumetrics + DCC-grade fluids, with a Stylize layer that can repaint the result into oil/ink/toon looks without touching the underlying physics.
+- **Honest about its state.** This is an active solo project. Where a subsystem is experimental or in progress, it says so.
+
+> **Status:** active development. There is no versioned release yet; the `main` branch is the current build.
 
 ---
 
-## 📊 Project Statistics (Verified)
+## 📊 Project at a glance
 <!-- STATS_START -->
 | Metric | Value |
 | :--- | :--- |
-| **Project Code/Shader Files** | 327 |
-| **Project Code/Shader Lines** | 207,957 |
-| **Source Tree Code/Shader Lines** | 467,165 |
-| **UI Control Points** | 1,278+ |
-| **Last Verified** | 2026-05-23 |
+| **Project code / shader lines** | ~259,000 |
+| **Project code / shader files** | 360+ |
+| **GPU kernel & shader files** | 56 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
+| **UI control points** | 1,278+ |
+| **Render backends** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
+| **Node systems** | Terrain (36+), Animation (14+), Material (11+) |
+| **Last verified** | 2026-06-02 |
 <!-- STATS_END -->
 
-Counts cover `raytrac_sdl2/source`. Project lines exclude vendored single-file libraries (`simdjson`, `stb`, `json.hpp`, `tinyexr`); source tree lines include them.
+Counts cover `raytrac_sdl2/source` and exclude vendored single-file libraries (`simdjson`, `stb`, `json.hpp`, `tinyexr`).
 
-Full Technical Report: [ARCHITECTURE.md](ARCHITECTURE.md)
-
----
-
-
-
-## ✨ Features
-
-### 🎨 Rendering Capabilities
-
-- **Materials**
-  - ✅ Principled BSDF (Disney-style uber-shader)
-  - ✅ Lambertian, Metal, Dielectric
-  - ✅ Volumetric rendering with noise-based density
-  - ✅ Subsurface Scattering (SSS)
-  - ✅ Clearcoat, Anisotropic materials
-  - ✅ **Hair System**: GPU-accelerated hair rendering and simulation
-  
-- **Lighting**
-  - ✅ Point lights, Directional lights
-  - ✅ Area lights (mesh-based)
-  - ✅ Emissive materials
-  - ✅ **HDR/EXR Environment Maps** (equirectangular projection)
-  - ✅ **Global Volumetric Clouds**:
-    - **Any Sky Mode**: Decoupled rendering works seamlessly with HDRI, Solid Color, or Nishita Sky.
-    - **Physical Scattering**: Henyey-Greenstein phase function with controllable Anisotropy (Silver Lining).
-    - **High Quality**: Adaptive ray marching (up to 128 steps) and jittered sampling to eliminate banding artifacts.
-    - **Dynamic Control**: Wind/Seed offsets, Coverage, Density, and Altitude layers.
-    - **Soft Horizon**: Smart density fading prevents black horizon artifacts.
-  - ✅ **Advanced Nishita Sky Model**: 
-  - Physical atmosphere (Air, Dust, Ozone, Altitude) matching Blender concepts.
-  - **Day/Night Cycle**: Automatic transition with procedural stars and moon.
-  - **Moon Rendering**: Horizon size magnification, redness, atmospheric dimming, and phases.
-  - **Sun Glow**: High Mie Anisotropy (0.98) for realistic sun halos.
-  - **Light Sync**: Automatically synchronizes Scene Directional Light with Sky Sun position.)
-  - ✅ Soft shadows with multiple importance sampling
-
-  - **Style Layer System**:
-    - A non-destructive art-direction pass that reads the converged render and AOV buffers, then restyles the image without changing scene geometry, materials, lights, or the path-traced base result.
-    - Domain-masked compositing separates sky, material, outline, and world-adapter behavior so a brush effect never spills across the entire viewport.
-    - CPU and GPU display rebuild paths can re-apply Stylize without resetting accumulation, so profile and slider edits update the current image quickly.
-    - **Backend parity**: CPU, Vulkan RT GPU compute (`stylize.comp`), and OptiX CUDA (`StylizeKernel.cu`) now share the same Stylize layer model and produce bit-identical output for matched presets while keeping the GPU paths fast and stable.
-    - **Backend support matrix**:
-      | Path | Acceleration | Output |
-      |------|--------------|--------|
-      | CPU display rebuild | Scalar/SIMD CPU fallback | Reference result |
-      | Vulkan RT | GPU compute shader | Matches CPU/OptiX |
-      | OptiX | CUDA post kernel | Matches CPU/Vulkan |
-    - **Sky Layer**:
-      - Runs only on valid sky pixels (`AOV valid && hit == false`).
-      - Uses spherical view-ray sampling so stylized gradients, cloud banks, and the sun remain locked to world direction instead of screen UVs.
-      - Reads Nishita sun direction, elevation, disc size, cloud coverage, density, scale, offsets, and seed as inputs.
-      - Presets: Painterly Clouds, Cartoon Cel, Sunset Bands, Ink Wash, and Clear Gradient.
-      - Stylized cloud banks use horizontal puff groups with separate shadow, highlight, and rim accents for cartoon/gouache looks.
-    - **Painterly Material Layer**:
-      - Runs only on surface pixels (`AOV hit == true`) and uses albedo, normal, world position, depth, material id, and derived edge strength.
-      - Surface-locked stroke fields prevent screen-space swimming and keep broad brush scales readable on objects.
-      - Palette influence, material color preservation, simplification, edge respect, pigment thickness, and normal softening are controlled per profile.
-      - Wet Oil Model exposes Body, Load, Pickup, Deposit, and Buildup controls for cheap painterly paint transport on top of material color.
-    - **Outline Layer**:
-      - Uses depth, normal, and material discontinuities to draw stylized edges.
-      - Supports Ink, Oil Paint, Pencil, Dry Brush, and Pressure line types with palette, custom, material-tint, warm-paint, and cool-pencil color modes.
-    - **World Adapter Controls**:
-      - Initial controls expose terrain stroke blend, foliage clustering, foliage palette variance, volume grain, and force-field motion response for future style-aware world effects.
-    - **Profiles**:
-      - Painterly Oil, Gouache, Ink + Wash, Graphic Toon, Clay / Maquette, and Dreamy Sunset provide complete starting points across sky, material, outline, palette, and world-adapter settings.
-
-- **Advanced Features**
-  - ✅ **Accumulative Rendering**: Progressive path tracing for noise-free, high-quality output
-  - ✅ **Adaptive Sampling**: Intelligent sampling engine focusing on noisy areas
-  - ✅ Depth of Field (DOF)
-  - ✅ Motion Blur
-  - ✅ Intel Open Image Denoise (OIDN) integration
-  - ✅ Tone mapping & post-processing
-  - ⚡ **[RECOMMENDED] Vulkan RT Backend** *(Primary)*: Hardware ray tracing pipeline built on Vulkan Ray Tracing (`VK_KHR_ray_tracing_pipeline`). Features GPU-accelerated skeletal animation via compute skinning shaders, TLAS/BLAS refit for dynamic geometry, persistent descriptor sets, async ping-pong frame pipeline with GPU tonemap, analytical LSS hair intersection, and persistent NanoVDB accessor for volumes. Auto-selected when hardware RT is available; gracefully falls back to OptiX or CPU if Vulkan dependencies (`vulkan-1.dll`) or a compatible GPU are absent.
-
-  <details>
-  <summary>⚡ <b>Vulkan Backend — Feature Compatibility</b> (expand)</summary>
-
-  | Feature | OptiX | Vulkan RT | Notes |
-  |---------|:-----:|:---------:|-------|
-  | Principled BSDF | ✅ | ✅ | Full parity |
-  | Lambertian / Metal / Dielectric | ✅ | ✅ | Full parity |
-  | Subsurface Scattering (SSS) | ✅ | ✅ | Minor colour tint difference |
-  | Clearcoat & Anisotropic | ✅ | ✅ | Full parity |
-  | Volumetric Rendering (NanoVDB) | ✅ | ✅ | Persistent leaf-cache accessor; equal or faster than OptiX in interactive modes |
-  | **Hair System** | ✅ | ✅ | Analytical LSS intersection + LSS-tight AABBs; outperforms OptiX hardware curves in this engine |
-  | HDR / EXR Environment | ✅ | ✅ | Full parity |
-  | Nishita Sky & Day/Night Cycle | ✅ | ✅ | Full parity |
-  | Volumetric Clouds | ✅ | 🧪 | Minor scattering differences |
-  | **Water / Ocean (FFT)** | ✅ | 🧪 | Wave reflection differences |
-  | Skeletal Animation (GPU Skinning) | ✅ | ✅ | Vulkan compute shader |
-  | Depth of Field (DOF) | ✅ | ✅ | Full parity |
-  | Motion Blur | ✅ | ✅ | Full parity |
-  | Soft Shadows (MIS) | ✅ | ✅ | Full parity |
-  | Area Lights | ✅ | ✅ | Full parity |
-  | Tone Mapping & Post-FX | ✅ | ✅ | GPU compute tonemap on Vulkan, fused into trace command buffer |
-  | OIDN Denoising | ✅ | ✅ | OptiX has tighter CUDA interop path |
-  | Adaptive Sampling | ✅ | ✅ | Full parity |
-  | Progressive / Accumulative Render | ✅ | ✅ | Vulkan converges faster (lower per-frame overhead) |
-
-  > **Legend:** ✅ Full support &nbsp;|&nbsp; 🧪 Supported, minor output differences possible
-
-  </details>
-
-  <details>
-  <summary>📊 <b>Vulkan RT vs OptiX — Interactive Benchmarks</b> (expand)</summary>
-
-  Measured on the same scene, same settings, same hardware. Frame times below are
-  representative interactive-viewport rates (camera in motion). For static scenes,
-  Vulkan's adaptive sampling pushes both backends well past 500 fps as pixels converge.
-
-  | Scene | Vulkan RT | OptiX | Ratio |
-  |---|:---:|:---:|:---:|
-  | Mesh-heavy + Nishita atmosphere | **600 fps** | 50 fps | **12.0×** |
-  | Hair-heavy (cubic B-spline strands, LSS intersection) | **300 fps** | 70 fps | **4.3×** |
-  | Volume / VDB cloud (Fast preset) | **300 fps** | 200 fps | **1.5×** |
-  | Volume / VDB cloud (Balanced preset) | comparable | comparable | ≈1.0× |
-  | Volume / VDB cloud (Exact preset, during camera motion) | 16 fps | 23 fps | 0.7× |
-  | Volume / VDB cloud (converged, adaptive sampling active) | **800 fps** | adaptive-bound | — |
-
-  **Why Vulkan wins interactive:**
-  - Async fence-based ping-pong frame pipeline (zero `vkQueueWaitIdle` per frame)
-  - GPU compute tonemap → small RGBA8 staging (no CPU Reinhard loop, 4× lower readback bandwidth)
-  - Analytical Linear-Swept-Sphere hair intersection + LSS-tight AABBs (instead of cubic B-spline Newton)
-  - Persistent NanoVDB read-accessor across march steps (leaf-cache hits skip the tree walk)
-  - Lean kernel (no per-pixel accumulation atomics or vignette compute in the hot path)
-
-  **Where OptiX still wins:**
-  - Exact preset during camera motion — hardware-accelerated CUDA NanoVDB texture path beats the GLSL software sampler when fully compute-bound
-  - OIDN GPU denoiser interop (CUDA-native zero-copy)
-  - Final stills if you specifically need NVIDIA's curve hardware primitives
-
-  </details>
-
-  - ✅ **Advanced Animation**: 
-    - Bone animation with quaternion interpolation
-    - Multi-track timeline with keyframe editing (Location/Rotation/Scale/Material)
-    - **Batch Animation Rendering**: Export animation sequences to image files with material keyframe support
-    - Cancellable renders with "Stop Animation" button
-    - Real-time playback preview with scrubbing
-  - ✅ **Advanced Cloud Lighting Controls**:
-    - Light Steps control for volumetric cloud quality
-    - Shadow Strength for realistic cloud shadows
-    - Ambient Strength for cloud base illumination
-    - Silver Intensity (Silver Lining) for sun-edge effects
-    - Cloud Absorption for light penetration control
-  - ✅ **Full Undo/Redo System** (v1.2):
-    - Object transforms (move, rotate, scale)
-    - Object deletion and duplication
-    - **Light transforms** (move, rotate, scale)
-    - **Light add/delete/duplicate**
-    - Keyboard shortcuts: Ctrl+Z (Undo), Ctrl+Y (Redo)
-  - ✅ **Advanced Selection System** (NEW v1.3):
-    - **Box Selection**: Right-click drag to select multiple objects
-    - **Mixed Selection**: Select lights + objects together
-    - **Ctrl+Click**: Add/remove from selection
-    - **Select All/None buttons**: Quick selection in Scene panel
-    - Multi-object transform: Move multiple selected items at once
-  - ✅ **Idle Preview** (NEW v1.3):
-    - During gizmo manipulation, pause mouse for 0.3s to preview position
-    - See render result before releasing - adjust if needed
-    - Blender-like UX for precise positioning
-
-### 🚀 Performance & Optimization
-
-- **Multi-BVH Support**
-  - Embree BVH (Intel, production-grade)
-  - Custom ParallelBVH (SAH-based, OpenMP parallelized)
-  - OptiX GPU acceleration structure
-  - ⚡ Vulkan RT TLAS/BLAS architecture — dynamic refit, compute skinning, async ping-pong frame pipeline *(Recommended primary backend)*
-
-- **Optimizations**
-  - SIMD vector operations
-  - Multi-threaded tile-based rendering
-  - Progressive refinement
-  - **Memory Optimization**: Triangular footprint reduced from 612 to 146 bytes (75% reduction)
-  - **Robust Texture System**: Crash-proof loader for Unicode paths and corrupted formats
-  - Cached Texture Management (Optimized Hit/Miss logic)
-  - **Deferred BVH Update** (NEW v1.3): Gizmo manipulation doesn't block - BVH updates only when needed
-  - **O(n) Multi-Delete** (NEW v1.3): Delete 100+ objects instantly (was O(n²))
-
-### 🖥️ User Interface
-
-- Modern ImGui-based Dark UI with Docking
-- **Animation Timeline**:
-  - Multi-track visualization with group hierarchy (Objects/Lights/Cameras/World)
-  - Per-Channel Keyframing: Separate Location/Rotation/Scale keyframes
-  - Expandable L/R/S sub-channels with color coding
-  - Context menu for insert/delete/duplicate operations
-  - Drag-to-move keyframes, zoom/pan/scrub navigation
-- Render Quality Presets (Low, Medium, High, Ultra)
-- Dynamic Resolution Scaling
-- Scene hierarchy viewer and Material editor
-
-### 📦 Asset Browser & Library System
-
-- Metadata-driven asset discovery for `model`, `anim_clip`, `vdb`, and `vdb_sequence`
-- Hybrid library workflow: built-in project `assets` root plus user-added local libraries
-- Extended VDB / VDB sequence metadata with grids, bounds, shader presets, and sequence info
-- Asset cards with preview/thumbnail cache, favorites, tags, and saved collection/smart-folder presets
-- Drag-and-drop scene placement with viewport ghost preview and auto-selection of the newly appended object
-- Project-scoped UI persistence for asset browser layout, library list, and saved collection filters
-- Performance metrics (FPS, rays/s, memory usage)
-- Box Selection: Right-click drag for multi-selection
-- Transform Gizmo Idle Preview: Pause during drag to preview position
+Full technical report: **[ARCHITECTURE.md](ARCHITECTURE.md)** · Türkçe: **[README_TR.md](README_TR.md)**
 
 ---
 
-## �️ Procedural Tools & Systems
+## 🧭 Workspaces
 
-### 🏔️ Advanced Terrain Editor
-<img src="docs/images/terrain_header.jpg" width="100%" alt="Terrain Editor System">
+RayTrophi Studio is organized into task-focused workspaces that all operate on the same live scene:
 
-- **Sculpting Brushes**: Intuitive brushes for raising, lowering, smoothing, and flattening terrain geometry in real-time.
-- **Hydraulic & Fluvial Erosion**: 
-  - Simulate realistic water flow and sediment transport
-  - Create natural-looking riverbeds and valleys automatically
-  - Control erosion strength, rain amount, and solubility
-- **Heightmap Support**: Import/Export 16-bit heightmaps for external workflows (World Machine, Gaea).
-- **Node-Based Workflow**: <img align="right" width="300" src="docs/images/terrain_nodegraph.jpg"> Non-destructive terrain generation using a powerful node graph editor. Combine noise, filters, and masks.
-
-### 🌿 Procedural Vegetation & Foliage
-<img src="docs/images/terrain_foliage_header.jpg" width="100%" alt="Foliage System">
-
-- **GPU Instancing**: Render millions of grass blades, trees, and rocks with zero performance cost using OptiX hardware acceleration.
-- **Smart Scattering**: 
-  - Rule-based placement (slope, height, texture mask)
-  - Collision avoidance to prevent overlapping instances
-- **Paint Mode**: Manually paint forests or specific details using brush tools.
-- **Dynamic Wind**: All foliage responds to global wind parameters (strength, direction, gust).
-
-### 💇 Hair & Fur System (New!)
-<img src="docs/images/hair_header.png" width="100%" alt="Hair System Features">
-
-
-- **GPU Simulated & Rendered**: Fully accelerated by NVIDIA OptiX for real-time performance.
-- **Grooming Brushes**:
-  - **Comb**: Style hair direction naturally
-  - **Cut/Grow**: Adjust length interactively
-  - **Smooth**: Relax hair strands
-- **Physics Integration**: Hair strands collide with character meshes and respond to gravity/forces.
-- **Material Support**: Melanin-based hair BSDF for realistic rendering.
-
-### 🌀 Physics & Particle Simulation Suite (New!)
-<img src="docs/images/simulation_header.jpg" width="100%" alt="Simulation Suite System">
-
-A high-performance, multi-threaded grid and particle-based simulation engine powered by CUDA and CPU backends, seamlessly integrated with the path-tracing render pipeline:
-- **Unified Particle Systems**: Add and manage multiple simulation domains, custom emitters, colliders, and force fields within a unified workspace.
-- **APIC / FLIP Liquid Solver**: High-fidelity hybrid fluid simulator preserving angular momentum and minimizing numerical dissipation. Features adjustable APIC/FLIP blending, adaptive resolution, closed/open boundary modes, dynamic particle reseeding to prevent leaks, and fluid material presets (Water, Oil, Custom).
-- **Combustible Gas & Smoke Solver**: Multi-threaded dense grid solver for temperature, soot, and fuel density. Features realistic combustion dynamics (fire/smoke generation, ignition, heat release, flame dissipation) and procedural FBM curl-noise turbulence.
-- **Physically-Based Whitewater (Ihmsen et al. 2012)**: Dynamically simulates secondary spray (airborne), foam (surface), and bubbles (submerged) based on trapped-air and wave-crest potentials:
-  - **Dynamic PBR Material Routing**: Automatically routes particles to physical presets—transmissive water droplets for Spray, scattering rough white PBR for Foam, and silvery semi-transmissive bubbles for Bubble. Features a *Custom Material Overrides* toggle to bind any scene PBR material independently.
-  - **Underwater Bubble TIR Correction**: Reduces Total Internal Reflection (TIR) dark-circle artifacts by tuning bubble IOR to 1.1, setting transmission to 0.65 (allowing 35% specular/diffuse highlights), and adding soft light-scattering emission (0.12).
-  - **Newton-Raphson Wave Snapping**: Projects surface foam particles onto the smoothed level-set water mesh boundary, eliminating floating foam artifacts on wavy water.
-  - **Stable Scale Variation & Dissolution**: Deterministic hash-based non-flickering size variation ($0.6\times$ to $1.4\times$) and smooth shrinking/dissolving animations near the end of particle lifetimes.
-  - **Icosphere Subdivisions**: Adjustable rendering resolution (subdivision level 0 to 3) for smooth close-up details.
-- **SimCache Disk Baking**: Bake heavy simulation frames (liquid, foam, gas) directly to binary `.simcache` files next to the project file. Scrub the timeline in real-time without re-simulating.
-- **Seamless Serialization**: Entire simulation state, domain settings, custom materials, timeline caches, and presets are fully saved and restored in the `.rtp` / `.rts` project files.
-
-### 🌊 Realistic Water & Ocean
-<img src="docs/images/water_header.jpg" width="100%" alt="Ocean Simulation">
-
-- **FFT Ocean Simulation**: Fast Fourier Transform based deep ocean waves with foam generation.
-- **Caustics**: Realistic light refraction and caustic patterns on the seabed.
-- **Underwater Volumetrics**: Fog density and absorption based on depth.
-
-### 🏞️ River Tool
-<img src="docs/images/river_header.jpg" width="100%" alt="River Tool">
-
-- **Spline-Based Generation**: Draw rivers using intuitive bezier curves.
-- **Auto-Carving**: Rivers automatically carve their path into the terrain.
-- **Flow Mapping**: Water texture flows along the spline direction naturally.
-- **Physics Interaction**: Objects float and drift according to river flow velocity.
-
-### 🛠️ Modeling & Mesh Editing Tools
-
-- **Sculpt Mode (Sculpt Mod)**: Brush-based surface editing for mesh and terrain targets.
-  - Mesh sculpting lives in the Modeling workspace and reuses the editable mesh cache, so strokes modify local/original triangle positions while object transforms stay intact.
-  - Tools include Grab, Draw, Inflate, Layer, Clay, Clay Strips, Pinch, Smooth, Flatten, Scrape and Crease; Shift temporarily switches to Smooth and Ctrl inverts additive sculpt brushes.
-  - `SculptModeState` stores the active target, brush preset, screen-space/world radius, strength, falloff, front-face filtering, live accumulation and X/Y/Z mirror flags.
-  - `SculptControlGraph` maps editable vertices to sculpt control nodes with neighbor links and spatial buckets, while `SculptPBVH` prunes dense meshes to the brush radius through local AABB leaf nodes.
-  - Stroke data captures touched triangles before editing, applies safe topology-aware vertex movement, recomputes affected smooth normals and records the final delta through `MeshEditCommand` for undo/redo.
-  - Live accumulation can patch/update raster viewport meshes during a stroke; deferred sync queues render backend, CPU BVH and scene-geometry dirty flags when the stroke finishes.
-  - Mesh density comes from the `ModifierStack` (`FlatSubdivision` / `SmoothSubdivision`), which evaluates from `base_mesh_cache` and is serialized as `mesh_modifiers`.
-  - Terrain sculpt uses the same Sculpt workspace/dock as a proxy path, routing Raise/Lower/Flatten/Smooth/Stamp controls to `TerrainManager` instead of the mesh PBVH path.
-- **Mesh Paint**: Layered texture painting directly on mesh materials.
-  - `MeshPaintAdapter` targets the selected triangle/material slot and manages a per-object `PaintTextureSet` keyed by node name + material id.
-  - Paint channels cover Base Color, Normal, Roughness, Metallic, Emission, Mask, Transmission and Opacity; existing material textures can seed the paint canvas before new strokes are applied.
-  - Brushes support paint, erase, soften, stamp, fill, clone and spray modes with falloff, spacing, alpha textures, paint textures, tinting, mirroring and wet/mix/smudge behavior.
-  - `PaintLayerStack` stores per-layer pixel buffers per channel, with visibility, lock, opacity and Normal/Add/Multiply/Screen/Overlay blend modes; the visible stack is composited into flat textures for the renderer.
-  - Dirty-region compositing and GPU texture updates keep interactive strokes responsive, while `PaintTextureCommand` and `PaintLayerCommand` integrate strokes with undo/redo.
-  - Height-mask workflows can generate normals, update local normal regions, bake height into normal maps and optionally clear the height mask after baking.
-  - Project save/load serializes mesh paint layer stacks under `mesh_paint_layers`, with layer pixels written as binary PNG blobs alongside the project data.
-- **Edit Mesh Mode**: Polygon editing toolbox with:
-  - **Extrude** faces/edges with transform gizmo
-  - **Delete Face/Edge/Vertex** with smart re-triangulation
-  - **Merge Vertex** (by distance or manual collapse)
-  - **Inset / Bevel / Loop Cut** operations
-  - **Weld, Split, Flip Normal** utilities
-  - **UV Auto-Unwrap / Smart Packer** for quick lightmap and paint workflows
-- **Undo/Redo & History**: Full operation stack in edit modes with optional step grouping for batch edits.
-- **Interoperability**: Edit-mode changes update CPU/GPU buffers and can be exported as GLB with modifiers applied.
-
-### 🎛️ Viewport Shading & Vulkan Raster Matcap Integration
-
-- **Vulkan Raster Solid + Matcap**: Fast Vulkan raster solid mode with Matcap shading for immediate sculpt/paint feedback. Matcap images placed in `raytrac_sdl2/assets/matcaps/` are automatically available to the viewport rasterizer.
-- **Use Cases**: Ideal for sculpting, topology inspection and quick feedback when ray-traced preview is too slow; preserves normals and curvature cues efficiently.
-- **Enable**: Toggle Matcap/Solid shading in the Viewport Shading menu (Solid / Matcap). Choose matcap under Viewport → Shading → Matcap.
-- **Files & Workflow**: Add PNG/TGA/JPG matcap files to `raytrac_sdl2/assets/matcaps/`, then reload assets or restart the app to see them in the matcap picker.
+| Workspace | What you do there |
+|-----------|-------------------|
+| **Layout / Scene** | Import assets, place and transform objects/lights/cameras, build hierarchy, box-select, gizmo-edit |
+| **Modeling** | Polygon editing (extrude, inset, bevel, loop cut, weld, merge, UV unwrap), modifier stack |
+| **Sculpt** | Brush-based surface sculpting on meshes and terrain (PBVH-accelerated) |
+| **Paint** | Layered PBR texture painting directly on the mesh (multi-channel, blend modes) |
+| **Terrain** | Sculpt + node-graph terrain, hydraulic/thermal erosion, heightmap I/O |
+| **Foliage / Scatter** | Rule-based and hand-painted instancing of grass, trees, rocks |
+| **Hair** | Groom, comb, cut/grow, simulate, and render hair & fur |
+| **Simulation** | Liquid (APIC/FLIP), gas/smoke/fire, whitewater, colliders, force fields, emitters |
+| **Animation** | Multi-track timeline, per-channel keyframing, skeletal animation, animation graph |
+| **Render / Look-dev** | Pick a backend, set sampling/quality, denoise, tonemap, and Stylize the result |
 
 ---
 
-## �🚦 Quick Start
+## 🎛️ Rendering & backends
+
+A single physically-based path tracer feeds three acceleration backends. The scene, materials, and lights are identical across all three — you choose the backend that fits the moment (CPU for headless/no-GPU, OptiX for NVIDIA curve hardware, Vulkan RT for fast interactive look-dev).
+
+### Materials & shading
+- **Principled BSDF** (Disney-style uber-shader): albedo, roughness, metallic, specular, clearcoat, sheen, anisotropy, transmission/IOR
+- **Lambertian, Metal, Dielectric** classic models
+- **Subsurface scattering (SSS)**
+- **Spectral / melanin-based hair BSDF**
+- **Volumetric rendering** with NanoVDB sparse volumes and procedural noise density
+- Full texture support (albedo, roughness, metallic, normal, emission, transmission, opacity) with sRGB/linear handling
+
+### Lighting & sky
+- Point, directional, spot, and **mesh-based area lights**; emissive materials
+- **HDR/EXR environment maps** (equirectangular)
+- **Nishita physical sky** with day/night cycle, procedural stars & moon (phases, horizon magnification, atmospheric dimming), sun glow, and automatic sun↔directional-light sync
+- **Global volumetric clouds** (Henyey-Greenstein scattering, adaptive ray marching, coverage/density/altitude/wind controls, soft horizon fade) — works over HDRI, solid color, or Nishita sky
+- Soft shadows with multiple importance sampling (MIS)
+
+### Sampling & post
+- Progressive **accumulative path tracing** with **adaptive sampling** (focuses samples on noisy regions)
+- Depth of field, motion blur
+- **Intel Open Image Denoise (OIDN)** — CPU and CUDA-accelerated paths, viewport and final
+- Tone mapping and post-processing
+
+### Backend comparison
+
+<details>
+<summary>⚡ <b>Feature parity: OptiX vs Vulkan RT</b> (expand)</summary>
+
+| Feature | OptiX | Vulkan RT | Notes |
+|---------|:-----:|:---------:|-------|
+| Principled BSDF | ✅ | ✅ | Full parity |
+| Lambertian / Metal / Dielectric | ✅ | ✅ | Full parity |
+| Subsurface Scattering (SSS) | ✅ | ✅ | Minor colour tint difference |
+| Clearcoat & Anisotropic | ✅ | ✅ | Full parity |
+| Volumetric rendering (NanoVDB) | ✅ | ✅ | Persistent leaf-cache accessor; equal or faster than OptiX interactively |
+| **Hair system** | ✅ | ✅ | Analytical LSS intersection + LSS-tight AABBs; outperforms OptiX hardware curves here |
+| HDR / EXR environment | ✅ | ✅ | Full parity |
+| Nishita sky & day/night | ✅ | ✅ | Full parity |
+| Volumetric clouds | ✅ | 🧪 | Minor scattering differences |
+| Water / Ocean (FFT) | ✅ | 🧪 | Wave reflection differences |
+| Skeletal animation (GPU skinning) | ✅ | ✅ | Vulkan compute shader |
+| Depth of field / motion blur | ✅ | ✅ | Full parity |
+| Soft shadows (MIS) / area lights | ✅ | ✅ | Full parity |
+| Tone mapping & post-FX | ✅ | ✅ | GPU compute tonemap on Vulkan, fused into the trace command buffer |
+| OIDN denoising | ✅ | ✅ | OptiX has the tighter CUDA-interop path |
+| Adaptive / progressive render | ✅ | ✅ | Vulkan converges faster (lower per-frame overhead) |
+| Stylize layer | ✅ | ✅ | CPU / Vulkan / OptiX produce matched output |
+
+> **Legend:** ✅ full support &nbsp;|&nbsp; 🧪 supported, minor output differences possible
+
+</details>
+
+<details>
+<summary>📈 <b>Interactive benchmarks (measured)</b> (expand)</summary>
+
+Same scene, same settings, same hardware, camera in motion. These are interactive-viewport frame rates, not final-frame numbers. On static scenes adaptive sampling pushes both backends well past 500 fps as pixels converge.
+
+| Scene | Vulkan RT | OptiX | Ratio |
+|---|:---:|:---:|:---:|
+| Mesh-heavy + Nishita atmosphere | 600 fps | 50 fps | 12.0× |
+| Hair-heavy (cubic B-spline strands, LSS intersection) | 300 fps | 70 fps | 4.3× |
+| Volume / VDB cloud (Fast preset) | 300 fps | 200 fps | 1.5× |
+| Volume / VDB cloud (Balanced preset) | comparable | comparable | ≈1.0× |
+| Volume / VDB cloud (Exact preset, camera moving) | 16 fps | 23 fps | 0.7× |
+
+**Why Vulkan leads interactively:** async fence-based ping-pong frame pipeline (no per-frame `vkQueueWaitIdle`), GPU compute tonemap into small RGBA8 staging, analytical Linear-Swept-Sphere hair intersection, persistent NanoVDB read-accessor across march steps, and a lean kernel without per-pixel accumulation atomics in the hot path.
+
+**Where OptiX still wins:** the Exact volume preset during camera motion (hardware CUDA NanoVDB texture path), CUDA-native zero-copy OIDN interop, and final stills that specifically need NVIDIA's curve hardware primitives.
+
+</details>
+
+---
+
+## 🌀 Physics & simulation suite
+
+A multi-threaded grid- and particle-based FX suite with CUDA and CPU backends, integrated directly into the path-traced render pipeline. Multiple simulation domains, emitters, colliders, and force fields coexist in one workspace and are saved with the project.
+
+### Liquid — APIC / FLIP solver
+- Hybrid **APIC/FLIP** solver with adjustable blending, preserving angular momentum and minimizing numerical dissipation
+- **MAC staggered grid** with PCG + MIC(0) preconditioned pressure solve (CPU) and a Jacobi-PCG / multigrid (MGPCG) pressure solve on the GPU
+- **Variational (cut-cell) solid coupling** (Batty/Bridson): fractional MAC-face weights give sub-grid-accurate collisions against analytic primitives, and moving colliders impart real momentum/splash through the pressure solve
+- **Ghost-fluid 2nd-order free surface** (Gibou/Enright): sub-cell level set removes the voxel "staircase" on the liquid surface
+- Keyframe-animated colliders are re-posed per sub-step so the fluid tracks moving geometry
+- Adaptive resolution, open/closed boundary modes, dynamic particle reseeding to prevent leaks, fluid material presets (Water, Oil, Custom)
+
+### Gas, smoke & fire
+- Multi-threaded dense-grid solver for temperature, soot, and fuel density
+- Combustion dynamics (ignition, heat release, flame dissipation) with procedural FBM curl-noise turbulence
+- Sparse-VDB active-voxel Poisson solve for efficient large domains
+
+### Whitewater (Ihmsen et al. 2012)
+Secondary **spray** (airborne), **foam** (surface), and **bubbles** (submerged) generated from trapped-air and wave-crest potentials, and advected through the solver with full collider response:
+- **Dynamic PBR material routing** — transmissive droplets for spray, scattering rough-white PBR for foam, silvery semi-transmissive bubbles — with a *Custom Material Override* to bind any scene material
+- **Underwater bubble TIR correction** to reduce total-internal-reflection dark-circle artifacts
+- **Newton-Raphson wave snapping** projects surface foam onto the smoothed level-set water mesh, eliminating floating foam on wavy water
+- Deterministic hash-based size variation and smooth dissolve near end-of-life
+- Adjustable icosphere subdivision (0–3) for close-up detail
+
+### Surfaces, caching & serialization
+- **Yu-Turk anisotropic surface reconstruction** with Laplacian smoothing for the render-time liquid mesh; surface resolution decoupled from the sim grid
+- **SimCache disk baking** — bake heavy liquid/foam/gas frames to binary `.simcache` files next to the project and scrub the timeline in real time without re-simulating
+- Full serialization of simulation state, domain settings, custom materials, timeline caches, and presets into `.rtp` / `.rts`
+
+> The GPU MGPCG pressure path is live; the GPU port of variational solids + ghost-fluid (Stage 2) is in progress, as are surface tension, implicit viscosity, and narrow-band/sparse performance work for full DCC parity.
+
+---
+
+## 🛠️ Procedural & authoring tools
+
+### 🏔️ Terrain
+- Real-time sculpting brushes (raise, lower, smooth, flatten, stamp)
+- **Hydraulic & thermal erosion** (GPU kernels) for natural riverbeds, valleys, and sediment transport
+- **Node-based, non-destructive workflow** (36+ terrain nodes) combining noise, filters, and masks
+- 16-bit heightmap import/export (World Machine / Gaea workflows)
+
+### 🌿 Vegetation & scatter
+- GPU-instanced grass, trees, and rocks at scale via hardware acceleration
+- Rule-based placement (slope, height, texture mask) with collision avoidance
+- Paint mode for hand-placed detail
+- Global dynamic wind (strength, direction, gust)
+
+### 💇 Hair & fur
+- GPU simulated and rendered; analytical LSS intersection on Vulkan
+- Grooming brushes: comb, cut/grow, smooth
+- Physics: strands collide with meshes and respond to gravity/forces
+- Melanin-based hair BSDF
+
+### 🌊 Ocean & 🏞️ rivers
+- **FFT ocean** with foam generation, caustics, and depth-based underwater volumetrics
+- **Spline/bezier rivers** with auto-carving into terrain, flow mapping, and flow-driven object drift
+
+### 🗿 Modeling, sculpt & paint
+- **Edit Mesh mode** — extrude, inset, bevel, loop cut, delete/merge/weld/split, flip normal, smart re-triangulation, UV auto-unwrap/smart packer
+- **Sculpt mode** — Grab, Draw, Inflate, Layer, Clay, Clay Strips, Pinch, Smooth, Flatten, Scrape, Crease; Shift→Smooth, Ctrl→invert; X/Y/Z mirror; PBVH pruning for dense meshes; modifier-stack subdivision; shared mesh/terrain sculpt path
+- **Mesh Paint** — layered PBR painting (Base Color, Normal, Roughness, Metallic, Emission, Mask, Transmission, Opacity); paint/erase/soften/stamp/fill/clone/spray brushes; per-layer stack with Normal/Add/Multiply/Screen/Overlay blend modes; height-to-normal baking; dirty-region GPU updates; serialized into the project as PNG blobs
+- Full **undo/redo** across all edit modes with optional step grouping; mesh edits propagate to CPU/GPU buffers and export as GLB with modifiers applied
+
+### 🎨 Stylize — non-destructive art direction
+A post-convergence layer that reads the path-traced result + AOV buffers and restyles the image without changing scene geometry, materials, or lights. Domain-masked compositing keeps sky, material, outline, and world effects separate.
+- **Sky layer** — view-ray-locked stylized gradients, cloud banks, and sun (Painterly Clouds, Cartoon Cel, Sunset Bands, Ink Wash, Clear Gradient)
+- **Painterly material layer** — surface-locked stroke fields (no screen-space swimming), palette influence, edge respect, pigment thickness, and a Wet Oil model (Body/Load/Pickup/Deposit/Buildup)
+- **Outline layer** — depth/normal/material-discontinuity edges with Ink, Oil, Pencil, Dry Brush, and Pressure line types
+- **Profiles** — Painterly Oil, Gouache, Ink + Wash, Graphic Toon, Clay/Maquette, Dreamy Sunset
+- **Backend parity** — CPU, Vulkan compute (`stylize.comp`), and OptiX CUDA (`StylizeKernel.cu`) produce matched output; re-applies without resetting accumulation
+
+### 🖥️ Viewport shading
+- Vulkan raster **Solid + Matcap** mode for fast sculpt/paint feedback (drop matcaps in `raytrac_sdl2/assets/matcaps/`)
+- Ray-traced interactive preview on any backend, with idle-preview during gizmo manipulation
+
+---
+
+## 🎞️ Animation & UI
+
+- **Multi-track timeline** with group hierarchy (Objects / Lights / Cameras / World), per-channel Location/Rotation/Scale/Material keyframes, color-coded sub-channels, drag-to-move, zoom/pan/scrub, and context-menu insert/delete/duplicate
+- **Skeletal animation** with quaternion interpolation and GPU compute skinning; **animation graph** (14+ nodes) for state machines and IK blend spaces
+- **Batch / sequence rendering** — export animation to image sequences (with material keyframes), cancellable mid-render, simulation-driven per frame
+- Modern **ImGui** docked dark UI, render quality presets (Low/Medium/High/Ultra), dynamic resolution scaling, scene hierarchy, material editor, performance metrics
+- **Selection** — box select (right-drag), mixed light+object selection, Ctrl+click add/remove, select all/none, multi-object transform
+- **Undo/redo** for transforms, deletion, duplication, lights — Ctrl+Z / Ctrl+Y
+
+### 📦 Asset browser & library
+- Metadata-driven discovery for `model`, `anim_clip`, `vdb`, and `vdb_sequence`
+- Built-in project `assets` root plus user-added local libraries
+- Asset cards with preview/thumbnail cache, favorites, tags, saved collections and smart folders
+- Drag-and-drop placement with viewport ghost preview and auto-selection
+- Project-scoped UI persistence for layout, library list, and filters
+
+---
+
+## 🚦 Quick Start
 
 ### Prerequisites
 
-**Required:**
-- **Visual Studio 2022** (MSVC v143) - **RECOMMENDED BUILD SYSTEM**
+**Required**
+- **Visual Studio 2022** (MSVC v143) — recommended build system
 - Windows 10/11 (x64)
-- CMake 3.20+ (optional, VS2022 preferred)
+- CMake 3.20+ (optional; VS2022 preferred)
 
-**Optional (for GPU rendering):**
-- NVIDIA GPU (SM 5.0+): GTX 9xx, 10xx, 16xx, or RTX series
-- CUDA Toolkit 12.0+
-- OptiX 7.x SDK
-- Vulkan SDK 1.3+ (For Vulkan rendering path)
+**Optional (GPU rendering)**
+- NVIDIA GPU (SM 5.0+): GTX 9xx/10xx/16xx or RTX series
+- CUDA Toolkit 12.0+, OptiX 7.x/8.x SDK
+- Vulkan SDK 1.3+ (for the Vulkan RT path)
 
-**GPU Compatibility:**
 | GPU Series | Architecture | Mode | Performance |
 |------------|--------------|------|-------------|
 | RTX 40xx | Ada Lovelace | Hardware RT | ⚡ Fastest |
-| RTX 30xx | Ampere | Hardware RT | ⚡ Very Fast |
+| RTX 30xx | Ampere | Hardware RT | ⚡ Very fast |
 | RTX 20xx | Turing | Hardware RT | ⚡ Fast |
 | GTX 16xx | Turing | Compute | 🔶 Good |
 | GTX 10xx | Pascal | Compute | 🔶 Moderate |
 | GTX 9xx | Maxwell | Compute | 🔶 Slower |
 
-### 📦 Dependencies & Environment Variables
+### Environment variables
 
-The project uses absolute paths via system environment variables. Before building, you **must set the following Environment Variables** in your Windows system to point to your local installation paths:
+The project resolves dependencies via system environment variables. Set these to your local install paths before building:
 
-| Environment Variable | Description | Example Path |
-|----------------------|-------------|--------------|
-| `SDL2_ROOT`          | SDL2 Root Directory | `E:\RayTrophi_projesi\external_dependencies\SDL2-2.30.4` |
-| `OPTIX_ROOT`         | OptiX SDK Directory | `C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0` |
-| `EMBREE_ROOT`        | Embree Root Directory | `E:\RayTrophi_projesi\external_dependencies\embree-4.4.0.x64.windows` |
-| `OIDN_ROOT`          | Intel Open Image Denoise Root | `E:\RayTrophi_projesi\external_dependencies\oidn-2.3.0.x64.windows` |
-| `ASSIMP_ROOT`        | Assimp Root Directory | `E:\RayTrophi_projesi\external_dependencies\Assimp` |
-| `CUDA_PATH`          | CUDA Toolkit Directory | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x` |
-| `VULKAN_SDK`         | Vulkan SDK Directory | `C:\VulkanSDK\1.3.xxx.0` |
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `SDL2_ROOT` | SDL2 root | `E:\...\SDL2-2.30.4` |
+| `OPTIX_ROOT` | OptiX SDK | `C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0` |
+| `EMBREE_ROOT` | Embree root | `E:\...\embree-4.4.0.x64.windows` |
+| `OIDN_ROOT` | Intel OIDN root | `E:\...\oidn-2.3.0.x64.windows` |
+| `ASSIMP_ROOT` | Assimp root | `E:\...\Assimp` |
+| `CUDA_PATH` | CUDA Toolkit | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x` (usually auto-set) |
+| `VULKAN_SDK` | Vulkan SDK | `C:\VulkanSDK\1.3.xxx.0` |
 
-*(Note: `CUDA_PATH` is usually set automatically when you install the CUDA Toolkit.)*
+Managed dependencies: SDL2, Embree 4.x, Assimp 5.x, ImGui, OpenMP, stb_image, TinyEXR, Intel OIDN, NanoVDB, and CUDA/OptiX (optional).
 
-All dependencies are managed automatically once these variables are correctly configured:
-- SDL2 (graphics output)
-- Embree 4.x (CPU BVH)
-- AssImp 5.x (model loading)
-- ImGui (UI)
-- OpenMP (parallelization)
-- stb_image (HDR/texture loading)
-- **TinyEXR** (EXR format support)
-- Intel OIDN (denoising)
-- CUDA/OptiX (GPU rendering - optional)
+### Build
 
-### 🔨 Build Instructions
-
-#### **Method 1: Visual Studio 2022 (RECOMMENDED)**
-
+**Visual Studio 2022 (recommended)**
 ```bash
-# 1. Clone the repository
 git clone https://github.com/maxkemal/RayTrophi.git
 cd RayTrophi/raytrac_sdl2
-
-# 2. Open the solution
-# Double-click raytrac_sdl2.vcxproj or open in Visual Studio 2022
-
-# 3. Build
-# Set configuration to "Release" and platform to "x64"
-# Build > Build Solution (Ctrl+Shift+B)
-
-# 4. Run
-# The executable will be in: x64/Release/raytracing_render_code.exe
+# Open raytrac_sdl2.vcxproj in Visual Studio 2022
+# Set Release | x64, then Build > Build Solution (Ctrl+Shift+B)
+# Output: x64/Release/raytracing_render_code.exe
 ```
+All dependencies (DLLs, PTX, shaders, resources) are copied to the output directory automatically.
 
-**Note**: All dependencies (DLLs, resources) are automatically copied to the output directory by the build system.
-
-#### **Method 2: CMake**
-
+**CMake**
 ```bash
 cmake -S raytrac_sdl2 -B raytrac_sdl2/build -G "Visual Studio 17 2022" -A x64
 cmake --build raytrac_sdl2/build --config Release -j 12
+# Output: raytrac_sdl2/build/bin/RELEASE/"RayTrophi Studio.exe"
 ```
+CMake keeps its executable, PTX, Vulkan shaders, and runtime DLLs isolated under `build/bin/<CONFIG>` so it never overwrites the VS2022 `x64` output.
 
-*(Note: CMake build is fully supported and keeps its executable, PTX files, Vulkan shaders, and runtime DLLs isolated under `raytrac_sdl2/build/bin/<CONFIG>` so it does not overwrite the VS2022 `x64` output.)*
-
-### ▶️ Running
-
-If built with Visual Studio:
-```bash
-cd x64/Release
-raytracing_render_code.exe
-```
-
-If built with CMake:
-```bash
-cd raytrac_sdl2/build/bin/RELEASE
-"RayTrophi Studio.exe"
-```
-
-The UI will appear. Use File > Load Scene to import models (GLTF recommended).
+### Run
+Launch the executable; the docked UI appears. Use **File → Load Scene** to import a model (GLTF recommended; 40+ formats via Assimp).
 
 ---
 
 ## 🏗️ Architecture
 
-### Project Structure
-
 ```
 RayTrophi/
-├── raytrac_sdl2/                  # Main project
-│   ├── source/
-│   │   ├── src/                   # Source files by module
-│   │   │   ├── Core/              # Main entry (Main.cpp), Project Management
-│   │   │   ├── Render/            # Renderer, OptiX Wrapper, BVH Builders
-│   │   │   ├── Scene/             # Scene Objects, Lights, Materials
-│   │   │   ├── Physics/           # Terrain, Water, Gas, VDB, Physics Engines
-│   │   │   ├── Device/            # CUDA Kernels (.cu) & GPU Logic
-│   │   │   ├── UI/                # ImGui Panels & Editor Logic
-│   │   │   ├── Utils/             # Helper Utilities (Loaders, Math)
-│   │   │   └── ...
-│   │   ├── include/               # Header files (.h)
-│   │   │   ├── Renderer.h
-│   │   │   ├── Material.h
-│   │   │   └── ...
-│   │   ├── raygen.ptx             # Compiled OptiX kernels
-│   │   └── ...
-│   ├── raytrac_sdl2.vcxproj       # Visual Studio project
-│   ├── CMakeLists.txt             # CMake build configuration
-│   └── raygen.ptx                 # OptiX shader
-└── README.md                      # This file
+└── raytrac_sdl2/
+    └── source/
+        ├── src/
+        │   ├── Core/        # Entry point (Main.cpp), project management
+        │   ├── Render/      # Renderer, OptiX wrapper, Embree/Parallel BVH, camera, textures
+        │   ├── Backend/      # Vulkan RT, OptiX, viewport backends, scene texture manager
+        │   ├── Scene/        # Objects, lights, materials, instancing, mesh, BSDFs
+        │   ├── Physics/      # Fluid (APIC/FLIP), gas, whitewater, terrain, ocean, river, sim world
+        │   ├── Device/       # CUDA kernels (.cu/.cuh), OptiX device code, Vulkan compute
+        │   ├── Hair/         # Hair system, strands, skinning, hair BSDF
+        │   ├── Paint/        # Mesh & terrain paint adapters, layer stack
+        │   ├── Stylize/      # Stylize CPU/CUDA kernels and state
+        │   ├── Animation/    # Animation controller, nodes, Ozz runtime
+        │   ├── Viewport/     # Viewport scene sync
+        │   ├── Math/         # Vec/Matrix/Quaternion
+        │   ├── UI/           # ImGui panels, timeline, gizmos, editors
+        │   └── Utils/        # Loaders, serialization, helpers
+        └── include/          # Headers (Backend, Core, Fluid, Hair, NodeSystem, Paint, Stylize, Viewport, Utils)
 ```
 
-### Core Components
+**Render backends**
+- **EmbreeBVH** (`Render/EmbreeBVH.cpp`) — Intel CPU kernels
+- **ParallelBVHNode** (`Render/ParallelBVHNode.cpp`) — custom SAH BVH, OpenMP-parallel build
+- **OptixWrapper** (`Render/OptixWrapper.cpp`, `Device/*.cu`) — CUDA/OptiX, SBT + texture-object caching
+- **VulkanBackend** (`Backend/VulkanBackend.cpp`) — `VK_KHR_ray_tracing_pipeline`, TLAS/BLAS refit, compute skinning, async ping-pong frame pipeline, GPU tonemap
 
-1. **Renderer** (`src/Render/Renderer.cpp`)
-   - Tile-based multi-threaded rendering
-   - Progressive refinement
-   - Denoising integration
-
-2. **BVH Systems**
-   - **EmbreeBVH** (`src/Render/EmbreeBVH.cpp`): Industry-standard, optimized for speed
-   - **ParallelBVHNode** (`src/Render/ParallelBVHNode.cpp`): Custom SAH-based, OpenMP parallel build
-   - **OptiX BVH** (`src/Render/OptixWrapper.cpp`): NVIDIA GPU structure
-   - **Vulkan RT** (`src/Backend/VulkanBackend.cpp`): Vulkan hardware ray tracing backend
-
-3. **Material System** (`src/Scene/PrincipledBSDF.cpp`)
-   - Modular property-based materials
-   - Texture support (albedo, roughness, metallic, normal, emission)
-   - sRGB/Linear color space handling
-
-4. **OptixWrapper** (`src/Render/OptixWrapper.cpp`, `src/Device/*.cu`)
-   - CUDA/OptiX backend
-   - SBT (Shader Binding Table) management
-   - Texture object caching
-
-5. **Physics & Procedural** (`src/Physics/*`)
-   - **TerrainManager**: Hydraulic erosion, sculpting
-   - **WaterManager**: FFT Ocean simulation
-   - **EmitterSystem**: Particle systems & forces
+**Node systems** (`include/NodeSystem/`) — graph core shared by the Terrain, Animation, and Material editors.
 
 ---
 
-
-
 ## 🎨 Gallery
 
-### 🎬 Demo Reel
-
 [![RayTrophi Showcase](https://img.youtube.com/vi/-xRiPhc-p6k/maxresdefault.jpg)](https://www.youtube.com/watch?v=-xRiPhc-p6k)
-
-**[▶️ Watch Full Demo Reel on YouTube](https://www.youtube.com/watch?v=-xRiPhc-p6k)**
-
-### 🖼️ Render Samples
+**[▶️ Watch the full demo reel](https://www.youtube.com/watch?v=-xRiPhc-p6k)**
 
 <div align="center">
 
-#### Architectural Visualization
-<img src="render_samples/1.png" width="800" alt="Complex Indoor Scene - 3.3M Triangles">
-<p><i>Complex architectural scene with advanced lighting - 3.3M triangles, Embree BVH</i></p>
+<img src="render_samples/1.png" width="800" alt="Complex architectural scene"><br>
+<i>Complex architectural scene — 3.3M triangles, Embree BVH</i>
 
-#### Product Rendering
-<img src="render_samples/indoor2.png" width="800" alt="Interior Design">
-<p><i>Interior design with volumetric lighting and subsurface scattering</i></p>
+<img src="render_samples/indoor2.png" width="800" alt="Interior design"><br>
+<i>Interior with volumetric lighting and subsurface scattering</i>
 
-#### GPU Accelerated Rendering
-<img src="render_samples/output1.png" width="800" alt="OptiX GPU Rendering">
-<p><i>Real-time GPU rendering with OptiX - 500M+ rays/second</i></p>
+<img src="render_samples/output1.png" width="800" alt="OptiX GPU rendering"><br>
+<i>GPU path tracing with OptiX</i>
 
-#### Stylized Rendering
-<img src="render_samples/stylesed_winter_dragon1.png" width="800" alt="Dragon Model">
-<p><i>Stylized dragon with custom materials and procedural textures</i></p>
+<img src="render_samples/stylesed_winter_dragon1.png" width="800" alt="Stylized dragon"><br>
+<i>Stylized render via the non-destructive Stylize layer</i>
 
-#### CPU Path Tracing
-<img src="render_samples/RayTrophi_cpu1.png" width="800" alt="CPU Rendering">
-<p><i>Pure CPU path tracing with progressive refinement</i></p>
+<img src="render_samples/RayTrophi_cpu1.png" width="800" alt="CPU rendering"><br>
+<i>Pure CPU path tracing with progressive refinement</i>
 
-#### Materials & Textures
-<img src="render_samples/stylize_cpu.png" width="800" alt="Material Showcase">
-<p><i>Principled BSDF materials with PBR textures</i></p>
-
-#### Outdoor Scene
-<img src="render_samples/yelken.png" width="800" alt="Sailboat Scene">
-<p><i>Outdoor environment with natural lighting</i></p>
-
-#### Real-time UI
-<img src="render_samples/Ekran görüntüsü 2025-12-04 161755.png" width="800" alt="ImGui Interface">
-<p><i>Interactive ImGui interface with live parameter adjustments</i></p>
+<img src="render_samples/yelken.png" width="800" alt="Outdoor scene"><br>
+<i>Outdoor environment with the Nishita physical sky</i>
 
 </div>
 
 ---
 
-## 🛠️ Building from Source - Detailed Guide
-
-### Dependencies Setup
-
-**Automatic (recommended):**
-The Visual Studio project manages dependencies via vcpkg or manual paths.
-
-**Manual:**
-1. Download SDL2, Embree, AssImp from official sources
-2. Update include/library paths in project properties
-
-### Build Configurations
-
-- **Debug**: Full symbols, slower (~10x)
-- **Release**: Optimized, production use
-- **RelWithDebInfo**: Optimized + symbols (profiling)
-
-### CMake vs Visual Studio
-
-| Feature                  | VS2022 .vcxproj | CMake         |
-|--------------------------|-----------------|---------------|
-| CPU Rendering (SDL)      | ✅ Working      | ✅ Working     |
-| GPU Rendering (OptiX)    | ✅ Working      | ✅ Working     |
-| Vulkan Rendering (RT)    | ✅ Working      | ✅ Working     |
-| Stylize Layer Parity     | ✅ CPU/Vulkan/OptiX | ✅ CPU/Vulkan/OptiX |
-| Dependency Management    | ✅ Excellent    | ⚠️ Manual     |
-| Build Speed              | Fast            | Slower        |
-| **Recommendation**       | **USE THIS**    | Experimental  |
-
-**Why VS2022?**
-- All dependencies are pre-configured
-- Resource files (icons, PTX) auto-copied
-- No SDL refresh bugs in CPU rendering
-- Better debugging experience
-
----
-
-## 📚 Usage Examples
-
-### Basic Rendering
-
-```cpp
-#include "Renderer.h"
-#include "SceneData.h"
-
-int main() {
-    Renderer renderer(1920, 1080, 8, 128);
-    SceneData scene;
-    OptixWrapper optix;
-    
-    // Load scene
-    renderer.create_scene(scene, &optix, "path/to/model.gltf");
-    
-    // Render
-    SDL_Surface* surface = /* ... */;
-    renderer.render_image(surface, scene, /* ... */);
-    
-    return 0;
-}
-```
-
-### Switching BVH Backend
-
-```cpp
-// Use Embree (fastest)
-renderer.rebuildBVH(scene, true);  // use_embree = true
-
-// Use custom ParallelBVH
-renderer.rebuildBVH(scene, false); // use_embree = false
-```
-
-### Material Creation
-
-```cpp
-auto mat = std::make_shared<PrincipledBSDF>();
-mat->albedoProperty.constant_value = Vec3(0.8, 0.1, 0.1); // Red
-mat->roughnessProperty.constant_value = Vec3(0.3, 0.3, 0.3);
-mat->metallicProperty.constant_value = Vec3(1.0, 1.0, 1.0); // Metallic
-```
-
----
-
-## 🐛 Known Issues & Limitations
-
-### Build System
-- CMake and VS2022 use separate output folders; keep them separate to avoid mixing old PTX/DLL files.
-- DLL dependencies must be in same folder as .exe; CMake copies the known SDL2, Assimp, OIDN, vcpkg, shader, and PTX runtime files after build.
-
-### Rendering
-- OptiX requires NVIDIA GPU with SM 5.0+ (GTX 9xx or newer)
-- RTX GPUs use hardware RT cores; GTX GPUs use compute-based ray tracing (slower)
-- Very large scenes (>10M triangles) may cause memory issues
-- Denoising uses Intel OIDN with CUDA acceleration on NVIDIA GPUs
-
-### Platform
-- Currently Windows-only (SDL2, DirectX dependencies)
-- Linux/macOS support would require porting
-
----
-
 ## 🗺️ Roadmap
 
-- [ ] Binned SAH for faster BVH construction
-- [ ] Index-based BVH (remove vector copying)
-- [ ] SBVH (Spatial BVH splits)
-- [ ] Linux/macOS support
-- [x] Vulkan backend (alternative to OptiX)
-- [ ] Network rendering (distributed ray tracing)
+**Recently shipped**
+- ✅ Vulkan RT backend (interactive primary) with GPU skinning, async ping-pong pipeline, analytical LSS hair
+- ✅ Physics & particle simulation suite (APIC/FLIP liquid, gas/fire, whitewater)
+- ✅ GPU MGPCG fluid pressure solve (CUDA)
+- ✅ Variational cut-cell solid coupling + ghost-fluid 2nd-order free surface (CPU)
+- ✅ Multi-material whitewater PBR routing + Newton-Raphson wave snapping
+- ✅ SimCache on-disk frame baking + full simulation serialization
+- ✅ Stylize layer with CPU / Vulkan / OptiX parity
+- ✅ Sculpt mode (mesh + terrain) and layered mesh paint
+
+**Planned / in progress**
+- [ ] GPU port of variational solids + ghost-fluid surface (Stage 2)
+- [ ] Fluid surface tension, implicit viscosity, narrow-band/sparse performance
+- [ ] Binned SAH / index-based BVH / SBVH spatial splits
 - [ ] USD format support
-- [ ] Light path visualization/debugging
+- [ ] Network / distributed rendering
+- [ ] Light-path visualization & debugging
+- [ ] Linux / macOS support (currently Windows-only: SDL2 + Windows dependencies)
+
+---
+
+## 🐛 Known limitations
+
+- **Windows-only** today (SDL2 + Windows dependencies); Linux/macOS would require porting.
+- **OptiX** needs an NVIDIA GPU (SM 5.0+); RTX uses hardware RT cores, GTX uses compute (slower).
+- Very large scenes (>10M triangles) can stress memory.
+- CMake and VS2022 use **separate output folders** — keep them separate to avoid mixing stale PTX/DLLs.
+- Vulkan volumetric clouds and FFT ocean show minor output differences vs OptiX (see parity table).
+- GPU fluid pressure is live, but variational solids + ghost-fluid surface are CPU-only for now.
 
 ---
 
 ## 🤝 Contributing
 
-Contributions are welcome! Areas of interest:
+Contributions are welcome — performance work, new material/FX models, format support, bug fixes, and docs.
 
-- Performance optimizations
-- New material models
-- Additional 3D format support
-- Bug fixes
-- Documentation improvements
-
-**How to contribute:**
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+1. Fork the repo
+2. Create a feature branch (`git checkout -b feature/your-feature`)
+3. Commit your changes
+4. Push and open a Pull Request
 
 ---
 
 ## 📝 License
 
-This project is licensed under the MIT License - see the [LICENSE](source/LICENSE) file for details.
-
----
+MIT License — see [LICENSE.txt](LICENSE.txt).
 
 ## 🙏 Acknowledgments
 
-- **Embree** - Intel's high-performance ray tracing kernels
-- **OptiX** - NVIDIA's GPU ray tracing engine
-- **AssImp** - Open Asset Import Library
-- **ImGui** - Dear ImGui for user interface
-- **SDL2** - Simple DirectMedia Layer
-- **Intel OIDN** - Open Image Denoise
-- **stb** - Sean Barrett's public domain libraries (stb_image for HDR)
-- **TinyEXR** - Syoyo Fujita's EXR loader library
-
----
+**Embree** (Intel CPU ray tracing) · **OptiX** (NVIDIA GPU ray tracing) · **Vulkan** · **Assimp** (asset import) · **ImGui** (UI) · **SDL2** · **Intel OIDN** (denoising) · **NanoVDB** (sparse volumes) · **Ozz-animation** (skeletal animation) · **stb** · **TinyEXR**
 
 ## 👤 Author
 
-**Kemal** - [@maxkemal](https://github.com/maxkemal)
+**Kemal Demirtaş** — [@maxkemal](https://github.com/maxkemal)
 
----
-
-## 📧 Contact & Support
-
-- **Issues**: [GitHub Issues](https://github.com/maxkemal/RayTrophi/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/maxkemal/RayTrophi/discussions)
+- **Issues:** [GitHub Issues](https://github.com/maxkemal/RayTrophi/issues)
+- **Discussions:** [GitHub Discussions](https://github.com/maxkemal/RayTrophi/discussions)
 
 ---
 
 <div align="center">
 
-**⭐ Star this repository if you find it useful!**
+**⭐ Star the repo if RayTrophi Studio is useful to you.**
 
 Made with ❤️ and lots of ☕
 

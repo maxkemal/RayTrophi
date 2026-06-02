@@ -1,710 +1,445 @@
-# 🌟 RayTrophi - Gelişmiş Gerçek Zamanlı Ray Tracing Motoru
+# RayTrophi Studio
 
 <div align="center">
 
-![Versiyon](https://img.shields.io/badge/versiyon-1.2-blue.svg)
+![Durum](https://img.shields.io/badge/durum-aktif%20geli%C5%9Ftirme-orange.svg)
 ![C++](https://img.shields.io/badge/C++-20-00599C.svg?logo=c%2B%2B)
-![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows)
-![CUDA](https://img.shields.io/badge/CUDA-12.0-76B900.svg?logo=nvidia)
+![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D6.svg?logo=windows)
+![Backend](https://img.shields.io/badge/render-CPU%20%7C%20OptiX%20%7C%20Vulkan%20RT-76B900.svg)
 ![Lisans](https://img.shields.io/badge/lisans-MIT-green.svg)
 
-**Hibrit CPU/GPU rendering ile yüksek performanslı, üretime hazır ray tracing renderleyici**
+**Hibrit CPU/GPU path tracer çekirdeği üzerine kurulu, açık kaynaklı bir 3B içerik üretim (DCC) uygulaması.**
 
-[![RayTrophi Showcase](https://img.youtube.com/vi/-xRiPhc-p6k/maxresdefault.jpg)](https://www.youtube.com/watch?v=-xRiPhc-p6k)
-**[▶️ Showcase Videosunu YouTube'da İzleyin](https://www.youtube.com/watch?v=-xRiPhc-p6k)**
+Modelle, sculpt yap, boya, tüy/saç grooming, simüle et, ışıklandır, animasyonla, render al — tek uygulamada.
 
-[Özellikler](#-özellikler) • [Hızlı Başlangıç](#-hızlı-başlangıç) • [Mimari](#-mimari) • [Performans](#-performans) • [Galeri](#-galeri)
+[![RayTrophi Tanıtım](https://img.youtube.com/vi/-xRiPhc-p6k/maxresdefault.jpg)](https://www.youtube.com/watch?v=-xRiPhc-p6k)
+**[▶️ YouTube'da tanıtımı izle](https://www.youtube.com/watch?v=-xRiPhc-p6k)**
+
+[Nedir](#-nedir) • [Çalışma Alanları](#-çalışma-alanları) • [Render](#%EF%B8%8F-render--backendler) • [Simülasyon](#-fizik--simülasyon-paketi) • [Hızlı Başlangıç](#-hızlı-başlangıç) • [Mimari](#%EF%B8%8F-mimari) • [Galeri](#-galeri)
 
 </div>
 
 ---
 
-## 📖 Genel Bakış
+## 📖 Nedir
 
-**RayTrophi**, mimari görselleştirme, ürün renderlaması ve gerçek zamanlı grafik için tasarlanmış, fiziksel tabanlı son teknoloji bir ray tracing motorudur. CPU rendering'in esnekliğini NVIDIA OptiX aracılığıyla GPU hızlandırmasının gücüyle birleştirir.
+**RayTrophi Studio**, bir path-tracing render motoru olarak başladı ve tam teşekküllü bir **dijital içerik üretim (DCC) uygulamasına** dönüştü. Sahneyi sıfırdan kurabileceğiniz tek bir masaüstü programı: poligon modelleme ve sculpt, doku boyama, saç/tüy grooming, arazi ve bitki örtüsü, sıvı/gaz/whitewater simülasyonu, okyanus ve nehirler — ve tümü, üç değiştirilebilir backend üzerinde çalışan fiziksel temelli bir path tracer ile render edilir (CPU, NVIDIA OptiX ve Vulkan Ray Tracing).
 
-### 🎯 Temel Özellikler
+Bu bir render-farm eklentisi ya da kütüphane değil. Modern dock'lu bir arayüzü, animasyon zaman çizelgesi, her araçta geri/ileri al, proje kaydet/yükle ve render sonucunun üzerine uygulanan tahribatsız bir sanat-yönetimi (Stylize) katmanı olan interaktif bir editördür.
 
-- **Hibrit Rendering**: CPU (Embree/Özel BVH) ve GPU (OptiX & Vulkan) hızlandırması arasında sorunsuz geçiş
+### Tasarım hedefleri
 
-- **Üretime Hazır**: Principled BSDF, gelişmiş materyaller, volumetric, subsurface scattering
-- **Yüksek Performans**: Optimize BVH yapısı (<1s 3.3M üçgen için), %75 bellek tasarruflu üçgen yapısı
-- **Gerçek Zamanlı Önizleme**: ImGui ile modern interaktif UI, animasyon timeline
-- **Endüstri Standardı**: AssImp yükleyici 40+ 3D format destekler (GLTF, FBX, OBJ, vb.)
+- **Tek uygulama, tam pipeline.** Geometri oluşturma, look-dev, FX, animasyon ve final render aynı sahnede, aynı `.rtp`/`.rts` projesinde, aynı geri-al yığınında yaşar.
+- **Üç render backend'i, tek özellik seti.** CPU (Embree), OptiX ve Vulkan RT arasında sahneyi değiştirmeden geçiş yap. Vulkan, önerilen interaktif backend; OptiX ve CPU birinci sınıf kalır.
+- **Fiziksel temelli ama sanat-yönetilebilir.** Principled BSDF + spektral saç + volumetrik + DCC seviyesi sıvılar; üstüne, fiziği bozmadan görüntüyü yağlıboya/mürekkep/toon görünümlere boyayan bir Stylize katmanı.
+- **Durumu konusunda dürüst.** Bu aktif, tek kişilik bir proje. Bir alt sistem deneyselse veya geliştirme aşamasındaysa, bunu açıkça belirtir.
+
+> **Durum:** aktif geliştirme. Henüz sürüm etiketi yok; `main` dalı güncel yapıdır.
 
 ---
 
-## 📊 Proje İstatistikleri (Doğrulanmış)
+## 📊 Bir bakışta proje
 <!-- STATS_START -->
 | Metrik | Değer |
 | :--- | :--- |
-| **Proje Kod/Shader Dosyaları** | 327 |
-| **Proje Kod/Shader Satırları** | 207,957 |
-| **Source Tree Kod/Shader Satırları** | 467,165 |
-| **UI Kontrol Noktaları** | 1,278+ |
-| **Son Doğrulama** | 2026-05-23 |
+| **Proje kod / shader satırı** | ~259.000 |
+| **Proje kod / shader dosyası** | 360+ |
+| **GPU çekirdek & shader dosyası** | 56 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
+| **UI kontrol noktası** | 1.278+ |
+| **Render backendleri** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
+| **Düğüm sistemleri** | Arazi (36+), Animasyon (14+), Materyal (11+) |
+| **Son doğrulama** | 2026-06-02 |
 <!-- STATS_END -->
 
-Sayımlar `raytrac_sdl2/source` ağacını kapsar. Proje satırları vendored tek-dosya kütüphaneleri (`simdjson`, `stb`, `json.hpp`, `tinyexr`) hariç tutar; source tree satırları bunları da içerir.
+Sayımlar `raytrac_sdl2/source` kapsamındadır ve tek dosyalık dış kütüphaneleri (`simdjson`, `stb`, `json.hpp`, `tinyexr`) hariç tutar.
 
-Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
-
----
-
-
-
-## ✨ Özellikler
-
-### 🎨 Rendering Yetenekleri
-
-- **Materyaller**
-  - ✅ Principled BSDF (Disney-tarzı uber-shader)
-  - ✅ Lambertian, Metal, Dielektrik
-  - ✅ Gürültü tabanlı yoğunluk ile volumetrik rendering
-  - ✅ Subsurface Scattering (SSS)
-  - ✅ Clearcoat, Anizotropik materyaller
-  - ✅ **Saç Sistemi**: GPU hızlandırmalı saç/kıl simülasyonu ve renderlaması
-  
-- **Aydınlatma**
-  - ✅ Nokta ışıklar, Yönlü ışıklar
-  - ✅ Alan ışıkları (mesh tabanlı)
-  - ✅ Işık yayan materyaller
-  - ✅ **HDR/EXR Environment Haritaları** (equirectangular projeksiyon)
-  - ✅- **Gelişmiş Nishita Gökyüzü Modeli**: 
-  - Blender uyumlu fiziksel atmosfer parametreleri (Air, Dust, Ozone, Altitude).
-  - **Gece/Gündüz Döngüsü**: Prosedürel yıldızlar ve ay ile otomatik geçiş.
-  - **Ay Özellikleri**: Ufukta büyüme efekti, kızıl renk değişimi, atmosferik sönümleme ve ay evreleri.
-  - **Güneş Halesi**: Yüksek Mie Anisotropy (0.98) ile gerçekçi atmosferik parlamalar.
-  - **Işık Senkronizasyonu**: Sahnedeki Directional Light'ı otomatik olarak güneş pozisyonuna kilitler.çılım)
-  - ✅ Çoklu önem örneklemesi ile yumuşak gölgeler
-
-  - **Style Layer Sistemi**:
-    - Yakınsamış render ve AOV bufferlarını okuyan, sahne geometrisini, materyalleri, ışıkları veya path-traced temel sonucu değiştirmeyen non-destructive art-direction katmanıdır.
-    - Domain maskeli compositing sky, material, outline ve world-adapter davranışlarını ayırır; brush efekti tüm viewport arka planına taşmaz.
-    - CPU ve GPU display rebuild yolları Stylize pass'i accumulation resetlemeden yeniden uygulayabilir; profil ve slider değişiklikleri mevcut görüntü üzerinde hızlı güncellenir.
-    - **Backend eşitliği**: CPU, Vulkan RT GPU compute (`stylize.comp`) ve OptiX CUDA (`StylizeKernel.cu`) artık aynı Stylize layer modelini paylaşır; eşleşen presetlerde birebir aynı çıktı üretirken GPU yolları hızlı ve stabil kalır.
-    - **Backend destek matrisi**:
-      | Yol | Hızlandırma | Çıktı |
-      |-----|-------------|-------|
-      | CPU display rebuild | Scalar/SIMD CPU fallback | Referans sonuç |
-      | Vulkan RT | GPU compute shader | CPU/OptiX ile eşleşir |
-      | OptiX | CUDA post kernel | CPU/Vulkan ile eşleşir |
-    - **Sky Layer**:
-      - Yalnızca geçerli sky piksellerinde çalışır (`AOV valid && hit == false`).
-      - Küresel view-ray örnekleme kullanır; stilize gradient, cloud bank ve güneş ekran UV'sine değil dünya yönüne kilitlenir.
-      - Nishita güneş yönü, yüksekliği, disk boyutu, cloud coverage, density, scale, offset ve seed değerlerini girdi olarak okur.
-      - Presetler: Painterly Clouds, Cartoon Cel, Sunset Bands, Ink Wash ve Clear Gradient.
-      - Stilize cloud bank yapısı yatay puff grupları, ayrı gölge, highlight ve rim vurguları ile cartoon/gouache görünümü üretir.
-    - **Painterly Material Layer**:
-      - Yalnızca yüzey piksellerinde çalışır (`AOV hit == true`) ve albedo, normal, world position, depth, material id ve türetilmiş edge strength kullanır.
-      - Surface-locked stroke field yapısı screen-space kaymayı azaltır ve büyük brush scale değerlerinin objeler üzerinde okunur kalmasını sağlar.
-      - Palette influence, material color preservation, simplification, edge respect, pigment thickness ve normal softening profil bazlı kontrol edilir.
-      - Wet Oil Model; Body, Load, Pickup, Deposit ve Buildup kontrolleriyle materyal rengi üstünde ucuz painterly paint transport davranışı üretir.
-    - **Outline Layer**:
-      - Depth, normal ve material discontinuity verilerinden stilize kenar çizgileri üretir.
-      - Ink, Oil Paint, Pencil, Dry Brush ve Pressure line type seçenekleri; palette, custom, material-tint, warm-paint ve cool-pencil renk modları ile çalışır.
-    - **World Adapter Kontrolleri**:
-      - Terrain stroke blend, foliage clustering, foliage palette variance, volume grain ve force-field motion response kontrolleri gelecekteki style-aware world efektleri için açılmıştır.
-    - **Profiller**:
-      - Painterly Oil, Gouache, Ink + Wash, Graphic Toon, Clay / Maquette ve Dreamy Sunset; sky, material, outline, palette ve world-adapter ayarlarını birlikte kuran başlangıç profilleridir.
-
-- **Gelişmiş Özellikler**
-  - ✅ **Birikimli (Accumulative) Render**: Gürültüsüz, yüksek kaliteli çıktı için zamanla biriken örnekleme
-  - ✅ **Adaptif Örnekleme (Adaptive Sampling)**: Gürültülü bölgelere odaklanan akıllı render motoru
-  - ✅ Derinlik Alanı (DOF)
-  - ✅ Hareket Bulanıklığı (Motion Blur)
-  - ✅ Intel Open Image Denoise (OIDN) entegrasyonu
-  - ✅ Ton haritalama & post-processing
-  - ⚡ **[ÖNERİLEN] Vulkan RT Backend** *(Birincil)*: `VK_KHR_ray_tracing_pipeline` üzerine inşa edilmiş donanım tabanlı ray tracing mimarisi. Compute shader ile GPU hızlandırmalı iskelet animasyonu (skinning), dinamik geometri için TLAS/BLAS refit, kalıcı descriptor set yönetimi, async ping-pong frame pipeline + GPU tonemap, analitik LSS hair intersection ve volume için kalıcı NanoVDB accessor içerir. Donanım RT desteği varsa otomatik seçilir; Vulkan bağımlılıkları (`vulkan-1.dll`) veya desteklenmeyen GPU'larda otomatik olarak OptiX veya CPU moduna geçiş yapar.
-
-  <details>
-  <summary>⚡ <b>Vulkan Backend — Özellik Uyumluluk Tablosu</b> (genişlet)</summary>
-
-  | Özellik | OptiX | Vulkan RT | Not |
-  |---------|:-----:|:---------:|-----|
-  | Principled BSDF | ✅ | ✅ | Tam uyumlu |
-  | Lambertian / Metal / Dielektrik | ✅ | ✅ | Tam uyumlu |
-  | Subsurface Scattering (SSS) | ✅ | ✅ | Küçük renk tonu farkı |
-  | Clearcoat & Anizotropik | ✅ | ✅ | Tam uyumlu |
-  | Volumetrik Render (NanoVDB) | ✅ | ✅ | Kalıcı leaf-cache accessor; interaktif modlarda OptiX kadar veya daha hızlı |
-  | **Saç Sistemi (Hair)** | ✅ | ✅ | Analitik LSS intersection + sıkı AABB'ler; bu motorda OptiX donanım curve'ünü geçer |
-  | HDR / EXR Environment | ✅ | ✅ | Tam uyumlu |
-  | Nishita Gökyüzü & Gece/Gündüz | ✅ | ✅ | Tam uyumlu |
-  | Volumetrik Bulutlar | ✅ | 🧪 | Saçılım hesabında küçük farklar |
-  | **Su / Okyanus (FFT)** | ✅ | 🧪 | Dalga refleksiyon farkları |
-  | Kemik Animasyon (GPU Skinning) | ✅ | ✅ | Vulkan compute shader |
-  | Derinlik Alanı (DOF) | ✅ | ✅ | Tam uyumlu |
-  | Hareket Bulanıklığı (Motion Blur) | ✅ | ✅ | Tam uyumlu |
-  | Yumuşak Gölgeler (MIS) | ✅ | ✅ | Tam uyumlu |
-  | Alan Işıkları | ✅ | ✅ | Tam uyumlu |
-  | Ton Haritalama & Post-FX | ✅ | ✅ | Vulkan'da GPU compute tonemap, trace komut tamponuna fused |
-  | OIDN Denoising | ✅ | ✅ | OptiX daha sıkı CUDA interop yolu sunar |
-  | Adaptif Örnekleme | ✅ | ✅ | Tam uyumlu |
-  | Birikimli (Progressive) Render | ✅ | ✅ | Vulkan daha hızlı yakınsar (daha düşük frame-overhead) |
-
-  > **Lejant:** ✅ Tam destek &nbsp;|&nbsp; 🧪 Destekleniyor, küçük çıktı farkları olabilir
-
-  </details>
-
-  <details>
-  <summary>📊 <b>Vulkan RT vs OptiX — Etkileşimli Benchmarklar</b> (genişlet)</summary>
-
-  Aynı sahne, aynı ayarlar, aynı donanım üzerinde ölçüldü. Aşağıdaki fps değerleri
-  etkileşimli viewport (kamera hareket halinde) için temsili. Statik sahnede Vulkan'ın
-  adaptif örneklemesi her iki backend'i de yakınsama sonrası 500+ fps'in üstüne taşır.
-
-  | Sahne | Vulkan RT | OptiX | Oran |
-  |---|:---:|:---:|:---:|
-  | Mesh ağırlıklı + Nishita atmosfer | **600 fps** | 50 fps | **12.0×** |
-  | Hair ağırlıklı (cubic B-spline, LSS intersection) | **300 fps** | 70 fps | **4.3×** |
-  | Volume / VDB bulut (Fast preset) | **300 fps** | 200 fps | **1.5×** |
-  | Volume / VDB bulut (Balanced preset) | benzer | benzer | ≈1.0× |
-  | Volume / VDB bulut (Exact, kamera hareketinde) | 16 fps | 23 fps | 0.7× |
-  | Volume / VDB bulut (yakınsamış, adaptif aktif) | **800 fps** | adaptif sınırlı | — |
-
-  **Vulkan'ın interaktifteki avantajının kaynağı:**
-  - Asenkron fence tabanlı ping-pong frame pipeline (frame başına `vkQueueWaitIdle` yok)
-  - GPU compute tonemap → küçük RGBA8 staging (CPU Reinhard yok, 4× düşük readback bandwidth)
-  - Analitik Linear-Swept-Sphere hair intersection + LSS-sıkı AABB'ler (cubic B-spline Newton yerine)
-  - March adımları arasında kalıcı NanoVDB read-accessor (leaf-cache hit'leri ağaç walk'unu atlatır)
-  - Yalın kernel (sıcak yolda piksel başına accumulation atomic veya vignette compute yok)
-
-  **OptiX'in hâlâ önde olduğu yerler:**
-  - Exact preset + kamera hareketi — fully compute-bound durumda CUDA NanoVDB texture yolu GLSL software sampler'ı geçer
-  - OIDN GPU denoiser interop (CUDA-native zero-copy)
-  - NVIDIA donanım curve primitive'lerine özellikle ihtiyaç duyulan final stills
-
-  </details>
-
-  - ✅ **Gelişmiş Animasyon**: Kemik (bone) animasyonu, quaternion interpolasyonu ve timeline kontrolü
-  - ✅ **Gelişmiş Bulut Aydınlatma Kontrolleri**:
-    - Işık Adımları (Light Steps): Volumetrik bulut kalitesi için
-    - Gölge Yoğunluğu (Shadow Strength): Gerçekçi bulut gölgeleri
-    - Ortam Aydınlatması (Ambient Strength): Bulut taban aydınlatması
-    - Gümüş Yoğunluğu (Silver Intensity): Güneş kenarı efektleri
-    - Bulut Absorpsiyonu (Absorption): Işık geçirgenlik kontrolü
-  - ✅ **Tam Undo/Redo Sistemi** (YENİ v1.2):
-    - Obje dönüştürmeleri (taşıma, döndürme, ölçekleme)
-    - Obje silme ve kopyalama
-    - **Işık dönüştürmeleri** (taşıma, döndürme, ölçekleme)
-    - **Işık ekleme/silme/kopyalama**
-    - Klavye kısayolları: Ctrl+Z (Geri Al), Ctrl+Y (Yinele)
-
-### 🚀 Performans & Optimizasyon
-
-- **Çoklu BVH Desteği**
-  - Embree BVH (Intel, üretim seviyesi)
-  - Özel ParallelBVH (SAH tabanlı, OpenMP paralelleştirilmiş)
-  - OptiX GPU hızlandırma yapısı
-  - ⚡ Vulkan RT TLAS/BLAS mimarisi — dinamik refit, compute skinning, async ping-pong frame pipeline *(Önerilen birincil backend)*
-
-- **Optimizasyonlar**
-- **Optimizasyonlar**
-  - SIMD vektör işlemleri
-  - Çok thread'li tile tabanlı rendering
-  - Progressive refinement (ilerlemeli iyileştirme)
-  - **Bellek Optimizasyonu**: Üçgen başına 612 byte -> 146 byte'a düşürüldü (%75 tasarruf)
-  - **Güvenli Texture Sistemi**: Unicode dosya yolları ve bozuk formatlar için crash korumalı yükleyici
-  - Önbellekli Texture Yönetimi (Cache Hit/Miss optimizasyonu)
-
-### 🖥️ Kullanıcı Arayüzü
-
-- Modern ImGui tabanlı koyu tema (Dark UI)
-- **Animasyon Timeline Paneli**: Play/Pause, Scrubbing, Kare atlama
-- Render Kalite Presetleri (Düşük, Orta, Yüksek, Ultra)
-- Dinamik Çözünürlük Ayarları (Resolution Scaling)
-- Sahne hiyerarşi görüntüleyici ve Materyal editörü
-- Performans metrikleri (FPS, rays/s, bellek kullanımı)
-
-### 📦 Asset Browser & Kütüphane Sistemi
-
-- Metadata tabanlı asset tarama: `model`, `anim_clip`, `vdb`, `vdb_sequence`
-- Proje içi `assets` kökü + kullanıcı ek kütüphaneleri (multi-library)
-- VDB / VDB sequence için grid, bounds, shader preset ve sequence metadata desteği
-- Asset kartları için preview/thumbnail cache, favoriler, etiketler ve kayıtlı collection/smart folder presetleri
-- Sürükle-bırak ile sahneye ekleme, viewport ghost preview ve eklenen nesnenin seçili kalması
-- Proje bazlı UI state kalıcılığı: asset browser düzeni, library listesi ve collection filtreleri geri yüklenir
+Tam teknik rapor: **[ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)** · English: **[README.md](README.md)**
 
 ---
 
-## 🛠️ Prosedürel Araçlar ve Sistemler
+## 🧭 Çalışma alanları
 
-### 🏔️ Gelişmiş Arazi Editörü
-<img src="docs/images/terrain_header.jpg" width="100%" alt="Arazi Editörü Sistemi">
+RayTrophi Studio, hepsi aynı canlı sahne üzerinde çalışan, göreve odaklı çalışma alanlarına bölünmüştür:
 
-- **Şekillendirme Fırçaları**: Arazi geometrisini gerçek zamanlı olarak yükseltmek, alçaltmak, yumuşatmak ve düzleştirmek için sezgisel fırçalar.
-- **Hidrolik & Nehir (Fluvial) Erozyonu**: 
-  - Gerçekçi su akışını ve tortu taşınımını simüle edin
-  - Doğal görünümlü nehir yatakları ve vadileri otomatik oluşturun
-  - Erozyon gücünü, yağmur miktarını ve çözünürlüğü kontrol edin
-- **Heightmap Desteği**: Harici iş akışları (World Machine, Gaea) için 16-bit yükseklik haritası içe/dışa aktarımı.
-- **Düğüm (Node) Tabanlı İş Akışı**: <img align="right" width="300" src="docs/images/terrain_nodegraph.jpg"> Güçlü bir düğüm grafiği editörü kullanarak tahribatsız (non-destructive) arazi oluşturma. Gürültüleri, filtreleri ve maskeleri birleştirin.
-
-### 🌿 Prosedürel Bitki Örtüsü & Dağılım
-<img src="docs/images/terrain_foliage_header.jpg" width="100%" alt="Bitki Örtüsü Sistemi">
-
-- **GPU Instancing**: OptiX donanım hızlandırması kullanarak milyonlarca çim, ağaç ve kayayı sıfır performans kaybıyla renderlayın.
-- **Akıllı Dağılım (Smart Scattering)**: 
-  - Kural tabanlı yerleşim (eğim, yükseklik, doku maskesi)
-  - Örneklerin üst üste binmesini önlemek için çarpışma (collision) engelleme
-- **Boyama Modu**: Fırça araçlarını kullanarak ormanları veya belirli ayrıntıları manuel olarak boyayın.
-- **Dinamik Rüzgar**: Tüm bitki örtüsü küresel rüzgar parametrelerine (güç, yön, ani rüzgar) tepki verir.
-
-### 💇 Saç & Kıl Sistemi (Yeni!)
-<img src="docs/images/hair_header.png" width="100%" alt="Saç Sistemi Özellikleri">
-
-
-- **GPU Simülasyon & Render**: Gerçek zamanlı performans için tamamen NVIDIA OptiX ile hızlandırılmıştır.
-- **Tarama (Grooming) Fırçaları**:
-  - **Tarak (Comb)**: Saç yönünü doğal bir şekilde şekillendirin
-  - **Kes/Uzat (Cut/Grow)**: Uzunluğu etkileşimli olarak ayarlayın
-  - **Yumuşat (Smooth)**: Saç tellerini gevşetin/düzeltin
-- **Fizik Entegrasyonu**: Saç telleri karakter ağlarıyla (mesh) çarpışır ve yerçekimine/kuvvetlere tepki verir.
-- **Materyal Desteği**: Gerçekçi renderlama için Melanin tabanlı saç BSDF materyali.
-
-### 🌀 Fizik & Parçacık Simülasyon Sistemi (Yeni!)
-<img src="docs/images/simulation_header.jpg" width="100%" alt="Simulation Suite System">
-
-Path-tracing render hattı ile tam entegre, CUDA ve CPU backend'leri tarafından desteklenen yüksek performanslı, çok iş parçacıklı grid ve parçacık tabanlı simülasyon motoru:
-- **Birleşik Parçacık Sistemleri**: Tek bir çalışma alanında birden fazla simülasyon domain'i, özel emitter'lar, çarpıştırıcılar (colliders) ve kuvvet alanları ekleyin ve yönetin.
-- **APIC / FLIP Sıvı Çözücü**: Açısal momentumu koruyan ve sayısal enerji kaybını minimize eden yüksek kaliteli hibrit sıvı simülatörü. Ayarlanabilir APIC/FLIP karışımı, adaptif çözünürlük, kapalı/açık sınır modları, sızıntıları önlemek için dinamik parçacık yeniden örneklemesi (reseeding) ve hazır sıvı materyal presetleri (Su, Yağ, Özel) içerir.
-- **Yanıcı Gaz & Duman Çözücü**: Sıcaklık, kurum (soot) ve yakıt yoğunluğu için çok iş parçacıklı yoğun grid çözücü. Gerçekçi yanma dinamikleri (yangın/duman oluşumu, tutuşma, ısı yayılımı, alev sönümlenmesi) ve prosedürel FBM curl-noise türbülansı sunar.
-- **Fiziksel Tabanlı Whitewater (Ihmsen et al. 2012)**: Hapsedilmiş hava (trapped-air) ve dalga tepesi (wave-crest) potansiyellerine dayalı olarak ikincil sprey (havada), köpük (yüzeyde) ve kabarcık (su altında) parçacıklarını dinamik olarak simüle eder:
-  - **Dinamik PBR Materyal Yönlendirme**: Parçacıkları otomatik olarak fiziksel presetlere yönlendirir—Sprey için geçirgen su damlaları, Köpük için saçılımlı pürüzlü beyaz PBR ve Kabarcık için gümüşi yarı geçirgen baloncuklar. Herhangi bir sahne PBR materyalini bağımsız olarak atamak için *Custom Material Overrides* seçeneği içerir.
-  - **Su Altı Kabarcık TIR Düzeltmesi**: Kabarcık IOR değerini 1.1'e çekerek, geçirgenliği 0.65 yaparak (%35 oranında speküler/diffuse yansıma payı bırakarak) ve yumuşak bir ışık saçılım emisyonu (0.12) ekleyerek su altı kabarcıklarındaki yansıma kararmalarını (TIR) önler.
-  - **Newton-Raphson Dalga Snapping**: Yüzey köpüğü parçacıklarını pürüzsüzleştirilmiş su yüzeyi (Level-Set) sınırına projekte ederek dalgalı sularda havada uçan köpük hatalarını giderir.
-  - **Kararlı Boyut Varyasyonu & Sönümleme**: Parçacık başına titremesiz kararlı boyut dağılımı ($0.6\times$ ila $1.4\times$) ve ömür sonuna yaklaşan parçacıklar için yumuşak küçülerek yok olma (dissolve) animasyonları sunar.
-  - **İkosahedron Alt Bölümleme (Subdivisions)**: Yakın çekim detayları için ayarlanabilir küre çözünürlüğü (subdivision 0..3) seçeneği.
-- **SimCache Disk Baking**: Ağır simülasyon karelerini (sıvı, köpük, gaz) doğrudan proje dosyasının yanındaki ikili `.simcache` dosyalarına kaydeder. Simülasyonu yeniden hesaplamadan timeline'da gerçek zamanlı gezinme imkanı sunar.
-- **Sorunsuz Serialization**: Aktif sistemler, domain tipleri, parametreler, özel materyaller ve timeline önbellekleri dahil olmak üzere tüm simülasyon durumu `.rtp` / `.rts` proje dosyalarında eksiksiz olarak kaydedilir ve geri yüklenir.
-
-### 🌊 Gerçekçi Su & Okyanus
-<img src="docs/images/water_header.jpg" width="100%" alt="Okyanus Simülasyonu">
-
-- **FFT Okyanus Simülasyonu**: Köpük oluşumu ile Hızlı Fourier Dönüşümü (FFT) tabanlı derin okyanus dalgaları.
-- **Caustics**: Deniz tabanında gerçekçi ışık kırılması ve kaustik desenleri.
-- **Su Altı Volumetrikleri**: Derinliğe bağlı sis yoğunluğu ve ışık emilimi (absorption).
-
-### 🏞️ Nehir Aracı
-<img src="docs/images/river_header.jpg" width="100%" alt="Nehir Aracı">
-
-- **Spline Tabanlı Oluşturma**: Sezgisel bezier eğrileri kullanarak nehirler çizin.
-- **Otomatik Oyma (Auto-Carving)**: Nehirler yollarını araziye otomatik olarak oyar.
-- **Akış Haritalama (Flow Mapping)**: Su dokusu, spline yönü boyunca doğal bir şekilde akar.
-- **Fizik Etkileşimi**: Nesneler nehir akış hızına göre sürüklenir ve yüzer.
+| Çalışma alanı | Orada ne yaparsın |
+|---------------|-------------------|
+| **Layout / Sahne** | Asset içe aktar, obje/ışık/kamera yerleştir ve dönüştür, hiyerarşi kur, kutu-seçim, gizmo |
+| **Modelleme** | Poligon düzenleme (extrude, inset, bevel, loop cut, weld, merge, UV unwrap), modifier yığını |
+| **Sculpt** | Mesh ve arazide fırça tabanlı yüzey heykeltıraşlığı (PBVH hızlandırmalı) |
+| **Boyama** | Mesh üzerine doğrudan katmanlı PBR doku boyama (çok kanallı, blend modları) |
+| **Arazi** | Sculpt + düğüm-grafiği arazi, hidrolik/termal erozyon, heightmap I/O |
+| **Bitki / Scatter** | Kural tabanlı ve elle boyanan çim/ağaç/kaya instancing |
+| **Saç** | Tüy/saç groom, tara, kes/uzat, simüle et ve render et |
+| **Simülasyon** | Sıvı (APIC/FLIP), gaz/duman/ateş, whitewater, collider, kuvvet alanları, emitter |
+| **Animasyon** | Çok-track zaman çizelgesi, kanal bazlı keyframe, iskelet animasyonu, animasyon grafiği |
+| **Render / Look-dev** | Backend seç, örnekleme/kalite ayarla, denoise, tonemap ve sonucu Stylize'la |
 
 ---
 
-### 🛠️ Modelleme & Mesh Düzenleme Araçları
+## 🖥️ Render & backendler
 
-- **Sculpt Modu (Sculpt Mod)**: Mesh ve terrain hedefleri için fırça tabanlı yüzey düzenleme sistemi.
-  - Mesh sculpting, Modeling workspace içinde editable mesh cache'i kullanır; stroke'lar obje transformunu bozmadan üçgenlerin local/original pozisyonlarını günceller.
-  - Grab, Draw, Inflate, Layer, Clay, Clay Strips, Pinch, Smooth, Flatten, Scrape ve Crease araçları vardır; Shift geçici Smooth, Ctrl ise additive sculpt fırçalarında ters yön davranışı verir.
-  - `SculptModeState`, aktif hedefi, fırça presetini, screen-space/world radius seçimini, strength, falloff, front-face filtresi, live accumulation ve X/Y/Z mirror bayraklarını tutar.
-  - `SculptControlGraph`, editable vertex'leri komşuluk bağlantılı sculpt control node'larına bağlar; `SculptPBVH` ise local AABB leaf node'larıyla yoğun mesh'lerde fırça yarıçapına göre aday vertex aramasını daraltır.
-  - Stroke state dokunulan üçgenlerin önceki halini yakalar, topology-dostu güvenli vertex hareketi uygular, etkilenen smooth normal'leri yeniden hesaplar ve sonucu undo/redo için `MeshEditCommand` olarak kaydeder.
-  - Live accumulation açıkken raster viewport mesh'i stroke sırasında patch/update edilebilir; ertelenmiş sync stroke sonunda render backend, CPU BVH ve scene-geometry dirty flag'lerini kuyruğa alır.
-  - Mesh yoğunluğu `ModifierStack` üzerinden gelir (`FlatSubdivision` / `SmoothSubdivision`); stack `base_mesh_cache` üzerinden evaluate edilir ve `mesh_modifiers` olarak serileştirilir.
-  - Terrain sculpt aynı Sculpt workspace/dock'u proxy yol olarak kullanır; Raise/Lower/Flatten/Smooth/Stamp kontrolleri mesh PBVH hattı yerine `TerrainManager` tarafına yönlenir.
-- **Mesh Paint**: Mesh materyalleri üzerinde doğrudan katmanlı texture boyama sistemi.
-  - `MeshPaintAdapter`, seçili üçgeni/materyal slotunu hedefler ve node adı + materyal id ile anahtarlanan obje bazlı `PaintTextureSet` yapısını yönetir.
-  - Base Color, Normal, Roughness, Metallic, Emission, Mask, Transmission ve Opacity kanalları desteklenir; mevcut materyal texture'ları yeni stroke'lardan önce paint canvas'ını besleyebilir.
-  - Fırçalar paint, erase, soften, stamp, fill, clone ve spray modlarını; falloff, spacing, alpha texture, paint texture, tint, mirror ve wet/mix/smudge davranışlarını destekler.
-  - `PaintLayerStack`, her kanal için katman başına pixel buffer tutar; görünürlük, kilit, opacity ve Normal/Add/Multiply/Screen/Overlay blend modlarıyla görünür stack renderer'ın kullandığı düz texture'lara compositelenir.
-  - Dirty-region compositing ve GPU texture güncellemeleri interaktif stroke'ları akıcı tutar; `PaintTextureCommand` ve `PaintLayerCommand` stroke'ları undo/redo sistemine bağlar.
-  - Height-mask akışı normal üretme, lokal normal bölgesi güncelleme, height bilgisini normal map'e bake etme ve istenirse bake sonrası height mask'i temizleme desteği sağlar.
-  - Proje kaydetme/yükleme, mesh paint katmanlarını `mesh_paint_layers` altında saklar; katman pixelleri proje verisinin yanında binary PNG blob'ları olarak serileştirilir.
-- **Edit Mesh Modu**: Klasik polygon düzenleme araçları:
-  - **Extrude** yüz/kenar transform gizmo ile
-  - **Yüz/Kenar/Vertex Silme** (akıllı yeniden üçgenleme)
-  - **Vertex Birleştirme** (mesafeye göre veya manuel çökertme)
-  - **Inset / Bevel / Loop Cut** işlemleri
-  - **Weld, Split, Flip Normal** yardımcı araçları
-  - **UV Otomatik Açma / Akıllı Paketleme** hızlı lightmap ve paint akışları için
-- **Undo/Redo & Geçmiş**: Düzenleme modlarında tam işlem geçmişi ve adım gruplayabilme.
-- **Eşzamanlılık (Interoperability)**: Edit-mode değişiklikleri CPU/GPU buffer'larını günceller ve isteğe bağlı olarak GLB'ye uygulanmış modifier'larla export edilebilir.
+Tek bir fiziksel temelli path tracer, üç hızlandırma backend'ini besler. Sahne, materyaller ve ışıklar üçünde de aynıdır — ana göre uygun olanı seçersin (başsız/GPU'suz için CPU, NVIDIA eğri donanımı için OptiX, hızlı interaktif look-dev için Vulkan RT).
 
-### 🎛️ Viewport Gösterimi & Vulkan Raster Matcap Entegrasyonu
+### Materyaller & gölgeleme
+- **Principled BSDF** (Disney tarzı uber-shader): albedo, roughness, metallic, specular, clearcoat, sheen, anisotropy, transmission/IOR
+- **Lambertian, Metal, Dielectric** klasik modeller
+- **Yüzey-altı saçılım (SSS)**
+- **Spektral / melanin tabanlı saç BSDF**
+- NanoVDB seyrek hacimler ve prosedürel gürültü yoğunluğuyla **volumetrik render**
+- Tam doku desteği (albedo, roughness, metallic, normal, emission, transmission, opacity), sRGB/linear yönetimi
 
-- **Vulkan Raster Solid + Matcap**: Matcap gölgelendirmeyi destekleyen hızlı Vulkan raster "Solid" viewport modu — sculpt/paint için anlık geri bildirim sağlar. Matcap dosyaları `raytrac_sdl2/assets/matcaps/` içine koyulduğunda viewport tarafından kullanılabilir.
-- **Kullanım Senaryoları**: Ray-traced görünüm çok yavaş olduğunda sculpt ve topoloji inceleme için ideal; normal ve eğrilik bilgilerini düşük maliyetle korur.
-- **Etkinleştirme**: Viewport Shading menüsünden Matcap/Solid modunu aktifleştirin. Matcap seçimi Viewport → Shading → Matcap yolunda bulunur.
-- **Dosya & İş Akışı**: PNG/TGA/JPG matcap dosyalarını `raytrac_sdl2/assets/matcaps/` klasörüne ekleyin, ardından varlıkları yeniden yükleyin veya uygulamayı yeniden başlatın; Matcap seçiminde görünecektir.
+### Işıklandırma & gökyüzü
+- Nokta, yönlü, spot ve **mesh tabanlı alan ışıkları**; emissive materyaller
+- **HDR/EXR ortam haritaları** (equirectangular)
+- Gündüz/gece döngülü **Nishita fiziksel gökyüzü**: prosedürel yıldız ve ay (evreler, ufuk büyütme, atmosferik sönümleme), güneş halesi, otomatik güneş↔yönlü-ışık senkronu
+- **Küresel volumetrik bulutlar** (Henyey-Greenstein saçılım, adaptif ray marching, kapsama/yoğunluk/yükseklik/rüzgâr kontrolleri, yumuşak ufuk geçişi) — HDRI, düz renk veya Nishita gökyüzü üzerinde çalışır
+- Çoklu önem örneklemeli (MIS) yumuşak gölgeler
 
-## 🚦 Hızlı Başlangıç
+### Örnekleme & post
+- Aşamalı **birikimsel path tracing** + **adaptif örnekleme** (örnekleri gürültülü bölgelere yoğunlaştırır)
+- Alan derinliği, hareket bulanıklığı
+- **Intel Open Image Denoise (OIDN)** — CPU ve CUDA hızlandırmalı yollar, viewport ve final
+- Tone mapping ve son-işleme
 
-### Ön Gereksinimler
+### Backend karşılaştırması
 
-**Gerekli:**
-- **Visual Studio 2022** (MSVC v143) - **ÖNERİLEN DERLEME SİSTEMİ**
+<details>
+<summary>⚡ <b>Özellik eşitliği: OptiX vs Vulkan RT</b> (genişlet)</summary>
+
+| Özellik | OptiX | Vulkan RT | Not |
+|---------|:-----:|:---------:|-----|
+| Principled BSDF | ✅ | ✅ | Tam eşitlik |
+| Lambertian / Metal / Dielectric | ✅ | ✅ | Tam eşitlik |
+| Yüzey-altı saçılım (SSS) | ✅ | ✅ | Küçük renk tonu farkı |
+| Clearcoat & Anisotropic | ✅ | ✅ | Tam eşitlik |
+| Volumetrik render (NanoVDB) | ✅ | ✅ | Kalıcı leaf-cache accessor; interaktifte OptiX'e eşit veya daha hızlı |
+| **Saç sistemi** | ✅ | ✅ | Analitik LSS kesişim + LSS-sıkı AABB; burada OptiX donanım eğrilerini geçer |
+| HDR / EXR ortam | ✅ | ✅ | Tam eşitlik |
+| Nishita gökyüzü & gündüz/gece | ✅ | ✅ | Tam eşitlik |
+| Volumetrik bulutlar | ✅ | 🧪 | Küçük saçılım farkları |
+| Su / Okyanus (FFT) | ✅ | 🧪 | Dalga yansıma farkları |
+| İskelet animasyonu (GPU skinning) | ✅ | ✅ | Vulkan compute shader |
+| Alan derinliği / hareket bulanıklığı | ✅ | ✅ | Tam eşitlik |
+| Yumuşak gölge (MIS) / alan ışıkları | ✅ | ✅ | Tam eşitlik |
+| Tone mapping & post-FX | ✅ | ✅ | Vulkan'da GPU compute tonemap, trace komut tamponuna kaynaşık |
+| OIDN denoise | ✅ | ✅ | OptiX'in CUDA-interop yolu daha sıkı |
+| Adaptif / aşamalı render | ✅ | ✅ | Vulkan daha hızlı yakınsar (kare başı daha az ek yük) |
+| Stylize katmanı | ✅ | ✅ | CPU / Vulkan / OptiX eşleşen çıktı üretir |
+
+> **Açıklama:** ✅ tam destek &nbsp;|&nbsp; 🧪 destekli, küçük çıktı farkları olabilir
+
+</details>
+
+<details>
+<summary>📈 <b>İnteraktif ölçümler</b> (genişlet)</summary>
+
+Aynı sahne, aynı ayarlar, aynı donanım, kamera hareket halinde. Bunlar interaktif viewport kare hızlarıdır, final-kare değil. Statik sahnelerde adaptif örnekleme, pikseller yakınsadıkça her iki backend'i de 500 fps üzerine taşır.
+
+| Sahne | Vulkan RT | OptiX | Oran |
+|---|:---:|:---:|:---:|
+| Mesh-yoğun + Nishita atmosfer | 600 fps | 50 fps | 12.0× |
+| Saç-yoğun (kübik B-spline, LSS kesişim) | 300 fps | 70 fps | 4.3× |
+| Hacim / VDB bulut (Fast preset) | 300 fps | 200 fps | 1.5× |
+| Hacim / VDB bulut (Balanced preset) | benzer | benzer | ≈1.0× |
+| Hacim / VDB bulut (Exact, kamera hareketli) | 16 fps | 23 fps | 0.7× |
+
+**Vulkan interaktifte neden önde:** asenkron fence tabanlı ping-pong kare pipeline'ı (kare başı `vkQueueWaitIdle` yok), küçük RGBA8 staging'e GPU compute tonemap, analitik Linear-Swept-Sphere saç kesişimi, march adımları boyunca kalıcı NanoVDB read-accessor ve sıcak yolda piksel başı birikim atomic'i olmayan yalın çekirdek.
+
+**OptiX'in hâlâ kazandığı yer:** kamera hareketindeyken Exact hacim preset'i (donanımsal CUDA NanoVDB doku yolu), CUDA-yerel sıfır-kopya OIDN interop ve özellikle NVIDIA eğri donanım primitifleri gereken final kareler.
+
+</details>
+
+---
+
+## 🌀 Fizik & simülasyon paketi
+
+CUDA ve CPU backend'li, çok iş parçacıklı grid ve parçacık tabanlı bir FX paketi; doğrudan path-traced render pipeline'ına entegre. Birden çok simülasyon domaini, emitter, collider ve kuvvet alanı tek çalışma alanında bir arada bulunur ve projeyle birlikte kaydedilir.
+
+### Sıvı — APIC / FLIP çözücü
+- Açısal momentumu koruyan, sayısal dağılımı en aza indiren ayarlanabilir karışımlı **APIC/FLIP** çözücü
+- PCG + MIC(0) ön koşullu basınç çözümü (CPU) ve GPU'da Jacobi-PCG / çok-ızgaralı (MGPCG) basınç çözümü ile **MAC kademeli ızgara**
+- **Varyasyonel (cut-cell) katı eşleşmesi** (Batty/Bridson): kesirli MAC-yüzey ağırlıkları analitik primitiflere karşı alt-ızgara doğruluğunda çarpışma sağlar; hareketli collider'lar basınç çözümü üzerinden gerçek momentum/sıçrama aktarır
+- **Ghost-fluid 2. derece serbest yüzey** (Gibou/Enright): alt-hücre level set, sıvı yüzeyindeki voksel "merdivenleşmesini" giderir
+- Keyframe ile animasyonlu collider'lar her alt-adımda yeniden konumlanır, böylece sıvı hareketli geometriyi takip eder
+- Adaptif çözünürlük, açık/kapalı sınır modları, sızıntıyı önleyen dinamik parçacık yeniden tohumlama, sıvı materyal preset'leri (Su, Yağ, Özel)
+
+### Gaz, duman & ateş
+- Sıcaklık, is ve yakıt yoğunluğu için çok iş parçacıklı yoğun-ızgara çözücü
+- Yanma dinamikleri (tutuşma, ısı salımı, alev sönümlenmesi) + prosedürel FBM curl-noise türbülans
+- Verimli büyük domainler için seyrek-VDB aktif-voksel Poisson çözümü
+
+### Whitewater (Ihmsen ve ark. 2012)
+Hapsolmuş hava ve dalga tepesi potansiyellerinden üretilen ikincil **sprey** (havada), **köpük** (yüzeyde) ve **kabarcık** (su altı); collider tepkisiyle çözücü içinde taşınır:
+- **Dinamik PBR materyal yönlendirme** — sprey için geçirgen damlacıklar, köpük için saçılan mat-beyaz PBR, gümüşi yarı-geçirgen kabarcıklar — herhangi bir sahne materyalini bağlayan *Özel Materyal Geçersiz Kılma* ile
+- Su-altı kabarcıklarda toplam-iç-yansıma (TIR) kaynaklı koyu-halka kusurlarını azaltan **TIR düzeltmesi**
+- Yüzey köpüğünü yumuşatılmış level-set su mesh'ine projelendirip dalgalı suda yüzen köpüğü gideren **Newton-Raphson dalga oturtma**
+- Deterministik hash tabanlı boyut varyasyonu ve ömür sonunda yumuşak çözünme
+- Yakın çekim detayı için ayarlanabilir icosphere alt bölümü (0–3)
+
+### Yüzeyler, önbellek & serileştirme
+- Render zamanı sıvı mesh'i için Laplacian yumuşatmalı **Yu-Turk anizotropik yüzey rekonstrüksiyonu**; yüzey çözünürlüğü sim ızgarasından bağımsız
+- **SimCache disk pişirme** — ağır sıvı/köpük/gaz karelerini proje yanına ikili `.simcache` dosyalarına pişir, yeniden simüle etmeden zaman çizelgesini gerçek zamanlı tara
+- Simülasyon durumu, domain ayarları, özel materyaller, timeline önbellekleri ve preset'lerin `.rtp` / `.rts` içine tam serileştirilmesi
+
+> GPU MGPCG basınç yolu canlı; varyasyonel katılar + ghost-fluid'in GPU portu (Faz 2) geliştirme aşamasında — tam DCC eşitliği için yüzey gerilimi, örtük viskozite ve dar-bant/seyrek performans çalışmaları da öyle.
+
+---
+
+## 🛠️ Prosedürel & oluşturma araçları
+
+### 🏔️ Arazi
+- Gerçek zamanlı sculpt fırçaları (yükselt, alçalt, yumuşat, düzleştir, stamp)
+- Doğal yatak/vadi/sediman taşınımı için **hidrolik & termal erozyon** (GPU çekirdekleri)
+- Gürültü, filtre ve maskeleri birleştiren **düğüm tabanlı, tahribatsız iş akışı** (36+ arazi düğümü)
+- 16-bit heightmap içe/dışa aktarım (World Machine / Gaea iş akışları)
+
+### 🌿 Bitki örtüsü & scatter
+- Donanım hızlandırmasıyla ölçekli GPU-instanced çim, ağaç, kaya
+- Çakışma önlemeli kural tabanlı yerleşim (eğim, yükseklik, doku maskesi)
+- Elle yerleştirme için boyama modu
+- Küresel dinamik rüzgâr (şiddet, yön, gust)
+
+### 💇 Saç & tüy
+- GPU simüle ve render; Vulkan'da analitik LSS kesişim
+- Grooming fırçaları: tara, kes/uzat, yumuşat
+- Fizik: teller mesh'lerle çarpışır, yerçekimi/kuvvetlere tepki verir
+- Melanin tabanlı saç BSDF
+
+### 🌊 Okyanus & 🏞️ nehirler
+- Köpük üretimi, kostik ve derinliğe bağlı su-altı volumetrikleriyle **FFT okyanus**
+- Araziye otomatik oyulan, akış haritalı ve akışa göre obje sürüklemeli **spline/bezier nehirler**
+
+### 🗿 Modelleme, sculpt & boyama
+- **Edit Mesh modu** — extrude, inset, bevel, loop cut, sil/birleştir/weld/split, normal çevir, akıllı yeniden-üçgenleme, UV otomatik-unwrap/akıllı paketleyici
+- **Sculpt modu** — Grab, Draw, Inflate, Layer, Clay, Clay Strips, Pinch, Smooth, Flatten, Scrape, Crease; Shift→Smooth, Ctrl→ters; X/Y/Z ayna; yoğun mesh'ler için PBVH budama; modifier-yığını alt bölümü; ortak mesh/arazi sculpt yolu
+- **Mesh Paint** — katmanlı PBR boyama (Base Color, Normal, Roughness, Metallic, Emission, Mask, Transmission, Opacity); boya/sil/yumuşat/stamp/fill/clone/spray fırçaları; Normal/Add/Multiply/Screen/Overlay blend modlu katman yığını; height→normal pişirme; dirty-region GPU güncellemeleri; projeye PNG blob olarak serileşir
+- Tüm düzenleme modlarında, isteğe bağlı adım gruplamalı tam **geri/ileri al**; mesh düzenlemeleri CPU/GPU tamponlarına yayılır ve modifier uygulanmış GLB olarak dışa aktarılır
+
+### 🎨 Stylize — tahribatsız sanat yönetimi
+Yakınsama sonrası, path-traced sonucu + AOV tamponlarını okuyup; sahne geometrisini, materyalleri veya ışıkları değiştirmeden görüntüyü yeniden stilize eden bir katman. Domain-maskeli kompozit, gök/materyal/dış-çizgi/dünya efektlerini ayrı tutar.
+- **Gök katmanı** — görüş-ışınına kilitli stilize gradyanlar, bulut kümeleri ve güneş (Painterly Clouds, Cartoon Cel, Sunset Bands, Ink Wash, Clear Gradient)
+- **Painterly materyal katmanı** — yüzeye kilitli fırça alanları (ekran-uzayı kayması yok), palet etkisi, kenar saygısı, pigment kalınlığı ve Wet Oil modeli (Body/Load/Pickup/Deposit/Buildup)
+- **Dış-çizgi katmanı** — derinlik/normal/materyal süreksizliği kenarları; Ink, Oil, Pencil, Dry Brush, Pressure çizgi türleri
+- **Profiller** — Painterly Oil, Gouache, Ink + Wash, Graphic Toon, Clay/Maquette, Dreamy Sunset
+- **Backend eşitliği** — CPU, Vulkan compute (`stylize.comp`) ve OptiX CUDA (`StylizeKernel.cu`) eşleşen çıktı üretir; birikimi sıfırlamadan yeniden uygular
+
+### 🖥️ Viewport gölgeleme
+- Hızlı sculpt/paint geri bildirimi için Vulkan raster **Solid + Matcap** modu (matcap'leri `raytrac_sdl2/assets/matcaps/` içine bırak)
+- Herhangi bir backend'de ışın izlemeli interaktif önizleme; gizmo sırasında idle-preview
+
+---
+
+## 🎞️ Animasyon & UI
+
+- Grup hiyerarşili (Obje / Işık / Kamera / Dünya) **çok-track zaman çizelgesi**, kanal bazlı Konum/Dönüş/Ölçek/Materyal keyframe'leri, renk-kodlu alt kanallar, sürükle-taşı, zoom/pan/tarama ve sağ-tık ekle/sil/çoğalt
+- Quaternion interpolasyonlu **iskelet animasyonu** + GPU compute skinning; durum makineleri ve IK blend uzayları için **animasyon grafiği** (14+ düğüm)
+- **Toplu / sekans render** — animasyonu görüntü dizisine (materyal keyframe'leriyle) aktar, render ortasında iptal edilebilir, kare başına simülasyon sürümlü
+- Modern **ImGui** dock'lu koyu UI, render kalite preset'leri (Low/Medium/High/Ultra), dinamik çözünürlük ölçekleme, sahne hiyerarşisi, materyal editörü, performans metrikleri
+- **Seçim** — kutu seçim (sağ-sürükle), karışık ışık+obje seçimi, Ctrl+tık ekle/çıkar, hepsini/hiçbirini seç, çoklu-obje dönüşüm
+- Dönüşüm, silme, çoğaltma, ışıklar için **geri/ileri al** — Ctrl+Z / Ctrl+Y
+
+### 📦 Asset tarayıcı & kütüphane
+- `model`, `anim_clip`, `vdb` ve `vdb_sequence` için metadata tabanlı keşif
+- Yerleşik proje `assets` kökü + kullanıcı eklemeli yerel kütüphaneler
+- Önizleme/thumbnail önbellekli asset kartları, favoriler, etiketler, kayıtlı koleksiyonlar ve akıllı klasörler
+- Viewport hayalet önizlemeli ve otomatik seçimli sürükle-bırak yerleştirme
+- Düzen, kütüphane listesi ve filtreler için proje-kapsamlı UI kalıcılığı
+
+---
+
+## 🚦 Hızlı başlangıç
+
+### Önkoşullar
+
+**Gerekli**
+- **Visual Studio 2022** (MSVC v143) — önerilen yapı sistemi
 - Windows 10/11 (x64)
-- CMake 3.20+ (opsiyonel, VS2022 tercih edilir)
+- CMake 3.20+ (opsiyonel; VS2022 tercih edilir)
 
-**Opsiyonel (GPU rendering için):**
-- NVIDIA GPU (SM 5.0+): GTX 9xx, 10xx, 16xx veya RTX serisi
-- CUDA Toolkit 12.0+
-- OptiX 7.x SDK
-- Vulkan SDK 1.3+ (Vulkan rendering desteği için)
+**Opsiyonel (GPU render)**
+- NVIDIA GPU (SM 5.0+): GTX 9xx/10xx/16xx veya RTX serisi
+- CUDA Toolkit 12.0+, OptiX 7.x/8.x SDK
+- Vulkan SDK 1.3+ (Vulkan RT yolu için)
 
-**GPU Uyumluluğu:**
 | GPU Serisi | Mimari | Mod | Performans |
 |------------|--------|-----|------------|
-| RTX 40xx | Ada Lovelace | Donanım RT | ⚡ En Hızlı |
-| RTX 30xx | Ampere | Donanım RT | ⚡ Çok Hızlı |
+| RTX 40xx | Ada Lovelace | Donanım RT | ⚡ En hızlı |
+| RTX 30xx | Ampere | Donanım RT | ⚡ Çok hızlı |
 | RTX 20xx | Turing | Donanım RT | ⚡ Hızlı |
 | GTX 16xx | Turing | Compute | 🔶 İyi |
 | GTX 10xx | Pascal | Compute | 🔶 Orta |
-| GTX 9xx | Maxwell | Compute | 🔶 Yavaş |
+| GTX 9xx | Maxwell | Compute | 🔶 Daha yavaş |
 
-### 📦 Bağımlılıklar
+### Ortam değişkenleri
 
-Tüm bağımlılıklar otomatik yönetilir:
-- SDL2 (grafik çıktısı)
-- Embree 4.x (CPU BVH)
-- AssImp 5.x (model yükleme)
-- ImGui (UI)
-- OpenMP (paralelleştirme)
-- stb_image (HDR/texture yükleme)
-- **TinyEXR** (EXR format desteği)
-- Intel OIDN (denoising)
-- CUDA/OptiX/Vulkan (GPU rendering - opsiyonel)
+Proje bağımlılıkları sistem ortam değişkenleriyle çözer. Derlemeden önce bunları yerel kurulum yollarına ayarla:
 
-| Ortam Değişkeni (Env Var) | Açıklama |
-|----------------------|-------------|
-| `SDL2_ROOT`          | SDL2 Kök Dizini | 
-| `OPTIX_ROOT`         | OptiX SDK Dizini | 
-| `EMBREE_ROOT`        | Embree Kök Dizini | 
-| `OIDN_ROOT`          | Intel Open Image Denoise Dizini |
-| `ASSIMP_ROOT`        | Assimp Kök Dizini | 
-| `CUDA_PATH`          | CUDA Toolkit Dizini | 
-| `VULKAN_SDK`         | Vulkan SDK Dizini | 
+| Değişken | Açıklama | Örnek |
+|----------|----------|-------|
+| `SDL2_ROOT` | SDL2 kökü | `E:\...\SDL2-2.30.4` |
+| `OPTIX_ROOT` | OptiX SDK | `C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0` |
+| `EMBREE_ROOT` | Embree kökü | `E:\...\embree-4.4.0.x64.windows` |
+| `OIDN_ROOT` | Intel OIDN kökü | `E:\...\oidn-2.3.0.x64.windows` |
+| `ASSIMP_ROOT` | Assimp kökü | `E:\...\Assimp` |
+| `CUDA_PATH` | CUDA Toolkit | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x` (genelde otomatik) |
+| `VULKAN_SDK` | Vulkan SDK | `C:\VulkanSDK\1.3.xxx.0` |
 
-### 🔨 Derleme Talimatları
+Yönetilen bağımlılıklar: SDL2, Embree 4.x, Assimp 5.x, ImGui, OpenMP, stb_image, TinyEXR, Intel OIDN, NanoVDB ve CUDA/OptiX (opsiyonel).
 
-#### **Yöntem 1: Visual Studio 2022 (ÖNERİLİR)**
+### Derleme
 
+**Visual Studio 2022 (önerilen)**
 ```bash
-# 1. Repository'yi klonlayın
 git clone https://github.com/maxkemal/RayTrophi.git
 cd RayTrophi/raytrac_sdl2
-
-# 2. Solution'ı açın
-# raytrac_sdl2.vcxproj dosyasına çift tıklayın veya Visual Studio 2022'de açın
-
-# 3. Derleyin
-# Konfigürasyonu "Release" ve platformu "x64" olarak ayarlayın
-# Build > Build Solution (Ctrl+Shift+B)
-
-# 4. Çalıştırın
-# Exe dosyası şurada olacak: x64/Release/raytracing_render_code.exe
+# raytrac_sdl2.vcxproj dosyasını Visual Studio 2022'de aç
+# Release | x64 seç, sonra Build > Build Solution (Ctrl+Shift+B)
+# Çıktı: x64/Release/raytracing_render_code.exe
 ```
+Tüm bağımlılıklar (DLL, PTX, shader, kaynaklar) çıktı dizinine otomatik kopyalanır.
 
-**Not**: Tüm bağımlılıklar (DLL'ler, kaynaklar) derleme sistemi tarafından otomatik olarak çıktı dizinine kopyalanır.
-
-#### **Yöntem 2: CMake**
-
+**CMake**
 ```bash
 cmake -S raytrac_sdl2 -B raytrac_sdl2/build -G "Visual Studio 17 2022" -A x64
 cmake --build raytrac_sdl2/build --config Release -j 12
+# Çıktı: raytrac_sdl2/build/bin/RELEASE/"RayTrophi Studio.exe"
 ```
+CMake; çalıştırılabilir, PTX, Vulkan shader ve runtime DLL'lerini `build/bin/<CONFIG>` altında izole tutar, VS2022 `x64` çıktısının üzerine asla yazmaz.
 
-*(Not: CMake derlemesi desteklenir; exe, PTX dosyaları, Vulkan shaderları ve runtime DLL'leri `raytrac_sdl2/build/bin/<CONFIG>` altında ayrı tutulur, bu yüzden VS2022 `x64` çıktısının üstüne yazmaz.)*
-
-### ▶️ Çalıştırma
-
-Visual Studio ile derlediyseniz:
-```bash
-cd x64/Release
-raytracing_render_code.exe
-```
-
-CMake ile derlediyseniz:
-```bash
-cd raytrac_sdl2/build/bin/RELEASE
-"RayTrophi Studio.exe"
-```
-
-UI açılacaktır. Model içe aktarmak için File > Load Scene kullanın (GLTF önerilir).
+### Çalıştırma
+Çalıştırılabiliri başlat; dock'lu UI açılır. **File → Load Scene** ile model içe aktar (GLTF önerilir; Assimp ile 40+ format).
 
 ---
 
 ## 🏗️ Mimari
 
-### Proje Yapısı
-
 ```
 RayTrophi/
-├── raytrac_sdl2/                  # Ana proje
-│   ├── source/
-│   │   ├── src/                   # Modüllere ayrılmış kaynak dosyalar
-│   │   │   ├── Core/              # Ana giriş (Main.cpp), Proje Yönetimi
-│   │   │   ├── Render/            # Renderer, OptiX Wrapper, BVH İnşası
-│   │   │   ├── Scene/             # Sahne Objeleri, Işıklar, Materyaller
-│   │   │   ├── Physics/           # Arazi, Su, Gaz Simülasyonu, Fizik Motoru
-│   │   │   ├── Device/            # CUDA Kernel (.cu) & GPU Mantığı
-│   │   │   ├── UI/                # ImGui Panelleri & Editör Mantığı
-│   │   │   ├── Utils/             # Yardımcı Araçlar (Yükleyiciler, Matematik)
-│   │   │   └── ...
-│   │   ├── include/               # Header (.h) dosyaları
-│   │   │   ├── Renderer.h
-│   │   │   ├── Material.h
-│   │   │   └── ...
-│   │   ├── raygen.ptx             # Derlenmiş OptiX kernelleri
-│   │   └── ...
-│   ├── raytrac_sdl2.vcxproj       # Visual Studio projesi
-│   ├── CMakeLists.txt             # CMake derleme yapılandırması
-│   └── raygen.ptx                 # OptiX shader
-└── README.md                      # Bu dosya
+└── raytrac_sdl2/
+    └── source/
+        ├── src/
+        │   ├── Core/        # Giriş noktası (Main.cpp), proje yönetimi
+        │   ├── Render/      # Renderer, OptiX wrapper, Embree/Parallel BVH, kamera, doku
+        │   ├── Backend/      # Vulkan RT, OptiX, viewport backendleri, sahne doku yöneticisi
+        │   ├── Scene/        # Objeler, ışıklar, materyaller, instancing, mesh, BSDF'ler
+        │   ├── Physics/      # Sıvı (APIC/FLIP), gaz, whitewater, arazi, okyanus, nehir, sim dünyası
+        │   ├── Device/       # CUDA çekirdekleri (.cu/.cuh), OptiX cihaz kodu, Vulkan compute
+        │   ├── Hair/         # Saç sistemi, teller, skinning, saç BSDF
+        │   ├── Paint/        # Mesh & arazi boyama adaptörleri, katman yığını
+        │   ├── Stylize/      # Stylize CPU/CUDA çekirdekleri ve durumu
+        │   ├── Animation/    # Animasyon denetleyici, düğümler, Ozz runtime
+        │   ├── Viewport/     # Viewport sahne senkronu
+        │   ├── Math/         # Vec/Matrix/Quaternion
+        │   ├── UI/           # ImGui panelleri, zaman çizelgesi, gizmolar, editörler
+        │   └── Utils/        # Yükleyiciler, serileştirme, yardımcılar
+        └── include/          # Header'lar (Backend, Core, Fluid, Hair, NodeSystem, Paint, Stylize, Viewport, Utils)
 ```
 
-### Temel Bileşenler
+**Render backendleri**
+- **EmbreeBVH** (`Render/EmbreeBVH.cpp`) — Intel CPU çekirdekleri
+- **ParallelBVHNode** (`Render/ParallelBVHNode.cpp`) — özel SAH BVH, OpenMP-paralel yapı
+- **OptixWrapper** (`Render/OptixWrapper.cpp`, `Device/*.cu`) — CUDA/OptiX, SBT + doku-objesi önbelleği
+- **VulkanBackend** (`Backend/VulkanBackend.cpp`) — `VK_KHR_ray_tracing_pipeline`, TLAS/BLAS refit, compute skinning, asenkron ping-pong kare pipeline'ı, GPU tonemap
 
-1. **Renderer** (`src/Render/Renderer.cpp`)
-   - Tile (kare) tabanlı çok thread'li rendering
-   - Progressive refinement (Aşamalı iyileştirme)
-   - Denoising entegrasyonu
-
-2. **BVH Sistemleri**
-   - **EmbreeBVH** (`src/Render/EmbreeBVH.cpp`): Endüstri standardı, hız için optimize
-   - **ParallelBVHNode** (`src/Render/ParallelBVHNode.cpp`): Özel SAH tabanlı, OpenMP paralel build
-   - **OptiX BVH** (`src/Render/OptixWrapper.cpp`): NVIDIA GPU hızlandırmalı yapı
-   - **Vulkan RT** (`src/Backend/VulkanBackend.cpp`): Vulkan donanım tabanlı ray tracing yapısı
-
-3. **Materyal Sistemi** (`src/Scene/PrincipledBSDF.cpp`)
-   - Modüler özellik tabanlı materyaller
-   - Texture desteği (albedo, roughness, metallic, normal, emission)
-   - sRGB/Linear renk uzayı işleme
-
-4. **OptixWrapper** (`src/Render/OptixWrapper.cpp`, `src/Device/*.cu`)
-   - CUDA/OptiX backend
-   - SBT (Shader Binding Table) yönetimi
-   - Texture object önbellekleme
-
-5. **Fizik & Prosedürel** (`src/Physics/*`)
-   - **TerrainManager**: Hidrolik erozyon, şekillendirme
-   - **WaterManager**: FFT Okyanus simülasyonu
-   - **EmitterSystem**: Parçacık sistemleri & kuvvetler
+**Düğüm sistemleri** (`include/NodeSystem/`) — Arazi, Animasyon ve Materyal editörlerinin paylaştığı grafik çekirdeği.
 
 ---
 
-
-
 ## 🎨 Galeri
 
-### 🎬 Demo Reel
-
-[![RayTrophi Showcase](https://img.youtube.com/vi/-xRiPhc-p6k/maxresdefault.jpg)](https://www.youtube.com/watch?v=-xRiPhc-p6k)
-
-**[▶️ Demo Reel'i YouTube'da İzleyin](https://www.youtube.com/watch?v=-xRiPhc-p6k)**
-
-### 🖼️ Render Örnekleri
+[![RayTrophi Tanıtım](https://img.youtube.com/vi/-xRiPhc-p6k/maxresdefault.jpg)](https://www.youtube.com/watch?v=-xRiPhc-p6k)
+**[▶️ Tam demo reel'i izle](https://www.youtube.com/watch?v=-xRiPhc-p6k)**
 
 <div align="center">
 
-#### Mimari Görselleştirme
-<img src="render_samples/1.png" width="800" alt="Karmaşık İç Mekan Sahnesi - 3.3M Üçgen">
-<p><i>Gelişmiş aydınlatma ile karmaşık mimari sahne - 3.3M üçgen, Embree BVH</i></p>
+<img src="render_samples/1.png" width="800" alt="Karmaşık mimari sahne"><br>
+<i>Karmaşık mimari sahne — 3,3M üçgen, Embree BVH</i>
 
-#### Ürün Renderlaması
-<img src="render_samples/indoor2.png" width="800" alt="İç Mekan Tasarımı">
-<p><i>Volumetrik aydınlatma ve subsurface scattering ile iç mekan tasarımı</i></p>
+<img src="render_samples/indoor2.png" width="800" alt="İç mekan tasarımı"><br>
+<i>Volumetrik ışıklandırma ve yüzey-altı saçılımlı iç mekan</i>
 
-#### GPU Hızlandırmalı Rendering
-<img src="render_samples/output1.png" width="800" alt="OptiX GPU Rendering">
-<p><i>OptiX ile gerçek zamanlı GPU rendering - 500M+ rays/saniye</i></p>
+<img src="render_samples/output1.png" width="800" alt="OptiX GPU render"><br>
+<i>OptiX ile GPU path tracing</i>
 
-#### Stilize Rendering
-<img src="render_samples/stylesed_winter_dragon1.png" width="800" alt="Ejderha Modeli">
-<p><i>Özel materyaller ve prosedürel texture'lar ile stilize ejderha</i></p>
+<img src="render_samples/stylesed_winter_dragon1.png" width="800" alt="Stilize ejderha"><br>
+<i>Tahribatsız Stylize katmanıyla stilize render</i>
 
-#### CPU Path Tracing
-<img src="render_samples/RayTrophi_cpu1.png" width="800" alt="CPU Rendering">
-<p><i>Progressive refinement ile saf CPU path tracing</i></p>
+<img src="render_samples/RayTrophi_cpu1.png" width="800" alt="CPU render"><br>
+<i>Aşamalı iyileştirmeli saf CPU path tracing</i>
 
-#### Materyaller & Texture'lar
-<img src="render_samples/stylize_cpu.png" width="800" alt="Materyal Gösterimi">
-<p><i>PBR texture'lar ile Principled BSDF materyalleri</i></p>
-
-#### Açık Hava Sahnesi
-<img src="render_samples/yelken.png" width="800" alt="Yelkenli Sahnesi">
-<p><i>Doğal aydınlatma ile açık hava ortamı</i></p>
-
-#### Gerçek Zamanlı UI
-<img src="render_samples/Ekran görüntüsü 2025-12-04 161755.png" width="800" alt="ImGui Arayüzü">
-<p><i>Canlı parametre ayarlamaları ile interaktif ImGui arayüzü</i></p>
+<img src="render_samples/yelken.png" width="800" alt="Açık hava sahnesi"><br>
+<i>Nishita fiziksel gökyüzüyle açık hava ortamı</i>
 
 </div>
 
 ---
 
-## 🛠️ Kaynaktan Derleme - Detaylı Kılavuz
+## 🗺️ Yol haritası
 
-### Bağımlılık Kurulumu
+**Yakın zamanda eklenenler**
+- ✅ Vulkan RT backend (interaktif birincil) — GPU skinning, asenkron ping-pong pipeline, analitik LSS saç
+- ✅ Fizik & parçacık simülasyon paketi (APIC/FLIP sıvı, gaz/ateş, whitewater)
+- ✅ GPU MGPCG sıvı basınç çözümü (CUDA)
+- ✅ Varyasyonel cut-cell katı eşleşmesi + ghost-fluid 2. derece serbest yüzey (CPU)
+- ✅ Çok-materyalli whitewater PBR yönlendirme + Newton-Raphson dalga oturtma
+- ✅ SimCache disk kare pişirme + tam simülasyon serileştirme
+- ✅ CPU / Vulkan / OptiX eşitlikli Stylize katmanı
+- ✅ Sculpt modu (mesh + arazi) ve katmanlı mesh boyama
 
-**Otomatik (önerilir):**
-Visual Studio projesi bağımlılıkları vcpkg veya manuel yollar ile yönetir.
-
-**Manuel:**
-1. SDL2, Embree, AssImp'i resmi kaynaklardan indirin
-2. Proje özelliklerinde include/library yollarını güncelleyin
-
-### Derleme Konfigürasyonları
-
-- **Debug**: Tam semboller, daha yavaş (~10x)
-- **Release**: Optimize, üretim kullanımı
-- **RelWithDebInfo**: Optimize + semboller (profiling)
-
-### CMake vs Visual Studio
-
-| Özellik                  | VS2022 .vcxproj | CMake         |
-|--------------------------|-----------------|---------------|
-| CPU Rendering (SDL)      | ✅ Çalışıyor    | ✅ Çalışıyor     |
-| GPU Rendering (OptiX)    | ✅ Çalışıyor    | ✅ Çalışıyor  |
-| Vulkan Rendering (RT)    | ✅ Çalışıyor    | ✅ Çalışıyor  |
-| Stylize Layer Eşitliği   | ✅ CPU/Vulkan/OptiX | ✅ CPU/Vulkan/OptiX |
-| Bağımlılık Yönetimi      | ✅ Mükemmel     | ⚠️ Manuel     |
-| Derleme Hızı             | Hızlı           | Daha yavaş    |
-| **Öneri**                | **BUNU KULLAN** | Deneysel      |
-
-**Neden VS2022?**
-- Tüm bağımlılıklar önceden yapılandırılmış
-- Kaynak dosyaları (ikonlar, PTX) otomatik kopyalanır
-- CPU rendering'de SDL refresh hatası yok
-- Daha iyi debugging deneyimi
-
----
-
-## 📚 Kullanım Örnekleri
-
-### Temel Rendering
-
-```cpp
-#include "Renderer.h"
-#include "SceneData.h"
-
-int main() {
-    Renderer renderer(1920, 1080, 8, 128);
-    SceneData scene;
-    OptixWrapper optix;
-    
-    // Sahne yükle
-    renderer.create_scene(scene, &optix, "path/to/model.gltf");
-    
-    // Render et
-    SDL_Surface* surface = /* ... */;
-    renderer.render_image(surface, scene, /* ... */);
-    
-    return 0;
-}
-```
-
-### BVH Backend Değiştirme
-
-```cpp
-// Embree kullan (en hızlı)
-renderer.rebuildBVH(scene, true);  // use_embree = true
-
-// Özel ParallelBVH kullan
-renderer.rebuildBVH(scene, false); // use_embree = false
-```
-
-### Materyal Oluşturma
-
-```cpp
-auto mat = std::make_shared<PrincipledBSDF>();
-mat->albedoProperty.constant_value = Vec3(0.8, 0.1, 0.1); // Kırmızı
-mat->roughnessProperty.constant_value = Vec3(0.3, 0.3, 0.3);
-mat->metallicProperty.constant_value = Vec3(1.0, 1.0, 1.0); // Metalik
-```
-
----
-
-## 🐛 Bilinen Sorunlar & Sınırlamalar
-
-### Derleme Sistemi
-- CMake ve VS2022 ayrı çıktı klasörleri kullanır; eski PTX/DLL dosyalarının karışmaması için bu ayrımı koruyun.
-- DLL bağımlılıkları .exe ile aynı klasörde olmalı; CMake bilinen SDL2, Assimp, OIDN, vcpkg, shader ve PTX runtime dosyalarını build sonunda kopyalar.
-
-### Rendering
-- OptiX, SM 5.0+ NVIDIA GPU gerektirir (GTX 9xx veya daha yeni)
-- RTX GPU'lar donanım RT core kullanır; GTX GPU'lar compute tabanlı ray tracing kullanır (daha yavaş)
-- Çok büyük sahneler (>10M üçgen) bellek sorunlarına neden olabilir
-- Denoising Intel OIDN kullanır, NVIDIA GPU'larda CUDA ile hızlandırılır
-
-### Platform
-- Şu anda sadece Windows (SDL2, DirectX bağımlılıkları)
-- Linux/macOS desteği portlama gerektirir
-
----
-
-## 🗺️ Yol Haritası
-
-- [ ] Daha hızlı BVH inşası için Binned SAH
-- [ ] Index tabanlı BVH (vektör kopyalamayı kaldır)
-- [ ] SBVH (Spatial BVH splits)
-- [ ] Linux/macOS desteği
-- [x] Vulkan backend (OptiX alternatifi)
-- [ ] Ağ rendering (dağıtık ray tracing)
+**Planlanan / devam eden**
+- [ ] Varyasyonel katılar + ghost-fluid yüzeyin GPU portu (Faz 2)
+- [ ] Sıvı yüzey gerilimi, örtük viskozite, dar-bant/seyrek performans
+- [ ] Binned SAH / index tabanlı BVH / SBVH uzamsal bölme
 - [ ] USD format desteği
-- [ ] Işık yolu görselleştirme/debugging
+- [ ] Ağ / dağıtık render
+- [ ] Işık-yolu görselleştirme & hata ayıklama
+- [ ] Linux / macOS desteği (şu an yalnızca Windows: SDL2 + Windows bağımlılıkları)
 
 ---
 
-## 🤝 Katkıda Bulunma
+## 🐛 Bilinen sınırlamalar
 
-Katkılar memnuniyetle karşılanır! İlgi alanları:
+- Bugün **yalnızca Windows** (SDL2 + Windows bağımlılıkları); Linux/macOS port gerektirir.
+- **OptiX**, NVIDIA GPU gerektirir (SM 5.0+); RTX donanım RT çekirdeği, GTX compute kullanır (daha yavaş).
+- Çok büyük sahneler (>10M üçgen) belleği zorlayabilir.
+- CMake ve VS2022 **ayrı çıktı klasörleri** kullanır — eski PTX/DLL karışmaması için ayrı tut.
+- Vulkan volumetrik bulutlar ve FFT okyanus, OptiX'e kıyasla küçük çıktı farkları gösterir (eşitlik tablosuna bak).
+- GPU sıvı basıncı canlı, ancak varyasyonel katılar + ghost-fluid yüzey şimdilik yalnızca CPU.
 
-- Performans optimizasyonları
-- Yeni materyal modelleri
-- Ek 3D format desteği
-- Hata düzeltmeleri
-- Dokümantasyon iyileştirmeleri
+---
 
-**Nasıl katkıda bulunulur:**
-1. Repository'yi fork edin
-2. Bir özellik branch'i oluşturun (`git checkout -b feature/muhteşem-özellik`)
-3. Değişikliklerinizi commit edin (`git commit -m 'Muhteşem özellik ekle'`)
-4. Branch'e push yapın (`git push origin feature/muhteşem-özellik`)
-5. Bir Pull Request açın
+## 🤝 Katkı
+
+Katkılar memnuniyetle karşılanır — performans çalışmaları, yeni materyal/FX modelleri, format desteği, hata düzeltmeleri ve dokümantasyon.
+
+1. Repoyu fork'la
+2. Özellik dalı oluştur (`git checkout -b feature/ozelligin`)
+3. Değişikliklerini commit'le
+4. Push'la ve bir Pull Request aç
 
 ---
 
 ## 📝 Lisans
 
-Bu proje MIT Lisansı altında lisanslanmıştır - detaylar için [LICENSE](source/LICENSE) dosyasına bakın.
-
----
+MIT Lisansı — bkz. [LICENSE.txt](LICENSE.txt).
 
 ## 🙏 Teşekkürler
 
-- **Embree** - Intel'in yüksek performanslı ray tracing çekirdekleri
-- **OptiX** - NVIDIA'nın GPU ray tracing motoru
-- **AssImp** - Open Asset Import Library
-- **ImGui** - Dear ImGui kullanıcı arayüzü için
-- **SDL2** - Simple DirectMedia Layer
-- **Intel OIDN** - Open Image Denoise
-- **stb** - Sean Barrett'ın public domain kütüphaneleri (HDR için stb_image)
-- **TinyEXR** - Syoyo Fujita'nın EXR yükleyici kütüphanesi
-
----
+**Embree** (Intel CPU ışın izleme) · **OptiX** (NVIDIA GPU ışın izleme) · **Vulkan** · **Assimp** (asset içe aktarma) · **ImGui** (UI) · **SDL2** · **Intel OIDN** (denoise) · **NanoVDB** (seyrek hacimler) · **Ozz-animation** (iskelet animasyonu) · **stb** · **TinyEXR**
 
 ## 👤 Yazar
 
-**Kemal** - [@maxkemal](https://github.com/maxkemal)
+**Kemal Demirtaş** — [@maxkemal](https://github.com/maxkemal)
 
----
-
-## 📧 İletişim & Destek
-
-- **Sorunlar**: [GitHub Issues](https://github.com/maxkemal/RayTrophi/issues)
-- **Tartışmalar**: [GitHub Discussions](https://github.com/maxkemal/RayTrophi/discussions)
+- **Sorunlar:** [GitHub Issues](https://github.com/maxkemal/RayTrophi/issues)
+- **Tartışmalar:** [GitHub Discussions](https://github.com/maxkemal/RayTrophi/discussions)
 
 ---
 
 <div align="center">
 
-**⭐ Faydalı bulduysanız bu repository'ye yıldız verin!**
+**⭐ RayTrophi Studio işine yarıyorsa repoya yıldız ver.**
 
-❤️ ve bol ☕ ile yapıldı
+❤️ ve bolca ☕ ile yapıldı.
 
 </div>
