@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <utility>
@@ -95,8 +96,8 @@ inline void voxelizeCollidersIntoGrid(
     const std::function<bool(const ParticleColliderDesc&, ParticleColliderOBB&)>& obb_resolver,
     const std::vector<Vec3>* collider_velocities = nullptr) {
     if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0) return;
+    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
 
-    std::fill(grid.solid.begin(), grid.solid.end(), static_cast<uint8_t>(0));
     // Lazily size solid_vel only when a collider is actually moving, so static /
     // no-collider domains never pay the per-cell Vec3 (keeps snapshots lean).
     bool any_moving = false;
@@ -106,11 +107,130 @@ inline void voxelizeCollidersIntoGrid(
         }
     }
     if (any_moving && grid.solid_vel.size() != grid.solid.size()) {
-        grid.solid_vel.resize(grid.solid.size());
+        // Zero-fill new elements so cells outside the incrementally-cleared
+        // footprint are never garbage (solid_vel is read only at solid cells,
+        // but a wholesale GPU upload must still see clean zeros).
+        grid.solid_vel.resize(grid.solid.size(), Vec3(0.0f, 0.0f, 0.0f));
     }
     const bool track_vel = (grid.solid_vel.size() == grid.solid.size());
-    if (track_vel) std::fill(grid.solid_vel.begin(), grid.solid_vel.end(), Vec3(0.0f, 0.0f, 0.0f));
-    if (colliders.empty()) return;
+
+    // ── Static-collider voxelization cache ───────────────────────────────────
+    // Stamping a mesh collider is O(footprint cells × closest-point query) and
+    // runs every step. A wide high-poly ground/beach collider has a footprint
+    // spanning the whole domain in X/Z, so this dominates the frame and starves
+    // a GPU solve. Hash the resolved collider set (transforms + per-collider
+    // velocity + grid identity); if it matches the last real voxelization, skip
+    // the entire clear/stamp — solid[]/solid_vel[] already hold the right mask.
+    // Velocity is in the hash so the frame a moving collider STOPS still restamps
+    // (vel→0) before the cache kicks in.
+    auto hashU = [](uint64_t h, uint64_t v) -> uint64_t {
+        return h ^ (v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+    };
+    auto hashF = [&](uint64_t h, float f) -> uint64_t {
+        uint32_t u = 0; std::memcpy(&u, &f, sizeof(u));
+        return hashU(h, static_cast<uint64_t>(u));
+    };
+    uint64_t sig = 1469598103934665603ULL;
+    sig = hashU(sig, static_cast<uint64_t>(nx));
+    sig = hashU(sig, static_cast<uint64_t>(ny));
+    sig = hashU(sig, static_cast<uint64_t>(nz));
+    sig = hashF(sig, grid.voxel_size);
+    sig = hashF(sig, grid.origin.x); sig = hashF(sig, grid.origin.y); sig = hashF(sig, grid.origin.z);
+    for (std::size_t ci = 0; ci < colliders.size(); ++ci) {
+        const auto& c = colliders[ci];
+        sig = hashU(sig, c.enabled ? 1ull : 0ull);
+        if (!c.enabled) continue;
+        sig = hashU(sig, static_cast<uint64_t>(c.source_mode));
+        sig = hashF(sig, c.thickness);
+        if (collider_velocities && ci < collider_velocities->size()) {
+            const Vec3& v = (*collider_velocities)[ci];
+            sig = hashF(sig, v.x); sig = hashF(sig, v.y); sig = hashF(sig, v.z);
+        }
+        switch (c.source_mode) {
+            case ParticleColliderSourceMode::PlaneY:
+                sig = hashF(sig, c.plane_y);
+                break;
+            case ParticleColliderSourceMode::Sphere:
+                sig = hashF(sig, c.sphere_center.x); sig = hashF(sig, c.sphere_center.y);
+                sig = hashF(sig, c.sphere_center.z); sig = hashF(sig, c.sphere_radius);
+                break;
+            case ParticleColliderSourceMode::Capsule:
+                sig = hashF(sig, c.capsule_start.x); sig = hashF(sig, c.capsule_start.y); sig = hashF(sig, c.capsule_start.z);
+                sig = hashF(sig, c.capsule_end.x);   sig = hashF(sig, c.capsule_end.y);   sig = hashF(sig, c.capsule_end.z);
+                sig = hashF(sig, c.capsule_radius);
+                break;
+            case ParticleColliderSourceMode::ObjectAABB: {
+                Vec3 lo = c.bounds_min, hi = c.bounds_max;
+                if (bounds_resolver && !c.source_name.empty()) {
+                    Vec3 rlo, rhi;
+                    if (bounds_resolver(c, rlo, rhi)) { lo = rlo; hi = rhi; }
+                }
+                sig = hashF(sig, lo.x); sig = hashF(sig, lo.y); sig = hashF(sig, lo.z);
+                sig = hashF(sig, hi.x); sig = hashF(sig, hi.y); sig = hashF(sig, hi.z);
+                break;
+            }
+            default: { // ObjectOBB / MeshSDF / ConvexDecomp / MeshBVH — transform-driven
+                ParticleColliderOBB obb;
+                if (obb_resolver && obb_resolver(c, obb)) {
+                    for (int r = 0; r < 3; ++r)
+                        for (int col = 0; col < 4; ++col)
+                            sig = hashF(sig, obb.local_to_world.m[r][col]);
+                    sig = hashF(sig, obb.local_bounds_min.x); sig = hashF(sig, obb.local_bounds_min.y); sig = hashF(sig, obb.local_bounds_min.z);
+                    sig = hashF(sig, obb.local_bounds_max.x); sig = hashF(sig, obb.local_bounds_max.y); sig = hashF(sig, obb.local_bounds_max.z);
+                } else {
+                    sig = hashU(sig, 0xDEADBEEFull);
+                }
+                sig = hashF(sig, c.sdf_extents.x); sig = hashF(sig, c.sdf_extents.y); sig = hashF(sig, c.sdf_extents.z);
+                break;
+            }
+        }
+    }
+    if (grid.collider_voxel_valid && grid.collider_voxel_sig == sig) {
+        return; // collider set unchanged — keep last step's solid mask, skip restamp
+    }
+    // From here the mask is (re)built to match this signature.
+    grid.collider_voxel_sig = sig;
+    grid.collider_voxel_valid = true;
+
+    // Dirty-region clear: wipe only LAST frame's collider footprint (grid.collider_cur)
+    // instead of the whole grid. Clearing prev then stamping cur is correct —
+    // vacated cells (prev∖cur) get zeroed, re-occupied cells get re-stamped to 1,
+    // and cells outside prev∪cur keep their (already 0) value. A dimension change
+    // or first call forces a full clear so no stale solids survive.
+    const bool dim_changed = grid.collider_track_dim[0] != nx ||
+                             grid.collider_track_dim[1] != ny ||
+                             grid.collider_track_dim[2] != nz;
+    if (dim_changed) {
+        std::fill(grid.solid.begin(), grid.solid.end(), static_cast<uint8_t>(0));
+        if (track_vel) std::fill(grid.solid_vel.begin(), grid.solid_vel.end(), Vec3(0.0f, 0.0f, 0.0f));
+        grid.collider_track_dim[0] = nx; grid.collider_track_dim[1] = ny; grid.collider_track_dim[2] = nz;
+        grid.collider_prev_lo[0] = 0; grid.collider_prev_lo[1] = 0; grid.collider_prev_lo[2] = 0;
+        grid.collider_prev_hi[0] = -1; grid.collider_prev_hi[1] = -1; grid.collider_prev_hi[2] = -1;
+    } else {
+        const int clo0 = std::max(0, grid.collider_cur_lo[0]), chi0 = std::min(nx - 1, grid.collider_cur_hi[0]);
+        const int clo1 = std::max(0, grid.collider_cur_lo[1]), chi1 = std::min(ny - 1, grid.collider_cur_hi[1]);
+        const int clo2 = std::max(0, grid.collider_cur_lo[2]), chi2 = std::min(nz - 1, grid.collider_cur_hi[2]);
+        for (int k = clo2; k <= chi2; ++k)
+        for (int j = clo1; j <= chi1; ++j)
+        for (int i = clo0; i <= chi0; ++i) {
+            const std::size_t ci = grid.cellIndex(i, j, k);
+            grid.solid[ci] = 0u;
+            if (track_vel) grid.solid_vel[ci] = Vec3(0.0f, 0.0f, 0.0f);
+        }
+        // Last frame's footprint becomes prev (consumed by computeSolidFaceWeights
+        // to reset face weights over the same region).
+        grid.collider_prev_lo[0] = grid.collider_cur_lo[0]; grid.collider_prev_lo[1] = grid.collider_cur_lo[1]; grid.collider_prev_lo[2] = grid.collider_cur_lo[2];
+        grid.collider_prev_hi[0] = grid.collider_cur_hi[0]; grid.collider_prev_hi[1] = grid.collider_cur_hi[1]; grid.collider_prev_hi[2] = grid.collider_cur_hi[2];
+    }
+
+    // This frame's footprint, accumulated by markCell during stamping.
+    int cur_lo[3] = { nx, ny, nz };
+    int cur_hi[3] = { -1, -1, -1 };
+    auto storeCurFootprint = [&]() {
+        grid.collider_cur_lo[0] = cur_lo[0]; grid.collider_cur_lo[1] = cur_lo[1]; grid.collider_cur_lo[2] = cur_lo[2];
+        grid.collider_cur_hi[0] = cur_hi[0]; grid.collider_cur_hi[1] = cur_hi[1]; grid.collider_cur_hi[2] = cur_hi[2];
+    };
+    if (colliders.empty()) { storeCurFootprint(); return; }
 
     const float h = grid.voxel_size;
     const float invH = (h > 0.0f) ? 1.0f / h : 0.0f;
@@ -123,11 +243,23 @@ inline void voxelizeCollidersIntoGrid(
     auto cellCenter = [&](int i, int j, int k) {
         return grid.origin + Vec3((i + 0.5f) * h, (j + 0.5f) * h, (k + 0.5f) * h);
     };
+    // markCell only WRITES the solid mask — no shared footprint bookkeeping — so
+    // the per-cell stamp loops below can run in parallel (each cell is visited
+    // once per collider → distinct indices → no race). The dirty-region footprint
+    // is grown per-collider from its cell range via expandFootprint (a superset of
+    // the actually-marked cells; clearing a few extra zero cells next frame is
+    // harmless).
     auto markCell = [&](int i, int j, int k) {
         if (i < 0 || i >= grid.nx || j < 0 || j >= grid.ny || k < 0 || k >= grid.nz) return;
         const std::size_t ci = grid.cellIndex(i, j, k);
         grid.solid[ci] = 1u;
         if (track_vel) grid.solid_vel[ci] = active_collider_vel;
+    };
+    auto expandFootprint = [&](int i0, int j0, int k0, int i1, int j1, int k1) {
+        if (i1 < i0 || j1 < j0 || k1 < k0) return;
+        if (i0 < cur_lo[0]) cur_lo[0] = i0; if (i1 > cur_hi[0]) cur_hi[0] = i1;
+        if (j0 < cur_lo[1]) cur_lo[1] = j0; if (j1 > cur_hi[1]) cur_hi[1] = j1;
+        if (k0 < cur_lo[2]) cur_lo[2] = k0; if (k1 > cur_hi[2]) cur_hi[2] = k1;
     };
     auto cellRange = [&](const Vec3& mn, const Vec3& mx,
                           int& i0, int& j0, int& k0,
@@ -161,6 +293,10 @@ inline void voxelizeCollidersIntoGrid(
                 const int j_max_raw = static_cast<int>(std::floor((top - grid_min.y) * invH));
                 const int j1 = std::clamp(j_max_raw, 0, grid.ny - 1);
                 (void)grid_top;
+                expandFootprint(0, 0, k0, grid.nx - 1, j1, k1);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
                 for (int k = k0; k <= k1; ++k)
                 for (int j = 0;  j <= j1; ++j)
                 for (int i = 0;  i <  grid.nx; ++i) {
@@ -173,7 +309,11 @@ inline void voxelizeCollidersIntoGrid(
                 const Vec3 sc = c.sphere_center;
                 int i0, j0, k0, i1, j1, k1;
                 cellRange(sc - Vec3(r, r, r), sc + Vec3(r, r, r), i0, j0, k0, i1, j1, k1);
+                expandFootprint(i0, j0, k0, i1, j1, k1);
                 const float r2 = r * r;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
                 for (int k = k0; k <= k1; ++k)
                 for (int j = j0; j <= j1; ++j)
                 for (int i = i0; i <= i1; ++i) {
@@ -192,7 +332,11 @@ inline void voxelizeCollidersIntoGrid(
                 cellRange(Vec3::min(a, b) - Vec3(r, r, r),
                           Vec3::max(a, b) + Vec3(r, r, r),
                           i0, j0, k0, i1, j1, k1);
+                expandFootprint(i0, j0, k0, i1, j1, k1);
                 const float r2 = r * r;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
                 for (int k = k0; k <= k1; ++k)
                 for (int j = j0; j <= j1; ++j)
                 for (int i = i0; i <= i1; ++i) {
@@ -222,6 +366,10 @@ inline void voxelizeCollidersIntoGrid(
                 hi = hi + Vec3(thick, thick, thick);
                 int i0, j0, k0, i1, j1, k1;
                 cellRange(lo, hi, i0, j0, k0, i1, j1, k1);
+                expandFootprint(i0, j0, k0, i1, j1, k1);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
                 for (int k = k0; k <= k1; ++k)
                 for (int j = j0; j <= j1; ++j)
                 for (int i = i0; i <= i1; ++i) {
@@ -250,7 +398,11 @@ inline void voxelizeCollidersIntoGrid(
                 }
                 int i0, j0, k0, i1, j1, k1;
                 cellRange(world_mn, world_mx, i0, j0, k0, i1, j1, k1);
+                expandFootprint(i0, j0, k0, i1, j1, k1);
                 const Matrix4x4 inv_xform = obb.local_to_world.inverse();
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
                 for (int k = k0; k <= k1; ++k)
                 for (int j = j0; j <= j1; ++j)
                 for (int i = i0; i <= i1; ++i) {
@@ -304,10 +456,14 @@ inline void voxelizeCollidersIntoGrid(
 
                 int i0, j0, k0, i1, j1, k1;
                 cellRange(world_mn, world_mx, i0, j0, k0, i1, j1, k1);
+                expandFootprint(i0, j0, k0, i1, j1, k1);
 
                 const Vec3 sdf_origin_scaled = c.sdf_origin * scale;
                 const Vec3 sdf_extents_scaled = c.sdf_extents * scale;
 
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
                 for (int k = k0; k <= k1; ++k)
                 for (int j = j0; j <= j1; ++j)
                 for (int i = i0; i <= i1; ++i) {
@@ -389,7 +545,11 @@ inline void voxelizeCollidersIntoGrid(
 
                     int i0, j0, k0, i1, j1, k1;
                     cellRange(world_mn, world_mx, i0, j0, k0, i1, j1, k1);
+                    expandFootprint(i0, j0, k0, i1, j1, k1);
 
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
                     for (int k = k0; k <= k1; ++k)
                     for (int j = j0; j <= j1; ++j)
                     for (int i = i0; i <= i1; ++i) {
@@ -407,8 +567,8 @@ inline void voxelizeCollidersIntoGrid(
             case ParticleColliderSourceMode::ObjectMeshBVH: {
                 ParticleColliderOBB obb;
                 if (!obb_resolver || !obb_resolver(c, obb)) break;
-                if (!c.local_triangles_cache || c.local_triangles_cache->empty()) break;
-                const auto& triangles = *c.local_triangles_cache;
+                const ColliderMeshBVH* bvh = c.mesh_bvh_cache.get();
+                if (!bvh || bvh->empty()) break;
 
                 const float thick = std::max(0.0f, c.thickness);
                 const Matrix4x4 inv_xform = obb.local_to_world.inverse();
@@ -420,6 +580,9 @@ inline void voxelizeCollidersIntoGrid(
                 if (avg_scale <= 1e-6f) avg_scale = 1.0f;
                 const float local_thick = thick / avg_scale;
 
+                // Size-ratio scale (current object size vs the size the BVH
+                // triangles were cached at). For BVH colliders sdf_extents is 0,
+                // so this is ~1 — the query then runs in raw cached-local space.
                 Vec3 cooked_size = c.sdf_extents / 1.3f;
                 if (cooked_size.length_squared() < 1e-6f) {
                     cooked_size = obb.local_bounds_max - obb.local_bounds_min;
@@ -434,61 +597,65 @@ inline void voxelizeCollidersIntoGrid(
                 scale.y = std::max(1e-4f, scale.y);
                 scale.z = std::max(1e-4f, scale.z);
 
-                for (const auto& tri : triangles) {
-                    Vec3 lp0 = tri.p0 * scale;
-                    Vec3 lp1 = tri.p1 * scale;
-                    Vec3 lp2 = tri.p2 * scale;
+                // The BVH stores raw cached-local triangles, so query a cell at
+                // lc/scale and compare against the threshold mapped into that same
+                // space (local_thick / mean_scale). Exact when scale==1 (the BVH
+                // collider norm), a mild approximation under non-uniform scale —
+                // the same class the triangle-scaling path used before.
+                const float mean_scale = std::max(1e-6f, (scale.x + scale.y + scale.z) / 3.0f);
+                const float thr = local_thick / mean_scale;
+                const float thr2 = thr * thr;
 
-                    float tri_min_x = std::min({lp0.x, lp1.x, lp2.x}) - local_thick;
-                    float tri_max_x = std::max({lp0.x, lp1.x, lp2.x}) + local_thick;
-                    float tri_min_y = std::min({lp0.y, lp1.y, lp2.y}) - local_thick;
-                    float tri_max_y = std::max({lp0.y, lp1.y, lp2.y}) + local_thick;
-                    float tri_min_z = std::min({lp0.z, lp1.z, lp2.z}) - local_thick;
-                    float tri_max_z = std::max({lp0.z, lp1.z, lp2.z}) + local_thick;
+                // Whole-mesh cell range from the scaled local bounds (+ thickness).
+                const Vec3 local_mn = obb.local_bounds_min * scale - Vec3(local_thick);
+                const Vec3 local_mx = obb.local_bounds_max * scale + Vec3(local_thick);
+                Vec3 world_mn(1e30f, 1e30f, 1e30f), world_mx(-1e30f, -1e30f, -1e30f);
+                for (int n = 0; n < 8; ++n) {
+                    const Vec3 corner((n & 1) ? local_mx.x : local_mn.x,
+                                      (n & 2) ? local_mx.y : local_mn.y,
+                                      (n & 4) ? local_mx.z : local_mn.z);
+                    const Vec3 w = obb.local_to_world * corner;
+                    world_mn = Vec3::min(world_mn, w);
+                    world_mx = Vec3::max(world_mx, w);
+                }
+                int i0, j0, k0, i1, j1, k1;
+                cellRange(world_mn, world_mx, i0, j0, k0, i1, j1, k1);
+                expandFootprint(i0, j0, k0, i1, j1, k1);
 
-                    Vec3 local_mn(tri_min_x, tri_min_y, tri_min_z);
-                    Vec3 local_mx(tri_max_x, tri_max_y, tri_max_z);
-
-                    Vec3 world_mn(1e30f, 1e30f, 1e30f), world_mx(-1e30f, -1e30f, -1e30f);
-                    for (int n = 0; n < 8; ++n) {
-                        const Vec3 corner(
-                            (n & 1) ? local_mx.x : local_mn.x,
-                            (n & 2) ? local_mx.y : local_mn.y,
-                            (n & 4) ? local_mx.z : local_mn.z);
-                        const Vec3 w = obb.local_to_world * corner;
-                        world_mn = Vec3::min(world_mn, w);
-                        world_mx = Vec3::max(world_mx, w);
-                    }
-
-                    int i0, j0, k0, i1, j1, k1;
-                    cellRange(world_mn, world_mx, i0, j0, k0, i1, j1, k1);
-
-                    for (int k = k0; k <= k1; ++k)
-                    for (int j = j0; j <= j1; ++j)
-                    for (int i = i0; i <= i1; ++i) {
-                        const Vec3 cc = cellCenter(i, j, k);
-                        const Vec3 lc = inv_xform * cc;
-                        Vec3 closest = closestPointOnTriangle(lc, lp0, lp1, lp2);
-                        if ((lc - closest).length_squared() <= local_thick * local_thick) {
-                            markCell(i, j, k);
-                        }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic)
+#endif
+                for (int k = k0; k <= k1; ++k)
+                for (int j = j0; j <= j1; ++j)
+                for (int i = i0; i <= i1; ++i) {
+                    const Vec3 cc = cellCenter(i, j, k);
+                    const Vec3 lc = inv_xform * cc;
+                    const Vec3 q(lc.x / scale.x, lc.y / scale.y, lc.z / scale.z);
+                    Vec3 closest;
+                    if (bvh->closestDistanceSquared(q, closest) <= thr2) {
+                        markCell(i, j, k);
                     }
                 }
                 break;
             }
         }
     }
+
+    storeCurFootprint();
 }
 
 // Fill the MAC-face fractional open-weights (FluidGrid::u/v/w_weight) used by the
 // variational pressure projection. Two passes:
 //   1. Binary: every face bordering a solid cell → fully blocked (0). Covers ALL
 //      collider types (incl. mesh/SDF) at cell accuracy, matching the solid mask.
-//   2. Analytic refine: for the closed-form primitives (sphere/capsule/AABB/OBB)
-//      super-sample each face inside the collider's bbox and write the true open
-//      fraction (min with the binary result so overlapping mesh solids still win).
-//      → sub-grid-accurate boundaries (no blocky leaking). PlaneY is axis-aligned
-//      so the binary pass already places it exactly; it is skipped here.
+//   2. Analytic refine: for every collider with a sub-grid inside test —
+//      sphere/capsule/AABB/OBB (closed form), ObjectMeshSDF (trilinear cooked
+//      distance), and ObjectConvexDecomp (per-octant boxes) — super-sample each
+//      face inside the collider's bbox and write the true open fraction (min with
+//      the binary result so overlapping solids still win). → sub-grid-accurate
+//      boundaries (no blocky leaking) for mesh colliders too. PlaneY (axis-aligned,
+//      placed exactly by the binary pass) and ObjectMeshBVH (no acceleration
+//      structure → too costly to super-sample) fall back to the binary pass.
 inline void computeSolidFaceWeights(
     FluidSim::FluidGrid& grid,
     const std::vector<ParticleColliderDesc>& colliders,
@@ -496,29 +663,112 @@ inline void computeSolidFaceWeights(
     const std::function<bool(const ParticleColliderDesc&, ParticleColliderOBB&)>& obb_resolver) {
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
     if (nx <= 0 || ny <= 0 || nz <= 0) return;
-    if (colliders.empty()) return;
 
-    // Lazily size the face-weight arrays (sub-grid solid boundary). Only reached
-    // when variational solids is on AND colliders exist, so collider-free / gas
-    // domains never allocate them.
     const std::size_t exp_u = static_cast<std::size_t>(nx + 1) * ny * nz;
     const std::size_t exp_v = static_cast<std::size_t>(nx) * (ny + 1) * nz;
     const std::size_t exp_w = static_cast<std::size_t>(nx) * ny * (nz + 1);
+    const bool sized = grid.u_weight.size() == exp_u &&
+                       grid.v_weight.size() == exp_v &&
+                       grid.w_weight.size() == exp_w;
+
+    // Reset the MAC-face weights back to fully-open (255) over a cell-AABB's
+    // faces only. Faces a collider vacated (in prev) and faces outside the
+    // refine footprint that stay open (min with 255 is a no-op) are handled by
+    // resetting prev∪cur — everything else keeps last frame's value.
+    auto resetWeightFaces = [&](const int* lo, const int* hi) {
+        if (hi[0] < lo[0] || hi[1] < lo[1] || hi[2] < lo[2]) return;
+        const int ci0 = std::max(0, lo[0]), ci1 = std::min(nx - 1, hi[0]); // cell range
+        const int cj0 = std::max(0, lo[1]), cj1 = std::min(ny - 1, hi[1]);
+        const int ck0 = std::max(0, lo[2]), ck1 = std::min(nz - 1, hi[2]);
+        if (ci1 < ci0 || cj1 < cj0 || ck1 < ck0) return;
+        for (int k = ck0; k <= ck1; ++k)
+            for (int j = cj0; j <= cj1; ++j)
+                for (int i = ci0; i <= ci1 + 1; ++i) // X-faces span [ci0, ci1+1]
+                    grid.u_weight[grid.velXIndex(i, j, k)] = 255u;
+        for (int k = ck0; k <= ck1; ++k)
+            for (int j = cj0; j <= cj1 + 1; ++j)       // Y-faces span [cj0, cj1+1]
+                for (int i = ci0; i <= ci1; ++i)
+                    grid.v_weight[grid.velYIndex(i, j, k)] = 255u;
+        for (int k = ck0; k <= ck1 + 1; ++k)           // Z-faces span [ck0, ck1+1]
+            for (int j = cj0; j <= cj1; ++j)
+                for (int i = ci0; i <= ci1; ++i)
+                    grid.w_weight[grid.velZIndex(i, j, k)] = 255u;
+    };
+    // prev ∪ cur collider footprint (cell AABB), the region to restore to open.
+    // Expanded by a small margin: the analytic refine can set a boundary face
+    // (whose cell centre is just outside the stamped solid) to <255 up to ~1 cell
+    // beyond the footprint, so the reset must cover it. Over-resetting is harmless
+    // (those faces are re-written below); under-resetting would leave stale values.
+    auto footprintUnion = [&](int* outlo, int* outhi) -> bool {
+        bool have = false;
+        auto add = [&](const int* lo, const int* hi) {
+            if (hi[0] < lo[0] || hi[1] < lo[1] || hi[2] < lo[2]) return;
+            if (!have) { for (int a = 0; a < 3; ++a) { outlo[a] = lo[a]; outhi[a] = hi[a]; } have = true; }
+            else { for (int a = 0; a < 3; ++a) { outlo[a] = std::min(outlo[a], lo[a]); outhi[a] = std::max(outhi[a], hi[a]); } }
+        };
+        add(grid.collider_prev_lo, grid.collider_prev_hi);
+        add(grid.collider_cur_lo, grid.collider_cur_hi);
+        if (have) { for (int a = 0; a < 3; ++a) { outlo[a] -= 2; outhi[a] += 2; } }
+        return have;
+    };
+
+    auto fullOpenInit = [&]() {
+        std::fill(grid.u_weight.begin(), grid.u_weight.end(), static_cast<uint8_t>(255));
+        std::fill(grid.v_weight.begin(), grid.v_weight.end(), static_cast<uint8_t>(255));
+        std::fill(grid.w_weight.begin(), grid.w_weight.end(), static_cast<uint8_t>(255));
+    };
+
+    // A full open-init is required when the arrays were just (re)allocated OR the
+    // weights aren't known globally-valid (first variational frame / toggled off
+    // mid-sim); otherwise the cheap incremental footprint reset suffices.
+    const bool need_full = !sized || !grid.collider_weights_init;
+
+    // Static-collider weight cache: when the collider set is unchanged since the
+    // weights were last built (same voxelize signature) AND they are still valid,
+    // the fractional face weights are identical — skip the whole reset + binary +
+    // super-sample pass. This is the variational analogue of the solid-mask voxelize
+    // cache, so a wide static collider (beach) pays the weight pass once, not every
+    // step. (voxelizeCollidersIntoGrid ran just before and refreshed collider_voxel_sig.)
+    if (!need_full && grid.collider_weights_sig == grid.collider_voxel_sig) {
+        return;
+    }
+
+    // Colliders removed this frame: just leave everything open.
+    if (colliders.empty()) {
+        if (sized) {
+            if (need_full) fullOpenInit();
+            else { int rlo[3], rhi[3]; if (footprintUnion(rlo, rhi)) resetWeightFaces(rlo, rhi); }
+            grid.collider_weights_init = true;
+            grid.collider_weights_sig = grid.collider_voxel_sig;
+        }
+        return;
+    }
+
     if (grid.u_weight.size() != exp_u) grid.u_weight.resize(exp_u);
     if (grid.v_weight.size() != exp_v) grid.v_weight.resize(exp_v);
     if (grid.w_weight.size() != exp_w) grid.w_weight.resize(exp_w);
 
-    std::fill(grid.u_weight.begin(), grid.u_weight.end(), static_cast<uint8_t>(255));
-    std::fill(grid.v_weight.begin(), grid.v_weight.end(), static_cast<uint8_t>(255));
-    std::fill(grid.w_weight.begin(), grid.w_weight.end(), static_cast<uint8_t>(255));
+    if (need_full) {
+        fullOpenInit();
+    } else {
+        int rlo[3], rhi[3];
+        if (footprintUnion(rlo, rhi)) resetWeightFaces(rlo, rhi);
+    }
+    grid.collider_weights_init = true;
+    grid.collider_weights_sig = grid.collider_voxel_sig; // weights now match this collider set
 
     const float h = grid.voxel_size;
     const float invH = (h > 0.0f) ? 1.0f / h : 0.0f;
 
-    // 1. Binary pass — faces of every solid cell are fully blocked.
-    for (int k = 0; k < nz; ++k)
-    for (int j = 0; j < ny; ++j)
-    for (int i = 0; i < nx; ++i) {
+    // 1. Binary pass — faces of every solid cell are fully blocked. Only the
+    //    current collider footprint can contain solids, so iterate that bbox
+    //    instead of the whole grid.
+    const int blo0 = std::max(0, grid.collider_cur_lo[0]), bhi0 = std::min(nx - 1, grid.collider_cur_hi[0]);
+    const int blo1 = std::max(0, grid.collider_cur_lo[1]), bhi1 = std::min(ny - 1, grid.collider_cur_hi[1]);
+    const int blo2 = std::max(0, grid.collider_cur_lo[2]), bhi2 = std::min(nz - 1, grid.collider_cur_hi[2]);
+    for (int k = blo2; k <= bhi2; ++k)
+    for (int j = blo1; j <= bhi1; ++j)
+    for (int i = blo0; i <= bhi0; ++i) {
         if (!grid.solid[grid.cellIndex(i, j, k)]) continue;
         grid.u_weight[grid.velXIndex(i,     j, k)] = 0u;
         grid.u_weight[grid.velXIndex(i + 1, j, k)] = 0u;
@@ -532,12 +782,20 @@ inline void computeSolidFaceWeights(
     //    point-inside test + world AABB (mirrors voxelizeCollidersIntoGrid so the
     //    weights agree with the solid mask).
     struct AnalyticSolid {
-        enum Type { Sphere, Capsule, AABB, OBB } type;
+        enum Type { Sphere, Capsule, AABB, OBB, SDF } type;
         Vec3 sc; float sr = 0.0f;                 // sphere
         Vec3 ca, cb; float cr = 0.0f; float cab2 = 0.0f; // capsule
         Vec3 lo, hi;                              // aabb (also OBB local bounds)
-        Matrix4x4 inv_xform;                      // OBB world->local
+        Matrix4x4 inv_xform;                      // OBB/SDF world->local
         Vec3 wmin, wmax;                          // world AABB
+        // SDF (ObjectMeshSDF): trilinear cooked-distance test. Mirrors the
+        // voxelizer + resolveSDFCollision criterion (dist_cooked*mean_scale <=
+        // local_thick) so the fractional face weights agree with the solid mask.
+        const std::vector<float>* sdf = nullptr;
+        int snx = 0, sny = 0, snz = 0;
+        Vec3 sdf_origin_scaled, sdf_extents_scaled;
+        float sdf_dist_scale = 1.0f;              // cooked distance -> local space
+        float sdf_thick = 0.0f;                   // local_thick threshold
 
         bool inside(const Vec3& p) const {
             switch (type) {
@@ -553,6 +811,35 @@ inline void computeSolidFaceWeights(
                 }
                 case AABB: return p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y && p.z >= lo.z && p.z <= hi.z;
                 case OBB: { const Vec3 l = inv_xform * p; return l.x >= lo.x && l.x <= hi.x && l.y >= lo.y && l.y <= hi.y && l.z >= lo.z && l.z <= hi.z; }
+                case SDF: {
+                    if (!sdf || sdf->empty()) return false;
+                    const Vec3 lp = (inv_xform * p) - sdf_origin_scaled;
+                    const float tx = sdf_extents_scaled.x > 1e-6f ? lp.x / sdf_extents_scaled.x : 0.0f;
+                    const float ty = sdf_extents_scaled.y > 1e-6f ? lp.y / sdf_extents_scaled.y : 0.0f;
+                    const float tz = sdf_extents_scaled.z > 1e-6f ? lp.z / sdf_extents_scaled.z : 0.0f;
+                    if (tx < 0.0f || tx > 1.0f || ty < 0.0f || ty > 1.0f || tz < 0.0f || tz > 1.0f) return false;
+                    auto smp = [&](int x, int y, int z) -> float {
+                        x = std::clamp(x, 0, snx - 1); y = std::clamp(y, 0, sny - 1); z = std::clamp(z, 0, snz - 1);
+                        const std::size_t idx = static_cast<std::size_t>(z * (snx * sny) + y * snx + x);
+                        return idx < sdf->size() ? (*sdf)[idx] : 0.0f;
+                    };
+                    const float fx = tx * (snx - 1), fy = ty * (sny - 1), fz = tz * (snz - 1);
+                    const int ix = std::clamp(static_cast<int>(std::floor(fx)), 0, snx - 1);
+                    const int iy = std::clamp(static_cast<int>(std::floor(fy)), 0, sny - 1);
+                    const int iz = std::clamp(static_cast<int>(std::floor(fz)), 0, snz - 1);
+                    const int ix1 = std::clamp(ix + 1, 0, snx - 1);
+                    const int iy1 = std::clamp(iy + 1, 0, sny - 1);
+                    const int iz1 = std::clamp(iz + 1, 0, snz - 1);
+                    const float dx = fx - ix, dy = fy - iy, dz = fz - iz;
+                    const float v00 = smp(ix, iy, iz)  * (1.0f - dx) + smp(ix1, iy, iz)  * dx;
+                    const float v10 = smp(ix, iy1, iz) * (1.0f - dx) + smp(ix1, iy1, iz) * dx;
+                    const float v01 = smp(ix, iy, iz1) * (1.0f - dx) + smp(ix1, iy, iz1) * dx;
+                    const float v11 = smp(ix, iy1, iz1)* (1.0f - dx) + smp(ix1, iy1, iz1)* dx;
+                    const float v0 = v00 * (1.0f - dy) + v10 * dy;
+                    const float v1 = v01 * (1.0f - dy) + v11 * dy;
+                    const float dist_cooked = v0 * (1.0f - dz) + v1 * dz;
+                    return dist_cooked * sdf_dist_scale <= sdf_thick;
+                }
             }
             return false;
         }
@@ -609,7 +896,92 @@ inline void computeSolidFaceWeights(
                 ok = true;
                 break;
             }
-            default: break; // PlaneY + mesh/SDF/convex/BVH → binary pass only
+            case ParticleColliderSourceMode::ObjectMeshSDF: {
+                if (!c.sdf_grid_data || c.sdf_grid_data->empty()) break;
+                ParticleColliderOBB obb;
+                if (!obb_resolver || !obb_resolver(c, obb)) break;
+                s.type = AnalyticSolid::SDF;
+                s.inv_xform = obb.local_to_world.inverse();
+                const float sx = Vec3(obb.local_to_world.m[0][0], obb.local_to_world.m[1][0], obb.local_to_world.m[2][0]).length();
+                const float sy = Vec3(obb.local_to_world.m[0][1], obb.local_to_world.m[1][1], obb.local_to_world.m[2][1]).length();
+                const float sz = Vec3(obb.local_to_world.m[0][2], obb.local_to_world.m[1][2], obb.local_to_world.m[2][2]).length();
+                float avg_scale = (sx + sy + sz) / 3.0f; if (avg_scale <= 1e-6f) avg_scale = 1.0f;
+                // cooked_size = sdf_extents / 1.3 (the 0.15 pad per side baked at cook
+                // time in rebuildSDFColliderAsync); keep in sync if that pad changes.
+                const Vec3 cooked_size = c.sdf_extents / 1.3f;
+                const Vec3 current_size = obb.local_bounds_max - obb.local_bounds_min;
+                Vec3 scl(cooked_size.x > 1e-6f ? current_size.x / cooked_size.x : 1.0f,
+                         cooked_size.y > 1e-6f ? current_size.y / cooked_size.y : 1.0f,
+                         cooked_size.z > 1e-6f ? current_size.z / cooked_size.z : 1.0f);
+                scl.x = std::max(1e-4f, scl.x); scl.y = std::max(1e-4f, scl.y); scl.z = std::max(1e-4f, scl.z);
+                s.sdf = c.sdf_grid_data.get();
+                s.snx = c.sdf_nx; s.sny = c.sdf_ny; s.snz = c.sdf_nz;
+                s.sdf_origin_scaled = c.sdf_origin * scl;
+                s.sdf_extents_scaled = c.sdf_extents * scl;
+                s.sdf_dist_scale = (scl.x + scl.y + scl.z) / 3.0f;
+                s.sdf_thick = thick / avg_scale;
+                const Vec3 local_mn = s.sdf_origin_scaled - Vec3(thick);
+                const Vec3 local_mx = (c.sdf_origin + c.sdf_extents) * scl + Vec3(thick);
+                for (int n = 0; n < 8; ++n) {
+                    const Vec3 corner((n & 1) ? local_mx.x : local_mn.x,
+                                      (n & 2) ? local_mx.y : local_mn.y,
+                                      (n & 4) ? local_mx.z : local_mn.z);
+                    const Vec3 wpt = obb.local_to_world * corner;
+                    if (n == 0) { s.wmin = wpt; s.wmax = wpt; }
+                    else { s.wmin = Vec3::min(s.wmin, wpt); s.wmax = Vec3::max(s.wmax, wpt); }
+                }
+                ok = true;
+                break;
+            }
+            case ParticleColliderSourceMode::ObjectConvexDecomp: {
+                // Each active octant is an axis-aligned box in object-local space →
+                // reuse the OBB inside test (local bounds + world->local transform).
+                // Pushes multiple solids, so it updates the union inline and skips
+                // the single post-switch push.
+                ParticleColliderOBB obb;
+                if (!obb_resolver || !obb_resolver(c, obb)) break;
+                if (!c.octant_min_cache || c.octant_min_cache->empty() ||
+                    !c.octant_max_cache || !c.octant_active_cache) break;
+                const auto& omin = *c.octant_min_cache;
+                const auto& omax = *c.octant_max_cache;
+                const auto& oact = *c.octant_active_cache;
+                const Matrix4x4 invx = obb.local_to_world.inverse();
+                const float sx = Vec3(obb.local_to_world.m[0][0], obb.local_to_world.m[1][0], obb.local_to_world.m[2][0]).length();
+                const float sy = Vec3(obb.local_to_world.m[0][1], obb.local_to_world.m[1][1], obb.local_to_world.m[2][1]).length();
+                const float sz = Vec3(obb.local_to_world.m[0][2], obb.local_to_world.m[1][2], obb.local_to_world.m[2][2]).length();
+                float avg_scale = (sx + sy + sz) / 3.0f; if (avg_scale <= 1e-6f) avg_scale = 1.0f;
+                const float local_thick = thick / avg_scale;
+                Vec3 cooked_size = c.sdf_extents / 1.3f;
+                if (cooked_size.length_squared() < 1e-6f) cooked_size = obb.local_bounds_max - obb.local_bounds_min;
+                const Vec3 current_size = obb.local_bounds_max - obb.local_bounds_min;
+                Vec3 scl(cooked_size.x > 1e-6f ? current_size.x / cooked_size.x : 1.0f,
+                         cooked_size.y > 1e-6f ? current_size.y / cooked_size.y : 1.0f,
+                         cooked_size.z > 1e-6f ? current_size.z / cooked_size.z : 1.0f);
+                scl.x = std::max(1e-4f, scl.x); scl.y = std::max(1e-4f, scl.y); scl.z = std::max(1e-4f, scl.z);
+                const int oct_n = std::min<int>(8, static_cast<int>(omin.size()));
+                for (int o = 0; o < oct_n; ++o) {
+                    if (o >= static_cast<int>(oact.size()) || !oact[o]) continue;
+                    if (o >= static_cast<int>(omax.size())) continue;
+                    AnalyticSolid os;
+                    os.type = AnalyticSolid::OBB;
+                    os.lo = omin[o] * scl - Vec3(local_thick);
+                    os.hi = omax[o] * scl + Vec3(local_thick);
+                    os.inv_xform = invx;
+                    for (int n = 0; n < 8; ++n) {
+                        const Vec3 corner((n & 1) ? os.hi.x : os.lo.x,
+                                          (n & 2) ? os.hi.y : os.lo.y,
+                                          (n & 4) ? os.hi.z : os.lo.z);
+                        const Vec3 wpt = obb.local_to_world * corner;
+                        if (n == 0) { os.wmin = wpt; os.wmax = wpt; }
+                        else { os.wmin = Vec3::min(os.wmin, wpt); os.wmax = Vec3::max(os.wmax, wpt); }
+                    }
+                    solids.push_back(os);
+                    union_min = Vec3::min(union_min, os.wmin);
+                    union_max = Vec3::max(union_max, os.wmax);
+                }
+                continue; // multi-push handled inline
+            }
+            default: break; // PlaneY + mesh BVH → binary pass only
         }
         if (!ok) continue;
         solids.push_back(s);
@@ -4481,6 +4853,11 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                         colliders_,
                                         collider_bounds_resolver_,
                                         collider_obb_resolver_);
+            } else {
+                // Weights aren't maintained while variational is off; mark them
+                // stale so the next on-frame does a full open-init (the colliders
+                // may have moved far during the gap, beyond the incremental reset).
+                state.grid.collider_weights_init = false;
             }
             auto step_params = fluid_params;
             step_params.max_particles = (i < grid_domains_.size()) ? grid_domains_[i].fluid_max_particles : 100000;
@@ -4539,6 +4916,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
 
             const bool try_gpu_g2p =
                 fluid_params.free_surface &&
+                // Periodic boundaries need the wrap-coupled CPU PCG (the GPU MGPCG
+                // still treats out-of-grid as solid, i.e. behaves as Closed); fall
+                // back to CPU so Periodic is correct on every device.
+                fluid_params.boundary != Fluid::APICSolverParams::BoundaryMode::Periodic &&
                 context.compute &&
                 context.compute->supportsDispatch() &&
                 i < grid_domain_compute_buffers_.size();
@@ -4731,6 +5112,21 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             continue;
         }
 
+        // Stamp the active collider set into grid.solid[] before the gas solver
+        // runs, exactly like the Fluid path above, so GridFluid::step's solid
+        // boundary enforcement + pressure projection treat colliders as walls
+        // (moving colliders carry momentum via grid.solid_vel). voxelize is a
+        // no-op-cheap dirty-region update when nothing moved / no colliders.
+        voxelizeCollidersIntoGrid(state.grid,
+                                  colliders_,
+                                  collider_bounds_resolver_,
+                                  collider_obb_resolver_,
+                                  &collider_velocities_);
+        const bool domain_has_solid =
+            state.grid.solid.size() == static_cast<std::size_t>(state.grid.getCellCount()) &&
+            std::any_of(state.grid.solid.begin(), state.grid.solid.end(),
+                        [](uint8_t s) { return s != 0u; });
+
         GridFluid::SolverParams params = base_params;
         if (i < grid_domains_.size()) {
             const auto& domain = grid_domains_[i];
@@ -4754,6 +5150,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             params.smoke_generation = domain.smoke_generation;
             params.flame_dissipation = domain.flame_dissipation;
             params.max_temperature = domain.fire_max_temperature;
+            params.expansion = domain.fire_expansion;
             // Per-domain procedural turbulence.
             params.turbulence_strength = domain.turbulence_strength;
             params.turbulence_scale = domain.turbulence_scale;
@@ -4772,9 +5169,15 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                grid_domains_[i].backend == SimulationDomainBackend::GPU_Vulkan)
             : g_sim_use_gpu_solver;
 
+        // The GPU grid pressure/advection kernels don't yet read grid.solid or
+        // the thermal-expansion divergence target, so a gas domain that contains
+        // a collider OR uses fire expansion falls back to the CPU solver (which
+        // honours both). Plain solid-free incompressible GPU gas is unaffected.
         const bool use_gpu_grid_solver =
             is_gpu_backend &&
             params.channel_velocity &&
+            !domain_has_solid &&
+            !(params.expansion > 0.0f) &&
             context.compute &&
             context.compute->supportsDispatch();
         SimulationGridDomainComputeBuffers* gpu_buffers = nullptr;
@@ -4817,7 +5220,11 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         params.skip_velocity_dissipation_clamp = gpu_grid_ready;
         params.skip_pressure_projection = gpu_grid_ready;
 
-        const bool is_sparse_vdb = (i < grid_domains_.size()) && (grid_domains_[i].backend == SimulationDomainBackend::CPU_SparseVDB);
+        // stepSparseVDB doesn't honour grid.solid yet, so a sparse-backend domain
+        // that contains a collider runs on the dense (solid-aware) step instead.
+        const bool is_sparse_vdb = (i < grid_domains_.size()) &&
+                                   (grid_domains_[i].backend == SimulationDomainBackend::CPU_SparseVDB) &&
+                                   !domain_has_solid;
         if (is_sparse_vdb) {
             GridFluid::stepSparseVDB(state.grid, params, dt, context.force_snapshot, context.time_seconds);
         } else {
@@ -4884,6 +5291,11 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
     stats_.emit_ms = elapsedMilliseconds(emit_start, emit_end);
 
     if (alive_count_ == 0) {
+        // Pure grid/fluid sims (no global particles) still need the mesh-collider
+        // caches (triangles / convex octants / BVH) refreshed before voxelization —
+        // the integrate path below builds them, but this early-out skips it. The
+        // call is version-gated, so it's a no-op once the caches are warm.
+        refreshResolvedColliders(std::max(0.0f, physics_settings_.particle_radius));
         const auto grid_start = SimulationClock::now();
         stepGridDomains(context);
         const auto grid_end = SimulationClock::now();
@@ -5102,15 +5514,26 @@ void ParticleSimulationSystem::refreshResolvedColliders(float particle_radius) {
                         collider.octant_min_cache = oct_min;
                         collider.octant_max_cache = oct_max;
                         collider.octant_active_cache = oct_active;
+                    } else if (collider.source_mode == ParticleColliderSourceMode::ObjectMeshBVH) {
+                        // Build the accelerated triangle BVH once (same version
+                        // gate as the triangle cache) so per-step voxelization is
+                        // a logarithmic nearest-point query, not a linear scan.
+                        auto bvh = std::make_shared<ColliderMeshBVH>();
+                        std::vector<ColliderMeshBVH::Triangle> bvh_tris;
+                        bvh_tris.reserve(local_tris->size());
+                        for (const auto& t : *local_tris) bvh_tris.push_back({ t.p0, t.p1, t.p2 });
+                        bvh->build(std::move(bvh_tris));
+                        collider.mesh_bvh_cache = bvh;
                     }
 
                     collider.last_mesh_cache_version = current_version;
                 }
-                
+
                 resolved.desc.local_triangles_cache = collider.local_triangles_cache;
                 resolved.desc.octant_min_cache = collider.octant_min_cache;
                 resolved.desc.octant_max_cache = collider.octant_max_cache;
                 resolved.desc.octant_active_cache = collider.octant_active_cache;
+                resolved.desc.mesh_bvh_cache = collider.mesh_bvh_cache;
             }
         }
 

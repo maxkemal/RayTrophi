@@ -104,6 +104,17 @@ struct SolverParams {
     float smoke_generation = 0.6f;       // density added per unit fuel burned
     float flame_dissipation = 3.0f;      // flame (interaction) field decay / second
     float max_temperature = 10.0f;       // hard cap so heat release cannot run away
+
+    // ── Thermal expansion (gas dilation) ─────────────────────────────────────
+    // Hot gas expands. The pressure projection is given a positive divergence
+    // TARGET proportional to (temperature - ambient) instead of solving for the
+    // usual incompressible div = 0. This pushes gas outward from hot regions,
+    // which is what makes fire roll/billow and — when a fuel pocket ignites and
+    // temperature spikes in one step — produces a real explosion blast wave
+    // (no separate impulse needed). 0 = pure incompressible smoke (old
+    // behaviour). Acts only where temperature > ambient, so it never disturbs
+    // cold smoke. Units: target divergence (1/s) per heat unit above ambient.
+    float expansion = 0.0f;
 };
 
 /// @brief Advance one fluid step in place on @p grid.

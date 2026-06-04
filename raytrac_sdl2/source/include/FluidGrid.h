@@ -137,6 +137,36 @@ public:
     std::vector<uint8_t> v_weight;  // Y-faces, size == vel_y
     std::vector<uint8_t> w_weight;  // Z-faces, size == vel_z
 
+    // Collider voxelization dirty-region (inclusive cell-index AABB). Lets the
+    // per-step solid + face-weight rebuild touch only the collider footprint
+    // (prev∪cur) instead of the whole grid — a big win for small/moving
+    // colliders in large domains. Managed by voxelizeCollidersIntoGrid, read by
+    // computeSolidFaceWeights (same frame, voxelize runs first). Empty when
+    // hi < lo. collider_track_dim != (nx,ny,nz) forces a full clear (first step
+    // or resize) so no stale solids survive. Transient — not serialized.
+    int collider_prev_lo[3] = {0, 0, 0};
+    int collider_prev_hi[3] = {-1, -1, -1};
+    int collider_cur_lo[3]  = {0, 0, 0};
+    int collider_cur_hi[3]  = {-1, -1, -1};
+    int collider_track_dim[3] = {-1, -1, -1};
+    // Static-collider voxelization cache: hash of the resolved collider set
+    // (transforms + velocities + grid identity) at the last real voxelization.
+    // When unchanged, voxelizeCollidersIntoGrid skips the whole clear/stamp and
+    // keeps solid[]/solid_vel[] from the previous step — a wide high-poly static
+    // ground/beach collider then costs ONE stamp instead of one per frame.
+    uint64_t collider_voxel_sig = 0;
+    bool     collider_voxel_valid = false;
+    // Same idea for the variational MAC-face open weights: when the collider set
+    // is unchanged since the weights were last built (sig matches collider_voxel_sig)
+    // computeSolidFaceWeights skips its whole reset+super-sample pass.
+    uint64_t collider_weights_sig = 0;
+    // False = the face weights are not known-good globally (first variational
+    // frame, or variational was toggled off while colliders kept moving), so the
+    // next computeSolidFaceWeights must do a full open-init instead of the
+    // incremental footprint reset. Set true once weights are globally valid;
+    // cleared by the caller whenever a step runs without recomputing them.
+    bool collider_weights_init = false;
+
     // Ghost-fluid free surface: cell-centered liquid level set (signed distance,
     // negative inside fluid). Lazy (sized by the projection only when ghost-fluid
     // is enabled). Rebuilt each step from the particle positions.
@@ -177,6 +207,10 @@ public:
         pressure.resize(cell_count, 0.0f);
         divergence.resize(cell_count, 0.0f);
         solid.resize(cell_count, 0);
+        // A (re)allocation can change the cell count / layout, so the cached
+        // collider-voxelization signature is no longer trustworthy — force the
+        // next voxelizeCollidersIntoGrid to do a full restamp.
+        collider_voxel_valid = false;
         // solid_vel + u/v/w_weight are LAZY: sized on demand by the collider
         // voxelizer only when a moving collider / variational solids are actually
         // in use, so no-collider / gas / static domains pay zero extra memory

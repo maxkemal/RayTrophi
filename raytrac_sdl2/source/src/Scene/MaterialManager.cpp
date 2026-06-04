@@ -1,5 +1,6 @@
-﻿#include "MaterialManager.h"
+#include "MaterialManager.h"
 #include "PrincipledBSDF.h"
+#include "Volumetric.h"
 #include "PBRMaterialSnapshot.h"
 #include "material_gpu.h"
 #include "globals.h"
@@ -533,6 +534,28 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
                 matJson["uvTransform"] = uvTransformJson;
             }
         }
+        else if (mat->type() == MaterialType::Volumetric) {
+            Volumetric* vol = dynamic_cast<Volumetric*>(mat.get());
+            if (vol) {
+                matJson["albedo"] = vec3ToJson(vol->getAlbedo());
+                matJson["density"] = vol->getDensity();
+                matJson["absorption"] = vol->getAbsorption();
+                matJson["scattering"] = vol->getScattering();
+                matJson["emissionColor"] = vec3ToJson(vol->getEmissionColor());
+                matJson["g"] = vol->getG();
+                matJson["stepSize"] = vol->getStepSize();
+                matJson["maxSteps"] = vol->getMaxSteps();
+                matJson["noiseScale"] = vol->getNoiseScale();
+                matJson["voidThreshold"] = vol->getVoidThreshold();
+                matJson["multiScatter"] = vol->getMultiScatter();
+                matJson["gBack"] = vol->getGBack();
+                matJson["lobeMix"] = vol->getLobeMix();
+                matJson["lightSteps"] = vol->getLightSteps();
+                matJson["shadowStrength"] = vol->getShadowStrength();
+                matJson["vdbVolumeId"] = vol->getVDBVolumeID();
+                matJson["densitySource"] = vol->getDensitySource();
+            }
+        }
         
         materialsArray.push_back(matJson);
     }
@@ -682,6 +705,33 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
             pbsdf->tilingFactor = pbsdf->textureTransform.tilingFactor;
             
             mat = pbsdf;
+        }
+        else if (type == MaterialType::Volumetric) {
+            auto perlin = std::make_shared<Perlin>();
+            
+            Vec3 albedo = jsonToVec3(matJson.value("albedo", json::array({0.8f, 0.8f, 0.8f})), Vec3(0.8f));
+            float density = matJson.value("density", 1.0f);
+            float absorption = matJson.value("absorption", 0.1f);
+            float scattering = matJson.value("scattering", 0.5f);
+            Vec3 emission = jsonToVec3(matJson.value("emissionColor", json::array({0.0f, 0.0f, 0.0f})), Vec3(0.0f));
+            
+            auto vol = std::make_shared<Volumetric>(albedo, density, absorption, scattering, emission, perlin);
+            
+            // set remaining fields
+            vol->setG(matJson.value("g", 0.0f));
+            vol->setStepSize(matJson.value("stepSize", 0.05f));
+            vol->setMaxSteps(matJson.value("maxSteps", 128));
+            vol->setNoiseScale(matJson.value("noiseScale", 1.0f));
+            vol->setVoidThreshold(matJson.value("voidThreshold", 0.0f));
+            vol->setMultiScatter(matJson.value("multiScatter", 0.3f));
+            vol->setGBack(matJson.value("gBack", -0.3f));
+            vol->setLobeMix(matJson.value("lobeMix", 0.7f));
+            vol->setLightSteps(matJson.value("lightSteps", 4));
+            vol->setShadowStrength(matJson.value("shadowStrength", 0.8f));
+            vol->setVDBVolumeID(matJson.value("vdbVolumeId", -1));
+            vol->setDensitySource(matJson.value("densitySource", 0));
+            
+            mat = vol;
         }
         // TODO: Add other material types (Metal, Dielectric, Volumetric) as needed
         else {

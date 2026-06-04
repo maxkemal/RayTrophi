@@ -803,10 +803,25 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
     // neighbour is then treated as AIR (Dirichlet p=0 → outflow) instead of a
     // SOLID wall, so the projection no longer cancels wall-normal velocity and
     // the liquid actually leaves (paired with the advection-step outflow cull).
-    // Closed/Periodic keep the sealed-wall behaviour here; Periodic's seam
-    // coupling is handled by the advection wrap, not the pressure solve.
+    // Closed seals every wall. Periodic connects each wall to the OPPOSITE one:
+    // an out-of-grid neighbour wraps to the far side (the seam becomes interior),
+    // so the Laplacian, the face weights and the gradient update all couple
+    // across it — the advection wrap then actually fires because the pressure
+    // solve no longer dams the fluid at the boundary (without this, Periodic was
+    // indistinguishable from Closed).
     const bool open_walls = (params.boundary == APICSolverParams::BoundaryMode::Open);
+    const bool periodic   = (params.boundary == APICSolverParams::BoundaryMode::Periodic);
+    // Wrap a (possibly out-of-range) index into [0,n) — used only on the periodic
+    // path. For non-periodic these helpers are never reached with out-of-range
+    // arguments (the isFluid guard short-circuits first), so the closed/open
+    // behaviour stays bit-identical.
+    auto wrapIdx = [](int v, int n) { v %= n; return v < 0 ? v + n : v; };
+    auto cIdx = [&](int i, int j, int k) -> size_t {
+        if (periodic) { i = wrapIdx(i, nx); j = wrapIdx(j, ny); k = wrapIdx(k, nz); }
+        return grid.cellIndex(i, j, k);
+    };
     auto isFluid = [&](int i, int j, int k) {
+        if (periodic) { i = wrapIdx(i, nx); j = wrapIdx(j, ny); k = wrapIdx(k, nz); }
         if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) return false;
         return cell[grid.cellIndex(i, j, k)] == CELL_FLUID;
     };
@@ -823,18 +838,29 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         grid.v_weight.size() == grid.vel_y.size() &&
         grid.w_weight.size() == grid.vel_z.size();
     const bool has_svel = grid.solid_vel.size() == grid.solid.size();
+    // A periodic boundary face (i==0 ≡ i==nx) is a genuine interior face linking
+    // cell (n-1) and cell (0); it stays open unless either wrapped cell is solid.
+    // (Variational sub-grid weights aren't tracked across the seam, so it uses the
+    // binary open/closed test there — periodic + cut-cell solids on the seam is an
+    // edge case not worth a second weight array.)
     auto fWx = [&](int i, int j, int k) -> float {
-        if (i <= 0 || i >= nx) return open_walls ? 1.0f : 0.0f;
+        if (i <= 0 || i >= nx)
+            return periodic ? ((grid.solid[grid.cellIndex(nx - 1, j, k)] || grid.solid[grid.cellIndex(0, j, k)]) ? 0.0f : 1.0f)
+                            : (open_walls ? 1.0f : 0.0f);
         if (use_var) return FluidSim::FluidGrid::weightToFloat(grid.u_weight[grid.velXIndex(i, j, k)]);
         return (grid.solid[grid.cellIndex(i - 1, j, k)] || grid.solid[grid.cellIndex(i, j, k)]) ? 0.0f : 1.0f;
     };
     auto fWy = [&](int i, int j, int k) -> float {
-        if (j <= 0 || j >= ny) return open_walls ? 1.0f : 0.0f;
+        if (j <= 0 || j >= ny)
+            return periodic ? ((grid.solid[grid.cellIndex(i, ny - 1, k)] || grid.solid[grid.cellIndex(i, 0, k)]) ? 0.0f : 1.0f)
+                            : (open_walls ? 1.0f : 0.0f);
         if (use_var) return FluidSim::FluidGrid::weightToFloat(grid.v_weight[grid.velYIndex(i, j, k)]);
         return (grid.solid[grid.cellIndex(i, j - 1, k)] || grid.solid[grid.cellIndex(i, j, k)]) ? 0.0f : 1.0f;
     };
     auto fWz = [&](int i, int j, int k) -> float {
-        if (k <= 0 || k >= nz) return open_walls ? 1.0f : 0.0f;
+        if (k <= 0 || k >= nz)
+            return periodic ? ((grid.solid[grid.cellIndex(i, j, nz - 1)] || grid.solid[grid.cellIndex(i, j, 0)]) ? 0.0f : 1.0f)
+                            : (open_walls ? 1.0f : 0.0f);
         if (use_var) return FluidSim::FluidGrid::weightToFloat(grid.w_weight[grid.velZIndex(i, j, k)]);
         return (grid.solid[grid.cellIndex(i, j, k - 1)] || grid.solid[grid.cellIndex(i, j, k)]) ? 0.0f : 1.0f;
     };
@@ -901,6 +927,37 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         const float t = pf / (pf - pa);
         return t < 0.1f ? 0.1f : (t > 1.0f ? 1.0f : t);
     };
+
+    // Periodic seam merge: the low face (index 0) and the high face (index N)
+    // of each axis are the SAME physical MAC face, but P2G fills them
+    // independently from particles near each wall. Collapse them to a single
+    // value before building divergence — otherwise the two sides feed
+    // inconsistent normal velocities into the solve (mass leak at the seam) and
+    // the gradient update can't keep them equal. Averaging is the cheap, mass-
+    // symmetric merge; the projection below then writes both faces identically.
+    if (periodic) {
+        for (int k = 0; k < nz; ++k)
+            for (int j = 0; j < ny; ++j) {
+                const size_t a = grid.velXIndex(0,  j, k);
+                const size_t b = grid.velXIndex(nx, j, k);
+                const float m = 0.5f * (grid.vel_x[a] + grid.vel_x[b]);
+                grid.vel_x[a] = grid.vel_x[b] = m;
+            }
+        for (int k = 0; k < nz; ++k)
+            for (int i = 0; i < nx; ++i) {
+                const size_t a = grid.velYIndex(i, 0,  k);
+                const size_t b = grid.velYIndex(i, ny, k);
+                const float m = 0.5f * (grid.vel_y[a] + grid.vel_y[b]);
+                grid.vel_y[a] = grid.vel_y[b] = m;
+            }
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                const size_t a = grid.velZIndex(i, j, 0);
+                const size_t b = grid.velZIndex(i, j, nz);
+                const float m = 0.5f * (grid.vel_z[a] + grid.vel_z[b]);
+                grid.vel_z[a] = grid.vel_z[b] = m;
+            }
+    }
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(thread_count) if(active_grid_parallel)
@@ -1053,6 +1110,22 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
     //    "Fluid Simulation for Computer Graphics" 2nd ed. §5.2.
     constexpr float tau = 0.97f;       // MIC tuning constant
     constexpr float safety = 0.25f;    // restart threshold (Bridson)
+    if (periodic) {
+        // MIC(0) factorises the matrix into banded lower/upper triangular sweeps
+        // in lexicographic order; the periodic wrap adds couplings (cell 0 ↔ cell
+        // N-1) that fall OUTSIDE that band, so the forward/backward substitution
+        // would silently drop them and the preconditioner would no longer match A.
+        // Use a Jacobi (diagonal) preconditioner instead: it has no ordering
+        // dependency, stays correct under wrap, and PCG still converges — just in
+        // more iterations. precon holds 1/diag here (Jacobi), not the MIC 1/√E.
+        for (int k = min_k; k <= max_k; ++k)
+            for (int j = min_j; j <= max_j; ++j)
+                for (int i = min_i; i <= max_i; ++i) {
+                    const size_t c = grid.cellIndex(i, j, k);
+                    if (!is_fluid[c]) continue;
+                    precon[c] = (Adiag[c] > 1e-12f) ? (1.0f / Adiag[c]) : 0.0f;
+                }
+    } else
     for (int k = min_k; k <= max_k; ++k) {
         for (int j = min_j; j <= max_j; ++j) {
             for (int i = min_i; i <= max_i; ++i) {
@@ -1123,6 +1196,17 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         const float tolerance = std::max(abs_tol, rel_tol * r_inf);
 
         auto applyPreconditioner = [&]() {
+            if (periodic) {
+                // Jacobi: z = D^{-1} r (precon holds 1/diag on the periodic path).
+                for (int k = min_k; k <= max_k; ++k)
+                    for (int j = min_j; j <= max_j; ++j)
+                        for (int i = min_i; i <= max_i; ++i) {
+                            const size_t c = grid.cellIndex(i, j, k);
+                            if (!is_fluid[c]) continue;
+                            z[c] = r[c] * precon[c];
+                        }
+                return;
+            }
             // Forward substitution: solve (L) q = r, where L is the lower
             // triangular part of MIC(0). Sweep in lex order; serial — MIC(0)
             // has data dependencies that block vectorisation/OMP without a
@@ -1193,28 +1277,39 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
                 if (!is_fluid[c]) { As[c] = 0.0f; continue; }
 
                 float v = Adiag[c] * s[c];
-                if (i > 0) {
-                    const size_t cm = grid.cellIndex(i - 1, j, k);
+                // Lower-neighbour coupling uses the neighbour's stored upper
+                // coefficient (symmetry: A[c,c-1] == Aplus*[c-1]). On the periodic
+                // path the lower neighbour of index 0 wraps to N-1 and the upper
+                // neighbour of N-1 wraps to 0; the seam coefficient lives in
+                // Aplus*[N-1] for both directions, so symmetry still holds.
+                const int im = (i > 0) ? i - 1 : (periodic ? nx - 1 : -1);
+                const int ip = (i + 1 < nx) ? i + 1 : (periodic ? 0 : -1);
+                const int jm = (j > 0) ? j - 1 : (periodic ? ny - 1 : -1);
+                const int jp = (j + 1 < ny) ? j + 1 : (periodic ? 0 : -1);
+                const int km = (k > 0) ? k - 1 : (periodic ? nz - 1 : -1);
+                const int kp = (k + 1 < nz) ? k + 1 : (periodic ? 0 : -1);
+                if (im >= 0) {
+                    const size_t cm = grid.cellIndex(im, j, k);
                     if (is_fluid[cm]) v += Aplusi[cm] * s[cm];
                 }
-                if (i + 1 < nx) {
-                    const size_t cp = grid.cellIndex(i + 1, j, k);
+                if (ip >= 0) {
+                    const size_t cp = grid.cellIndex(ip, j, k);
                     if (is_fluid[cp]) v += Aplusi[c] * s[cp];
                 }
-                if (j > 0) {
-                    const size_t cm = grid.cellIndex(i, j - 1, k);
+                if (jm >= 0) {
+                    const size_t cm = grid.cellIndex(i, jm, k);
                     if (is_fluid[cm]) v += Aplusj[cm] * s[cm];
                 }
-                if (j + 1 < ny) {
-                    const size_t cp = grid.cellIndex(i, j + 1, k);
+                if (jp >= 0) {
+                    const size_t cp = grid.cellIndex(i, jp, k);
                     if (is_fluid[cp]) v += Aplusj[c] * s[cp];
                 }
-                if (k > 0) {
-                    const size_t cm = grid.cellIndex(i, j, k - 1);
+                if (km >= 0) {
+                    const size_t cm = grid.cellIndex(i, j, km);
                     if (is_fluid[cm]) v += Aplusk[cm] * s[cm];
                 }
-                if (k + 1 < nz) {
-                    const size_t cp = grid.cellIndex(i, j, k + 1);
+                if (kp >= 0) {
+                    const size_t cp = grid.cellIndex(i, j, kp);
                     if (is_fluid[cp]) v += Aplusk[c] * s[cp];
                 }
                 As[c] = v;
@@ -1310,6 +1405,11 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         const int i = min_i + static_cast<int>(raw % (active_nx + 1));
         const int j = min_j + static_cast<int>((raw / (active_nx + 1)) % active_ny);
         const int k = min_k + static_cast<int>(raw / (static_cast<int64_t>(active_nx + 1) * active_ny));
+        // Periodic seam faces (i==0 and i==N are the same physical face) are
+        // handled once in the dedicated post-pass below — skipping them here
+        // avoids the active-region loop touching only one copy when fluid sits
+        // on a single side of the seam.
+        if (periodic && (i <= 0 || i >= nx)) continue;
         // Fully-closed face → take the solid's normal velocity (moving wall);
         // open/partial face → subtract the pressure gradient (the weight already
         // lives in the matrix, so the update itself is the plain MAC gradient).
@@ -1321,13 +1421,13 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         bool lo_fluid = isFluid(i - 1, j, k);
         bool hi_fluid = isFluid(i,     j, k);
         if (!lo_fluid && !hi_fluid) continue;
-        float p_lo = lo_fluid ? p[grid.cellIndex(i - 1, j, k)] : 0.0f;
-        float p_hi = hi_fluid ? p[grid.cellIndex(i,     j, k)] : 0.0f;
+        float p_lo = lo_fluid ? p[cIdx(i - 1, j, k)] : 0.0f;
+        float p_hi = hi_fluid ? p[cIdx(i,     j, k)] : 0.0f;
         // Ghost-fluid: the air-side pressure is the extrapolated p that puts p=0
         // at the sub-cell surface (p_ghost = p_fluid*(1 - 1/theta)) instead of 0.
         if (gfm_active) {
-            if (lo_fluid && !hi_fluid)      p_hi = p_lo * (1.0f - 1.0f / airTheta(grid.cellIndex(i - 1, j, k), i,     j, k));
-            else if (hi_fluid && !lo_fluid) p_lo = p_hi * (1.0f - 1.0f / airTheta(grid.cellIndex(i,     j, k), i - 1, j, k));
+            if (lo_fluid && !hi_fluid)      p_hi = p_lo * (1.0f - 1.0f / airTheta(cIdx(i - 1, j, k), i,     j, k));
+            else if (hi_fluid && !lo_fluid) p_lo = p_hi * (1.0f - 1.0f / airTheta(cIdx(i,     j, k), i - 1, j, k));
         }
         grid.vel_x[grid.velXIndex(i, j, k)] -= grad_scale * (p_hi - p_lo);
     }
@@ -1338,6 +1438,7 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         const int i = min_i + static_cast<int>(raw % active_nx);
         const int j = min_j + static_cast<int>((raw / active_nx) % (active_ny + 1));
         const int k = min_k + static_cast<int>(raw / (static_cast<int64_t>(active_nx) * (active_ny + 1)));
+        if (periodic && (j <= 0 || j >= ny)) continue;
         const float wf = fWy(i, j, k);
         if (wf <= 0.0f) {
             grid.vel_y[grid.velYIndex(i, j, k)] = svY(i, j, k);
@@ -1346,11 +1447,11 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         bool lo_fluid = isFluid(i, j - 1, k);
         bool hi_fluid = isFluid(i, j,     k);
         if (!lo_fluid && !hi_fluid) continue;
-        float p_lo = lo_fluid ? p[grid.cellIndex(i, j - 1, k)] : 0.0f;
-        float p_hi = hi_fluid ? p[grid.cellIndex(i, j,     k)] : 0.0f;
+        float p_lo = lo_fluid ? p[cIdx(i, j - 1, k)] : 0.0f;
+        float p_hi = hi_fluid ? p[cIdx(i, j,     k)] : 0.0f;
         if (gfm_active) {
-            if (lo_fluid && !hi_fluid)      p_hi = p_lo * (1.0f - 1.0f / airTheta(grid.cellIndex(i, j - 1, k), i, j,     k));
-            else if (hi_fluid && !lo_fluid) p_lo = p_hi * (1.0f - 1.0f / airTheta(grid.cellIndex(i, j,     k), i, j - 1, k));
+            if (lo_fluid && !hi_fluid)      p_hi = p_lo * (1.0f - 1.0f / airTheta(cIdx(i, j - 1, k), i, j,     k));
+            else if (hi_fluid && !lo_fluid) p_lo = p_hi * (1.0f - 1.0f / airTheta(cIdx(i, j,     k), i, j - 1, k));
         }
         grid.vel_y[grid.velYIndex(i, j, k)] -= grad_scale * (p_hi - p_lo);
     }
@@ -1361,6 +1462,7 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         const int i = min_i + static_cast<int>(raw % active_nx);
         const int j = min_j + static_cast<int>((raw / active_nx) % active_ny);
         const int k = min_k + static_cast<int>(raw / (static_cast<int64_t>(active_nx) * active_ny));
+        if (periodic && (k <= 0 || k >= nz)) continue;
         const float wf = fWz(i, j, k);
         if (wf <= 0.0f) {
             grid.vel_z[grid.velZIndex(i, j, k)] = svZ(i, j, k);
@@ -1369,13 +1471,61 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         bool lo_fluid = isFluid(i, j, k - 1);
         bool hi_fluid = isFluid(i, j, k);
         if (!lo_fluid && !hi_fluid) continue;
-        float p_lo = lo_fluid ? p[grid.cellIndex(i, j, k - 1)] : 0.0f;
-        float p_hi = hi_fluid ? p[grid.cellIndex(i, j, k)]     : 0.0f;
+        float p_lo = lo_fluid ? p[cIdx(i, j, k - 1)] : 0.0f;
+        float p_hi = hi_fluid ? p[cIdx(i, j, k)]     : 0.0f;
         if (gfm_active) {
-            if (lo_fluid && !hi_fluid)      p_hi = p_lo * (1.0f - 1.0f / airTheta(grid.cellIndex(i, j, k - 1), i, j, k));
-            else if (hi_fluid && !lo_fluid) p_lo = p_hi * (1.0f - 1.0f / airTheta(grid.cellIndex(i, j, k),     i, j, k - 1));
+            if (lo_fluid && !hi_fluid)      p_hi = p_lo * (1.0f - 1.0f / airTheta(cIdx(i, j, k - 1), i, j, k));
+            else if (hi_fluid && !lo_fluid) p_lo = p_hi * (1.0f - 1.0f / airTheta(cIdx(i, j, k),     i, j, k - 1));
         }
         grid.vel_z[grid.velZIndex(i, j, k)] -= grad_scale * (p_hi - p_lo);
+    }
+
+    // Periodic seam gradient pass. The seam faces still hold the merged
+    // pre-projection velocity m (the main loops skipped them); apply the seam
+    // pressure gradient ONCE and write both copies identically so the wrap stays
+    // single-valued regardless of which side carried fluid. The lo cell is the
+    // far wall (N-1), the hi cell is the near wall (0). GFM isn't applied at the
+    // seam (the wrapped air-extrapolation theta collapses to 1 → plain p=0).
+    if (periodic) {
+        for (int k = 0; k < nz; ++k)
+            for (int j = 0; j < ny; ++j) {
+                const size_t f0 = grid.velXIndex(0,  j, k);
+                const size_t fN = grid.velXIndex(nx, j, k);
+                if (fWx(0, j, k) <= 0.0f) { grid.vel_x[f0] = grid.vel_x[fN] = svX(0, j, k); continue; }
+                const bool lo_fluid = isFluid(nx - 1, j, k);
+                const bool hi_fluid = isFluid(0,      j, k);
+                if (!lo_fluid && !hi_fluid) continue;
+                const float p_lo = lo_fluid ? p[grid.cellIndex(nx - 1, j, k)] : 0.0f;
+                const float p_hi = hi_fluid ? p[grid.cellIndex(0,      j, k)] : 0.0f;
+                const float nv = grid.vel_x[f0] - grad_scale * (p_hi - p_lo);
+                grid.vel_x[f0] = grid.vel_x[fN] = nv;
+            }
+        for (int k = 0; k < nz; ++k)
+            for (int i = 0; i < nx; ++i) {
+                const size_t f0 = grid.velYIndex(i, 0,  k);
+                const size_t fN = grid.velYIndex(i, ny, k);
+                if (fWy(i, 0, k) <= 0.0f) { grid.vel_y[f0] = grid.vel_y[fN] = svY(i, 0, k); continue; }
+                const bool lo_fluid = isFluid(i, ny - 1, k);
+                const bool hi_fluid = isFluid(i, 0,      k);
+                if (!lo_fluid && !hi_fluid) continue;
+                const float p_lo = lo_fluid ? p[grid.cellIndex(i, ny - 1, k)] : 0.0f;
+                const float p_hi = hi_fluid ? p[grid.cellIndex(i, 0,      k)] : 0.0f;
+                const float nv = grid.vel_y[f0] - grad_scale * (p_hi - p_lo);
+                grid.vel_y[f0] = grid.vel_y[fN] = nv;
+            }
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                const size_t f0 = grid.velZIndex(i, j, 0);
+                const size_t fN = grid.velZIndex(i, j, nz);
+                if (fWz(i, j, 0) <= 0.0f) { grid.vel_z[f0] = grid.vel_z[fN] = svZ(i, j, 0); continue; }
+                const bool lo_fluid = isFluid(i, j, nz - 1);
+                const bool hi_fluid = isFluid(i, j, 0);
+                if (!lo_fluid && !hi_fluid) continue;
+                const float p_lo = lo_fluid ? p[grid.cellIndex(i, j, nz - 1)] : 0.0f;
+                const float p_hi = hi_fluid ? p[grid.cellIndex(i, j, 0)]      : 0.0f;
+                const float nv = grid.vel_z[f0] - grad_scale * (p_hi - p_lo);
+                grid.vel_z[f0] = grid.vel_z[fN] = nv;
+            }
     }
 
     return fluid_cell_count;

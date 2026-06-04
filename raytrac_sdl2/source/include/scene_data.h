@@ -26,6 +26,7 @@
 #include "Fluid/FluidSimulationSystem.h"
 #include "globals.h"
 #include "SurfaceMeshCache.h"
+#include "ColliderMeshBVH.h"
 #include "MeshModifiers.h"
 #include "Paint/PaintTextureSet.h"
 #include "Paint/PaintLayerStack.h"
@@ -33,6 +34,7 @@
 #include <functional>
 #include <string>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -81,6 +83,15 @@ struct SceneData {
     std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>> base_mesh_cache; // nodeName -> list of Triangles
     mutable std::unordered_map<std::string, RayTrophiSim::SurfaceMeshCache> surface_mesh_cache; // shared wet/particle/collider surface cache
     mutable uint64_t surface_mesh_cache_version = 1;
+    // Per-epoch rebuild memo for getSurfaceMeshCacheForObject(refresh=true): the
+    // collider OBB/bounds resolvers re-derive an object's world-space surface
+    // (a full O(scene objects) rescan + rebuild) several times per sim step. Within
+    // one "geometry epoch" (g_scene_geometry_generation unchanged AND no keyframe
+    // re-pose) the world triangles can't change, so an object is rebuilt at most
+    // ONCE per epoch and reused. A static high-poly ground/beach collider then
+    // resolves once for the whole bake instead of N times per frame.
+    mutable std::unordered_set<std::string> surface_cache_epoch_done_;
+    mutable uint64_t surface_cache_epoch_gen_ = ~0ull;
     std::unordered_map<std::string, MeshModifiers::ModifierStack> mesh_modifiers;          // nodeName -> Modifier Stack
     std::unordered_map<std::string, Paint::PaintTextureSet> mesh_paint_texture_sets;       // nodeName#materialID -> texture set
     std::unordered_map<std::string, Paint::PaintLayerStack> mesh_paint_layer_stacks;      // nodeName#materialID -> layer stack
@@ -761,6 +772,23 @@ struct SceneData {
     int         sim_cache_start_frame_ = 0;
     int         sim_cache_end_frame_ = 0;
 
+    // ── Cooperative (frame-driven) disk bake state machine ───────────────────
+    // A disk bake re-simulates the whole timeline range; one blocking loop would
+    // freeze the UI for the entire bake. Instead it runs as a state machine
+    // advanced a few frames per UI tick (tickSimulationDiskBake, time-budgeted)
+    // so the progress bar + Cancel stay live and the app never freezes for long.
+    // Everything runs on the main thread → no GPU/Vulkan/CUDA cross-thread hazard.
+    bool        sim_bake_active_ = false;
+    bool        sim_bake_cancel_ = false;
+    bool        sim_bake_ok_ = true;
+    std::string sim_bake_dir_;
+    int         sim_bake_start_ = 0;
+    int         sim_bake_end_ = 0;
+    int         sim_bake_cur_ = 0;          // last frame stepped/written
+    float       sim_bake_fps_ = 24.0f;
+    float       sim_bake_dt_ = 1.0f / 24.0f;
+    std::vector<std::pair<uint32_t, uint64_t>> sim_bake_hashes_;
+
     void syncSimulationRenderVolumes() {
         // The bridge does CUDA work (registerOrUpdateLiveVolume -> uploadToGPU) and
         // mutates world.objects. Doing either while a backend is tearing down /
@@ -1364,6 +1392,11 @@ struct SceneData {
                 break;
             }
         }
+        // These objects just moved without bumping g_scene_geometry_generation, so
+        // drop them from the surface-cache epoch memo — their next resolve must
+        // rebuild from the new world verts. Static (un-posed) objects keep their
+        // memo and stay cheap.
+        for (const auto& name : posed_names) surface_cache_epoch_done_.erase(name);
     }
 
     bool hasSimFrame(int frame) const {
@@ -1795,9 +1828,31 @@ struct SceneData {
     // per-system config signatures. Render-only — see SimCache.h. BLOCKING: walks
     // the whole sim on the calling thread (an explicit user action; the UI should
     // run it on a worker). Binds the cache so scrubbing serves from disk at once.
+    // Blocking convenience wrapper (runs the cooperative bake to completion on
+    // the calling thread without yielding). The interactive UI uses the
+    // begin/tick/cancel state machine below instead so it never freezes.
     bool bakeSimulationToDisk(const std::string& cache_dir, int start_frame, int end_frame, float fps) {
+        if (!beginSimulationDiskBake(cache_dir, start_frame, end_frame, fps)) return false;
+        while (tickSimulationDiskBake(1.0e9)) { /* run to completion */ }
+        return sim_cache_valid_;
+    }
+
+    // ── Cooperative disk bake: begin / tick / cancel ─────────────────────────
+    // Start a frame-driven bake. Does the one-time setup (clear folder, snapshot
+    // authored config hashes, reset + synchronize, write frame 0 if in range) and
+    // arms the state machine. Returns false if a bake is already running or the
+    // request is invalid. Drive it each UI tick with tickSimulationDiskBake.
+    bool beginSimulationDiskBake(const std::string& cache_dir, int start_frame, int end_frame, float fps) {
+        if (sim_bake_active_) return false;                                  // already baking
         if (cache_dir.empty() || end_frame < start_frame || particle_systems.empty()) return false;
-        const float dt = (fps > 1.0f) ? (1.0f / fps) : (1.0f / 24.0f);
+
+        sim_bake_dir_    = cache_dir;
+        sim_bake_start_  = start_frame;
+        sim_bake_end_    = end_frame;
+        sim_bake_fps_    = fps;
+        sim_bake_dt_     = (fps > 1.0f) ? (1.0f / fps) : (1.0f / 24.0f);
+        sim_bake_cancel_ = false;
+        sim_bake_ok_     = true;
 
         RayTrophiSim::SimCache::clearCache(cache_dir);  // fresh folder for this bake
 
@@ -1805,68 +1860,130 @@ struct SceneData {
         // Adaptive domains auto-resize their resolution while the sim runs, and
         // bounds get resolved live — computing the hash post-bake would capture
         // those derived values and never match the freshly-loaded (authored) hash
-        // on reload, so the cache would silently never bind. (computeSystemConfigHash
-        // already excludes resolution/bounds, but snapshotting here is the robust
-        // belt-and-braces: the manifest reflects exactly the authored state.)
-        std::vector<std::pair<uint32_t, uint64_t>> system_hashes;
-        system_hashes.reserve(particle_systems.size());
+        // on reload, so the cache would silently never bind.
+        sim_bake_hashes_.clear();
+        sim_bake_hashes_.reserve(particle_systems.size());
         for (const auto& sys : particle_systems) {
-            system_hashes.emplace_back(sys.id, computeSystemConfigHash(sys));
+            sim_bake_hashes_.emplace_back(sys.id, computeSystemConfigHash(sys));
         }
 
         resetSimulationToStart();
         // resetGridDomainStates() leaves states DEFAULT-constructed (type = Gas,
         // empty grid). Synchronize now so frame 0 carries the correct domain type
-        // + grid metadata — otherwise a reloaded bake restores a "gas" frame 0 and
-        // the sim appears to run in gas mode until the user scrubs forward.
+        // + grid metadata — otherwise a reloaded bake restores a "gas" frame 0.
         for (auto& sys : particle_systems) {
             if (sys.runtime) sys.runtime->synchronizeGridDomainsNow();
         }
         sim_timeline_frame_ = 0;
+        sim_bake_cur_ = 0;
+        if (0 >= start_frame) {                 // frame 0 has no step; write if in range
+            if (!writeAllSystemsBakeFrame_(0)) sim_bake_ok_ = false;
+        }
+        sim_bake_active_ = true;
+        return true;
+    }
+
+    // Advance the active bake for up to budget_ms of wall time, then yield. Steps
+    // the sim + writes each frame in range. Returns true while the bake is still
+    // running (call again next tick), false once it finished or was cancelled (in
+    // which case it has already written the manifest + bound the cache, or cleared
+    // a partial bake on cancel, and refreshed the render volumes).
+    bool tickSimulationDiskBake(double budget_ms) {
+        if (!sim_bake_active_) return false;
+        if (sim_bake_cancel_) { finalizeSimulationDiskBake_(true); return false; }
+
+        const auto t0 = std::chrono::steady_clock::now();
+        while (sim_bake_cur_ < sim_bake_end_) {
+            ++sim_bake_cur_;
+            // Re-pose keyframed sim-source objects (e.g. animated colliders) for the
+            // frame we are about to step INTO, so the solid mask tracks the moving
+            // geometry instead of freezing at the reset pose — same as the live
+            // timeline + sequence-render drivers. Also drops the moved objects from
+            // the surface-cache epoch memo so their next resolve rebuilds from the
+            // new world verts (static colliders stay memoized and cheap).
+            applySimSourceObjectPosesForFrame(sim_bake_cur_);
+            syncSimulationWorld();
+            simulation_world.stepOnce(sim_bake_dt_);
+            sim_timeline_frame_ = sim_bake_cur_;
+            if (sim_bake_cur_ >= sim_bake_start_) {
+                if (!writeAllSystemsBakeFrame_(sim_bake_cur_)) sim_bake_ok_ = false;
+            }
+            if (sim_bake_cancel_) { finalizeSimulationDiskBake_(true); return false; }
+            const double elapsed = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+            if (elapsed >= budget_ms) break;     // hand the frame back to the UI
+        }
+        if (sim_bake_cur_ >= sim_bake_end_) {
+            finalizeSimulationDiskBake_(false);
+            return false;
+        }
+        return true;
+    }
+
+    void cancelSimulationDiskBake() { if (sim_bake_active_) sim_bake_cancel_ = true; }
+
+    bool  isSimulationBaking()  const { return sim_bake_active_; }
+    int   simBakeCurrentFrame() const { return sim_bake_cur_; }
+    int   simBakeStartFrame()   const { return sim_bake_start_; }
+    int   simBakeEndFrame()     const { return sim_bake_end_; }
+    float simBakeProgress()     const {
+        if (sim_bake_end_ <= 0) return sim_bake_active_ ? 0.0f : 1.0f;
+        return std::clamp(static_cast<float>(sim_bake_cur_) / static_cast<float>(sim_bake_end_), 0.0f, 1.0f);
+    }
+
+private:
+    // Write every particle system's current grid-domain state for frame f to the
+    // active bake folder. Returns false if any system's write failed.
+    bool writeAllSystemsBakeFrame_(int f) {
         bool ok = true;
-        for (int f = 0; f <= end_frame; ++f) {
-            if (f > 0) {
-                syncSimulationWorld();
-                simulation_world.stepOnce(dt);
-                sim_timeline_frame_ = f;
+        for (auto& sys : particle_systems) {
+            if (!sys.runtime) continue;
+            if (!RayTrophiSim::SimCache::writeSystemFrame(
+                    sim_bake_dir_, sys.id, f, sys.runtime->gridDomainStates())) {
+                ok = false;
             }
-            if (f >= start_frame) {
-                for (auto& sys : particle_systems) {
-                    if (!sys.runtime) continue;
-                    if (!RayTrophiSim::SimCache::writeSystemFrame(
-                            cache_dir, sys.id, f, sys.runtime->gridDomainStates())) {
-                        ok = false;
-                    }
+        }
+        return ok;
+    }
+
+    // End the active bake: on success write the manifest + bind the cache so
+    // scrubbing streams from disk; on cancel drop the partial folder so a
+    // half-bake is never bound. Either way return to free-run + refresh volumes.
+    void finalizeSimulationDiskBake_(bool cancelled) {
+        if (!cancelled) {
+            RayTrophiSim::SimCache::Manifest m;
+            m.version = RayTrophiSim::SimCache::kVersion;
+            m.start_frame = sim_bake_start_;
+            m.end_frame = sim_bake_end_;
+            m.fps = sim_bake_fps_;
+            for (const auto& sys : particle_systems) {
+                RayTrophiSim::SimCache::SystemManifest sm;
+                sm.id = sys.id;
+                sm.config_hash = 0;
+                for (const auto& kv : sim_bake_hashes_) {
+                    if (kv.first == sys.id) { sm.config_hash = kv.second; break; }
                 }
+                sm.domain_count = sys.runtime ? (int)sys.runtime->gridDomainStates().size() : 0;
+                m.systems.push_back(sm);
             }
-        }
+            if (!RayTrophiSim::SimCache::writeManifest(sim_bake_dir_, m)) sim_bake_ok_ = false;
 
-        RayTrophiSim::SimCache::Manifest m;
-        m.version = RayTrophiSim::SimCache::kVersion;
-        m.start_frame = start_frame;
-        m.end_frame = end_frame;
-        m.fps = fps;
-        for (const auto& sys : particle_systems) {
-            RayTrophiSim::SimCache::SystemManifest sm;
-            sm.id = sys.id;
-            sm.config_hash = 0;
-            for (const auto& kv : system_hashes) {
-                if (kv.first == sys.id) { sm.config_hash = kv.second; break; }
-            }
-            sm.domain_count = sys.runtime ? (int)sys.runtime->gridDomainStates().size() : 0;
-            m.systems.push_back(sm);
+            sim_cache_dir_ = sim_bake_dir_;
+            sim_cache_valid_ = sim_bake_ok_;
+            sim_cache_start_frame_ = sim_bake_start_;
+            sim_cache_end_frame_ = sim_bake_end_;
+        } else {
+            RayTrophiSim::SimCache::clearCache(sim_bake_dir_);  // drop the half-bake
+            sim_bake_ok_ = false;
         }
-        if (!RayTrophiSim::SimCache::writeManifest(cache_dir, m)) ok = false;
-
-        sim_cache_dir_ = cache_dir;
-        sim_cache_valid_ = ok;
-        sim_cache_start_frame_ = start_frame;
-        sim_cache_end_frame_ = end_frame;
 
         sim_timeline_frame_ = -1;       // back to free-run; disk now serves restores
         syncSimulationRenderVolumes();
-        return ok;
+        sim_bake_active_ = false;
+        sim_bake_hashes_.clear();
     }
+
+public:
 
     // Validate a cache folder against the CURRENT systems' config and bind it so
     // restoreSimFrame streams from disk. Returns false (and leaves the cache
@@ -2708,6 +2825,24 @@ public:
             return &existing->second;
         }
 
+        // Per-epoch memo: skip the rebuild if this object was already refreshed in
+        // the current geometry epoch. A new epoch (gizmo/proc edit bumps
+        // g_scene_geometry_generation; keyframe re-pose erases posed names from the
+        // set, see applySimSourceObjectPosesForFrame) drops the memo so the rescan
+        // runs exactly once after anything that can move world vertices.
+        if (refresh) {
+            const uint64_t gen = g_scene_geometry_generation.load(std::memory_order_acquire);
+            if (gen != surface_cache_epoch_gen_) {
+                surface_cache_epoch_gen_ = gen;
+                surface_cache_epoch_done_.clear();
+            }
+            if (existing != surface_mesh_cache.end() &&
+                !existing->second.empty() &&
+                surface_cache_epoch_done_.find(node_name) != surface_cache_epoch_done_.end()) {
+                return &existing->second; // already rebuilt this epoch
+            }
+        }
+
         std::vector<std::shared_ptr<Triangle>> triangles;
         for (const auto& obj : world.objects) {
             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
@@ -2730,6 +2865,7 @@ public:
 
         auto& cache = surface_mesh_cache[node_name];
         cache = RayTrophiSim::SurfaceMeshCache::build(node_name, triangles, surface_mesh_cache_version);
+        if (refresh && !cache.empty()) surface_cache_epoch_done_.insert(node_name);
         return cache.empty() ? nullptr : &cache;
     }
 
@@ -3166,87 +3302,46 @@ public:
             int nz = N;
             result_vec->resize(static_cast<std::size_t>(nx * ny * nz), 0.0f);
 
-            auto pointTriangleDistanceSquared = [](const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, Vec3& out_closest) -> float {
-                Vec3 ab = b - a;
-                Vec3 ac = c - a;
-                Vec3 ap = p - a;
-                float d1 = Vec3::dot(ab, ap);
-                float d2 = Vec3::dot(ac, ap);
-                if (d1 <= 0.0f && d2 <= 0.0f) {
-                    out_closest = a;
-                    return (p - a).length_squared();
-                }
-                Vec3 bp = p - b;
-                float d3 = Vec3::dot(ab, bp);
-                float d4 = Vec3::dot(ac, bp);
-                if (d3 >= 0.0f && d4 <= d3) {
-                    out_closest = b;
-                    return (p - b).length_squared();
-                }
-                float vc = d1 * d4 - d3 * d2;
-                if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
-                    float v = d1 / (d1 - d3);
-                    out_closest = a + ab * v;
-                    return (p - out_closest).length_squared();
-                }
-                Vec3 cp = p - c;
-                float d5 = Vec3::dot(ab, cp);
-                float d6 = Vec3::dot(ac, cp);
-                if (d6 >= 0.0f && d5 <= d6) {
-                    out_closest = c;
-                    return (p - c).length_squared();
-                }
-                float vb = d5 * d2 - d1 * d6;
-                if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
-                    float w = d2 / (d2 - d6);
-                    out_closest = a + ac * w;
-                    return (p - out_closest).length_squared();
-                }
-                float va = d3 * d6 - d5 * d4;
-                if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
-                    float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-                    out_closest = b + (c - b) * w;
-                    return (p - out_closest).length_squared();
-                }
-                float denom = 1.0f / (va + vb + vc);
-                float v = vb * denom;
-                float w = vc * denom;
-                out_closest = a + ab * v + ac * w;
-                return (p - out_closest).length_squared();
+            // Build a triangle BVH over ALL local-space triangles (no stride
+            // decimation) so the distance field is exact and the cook costs
+            // O(cells · log tris) instead of the old O(cells · tris) brute force.
+            ColliderMeshBVH bvh;
+            {
+                std::vector<ColliderMeshBVH::Triangle> bvh_tris;
+                bvh_tris.reserve(triangles.size());
+                for (const auto& tri : triangles) bvh_tris.push_back({ tri.p0, tri.p1, tri.p2 });
+                bvh.build(std::move(bvh_tris));
+            }
+
+            // Inside/outside by ray-parity vote over three non-axis-aligned probe
+            // directions (each ~unit length). Robust to a single ray grazing a
+            // shared edge, and far more reliable than the old single-nearest-
+            // triangle normal dot, which flipped sign on edges / thin features.
+            const Vec3 probe_dirs[3] = {
+                Vec3(0.5060f,  0.7071f, 0.4943f),
+                Vec3(-0.3651f, 0.5345f, 0.7625f),
+                Vec3(0.8112f, -0.2701f, 0.5184f)
             };
 
+            float* out = result_vec->data();
+            const float step_x = extents.x / nx, step_y = extents.y / ny, step_z = extents.z / nz;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1)
+#endif
             for (int k = 0; k < nz; ++k)
             for (int j = 0; j < ny; ++j)
             for (int i = 0; i < nx; ++i) {
-                Vec3 cell_p = origin + Vec3(
-                    (i + 0.5f) * (extents.x / nx),
-                    (j + 0.5f) * (extents.y / ny),
-                    (k + 0.5f) * (extents.z / nz)
-                );
-
-                float min_dist_sq = std::numeric_limits<float>::max();
-                Vec3 best_closest(0.0f);
-                Vec3 best_normal(0.0f, 1.0f, 0.0f);
-
-                std::size_t stride = triangles.size() > 5000 ? (triangles.size() / 5000 + 1) : 1;
-                for (std::size_t t = 0; t < triangles.size(); t += stride) {
-                    const auto& tri = triangles[t];
-                    Vec3 closest;
-                    float d_sq = pointTriangleDistanceSquared(cell_p, tri.p0, tri.p1, tri.p2, closest);
-                    if (d_sq < min_dist_sq) {
-                        min_dist_sq = d_sq;
-                        best_closest = closest;
-                        best_normal = tri.normal;
-                    }
+                const Vec3 cell_p = origin + Vec3((i + 0.5f) * step_x,
+                                                  (j + 0.5f) * step_y,
+                                                  (k + 0.5f) * step_z);
+                Vec3 closest;
+                float dist = std::sqrt(bvh.closestDistanceSquared(cell_p, closest));
+                int inside_votes = 0;
+                for (int d = 0; d < 3; ++d) {
+                    if (bvh.countRayHits(cell_p, probe_dirs[d]) & 1) ++inside_votes;
                 }
-
-                float dist = std::sqrt(min_dist_sq);
-                Vec3 delta = cell_p - best_closest;
-                if (Vec3::dot(delta, best_normal) < 0.0f) {
-                    dist = -dist;
-                }
-
-                result_vec->at(static_cast<std::size_t>(k * (nx * ny) + j * nx + i)) = dist;
+                if (inside_votes >= 2) dist = -dist;
+                out[static_cast<std::size_t>(k * (nx * ny) + j * nx + i)] = dist;
             }
 
             auto p_sys = target_runtime ? target_runtime : this->getParticleSimulationSystem();
@@ -3638,6 +3733,11 @@ public:
         releaseSimulationRenderVolumes();
         clearSimFrameCache();
         sim_timeline_frame_ = -1;
+        // Abandon any in-flight cooperative disk bake — its tick references the
+        // particle_systems we are about to clear, so it must not run again.
+        sim_bake_active_ = false;
+        sim_bake_cancel_ = false;
+        sim_bake_hashes_.clear();
         // Drop any disk bake-cache binding from the previous project so a freshly
         // loaded scene without a cache doesn't keep streaming the old one.
         sim_cache_valid_ = false;
