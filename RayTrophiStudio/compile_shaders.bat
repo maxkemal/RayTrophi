@@ -84,21 +84,23 @@ if exist "%OUTPUT_DIR%\miss.rmiss.spv" del /Q "%OUTPUT_DIR%\miss.rmiss.spv"
 if exist "%OUTPUT_DIR%\raygen.rgen.spv" del /Q "%OUTPUT_DIR%\raygen.rgen.spv"
 if exist "%OUTPUT_DIR%\rgen.spv" del /Q "%OUTPUT_DIR%\rgen.spv"
 
-REM Deploy compiled .spv to runtime directories
+REM Deploy compiled .spv to runtime shaders\ subfolders.
+REM Auto-creates the shaders\ subfolder under any build output that exists, so no manual copy is ever needed.
 echo.
-echo Deploying .spv files to runtime directories...
-set DEPLOY1=%~dp0x64\Release\shaders
-set DEPLOY2=%~dp0..\x64\Release\shaders
-set DEPLOY3=%~dp0..\build\Release\shaders
+echo Deploying .spv files to runtime shaders\ subfolders...
+set OUT1=%~dp0..\x64\Release
+set OUT2=%~dp0..\x64\Debug
+set OUT3=%~dp0..\build\Release
 
-for %%d in ("%DEPLOY1%" "%DEPLOY2%" "%DEPLOY3%") do (
-    if exist %%d (
-        echo   Copying to %%d
-        copy /Y "%OUTPUT_DIR%\*.spv" %%d >nul 2>&1
-        if exist "%%~fd\gradient_test.spv" del /Q "%%~fd\gradient_test.spv"
-        if exist "%%~fd\miss.rmiss.spv" del /Q "%%~fd\miss.rmiss.spv"
-        if exist "%%~fd\raygen.rgen.spv" del /Q "%%~fd\raygen.rgen.spv"
-        if exist "%%~fd\rgen.spv" del /Q "%%~fd\rgen.spv"
+for %%p in ("%OUT1%" "%OUT2%" "%OUT3%") do (
+    if exist %%p (
+        if not exist "%%~p\shaders" mkdir "%%~p\shaders"
+        echo   Copying to %%~p\shaders
+        copy /Y "%OUTPUT_DIR%\*.spv" "%%~p\shaders" >nul 2>&1
+        if exist "%%~p\shaders\gradient_test.spv" del /Q "%%~p\shaders\gradient_test.spv"
+        if exist "%%~p\shaders\miss.rmiss.spv" del /Q "%%~p\shaders\miss.rmiss.spv"
+        if exist "%%~p\shaders\raygen.rgen.spv" del /Q "%%~p\shaders\raygen.rgen.spv"
+        if exist "%%~p\shaders\rgen.spv" del /Q "%%~p\shaders\rgen.spv"
     )
 )
 echo Deploy complete.
