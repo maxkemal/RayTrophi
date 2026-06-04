@@ -2940,7 +2940,15 @@ void SceneUI::draw(UIContext& ctx)
     const bool render_owns_sim =
         ctx.is_animation_mode && rendering_in_progress.load() && !g_seq_save_active;
 
-    if (!render_owns_sim && ctx.scene.anySimulationRuntimeEnabled()) {
+    if (ctx.scene.isSimulationBaking()) {
+        // A cooperative disk bake owns the sim timeline while it runs. Advance it
+        // a time-budgeted slice per UI tick (the progress bar + Cancel live in the
+        // sim panel) and keep the loop awake so the next slice fires and the
+        // progress redraws. Skip the normal live/timeline drive entirely — the
+        // bake is the sole stepper, so the two cannot race on sim state.
+        ctx.scene.tickSimulationDiskBake(20.0 /* ms budget per UI frame */);
+        ctx.start_render = true;
+    } else if (!render_owns_sim && ctx.scene.anySimulationRuntimeEnabled()) {
         const float rt_dt = std::clamp(io.DeltaTime, 0.0f, 1.0f / 30.0f);
         const bool live_mode = !g_sim_timeline_mode;
         // Timeline mode (default): play bakes into the cache, scrub restores, a

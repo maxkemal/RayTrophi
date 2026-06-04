@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 #include <SurfaceMeshCache.h>
+#include "ColliderMeshBVH.h"
 
 namespace RayTrophiSim {
 
@@ -184,6 +185,10 @@ struct SimulationGridDomainDesc {
     float smoke_generation = 0.6f;
     float flame_dissipation = 3.0f;
     float fire_max_temperature = 10.0f;
+    // Thermal expansion: gas dilation driven by (temperature - ambient). Gives
+    // fire its rolling billow and turns a sudden fuel ignition into a real
+    // explosion blast. 0 = incompressible smoke (default; old projects unchanged).
+    float fire_expansion = 0.0f;
     // Procedural curl-noise turbulence (Gas domains, dense CPU/GPU path). Adds
     // divergence-free FBM swirl modulated by local activity. 0 strength = off.
     // Not applied on the CPU_SparseVDB backend (which also skips vorticity).
@@ -484,6 +489,11 @@ struct ParticleColliderDesc {
     std::shared_ptr<std::vector<Vec3>> octant_min_cache;
     std::shared_ptr<std::vector<Vec3>> octant_max_cache;
     std::shared_ptr<std::vector<bool>> octant_active_cache;
+    // Accelerated nearest-triangle queries for ObjectMeshBVH voxelization. Built
+    // alongside local_triangles_cache (same version gate) so the per-step solid
+    // stamp is O(cells·log tris) instead of the old linear scan over every
+    // triangle, and uses the exact same BVH math as the SDF cook (consistency).
+    std::shared_ptr<ColliderMeshBVH> mesh_bvh_cache;
     uint64_t last_mesh_cache_version = 0;
 };
 

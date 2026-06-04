@@ -361,6 +361,83 @@ void setWallBcs(FluidGrid& grid, Boundary boundary) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Solid (collider) coupling
+// ─────────────────────────────────────────────────────────────────────────
+// grid.solid[] is stamped by the collider voxelizer before the step. These two
+// helpers make the gas solver honour those solids the same way the APIC liquid
+// path does: MAC faces touching a solid cell carry the solid's velocity (no
+// penetration; a MOVING collider hands its momentum to the gas), and scalar
+// content inside solids is wiped so smoke never accumulates inside a collider.
+// All guarded so a domain with no colliders (grid.solid all-zero) pays nothing
+// beyond a single empty-check.
+inline bool gridHasSolid(const FluidGrid& grid) {
+    return grid.solid.size() == static_cast<std::size_t>(grid.getCellCount());
+}
+
+void enforceSolidBoundaries(FluidGrid& grid) {
+    if (!gridHasSolid(grid)) return;
+    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
+    const bool has_vel = grid.solid_vel.size() == grid.solid.size();
+    auto solidVel = [&](int i, int j, int k) -> Vec3 {
+        return has_vel ? grid.solid_vel[grid.cellIndex(i, j, k)] : Vec3(0.0f, 0.0f, 0.0f);
+    };
+    // X faces: face (i,j,k) borders cells (i-1) and (i).
+    for (int k = 0; k < nz; ++k)
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i <= nx; ++i) {
+                const bool sL = (i > 0)  && grid.isSolid(i - 1, j, k);
+                const bool sR = (i < nx) && grid.isSolid(i, j, k);
+                if (!sL && !sR) continue;
+                float v = 0.0f;
+                if (sL && sR)      v = 0.5f * (solidVel(i - 1, j, k).x + solidVel(i, j, k).x);
+                else if (sL)       v = solidVel(i - 1, j, k).x;
+                else               v = solidVel(i, j, k).x;
+                grid.velXAt(i, j, k) = v;
+            }
+    // Y faces.
+    for (int k = 0; k < nz; ++k)
+        for (int j = 0; j <= ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                const bool sL = (j > 0)  && grid.isSolid(i, j - 1, k);
+                const bool sR = (j < ny) && grid.isSolid(i, j, k);
+                if (!sL && !sR) continue;
+                float v = 0.0f;
+                if (sL && sR)      v = 0.5f * (solidVel(i, j - 1, k).y + solidVel(i, j, k).y);
+                else if (sL)       v = solidVel(i, j - 1, k).y;
+                else               v = solidVel(i, j, k).y;
+                grid.velYAt(i, j, k) = v;
+            }
+    // Z faces.
+    for (int k = 0; k <= nz; ++k)
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                const bool sL = (k > 0)  && grid.isSolid(i, j, k - 1);
+                const bool sR = (k < nz) && grid.isSolid(i, j, k);
+                if (!sL && !sR) continue;
+                float v = 0.0f;
+                if (sL && sR)      v = 0.5f * (solidVel(i, j, k - 1).z + solidVel(i, j, k).z);
+                else if (sL)       v = solidVel(i, j, k - 1).z;
+                else               v = solidVel(i, j, k).z;
+                grid.velZAt(i, j, k) = v;
+            }
+}
+
+void clearSolidScalars(FluidGrid& grid, const SolverParams& params) {
+    if (!gridHasSolid(grid)) return;
+    const std::size_t cells = static_cast<std::size_t>(grid.getCellCount());
+    const bool clr_d = params.channel_density     && grid.density.size()     == cells;
+    const bool clr_t = params.channel_temperature && grid.temperature.size() == cells;
+    const bool clr_f = params.channel_fuel        && grid.fuel.size()        == cells;
+    if (!clr_d && !clr_t && !clr_f) return;
+    for (std::size_t c = 0; c < cells; ++c) {
+        if (!grid.solid[c]) continue;
+        if (clr_d) grid.density[c]     = 0.0f;
+        if (clr_t) grid.temperature[c] = 0.0f;
+        if (clr_f) grid.fuel[c]        = 0.0f;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Pressure projection (make velocity divergence-free)
 // ─────────────────────────────────────────────────────────────────────────
 void project(FluidGrid& grid, const SolverParams& params, float dt) {
@@ -374,14 +451,44 @@ void project(FluidGrid& grid, const SolverParams& params, float dt) {
         return;
     }
 
-    // 1) Divergence of the current velocity field.
+    // Solid (collider) mask. When present, solid cells act as internal Neumann
+    // walls: their pressure is never solved, the Laplacian stencil mirrors the
+    // centre cell across a solid face (zero flux), and the pressure gradient is
+    // not subtracted on faces touching a solid (their velocity is already the
+    // enforced solid velocity). With no colliders has_solid is false and every
+    // branch below collapses to the original divergence-free interior solve.
+    const bool has_solid = gridHasSolid(grid);
+    auto isSolidCell = [&](int ii, int jj, int kk) -> bool {
+        return has_solid && ii >= 0 && ii < nx && jj >= 0 && jj < ny && kk >= 0 && kk < nz &&
+               grid.solid[grid.cellIndex(ii, jj, kk)] != 0u;
+    };
+
+    // Thermal expansion target: hot gas dilates, so the projection aims for a
+    // POSITIVE divergence φ = expansion·max(0, T - ambient) at hot cells instead
+    // of the usual div = 0. Subtracting φ from the measured divergence here makes
+    // the solved field satisfy ∇·u = φ (gas pushed outward → fire roll / blast).
+    const bool use_expansion =
+        params.expansion > 0.0f && params.channel_temperature &&
+        grid.temperature.size() == static_cast<std::size_t>(grid.getCellCount());
+    const float ambient = params.ambient_temperature;
+    const float expansion = params.expansion;
+    const float max_phi = expansion * std::max(0.0f, params.max_temperature - ambient);
+
+    // 1) Divergence of the current velocity field (skip solid cells).
     for (int k = 0; k < nz; ++k)
         for (int j = 0; j < ny; ++j)
             for (int i = 0; i < nx; ++i) {
+                const std::size_t c = grid.cellIndex(i, j, k);
+                if (has_solid && grid.solid[c]) { div[c] = 0.0f; continue; }
                 const float du = grid.velXAt(i + 1, j, k) - grid.velXAt(i, j, k);
                 const float dv = grid.velYAt(i, j + 1, k) - grid.velYAt(i, j, k);
                 const float dw = grid.velZAt(i, j, k + 1) - grid.velZAt(i, j, k);
-                div[grid.cellIndex(i, j, k)] = (du + dv + dw) * inv_h;
+                float d = (du + dv + dw) * inv_h;
+                if (use_expansion) {
+                    const float phi = std::min(max_phi, expansion * std::max(0.0f, grid.temperature[c] - ambient));
+                    d -= phi; // target divergence φ instead of 0
+                }
+                div[c] = d;
             }
 
     const bool open = (params.boundary == Boundary::Open);
@@ -409,38 +516,51 @@ void project(FluidGrid& grid, const SolverParams& params, float dt) {
         return P[grid.cellIndex(ii, jj, kk)];
     };
 
-    // 2) Solve the Poisson system with SOR-relaxed Gauss-Seidel.
+    // 2) Solve the Poisson system with SOR-relaxed Gauss-Seidel. A solid
+    // neighbour mirrors the centre cell's pressure (Neumann: zero flux through
+    // the solid face), matching how the closed-domain walls are treated, so the
+    // fixed 6-point stencil is preserved and the no-collider path is unchanged.
     const int iterations = std::max(1, params.pressure_iterations);
     for (int iter = 0; iter < iterations; ++iter) {
         for (int k = 0; k < nz; ++k)
             for (int j = 0; j < ny; ++j)
                 for (int i = 0; i < nx; ++i) {
                     const std::size_t c = grid.cellIndex(i, j, k);
+                    if (has_solid && grid.solid[c]) continue; // solid: pressure not solved
+                    const float pc = P[c];
+                    auto nb = [&](int ii, int jj, int kk) -> float {
+                        return isSolidCell(ii, jj, kk) ? pc : getP(ii, jj, kk);
+                    };
                     const float sum =
-                        getP(i - 1, j, k) + getP(i + 1, j, k) +
-                        getP(i, j - 1, k) + getP(i, j + 1, k) +
-                        getP(i, j, k - 1) + getP(i, j, k + 1);
+                        nb(i - 1, j, k) + nb(i + 1, j, k) +
+                        nb(i, j - 1, k) + nb(i, j + 1, k) +
+                        nb(i, j, k - 1) + nb(i, j, k + 1);
                     const float rhs = div[c] * h2 * inv_dt;
                     const float p_gs = (sum - rhs) / 6.0f;
                     P[c] += params.sor_omega * (p_gs - P[c]);
                 }
     }
 
-    // 3) Subtract the pressure gradient from velocity (all faces, boundary-aware).
+    // 3) Subtract the pressure gradient from velocity (boundary-aware). Faces
+    // touching a solid cell are skipped — their velocity is the enforced solid
+    // velocity and must not be perturbed by the projection.
     const float scale = dt * inv_h;
     for (int k = 0; k < nz; ++k)
         for (int j = 0; j < ny; ++j)
             for (int i = 0; i <= nx; ++i) {
+                if (isSolidCell(i - 1, j, k) || isSolidCell(i, j, k)) continue;
                 grid.velXAt(i, j, k) -= scale * (getP(i, j, k) - getP(i - 1, j, k));
             }
     for (int k = 0; k < nz; ++k)
         for (int j = 0; j <= ny; ++j)
             for (int i = 0; i < nx; ++i) {
+                if (isSolidCell(i, j - 1, k) || isSolidCell(i, j, k)) continue;
                 grid.velYAt(i, j, k) -= scale * (getP(i, j, k) - getP(i, j - 1, k));
             }
     for (int k = 0; k <= nz; ++k)
         for (int j = 0; j < ny; ++j)
             for (int i = 0; i < nx; ++i) {
+                if (isSolidCell(i, j, k - 1) || isSolidCell(i, j, k)) continue;
                 grid.velZAt(i, j, k) -= scale * (getP(i, j, k) - getP(i, j, k - 1));
             }
 }
@@ -557,6 +677,10 @@ void step(FluidGrid& grid,
     }
 
     setWallBcs(grid, params.boundary);
+    // Collider coupling: stop scalar content from advecting into solids, and pin
+    // the velocity at solid faces (no-op when the domain has no colliders).
+    clearSolidScalars(grid, params);
+    if (params.channel_velocity) enforceSolidBoundaries(grid);
 
     // 2) Combustion: burn fuel -> heat + smoke (before buoyancy so released heat
     // lifts this step). Opt-in; no-op when fire is disabled.
@@ -589,10 +713,15 @@ void step(FluidGrid& grid,
             dissipate(grid.vel_z, params.velocity_dissipation, dt);
             clampVelocity(grid, params.max_velocity);
         }
+        // Re-pin solid faces after the body forces / dissipation perturbed them,
+        // so the projection's divergence sees the true (possibly moving) solid
+        // velocity and the result stays incompressible around the collider.
+        enforceSolidBoundaries(grid);
         if (!params.skip_pressure_projection) {
             project(grid, params, dt);
         }
         setWallBcs(grid, params.boundary);
+        enforceSolidBoundaries(grid);
     }
 }
 

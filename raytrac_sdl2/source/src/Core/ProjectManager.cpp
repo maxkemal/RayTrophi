@@ -3095,6 +3095,12 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["show_background"] = settings.show_background;
     j["persistent_tonemap"] = settings.persistent_tonemap;
     
+    // Animation Sequencer Settings
+    j["animation_start_frame"] = settings.animation_start_frame;
+    j["animation_end_frame"] = settings.animation_end_frame;
+    j["animation_fps"] = settings.animation_fps;
+    j["animation_output_folder"] = settings.animation_output_folder;
+    
     return j;
 }
 
@@ -3132,6 +3138,12 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     settings.aspect_ratio_index = j.value("aspect_ratio_index", settings.aspect_ratio_index);
     settings.show_background = j.value("show_background", settings.show_background);
     settings.persistent_tonemap = j.value("persistent_tonemap", settings.persistent_tonemap);
+    
+    // Animation Sequencer Settings
+    settings.animation_start_frame = j.value("animation_start_frame", 0);
+    settings.animation_end_frame = j.value("animation_end_frame", 100);
+    settings.animation_fps = j.value("animation_fps", 24);
+    settings.animation_output_folder = j.value("animation_output_folder", "");
     
     SCENE_LOG_INFO("[ProjectManager] Loaded render settings.");
 }
@@ -3906,6 +3918,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         e["angular_jitter"] = emitter.angular_jitter;
         e["enabled"] = emitter.enabled;
         e["seed"] = emitter.seed;
+        e["burst_count"] = emitter.burst_count;
         return e;
     };
 
@@ -4003,6 +4016,8 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"cpu_threads", domain.fluid_params.cpu_threads},
             {"parallel_particle_threshold", domain.fluid_params.parallel_particle_threshold},
             {"free_surface", domain.fluid_params.free_surface},
+            {"ghost_fluid_surface", domain.fluid_params.ghost_fluid_surface},
+            {"variational_solids", domain.fluid_params.variational_solids},
             {"flip_blend", domain.fluid_params.flip_blend},
             {"reseed_enabled", domain.fluid_params.reseed_enabled},
             {"reseed_target_per_cell", domain.fluid_params.reseed_target_per_cell},
@@ -4218,7 +4233,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         emitter.enabled = item.value("enabled", emitter.enabled);
         emitter.seed = item.value("seed", emitter.seed);
         emitter.accumulator = 0.0f;
-        emitter.burst_count = 0;
+        emitter.burst_count = item.value("burst_count", 0);
         return emitter;
     };
 
@@ -4331,6 +4346,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.cpu_threads = f.value("cpu_threads", domain.fluid_params.cpu_threads);
             domain.fluid_params.parallel_particle_threshold = f.value("parallel_particle_threshold", domain.fluid_params.parallel_particle_threshold);
             domain.fluid_params.free_surface = f.value("free_surface", domain.fluid_params.free_surface);
+            domain.fluid_params.ghost_fluid_surface = f.value("ghost_fluid_surface", domain.fluid_params.ghost_fluid_surface);
+            domain.fluid_params.variational_solids = f.value("variational_solids", domain.fluid_params.variational_solids);
             // New params (added with FLIP + reseed). value() falls back to the
             // struct default if the project file predates them — old projects
             // load with sane defaults, no migration step needed.
@@ -4490,6 +4507,13 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             for (const auto& collider_item : *colliders) {
                 if (!collider_item.is_object()) continue;
                 auto& added_col = system.runtime->addCollider(parseCollider(collider_item));
+                // ObjectConvexDecomp / ObjectMeshBVH are deprecated — consolidated
+                // onto the SDF collider. Migrate legacy projects so they keep
+                // colliding (the enum values are still parsed for compatibility).
+                if (added_col.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp ||
+                    added_col.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH) {
+                    added_col.source_mode = RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF;
+                }
                 // Voxel colliders don't serialize their SDF grid — rebuild it from
                 // the source mesh on load. Pass THIS system's runtime explicitly
                 // (it is not the active system yet during load).

@@ -332,6 +332,17 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["max_velocity"] = d.fluid_params.max_velocity;
     j["fluid_params"]["viscosity_iterations"] = d.fluid_params.viscosity_iterations;
     j["fluid_params"]["current_preset"] = static_cast<int>(d.fluid_params.current_preset);
+    j["fluid_params"]["free_surface"] = d.fluid_params.free_surface;
+    j["fluid_params"]["ghost_fluid_surface"] = d.fluid_params.ghost_fluid_surface;
+    j["fluid_params"]["variational_solids"] = d.fluid_params.variational_solids;
+    j["fluid_params"]["domain_motion_coupling"] = d.fluid_params.domain_motion_coupling;
+    j["fluid_params"]["reseed_target_per_cell"] = d.fluid_params.reseed_target_per_cell;
+    j["fluid_params"]["reseed_min_per_cell"] = d.fluid_params.reseed_min_per_cell;
+    j["fluid_params"]["reseed_max_per_cell"] = d.fluid_params.reseed_max_per_cell;
+    j["fluid_params"]["sor_omega"] = d.fluid_params.sor_omega;
+    j["fluid_params"]["max_affine"] = d.fluid_params.max_affine;
+    j["fluid_params"]["cpu_threads"] = d.fluid_params.cpu_threads;
+    j["fluid_params"]["parallel_particle_threshold"] = d.fluid_params.parallel_particle_threshold;
 
     j["fluid_seed_min"] = vec3ToJson(d.fluid_seed_min);
     j["fluid_seed_max"] = vec3ToJson(d.fluid_seed_max);
@@ -408,6 +419,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["smoke_generation"] = d.smoke_generation;
     j["flame_dissipation"] = d.flame_dissipation;
     j["fire_max_temperature"] = d.fire_max_temperature;
+    j["fire_expansion"] = d.fire_expansion;
     j["turbulence_strength"] = d.turbulence_strength;
     j["turbulence_scale"] = d.turbulence_scale;
     j["turbulence_octaves"] = d.turbulence_octaves;
@@ -466,6 +478,17 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("current_preset"))
             d.fluid_params.current_preset =
                 static_cast<RayTrophiSim::Fluid::APICSolverParams::FluidPreset>(fp["current_preset"].get<int>());
+        if (fp.contains("free_surface")) d.fluid_params.free_surface = fp["free_surface"];
+        if (fp.contains("ghost_fluid_surface")) d.fluid_params.ghost_fluid_surface = fp["ghost_fluid_surface"];
+        if (fp.contains("variational_solids")) d.fluid_params.variational_solids = fp["variational_solids"];
+        if (fp.contains("domain_motion_coupling")) d.fluid_params.domain_motion_coupling = fp["domain_motion_coupling"];
+        if (fp.contains("reseed_target_per_cell")) d.fluid_params.reseed_target_per_cell = fp["reseed_target_per_cell"];
+        if (fp.contains("reseed_min_per_cell")) d.fluid_params.reseed_min_per_cell = fp["reseed_min_per_cell"];
+        if (fp.contains("reseed_max_per_cell")) d.fluid_params.reseed_max_per_cell = fp["reseed_max_per_cell"];
+        if (fp.contains("sor_omega")) d.fluid_params.sor_omega = fp["sor_omega"];
+        if (fp.contains("max_affine")) d.fluid_params.max_affine = fp["max_affine"];
+        if (fp.contains("cpu_threads")) d.fluid_params.cpu_threads = fp["cpu_threads"];
+        if (fp.contains("parallel_particle_threshold")) d.fluid_params.parallel_particle_threshold = fp["parallel_particle_threshold"];
     }
 
     if (j.contains("fluid_seed_min")) d.fluid_seed_min = jsonToVec3(j["fluid_seed_min"]);
@@ -553,6 +576,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("smoke_generation")) d.smoke_generation = j["smoke_generation"];
     if (j.contains("flame_dissipation")) d.flame_dissipation = j["flame_dissipation"];
     if (j.contains("fire_max_temperature")) d.fire_max_temperature = j["fire_max_temperature"];
+    if (j.contains("fire_expansion")) d.fire_expansion = j["fire_expansion"];
     if (j.contains("turbulence_strength")) d.turbulence_strength = j["turbulence_strength"];
     if (j.contains("turbulence_scale")) d.turbulence_scale = j["turbulence_scale"];
     if (j.contains("turbulence_octaves")) d.turbulence_octaves = j["turbulence_octaves"];
@@ -613,6 +637,7 @@ RayTrophiSim::SimulationFlowSourceDesc jsonToFlowSource(const json& j) {
     return fs;
 }
 
+// NOTE: SceneSerializer::Serialize is currently NOT used. Saving is handled by ProjectManager.
 void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& settings, const std::string& filepath) {
     json root;
 
@@ -692,6 +717,12 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
     root["settings"]["use_vulkan"] = settings.use_vulkan;
     root["settings"]["backend"] = settings.use_vulkan ? "vulkan" : (settings.use_optix ? "optix" : "cpu");
     root["settings"]["persistent_tonemap"] = settings.persistent_tonemap;
+    
+    // Animation Sequencer Settings
+    root["settings"]["animation_start_frame"] = settings.animation_start_frame;
+    root["settings"]["animation_end_frame"] = settings.animation_end_frame;
+    root["settings"]["animation_fps"] = settings.animation_fps;
+    root["settings"]["animation_output_folder"] = settings.animation_output_folder;
 
     // 6. PostFX
     const auto& pp = scene.color_processor.params;
@@ -820,6 +851,7 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
     }
 }
 
+// NOTE: SceneSerializer::Deserialize is only used as a fallback legacy loader (e.g. for non-.rtp files) in scene_ui.cpp.
 bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Renderer& renderer, Backend::IBackend* backend, const std::string& filepath) {
     simdjson::dom::parser parser;
     simdjson::dom::element root;
@@ -1016,6 +1048,14 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         settings.use_optix = optix;
         settings.use_vulkan = vulkan;
         settings.persistent_tonemap = tonemap;
+        
+        // Animation Sequencer Settings
+        int64_t anim_start = 0, anim_end = 100, anim_fps = 24;
+        std::string_view anim_out_sv;
+        if (!s["animation_start_frame"].get(anim_start)) settings.animation_start_frame = (int)anim_start;
+        if (!s["animation_end_frame"].get(anim_end)) settings.animation_end_frame = (int)anim_end;
+        if (!s["animation_fps"].get(anim_fps)) settings.animation_fps = (int)anim_fps;
+        if (!s["animation_output_folder"].get(anim_out_sv)) settings.animation_output_folder = std::string(anim_out_sv);
     }
 
     // 6. PostFX
@@ -1212,7 +1252,15 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                     for (const auto& cj : rtj["colliders"]) {
                         auto col_desc = jsonToCollider(cj);
                         auto& added_col = system.runtime->addCollider(col_desc);
-                        
+
+                        // ObjectConvexDecomp / ObjectMeshBVH are deprecated — the SDF
+                        // collider supersedes both. Migrate legacy projects to SDF so
+                        // they keep colliding (the enum values are still parsed).
+                        if (added_col.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp ||
+                            added_col.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH) {
+                            added_col.source_mode = RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF;
+                        }
+
                         // If it's ObjectMeshSDF and has a valid source_name, trigger rebuild.
                         // Pass THIS system's runtime explicitly: during load it is not the
                         // active system yet (active index is set after all systems are read),

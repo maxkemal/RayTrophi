@@ -1829,7 +1829,15 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Upper ceiling limit for thermal values inside combustion voxels.");
                         }
-                        
+                        ImGui::DragFloat("Thermal Expansion (Blast)", &domain.fire_expansion, 0.02f, 0.0f, 20.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Hot gas dilates: the pressure solve targets an outward divergence\n"
+                                              "proportional to (temperature - ambient). Gives fire its rolling\n"
+                                              "billow, and a sudden fuel ignition becomes a real explosion blast.\n"
+                                              "0 = incompressible smoke. Note: this domain runs on the CPU solver\n"
+                                              "while expansion is > 0 (GPU grid path doesn't model expansion yet).");
+                        }
+
                         ImGui::Spacing();
                         ImGui::TextDisabled("Physics Note: Remember to add a Flow Source emitting Fuel and Temperature.\n"
                                              "Set shader mode to 'Blackbody' in the Shading tab for realistic fire rendering.");
@@ -2998,36 +3006,52 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             const bool has_project = !proj_path.empty();
             const bool has_systems = !scene.particle_systems.empty();
             const bool can_bake = has_project && has_systems;
+            const bool baking = scene.isSimulationBaking();
 
-            if (!can_bake) ImGui::BeginDisabled();
-            if (ImGui::Button("Bake Simulation to Disk (point cache)##SimPointBake", ImVec2(-1, 30))) {
-                const std::string dir = SceneData::simCacheDirForProject(proj_path);
-                int s = std::min(ui_ctx.render_settings.animation_start_frame,
-                                 ui_ctx.render_settings.animation_end_frame);
-                int e = std::max(ui_ctx.render_settings.animation_start_frame,
-                                 ui_ctx.render_settings.animation_end_frame);
-                if (e <= s) { s = 0; e = 100; }  // sane default if no range set
-                const float fps = static_cast<float>(std::max(1, ui_ctx.render_settings.animation_fps));
+            if (baking) {
+                // ── Live progress + cancel (the bake runs frame-driven on the main
+                //    thread via tickSimulationDiskBake, so the UI stays responsive).
+                const float frac = scene.simBakeProgress();
+                char overlay[64];
+                std::snprintf(overlay, sizeof(overlay), "Baking  frame %d / %d",
+                              scene.simBakeCurrentFrame(), scene.simBakeEndFrame());
+                ImGui::ProgressBar(frac, ImVec2(-1, 24), overlay);
+                if (ImGui::Button("Cancel Bake##SimPointBakeCancel", ImVec2(-1, 24))) {
+                    scene.cancelSimulationDiskBake();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Stop the bake and discard the partial cache on disk.");
+                }
+            } else {
+                if (!can_bake) ImGui::BeginDisabled();
+                if (ImGui::Button("Bake Simulation to Disk (point cache)##SimPointBake", ImVec2(-1, 30))) {
+                    const std::string dir = SceneData::simCacheDirForProject(proj_path);
+                    int s = std::min(ui_ctx.render_settings.animation_start_frame,
+                                     ui_ctx.render_settings.animation_end_frame);
+                    int e = std::max(ui_ctx.render_settings.animation_start_frame,
+                                     ui_ctx.render_settings.animation_end_frame);
+                    if (e <= s) { s = 0; e = 100; }  // sane default if no range set
+                    const float fps = static_cast<float>(std::max(1, ui_ctx.render_settings.animation_fps));
 
-                drainSimulationMutationBackends();
-                const bool ok = scene.bakeSimulationToDisk(dir, s, e, fps);
-                SCENE_LOG_INFO(ok ? ("Simulation point cache baked to: " + dir)
-                                  : std::string("Simulation point cache bake FAILED."));
-
-                ui_ctx.renderer.resetCPUAccumulation();
-                if (ui_ctx.backend_ptr) ui_ctx.backend_ptr->resetAccumulation();
-                ui_ctx.start_render = true;
+                    drainSimulationMutationBackends();
+                    // Non-blocking: arm the cooperative bake. The per-frame driver in
+                    // renderSceneUI advances it (tickSimulationDiskBake) while the
+                    // progress bar above tracks it; Cancel aborts mid-bake.
+                    if (!scene.beginSimulationDiskBake(dir, s, e, fps)) {
+                        SCENE_LOG_INFO("Simulation point cache bake could not start (no systems / invalid range).");
+                    }
+                }
+                if (!can_bake) ImGui::EndDisabled();
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(has_project
+                        ? "Re-simulates the timeline range and writes ALL particle systems\n"
+                          "(fluid particles + foam + gas grids) to <project>.simcache.\n"
+                          "Reloading the project restores the bake without re-simulating.\n"
+                          "Runs in the background with a progress bar — the UI stays responsive."
+                        : "Save the project first — the cache is written next to the project file.");
+                }
             }
-            if (!can_bake) ImGui::EndDisabled();
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip(has_project
-                    ? "Re-simulates the timeline range and writes ALL particle systems\n"
-                      "(fluid particles + foam + gas grids) to <project>.simcache.\n"
-                      "Reloading the project restores the bake without re-simulating.\n"
-                      "Blocks the UI during the bake."
-                    : "Save the project first — the cache is written next to the project file.");
-            }
-            if (scene.hasValidSimDiskCache()) {
+            if (!baking && scene.hasValidSimDiskCache()) {
                 ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Bake cache active (scrub reads from disk).");
                 ImGui::SameLine();
                 if (ImGui::SmallButton("Clear Bake##SimPointBakeClear")) {
@@ -3200,7 +3224,16 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             ImGui::Checkbox("Collider Enabled##CollTab", &c.enabled);
             ImGui::TextDisabled("Source Reference: %s", c.source_name.empty() ? "Manual Primitive" : c.source_name.c_str());
 
-            const char* modes[] = { "Plane Y Height", "Object AABB Volume", "Object OBB (Oriented)", "Sphere Primitive", "Capsule Primitive", "Object Mesh SDF (Voxel)", "Object Convex Decomp", "Object Mesh BVH" };
+            // ObjectConvexDecomp / ObjectMeshBVH are deprecated: the SDF collider
+            // (true signed field, filled interior, sub-grid weights, BVH cook)
+            // supersedes both. Migrate any legacy collider to SDF on display and
+            // drop them from the picker; the enum values remain for project load.
+            if (c.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp ||
+                c.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH) {
+                c.source_mode = RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF;
+                if (!c.source_name.empty()) scene.rebuildSDFColliderAsync(c);
+            }
+            const char* modes[] = { "Plane Y Height", "Object AABB Volume", "Object OBB (Oriented)", "Sphere Primitive", "Capsule Primitive", "Object Mesh SDF (Voxel)" };
             int mode_idx = static_cast<int>(c.source_mode);
             if (ImGui::Combo("Collision Mode##CollTab", &mode_idx, modes, IM_ARRAYSIZE(modes))) {
                 c.source_mode = static_cast<RayTrophiSim::ParticleColliderSourceMode>(mode_idx);
@@ -3315,16 +3348,6 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                     } else {
                         ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.4f, 1.0f), "SDF Status: Compiled (%d^3 voxels)", c.sdf_nx);
                     }
-                }
-            } else if (c.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp ||
-                       c.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH) {
-                if (c.source_name.empty()) {
-                    ImGui::TextDisabled("Please bind a scene geometry reference above.");
-                } else {
-                    ImGui::Text("Mesh Reference: %s", c.source_name.c_str());
-                    ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.4f, 1.0f), "Mode: Active (Dynamic Proxy Model)");
-                    ImGui::DragFloat("Mesh decimation ratio##CollTab", &c.decimation_ratio, 0.01f, 0.01f, 1.0f, "%.2f");
-                    ImGui::Checkbox("Render Bounding Wireframe##CollTab", &c.draw_wireframe);
                 }
             }
             ImGui::Spacing();
