@@ -2097,8 +2097,8 @@ void OptixAccelManager::initFoliageKernel() {
     if (!std::filesystem::exists(ptxPath)) {
         ptxPath = "../foliage_deform.ptx"; // Try parent
         if (!std::filesystem::exists(ptxPath)) {
-             // Try raytrac_sdl2 folder if running from build
-             ptxPath = "../../raytrac_sdl2/foliage_deform.ptx";
+             // Try RayTrophiStudio folder if running from build
+             ptxPath = "../../RayTrophiStudio/foliage_deform.ptx";
         }
     }
     

@@ -30,7 +30,7 @@
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{5bac7720-07df-4c9c-b8ac-aaf8fe410cd8}</ProjectGuid>
-    <RootNamespace>raytracsdl2</RootNamespace>
+    <RootNamespace>RayTrophiStudio</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
     <ProjectName>RayTrophi Studio</ProjectName>
   </PropertyGroup>
