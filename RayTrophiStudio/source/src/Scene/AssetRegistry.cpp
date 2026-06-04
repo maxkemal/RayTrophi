@@ -409,11 +409,11 @@ std::filesystem::path AssetRegistry::resolveDefaultRoot() {
     const std::vector<std::filesystem::path> candidates = {
         exe_dir / "assets",
         exe_dir / ".." / "assets",
-        exe_dir / ".." / ".." / "raytrac_sdl2" / "assets",
+        exe_dir / ".." / ".." / "RayTrophiStudio" / "assets",
         "assets",
         "../assets",
-        "raytrac_sdl2/assets",
-        "../../raytrac_sdl2/assets"
+        "RayTrophiStudio/assets",
+        "../../RayTrophiStudio/assets"
     };
 
     for (const auto& candidate : candidates) {

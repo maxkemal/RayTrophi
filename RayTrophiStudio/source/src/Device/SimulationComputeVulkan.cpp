@@ -59,7 +59,7 @@ static std::vector<uint32_t> loadSPV(const std::string& path) {
 
 static std::string findShaderDir() {
     for (const char* dir : {"shaders", "source/shaders", "../shaders",
-                             "raytrac_sdl2/source/shaders"}) {
+                             "RayTrophiStudio/source/shaders"}) {
         if (std::filesystem::exists(std::string(dir) + "/skinning.spv"))
             return dir;
     }
