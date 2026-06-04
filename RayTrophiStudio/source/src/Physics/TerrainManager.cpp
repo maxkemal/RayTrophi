@@ -3625,19 +3625,13 @@ void TerrainManager::initCuda() {
     // Force CUDART initialization to ensure interop is ready
     cudaFree(0);
 
-    // Load PTX Module
-    std::string ptxPath = "erosion_kernels.ptx";
-    if (!std::filesystem::exists(ptxPath)) {
-         // Try project root or build dir
-         ptxPath = "../erosion_kernels.ptx"; 
-    }
-    
-    // Check absolute path based on execution
-    // Assuming run from build dir? User said Compile PTX output is E:/.../raytrac_sdl2/erosion_kernels.ptx
-    // I'll try that specific path if relative fails, or just assume relative to executable.
-    
-    // Using simple path first
-    res = cuModuleLoad((CUmodule*)&cudaModule, "erosion_kernels.ptx");
+    // Load PTX Module (prefer ptx/ subfolder next to exe, fall back to legacy root / build layout)
+    std::string ptxPath = "ptx/erosion_kernels.ptx";
+    if (!std::filesystem::exists(ptxPath)) ptxPath = "erosion_kernels.ptx";
+    if (!std::filesystem::exists(ptxPath)) ptxPath = "../ptx/erosion_kernels.ptx";
+    if (!std::filesystem::exists(ptxPath)) ptxPath = "../erosion_kernels.ptx";
+
+    res = cuModuleLoad((CUmodule*)&cudaModule, ptxPath.c_str());
     if (res != CUDA_SUCCESS) {
         // Try reading file content manually to debug or just informative error
         SCENE_LOG_ERROR("[GPU Erosion] Failed to load module 'erosion_kernels.ptx' (Error: " + std::to_string(res) + ")");

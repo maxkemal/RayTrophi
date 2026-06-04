@@ -8,11 +8,14 @@ echo   Supports: GTX 9xx, 10xx, 16xx, RTX
 echo ========================================
 echo.
 
+REM PTX files are built into (and loaded from) a dedicated ptx\ subfolder
+if not exist "%~dp0ptx" mkdir "%~dp0ptx"
+
 echo.
 echo Compiling raygen_kernels.cu...
 "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" ^
 -ptx "%~dp0source\src\Device\raygen.cu" ^
--o "%~dp0raygen.ptx" ^
+-o "%~dp0ptx\raygen.ptx" ^
 -I"C:\ProgramData\NVIDIA Corporation\OptiX SDK 9.0.0\include" ^
 -I"%~dp0source\include" ^
 -I"%~dp0libs" ^
@@ -26,7 +29,7 @@ echo.
 echo Compiling miss_kernels.cu...
 "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" ^
 -ptx "%~dp0source\src\Device\miss_kernels.cu" ^
--o "%~dp0miss_kernels.ptx" ^
+-o "%~dp0ptx\miss_kernels.ptx" ^
 -I"C:\ProgramData\NVIDIA Corporation\OptiX SDK 9.0.0\include" ^
 -I"%~dp0source\include" ^
 -I"%~dp0libs" ^
@@ -40,7 +43,7 @@ echo.
 echo Compiling hitgroup_kernels.cu...
 "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" ^
 -ptx "%~dp0source\src\Device\hitgroup_kernels.cu" ^
--o "%~dp0hitgroup_kernels.ptx" ^
+-o "%~dp0ptx\hitgroup_kernels.ptx" ^
 -I"C:\ProgramData\NVIDIA Corporation\OptiX SDK 9.0.0\include" ^
 -I"%~dp0source\include" ^
 -I"%~dp0libs" ^
@@ -54,7 +57,7 @@ echo.
 echo Compiling erosion_kernels.cu...
 "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" ^
 -ptx "%~dp0source\src\Device\erosion_kernels.cu" ^
--o "%~dp0erosion_kernels.ptx" ^
+-o "%~dp0ptx\erosion_kernels.ptx" ^
 -I"%~dp0source\include" ^
 -I"%~dp0libs" ^
 -I"%~dp0source\src\Device" ^
@@ -67,7 +70,7 @@ echo.
 echo Compiling foliage_deform.cu...
 "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" ^
 -ptx "%~dp0source\src\Device\foliage_deform.cu" ^
--o "%~dp0foliage_deform.ptx" ^
+-o "%~dp0ptx\foliage_deform.ptx" ^
 -I"%~dp0source\include" ^
 -I"%~dp0libs" ^
 -I"%~dp0source\src\Device" ^
@@ -90,19 +93,15 @@ echo   All PTX files compiled successfully!
 echo ========================================
 
 echo.
-echo Deploying PTX files to runtime directories...
-set DEPLOY1=%~dp0..\x64\Release
-set DEPLOY2=%~dp0..\x64\Debug
-set DEPLOY3=%~dp0
+echo Deploying PTX files to runtime ptx\ subfolders...
+set OUT1=%~dp0..\x64\Release
+set OUT2=%~dp0..\x64\Debug
 
-for %%d in ("%DEPLOY1%" "%DEPLOY2%" "%DEPLOY3%") do (
+for %%d in ("%OUT1%" "%OUT2%") do (
     if exist %%d (
-        echo   Copying to %%d
-        copy /Y "%~dp0raygen.ptx" %%d >nul 2>&1
-        copy /Y "%~dp0miss_kernels.ptx" %%d >nul 2>&1
-        copy /Y "%~dp0hitgroup_kernels.ptx" %%d >nul 2>&1
-        copy /Y "%~dp0erosion_kernels.ptx" %%d >nul 2>&1
-        copy /Y "%~dp0foliage_deform.ptx" %%d >nul 2>&1
+        if not exist "%%~d\ptx" mkdir "%%~d\ptx"
+        echo   Copying to %%~d\ptx
+        copy /Y "%~dp0ptx\*.ptx" "%%~d\ptx" >nul 2>&1
     )
 )
 echo Deploy complete.

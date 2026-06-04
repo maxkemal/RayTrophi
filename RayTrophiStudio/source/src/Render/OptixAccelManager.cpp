@@ -2093,14 +2093,11 @@ void OptixAccelManager::initFoliageKernel() {
     if (foliage_kernel_initialized) return;
 
     // Try to locate PTX file
-    std::string ptxPath = "foliage_deform.ptx";
-    if (!std::filesystem::exists(ptxPath)) {
-        ptxPath = "../foliage_deform.ptx"; // Try parent
-        if (!std::filesystem::exists(ptxPath)) {
-             // Try RayTrophiStudio folder if running from build
-             ptxPath = "../../RayTrophiStudio/foliage_deform.ptx";
-        }
-    }
+    std::string ptxPath = "ptx/foliage_deform.ptx";            // preferred: ptx/ next to exe
+    if (!std::filesystem::exists(ptxPath)) ptxPath = "foliage_deform.ptx";       // legacy: exe root
+    if (!std::filesystem::exists(ptxPath)) ptxPath = "../ptx/foliage_deform.ptx";
+    if (!std::filesystem::exists(ptxPath)) ptxPath = "../foliage_deform.ptx";
+    if (!std::filesystem::exists(ptxPath)) ptxPath = "../../RayTrophiStudio/foliage_deform.ptx"; // dev: run from build
     
     if (!std::filesystem::exists(ptxPath)) {
         SCENE_LOG_ERROR("[OptixAccelManager] foliage_deform.ptx NOT FOUND at: " + ptxPath);
