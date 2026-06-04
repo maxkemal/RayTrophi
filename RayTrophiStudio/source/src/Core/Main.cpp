@@ -1528,7 +1528,8 @@ bool initializeOptixIfAvailable() {
         }
 
         auto load_ptx = [](const std::wstring& filename) -> std::string {
-            std::filesystem::path ptx_path = filename;
+            std::filesystem::path ptx_path = std::filesystem::path(L"ptx") / filename;
+            if (!std::filesystem::exists(ptx_path)) ptx_path = filename; // legacy: PTX directly in exe dir
             std::ifstream file(ptx_path, std::ios::binary);
             if (!file.is_open()) {
                 throw std::runtime_error("Failed to open PTX file: " + WStringToString(ptx_path));
@@ -1580,7 +1581,8 @@ std::unique_ptr<Backend::IBackend> buildOptixBackendWorker() {
         }
 
         auto load_ptx = [](const std::wstring& filename) -> std::string {
-            std::filesystem::path ptx_path = filename;
+            std::filesystem::path ptx_path = std::filesystem::path(L"ptx") / filename;
+            if (!std::filesystem::exists(ptx_path)) ptx_path = filename; // legacy: PTX directly in exe dir
             std::ifstream file(ptx_path, std::ios::binary);
             if (!file.is_open()) {
                 throw std::runtime_error("Failed to open PTX file: " + WStringToString(ptx_path));
