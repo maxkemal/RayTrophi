@@ -887,6 +887,19 @@ private:
     bool show_scene_log = false; // Default closed
     bool focus_bottom_panel_next_frame = false;
     bool pending_project_ui_restore = false;
+    // --- Modern dockable panel layout (ImGui docking) ---
+    bool docking_enabled = true;        // Master toggle: dockable panels vs. legacy pinned layout
+    bool docking_layout_dirty = true;   // Rebuild the default DockBuilder layout next frame
+    void drawDockSpaceHost(UIContext& ctx); // Hosts the DockSpace + default layout, feeds viewport rect back to legacy offsets
+    // --- Detachable (tear-off) Properties sub-tabs ---
+    // Side-effect-free editor tabs can be popped into their own dockable window so two
+    // panels (e.g. Render Settings + Stylize) are usable at once. Indexed by active_properties_tab.
+    bool properties_tab_popped_[16] = {};
+    ImVec2 properties_pop_spawn_pos_[16] = {};          // where a freshly torn-off window first appears (cursor)
+    bool properties_pop_spawn_pending_[16] = {};        // true only for THIS-session button pops; serialized restores use the imgui.ini position
+    void drawPoppedTabContent(UIContext& ctx, int tab); // renders one popped tab's content
+    void drawPoppedPropertyWindows(UIContext& ctx);     // hosts all currently popped tabs as windows
+    void drawHairTabContent(UIContext& ctx);            // hair tab body (shared by main panel + popped window)
     float side_panel_width = 360.0f; // Resizable Left Panel width
     float bottom_panel_height = 100.0f; // Default to minimum height
     float preferred_bottom_panel_height = 100.0f; // Persist desired height; avoid shrinking permanently during minimized/small viewport frames

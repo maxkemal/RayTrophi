@@ -35,6 +35,7 @@
 #include "scene_data.h"    // Added explicit include
 #include "ui_modern.h"
 #include "imgui.h"
+#include "imgui_internal.h"   // DockBuilder* API + ImGuiDockNode for the dockable layout
 #include <SDL_image.h>
 #include "stb_image.h"
 #include "ImGuizmo.h"  // Transform gizmo
@@ -1094,7 +1095,7 @@ void SceneUI::drawLogPanelEmbedded()
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f, 1.0f, 0.3f, 1.0f));
 
     // AllowItemOverlap ile header oluşturuyoruz — böylece aynı satırda başka butonlar çalışır
-    ImGuiTreeNodeFlags hdrFlags = ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowItemOverlap;
+    ImGuiTreeNodeFlags hdrFlags = ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap;
     bool open = ImGui::CollapsingHeader(logTitle.c_str(), hdrFlags);
 
     if (titleChanged)
@@ -1284,9 +1285,8 @@ void SceneUI::drawResolutionPanel(UIContext& ctx)
         
         if (UIWidgets::BeginSection("Display Settings", ImVec4(0.5f, 0.5f, 0.6f, 1.0f))) {
             if (ImGui::Combo("Presets", &preset_index,
-                [](void* data, int idx, const char** out_text) {
-                    *out_text = ((ResolutionPreset*)data)[idx].name;
-                    return true;
+                [](void* data, int idx) -> const char* {
+                    return ((ResolutionPreset*)data)[idx].name;
                 }, presets, IM_ARRAYSIZE(presets)))
             {
                 if (preset_index != 0) {
@@ -1796,6 +1796,272 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
 
 // drawWorldContent moved to scene_ui_world.cpp
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DETACHABLE (TEAR-OFF) PROPERTIES SUB-TABS
+// Any sidebar tab can be dragged out of the rail into its own dockable/closable
+// window so several panels are usable at once. Content renders in exactly ONE place
+// (main panel XOR popped window), so side effects never double-fire.
+// ─────────────────────────────────────────────────────────────────────────────
+static bool isPoppablePropertyTab(int tab)
+{
+    return tab >= 0 && tab <= 12; // every sidebar tab index
+}
+
+static const char* poppablePropertyTabName(int tab)
+{
+    switch (tab) {
+        case 0:  return "Scene";
+        case 1:  return "Render Settings";
+        case 2:  return "Terrain";
+        case 3:  return "Water";
+        case 4:  return "Volumetric";
+        case 5:  return "Simulation";
+        case 6:  return "World";
+        case 7:  return "Modifiers";
+        case 8:  return "Hair & Fur";
+        case 9:  return "System";
+        case 10: return "Paint";
+        case 11: return "Scatter";
+        case 12: return "Stylize";
+        default: return "Panel";
+    }
+}
+
+// Renders a single tab's content. This is the single source of truth shared by the
+// main Properties switch and the torn-off windows (kept in lockstep with that switch).
+void SceneUI::drawPoppedTabContent(UIContext& ctx, int tab)
+{
+    switch (tab) {
+        case 0:  drawSceneHierarchy(ctx); break;
+        case 1:  drawRenderInspectorContent(ctx); break;
+        case 2:  if (show_terrain_tab) drawTerrainPanel(ctx); break;
+        case 3:
+            if (show_water_tab) {
+                if (ImGui::Button("Water##WaterSubtabPop")) active_water_subtab = 0;
+                ImGui::SameLine();
+                if (ImGui::Button("River##WaterSubtabPop")) active_water_subtab = 1;
+                ImGui::Separator();
+                if (active_water_subtab == 0) drawWaterPanel(ctx);
+                else                          drawRiverPanel(ctx);
+            }
+            break;
+        case 4:  if (show_volumetric_tab) drawVolumetricPanel(ctx); break;
+        case 5:  if (show_forcefield_tab) ForceFieldUI::drawForceFieldPanel(ctx, ctx.scene, &timeline); break;
+        case 6:  if (show_world_tab) drawWorldContent(ctx); break;
+        case 7:  drawModifiersPanel(ctx); break;
+        case 8:  if (show_hair_tab) drawHairTabContent(ctx); break;
+        case 9:  drawThemeSelector(); drawResolutionPanel(ctx); break;
+        case 10: if (show_paint_tab) drawPaintPanel(ctx); break;
+        case 11: if (show_scatter_tab) drawScatterBrushPanel(ctx); break;
+        case 12: if (show_stylize_tab) drawStylizePanel(ctx); break;
+        default: break;
+    }
+}
+
+// Hosts every currently popped tab as its own dockable/closable window. Closing a
+// window pops the tab back into the main Properties panel.
+void SceneUI::drawPoppedPropertyWindows(UIContext& ctx)
+{
+    // Works with or without docking: with docking these windows are dockable,
+    // otherwise they simply float.
+    for (int tab = 0; tab < 16; ++tab) {
+        if (!properties_tab_popped_[tab] || !isPoppablePropertyTab(tab))
+            continue;
+
+        bool open = true;
+        ImGui::SetNextWindowSize(ImVec2(380, 540), ImGuiCond_FirstUseEver);
+        // Fresh button pop -> appear at the cursor. Serialized restore -> keep the
+        // position imgui.ini already holds for this window.
+        if (properties_pop_spawn_pending_[tab]) {
+            ImGui::SetNextWindowPos(properties_pop_spawn_pos_[tab], ImGuiCond_Always);
+            properties_pop_spawn_pending_[tab] = false;
+        }
+        std::string title = std::string(poppablePropertyTabName(tab)) + "###prop_pop_" + std::to_string(tab);
+        if (ImGui::Begin(title.c_str(), &open, ImGuiWindowFlags_NoCollapse)) {
+            ImGui::PushItemWidth(UIWidgets::GetInspectorItemWidth());
+            UIWidgets::PushControlSurfaceStyle(ImVec4(0.62f, 0.74f, 0.98f, 1.0f)); // same modern surface as the docked panel
+            drawPoppedTabContent(ctx, tab);
+            UIWidgets::PopControlSurfaceStyle();
+            ImGui::PopItemWidth();
+        }
+        ImGui::End();
+
+        if (!open)
+            properties_tab_popped_[tab] = false; // closed -> back into the main panel
+    }
+}
+
+// Hair & Fur tab body. Extracted from the main Properties switch so the popped
+// window can reuse it verbatim (function-static caches persist as before).
+void SceneUI::drawHairTabContent(UIContext& ctx)
+{
+    // Get selected mesh triangles for hair generation target
+    static std::vector<std::shared_ptr<Triangle>> selectedMeshTriangles;
+    static std::string lastSelectedMeshName;
+    const std::vector<std::shared_ptr<Triangle>>* selectedTris = nullptr;
+
+    // Check if we have a selected object
+    bool hasValidSelection = (ctx.selection.selected.type == SelectableType::Object &&
+                             ctx.selection.selected.object != nullptr);
+
+    if (hasValidSelection) {
+        std::string selectedNodeName = ctx.selection.selected.object->getNodeName();
+        if (selectedNodeName != lastSelectedMeshName) {
+            lastSelectedMeshName = selectedNodeName;
+            selectedMeshTriangles.clear();
+            for (const auto& obj : ctx.scene.world.objects) {
+                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                if (tri && tri->getNodeName() == selectedNodeName) {
+                    selectedMeshTriangles.push_back(tri);
+                }
+            }
+        }
+        if (!selectedMeshTriangles.empty()) {
+            selectedTris = &selectedMeshTriangles;
+        }
+    } else {
+        if (!lastSelectedMeshName.empty()) {
+            lastSelectedMeshName.clear();
+            selectedMeshTriangles.clear();
+        }
+        selectedTris = nullptr;
+    }
+
+    if (!hairUI.onOpenFileDialog) {
+         hairUI.onOpenFileDialog = [](const wchar_t* filter) {
+             return SceneUI::openFileDialogW(filter);
+         };
+    }
+    hairUI.render(ctx.renderer.getHairSystem(), selectedTris, &ctx.renderer, [&ctx, this]() {
+        this->ensureCPUSyncForPicking(ctx);
+    });
+
+    ctx.renderer.hideInterpolatedHair = hairUI.shouldHideChildren();
+
+    static Hair::HairMaterialParams lastMaterial;
+    static bool firstFrame = true;
+    Hair::HairMaterialParams currentMaterial = hairUI.getMaterial();
+
+    bool materialChanged = firstFrame ||
+        (lastMaterial.colorMode != currentMaterial.colorMode) ||
+        (lastMaterial.melanin != currentMaterial.melanin) ||
+        (lastMaterial.melaninRedness != currentMaterial.melaninRedness) ||
+        (lastMaterial.roughness != currentMaterial.roughness) ||
+        (lastMaterial.radialRoughness != currentMaterial.radialRoughness) ||
+        (lastMaterial.ior != currentMaterial.ior) ||
+        (lastMaterial.cuticleAngle != currentMaterial.cuticleAngle) ||
+        (lastMaterial.coat != currentMaterial.coat) ||
+        (std::abs(lastMaterial.color.x - currentMaterial.color.x) > 0.001f) ||
+        (std::abs(lastMaterial.color.y - currentMaterial.color.y) > 0.001f) ||
+        (std::abs(lastMaterial.color.z - currentMaterial.color.z) > 0.001f) ||
+        (std::abs(lastMaterial.coatTint.x - currentMaterial.coatTint.x) > 0.001f) ||
+        (std::abs(lastMaterial.coatTint.y - currentMaterial.coatTint.y) > 0.001f) ||
+        (std::abs(lastMaterial.coatTint.z - currentMaterial.coatTint.z) > 0.001f);
+
+    if (materialChanged) {
+        lastMaterial = currentMaterial;
+        firstFrame = false;
+    }
+
+    if (materialChanged) {
+        ctx.renderer.setHairMaterial(currentMaterial);
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.renderer.updateBackendMaterials(ctx.scene);
+            ctx.start_render = true;
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODERN DOCKABLE LAYOUT
+// A full-viewport host window owns an ImGui DockSpace with a pass-through central
+// node (so the SDL-rendered 3D viewport shows through). Panels (Properties,
+// BottomPanel, and any floating tool window) dock into it and become freely
+// movable / tabbable / closable.
+//
+// The 3D viewport is NOT an ImGui window: picking / gizmos / overlays derive their
+// region from side_panel_width / bottom_panel_height / menu_height. To keep those
+// aligned no matter where panels are docked, we read the *central node* rect every
+// frame and feed it back into those legacy members.
+// ─────────────────────────────────────────────────────────────────────────────
+void SceneUI::drawDockSpaceHost(UIContext& ctx)
+{
+    if (!docking_enabled) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    const float menu_height = getMainMenuReservedHeight();
+    const float status_bar_height = 24.0f;
+
+    const ImVec2 host_pos(0.0f, menu_height);
+    const ImVec2 host_size(io.DisplaySize.x,
+                           (std::max)(0.0f, io.DisplaySize.y - menu_height - status_bar_height));
+
+    ImGui::SetNextWindowPos(host_pos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(host_size, ImGuiCond_Always);
+
+    const ImGuiWindowFlags host_flags =
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDocking |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::Begin("##RayTrophiDockHost", nullptr, host_flags);
+    ImGui::PopStyleVar(3);
+
+    // NOTE: bump this string whenever the default layout changes — a new id has no
+    // persisted node in imgui.ini, so the correct default rebuilds and any stale
+    // user layout (e.g. an old full-width bottom panel) is discarded automatically.
+    const ImGuiID dockspace_id = ImGui::GetID("RayTrophiDockSpace_v2");
+
+    // (Re)build the default layout once, or when the user requests a reset.
+    if (docking_layout_dirty || ImGui::DockBuilderGetNode(dockspace_id) == nullptr) {
+        docking_layout_dirty = false;
+        ImGui::DockBuilderRemoveNode(dockspace_id);
+        ImGui::DockBuilderAddNode(dockspace_id,
+            ImGuiDockNodeFlags_DockSpace | ImGuiDockNodeFlags_PassthruCentralNode);
+        ImGui::DockBuilderSetNodeSize(dockspace_id, host_size);
+
+        const float left_ratio = (host_size.x > 1.0f)
+            ? std::clamp(side_panel_width / host_size.x, 0.12f, 0.45f) : 0.22f;
+        const float bottom_ratio = (host_size.y > 1.0f)
+            ? std::clamp(bottom_panel_height / host_size.y, 0.12f, 0.50f) : 0.26f;
+
+        ImGuiID dock_main = dockspace_id;
+        ImGuiID dock_left = ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Left, left_ratio, nullptr, &dock_main);
+        ImGuiID dock_bottom = ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Down, bottom_ratio, nullptr, &dock_main);
+
+        ImGui::DockBuilderDockWindow("Properties", dock_left);
+        ImGui::DockBuilderDockWindow("BottomPanel", dock_bottom);
+        ImGui::DockBuilderFinish(dockspace_id);
+    }
+
+    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
+
+    // Keep viewport picking / gizmos / overlays aligned: the central (empty) node IS
+    // the 3D viewport region, so mirror its rect into the legacy offset members.
+    if (ImGuiDockNode* central = ImGui::DockBuilderGetCentralNode(dockspace_id)) {
+        const float left_inset = (std::max)(0.0f, central->Pos.x);
+        const float central_bottom = central->Pos.y + central->Size.y;
+        const float host_bottom = host_pos.y + host_size.y;
+
+        if (showSidePanel)
+            side_panel_width = left_inset;
+
+        const float derived_bottom = (std::max)(0.0f, host_bottom - central_bottom);
+        if (derived_bottom > 1.0f) {
+            bottom_panel_height = derived_bottom;
+            preferred_bottom_panel_height = derived_bottom;
+        }
+    }
+
+    ImGui::End();
+}
+
 void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 {
     const float menu_height = getMainMenuReservedHeight();
@@ -1804,24 +2070,30 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
     float target_height = screen_y - menu_height - status_bar_height;
 
     // Panel ayarları
-    // Lock Height to target_height (MinY = MaxY), allow Width resize (300-800)
-    ImGui::SetNextWindowSizeConstraints(
-        ImVec2(300, target_height),                 
-        ImVec2(800, target_height) 
-    );
+    // Lock Height to target_height (MinY = MaxY), allow Width resize (300-800).
+    // When docking is enabled the dock node owns the geometry, so we skip the lock.
+    if (!docking_enabled) {
+        ImGui::SetNextWindowSizeConstraints(
+            ImVec2(300, target_height),
+            ImVec2(800, target_height)
+        );
+    }
 
     // LEFT SIDE DOCKING
     ImGuiIO& io = ImGui::GetIO();
     
-    // Position at (0, menu_height) -> TOP LEFT
-    ImGui::SetNextWindowPos(ImVec2(0, menu_height), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(side_panel_width, target_height), ImGuiCond_FirstUseEver);
+    // Legacy pinned layout: hard-anchor at (0, menu_height) with no title bar.
+    // Docking layout: let the dock node place/size the window; keep the title bar
+    // as the drag/tab handle.
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+    if (!docking_enabled) {
+        ImGui::SetNextWindowPos(ImVec2(0, menu_height), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(side_panel_width, target_height), ImGuiCond_FirstUseEver);
+        flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar;
+    }
     if (focus_properties_panel_next_frame) {
         ImGui::SetNextWindowFocus();
     }
-
-    // Remove TitleBar and Resize for a seamless docked look
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse;
 
     // Panel shell styling
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
@@ -1839,8 +2111,11 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         ImDrawList* parent_dl = ImGui::GetWindowDrawList();
         ImVec2 win_pos = ImGui::GetWindowPos();
         ImVec2 win_size = ImGui::GetWindowSize();
-        // Update width if user resized
-        side_panel_width = ImGui::GetWindowWidth();
+        // Update width if user resized. Under docking the viewport left inset is
+        // derived from the dock central node (drawDockSpaceHost), so this window's
+        // width is NOT authoritative — the panel may be docked right/floating/closed.
+        if (!docking_enabled)
+            side_panel_width = ImGui::GetWindowWidth();
 
         // ─────────────────────────────────────────────────────────────────────────
         // MODERN VERTICAL TAB NAVIGATION
@@ -2024,6 +2299,10 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                 ImGui::BeginTooltip();
                 ImGui::PushTextWrapPos(ImGui::GetFontSize() * 22.0f);
                 ImGui::TextUnformatted(tooltip);
+                if (isPoppablePropertyTab(index) && properties_tab_popped_[index]) {
+                    ImGui::Spacing();
+                    ImGui::TextDisabled("(open in a separate window)");
+                }
                 ImGui::PopTextWrapPos();
                 ImGui::EndTooltip();
                 ImGui::PopStyleVar(2);
@@ -2086,6 +2365,32 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         // Prevents sliders/inputs from stretching too far on wide panels, keeping labels legible
         ImGui::PushItemWidth(UIWidgets::GetInspectorItemWidth());
 
+        // Unified modern/soft control surface for EVERY tab (matches the Render
+        // Settings look). The theme still drives window/text colors; this only
+        // softens buttons/frames/sliders inside the content area. Render's own
+        // inner Push/Pop simply nests on top (balanced).
+        UIWidgets::PushControlSurfaceStyle(ImVec4(0.62f, 0.74f, 0.98f, 1.0f));
+
+        // --- Detachable tab control (every editor tab) ---
+        const bool tab_is_poppable = isPoppablePropertyTab(active_properties_tab);
+        const bool tab_is_popped = tab_is_poppable && properties_tab_popped_[active_properties_tab];
+        if (tab_is_popped) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("This tab is open in a separate window.");
+            if (ImGui::SmallButton("Dock back to panel")) properties_tab_popped_[active_properties_tab] = false;
+        } else if (tab_is_poppable) {
+            if (ImGui::SmallButton("Open in separate window")) {
+                properties_tab_popped_[active_properties_tab] = true;
+                properties_pop_spawn_pos_[active_properties_tab] = ImGui::GetIO().MousePos;
+                properties_pop_spawn_pending_[active_properties_tab] = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Detach this tab into its own movable/dockable window");
+            ImGui::Spacing();
+        }
+
+        // When the active tab is popped out its content lives in a separate window,
+        // so skip the in-panel switch (avoids double-rendering side effects).
+        if (!tab_is_popped)
         switch (active_properties_tab) {
             case 0: drawSceneHierarchy(ctx); break;
             case 1:
@@ -2472,102 +2777,9 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             case 11: if (show_scatter_tab) drawScatterBrushPanel(ctx); break;
             case 9: drawThemeSelector(); drawResolutionPanel(ctx); break;
             case 10: if (show_paint_tab) drawPaintPanel(ctx); break;
-            case 8: if (show_hair_tab) {
-                // Get selected mesh triangles for hair generation target
-                static std::vector<std::shared_ptr<Triangle>> selectedMeshTriangles;
-                static std::string lastSelectedMeshName;
-                const std::vector<std::shared_ptr<Triangle>>* selectedTris = nullptr;
-                
-                // Check if we have a selected object
-                bool hasValidSelection = (ctx.selection.selected.type == SelectableType::Object && 
-                                         ctx.selection.selected.object != nullptr);
-                
-                if (hasValidSelection) {
-                    // Get the nodeName of selected object
-                    std::string selectedNodeName = ctx.selection.selected.object->getNodeName();
-                    
-                    // Only rebuild triangle list if selection changed
-                    if (selectedNodeName != lastSelectedMeshName) {
-                        lastSelectedMeshName = selectedNodeName;
-                        selectedMeshTriangles.clear();
-                        
-                        for (const auto& obj : ctx.scene.world.objects) {
-                            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                            if (tri && tri->getNodeName() == selectedNodeName) {
-                                selectedMeshTriangles.push_back(tri);
-                            }
-                        }
-                    }
-                    
-                    if (!selectedMeshTriangles.empty()) {
-                        selectedTris = &selectedMeshTriangles;
-                    }
-                } else {
-                    // Selection cleared - clear cached data
-                    if (!lastSelectedMeshName.empty()) {
-                        lastSelectedMeshName.clear();
-                        selectedMeshTriangles.clear();
-                    }
-                    selectedTris = nullptr;
-                }
-                
-                if (!hairUI.onOpenFileDialog) {
-                     hairUI.onOpenFileDialog = [](const wchar_t* filter) {
-                         return SceneUI::openFileDialogW(filter);
-                     };
-                }
-                hairUI.render(ctx.renderer.getHairSystem(), selectedTris, &ctx.renderer, [&ctx, this]() {
-                    // [FIX] Ensure CPU BVH is up to date before "Generate Full" so hair sits on the *current* mesh surface,
-                    // not the old one (if gizmo was just used).
-                    this->ensureCPUSyncForPicking(ctx);
-                });
-                
-                // [NEW] Sync hide children preference for performance during grooming
-                ctx.renderer.hideInterpolatedHair = hairUI.shouldHideChildren();
-                
-                // Track if material changed for render reset
-                static Hair::HairMaterialParams lastMaterial;
-                static bool firstFrame = true;
-                Hair::HairMaterialParams currentMaterial = hairUI.getMaterial();
-                
-                bool materialChanged = firstFrame ||
-                    (lastMaterial.colorMode != currentMaterial.colorMode) ||
-                    (lastMaterial.melanin != currentMaterial.melanin) ||
-                    (lastMaterial.melaninRedness != currentMaterial.melaninRedness) ||
-                    (lastMaterial.roughness != currentMaterial.roughness) ||
-                    (lastMaterial.radialRoughness != currentMaterial.radialRoughness) ||
-                    (lastMaterial.ior != currentMaterial.ior) ||
-                    (lastMaterial.cuticleAngle != currentMaterial.cuticleAngle) ||
-                    (lastMaterial.coat != currentMaterial.coat) ||
-                    (std::abs(lastMaterial.color.x - currentMaterial.color.x) > 0.001f) ||
-                    (std::abs(lastMaterial.color.y - currentMaterial.color.y) > 0.001f) ||
-                    (std::abs(lastMaterial.color.z - currentMaterial.color.z) > 0.001f) ||
-                    (std::abs(lastMaterial.coatTint.x - currentMaterial.coatTint.x) > 0.001f) ||
-                    (std::abs(lastMaterial.coatTint.y - currentMaterial.coatTint.y) > 0.001f) ||
-                    (std::abs(lastMaterial.coatTint.z - currentMaterial.coatTint.z) > 0.001f);
-                
-                if (materialChanged) {
-                    lastMaterial = currentMaterial;
-                    firstFrame = false;
-                }
-                
-                // [FIXED] Removed global ctx.renderer.setHairMaterial(currentMaterial) override
-                // Now each hair groom uses its own material from HairSystem during intersect.
-
-                
-                // Reset render accumulation if material changed
-                if (materialChanged) {
-                    ctx.renderer.setHairMaterial(currentMaterial); // [UPDATED] Keep GPU in sync
-                    ctx.renderer.resetCPUAccumulation();
-                    
-                    // Sync to GPU immediately for live feedback
-                    if (ctx.backend_ptr) {
-                        ctx.renderer.updateBackendMaterials(ctx.scene);
-                        ctx.start_render = true; // [NEW] Trigger render pass immediately
-                    }
-                }
-            } break;
+            case 8: if (show_hair_tab) drawHairTabContent(ctx); break;
         }
+        UIWidgets::PopControlSurfaceStyle();
         ImGui::PopItemWidth();
 
         // Safety: Disable terrain brush when leaving terrain tools, unless the new paint mode
@@ -2576,7 +2788,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             (active_properties_tab == 10) &&
             paint_mode_state.enabled &&
             paint_mode_state.hasValidTarget();
-        if (active_properties_tab != 2 && !allow_paint_bridge) {
+        if (active_properties_tab != 2 && !properties_tab_popped_[2] && !allow_paint_bridge) {
             terrain_brush.enabled = false;
         }
 
@@ -2585,22 +2797,22 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         static int s_last_active_tab = -1;
         if (s_last_active_tab == -1) s_last_active_tab = active_properties_tab;
         if (s_last_active_tab != active_properties_tab) {
-            // Leaving Terrain tab -> disable foliage brush
-            if (s_last_active_tab == 2) {
+            // Leaving Terrain tab -> disable foliage brush (unless it is popped out & still visible)
+            if (s_last_active_tab == 2 && !properties_tab_popped_[2]) {
                 foliage_brush.enabled = false;
                 foliage_brush.active_group_id = -1;
                 foliage_brush.pending_instances.clear();
                 foliage_brush.pending_group_id = -1;
             }
-            // Leaving Scatter (legacy) tab -> disable scatter brush
-            if (s_last_active_tab == 11) {
+            // Leaving Scatter (legacy) tab -> disable scatter brush (unless popped out)
+            if (s_last_active_tab == 11 && !properties_tab_popped_[11]) {
                 scatter_brush.enabled = false;
                 scatter_brush.active_group_id = -1;
                 scatter_brush.pending_instances.clear();
                 scatter_brush.pending_group_id = -1;
             }
-            // Leaving Paint tab -> fully exit paint mode
-            if (s_last_active_tab == 10) {
+            // Leaving Paint tab -> fully exit paint mode (unless popped out & still visible)
+            if (s_last_active_tab == 10 && !properties_tab_popped_[10]) {
                 paint_mode_state.enabled = false;
                 paint_mode_state.clearAdapter();
             }
@@ -2868,9 +3080,13 @@ void SceneUI::draw(UIContext& ctx)
     drawMainMenuBar(ctx);
     handleEditorShortcuts(ctx);
 
+    // Host the dockable layout (no-op when docking_enabled is false).
+    drawDockSpaceHost(ctx);
+
     float left_offset = 0.0f;
     drawPanels(ctx);
     left_offset = showSidePanel ? side_panel_width : 0.0f;
+    drawPoppedPropertyWindows(ctx); // detachable Properties sub-tabs (floating/dockable)
     drawPaintBrushDock(ctx);
 
     float vp_width = ImGui::GetIO().DisplaySize.x;
@@ -3298,6 +3514,9 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                 std::string sel_str = "Selected: " + ctx.selection.selected.name;
                 drawPill(sel_str.c_str(), ImVec4(0.4f, 0.8f, 1.0f, 1.0f), true);
             }
+            // drawPill moves the cursor via SetCursorScreenPos without submitting an
+            // item; anchor it so ImGui 1.92 doesn't warn about extending boundaries.
+            ImGui::Dummy(ImVec2(0.0f, 0.0f));
         }
         else {
             ImGui::Text("Ready");
@@ -3476,8 +3695,10 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
 
     // Calculate panel position
     float panel_top = screen_y - effective_bottom_panel_height - status_bar_height;
-    
+
     // --- RESIZE HANDLE (invisible button at top edge) ---
+    // Docking provides its own splitter between dock nodes, so skip the custom handle.
+    if (!docking_enabled) {
     ImGui::SetNextWindowPos(ImVec2(0, panel_top - resize_handle_height / 2), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(screen_x, resize_handle_height), ImGuiCond_Always);
     
@@ -3517,10 +3738,14 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     ImGui::End();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
+    } // end if (!docking_enabled) custom resize handle
 
     // --- MAIN BOTTOM PANEL ---
-    ImGui::SetNextWindowPos(ImVec2(0, panel_top), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(screen_x, effective_bottom_panel_height), ImGuiCond_Always);
+    // Legacy: pin to the bottom strip. Docking: the dock node owns geometry.
+    if (!docking_enabled) {
+        ImGui::SetNextWindowPos(ImVec2(0, panel_top), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(screen_x, effective_bottom_panel_height), ImGuiCond_Always);
+    }
     if (focus_bottom_panel_next_frame) {
         ImGui::SetNextWindowFocus();
     }
@@ -3530,11 +3755,10 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     // ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f)); // Removed hardcoded
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8)); // Added padding to prevent "stuck to left" look
-    if (ImGui::Begin("BottomPanel", nullptr,
-        ImGuiWindowFlags_NoTitleBar |
-        ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoCollapse))
+    ImGuiWindowFlags bottom_flags = ImGuiWindowFlags_NoCollapse;
+    if (!docking_enabled)
+        bottom_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
+    if (ImGui::Begin("BottomPanel", nullptr, bottom_flags))
     {
         if (focus_bottom_panel_next_frame) {
             ImGui::SetWindowFocus();
@@ -7235,6 +7459,14 @@ std::string SceneUI::serialize() {
     j["bottom_panel_height"] = bottom_panel_height;
     j["preferred_bottom_panel_height"] = preferred_bottom_panel_height;
     j["hierarchy_panel_height"] = hierarchy_panel_height;
+    j["docking_enabled"] = docking_enabled;
+    // Which Properties sub-tabs are currently torn off into their own windows.
+    {
+        nlohmann::json popped = nlohmann::json::array();
+        for (int t = 0; t <= 12; ++t)
+            if (properties_tab_popped_[t]) popped.push_back(t);
+        j["properties_popped_tabs"] = popped;
+    }
 
     if (mesh_edit_layer.active && !mesh_edit_layer.object_name.empty()) {
         nlohmann::json layer;
@@ -7365,6 +7597,18 @@ void SceneUI::deserialize(const std::string& data) {
         preferred_bottom_panel_height = bottom_panel_height;
         if (j.contains("preferred_bottom_panel_height")) preferred_bottom_panel_height = j["preferred_bottom_panel_height"];
         if (j.contains("hierarchy_panel_height")) hierarchy_panel_height = j["hierarchy_panel_height"];
+        if (j.contains("docking_enabled")) {
+            docking_enabled = j["docking_enabled"];
+            docking_layout_dirty = true; // rebuild default layout to match restored preference
+        }
+        // Restore torn-off Properties sub-tabs (positions come from imgui.ini, so no spawn override).
+        for (int t = 0; t < 16; ++t) { properties_tab_popped_[t] = false; properties_pop_spawn_pending_[t] = false; }
+        if (j.contains("properties_popped_tabs") && j["properties_popped_tabs"].is_array()) {
+            for (const auto& t : j["properties_popped_tabs"]) {
+                int idx = t.get<int>();
+                if (isPoppablePropertyTab(idx)) properties_tab_popped_[idx] = true;
+            }
+        }
 
         pending_serialized_mesh_edit_layer = PendingSerializedMeshEditLayer{};
         if (j.contains("mesh_edit_layer") && j["mesh_edit_layer"].is_object()) {

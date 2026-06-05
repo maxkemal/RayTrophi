@@ -1861,6 +1861,10 @@ int main(int argc, char* argv[]) try {
     startupDiagLog("[Startup] ImGui::CreateContext done");
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // Modern dockable panel layout. Internal docking only — the SDLRenderer2 backend
+    // does not support multi-viewport (OS-detached) windows, so we do NOT set
+    // ImGuiConfigFlags_ViewportsEnable here.
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer2_Init(renderer);
     startupDiagLog("[Startup] ImGui SDL init done");

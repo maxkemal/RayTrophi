@@ -1913,13 +1913,12 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
                 }
             }
 
-            auto comboGetter = [](void* data, int idx, const char** out_text) -> bool {
+            auto comboGetter = [](void* data, int idx) -> const char* {
                 auto* items = static_cast<std::vector<std::string>*>(data);
                 if (!items || idx < 0 || idx >= static_cast<int>(items->size())) {
-                    return false;
+                    return nullptr;
                 }
-                *out_text = (*items)[idx].empty() ? "Auto Detect" : (*items)[idx].c_str();
-                return true;
+                return (*items)[idx].empty() ? "Auto Detect" : (*items)[idx].c_str();
             };
 
             ImGui::Separator();
