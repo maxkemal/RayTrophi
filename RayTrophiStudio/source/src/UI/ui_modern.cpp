@@ -298,7 +298,7 @@ ImGuiTreeNodeFlags GetSectionFlags(bool defaultOpen) {
     ImGuiTreeNodeFlags flags =
         ImGuiTreeNodeFlags_Framed |
         ImGuiTreeNodeFlags_SpanFullWidth |
-        ImGuiTreeNodeFlags_AllowItemOverlap |
+        ImGuiTreeNodeFlags_AllowOverlap |
         ImGuiTreeNodeFlags_FramePadding |
         ImGuiTreeNodeFlags_NoTreePushOnOpen; // Disable default tree indentation
     

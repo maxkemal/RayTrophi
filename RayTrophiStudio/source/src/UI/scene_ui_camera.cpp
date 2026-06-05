@@ -660,9 +660,8 @@
             ImGui::SameLine(80);
             ImGui::PushItemWidth(-1);
             if (ImGui::Combo("##FStop", &selected_fstop,
-                [](void* data, int idx, const char** out_text) {
-                    *out_text = ((FStopPreset*)data)[idx].name;
-                    return true;
+                [](void* data, int idx) -> const char* {
+                    return ((FStopPreset*)data)[idx].name;
                 }, (void*)fstop_presets, IM_ARRAYSIZE(fstop_presets)))
             {
                 if (selected_fstop > 0) {

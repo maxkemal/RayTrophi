@@ -3498,7 +3498,7 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
             // Dim hidden layers
             if (!ld->meta.visible) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.45f, 0.48f, 1.0f));
             if (ImGui::Selectable(ld->meta.name.c_str(), is_active,
-                                  ImGuiSelectableFlags_AllowItemOverlap,
+                                  ImGuiSelectableFlags_AllowOverlap,
                                   ImVec2(selectable_w, ROW_HEIGHT))) {
                 paint_mode_state.active_layer_index = i;
                 paint_mode_state.active_layer_id = ld->id;

@@ -242,9 +242,9 @@ namespace NodeSystem {
         
         void handleInput(GraphBase& graph) {
             ImGui::SetCursorScreenPos(canvasPos_);
+            ImGui::SetNextItemAllowOverlap(); // must precede the item in ImGui 1.92+
             ImGui::InvisibleButton("##CanvasInput", canvasSize_,
                 ImGuiButtonFlags_MouseButtonMiddle | ImGuiButtonFlags_MouseButtonRight);
-            ImGui::SetItemAllowOverlap();
             
             // Pan (middle mouse)
             if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {

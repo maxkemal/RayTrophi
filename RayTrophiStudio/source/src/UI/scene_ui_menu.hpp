@@ -797,6 +797,14 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  if (show_scene_log) show_animation_panel = false;
             }
             ImGui::Separator();
+            // --- Dockable layout (modern movable/tabbable panels) ---
+            if (ImGui::MenuItem("Dockable Layout", nullptr, &docking_enabled)) {
+                if (docking_enabled) docking_layout_dirty = true; // (re)build default layout
+            }
+            if (ImGui::MenuItem("Reset Panel Layout", nullptr, false, docking_enabled)) {
+                docking_layout_dirty = true;
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem("Terrain Tab", nullptr, &show_terrain_tab)) { 
                 if (show_terrain_tab) { tab_to_focus = "Terrain"; focus_properties_panel_next_frame = true; }
             }
