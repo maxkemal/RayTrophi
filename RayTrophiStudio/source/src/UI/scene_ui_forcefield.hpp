@@ -158,7 +158,8 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         if (ImGui::BeginTabItem("Fields"))    { simulation_section = 0; ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Particles")) { simulation_section = 1; ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Domains"))   { simulation_section = 2; ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Colliders")) { simulation_section = 3; ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Collision")) { simulation_section = 3; ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Rigid")) { simulation_section = 4; ImGui::EndTabItem(); }
         ImGui::EndTabBar();
     }
     ImGui::Separator();
@@ -1330,6 +1331,14 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         ImGui::SeparatorText("Selected Domain");
         ImGui::Checkbox("Domain Enabled", &domain.enabled);
 
+        // Auto-reseed accumulator: any seed-OR-shape param whose edit settles this
+        // frame sets `seed_settled`. The toggle checkbox lives in the Fluid
+        // Seeding header; the actual reseed (rewind to frame 0 + re-seed all fluid
+        // domains) runs once at the very end of this panel so it covers BOTH the
+        // Setup&Grid tab (resolution/voxel/bounds) and the Fluid seeding tab.
+        static bool s_fluid_auto_reseed = true;
+        bool seed_settled = false;
+
         // Solver type (Gas vs. Fluid Segmented Buttons)
         {
             ImGui::Text("Domain Solver Type:");
@@ -1479,6 +1488,7 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                     const int mr = std::max({ domain.resolution_x, domain.resolution_y, domain.resolution_z, 1 });
                     domain.voxel_size = me / static_cast<float>(mr);
                 }
+                seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Per-axis resolution of the 3D voxel simulation grid (8-512 each).\n\n"
                                       "WARNING: Cost scales with the product X*Y*Z (cubic for a cube)!\n"
@@ -1570,6 +1580,7 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                         ui_ctx.start_render = true;
                     }
                 }
+                seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Hard per-axis ceiling for the simulation grid - the solver re-derives\n"
                                       "resolution from voxel size each rebuild and clamps every axis to this.\n"
@@ -1657,10 +1668,12 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                         ImGui::TextDisabled("Dynamic Bounds Max: %.2f, %.2f, %.2f", domain.bounds_max.x, domain.bounds_max.y, domain.bounds_max.z);
                     } else {
                         ImGui::DragFloat3("Domain Minimum Bounds", &domain.bounds_min.x, 0.05f, -10000.0f, 10000.0f, "%.2f");
+                        seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Minimum coordinates of the domain bounding box in world space (X, Y, Z).");
                         }
                         ImGui::DragFloat3("Domain Maximum Bounds", &domain.bounds_max.x, 0.05f, -10000.0f, 10000.0f, "%.2f");
+                        seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Maximum coordinates of the domain bounding box in world space (X, Y, Z).");
                         }
@@ -1914,20 +1927,111 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                     if (ImGui::CollapsingHeader("Fluid Seeding & Capacity", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
 
+                    // Auto-reseed toggle (the accumulator + the actual reseed live
+                    // at the top/bottom of this panel so shape params count too).
+                    ImGui::Checkbox("Auto Reseed on Edit", &s_fluid_auto_reseed);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("When on, changing a seed OR grid-shape parameter (fill level, wall\n"
+                                          "margin, seed box, particles/cell, max particles, seed mode, resolution,\n"
+                                          "voxel size, domain bounds) automatically re-seeds the fluid and snaps\n"
+                                          "the timeline to frame 0 when you release the control \xE2\x80\x94 no manual\n"
+                                          "Reset + Seed Fluid Now. Solver params (viscosity, blends, ...) apply\n"
+                                          "live and never reseed.");
+                    }
+
+                    using RayTrophiSim::FluidSeedMode;
+                    const char* seed_mode_labels[] = { "Seed Box", "Fill Domain (resting tank)" };
+                    int seed_mode_idx = static_cast<int>(domain.fluid_seed_mode);
+                    ImGui::SetNextItemWidth(250.0f);
+                    if (ImGui::Combo("Seed Mode", &seed_mode_idx, seed_mode_labels, IM_ARRAYSIZE(seed_mode_labels))) {
+                        domain.fluid_seed_mode = static_cast<FluidSeedMode>(seed_mode_idx);
+                        seed_settled = true;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Seed Box: fill a user-positioned region (good for a localized blob you then drop/emit).\n"
+                                          "Fill Domain: pre-fill the whole domain footprint from the floor up to the fill level "
+                                          "as a resting tank \xE2\x80\x94 skips the long settling transient for standing water; "
+                                          "colliders then carve waves on top.");
+                    }
+
+                    if (domain.fluid_seed_mode == FluidSeedMode::FillLevel) {
+                        ImGui::SetNextItemWidth(250.0f);
+                        ImGui::SliderFloat("Fill Level (target)", &domain.fluid_fill_level, 0.0f, 1.0f, "%.2f");
+                        seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("TARGET fraction of the domain height filled with liquid at rest.\n"
+                                              "0.5 = half-full, 1.0 = brim-full. The ACTUAL level is capped by the\n"
+                                              "particle budget below: ppc stays fixed for stability, so when the\n"
+                                              "budget can't reach the target the level drops (complete layers from\n"
+                                              "the floor up), never the density.");
+                        }
+                        ImGui::SetNextItemWidth(250.0f);
+                        ImGui::DragFloat("Wall Margin", &domain.fluid_fill_wall_margin, 0.01f, 0.0f, 10000.0f, "%.3f");
+                        seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("World-unit inset from the side walls (X/Z). Leave 0 to fill wall-to-wall.");
+                        }
+
+                        // Budget readout. ppc is fixed for stability; the budget caps the
+                        // ACTUAL fill HEIGHT (complete layers from the floor up), so show
+                        // both the target and the effective level the budget reaches, plus
+                        // a one-click "raise cap to hit target".
+                        {
+                            const int req_ppc = std::max(1, domain.fluid_seed_particles_per_cell);
+                            // Effective fill at the current budget (replace-seed assumed).
+                            Vec3 eff_lo, eff_hi;
+                            const float eff_level = RayTrophiSim::computeFluidFillSeedAABB(
+                                domain.bounds_min, domain.bounds_max, domain.voxel_size,
+                                domain.fluid_fill_level, domain.fluid_fill_wall_margin,
+                                req_ppc, domain.fluid_max_particles, eff_lo, eff_hi);
+                            // Target need (no budget cap): cells in target region * ppc.
+                            const float fl_m = std::max(0.0f, domain.fluid_fill_wall_margin);
+                            const float fl_lvl = std::clamp(domain.fluid_fill_level, 0.0f, 1.0f);
+                            const Vec3 tb_lo(domain.bounds_min.x + fl_m, domain.bounds_min.y, domain.bounds_min.z + fl_m);
+                            const Vec3 tb_hi(domain.bounds_max.x - fl_m,
+                                             domain.bounds_min.y + (domain.bounds_max.y - domain.bounds_min.y) * fl_lvl,
+                                             domain.bounds_max.z - fl_m);
+                            const std::size_t target_needed = RayTrophiSim::Fluid::estimateSeedBoxParticleCount(
+                                domain.bounds_min, domain.resolution_x, domain.resolution_y, domain.resolution_z,
+                                domain.voxel_size, tb_lo, tb_hi, req_ppc);
+
+                            ImGui::TextDisabled("Target %.2f needs ~%zu particles @ %d ppc",
+                                                fl_lvl, target_needed, req_ppc);
+                            const bool budget_limited = eff_level < fl_lvl - 1e-3f;
+                            if (budget_limited) {
+                                ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.2f, 1.0f),
+                                    "Budget reaches level ~%.2f (cap %zu). Liquid stays\n"
+                                    "stable @ %d ppc, just shallower. Raise cap to hit target.",
+                                    eff_level, domain.fluid_max_particles, req_ppc);
+                                if (ImGui::Button("Set Max Particles to hit target##FitFill")) {
+                                    domain.fluid_max_particles = target_needed + target_needed / 10u + 1000u; // +10%
+                                    seed_settled = true;
+                                }
+                            } else {
+                                ImGui::TextDisabled("Budget OK \xE2\x80\x94 reaches the target level.");
+                            }
+                        }
+                    } else {
                     ImGui::DragFloat3("Fluid Seed Box Min", &domain.fluid_seed_min.x, 0.05f, -10000.0f, 10000.0f, "%.2f");
+                    seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Minimum coordinates of the initial volume region containing liquid at startup.");
                     }
                     ImGui::DragFloat3("Fluid Seed Box Max", &domain.fluid_seed_max.x, 0.05f, -10000.0f, 10000.0f, "%.2f");
+                    seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Maximum coordinates of the initial volume region containing liquid at startup.");
                     }
+                    }
 
                     ImGui::SetNextItemWidth(250.0f);
-                    ImGui::SliderInt("Particles Per Voxel", &domain.fluid_seed_particles_per_cell, 1, 16);
+                    ImGui::SliderInt("Particles Per Voxel", &domain.fluid_seed_particles_per_cell, 2, 16);
+                    seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Number of fluid particles spawned per grid cell during seeding.\n"
-                                          "Higher values increase liquid density. 4 to 8 is ideal for standard water.");
+                        ImGui::SetTooltip("Particles spawned per grid cell. This is a STABILITY constant, not a\n"
+                                          "budget knob: at 1 ppc the cells can't build internal pressure and the\n"
+                                          "liquid just collapses / settles slowly. Keep 4-8 for standard water.\n"
+                                          "To fit a budget, change Voxel Size or Max Particles \xE2\x80\x94 not this.");
                     }
 
                     ImGui::SetNextItemWidth(250.0f);
@@ -1935,6 +2039,7 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                     if (ImGui::DragInt("Max Particles Limit", &max_particles_ui, 1000.0f, 1000, 10000000)) {
                         domain.fluid_max_particles = static_cast<std::size_t>(std::max(1000, max_particles_ui));
                     }
+                    seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Maximum total active particles allowed to prevent VRAM or RAM overflow.");
                     }
@@ -2786,12 +2891,14 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             }
         }
 
-        if (is_fluid_domain) {
+        // Legacy standalone-FluidObject VDB cache UI. The grid-domain workflow
+        // does NOT use FluidObjects (bake is the SimCache path below), so this is
+        // muted: it never auto-creates a "Fluid 1" anymore and only shows if a
+        // FluidObject already exists in the scene (old projects). Grid-domain-only
+        // users never see it.
+        if (is_fluid_domain && !scene.fluid_objects.empty()) {
             ImGui::Spacing();
             if (ImGui::CollapsingHeader("Fluid VDB Cache & Threaded Baking##FluidCacheBakeHeader", ImGuiTreeNodeFlags_DefaultOpen)) {
-                if (scene.fluid_objects.empty()) {
-                    scene.addFluidObject("Fluid 1");
-                }
                 if (scene.active_fluid_object_index < 0 ||
                     scene.active_fluid_object_index >= static_cast<int>(scene.fluid_objects.size())) {
                     scene.active_fluid_object_index = 0;
@@ -3061,6 +3168,36 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             }
         }
 
+        // ── Auto-reseed (toggle in the Fluid Seeding header) ──────────────────
+        // A seed OR grid-shape parameter just settled this frame (released after
+        // edit). Re-seed every fluid domain and snap the timeline to frame 0 so
+        // the fresh initial state is what's shown — shape edits rebuild the grid,
+        // which needs a clean restart. Reseeding ALL fluid domains keeps the
+        // frame-0 rewind from leaving other tanks empty; the rewind clears the
+        // particles first, so replace_on_seed is irrelevant (nothing to stack on).
+        if (seed_settled && s_fluid_auto_reseed && particles &&
+            domain.type == RayTrophiSim::SimulationDomainType::Fluid) {
+            for (auto& sys : scene.particle_systems) {
+                if (!sys.runtime) continue;
+                for (auto& d : sys.runtime->gridDomains()) {
+                    if (d.type == RayTrophiSim::SimulationDomainType::Fluid)
+                        d.fluid_pending_seed = true;
+                }
+            }
+            // Drain any in-flight GPU sim mutations before the reset clears state
+            // (mirrors the "Reset Simulation" button's safe ordering).
+            drainSimulationMutationBackends();
+            // Rewind sim + clear the stale bake; skip capturing the empty pre-seed
+            // state — we capture frame 0 AFTER seeding below.
+            scene.resetSimulationToStart(/*clear_cache=*/true, /*capture_frame=*/false);
+            for (auto& sys : scene.particle_systems) {
+                if (sys.runtime) sys.runtime->synchronizeGridDomainsNow();
+            }
+            scene.captureSimFrame(0);
+            if (timeline) timeline->setCurrentFrame(0);
+            ui_ctx.start_render = true;
+        }
+
         if (ImGui::Button("Remove Domain##SimulationPanel", ImVec2(-1, 0))) {
             particles->removeGridDomain(static_cast<std::size_t>(selected_domain_index));
             if (ui_ctx.selection.selected.type == SelectableType::SimulationDomain &&
@@ -3078,8 +3215,216 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
     // Global collider list. Used by both particle physics and the Fluid grid
     // voxelization. Full creation + editing lives here — Particles tab only
     // keeps a deprecation hint pointing here.
+    // Dedicated Rigid Bodies (Jolt Physics) panel — ACTIVE dynamics, independent
+    // of any sim domain (a rigid body falls/collides on its own via gravity +
+    // static colliders). Lives in its own "Rigid Bodies" section tab so the list
+    // gets the full panel width/height.
+    auto drawRigidBodyControls = [&]() {
+        const bool has_obj =
+            ui_ctx.selection.selected.type == SelectableType::Object &&
+            ui_ctx.selection.selected.object != nullptr &&
+            !ui_ctx.selection.selected.object->getNodeName().empty();
+        const std::string sel_name =
+            has_obj ? ui_ctx.selection.selected.object->getNodeName() : std::string();
+
+        ImGui::TextColored(ImVec4(0.98f, 0.62f, 0.10f, 1.00f), "Rigid Bodies (Physics)");
+        ImGui::Separator();
+        ImGui::TextDisabled("Active rigid-body dynamics — no simulation domain required.");
+        ImGui::Spacing();
+
+        int sel_rb = -1;
+        for (int i = 0; i < (int)scene.rigid_bodies.size(); ++i) {
+            if (scene.rigid_bodies[i].source_name == sel_name) { sel_rb = i; break; }
+        }
+
+        // --- Creation buttons for the selected mesh ---
+        if (!has_obj) ImGui::BeginDisabled();
+        const float bw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
+        if (ImGui::Button(sel_rb >= 0 ? "Reset as Rigid Body##RBAdd" : "Make Rigid Body##RBAdd", ImVec2(bw, 30))) {
+            scene.addRigidBodyForObject(sel_name, /*dynamic=*/true);
+        }
+        if (ImGui::IsItemHovered() && has_obj)
+            ImGui::SetTooltip("Selected mesh becomes a dynamic rigid body (falls, collides, tumbles).");
+        ImGui::SameLine();
+        if (ImGui::Button("Make Static Collider##RBStatic", ImVec2(bw, 30))) {
+            scene.addRigidBodyForObject(sel_name, /*dynamic=*/false);
+        }
+        if (ImGui::IsItemHovered() && has_obj)
+            ImGui::SetTooltip("Selected mesh becomes immovable collision geometry (ground/walls).");
+        if (!has_obj) ImGui::EndDisabled();
+        if (!has_obj) ImGui::TextDisabled("Select a mesh object above to add it as a rigid body.");
+
+        ImGui::Spacing();
+        ImGui::Text("Registered Bodies: %zu", scene.rigid_bodies.size());
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // --- Full-height editable list ---
+        ImGui::BeginChild("RigidBodyList", ImVec2(0, 0), true);
+        int rb_to_remove = -1;
+        for (int i = 0; i < (int)scene.rigid_bodies.size(); ++i) {
+            auto& rb = scene.rigid_bodies[i];
+            ImGui::PushID(i);
+            const bool is_sel = (i == sel_rb);
+
+            if (is_sel) ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.40f, 0.28f, 0.06f, 0.65f));
+            const bool open = ImGui::CollapsingHeader(
+                (rb.source_name + (rb.dynamic ? "  [Dynamic]" : "  [Static]") + "###rbhdr").c_str(),
+                ImGuiTreeNodeFlags_DefaultOpen);
+            if (is_sel) ImGui::PopStyleColor();
+
+            if (open) {
+                ImGui::Indent(8.0f);
+                bool rb_changed = false;
+                bool rb_rebuild = false;
+
+                if (ImGui::CollapsingHeader("Body", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    int type_idx = static_cast<int>(rb.motion_type);
+                    ImGui::SetNextItemWidth(180);
+                    if (ImGui::Combo("Type##rbtype", &type_idx, "Static\0Dynamic\0Kinematic\0")) {
+                        rb.motion_type = static_cast<RayTrophiSim::RigidBodyMotionType>(type_idx);
+                        rb.dynamic = rb.motion_type == RayTrophiSim::RigidBodyMotionType::Dynamic;
+                        rb_rebuild = true;
+                        rb_changed = true;
+                    }
+
+                    ImGui::Checkbox("Enabled##rbenabled", &rb.enabled);
+                    if (ImGui::IsItemEdited()) {
+                        rb_rebuild = true;
+                        rb_changed = true;
+                    }
+
+                    ImGui::TextDisabled("Collider: %s", rb.collider_name.empty() ? "Object bounds fallback" : rb.collider_name.c_str());
+
+                    const bool is_dynamic = rb.motion_type == RayTrophiSim::RigidBodyMotionType::Dynamic;
+                    ImGui::BeginDisabled(!is_dynamic);
+                    if (ImGui::Checkbox("Auto Mass From Density##rbautomass", &rb.auto_mass_from_density)) {
+                        rb_rebuild = true;
+                        rb_changed = true;
+                    }
+                    ImGui::SetNextItemWidth(150);
+                    if (ImGui::DragFloat("Density (kg/m3)##rbdensity", &rb.density, 5.0f, 0.1f, 20000.0f, "%.1f")) {
+                        rb_rebuild = true;
+                        rb_changed = true;
+                    }
+                    ImGui::BeginDisabled(rb.auto_mass_from_density);
+                    ImGui::SetNextItemWidth(150);
+                    if (ImGui::DragFloat("Mass (kg)##rbmass", &rb.mass, 0.1f, 0.0f, 100000.0f, "%.2f")) {
+                        rb_rebuild = true;
+                        rb_changed = true;
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Density below water (~1000 kg/m3) will tend to float once fluid coupling is solved.");
+                    }
+                }
+
+                if (ImGui::CollapsingHeader("Motion", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::SetNextItemWidth(150);
+                    if (ImGui::DragFloat("Linear Damping##rblinDamp", &rb.linear_damping, 0.01f, 0.0f, 20.0f, "%.3f")) {
+                        rb_rebuild = true;
+                        rb_changed = true;
+                    }
+                    ImGui::SetNextItemWidth(150);
+                    if (ImGui::DragFloat("Angular Damping##rbangDamp", &rb.angular_damping, 0.01f, 0.0f, 20.0f, "%.3f")) {
+                        rb_rebuild = true;
+                        rb_changed = true;
+                    }
+                    ImGui::SetNextItemWidth(150);
+                    if (ImGui::DragFloat("Gravity Scale##rbgrav", &rb.gravity_scale, 0.01f, -10.0f, 10.0f, "%.2f")) {
+                        rb_rebuild = true;
+                        rb_changed = true;
+                    }
+
+                    ImGui::SetNextItemWidth(-FLT_MIN);
+                    if (ImGui::DragFloat3("Initial Velocity##rblinvel", &rb.initial_linear_velocity.x, 0.05f, -1000.0f, 1000.0f, "%.2f")) {
+                        rb_rebuild = true;
+                        rb_changed = true;
+                    }
+                    ImGui::SetNextItemWidth(-FLT_MIN);
+                    if (ImGui::DragFloat3("Initial Angular Velocity##rbangvel", &rb.initial_angular_velocity.x, 0.05f, -1000.0f, 1000.0f, "%.2f")) {
+                        rb_rebuild = true;
+                        rb_changed = true;
+                    }
+
+                    if (ImGui::Checkbox("Allow Sleeping##rbsleep", &rb.sleep_enabled)) {
+                        rb_rebuild = true;
+                        rb_changed = true;
+                    }
+                }
+
+                if (ImGui::CollapsingHeader("Axis Locks")) {
+                    ImGui::TextDisabled("Stored for the rigid solver roadmap; Jolt axis constraints land next.");
+                    rb_changed |= ImGui::Checkbox("Lock X Translation##rbltx", &rb.lock_translation_x); ImGui::SameLine();
+                    rb_changed |= ImGui::Checkbox("Lock Y Translation##rblty", &rb.lock_translation_y); ImGui::SameLine();
+                    rb_changed |= ImGui::Checkbox("Lock Z Translation##rbltz", &rb.lock_translation_z);
+                    rb_changed |= ImGui::Checkbox("Lock X Rotation##rblrx", &rb.lock_rotation_x); ImGui::SameLine();
+                    rb_changed |= ImGui::Checkbox("Lock Y Rotation##rblry", &rb.lock_rotation_y); ImGui::SameLine();
+                    rb_changed |= ImGui::Checkbox("Lock Z Rotation##rblrz", &rb.lock_rotation_z);
+                }
+
+                if (ImGui::CollapsingHeader("Fluid Coupling", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    rb_changed |= ImGui::Checkbox("Use Fluid Coupling##rbfluid", &rb.fluid_coupling_enabled);
+                    ImGui::BeginDisabled(!rb.fluid_coupling_enabled);
+                    rb_changed |= ImGui::DragFloat("Fluid Density##rbfldens", &rb.fluid_density, 5.0f, 0.1f, 20000.0f, "%.1f");
+                    rb_changed |= ImGui::DragFloat("Buoyancy Scale##rbbscale", &rb.buoyancy_scale, 0.01f, 0.0f, 10.0f, "%.2f");
+                    rb_changed |= ImGui::DragFloat("Fluid Drag##rbfdrag", &rb.fluid_drag, 0.01f, 0.0f, 100.0f, "%.2f");
+                    rb_changed |= ImGui::DragFloat("Angular Fluid Drag##rbfadrag", &rb.fluid_angular_drag, 0.01f, 0.0f, 100.0f, "%.2f");
+                    ImGui::EndDisabled();
+                    // Always-visible float/sink verdict (the one number that
+                    // explains most "won't float/sink" confusion). The rest of
+                    // the per-step coupling telemetry is tucked under a collapsed
+                    // Debug header so the panel stays clean.
+                    if (rb.fluid_coupling_enabled && rb.dbg_coupled) {
+                        const bool floats = rb.dbg_body_density < rb.fluid_density;
+                        ImGui::TextColored(floats ? ImVec4(0.45f, 0.85f, 1.0f, 1.0f)
+                                                  : ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
+                                           "Body %.0f kg/m3 vs fluid %.0f  (%s)",
+                                           rb.dbg_body_density, rb.fluid_density,
+                                           floats ? "floats" : "sinks");
+                        if (ImGui::TreeNodeEx("Coupling Debug##rbcpldbg", ImGuiTreeNodeFlags_None)) {
+                            ImGui::Text("Submerged: %d / %d pts   sd_min %.3f m",
+                                        rb.dbg_submerged_pts, rb.dbg_sample_count, rb.dbg_min_sd);
+                            ImGui::Text("Buoy accel: %+.2f m/s2  (g = 9.81)", rb.dbg_buoy_accel_y);
+                            ImGui::Text("Drag accel: %+.2f m/s2", rb.dbg_drag_accel_y);
+                            ImGui::Text("Body vel Y: %+.3f m/s", rb.dbg_vel_y);
+                            ImGui::TreePop();
+                        }
+                    }
+                }
+
+                if (rb_rebuild) rb.created = false;
+                if (rb_changed) {
+                    if (scene.rigid_body_system) {
+                        scene.rigid_body_system->resetRuntime(true);
+                        scene.rigid_body_system->setBodies(&scene.rigid_bodies);
+                    }
+                    scene.invalidateRigidBodySimulationCache();
+                }
+
+                ImGui::Spacing();
+                if (ImGui::SmallButton("Remove##rbrm")) rb_to_remove = i;
+
+                ImGui::Unindent(8.0f);
+            }
+            ImGui::PopID();
+        }
+        if (scene.rigid_bodies.empty()) {
+            ImGui::TextDisabled("No rigid bodies yet. Select a mesh and click \"Make Rigid Body\".");
+        }
+        ImGui::EndChild();
+
+        if (rb_to_remove >= 0 && rb_to_remove < (int)scene.rigid_bodies.size()) {
+            scene.removeRigidBodyForObject(scene.rigid_bodies[rb_to_remove].source_name);
+        }
+    };
+
     auto drawColliderControls = [&]() {
-        auto p_sim = scene.getParticleSimulationSystem();
+        scene.ensureActiveParticleSystemObject();
+        auto* p_sim = &scene.ensureParticleSimulationSystem();
+        scene.syncRigidBodyProxyColliders();
+        const uint64_t collider_sig_before = scene.computeSimConfigSignature();
         static int selected_collider_index_global = -1;
 
         // Group 1: Creation & List Manager
@@ -3088,13 +3433,8 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         ImGui::Separator();
         ImGui::Spacing();
 
-        if (!p_sim) {
-            ImGui::TextDisabled("No particle simulation system active in scene.");
-            ImGui::EndChild();
-            return;
-        }
         ImGui::Text("Active Colliders: %zu registered", p_sim->colliders().size());
-        ImGui::TextDisabled("Affects particle dynamics + fluid voxelization bounds.");
+        ImGui::TextDisabled("Shared by particles, fluids, and rigid bodies.");
 
         ImGui::Spacing();
         ImGui::TextDisabled("Add Primitive Collider:");
@@ -3206,6 +3546,8 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         
         if (collider_to_remove >= 0) {
             p_sim->removeCollider(static_cast<std::size_t>(collider_to_remove));
+            scene.syncRigidBodyProxyColliders();
+            scene.invalidateRigidBodySimulationCache();
             const int post = static_cast<int>(p_sim->colliders().size());
             selected_collider_index_global = (collider_to_remove < post) ? collider_to_remove : post - 1;
             return;
@@ -3379,6 +3721,11 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             scene.clearParticleColliders();
             selected_collider_index_global = -1;
         }
+
+        if (scene.computeSimConfigSignature() != collider_sig_before) {
+            scene.syncRigidBodyProxyColliders();
+            scene.invalidateRigidBodySimulationCache();
+        }
     };
 
     if (simulation_section == 1) {
@@ -3393,6 +3740,11 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
     if (simulation_section == 3) {
         clearForceFieldSelection();
         drawColliderControls();
+        return;
+    }
+    if (simulation_section == 4) {
+        clearForceFieldSelection();
+        drawRigidBodyControls();
         return;
     }
     

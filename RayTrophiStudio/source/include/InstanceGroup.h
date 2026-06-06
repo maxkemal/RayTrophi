@@ -235,7 +235,30 @@ struct InstanceGroup {
     
     // Statistics
     size_t getInstanceCount() const { return instances.size(); }
-    size_t getTriangleCount() const { return source_triangles.size() * instances.size(); }
+    size_t getTriangleCount() const {
+        if (!sources.empty()) {
+            size_t total = 0;
+            for (const auto& inst : instances) {
+                int src_idx = inst.source_index;
+                if (src_idx < 0 || src_idx >= static_cast<int>(sources.size())) {
+                    src_idx = 0;
+                }
+
+                const auto& source = sources[static_cast<size_t>(src_idx)];
+                if (source.centered_triangles_ptr) {
+                    total += source.centered_triangles_ptr->size();
+                } else {
+                    total += source.triangles.size();
+                }
+            }
+            return total;
+        }
+
+        const size_t source_count = source_triangles_ptr
+            ? source_triangles_ptr->size()
+            : source_triangles.size();
+        return source_count * instances.size();
+    }
     
     // Operations
     void addInstance(const InstanceTransform& transform);

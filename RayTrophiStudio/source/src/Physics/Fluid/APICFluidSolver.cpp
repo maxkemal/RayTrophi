@@ -392,17 +392,44 @@ void seedBox(FluidParticles& particles,
     added = std::min(added, max_new_particles);
     particles.reserve(particles.size() + added);
 
+    // Stratified placement. Pure uniform jitter (one random point per particle
+    // anywhere in the cell) clumps like Poisson noise: even though the integer
+    // count per cell is exactly particles_per_cell, the sub-cell clustering
+    // means the first advect step redistributes mass and some cells spike above
+    // target — the density-targeted pressure projection then expels them, so a
+    // freshly seeded "resting tank" gushes upward on the first frames. Splitting
+    // each cell into a regular sub-lattice (sub^3 slots) with one jittered point
+    // per occupied slot gives blue-noise-like uniform coverage, so the tank
+    // starts near hydrostatic equilibrium and the surface stays put.
+    const int sub = std::max(1, static_cast<int>(std::ceil(std::cbrt(
+        static_cast<double>(std::max(1, particles_per_cell))))));
+    const float inv_sub = 1.0f / static_cast<float>(sub);
+
+    // Y-major iteration (j outer). When max_new_particles truncates the seed
+    // (budget too small to fill the whole region), the cells that go unseeded
+    // are the TOP layers — leaving complete horizontal layers from the floor up
+    // plus at most one partial top layer. This is the graceful failure for a
+    // "resting tank": the fill level just drops to whatever the budget affords,
+    // never the vertical -Z wall slab a Z-major fill would leave.
     size_t emitted = 0;
-    for (int k = k0; k <= k1; ++k)
     for (int j = j0; j <= j1; ++j)
+    for (int k = k0; k <= k1; ++k)
     for (int i = i0; i <= i1; ++i) {
         if (grid.isSolid(i, j, k)) continue;
         Vec3 cellMin = grid.origin + Vec3(i * h, j * h, k * h);
-        for (int p = 0; p < particles_per_cell; ++p) {
+        int placed = 0;
+        for (int sz = 0; sz < sub && placed < particles_per_cell; ++sz)
+        for (int sy = 0; sy < sub && placed < particles_per_cell; ++sy)
+        for (int sx = 0; sx < sub && placed < particles_per_cell; ++sx) {
             if (emitted >= max_new_particles) return;
-            Vec3 jitter(U(rng), U(rng), U(rng));
-            particles.emit(cellMin + jitter * h, Vec3(0, 0, 0));
+            // Sub-cell base corner + jitter confined to that sub-cell.
+            Vec3 frac(
+                (static_cast<float>(sx) + U(rng)) * inv_sub,
+                (static_cast<float>(sy) + U(rng)) * inv_sub,
+                (static_cast<float>(sz) + U(rng)) * inv_sub);
+            particles.emit(cellMin + frac * h, Vec3(0, 0, 0));
             ++emitted;
+            ++placed;
         }
     }
 }

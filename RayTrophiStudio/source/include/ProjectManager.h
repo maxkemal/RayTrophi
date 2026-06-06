@@ -177,6 +177,10 @@ private:
     // Serialize particle simulation descriptors
     nlohmann::json serializeParticleSimulation(const SceneData& scene);
     void deserializeParticleSimulation(const nlohmann::json& j, SceneData& scene);
+
+    // Serialize rigid body descriptors
+    nlohmann::json serializeRigidBodies(const SceneData& scene);
+    void deserializeRigidBodies(const nlohmann::json& j, SceneData& scene);
     
     // Temporary storage for package contents during editing
     struct PackageFile {

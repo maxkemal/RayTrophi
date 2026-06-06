@@ -16,6 +16,7 @@
 #include "SceneSelection.h"
 #include "scene_data.h"   // Explicit include
 #include "Triangle.h"
+#include "InstanceManager.h"
 #include "imgui.h"
 #include "CameraPresets.h"
 #include "Backend/IViewportBackend.h"
@@ -1415,6 +1416,18 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
 
     ImGuiIO& io = ImGui::GetIO();
     float dt = io.DeltaTime;
+
+    const auto formatCompactCount = [](size_t value) -> std::string {
+        char buffer[32];
+        if (value >= 1000000ull) {
+            std::snprintf(buffer, sizeof(buffer), "%.1fM", static_cast<double>(value) / 1000000.0);
+        } else if (value >= 1000ull) {
+            std::snprintf(buffer, sizeof(buffer), "%.1fK", static_cast<double>(value) / 1000.0);
+        } else {
+            std::snprintf(buffer, sizeof(buffer), "%zu", value);
+        }
+        return buffer;
+    };
     
     // Position: Top Left of Viewport (respecting Left Panel)
     // Left Offset + 20px padding (user requested: "panelin solunda" but "viewport içinde", assuming next to panel)
@@ -1485,15 +1498,25 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                 text_col = IM_COL32(180, 210, 255, 255);
             }
 
-            ImVec2 pos = ImGui::GetCursorScreenPos();
+            const auto drawHudLine = [](const std::string& text, ImU32 color) {
+                ImVec2 pos = ImGui::GetCursorScreenPos();
+                ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x + 1, pos.y + 1), IM_COL32(0, 0, 0, 200), text.c_str());
+                ImGui::GetWindowDrawList()->AddText(pos, color, text.c_str());
+                ImGui::Dummy(ImGui::CalcTextSize(text.c_str()));
+            };
 
-            // Shadow
-            ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x+1, pos.y+1), IM_COL32(0,0,0,200), status_text.c_str());
-            ImGui::GetWindowDrawList()->AddText(pos, text_col, status_text.c_str());
+            drawHudLine(status_text, text_col);
 
-            // Advance cursor with DYNAMIC width to prevent clipping
-            ImVec2 text_size = ImGui::CalcTextSize(status_text.c_str());
-            ImGui::Dummy(text_size);
+            if (ctx.render_settings.show_scene_stats_hud) {
+                drawHudLine("Scene tris: " + formatCompactCount(cached_scene_triangle_count), IM_COL32(235, 235, 235, 225));
+
+                const size_t instance_count = InstanceManager::getInstance().getTotalInstanceCount();
+                const size_t instance_triangle_count = InstanceManager::getInstance().getTotalTriangleCount();
+                if (instance_count > 0) {
+                    drawHudLine("Instances: " + formatCompactCount(instance_count), IM_COL32(235, 235, 235, 225));
+                    drawHudLine("Instance tris: " + formatCompactCount(instance_triangle_count), IM_COL32(235, 235, 235, 225));
+                }
+            }
 
             ImGui::Dummy(ImVec2(0, 2)); // Small spacing
         }
@@ -1547,59 +1570,6 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
     }
     ImGui::End();
     ImGui::PopStyleVar();
-
-    // Bottom-right transparent scene/selection info
-    const auto formatCompactCount = [](size_t value) -> std::string {
-        char buffer[32];
-        if (value >= 1000000ull) {
-            std::snprintf(buffer, sizeof(buffer), "%.1fM", static_cast<double>(value) / 1000000.0);
-        } else if (value >= 1000ull) {
-            std::snprintf(buffer, sizeof(buffer), "%.1fK", static_cast<double>(value) / 1000.0);
-        } else {
-            std::snprintf(buffer, sizeof(buffer), "%zu", value);
-        }
-        return buffer;
-    };
-
-    std::vector<std::string> hud_lines;
-    const size_t scene_triangle_count = cached_scene_triangle_count;
-
-    hud_lines.push_back("Scene Tri  " + formatCompactCount(scene_triangle_count));
-
-    if (ctx.selection.hasSelection()) {
-        const SelectableItem& selected = ctx.selection.selected;
-        if (selected.type == SelectableType::Object && selected.object) {
-            const std::string node_name = selected.object->getNodeName();
-            size_t selected_triangle_count = 0;
-            auto selected_count_it = cached_triangle_count_by_object.find(node_name);
-            if (selected_count_it != cached_triangle_count_by_object.end()) {
-                selected_triangle_count = selected_count_it->second;
-            }
-
-            hud_lines.push_back("Selected Tri  " + formatCompactCount(selected_triangle_count));
-        }
-    }
-
-    if (!hud_lines.empty()) {
-        ImDrawList* draw_list = ImGui::GetForegroundDrawList();
-        float max_width = 0.0f;
-        float total_height = 0.0f;
-        for (const auto& line : hud_lines) {
-            const ImVec2 size = ImGui::CalcTextSize(line.c_str());
-            max_width = (std::max)(max_width, size.x);
-            total_height += size.y;
-        }
-        total_height += (hud_lines.size() > 1) ? 4.0f * static_cast<float>(hud_lines.size() - 1) : 0.0f;
-
-        const float x = io.DisplaySize.x - max_width - 24.0f - getPaintBrushDockWidth();
-        float y = io.DisplaySize.y - total_height - 18.0f;
-        for (const auto& line : hud_lines) {
-            const ImVec2 pos(x, y);
-            draw_list->AddText(ImVec2(pos.x + 1.0f, pos.y + 1.0f), IM_COL32(0, 0, 0, 190), line.c_str());
-            draw_list->AddText(pos, IM_COL32(235, 235, 235, 225), line.c_str());
-            y += ImGui::CalcTextSize(line.c_str()).y + 4.0f;
-        }
-    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

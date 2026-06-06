@@ -86,6 +86,12 @@ public:
     bool isPlaying() const { return is_playing; }
     std::string selected_track;
 
+    // Force the next handleSelectionSync to re-apply selected_track from the live
+    // viewport selection, even if the selection itself didn't change. Used when a
+    // panel (e.g. World) temporarily hijacks selected_track and then releases it,
+    // so keying objects works again without forcing the user to reselect.
+    void invalidateSelectionSync() { last_selection_.clear(); selection_sync_force_ = true; }
+
     // Reset timeline state for new projects
     void reset() {
         current_frame = 0;
@@ -97,6 +103,8 @@ public:
         selected_track = "";
         selected_keyframe_frame = -1;
         is_dragging_keyframe = false;
+        last_selection_.clear();
+        selection_sync_force_ = false;
         lastSyncedAnimCount = 0;  // re-sync animation data after project reload
     }
 
@@ -153,6 +161,10 @@ private:
     // Track data
     std::vector<TimelineTrack> tracks;
     bool tracks_dirty = true;
+    // Selection-sync state (was a function-static; promoted to a member so a panel
+    // releasing a hijacked selected_track can force a re-sync, and reset() clears it).
+    std::string last_selection_;
+    bool selection_sync_force_ = false;
     size_t lastSyncedAnimCount = 0;  // how many AnimationData entries have been synced
     
     // Selection & Interaction

@@ -40,6 +40,7 @@
 #include "Stylize/StylizePostProcess.h"
 #include "Stylize/StylizeKernel.h"
 #include "CameraPresets.h"
+#include "Jolt/JoltSmokeTest.h"  // Faz 0: --jolt-selftest link/runtime proof
 #include "scene_data.h"       // Added explicit include
 #include "AnimationNodes.h"
 #include "OptixWrapper.h"     // Added explicit include
@@ -1747,6 +1748,26 @@ int main(int argc, char* argv[]) try {
                         " pid=" + std::to_string(GetCurrentProcessId()) +
                         " verbose=" + (g_startupDiagVerbose ? "1" : "0"));
 
+    // Faz 0 Jolt Physics integration self-test. Runs a tiny standalone Jolt
+    // world (sphere dropped onto a floor) and exits — proves Jolt links and
+    // runs before any adapter/runtime wiring exists. Normal launches skip this.
+    // Result goes to SceneLog.txt so it is visible even with the console closed.
+    if (hasArg(argc, argv, "--jolt-selftest")) {
+        auto logResult = [](const char* tag, const RayTrophiSim::JoltIntegration::SmokeTestResult& r) {
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                          "[Jolt][%s] init=%d stepped=%d steps=%d start_y=%.3f final_y=%.3f (expected ~0.5)",
+                          tag, r.initialized ? 1 : 0, r.stepped ? 1 : 0, r.steps, r.start_y, r.final_y);
+            const bool ok = r.initialized && r.stepped && r.final_y > 0.2f && r.final_y < 0.8f;
+            if (ok) SCENE_LOG_INFO(std::string(buf) + " -> PASS");
+            else    SCENE_LOG_ERROR(std::string(buf) + " -> FAIL");
+        };
+        // Raw-Jolt link/runtime proof (Faz 0) + JoltWorld wrapper proof (Faz 1).
+        logResult("SmokeTest", RayTrophiSim::JoltIntegration::runSmokeTest());
+        logResult("WorldTest", RayTrophiSim::JoltIntegration::runWorldTest());
+        return 0;
+    }
+
     // Register clean-shutdown cleanup: remove StartupCrash.log when the
     // application exits normally. Crashes will not run this handler.
     std::atexit(removeStartupCrashLogIfExists);
@@ -2053,6 +2074,15 @@ int main(int argc, char* argv[]) try {
         }
 
         g_backend->resetAccumulation();
+        if (forceFullSync || did_geometry) {
+            // A full geometry sync has already rebuilt/refreshed the active
+            // backend. Drop stale rebuild/refit requests that may have been
+            // raised by live fluid/foam while a backend switch was in flight.
+            g_optix_rebuild_pending = false;
+            g_vulkan_rebuild_pending = false;
+            g_vulkan_geometry_append_pending = false;
+            g_gpu_refit_pending = false;
+        }
         g_needs_optix_sync.store(false, std::memory_order_release);
         return true;
     };

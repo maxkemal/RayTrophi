@@ -136,6 +136,9 @@ set(MINIZ_SOURCES
     "external/miniz.c"
 )
 
+# Jolt Physics (v5.5.0, MIT) - compiled in-project for matching flags/runtime/SIMD
+file(GLOB_RECURSE SOURCES_JOLT "external/JoltPhysics/Jolt/*.cpp")
+
 # Host-callable CUDA files (compiled to .obj)
 set(CUDA_SOURCES_OBJ
     "source/src/Device/fft_ocean.cu"
@@ -184,7 +187,7 @@ set(OZZ_RUNTIME_SOURCES
 )
 
 # Gather all sources
-set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${MINIZ_SOURCES} ${CUDA_SOURCES_OBJ} ${HEADERS})
+set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${MINIZ_SOURCES} ${SOURCES_JOLT} ${CUDA_SOURCES_OBJ} ${HEADERS})
 if(RAYTROPHI_ENABLE_OZZ)
     list(APPEND ALL_SOURCES ${OZZ_RUNTIME_SOURCES})
 endif()
@@ -297,6 +300,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Device"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Stylize"
     "${CMAKE_CURRENT_SOURCE_DIR}/external"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/JoltPhysics"
     "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui"
     "${CMAKE_CURRENT_SOURCE_DIR}/external/ozz-animation/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/external/ozz-animation/src"

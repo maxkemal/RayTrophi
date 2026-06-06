@@ -707,6 +707,36 @@ static RayTrophiSim::SimulationDomainType simulationDomainTypeFromString(const s
     return RayTrophiSim::SimulationDomainType::Gas;
 }
 
+static const char* rigidBodyShapeToString(RayTrophiSim::RigidBodyShape shape) {
+    switch (shape) {
+        case RayTrophiSim::RigidBodyShape::Sphere: return "Sphere";
+        case RayTrophiSim::RigidBodyShape::Capsule: return "Capsule";
+        case RayTrophiSim::RigidBodyShape::Box:
+        default: return "Box";
+    }
+}
+
+static RayTrophiSim::RigidBodyShape rigidBodyShapeFromString(const std::string& value) {
+    if (value == "Sphere") return RayTrophiSim::RigidBodyShape::Sphere;
+    if (value == "Capsule") return RayTrophiSim::RigidBodyShape::Capsule;
+    return RayTrophiSim::RigidBodyShape::Box;
+}
+
+static const char* rigidBodyMotionTypeToString(RayTrophiSim::RigidBodyMotionType type) {
+    switch (type) {
+        case RayTrophiSim::RigidBodyMotionType::Static: return "Static";
+        case RayTrophiSim::RigidBodyMotionType::Kinematic: return "Kinematic";
+        case RayTrophiSim::RigidBodyMotionType::Dynamic:
+        default: return "Dynamic";
+    }
+}
+
+static RayTrophiSim::RigidBodyMotionType rigidBodyMotionTypeFromString(const std::string& value) {
+    if (value == "Static") return RayTrophiSim::RigidBodyMotionType::Static;
+    if (value == "Kinematic") return RayTrophiSim::RigidBodyMotionType::Kinematic;
+    return RayTrophiSim::RigidBodyMotionType::Dynamic;
+}
+
 static const char* particlePhysicsModeToString(RayTrophiSim::ParticlePhysicsMode mode) {
     switch (mode) {
         case RayTrophiSim::ParticlePhysicsMode::Granular: return "Granular";
@@ -1483,6 +1513,11 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         } else {
             SCENE_LOG_INFO("[ProjectManager] Saved empty particle simulation.");
         }
+
+        // Rigid Bodies
+        if (progress_callback) progress_callback(84, "Saving rigid bodies...");
+        root["rigid_bodies"] = serializeRigidBodies(scene);
+        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.rigid_bodies.size()) + " rigid body descriptor(s).");
         
         // Hair System
         if (progress_callback) progress_callback(84, "Saving hair system...");
@@ -1956,11 +1991,12 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             }
 
             // VDB / Gas / Force Fields / Particle Simulation
-            simdjson::dom::element vdb_el, gas_el, ff_el, particles_el;
+            simdjson::dom::element vdb_el, gas_el, ff_el, particles_el, rigid_el;
             if (!root["vdb_volumes"].get(vdb_el)) deserializeVDBVolumes(sjsonToNlohmann(vdb_el), scene);
             if (!root["gas_volumes"].get(gas_el)) deserializeGasVolumes(sjsonToNlohmann(gas_el), scene);
             if (!root["force_fields"].get(ff_el)) deserializeForceFields(sjsonToNlohmann(ff_el), scene);
             if (!root["particle_simulation"].get(particles_el)) deserializeParticleSimulation(sjsonToNlohmann(particles_el), scene);
+            if (!root["rigid_bodies"].get(rigid_el)) deserializeRigidBodies(sjsonToNlohmann(rigid_el), scene);
 
             // Hair System
             // newProject already cleared HairSystem + uploaded empty hair to GPU.
@@ -3067,6 +3103,7 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     
     j["samples_per_pixel"] = settings.samples_per_pixel;
     j["samples_per_pass"] = settings.samples_per_pass;
+    j["show_scene_stats_hud"] = settings.show_scene_stats_hud;
     j["mouse_sensitivity"] = settings.mouse_sensitivity;
     j["max_bounces"] = settings.max_bounces;
     j["diffuse_bounces"] = settings.diffuse_bounces;
@@ -3107,6 +3144,7 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
 void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& settings) {
     settings.samples_per_pixel = j.value("samples_per_pixel", 1);
     settings.samples_per_pass = j.value("samples_per_pass", 1);
+    settings.show_scene_stats_hud = j.value("show_scene_stats_hud", true);
     settings.mouse_sensitivity = j.value("mouse_sensitivity", 0.4f);
     settings.max_bounces = j.value("max_bounces", 10);
     settings.max_bounces = std::max(1, settings.max_bounces);
@@ -3880,6 +3918,148 @@ void ProjectManager::deserializeForceFields(const json& j, SceneData& scene) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// RIGID BODY SERIALIZATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+json ProjectManager::serializeRigidBodies(const SceneData& scene) {
+    json root;
+    root["version"] = 1;
+    root["bodies"] = json::array();
+
+    for (const auto& rb : scene.rigid_bodies) {
+        json b;
+        b["name"] = rb.name;
+        b["source_name"] = rb.source_name;
+        b["collider_name"] = rb.collider_name;
+        b["enabled"] = rb.enabled;
+        b["dynamic"] = rb.dynamic;
+        b["motion_type"] = rigidBodyMotionTypeToString(rb.motion_type);
+        b["shape"] = rigidBodyShapeToString(rb.shape);
+        b["mass"] = rb.mass;
+        b["auto_mass_from_density"] = rb.auto_mass_from_density;
+        b["density"] = rb.density;
+        b["linear_damping"] = rb.linear_damping;
+        b["angular_damping"] = rb.angular_damping;
+        b["gravity_scale"] = rb.gravity_scale;
+        b["friction"] = rb.friction;
+        b["restitution"] = rb.restitution;
+        b["initial_linear_velocity"] = vec3ToJson(rb.initial_linear_velocity);
+        b["initial_angular_velocity"] = vec3ToJson(rb.initial_angular_velocity);
+        b["sleep_enabled"] = rb.sleep_enabled;
+        b["lock_translation_x"] = rb.lock_translation_x;
+        b["lock_translation_y"] = rb.lock_translation_y;
+        b["lock_translation_z"] = rb.lock_translation_z;
+        b["lock_rotation_x"] = rb.lock_rotation_x;
+        b["lock_rotation_y"] = rb.lock_rotation_y;
+        b["lock_rotation_z"] = rb.lock_rotation_z;
+        b["fluid_coupling_enabled"] = rb.fluid_coupling_enabled;
+        b["buoyancy_scale"] = rb.buoyancy_scale;
+        b["fluid_density"] = rb.fluid_density;
+        b["fluid_drag"] = rb.fluid_drag;
+        b["fluid_angular_drag"] = rb.fluid_angular_drag;
+        b["rest_captured"] = rb.rest_captured;
+        if (rb.rest_captured) {
+            b["initial_pivot"] = mat4ToJson(rb.initial_pivot);
+            b["rest_half_extents"] = vec3ToJson(rb.rest_half_extents);
+        }
+        root["bodies"].push_back(std::move(b));
+    }
+
+    return root;
+}
+
+void ProjectManager::deserializeRigidBodies(const json& j, SceneData& scene) {
+    if (!j.is_object() && !j.is_array()) {
+        return;
+    }
+
+    scene.rigid_bodies.clear();
+
+    const json* bodies = nullptr;
+    if (j.contains("bodies") && j["bodies"].is_array()) {
+        bodies = &j["bodies"];
+    } else if (j.is_array()) {
+        bodies = &j;
+    }
+    if (!bodies) {
+        return;
+    }
+
+    scene.rigid_bodies.reserve(bodies->size());
+    for (const auto& item : *bodies) {
+        if (!item.is_object()) continue;
+
+        RayTrophiSim::RigidBodyObject rb;
+        rb.name = item.value("name", rb.name);
+        rb.source_name = item.value("source_name", rb.source_name);
+        rb.collider_name = item.value("collider_name", rb.collider_name);
+        rb.enabled = item.value("enabled", rb.enabled);
+        rb.motion_type = rigidBodyMotionTypeFromString(
+            item.value("motion_type", std::string(rb.dynamic ? "Dynamic" : "Static")));
+        rb.dynamic = item.value("dynamic", rb.motion_type != RayTrophiSim::RigidBodyMotionType::Static);
+        rb.shape = rigidBodyShapeFromString(item.value("shape", std::string("Box")));
+        rb.mass = item.value("mass", rb.mass);
+        rb.auto_mass_from_density = item.value("auto_mass_from_density", rb.auto_mass_from_density);
+        rb.density = item.value("density", rb.density);
+        rb.linear_damping = item.value("linear_damping", rb.linear_damping);
+        rb.angular_damping = item.value("angular_damping", rb.angular_damping);
+        rb.gravity_scale = item.value("gravity_scale", rb.gravity_scale);
+        rb.friction = item.value("friction", rb.friction);
+        rb.restitution = item.value("restitution", rb.restitution);
+        if (item.contains("initial_linear_velocity")) rb.initial_linear_velocity = jsonToVec3(item["initial_linear_velocity"]);
+        if (item.contains("initial_angular_velocity")) rb.initial_angular_velocity = jsonToVec3(item["initial_angular_velocity"]);
+        rb.sleep_enabled = item.value("sleep_enabled", rb.sleep_enabled);
+        rb.lock_translation_x = item.value("lock_translation_x", rb.lock_translation_x);
+        rb.lock_translation_y = item.value("lock_translation_y", rb.lock_translation_y);
+        rb.lock_translation_z = item.value("lock_translation_z", rb.lock_translation_z);
+        rb.lock_rotation_x = item.value("lock_rotation_x", rb.lock_rotation_x);
+        rb.lock_rotation_y = item.value("lock_rotation_y", rb.lock_rotation_y);
+        rb.lock_rotation_z = item.value("lock_rotation_z", rb.lock_rotation_z);
+        rb.fluid_coupling_enabled = item.value("fluid_coupling_enabled", rb.fluid_coupling_enabled);
+        rb.buoyancy_scale = item.value("buoyancy_scale", rb.buoyancy_scale);
+        rb.fluid_density = item.value("fluid_density", rb.fluid_density);
+        rb.fluid_drag = item.value("fluid_drag", rb.fluid_drag);
+        rb.fluid_angular_drag = item.value("fluid_angular_drag", rb.fluid_angular_drag);
+        const bool hasSerializedRest = item.value("rest_captured", false) && item.contains("initial_pivot");
+        if (hasSerializedRest) {
+            rb.rest_captured = true;
+            rb.initial_pivot = jsonToMat4(item["initial_pivot"]);
+            if (item.contains("rest_half_extents")) rb.rest_half_extents = jsonToVec3(item["rest_half_extents"]);
+        } else {
+            rb.rest_captured = false;
+        }
+
+        // Runtime/Jolt state is intentionally not serialized.
+        rb.handle = 0xffffffffu;
+        rb.created = false;
+        rb.has_written = false;
+        scene.rigid_bodies.push_back(std::move(rb));
+    }
+
+    if (!scene.rigid_bodies.empty()) {
+        scene.ensureRigidBodySystem();
+        if (scene.rigid_body_system) {
+            scene.rigid_body_system->setBodies(&scene.rigid_bodies);
+            scene.rigid_body_system->resetRuntime(true);
+        }
+        scene.syncRigidBodyProxyColliders();
+        for (auto& rb : scene.rigid_bodies) {
+            if (!rb.rest_captured) {
+                scene.captureRigidBodyRestPose(rb);
+            }
+        }
+        if (scene.rigid_body_system) {
+            scene.rigid_body_system->resetRuntime(true);
+            scene.rigid_body_system->setBodies(&scene.rigid_bodies);
+        }
+    } else if (scene.rigid_body_system) {
+        scene.rigid_body_system->resetRuntime(false);
+        scene.rigid_body_system->setBodies(&scene.rigid_bodies);
+    }
+    scene.invalidateRigidBodySimulationCache();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // PARTICLE SIMULATION SERIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -3996,6 +4176,9 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"seed_particles_per_cell", domain.fluid_seed_particles_per_cell},
             {"max_particles", domain.fluid_max_particles},
             {"replace_on_seed", domain.fluid_replace_on_seed},
+            {"seed_mode", (int)domain.fluid_seed_mode},
+            {"fill_level", domain.fluid_fill_level},
+            {"fill_wall_margin", domain.fluid_fill_wall_margin},
             {"gravity", vec3ToJson(domain.fluid_params.gravity)},
             {"particles_per_cell", domain.fluid_params.particles_per_cell},
             {"cfl", domain.fluid_params.cfl},
@@ -4326,6 +4509,9 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_seed_particles_per_cell = f.value("seed_particles_per_cell", domain.fluid_seed_particles_per_cell);
             domain.fluid_max_particles = f.value("max_particles", domain.fluid_max_particles);
             domain.fluid_replace_on_seed = f.value("replace_on_seed", domain.fluid_replace_on_seed);
+            domain.fluid_seed_mode = (RayTrophiSim::FluidSeedMode)f.value("seed_mode", (int)domain.fluid_seed_mode);
+            domain.fluid_fill_level = f.value("fill_level", domain.fluid_fill_level);
+            domain.fluid_fill_wall_margin = f.value("fill_wall_margin", domain.fluid_fill_wall_margin);
             if (f.contains("gravity")) domain.fluid_params.gravity = jsonToVec3(f["gravity"]);
             domain.fluid_params.particles_per_cell = f.value("particles_per_cell", domain.fluid_params.particles_per_cell);
             domain.fluid_params.cfl = f.value("cfl", domain.fluid_params.cfl);

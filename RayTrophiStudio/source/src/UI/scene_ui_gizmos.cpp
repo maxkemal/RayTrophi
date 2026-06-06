@@ -76,6 +76,18 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
         ctx.scene.pruneInvalidParticleObjectBindings();
     }
 
+    // Keep sim-source object poses (and thus their collider/emitter/domain gizmos)
+    // synced to the timeline playhead while editing. The sim loop re-poses during
+    // playback/bake, but idle frame changes — and keyframe edits AT the current
+    // frame (which don't change the frame number) — do not, so the surface mesh
+    // cache the gizmos read for bounds stays stale and the boxes lag behind the
+    // object. applySimSourceObjectPosesForFrame is now a no-op when the evaluated
+    // pose is unchanged (it tracks the last pushed matrix), so calling it every
+    // idle frame is cheap and catches both scrubbing and same-frame key edits.
+    if (particles && !timeline.isPlaying()) {
+        ctx.scene.applySimSourceObjectPosesForFrame(timeline.getCurrentFrame());
+    }
+
     const Camera& cam = *ctx.scene.camera;
     ImGuiIO& io = ImGui::GetIO();
     const float screen_w = io.DisplaySize.x;
@@ -127,6 +139,15 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
     };
 
     const std::string selected_source_name = selectedSourceName();
+    // The collider/bounds gizmos resolve their box from the per-epoch surface-mesh
+    // cache. A manual gizmo drag moves the object but may not bump the geometry
+    // generation until release, so that memo can stay stale and the box lags the
+    // object. Drop the selected object's memo each idle frame so its gizmo always
+    // rebuilds from the live verts and tracks the drag. (Sim writeback already
+    // drops the memo via the pivot setter; this covers manual editing.) Cosmetic.
+    if (!timeline.isPlaying() && !selected_source_name.empty()) {
+        ctx.scene.refreshSimSourceGizmoBounds(selected_source_name);
+    }
     const int selected_domain_index =
         (ctx.selection.selected.type == SelectableType::SimulationDomain &&
          ctx.selection.selected.particle_system_index == ctx.scene.active_particle_system_index)
@@ -463,9 +484,21 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
             const auto& fluid_domain = grid_domains[domain_index];
             // Seed AABB — cyan tint, distinguishes it from the domain box. Lets
             // the user see where Seed Fluid will deposit particles before they
-            // press the button.
-            drawAABB(fluid_domain.fluid_seed_min,
-                     fluid_domain.fluid_seed_max,
+            // press the button. FillLevel mirrors the resting-tank region the
+            // seeder actually produces, including the budget-capped (effective)
+            // fill height, so the cyan box matches the real result.
+            Vec3 seed_lo = fluid_domain.fluid_seed_min;
+            Vec3 seed_hi = fluid_domain.fluid_seed_max;
+            if (fluid_domain.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel) {
+                RayTrophiSim::computeFluidFillSeedAABB(
+                    state.bounds_min, state.bounds_max, state.voxel_size,
+                    fluid_domain.fluid_fill_level, fluid_domain.fluid_fill_wall_margin,
+                    std::max(1, fluid_domain.fluid_seed_particles_per_cell),
+                    fluid_domain.fluid_max_particles,
+                    seed_lo, seed_hi);
+            }
+            drawAABB(seed_lo,
+                     seed_hi,
                      IM_COL32(80, 235, 255, 130),
                      1.1f);
             draw_particle_dots = fluid_domain.fluid_debug_overlay;

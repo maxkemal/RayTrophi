@@ -7696,6 +7696,8 @@ void VulkanBackendAdapter::updateInstanceMaterialBinding(const std::string& node
 void VulkanBackendAdapter::setVisibilityByNodeName(const std::string& nodeName, bool visible) {
     if (!m_device || !m_device->isInitialized()) return;
 
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
     bool changed = false;
     std::unordered_set<std::string> dirtyRasterMeshes;
     for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
@@ -7729,13 +7731,17 @@ void VulkanBackendAdapter::setVisibilityByNodeName(const std::string& nodeName, 
     }
 
     if (changed) {
+        // Visibility edits rebuild/refit TLAS instance data. Serialize them with
+        // any in-flight trace or foam-driven topology rebuild before touching AS.
+        m_device->waitIdle();
+
         for (const auto& meshKey : dirtyRasterMeshes) {
             auto meshIt = m_rasterMeshes.find(meshKey);
             if (meshIt != m_rasterMeshes.end()) {
                 uploadRasterInstanceBuffer(meshIt->second);
             }
         }
-        if (!m_vkInstances.empty()) {
+        if (!m_topology_dirty && !m_vkInstances.empty() && m_device->hasTLAS()) {
             // [VULKAN FIX] Update the TLAS with new visibility masks (include hair)
             auto mergedVis = m_vkInstances;
             for (const auto& h : m_hairVkInstances) mergedVis.push_back(h);

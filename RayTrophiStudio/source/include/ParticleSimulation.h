@@ -12,6 +12,8 @@
 
 #include <memory>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -114,6 +116,58 @@ inline uint32_t defaultGridDomainChannels() {
            static_cast<uint32_t>(SimulationGridDomainChannelFlags::Pressure);
 }
 
+// How the APIC liquid is initialised when "Seed Fluid" runs.
+//   SeedBox   — fill the user-positioned fluid_seed_min/max AABB (legacy; good
+//               for a localized blob you then drop / emit from).
+//   FillLevel — pre-fill the whole domain footprint from the floor up to
+//               fluid_fill_level (fraction of domain height) as a resting tank.
+//               Skips the long emission/settling transient for standing-water
+//               setups ("dolu kap"); colliders then carve waves on top.
+enum class FluidSeedMode : uint32_t {
+    SeedBox = 0,
+    FillLevel = 1
+};
+
+// Resting-tank fill region (single source of truth for the seeder, the viewport
+// gizmo and the UI readout). Fills the full XZ footprint (inset by wall_margin)
+// from the floor up to fill_level of the domain height, then caps the height to
+// whatever `budget` particles afford at `ppc` (COMPLETE horizontal layers). ppc
+// is a stability constant (> 1 for real internal pressure), so an under-budget
+// fill loses HEIGHT, never density — the level just becomes what the budget
+// supports. Returns the effective fill fraction actually seeded (0..fill_level).
+inline float computeFluidFillSeedAABB(const Vec3& bounds_min,
+                                      const Vec3& bounds_max,
+                                      float voxel_size,
+                                      float fill_level,
+                                      float wall_margin,
+                                      int ppc,
+                                      std::size_t budget,
+                                      Vec3& out_lo,
+                                      Vec3& out_hi) {
+    const float lvl = std::clamp(fill_level, 0.0f, 1.0f);
+    const float m   = std::max(0.0f, wall_margin);
+    const float height = std::max(0.0f, bounds_max.y - bounds_min.y);
+    out_lo = Vec3(bounds_min.x + m, bounds_min.y, bounds_min.z + m);
+    out_hi = Vec3(bounds_max.x - m, bounds_min.y + height * lvl, bounds_max.z - m);
+    if (voxel_size <= 0.0f || ppc <= 0 || height <= 0.0f) return lvl;
+
+    // Footprint = cells in one floor-level XZ layer.
+    const float fx = std::max(0.0f, out_hi.x - out_lo.x);
+    const float fz = std::max(0.0f, out_hi.z - out_lo.z);
+    const std::size_t nx = static_cast<std::size_t>(std::floor(fx / voxel_size));
+    const std::size_t nz = static_cast<std::size_t>(std::floor(fz / voxel_size));
+    const std::size_t footprint = nx * nz;
+    if (footprint == 0) return 0.0f;
+
+    const std::size_t affordable_layers =
+        (budget / static_cast<std::size_t>(ppc)) / footprint;
+    const float budget_max_y =
+        bounds_min.y + static_cast<float>(affordable_layers) * voxel_size;
+    if (budget_max_y < out_hi.y) out_hi.y = budget_max_y;  // budget caps the level
+
+    return (out_hi.y - bounds_min.y) / height;  // effective fill fraction
+}
+
 struct ParticlePhysicsSettings {
     ParticlePhysicsMode mode = ParticlePhysicsMode::Spark;
     ParticleQualityMode quality = ParticleQualityMode::Realtime;
@@ -168,6 +222,13 @@ struct SimulationGridDomainDesc {
     std::size_t fluid_max_particles = 100000;
     bool fluid_replace_on_seed = true;
     bool fluid_pending_seed = false;
+    // Seed strategy. SeedBox (default) keeps old projects' behaviour. FillLevel
+    // ignores fluid_seed_min/max and instead fills the domain footprint from the
+    // floor up to fluid_fill_level of the domain height, optionally inset from
+    // the side walls by fluid_fill_wall_margin (world units).
+    FluidSeedMode fluid_seed_mode = FluidSeedMode::SeedBox;
+    float fluid_fill_level = 0.5f;        // 0..1 fraction of domain height
+    float fluid_fill_wall_margin = 0.0f;  // world-unit inset from the side walls
     // Translation anchors: previous frame's domain min/max corners. We use
     // BOTH so we can distinguish translation (both corners shift by the
     // same delta → seed follows) from resize (only one corner moves → seed

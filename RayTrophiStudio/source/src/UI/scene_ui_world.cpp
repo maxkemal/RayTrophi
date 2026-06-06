@@ -45,9 +45,22 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
     World& world = ctx.renderer.world;
     WorldMode current_mode = world.getMode();
     
-    // Auto-select "World" track in timeline when World panel is active
-    // This allows keyframe manipulation (move, delete) for world keyframes
-    timeline.selected_track = "World";
+    // Auto-select the "World" track ONLY while the World panel is focused, so the
+    // user can move/delete/add world keyframes from here. Doing this every frame the
+    // panel is merely drawn (docked/visible but not focused) permanently hijacked
+    // selected_track to "World" — which silently blocked keying objects for the rest
+    // of the session, because handleSelectionSync only restores it on a selection
+    // CHANGE. On focus release we force a selection re-sync to hand the timeline back.
+    {
+        const bool world_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+        static bool prev_world_focused = false;
+        if (world_focused) {
+            timeline.selected_track = "World";
+        } else if (prev_world_focused) {
+            timeline.invalidateSelectionSync();  // released: restore live selection's track
+        }
+        prev_world_focused = world_focused;
+    }
     
     UIWidgets::ColoredHeader("Environment Settings", ImVec4(0.3f, 0.7f, 1.0f, 1.0f));
     UIWidgets::Divider();

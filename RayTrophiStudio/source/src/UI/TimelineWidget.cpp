@@ -2640,16 +2640,20 @@ void TimelineWidget::handleSelectionSync(UIContext& ctx) {
         }
     }
     
-    // PERFORMANCE: Only update and mark dirty if selection actually changed
-    static std::string last_selection;
-    if (viewport_selection != last_selection) {
-        last_selection = viewport_selection;
-        
+    // PERFORMANCE: Only update and mark dirty if selection actually changed.
+    // selection_sync_force_ lets a panel that hijacked selected_track (e.g. World)
+    // hand it back to the live selection on release, even when the selection itself
+    // didn't change (otherwise re-selecting the same object wouldn't restore it and
+    // keying objects would stay broken for the whole session).
+    if (viewport_selection != last_selection_ || selection_sync_force_) {
+        last_selection_ = viewport_selection;
+        selection_sync_force_ = false;
+
         // Update selected track
         if (!viewport_selection.empty()) {
             selected_track = viewport_selection;
         }
-        
+
         // PERFORMANCE: Only mark dirty when selection changes, not every frame
         tracks_dirty = true;
     }

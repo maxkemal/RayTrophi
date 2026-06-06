@@ -70,7 +70,7 @@ RayTrophi Studio is organized into task-focused workspaces that all operate on t
 | **Terrain** | Sculpt + node-graph terrain, hydraulic/thermal erosion, heightmap I/O |
 | **Foliage / Scatter** | Rule-based and hand-painted instancing of grass, trees, rocks |
 | **Hair** | Groom, comb, cut/grow, simulate, and render hair & fur |
-| **Simulation** | Liquid (APIC/FLIP), gas/smoke/fire, whitewater, colliders, force fields, emitters |
+| **Simulation** | Liquid (APIC/FLIP), gas/smoke/fire, whitewater, rigid bodies (Jolt), colliders, force fields, emitters |
 | **Animation** | Multi-track timeline, per-channel keyframing, skeletal animation, animation graph |
 | **Render / Look-dev** | Pick a backend, set sampling/quality, denoise, tonemap, and Stylize the result |
 
@@ -153,7 +153,7 @@ Same scene, same settings, same hardware, camera in motion. These are interactiv
 
 ## 🌀 Physics & simulation suite
 
-A multi-threaded grid- and particle-based FX suite with CUDA and CPU backends, integrated directly into the path-traced render pipeline. Multiple simulation domains, emitters, colliders, and force fields coexist in one workspace and are saved with the project.
+A multi-threaded grid- and particle-based FX suite with CUDA and CPU backends, integrated directly into the path-traced render pipeline. Multiple simulation domains, emitters, colliders, rigid bodies, and force fields coexist in one workspace and are saved with the project.
 
 ### Liquid — APIC / FLIP solver
 - Hybrid **APIC/FLIP** solver with adjustable blending, preserving angular momentum and minimizing numerical dissipation
@@ -175,6 +175,13 @@ Secondary **spray** (airborne), **foam** (surface), and **bubbles** (submerged) 
 - **Newton-Raphson wave snapping** projects surface foam onto the smoothed level-set water mesh, eliminating floating foam on wavy water
 - Deterministic hash-based size variation and smooth dissolve near end-of-life
 - Adjustable icosphere subdivision (0–3) for close-up detail
+
+### Rigid bodies — Jolt Physics + two-way fluid coupling
+- **Jolt Physics**-backed rigid-body solver on the shared simulation timeline: tag any scene object **Static, Dynamic, or Kinematic**, with box / sphere / capsule / oriented-box shapes fitted to its bounds
+- Per-body **mass or auto-mass-from-density, linear & angular damping, friction, restitution, gravity scale, initial linear/angular velocity, sleep, and per-axis translation/rotation locks**
+- **Two-way fluid coupling.** A body is voxelized into the liquid/gas grid as a moving solid through the variational cut-cell path, so it pushes and splashes the fluid; in return, **buoyancy and linear/angular drag** sampled from the fluid level set act back on the body — float, sink, and bob driven by the same field the renderer reads
+- **Kinematic** bodies are keyframe-driven (animated colliders that stir the fluid); **Dynamic** bodies are owned by the solver, so the timeline never fights the simulated pose
+- **Selective re-bake.** Editing or moving a rigid body only drops the (expensive) fluid bake when that body actually couples to a fluid domain — an unrelated static prop re-simulates on its own (cheap) while the liquid cache is preserved
 
 ### Surfaces, caching & serialization
 - **Yu-Turk anisotropic surface reconstruction** with Laplacian smoothing for the render-time liquid mesh; surface resolution decoupled from the sim grid
@@ -379,6 +386,7 @@ RayTrophi/
 **Recently shipped**
 - ✅ Vulkan RT backend (interactive primary) with GPU skinning, async ping-pong pipeline, analytical LSS hair
 - ✅ Physics & particle simulation suite (APIC/FLIP liquid, gas/fire, whitewater)
+- ✅ Rigid-body dynamics (Jolt Physics) with two-way fluid coupling — solid voxelization + buoyancy/drag, selective fluid re-bake
 - ✅ GPU MGPCG fluid pressure solve (CUDA)
 - ✅ Variational cut-cell solid coupling + ghost-fluid 2nd-order free surface (CPU)
 - ✅ Multi-material whitewater PBR routing + Newton-Raphson wave snapping
@@ -423,9 +431,11 @@ Contributions are welcome — performance work, new material/FX models, format s
 
 MIT License — see [LICENSE.txt](LICENSE.txt).
 
+Third-party libraries and SDKs remain under their own licenses. See the **Third-party components** section in [LICENSE.txt](LICENSE.txt) for Jolt Physics, Assimp, Dear ImGui, ozz-animation, Intel OIDN, Embree, OptiX/CUDA, Vulkan, SDL2, JSON libraries, stb, TinyEXR, NanoVDB/OpenVDB, miniz, and related notices.
+
 ## 🙏 Acknowledgments
 
-**Embree** (Intel CPU ray tracing) · **OptiX** (NVIDIA GPU ray tracing) · **Vulkan** · **Assimp** (asset import) · **ImGui** (UI) · **SDL2** · **Intel OIDN** (denoising) · **NanoVDB** (sparse volumes) · **Ozz-animation** (skeletal animation) · **stb** · **TinyEXR**
+**Embree** (Intel CPU ray tracing) · **OptiX** (NVIDIA GPU ray tracing) · **Vulkan** · **Jolt Physics** (rigid-body physics) · **Assimp** (asset import) · **ImGui** (UI) · **SDL2** · **Intel OIDN** (denoising) · **NanoVDB** (sparse volumes) · **Ozz-animation** (skeletal animation) · **stb** · **TinyEXR**
 
 ## 👤 Author
 

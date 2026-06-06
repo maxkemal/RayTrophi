@@ -70,7 +70,7 @@ RayTrophi Studio, hepsi aynı canlı sahne üzerinde çalışan, göreve odaklı
 | **Arazi** | Sculpt + düğüm-grafiği arazi, hidrolik/termal erozyon, heightmap I/O |
 | **Bitki / Scatter** | Kural tabanlı ve elle boyanan çim/ağaç/kaya instancing |
 | **Saç** | Tüy/saç groom, tara, kes/uzat, simüle et ve render et |
-| **Simülasyon** | Sıvı (APIC/FLIP), gaz/duman/ateş, whitewater, collider, kuvvet alanları, emitter |
+| **Simülasyon** | Sıvı (APIC/FLIP), gaz/duman/ateş, whitewater, rigid body (Jolt), collider, kuvvet alanları, emitter |
 | **Animasyon** | Çok-track zaman çizelgesi, kanal bazlı keyframe, iskelet animasyonu, animasyon grafiği |
 | **Render / Look-dev** | Backend seç, örnekleme/kalite ayarla, denoise, tonemap ve sonucu Stylize'la |
 
@@ -153,7 +153,7 @@ Aynı sahne, aynı ayarlar, aynı donanım, kamera hareket halinde. Bunlar inter
 
 ## 🌀 Fizik & simülasyon paketi
 
-CUDA ve CPU backend'li, çok iş parçacıklı grid ve parçacık tabanlı bir FX paketi; doğrudan path-traced render pipeline'ına entegre. Birden çok simülasyon domaini, emitter, collider ve kuvvet alanı tek çalışma alanında bir arada bulunur ve projeyle birlikte kaydedilir.
+CUDA ve CPU backend'li, çok iş parçacıklı grid ve parçacık tabanlı bir FX paketi; doğrudan path-traced render pipeline'ına entegre. Birden çok simülasyon domaini, emitter, collider, rigid body ve kuvvet alanı tek çalışma alanında bir arada bulunur ve projeyle birlikte kaydedilir.
 
 ### Sıvı — APIC / FLIP çözücü
 - Açısal momentumu koruyan, sayısal dağılımı en aza indiren ayarlanabilir karışımlı **APIC/FLIP** çözücü
@@ -175,6 +175,13 @@ Hapsolmuş hava ve dalga tepesi potansiyellerinden üretilen ikincil **sprey** (
 - Yüzey köpüğünü yumuşatılmış level-set su mesh'ine projelendirip dalgalı suda yüzen köpüğü gideren **Newton-Raphson dalga oturtma**
 - Deterministik hash tabanlı boyut varyasyonu ve ömür sonunda yumuşak çözünme
 - Yakın çekim detayı için ayarlanabilir icosphere alt bölümü (0–3)
+
+### Rigid body — Jolt Physics + iki-yönlü sıvı eşleşmesi
+- Paylaşılan simülasyon zaman çizelgesinde **Jolt Physics** tabanlı rigid-body çözücü: herhangi bir sahne objesini **Static, Dynamic veya Kinematic** olarak işaretle; sınırlarına oturtulan box / sphere / capsule / yönlü-kutu şekilleri
+- Gövde başına **kütle veya yoğunluktan-otomatik-kütle, doğrusal & açısal sönümleme, sürtünme, geri tepme (restitution), yerçekimi ölçeği, başlangıç doğrusal/açısal hızı, uyku ve eksen bazlı öteleme/dönüş kilitleri**
+- **İki-yönlü sıvı eşleşmesi.** Gövde, varyasyonel cut-cell yolu üzerinden sıvı/gaz ızgarasına hareketli bir katı olarak voksellenir, böylece sıvıyı iter ve sıçratır; karşılığında sıvı level set'inden örneklenen **kaldırma kuvveti (buoyancy) ve doğrusal/açısal sürükleme** gövdeye geri etki eder — render'ın okuduğu aynı alandan yüzme, batma ve sallanma davranışı
+- **Kinematic** gövdeler keyframe ile sürülür (sıvıyı karıştıran animasyonlu collider'lar); **Dynamic** gövdelerin sahibi çözücüdür, böylece zaman çizelgesi simüle edilen pozla çakışmaz
+- **Seçici yeniden-pişirme.** Bir rigid body'yi düzenlemek veya taşımak, (pahalı) sıvı bake'ini yalnızca o gövde gerçekten bir sıvı domainiyle etkileşiyorsa düşürür — alakasız bir static prop kendi başına ucuzca yeniden simüle edilir, sıvı önbelleği korunur
 
 ### Yüzeyler, önbellek & serileştirme
 - Render zamanı sıvı mesh'i için Laplacian yumuşatmalı **Yu-Turk anizotropik yüzey rekonstrüksiyonu**; yüzey çözünürlüğü sim ızgarasından bağımsız
@@ -379,6 +386,7 @@ RayTrophi/
 **Yakın zamanda eklenenler**
 - ✅ Vulkan RT backend (interaktif birincil) — GPU skinning, asenkron ping-pong pipeline, analitik LSS saç
 - ✅ Fizik & parçacık simülasyon paketi (APIC/FLIP sıvı, gaz/ateş, whitewater)
+- ✅ Rigid-body dinamiği (Jolt Physics) + iki-yönlü sıvı eşleşmesi — katı voksellemesi + kaldırma/sürükleme, seçici sıvı yeniden-pişirme
 - ✅ GPU MGPCG sıvı basınç çözümü (CUDA)
 - ✅ Varyasyonel cut-cell katı eşleşmesi + ghost-fluid 2. derece serbest yüzey (CPU)
 - ✅ Çok-materyalli whitewater PBR yönlendirme + Newton-Raphson dalga oturtma
@@ -423,9 +431,11 @@ Katkılar memnuniyetle karşılanır — performans çalışmaları, yeni matery
 
 MIT Lisansı — bkz. [LICENSE.txt](LICENSE.txt).
 
+Üçüncü taraf kütüphane ve SDK'lar kendi lisansları altında kalır. Jolt Physics, Assimp, Dear ImGui, ozz-animation, Intel OIDN, Embree, OptiX/CUDA, Vulkan, SDL2, JSON kütüphaneleri, stb, TinyEXR, NanoVDB/OpenVDB, miniz ve ilgili notlar için [LICENSE.txt](LICENSE.txt) içindeki **Third-party components** bölümüne bakın.
+
 ## 🙏 Teşekkürler
 
-**Embree** (Intel CPU ışın izleme) · **OptiX** (NVIDIA GPU ışın izleme) · **Vulkan** · **Assimp** (asset içe aktarma) · **ImGui** (UI) · **SDL2** · **Intel OIDN** (denoise) · **NanoVDB** (seyrek hacimler) · **Ozz-animation** (iskelet animasyonu) · **stb** · **TinyEXR**
+**Embree** (Intel CPU ışın izleme) · **OptiX** (NVIDIA GPU ışın izleme) · **Vulkan** · **Jolt Physics** (rigid-body fizik) · **Assimp** (asset içe aktarma) · **ImGui** (UI) · **SDL2** · **Intel OIDN** (denoise) · **NanoVDB** (seyrek hacimler) · **Ozz-animation** (iskelet animasyonu) · **stb** · **TinyEXR**
 
 ## 👤 Yazar
 
