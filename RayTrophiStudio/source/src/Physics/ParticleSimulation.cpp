@@ -4310,18 +4310,53 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                 state.particles.clear();
                 state.foam.clear();   // drop stale whitewater with the old liquid
             }
+            // Resolve the effective seed AABB. FillLevel mode treats the domain
+            // as a resting tank: fill the whole footprint from the floor up to
+            // fluid_fill_level of the domain height (skips the long emission /
+            // settling transient for standing water). SeedBox uses the explicit
+            // user AABB. Particles are emitted at rest (v=0) by seedBox either
+            // way, so the result starts in hydrostatic balance.
+            const std::size_t seed_budget =
+                state.particles.size() < domain.fluid_max_particles
+                    ? domain.fluid_max_particles - state.particles.size()
+                    : 0u;
+
+            // ppc is a STABILITY constant, not a budget knob: it must stay > 1 so
+            // the cells carry enough samples to build real internal pressure
+            // (incompressibility). At 1 ppc the liquid is under-resolved and just
+            // collapses. So ppc is fixed and, when the budget can't afford the
+            // full target fill, the fill HEIGHT drops instead (complete layers
+            // from the floor up) — fully-resolved, stable, pile-free.
+            const int ppc = std::max(1, domain.fluid_seed_particles_per_cell);
+
+            Vec3 seed_lo = domain.fluid_seed_min;
+            Vec3 seed_hi = domain.fluid_seed_max;
+            if (domain.fluid_seed_mode == FluidSeedMode::FillLevel) {
+                computeFluidFillSeedAABB(state.bounds_min, state.bounds_max,
+                                         state.grid.voxel_size,
+                                         domain.fluid_fill_level,
+                                         domain.fluid_fill_wall_margin,
+                                         ppc, seed_budget,
+                                         seed_lo, seed_hi);
+            }
+
+            // The seeded density IS the rest density: couple the solver's
+            // density-correction target to the seeded ppc so a freshly filled
+            // tank starts at exactly "target per cell" (over == 0). Without this,
+            // a seed denser than the fixed default target makes every cell
+            // over-populated and the density-targeted pressure projection
+            // permanently expels particles upward (the tank "rises").
+            domain.fluid_params.particles_per_cell = ppc;
             // Stable per-domain seed: index-based, so jitter patterns are
             // reproducible across runs and don't depend on heap addresses
             // (the desc vector can reallocate as domains are added).
             Fluid::seedBox(state.particles,
                            state.grid,
-                           domain.fluid_seed_min,
-                           domain.fluid_seed_max,
-                           domain.fluid_seed_particles_per_cell,
+                           seed_lo,
+                           seed_hi,
+                           ppc,
                            /*seed=*/static_cast<uint32_t>(i + 1u) * 2654435761u,
-                           state.particles.size() < domain.fluid_max_particles
-                               ? domain.fluid_max_particles - state.particles.size()
-                               : 0u);
+                           seed_budget);
             domain.fluid_pending_seed = false;
         }
     }

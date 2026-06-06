@@ -1569,6 +1569,10 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
         }
 
         UIWidgets::Divider();
+        UIWidgets::ColoredHeader("Viewport HUD", ImVec4(0.70f, 0.86f, 1.0f, 1.0f));
+        ImGui::Checkbox("Show Scene Stats HUD", &ctx.render_settings.show_scene_stats_hud);
+
+        UIWidgets::Divider();
         UIWidgets::ColoredHeader("Raster Viewport Quality", ImVec4(0.96f, 0.84f, 0.58f, 1.0f));
         const char* raster_quality_items[] = { "Auto", "Performance", "Balanced", "Quality" };
         int raster_quality = static_cast<int>(ctx.render_settings.raster_viewport_quality_preset);
@@ -2320,7 +2324,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (show_terrain_tab)    drawTabButton(2, UIWidgets::IconType::Terrain,    "Terrain Editor");
         if (show_water_tab)      drawTabButton(3, UIWidgets::IconType::Water,      active_water_subtab == 0 ? "Water" : "River Spline");
         if (show_volumetric_tab) drawTabButton(4, UIWidgets::IconType::Volumetric, "Volumetrics");
-        if (show_forcefield_tab) drawTabButton(5, UIWidgets::IconType::Force,      "Simulation");
+        if (show_forcefield_tab) drawTabButton(5, UIWidgets::IconType::Force,      "Physics");
         if (show_world_tab)      drawTabButton(6, UIWidgets::IconType::World,      "World & Sky");
         if (show_stylize_tab)    drawTabButton(12, UIWidgets::IconType::Brush,     "Stylize Mode");
         if (show_hair_tab)       drawTabButton(8, UIWidgets::IconType::Hair,       "Hair & Fur");
@@ -2554,6 +2558,9 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                             ctx.start_render = true;
                             resetSceneUiSamplingAccumulation(ctx);
                         }
+
+                        UIWidgets::Divider();
+                        ImGui::Checkbox("Show Scene Stats HUD", &ctx.render_settings.show_scene_stats_hud);
                         
                         UIWidgets::EndSection();
                     }

@@ -19,3 +19,59 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Third-party components
+----------------------
+
+RayTrophiStudio uses third-party libraries and SDKs. They remain under their
+own licenses; the RayTrophiStudio MIT License above does not relicense them.
+When a dependency is vendored in this repository, keep its license text and
+copyright notices with the corresponding files.
+
+Vendored or source-included components:
+
+- Jolt Physics — MIT License.
+  See RayTrophiStudio/external/JoltPhysics/LICENSE.
+- Dear ImGui — MIT License.
+  See RayTrophiStudio/external/imgui/imgui.cpp and related ImGui source files.
+- ozz-animation — MIT License.
+  See RayTrophiStudio/external/ozz-animation/LICENSE.md.
+- JsonCpp, used under ozz-animation externals — Public Domain or MIT License.
+  See RayTrophiStudio/external/ozz-animation/extern/jsoncpp/LICENSE.
+- nlohmann/json — MIT License.
+  See RayTrophiStudio/source/include/json.hpp.
+- simdjson — Apache License 2.0, with bundled third-party notices in the
+  amalgamated source/header.
+  See RayTrophiStudio/source/include/simdjson.h and
+  RayTrophiStudio/source/src/simdjson.cpp.
+- stb single-file libraries — MIT License or Public Domain.
+  See the license blocks in RayTrophiStudio/source/include/stb_image.h,
+  RayTrophiStudio/source/include/stb_image_write.h, and related stb files.
+- TinyEXR — BSD-style license; parts include OpenEXR/ILM BSD-style notices.
+  See RayTrophiStudio/source/include/tinyexr.h.
+- miniz — MIT License.
+  See RayTrophiStudio/external/miniz.h and related miniz source files.
+- tinygltf and its bundled nlohmann/json copy under ozz-animation — MIT License.
+  See RayTrophiStudio/external/ozz-animation/src/animation/offline/gltf/extern/.
+
+External SDK and runtime dependencies:
+
+- Assimp — BSD 3-Clause License. The build uses the Assimp package selected by
+  ASSIMP_ROOT; keep Assimp's own license/notice files with redistributed
+  binaries.
+- Intel Embree — Apache License 2.0. The build uses the Embree package selected
+  by EMBREE_ROOT.
+- Intel Open Image Denoise (OIDN) — Apache License 2.0. The build uses the OIDN
+  package selected by OIDN_ROOT.
+- SDL2 — zlib License. The build uses the SDL2 package selected by SDL2_ROOT.
+- Vulkan SDK / Vulkan loader, headers, validation layers, and tools — governed
+  by the Khronos/Vulkan SDK component licenses (commonly Apache License 2.0 or
+  MIT-style component licenses). See the installed VULKAN_SDK license files.
+- NVIDIA CUDA Toolkit and NVIDIA OptiX SDK — governed by NVIDIA's SDK license
+  agreements/EULAs. See the installed CUDA Toolkit and OptiX SDK license files.
+- NanoVDB/OpenVDB components — governed by the license files supplied with the
+  NanoVDB/OpenVDB package used for the build.
+
+This list is intended as attribution for the main third-party components used
+by the project. If additional third-party code or binaries are added, include
+their license notices here or beside the vendored package.

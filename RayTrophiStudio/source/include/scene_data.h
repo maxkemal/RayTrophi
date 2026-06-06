@@ -24,6 +24,8 @@
 #include <thread>
 #include "Fluid/FluidObject.h"
 #include "Fluid/FluidSimulationSystem.h"
+#include "RigidBodySystem.h"
+#include "Core/RenderStateManager.h"
 #include "globals.h"
 #include "SurfaceMeshCache.h"
 #include "ColliderMeshBVH.h"
@@ -92,6 +94,13 @@ struct SceneData {
     // resolves once for the whole bake instead of N times per frame.
     mutable std::unordered_set<std::string> surface_cache_epoch_done_;
     mutable uint64_t surface_cache_epoch_gen_ = ~0ull;
+    // Last sim-source pose matrix actually pushed onto each object by
+    // applySimSourceObjectPosesForFrame. Lets that pass be a cheap no-op when the
+    // evaluated pose is unchanged (so it can be called every idle UI frame to keep
+    // gizmos live), and only erase the surface-cache memo / re-push when the pose
+    // truly changed — either the playhead moved OR a keyframe at the current frame
+    // was added/edited (which doesn't change the frame number).
+    mutable std::unordered_map<std::string, Matrix4x4> last_sim_pose_applied_;
     std::unordered_map<std::string, MeshModifiers::ModifierStack> mesh_modifiers;          // nodeName -> Modifier Stack
     std::unordered_map<std::string, Paint::PaintTextureSet> mesh_paint_texture_sets;       // nodeName#materialID -> texture set
     std::unordered_map<std::string, Paint::PaintLayerStack> mesh_paint_layer_stacks;      // nodeName#materialID -> layer stack
@@ -608,6 +617,541 @@ struct SceneData {
         return nullptr;
     }
 
+    // =========================================================================
+    // Rigid Bodies (Jolt Physics)
+    // -------------------------------------------------------------------------
+    // Each RigidBodyObject drives a scene mesh (by nodeName). The RigidBodySystem
+    // sizes/poses a Jolt body from the object's oriented bounds, steps it through
+    // the shared SimulationWorld, and writes the rigid motion back onto the
+    // object's transform. Same lifecycle as gas/fluid systems.
+    // =========================================================================
+    std::vector<RayTrophiSim::RigidBodyObject> rigid_bodies;
+    std::shared_ptr<RayTrophiSim::RigidBodySystem> rigid_body_system;
+
+    // Per-step rigid-fluid coupling level sets (sim resolution), rebuilt by the
+    // RigidBodySystem's prepare() callback and read by its sampler() within the
+    // SAME step. Covers both FluidObjects and grid-domain fluids. The borrowed
+    // grid pointer is only valid during that step (the fluid systems step after
+    // the rigid system, so the grids are stable while these are in use).
+    struct FluidCouplingField {
+        const FluidSim::FluidGrid* grid = nullptr;  // borrowed (within-step only)
+        std::vector<float> sdf;                       // sim-res level set (phi<0 inside)
+    };
+    std::vector<FluidCouplingField> fluid_coupling_fields_;
+
+    std::string rigidBodyProxyColliderName(const std::string& node_name) const {
+        return node_name.empty() ? "Rigid Body Proxy Collider" : node_name + " Rigid Body Proxy Collider";
+    }
+
+    void upsertRigidBodyProxyCollider(RayTrophiSim::ParticleSimulationSystem& runtime,
+                                      const RayTrophiSim::RigidBodyObject& rb) {
+        if (rb.source_name.empty()) return;
+
+        RayTrophiSim::ParticleColliderDesc desc;
+        desc.name = rigidBodyProxyColliderName(rb.source_name);
+        desc.source_mode = RayTrophiSim::ParticleColliderSourceMode::ObjectOBB;
+        desc.source_name = rb.source_name;
+        desc.enabled = rb.enabled;
+        desc.restitution = rb.restitution;
+        desc.friction = rb.friction;
+        desc.thickness = 0.02f;
+        fitParticleColliderToObjectBounds(desc, rb.source_name, true);
+        desc.name = rigidBodyProxyColliderName(rb.source_name);
+
+        auto& colliders = runtime.colliders();
+        for (auto& collider : colliders) {
+            if (collider.name == desc.name && collider.source_name == rb.source_name) {
+                collider = desc;
+                return;
+            }
+        }
+        runtime.addCollider(desc);
+    }
+
+    void removeRigidBodyProxyColliders(const std::string& node_name) {
+        if (node_name.empty()) return;
+        const std::string proxy_name = rigidBodyProxyColliderName(node_name);
+        for (auto& system : particle_systems) {
+            if (!system.runtime) continue;
+            auto& colliders = system.runtime->colliders();
+            colliders.erase(
+                std::remove_if(colliders.begin(), colliders.end(),
+                    [&](const RayTrophiSim::ParticleColliderDesc& collider) {
+                        return collider.name == proxy_name && collider.source_name == node_name;
+                    }),
+                colliders.end());
+        }
+    }
+
+    bool isRigidBodyProxyCollider(const RayTrophiSim::ParticleColliderDesc& collider,
+                                  const std::string& node_name) const {
+        return !node_name.empty() &&
+               collider.name == rigidBodyProxyColliderName(node_name) &&
+               collider.source_name == node_name;
+    }
+
+    RayTrophiSim::ParticleColliderDesc* findAuthoredColliderForRigidBody(RayTrophiSim::RigidBodyObject& rb) {
+        for (auto& system : particle_systems) {
+            if (!system.runtime) continue;
+            for (auto& collider : system.runtime->colliders()) {
+                if (!collider.enabled) continue;
+                if (!rb.collider_name.empty() && collider.name == rb.collider_name) return &collider;
+            }
+        }
+        for (auto& system : particle_systems) {
+            if (!system.runtime) continue;
+            for (auto& collider : system.runtime->colliders()) {
+                if (!collider.enabled || isRigidBodyProxyCollider(collider, rb.source_name)) continue;
+                if (!rb.source_name.empty() && collider.source_name == rb.source_name) return &collider;
+            }
+        }
+        return nullptr;
+    }
+
+    const RayTrophiSim::ParticleColliderDesc* findAuthoredColliderForRigidBody(const RayTrophiSim::RigidBodyObject& rb) const {
+        for (const auto& system : particle_systems) {
+            if (!system.runtime) continue;
+            for (const auto& collider : system.runtime->colliders()) {
+                if (!collider.enabled) continue;
+                if (!rb.collider_name.empty() && collider.name == rb.collider_name) return &collider;
+            }
+        }
+        for (const auto& system : particle_systems) {
+            if (!system.runtime) continue;
+            for (const auto& collider : system.runtime->colliders()) {
+                if (!collider.enabled || isRigidBodyProxyCollider(collider, rb.source_name)) continue;
+                if (!rb.source_name.empty() && collider.source_name == rb.source_name) return &collider;
+            }
+        }
+        return nullptr;
+    }
+
+    Matrix4x4 rigidPoseFromCenter(const Vec3& center) const {
+        Matrix4x4 pose = Matrix4x4::identity();
+        pose.m[0][3] = center.x;
+        pose.m[1][3] = center.y;
+        pose.m[2][3] = center.z;
+        return pose;
+    }
+
+    Matrix4x4 rigidPoseFromCapsuleSegment(const Vec3& start, const Vec3& end) const {
+        const Vec3 center = (start + end) * 0.5f;
+        const Vec3 segment = end - start;
+        const float len = segment.length();
+        const Vec3 axis_y = len > 1e-6f ? segment * (1.0f / len) : Vec3(0.0f, 1.0f, 0.0f);
+        const Vec3 helper = std::fabs(axis_y.y) < 0.95f ? Vec3(0.0f, 1.0f, 0.0f) : Vec3(1.0f, 0.0f, 0.0f);
+        Vec3 axis_x = Vec3::cross(helper, axis_y);
+        const float x_len = axis_x.length();
+        axis_x = x_len > 1e-6f ? axis_x * (1.0f / x_len) : Vec3(1.0f, 0.0f, 0.0f);
+        Vec3 axis_z = Vec3::cross(axis_y, axis_x);
+        const float z_len = axis_z.length();
+        axis_z = z_len > 1e-6f ? axis_z * (1.0f / z_len) : Vec3(0.0f, 0.0f, 1.0f);
+
+        Matrix4x4 pose = Matrix4x4::identity();
+        pose.m[0][0] = axis_x.x; pose.m[1][0] = axis_x.y; pose.m[2][0] = axis_x.z;
+        pose.m[0][1] = axis_y.x; pose.m[1][1] = axis_y.y; pose.m[2][1] = axis_y.z;
+        pose.m[0][2] = axis_z.x; pose.m[1][2] = axis_z.y; pose.m[2][2] = axis_z.z;
+        pose.m[0][3] = center.x; pose.m[1][3] = center.y; pose.m[2][3] = center.z;
+        return pose;
+    }
+
+    bool resolveRigidBodyColliderShape(const RayTrophiSim::RigidBodyObject& rb,
+                                       Matrix4x4& out_box_pose,
+                                       Vec3& out_half,
+                                       RayTrophiSim::RigidBodyShape& out_shape) const {
+        const auto* collider = findAuthoredColliderForRigidBody(rb);
+        if (!collider) return false;
+
+        const float kMinHalf = 0.025f;
+        switch (collider->source_mode) {
+            case RayTrophiSim::ParticleColliderSourceMode::Sphere:
+                out_shape = RayTrophiSim::RigidBodyShape::Sphere;
+                out_half = Vec3(std::max(collider->sphere_radius, kMinHalf),
+                                std::max(collider->sphere_radius, kMinHalf),
+                                std::max(collider->sphere_radius, kMinHalf));
+                out_box_pose = rigidPoseFromCenter(collider->sphere_center);
+                return true;
+            case RayTrophiSim::ParticleColliderSourceMode::Capsule: {
+                const float len = (collider->capsule_end - collider->capsule_start).length();
+                const float radius = std::max(collider->capsule_radius, kMinHalf);
+                out_shape = RayTrophiSim::RigidBodyShape::Capsule;
+                out_half = Vec3(radius, std::max(kMinHalf, len * 0.5f + radius), radius);
+                out_box_pose = rigidPoseFromCapsuleSegment(collider->capsule_start, collider->capsule_end);
+                return true;
+            }
+            case RayTrophiSim::ParticleColliderSourceMode::PlaneY:
+                out_shape = RayTrophiSim::RigidBodyShape::Box;
+                out_half = Vec3(500.0f, kMinHalf, 500.0f);
+                out_box_pose = rigidPoseFromCenter(Vec3(0.0f, collider->plane_y - kMinHalf, 0.0f));
+                return true;
+            case RayTrophiSim::ParticleColliderSourceMode::ObjectAABB: {
+                const Vec3 mn = Vec3::min(collider->bounds_min, collider->bounds_max);
+                const Vec3 mx = Vec3::max(collider->bounds_min, collider->bounds_max);
+                out_shape = RayTrophiSim::RigidBodyShape::Box;
+                out_half = (mx - mn) * 0.5f;
+                out_half.x = std::max(out_half.x, kMinHalf);
+                out_half.y = std::max(out_half.y, kMinHalf);
+                out_half.z = std::max(out_half.z, kMinHalf);
+                out_box_pose = rigidPoseFromCenter((mn + mx) * 0.5f);
+                return true;
+            }
+            case RayTrophiSim::ParticleColliderSourceMode::ObjectOBB:
+            case RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF:
+            case RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp:
+            case RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH: {
+                RayTrophiSim::ParticleColliderOBB obb;
+                if (!resolveObjectOBBForSimulation(collider->source_name, obb)) return false;
+                const Vec3 mn = obb.local_bounds_min;
+                const Vec3 mx = obb.local_bounds_max;
+                out_shape = RayTrophiSim::RigidBodyShape::Box;
+                out_half = (mx - mn) * 0.5f;
+                out_half.x = std::max(out_half.x, kMinHalf);
+                out_half.y = std::max(out_half.y, kMinHalf);
+                out_half.z = std::max(out_half.z, kMinHalf);
+                const Vec3 center_world = obb.local_to_world * ((mn + mx) * 0.5f);
+                out_box_pose = obb.local_to_world;
+                out_box_pose.m[0][3] = center_world.x;
+                out_box_pose.m[1][3] = center_world.y;
+                out_box_pose.m[2][3] = center_world.z;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void syncRigidBodyProxyColliders() {
+        for (auto& rb : rigid_bodies) {
+            if (!rb.enabled) {
+                removeRigidBodyProxyColliders(rb.source_name);
+                continue;
+            }
+
+            RayTrophiSim::ParticleColliderDesc* authored = nullptr;
+            for (auto& system : particle_systems) {
+                if (!system.runtime) continue;
+                for (auto& collider : system.runtime->colliders()) {
+                    if (!collider.enabled || isRigidBodyProxyCollider(collider, rb.source_name)) continue;
+                    if (!rb.collider_name.empty() && collider.name == rb.collider_name) {
+                        authored = &collider;
+                        break;
+                    }
+                }
+                if (authored) break;
+            }
+            if (!authored) {
+                for (auto& system : particle_systems) {
+                    if (!system.runtime) continue;
+                    for (auto& collider : system.runtime->colliders()) {
+                        if (!collider.enabled || isRigidBodyProxyCollider(collider, rb.source_name)) continue;
+                        if (!rb.source_name.empty() && collider.source_name == rb.source_name) {
+                            authored = &collider;
+                            break;
+                        }
+                    }
+                    if (authored) break;
+                }
+            }
+
+            if (authored) {
+                const std::string authored_name = authored->name;
+                const float authored_friction = authored->friction;
+                const float authored_restitution = authored->restitution;
+                removeRigidBodyProxyColliders(rb.source_name);
+                rb.collider_name = authored_name;
+                rb.friction = authored_friction;
+                rb.restitution = authored_restitution;
+                continue;
+            }
+
+            const std::string proxy_name = rigidBodyProxyColliderName(rb.source_name);
+            for (auto& system : particle_systems) {
+                if (!system.runtime) continue;
+                for (auto& collider : system.runtime->colliders()) {
+                    if (collider.name == proxy_name && collider.source_name == rb.source_name) {
+                        rb.friction = collider.friction;
+                        rb.restitution = collider.restitution;
+                        rb.collider_name = proxy_name;
+                    }
+                }
+            }
+            rb.collider_name = proxy_name;
+            for (auto& system : particle_systems) {
+                if (system.runtime) upsertRigidBodyProxyCollider(*system.runtime, rb);
+            }
+        }
+    }
+
+    bool captureRigidBodyRestPose(RayTrophiSim::RigidBodyObject& rb) {
+        if (rb.source_name.empty()) return false;
+
+        Matrix4x4 pivot = Matrix4x4::identity();
+        bool have_pivot = false;
+        for (auto& obj : world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (tri && tri->getNodeName() == rb.source_name) {
+                if (Transform* th = tri->getTransformPtr()) {
+                    pivot = th->getPivotMatrix();
+                    have_pivot = true;
+                }
+                break;
+            }
+        }
+        if (!have_pivot) return false;
+
+        Matrix4x4 body_pose = Matrix4x4::identity();
+        Vec3 half;
+        RayTrophiSim::RigidBodyShape resolved_shape = rb.shape;
+        if (!resolveRigidBodyColliderShape(rb, body_pose, half, resolved_shape)) {
+            RayTrophiSim::ParticleColliderOBB obb;
+            if (!resolveObjectOBBForSimulation(rb.source_name, obb)) return false;
+            half = (obb.local_bounds_max - obb.local_bounds_min) * 0.5f;
+        }
+        const float kMinHalf = 0.025f;
+        half.x = std::max(half.x, kMinHalf);
+        half.y = std::max(half.y, kMinHalf);
+        half.z = std::max(half.z, kMinHalf);
+
+        rb.initial_pivot = pivot;
+        rb.rest_half_extents = half;
+        rb.shape = resolved_shape;
+        rb.rest_captured = true;
+        rb.created = false;
+        rb.handle = 0xffffffffu;
+        rb.has_written = false;
+        return true;
+    }
+
+    void invalidateRigidBodySimulationCache() {
+        clearSimFrameCache();
+        sim_timeline_frame_ = -1;
+        rigid_timeline_frame_ = -1;
+        sim_cache_valid_ = false;
+        sim_cache_dir_.clear();
+        last_sim_config_sig_ = 0;
+        last_fluid_coupling_sig_ = 0;
+    }
+
+    void ensureRigidBodySystem() {
+        syncSimulationWorld();
+        if (!rigid_body_system) {
+            rigid_body_system = std::make_shared<RayTrophiSim::RigidBodySystem>();
+
+            // Shape + initial pose: derive an oriented box from the object's live
+            // world verts (same OBB the particle colliders use), then move the pose
+            // to the box CENTRE and report half-extents.
+            rigid_body_system->setShapeResolver(
+                [this](const RayTrophiSim::RigidBodyObject& rb,
+                       Matrix4x4& out_box_pose,
+                       Vec3& out_half,
+                       RayTrophiSim::RigidBodyShape& out_shape) -> bool {
+                    if (resolveRigidBodyColliderShape(rb, out_box_pose, out_half, out_shape)) {
+                        return true;
+                    }
+
+                    RayTrophiSim::ParticleColliderOBB obb;
+                    const std::string& node = rb.source_name;
+                    if (!resolveObjectOBBForSimulation(node, obb)) return false;
+                    out_shape = rb.shape;
+                    const Vec3 mn = obb.local_bounds_min;
+                    const Vec3 mx = obb.local_bounds_max;
+                    out_half = (mx - mn) * 0.5f;
+                    // Clamp thin axes: a flat ground plane has ~0 thickness, which
+                    // would make a degenerate 2D box the rigid body tunnels through.
+                    // A solid slab (min 2.5cm half-thickness) blocks reliably.
+                    const float kMinHalf = 0.025f;
+                    out_half.x = std::max(out_half.x, kMinHalf);
+                    out_half.y = std::max(out_half.y, kMinHalf);
+                    out_half.z = std::max(out_half.z, kMinHalf);
+                    const Vec3 c_local = (mn + mx) * 0.5f;
+                    const Vec3 center_world = obb.local_to_world * c_local;  // point transform
+                    out_box_pose = obb.local_to_world;  // keep orthonormal rotation columns
+                    out_box_pose.m[0][3] = center_world.x;
+                    out_box_pose.m[1][3] = center_world.y;
+                    out_box_pose.m[2][3] = center_world.z;
+                    return true;
+                });
+
+            rigid_body_system->setPivotGetter(
+                [this](const std::string& node, Matrix4x4& out_pivot) -> bool {
+                    for (auto& obj : world.objects) {
+                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                        if (tri && tri->getNodeName() == node) {
+                            if (Transform* th = tri->getTransformPtr()) {
+                                out_pivot = th->getPivotMatrix();
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                });
+
+            rigid_body_system->setPivotSetter(
+                [this](const std::string& node, const Matrix4x4& pivot) {
+                    auto matrixEqual = [](const Matrix4x4& a, const Matrix4x4& b) {
+                        for (int r = 0; r < 4; ++r) {
+                            for (int c = 0; c < 4; ++c) {
+                                if (a.m[r][c] != b.m[r][c]) return false;
+                            }
+                        }
+                        return true;
+                    };
+                    bool changed = false;
+                    for (auto& obj : world.objects) {
+                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                        if (tri && tri->getNodeName() == node) {
+                            if (Transform* th = tri->getTransformPtr()) {
+                                if (!matrixEqual(th->getPivotMatrix(), pivot)) {
+                                    th->setPivotMatrix(pivot);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    if (!changed) return;
+                    // Object moved without bumping geometry generation: drop the
+                    // surface-cache epoch memo so any future resolve rebuilds.
+                    surface_cache_epoch_done_.erase(node);
+                    // The mesh moved, but topology did not. Request transform/refit
+                    // only; a full geometry rebuild every Jolt step is far too heavy.
+                    Core::RenderStateManager::instance().markDirty(Core::DirtyScope::Transforms);
+                });
+
+            // ── Rigid-fluid coupling (buoyancy + drag) ────────────────────────
+            // prepare(): once per step (only when a coupled body exists), rebuild
+            // a sim-resolution coupling level set for EVERY fluid source — both
+            // standalone FluidObjects AND grid-domain fluids (particle systems).
+            // Built into SceneData-side scratch (fluid_coupling_fields_) because
+            // grid-domain states are exposed const; borrowed grid pointers stay
+            // valid for the duration of this step (the owning systems step later,
+            // at order >= 100). Separate from the render SDF (refined + render-
+            // mode gated), so it can be sampled with grid.sampleCellCentered().
+            rigid_body_system->setFluidCouplingPrepare([this]() {
+                fluid_coupling_fields_.clear();
+                auto build_for = [this](const RayTrophiSim::Fluid::FluidParticles& parts,
+                                        const FluidSim::FluidGrid& grid,
+                                        const RayTrophiSim::Fluid::LevelSetParams& base) {
+                    if (parts.size() == 0 || grid.nx <= 0) return;
+                    RayTrophiSim::Fluid::LevelSetParams lp = base;
+                    lp.surface_resolution_multiplier = 1;  // sim grid (sample-able)
+                    lp.anisotropy_enabled = false;         // cheap + robust, not pretty
+                    // CRITICAL for coupling: empty cells far above the water must
+                    // read as clearly OUTSIDE, not the small +narrow_band sentinel
+                    // (buildLevelSet clamps phi to ±narrow_band and fills empty
+                    // cells with far_value=narrow_band). With the default 3 voxels
+                    // a body reads partial submersion at ANY height and floats
+                    // mid-domain. Push the sentinel far out and disable smoothing
+                    // so the far-cell value can't smear back down toward the
+                    // surface. Real (in-water) cells are bounded by the kernel
+                    // radius, so widening the clamp never affects them.
+                    lp.narrow_band_voxels = 64.0f;
+                    lp.smoothing_iterations = 0;
+                    FluidCouplingField field;
+                    field.grid = &grid;
+                    if (RayTrophiSim::Fluid::buildLevelSet(parts, grid, lp, field.sdf, nullptr)) {
+                        fluid_coupling_fields_.push_back(std::move(field));
+                    }
+                };
+                // Standalone APIC FluidObjects.
+                for (auto& obj : fluid_objects) {
+                    if (!obj.enabled) continue;
+                    obj.ensureGrid();
+                    build_for(obj.particles, obj.grid, obj.level_set_params);
+                }
+                // Grid-domain fluids living inside particle systems.
+                const RayTrophiSim::Fluid::LevelSetParams kDomainLevelSet{};
+                for (auto& sys : particle_systems) {
+                    if (!sys.runtime) continue;
+                    for (const auto& gd : sys.runtime->gridDomainStates()) {
+                        if (gd.type != RayTrophiSim::SimulationDomainType::Fluid || !gd.valid) continue;
+                        build_for(gd.particles, gd.grid, kDomainLevelSet);
+                    }
+                }
+            });
+
+            // sampler(): query the fluid at a world point. signed_distance < 0 =>
+            // submerged; velocity drives drag. Reads the fields prepare() built.
+            rigid_body_system->setFluidSampler(
+                [this](const Vec3& wp,
+                       RayTrophiSim::RigidBodySystem::FluidSample& out) -> bool {
+                    for (const auto& f : fluid_coupling_fields_) {
+                        if (!f.grid) continue;
+                        const auto& g = *f.grid;
+                        const size_t cells = static_cast<size_t>(g.nx) * g.ny * g.nz;
+                        if (f.sdf.size() != cells) continue;  // stale size guard
+                        Vec3 lo, hi;
+                        g.getWorldBounds(lo, hi);
+                        if (wp.x < lo.x || wp.y < lo.y || wp.z < lo.z ||
+                            wp.x > hi.x || wp.y > hi.y || wp.z > hi.z) continue;
+                        out.signed_distance = g.sampleCellCentered(f.sdf, wp);
+                        out.velocity = g.sampleVelocity(wp);
+                        out.valid = true;
+                        return true;
+                    }
+                    return false;
+                });
+
+            simulation_world.addSystem(rigid_body_system);
+        }
+        rigid_body_system->setBodies(&rigid_bodies);
+    }
+
+    // Mark a scene object as a rigid body (dynamic) or static collider. Returns a
+    // pointer to the descriptor (existing one updated if the object already has it).
+    RayTrophiSim::RigidBodyObject* addRigidBodyForObject(const std::string& node_name, bool dynamic = true) {
+        if (node_name.empty()) return nullptr;
+        ensureRigidBodySystem();
+        for (auto& rb : rigid_bodies) {
+            if (rb.source_name == node_name) {
+                rb.dynamic = dynamic;
+                rb.motion_type = dynamic ? RayTrophiSim::RigidBodyMotionType::Dynamic
+                                         : RayTrophiSim::RigidBodyMotionType::Static;
+                rb.enabled = true;
+                syncRigidBodyProxyColliders();
+                captureRigidBodyRestPose(rb);
+                if (rigid_body_system) {
+                    rigid_body_system->resetRuntime(true);
+                    rigid_body_system->setBodies(&rigid_bodies);
+                }
+                invalidateRigidBodySimulationCache();
+                return &rb;
+            }
+        }
+        RayTrophiSim::RigidBodyObject rb;
+        rb.source_name = node_name;
+        rb.name = node_name + (dynamic ? " (Rigid)" : " (Static)");
+        rb.dynamic = dynamic;
+        rb.motion_type = dynamic ? RayTrophiSim::RigidBodyMotionType::Dynamic
+                                 : RayTrophiSim::RigidBodyMotionType::Static;
+        rigid_bodies.push_back(rb);
+        rigid_body_system->setBodies(&rigid_bodies);  // vector may have reallocated
+        syncRigidBodyProxyColliders();
+        captureRigidBodyRestPose(rigid_bodies.back());
+        rigid_body_system->resetRuntime(true);
+        rigid_body_system->setBodies(&rigid_bodies);
+        invalidateRigidBodySimulationCache();
+        return &rigid_bodies.back();
+    }
+
+    bool removeRigidBodyForObject(const std::string& node_name) {
+        if (rigid_body_system) {
+            rigid_body_system->resetRuntime(true);
+        }
+        removeRigidBodyProxyColliders(node_name);
+        const size_t before = rigid_bodies.size();
+        rigid_bodies.erase(
+            std::remove_if(rigid_bodies.begin(), rigid_bodies.end(),
+                [&](const RayTrophiSim::RigidBodyObject& rb) { return rb.source_name == node_name; }),
+            rigid_bodies.end());
+        if (rigid_body_system) {
+            rigid_body_system->setBodies(&rigid_bodies);
+        }
+        if (rigid_bodies.size() != before) {
+            syncRigidBodyProxyColliders();
+            invalidateRigidBodySimulationCache();
+        }
+        return rigid_bodies.size() != before;
+    }
+
     struct FluidRenderBinding {
         int vdb_id = -1;
         std::shared_ptr<VDBVolume> volume;
@@ -760,7 +1304,22 @@ struct SceneData {
     // resimulates the gap). "Reset Simulation" returns to free-run.
     std::map<int, std::vector<std::vector<RayTrophiSim::SimulationGridDomainState>>> sim_frame_cache_;
     int sim_timeline_frame_ = -1;
+    int rigid_timeline_frame_ = -1;
     static constexpr int kMaxCachedSimFrames = 600;
+    // Config signature for automatic memory-cache invalidation: when the sim
+    // SETUP changes (add/remove of any sim element, rigid-body param edits, …)
+    // the bake cache is dropped automatically instead of relying on manual reset.
+    // Live sim state (per-step positions) is deliberately excluded so the
+    // signature is stable while a sim is running.
+    uint64_t last_sim_config_sig_ = 0;
+    // Sub-signature of only the fluid-bake inputs (grid/emitter/collider config +
+    // fluid-coupled rigid bodies). When the global signature changes but THIS one
+    // doesn't, the change was a non-coupling rigid edit/move: the cheap rigid
+    // re-sim runs but the expensive fluid cache is preserved.
+    uint64_t last_fluid_coupling_sig_ = 0;
+    // Last g_scene_geometry_generation value consumed by refreshRigidRestPosesOnUserEdit;
+    // lets the idle user-edit detector skip work when no geometry edit happened.
+    uint64_t last_user_edit_gen_ = 0;
 
     // ── On-disk bake cache (render-only point cache; see SimCache.h) ──────────
     // When a project is loaded with a valid <project>.simcache/ folder, the
@@ -1325,6 +1884,264 @@ struct SceneData {
         sim_frame_cache_.clear();
     }
 
+    // Live source-object pivot (frame-0 spawn pose) for a rigid body. Returns
+    // false if the bound scene object can't be resolved yet. Used by the config
+    // signatures to detect REPOSITIONING (moving the object without editing any
+    // rigid param) and by the fluid-coupling overlap test.
+    bool getRigidBodySourcePivot(const RayTrophiSim::RigidBodyObject& rb, Matrix4x4& out) const {
+        if (rb.source_name.empty()) return false;
+        for (const auto& obj : world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (tri && tri->getNodeName() == rb.source_name) {
+                if (Transform* th = tri->getTransformPtr()) { out = th->getPivotMatrix(); return true; }
+                return false;
+            }
+        }
+        return false;
+    }
+
+    // Refresh cached rigid rest poses (rb.initial_pivot) after a USER transform
+    // edit — e.g. dragging a rigid's source object with the gizmo. The geometry
+    // generation counter bumps on any world-vertex edit, but the simulation bumps
+    // it too while stepping, so a bump is only trusted as a user edit by the IDLE
+    // gate at the call site. Cheap: returns immediately when the generation hasn't
+    // changed; on a real change it does an O(1) pivot read per rigid and only the
+    // (heavier) full rest-pose recapture for bodies whose source actually moved.
+    // The recapture updates initial_pivot so the config signatures pick up the
+    // move on this same tick (no per-tick world scan in the hot path).
+    void refreshRigidRestPosesOnUserEdit() {
+        const uint64_t gen = g_scene_geometry_generation.load(std::memory_order_acquire);
+        if (gen == last_user_edit_gen_) return;
+        last_user_edit_gen_ = gen;
+        auto q = [](float f) { return static_cast<int64_t>(f * 1000.0f); };
+        auto poseDiffers = [&](const Matrix4x4& a, const Matrix4x4& b) {
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 4; ++c)
+                    if (q(a.m[r][c]) != q(b.m[r][c])) return true;
+            return false;
+        };
+        for (auto& rb : rigid_bodies) {
+            Matrix4x4 live;
+            if (!getRigidBodySourcePivot(rb, live)) continue;
+            // CRITICAL: the sim writes its simulated pose back onto the source
+            // object every step (last_written_pivot). That is NOT a user edit — if
+            // we recaptured it as the spawn pose, initial_pivot would drift to the
+            // body's current position each frame, the signature would change every
+            // tick, and the body would be reset+re-simulated endlessly (it appears
+            // to vibrate / be in two places at once). So skip when the live pose
+            // still matches the last sim write, and skip when it already matches
+            // the cached spawn pose. Only a pose differing from BOTH is a genuine
+            // user reposition that should redefine the spawn point.
+            if (rb.has_written && !poseDiffers(live, rb.last_written_pivot)) continue;
+            if (rb.rest_captured && !poseDiffers(live, rb.initial_pivot)) continue;
+            captureRigidBodyRestPose(rb);
+        }
+    }
+
+    // Does editing/moving this rigid body change any FLUID bake? A Static body
+    // can never move, so it only couples when its rest sphere overlaps a Fluid
+    // grid-domain AABB — a far static prop's edits leave the (expensive) fluid
+    // cache intact. Dynamic/Kinematic bodies may fall or animate into the tank
+    // later, so they are treated as coupled whenever ANY fluid domain exists.
+    // Conservative (returns true) when the rest pose can't be resolved.
+    bool rigidCouplesToFluid(const RayTrophiSim::RigidBodyObject& rb) const {
+        const bool can_move = (rb.motion_type != RayTrophiSim::RigidBodyMotionType::Static);
+        Vec3 center;
+        float radius_sq = 0.0f;
+        bool have_sphere = false;
+        if (!can_move && rb.rest_captured) {
+            // Cached rest pose — no live world scan (refreshed on user edit).
+            center = rb.initial_pivot.getTranslation();
+            const Vec3 hh = rb.rest_half_extents;
+            radius_sq = hh.x * hh.x + hh.y * hh.y + hh.z * hh.z;
+            have_sphere = true;
+        }
+        for (const auto& s : particle_systems) {
+            if (!s.runtime) continue;
+            for (const auto& d : s.runtime->gridDomains()) {
+                if (d.type != RayTrophiSim::SimulationDomainType::Fluid) continue;
+                if (can_move) return true;        // dynamic/kinematic + any fluid => coupled
+                if (!have_sphere) return true;    // unresolved static pose => conservative
+                // Closest point on the domain AABB to the rest-sphere centre.
+                const float cx = std::max(d.bounds_min.x, std::min(center.x, d.bounds_max.x));
+                const float cy = std::max(d.bounds_min.y, std::min(center.y, d.bounds_max.y));
+                const float cz = std::max(d.bounds_min.z, std::min(center.z, d.bounds_max.z));
+                const float dx = center.x - cx, dy = center.y - cy, dz = center.z - cz;
+                if (dx * dx + dy * dy + dz * dz <= radius_sq) return true;
+            }
+        }
+        return false;
+    }
+
+    // Signature of ONLY the inputs a fluid bake actually depends on: the grid /
+    // emitter / collider / flow-source config, the gas/fluid/force-field element
+    // counts, and the rigid bodies that couple to fluid (their collider geometry,
+    // dynamics, and live spawn pose). A non-coupling rigid (e.g. a far static
+    // prop) is deliberately absent here, so editing or moving it leaves this
+    // signature — and therefore the fluid cache — unchanged.
+    uint64_t computeFluidCouplingSignature() const {
+        auto mix = [](uint64_t h, uint64_t v) {
+            h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+            return h;
+        };
+        auto qf = [](float f) { return static_cast<uint64_t>(static_cast<int64_t>(f * 1000.0f)); };
+        uint64_t h = 1469598103934665603ull;
+        h = mix(h, particle_systems.size());
+        for (const auto& s : particle_systems) {
+            if (!s.runtime) { h = mix(h, 0); continue; }
+            h = mix(h, s.runtime->gridDomains().size());
+            h = mix(h, s.runtime->emitters().size());
+            h = mix(h, s.runtime->colliders().size());
+            for (const auto& c : s.runtime->colliders()) {
+                for (char ch : c.name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                for (char ch : c.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                h = mix(h, static_cast<uint64_t>(c.source_mode));
+                h = mix(h, c.enabled ? 1ull : 0ull);
+                h = mix(h, qf(c.plane_y));
+                h = mix(h, qf(c.sphere_center.x)); h = mix(h, qf(c.sphere_center.y)); h = mix(h, qf(c.sphere_center.z));
+                h = mix(h, qf(c.sphere_radius));
+                h = mix(h, qf(c.capsule_start.x)); h = mix(h, qf(c.capsule_start.y)); h = mix(h, qf(c.capsule_start.z));
+                h = mix(h, qf(c.capsule_end.x)); h = mix(h, qf(c.capsule_end.y)); h = mix(h, qf(c.capsule_end.z));
+                h = mix(h, qf(c.capsule_radius));
+                h = mix(h, qf(c.bounds_min.x)); h = mix(h, qf(c.bounds_min.y)); h = mix(h, qf(c.bounds_min.z));
+                h = mix(h, qf(c.bounds_max.x)); h = mix(h, qf(c.bounds_max.y)); h = mix(h, qf(c.bounds_max.z));
+                h = mix(h, qf(c.friction));
+                h = mix(h, qf(c.restitution));
+                h = mix(h, qf(c.thickness));
+            }
+            h = mix(h, s.runtime->flowSources().size());
+        }
+        h = mix(h, gas_volumes.size());
+        h = mix(h, fluid_objects.size());
+        h = mix(h, force_field_manager.force_fields.size());
+        for (const auto& rb : rigid_bodies) {
+            if (!rigidCouplesToFluid(rb)) continue;
+            for (char c : rb.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
+            for (char c : rb.collider_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
+            h = mix(h, static_cast<uint64_t>(rb.motion_type));
+            h = mix(h, static_cast<uint64_t>(rb.shape));
+            h = mix(h, rb.enabled ? 1ull : 0ull);
+            h = mix(h, rb.dynamic ? 1ull : 0ull);
+            h = mix(h, qf(rb.mass));
+            h = mix(h, rb.auto_mass_from_density ? 1ull : 0ull);
+            h = mix(h, qf(rb.density));
+            h = mix(h, qf(rb.linear_damping));
+            h = mix(h, qf(rb.angular_damping));
+            h = mix(h, qf(rb.gravity_scale));
+            h = mix(h, qf(rb.friction));
+            h = mix(h, qf(rb.restitution));
+            h = mix(h, qf(rb.initial_linear_velocity.x));
+            h = mix(h, qf(rb.initial_linear_velocity.y));
+            h = mix(h, qf(rb.initial_linear_velocity.z));
+            h = mix(h, qf(rb.initial_angular_velocity.x));
+            h = mix(h, qf(rb.initial_angular_velocity.y));
+            h = mix(h, qf(rb.initial_angular_velocity.z));
+            h = mix(h, rb.lock_translation_x ? 1ull : 0ull);
+            h = mix(h, rb.lock_translation_y ? 1ull : 0ull);
+            h = mix(h, rb.lock_translation_z ? 1ull : 0ull);
+            h = mix(h, rb.lock_rotation_x ? 1ull : 0ull);
+            h = mix(h, rb.lock_rotation_y ? 1ull : 0ull);
+            h = mix(h, rb.lock_rotation_z ? 1ull : 0ull);
+            // Cached spawn pose (see computeSimConfigSignature) — O(1), no scan.
+            {
+                const Vec3 t = rb.initial_pivot.getTranslation();
+                h = mix(h, qf(t.x)); h = mix(h, qf(t.y)); h = mix(h, qf(t.z));
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 4; ++c) h = mix(h, qf(rb.initial_pivot.m[r][c]));
+            }
+        }
+        return h;
+    }
+
+    // Cheap content hash of the simulation SETUP (not its live state). Changes
+    // when sim elements are added/removed or a rigid body's params are edited, so
+    // updateSimulationTimeline can auto-drop a stale bake cache. Excludes anything
+    // that mutates per step (particle counts, positions) so it stays stable while
+    // the sim runs. NOTE: deep per-domain particle/gas/fluid param edits are not
+    // all hashed yet — full content signature is part of the Faz 5 cache hardening.
+    uint64_t computeSimConfigSignature() const {
+        auto mix = [](uint64_t h, uint64_t v) {
+            h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+            return h;
+        };
+        auto qf = [](float f) { return static_cast<uint64_t>(static_cast<int64_t>(f * 1000.0f)); };
+        uint64_t h = 1469598103934665603ull;
+        h = mix(h, particle_systems.size());
+        for (const auto& s : particle_systems) {
+            if (!s.runtime) { h = mix(h, 0); continue; }
+            h = mix(h, s.runtime->gridDomains().size());
+            h = mix(h, s.runtime->emitters().size());
+            h = mix(h, s.runtime->colliders().size());
+            for (const auto& c : s.runtime->colliders()) {
+                for (char ch : c.name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                for (char ch : c.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                h = mix(h, static_cast<uint64_t>(c.source_mode));
+                h = mix(h, c.enabled ? 1ull : 0ull);
+                h = mix(h, qf(c.plane_y));
+                h = mix(h, qf(c.sphere_center.x)); h = mix(h, qf(c.sphere_center.y)); h = mix(h, qf(c.sphere_center.z));
+                h = mix(h, qf(c.sphere_radius));
+                h = mix(h, qf(c.capsule_start.x)); h = mix(h, qf(c.capsule_start.y)); h = mix(h, qf(c.capsule_start.z));
+                h = mix(h, qf(c.capsule_end.x)); h = mix(h, qf(c.capsule_end.y)); h = mix(h, qf(c.capsule_end.z));
+                h = mix(h, qf(c.capsule_radius));
+                h = mix(h, qf(c.bounds_min.x)); h = mix(h, qf(c.bounds_min.y)); h = mix(h, qf(c.bounds_min.z));
+                h = mix(h, qf(c.bounds_max.x)); h = mix(h, qf(c.bounds_max.y)); h = mix(h, qf(c.bounds_max.z));
+                h = mix(h, qf(c.friction));
+                h = mix(h, qf(c.restitution));
+                h = mix(h, qf(c.thickness));
+            }
+            h = mix(h, s.runtime->flowSources().size());
+        }
+        h = mix(h, gas_volumes.size());
+        h = mix(h, fluid_objects.size());
+        h = mix(h, force_field_manager.force_fields.size());
+        h = mix(h, rigid_bodies.size());
+        for (const auto& rb : rigid_bodies) {
+            for (char c : rb.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
+            for (char c : rb.collider_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
+            h = mix(h, static_cast<uint64_t>(rb.motion_type));
+            h = mix(h, rb.dynamic ? 1ull : 0ull);
+            h = mix(h, static_cast<uint64_t>(rb.shape));
+            h = mix(h, qf(rb.mass));
+            h = mix(h, rb.auto_mass_from_density ? 1ull : 0ull);
+            h = mix(h, qf(rb.density));
+            h = mix(h, qf(rb.linear_damping));
+            h = mix(h, qf(rb.angular_damping));
+            h = mix(h, qf(rb.gravity_scale));
+            h = mix(h, qf(rb.friction));
+            h = mix(h, qf(rb.restitution));
+            h = mix(h, qf(rb.initial_linear_velocity.x));
+            h = mix(h, qf(rb.initial_linear_velocity.y));
+            h = mix(h, qf(rb.initial_linear_velocity.z));
+            h = mix(h, qf(rb.initial_angular_velocity.x));
+            h = mix(h, qf(rb.initial_angular_velocity.y));
+            h = mix(h, qf(rb.initial_angular_velocity.z));
+            h = mix(h, rb.sleep_enabled ? 1ull : 0ull);
+            h = mix(h, rb.lock_translation_x ? 1ull : 0ull);
+            h = mix(h, rb.lock_translation_y ? 1ull : 0ull);
+            h = mix(h, rb.lock_translation_z ? 1ull : 0ull);
+            h = mix(h, rb.lock_rotation_x ? 1ull : 0ull);
+            h = mix(h, rb.lock_rotation_y ? 1ull : 0ull);
+            h = mix(h, rb.lock_rotation_z ? 1ull : 0ull);
+            h = mix(h, rb.fluid_coupling_enabled ? 1ull : 0ull);
+            h = mix(h, qf(rb.buoyancy_scale));
+            h = mix(h, qf(rb.fluid_density));
+            h = mix(h, qf(rb.fluid_drag));
+            h = mix(h, qf(rb.fluid_angular_drag));
+            h = mix(h, rb.enabled ? 1ull : 0ull);
+            // CACHED spawn pose (rb.initial_pivot) so MOVING a rigid changes the
+            // signature without a per-tick world scan — O(1) here. The cache is
+            // refreshed only on a real user transform edit by
+            // refreshRigidRestPosesOnUserEdit() (called from updateSimulationTimeline).
+            {
+                const Vec3 t = rb.initial_pivot.getTranslation();
+                h = mix(h, qf(t.x)); h = mix(h, qf(t.y)); h = mix(h, qf(t.z));
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 4; ++c) h = mix(h, qf(rb.initial_pivot.m[r][c]));
+            }
+        }
+        return h;
+    }
+
     // Apply the keyframed transform of every object bound as a simulation source
     // (collider / emitter / grid domain / flow source) for an ARBITRARY timeline
     // frame, so the sim sees its animated pose at that exact frame.
@@ -1342,6 +2159,16 @@ struct SceneData {
     // transform handle. The SurfaceMeshCache the voxelizer reads computes world
     // verts as getTransformMatrix()*original, so updating the handle is enough for
     // moved geometry to reach the solid mask — no CPU vertex bake required.
+    // True when a node is the source object of an ENABLED, DYNAMIC rigid body —
+    // i.e. the rigid sim writes its pose every step and owns its transform.
+    // Such nodes must not be re-posed by keyframe / serialize-cached tracks.
+    bool isSimOwnedRigidSource(const std::string& name) const {
+        if (name.empty()) return false;
+        for (const auto& rb : rigid_bodies)
+            if (rb.enabled && rb.dynamic && rb.source_name == name) return true;
+        return false;
+    }
+
     void applySimSourceObjectPosesForFrame(int frame) {
         if (timeline.tracks.empty() || particle_systems.empty()) return;
 
@@ -1363,19 +2190,41 @@ struct SceneData {
 
         // Evaluate each source's transform track ONCE for this frame; drop names
         // with no transform track so the world.objects pass below stays cheap.
+        // Also drop names whose evaluated pose is identical to what we last pushed
+        // (same playhead AND no keyframe edit) — those need no re-push and, crucially,
+        // no surface-cache memo erase, so this can run every idle frame for free.
         std::vector<std::string> posed_names;
         std::vector<Matrix4x4> posed_mats;
         posed_names.reserve(source_names.size());
         posed_mats.reserve(source_names.size());
+        auto matrixEqual = [](const Matrix4x4& a, const Matrix4x4& b) {
+            for (int r = 0; r < 4; ++r)
+                for (int c = 0; c < 4; ++c)
+                    if (a.m[r][c] != b.m[r][c]) return false;
+            return true;
+        };
         for (const auto& name : source_names) {
+            // A DYNAMIC rigid body owns its source object's transform — the rigid
+            // sim writes the simulated pose every step. If we ALSO pushed a keyframe
+            // (or a serialize-cached frame-0 pose) onto it here, the two drivers
+            // fight and the object flickers between the authored and the simulated
+            // pose ("two places at once" vibration). Kinematic/static bodies are
+            // keyframe-driven and must still be posed, so gate on rb.dynamic only.
+            if (isSimOwnedRigidSource(name)) continue;
             auto track_it = timeline.tracks.find(name);
             if (track_it == timeline.tracks.end() || track_it->second.keyframes.empty()) continue;
             Keyframe kf = track_it->second.evaluate(frame);
             if (!kf.has_transform) continue;
+            Matrix4x4 mat = Matrix4x4::fromTRS(kf.transform.position,
+                                               kf.transform.rotation,
+                                               kf.transform.scale);
+            auto prev = last_sim_pose_applied_.find(name);
+            if (prev != last_sim_pose_applied_.end() && matrixEqual(prev->second, mat)) {
+                continue;  // pose unchanged since last push — nothing to do
+            }
+            last_sim_pose_applied_[name] = mat;
             posed_names.push_back(name);
-            posed_mats.push_back(Matrix4x4::fromTRS(kf.transform.position,
-                                                    kf.transform.rotation,
-                                                    kf.transform.scale));
+            posed_mats.push_back(mat);
         }
         if (posed_names.empty()) return;
 
@@ -1426,6 +2275,10 @@ struct SceneData {
     }
 
     bool restoreSimFrame(int frame, float fixed_dt = 1.0f / 24.0f) {
+        // Rigid bodies aren't frame-cached yet (Faz 5); the start is the only frame
+        // we can faithfully reconstruct, so reset them to their initial pose there.
+        // (A loop-back / scrub to frame 0 thus puts a fallen body back at the top.)
+        if (frame <= 0 && rigid_body_system) rigid_body_system->resetRuntime();
         auto it = sim_frame_cache_.find(frame);
         if (it != sim_frame_cache_.end() && it->second.size() == particle_systems.size()) {
             for (std::size_t i = 0; i < particle_systems.size(); ++i) {
@@ -1472,8 +2325,49 @@ struct SceneData {
         return true;
     }
 
-    void resetSimulationToStart() {
-        clearSimFrameCache();
+    void stepRigidBodiesOnly(float fixed_dt, int frame) {
+        if (!rigid_body_system || rigid_bodies.empty()) return;
+        if (fixed_dt <= 0.0f) fixed_dt = 1.0f / 24.0f;
+
+        RayTrophiSim::SimulationContext ctx = simulation_world.makeContext(fixed_dt, 0, 1);
+        ctx.dt = fixed_dt;
+        ctx.fixed_dt = fixed_dt;
+        ctx.time_seconds = static_cast<float>(frame) * fixed_dt;
+        ctx.frame = frame;
+        ctx.substep_index = 0;
+        ctx.substep_count = 1;
+
+        rigid_body_system->prepare(ctx);
+        rigid_body_system->step(ctx);
+        rigid_body_system->finalize(ctx);
+    }
+
+    bool advanceRigidTimelineToFrame(int target_frame, float fixed_dt, int max_steps) {
+        if (target_frame < 0) target_frame = 0;
+        if (!rigid_body_system || rigid_bodies.empty()) {
+            rigid_timeline_frame_ = target_frame;
+            return true;
+        }
+        if (rigid_timeline_frame_ < 0 || target_frame < rigid_timeline_frame_) {
+            rigid_body_system->resetRuntime();
+            rigid_timeline_frame_ = 0;
+        }
+        int steps = 0;
+        while (rigid_timeline_frame_ < target_frame && steps < max_steps) {
+            const int next_frame = rigid_timeline_frame_ + 1;
+            applySimSourceObjectPosesForFrame(next_frame);
+            syncSimulationWorld();
+            stepRigidBodiesOnly(fixed_dt, next_frame);
+            rigid_timeline_frame_ = next_frame;
+            ++steps;
+        }
+        return rigid_timeline_frame_ == target_frame;
+    }
+
+    void resetSimulationToStart(bool clear_cache = true, bool capture_frame = true) {
+        if (clear_cache) {
+            clearSimFrameCache();
+        }
         for (auto& system : particle_systems) {
             if (system.runtime) {
                 invalidateSimulationRenderBindings(system);
@@ -1481,15 +2375,21 @@ struct SceneData {
                 system.runtime->clear();  // particles back to empty for a deterministic bake
             }
         }
+        // Rigid bodies respawn at their source objects' poses on the next step.
+        if (rigid_body_system) rigid_body_system->resetRuntime();
+        rigid_timeline_frame_ = 0;
         simulation_world.resetTime(0.0f, 0);
         applySimSourceObjectPosesForFrame(0);
-        captureSimFrame(0);
+        if (capture_frame) {
+            captureSimFrame(0);
+        }
     }
 
     // Return to interactive free-run preview (default mode).
     void resetSimulation() {
         resetSimulationToStart();
         sim_timeline_frame_ = -1;
+        rigid_timeline_frame_ = -1;
         syncSimulationRenderVolumes();
     }
 
@@ -1541,9 +2441,44 @@ struct SceneData {
         simulation_render_updated = false;
         const bool force_resync = force_simulation_render_sync_;
 
+        // Catch a user moving a rigid's source object (gizmo) while the timeline is
+        // IDLE — sitting on its current baked frame, not playing/scrubbing. Only
+        // then is a geometry-generation bump a user edit rather than the sim's own
+        // per-step churn. Refreshes rb.initial_pivot so the signature below sees the
+        // move WITHOUT scanning world.objects every tick.
+        if (!playing && !force_resync && sim_timeline_frame_ == tl_frame) {
+            refreshRigidRestPosesOnUserEdit();
+        }
+
+        // Auto-invalidate the in-memory bake cache when the simulation SETUP
+        // changes (add/remove of any sim element, rigid-body param edit, …) so a
+        // stale cache is never replayed. Replaces the old manual-reset workflow.
+        // Disk cache is left to the Faz 5 hardening; only the memory cache + the
+        // live-bake cursor are dropped here.
+        const uint64_t cfg_sig = computeSimConfigSignature();
+        if (cfg_sig != last_sim_config_sig_) {
+            syncRigidBodyProxyColliders();
+            // Decide whether the change actually touches a FLUID bake. A far or
+            // static rigid that doesn't overlap any fluid domain only needs the
+            // cheap rigid re-sim — the expensive fluid cache survives. Anything
+            // that couples to fluid (or any non-rigid setup edit) drops it and
+            // rewinds so the fluid re-bakes from frame 0. Recompute the coupling
+            // signature AFTER the proxy-collider sync so it sees current geometry.
+            const uint64_t fluid_sig = computeFluidCouplingSignature();
+            const bool fluid_affected = (fluid_sig != last_fluid_coupling_sig_);
+            last_sim_config_sig_ = computeSimConfigSignature();
+            last_fluid_coupling_sig_ = fluid_sig;
+            if (fluid_affected) {
+                clearSimFrameCache();
+                sim_timeline_frame_ = -1;  // force a fresh fluid bake from frame 0
+            }
+            rigid_timeline_frame_ = -1;    // rigid is not frame-cached; cheap to re-sim
+        }
+
         // Live Update: free-run whenever the timeline is not actively playing.
         if (live_mode && !playing) {
             sim_timeline_frame_ = -1;  // detached from the baked timeline
+            rigid_timeline_frame_ = -1;
             syncSimulationWorld();
             simulation_world.stepOnce(realtime_dt);
             syncSimulationRenderVolumes();
@@ -1564,11 +2499,17 @@ struct SceneData {
             int want = tl_frame;
             if (want < sim_cache_start_frame_) want = sim_cache_start_frame_;
             if (want > sim_cache_end_frame_)   want = sim_cache_end_frame_;
+            bool cache_frame_ready = (want == sim_timeline_frame_);
             if (want != sim_timeline_frame_ || force_resync) {
                 if (restoreSimFrameFromDisk(want, fixed_dt)) {
                     sim_timeline_frame_ = want;
+                    cache_frame_ready = true;
                     changed = true;
                 }
+            }
+            if (cache_frame_ready && rigid_timeline_frame_ != want) {
+                advanceRigidTimelineToFrame(want, fixed_dt, kMaxStepsPerTick);
+                changed = true;
             }
             if (changed) syncSimulationRenderVolumes();
             return;
@@ -1576,25 +2517,31 @@ struct SceneData {
 
         if (force_resync && !playing && restoreSimFrame(tl_frame, fixed_dt)) {
             sim_timeline_frame_ = tl_frame;
+            advanceRigidTimelineToFrame(tl_frame, fixed_dt, kMaxStepsPerTick);
             changed = true;
         }
 
         // Fresh bake on first entry. On a playback loop-back (tl_frame jumps
-        // below our baked frame), do NOT re-bake from scratch — resetSimulation
-        // ToStart() wipes the whole sim frame cache, which thrashed memory on
-        // every wrap. Instead replay the cached loop-start frame; only fall back
-        // to a fresh bake if that frame isn't cached. The (tl_frame !=
-        // sim_timeline_frame_) block below then replays the rest from cache too.
+        // below our baked frame), do NOT drop the whole cache. Rigid bodies are
+        // not frame-cached yet, so some rewinds still need a deterministic resim
+        // from frame 0, but the grid/fluid cache remains useful for non-rigid
+        // frames and for the next scrub/play pass.
         if (sim_timeline_frame_ < 0) {
-            resetSimulationToStart();
-            sim_timeline_frame_ = 0;
+            if (restoreSimFrame(tl_frame, fixed_dt)) {
+                sim_timeline_frame_ = tl_frame;
+                advanceRigidTimelineToFrame(tl_frame, fixed_dt, kMaxStepsPerTick);
+            } else {
+                resetSimulationToStart(false, false);
+                sim_timeline_frame_ = 0;
+            }
             changed = true;
         } else if (playing && tl_frame < sim_timeline_frame_) {
             if (restoreSimFrame(tl_frame, fixed_dt)) {
                 sim_timeline_frame_ = tl_frame;
+                advanceRigidTimelineToFrame(tl_frame, fixed_dt, kMaxStepsPerTick);
                 changed = true;
             } else {
-                resetSimulationToStart();
+                resetSimulationToStart(false, false);
                 sim_timeline_frame_ = 0;
                 changed = true;
             }
@@ -1603,6 +2550,7 @@ struct SceneData {
         if (tl_frame != sim_timeline_frame_) {
             if (restoreSimFrame(tl_frame, fixed_dt)) {
                 sim_timeline_frame_ = tl_frame;
+                advanceRigidTimelineToFrame(tl_frame, fixed_dt, kMaxStepsPerTick);
                 changed = true;
             } else {
                 // Uncached: rewind to nearest cached <= target, then resim (capped).
@@ -1610,8 +2558,9 @@ struct SceneData {
                     const int nearest = nearestCachedSimFrameAtOrBelow(tl_frame);
                     if (nearest >= 0 && restoreSimFrame(nearest, fixed_dt)) {
                         sim_timeline_frame_ = nearest;
+                        advanceRigidTimelineToFrame(nearest, fixed_dt, kMaxStepsPerTick);
                     } else {
-                        resetSimulationToStart();
+                        resetSimulationToStart(false, false);
                         sim_timeline_frame_ = 0;
                     }
                     changed = true;
@@ -1625,6 +2574,7 @@ struct SceneData {
                     syncSimulationWorld();
                     simulation_world.stepOnce(fixed_dt);
                     ++sim_timeline_frame_;
+                    rigid_timeline_frame_ = sim_timeline_frame_;
                     captureSimFrame(sim_timeline_frame_);
                     ++steps;
                     changed = true;
@@ -1636,6 +2586,11 @@ struct SceneData {
                     applySimSourceObjectPosesForFrame(tl_frame);
                 }
             }
+        }
+
+        if (sim_timeline_frame_ >= 0 && rigid_timeline_frame_ != sim_timeline_frame_) {
+            advanceRigidTimelineToFrame(sim_timeline_frame_, fixed_dt, kMaxStepsPerTick);
+            changed = true;
         }
 
         // Only touch the renderer when something actually changed; otherwise the
@@ -1685,6 +2640,7 @@ struct SceneData {
         } else if (restoreSimFrame(tl_frame, fixed_dt)) {
             // Exact cached frame → restore and done.
             sim_timeline_frame_ = tl_frame;
+            advanceRigidTimelineToFrame(tl_frame, fixed_dt, tl_frame + 1);
             syncSimulationRenderVolumes();
             syncParticleRenderInstances(enable_rt_geometry);
             return;
@@ -1698,6 +2654,7 @@ struct SceneData {
             const int nearest = cache_frames ? nearestCachedSimFrameAtOrBelow(tl_frame) : -1;
             if (nearest >= 0 && restoreSimFrame(nearest, fixed_dt)) {
                 sim_timeline_frame_ = nearest;
+                advanceRigidTimelineToFrame(nearest, fixed_dt, nearest + 1);
             } else {
                 resetSimulationToStart();
                 sim_timeline_frame_ = 0;
@@ -1712,6 +2669,7 @@ struct SceneData {
             syncSimulationWorld();
             simulation_world.stepOnce(fixed_dt);
             ++sim_timeline_frame_;
+            rigid_timeline_frame_ = sim_timeline_frame_;
             if (cache_frames) captureSimFrame(sim_timeline_frame_);
         }
 
@@ -1751,12 +2709,14 @@ struct SceneData {
         const float dt = (fps > 1.0f) ? (1.0f / fps) : (1.0f / 24.0f);
         resetSimulationToStart();
         sim_timeline_frame_ = 0;
+        rigid_timeline_frame_ = 0;
         int written = 0;
         for (int f = 0; f <= end_frame; ++f) {
             if (f > 0) {
                 syncSimulationWorld();
                 simulation_world.stepOnce(dt);
                 sim_timeline_frame_ = f;
+                rigid_timeline_frame_ = f;
             }
             if (f >= start_frame) {
                 std::string num = std::to_string(f);
@@ -1766,6 +2726,7 @@ struct SceneData {
             }
         }
         sim_timeline_frame_ = -1;
+        rigid_timeline_frame_ = -1;
         syncSimulationRenderVolumes();
         return written;
     }
@@ -1875,6 +2836,7 @@ struct SceneData {
             if (sys.runtime) sys.runtime->synchronizeGridDomainsNow();
         }
         sim_timeline_frame_ = 0;
+        rigid_timeline_frame_ = 0;
         sim_bake_cur_ = 0;
         if (0 >= start_frame) {                 // frame 0 has no step; write if in range
             if (!writeAllSystemsBakeFrame_(0)) sim_bake_ok_ = false;
@@ -1905,6 +2867,7 @@ struct SceneData {
             syncSimulationWorld();
             simulation_world.stepOnce(sim_bake_dt_);
             sim_timeline_frame_ = sim_bake_cur_;
+            rigid_timeline_frame_ = sim_bake_cur_;
             if (sim_bake_cur_ >= sim_bake_start_) {
                 if (!writeAllSystemsBakeFrame_(sim_bake_cur_)) sim_bake_ok_ = false;
             }
@@ -1978,6 +2941,7 @@ private:
         }
 
         sim_timeline_frame_ = -1;       // back to free-run; disk now serves restores
+        rigid_timeline_frame_ = -1;
         syncSimulationRenderVolumes();
         sim_bake_active_ = false;
         sim_bake_hashes_.clear();
@@ -2477,6 +3441,7 @@ public:
         applyParticleSystemEnabledState(system);
         particle_systems.push_back(std::move(system));
         active_particle_system_index = static_cast<int>(particle_systems.size()) - 1;
+        syncRigidBodyProxyColliders();
         return particle_systems.back();
     }
 
@@ -2622,6 +3587,7 @@ public:
         // Cache is indexed per-system; system add/remove invalidates it.
         clearSimFrameCache();
         sim_timeline_frame_ = -1;
+        rigid_timeline_frame_ = -1;
         if (system.runtime) {
             system.runtime->releaseComputeResources(simulation_world.compute());
             simulation_world.removeSystem(system.runtime.get());
@@ -2667,7 +3633,8 @@ public:
         // per-object enabled/runtime checks; this UI predicate must not walk or
         // dereference scene-owned runtime objects while transient NanoVDB/live
         // volume bindings may be mutating adjacent scene containers.
-        return !particle_systems.empty() || !fluid_objects.empty() || !gas_volumes.empty();
+        return !particle_systems.empty() || !fluid_objects.empty() || !gas_volumes.empty() ||
+               !rigid_bodies.empty();
     }
 
     bool hasLiveSimulationObject(const std::string& node_name) const {
@@ -2808,10 +3775,20 @@ public:
     void invalidateSurfaceMeshCache(const std::string& node_name = std::string()) const {
         if (node_name.empty()) {
             surface_mesh_cache.clear();
+            last_sim_pose_applied_.clear();  // drop stale sim-pose memo on full reset/reload
         } else {
             surface_mesh_cache.erase(node_name);
+            last_sim_pose_applied_.erase(node_name);
         }
         ++surface_mesh_cache_version;
+    }
+
+    // Drop ONLY the per-epoch rebuild memo for one node (not the cache entry, not
+    // the version) so the next bounds/OBB resolve rebuilds from current world
+    // verts. Cheap — lets the collider/bounds gizmos track an object that moved
+    // without bumping the geometry generation (manual gizmo drag mid-edit).
+    void refreshSimSourceGizmoBounds(const std::string& node_name) const {
+        if (!node_name.empty()) surface_cache_epoch_done_.erase(node_name);
     }
 
     const RayTrophiSim::SurfaceMeshCache* getSurfaceMeshCacheForObject(const std::string& node_name,
@@ -3165,6 +4142,8 @@ public:
         ensureActiveParticleSystemObject();
         auto& collider = ensureParticleSimulationSystem().addCollider(desc);
         syncActiveParticleSystemObjectFromRuntime();
+        syncRigidBodyProxyColliders();
+        invalidateRigidBodySimulationCache();
         return collider;
     }
 
@@ -3526,9 +4505,12 @@ public:
     }
 
     void clearParticleColliders() {
-        if (auto runtime = activeParticleRuntime()) {
-            runtime->clearColliders();
-        }
+        ensureActiveParticleSystemObject();
+        auto& runtime = ensureParticleSimulationSystem();
+        runtime.clearColliders();
+        syncActiveParticleSystemObjectFromRuntime();
+        syncRigidBodyProxyColliders();
+        invalidateRigidBodySimulationCache();
     }
 
     void spawnDebugParticleBurst(const Vec3& center,
@@ -3733,6 +4715,7 @@ public:
         releaseSimulationRenderVolumes();
         clearSimFrameCache();
         sim_timeline_frame_ = -1;
+        rigid_timeline_frame_ = -1;
         // Abandon any in-flight cooperative disk bake — its tick references the
         // particle_systems we are about to clear, so it must not run again.
         sim_bake_active_ = false;
@@ -3748,6 +4731,10 @@ public:
         // during destruction ordering or if a system dtor triggers a step.
         if (fluid_simulation_system) {
             fluid_simulation_system->setObjects(nullptr);
+        }
+        // Detach the RigidBodySystem from rigid_bodies before clearing it.
+        if (rigid_body_system) {
+            rigid_body_system->setBodies(nullptr);
         }
 
         // Release particle system compute resources before clearing.
@@ -3767,6 +4754,8 @@ public:
         // NOW safe to destroy the actual data vectors.
         fluid_objects.clear();
         fluid_simulation_system.reset();
+        rigid_bodies.clear();
+        rigid_body_system.reset();
         next_fluid_object_id = 1;
         active_fluid_object_index = -1;
         particle_systems.clear();

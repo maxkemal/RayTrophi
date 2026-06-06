@@ -350,6 +350,9 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_max_particles"] = (int)d.fluid_max_particles;
     j["fluid_replace_on_seed"] = d.fluid_replace_on_seed;
     j["fluid_pending_seed"] = d.fluid_pending_seed;
+    j["fluid_seed_mode"] = (int)d.fluid_seed_mode;
+    j["fluid_fill_level"] = d.fluid_fill_level;
+    j["fluid_fill_wall_margin"] = d.fluid_fill_wall_margin;
     j["fluid_render_mode"] = (int)d.fluid_render_mode;
     j["fluid_particle_color"] = vec3ToJson(d.fluid_particle_color);
     j["fluid_particle_radius_factor"] = d.fluid_particle_radius_factor;
@@ -497,6 +500,9 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_max_particles")) d.fluid_max_particles = j["fluid_max_particles"];
     if (j.contains("fluid_replace_on_seed")) d.fluid_replace_on_seed = j["fluid_replace_on_seed"];
     if (j.contains("fluid_pending_seed")) d.fluid_pending_seed = j["fluid_pending_seed"];
+    if (j.contains("fluid_seed_mode")) d.fluid_seed_mode = (RayTrophiSim::FluidSeedMode)(int)j["fluid_seed_mode"];
+    if (j.contains("fluid_fill_level")) d.fluid_fill_level = j["fluid_fill_level"];
+    if (j.contains("fluid_fill_wall_margin")) d.fluid_fill_wall_margin = j["fluid_fill_wall_margin"];
     if (j.contains("fluid_render_mode")) d.fluid_render_mode = (RayTrophiSim::Fluid::FluidRenderMode)j["fluid_render_mode"];
     if (j.contains("fluid_particle_color")) d.fluid_particle_color = jsonToVec3(j["fluid_particle_color"]);
     if (j.contains("fluid_particle_radius_factor")) d.fluid_particle_radius_factor = j["fluid_particle_radius_factor"];

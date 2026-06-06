@@ -113,6 +113,7 @@ struct RenderSettings {
     int max_bounces = 10;
     int diffuse_bounces = 4;
     int transmission_bounces = 8;
+    bool show_scene_stats_hud = true;
 
     // Adaptive Sampling
     bool use_adaptive_sampling = true;

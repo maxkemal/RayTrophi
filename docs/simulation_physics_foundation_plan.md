@@ -123,8 +123,23 @@ Acceptance:
 
 Goal: build our own rigid foundation after field/scheduler/gpu paths are proven.
 
+- Shared collider authoring bridge:
+  - Scene collider descriptors are the single source for collision shape, contact material, and fluid boundary data.
+  - Rigid body descriptors reference an authored collider and keep only body dynamics: enabled/static/dynamic/kinematic, mass/density, velocity/damping, sleep, locks, fluid coupling, and future constraints.
+  - The Jolt bridge resolves simple collider modes directly (box/OBB, AABB, sphere, capsule, plane slab). Mesh/SDF/convex modes continue to feed fluid and use a rigid box approximation until advanced rigid collision shapes land.
+  - Proxy colliders are compatibility fallback only when a rigid body has no authored collider.
+- Rigid body UI/control surface:
+  - Body controls: motion type, enabled, collider binding, mass, density, auto mass from density.
+  - Motion controls: linear/angular damping, gravity scale, initial linear/angular velocity, sleep.
+  - Constraint controls: translation/rotation locks first, hinge/slider constraints later.
+  - Fluid coupling controls: enable coupling, fluid density, buoyancy scale, linear/angular fluid drag.
+- Rigid-fluid coupling:
+  - Estimate submerged volume from the rigid collider against fluid height/SDF.
+  - Apply buoyancy as `fluid_density * submerged_volume * gravity * buoyancy_scale` and compare against object mass.
+  - Apply buoyancy and drag at multiple sample points so light bodies float and rock with waves, while dense bodies sink.
+  - Feed rigid collider velocity back to the fluid boundary so moving bodies push water and create waves.
 - Rigid body state buffers
-- Sphere, box, capsule, plane colliders
+- Sphere, box, capsule, plane colliders sourced from the shared collider registry
 - Broadphase grid or sweep-and-prune
 - Contact manifold
 - Sequential impulse solver
@@ -134,6 +149,9 @@ Goal: build our own rigid foundation after field/scheduler/gpu paths are proven.
 Acceptance:
 
 - Dynamic bodies respond to scene force fields
+- Editing the collider panel updates fluid and rigid collision without duplicating shape/material controls in the rigid body panel
+- Rigid UI exposes body dynamics without duplicating collider shape/material controls
+- Light rigid bodies float and bob on fluid, while dense bodies sink according to mass/density
 - Basic stacking and collisions are stable at fixed timestep
 - Scene transforms can be written back after solve
 

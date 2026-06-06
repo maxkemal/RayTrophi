@@ -766,7 +766,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  addViewportMessage("Added Force Field");
                  show_forcefield_tab = true;
              }
-             
+
              ImGui::EndMenu();
         }
 
@@ -814,7 +814,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             if (ImGui::MenuItem("Volumetrics Tab", nullptr, &show_volumetric_tab)) {
                 if (show_volumetric_tab) { tab_to_focus = "Volumetric"; focus_properties_panel_next_frame = true; }
             }
-            if (ImGui::MenuItem("Simulation Tab", nullptr, &show_forcefield_tab)) {
+            if (ImGui::MenuItem("Physics Tab", nullptr, &show_forcefield_tab)) {
                 if (show_forcefield_tab) { tab_to_focus = "Simulation"; focus_properties_panel_next_frame = true; }
             }
             if (ImGui::MenuItem("World Tab", nullptr, &show_world_tab)) { 
