@@ -711,6 +711,7 @@ static const char* rigidBodyShapeToString(RayTrophiSim::RigidBodyShape shape) {
     switch (shape) {
         case RayTrophiSim::RigidBodyShape::Sphere: return "Sphere";
         case RayTrophiSim::RigidBodyShape::Capsule: return "Capsule";
+        case RayTrophiSim::RigidBodyShape::Mesh: return "Mesh";
         case RayTrophiSim::RigidBodyShape::Box:
         default: return "Box";
     }
@@ -719,6 +720,7 @@ static const char* rigidBodyShapeToString(RayTrophiSim::RigidBodyShape shape) {
 static RayTrophiSim::RigidBodyShape rigidBodyShapeFromString(const std::string& value) {
     if (value == "Sphere") return RayTrophiSim::RigidBodyShape::Sphere;
     if (value == "Capsule") return RayTrophiSim::RigidBodyShape::Capsule;
+    if (value == "Mesh") return RayTrophiSim::RigidBodyShape::Mesh;
     return RayTrophiSim::RigidBodyShape::Box;
 }
 
@@ -735,6 +737,21 @@ static RayTrophiSim::RigidBodyMotionType rigidBodyMotionTypeFromString(const std
     if (value == "Static") return RayTrophiSim::RigidBodyMotionType::Static;
     if (value == "Kinematic") return RayTrophiSim::RigidBodyMotionType::Kinematic;
     return RayTrophiSim::RigidBodyMotionType::Dynamic;
+}
+
+static const char* bodyKindToString(RayTrophiSim::BodyKind kind) {
+    switch (kind) {
+        case RayTrophiSim::BodyKind::SoftBody: return "SoftBody";
+        case RayTrophiSim::BodyKind::Cloth: return "Cloth";
+        case RayTrophiSim::BodyKind::Rigid:
+        default: return "Rigid";
+    }
+}
+
+static RayTrophiSim::BodyKind bodyKindFromString(const std::string& value) {
+    if (value == "SoftBody") return RayTrophiSim::BodyKind::SoftBody;
+    if (value == "Cloth") return RayTrophiSim::BodyKind::Cloth;
+    return RayTrophiSim::BodyKind::Rigid;
 }
 
 static const char* particlePhysicsModeToString(RayTrophiSim::ParticlePhysicsMode mode) {
@@ -1175,13 +1192,21 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         };
 
         if (progress_callback) progress_callback(5, "Writing geometry...");
-        
+
         // Write geometry to binary file FIRST
         if (save_settings.save_geometry) {
             ScopedPerfTimer timer("saveProject writeGeometryBinary");
+            // Physics bodies bake their simulated/deformed result into the source
+            // meshes' LOCAL verts, which writeGeometryBinary serializes verbatim.
+            // Restore every body to its rest mesh so the FILE holds the clean rest
+            // pose (not the final sim frame, which otherwise reloads stuck and even
+            // survives removing the body), then put the live deformation back after
+            // the geometry is written so the on-screen sim is undisturbed.
+            auto body_rest_snapshot = scene.snapshotAndRestoreBodiesToRest();
             measureBinarySection("geometry", [&]() {
                 writeGeometryBinary(out_bin, scene);
             });
+            scene.reapplyBodyRestSnapshot(body_rest_snapshot);
         }
         
         if (progress_callback) progress_callback(30, "Writing metadata...");
@@ -3932,6 +3957,7 @@ json ProjectManager::serializeRigidBodies(const SceneData& scene) {
         b["source_name"] = rb.source_name;
         b["collider_name"] = rb.collider_name;
         b["enabled"] = rb.enabled;
+        b["kind"] = bodyKindToString(rb.kind);
         b["dynamic"] = rb.dynamic;
         b["motion_type"] = rigidBodyMotionTypeToString(rb.motion_type);
         b["shape"] = rigidBodyShapeToString(rb.shape);
@@ -3956,7 +3982,35 @@ json ProjectManager::serializeRigidBodies(const SceneData& scene) {
         b["buoyancy_scale"] = rb.buoyancy_scale;
         b["fluid_density"] = rb.fluid_density;
         b["fluid_drag"] = rb.fluid_drag;
+        b["fluid_quadratic_drag"] = rb.fluid_quadratic_drag;
         b["fluid_angular_drag"] = rb.fluid_angular_drag;
+        b["fluid_max_coupling_speed"] = rb.fluid_max_coupling_speed;
+        // Soft-body / cloth authoring (meaningful when kind != Rigid).
+        b["soft_stiffness"] = rb.soft_stiffness;
+        b["soft_compliance"] = rb.soft_compliance;
+        b["soft_pressure"] = rb.soft_pressure;
+        b["soft_damping"] = rb.soft_damping;
+        b["soft_vertex_radius"] = rb.soft_vertex_radius;
+        b["soft_iterations"] = rb.soft_iterations;
+        b["soft_friction"] = rb.soft_friction;
+        b["soft_restitution"] = rb.soft_restitution;
+        b["soft_gravity_factor"] = rb.soft_gravity_factor;
+        b["soft_mass"] = rb.soft_mass;
+        b["soft_two_sided"] = rb.soft_two_sided;
+        b["force_field_enabled"] = rb.force_field_enabled;
+        b["force_field_scale"] = rb.force_field_scale;
+        // Cloth/soft pin regions (world-space spheres).
+        if (!rb.soft_pins.empty()) {
+            json pins = json::array();
+            for (const auto& pin : rb.soft_pins) {
+                json p;
+                p["center"] = vec3ToJson(pin.center);
+                p["radius"] = pin.radius;
+                p["enabled"] = pin.enabled;
+                pins.push_back(std::move(p));
+            }
+            b["soft_pins"] = std::move(pins);
+        }
         b["rest_captured"] = rb.rest_captured;
         if (rb.rest_captured) {
             b["initial_pivot"] = mat4ToJson(rb.initial_pivot);
@@ -3994,6 +4048,7 @@ void ProjectManager::deserializeRigidBodies(const json& j, SceneData& scene) {
         rb.source_name = item.value("source_name", rb.source_name);
         rb.collider_name = item.value("collider_name", rb.collider_name);
         rb.enabled = item.value("enabled", rb.enabled);
+        rb.kind = bodyKindFromString(item.value("kind", std::string("Rigid")));
         rb.motion_type = rigidBodyMotionTypeFromString(
             item.value("motion_type", std::string(rb.dynamic ? "Dynamic" : "Static")));
         rb.dynamic = item.value("dynamic", rb.motion_type != RayTrophiSim::RigidBodyMotionType::Static);
@@ -4019,7 +4074,33 @@ void ProjectManager::deserializeRigidBodies(const json& j, SceneData& scene) {
         rb.buoyancy_scale = item.value("buoyancy_scale", rb.buoyancy_scale);
         rb.fluid_density = item.value("fluid_density", rb.fluid_density);
         rb.fluid_drag = item.value("fluid_drag", rb.fluid_drag);
+        rb.fluid_quadratic_drag = item.value("fluid_quadratic_drag", rb.fluid_quadratic_drag);
         rb.fluid_angular_drag = item.value("fluid_angular_drag", rb.fluid_angular_drag);
+        rb.fluid_max_coupling_speed = item.value("fluid_max_coupling_speed", rb.fluid_max_coupling_speed);
+        rb.soft_stiffness = item.value("soft_stiffness", rb.soft_stiffness);
+        rb.soft_compliance = item.value("soft_compliance", rb.soft_compliance);
+        rb.soft_pressure = item.value("soft_pressure", rb.soft_pressure);
+        rb.soft_damping = item.value("soft_damping", rb.soft_damping);
+        rb.soft_vertex_radius = item.value("soft_vertex_radius", rb.soft_vertex_radius);
+        rb.soft_iterations = item.value("soft_iterations", rb.soft_iterations);
+        rb.soft_friction = item.value("soft_friction", rb.soft_friction);
+        rb.soft_restitution = item.value("soft_restitution", rb.soft_restitution);
+        rb.soft_gravity_factor = item.value("soft_gravity_factor", rb.soft_gravity_factor);
+        rb.soft_mass = item.value("soft_mass", rb.soft_mass);
+        rb.soft_two_sided = item.value("soft_two_sided", rb.soft_two_sided);
+        rb.force_field_enabled = item.value("force_field_enabled", rb.force_field_enabled);
+        rb.force_field_scale = item.value("force_field_scale", rb.force_field_scale);
+        if (item.contains("soft_pins") && item["soft_pins"].is_array()) {
+            rb.soft_pins.clear();
+            for (const auto& p : item["soft_pins"]) {
+                if (!p.is_object()) continue;
+                RayTrophiSim::SoftPinRegion pin;
+                if (p.contains("center")) pin.center = jsonToVec3(p["center"]);
+                pin.radius = p.value("radius", pin.radius);
+                pin.enabled = p.value("enabled", pin.enabled);
+                rb.soft_pins.push_back(pin);
+            }
+        }
         const bool hasSerializedRest = item.value("rest_captured", false) && item.contains("initial_pivot");
         if (hasSerializedRest) {
             rb.rest_captured = true;

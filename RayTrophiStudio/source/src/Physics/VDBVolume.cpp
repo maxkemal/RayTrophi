@@ -282,7 +282,10 @@ void VDBVolume::unload() {
 
 bool VDBVolume::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool ignore_volumes) const {
     if (!visible || ignore_volumes || !isLoaded()) return false;
-    
+    // Particles/splat-sphere fluid mode: volume kept alive for the GPU only, no CPU
+    // contribution. Don't occlude — let the CPU ray reach the splat spheres inside.
+    if (cpu_render_skip) return false;
+
     float t_enter, t_exit;
     if (!intersectTransformedAABB(r, -std::numeric_limits<float>::infinity(), t_max, t_enter, t_exit)) {
         return false;

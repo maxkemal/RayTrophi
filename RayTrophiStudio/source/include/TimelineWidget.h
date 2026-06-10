@@ -83,6 +83,11 @@ public:
     // Public state (for external access)
     int getCurrentFrame() const { return current_frame; }
     void setCurrentFrame(int frame) { current_frame = frame; }
+    // Timeline frame range — the single source of truth for how long the scene runs.
+    // Physics disk-bake uses this (NOT the sequence-render range) so a bake always
+    // covers the whole timeline regardless of render output settings.
+    int getStartFrame() const { return start_frame; }
+    int getEndFrame() const { return end_frame; }
     bool isPlaying() const { return is_playing; }
     std::string selected_track;
 

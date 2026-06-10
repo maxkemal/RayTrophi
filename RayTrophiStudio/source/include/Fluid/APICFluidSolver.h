@@ -323,6 +323,20 @@ const float*  getLastFlipPreSnapshotX();
 const float*  getLastFlipPreSnapshotY();
 const float*  getLastFlipPreSnapshotZ();
 
+/// @brief Integrate gravity + external force fields onto the particle velocities
+///        (APIC step 1). Factored out of step() so the GPU pipeline can run this
+///        cheap, CPU-only, correctness-critical pass (force-field/noise/wind
+///        surface-drag eval is not ported to the device) and then upload the
+///        post-force velocities for a GPU P2G — instead of falling the whole
+///        solve back to the CPU whenever a force field is active. Reads `grid`
+///        only for the wind free-surface band; writes only particle velocities.
+void applyExternalForces(FluidParticles& particles,
+                         const FluidSim::FluidGrid& grid,
+                         const APICSolverParams& params,
+                         const SimulationForceFieldSnapshot* forces,
+                         float time_seconds,
+                         float dt);
+
 /// @brief Advance one liquid step. `grid` is used as scratch velocity field;
 ///        its density/temperature/fuel channels are not touched.
 void step(FluidParticles& particles,

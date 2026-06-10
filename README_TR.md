@@ -70,7 +70,7 @@ RayTrophi Studio, hepsi aynı canlı sahne üzerinde çalışan, göreve odaklı
 | **Arazi** | Sculpt + düğüm-grafiği arazi, hidrolik/termal erozyon, heightmap I/O |
 | **Bitki / Scatter** | Kural tabanlı ve elle boyanan çim/ağaç/kaya instancing |
 | **Saç** | Tüy/saç groom, tara, kes/uzat, simüle et ve render et |
-| **Simülasyon** | Sıvı (APIC/FLIP), gaz/duman/ateş, whitewater, rigid body (Jolt), collider, kuvvet alanları, emitter |
+| **Simülasyon** | Sıvı (APIC/FLIP), gaz/duman/ateş, whitewater, rigid + soft body & cloth (Jolt), mesh/primitif collider, kuvvet alanları, emitter |
 | **Animasyon** | Çok-track zaman çizelgesi, kanal bazlı keyframe, iskelet animasyonu, animasyon grafiği |
 | **Render / Look-dev** | Backend seç, örnekleme/kalite ayarla, denoise, tonemap ve sonucu Stylize'la |
 
@@ -176,12 +176,14 @@ Hapsolmuş hava ve dalga tepesi potansiyellerinden üretilen ikincil **sprey** (
 - Deterministik hash tabanlı boyut varyasyonu ve ömür sonunda yumuşak çözünme
 - Yakın çekim detayı için ayarlanabilir icosphere alt bölümü (0–3)
 
-### Rigid body — Jolt Physics + iki-yönlü sıvı eşleşmesi
-- Paylaşılan simülasyon zaman çizelgesinde **Jolt Physics** tabanlı rigid-body çözücü: herhangi bir sahne objesini **Static, Dynamic veya Kinematic** olarak işaretle; sınırlarına oturtulan box / sphere / capsule / yönlü-kutu şekilleri
+### Gövdeler — Jolt Physics: rigid, soft & cloth + iki-yönlü sıvı eşleşmesi
+- Paylaşılan simülasyon zaman çizelgesinde **Jolt Physics** tabanlı gövde çözücü: herhangi bir sahne objesini **Static, Dynamic veya Kinematic** olarak işaretle; sınırlarına oturtulan **box / sphere / capsule / yönlü-kutu** primitifleri ya da objenin gerçek geometrisini kullanan bir **mesh collider** — static gövdeler için tam üçgen mesh, hareketli gövdeler için convex hull; böylece SDF/mesh kaynaklı bir collider OBB yerine gerçek şekille çarpışır
+- **Soft body & cloth.** Bir mesh'i deforme olabilen **soft body** veya **cloth** olarak işaretle (Jolt soft-body çözücü): gövde başına sertlik/compliance, basınç (kapalı-hacim şişirme), sönümleme, iterasyon, vertex çarpışma kalınlığı ve **vertex pinleme** (rest vertex'leri sabit tutarak kumaşı köşe/kenardan asma); deforme mesh doğrudan render'a geri yazılır
 - Gövde başına **kütle veya yoğunluktan-otomatik-kütle, doğrusal & açısal sönümleme, sürtünme, geri tepme (restitution), yerçekimi ölçeği, başlangıç doğrusal/açısal hızı, uyku ve eksen bazlı öteleme/dönüş kilitleri**
+- **Kuvvet alanları her gövde türünü sürer** — rigid (COM'da kuvvet), soft & cloth (vertex bazlı hız itmesi, pinli vertex'ler hariç)
 - **İki-yönlü sıvı eşleşmesi.** Gövde, varyasyonel cut-cell yolu üzerinden sıvı/gaz ızgarasına hareketli bir katı olarak voksellenir, böylece sıvıyı iter ve sıçratır; karşılığında sıvı level set'inden örneklenen **kaldırma kuvveti (buoyancy) ve doğrusal/açısal sürükleme** gövdeye geri etki eder — render'ın okuduğu aynı alandan yüzme, batma ve sallanma davranışı
 - **Kinematic** gövdeler keyframe ile sürülür (sıvıyı karıştıran animasyonlu collider'lar); **Dynamic** gövdelerin sahibi çözücüdür, böylece zaman çizelgesi simüle edilen pozla çakışmaz
-- **Seçici yeniden-pişirme.** Bir rigid body'yi düzenlemek veya taşımak, (pahalı) sıvı bake'ini yalnızca o gövde gerçekten bir sıvı domainiyle etkileşiyorsa düşürür — alakasız bir static prop kendi başına ucuzca yeniden simüle edilir, sıvı önbelleği korunur
+- **Seçici yeniden-pişirme.** Bir gövdeyi düzenlemek veya taşımak, (pahalı) sıvı bake'ini yalnızca o gövde gerçekten bir sıvı domainiyle etkileşiyorsa düşürür — alakasız bir static prop kendi başına ucuzca yeniden simüle edilir, sıvı önbelleği korunur
 
 ### Yüzeyler, önbellek & serileştirme
 - Render zamanı sıvı mesh'i için Laplacian yumuşatmalı **Yu-Turk anizotropik yüzey rekonstrüksiyonu**; yüzey çözünürlüğü sim ızgarasından bağımsız
@@ -386,7 +388,7 @@ RayTrophi/
 **Yakın zamanda eklenenler**
 - ✅ Vulkan RT backend (interaktif birincil) — GPU skinning, asenkron ping-pong pipeline, analitik LSS saç
 - ✅ Fizik & parçacık simülasyon paketi (APIC/FLIP sıvı, gaz/ateş, whitewater)
-- ✅ Rigid-body dinamiği (Jolt Physics) + iki-yönlü sıvı eşleşmesi — katı voksellemesi + kaldırma/sürükleme, seçici sıvı yeniden-pişirme
+- ✅ Rigid, soft-body & cloth dinamiği (Jolt Physics) — primitif/mesh collider, vertex pinleme, kuvvet-alanı eşleşmesi, iki-yönlü sıvı eşleşmesi (katı voksellemesi + kaldırma/sürükleme), seçici sıvı yeniden-pişirme
 - ✅ GPU MGPCG sıvı basınç çözümü (CUDA)
 - ✅ Varyasyonel cut-cell katı eşleşmesi + ghost-fluid 2. derece serbest yüzey (CPU)
 - ✅ Çok-materyalli whitewater PBR yönlendirme + Newton-Raphson dalga oturtma

@@ -276,8 +276,19 @@ Vec3 ForceField::evaluateCurlNoise(const Vec3& world_pos, float time) const {
         noise.lacunarity, noise.persistence,
         noise.speed, noise.seed
     );
-    
+
     return curl * strength * noise.amplitude;
+}
+
+Vec3 ForceField::sampleCurlDetail(const Vec3& world_pos, float time) const {
+    // Same divergence-free field as the CurlNoise type, but returned unscaled
+    // by strength so the fluid wind layer can mix it onto the target velocity.
+    return Noise::curlFBM_animated(
+        world_pos, time,
+        noise.octaves, noise.frequency,
+        noise.lacunarity, noise.persistence,
+        noise.speed, noise.seed
+    );
 }
 
 Vec3 ForceField::evaluateDrag(const Vec3& local_pos, const Vec3& velocity, float time) const {
@@ -344,18 +355,25 @@ nlohmann::json ForceField::toJson() const {
     // Drag
     j["linear_drag"] = linear_drag;
     j["quadratic_drag"] = quadratic_drag;
-    
+
+    // Fluid wind coupling
+    j["fluid_surface_drag"] = fluid_surface_drag;
+    j["fluid_drag_coupling"] = fluid_drag_coupling;
+    j["fluid_surface_depth"] = fluid_surface_depth;
+    j["fluid_curl_detail"] = fluid_curl_detail;
+
     // Time
     j["start_frame"] = start_frame;
     j["end_frame"] = end_frame;
     j["phase"] = phase;
-    
+
     // Affect masks
     j["affects_gas"] = affects_gas;
     j["affects_particles"] = affects_particles;
     j["affects_cloth"] = affects_cloth;
     j["affects_rigidbody"] = affects_rigidbody;
-    
+    j["affects_fluid"] = affects_fluid;
+
     return j;
 }
 
@@ -401,15 +419,21 @@ void ForceField::fromJson(const nlohmann::json& j) {
     
     if (j.contains("linear_drag")) linear_drag = j["linear_drag"];
     if (j.contains("quadratic_drag")) quadratic_drag = j["quadratic_drag"];
-    
+
+    if (j.contains("fluid_surface_drag")) fluid_surface_drag = j["fluid_surface_drag"];
+    if (j.contains("fluid_drag_coupling")) fluid_drag_coupling = j["fluid_drag_coupling"];
+    if (j.contains("fluid_surface_depth")) fluid_surface_depth = j["fluid_surface_depth"];
+    if (j.contains("fluid_curl_detail")) fluid_curl_detail = j["fluid_curl_detail"];
+
     if (j.contains("start_frame")) start_frame = j["start_frame"];
     if (j.contains("end_frame")) end_frame = j["end_frame"];
     if (j.contains("phase")) phase = j["phase"];
-    
+
     if (j.contains("affects_gas")) affects_gas = j["affects_gas"];
     if (j.contains("affects_particles")) affects_particles = j["affects_particles"];
     if (j.contains("affects_cloth")) affects_cloth = j["affects_cloth"];
     if (j.contains("affects_rigidbody")) affects_rigidbody = j["affects_rigidbody"];
+    if (j.contains("affects_fluid")) affects_fluid = j["affects_fluid"];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

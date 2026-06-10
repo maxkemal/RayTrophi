@@ -638,6 +638,12 @@ public:
     void setEnabled(bool enabled);
     void reserve(std::size_t capacity);
     void clear();
+    // Overwrite the live discrete-particle SoA with a captured snapshot (timeline
+    // frame cache replay). Restores the alive count and forces a GPU re-upload so a
+    // cached-frame scrub/loop-back shows the exact particles that were baked, instead
+    // of an empty SoA. Grid domains/emitter accumulators are NOT touched here (those
+    // are handled by the grid-domain cache + the deterministic re-sim path).
+    void restoreSoA(const ParticleSoABuffers& src, std::size_t alive_count);
     void releaseComputeResources(SimulationComputeContext& compute);
     std::size_t spawn(const ParticleSpawnDesc& desc);
     bool kill(std::size_t index);

@@ -22,6 +22,16 @@ Camera::Camera()
     enable_vignetting(false), enable_chromatic_aberration(false) {
 }
 Ray Camera::get_ray(float s, float t) const {
+    // ---------------- ORTHOGRAPHIC (parallel rays) ----------------
+    // Spread ray origins across the image plane; all rays share the forward direction.
+    // No lens/DOF/distortion in ortho — those are perspective-lens effects.
+    if (orthographic) {
+        const float half_h = ortho_height * 0.5f;
+        const float half_w = half_h * aspect_ratio;
+        Vec3 ro = origin + (s - 0.5f) * (2.0f * half_w) * u + (t - 0.5f) * (2.0f * half_h) * v;
+        return Ray(ro, (-w)); // -w is the forward (lookfrom -> lookat) direction, already unit-length
+    }
+
     float use_s = s;
     float use_t = t;
 
@@ -129,6 +139,54 @@ void Camera::moveToTargetLocked(const Vec3& new_position) {
 void Camera::setLookDirection(const Vec3& direction_normalized) {
     lookat = lookfrom + direction_normalized * focus_dist;
     update_camera_vectors();
+}
+
+void Camera::setStandardView(StandardView view, bool setOrtho) {
+    // Default: keep the current orbit pivot (lookat) and distance.
+    setStandardView(view, lookat, (lookfrom - lookat).length(), setOrtho);
+}
+
+void Camera::setStandardView(StandardView view, const Vec3& pivot, float distance, bool setOrtho) {
+    standard_view = view;
+
+    if (view == StandardView::Perspective) {
+        orthographic = false;
+        update_camera_vectors();
+        markDirty();
+        return;
+    }
+
+    float dist = distance;
+    if (dist < 1e-3f) dist = 10.0f;
+
+    Vec3 dir;   // unit vector FROM pivot TO the new camera position
+    Vec3 up;
+    switch (view) {
+        case StandardView::Top:    dir = Vec3(0, 1, 0);  up = Vec3(0, 0, -1); break; // looking -Y
+        case StandardView::Bottom: dir = Vec3(0, -1, 0); up = Vec3(0, 0, 1);  break; // looking +Y
+        case StandardView::Front:  dir = Vec3(0, 0, 1);  up = Vec3(0, 1, 0);  break; // looking -Z
+        case StandardView::Back:   dir = Vec3(0, 0, -1); up = Vec3(0, 1, 0);  break; // looking +Z
+        case StandardView::Right:  dir = Vec3(1, 0, 0);  up = Vec3(0, 1, 0);  break; // looking -X
+        case StandardView::Left:   dir = Vec3(-1, 0, 0); up = Vec3(0, 1, 0);  break; // looking +X
+        default: dir = Vec3(0, 0, 1); up = Vec3(0, 1, 0); break;
+    }
+
+    lookfrom = pivot + dir * dist;
+    lookat = pivot;
+    vup = up;
+    origin = lookfrom;
+
+    if (setOrtho) {
+        orthographic = true;
+        // Frame the same world span the perspective view showed at the pivot plane,
+        // so toggling between perspective and ortho doesn't jump scale.
+        const float theta = (vfov > 1.0f ? vfov : 45.0f) * static_cast<float>(M_PI) / 180.0f;
+        ortho_height = 2.0f * dist * std::tan(theta * 0.5f);
+        if (ortho_height < 1e-3f) ortho_height = dist;
+    }
+
+    update_camera_vectors();
+    markDirty();
 }
 
 Vec3 Camera::random_in_unit_polygon(int sides) const {

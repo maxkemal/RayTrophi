@@ -124,6 +124,12 @@ struct CameraParams {
     float aperture = 0.0f;
     float focusDistance = 1.0f;
     float aspectRatio = 1.777f;
+
+    // Orthographic / standard-view state (viewport alignment).
+    bool  orthographic = false;      // true = parallel projection in the raster preview
+    float orthoHeight = 10.0f;       // full vertical world-units visible (used when orthographic)
+    int   gridPlane = 0;             // active grid plane: 0=XZ (floor), 1=XY (front), 2=YZ (side)
+
     float exposureFactor = 1.0f;
     float ev_compensation = 0.0f;
     int isoPresetIndex = -1;

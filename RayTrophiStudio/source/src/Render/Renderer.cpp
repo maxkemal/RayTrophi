@@ -3572,6 +3572,11 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync) {
     if (hairSystem.getTotalStrandCount() > 0) {
         hairSystem.buildBVH(!hideInterpolatedHair);
     }
+
+    // Keep the separate particle-only BVH in sync with any full scene rebuild
+    // (backend switch, geometry edit, project load), so the CPU composite shows
+    // current particles immediately — not only after the next motion tick.
+    scene.rebuildParticleBVH(use_embree);
 }
 
 void Renderer::updateBVH(SceneData& scene, bool use_embree) {
@@ -5363,6 +5368,178 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 }
                 if (t_enter < 0.001f) t_enter = 0.001f;
 
+                // ── FLUID SURFACE (render_as_isosurface) — CPU dielectric ───────────
+                // Mirrors the Vulkan RT reference (volume_closesthit.rchit source_type==4,
+                // the default backend): walk the SDF density proxy for the iso=0.5
+                // crossing, build a gradient normal, and Fresnel-importance-sample a
+                // reflect/refract dielectric event with the fluid IOR + Beer-Lambert
+                // depth tint. Self-contained: every path redirects current_ray and
+                // `continue`s, so the fog body below never runs for an iso volume.
+                if (vdb && vdb->render_as_isosurface && live_vol_id >= 0) {
+                    auto& isoMgr = VDBVolumeManager::getInstance();
+                    const float ISO_THRESH = 0.5f;
+                    const float ior_w = (vdb->render_isosurface_ior > 1.0f) ? vdb->render_isosurface_ior : 1.33f;
+                    const float iso_rough = std::clamp(vdb->render_isosurface_roughness, 0.0f, 1.0f);
+                    const float iso_foam = std::clamp(vdb->render_isosurface_foam, 0.0f, 1.0f);
+                    const float iso_remap_low = vol_shader ? vol_shader->density.remap_low : 0.0f;
+                    const float iso_remap_high = vol_shader ? vol_shader->density.remap_high : 1.0f;
+                    const float iso_remap_range = std::max(1e-6f, iso_remap_high - iso_remap_low);
+                    const float iso_mult = (vol_shader && vol_shader->density.multiplier > 0.0f) ? vol_shader->density.multiplier : 1.0f;
+                    const Vec3 iso_abs_col = vol_shader ? vol_shader->absorption.color : Vec3(0.0f);
+                    const float iso_abs_coeff = vol_shader ? vol_shader->absorption.coefficient : 0.0f;
+                    const Vec3 iso_scatter_col = vol_shader ? vol_shader->scattering.color : Vec3(1.0f);
+                    const float iso_voxel = std::max(1e-4f, vdb->getVoxelSize());
+
+                    auto isoSample = [&](const Vec3& wp) -> float {
+                        Vec3 lp = inv_transform.transform_point(wp);
+                        float v = isoMgr.sampleDensityCPU(live_vol_id, lp.x, lp.y, lp.z);
+                        if (!std::isfinite(v)) return 0.0f;
+                        return std::max((v - iso_remap_low) / iso_remap_range, 0.0f) * iso_mult;
+                    };
+
+                    const float iso_step_size = vol_shader ? vol_shader->quality.step_size : 0.1f;
+                    const int   isoCap = std::clamp(vol_shader ? vol_shader->quality.max_steps : 256, 32, 2048);
+                    const float marchLen = std::max(0.0f, t_exit - t_enter);
+                    const float fineStep = std::min(std::max(iso_step_size, iso_voxel * 0.1f), iso_voxel * 0.5f);
+                    const float coverStep = marchLen / (float)isoCap;
+                    const float walkStep = std::max(0.001f, std::max(fineStep, coverStep));
+                    const int   maxStepsIso = std::min((int)(marchLen / walkStep) + 2, isoCap + 2);
+
+                    float tw = t_enter;
+                    float startD = isoSample(current_ray.at(tw));
+                    const bool startInside = startD > ISO_THRESH;
+                    float prevD = startD;
+                    float hitT = -1.0f;
+                    for (int s = 0; s < maxStepsIso; ++s) {
+                        float nextT = std::min(tw + walkStep, t_exit);
+                        float curD = isoSample(current_ray.at(nextT));
+                        bool crossed = startInside
+                            ? (prevD >= ISO_THRESH && curD < ISO_THRESH)   // exit
+                            : (prevD <  ISO_THRESH && curD >= ISO_THRESH);  // enter
+                        if (crossed) {
+                            // Bisection refine (kills staircase aliasing on the band).
+                            float t0 = tw, t1 = nextT, d0 = prevD, d1 = curD;
+                            for (int it = 0; it < 4; ++it) {
+                                float tm = 0.5f * (t0 + t1);
+                                float dm = isoSample(current_ray.at(tm));
+                                bool mi = dm > ISO_THRESH;
+                                if (startInside == mi) { t0 = tm; d0 = dm; } else { t1 = tm; d1 = dm; }
+                            }
+                            float denom = d1 - d0;
+                            float frac = (ISO_THRESH - d0) / ((std::abs(denom) > 1e-6f) ? denom : 1e-6f);
+                            frac = std::clamp(frac, 0.0f, 1.0f);
+                            hitT = t0 + frac * (t1 - t0);
+                            break;
+                        }
+                        prevD = curD;
+                        tw = nextT;
+                        if (tw >= t_exit) break;
+                    }
+
+                    const float dir_len = current_ray.direction.length();
+
+                    if (hitT < 0.0f) {
+                        // No surface crossing in this span.
+                        if (hit_solid_inside) {
+                            // A solid sits inside the domain (t_exit was clamped to it):
+                            // tint by the water in front, then let the NEXT bounce shade it.
+                            if (startInside) {
+                                float depth = std::max(0.0f, t_exit - t_enter) * dir_len;
+                                throughput = throughput * Vec3f(
+                                    std::exp(-iso_abs_col.x * iso_abs_coeff * depth),
+                                    std::exp(-iso_abs_col.y * iso_abs_coeff * depth),
+                                    std::exp(-iso_abs_col.z * iso_abs_coeff * depth));
+                                throughput = throughput * toVec3f(iso_scatter_col);
+                            }
+                            current_ray = Ray(current_ray.at(std::max(t_exit - 0.01f, t_enter)), current_ray.direction);
+                            bounce--;  // transparent water pass; solid charged on next bounce
+                            continue;
+                        }
+                        // Pure pass-through (empty span): continue past the domain.
+                        current_ray = Ray(current_ray.at(t_exit + 0.001f), current_ray.direction);
+                        bounce--;
+                        continue;
+                    }
+
+                    // ── Surface dielectric event ────────────────────────────────────
+                    Vec3 hitPos = current_ray.at(hitT);
+                    float h = std::max(0.001f, iso_voxel);
+                    float sxp = isoSample(hitPos + Vec3(h, 0, 0)), sxm = isoSample(hitPos - Vec3(h, 0, 0));
+                    float syp = isoSample(hitPos + Vec3(0, h, 0)), sym = isoSample(hitPos - Vec3(0, h, 0));
+                    float szp = isoSample(hitPos + Vec3(0, 0, h)), szm = isoSample(hitPos - Vec3(0, 0, h));
+                    Vec3 grad(sxp - sxm, syp - sym, szp - szm);
+                    float gradLen = grad.length();
+
+                    // Whitewater from SDF curvature (Laplacian); added immediately.
+                    if (iso_foam > 1e-3f) {
+                        float dc = isoSample(hitPos);
+                        float lap = std::abs((sxp + sxm + syp + sym + szp + szm) - 6.0f * dc);
+                        float ft = std::clamp((lap - 0.15f) / (0.7f - 0.15f), 0.0f, 1.0f);
+                        ft = ft * ft * (3.0f - 2.0f * ft);   // smoothstep
+                        float foam = iso_foam * ft * 0.9f;
+                        color += throughput * Vec3f(foam, foam, foam);
+                    }
+
+                    Vec3 rayDir = current_ray.direction.normalize();
+                    // -gradient points OUT of the denser interior toward air.
+                    Vec3 N = (gradLen > 1e-6f) ? (grad * (-1.0f / gradLen)) : (rayDir * -1.0f);
+                    if (Vec3::dot(rayDir, N) > 0.0f) N = N * -1.0f;
+
+                    // GGX roughness: jitter N inside a microfacet lobe (blurs both lobes).
+                    if (iso_rough > 1e-3f) {
+                        float a = iso_rough * iso_rough;
+                        float u1 = (float)rand() / RAND_MAX;
+                        float u2 = (float)rand() / RAND_MAX;
+                        float phi = 6.2831853f * u1;
+                        float cosT = std::sqrt(std::max(0.0f, (1.0f - u2) / (1.0f + (a * a - 1.0f) * u2)));
+                        float sinT = std::sqrt(std::max(0.0f, 1.0f - cosT * cosT));
+                        Vec3 hT(sinT * std::cos(phi), sinT * std::sin(phi), cosT);
+                        Vec3 up = (std::abs(N.z) < 0.999f) ? Vec3(0, 0, 1) : Vec3(1, 0, 0);
+                        Vec3 T = Vec3::cross(up, N).normalize();
+                        Vec3 B = Vec3::cross(N, T);
+                        Vec3 Np = (hT.x * T + hT.y * B + hT.z * N).normalize();
+                        if (Vec3::dot(rayDir, Np) < 0.0f) N = Np;
+                    }
+
+                    // Beer-Lambert over the in-fluid segment (only on an exit event).
+                    if (startInside) {
+                        float depth = std::max(0.0f, hitT - t_enter) * dir_len;
+                        throughput = throughput * Vec3f(
+                            std::exp(-iso_abs_col.x * iso_abs_coeff * depth),
+                            std::exp(-iso_abs_col.y * iso_abs_coeff * depth),
+                            std::exp(-iso_abs_col.z * iso_abs_coeff * depth));
+                    }
+
+                    // Fresnel (Schlick), importance-sampled reflect vs refract.
+                    float cosTheta = std::min(std::abs(Vec3::dot(rayDir, N)), 1.0f);
+                    float r0 = (1.0f - ior_w) / (1.0f + ior_w); r0 = r0 * r0;
+                    float fres = r0 + (1.0f - r0) * std::pow(1.0f - cosTheta, 5.0f);
+                    float eta = startInside ? ior_w : (1.0f / ior_w);
+                    float sin2t = eta * eta * std::max(0.0f, 1.0f - cosTheta * cosTheta);
+                    bool tir = sin2t > 1.0f;
+
+                    Vec3 outDir;
+                    if (tir || ((float)rand() / RAND_MAX) < fres) {
+                        outDir = Vec3::reflect(rayDir, N).normalize();   // scene/sky reflection
+                    } else {
+                        outDir = Vec3::refract(rayDir, N, eta).normalize();  // through the water
+                        throughput = throughput * toVec3f(iso_scatter_col); // mild surface cast
+                    }
+                    // Register the water surface as the PRIMARY hit so aerial
+                    // perspective (Nishita) scatters over the camera→surface span,
+                    // not the 10000-unit background default — otherwise the sky's
+                    // aerial layer washes the refractive surface out completely.
+                    // hitT is a parameter along current_ray, which == r at bounce 0,
+                    // so it shares solid_rec.t's units (no dir_len scaling — that
+                    // would desync from how applyAerialPerspective reads r.direction).
+                    if (bounce == 0 && first_hit_t < 0.0f) {
+                        first_hit_t = hitT;
+                    }
+                    current_ray = Ray(hitPos + outDir * 0.003f, outDir);
+                    // Real dielectric bounce (matches the GPU path: not refunded).
+                    continue;
+                }
+
                 float step_size = vol_shader ? vol_shader->quality.step_size : 0.1f;
                 if (step_size < 0.001f) step_size = 0.001f;
 
@@ -5697,6 +5874,25 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 current_ray = Ray(current_ray.at(t_far + 0.0001f), current_ray.direction);
                 continue; // Continue tracing behind VDB
             }
+        }
+        else if (vdb) {
+            // A VDB hittable was hit but has no renderable volume on the CPU
+            // (live_vol_id < 0, not procedural). This is the fluid Particles /
+            // splat-sphere mode: the domain volume is kept registered+visible so the
+            // GPU SSBO slot mapping stays valid, but it carries no CPU density. Pass
+            // the ray STRAIGHT THROUGH the domain AABB instead of letting it fall to
+            // surface shading below — a VDBVolume has no surface material, so that
+            // path shaded the whole domain box black (the reported bug). The discrete
+            // splat spheres render independently via the particle BVH composite.
+            float vt_enter, vt_exit;
+            if (vdb->intersectTransformedAABB(current_ray, 0.001f,
+                    std::numeric_limits<float>::infinity(), vt_enter, vt_exit)) {
+                current_ray = Ray(current_ray.at(vt_exit + 0.001f), current_ray.direction);
+            } else {
+                current_ray = Ray(current_ray.at(rec.t + 0.001f), current_ray.direction);
+            }
+            bounce--;  // pure pass-through — don't consume a bounce
+            continue;
         }
 
         // --- Mesh Volume Rendering ---
@@ -6980,6 +7176,41 @@ bool Renderer::isCPUAccumulationComplete() const {
     return cpu_accumulated_samples >= target_max_samples;
 }
 
+// Tests the static scene BVH and the separate particle-only BVH as one root,
+// returning the nearest hit / either occlusion. Lets the CPU integrator query
+// discrete sim particles (which live in their own synchronously-rebuilt BVH so a
+// moving sim never freezes them — see SceneData::particle_bvh) without touching
+// any of the integrator's many internal bvh->hit call sites.
+namespace {
+class CompositeRenderBVH : public Hittable {
+public:
+    const Hittable* a = nullptr;   // static scene BVH
+    const Hittable* b = nullptr;   // particle-only BVH
+    bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool ignore_volumes = false) const override {
+        bool any = false;
+        float closest = t_max;
+        if (a && a->hit(r, t_min, closest, rec, ignore_volumes)) { any = true; closest = rec.t; }
+        HitRecord tmp;
+        if (b && b->hit(r, t_min, closest, tmp, ignore_volumes)) { any = true; rec = tmp; }
+        return any;
+    }
+    bool occluded(const Ray& r, float t_min, float t_max) const override {
+        if (a && a->occluded(r, t_min, t_max)) return true;
+        if (b && b->occluded(r, t_min, t_max)) return true;
+        return false;
+    }
+    bool bounding_box(float t0, float t1, AABB& out) const override {
+        AABB ba, bb; bool ha = false, hb = false;
+        if (a) ha = a->bounding_box(t0, t1, ba);
+        if (b) hb = b->bounding_box(t0, t1, bb);
+        if (ha && hb) { out = surrounding_box(ba, bb); return true; }
+        if (ha) { out = ba; return true; }
+        if (hb) { out = bb; return true; }
+        return false;
+    }
+};
+} // namespace
+
 void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window, SceneData& scene, int samples_this_pass, int override_target_samples) {
     // [SAFETY CHECK] Prevent rendering if stopped or loading a new project
     // This prevents access violations when camera/scene data is being destroyed
@@ -7135,6 +7366,18 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
     std::atomic<int> next_pixel_index{ 0 };
     std::atomic<bool> should_stop{ false };
 
+    // Root traversed by every ray this pass. When live particles exist, wrap the
+    // static scene BVH + the particle-only BVH in a composite so particles render
+    // without editing the integrator's internal hit calls; otherwise pass the
+    // scene BVH directly (zero overhead). Read-only during the parallel pass.
+    CompositeRenderBVH composite_bvh;
+    const Hittable* render_bvh = scene.bvh.get();
+    if (scene.particle_bvh) {
+        composite_bvh.a = scene.bvh.get();
+        composite_bvh.b = scene.particle_bvh.get();
+        render_bvh = &composite_bvh;
+    }
+
     // Worker function for progressive accumulation
     auto progressive_worker = [&](int thread_id) {
         std::mt19937 rng(std::random_device{}() + thread_id + cpu_accumulated_samples * 1337);
@@ -7242,7 +7485,7 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                 bool primary_hit = false;
 
                 Vec3 sample_color = ray_color(
-                    r, scene.bvh.get(), scene.lights, scene.background_color, max_depth, 0, scene,
+                    r, render_bvh, scene.lights, scene.background_color, max_depth, 0, scene,
                     &primary_albedo, &primary_normal, &primary_hit, &primary_depth, &primary_material_id,
                     &primary_world_position);
                 color_sum = color_sum + sample_color;
@@ -8259,6 +8502,15 @@ void Renderer::syncCameraToBackend(const Camera& cam) {
     cp.aperture = cam.aperture;
     cp.focusDistance = cam.focus_dist;
     cp.aspectRatio = cam.aspect_ratio;
+    cp.orthographic = cam.orthographic;
+    cp.orthoHeight = cam.ortho_height;
+    switch (cam.standard_view) {
+        case Camera::StandardView::Front:
+        case Camera::StandardView::Back:  cp.gridPlane = 1; break;
+        case Camera::StandardView::Left:
+        case Camera::StandardView::Right: cp.gridPlane = 2; break;
+        default:                          cp.gridPlane = 0; break;
+    }
     cp.exposureFactor = cam.getPhysicalExposureMultiplier();
     cp.ev_compensation = cam.ev_compensation;
     cp.isoPresetIndex = cam.iso_preset_index;

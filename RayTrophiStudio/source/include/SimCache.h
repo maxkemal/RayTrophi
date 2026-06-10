@@ -63,6 +63,23 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
 bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame,
                      std::vector<SimulationGridDomainState>& out_domains);
 
+// ── Soft / cloth bodies ──────────────────────────────────────────────────────
+// Soft-body deformation is mesh-resident (not a pose), so it is baked as one file
+// per frame holding every soft body's deformed UNIQUE world vertices, keyed by the
+// source object's node name. Lives in the same cache_dir as the fluid frames
+// (soft_f<######>.rtfc). Render-only, like the rest of the cache.
+struct SoftBodyFrame {
+    std::string       name;       // source object nodeName
+    std::vector<Vec3> vertices;   // welded/unique deformed positions (world space)
+};
+
+std::string softFrameFilePath(const std::string& cache_dir, int frame);
+bool softFrameExists(const std::string& cache_dir, int frame);
+bool writeSoftFrame(const std::string& cache_dir, int frame,
+                    const std::vector<SoftBodyFrame>& bodies);
+bool readSoftFrame(const std::string& cache_dir, int frame,
+                   std::vector<SoftBodyFrame>& out_bodies);
+
 // ── Manifest ────────────────────────────────────────────────────────────────
 struct SystemManifest {
     uint32_t id = 0;

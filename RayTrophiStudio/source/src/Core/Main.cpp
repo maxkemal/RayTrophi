@@ -531,8 +531,10 @@ bool g_bvh_rebuild_pending = false;      // CPU BVH needs rebuild
 bool g_gpu_refit_pending = false;        // GPU Geometry needs update (Deferred)
 bool g_vulkan_rebuild_pending = false;    // GPU Vulkan geometry needs rebuild
 bool g_vulkan_geometry_append_pending = false; // Additive-only mutation (scatter etc.) — try incremental TLAS refit first
+bool g_vulkan_geometry_deform_pending = false; // Physics body deformed its mesh — refit only those BLAS in place (vs full rebuild)
 bool g_viewport_raster_rebuild_pending = false; // Interactive raster viewport needs rebuild
 bool g_optix_rebuild_pending = false;
+bool g_particle_cpu_geometry_dirty = false; // Particle bridge changed; CPU-active path re-expands particles into the BVH
 
 // ── Viewport-driven sequence save ───────────────────────────────────────────
 // Renders an animation to disk through the SAME fast interactive viewport path
@@ -2079,7 +2081,18 @@ int main(int argc, char* argv[]) try {
             // backend. Drop stale rebuild/refit requests that may have been
             // raised by live fluid/foam while a backend switch was in flight.
             g_optix_rebuild_pending = false;
-            g_vulkan_rebuild_pending = false;
+            // EXCEPTION — Vulkan: rebuildBackendGeometry() above does NOT build for
+            // Vulkan; it only RAISES g_vulkan_rebuild_pending so the heavy
+            // updateGeometry()/createTLAS runs later in the deferred pending-block.
+            // Clearing it here (correct for the SYNCHRONOUS OptiX path) silently
+            // cancels that rebuild — after switching back to Vulkan RT the TLAS is
+            // never built, so geometry is invisible and accumulation is stuck at
+            // pass 0 (the reported bug; only Vulkan RT, because OptiX/CPU rebuild
+            // synchronously). Keep the full-rebuild flag for Vulkan; the lighter
+            // append/refit requests below are subsumed by it and safe to drop.
+            if (!render_settings.use_vulkan) {
+                g_vulkan_rebuild_pending = false;
+            }
             g_vulkan_geometry_append_pending = false;
             g_gpu_refit_pending = false;
         }
@@ -2476,11 +2489,21 @@ int main(int argc, char* argv[]) try {
             if (sameBackendRequested) {
                 if (g_backend) {
                     attachActiveBackendStatusCallback();
-                    // Re-selecting the active Vulkan backend still needs a full
-                    // scene sync because New Project/initialization paths can mark
-                    // the backend dirty without requiring a teardown/recreate.
+                    // Re-selecting the active Vulkan backend may still need a scene
+                    // sync because New Project/initialization paths can mark the
+                    // backend dirty without a teardown/recreate. But gate it on an
+                    // ACTUAL dirty signal — an accidental re-select of the already
+                    // active backend with nothing dirty must be a no-op, NOT a forced
+                    // full geometry rebuild (the heavy deferred Vulkan TLAS build for
+                    // nothing). OptiX already behaves this way; this brings Vulkan in
+                    // line. The g_*_dirty set below is exactly what syncActiveRender-
+                    // BackendScene consumes, so it's complete.
+                    const bool sceneDirty =
+                        g_geometry_dirty || g_materials_dirty || g_texture_pool_dirty ||
+                        g_gas_volumes_dirty || g_world_dirty || g_lights_dirty ||
+                        g_camera_dirty || g_vulkan_rebuild_pending;
                     const bool forceFull =
-                        currentIsVulkan ||
+                        (currentIsVulkan && sceneDirty) ||
                         g_needs_optix_sync.load(std::memory_order_acquire);
                     if (forceFull) {
                         (void)syncActiveRenderBackendScene(currentIsVulkan);
@@ -2969,6 +2992,10 @@ int main(int argc, char* argv[]) try {
                             direction.y = sinf(rad_pitch);
                             direction.z = sinf(rad_yaw) * cosf(rad_pitch);
                             scene.camera->vup = Vec3(0.0f, 1.0f, 0.0f);
+                            // Free rotation leaves an aligned orthographic standard view and
+                            // returns to a normal perspective camera.
+                            scene.camera->orthographic = false;
+                            scene.camera->standard_view = Camera::StandardView::Perspective;
                             scene.camera->setLookDirection(direction.normalize());
                         }
                     }
@@ -2986,11 +3013,20 @@ int main(int argc, char* argv[]) try {
                     const Uint8* k_state = SDL_GetKeyboardState(NULL);
                     bool is_shift = k_state[SDL_SCANCODE_LSHIFT] || k_state[SDL_SCANCODE_RSHIFT];
                     float wheel_boost = is_shift ? (3.0f + render_settings.mouse_sensitivity * 2.0f) : 1.0f;
-                    float move_v = 1.5f * render_settings.mouse_sensitivity * wheel_boost; 
-                    Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
-                    scene.camera->lookfrom += forward * scroll_amount * move_v;
-                    scene.camera->lookat = scene.camera->lookfrom + forward * scene.camera->focus_dist;
-                    scene.camera->update_camera_vectors();
+                    float move_v = 1.5f * render_settings.mouse_sensitivity * wheel_boost;
+                    if (scene.camera->orthographic) {
+                        // Dollying does nothing under parallel projection — zoom by scaling the
+                        // visible extent instead so the grid/geometry actually grow/shrink.
+                        float zoom_factor = std::pow(0.9f, scroll_amount * wheel_boost);
+                        scene.camera->ortho_height = std::clamp(
+                            scene.camera->ortho_height * zoom_factor, 0.01f, 100000.0f);
+                        scene.camera->update_camera_vectors();
+                    } else {
+                        Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
+                        scene.camera->lookfrom += forward * scroll_amount * move_v;
+                        scene.camera->lookat = scene.camera->lookfrom + forward * scene.camera->focus_dist;
+                        scene.camera->update_camera_vectors();
+                    }
                     ui.updateAutofocus(ui_ctx);
                     last_camera_move_time = std::chrono::steady_clock::now();
                     camera_moved = true;
@@ -4799,7 +4835,21 @@ int main(int argc, char* argv[]) try {
                         if (scene.camera) {
                             ray_renderer.world.setCameraY(scene.camera->lookfrom.y);
                         }
-                        
+
+                        // Discrete sim particles moved this frame (bridge flagged it in
+                        // ui.draw). Rebuild the particle-only BVH HERE — immediately before
+                        // the CPU pass — so the render uses the CURRENT frame's particles
+                        // with zero lag. Doing it in the post-render trigger instead left
+                        // every pass one frame stale (and a converged/early-returned pass
+                        // could skip the update entirely), so particles looked frozen until
+                        // a backend round-trip forced a full rebuild. Cleared here; the
+                        // post-render trigger only kicks start_render so this block runs.
+                        if (g_particle_cpu_geometry_dirty) {
+                            scene.rebuildParticleBVH(ui_ctx.render_settings.UI_use_embree);
+                            ray_renderer.resetCPUAccumulation();
+                            g_particle_cpu_geometry_dirty = false;
+                        }
+
                         // Single pass render - uses accumulation internally
                         // Apply quality preset samples when timeline is playing
                         auto sample_start = std::chrono::high_resolution_clock::now();
@@ -5517,6 +5567,14 @@ int main(int argc, char* argv[]) try {
         const bool active_vulkan_raster_backend =
             (rasterViewportBackend != nullptr);
 
+        // Tell the physics write-back which refresh path to use for deforming bodies.
+        // Vulkan RT (rendered mode) → cheap per-mesh BLAS refit; anything else → the
+        // full-rebuild path. Backend type is stable across a play session, so the
+        // one-frame lag relative to the sim step (which runs earlier, in the UI pass)
+        // is harmless.
+        scene.setDeformRefitViaVulkan(active_vulkan_render_backend && g_hasVulkan &&
+                                      !interactive_viewport_active && !skip_backend_for_anim);
+
         // Drop stale pending flags that belong to an inactive backend to avoid
         // repeated heavy rebuild attempts after backend/mode transitions.
         if (!active_optix_backend && g_optix_rebuild_pending) {
@@ -5577,6 +5635,16 @@ int main(int argc, char* argv[]) try {
             if (g_bvh_rebuild_deferred_frames <= 0) {
                 g_bvh_rebuild_pending = true;
             }
+        }
+
+        // Particle bridge changed its live instance set this frame. The actual
+        // particle_bvh rebuild happens in the CPU render block immediately before the
+        // pass (zero-lag, current-frame particles). Here we only KICK a render so that
+        // block is entered — gated on CPU being the active backend so a moving sim
+        // costs nothing during GPU/viewport sessions (GPU refits via g_gpu_refit_pending).
+        // The flag is left set for the render block to consume + clear.
+        if (g_particle_cpu_geometry_dirty && !use_optix && !render_settings.use_vulkan) {
+            start_render = true;
         }
 
         static std::future<std::shared_ptr<Hittable>> g_bvh_future;
@@ -5811,6 +5879,41 @@ int main(int argc, char* argv[]) try {
                     g_vulkan_rebuild_pending = true;
                 }
                 g_vulkan_geometry_append_pending = false;
+            }
+        }
+
+        // ── Deforming-body refit fast path (rigid / soft / cloth sim) ───────────────
+        // A simulated body bakes new verts into its source mesh every frame. The full
+        // rebuild below would destroy + recreate EVERY BLAS in the scene per frame —
+        // unusable in a crowded scene. Refit ONLY the changed bodies' BLAS in place
+        // ([World-Solo] meshes are created with allowUpdate) and refresh the TLAS;
+        // promote to a full rebuild if any mesh can't be refit (topology mismatch) or
+        // a full rebuild is already queued this frame.
+        if (g_vulkan_geometry_deform_pending && active_vulkan_render_backend && g_hasVulkan &&
+            !interactive_viewport_active && !skip_backend_for_anim) {
+            g_vulkan_geometry_deform_pending = false;
+            if (g_backend) {
+                auto* vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
+                bool all_ok = (vkBackend != nullptr) && !g_vulkan_rebuild_pending;
+                if (all_ok) {
+                    for (const auto& node : scene.takePendingDeformNodes()) {
+                        auto tris = scene.collectNodeTriangles(node);
+                        if (tris.empty() || !vkBackend->updateInteractiveMesh(node, tris)) {
+                            all_ok = false;
+                            break;
+                        }
+                    }
+                }
+                if (all_ok) {
+                    g_backend->resetAccumulation();
+                    start_render = true;
+                    g_camera_dirty = true;
+                } else {
+                    // Could not refit in place (or a full rebuild is already queued) —
+                    // fall back to the proven full-scene rebuild below.
+                    scene.clearPendingDeformNodes();
+                    g_vulkan_rebuild_pending = true;
+                }
             }
         }
 
