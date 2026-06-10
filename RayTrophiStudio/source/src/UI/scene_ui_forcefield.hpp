@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -34,12 +34,31 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <cstdint>
 #include <thread>
 
 namespace ForceFieldUI {
 
 // Currently selected force field for UI
 inline std::shared_ptr<Physics::ForceField> selected_force_field = nullptr;
+
+// Edit-Mesh vertex selection snapshot, published by SceneUI each frame so the
+// (free-function) Bodies panel can offer "Pin Selected Vertices" for cloth/soft
+// bodies WITHOUT depending on the full SceneUI type. `active` is true only when
+// Edit Mesh > Vertex mode is on for `object_name`; `world_positions` are the
+// selected vertices in world space. See SceneUI::publishEditPinSelection().
+struct EditPinSelectionSnapshot {
+    bool active = false;
+    std::string object_name;
+    std::vector<Vec3> world_positions;
+};
+inline EditPinSelectionSnapshot g_edit_pin_selection;
+
+// Total physical system RAM in bytes (0 on failure). Defined in scene_ui.cpp, where
+// <windows.h> is available — this header is included before that include, so the
+// query can't live here. Used to size the "RAM sim cache is large, bake to disk"
+// nudge relative to the actual machine instead of a fixed threshold.
+std::uint64_t queryTotalPhysicalRamBytes();
 
 // Fluid baking state variables (defined at namespace scope to avoid MSVC lambda capture errors)
 inline bool is_baking = false;
@@ -159,10 +178,106 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         if (ImGui::BeginTabItem("Particles")) { simulation_section = 1; ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Domains"))   { simulation_section = 2; ImGui::EndTabItem(); }
         if (ImGui::BeginTabItem("Collision")) { simulation_section = 3; ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Rigid")) { simulation_section = 4; ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Bodies")) { simulation_section = 4; ImGui::EndTabItem(); }
         ImGui::EndTabBar();
     }
     ImGui::Separator();
+
+    // Disk-bake controls (point/geo cache). Scene-wide: fluid particle systems AND
+    // soft/cloth bodies are baked together into <project>.simcache. Shown in both
+    // the Domains panel and the Bodies panel so a cloth-only scene (no fluid) can
+    // still bake.
+    auto drawSimBakeControls = [&]() {
+        const std::string proj_path = ProjectManager::getInstance().getCurrentFilePath();
+        const bool has_project = !proj_path.empty();
+        const bool has_systems = !scene.particle_systems.empty() || !scene.rigid_bodies.empty();
+        const bool can_bake = has_project && has_systems;
+        const bool baking = scene.isSimulationBaking();
+
+        if (baking) {
+            const float frac = scene.simBakeProgress();
+            char overlay[64];
+            std::snprintf(overlay, sizeof(overlay), "Baking  frame %d / %d",
+                          scene.simBakeCurrentFrame(), scene.simBakeEndFrame());
+            ImGui::ProgressBar(frac, ImVec2(-1, 24), overlay);
+            if (ImGui::Button("Cancel Bake##SimPointBakeCancel", ImVec2(-1, 24))) {
+                scene.cancelSimulationDiskBake();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Stop the bake and discard the partial cache on disk.");
+        } else {
+            if (!can_bake) ImGui::BeginDisabled();
+            if (ImGui::Button("Bake Simulation to Disk (point cache)##SimPointBake", ImVec2(-1, 30))) {
+                const std::string dir = SceneData::simCacheDirForProject(proj_path);
+                // Bake the TIMELINE range (single source of truth), not the
+                // sequence-render range — a sim cache should cover the whole timeline
+                // regardless of render output settings. Fall back to the render range
+                // only if the timeline isn't wired (defensive).
+                int s, e;
+                if (timeline) {
+                    s = std::min(timeline->getStartFrame(), timeline->getEndFrame());
+                    e = std::max(timeline->getStartFrame(), timeline->getEndFrame());
+                } else {
+                    s = std::min(ui_ctx.render_settings.animation_start_frame,
+                                 ui_ctx.render_settings.animation_end_frame);
+                    e = std::max(ui_ctx.render_settings.animation_start_frame,
+                                 ui_ctx.render_settings.animation_end_frame);
+                }
+                if (e <= s) { s = 0; e = 100; }
+                const float fps = static_cast<float>(std::max(1, ui_ctx.render_settings.animation_fps));
+                drainSimulationMutationBackends();
+                if (!scene.beginSimulationDiskBake(dir, s, e, fps)) {
+                    SCENE_LOG_INFO("Simulation point cache bake could not start (no systems / invalid range).");
+                }
+            }
+            if (!can_bake) ImGui::EndDisabled();
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(has_project
+                    ? "Re-simulates the timeline range and writes fluid particle systems\n"
+                      "(particles + foam + gas) AND soft/cloth bodies to <project>.simcache.\n"
+                      "Reloading the project restores the bake without re-simulating."
+                    : "Save the project first — the cache is written next to the project file.");
+            }
+        }
+        // RAM cache nudge: interactive preview keeps every frame in RAM, which balloons
+        // with crowded/long sims. When it grows large, recommend baking to disk (then
+        // scrubbing streams from disk and the RAM frame cache is bypassed).
+        if (!scene.hasValidSimDiskCache()) {
+            const double cache_mb = scene.estimateSimCacheBytes() / (1024.0 * 1024.0);
+            if (cache_mb >= 1.0) {
+                const double total_ram_mb = queryTotalPhysicalRamBytes() / (1024.0 * 1024.0);
+                // Size the warning to the actual machine: trip at ~20% of physical RAM
+                // (256 MB floor so small machines still get a sensible nudge). Fall back
+                // to a fixed ~1 GB if the RAM query failed.
+                const double warn_mb = (total_ram_mb > 0.0) ? std::max(256.0, total_ram_mb * 0.20)
+                                                            : 1024.0;
+                const bool warn = cache_mb >= warn_mb;
+                const ImVec4 col = warn ? ImVec4(1.0f, 0.55f, 0.15f, 1.0f)
+                                        : ImVec4(0.65f, 0.65f, 0.65f, 1.0f);
+                if (total_ram_mb > 0.0)
+                    ImGui::TextColored(col, "RAM sim cache: ~%.0f MB / %.1f GB system (%d frames)%s",
+                                       cache_mb, total_ram_mb / 1024.0, scene.cachedSimFrameCount(),
+                                       warn ? "  - bake to disk" : "");
+                else
+                    ImGui::TextColored(col, "RAM sim cache: ~%.0f MB (%d frames)%s",
+                                       cache_mb, scene.cachedSimFrameCount(),
+                                       warn ? "  - bake to disk" : "");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Interactive preview holds every frame in RAM and grows with\n"
+                                      "crowded/long sims. Bake to disk (above) — scrubbing then streams\n"
+                                      "from disk and the RAM frame cache is freed automatically.\n"
+                                      "(Estimate covers soft/cloth + particles + rigid; excludes fluid grid.)");
+            }
+        }
+        if (!baking && scene.hasValidSimDiskCache()) {
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Bake cache active (scrub reads from disk).");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Clear Bake##SimPointBakeClear")) {
+                RayTrophiSim::SimCache::clearCache(scene.simDiskCacheDir());
+                scene.clearSimDiskCacheBinding();
+            }
+        }
+    };
 
     auto drawParticleControls = [&]() {
         static bool particle_ground_enabled = true;
@@ -173,28 +288,64 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         static int selected_collider_index = -1;
         static std::string last_synced_selection_key;
 
-        // Group 1: Display & Presets
-        ImGui::BeginChild("ParticleDisplayGroup", ImVec2(0, 140), true);
-        ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "Viewport Display & Presets");
+        auto particles = scene.getParticleSimulationSystem();
+        if (particles) {
+            if (scene.pruneInvalidParticleObjectBindings() > 0) {
+                selected_emitter_index = -1;
+                selected_collider_index = -1;
+            }
+            particle_ground_enabled = particles->collisionPlaneEnabled();
+            particle_ground_y = particles->collisionPlaneY();
+            particle_restitution = particles->collisionRestitution();
+            particle_drag = particles->linearDrag();
+        }
+
+        auto applyParticleTestSettings = [&]() {
+            auto& system = scene.ensureParticleSimulationSystem();
+            particle_drag = std::max(0.0f, particle_drag);
+            particle_restitution = std::clamp(particle_restitution, 0.0f, 1.0f);
+            system.setLinearDrag(particle_drag);
+            system.setCollisionPlane(particle_ground_y, particle_ground_enabled, particle_restitution);
+            scene.syncActiveParticleSystemObjectFromRuntime();
+        };
+
+        const int alive = particles ? static_cast<int>(particles->aliveCount()) : 0;
+        const int capacity = particles ? static_cast<int>(particles->capacity()) : 0;
+        const int emitter_count = particles ? static_cast<int>(particles->emitters().size()) : 0;
+        const int collider_count = particles ? static_cast<int>(particles->colliders().size()) : 0;
+        const int domain_count = particles ? static_cast<int>(particles->gridDomains().size()) : 0;
+
+        ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "Particle Systems");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%d / %d alive | Emitters %d | Colliders %d | Domains %d",
+                            alive, capacity, emitter_count, collider_count, domain_count);
         ImGui::Separator();
-        ImGui::Spacing();
 
         const char* display_modes[] = { "Solid (Billboards)", "Debug (Overlay)", "Render (Preview)" };
-        if (ImGui::Combo("Display Mode##PartDisp", &ui_ctx.particle_display_mode, display_modes, IM_ARRAYSIZE(display_modes))) {
-            ui_ctx.start_render = true;
+        const float controls_width = ImGui::GetContentRegionAvail().x;
+        const bool compact_particle_header = controls_width < 460.0f;
+        if (!compact_particle_header) {
+            ImGui::Columns(2, "ParticleOverviewColumns", false);
+            ImGui::SetColumnWidth(0, std::max(220.0f, controls_width * 0.42f));
         }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Sets the viewport visualization style for particle systems:\n\n"
-                              "1. Solid: Renders fast textured billboards/points.\n"
-                              "2. Debug: Renders vector overlays showing velocity, bounds, or particle IDs.\n"
-                              "3. Render: Reconstructs high-fidelity volumetric density previews.");
+        {
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::Combo("Display Mode##PartDisp", &ui_ctx.particle_display_mode, display_modes, IM_ARRAYSIZE(display_modes))) {
+                ui_ctx.start_render = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Sets the viewport visualization style for particle systems:\n\n"
+                                  "1. Solid: Renders fast textured billboards/points.\n"
+                                  "2. Debug: Renders vector overlays showing velocity, bounds, or particle IDs.\n"
+                                  "3. Render: Reconstructs high-fidelity volumetric density previews.");
+            }
+            if (ui_ctx.particle_display_mode == 1) {
+                ImGui::TextDisabled("Debug overlay draws over the viewport.");
+            }
         }
-        if (ui_ctx.particle_display_mode == 1) {
-            ImGui::TextDisabled("  [Debug overlay draws on top of all viewport elements]");
+        if (!compact_particle_header) {
+            ImGui::NextColumn();
         }
-
-        ImGui::Spacing();
-        ImGui::TextDisabled("Quick Presets:");
         {
             const float pw = (ImGui::GetContentRegionAvail().x - 2.0f * ImGui::GetStyle().ItemSpacing.x) / 3.0f;
             if (ImGui::Button("Campfire##PresetCamp", ImVec2(pw, 26))) {
@@ -218,14 +369,12 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                 ImGui::SetTooltip("Spawns a grid-domain volumetric smoke system with fine rising turbulence.");
             }
         }
-        ImGui::EndChild();
-
-        // Group 2: System Selection & Appearance
-        ImGui::BeginChild("ParticleSystemSelectionGroup", ImVec2(0, 395), true);
-        ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "Active Particle System & RT Appearance");
-        ImGui::Separator();
+        if (!compact_particle_header) {
+            ImGui::Columns(1);
+        }
         ImGui::Spacing();
 
+        particles = scene.getParticleSimulationSystem();
         if (scene.particle_systems.empty()) {
             if (ImGui::Button("Add Particle System##PartAddSys", ImVec2(-1, 30))) {
                 scene.addParticleSystemObject();
@@ -233,7 +382,6 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Creates and registers a new empty particle system container in the scene.");
             }
-            ImGui::EndChild();
             return;
         }
 
@@ -241,6 +389,14 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             scene.active_particle_system_index >= static_cast<int>(scene.particle_systems.size())) {
             scene.setActiveParticleSystemObject(0);
         }
+
+        if (!ImGui::BeginTabBar("##ParticleAuthoringTabs", ImGuiTabBarFlags_FittingPolicyResizeDown)) {
+            scene.syncActiveParticleSystemObjectFromRuntime();
+            return;
+        }
+
+        // Group 2: System Selection & Appearance
+        if (ImGui::BeginTabItem("System")) {
 
         const char* preview = "Select System...";
         if (const auto* active_system = scene.activeParticleSystemObject()) {
@@ -385,33 +541,11 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                 }
             }
         }
-        ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
 
         // Group 3: Physics & Simulation Solver Settings
-        ImGui::BeginChild("ParticlePhysicsGroup", ImVec2(0, 310), true);
-        ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "SPH Physics & Solver Parameters");
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        auto particles = scene.getParticleSimulationSystem();
-        if (particles) {
-            if (scene.pruneInvalidParticleObjectBindings() > 0) {
-                selected_emitter_index = -1;
-                selected_collider_index = -1;
-            }
-            particle_ground_enabled = particles->collisionPlaneEnabled();
-            particle_ground_y = particles->collisionPlaneY();
-            particle_restitution = particles->collisionRestitution();
-            particle_drag = particles->linearDrag();
-        }
-        const int alive = particles ? static_cast<int>(particles->aliveCount()) : 0;
-        const int capacity = particles ? static_cast<int>(particles->capacity()) : 0;
-        const int emitter_count = particles ? static_cast<int>(particles->emitters().size()) : 0;
-        const int collider_count = particles ? static_cast<int>(particles->colliders().size()) : 0;
-        const int domain_count = particles ? static_cast<int>(particles->gridDomains().size()) : 0;
-        
-        ImGui::Text("Active Timestep Stats: %d / %d Particles Alive", alive, capacity);
-        ImGui::TextDisabled("Emitters: %d | Colliders: %d | Domains: %d", emitter_count, collider_count, domain_count);
+        if (ImGui::BeginTabItem("Physics")) {
 
         if (particles) {
             ImGui::Spacing();
@@ -473,22 +607,11 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                 ImGui::DragFloat("Turbulent Vorticity", &physics.vorticity, 0.01f, 0.0f, 100.0f, "%.3f");
             }
         }
-        ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
 
         // Group 4: World Boundaries, Collisions, and Spawning
-        ImGui::BeginChild("ParticleWorldGroup", ImVec2(0, 195), true);
-        ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "Ground Plane Constraints & Debug Emitters");
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        auto applyParticleTestSettings = [&]() {
-            auto& system = scene.ensureParticleSimulationSystem();
-            particle_drag = std::max(0.0f, particle_drag);
-            particle_restitution = std::clamp(particle_restitution, 0.0f, 1.0f);
-            system.setLinearDrag(particle_drag);
-            system.setCollisionPlane(particle_ground_y, particle_ground_enabled, particle_restitution);
-            scene.syncActiveParticleSystemObjectFromRuntime();
-        };
+        if (ImGui::BeginTabItem("Actions")) {
 
         bool settings_changed = false;
         settings_changed |= ImGui::Checkbox("Enable Ground Plane", &particle_ground_enabled);
@@ -528,13 +651,20 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Instantly injects a rapid burst of SPH particles at camera focus point or active force field.");
         }
-        ImGui::EndChild();
+            ImGui::Spacing();
+            ImGui::Separator();
+            if (ImGui::Button("Clear Emitters Queue##PartEmitClr", ImVec2(-1, 30))) {
+                scene.clearParticleEmitters();
+                selected_emitter_index = -1;
+            }
+            if (ImGui::Button("Wipe All Active Particles##PartWipeClr", ImVec2(-1, 30))) {
+                scene.clearParticles();
+            }
+            ImGui::EndTabItem();
+        }
 
         // Group 5: Spawning Sources & Emitters
-        ImGui::BeginChild("ParticleEmitterGroup", ImVec2(0, 520), true);
-        ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "Particle Emitters Manager");
-        ImGui::Separator();
-        ImGui::Spacing();
+        if (ImGui::BeginTabItem("Emitters")) {
 
         const bool has_object_selection =
             ui_ctx.selection.selected.type == SelectableType::Object &&
@@ -577,23 +707,29 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                 selected_emitter_index = static_cast<int>(emitters.size()) - 1;
             }
             int emitter_to_remove = -1;
-            
-            ImGui::BeginChild("ParticleEmitterListSubChild", ImVec2(0, 110), true);
-            for (int i = 0; i < static_cast<int>(emitters.size()); ++i) {
-                char label[256];
-                std::snprintf(label, sizeof(label), "%s##emitter%d", emitters[i].name.c_str(), i);
-                if (ImGui::Selectable(label, selected_emitter_index == i)) {
-                    selected_emitter_index = i;
-                }
-                if (ImGui::BeginPopupContextItem()) {
-                    selected_emitter_index = i;
-                    if (ImGui::MenuItem("Remove Emitter")) {
+
+            if (ImGui::BeginTable("ParticleEmitterListTable", 2,
+                                  ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("Emitter");
+                ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 28.0f);
+                for (int i = 0; i < static_cast<int>(emitters.size()); ++i) {
+                    ImGui::PushID(i);
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    if (ImGui::Selectable(emitters[i].name.c_str(), selected_emitter_index == i)) {
+                        selected_emitter_index = i;
+                    }
+                    ImGui::TableSetColumnIndex(1);
+                    if (ImGui::SmallButton("x")) {
                         emitter_to_remove = i;
                     }
-                    ImGui::EndPopup();
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Remove emitter");
+                    }
+                    ImGui::PopID();
                 }
+                ImGui::EndTable();
             }
-            ImGui::EndChild();
             if (emitter_to_remove >= 0) {
                 particles->removeEmitter(static_cast<std::size_t>(emitter_to_remove));
                 selected_emitter_index = std::min(emitter_to_remove, static_cast<int>(particles->emitters().size()) - 1);
@@ -654,19 +790,10 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                 }
             }
         }
-        ImGui::EndChild();
-
-        // Footer clear triggers
-        ImGui::Spacing();
-        ImGui::Separator();
-        if (ImGui::Button("Clear Emitters Queue##PartEmitClr", ImVec2(-1, 30))) {
-            scene.clearParticleEmitters();
-            selected_emitter_index = -1;
-        }
-        if (ImGui::Button("Wipe All Active Particles##PartWipeClr", ImVec2(-1, 30))) {
-            scene.clearParticles();
+            ImGui::EndTabItem();
         }
 
+        ImGui::EndTabBar();
         scene.syncActiveParticleSystemObjectFromRuntime();
     };
 
@@ -3108,65 +3235,7 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         // Writes every particle system (fluid particles + foam + gas grids) for
         // the timeline range to "<project>.simcache" next to the project file.
         // Reloading restores the bake without re-simulating (SimCache).
-        {
-            const std::string proj_path = ProjectManager::getInstance().getCurrentFilePath();
-            const bool has_project = !proj_path.empty();
-            const bool has_systems = !scene.particle_systems.empty();
-            const bool can_bake = has_project && has_systems;
-            const bool baking = scene.isSimulationBaking();
-
-            if (baking) {
-                // ── Live progress + cancel (the bake runs frame-driven on the main
-                //    thread via tickSimulationDiskBake, so the UI stays responsive).
-                const float frac = scene.simBakeProgress();
-                char overlay[64];
-                std::snprintf(overlay, sizeof(overlay), "Baking  frame %d / %d",
-                              scene.simBakeCurrentFrame(), scene.simBakeEndFrame());
-                ImGui::ProgressBar(frac, ImVec2(-1, 24), overlay);
-                if (ImGui::Button("Cancel Bake##SimPointBakeCancel", ImVec2(-1, 24))) {
-                    scene.cancelSimulationDiskBake();
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Stop the bake and discard the partial cache on disk.");
-                }
-            } else {
-                if (!can_bake) ImGui::BeginDisabled();
-                if (ImGui::Button("Bake Simulation to Disk (point cache)##SimPointBake", ImVec2(-1, 30))) {
-                    const std::string dir = SceneData::simCacheDirForProject(proj_path);
-                    int s = std::min(ui_ctx.render_settings.animation_start_frame,
-                                     ui_ctx.render_settings.animation_end_frame);
-                    int e = std::max(ui_ctx.render_settings.animation_start_frame,
-                                     ui_ctx.render_settings.animation_end_frame);
-                    if (e <= s) { s = 0; e = 100; }  // sane default if no range set
-                    const float fps = static_cast<float>(std::max(1, ui_ctx.render_settings.animation_fps));
-
-                    drainSimulationMutationBackends();
-                    // Non-blocking: arm the cooperative bake. The per-frame driver in
-                    // renderSceneUI advances it (tickSimulationDiskBake) while the
-                    // progress bar above tracks it; Cancel aborts mid-bake.
-                    if (!scene.beginSimulationDiskBake(dir, s, e, fps)) {
-                        SCENE_LOG_INFO("Simulation point cache bake could not start (no systems / invalid range).");
-                    }
-                }
-                if (!can_bake) ImGui::EndDisabled();
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip(has_project
-                        ? "Re-simulates the timeline range and writes ALL particle systems\n"
-                          "(fluid particles + foam + gas grids) to <project>.simcache.\n"
-                          "Reloading the project restores the bake without re-simulating.\n"
-                          "Runs in the background with a progress bar — the UI stays responsive."
-                        : "Save the project first — the cache is written next to the project file.");
-                }
-            }
-            if (!baking && scene.hasValidSimDiskCache()) {
-                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Bake cache active (scrub reads from disk).");
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Clear Bake##SimPointBakeClear")) {
-                    RayTrophiSim::SimCache::clearCache(scene.simDiskCacheDir());
-                    scene.clearSimDiskCacheBinding();
-                }
-            }
-        }
+        drawSimBakeControls();
 
         // ── Auto-reseed (toggle in the Fluid Seeding header) ──────────────────
         // A seed OR grid-shape parameter just settled this frame (released after
@@ -3227,9 +3296,9 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         const std::string sel_name =
             has_obj ? ui_ctx.selection.selected.object->getNodeName() : std::string();
 
-        ImGui::TextColored(ImVec4(0.98f, 0.62f, 0.10f, 1.00f), "Rigid Bodies (Physics)");
+        ImGui::TextColored(ImVec4(0.98f, 0.62f, 0.10f, 1.00f), "Physics Bodies");
         ImGui::Separator();
-        ImGui::TextDisabled("Active rigid-body dynamics — no simulation domain required.");
+        ImGui::TextDisabled("Rigid, soft & cloth bodies — no simulation domain required.");
         ImGui::Spacing();
 
         int sel_rb = -1;
@@ -3240,52 +3309,189 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         // --- Creation buttons for the selected mesh ---
         if (!has_obj) ImGui::BeginDisabled();
         const float bw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
-        if (ImGui::Button(sel_rb >= 0 ? "Reset as Rigid Body##RBAdd" : "Make Rigid Body##RBAdd", ImVec2(bw, 30))) {
+        if (ImGui::Button(sel_rb >= 0 ? "Reset as Rigid Body##RBAdd" : "Make Rigid Body##RBAdd", ImVec2(bw, 28))) {
             scene.addRigidBodyForObject(sel_name, /*dynamic=*/true);
         }
         if (ImGui::IsItemHovered() && has_obj)
             ImGui::SetTooltip("Selected mesh becomes a dynamic rigid body (falls, collides, tumbles).");
         ImGui::SameLine();
-        if (ImGui::Button("Make Static Collider##RBStatic", ImVec2(bw, 30))) {
+        if (ImGui::Button("Make Static Collider##RBStatic", ImVec2(bw, 28))) {
             scene.addRigidBodyForObject(sel_name, /*dynamic=*/false);
         }
         if (ImGui::IsItemHovered() && has_obj)
             ImGui::SetTooltip("Selected mesh becomes immovable collision geometry (ground/walls).");
+
+        if (ImGui::Button("Make Soft Body##RBSoft", ImVec2(bw, 28))) {
+            scene.addSoftBodyForObject(sel_name, RayTrophiSim::BodyKind::SoftBody);
+        }
+        if (ImGui::IsItemHovered() && has_obj)
+            ImGui::SetTooltip("Selected mesh becomes a deformable soft body (falls, deforms, collides).");
+        ImGui::SameLine();
+        if (ImGui::Button("Make Cloth##RBCloth", ImVec2(bw, 28))) {
+            scene.addSoftBodyForObject(sel_name, RayTrophiSim::BodyKind::Cloth);
+        }
+        if (ImGui::IsItemHovered() && has_obj)
+            ImGui::SetTooltip("Selected mesh becomes cloth (surface soft body, two-sided, drapes & collides).");
         if (!has_obj) ImGui::EndDisabled();
-        if (!has_obj) ImGui::TextDisabled("Select a mesh object above to add it as a rigid body.");
+        if (!has_obj) ImGui::TextDisabled("Select a mesh object above to add it as a physics body.");
 
         ImGui::Spacing();
         ImGui::Text("Registered Bodies: %zu", scene.rigid_bodies.size());
         ImGui::Separator();
         ImGui::Spacing();
 
-        // --- Full-height editable list ---
-        ImGui::BeginChild("RigidBodyList", ImVec2(0, 0), true);
+        // Shared handler: rewire the live solver + invalidate the bake cache so
+        // any body edit takes effect on the next play.
+        auto applyRigidBodyChange = [&]() {
+            if (scene.rigid_body_system) {
+                scene.rigid_body_system->resetRuntime(true);
+                scene.rigid_body_system->setBodies(&scene.rigid_bodies);
+            }
+            scene.invalidateRigidBodySimulationCache();
+        };
+        // Unified body "type" across both axes (kind + rigid motion), so the list
+        // shows ONE picker: Static / Dynamic / Kinematic / Soft Body / Cloth — the
+        // exact set the user reasons about. Index 0..2 = Rigid + that motion type;
+        // 3 = SoftBody, 4 = Cloth.
+        static const char* kBodyTypeItems = "Static\0Dynamic\0Kinematic\0Soft Body\0Cloth\0";
+        auto bodyTypeIndex = [](const RayTrophiSim::RigidBodyObject& body) -> int {
+            if (body.kind == RayTrophiSim::BodyKind::SoftBody) return 3;
+            if (body.kind == RayTrophiSim::BodyKind::Cloth)    return 4;
+            switch (body.motion_type) {
+                case RayTrophiSim::RigidBodyMotionType::Static:    return 0;
+                case RayTrophiSim::RigidBodyMotionType::Kinematic: return 2;
+                case RayTrophiSim::RigidBodyMotionType::Dynamic:
+                default:                                           return 1;
+            }
+        };
+        auto bodyTypeLabel = [&](const RayTrophiSim::RigidBodyObject& body) -> const char* {
+            switch (bodyTypeIndex(body)) {
+                case 0: return "Static";
+                case 2: return "Kinematic";
+                case 3: return "Soft Body";
+                case 4: return "Cloth";
+                case 1:
+                default: return "Dynamic";
+            }
+        };
+        // Apply a combined-type pick to a body: routes kind + motion + dynamic and
+        // forces a Jolt rebuild. Returns true if anything changed.
+        auto applyBodyType = [&](RayTrophiSim::RigidBodyObject& body, int idx) -> bool {
+            RayTrophiSim::BodyKind new_kind = RayTrophiSim::BodyKind::Rigid;
+            RayTrophiSim::RigidBodyMotionType new_motion = body.motion_type;
+            switch (idx) {
+                case 0: new_kind = RayTrophiSim::BodyKind::Rigid;    new_motion = RayTrophiSim::RigidBodyMotionType::Static; break;
+                case 2: new_kind = RayTrophiSim::BodyKind::Rigid;    new_motion = RayTrophiSim::RigidBodyMotionType::Kinematic; break;
+                case 3: new_kind = RayTrophiSim::BodyKind::SoftBody; new_motion = RayTrophiSim::RigidBodyMotionType::Dynamic; break;
+                case 4: new_kind = RayTrophiSim::BodyKind::Cloth;    new_motion = RayTrophiSim::RigidBodyMotionType::Dynamic; break;
+                case 1:
+                default: new_kind = RayTrophiSim::BodyKind::Rigid;   new_motion = RayTrophiSim::RigidBodyMotionType::Dynamic; break;
+            }
+            if (body.kind == new_kind && body.motion_type == new_motion) return false;
+            // Restore the mesh to rest using the CURRENT kind's cache BEFORE
+            // switching kind. resetRuntime routes by the body's live `kind`; if
+            // we change it first, the restore picks the new kind's (nonexistent)
+            // cache and the mesh stays deformed.
+            scene.restoreBodyMeshToRest(body.source_name, body.kind);
+            body.kind = new_kind;
+            body.motion_type = new_motion;
+            body.dynamic = (new_kind != RayTrophiSim::BodyKind::Rigid) ||
+                           (new_motion == RayTrophiSim::RigidBodyMotionType::Dynamic);
+            body.created = false;
+            body.rest_captured = false;  // force fresh rest capture for the new kind
+            scene.syncRigidBodyProxyColliders();  // soft/cloth drop their rigid proxy
+            return true;
+        };
+
         int rb_to_remove = -1;
-        for (int i = 0; i < (int)scene.rigid_bodies.size(); ++i) {
-            auto& rb = scene.rigid_bodies[i];
-            ImGui::PushID(i);
-            const bool is_sel = (i == sel_rb);
+        int rb_to_apply = -1;   // "Apply at Frame": freeze current shape + drop the body
+        std::string selection_request_name;  // set when a list row is clicked
 
-            if (is_sel) ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.40f, 0.28f, 0.06f, 0.65f));
-            const bool open = ImGui::CollapsingHeader(
-                (rb.source_name + (rb.dynamic ? "  [Dynamic]" : "  [Static]") + "###rbhdr").c_str(),
-                ImGuiTreeNodeFlags_DefaultOpen);
-            if (is_sel) ImGui::PopStyleColor();
+        // --- Compact registry list (name | type | remove) ----------------
+        // One row per body; selecting a row drives the viewport selection so the
+        // list and 3D view stay in lockstep. The editor below targets only the
+        // selected body, so the panel no longer grows one giant sub-panel per
+        // object. Soft Body slots into the same list/editor when it lands.
+        if (scene.rigid_bodies.empty()) {
+            ImGui::TextDisabled("No rigid bodies yet. Select a mesh and click \"Make Rigid Body\".");
+        } else if (ImGui::BeginTable("RigidBodyRegistryTable", 3,
+                                     ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("Body");
+            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 124.0f);
+            ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 28.0f);
+            for (int i = 0; i < (int)scene.rigid_bodies.size(); ++i) {
+                auto& body = scene.rigid_bodies[i];
+                ImGui::PushID(i);
+                const bool is_sel = (i == sel_rb);
 
-            if (open) {
-                ImGui::Indent(8.0f);
-                bool rb_changed = false;
-                bool rb_rebuild = false;
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                if (ImGui::Selectable(body.source_name.c_str(), is_sel)) {
+                    selection_request_name = body.source_name;
+                }
 
-                if (ImGui::CollapsingHeader("Body", ImGuiTreeNodeFlags_DefaultOpen)) {
-                    int type_idx = static_cast<int>(rb.motion_type);
+                ImGui::TableSetColumnIndex(1);
+                ImGui::SetNextItemWidth(-FLT_MIN);
+                int row_type = bodyTypeIndex(body);
+                if (ImGui::Combo("##rbrowtype", &row_type, kBodyTypeItems)) {
+                    if (applyBodyType(body, row_type)) applyRigidBodyChange();
+                }
+
+                ImGui::TableSetColumnIndex(2);
+                if (ImGui::SmallButton("x")) rb_to_remove = i;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this body");
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+
+        // List click -> viewport selection (bidirectional sync; viewport -> list
+        // already happens because sel_rb is derived from the active selection).
+        if (!selection_request_name.empty()) {
+            for (size_t i = 0; i < scene.world.objects.size(); ++i) {
+                auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
+                if (!tri) continue;
+                std::string nn = tri->getNodeName();
+                if (nn.empty()) nn = tri->nodeName;
+                if (nn == selection_request_name) {
+                    ui_ctx.selection.selectObject(tri, (int)i, nn);
+                    break;
+                }
+            }
+            for (int i = 0; i < (int)scene.rigid_bodies.size(); ++i) {
+                if (scene.rigid_bodies[i].source_name == selection_request_name) { sel_rb = i; break; }
+            }
+        }
+
+        // --- Editor for the selected body --------------------------------
+        ImGui::Spacing();
+        if (sel_rb < 0) {
+            ImGui::TextDisabled(scene.rigid_bodies.empty()
+                ? "Add a body above to begin."
+                : "Select a body (in the list or viewport) to edit its properties.");
+        } else {
+            auto& rb = scene.rigid_bodies[sel_rb];
+            ImGui::PushID(sel_rb);
+            ImGui::TextColored(ImVec4(0.98f, 0.62f, 0.10f, 1.00f), "%s  [%s]",
+                               rb.source_name.c_str(), bodyTypeLabel(rb));
+            ImGui::Separator();
+            bool rb_changed = false;
+            bool rb_rebuild = false;
+
+            const bool is_rigid = (rb.kind == RayTrophiSim::BodyKind::Rigid);
+            if (!ImGui::BeginTabBar("##RigidBodyAuthoringTabs", ImGuiTabBarFlags_FittingPolicyResizeDown)) {
+                ImGui::PopID();
+                return;
+            }
+
+                if (ImGui::BeginTabItem("Body")) {
+                    int type_idx = bodyTypeIndex(rb);
                     ImGui::SetNextItemWidth(180);
-                    if (ImGui::Combo("Type##rbtype", &type_idx, "Static\0Dynamic\0Kinematic\0")) {
-                        rb.motion_type = static_cast<RayTrophiSim::RigidBodyMotionType>(type_idx);
-                        rb.dynamic = rb.motion_type == RayTrophiSim::RigidBodyMotionType::Dynamic;
-                        rb_rebuild = true;
-                        rb_changed = true;
+                    if (ImGui::Combo("Type##rbtype", &type_idx, kBodyTypeItems)) {
+                        if (applyBodyType(rb, type_idx)) {
+                            rb_rebuild = true;
+                            rb_changed = true;
+                        }
                     }
 
                     ImGui::Checkbox("Enabled##rbenabled", &rb.enabled);
@@ -3296,31 +3502,158 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
 
                     ImGui::TextDisabled("Collider: %s", rb.collider_name.empty() ? "Object bounds fallback" : rb.collider_name.c_str());
 
-                    const bool is_dynamic = rb.motion_type == RayTrophiSim::RigidBodyMotionType::Dynamic;
-                    ImGui::BeginDisabled(!is_dynamic);
-                    if (ImGui::Checkbox("Auto Mass From Density##rbautomass", &rb.auto_mass_from_density)) {
-                        rb_rebuild = true;
-                        rb_changed = true;
+                    // Mass/density only drive the rigid path; soft bodies carry
+                    // their own total mass in the Soft Body section below.
+                    if (is_rigid) {
+                        const bool is_dynamic = rb.motion_type == RayTrophiSim::RigidBodyMotionType::Dynamic;
+                        ImGui::BeginDisabled(!is_dynamic);
+                        if (ImGui::Checkbox("Auto Mass From Density##rbautomass", &rb.auto_mass_from_density)) {
+                            rb_rebuild = true;
+                            rb_changed = true;
+                        }
+                        ImGui::SetNextItemWidth(150);
+                        if (ImGui::DragFloat("Density (kg/m3)##rbdensity", &rb.density, 5.0f, 0.1f, 20000.0f, "%.1f")) {
+                            rb_rebuild = true;
+                            rb_changed = true;
+                        }
+                        ImGui::BeginDisabled(rb.auto_mass_from_density);
+                        ImGui::SetNextItemWidth(150);
+                        if (ImGui::DragFloat("Mass (kg)##rbmass", &rb.mass, 0.1f, 0.0f, 100000.0f, "%.2f")) {
+                            rb_rebuild = true;
+                            rb_changed = true;
+                        }
+                        ImGui::EndDisabled();
+                        ImGui::EndDisabled();
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Density below water (~1000 kg/m3) will tend to float once fluid coupling is solved.");
+                        }
                     }
-                    ImGui::SetNextItemWidth(150);
-                    if (ImGui::DragFloat("Density (kg/m3)##rbdensity", &rb.density, 5.0f, 0.1f, 20000.0f, "%.1f")) {
-                        rb_rebuild = true;
-                        rb_changed = true;
-                    }
-                    ImGui::BeginDisabled(rb.auto_mass_from_density);
-                    ImGui::SetNextItemWidth(150);
-                    if (ImGui::DragFloat("Mass (kg)##rbmass", &rb.mass, 0.1f, 0.0f, 100000.0f, "%.2f")) {
-                        rb_rebuild = true;
-                        rb_changed = true;
-                    }
-                    ImGui::EndDisabled();
-                    ImGui::EndDisabled();
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Density below water (~1000 kg/m3) will tend to float once fluid coupling is solved.");
-                    }
+                    ImGui::EndTabItem();
                 }
 
-                if (ImGui::CollapsingHeader("Motion", ImGuiTreeNodeFlags_DefaultOpen)) {
+                // ---- Soft Body / Cloth section (deformable kinds) ----
+                if (ImGui::BeginTabItem("Soft")) {
+                    if (is_rigid) {
+                        ImGui::TextDisabled("Soft-body controls apply to Soft Body and Cloth body types.");
+                    } else {
+                    ImGui::TextDisabled("Deformable body — falls, drapes & collides during play.");
+                    ImGui::TextDisabled("Heavy: rebuilds mesh geometry each frame; no bake/scrub cache yet.");
+                    ImGui::Spacing();
+
+                    const bool is_cloth = (rb.kind == RayTrophiSim::BodyKind::Cloth);
+                    ImGui::SetNextItemWidth(150);
+                    rb_changed |= ImGui::DragFloat("Stiffness##sbstiff", &rb.soft_stiffness, 0.005f, 0.0f, 1.0f, "%.3f");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Edge constraint stiffness: 0 = floppy, 1 = rigid-ish.");
+                    ImGui::SetNextItemWidth(150);
+                    rb_changed |= ImGui::DragFloat("Compliance##sbcompl", &rb.soft_compliance, 0.0001f, 0.0f, 1.0f, "%.4f");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("XPBD inverse stiffness; 0 = fully stiff.");
+                    ImGui::SetNextItemWidth(150);
+                    rb_changed |= ImGui::DragFloat("Damping##sbdamp", &rb.soft_damping, 0.005f, 0.0f, 1.0f, "%.3f");
+                    ImGui::SetNextItemWidth(150);
+                    rb_changed |= ImGui::DragInt("Iterations##sbiter", &rb.soft_iterations, 0.1f, 1, 64);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Constraint solver iterations per step (higher = stiffer/stabler, slower).");
+                    ImGui::SetNextItemWidth(150);
+                    rb_changed |= ImGui::DragFloat("Total Mass (kg)##sbmass", &rb.soft_mass, 0.05f, 0.001f, 100000.0f, "%.3f");
+                    ImGui::SetNextItemWidth(150);
+                    rb_changed |= ImGui::DragFloat("Vertex Radius##sbvr", &rb.soft_vertex_radius, 0.001f, 0.0f, 1.0f, "%.4f");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-vertex collision thickness (m).");
+
+                    ImGui::BeginDisabled(is_cloth);  // closed-volume pressure is meaningless for open cloth
+                    ImGui::SetNextItemWidth(150);
+                    rb_changed |= ImGui::DragFloat("Pressure##sbpress", &rb.soft_pressure, 0.05f, 0.0f, 1000.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Closed-volume inflation (balloons / soft solids). N/A for cloth.");
+                    ImGui::EndDisabled();
+
+                    ImGui::SetNextItemWidth(150);
+                    rb_changed |= ImGui::DragFloat("Friction##sbfric", &rb.soft_friction, 0.01f, 0.0f, 1.0f, "%.3f");
+                    ImGui::SetNextItemWidth(150);
+                    rb_changed |= ImGui::DragFloat("Restitution##sbrest", &rb.soft_restitution, 0.01f, 0.0f, 1.0f, "%.3f");
+                    ImGui::SetNextItemWidth(150);
+                    rb_changed |= ImGui::DragFloat("Gravity Factor##sbgrav", &rb.soft_gravity_factor, 0.01f, -10.0f, 10.0f, "%.2f");
+                    if (is_cloth) {
+                        rb_changed |= ImGui::Checkbox("Two-Sided Collision##sb2s", &rb.soft_two_sided);
+                    }
+                    if (rb_changed) rb_rebuild = true;
+
+                    // ---- Pins: hold rest vertices fixed (hang cloth from corners) ----
+                    ImGui::Spacing();
+                    ImGui::SeparatorText("Pins");
+                    ImGui::TextDisabled("Pinned vertices stay fixed in place during play.");
+
+                    // Primary workflow: mark the vertices selected in Edit Mesh mode.
+                    // Each selected vertex becomes a small world-space pin sphere, so it
+                    // survives re-import and needs no gizmo alignment. The selection is
+                    // published by SceneUI into g_edit_pin_selection (the panel is a free
+                    // function, so it can't read SceneUI's edit cache directly).
+                    const bool edit_on_this =
+                        ForceFieldUI::g_edit_pin_selection.active &&
+                        ForceFieldUI::g_edit_pin_selection.object_name == rb.source_name &&
+                        !ForceFieldUI::g_edit_pin_selection.world_positions.empty();
+                    const int sel_vcount = edit_on_this
+                        ? (int)ForceFieldUI::g_edit_pin_selection.world_positions.size() : 0;
+
+                    static float pin_snap_radius = 0.05f;
+                    ImGui::SetNextItemWidth(120);
+                    ImGui::DragFloat("Pin Radius##sbpinr", &pin_snap_radius, 0.005f, 0.001f, 10.0f, "%.3f");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Sphere radius used when pinning selected vertices (world units).");
+
+                    ImGui::BeginDisabled(!edit_on_this);
+                    if (ImGui::Button(sel_vcount > 0
+                                          ? (std::string("Pin ") + std::to_string(sel_vcount) + " Selected Vertices##sbpinsel").c_str()
+                                          : "Pin Selected Vertices##sbpinsel",
+                                      ImVec2(-FLT_MIN, 26))) {
+                        for (const Vec3& wp : ForceFieldUI::g_edit_pin_selection.world_positions) {
+                            RayTrophiSim::SoftPinRegion pin;
+                            pin.center = wp;
+                            pin.radius = pin_snap_radius;
+                            rb.soft_pins.push_back(pin);
+                        }
+                        rb_rebuild = true;
+                        rb_changed = true;
+                    }
+                    ImGui::EndDisabled();
+                    if (!edit_on_this) {
+                        ImGui::TextDisabled("Enter Edit Mesh > Vertex mode on this object,");
+                        ImGui::TextDisabled("select vertices, then click Pin.");
+                    }
+
+                    // Pin region list: per-pin radius/enable/remove + add empty/clear.
+                    int pin_to_remove = -1;
+                    for (int pi = 0; pi < (int)rb.soft_pins.size(); ++pi) {
+                        ImGui::PushID(pi);
+                        auto& pin = rb.soft_pins[pi];
+                        if (ImGui::Checkbox("##pinen", &pin.enabled)) { rb_rebuild = true; rb_changed = true; }
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(150);
+                        if (ImGui::DragFloat3("##pinc", &pin.center.x, 0.01f, -1e6f, 1e6f, "%.3f")) { rb_rebuild = true; rb_changed = true; }
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(70);
+                        if (ImGui::DragFloat("##pinr", &pin.radius, 0.005f, 0.001f, 100.0f, "r %.3f")) { rb_rebuild = true; rb_changed = true; }
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("x##pinrm")) pin_to_remove = pi;
+                        ImGui::PopID();
+                    }
+                    if (pin_to_remove >= 0) {
+                        rb.soft_pins.erase(rb.soft_pins.begin() + pin_to_remove);
+                        rb_rebuild = true; rb_changed = true;
+                    }
+                    if (!rb.soft_pins.empty()) {
+                        if (ImGui::SmallButton("Clear All Pins##sbpinclr")) {
+                            rb.soft_pins.clear();
+                            rb_rebuild = true; rb_changed = true;
+                        }
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(%d pinned last play)", rb.dbg_pinned_count);
+                    }
+
+                    }
+                    ImGui::EndTabItem();
+                }
+
+                // Motion / Axis Locks / Fluid Coupling are rigid-body concepts.
+                if (is_rigid) {
+                if (ImGui::BeginTabItem("Motion")) {
                     ImGui::SetNextItemWidth(150);
                     if (ImGui::DragFloat("Linear Damping##rblinDamp", &rb.linear_damping, 0.01f, 0.0f, 20.0f, "%.3f")) {
                         rb_rebuild = true;
@@ -3352,9 +3685,10 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                         rb_rebuild = true;
                         rb_changed = true;
                     }
+                    ImGui::EndTabItem();
                 }
 
-                if (ImGui::CollapsingHeader("Axis Locks")) {
+                if (ImGui::BeginTabItem("Locks")) {
                     ImGui::TextDisabled("Stored for the rigid solver roadmap; Jolt axis constraints land next.");
                     rb_changed |= ImGui::Checkbox("Lock X Translation##rbltx", &rb.lock_translation_x); ImGui::SameLine();
                     rb_changed |= ImGui::Checkbox("Lock Y Translation##rblty", &rb.lock_translation_y); ImGui::SameLine();
@@ -3362,15 +3696,21 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                     rb_changed |= ImGui::Checkbox("Lock X Rotation##rblrx", &rb.lock_rotation_x); ImGui::SameLine();
                     rb_changed |= ImGui::Checkbox("Lock Y Rotation##rblry", &rb.lock_rotation_y); ImGui::SameLine();
                     rb_changed |= ImGui::Checkbox("Lock Z Rotation##rblrz", &rb.lock_rotation_z);
+                    ImGui::EndTabItem();
                 }
 
-                if (ImGui::CollapsingHeader("Fluid Coupling", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (ImGui::BeginTabItem("Fluid")) {
                     rb_changed |= ImGui::Checkbox("Use Fluid Coupling##rbfluid", &rb.fluid_coupling_enabled);
                     ImGui::BeginDisabled(!rb.fluid_coupling_enabled);
                     rb_changed |= ImGui::DragFloat("Fluid Density##rbfldens", &rb.fluid_density, 5.0f, 0.1f, 20000.0f, "%.1f");
                     rb_changed |= ImGui::DragFloat("Buoyancy Scale##rbbscale", &rb.buoyancy_scale, 0.01f, 0.0f, 10.0f, "%.2f");
                     rb_changed |= ImGui::DragFloat("Fluid Drag##rbfdrag", &rb.fluid_drag, 0.01f, 0.0f, 100.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Linear (viscous) drag: -k*v. Damps slow drift.");
+                    rb_changed |= ImGui::DragFloat("Form Drag (slam)##rbfqdrag", &rb.fluid_quadratic_drag, 0.01f, 0.0f, 100.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Quadratic form/slam drag: grows with speed (~v^2).\nThis is what stops a body skipping off the water surface; raise it if impacts bounce too much.");
                     rb_changed |= ImGui::DragFloat("Angular Fluid Drag##rbfadrag", &rb.fluid_angular_drag, 0.01f, 0.0f, 100.0f, "%.2f");
+                    rb_changed |= ImGui::DragFloat("Max Coupling Speed##rbfmaxspd", &rb.fluid_max_coupling_speed, 0.1f, 0.0f, 50.0f, "%.1f m/s");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Speed cap on the fluid velocity that drives drag.\nDamps the splash a plunging body stamps into the grid so it isn't flung sideways. 0 disables the clamp.");
                     ImGui::EndDisabled();
                     // Always-visible float/sink verdict (the one number that
                     // explains most "won't float/sink" confusion). The rest of
@@ -3392,32 +3732,109 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                             ImGui::TreePop();
                         }
                     }
+                    ImGui::EndTabItem();
                 }
 
-                if (rb_rebuild) rb.created = false;
-                if (rb_changed) {
-                    if (scene.rigid_body_system) {
-                        scene.rigid_body_system->resetRuntime(true);
-                        scene.rigid_body_system->setBodies(&scene.rigid_bodies);
-                    }
-                    scene.invalidateRigidBodySimulationCache();
+                // ---- Force-field coupling (rigid bodies) ----
+                if (ImGui::BeginTabItem("Forces")) {
+                    const bool is_dynamic = rb.motion_type == RayTrophiSim::RigidBodyMotionType::Dynamic;
+                    ImGui::BeginDisabled(!is_dynamic);
+                    if (ImGui::Checkbox("Affected by Force Fields##rbffen", &rb.force_field_enabled)) rb_changed = true;
+                    ImGui::BeginDisabled(!rb.force_field_enabled);
+                    ImGui::SetNextItemWidth(150);
+                    if (ImGui::DragFloat("FF Influence##rbffscale", &rb.force_field_scale, 0.01f, 0.0f, 20.0f, "%.2f")) rb_changed = true;
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Per-body multiplier on scene force fields. Applied as a force at the body's center of mass.");
+                    ImGui::EndDisabled();
+                    ImGui::EndDisabled();
+                    if (!is_dynamic) ImGui::TextDisabled("Only dynamic bodies react to force fields.");
+                    ImGui::EndTabItem();
                 }
+                } // is_rigid (Motion / Axis Locks / Fluid Coupling / Force Fields)
+                else {
+                    if (ImGui::BeginTabItem("Fluid")) {
+                        rb_changed |= ImGui::Checkbox("Use Fluid Coupling##rbfluid_soft", &rb.fluid_coupling_enabled);
+                        ImGui::BeginDisabled(!rb.fluid_coupling_enabled);
+                        rb_changed |= ImGui::DragFloat("Fluid Density##rbfldens_soft", &rb.fluid_density, 5.0f, 0.1f, 20000.0f, "%.1f");
+                        rb_changed |= ImGui::DragFloat("Buoyancy Scale##rbbscale_soft", &rb.buoyancy_scale, 0.01f, 0.0f, 10.0f, "%.2f");
+                        rb_changed |= ImGui::DragFloat("Fluid Drag##rbfdrag_soft", &rb.fluid_drag, 0.01f, 0.0f, 100.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Linear (viscous) drag: -k*v. Damps slow drift.");
+                        rb_changed |= ImGui::DragFloat("Form Drag (slam)##rbfqdrag_soft", &rb.fluid_quadratic_drag, 0.01f, 0.0f, 100.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Quadratic form/slam drag: grows with speed (~v^2).");
+                        rb_changed |= ImGui::DragFloat("Angular Fluid Drag##rbfadrag_soft", &rb.fluid_angular_drag, 0.01f, 0.0f, 100.0f, "%.2f");
+                        rb_changed |= ImGui::DragFloat("Max Coupling Speed##rbfmaxspd_soft", &rb.fluid_max_coupling_speed, 0.1f, 0.0f, 50.0f, "%.1f m/s");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Speed cap on the fluid velocity that drives drag. 0 disables the clamp.");
+                        ImGui::EndDisabled();
+
+                        if (rb.fluid_coupling_enabled && rb.dbg_coupled) {
+                            const bool floats = rb.dbg_body_density < rb.fluid_density;
+                            ImGui::TextColored(floats ? ImVec4(0.45f, 0.85f, 1.0f, 1.0f)
+                                                      : ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
+                                               "Body %.0f kg/m3 vs fluid %.0f  (%s)",
+                                               rb.dbg_body_density, rb.fluid_density,
+                                               floats ? "floats" : "sinks");
+                            if (ImGui::TreeNodeEx("Coupling Debug##rbcpldbg_soft", ImGuiTreeNodeFlags_None)) {
+                                ImGui::Text("Submerged: %d / %d pts   sd_min %.3f m",
+                                            rb.dbg_submerged_pts, rb.dbg_sample_count, rb.dbg_min_sd);
+                                ImGui::Text("Buoy accel: %+.2f m/s2  (g = 9.81)", rb.dbg_buoy_accel_y);
+                                ImGui::Text("Drag accel: %+.2f m/s2", rb.dbg_drag_accel_y);
+                                ImGui::Text("Body vel Y: %+.3f m/s", rb.dbg_vel_y);
+                                ImGui::TreePop();
+                            }
+                        }
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem("Forces")) {
+                        if (ImGui::Checkbox("Affected by Force Fields##rbffen_soft", &rb.force_field_enabled)) rb_changed = true;
+                        ImGui::BeginDisabled(!rb.force_field_enabled);
+                        ImGui::SetNextItemWidth(150);
+                        if (ImGui::DragFloat("FF Influence##rbffscale_soft", &rb.force_field_scale, 0.01f, 0.0f, 20.0f, "%.2f")) rb_changed = true;
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Per-body multiplier on scene force fields (wind/vortex/turbulence...).");
+                        ImGui::EndDisabled();
+                        ImGui::EndTabItem();
+                    }
+                }
+
+                ImGui::EndTabBar();
+
+                // A structural rebuild (shape / mass / soft params / pins) must reset
+                // the body to its REST pose BEFORE the Jolt body is recreated. Setting
+                // rb.created=false alone made the next ensureBodyCreated re-capture the
+                // rest from the CURRENT (mid-sim, deformed) mesh — so editing a param at
+                // frame 50 turned that frame's deformed shape into the new "rest" and
+                // frame 0 stopped returning to the original. applyRigidBodyChange()
+                // (resetRuntime → restore rest + invalidate cache → re-sim from frame 0)
+                // keeps the rest clean while still re-simulating up to the current frame.
+                if (rb_rebuild) rb_changed = true;
+                if (rb_changed) applyRigidBodyChange();
 
                 ImGui::Spacing();
-                if (ImGui::SmallButton("Remove##rbrm")) rb_to_remove = i;
+                if (ImGui::SmallButton("Remove##rbrm")) rb_to_remove = sel_rb;
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Apply at Frame##rbapply")) rb_to_apply = sel_rb;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Freeze the object at its CURRENT simulated shape and remove the body.\n"
+                                      "The mesh keeps this pose permanently (no more simulation, no rest restore).\n"
+                                      "Other bodies keep simulating. Stop at the frame you want first.");
 
-                ImGui::Unindent(8.0f);
-            }
-            ImGui::PopID();
+                ImGui::PopID();
         }
-        if (scene.rigid_bodies.empty()) {
-            ImGui::TextDisabled("No rigid bodies yet. Select a mesh and click \"Make Rigid Body\".");
-        }
-        ImGui::EndChild();
 
         if (rb_to_remove >= 0 && rb_to_remove < (int)scene.rigid_bodies.size()) {
             scene.removeRigidBodyForObject(scene.rigid_bodies[rb_to_remove].source_name);
         }
+        if (rb_to_apply >= 0 && rb_to_apply < (int)scene.rigid_bodies.size()) {
+            // applyBodyAtCurrentFrame requests a SceneUI mesh/bbox cache rebuild
+            // internally (this free-function panel can't touch SceneUI caches).
+            scene.applyBodyAtCurrentFrame(scene.rigid_bodies[rb_to_apply].source_name);
+        }
+
+        // Disk bake (works without any fluid — soft/cloth + rigid bake here too).
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextDisabled("Simulation Bake (disk cache)");
+        drawSimBakeControls();
     };
 
     auto drawColliderControls = [&]() {
@@ -3427,17 +3844,14 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         const uint64_t collider_sig_before = scene.computeSimConfigSignature();
         static int selected_collider_index_global = -1;
 
-        // Group 1: Creation & List Manager
-        ImGui::BeginChild("ColliderManagerGroup", ImVec2(0, 360), true);
-        ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "Collider Registry & Presets");
+        ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "Colliders");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%zu registered", p_sim->colliders().size());
         ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::Text("Active Colliders: %zu registered", p_sim->colliders().size());
         ImGui::TextDisabled("Shared by particles, fluids, and rigid bodies.");
 
         ImGui::Spacing();
-        ImGui::TextDisabled("Add Primitive Collider:");
+        ImGui::TextDisabled("Add Primitive:");
         {
             const float pw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
             if (ImGui::Button("Add Sphere##CollAddSph", ImVec2(pw, 26))) {
@@ -3473,7 +3887,7 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         }
 
         ImGui::Spacing();
-        ImGui::TextDisabled("Add Mesh-Bound Collider:");
+        ImGui::TextDisabled("Add From Selection:");
         const bool has_object_selection =
             ui_ctx.selection.selected.type == SelectableType::Object &&
             ui_ctx.selection.selected.object != nullptr &&
@@ -3515,23 +3929,26 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         }
         if (!has_object_selection || obb_exists) ImGui::EndDisabled();
 
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
         auto& colliders = p_sim->colliders();
         if (selected_collider_index_global >= static_cast<int>(colliders.size())) {
             selected_collider_index_global = static_cast<int>(colliders.size()) - 1;
         }
         if (selected_collider_index_global < 0) selected_collider_index_global = 0;
 
-        ImGui::Text("Active Collider List:");
+        ImGui::Spacing();
         int collider_to_remove = -1;
-        if (ImGui::BeginListBox("##ActiveColliderListStandalone", ImVec2(-1, 110))) {
+        if (colliders.empty()) {
+            ImGui::TextDisabled("No colliders yet.");
+        } else if (ImGui::BeginTable("ColliderRegistryTable", 3,
+                                     ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("Collider");
+            ImGui::TableSetupColumn("Enabled", ImGuiTableColumnFlags_WidthFixed, 68.0f);
+            ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 28.0f);
             for (int i = 0; i < static_cast<int>(colliders.size()); ++i) {
-                char label[256];
-                std::snprintf(label, sizeof(label), "%s##colltab%d", colliders[i].name.c_str(), i);
-                if (ImGui::Selectable(label, selected_collider_index_global == i)) {
+                ImGui::PushID(i);
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                if (ImGui::Selectable(colliders[i].name.c_str(), selected_collider_index_global == i)) {
                     selected_collider_index_global = i;
                 }
                 if (ImGui::BeginPopupContextItem()) {
@@ -3539,10 +3956,15 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                     if (ImGui::MenuItem("Remove Collider")) collider_to_remove = i;
                     ImGui::EndPopup();
                 }
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Checkbox("##enabled", &colliders[i].enabled);
+                ImGui::TableSetColumnIndex(2);
+                if (ImGui::SmallButton("x")) collider_to_remove = i;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove collider");
+                ImGui::PopID();
             }
-            ImGui::EndListBox();
+            ImGui::EndTable();
         }
-        ImGui::EndChild(); // Closes "ColliderManagerGroup"
         
         if (collider_to_remove >= 0) {
             p_sim->removeCollider(static_cast<std::size_t>(collider_to_remove));
@@ -3560,8 +3982,9 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         auto& c = colliders[static_cast<std::size_t>(selected_collider_index_global)];
 
         // Group 2: Selected Collider Bindings
-        if (ImGui::CollapsingHeader("Collider Bindings & Transform Modes", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Spacing();
+        if (ImGui::BeginTabBar("##ColliderAuthoringTabs", ImGuiTabBarFlags_FittingPolicyResizeDown)) {
+
+        if (ImGui::BeginTabItem("Binding")) {
 
             ImGui::Checkbox("Collider Enabled##CollTab", &c.enabled);
             ImGui::TextDisabled("Source Reference: %s", c.source_name.empty() ? "Manual Primitive" : c.source_name.c_str());
@@ -3609,12 +4032,11 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             if (!c.source_name.empty() && ImGui::Button("Clear Object Binding Connection##CollClearBtn", ImVec2(-1, 24))) {
                 c.source_name.clear();
             }
-            ImGui::Spacing();
+            ImGui::EndTabItem();
         }
 
         // Group 3: Geometric Properties
-        if (ImGui::CollapsingHeader("Geometric Bounds Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Spacing();
+        if (ImGui::BeginTabItem("Geometry")) {
 
             if (c.source_mode == RayTrophiSim::ParticleColliderSourceMode::PlaneY) {
                 ImGui::DragFloat("Plane Y Height##CollTab", &c.plane_y, 0.05f, -1000.0f, 1000.0f, "%.2f");
@@ -3692,12 +4114,11 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                     }
                 }
             }
-            ImGui::Spacing();
+            ImGui::EndTabItem();
         }
 
         // Group 4: Physical Materials
-        if (ImGui::CollapsingHeader("Friction & Voxelization Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Spacing();
+        if (ImGui::BeginTabItem("Material")) {
 
             ImGui::DragFloat("Restitution (Bounce)##CollTab", &c.restitution, 0.01f, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) {
@@ -3712,14 +4133,18 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                 ImGui::SetTooltip("Inflates the collision bounds during fluid grid voxelization.\n"
                                   "For sub-voxel thin walls, set this value >= active Fluid voxel_size to prevent fluid leaks.");
             }
+            ImGui::EndTabItem();
         }
 
         // General footer actions
-        ImGui::Spacing();
-        ImGui::Separator();
-        if (ImGui::Button("Wipe All Registered Colliders##CollTabWipe", ImVec2(-1, 30))) {
-            scene.clearParticleColliders();
-            selected_collider_index_global = -1;
+        if (ImGui::BeginTabItem("Actions")) {
+            if (ImGui::Button("Wipe All Registered Colliders##CollTabWipe", ImVec2(-1, 30))) {
+                scene.clearParticleColliders();
+                selected_collider_index_global = -1;
+            }
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
         }
 
         if (scene.computeSimConfigSignature() != collider_sig_before) {
@@ -3748,14 +4173,25 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         return;
     }
     
-    // Group 1: Force Fields Registry & List
-    ImGui::BeginChild("FieldManagerGroup", ImVec2(0, 245), true);
-    ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "Force Field Registry");
+    ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "Force Fields");
+    ImGui::SameLine();
+    ImGui::TextDisabled("%d registered", static_cast<int>(manager.force_fields.size()));
+    // Heads-up about cache invalidation: editing a force field resets the sim cache
+    // and rewinds to the start. We don't spell this out in a long static line (it
+    // crowds the panel and reads as noise) — a transient HUD toast fires at the
+    // moment it actually happens (see consumeSimRewindRequest in SceneUI::draw).
+    // A small "(i)" marker here carries the detail on hover for the curious.
+    if (!scene.fluid_objects.empty() || !manager.force_fields.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(i)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Editing a force field invalidates the simulation cache:\n"
+                              "the RAM + on-disk bake is dropped and the timeline rewinds to\n"
+                              "the start. Press Play to re-bake, then re-bake to disk when happy.");
+        }
+    }
     ImGui::Separator();
-    ImGui::Spacing();
 
-    ImGui::Text("Total Registered Fields: %d", static_cast<int>(manager.force_fields.size()));
-    
     // Add new force field dropdown
     if (ImGui::Button("+ Add Force Field##FFAryAdd", ImVec2(-1, 28))) {
         ImGui::OpenPopup("AddForceFieldPopup");
@@ -3803,68 +4239,100 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
 
     // List existing force fields
     ImGui::Spacing();
-    ImGui::BeginChild("ForceFieldListSubChild", ImVec2(0, 130), true);
-    for (size_t i = 0; i < manager.force_fields.size(); ++i) {
-        auto& field = manager.force_fields[i];
-        if (!field) continue;
-        
-        bool is_selected = (selected_force_field == field);
-        
-        UIWidgets::IconType icon_type = UIWidgets::IconType::Force;
-        switch (field->type) {
-            case Physics::ForceFieldType::Wind:      icon_type = UIWidgets::IconType::Wind; break;
-            case Physics::ForceFieldType::Gravity:   icon_type = UIWidgets::IconType::Gravity; break;
-            case Physics::ForceFieldType::Vortex:    icon_type = UIWidgets::IconType::Vortex; break;
-            case Physics::ForceFieldType::Turbulence:
-            case Physics::ForceFieldType::CurlNoise: icon_type = UIWidgets::IconType::Noise; break;
-            case Physics::ForceFieldType::Magnetic:  icon_type = UIWidgets::IconType::Magnet; break;
-            case Physics::ForceFieldType::Attractor:
-            case Physics::ForceFieldType::Repeller:
-            case Physics::ForceFieldType::Drag:      icon_type = UIWidgets::IconType::Physics; break;
-            default: break;
-        }
-        
-        ImVec2 pos = ImGui::GetCursorScreenPos();
-        UIWidgets::DrawIcon(icon_type, ImVec2(pos.x, pos.y), 16, 
-            is_selected ? ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f)) : ImGui::ColorConvertFloat4ToU32(ImVec4(0.7f, 0.7f, 0.7f, 1.0f)), 1.0f);
-        
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20);
-        std::string label = field->name + "##ff" + std::to_string(i);
-        
-        if (!field->enabled) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
-        }
-        
-        if (ImGui::Selectable(label.c_str(), is_selected)) {
-            ui_ctx.selection.selectForceField(field, -1, field->name);
-            selected_force_field = field;
-        }
-        
-        if (!field->enabled) {
-            ImGui::PopStyleColor();
-        }
-        
-        if (ImGui::BeginPopupContextItem()) {
-            if (ImGui::MenuItem("Delete Field")) {
-                manager.removeForceField(field);
-                if (selected_force_field == field) {
-                    selected_force_field = nullptr;
+    std::shared_ptr<Physics::ForceField> field_to_remove = nullptr;
+    std::shared_ptr<Physics::ForceField> field_to_duplicate = nullptr;
+    if (manager.force_fields.empty()) {
+        ImGui::TextDisabled("No force fields yet.");
+    } else if (ImGui::BeginTable("ForceFieldRegistryTable", 4,
+                                 ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+        ImGui::TableSetupColumn("Name");
+        ImGui::TableSetupColumn("Enabled", ImGuiTableColumnFlags_WidthFixed, 68.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 54.0f);
+        for (size_t i = 0; i < manager.force_fields.size(); ++i) {
+            auto& row_field = manager.force_fields[i];
+            if (!row_field) continue;
+
+            const bool is_selected = selected_force_field == row_field;
+            UIWidgets::IconType icon_type = UIWidgets::IconType::Force;
+            switch (row_field->type) {
+                case Physics::ForceFieldType::Wind:      icon_type = UIWidgets::IconType::Wind; break;
+                case Physics::ForceFieldType::Gravity:   icon_type = UIWidgets::IconType::Gravity; break;
+                case Physics::ForceFieldType::Vortex:    icon_type = UIWidgets::IconType::Vortex; break;
+                case Physics::ForceFieldType::Turbulence:
+                case Physics::ForceFieldType::CurlNoise: icon_type = UIWidgets::IconType::Noise; break;
+                case Physics::ForceFieldType::Magnetic:  icon_type = UIWidgets::IconType::Magnet; break;
+                case Physics::ForceFieldType::Attractor:
+                case Physics::ForceFieldType::Repeller:
+                case Physics::ForceFieldType::Drag:      icon_type = UIWidgets::IconType::Physics; break;
+                default: break;
+            }
+
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            UIWidgets::DrawIcon(icon_type, ImVec2(pos.x, pos.y + 2.0f), 16,
+                is_selected ? ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f))
+                            : ImGui::ColorConvertFloat4ToU32(ImVec4(0.7f, 0.7f, 0.7f, 1.0f)), 1.0f);
+            ImGui::Dummy(ImVec2(18.0f, 20.0f));
+
+            ImGui::TableSetColumnIndex(1);
+            if (!row_field->enabled) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+            }
+            if (ImGui::Selectable(row_field->name.c_str(), is_selected)) {
+                ui_ctx.selection.selectForceField(row_field, -1, row_field->name);
+                selected_force_field = row_field;
+            }
+            if (!row_field->enabled) {
+                ImGui::PopStyleColor();
+            }
+            if (ImGui::BeginPopupContextItem()) {
+                if (ImGui::MenuItem("Delete Field")) {
+                    field_to_remove = row_field;
                 }
+                if (ImGui::MenuItem("Duplicate Field")) {
+                    field_to_duplicate = row_field;
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem(row_field->enabled ? "Disable" : "Enable")) {
+                    row_field->enabled = !row_field->enabled;
+                }
+                ImGui::EndPopup();
             }
-            if (ImGui::MenuItem("Duplicate Field")) {
-                auto copy = std::make_shared<Physics::ForceField>(*field);
-                copy->name += " Copy";
-                manager.addForceField(copy);
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Checkbox("##enabled", &row_field->enabled);
+            ImGui::TableSetColumnIndex(3);
+            if (ImGui::SmallButton("+")) {
+                field_to_duplicate = row_field;
             }
-            ImGui::Separator();
-            if (ImGui::MenuItem(field->enabled ? "Disable" : "Enable")) {
-                field->enabled = !field->enabled;
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Duplicate field");
             }
-            ImGui::EndPopup();
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x")) {
+                field_to_remove = row_field;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Delete field");
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (field_to_duplicate) {
+        auto copy = std::make_shared<Physics::ForceField>(*field_to_duplicate);
+        copy->name += " Copy";
+        manager.addForceField(copy);
+    }
+    if (field_to_remove) {
+        manager.removeForceField(field_to_remove);
+        if (selected_force_field == field_to_remove) {
+            selected_force_field = nullptr;
         }
     }
-    ImGui::EndChild();
-    ImGui::EndChild();
     
     // ═══════════════════════════════════════════════════════════════════════
     // SELECTED FORCE FIELD PROPERTIES
@@ -3876,11 +4344,12 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
     
     auto& field = selected_force_field;
     
+    if (!ImGui::BeginTabBar("##ForceFieldAuthoringTabs", ImGuiTabBarFlags_FittingPolicyResizeDown)) {
+        return;
+    }
+
     // Group 1: General & Transform Settings
-    ImGui::BeginChild("FieldGeneralTransformGroup", ImVec2(0, 220), true);
-    ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "General & Transform Settings");
-    ImGui::Separator();
-    ImGui::Spacing();
+    if (ImGui::BeginTabItem("General")) {
 
     // Name
     char name_buf[128];
@@ -3915,13 +4384,11 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
     if (ImGui::DragFloat3("Scale##FFScale", scale, 0.05f, 0.001f, 10000.0f, "%.3f")) {
         field->scale = Vec3(scale[0], scale[1], scale[2]);
     }
-    ImGui::EndChild();
+        ImGui::EndTabItem();
+    }
 
     // Group 2: Dynamics & Shape Settings
-    ImGui::BeginChild("FieldDynamicsGroup", ImVec2(0, 310), true);
-    ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "Dynamics & Shape Settings");
-    ImGui::Separator();
-    ImGui::Spacing();
+    if (ImGui::BeginTabItem("Dynamics")) {
 
     const char* types[] = { 
         "Wind Field", "Gravity Field", "Attractor Field", "Repeller Field", 
@@ -3958,6 +4425,32 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         }
     }
     
+    // Wind→fluid coupling (liquid only). Other systems always use the body force.
+    if (field->type == Physics::ForceFieldType::Wind) {
+        ImGui::Separator();
+        ImGui::Checkbox("Fluid Surface Drag##FFWindFluidDrag", &field->fluid_surface_drag);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Liquid only: drive water as a relative-velocity surface drag\n"
+                              "instead of a uniform body push. Water gains 'weight' — it\n"
+                              "accelerates toward the wind speed and saturates there, and the\n"
+                              "push fades with depth so deep water stays calm.\n"
+                              "With this ON, Strength is read as the target surface speed (m/s).");
+        }
+        if (field->fluid_surface_drag) {
+            ImGui::DragFloat("Drag Coupling (1/s)##FFWindCoupling", &field->fluid_drag_coupling, 0.05f, 0.0f, 50.0f, "%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How fast surface water reaches the wind speed. Higher = snappier.");
+            ImGui::DragFloat("Surface Depth (m)##FFWindDepth", &field->fluid_surface_depth, 0.01f, 0.01f, 50.0f, "%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How far below the free surface the wind still pushes the liquid.");
+            ImGui::DragFloat("Curl Detail##FFWindCurl", &field->fluid_curl_detail, 0.01f, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Mix divergence-free curl-noise turbulence onto the wind so the\n"
+                                  "surface flow swirls instead of moving in a dead-straight line.\n"
+                                  "Uses this field's Noise settings (frequency/octaves/speed).");
+        }
+    }
+
     // Vortex-specific core properties
     if (field->type == Physics::ForceFieldType::Vortex) {
         float axis[3] = { field->axis.x, field->axis.y, field->axis.z };
@@ -3999,18 +4492,16 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             ImGui::SetTooltip("Distance from pivot where the force begins to decay (Inner) and drops to zero (Outer).");
         }
     }
-    ImGui::EndChild();
+        ImGui::EndTabItem();
+    }
 
     // Group 3: Noise & Turbulence Settings
-    if (field->type == Physics::ForceFieldType::Turbulence || 
-        field->type == Physics::ForceFieldType::CurlNoise ||
-        field->type == Physics::ForceFieldType::Wind) {
-        
-        ImGui::BeginChild("FieldNoiseGroup", ImVec2(0, 205), true);
-        ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "Noise & Turbulence Settings");
-        ImGui::Separator();
-        ImGui::Spacing();
+    if (ImGui::BeginTabItem("Noise")) {
+        const bool supports_noise = field->type == Physics::ForceFieldType::Turbulence ||
+                                    field->type == Physics::ForceFieldType::CurlNoise ||
+                                    field->type == Physics::ForceFieldType::Wind;
 
+        ImGui::BeginDisabled(!supports_noise);
         ImGui::Checkbox("Enable FBM Noise Modulation##FFUseNoise", &field->use_noise);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Applies fractal Brownian motion noise field to produce turbulence fluctuations.");
@@ -4025,14 +4516,15 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             ImGui::DragFloat("Evolution Speed##FFNoiseSpd", &field->noise.speed, 0.01f, 0.0f, 10.0f, "%.2f");
             ImGui::DragInt("Random Seed##FFNoiseSeed", &field->noise.seed, 1, 0, 99999);
         }
-        ImGui::EndChild();
+        ImGui::EndDisabled();
+        if (!supports_noise) {
+            ImGui::TextDisabled("Noise controls are used by Wind, Turbulence, and Curl Noise fields.");
+        }
+        ImGui::EndTabItem();
     }
     
     // Group 4: Activation Bounds & Mask Bindings
-    ImGui::BeginChild("FieldTimeAffectsGroup", ImVec2(0, 175), true);
-    ImGui::TextColored(ImVec4(0.08f, 0.58f, 0.98f, 1.00f), "Activation Bounds & Mask Bindings");
-    ImGui::Separator();
-    ImGui::Spacing();
+    if (ImGui::BeginTabItem("Activation")) {
 
     ImGui::DragFloat("Start Frame Limit##FFTimeStart", &field->start_frame, 1.0f, 0.0f, 100000.0f, "%.0f");
     ImGui::DragFloat("End Frame Limit##FFTimeEnd", &field->end_frame, 1.0f, -1.0f, 100000.0f, "%.0f");
@@ -4047,7 +4539,10 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
     ImGui::Checkbox("Particles##FFAffectPart", &field->affects_particles); ImGui::SameLine(240);
     ImGui::Checkbox("Cloth##FFAffectCloth", &field->affects_cloth); ImGui::SameLine(360);
     ImGui::Checkbox("Rigid Bodies##FFAffectRigid", &field->affects_rigidbody);
-    ImGui::EndChild();
+        ImGui::EndTabItem();
+    }
+
+    ImGui::EndTabBar();
 }
 
 } // namespace ForceFieldUI

@@ -69,6 +69,25 @@ inline std::string manifestPath(const std::string& dir) {
     return (fs::path(dir) / "manifest.json").string();
 }
 
+inline std::string softFramePath(const std::string& dir, int frame) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "soft_f%06d.rtfc", frame);
+    return (fs::path(dir) / buf).string();
+}
+
+inline void writeString(std::ostream& os, const std::string& s) {
+    const uint32_t n = static_cast<uint32_t>(s.size());
+    writePod(os, n);
+    if (n) os.write(s.data(), n);
+}
+inline bool readString(std::istream& is, std::string& s) {
+    uint32_t n = 0;
+    if (!readPod(is, n)) return false;
+    s.resize(n);
+    if (n) is.read(&s[0], n);
+    return static_cast<bool>(is);
+}
+
 } // namespace
 
 std::string frameFilePath(const std::string& cache_dir, uint32_t system_id, int frame) {
@@ -78,6 +97,59 @@ std::string frameFilePath(const std::string& cache_dir, uint32_t system_id, int 
 bool frameExists(const std::string& cache_dir, uint32_t system_id, int frame) {
     std::error_code ec;
     return fs::exists(framePath(cache_dir, system_id, frame), ec);
+}
+
+// ── Soft / cloth body frames ─────────────────────────────────────────────────
+std::string softFrameFilePath(const std::string& cache_dir, int frame) {
+    return softFramePath(cache_dir, frame);
+}
+
+bool softFrameExists(const std::string& cache_dir, int frame) {
+    std::error_code ec;
+    return fs::exists(softFramePath(cache_dir, frame), ec);
+}
+
+bool writeSoftFrame(const std::string& cache_dir, int frame,
+                    const std::vector<SoftBodyFrame>& bodies) {
+    std::error_code ec;
+    fs::create_directories(cache_dir, ec);
+
+    std::ofstream os(softFramePath(cache_dir, frame), std::ios::binary | std::ios::trunc);
+    if (!os) return false;
+
+    writePod(os, kMagic);
+    writePod(os, kVersion);
+    writePod(os, static_cast<uint32_t>(bodies.size()));
+    for (const auto& b : bodies) {
+        writeString(os, b.name);
+        writePod(os, static_cast<uint64_t>(b.vertices.size()));
+        for (const Vec3& v : b.vertices) writeVec3(os, v);
+    }
+    return static_cast<bool>(os);
+}
+
+bool readSoftFrame(const std::string& cache_dir, int frame,
+                   std::vector<SoftBodyFrame>& out_bodies) {
+    out_bodies.clear();
+    std::ifstream is(softFramePath(cache_dir, frame), std::ios::binary);
+    if (!is) return false;
+
+    uint32_t magic = 0, version = 0, count = 0;
+    if (!readPod(is, magic) || !readPod(is, version) || !readPod(is, count)) return false;
+    if (magic != kMagic || version != kVersion) return false;
+
+    out_bodies.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        SoftBodyFrame b;
+        uint64_t n = 0;
+        if (!readString(is, b.name) || !readPod(is, n)) return false;
+        b.vertices.resize(static_cast<size_t>(n));
+        for (uint64_t k = 0; k < n; ++k) {
+            if (!readVec3(is, b.vertices[static_cast<size_t>(k)])) return false;
+        }
+        out_bodies.push_back(std::move(b));
+    }
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

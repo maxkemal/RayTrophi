@@ -205,6 +205,23 @@ public:
     // ─────────────────────────────────────────────────────────────────────────
     float linear_drag = 0.1f;              ///< Linear velocity damping: F = -drag * v
     float quadratic_drag = 0.0f;           ///< Quadratic damping: F = -drag * v²
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Fluid wind coupling (Wind type only, APIC liquid)
+    // ─────────────────────────────────────────────────────────────────────────
+    // When enabled, a Wind field drives the APIC liquid as a relative-velocity
+    // surface drag instead of a uniform body acceleration. This gives water
+    // "weight": the surface accelerates toward the wind speed and then saturates
+    // (it does not speed up without limit), and the push is confined to a band
+    // just below the free surface so deep water stays calm. Other systems
+    // (gas/rigid/cloth/particle) are unaffected and keep using the body force.
+    // With drag active, `strength` is read as the TARGET surface speed (m/s),
+    // not an acceleration. Only the horizontal (XZ) velocity is dragged so the
+    // wind never fights gravity/buoyancy.
+    bool  fluid_surface_drag  = true;      ///< Wind→fluid: drag model vs legacy body accel
+    float fluid_drag_coupling = 4.0f;      ///< 1/s — how fast surface water reaches wind speed
+    float fluid_surface_depth = 0.5f;      ///< world units — influence band below the free surface
+    float fluid_curl_detail   = 0.0f;      ///< 0..1 — curl-noise turbulence mixed onto the wind
     
     // ─────────────────────────────────────────────────────────────────────────
     // Time-based
@@ -299,6 +316,15 @@ public:
      * @brief Get icon name for UI display
      */
     const char* getIconName() const;
+
+    /**
+     * @brief Divergence-free curl-noise vector for the fluid wind detail layer.
+     *
+     * Uses this field's own NoiseSettings and is NOT scaled by strength (the
+     * caller scales it), so it returns a roughly unit-magnitude swirling flow
+     * that reads as turbulent wind gusts on the liquid surface.
+     */
+    Vec3 sampleCurlDetail(const Vec3& world_pos, float time) const;
 
 private:
     // Internal evaluation functions for each type

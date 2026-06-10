@@ -343,7 +343,12 @@ void EmbreeBVH::userIntersectFunc(const RTCIntersectFunctionNArguments* args) {
         
         Ray r(origin, dir);
         const VDBVolume* vdb = bvh->vdb_objects[primID];
-        
+        // Particles/splat-sphere fluid mode keeps the volume registered for the GPU
+        // SSBO mapping but it must NOT occlude/shadow on the CPU, or its AABB masks
+        // the discrete splat spheres inside the domain. Checked at runtime (no rebuild
+        // needed when the render mode toggles).
+        if (vdb && vdb->cpu_render_skip) continue;
+
         float t_enter, t_exit;
         // Pass -infinity instead of tnear to detect if we are inside the box (t_enter < tnear)
         if (vdb->intersectTransformedAABB(r, -std::numeric_limits<float>::infinity(), tfar, t_enter, t_exit)) {
@@ -400,7 +405,12 @@ void EmbreeBVH::userOccludedFunc(const RTCOccludedFunctionNArguments* args) {
         
         Ray r(origin, dir);
         const VDBVolume* vdb = bvh->vdb_objects[primID];
-        
+        // Particles/splat-sphere fluid mode keeps the volume registered for the GPU
+        // SSBO mapping but it must NOT occlude/shadow on the CPU, or its AABB masks
+        // the discrete splat spheres inside the domain. Checked at runtime (no rebuild
+        // needed when the render mode toggles).
+        if (vdb && vdb->cpu_render_skip) continue;
+
         float t_enter, t_exit;
         if (vdb->intersectTransformedAABB(r, tnear, tfar, t_enter, t_exit)) {
             // Stochastic Ray Marching for Shadow

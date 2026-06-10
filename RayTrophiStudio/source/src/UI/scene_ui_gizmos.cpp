@@ -50,6 +50,30 @@ Backend::IViewportBackend* getGizmoViewportBackend(UIContext& ctx) {
     return dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr);
 }
 
+// World->screen projection for the viewport gizmo overlays (lights, selection box, camera,
+// force fields). Ortho-aware so these track the orthographic standard views instead of drifting
+// to the wrong place/size — perspective math is bit-identical to the previous inline code.
+// Returns false when the point should be skipped (behind a perspective camera, or degenerate).
+inline bool projectGizmoWorldPoint(const Camera& cam, bool useOrtho, float aspect_ratio,
+                                   float screen_w, float screen_h, const Vec3& point, ImVec2& out) {
+    const Vec3 fwd = (cam.lookat - cam.lookfrom).normalize();
+    const Vec3 right = fwd.cross(cam.vup).normalize();
+    const Vec3 up = right.cross(fwd).normalize();
+    const Vec3 to_pt = point - cam.lookfrom;
+    const float depth = to_pt.dot(fwd);
+    if (!useOrtho && depth <= 0.01f) return false;
+    const float local_x = to_pt.dot(right);
+    const float local_y = to_pt.dot(up);
+    const float half_h = useOrtho
+        ? (((cam.ortho_height > 1e-4f) ? cam.ortho_height : 10.0f) * 0.5f)
+        : (depth * tanf(cam.vfov * 0.5f * 3.14159265359f / 180.0f));
+    const float half_w = half_h * aspect_ratio;
+    if (fabsf(half_w) <= 1e-6f || fabsf(half_h) <= 1e-6f) return false;
+    out.x = ((local_x / half_w) * 0.5f + 0.5f) * screen_w;
+    out.y = (0.5f - (local_y / half_h) * 0.5f) * screen_h;
+    return true;
+}
+
 void updateGizmoObjectTransformOnActiveBackends(UIContext& ctx, const std::string& objectName, const Matrix4x4& transform) {
     if (objectName.empty()) return;
 
@@ -101,17 +125,19 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
     const Vec3 cam_up = cam_right.cross(cam_forward).normalize();
     const float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
     const float tan_half_fov = tanf(fov_rad * 0.5f);
+    const bool gizmoOrtho = cam.orthographic && viewport_settings.shading_mode != 2;
 
     auto projectPoint = [&](const Vec3& point, ImVec2& out, float& depth) -> bool {
         const Vec3 to_pt = point - cam.lookfrom;
         depth = to_pt.dot(cam_forward);
-        if (depth <= 0.01f) {
+        if (!gizmoOrtho && depth <= 0.01f) {
             return false;
         }
 
         const float local_x = to_pt.dot(cam_right);
         const float local_y = to_pt.dot(cam_up);
-        const float half_h = depth * tan_half_fov;
+        const float half_h = gizmoOrtho ? (((cam.ortho_height > 1e-4f) ? cam.ortho_height : 10.0f) * 0.5f)
+                                        : (depth * tan_half_fov);
         const float half_w = half_h * aspect_ratio;
         if (fabsf(half_w) <= 1e-6f || fabsf(half_h) <= 1e-6f) {
             return false;
@@ -1026,6 +1052,34 @@ void SceneUI::recenterObjectPivotToBoundsCenter(UIContext& ctx, const std::strin
 // ===============================================================================
 // SELECTION BOUNDING BOX DRAWING (Multi-selection support)
 // ===============================================================================
+bool SceneUI::bodyWorldAABB(UIContext& ctx, const std::string& node, Vec3& out_min, Vec3& out_max) {
+    const uint64_t ver = ctx.scene.bodyGeomVersion();
+    // Memo hit: stopped body (version unchanged) and not being dragged → O(1).
+    auto it = body_aabb_memo_.find(node);
+    if (!is_dragging && it != body_aabb_memo_.end() && std::get<0>(it->second) == ver) {
+        out_min = std::get<1>(it->second);
+        out_max = std::get<2>(it->second);
+        return true;
+    }
+    // Recompute from the body's OWN triangles (O(1) node lookup, NOT a scene scan).
+    auto mcit = mesh_cache.find(node);
+    if (mcit == mesh_cache.end()) return false;
+    Vec3 mn(1e30f, 1e30f, 1e30f), mx(-1e30f, -1e30f, -1e30f);
+    bool any = false;
+    for (const auto& entry : mcit->second) {
+        const auto& tri = entry.second;
+        if (!tri) continue;
+        for (int i = 0; i < 3; ++i) {
+            const Vec3 p = tri->getVertexPosition(i);
+            mn = Vec3::min(mn, p); mx = Vec3::max(mx, p); any = true;
+        }
+    }
+    if (!any) return false;
+    out_min = mn; out_max = mx;
+    body_aabb_memo_[node] = std::make_tuple(ver, mn, mx);
+    return true;
+}
+
 void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
     SceneSelection& sel = ctx.selection;
     Camera& cam = *ctx.scene.camera;
@@ -1045,25 +1099,15 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
     // FOV calculations
     float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
     float tan_half_fov = tanf(fov_rad * 0.5f);
+    // Orthographic standard views (raster preview only — Rendered path-traces in perspective).
+    const bool gizmoOrtho = cam.orthographic && viewport_settings.shading_mode != 2;
     // Helper lambda to draw an oriented box from 8 explicit corners with granular occlusion.
     // Corner order matches axis-aligned convention:
     //   0:(-,-,-) 1:(+,-,-) 2:(+,+,-) 3:(-,+,-) 4:(-,-,+) 5:(+,-,+) 6:(+,+,+) 7:(-,+,+)
     auto DrawOrientedBox = [&](const Vec3 corners[8], ImU32 color, float thickness) {
         ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
         auto ProjectPoint = [&](const Vec3& point, ImVec2& out) -> bool {
-            Vec3 to_pt = point - cam.lookfrom;
-            float depth = to_pt.dot(cam_forward);
-            if (depth <= 0.01f) return false;
-
-            float local_x = to_pt.dot(cam_right);
-            float local_y = to_pt.dot(cam_up);
-            float half_h = depth * tan_half_fov;
-            float half_w = half_h * aspect_ratio;
-            if (fabs(half_w) <= 1e-6f || fabs(half_h) <= 1e-6f) return false;
-
-            out.x = ((local_x / half_w) * 0.5f + 0.5f) * screen_w;
-            out.y = (0.5f - (local_y / half_h) * 0.5f) * screen_h;
-            return true;
+            return projectGizmoWorldPoint(cam, gizmoOrtho, aspect_ratio, screen_w, screen_h, point, out);
         };
 
         float proj_min_x = screen_w;
@@ -1121,40 +1165,14 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
             ImVec2 prev_scr;
             
             // Project start point
-            bool prev_vis = false;
-            {
-                Vec3 to_pt = prev_p - cam.lookfrom;
-                float depth = to_pt.dot(cam_forward);
-                if (depth > 0.01f) {
-                    float local_x = to_pt.dot(cam_right);
-                    float local_y = to_pt.dot(cam_up);
-                    float half_h = depth * tan_half_fov;
-                    float half_w = half_h * aspect_ratio;
-                    prev_scr.x = ((local_x / half_w) * 0.5f + 0.5f) * screen_w;
-                    prev_scr.y = (0.5f - (local_y / half_h) * 0.5f) * screen_h;
-                    prev_vis = true;
-                }
-            }
+            bool prev_vis = ProjectPoint(prev_p, prev_scr);
 
             for (int i = 1; i <= segments; ++i) {
                 float t = (float)i / (float)segments;
                 Vec3 curr_p = p_start * (1.0f - t) + p_end * t;
                 
                 ImVec2 curr_scr;
-                bool curr_vis = false;
-                
-                // Project current point
-                Vec3 to_pt = curr_p - cam.lookfrom;
-                float depth = to_pt.dot(cam_forward);
-                if (depth > 0.01f) {
-                    float local_x = to_pt.dot(cam_right);
-                    float local_y = to_pt.dot(cam_up);
-                    float half_h = depth * tan_half_fov;
-                    float half_w = half_h * aspect_ratio;
-                    curr_scr.x = ((local_x / half_w) * 0.5f + 0.5f) * screen_w;
-                    curr_scr.y = (0.5f - (local_y / half_h) * 0.5f) * screen_h;
-                    curr_vis = true;
-                }
+                bool curr_vis = ProjectPoint(curr_p, curr_scr);
 
                 if (prev_vis && curr_vis) {
                     // Check visibility of the segment midpoint
@@ -1234,14 +1252,17 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         DrawOrientedBox(corners, color, thickness);
     };
 
-    // Inline projection for hull (mirrors DrawOrientedBox::ProjectPoint).
+    // Projection for hull + per-vertex raster outline (ortho-aware). Inlined with the
+    // precomputed camera basis — this is called per mesh vertex on dense selections, so it
+    // must not re-normalize the basis every call.
     auto ProjectWorldPoint = [&](const Vec3& point, ImVec2& out) -> bool {
         Vec3 to_pt = point - cam.lookfrom;
         float depth = to_pt.dot(cam_forward);
-        if (depth <= 0.01f) return false;
+        if (!gizmoOrtho && depth <= 0.01f) return false;
         float local_x = to_pt.dot(cam_right);
         float local_y = to_pt.dot(cam_up);
-        float half_h = depth * tan_half_fov;
+        float half_h = gizmoOrtho ? (((cam.ortho_height > 1e-4f) ? cam.ortho_height : 10.0f) * 0.5f)
+                                  : (depth * tan_half_fov);
         float half_w = half_h * aspect_ratio;
         if (fabsf(half_w) <= 1e-6f || fabsf(half_h) <= 1e-6f) return false;
         out.x = ((local_x / half_w) * 0.5f + 0.5f) * screen_w;
@@ -2034,7 +2055,50 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
 
             bool drew_outline = false;
             if (item.type == SelectableType::Object && item.object) {
-                if (viewport_settings.show_selection_outline) {
+                // DrawSelectionRaster rasterizes the WHOLE mesh into a screen-space
+                // mask (plus per-edge BVH occlusion ray casts) EVERY frame — it runs
+                // even when the scene is static, which is the dominant idle CPU cost a
+                // selected body pays (10x slower with gizmos on). For a physics body we
+                // don't need that pixel-tight silhouette: draw a cheap world-AABB from
+                // the body's OWN verts instead. It tracks the body when it moves and
+                // costs effectively nothing when static. Applies whether playing or not.
+                bool is_body = false;
+                {
+                    const std::string& bn = item.object->nodeName;
+                    for (const auto& rb : ctx.scene.rigid_bodies) {
+                        if (rb.enabled && rb.source_name == bn) { is_body = true; break; }
+                    }
+                }
+                if (is_body) {
+                    if (viewport_settings.show_selection_outline) {
+                        Vec3 mn, mx;
+                        // Memoized world-AABB: a STOPPED body recomputes only when its
+                        // geometry version changes, so it costs O(1)/frame at idle (the
+                        // per-frame triangle walk was the ~6% idle CPU the user saw).
+                        if (bodyWorldAABB(ctx, item.object->nodeName, mn, mx)) {
+                            // Plain, occlusion-FREE border. DrawBoundingBox/DrawOrientedBox
+                            // run per-edge BVH occlusion ray casts (96/frame for a small
+                            // box) even when static — exactly the constant CPU we're
+                            // killing. 12 straight AddLine calls cost nothing.
+                            const Vec3 cs[8] = {
+                                Vec3(mn.x, mn.y, mn.z), Vec3(mx.x, mn.y, mn.z),
+                                Vec3(mx.x, mx.y, mn.z), Vec3(mn.x, mx.y, mn.z),
+                                Vec3(mn.x, mn.y, mx.z), Vec3(mx.x, mn.y, mx.z),
+                                Vec3(mx.x, mx.y, mx.z), Vec3(mn.x, mx.y, mx.z)
+                            };
+                            const int eds[12][2] = {
+                                {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7}
+                            };
+                            ImDrawList* dl = ImGui::GetBackgroundDrawList();
+                            for (const auto& ed : eds) {
+                                ImVec2 a, b;
+                                if (ProjectWorldPoint(cs[ed[0]], a) && ProjectWorldPoint(cs[ed[1]], b))
+                                    dl->AddLine(a, b, color, thickness);
+                            }
+                        }
+                    }
+                    drew_outline = true;  // cheap bbox (or outline off) — skip raster/hull
+                } else if (viewport_settings.show_selection_outline) {
                     std::string outlineName = item.object->nodeName;
                     if (outlineName.empty()) outlineName = "Unnamed";
                     // Prefer  rasterized outline (concave-tight, occlusion
@@ -2116,22 +2180,13 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
     float aspect = (image_height > 0)
         ? (static_cast<float>(image_width) / static_cast<float>(image_height))
         : (io.DisplaySize.x / io.DisplaySize.y);
+    const bool gizmoOrtho = cam.orthographic && viewport_settings.shading_mode != 2;
 
     auto Project = [&](const Vec3& p) -> ImVec2 {
-        Vec3 to_point = p - cam.lookfrom;
-        float depth = to_point.dot(cam_forward);
-        if (depth <= 0.1f) return ImVec2(-10000, -10000);
-
-        float local_x = to_point.dot(cam_right);
-        float local_y = to_point.dot(cam_up);
-
-        float half_h = depth * tan_half_fov;
-        float half_w = half_h * aspect;
-
-        return ImVec2(
-            ((local_x / half_w) * 0.5f + 0.5f) * io.DisplaySize.x,
-            (0.5f - (local_y / half_h) * 0.5f) * io.DisplaySize.y
-        );
+        ImVec2 out;
+        if (!projectGizmoWorldPoint(cam, gizmoOrtho, aspect, io.DisplaySize.x, io.DisplaySize.y, p, out))
+            return ImVec2(-10000, -10000);
+        return out;
         };
 
     auto IsOnScreen = [](const ImVec2& v) { return v.x > -5000; };
@@ -2344,7 +2399,12 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     // in the hierarchy. Calling BeginFrame/SetRect before any early return resets
     // that stale hover state and keeps viewport picking responsive after deletes.
     ImGuizmo::BeginFrame();
-    ImGuizmo::SetOrthographic(false);
+    // Match the viewport projection so the gizmo overlays the geometry. Orthographic only applies
+    // to the raster preview modes (Solid/Matcap/Preview); the Rendered viewport (shading_mode==2)
+    // path-traces in PERSPECTIVE even under a standard view, so the gizmo must stay perspective there.
+    const bool gizmoUseOrtho = ctx.scene.camera && ctx.scene.camera->orthographic &&
+                               viewport_settings.shading_mode != 2;
+    ImGuizmo::SetOrthographic(gizmoUseOrtho);
     ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
 
     if (!sel.hasSelection() || !sel.show_gizmo || !ctx.scene.camera) return;
@@ -2383,17 +2443,57 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     // �������������������������������������������������������������������������
     // Build Projection Matrix (Perspective)
     // �������������������������������������������������������������������������
-    float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
     float near_plane = 0.1f;
     float far_plane = 10000.0f;
-    float tan_half_fov = tanf(fov_rad * 0.5f);
+    // Kept at function scope: also used by the drag-speed (pixel->world) math below.
+    float tan_half_fov = tanf(cam.vfov * 3.14159265359f / 180.0f * 0.5f);
 
     float projMatrix[16] = { 0 };
-    projMatrix[0] = 1.0f / (aspect_ratio * tan_half_fov);
-    projMatrix[5] = 1.0f / tan_half_fov;
-    projMatrix[10] = -(far_plane + near_plane) / (far_plane - near_plane);
-    projMatrix[11] = -1.0f;
-    projMatrix[14] = -(2.0f * far_plane * near_plane) / (far_plane - near_plane);
+    if (gizmoUseOrtho) {
+        // GL-style orthographic (parallel) projection so the gizmo matches the ortho viewport.
+        const float orthoH = (cam.ortho_height > 1e-4f) ? cam.ortho_height : 10.0f;
+        const float orthoW = orthoH * aspect_ratio;
+        projMatrix[0]  = 2.0f / orthoW;
+        projMatrix[5]  = 2.0f / orthoH;
+        projMatrix[10] = -2.0f / (far_plane - near_plane);
+        projMatrix[14] = -(far_plane + near_plane) / (far_plane - near_plane);
+        projMatrix[15] = 1.0f;
+    } else {
+        projMatrix[0] = 1.0f / (aspect_ratio * tan_half_fov);
+        projMatrix[5] = 1.0f / tan_half_fov;
+        projMatrix[10] = -(far_plane + near_plane) / (far_plane - near_plane);
+        projMatrix[11] = -1.0f;
+        projMatrix[14] = -(2.0f * far_plane * near_plane) / (far_plane - near_plane);
+    }
+
+    // Gizmo sizing. Perspective keeps ImGuizmo's default constant *screen* size. Orthographic
+    // ties the gizmo to the selected object's *world* size, so it scales together with the
+    // geometry when zooming (ortho zoom changes ortho_height, not camera distance) instead of
+    // staying a fixed screen size that no longer matches a zoomed-in object.
+    if (gizmoUseOrtho) {
+        // Determine a zoom-INVARIANT world size for the selection so the gizmo stays a constant
+        // world size (scales with the geometry on ortho zoom). cached_aabb is world-space and
+        // covers every selection type; bodyWorldAABB is the object fallback; then a fixed default.
+        float worldSize = 0.0f;
+        if (sel.selected.has_cached_aabb) {
+            worldSize = (sel.selected.cached_aabb.max - sel.selected.cached_aabb.min).length();
+        }
+        if (worldSize < 1e-4f && sel.selected.type == SelectableType::Object && sel.selected.object) {
+            Vec3 bmin, bmax;
+            if (bodyWorldAABB(ctx, sel.selected.object->nodeName, bmin, bmax))
+                worldSize = (bmax - bmin).length();
+        }
+        if (worldSize < 1e-4f) worldSize = 1.0f; // last resort — still a fixed world size (scales with zoom)
+        const float orthoW = ((cam.ortho_height > 1e-4f) ? cam.ortho_height : 10.0f) * aspect_ratio;
+        // mGizmoSizeClipSpace = desiredWorldSize * (NDC units per world unit) so mScreenFactor
+        // (= clipSpace / rightLength) resolves to a constant world size that scales with zoom.
+        // Clamp to a sane on-screen fraction so it never vanishes or fills the viewport at zoom
+        // extremes, while still scaling between those bounds.
+        const float gizmoClip = std::clamp((worldSize * 0.6f) * (2.0f / orthoW), 0.04f, 0.45f);
+        ImGuizmo::SetGizmoSizeClipSpace(gizmoClip);
+    } else {
+        ImGuizmo::SetGizmoSizeClipSpace(0.1f); // ImGuizmo default (constant screen size)
+    }
 
     auto Project = [&](Vec3 p) -> ImVec2 {
         float x = p.x, y = p.y, z = p.z;
@@ -2584,6 +2684,11 @@ mesh_edit_changed_confirmed:
     }
 
     float objectMatrix[16];
+    // While a physics body is sim-driven (timeline playing) we suppress the
+    // interactive gizmo entirely — repositioning it on the moving geometry cost a
+    // whole-scene vertex walk every frame. drawSelectionBoundingBox draws a cheap
+    // live bbox instead. Set in the Object branch below, consumed at Manipulate().
+    bool skip_body_gizmo = false;
     Vec3 pos = sel.selected.position;
 
     // AreaLight: position zaten merkez noktas\u0131, ek offset gerekli de\u011fil
@@ -2782,6 +2887,41 @@ mesh_edit_changed_confirmed:
         auto transform = sel.selected.object->getTransformHandle();
         if (transform) {
             Matrix4x4 mat = transform->getPivotMatrix();
+
+            // Body-simulated objects move their GEOMETRY (vertex baking) but leave
+            // the transform handle at the spawn pose, so getPivotMatrix would leave
+            // the gizmo behind the moving object. Re-center the gizmo on the object's
+            // LIVE world-vertex AABB (translation only, keeping the spawn orientation)
+            // so it sits on the object regardless of where the authored pivot point
+            // is — using the rigid pivot pose instead would chase the pivot POINT,
+            // which on imported meshes is often far from the visible geometry.
+            const std::string node = sel.selected.object->getNodeName();
+            if (!node.empty()) {
+                bool is_body = false;
+                for (const auto& rb : ctx.scene.rigid_bodies) {
+                    if (rb.enabled && rb.source_name == node) { is_body = true; break; }
+                }
+                if (is_body) {
+                    if (timeline.isPlaying()) {
+                        // Sim-driven: skip the interactive gizmo (and its per-frame
+                        // vertex walk). The cheap live bbox in drawSelectionBoundingBox
+                        // is the selection indicator while playing.
+                        skip_body_gizmo = true;
+                    } else {
+                        // Idle: re-center on the body's live world-AABB so the gizmo sits
+                        // on the object regardless of where the authored pivot is. The
+                        // memoized AABB (recomputed only when the body's geometry version
+                        // changes) keeps a STOPPED body at O(1)/frame — the per-frame
+                        // triangle walk here was the residual idle CPU cost.
+                        Vec3 mn, mx;
+                        if (bodyWorldAABB(ctx, node, mn, mx)) {
+                            const Vec3 c = (mn + mx) * 0.5f;
+                            mat.m[0][3] = c.x; mat.m[1][3] = c.y; mat.m[2][3] = c.z;
+                        }
+                    }
+                }
+            }
+
             objectMatrix[0] = mat.m[0][0]; objectMatrix[1] = mat.m[1][0]; objectMatrix[2] = mat.m[2][0]; objectMatrix[3] = mat.m[3][0];
             objectMatrix[4] = mat.m[0][1]; objectMatrix[5] = mat.m[1][1]; objectMatrix[6] = mat.m[2][1]; objectMatrix[7] = mat.m[3][1];
             objectMatrix[8] = mat.m[0][2]; objectMatrix[9] = mat.m[1][2]; objectMatrix[10] = mat.m[2][2]; objectMatrix[11] = mat.m[3][2];
@@ -3176,7 +3316,11 @@ mesh_edit_changed_confirmed:
     oldMat.m[0][2] = objectMatrix[8]; oldMat.m[1][2] = objectMatrix[9]; oldMat.m[2][2] = objectMatrix[10]; oldMat.m[3][2] = objectMatrix[11];
     oldMat.m[0][3] = objectMatrix[12]; oldMat.m[1][3] = objectMatrix[13]; oldMat.m[2][3] = objectMatrix[14]; oldMat.m[3][3] = objectMatrix[15];
 
-    bool manipulated = ImGuizmo::Manipulate(viewMatrix, projMatrix, operation, mode, objectMatrix);
+    // Sim-driven bodies suppress the interactive gizmo (no per-frame vertex walk);
+    // the live bbox in drawSelectionBoundingBox stands in for it while playing.
+    bool manipulated = skip_body_gizmo
+        ? false
+        : ImGuizmo::Manipulate(viewMatrix, projMatrix, operation, mode, objectMatrix);
 
     if (manipulated && is_mixed_group) {
         // Update persistent matrix for next frame interaction
@@ -3217,8 +3361,11 @@ mesh_edit_changed_confirmed:
             } else {   
 
             float dist_to_cam = (oldGizmoPos - cam.lookfrom).length();
-            // Estimate world size of 1 pixel at object depth
-            float pixel_world_size = dist_to_cam * (2.0f * tan_half_fov) / io.DisplaySize.y;
+            // Estimate world size of 1 pixel at object depth. Under orthographic projection the
+            // pixel size is constant (set by ortho_height), independent of depth.
+            float pixel_world_size = gizmoUseOrtho
+                ? (((cam.ortho_height > 1e-4f) ? cam.ortho_height : 10.0f) / io.DisplaySize.y)
+                : (dist_to_cam * (2.0f * tan_half_fov) / io.DisplaySize.y);
 
             float mouse_move_len = sqrtf(io.MouseDelta.x * io.MouseDelta.x + io.MouseDelta.y * io.MouseDelta.y);
             if (mouse_move_len < 1.0f) mouse_move_len = 1.0f;
@@ -3889,26 +4036,10 @@ void SceneUI::drawCameraGizmos(UIContext& ctx) {
         ? (static_cast<float>(image_width) / static_cast<float>(image_height))
         : (screen_w / screen_h);
 
-    // Lambda to project 3D point to screen
+    const bool gizmoOrtho = activeCam.orthographic && viewport_settings.shading_mode != 2;
+    // Lambda to project 3D point to screen (ortho-aware)
     auto Project = [&](const Vec3& world_pos, ImVec2& screen_pos) -> bool {
-        Vec3 to_point = world_pos - activeCam.lookfrom;
-        float depth = to_point.dot(cam_forward);
-        if (depth < 0.1f) return false;  // Behind camera
-
-        float local_x = to_point.dot(cam_right);
-        float local_y = to_point.dot(cam_up);
-
-        float half_height = depth * tan_half_fov;
-        float half_width = half_height * aspect;
-
-        float ndc_x = local_x / half_width;
-        float ndc_y = local_y / half_height;
-
-        if (fabs(ndc_x) > 1.2f || fabs(ndc_y) > 1.2f) return false;  // Outside frustum
-
-        screen_pos.x = (ndc_x * 0.5f + 0.5f) * screen_w;
-        screen_pos.y = (0.5f - ndc_y * 0.5f) * screen_h;
-        return true;
+        return projectGizmoWorldPoint(activeCam, gizmoOrtho, aspect, screen_w, screen_h, world_pos, screen_pos);
         };
 
     // Draw each non-active camera with 3D frustum
@@ -4018,16 +4149,13 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
     float aspect = (image_height > 0)
         ? (static_cast<float>(image_width) / static_cast<float>(image_height))
         : (io.DisplaySize.x / io.DisplaySize.y);
+    const bool gizmoOrtho = cam.orthographic && viewport_settings.shading_mode != 2;
 
     auto Project = [&](const Vec3& p) -> ImVec2 {
-        Vec3 to_point = p - cam.lookfrom;
-        float depth = to_point.dot(cam_forward);
-        if (depth <= 0.1f) return ImVec2(-10000, -10000);
-        float local_x = to_point.dot(cam_right);
-        float local_y = to_point.dot(cam_up);
-        float half_h = depth * tan_half_fov;
-        float half_w = half_h * aspect;
-        return ImVec2(((local_x / half_w) * 0.5f + 0.5f) * io.DisplaySize.x, (0.5f - (local_y / half_h) * 0.5f) * io.DisplaySize.y);
+        ImVec2 out;
+        if (!projectGizmoWorldPoint(cam, gizmoOrtho, aspect, io.DisplaySize.x, io.DisplaySize.y, p, out))
+            return ImVec2(-10000, -10000);
+        return out;
     };
 
     for (const auto& ff : ctx.scene.force_field_manager.force_fields) {
@@ -4137,6 +4265,38 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
                         if (i > 0 && p_screen.x > -5000 && last_p.x > -5000) {
                             draw_list->AddLine(last_p, p_screen, IM_COL32(255, 0, 255, 80), 1.0f);
                         }
+                        last_p = p_screen;
+                    }
+                }
+            }
+        }
+    }
+
+    // Cloth/soft pin regions of the SELECTED body: small cyan wire spheres so the
+    // user sees what is held fixed (authored from Edit-Mesh vertex selection).
+    if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+        const std::string& sel_node = sel.selected.object->getNodeName();
+        for (const auto& rb : ctx.scene.rigid_bodies) {
+            if (rb.kind == RayTrophiSim::BodyKind::Rigid) continue;
+            if (rb.source_name != sel_node || rb.soft_pins.empty()) continue;
+            for (const auto& pin : rb.soft_pins) {
+                if (!pin.enabled) continue;
+                const float r = pin.radius;
+                const ImU32 pin_col = IM_COL32(80, 230, 255, 220);
+                ImVec2 c = Project(pin.center);
+                if (c.x > -5000) draw_list->AddCircleFilled(c, 3.0f, pin_col);
+                for (int plane = 0; plane < 3; ++plane) {
+                    const int segs = 20;
+                    ImVec2 last_p;
+                    for (int i = 0; i <= segs; ++i) {
+                        float a = i * (6.28318f / segs);
+                        Vec3 p3d;
+                        if (plane == 0)      p3d = pin.center + Vec3(cosf(a)*r, sinf(a)*r, 0);
+                        else if (plane == 1) p3d = pin.center + Vec3(cosf(a)*r, 0, sinf(a)*r);
+                        else                 p3d = pin.center + Vec3(0, cosf(a)*r, sinf(a)*r);
+                        ImVec2 p_screen = Project(p3d);
+                        if (i > 0 && p_screen.x > -5000 && last_p.x > -5000)
+                            draw_list->AddLine(last_p, p_screen, pin_col, 1.0f);
                         last_p = p_screen;
                     }
                 }

@@ -44,6 +44,7 @@
 #include <utility>
 #include <unordered_map>
 #include <map>
+#include <array>
 #include <unordered_set>
 #include <filesystem>
 
@@ -80,6 +81,14 @@ struct SceneData {
     // =========================================================================
     HittableList world;                                    // All renderable objects
     std::shared_ptr<Hittable> bvh;                         // Acceleration structure
+    // Separate, synchronously-rebuilt BVH holding ONLY discrete sim particles
+    // (InstanceManager transient groups) for the CPU reference renderer. Kept out
+    // of the async `bvh` because particles move every frame: the async build's
+    // topology-generation guard discards every in-flight result during playback,
+    // so particles would freeze. This small particle-only structure rebuilds in a
+    // few ms on the main thread each frame they move; the CPU integrator queries it
+    // alongside `bvh`. Null when there are no live particles.
+    std::shared_ptr<Hittable> particle_bvh;
     
     // Non-destructive Modeling Cache
     std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>> base_mesh_cache; // nodeName -> list of Triangles
@@ -636,8 +645,117 @@ struct SceneData {
     struct FluidCouplingField {
         const FluidSim::FluidGrid* grid = nullptr;  // borrowed (within-step only)
         std::vector<float> sdf;                       // sim-res level set (phi<0 inside)
+        // Per-XZ-column free-surface height (world Y), size nx*nz, indexed
+        // i + k*nx. -1e30 marks a dry column. Lets the rigid sampler measure
+        // submersion against where the surface IS rather than against the
+        // particle field a sunk body has displaced out of its own cells.
+        std::vector<float> surface_h;
     };
     std::vector<FluidCouplingField> fluid_coupling_fields_;
+
+    // Soft-body weld topology cache (node -> mesh mapping). Built by the soft mesh
+    // resolver so the writer can scatter the solver's UNIQUE deformed vertices back
+    // to every (shared) triangle corner. Keyed by source nodeName.
+    struct SoftWeldCache {
+        std::vector<std::shared_ptr<Triangle>> tris;  // triangles for this node, in order
+        std::vector<uint32_t> corner_unique;          // 3 per triangle: unique vertex idx per corner
+        std::vector<Vec3> rest_world_unique;          // rest WORLD pos per unique vertex (Jolt seed + reference)
+        std::size_t unique_count = 0;                 // welded vertex count (== solver vertex count)
+        // True bind-pose LOCAL positions/normals captured at resolve time (the writer
+        // overwrites `original` with the deformed-local geometry the BLAS reads, so we
+        // keep the rest here to restore on reset). Parallel to `tris`, 3 per triangle.
+        std::vector<std::array<Vec3, 3>> rest_local_pos;
+        std::vector<std::array<Vec3, 3>> rest_local_nrm;
+        uint64_t geometry_generation = 0;             // g_scene_geometry_generation when captured
+    };
+    std::unordered_map<std::string, SoftWeldCache> soft_weld_cache_;
+    // Rest-pose cache for RIGID bodies that render via vertex baking (see
+    // applyRigidBakedTransform). Kept SEPARATE from soft_weld_cache_ so the soft
+    // kind==Rigid guards and the soft frame/disk caches never see rigid nodes. Only
+    // tris + rest_local_pos/nrm are populated (rigid needs no welding/Jolt seed).
+    std::unordered_map<std::string, SoftWeldCache> rigid_bake_cache_;
+
+    // ── Per-mesh deform refit (Vulkan RT perf) ───────────────────────────────
+    // A simulated body bakes new verts into its source mesh EVERY step. Routing
+    // that through markDirty(Geometry) made the Vulkan render loop destroy + rebuild
+    // EVERY BLAS in the scene per frame (rebuildAccelerationStructure) — so one body
+    // in a crowded scene froze playback. When the active render backend is Vulkan RT
+    // we instead record the changed node here and refit ONLY its BLAS in place
+    // (updateInteractiveMesh) from the render loop; other backends keep the proven
+    // full-rebuild path. Set per-frame by Main via setDeformRefitViaVulkan().
+    std::unordered_set<std::string> pending_deform_nodes_;
+    bool deform_refit_via_vulkan_ = false;
+    // Bumped whenever ANY body's mesh verts change (sim write-back / reset). The
+    // selection gizmo/outline memoizes a body's world-AABB against this so a STATIC
+    // (stopped) body costs O(1) per frame instead of re-walking its triangles every
+    // frame — that per-frame walk was why a selected body pinned the idle UI at ~6%
+    // CPU while a plain (bbox-cached) object stayed at ~0%.
+    uint64_t body_geom_version_ = 1;
+    bool ui_mesh_cache_rebuild_request_ = false;  // see requestUiMeshCacheRebuild()
+
+    // Free-surface height (world Y) the fluid reaches AROUND a world point — the
+    // MAX column surface over a small XZ neighbourhood, NOT the local column top.
+    // A floating/sunk body displaces fluid out of its own column, so that
+    // column's top reads at the body's underside (or is dry); the body's true
+    // submersion reference is the SURROUNDING water level, which the neighbourhood
+    // max recovers. Robust for both floaters (surrounding waterline) and sunk
+    // bodies (the tank surface above them). Returns -1e30 if no fluid is near.
+    float sampleFluidColumnSurface(const FluidCouplingField& f, const Vec3& wp) const {
+        if (!f.grid) return -1.0e30f;
+        const auto& g = *f.grid;
+        if (f.surface_h.size() != static_cast<size_t>(g.nx) * g.nz) return -1.0e30f;
+        const int ic = static_cast<int>(std::floor((wp.x - g.origin.x) / g.voxel_size));
+        const int kc = static_cast<int>(std::floor((wp.z - g.origin.z) / g.voxel_size));
+        constexpr int R = 3;  // ~few cells reaches open water beside a small body
+        float best = -1.0e30f;
+        for (int dk = -R; dk <= R; ++dk) {
+            const int k = kc + dk;
+            if (k < 0 || k >= g.nz) continue;
+            for (int di = -R; di <= R; ++di) {
+                const int i = ic + di;
+                if (i < 0 || i >= g.nx) continue;
+                const float h = f.surface_h[static_cast<size_t>(i) + static_cast<size_t>(k) * g.nx];
+                if (h > best) best = h;
+            }
+        }
+        return best;
+    }
+
+    // AMBIENT (wave) fluid velocity around a world point. A floating/submerged body
+    // displaces fluid out of its own cells AND the solver stamps the body's own
+    // velocity (solid_vel) into them, so sampling the grid velocity AT the body
+    // reads ~the body's own motion → zero relative velocity → drag can only damp
+    // the body, never let WAVES drag it. Instead we average the grid velocity over
+    // genuine-fluid samples in a small neighbourhood (the surrounding water column
+    // + sides + below), which carries the wave flow. Returns false if no fluid is
+    // near (point not really in/under water). voxel-scaled offsets, cheap (8 taps).
+    bool sampleFluidAmbientVelocity(const FluidCouplingField& f, const Vec3& wp, Vec3& out_vel) const {
+        if (!f.grid) return false;
+        const auto& g = *f.grid;
+        const float h = g.voxel_size;
+        const Vec3 taps[8] = {
+            Vec3(0.0f, 0.0f, 0.0f),
+            Vec3( 2.0f * h, 0.0f, 0.0f), Vec3(-2.0f * h, 0.0f, 0.0f),
+            Vec3(0.0f, 0.0f,  2.0f * h), Vec3(0.0f, 0.0f, -2.0f * h),
+            Vec3(0.0f, -1.5f * h, 0.0f), Vec3(0.0f, -3.0f * h, 0.0f),
+            Vec3(0.0f,  1.0f * h, 0.0f)
+        };
+        Vec3 acc(0.0f, 0.0f, 0.0f);
+        int n = 0;
+        for (const Vec3& o : taps) {
+            const Vec3 p = wp + o;
+            if (g.sampleCellCentered(f.sdf, p) < 0.0f) {  // genuine fluid (not cavity/air)
+                const Vec3 v = g.sampleVelocity(p);
+                if (std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z)) {
+                    acc = acc + v;
+                    ++n;
+                }
+            }
+        }
+        if (n == 0) return false;
+        out_vel = acc * (1.0f / static_cast<float>(n));
+        return true;
+    }
 
     std::string rigidBodyProxyColliderName(const std::string& node_name) const {
         return node_name.empty() ? "Rigid Body Proxy Collider" : node_name + " Rigid Body Proxy Collider";
@@ -803,12 +921,26 @@ struct SceneData {
                 if (!resolveObjectOBBForSimulation(collider->source_name, obb)) return false;
                 const Vec3 mn = obb.local_bounds_min;
                 const Vec3 mx = obb.local_bounds_max;
-                out_shape = RayTrophiSim::RigidBodyShape::Box;
+                // ObjectOBB stays an oriented box. The mesh-derived modes (SDF /
+                // convex-decomp / mesh-BVH) want the ACTUAL mesh boundary, so route
+                // them to the Mesh shape (exact triangle mesh when static, convex
+                // hull when dynamic). The OBB-derived half-extents/pose below are
+                // still emitted: they are the fluid-coupling volume fallback and the
+                // shape used if the source triangles can't be resolved this tick.
+                out_shape = (collider->source_mode ==
+                             RayTrophiSim::ParticleColliderSourceMode::ObjectOBB)
+                                ? RayTrophiSim::RigidBodyShape::Box
+                                : RayTrophiSim::RigidBodyShape::Mesh;
                 out_half = (mx - mn) * 0.5f;
                 out_half.x = std::max(out_half.x, kMinHalf);
                 out_half.y = std::max(out_half.y, kMinHalf);
                 out_half.z = std::max(out_half.z, kMinHalf);
-                const Vec3 center_world = obb.local_to_world * ((mn + mx) * 0.5f);
+                // POINT transform (must include the centroid translation). Using
+                // operator* (vector transform, drops translation) placed the box
+                // centre at ~world origin instead of the object's centre; the
+                // re-pose then swung the body around the world origin the instant
+                // it rotated (rotated source object "jumped to -Y").
+                const Vec3 center_world = obb.local_to_world.transform_point((mn + mx) * 0.5f);
                 out_box_pose = obb.local_to_world;
                 out_box_pose.m[0][3] = center_world.x;
                 out_box_pose.m[1][3] = center_world.y;
@@ -822,6 +954,13 @@ struct SceneData {
     void syncRigidBodyProxyColliders() {
         for (auto& rb : rigid_bodies) {
             if (!rb.enabled) {
+                removeRigidBodyProxyColliders(rb.source_name);
+                continue;
+            }
+            // Only Rigid bodies expose a proxy collider so the fluid/particle
+            // solver can see them. Soft / Cloth bodies are deformable (and not
+            // simulated yet) — a rigid box proxy would misrepresent them.
+            if (rb.kind != RayTrophiSim::BodyKind::Rigid) {
                 removeRigidBodyProxyColliders(rb.source_name);
                 continue;
             }
@@ -963,7 +1102,11 @@ struct SceneData {
                     out_half.y = std::max(out_half.y, kMinHalf);
                     out_half.z = std::max(out_half.z, kMinHalf);
                     const Vec3 c_local = (mn + mx) * 0.5f;
-                    const Vec3 center_world = obb.local_to_world * c_local;  // point transform
+                    // POINT transform (include centroid translation). operator* is a
+                    // vector transform that DROPS translation, which put the box
+                    // centre at ~world origin → the body swung around the origin as
+                    // soon as it rotated (rotated source "jumped to -Y" then rose).
+                    const Vec3 center_world = obb.local_to_world.transform_point(c_local);
                     out_box_pose = obb.local_to_world;  // keep orthonormal rotation columns
                     out_box_pose.m[0][3] = center_world.x;
                     out_box_pose.m[1][3] = center_world.y;
@@ -1016,6 +1159,51 @@ struct SceneData {
                     Core::RenderStateManager::instance().markDirty(Core::DirtyScope::Transforms);
                 });
 
+            // Rigid render write-back: bake the body's world-space rigid delta into
+            // the source mesh verts (NOT the transform handle — that corrupted
+            // imported/non-TRS meshes from frame 0). Mirrors the soft render path but
+            // preserves authored per-corner normals. See applyRigidBakedTransform.
+            rigid_body_system->setRigidMeshBaker(
+                [this](const std::string& node, const Matrix4x4& world_delta) {
+                    applyRigidBakedTransform(node, world_delta);
+                });
+
+            // ── Soft-body geometry I/O ────────────────────────────────────────
+            // resolver(): (re)build the weld cache from the rest mesh and hand Jolt
+            // the unique rest world vertices + face indices. The weld key is the REST
+            // world position (transform * original), stable across the sim (we never
+            // touch a soft source's transform/original), so shared corners collapse to
+            // one particle and the mesh stays connected. See rebuildSoftWeldCache.
+            rigid_body_system->setSoftMeshResolver(
+                [this](const RayTrophiSim::RigidBodyObject& rb,
+                       std::vector<Vec3>& out_vertices,
+                       std::vector<uint32_t>& out_indices) -> bool {
+                    if (!rebuildSoftWeldCache(rb.source_name)) return false;
+                    const SoftWeldCache& cache = soft_weld_cache_[rb.source_name];
+                    out_vertices = cache.rest_world_unique;
+                    out_indices = cache.corner_unique;
+                    return out_vertices.size() >= 3;
+                });
+
+            // writer(): scatter the solver's unique deformed vertices back onto every
+            // triangle corner. The GPU BLAS is built from LOCAL vertices
+            // (getOriginalVertexPosition) + the object's instance transform, so the
+            // deformation must go into `original` (= inverse(transform) * world); we
+            // also set `position` (world) so the CPU/world paths agree. Then request a
+            // geometry rebuild. A hand-rolled flat normal per triangle (Vec3::normalize
+            // zeroes tiny vectors, which would blank thin triangles).
+            rigid_body_system->setSoftMeshWriter(
+                [this](const std::string& node, const std::vector<Vec3>& world_verts) {
+                    applySoftDeformedVerts(node, world_verts);
+                });
+
+            // resetToRest(): the writer overwrote each triangle's `original` (local)
+            // with the deformed geometry, so restore the cached bind-pose local first,
+            // then recompute world positions; finally drop the cache so the next create
+            // re-resolves a clean rest.
+            rigid_body_system->setSoftMeshResetToRest(
+                [this](const std::string& node) { restoreSoftRestMesh(node); });
+
             // ── Rigid-fluid coupling (buoyancy + drag) ────────────────────────
             // prepare(): once per step (only when a coupled body exists), rebuild
             // a sim-resolution coupling level set for EVERY fluid source — both
@@ -1048,6 +1236,48 @@ struct SceneData {
                     FluidCouplingField field;
                     field.grid = &grid;
                     if (RayTrophiSim::Fluid::buildLevelSet(parts, grid, lp, field.sdf, nullptr)) {
+                        // Per-column free-surface height: scan each XZ column from
+                        // the top down for the highest fluid cell (phi<0) and
+                        // refine to the zero-crossing into the cell above. This is
+                        // the height fluid reaches in that column independent of
+                        // any cavity a sunk body carved, so submersion stays
+                        // correct for fully submerged bodies.
+                        const int gnx = grid.nx, gny = grid.ny, gnz = grid.nz;
+                        const float vs = grid.voxel_size;
+                        const float oy = grid.origin.y;
+                        field.surface_h.assign(static_cast<size_t>(gnx) * gnz, -1.0e30f);
+                        for (int k = 0; k < gnz; ++k) {
+                            for (int i = 0; i < gnx; ++i) {
+                                int j_top = -1;
+                                for (int j = gny - 1; j >= 0; --j) {
+                                    if (field.sdf[static_cast<size_t>(i) +
+                                                  static_cast<size_t>(j) * gnx +
+                                                  static_cast<size_t>(k) * gnx * gny] < 0.0f) {
+                                        j_top = j;
+                                        break;
+                                    }
+                                }
+                                if (j_top < 0) continue;  // dry column
+                                float surf = oy + (j_top + 0.5f) * vs;  // top fluid cell centre
+                                if (j_top + 1 < gny) {
+                                    const float phi0 = field.sdf[static_cast<size_t>(i) +
+                                        static_cast<size_t>(j_top) * gnx +
+                                        static_cast<size_t>(k) * gnx * gny];
+                                    const float phi1 = field.sdf[static_cast<size_t>(i) +
+                                        static_cast<size_t>(j_top + 1) * gnx +
+                                        static_cast<size_t>(k) * gnx * gny];
+                                    if (phi1 > phi0) {
+                                        float frac = -phi0 / (phi1 - phi0);
+                                        frac = std::min(1.0f, std::max(0.0f, frac));
+                                        surf += frac * vs;
+                                    }
+                                } else {
+                                    surf = oy + gny * vs;  // fluid reaches domain top
+                                }
+                                field.surface_h[static_cast<size_t>(i) +
+                                                static_cast<size_t>(k) * gnx] = surf;
+                            }
+                        }
                         fluid_coupling_fields_.push_back(std::move(field));
                     }
                 };
@@ -1068,8 +1298,9 @@ struct SceneData {
                 }
             });
 
-            // sampler(): query the fluid at a world point. signed_distance < 0 =>
-            // submerged; velocity drives drag. Reads the fields prepare() built.
+            // sampler(): query the fluid at a world point. signed_distance is the
+            // point's height relative to the free SURFACE in its column (<0 below
+            // it); velocity drives drag. Reads the fields prepare() built.
             rigid_body_system->setFluidSampler(
                 [this](const Vec3& wp,
                        RayTrophiSim::RigidBodySystem::FluidSample& out) -> bool {
@@ -1080,10 +1311,28 @@ struct SceneData {
                         if (f.sdf.size() != cells) continue;  // stale size guard
                         Vec3 lo, hi;
                         g.getWorldBounds(lo, hi);
-                        if (wp.x < lo.x || wp.y < lo.y || wp.z < lo.z ||
-                            wp.x > hi.x || wp.y > hi.y || wp.z > hi.z) continue;
-                        out.signed_distance = g.sampleCellCentered(f.sdf, wp);
-                        out.velocity = g.sampleVelocity(wp);
+                        // Only the XZ footprint must be in-domain — a body falling
+                        // from above the domain top is "not submerged" (handled by
+                        // the surface height), not "outside the fluid".
+                        if (wp.x < lo.x || wp.z < lo.z || wp.x > hi.x || wp.z > hi.z) continue;
+
+                        // Submersion vs the free surface, NOT vs the particle field
+                        // at this interior point (a sunk body displaces particles
+                        // out of its own cells, so that test gave zero buoyancy).
+                        const float surf = sampleFluidColumnSurface(f, wp);
+                        if (surf <= -1.0e30f) continue;  // no fluid in this column area
+                        out.signed_distance = wp.y - surf;  // <0 => below surface
+
+                        // Velocity for drag = the AMBIENT (wave) flow in the water
+                        // AROUND the body, not the grid velocity AT the sample point.
+                        // The body's own cells are solid (cavity) and carry the
+                        // body's stamped velocity, so sampling there gives ~zero
+                        // relative velocity and waves can't drag it. The neighbourhood
+                        // average picks up the surrounding wave flow; if no fluid is
+                        // near, fall back to still water (0 → drag just damps).
+                        Vec3 amb;
+                        out.velocity = sampleFluidAmbientVelocity(f, wp, amb)
+                                           ? amb : Vec3(0.0f, 0.0f, 0.0f);
                         out.valid = true;
                         return true;
                     }
@@ -1132,10 +1381,64 @@ struct SceneData {
         return &rigid_bodies.back();
     }
 
+    // Mark a scene object as a deformable body (soft body or cloth). Mirrors
+    // addRigidBodyForObject but sets `kind`; foundation only — the soft solver is
+    // not wired yet, so the body is authored/serialized but inert. Returns the
+    // descriptor (existing one converted in place if the object already has one).
+    RayTrophiSim::RigidBodyObject* addSoftBodyForObject(const std::string& node_name,
+                                                        RayTrophiSim::BodyKind kind = RayTrophiSim::BodyKind::SoftBody) {
+        if (node_name.empty()) return nullptr;
+        ensureRigidBodySystem();
+        const char* suffix = (kind == RayTrophiSim::BodyKind::Cloth) ? " (Cloth)" : " (Soft)";
+        for (auto& rb : rigid_bodies) {
+            if (rb.source_name == node_name) {
+                rb.kind = kind;
+                rb.dynamic = true;
+                rb.motion_type = RayTrophiSim::RigidBodyMotionType::Dynamic;
+                rb.enabled = true;
+                syncRigidBodyProxyColliders();   // drops any stale rigid proxy
+                captureRigidBodyRestPose(rb);
+                if (rigid_body_system) {
+                    rigid_body_system->resetRuntime(true);
+                    rigid_body_system->setBodies(&rigid_bodies);
+                }
+                invalidateRigidBodySimulationCache();
+                return &rb;
+            }
+        }
+        RayTrophiSim::RigidBodyObject rb;
+        rb.source_name = node_name;
+        rb.name = node_name + suffix;
+        rb.kind = kind;
+        rb.dynamic = true;
+        rb.motion_type = RayTrophiSim::RigidBodyMotionType::Dynamic;
+        rigid_bodies.push_back(rb);
+        rigid_body_system->setBodies(&rigid_bodies);  // vector may have reallocated
+        syncRigidBodyProxyColliders();
+        captureRigidBodyRestPose(rigid_bodies.back());
+        rigid_body_system->resetRuntime(true);
+        rigid_body_system->setBodies(&rigid_bodies);
+        invalidateRigidBodySimulationCache();
+        return &rigid_bodies.back();
+    }
+
     bool removeRigidBodyForObject(const std::string& node_name) {
+        // Determine the body's kind BEFORE resetRuntime so we can restore the
+        // mesh through the correct cache (rigid vs soft/cloth). resetRuntime
+        // routes by the body's current `kind`; if we let it run blindly it
+        // would use the right path, but we also need to clean up our own caches
+        // afterwards, and the body is about to be erased, so do it explicitly.
+        RayTrophiSim::BodyKind removed_kind = RayTrophiSim::BodyKind::Rigid;
+        for (const auto& rb : rigid_bodies) {
+            if (rb.source_name == node_name) { removed_kind = rb.kind; break; }
+        }
         if (rigid_body_system) {
             rigid_body_system->resetRuntime(true);
         }
+        // Explicitly restore this node's mesh to rest using the correct cache
+        // for its kind, then drop both caches so no stale deformation data
+        // can leak back (e.g. if the same node is later re-added as a body).
+        restoreBodyMeshToRest(node_name, removed_kind);
         removeRigidBodyProxyColliders(node_name);
         const size_t before = rigid_bodies.size();
         rigid_bodies.erase(
@@ -1150,6 +1453,46 @@ struct SceneData {
             invalidateRigidBodySimulationCache();
         }
         return rigid_bodies.size() != before;
+    }
+
+    // Freeze a physics body at its CURRENT frame: commit the deformed/posed mesh as
+    // the object's permanent geometry and remove the body operator. The sim already
+    // baked the current frame into the source mesh's `original` verts, so "apply" is:
+    // destroy just this Jolt body (others keep simulating), drop the descriptor + its
+    // rest/topology caches, and DON'T restore the rest pose — the frozen shape stays
+    // and, since save-rest-restore iterates rigid_bodies, the now-removed body's mesh
+    // serializes as-is. Returns false if no body drives `node`.
+    bool applyBodyAtCurrentFrame(std::string node) {  // BY VALUE: the caller passes a
+        // rigid_bodies element's source_name; erasing it below would dangle a reference.
+        auto it = std::find_if(rigid_bodies.begin(), rigid_bodies.end(),
+            [&](const RayTrophiSim::RigidBodyObject& rb) { return rb.source_name == node; });
+        if (it == rigid_bodies.end()) return false;
+
+        // Remove only THIS body from the Jolt world (leaves others mid-sim intact).
+        if (rigid_body_system) rigid_body_system->destroyBodyForNode(node);
+
+        removeRigidBodyProxyColliders(node);
+        rigid_bodies.erase(it);
+
+        // Drop the body's rest/topology caches so nothing can later restore the old
+        // rest or replay a stale deformed frame onto the now-frozen mesh.
+        rigid_bake_cache_.erase(node);
+        soft_weld_cache_.erase(node);
+        for (auto& kv : soft_frame_cache_) kv.second.erase(node);
+
+        if (rigid_body_system) rigid_body_system->setBodies(&rigid_bodies);
+        syncRigidBodyProxyColliders();
+        // Cached sim frames reference the old body set; drop them so a later play
+        // re-sims the remaining bodies cleanly (and never re-deforms the frozen one).
+        invalidateRigidBodySimulationCache();
+
+        // The frozen verts are already in the mesh; flag a one-shot geometry refresh
+        // (backend BLAS) + a SceneUI mesh/bbox cache rebuild (the object's bounds
+        // changed shape but its triangle count didn't, so SceneUI won't auto-rebuild).
+        ++body_geom_version_;
+        requestUiMeshCacheRebuild();
+        Core::RenderStateManager::instance().markDirty(Core::DirtyScope::Geometry);
+        return true;
     }
 
     struct FluidRenderBinding {
@@ -1303,6 +1646,29 @@ struct SceneData {
     // 0: each frame's grid state is cached; scrubbing restores from the cache (or
     // resimulates the gap). "Reset Simulation" returns to free-run.
     std::map<int, std::vector<std::vector<RayTrophiSim::SimulationGridDomainState>>> sim_frame_cache_;
+    // Rigid bodies are frame-cached in LOCKSTEP with sim_frame_cache_ (captured in
+    // captureSimFrame, replayed in restoreRigidFrame). This is what keeps the rigid
+    // motion identical on replay: the bake is the only pass where rigid (order 50)
+    // and fluid (order 100) step coupled together, so we record the rigid result
+    // then play it back verbatim instead of re-simulating it against a frozen
+    // fluid frame (which diverges from the cached fluid). Cleared with the fluid
+    // cache in clearSimFrameCache().
+    std::map<int, std::vector<RayTrophiSim::RigidBodyFrameState>> rigid_frame_cache_;
+    // Soft/cloth bodies are frame-cached alongside the fluid+rigid caches: the
+    // deformed UNIQUE world vertices per soft node per frame (captured post-step in
+    // captureSimFrame, scattered back to the mesh on replay in restoreSimFrame). The
+    // deformation lives in the mesh, not in a pose, so it must be recorded per frame
+    // or a cached-frame replay would freeze the cloth. Cleared with the fluid cache.
+    std::map<int, std::map<std::string, std::vector<Vec3>>> soft_frame_cache_;
+    // Discrete particles are frame-cached alongside the fluid+rigid+soft caches:
+    // the full per-system SoA + alive count, captured post-step in captureSimFrame
+    // and restored in restoreSimFrame. WHY: sim_frame_cache_ holds only grid-domain
+    // states, so a cached-frame replay (loop-back / scrub within the baked range)
+    // restored the grid but left the discrete particle SoA empty (clear()ed on the
+    // rewind) — frames up to the previously-played head showed NO particles until
+    // the sim re-simulated PAST the cache (the reported "empty until played frame"
+    // bug). Indexed [frame] -> per-system {SoA, alive}. Cleared with the fluid cache.
+    std::map<int, std::vector<std::pair<RayTrophiSim::ParticleSoABuffers, std::size_t>>> particle_frame_cache_;
     int sim_timeline_frame_ = -1;
     int rigid_timeline_frame_ = -1;
     static constexpr int kMaxCachedSimFrames = 600;
@@ -1330,6 +1696,9 @@ struct SceneData {
     bool        sim_cache_valid_ = false;
     int         sim_cache_start_frame_ = 0;
     int         sim_cache_end_frame_ = 0;
+    // Set when a fluid-affecting edit rewinds the sim to frame 0; the UI consumes
+    // it (consumeSimRewindRequest) to move the timeline playhead back to start.
+    bool        sim_rewind_request_ = false;
 
     // ── Cooperative (frame-driven) disk bake state machine ───────────────────
     // A disk bake re-simulates the whole timeline range; one blocking loop would
@@ -1428,6 +1797,14 @@ struct SceneData {
                     // registered (shows a momentary stale frame, then updates naturally).
                     if (system.domain_vdb_ids[d] >= 0) {
                         g_gas_volumes_dirty = true;
+                    }
+                    // Particles/splat-sphere mode: the kept-alive volume must NOT
+                    // occlude on the CPU, or its AABB masks the splat spheres inside
+                    // the domain (only wall-adjacent ones, hit before the box entry,
+                    // survived). GPU keeps using it via the SSBO (visible stays true).
+                    if (fluid_skip_volume && d < system.domain_volumes.size() &&
+                        system.domain_volumes[d]) {
+                        system.domain_volumes[d]->cpu_render_skip = true;
                     }
                     continue;
                 }
@@ -1757,6 +2134,10 @@ struct SceneData {
                 auto& vol = system.domain_volumes[d];
                 vol->name = volume_name;
                 vol->visible = true;
+                // Renderable on CPU again (Volume/SurfaceSDF route): clear any skip
+                // left over from a previous Particles-mode frame so the CPU BVH
+                // treats it as a real volume occluder once more.
+                vol->cpu_render_skip = false;
                 // Mark the volume's render route every frame — the SDF proxy
                 // density is the same NanoVDB channel either way; the shader
                 // picks "fog raymarch" vs "isosurface walk + refraction" based
@@ -1775,7 +2156,16 @@ struct SceneData {
                 if (created) {
                     // New hittable added to world.objects: rebuild GPU TLAS so it
                     // gets primary-ray hits and re-sync volume buffers.
-                    // (No CPU BVH flag: live volumes are not CPU-sampleable.)
+                    // CPU BVH: the live volume IS CPU-sampleable — VDBVolume::hit +
+                    // the ray_color VDB ray-march read it through sampleDensityCPU on
+                    // the manager's host NanoVDB handle (exactly like a disk VDB, which
+                    // is also dual-listed in world.objects + vdb_volumes). So flag the
+                    // CPU BVH for a rebuild too; only on CREATE (a structural change),
+                    // not on per-step density updates — those are picked up at shade
+                    // time and need no BVH work as long as the domain bounds are fixed.
+                    // The async builder (Main.cpp) snapshots world.objects only, so the
+                    // volume is added exactly once. This is what lets gas/fluid Volume +
+                    // SurfaceSDF render in the CPU reference backend (offline).
                     // became_visible is NOT treated as a structural change — the TLAS
                     // instance was already registered on 'created', so showing it again
                     // only requires an SSBO update (g_gas_volumes_dirty) to re-activate
@@ -1785,6 +2175,7 @@ struct SceneData {
                     g_vulkan_rebuild_pending = true;
                     g_optix_rebuild_pending = true;
                     g_gas_volumes_dirty = true;
+                    g_bvh_rebuild_pending = true;
                 } else if (became_visible) {
                     g_gas_volumes_dirty = true;
                 }
@@ -1867,6 +2258,22 @@ struct SceneData {
     void syncFluidFoamRenderInstances(bool enable_rt_geometry);
     void releaseDomainFluidFoamInstances();
 
+    // CPU reference render bridge for discrete particles. The GPU backends iterate
+    // InstanceManager transient groups directly, but the CPU BVH is built only from
+    // world.objects (rebuildSceneObjects skips transient groups). This expands every
+    // live transient particle/fluid/foam instance into a HittableInstance (one shared
+    // child EmbreeBVH per primitive source, cached on the source) and appends them to
+    // `out`. Callers append into a snapshot used solely for the CPU BVH build, so the
+    // particles never reach world.objects (no double-render on GPU / no selection-list
+    // churn). Builds the child BVH lazily and reuses it until the bridge clears sources.
+    void appendParticleCPUHittables(std::vector<std::shared_ptr<Hittable>>& out);
+
+    // (Re)build the particle-only `particle_bvh` synchronously from the current live
+    // particle set. Cheap (particles only, no static geometry). Sets particle_bvh to
+    // null when no particles are live. Called per-frame on particle motion (CPU path)
+    // and after any full scene-BVH rebuild so the composite stays in sync.
+    void rebuildParticleBVH(bool use_embree);
+
     // Free all live grid-domain volumes and their scene objects (reload / clear).
     void releaseSimulationRenderVolumes() {
         for (auto& system : particle_systems) {
@@ -1882,6 +2289,9 @@ struct SceneData {
     // ── Timeline simulation driver ───────────────────────────────────────────
     void clearSimFrameCache() {
         sim_frame_cache_.clear();
+        rigid_frame_cache_.clear();  // rigid is cached in lockstep; never outlive the fluid cache
+        soft_frame_cache_.clear();   // soft deformation cache, same lockstep
+        particle_frame_cache_.clear(); // discrete particle SoA, same lockstep
     }
 
     // Live source-object pivot (frame-0 spawn pose) for a rigid body. Returns
@@ -1991,6 +2401,31 @@ struct SceneData {
             if (!s.runtime) { h = mix(h, 0); continue; }
             h = mix(h, s.runtime->gridDomains().size());
             h = mix(h, s.runtime->emitters().size());
+            // Emitter config (rate/velocity/spread/lifetime/shape/etc.) must
+            // invalidate the bake — editing it otherwise replays the stale RAM
+            // cache. Skip the LIVE `accumulator` (the sim writes it every step, so
+            // hashing it would reset the cache every frame — the same live-pose
+            // thrash trap the force-field/rigid hashes avoid). source_name/point/
+            // direction are authored config (the resolver reads them, never writes).
+            for (const auto& em : s.runtime->emitters()) {
+                h = mix(h, em.enabled ? 1ull : 0ull);
+                h = mix(h, static_cast<uint64_t>(em.source_mode));
+                h = mix(h, static_cast<uint64_t>(em.spawn_mode));
+                for (char ch : em.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                h = mix(h, qf(em.point.x)); h = mix(h, qf(em.point.y)); h = mix(h, qf(em.point.z));
+                h = mix(h, qf(em.local_offset.x)); h = mix(h, qf(em.local_offset.y)); h = mix(h, qf(em.local_offset.z));
+                h = mix(h, qf(em.direction.x)); h = mix(h, qf(em.direction.y)); h = mix(h, qf(em.direction.z));
+                h = mix(h, qf(em.surface_offset));
+                h = mix(h, qf(em.rate_per_second));
+                h = mix(h, static_cast<uint64_t>(em.burst_count));
+                h = mix(h, qf(em.speed));
+                h = mix(h, qf(em.spread));
+                h = mix(h, qf(em.lifetime_seconds));
+                h = mix(h, qf(em.mass));
+                h = mix(h, qf(em.angular_velocity));
+                h = mix(h, qf(em.angular_jitter));
+                h = mix(h, static_cast<uint64_t>(em.seed));
+            }
             h = mix(h, s.runtime->colliders().size());
             for (const auto& c : s.runtime->colliders()) {
                 for (char ch : c.name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
@@ -2013,7 +2448,37 @@ struct SceneData {
         }
         h = mix(h, gas_volumes.size());
         h = mix(h, fluid_objects.size());
+        // Force fields drive the fluid too, so editing a field that affects fluid
+        // (strength / direction / position / wind-coupling knobs / noise) must
+        // re-bake the FLUID — not just bump the count. Without this the fluid
+        // cache replayed stale after any wind tweak (only the rigid/soft caches
+        // dropped). Gated on affects_fluid: a field that doesn't touch fluid never
+        // invalidates the (expensive) fluid bake.
         h = mix(h, force_field_manager.force_fields.size());
+        for (const auto& ff : force_field_manager.force_fields) {
+            if (!ff || !ff->affects_fluid) { h = mix(h, 0); continue; }
+            h = mix(h, ff->enabled ? 1ull : 0ull);
+            h = mix(h, static_cast<uint64_t>(ff->type));
+            h = mix(h, static_cast<uint64_t>(ff->shape));
+            h = mix(h, static_cast<uint64_t>(ff->falloff_type));
+            h = mix(h, qf(ff->strength));
+            h = mix(h, qf(ff->position.x)); h = mix(h, qf(ff->position.y)); h = mix(h, qf(ff->position.z));
+            h = mix(h, qf(ff->rotation.x)); h = mix(h, qf(ff->rotation.y)); h = mix(h, qf(ff->rotation.z));
+            h = mix(h, qf(ff->scale.x)); h = mix(h, qf(ff->scale.y)); h = mix(h, qf(ff->scale.z));
+            h = mix(h, qf(ff->direction.x)); h = mix(h, qf(ff->direction.y)); h = mix(h, qf(ff->direction.z));
+            h = mix(h, qf(ff->falloff_radius)); h = mix(h, qf(ff->inner_radius));
+            h = mix(h, qf(ff->axis.x)); h = mix(h, qf(ff->axis.y)); h = mix(h, qf(ff->axis.z));
+            h = mix(h, qf(ff->inward_force)); h = mix(h, qf(ff->upward_force));
+            h = mix(h, qf(ff->linear_drag)); h = mix(h, qf(ff->quadratic_drag));
+            h = mix(h, ff->use_noise ? 1ull : 0ull);
+            h = mix(h, qf(ff->noise.frequency)); h = mix(h, qf(ff->noise.amplitude));
+            h = mix(h, qf(ff->noise.speed)); h = mix(h, static_cast<uint64_t>(ff->noise.octaves));
+            // Wind→fluid surface-drag knobs.
+            h = mix(h, ff->fluid_surface_drag ? 1ull : 0ull);
+            h = mix(h, qf(ff->fluid_drag_coupling));
+            h = mix(h, qf(ff->fluid_surface_depth));
+            h = mix(h, qf(ff->fluid_curl_detail));
+        }
         for (const auto& rb : rigid_bodies) {
             if (!rigidCouplesToFluid(rb)) continue;
             for (char c : rb.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
@@ -2042,6 +2507,16 @@ struct SceneData {
             h = mix(h, rb.lock_rotation_x ? 1ull : 0ull);
             h = mix(h, rb.lock_rotation_y ? 1ull : 0ull);
             h = mix(h, rb.lock_rotation_z ? 1ull : 0ull);
+            // Fluid-coupling params: a coupled body that drags/floats differently
+            // pushes the fluid differently, so editing these must re-bake the FLUID
+            // too (not just the rigid) — otherwise the rigid replays against a stale
+            // fluid and diverges.
+            h = mix(h, rb.fluid_coupling_enabled ? 1ull : 0ull);
+            h = mix(h, qf(rb.buoyancy_scale));
+            h = mix(h, qf(rb.fluid_density));
+            h = mix(h, qf(rb.fluid_drag));
+            h = mix(h, qf(rb.fluid_quadratic_drag));
+            h = mix(h, qf(rb.fluid_angular_drag));
             // Cached spawn pose (see computeSimConfigSignature) — O(1), no scan.
             {
                 const Vec3 t = rb.initial_pivot.getTranslation();
@@ -2071,6 +2546,31 @@ struct SceneData {
             if (!s.runtime) { h = mix(h, 0); continue; }
             h = mix(h, s.runtime->gridDomains().size());
             h = mix(h, s.runtime->emitters().size());
+            // Emitter config (rate/velocity/spread/lifetime/shape/etc.) must
+            // invalidate the bake — editing it otherwise replays the stale RAM
+            // cache. Skip the LIVE `accumulator` (the sim writes it every step, so
+            // hashing it would reset the cache every frame — the same live-pose
+            // thrash trap the force-field/rigid hashes avoid). source_name/point/
+            // direction are authored config (the resolver reads them, never writes).
+            for (const auto& em : s.runtime->emitters()) {
+                h = mix(h, em.enabled ? 1ull : 0ull);
+                h = mix(h, static_cast<uint64_t>(em.source_mode));
+                h = mix(h, static_cast<uint64_t>(em.spawn_mode));
+                for (char ch : em.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+                h = mix(h, qf(em.point.x)); h = mix(h, qf(em.point.y)); h = mix(h, qf(em.point.z));
+                h = mix(h, qf(em.local_offset.x)); h = mix(h, qf(em.local_offset.y)); h = mix(h, qf(em.local_offset.z));
+                h = mix(h, qf(em.direction.x)); h = mix(h, qf(em.direction.y)); h = mix(h, qf(em.direction.z));
+                h = mix(h, qf(em.surface_offset));
+                h = mix(h, qf(em.rate_per_second));
+                h = mix(h, static_cast<uint64_t>(em.burst_count));
+                h = mix(h, qf(em.speed));
+                h = mix(h, qf(em.spread));
+                h = mix(h, qf(em.lifetime_seconds));
+                h = mix(h, qf(em.mass));
+                h = mix(h, qf(em.angular_velocity));
+                h = mix(h, qf(em.angular_jitter));
+                h = mix(h, static_cast<uint64_t>(em.seed));
+            }
             h = mix(h, s.runtime->colliders().size());
             for (const auto& c : s.runtime->colliders()) {
                 for (char ch : c.name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
@@ -2093,7 +2593,42 @@ struct SceneData {
         }
         h = mix(h, gas_volumes.size());
         h = mix(h, fluid_objects.size());
+        // Force fields now drive rigid + soft/cloth bodies too, so editing a field
+        // (strength / position / direction / masks) must invalidate the body bake.
+        // Cheap: a handful of fields folded into the hash that already runs each
+        // frame — no extra structure or pass. Force fields are not keyframed, so
+        // hashing their LIVE pose only changes on a real user edit (no playback
+        // thrash). Catches both panel edits and viewport gizmo drags.
         h = mix(h, force_field_manager.force_fields.size());
+        for (const auto& ff : force_field_manager.force_fields) {
+            if (!ff) { h = mix(h, 0); continue; }
+            h = mix(h, ff->enabled ? 1ull : 0ull);
+            h = mix(h, static_cast<uint64_t>(ff->type));
+            h = mix(h, static_cast<uint64_t>(ff->shape));
+            h = mix(h, static_cast<uint64_t>(ff->falloff_type));
+            h = mix(h, qf(ff->strength));
+            h = mix(h, qf(ff->position.x)); h = mix(h, qf(ff->position.y)); h = mix(h, qf(ff->position.z));
+            h = mix(h, qf(ff->rotation.x)); h = mix(h, qf(ff->rotation.y)); h = mix(h, qf(ff->rotation.z));
+            h = mix(h, qf(ff->scale.x)); h = mix(h, qf(ff->scale.y)); h = mix(h, qf(ff->scale.z));
+            h = mix(h, qf(ff->direction.x)); h = mix(h, qf(ff->direction.y)); h = mix(h, qf(ff->direction.z));
+            h = mix(h, qf(ff->falloff_radius)); h = mix(h, qf(ff->inner_radius));
+            h = mix(h, qf(ff->axis.x)); h = mix(h, qf(ff->axis.y)); h = mix(h, qf(ff->axis.z));
+            h = mix(h, qf(ff->inward_force)); h = mix(h, qf(ff->upward_force));
+            h = mix(h, qf(ff->linear_drag)); h = mix(h, qf(ff->quadratic_drag));
+            h = mix(h, ff->use_noise ? 1ull : 0ull);
+            h = mix(h, qf(ff->noise.frequency)); h = mix(h, qf(ff->noise.amplitude));
+            h = mix(h, qf(ff->noise.speed)); h = mix(h, static_cast<uint64_t>(ff->noise.octaves));
+            // Wind→fluid surface-drag knobs (editing them must invalidate the bake).
+            h = mix(h, ff->fluid_surface_drag ? 1ull : 0ull);
+            h = mix(h, qf(ff->fluid_drag_coupling));
+            h = mix(h, qf(ff->fluid_surface_depth));
+            h = mix(h, qf(ff->fluid_curl_detail));
+            h = mix(h, ff->affects_rigidbody ? 1ull : 0ull);
+            h = mix(h, ff->affects_cloth ? 1ull : 0ull);
+            h = mix(h, ff->affects_fluid ? 1ull : 0ull);
+            h = mix(h, ff->affects_gas ? 1ull : 0ull);
+            h = mix(h, ff->affects_particles ? 1ull : 0ull);
+        }
         h = mix(h, rigid_bodies.size());
         for (const auto& rb : rigid_bodies) {
             for (char c : rb.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
@@ -2126,8 +2661,36 @@ struct SceneData {
             h = mix(h, qf(rb.buoyancy_scale));
             h = mix(h, qf(rb.fluid_density));
             h = mix(h, qf(rb.fluid_drag));
+            h = mix(h, qf(rb.fluid_quadratic_drag));
             h = mix(h, qf(rb.fluid_angular_drag));
             h = mix(h, rb.enabled ? 1ull : 0ull);
+            // Force-field coupling knobs (drive every body kind).
+            h = mix(h, rb.force_field_enabled ? 1ull : 0ull);
+            h = mix(h, qf(rb.force_field_scale));
+            // Cloth/soft pins: editing/adding/removing a pin must rebuild the body.
+            h = mix(h, rb.soft_pins.size());
+            for (const auto& pin : rb.soft_pins) {
+                h = mix(h, pin.enabled ? 1ull : 0ull);
+                h = mix(h, qf(pin.radius));
+                h = mix(h, qf(pin.center.x)); h = mix(h, qf(pin.center.y)); h = mix(h, qf(pin.center.z));
+            }
+            // Body kind + soft params: changing Rigid<->Soft/Cloth or editing any
+            // soft authoring value must invalidate the bake (the deformation cache
+            // is keyed off these). Cheap to fold in here.
+            h = mix(h, static_cast<uint64_t>(rb.kind));
+            if (rb.kind != RayTrophiSim::BodyKind::Rigid) {
+                h = mix(h, qf(rb.soft_stiffness));
+                h = mix(h, qf(rb.soft_compliance));
+                h = mix(h, qf(rb.soft_pressure));
+                h = mix(h, qf(rb.soft_damping));
+                h = mix(h, qf(rb.soft_vertex_radius));
+                h = mix(h, static_cast<uint64_t>(rb.soft_iterations));
+                h = mix(h, qf(rb.soft_friction));
+                h = mix(h, qf(rb.soft_restitution));
+                h = mix(h, qf(rb.soft_gravity_factor));
+                h = mix(h, qf(rb.soft_mass));
+                h = mix(h, rb.soft_two_sided ? 1ull : 0ull);
+            }
             // CACHED spawn pose (rb.initial_pivot) so MOVING a rigid changes the
             // signature without a per-tick world scan — O(1) here. The cache is
             // refreshed only on a real user transform edit by
@@ -2260,6 +2823,488 @@ struct SceneData {
         return best;
     }
 
+    // Rough RAM footprint of the in-memory sim frame caches, for the UI "cache is
+    // getting big — bake to disk" nudge. Covers the per-frame body (soft/cloth verts)
+    // + particle (SoA columns) + rigid (poses) snapshots — the ones that balloon with
+    // crowded/long scenes. Fluid/gas GRID states (sim_frame_cache_) are NOT included:
+    // their per-cell size isn't cheaply known here, so this under-reports pure-fluid
+    // scenes (a disk bake is recommended there regardless).
+    std::size_t estimateSimCacheBytes() const {
+        std::size_t bytes = 0;
+        for (const auto& f : soft_frame_cache_)
+            for (const auto& n : f.second)
+                bytes += n.second.size() * sizeof(Vec3);
+        for (const auto& f : particle_frame_cache_)
+            for (const auto& snap : f.second)
+                bytes += snap.first.position_x.size() * 80;  // ~20 float columns + flags
+        for (const auto& f : rigid_frame_cache_)
+            bytes += f.second.size() * sizeof(RayTrophiSim::RigidBodyFrameState);
+        return bytes;
+    }
+    int cachedSimFrameCount() const { return static_cast<int>(sim_frame_cache_.size()); }
+
+    // Scatter the solver's UNIQUE deformed world vertices back onto every triangle
+    // corner of a soft body's mesh. The GPU BLAS reads LOCAL vertices
+    // (getOriginalVertexPosition) + the instance transform, so the deformation goes
+    // into `original` (= inverse(transform) * world); `position` (world) is set too
+    // for the CPU/world-space paths. Flat per-triangle normals in each space.
+    // (Re)build the weld topology cache for a soft body's source mesh: gather its
+    // triangles, weld corners by REST world position (~0.1 mm), and record the
+    // corner->unique map, the unique rest world positions (Jolt seed), and the bind-
+    // pose local pos/normals (for reset). Used by the resolver AND by disk replay
+    // (where the body was never live-created, so no cache exists yet). Returns false
+    // if the mesh isn't available or is degenerate.
+    bool rebuildSoftWeldCache(const std::string& node) {
+        if (node.empty()) return false;
+
+        extern std::atomic<uint64_t> g_scene_geometry_generation;
+        const uint64_t current_gen = g_scene_geometry_generation.load(std::memory_order_acquire);
+
+        std::size_t current_tri_count = 0;
+        for (const auto& obj : world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (tri && tri->getNodeName() == node) current_tri_count++;
+        }
+
+        auto it = soft_weld_cache_.find(node);
+        const bool have_rest = (it != soft_weld_cache_.end() &&
+                                !it->second.rest_local_pos.empty() &&
+                                it->second.tris.size() == current_tri_count);
+        if (have_rest && it->second.geometry_generation == current_gen) {
+            return true; // Nothing changed since capture — reuse as-is.
+        }
+        if (have_rest) {
+            // Topology is UNCHANGED but the geometry generation moved. That bump is
+            // almost always a SIM deformation write-back (or a reset) — and the live
+            // `original` verts now hold the CURRENT DEFORMED shape. Re-deriving the rest
+            // from them would freeze that deformed frame in as the new "rest", so editing
+            // a body param / adding a force at frame N made frame N the baseline and
+            // frame 0 stopped returning to the original (the reported soft/cloth bug;
+            // rigid was immune because rigid_bake_cache_ is captured once and never
+            // re-derived). Keep the AUTHORED rest_local + topology; only refresh the rest
+            // WORLD seed (Jolt) from rest_local * the CURRENT transform so moving the
+            // object before play still relocates the soft body. (A genuine REST-mesh edit
+            // changes the triangle COUNT or drops the cache; pure vertex edits of a soft
+            // rest aren't picked up here — acceptable vs. the deformation-corruption bug.)
+            SoftWeldCache& cache = it->second;
+            cache.geometry_generation = current_gen;
+            cache.rest_world_unique.assign(cache.unique_count, Vec3(0.0f, 0.0f, 0.0f));
+            std::size_t corner = 0;
+            for (std::size_t t = 0; t < cache.tris.size(); ++t) {
+                const Matrix4x4 xf = cache.tris[t] ? cache.tris[t]->getTransformMatrix()
+                                                   : Matrix4x4::identity();
+                const bool has_lp = (t < cache.rest_local_pos.size());
+                for (int i = 0; i < 3; ++i, ++corner) {
+                    if (!has_lp || corner >= cache.corner_unique.size()) continue;
+                    const uint32_t u = cache.corner_unique[corner];
+                    if (u < cache.unique_count)
+                        cache.rest_world_unique[u] = xf.transform_point(cache.rest_local_pos[t][i]);
+                }
+            }
+            return cache.unique_count >= 3;
+        }
+
+        SoftWeldCache cache;
+        cache.geometry_generation = current_gen;
+        for (auto& obj : world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (tri && tri->getNodeName() == node) cache.tris.push_back(tri);
+        }
+        if (cache.tris.empty()) return false;
+
+        std::map<std::array<int64_t, 3>, uint32_t> weld;  // quantized rest pos -> idx
+        const double kQuant = 10000.0;  // ~0.1 mm weld tolerance
+        cache.corner_unique.reserve(cache.tris.size() * 3);
+        cache.rest_local_pos.reserve(cache.tris.size());
+        cache.rest_local_nrm.reserve(cache.tris.size());
+        for (auto& tri : cache.tris) {
+            const Matrix4x4 xf = tri->getTransformMatrix();
+            std::array<Vec3, 3> lp, ln;
+            for (int i = 0; i < 3; ++i) {
+                lp[i] = tri->getOriginalVertexPosition(i);
+                ln[i] = tri->getOriginalVertexNormal(i);
+                const Vec3 rest = xf.transform_point(tri->getOriginalVertexPosition(i));
+                const std::array<int64_t, 3> key{
+                    (int64_t)std::llround((double)rest.x * kQuant),
+                    (int64_t)std::llround((double)rest.y * kQuant),
+                    (int64_t)std::llround((double)rest.z * kQuant)};
+                uint32_t idx;
+                auto it = weld.find(key);
+                if (it == weld.end()) {
+                    idx = (uint32_t)cache.rest_world_unique.size();
+                    cache.rest_world_unique.push_back(rest);
+                    weld.emplace(key, idx);
+                } else {
+                    idx = it->second;
+                }
+                cache.corner_unique.push_back(idx);
+            }
+            cache.rest_local_pos.push_back(lp);
+            cache.rest_local_nrm.push_back(ln);
+        }
+        cache.unique_count = cache.rest_world_unique.size();
+        const bool ok = cache.unique_count >= 3;
+        soft_weld_cache_[node] = std::move(cache);
+        return ok;
+    }
+
+    // Snapshot every soft body's deformed UNIQUE world vertices (read from the
+    // meshes the writer just updated). Shared by the in-memory capture and disk bake.
+    void snapshotSoftBodies(std::map<std::string, std::vector<Vec3>>& out) const {
+        out.clear();
+        for (const auto& kv : soft_weld_cache_) {
+            const SoftWeldCache& cache = kv.second;
+            if (cache.unique_count == 0) continue;
+            std::vector<Vec3> uniq(cache.unique_count, Vec3(0.0f, 0.0f, 0.0f));
+            std::size_t corner = 0;
+            for (const auto& tri : cache.tris) {
+                if (!tri) { corner += 3; continue; }
+                for (int i = 0; i < 3; ++i, ++corner) {
+                    const uint32_t u = cache.corner_unique[corner];
+                    if (u < uniq.size()) uniq[u] = tri->getVertexPosition(i);  // world (writer set this)
+                }
+            }
+            out[kv.first] = std::move(uniq);
+        }
+    }
+
+    void applySoftDeformedVerts(const std::string& node, const std::vector<Vec3>& world_verts) {
+        auto it = soft_weld_cache_.find(node);
+        if (it == soft_weld_cache_.end()) return;
+        SoftWeldCache& cache = it->second;
+        if (world_verts.size() != cache.unique_count) return;  // stale topology
+
+        const Transform* last_xf = nullptr;
+        bool inv_valid = false;
+        Matrix4x4 inv_xf = Matrix4x4::identity();
+
+        // Pass 1: write positions (world `position` + local `original` the BLAS reads)
+        // and accumulate AREA-WEIGHTED face normals per shared vertex so the surface
+        // shades SMOOTH (welded corners share a normal) instead of faceted flat.
+        std::vector<Vec3> nw_acc(cache.unique_count, Vec3(0.0f, 0.0f, 0.0f));
+        std::vector<Vec3> nl_acc(cache.unique_count, Vec3(0.0f, 0.0f, 0.0f));
+        std::size_t corner = 0;
+        for (auto& tri : cache.tris) {
+            if (!tri) { corner += 3; continue; }
+            const Transform* xfp = tri->getTransformPtr();
+            if (!inv_valid || xfp != last_xf) {
+                inv_xf = tri->getTransformMatrix().inverse();
+                last_xf = xfp;
+                inv_valid = true;
+            }
+            uint32_t u[3];
+            Vec3 wp[3], lp[3];
+            for (int i = 0; i < 3; ++i, ++corner) {
+                u[i] = cache.corner_unique[corner];
+                wp[i] = (u[i] < world_verts.size()) ? world_verts[u[i]] : tri->getVertexPosition(i);
+                lp[i] = inv_xf.transform_point(wp[i]);
+                tri->setVertexPosition(i, wp[i]);
+                tri->setOriginalVertexPosition(i, lp[i]);
+            }
+            // Unnormalized cross == 2*area*unit_normal => area weighting for free.
+            auto cross = [](const Vec3& a, const Vec3& b) {
+                return Vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+            };
+            const Vec3 fnw = cross(wp[1] - wp[0], wp[2] - wp[0]);
+            const Vec3 fnl = cross(lp[1] - lp[0], lp[2] - lp[0]);
+            for (int i = 0; i < 3; ++i) {
+                if (u[i] < cache.unique_count) { nw_acc[u[i]] += fnw; nl_acc[u[i]] += fnl; }
+            }
+        }
+        auto norm = [](const Vec3& v, const Vec3& fallback) {
+            const float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+            return (len > 1e-12f) ? Vec3(v.x / len, v.y / len, v.z / len) : fallback;
+        };
+        for (std::size_t u = 0; u < cache.unique_count; ++u) {
+            nw_acc[u] = norm(nw_acc[u], Vec3(0.0f, 1.0f, 0.0f));
+            nl_acc[u] = norm(nl_acc[u], Vec3(0.0f, 1.0f, 0.0f));
+        }
+
+        // Pass 2: assign the smooth (shared) normal to each corner.
+        corner = 0;
+        for (auto& tri : cache.tris) {
+            if (!tri) { corner += 3; continue; }
+            for (int i = 0; i < 3; ++i, ++corner) {
+                const uint32_t uu = cache.corner_unique[corner];
+                if (uu < cache.unique_count) {
+                    tri->setVertexNormal(i, nw_acc[uu]);
+                    tri->setOriginalVertexNormal(i, nl_acc[uu]);
+                }
+            }
+        }
+        markBodyGeometryDirty(node);
+    }
+
+    // Cache the rest-pose LOCAL verts/normals of a RIGID body's source mesh (called
+    // lazily on the first bake, while the mesh is still at rest). Mirrors the
+    // rest_local capture in rebuildSoftWeldCache but skips welding (a rigid mesh is
+    // moved as a whole, so corners need no merging and normals must stay per-corner).
+    bool rebuildRigidBakeCache(const std::string& node) {
+        if (node.empty()) return false;
+        SoftWeldCache cache;
+        for (auto& obj : world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (tri && tri->getNodeName() == node) cache.tris.push_back(tri);
+        }
+        if (cache.tris.empty()) return false;
+        cache.rest_local_pos.reserve(cache.tris.size());
+        cache.rest_local_nrm.reserve(cache.tris.size());
+        for (auto& tri : cache.tris) {
+            std::array<Vec3, 3> lp, ln;
+            for (int i = 0; i < 3; ++i) {
+                lp[i] = tri->getOriginalVertexPosition(i);
+                ln[i] = tri->getOriginalVertexNormal(i);
+            }
+            cache.rest_local_pos.push_back(lp);
+            cache.rest_local_nrm.push_back(ln);
+        }
+        rigid_bake_cache_[node] = std::move(cache);
+        return true;
+    }
+
+    // Render write-back for a RIGID body: apply the body's world-space rigid delta
+    // D = B(t)*inv(B0) to the source mesh by baking transformed vertices into BOTH
+    // `original` (LOCAL — what the GPU BLAS reads) and `position` (WORLD — CPU path),
+    // leaving the object's TRANSFORM HANDLE untouched. This is the soft-body render
+    // path adapted for rigid: it renders imported/non-TRS meshes correctly in every
+    // backend (moving the transform corrupted them from frame 0), while PRESERVING
+    // the mesh's authored per-corner normals (no welding/smoothing — a flat cube
+    // stays flat). D == identity restores the rest pose.
+    void applyRigidBakedTransform(const std::string& node, const Matrix4x4& D) {
+        auto it = rigid_bake_cache_.find(node);
+        if (it == rigid_bake_cache_.end()) {
+            if (!rebuildRigidBakeCache(node)) return;   // captured at rest (first call)
+            it = rigid_bake_cache_.find(node);
+        }
+        SoftWeldCache& cache = it->second;
+
+        const Transform* last_xf = nullptr;
+        Matrix4x4 Th = Matrix4x4::identity();
+        Matrix4x4 Mlocal = Matrix4x4::identity();      // rest LOCAL pos -> deformed LOCAL pos
+        Matrix4x4 Mlocal_n = Matrix4x4::identity();    // LOCAL normal transform
+        Matrix4x4 NT = Matrix4x4::identity();          // LOCAL normal -> WORLD normal
+        bool have = false;
+
+        for (std::size_t t = 0; t < cache.tris.size(); ++t) {
+            auto& tri = cache.tris[t];
+            if (!tri) continue;
+            const Transform* xfp = tri->getTransformPtr();
+            if (!have || xfp != last_xf) {
+                Th = tri->getTransformMatrix();                 // unchanged spawn world matrix
+                // new_local = inv(Th) * D * Th * rest_local  (apply D in world, back to local)
+                Mlocal = Th.inverse() * D * Th;
+                Mlocal_n = Mlocal.inverse().transpose();
+                NT = xfp ? xfp->getNormalTransform() : Matrix4x4::identity();
+                last_xf = xfp;
+                have = true;
+            }
+            const std::array<Vec3, 3>& rlp = cache.rest_local_pos[t];
+            const std::array<Vec3, 3>& rln = cache.rest_local_nrm[t];
+            auto unit = [](const Vec3& v) {
+                const float l = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+                return (l > 1e-12f) ? Vec3(v.x / l, v.y / l, v.z / l) : Vec3(0.0f, 1.0f, 0.0f);
+            };
+            for (int i = 0; i < 3; ++i) {
+                const Vec3 lp = Mlocal.transform_point(rlp[i]);
+                const Vec3 ln = unit(Mlocal_n.transform_vector(rln[i]));
+                const Vec3 wp = Th.transform_point(lp);
+                const Vec3 wn = unit(NT.transform_vector(ln));
+                tri->setOriginalVertexPosition(i, lp);
+                tri->setVertexPosition(i, wp);
+                tri->setOriginalVertexNormal(i, ln);
+                tri->setVertexNormal(i, wn);
+            }
+        }
+        markBodyGeometryDirty(node);
+    }
+
+    // Restore a soft/cloth body's source mesh to its undeformed rest pose. The
+    // writer overwrote each triangle's LOCAL `original` with the deformed geometry,
+    // so we restore the cached bind-pose local first, then recompute world. Shared
+    // by the soft reset-to-rest callback AND the save-time rest restore.
+    void restoreSoftRestMesh(const std::string& node) {
+        ++body_geom_version_;  // verts change → invalidate the gizmo's memoized AABB
+        auto it = soft_weld_cache_.find(node);
+        if (it != soft_weld_cache_.end()) {
+            SoftWeldCache& cache = it->second;
+            for (std::size_t t = 0; t < cache.tris.size(); ++t) {
+                auto& tri = cache.tris[t];
+                if (!tri) continue;
+                if (t < cache.rest_local_pos.size()) {
+                    for (int i = 0; i < 3; ++i) {
+                        tri->setOriginalVertexPosition(i, cache.rest_local_pos[t][i]);
+                        tri->setOriginalVertexNormal(i, cache.rest_local_nrm[t][i]);
+                    }
+                }
+                tri->updateTransformedVertices();  // position = transform * restored original
+            }
+            // Keep the weld topology: a cached-frame replay still needs it to
+            // scatter, and the resolver overwrites it on the next create.
+            Core::RenderStateManager::instance().markDirty(Core::DirtyScope::Geometry);
+            return;
+        }
+        // No cache (never simulated): just recompute from current original.
+        bool any = false;
+        for (auto& obj : world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (tri && tri->getNodeName() == node) {
+                tri->updateTransformedVertices();
+                any = true;
+            }
+        }
+        if (any) Core::RenderStateManager::instance().markDirty(Core::DirtyScope::Geometry);
+    }
+
+    // Restore a body's source mesh to its rest pose using the cache appropriate
+    // for its CURRENT kind — MUST be called BEFORE kind is changed so the right
+    // restore path is taken. Both rigid (rigid_bake_cache_) and soft/cloth
+    // (soft_weld_cache_) caches are dropped afterwards so the new kind (or the
+    // removal path) starts with a clean mesh and rebuilds from rest geometry.
+    void restoreBodyMeshToRest(const std::string& node, RayTrophiSim::BodyKind current_kind) {
+        if (node.empty()) return;
+        if (current_kind == RayTrophiSim::BodyKind::Rigid) {
+            // Rigid body: identity delta restores the rest mesh via the bake cache.
+            applyRigidBakedTransform(node, Matrix4x4::identity());
+        } else {
+            // Soft / Cloth: restore from the weld cache's saved rest_local_pos.
+            restoreSoftRestMesh(node);
+        }
+        // Drop both caches so the new kind (or a fresh add) rebuilds from the
+        // now-clean rest mesh, not from stale deformed geometry.
+        soft_weld_cache_.erase(node);
+        rigid_bake_cache_.erase(node);
+    }
+
+    // Route a body's per-frame geometry change to the cheapest correct refresh.
+    // Vulkan RT active → record the node for an in-place per-mesh BLAS refit
+    // (consumed in the render loop), avoiding the full-scene BLAS teardown that
+    // markDirty(Geometry) forces every frame. Any other backend (OptiX / CPU) →
+    // the proven full-rebuild path. See pending_deform_nodes_.
+    void markBodyGeometryDirty(const std::string& node) {
+        ++body_geom_version_;  // invalidate the gizmo's memoized world-AABB
+        if (deform_refit_via_vulkan_ && !node.empty()) {
+            pending_deform_nodes_.insert(node);
+            g_vulkan_geometry_deform_pending = true;
+        } else {
+            Core::RenderStateManager::instance().markDirty(Core::DirtyScope::Geometry);
+        }
+    }
+
+    // Monotonic counter; the selection gizmo memoizes a body's world-AABB against it.
+    uint64_t bodyGeomVersion() const { return body_geom_version_; }
+
+    // One-shot request for SceneUI to rebuild its mesh/bbox caches. Set by data-side
+    // ops (e.g. applyBodyAtCurrentFrame) that change an object's geometry WITHOUT
+    // changing the object count — the free-function panels can't reach SceneUI's
+    // caches directly, and SceneUI only auto-rebuilds on a membership-count change.
+    void requestUiMeshCacheRebuild() { ui_mesh_cache_rebuild_request_ = true; }
+    bool consumeUiMeshCacheRebuild() {
+        const bool v = ui_mesh_cache_rebuild_request_;
+        ui_mesh_cache_rebuild_request_ = false;
+        return v;
+    }
+
+    // Set each frame by the render loop: true only when the active RENDER backend
+    // is Vulkan RT and a per-mesh BLAS refit is valid for this frame.
+    void setDeformRefitViaVulkan(bool v) { deform_refit_via_vulkan_ = v; }
+    bool hasPendingDeformNodes() const { return !pending_deform_nodes_.empty(); }
+    void clearPendingDeformNodes() { pending_deform_nodes_.clear(); }
+    std::vector<std::string> takePendingDeformNodes() {
+        std::vector<std::string> out(pending_deform_nodes_.begin(), pending_deform_nodes_.end());
+        pending_deform_nodes_.clear();
+        return out;
+    }
+    // Triangles of a body's source mesh, in the same order the BLAS was built from
+    // (world.objects order — what the body caches also capture), for the per-mesh
+    // refit path. Empty when the node has no mesh yet.
+    std::vector<std::shared_ptr<Triangle>> collectNodeTriangles(const std::string& node) {
+        auto rit = rigid_bake_cache_.find(node);
+        if (rit != rigid_bake_cache_.end() && !rit->second.tris.empty()) return rit->second.tris;
+        auto sit = soft_weld_cache_.find(node);
+        if (sit != soft_weld_cache_.end() && !sit->second.tris.empty()) return sit->second.tris;
+        std::vector<std::shared_ptr<Triangle>> tris;
+        for (auto& obj : world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (tri && tri->getNodeName() == node) tris.push_back(tri);
+        }
+        return tris;
+    }
+
+    // ── Save-time rest restore ───────────────────────────────────────────────
+    // The sim bakes its deformed/posed result straight into the source meshes'
+    // LOCAL `original` verts (applySoftDeformedVerts / applyRigidBakedTransform),
+    // and the project serializer writes those verts verbatim (writeGeometryBinary
+    // dumps getOriginalVertexPosition/Normal). Saving mid-sim — or after pausing on
+    // a non-rest frame — therefore persisted the FINAL sim pose into the file; on
+    // reload the body was stuck in it (the load-time resetRuntime then cached the
+    // deformed mesh as the new "rest", so even removing the body restored to the
+    // corrupted pose). Before geometry is written we restore every body to its rest
+    // mesh; reapplyBodyRestSnapshot() puts the live deformation back afterwards so
+    // the on-screen simulation is undisturbed by the save.
+    struct BodyRestSnapshot {
+        std::shared_ptr<Triangle> tri;
+        std::array<Vec3, 3> orig_pos;
+        std::array<Vec3, 3> orig_nrm;
+    };
+
+    std::vector<BodyRestSnapshot> snapshotAndRestoreBodiesToRest() {
+        std::vector<BodyRestSnapshot> snaps;
+        if (rigid_bodies.empty()) return snaps;
+        for (auto& rb : rigid_bodies) {
+            const std::string& node = rb.source_name;
+            if (node.empty()) continue;
+            bool any = false;
+            for (auto& obj : world.objects) {
+                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                if (!tri || tri->getNodeName() != node) continue;
+                BodyRestSnapshot s;
+                s.tri = tri;
+                for (int i = 0; i < 3; ++i) {
+                    s.orig_pos[i] = tri->getOriginalVertexPosition(i);
+                    s.orig_nrm[i] = tri->getOriginalVertexNormal(i);
+                }
+                snaps.push_back(std::move(s));
+                any = true;
+            }
+            if (!any) continue;
+            if (rb.kind == RayTrophiSim::BodyKind::Rigid)
+                applyRigidBakedTransform(node, Matrix4x4::identity());
+            else
+                restoreSoftRestMesh(node);
+        }
+        return snaps;
+    }
+
+    void reapplyBodyRestSnapshot(const std::vector<BodyRestSnapshot>& snaps) {
+        if (snaps.empty()) return;
+        for (const auto& s : snaps) {
+            if (!s.tri) continue;
+            for (int i = 0; i < 3; ++i) {
+                s.tri->setOriginalVertexPosition(i, s.orig_pos[i]);
+                s.tri->setOriginalVertexNormal(i, s.orig_nrm[i]);
+            }
+            s.tri->updateTransformedVertices();
+        }
+        ++body_geom_version_;  // verts changed → invalidate the gizmo's memoized AABB
+        Core::RenderStateManager::instance().markDirty(Core::DirtyScope::Geometry);
+    }
+
+    // Snapshot the deformed UNIQUE world vertices of every soft body for `frame`
+    // (read from the meshes the writer just updated). No-op without soft bodies.
+    void captureSoftFrame(int frame) {
+        if (soft_weld_cache_.empty()) return;
+        snapshotSoftBodies(soft_frame_cache_[frame]);
+    }
+
+    // Replay the cached soft deformation for `frame` back onto the meshes. Returns
+    // false when the frame isn't cached.
+    bool restoreSoftFrame(int frame) {
+        auto it = soft_frame_cache_.find(frame);
+        if (it == soft_frame_cache_.end()) return false;
+        for (auto& kv : it->second) applySoftDeformedVerts(kv.first, kv.second);
+        return true;
+    }
+
     void captureSimFrame(int frame) {
         if (static_cast<int>(sim_frame_cache_.size()) >= kMaxCachedSimFrames &&
             sim_frame_cache_.find(frame) == sim_frame_cache_.end()) {
@@ -2272,6 +3317,49 @@ struct SceneData {
             if (system.runtime) entry.push_back(system.runtime->gridDomainStates());
             else entry.emplace_back();
         }
+        // Capture the discrete particle SoA in the SAME pass so a cached-frame
+        // replay restores the actual particles (grid states alone left them empty).
+        auto& psnap = particle_frame_cache_[frame];
+        psnap.clear();
+        psnap.reserve(particle_systems.size());
+        for (auto& system : particle_systems) {
+            if (system.runtime) psnap.emplace_back(system.runtime->buffers(), system.runtime->aliveCount());
+            else psnap.emplace_back();
+        }
+        // Capture the rigid bodies in the SAME pass so replay restores them in
+        // lockstep with this fluid frame (see rigid_frame_cache_).
+        captureRigidFrame(frame);
+        // Soft/cloth deformation is mesh-resident, so record it per frame too.
+        captureSoftFrame(frame);
+    }
+
+    // Snapshot the dynamic rigid bodies for `frame`, keyed alongside the fluid
+    // cache. No-op when there are no rigid bodies.
+    void captureRigidFrame(int frame) {
+        if (!rigid_body_system || rigid_bodies.empty()) return;
+        rigid_body_system->captureFrameState(rigid_frame_cache_[frame]);
+    }
+
+    // Replay the rigid bodies for `frame` from the cache (pose + velocities), so
+    // their motion matches the cached fluid exactly instead of being re-simulated
+    // against a frozen fluid frame. Returns false when the frame isn't cached.
+    bool restoreRigidFrame(int frame) {
+        if (!rigid_body_system) return false;
+        auto it = rigid_frame_cache_.find(frame);
+        if (it == rigid_frame_cache_.end()) return false;
+        if (!rigid_body_system->restoreFrameState(it->second)) return false;
+        rigid_timeline_frame_ = frame;
+        return true;
+    }
+
+    // Bring the rigid timeline to `frame`: replay it from the cache when present
+    // (the deterministic, fluid-matching path), otherwise fall back to the cheap
+    // re-sim (used by the disk-cache path and any uncached gap).
+    void syncRigidToFrame(int frame, float fixed_dt, int max_steps) {
+        if (frame < 0) frame = 0;
+        if (rigid_timeline_frame_ == frame) return;
+        if (restoreRigidFrame(frame)) return;
+        advanceRigidTimelineToFrame(frame, fixed_dt, max_steps);
     }
 
     bool restoreSimFrame(int frame, float fixed_dt = 1.0f / 24.0f) {
@@ -2279,11 +3367,23 @@ struct SceneData {
         // we can faithfully reconstruct, so reset them to their initial pose there.
         // (A loop-back / scrub to frame 0 thus puts a fallen body back at the top.)
         if (frame <= 0 && rigid_body_system) rigid_body_system->resetRuntime();
+        // Soft/cloth deformation is mesh-resident and cached per frame; replay it so
+        // a cached-frame scrub/loop shows the cloth's shape instead of a frozen mesh.
+        restoreSoftFrame(frame);
         auto it = sim_frame_cache_.find(frame);
         if (it != sim_frame_cache_.end() && it->second.size() == particle_systems.size()) {
+            // Restore the discrete particle SoA from the lockstep cache (if present
+            // for this frame) so a cached-frame replay shows the actual particles
+            // instead of an empty SoA.
+            auto pit = particle_frame_cache_.find(frame);
+            const bool have_particles =
+                (pit != particle_frame_cache_.end() && pit->second.size() == particle_systems.size());
             for (std::size_t i = 0; i < particle_systems.size(); ++i) {
                 if (particle_systems[i].runtime) {
                     particle_systems[i].runtime->setGridDomainStates(it->second[i]);
+                    if (have_particles) {
+                        particle_systems[i].runtime->restoreSoA(pit->second[i].first, pit->second[i].second);
+                    }
                     invalidateSimulationRenderBindings(particle_systems[i]);
                 }
             }
@@ -2319,6 +3419,16 @@ struct SceneData {
             if (particle_systems[i].runtime) {
                 particle_systems[i].runtime->setGridDomainStates(loaded[i]);
                 invalidateSimulationRenderBindings(particle_systems[i]);
+            }
+        }
+        // Soft bodies: replay the baked deformation. On a freshly reopened project
+        // the body was never live-created, so build the weld topology on demand.
+        std::vector<RayTrophiSim::SimCache::SoftBodyFrame> soft;
+        if (RayTrophiSim::SimCache::readSoftFrame(sim_cache_dir_, frame, soft)) {
+            for (auto& b : soft) {
+                if (soft_weld_cache_.find(b.name) == soft_weld_cache_.end())
+                    rebuildSoftWeldCache(b.name);
+                applySoftDeformedVerts(b.name, b.vertices);
             }
         }
         simulation_world.resetTime(static_cast<float>(frame) * fixed_dt, frame);
@@ -2373,6 +3483,21 @@ struct SceneData {
                 invalidateSimulationRenderBindings(system);
                 system.runtime->resetGridDomainStates();
                 system.runtime->clear();  // particles back to empty for a deterministic bake
+                // Re-arm standing-tank (FillLevel) fluid seeds and synchronize the
+                // domain states NOW, so frame 0 already carries the full tank +
+                // correct grid metadata — exactly what the disk bake does
+                // (bakeSimulationToDisk). Without this the interactive play path
+                // started frame 0 EMPTY (clear() wiped the seeded particles and the
+                // seed wasn't re-applied until the first step), so a fill domain
+                // only refilled a couple of frames in and its SurfaceSDF volume
+                // wasn't built/raymarched until ~frame 2 (the reported bug).
+                for (auto& dom : system.runtime->gridDomains()) {
+                    if (dom.type == RayTrophiSim::SimulationDomainType::Fluid &&
+                        dom.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel) {
+                        dom.fluid_pending_seed = true;
+                    }
+                }
+                system.runtime->synchronizeGridDomainsNow();
             }
         }
         // Rigid bodies respawn at their source objects' poses on the next step.
@@ -2395,6 +3520,15 @@ struct SceneData {
 
     void requestSimulationTimelineRenderResync() {
         force_simulation_render_sync_ = true;
+    }
+
+    // A fluid-affecting setup edit rewinds the sim to frame 0 (see
+    // updateSimulationTimeline) instead of auto-resimming up to a high parked
+    // frame. The UI layer consumes this to move the timeline playhead to start.
+    bool consumeSimRewindRequest() {
+        const bool r = sim_rewind_request_;
+        sim_rewind_request_ = false;
+        return r;
     }
 
     // Push appearance-only SurfaceSDF params (IOR + VolumeShader edits) to the
@@ -2436,7 +3570,8 @@ struct SceneData {
     //   live_mode == false : Timeline (default) — play bakes into the cache, scrub
     //                        restores/resimulates, and a stopped timeline stays
     //                        frozen (no stepping, no render churn → cheap/idle).
-    void updateSimulationTimeline(int tl_frame, bool playing, float realtime_dt, float fps, bool live_mode) {
+    void updateSimulationTimeline(int tl_frame, bool playing, float realtime_dt, float fps, bool live_mode,
+                                  bool ui_editing = false) {
         if (tl_frame < 0) tl_frame = 0;
         simulation_render_updated = false;
         const bool force_resync = force_simulation_render_sync_;
@@ -2453,26 +3588,53 @@ struct SceneData {
         // Auto-invalidate the in-memory bake cache when the simulation SETUP
         // changes (add/remove of any sim element, rigid-body param edit, …) so a
         // stale cache is never replayed. Replaces the old manual-reset workflow.
-        // Disk cache is left to the Faz 5 hardening; only the memory cache + the
-        // live-bake cursor are dropped here.
         const uint64_t cfg_sig = computeSimConfigSignature();
         if (cfg_sig != last_sim_config_sig_) {
-            syncRigidBodyProxyColliders();
-            // Decide whether the change actually touches a FLUID bake. A far or
-            // static rigid that doesn't overlap any fluid domain only needs the
-            // cheap rigid re-sim — the expensive fluid cache survives. Anything
-            // that couples to fluid (or any non-rigid setup edit) drops it and
-            // rewinds so the fluid re-bakes from frame 0. Recompute the coupling
-            // signature AFTER the proxy-collider sync so it sees current geometry.
-            const uint64_t fluid_sig = computeFluidCouplingSignature();
-            const bool fluid_affected = (fluid_sig != last_fluid_coupling_sig_);
-            last_sim_config_sig_ = computeSimConfigSignature();
-            last_fluid_coupling_sig_ = fluid_sig;
-            if (fluid_affected) {
-                clearSimFrameCache();
-                sim_timeline_frame_ = -1;  // force a fresh fluid bake from frame 0
+            // Settle-gate: defer the (expensive) cache drop until the edit finishes.
+            // The signature changes on EVERY drag tick, so committing immediately
+            // would restart the bake from frame 0 each frame of a slider drag —
+            // never progressing. ui_editing is true while a widget is held; we keep
+            // showing the current cache until the user lets go, then commit once.
+            if (!ui_editing) {
+                syncRigidBodyProxyColliders();
+                // Decide whether the change actually touches a FLUID bake. A far or
+                // static rigid that doesn't overlap any fluid domain only needs the
+                // cheap rigid re-sim — the expensive fluid cache survives. Recompute
+                // the coupling signature AFTER the proxy-collider sync.
+                const uint64_t fluid_sig = computeFluidCouplingSignature();
+                const bool fluid_affected = (fluid_sig != last_fluid_coupling_sig_);
+                last_sim_config_sig_ = computeSimConfigSignature();
+                last_fluid_coupling_sig_ = fluid_sig;
+                if (fluid_affected) {
+                    // Viewing frame N of a changed sim needs a fresh deterministic
+                    // bake of 0..N. Auto-resimming up to a high PARKED frame on every
+                    // edit is costly, so instead rewind to frame 0 (cheap — one seed),
+                    // drop the RAM + disk caches, and ask the UI to move the playhead
+                    // to start. The user plays forward to re-bake (and re-bakes to
+                    // disk) when satisfied — the cost is opt-in, not automatic.
+                    resetSimulationToStart(/*clear_cache=*/true, /*capture_frame=*/true);
+                    sim_cache_valid_ = false;   // on-disk bake is stale too
+                    sim_timeline_frame_ = 0;
+                    rigid_timeline_frame_ = 0;
+                    sim_rewind_request_ = true;
+                    // Show frame 0 now and skip this tick's bake/scrub — tl_frame
+                    // still holds the OLD parked value, so falling through would
+                    // catch up 0→N, exactly the cost we are avoiding. The playhead
+                    // moves to start next tick once the UI consumes the request.
+                    syncSimulationRenderVolumes();
+                    simulation_render_updated = true;
+                    return;
+                } else {
+                    // Non-coupling rigid edit/move: keep the fluid cache but drop the
+                    // now-stale rigid AND soft caches so the changed body re-bakes on
+                    // next play. (soft_frame_cache_ was previously left intact here,
+                    // so adding a second body froze the first at its last cached
+                    // deform while only the newest body re-simulated — the bug.)
+                    rigid_frame_cache_.clear();
+                    soft_frame_cache_.clear();
+                    rigid_timeline_frame_ = -1;  // rigid re-bakes/replays from frame 0
+                }
             }
-            rigid_timeline_frame_ = -1;    // rigid is not frame-cached; cheap to re-sim
         }
 
         // Live Update: free-run whenever the timeline is not actively playing.
@@ -2508,7 +3670,7 @@ struct SceneData {
                 }
             }
             if (cache_frame_ready && rigid_timeline_frame_ != want) {
-                advanceRigidTimelineToFrame(want, fixed_dt, kMaxStepsPerTick);
+                syncRigidToFrame(want, fixed_dt, kMaxStepsPerTick);
                 changed = true;
             }
             if (changed) syncSimulationRenderVolumes();
@@ -2517,7 +3679,7 @@ struct SceneData {
 
         if (force_resync && !playing && restoreSimFrame(tl_frame, fixed_dt)) {
             sim_timeline_frame_ = tl_frame;
-            advanceRigidTimelineToFrame(tl_frame, fixed_dt, kMaxStepsPerTick);
+            syncRigidToFrame(tl_frame, fixed_dt, kMaxStepsPerTick);
             changed = true;
         }
 
@@ -2529,7 +3691,7 @@ struct SceneData {
         if (sim_timeline_frame_ < 0) {
             if (restoreSimFrame(tl_frame, fixed_dt)) {
                 sim_timeline_frame_ = tl_frame;
-                advanceRigidTimelineToFrame(tl_frame, fixed_dt, kMaxStepsPerTick);
+                syncRigidToFrame(tl_frame, fixed_dt, kMaxStepsPerTick);
             } else {
                 resetSimulationToStart(false, false);
                 sim_timeline_frame_ = 0;
@@ -2538,7 +3700,7 @@ struct SceneData {
         } else if (playing && tl_frame < sim_timeline_frame_) {
             if (restoreSimFrame(tl_frame, fixed_dt)) {
                 sim_timeline_frame_ = tl_frame;
-                advanceRigidTimelineToFrame(tl_frame, fixed_dt, kMaxStepsPerTick);
+                syncRigidToFrame(tl_frame, fixed_dt, kMaxStepsPerTick);
                 changed = true;
             } else {
                 resetSimulationToStart(false, false);
@@ -2550,7 +3712,7 @@ struct SceneData {
         if (tl_frame != sim_timeline_frame_) {
             if (restoreSimFrame(tl_frame, fixed_dt)) {
                 sim_timeline_frame_ = tl_frame;
-                advanceRigidTimelineToFrame(tl_frame, fixed_dt, kMaxStepsPerTick);
+                syncRigidToFrame(tl_frame, fixed_dt, kMaxStepsPerTick);
                 changed = true;
             } else {
                 // Uncached: rewind to nearest cached <= target, then resim (capped).
@@ -2558,7 +3720,7 @@ struct SceneData {
                     const int nearest = nearestCachedSimFrameAtOrBelow(tl_frame);
                     if (nearest >= 0 && restoreSimFrame(nearest, fixed_dt)) {
                         sim_timeline_frame_ = nearest;
-                        advanceRigidTimelineToFrame(nearest, fixed_dt, kMaxStepsPerTick);
+                        syncRigidToFrame(nearest, fixed_dt, kMaxStepsPerTick);
                     } else {
                         resetSimulationToStart(false, false);
                         sim_timeline_frame_ = 0;
@@ -2589,7 +3751,7 @@ struct SceneData {
         }
 
         if (sim_timeline_frame_ >= 0 && rigid_timeline_frame_ != sim_timeline_frame_) {
-            advanceRigidTimelineToFrame(sim_timeline_frame_, fixed_dt, kMaxStepsPerTick);
+            syncRigidToFrame(sim_timeline_frame_, fixed_dt, kMaxStepsPerTick);
             changed = true;
         }
 
@@ -2640,7 +3802,7 @@ struct SceneData {
         } else if (restoreSimFrame(tl_frame, fixed_dt)) {
             // Exact cached frame → restore and done.
             sim_timeline_frame_ = tl_frame;
-            advanceRigidTimelineToFrame(tl_frame, fixed_dt, tl_frame + 1);
+            syncRigidToFrame(tl_frame, fixed_dt, tl_frame + 1);
             syncSimulationRenderVolumes();
             syncParticleRenderInstances(enable_rt_geometry);
             return;
@@ -2654,7 +3816,7 @@ struct SceneData {
             const int nearest = cache_frames ? nearestCachedSimFrameAtOrBelow(tl_frame) : -1;
             if (nearest >= 0 && restoreSimFrame(nearest, fixed_dt)) {
                 sim_timeline_frame_ = nearest;
-                advanceRigidTimelineToFrame(nearest, fixed_dt, nearest + 1);
+                syncRigidToFrame(nearest, fixed_dt, nearest + 1);
             } else {
                 resetSimulationToStart();
                 sim_timeline_frame_ = 0;
@@ -2805,7 +3967,12 @@ struct SceneData {
     // request is invalid. Drive it each UI tick with tickSimulationDiskBake.
     bool beginSimulationDiskBake(const std::string& cache_dir, int start_frame, int end_frame, float fps) {
         if (sim_bake_active_) return false;                                  // already baking
-        if (cache_dir.empty() || end_frame < start_frame || particle_systems.empty()) return false;
+        // Bake needs SOMETHING to cache: a particle/fluid/gas system OR a rigid/
+        // soft body. A cloth-only scene has no particle_systems but still bakes its
+        // soft deformation — previously this guard bailed on empty particle_systems
+        // so the Bodies-panel bake button did nothing without a fluid domain.
+        if (cache_dir.empty() || end_frame < start_frame ||
+            (particle_systems.empty() && rigid_bodies.empty())) return false;
 
         sim_bake_dir_    = cache_dir;
         sim_bake_start_  = start_frame;
@@ -2906,7 +4073,26 @@ private:
                 ok = false;
             }
         }
+        if (!writeSoftBodiesBakeFrame_(f)) ok = false;
         return ok;
+    }
+
+    // Write every soft body's deformed world vertices for frame f (alongside the
+    // fluid frames, same folder). No-op (success) when there are no soft bodies.
+    bool writeSoftBodiesBakeFrame_(int f) {
+        if (soft_weld_cache_.empty()) return true;
+        std::map<std::string, std::vector<Vec3>> snap;
+        snapshotSoftBodies(snap);
+        if (snap.empty()) return true;
+        std::vector<RayTrophiSim::SimCache::SoftBodyFrame> bodies;
+        bodies.reserve(snap.size());
+        for (auto& kv : snap) {
+            RayTrophiSim::SimCache::SoftBodyFrame b;
+            b.name = kv.first;
+            b.vertices = std::move(kv.second);
+            bodies.push_back(std::move(b));
+        }
+        return RayTrophiSim::SimCache::writeSoftFrame(sim_bake_dir_, f, bodies);
     }
 
     // End the active bake: on success write the manifest + bind the cache so
@@ -2935,6 +4121,11 @@ private:
             sim_cache_valid_ = sim_bake_ok_;
             sim_cache_start_frame_ = sim_bake_start_;
             sim_cache_end_frame_ = sim_bake_end_;
+            // Disk now serves every frame (restoreSimFrame falls through to disk on a
+            // RAM miss), so drop the in-memory frame caches and reclaim that RAM — this
+            // is the whole point of baking on a crowded/long scene. The rest/topology
+            // caches (soft_weld_cache_ / rigid_bake_cache_) are NOT touched.
+            if (sim_bake_ok_) clearSimFrameCache();
         } else {
             RayTrophiSim::SimCache::clearCache(sim_bake_dir_);  // drop the half-bake
             sim_bake_ok_ = false;
@@ -3043,6 +4234,11 @@ private:
             g_vulkan_rebuild_pending = true;
             g_optix_rebuild_pending = true;
             g_gas_volumes_dirty = true;
+            // Drop the now-erased volume node from the CPU BVH too, else the CPU
+            // reference render keeps hitting the stale/dangling volume AABB and the
+            // domain shows black (e.g. when a fluid domain switches to Particles
+            // mode, which tears the volume down). Symmetric with the create path.
+            g_bvh_rebuild_pending = true;
         }
         if (d < system.domain_sdf_signatures.size()) {
             system.domain_sdf_signatures[d] = 0;
@@ -3069,6 +4265,7 @@ private:
             g_vulkan_rebuild_pending = true;
             g_optix_rebuild_pending = true;
             g_gas_volumes_dirty = true;
+            g_bvh_rebuild_pending = true;  // drop stale node from CPU BVH (see removeDomainVolume)
         }
     }
 
@@ -4774,6 +5971,9 @@ public:
         object_groups.clear();
         mesh_modifiers.clear();
         base_mesh_cache.clear();
+        soft_weld_cache_.clear();   // holds shared_ptr<Triangle> into the old scene
+        rigid_bake_cache_.clear();  // ditto (rigid render-bake rest cache)
+        soft_frame_cache_.clear();
         invalidateSurfaceMeshCache();
 
         // Reset Post-Processing to defaults

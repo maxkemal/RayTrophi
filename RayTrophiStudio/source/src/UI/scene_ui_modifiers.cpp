@@ -3524,6 +3524,7 @@ void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapt
 
             // Advance cursor
             ImGui::SetCursorScreenPos(ImVec2(row_min.x, row_max.y + 1.0f));
+            ImGui::Dummy(ImVec2(0.0f, 0.0f));
             ImGui::PopID();
         }
 

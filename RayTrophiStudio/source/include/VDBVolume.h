@@ -313,6 +313,14 @@ public:
     // of as fog. Set by the SurfaceSDF render route. Maps to source_type=4 in
     // GpuVDBVolume / VkVolumeInstance; shaders branch on it.
     bool render_as_isosurface = false;
+    // When true, this volume is kept registered + visible ONLY for the GPU SSBO
+    // slot mapping (fluid Particles / splat-sphere render mode keeps the domain
+    // volume alive to avoid TLAS rebuild churn) but contributes NOTHING on the CPU.
+    // VDBVolume::hit returns false so the CPU BVH doesn't treat the domain AABB as
+    // an occluder — otherwise the box masked the discrete splat spheres INSIDE it
+    // (only wall-adjacent spheres, hit before the AABB entry, survived). The GPU is
+    // unaffected (it never calls VDBVolume::hit; it raymarches via the SSBO/SBT).
+    bool cpu_render_skip = false;
     // IOR for the isosurface dielectric boundary (water 1.33, glass 1.5).
     // Carried into GpuVDBVolume.ior / VkVolumeInstance ior reserved slot.
     float render_isosurface_ior = 1.33f;

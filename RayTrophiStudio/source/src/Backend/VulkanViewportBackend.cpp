@@ -1635,6 +1635,9 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         mix(c.lookAt.x); mix(c.lookAt.y); mix(c.lookAt.z);
         mix(c.up.x); mix(c.up.y); mix(c.up.z);
         mix(c.fov);
+        mix(c.orthographic ? 1.0f : 0.0f);
+        mix(c.orthoHeight);
+        mix((float)c.gridPlane);
         return h;
     };
     uint64_t camHash = hashCamera(m_camera);
@@ -1698,13 +1701,27 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         return proj;
     };
 
+    auto makeOrthoMatrix = [&](float orthoHeight, float aspect, float zNear, float zFar) {
+        const float h = (orthoHeight > 1e-4f) ? orthoHeight : 10.0f;
+        const float w = h * aspect;
+        Matrix4x4 proj = Matrix4x4::zero();
+        proj.m[0][0] = 2.0f / w;
+        proj.m[1][1] = -2.0f / h;                  // Y-flip, matching the perspective convention
+        proj.m[2][2] = 1.0f / (zNear - zFar);      // maps z_eye[-near,-far] -> NDC z[0,1]
+        proj.m[2][3] = zNear / (zNear - zFar);
+        proj.m[3][3] = 1.0f;
+        return proj;
+    };
+
     Matrix4x4 view = makeViewMatrix(m_camera.origin, m_camera.lookAt, m_camera.up);
     const float aspect = (height > 0) ? ((float)width / (float)height) : 1.0f;
-    Matrix4x4 proj = makePerspectiveMatrix(
-        m_camera.fov > 1.0f ? m_camera.fov : 60.0f,
-        aspect,
-        0.01f,
-        1000000.0f);
+    Matrix4x4 proj = m_camera.orthographic
+        ? makeOrthoMatrix(m_camera.orthoHeight, aspect, 0.01f, 1000000.0f)
+        : makePerspectiveMatrix(
+            m_camera.fov > 1.0f ? m_camera.fov : 60.0f,
+            aspect,
+            0.01f,
+            1000000.0f);
     Matrix4x4 viewProj = proj * view;
 
     const float fovDeg = m_camera.fov > 1.0f ? m_camera.fov : 60.0f;
@@ -2010,17 +2027,101 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         }
     }
 
-    if (!m_interactiveViewport.gridVertexBuffer.buffer) {
-        const float gridHalf = 10.0f;
-        const float step = 1.0f;
-        const float thin = 0.005f;
-        const float axisThin = 0.020f;
+    // Rebuild the reference grid when it doesn't exist yet, when the active plane changed
+    // (standard view switched), or when the adaptive spacing bucket changed (zoom). The grid
+    // lays out on the plane the camera faces so it stays a usable alignment reference, and the
+    // spacing follows the zoom so it never collapses to a few lines or fuses into a mass.
+    const int activeGridPlane = m_camera.gridPlane;
+    float viewScale;
+    if (m_camera.orthographic) {
+        viewScale = (m_camera.orthoHeight > 1e-4f) ? m_camera.orthoHeight : 10.0f;
+    } else {
+        // Use the camera's perpendicular distance to the active grid plane.
+        // This is much more stable than orbit distance (origin-lookAt) because:
+        //  - It doesn't change during pan (camera slides parallel to the grid)
+        //  - It changes smoothly during orbit/zoom
+        //  - It reflects the actual visible grid extent
+        float planeDist;
+        switch (activeGridPlane) {
+            case 1:  planeDist = std::abs(m_camera.origin.z); break; // XY plane
+            case 2:  planeDist = std::abs(m_camera.origin.x); break; // YZ plane
+            default: planeDist = std::abs(m_camera.origin.y); break; // XZ floor
+        }
+        // Scale by FOV so wider lenses get coarser grid (more visible area)
+        const float fovRad = (m_camera.fov > 1.0f ? m_camera.fov : 60.0f) * 3.14159265f / 180.0f;
+        const float fovScale = 2.0f * std::tan(fovRad * 0.5f); // visible height at unit distance
+        viewScale = planeDist * fovScale;
+        // Fallback: when camera is ON the grid plane (planeDist ≈ 0), use orbit distance
+        if (viewScale < 0.5f) {
+            const float orbitDist = (m_camera.origin - m_camera.lookAt).length();
+            viewScale = (std::max)(orbitDist * fovScale, 1.0f);
+        }
+    }
+    // Finer 1-2-5 sub-steps to reduce visible grid "pop" (max ratio ≈ 1.5×).
+    auto niceStep = [](float x) -> float {
+        if (x <= 1e-6f) return 1.0f;
+        const float p = std::pow(10.0f, std::floor(std::log10(x)));
+        const float n = x / p; // 1..10
+        float m;
+        if      (n < 1.25f) m = 1.0f;
+        else if (n < 1.75f) m = 1.5f;
+        else if (n < 2.5f)  m = 2.0f;
+        else if (n < 4.0f)  m = 3.0f;
+        else if (n < 6.0f)  m = 5.0f;
+        else if (n < 8.5f)  m = 7.0f;
+        else                m = 10.0f;
+        return m * p;
+    };
+    // Hysteresis: only switch spacing when the new value differs by >15%
+    // from the currently built spacing. This prevents rapid flip-flopping
+    // at the boundary of two nice-step buckets during camera pan.
+    float candidateSpacing = niceStep(viewScale * 0.1f);
+    const float builtSpacing = m_interactiveViewport.gridBuiltSpacing;
+    if (builtSpacing > 0.0f) {
+        const float ratio = candidateSpacing / builtSpacing;
+        if (ratio > 0.87f && ratio < 1.15f) {
+            candidateSpacing = builtSpacing; // keep current
+        }
+    }
+    const float gridSpacing = candidateSpacing;
+
+    if (!m_interactiveViewport.gridVertexBuffer.buffer ||
+        m_interactiveViewport.gridBuiltPlane != activeGridPlane ||
+        m_interactiveViewport.gridBuiltSpacing != gridSpacing) {
+        if (m_interactiveViewport.gridVertexBuffer.buffer) {
+            m_device->destroyBuffer(m_interactiveViewport.gridVertexBuffer);
+            m_interactiveViewport.gridVertexBuffer = {};
+        }
+        if (m_interactiveViewport.gridNormalBuffer.buffer) {
+            m_device->destroyBuffer(m_interactiveViewport.gridNormalBuffer);
+            m_interactiveViewport.gridNormalBuffer = {};
+        }
+
+        // Scale the number of lines so the total grid extent stays
+        // proportional to the visible area (~4× viewScale on each side).
+        // This prevents the grid from suddenly covering a much larger area
+        // when the spacing bumps up, which made objects look shrunken.
+        const float desiredHalf = viewScale * 4.0f;
+        const int   linesEachSide = (std::max)(10, (int)std::ceil(desiredHalf / gridSpacing));
+        const float gridHalf = gridSpacing * (float)linesEachSide;
+        const float step = gridSpacing;
+        const float thin = gridSpacing * 0.008f; // thicker so 720p (no MSAA) doesn't break lines up
+        const float axisThin = gridSpacing * 0.022f;
+
+        // Plane basis: ax = horizontal axis, ay = vertical axis, nrm = plane normal.
+        Vec3 ax, ay, nrm;
+        switch (activeGridPlane) {
+            case 1: ax = Vec3(1, 0, 0); ay = Vec3(0, 1, 0); nrm = Vec3(0, 0, 1); break; // XY (Front/Back)
+            case 2: ax = Vec3(0, 0, 1); ay = Vec3(0, 1, 0); nrm = Vec3(1, 0, 0); break; // YZ (Left/Right)
+            default: ax = Vec3(1, 0, 0); ay = Vec3(0, 0, 1); nrm = Vec3(0, 1, 0); break; // XZ (Top/Persp floor)
+        }
+        const Vec3 nOff = nrm * (gridSpacing * 0.0002f); // lift axis lines so they win the depth test
 
         std::vector<float> positions, normals;
         auto addLineQuad = [&](Vec3 a, Vec3 b, Vec3 widthDir) {
             Vec3 w = widthDir;
             Vec3 p0 = a - w, p1 = a + w, p2 = b + w, p3 = b - w;
-            Vec3 n(0.0f, 1.0f, 0.0f);
+            Vec3 n = nrm;
             // Emit triangles (front-facing) and their reversed winding (back-facing)
             for (const Vec3& p : { p0, p1, p2, p0, p2, p3, p2, p1, p0, p3, p2, p0 }) {
                 positions.push_back(p.x); positions.push_back(p.y); positions.push_back(p.z);
@@ -2029,29 +2130,31 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         };
 
         uint32_t seg0Start = 0;
-        for (float x = -gridHalf; x <= gridHalf + 0.001f; x += step) {
-            if (std::abs(x) < 0.01f) continue;
-            addLineQuad(Vec3(x, 0.0f, -gridHalf), Vec3(x, 0.0f, gridHalf), Vec3(thin, 0.0f, 0.0f));
+        for (float u = -gridHalf; u <= gridHalf + step * 0.001f; u += step) {
+            if (std::abs(u) < step * 0.5f) continue;
+            addLineQuad(ax * u - ay * gridHalf, ax * u + ay * gridHalf, ax * thin);
         }
-        for (float z = -gridHalf; z <= gridHalf + 0.001f; z += step) {
-            if (std::abs(z) < 0.01f) continue;
-            addLineQuad(Vec3(-gridHalf, 0.0f, z), Vec3(gridHalf, 0.0f, z), Vec3(0.0f, 0.0f, thin));
+        for (float v = -gridHalf; v <= gridHalf + step * 0.001f; v += step) {
+            if (std::abs(v) < step * 0.5f) continue;
+            addLineQuad(ay * v - ax * gridHalf, ay * v + ax * gridHalf, ay * thin);
         }
         uint32_t seg0Count = (uint32_t)(positions.size() / 3);
 
         uint32_t seg1Start = (uint32_t)(positions.size() / 3);
-        addLineQuad(Vec3(0.0f, 0.001f, 0.0f), Vec3(gridHalf, 0.001f, 0.0f), Vec3(0.0f, 0.0f, axisThin));
+        addLineQuad(nOff, ax * gridHalf + nOff, ay * axisThin);
         uint32_t seg1Count = (uint32_t)(positions.size() / 3) - seg1Start;
 
         uint32_t seg2Start = (uint32_t)(positions.size() / 3);
-        // Use same small Y offset as +X axis and slightly larger width so it's visible
-        addLineQuad(Vec3(0.0f, 0.001f, 0.0f), Vec3(0.0f, 0.001f, gridHalf), Vec3(axisThin, 0.0f, 0.0f));
+        addLineQuad(nOff, ay * gridHalf + nOff, ax * axisThin);
         uint32_t seg2Count = (uint32_t)(positions.size() / 3) - seg2Start;
 
         uint32_t seg3Start = (uint32_t)(positions.size() / 3);
-        addLineQuad(Vec3(-gridHalf, 0.001f, 0.0f), Vec3(0.0f, 0.001f, 0.0f), Vec3(0.0f, 0.0f, thin));
-        addLineQuad(Vec3(0.0f, 0.001f, -gridHalf), Vec3(0.0f, 0.001f, 0.0f), Vec3(thin, 0.0f, 0.0f));
+        addLineQuad(ax * -gridHalf + nOff, nOff, ay * thin);
+        addLineQuad(ay * -gridHalf + nOff, nOff, ax * thin);
         uint32_t seg3Count = (uint32_t)(positions.size() / 3) - seg3Start;
+
+        m_interactiveViewport.gridBuiltPlane = activeGridPlane;
+        m_interactiveViewport.gridBuiltSpacing = gridSpacing;
 
         m_interactiveViewport.gridVertexCount = (uint32_t)(positions.size() / 3);
         m_interactiveViewport.gridSegments[0] = seg0Start;

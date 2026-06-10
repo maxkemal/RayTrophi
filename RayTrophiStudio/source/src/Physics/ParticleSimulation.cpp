@@ -3540,6 +3540,17 @@ void ParticleSimulationSystem::clear() {
     ++data_version_;
 }
 
+void ParticleSimulationSystem::restoreSoA(const ParticleSoABuffers& src, std::size_t alive_count) {
+    buffers_ = src;
+    alive_count_ = std::min(alive_count, buffers_.alive.size());
+    // The neighbor grid is rebuilt from scratch each step, so just drop it.
+    neighbor_grid_.clear();
+    // Force the next uploadToCompute to re-push the whole SoA to the GPU (the
+    // restored data is a brand-new state the device hasn't seen).
+    compute_buffers_.source_version = 0;
+    ++data_version_;
+}
+
 void ParticleSimulationSystem::releaseComputeResources(SimulationComputeContext& compute) {
     auto destroy = [&](ComputeBufferHandle& handle) {
         if (handle.valid()) {
@@ -4844,6 +4855,12 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     ? state.domain_motion_delta * (motion_coupling / dt)
                     : Vec3(0.0f, 0.0f, 0.0f);
             bool gpu_integrated_forces = false;
+            // True once force fields have been evaluated on the CPU (force-field
+            // branch below). The forces are then already baked into the particle
+            // velocities, so the downstream step() calls must NOT re-apply them and
+            // the container-velocity fold must not run twice — even if the GPU
+            // upload that follows fails and we drop back to a CPU P2G.
+            bool cpu_forces_applied = false;
             const bool fluid_gpu_requested = (i < grid_domains_.size()) &&
                 (grid_domains_[i].backend == SimulationDomainBackend::GPU_CUDA ||
                  grid_domains_[i].backend == SimulationDomainBackend::GPU_Vulkan);
@@ -4852,20 +4869,44 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             const bool force_fields_require_cpu =
                 context.force_snapshot && !context.force_snapshot->empty();
             if (fluid_gpu_requested &&
-                !force_fields_require_cpu &&
                 fluid_gpu_compute_available &&
                 i < grid_domain_compute_buffers_.size()) {
                 auto& gpu_buffers = grid_domain_compute_buffers_[i];
                 if (ensureGridDomainComputeBuffers(*context.compute, gpu_buffers, state.grid)) {
-                    gpu_integrated_forces = runGpuFluidParticleIntegrateForces(state,
-                                                                               fluid_params,
-                                                                               container_velocity_delta,
-                                                                               dt,
-                                                                               context.compute,
-                                                                               gpu_buffers);
+                    if (!force_fields_require_cpu) {
+                        // Pure gravity (+ container velocity): integrate on the GPU.
+                        gpu_integrated_forces = runGpuFluidParticleIntegrateForces(state,
+                                                                                   fluid_params,
+                                                                                   container_velocity_delta,
+                                                                                   dt,
+                                                                                   context.compute,
+                                                                                   gpu_buffers);
+                    } else {
+                        // Force fields are CPU-only (noise / wind surface-drag are not
+                        // ported to the device). Evaluate them on the CPU, fold in the
+                        // container velocity, then UPLOAD the post-force particle state
+                        // so GPU P2G / pressure / G2P still run on the device. Only the
+                        // cheap force accumulation stays on the CPU — the heavy scatter
+                        // and pressure solve no longer fall back just because a force
+                        // field (e.g. wind) is active.
+                        Fluid::applyExternalForces(state.particles, state.grid, fluid_params,
+                                                   context.force_snapshot, context.time_seconds, dt);
+                        cpu_forces_applied = true;
+                        if (motion_mag > 1e-7f) {
+                            const std::size_t pc = state.particles.velocity.size();
+                            for (std::size_t pi = 0; pi < pc; ++pi)
+                                state.particles.velocity[pi] =
+                                    state.particles.velocity[pi] + container_velocity_delta;
+                        }
+                        // Upload the post-force state for GPU P2G. If this fails the
+                        // forces stay correctly applied on the CPU (cpu_forces_applied);
+                        // the step falls back to a CPU P2G without re-integrating.
+                        gpu_integrated_forces =
+                            ensureGpuFluidParticleBuffers(state, context.compute, gpu_buffers);
+                    }
                 }
             }
-            if (!gpu_integrated_forces && motion_mag > 1e-7f) {
+            if (!gpu_integrated_forces && !cpu_forces_applied && motion_mag > 1e-7f) {
                 const std::size_t particle_count = state.particles.velocity.size();
                 for (std::size_t pi = 0; pi < particle_count; ++pi) {
                     state.particles.velocity[pi] = state.particles.velocity[pi] + container_velocity_delta;
@@ -4896,6 +4937,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             }
             auto step_params = fluid_params;
             step_params.max_particles = (i < grid_domains_.size()) ? grid_domains_[i].fluid_max_particles : 100000;
+            // Forces were evaluated on the CPU (force-field branch); make every
+            // downstream step() skip its force stage so they are not applied twice.
+            // This holds whether or not the GPU upload/P2G succeeded.
+            if (cpu_forces_applied) step_params.external_forces_preintegrated = true;
 
             // One-shot GPU MGPCG correctness self-test. Runs on a synthetic
             // isolated grid the first time any fluid domain is stepped — does
@@ -5101,7 +5146,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             state.fluid_stats.density_ms           = elapsedMilliseconds(density_begin, density_end);
             state.fluid_stats.density_on_gpu       = density_on_gpu;
             state.fluid_stats.active_fluid_cells   = state.active_density_cells;
-            state.fluid_stats.forces_on_gpu        = gpu_integrated_forces;
+            state.fluid_stats.forces_on_gpu        = gpu_integrated_forces && !force_fields_require_cpu;
             state.fluid_stats.gpu_requested        = fluid_gpu_requested;
             state.fluid_stats.gpu_compute_available = fluid_gpu_compute_available;
             state.fluid_stats.compute_device = fluid_gpu_compute_available && context.compute
@@ -5112,22 +5157,26 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
 
             // GPU status string. When g2p_on_gpu is set the all-GPU path ran,
             // which now includes the MGPCG pressure projection (Jacobi-PCG).
+            // Force fields keep their evaluation on the CPU (noise / wind
+            // surface-drag are not ported to the device), but the post-force
+            // velocities are uploaded so P2G/pressure/G2P still run on the GPU —
+            // hence "forces CPU(fields)" rather than a full CPU fallback.
+            const std::string forces_loc = force_fields_require_cpu
+                ? "forces CPU(fields)" : "forces GPU";
             if (!fluid_gpu_requested) {
                 state.fluid_stats.gpu_status = "CPU reference path";
             } else if (!fluid_gpu_compute_available) {
                 state.fluid_stats.gpu_status = "GPU requested, but no simulation compute backend available; CPU fallback.";
-            } else if (force_fields_require_cpu) {
-                state.fluid_stats.gpu_status = "GPU partial: force fields are CPU-only; force/P2G on CPU.";
             } else if (!gpu_integrated_forces) {
                 state.fluid_stats.gpu_status = "GPU requested on " + state.fluid_stats.compute_device + ", but force integration failed; CPU fallback.";
             } else if (!step_params.p2g_precomputed) {
                 state.fluid_stats.gpu_status = "GPU requested on " + state.fluid_stats.compute_device + ", but P2G failed; CPU P2G fallback.";
             } else if (!g2p_on_gpu) {
-                state.fluid_stats.gpu_status = "GPU partial on " + state.fluid_stats.compute_device + ": forces/P2G/density. Pressure+G2P CPU fallback (PCG).";
+                state.fluid_stats.gpu_status = "GPU partial on " + state.fluid_stats.compute_device + ": P2G/density GPU, pressure+G2P CPU (PCG). " + forces_loc + ".";
             } else if (!density_on_gpu) {
-                state.fluid_stats.gpu_status = "GPU on " + state.fluid_stats.compute_device + ": forces/P2G/pressure(MGPCG)/G2P. Density CPU fallback.";
+                state.fluid_stats.gpu_status = "GPU on " + state.fluid_stats.compute_device + ": P2G/pressure(MGPCG)/G2P. Density CPU. " + forces_loc + ".";
             } else {
-                state.fluid_stats.gpu_status = "GPU on " + state.fluid_stats.compute_device + ": forces/P2G/pressure(MGPCG)/G2P/density. Advect+reseed CPU.";
+                state.fluid_stats.gpu_status = "GPU on " + state.fluid_stats.compute_device + ": P2G/pressure(MGPCG)/G2P/density. Advect+reseed CPU. " + forces_loc + ".";
             }
             continue;
         }

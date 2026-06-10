@@ -10,11 +10,13 @@
 #include "Fluid/APICFluidSolver.h"
 #include "GridFluidSolver.h"
 #include "SimulationWorld.h"
+#include "ForceField.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -2036,6 +2038,128 @@ static void redistributeParticles(FluidParticles& parts,
     }
 }
 
+void applyExternalForces(FluidParticles& particles,
+                         const FluidSim::FluidGrid& grid,
+                         const APICSolverParams& params,
+                         const SimulationForceFieldSnapshot* forces,
+                         float time_seconds,
+                         float dt) {
+    if (particles.empty() || dt <= 0.0f) return;
+
+    const int thread_count = solverThreadCount(params);
+    const bool particle_parallel = shouldParallelParticles(params, particles.size());
+    auto clampVelocity = [&](Vec3& v) {
+        const float speed = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+        if (speed > params.max_velocity && speed > 1e-6f) {
+            v = v * (params.max_velocity / speed);
+        }
+    };
+
+    // Wind is special on liquids. Applied as a uniform body acceleration it makes
+    // water feel weightless: every particle (surface and deep) speeds up without
+    // limit. So for Wind fields flagged fluid_surface_drag we instead apply a
+    // relative-velocity surface drag — the horizontal velocity is pulled toward
+    // the wind speed and saturates there (weight), and the push fades out over a
+    // band below the free surface (deep water stays calm). Every other field type,
+    // and Wind on non-fluid systems, keeps the body-force path.
+    const uint32_t fluid_mask = toSimulationSystemMask(SimulationSystemKind::Fluid);
+    const std::vector<const Physics::ForceField*>* active_fields =
+        (forces && !forces->empty()) ? &forces->activeFields() : nullptr;
+    const std::vector<PackedForceField>* packed_fields =
+        (forces && !forces->empty()) ? &forces->packedFields() : nullptr;
+
+    // Collect Wind fields that drive this liquid as a surface drag.
+    std::vector<const Physics::ForceField*> wind_drag_fields;
+    if (active_fields) {
+        for (size_t fi = 0; fi < active_fields->size(); ++fi) {
+            const Physics::ForceField* f = (*active_fields)[fi];
+            if (!f) continue;
+            if (packed_fields && fi < packed_fields->size() &&
+                ((*packed_fields)[fi].affect_mask & fluid_mask) == 0u) continue;
+            if (f->type == Physics::ForceFieldType::Wind && f->fluid_surface_drag)
+                wind_drag_fields.push_back(f);
+        }
+    }
+
+    // Free-surface height per XZ column (highest particle.y), built once and
+    // sampled per particle to confine the wind push to the surface band.
+    const int cnx = std::max(1, grid.nx);
+    const int cnz = std::max(1, grid.nz);
+    const float inv_h = grid.voxel_size > 1e-6f ? 1.0f / grid.voxel_size : 0.0f;
+    std::vector<float> column_top_y;
+    const bool wind_drag_active = !wind_drag_fields.empty() && inv_h > 0.0f;
+    if (wind_drag_active) {
+        column_top_y.assign(static_cast<size_t>(cnx) * static_cast<size_t>(cnz),
+                            -std::numeric_limits<float>::max());
+        for (size_t pi = 0; pi < particles.position.size(); ++pi) {
+            const Vec3& p = particles.position[pi];
+            int gx = std::clamp(static_cast<int>(std::floor((p.x - grid.origin.x) * inv_h)), 0, cnx - 1);
+            int gz = std::clamp(static_cast<int>(std::floor((p.z - grid.origin.z) * inv_h)), 0, cnz - 1);
+            float& top = column_top_y[static_cast<size_t>(gz) * cnx + gx];
+            if (p.y > top) top = p.y;
+        }
+    }
+
+    auto windDragAccel = [&](const Vec3& pos, const Vec3& v) -> Vec3 {
+        int gx = std::clamp(static_cast<int>(std::floor((pos.x - grid.origin.x) * inv_h)), 0, cnx - 1);
+        int gz = std::clamp(static_cast<int>(std::floor((pos.z - grid.origin.z) * inv_h)), 0, cnz - 1);
+        const float surf = column_top_y[static_cast<size_t>(gz) * cnx + gx];
+        Vec3 a(0.0f, 0.0f, 0.0f);
+        for (const Physics::ForceField* f : wind_drag_fields) {
+            // Surface band weight: 1 at/above the free surface, 0 once the
+            // particle is fluid_surface_depth below it.
+            const float band = std::max(1e-4f, f->fluid_surface_depth);
+            const float depth = surf - pos.y;          // >0 below the surface
+            const float w = 1.0f - std::clamp(depth / band, 0.0f, 1.0f);
+            if (w <= 0.0f) continue;
+
+            // Shaped (non-Infinite) wind falls off radially from its centre.
+            float fall = 1.0f;
+            if (f->shape != Physics::ForceFieldShape::Infinite)
+                fall = f->calculateFalloff((pos - f->position).length());
+            if (fall <= 0.0f) continue;
+
+            // strength = target surface speed (m/s) along the wind direction.
+            const float dl = f->direction.length();
+            Vec3 wind_vel = dl > 1e-6f ? f->direction * (f->strength / dl) : Vec3(0,0,0);
+            if (f->fluid_curl_detail > 0.0f)
+                wind_vel = wind_vel + f->sampleCurlDetail(pos, time_seconds) *
+                                      (f->strength * f->fluid_curl_detail);
+
+            Vec3 rel = wind_vel * (w * fall) - v;
+            rel.y = 0.0f;  // horizontal only — never fight gravity/buoyancy
+            a = a + rel * (f->fluid_drag_coupling * w * fall);
+        }
+        return a;
+    };
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(thread_count) if(particle_parallel)
+#endif
+    for (int64_t raw_i = 0; raw_i < static_cast<int64_t>(particles.velocity.size()); ++raw_i) {
+        const size_t pi = static_cast<size_t>(raw_i);
+        Vec3& v = particles.velocity[pi];
+        const Vec3& pos = particles.position[pi];
+        Vec3 acceleration = params.gravity;
+        if (active_fields) {
+            // Body-force fields (everything except surface-drag wind). Mirrors
+            // SimulationForceFieldSnapshot::evaluateAt's mask + dispatch.
+            for (size_t fi = 0; fi < active_fields->size(); ++fi) {
+                const Physics::ForceField* f = (*active_fields)[fi];
+                if (!f) continue;
+                if (packed_fields && fi < packed_fields->size() &&
+                    ((*packed_fields)[fi].affect_mask & fluid_mask) == 0u) continue;
+                if (f->type == Physics::ForceFieldType::Wind && f->fluid_surface_drag) continue;
+                acceleration = acceleration + f->evaluate(pos, time_seconds, v);
+            }
+            if (wind_drag_active)
+                acceleration = acceleration + windDragAccel(pos, v);
+        }
+        v = v + acceleration * dt;
+        clampVelocity(v);
+    }
+}
+
 void step(FluidParticles& particles,
           FluidSim::FluidGrid& grid,
           const APICSolverParams& params,
@@ -2070,27 +2194,12 @@ void step(FluidParticles& particles,
     const int thread_count = solverThreadCount(params);
     const bool particle_parallel = shouldParallelParticles(params, particles.size());
 
-    // 1. External forces on particles. Force fields are sampled on the APIC
-    // particles, so emitters/fields steer the true liquid mass before P2G.
+    // 1. External forces on particles (gravity + force fields, incl. the wind
+    // surface-drag model). Factored into applyExternalForces so the GPU pipeline
+    // can run it on the CPU then upload the post-force velocities for a GPU P2G.
     auto stage_begin = SolverClock::now();
     if (!params.external_forces_preintegrated) {
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(thread_count) if(particle_parallel)
-#endif
-        for (int64_t raw_i = 0; raw_i < static_cast<int64_t>(particles.velocity.size()); ++raw_i) {
-            const size_t pi = static_cast<size_t>(raw_i);
-            Vec3& v = particles.velocity[pi];
-            Vec3 acceleration = params.gravity;
-            if (forces && !forces->empty()) {
-                acceleration = acceleration +
-                    forces->evaluateAt(particles.position[pi],
-                                       time_seconds,
-                                       v,
-                                       SimulationSystemKind::Fluid);
-            }
-            v = v + acceleration * dt;
-            clampVelocity(v);
-        }
+        applyExternalForces(particles, grid, params, forces, time_seconds, dt);
     }
     auto stage_end = SolverClock::now();
     out_stats.forces_ms = elapsedMs(stage_begin, stage_end);

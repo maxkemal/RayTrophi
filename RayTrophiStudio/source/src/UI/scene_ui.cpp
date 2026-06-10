@@ -75,6 +75,18 @@
 #include <unordered_set>  // For fast deletion lookup
 #include <windows.h>
 #include <commdlg.h>
+
+// System RAM query for the "RAM sim cache is large, bake to disk" nudge. Declared in
+// scene_ui_forcefield.hpp (which is included before <windows.h>), defined here where
+// the Win32 API is available.
+namespace ForceFieldUI {
+    std::uint64_t queryTotalPhysicalRamBytes() {
+        MEMORYSTATUSEX ms; ms.dwLength = sizeof(ms);
+        if (GlobalMemoryStatusEx(&ms)) return static_cast<std::uint64_t>(ms.ullTotalPhys);
+        return 0;
+    }
+}
+
 #include <shlobj.h>  // SHBrowseForFolder için
 #include <shobjidl.h>
 #include <chrono>  // Playback timing için
@@ -2959,6 +2971,42 @@ void SceneUI::validateSelectionAgainstScene(UIContext& ctx) {
     }
 }
 
+// Publish the current Edit-Mesh vertex selection (world space) into the
+// ForceFieldUI global so the (free-function) Bodies panel can offer
+// "Pin Selected Vertices" for cloth/soft bodies without touching SceneUI's
+// internals. Cheap: only fills the buffer while Edit > Vertex mode is active.
+void SceneUI::publishEditPinSelection(UIContext& ctx)
+{
+    auto& snap = ForceFieldUI::g_edit_pin_selection;
+    const bool active =
+        mesh_overlay_settings.enabled && mesh_overlay_settings.edit_mode &&
+        mesh_workspace_mode == MeshWorkspaceMode::Edit &&
+        ctx.selection.mesh_element_mode == MeshElementSelectMode::Vertex &&
+        !active_mesh_edit_object_name.empty() &&
+        editable_mesh_cache.object_name == active_mesh_edit_object_name &&
+        !editable_mesh_cache.selection.vertex_ids.empty();
+
+    if (!active) {
+        if (snap.active) {
+            snap.active = false;
+            snap.object_name.clear();
+            snap.world_positions.clear();
+        }
+        return;
+    }
+
+    snap.active = true;
+    snap.object_name = active_mesh_edit_object_name;
+    snap.world_positions.clear();
+    snap.world_positions.reserve(editable_mesh_cache.selection.vertex_ids.size());
+    const Matrix4x4& xf = editable_mesh_cache.source_object_transform;
+    for (int vid : editable_mesh_cache.selection.vertex_ids) {
+        if (vid < 0 || vid >= (int)editable_mesh_cache.vertices.size()) continue;
+        snap.world_positions.push_back(
+            xf.transform_point(editable_mesh_cache.vertices[vid].local_position));
+    }
+}
+
 void SceneUI::draw(UIContext& ctx)
 {
     // Apply project-scoped UI state after load finalization on the main thread.
@@ -2974,6 +3022,7 @@ void SceneUI::draw(UIContext& ctx)
     // Texture Safety Cleanup
     manageTextureGraveyard();
     syncMeshEditState(ctx);
+    publishEditPinSelection(ctx);
     tryRestoreSerializedMeshEditLayer(ctx);
     processPendingMeshEditGpuSync(ctx);
 
@@ -3047,6 +3096,13 @@ void SceneUI::draw(UIContext& ctx)
         mesh_cache_valid = false;
         last_scene_obj_count = ctx.scene.world.objects.size();
         scene_membership_changed = true;
+    }
+    // Data-side ops can change an object's geometry without changing the object
+    // count (e.g. "Apply at Frame" freezes a body's deformed mesh). Honor their
+    // one-shot request to rebuild the mesh/bbox caches so the selection outline
+    // tracks the new shape.
+    if (ctx.scene.consumeUiMeshCacheRebuild()) {
+        mesh_cache_valid = false;
     }
 
     if (ctx.scene.lights.size() != last_scene_light_count) {
@@ -3176,7 +3232,21 @@ void SceneUI::draw(UIContext& ctx)
         const bool live_mode = !g_sim_timeline_mode;
         // Timeline mode (default): play bakes into the cache, scrub restores, a
         // stopped timeline stays frozen. Live mode: continuous free-run preview.
-        ctx.scene.updateSimulationTimeline(timeline.getCurrentFrame(), timeline.isPlaying(), rt_dt, 24.0f, live_mode);
+        // ui_editing: while a widget is held (slider drag, etc.) the sim-config
+        // signature changes every tick. Pass this so the cache invalidation is
+        // deferred until the edit settles (no per-tick re-bake-from-0 thrash).
+        const bool ui_editing = ImGui::IsAnyItemActive();
+        ctx.scene.updateSimulationTimeline(timeline.getCurrentFrame(), timeline.isPlaying(), rt_dt, 24.0f, live_mode, ui_editing);
+        // A fluid-affecting edit rewinds the sim to frame 0 instead of auto-resimming
+        // up to a high parked frame; move the playhead to start so the cost of the
+        // re-bake is opt-in (the user plays forward when ready). Flash a transient
+        // HUD toast at the moment it happens — far more noticeable than a static
+        // panel note, and it tells the user why the playhead just jumped.
+        if (ctx.scene.consumeSimRewindRequest()) {
+            timeline.setCurrentFrame(timeline.getStartFrame());
+            addViewportMessage("Sim changed - cache reset, rewound to start. Press Play to re-bake.",
+                               4.0f, ImVec4(1.00f, 0.62f, 0.10f, 1.00f));
+        }
         // Keep rendering / reset accumulation only while the gas is actually
         // changing (live mode, or a baked/scrubbed frame). A frozen timeline lets
         // the render converge and the loop go idle — the cheap default.

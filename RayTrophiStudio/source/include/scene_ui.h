@@ -47,6 +47,7 @@ class GasVolume;
 #include <vector>
 #include <array>
 #include <unordered_map>
+#include <tuple>
 #include "Vec3.h" // For bbox_cache
 #include "instancegroup.h"
 #include "Backend/IBackend.h"
@@ -246,6 +247,9 @@ public:
      void clearEditableMeshSelection();
      void resetMeshEditState(UIContext& ctx);
      void syncMeshEditState(UIContext& ctx);
+     // Publishes the Edit-Mesh vertex selection (world space) to ForceFieldUI so the
+     // Bodies panel can pin selected vertices on a cloth/soft body. Called per frame.
+     void publishEditPinSelection(UIContext& ctx);
      bool ensureMeshEditLayer(UIContext& ctx, const std::string& objectName);
      void refreshMeshEditLayerEditedState(UIContext& ctx);
      void captureMeshEditLayerState(UIContext& ctx, const std::string& objectName, std::vector<MeshEditTriangleState>& outStates);
@@ -928,6 +932,16 @@ private:
     // Bounding Box Cache - avoids recalculating bounds every frame (HUGE perf win for large objects)
     // Key: nodeName, Value: {bb_min, bb_max}
     std::map<std::string, std::pair<Vec3, Vec3>> bbox_cache;
+
+    // Memoized LIVE world-AABB of a selected physics body, keyed by node. A body's
+    // verts move every sim step but are STATIC when stopped, yet the gizmo/outline
+    // re-walked them every frame — pinning the idle UI at ~6% CPU. Cached against
+    // SceneData::bodyGeomVersion() (bumped on any body write-back/reset) so a stopped
+    // body recomputes only once. Tuple: {geom_version, bb_min, bb_max}.
+    std::unordered_map<std::string, std::tuple<uint64_t, Vec3, Vec3>> body_aabb_memo_;
+    // Live world-AABB of a body's source mesh, memoized against bodyGeomVersion().
+    // Returns false if the node has no cached mesh yet. Recomputes while dragging.
+    bool bodyWorldAABB(UIContext& ctx, const std::string& node, Vec3& out_min, Vec3& out_max);
 
     // Selection-outline hull candidate cache: local-space extremal points per object.
     // Populated lazily on first selection; invalidated when mesh geometry changes.

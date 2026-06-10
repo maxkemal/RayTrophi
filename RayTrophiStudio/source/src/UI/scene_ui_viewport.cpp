@@ -474,6 +474,156 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
     ImGui::PopStyleColor(2); // Border, WindowBg
     ImGui::End();
     // overlay handled by raster grid (depth-tested) in the Vulkan backend
+
+    // ── ViewCube: standard-view navigator (top-right, below the toolbar) ──
+    // Click a face to snap to Top/Front/Side (orthographic); drag to free-orbit.
+    if (ctx.scene.camera) {
+        Camera& cam = *ctx.scene.camera;
+
+        const float cube_sz = 92.0f;
+        const float cube_x = io.DisplaySize.x - right_margin - cube_sz - 2.0f;
+        const float cube_y = top_margin + 40.0f;
+
+        ImGui::SetNextWindowPos(ImVec2(cube_x, cube_y), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(cube_sz, cube_sz), ImGuiCond_Always);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGuiWindowFlags cubeFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+            ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus |
+            ImGuiWindowFlags_NoBackground;
+        if (ImGui::Begin("##ViewCube", nullptr, cubeFlags)) {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const ImVec2 wpos = ImGui::GetWindowPos();
+            const ImVec2 wsz = ImGui::GetWindowSize();
+            const ImVec2 center(wpos.x + wsz.x * 0.5f, wpos.y + wsz.y * 0.5f);
+            const float radius = cube_sz * 0.30f;
+
+            ImGui::SetCursorScreenPos(wpos);
+            ImGui::InvisibleButton("##viewcube_hit", wsz);
+            const bool hovered = ImGui::IsItemHovered();
+            const bool active = ImGui::IsItemActive();
+
+            // Camera view basis: right=u, up=v, toward-camera=w (maintained by update_camera_vectors).
+            const Vec3 U = cam.u, Vv = cam.v, W = cam.w;
+            auto project = [&](const Vec3& d) -> ImVec2 {
+                return ImVec2(center.x + (float)Vec3::dot(d, U) * radius,
+                              center.y - (float)Vec3::dot(d, Vv) * radius);
+            };
+
+            struct Face { Vec3 n, t0, t1; const char* label; Camera::StandardView view; };
+            const Face faces[6] = {
+                { Vec3( 1,0,0), Vec3(0,1,0), Vec3(0,0,1), "R",   Camera::StandardView::Right  },
+                { Vec3(-1,0,0), Vec3(0,1,0), Vec3(0,0,1), "L",   Camera::StandardView::Left   },
+                { Vec3(0, 1,0), Vec3(1,0,0), Vec3(0,0,1), "TOP", Camera::StandardView::Top    },
+                { Vec3(0,-1,0), Vec3(1,0,0), Vec3(0,0,1), "BOT", Camera::StandardView::Bottom },
+                { Vec3(0,0, 1), Vec3(1,0,0), Vec3(0,1,0), "F",   Camera::StandardView::Front  },
+                { Vec3(0,0,-1), Vec3(1,0,0), Vec3(0,1,0), "BK",  Camera::StandardView::Back   },
+            };
+
+            ImVec2 quad[6][4];
+            float fz[6];
+            for (int i = 0; i < 6; ++i) {
+                fz[i] = (float)Vec3::dot(faces[i].n, W);
+                const Vec3 c = faces[i].n;
+                quad[i][0] = project(c - faces[i].t0 - faces[i].t1);
+                quad[i][1] = project(c + faces[i].t0 - faces[i].t1);
+                quad[i][2] = project(c + faces[i].t0 + faces[i].t1);
+                quad[i][3] = project(c - faces[i].t0 + faces[i].t1);
+            }
+            auto pointInQuad = [](const ImVec2* q, const ImVec2& p) -> bool {
+                bool in = false;
+                for (int a = 0, b = 3; a < 4; b = a++) {
+                    if (((q[a].y > p.y) != (q[b].y > p.y)) &&
+                        (p.x < (q[b].x - q[a].x) * (p.y - q[a].y) / (q[b].y - q[a].y) + q[a].x))
+                        in = !in;
+                }
+                return in;
+            };
+
+            const ImVec2 mp = io.MousePos;
+            int hoverFace = -1; float bestZ = 0.02f;
+            if (hovered) {
+                for (int i = 0; i < 6; ++i)
+                    if (fz[i] > bestZ && pointInQuad(quad[i], mp)) { hoverFace = i; bestZ = fz[i]; }
+            }
+
+            int order[6] = { 0,1,2,3,4,5 };
+            std::sort(order, order + 6, [&](int a, int b) { return fz[a] < fz[b]; });
+            for (int oi = 0; oi < 6; ++oi) {
+                const int i = order[oi];
+                if (fz[i] <= 0.02f) continue; // back-facing
+                const float shade = 0.30f + 0.45f * std::clamp(fz[i], 0.0f, 1.0f);
+                const ImU32 fill = (i == hoverFace)
+                    ? IM_COL32(90, 150, 230, 235)
+                    : IM_COL32((int)(shade * 120), (int)(shade * 135), (int)(shade * 160), 210);
+                dl->AddQuadFilled(quad[i][0], quad[i][1], quad[i][2], quad[i][3], fill);
+                dl->AddQuad(quad[i][0], quad[i][1], quad[i][2], quad[i][3], IM_COL32(18, 22, 30, 220), 1.5f);
+                const ImVec2 lc = project(faces[i].n);
+                const ImVec2 ts = ImGui::CalcTextSize(faces[i].label);
+                dl->AddText(ImVec2(lc.x - ts.x * 0.5f, lc.y - ts.y * 0.5f), IM_COL32(236, 239, 246, 255), faces[i].label);
+            }
+
+            // Refresh the interactive (solid/matcap) viewport. Push the camera straight to the
+            // active shading backend + reset accumulation so it re-renders THIS frame — the
+            // g_camera_dirty signal alone races with other consumers and was unreliable here.
+            auto refreshViewport = [&]() {
+                if (ctx.backend_ptr) {
+                    ctx.backend_ptr->syncCamera(cam);
+                    ctx.backend_ptr->resetAccumulation();
+                }
+                ctx.renderer.resetCPUAccumulation();
+                extern bool g_camera_dirty;
+                g_camera_dirty = true; // also drive the render-backend sync path next frame
+                ProjectManager::getInstance().markModified();
+            };
+
+            // Orbit/snap pivot: selection centre when something is selected, else world origin
+            // (where the reference grid lives) — keeps the view centred and the grid in frame.
+            const Vec3 snapPivot = ctx.selection.hasSelection()
+                ? ctx.selection.selected.position : Vec3(0.0f, 0.0f, 0.0f);
+
+            // Click snaps to a standard view; drag (>4px) free-orbits around the pivot.
+            static bool dragging = false; static bool moved = false; static ImVec2 dragLast;
+            if (ImGui::IsItemActivated()) { dragging = true; moved = false; dragLast = mp; }
+            if (active && dragging) {
+                const ImVec2 d(mp.x - dragLast.x, mp.y - dragLast.y);
+                if (std::abs(d.x) + std::abs(d.y) > 4.0f) moved = true;
+                if (moved && (d.x != 0.0f || d.y != 0.0f)) {
+                    const Vec3 pivot = cam.lookat;
+                    Vec3 rel = cam.lookfrom - pivot;
+                    auto rot = [](Vec3 p, Vec3 axis, float ang) {
+                        axis = axis.normalize();
+                        const float c = cosf(ang), s = sinf(ang);
+                        return p * c + Vec3::cross(axis, p) * s + axis * ((float)Vec3::dot(axis, p)) * (1.0f - c);
+                    };
+                    const float k = 0.01f;
+                    rel = rot(rel, Vec3(0, 1, 0), -d.x * k);
+                    rel = rot(rel, cam.u, -d.y * k);
+                    cam.lookfrom = pivot + rel;
+                    // Free-orbiting the cube leaves the aligned ortho views and returns to a
+                    // normal perspective camera (this is the way back out of orthographic).
+                    cam.standard_view = Camera::StandardView::Perspective;
+                    cam.orthographic = false;
+                    cam.update_camera_vectors();
+                    cam.markDirty();
+                    refreshViewport();
+                    dragLast = mp;
+                }
+            }
+            if (ImGui::IsItemDeactivated()) {
+                if (!moved && hoverFace >= 0) {
+                    float dist = (cam.lookfrom - cam.lookat).length();
+                    if (dist < 1e-3f) dist = 10.0f;
+                    cam.setStandardView(faces[hoverFace].view, snapPivot, dist, true);
+                    refreshViewport();
+                    addViewportMessage("View aligned", 1.2f, ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+                }
+                dragging = false;
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

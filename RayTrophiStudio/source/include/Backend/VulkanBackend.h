@@ -667,6 +667,7 @@ public:
     VulkanRT::BufferHandle m_geometryDataBuffer; // SSBO containing VkGeometryData for each BLAS
     VulkanRT::BufferHandle m_instanceDataBuffer; // SSBO containing VkInstanceData for each TLAS instance
     VulkanRT::BufferHandle m_tlasInstanceBuffer; // Buffer containing VkAccelerationStructureInstanceKHR for TLAS building
+    VulkanRT::BufferHandle m_tlasScratchBuffer;  // Persistent TLAS build/update scratch (reused across frames; grows on demand)
     VulkanRT::BufferHandle m_worldBuffer; // SSBO containing complete Nishita parameters
     VulkanRT::BufferHandle m_volumeBuffer; // SSBO containing VkVolumeInstance array (binding 9)
     VulkanRT::BufferHandle m_terrainLayerBuffer; // SSBO containing VkTerrainLayerData array (binding 12)
@@ -1244,7 +1245,9 @@ protected:
         VulkanRT::BufferHandle gridNormalBuffer;
         VulkanRT::BufferHandle identityInstanceBuffer;
         uint32_t gridVertexCount = 0;
-        uint32_t gridSegments[8] = {}; // [start,count] pairs: regular, xAxis, zAxis, negAxis
+        uint32_t gridSegments[8] = {}; // [start,count] pairs: regular, axisU, axisV, negAxis
+        int gridBuiltPlane = -1;       // plane the cached grid was built for: 0=XZ,1=XY,2=YZ (-1=none)
+        float gridBuiltSpacing = 0.0f; // adaptive line spacing the cached grid was built for (0=none)
 
         // Hair polyline overlay (Solid/Matcap viewport)
         VkPipeline hairLinePipeline = VK_NULL_HANDLE;

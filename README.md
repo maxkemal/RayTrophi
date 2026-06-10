@@ -70,7 +70,7 @@ RayTrophi Studio is organized into task-focused workspaces that all operate on t
 | **Terrain** | Sculpt + node-graph terrain, hydraulic/thermal erosion, heightmap I/O |
 | **Foliage / Scatter** | Rule-based and hand-painted instancing of grass, trees, rocks |
 | **Hair** | Groom, comb, cut/grow, simulate, and render hair & fur |
-| **Simulation** | Liquid (APIC/FLIP), gas/smoke/fire, whitewater, rigid bodies (Jolt), colliders, force fields, emitters |
+| **Simulation** | Liquid (APIC/FLIP), gas/smoke/fire, whitewater, rigid + soft bodies & cloth (Jolt), mesh/primitive colliders, force fields, emitters |
 | **Animation** | Multi-track timeline, per-channel keyframing, skeletal animation, animation graph |
 | **Render / Look-dev** | Pick a backend, set sampling/quality, denoise, tonemap, and Stylize the result |
 
@@ -176,12 +176,14 @@ Secondary **spray** (airborne), **foam** (surface), and **bubbles** (submerged) 
 - Deterministic hash-based size variation and smooth dissolve near end-of-life
 - Adjustable icosphere subdivision (0–3) for close-up detail
 
-### Rigid bodies — Jolt Physics + two-way fluid coupling
-- **Jolt Physics**-backed rigid-body solver on the shared simulation timeline: tag any scene object **Static, Dynamic, or Kinematic**, with box / sphere / capsule / oriented-box shapes fitted to its bounds
+### Bodies — Jolt Physics: rigid, soft & cloth + two-way fluid coupling
+- **Jolt Physics**-backed body solver on the shared simulation timeline: tag any scene object **Static, Dynamic, or Kinematic**, with **box / sphere / capsule / oriented-box** primitives fitted to its bounds, or a **mesh collider** that uses the object's real geometry — an exact triangle mesh for static bodies and a convex hull for moving ones, so a collider driven by an SDF/mesh source collides against the true shape instead of an OBB
+- **Soft bodies & cloth.** Tag a mesh as a deformable **soft body** or **cloth** (Jolt soft-body solver): per-body stiffness/compliance, pressure (closed-volume inflation), damping, iterations, vertex collision thickness, and **vertex pinning** (hold rest vertices fixed to hang cloth from corners/edges); the deformed mesh is written straight back for rendering
 - Per-body **mass or auto-mass-from-density, linear & angular damping, friction, restitution, gravity scale, initial linear/angular velocity, sleep, and per-axis translation/rotation locks**
+- **Force fields drive every body kind** — rigid (force at the COM), soft & cloth (per-vertex velocity push, pinned vertices excluded)
 - **Two-way fluid coupling.** A body is voxelized into the liquid/gas grid as a moving solid through the variational cut-cell path, so it pushes and splashes the fluid; in return, **buoyancy and linear/angular drag** sampled from the fluid level set act back on the body — float, sink, and bob driven by the same field the renderer reads
 - **Kinematic** bodies are keyframe-driven (animated colliders that stir the fluid); **Dynamic** bodies are owned by the solver, so the timeline never fights the simulated pose
-- **Selective re-bake.** Editing or moving a rigid body only drops the (expensive) fluid bake when that body actually couples to a fluid domain — an unrelated static prop re-simulates on its own (cheap) while the liquid cache is preserved
+- **Selective re-bake.** Editing or moving a body only drops the (expensive) fluid bake when that body actually couples to a fluid domain — an unrelated static prop re-simulates on its own (cheap) while the liquid cache is preserved
 
 ### Surfaces, caching & serialization
 - **Yu-Turk anisotropic surface reconstruction** with Laplacian smoothing for the render-time liquid mesh; surface resolution decoupled from the sim grid
@@ -386,7 +388,7 @@ RayTrophi/
 **Recently shipped**
 - ✅ Vulkan RT backend (interactive primary) with GPU skinning, async ping-pong pipeline, analytical LSS hair
 - ✅ Physics & particle simulation suite (APIC/FLIP liquid, gas/fire, whitewater)
-- ✅ Rigid-body dynamics (Jolt Physics) with two-way fluid coupling — solid voxelization + buoyancy/drag, selective fluid re-bake
+- ✅ Rigid, soft-body & cloth dynamics (Jolt Physics) — primitive/mesh colliders, vertex pinning, force-field coupling, two-way fluid coupling (solid voxelization + buoyancy/drag), selective fluid re-bake
 - ✅ GPU MGPCG fluid pressure solve (CUDA)
 - ✅ Variational cut-cell solid coupling + ghost-fluid 2nd-order free surface (CPU)
 - ✅ Multi-material whitewater PBR routing + Newton-Raphson wave snapping

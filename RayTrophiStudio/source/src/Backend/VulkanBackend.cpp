@@ -821,6 +821,9 @@ void VulkanDevice::shutdown() {
         if (m_tlasInstanceBuffer.buffer) {
             destroyBuffer(m_tlasInstanceBuffer);
         }
+        if (m_tlasScratchBuffer.buffer) {
+            destroyBuffer(m_tlasScratchBuffer);
+        }
 
         // Destroy RT pipeline
         if (m_rtPipeline) vkDestroyPipeline(m_device, m_rtPipeline, nullptr);
@@ -2600,10 +2603,9 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info) {
         return;
     }
 
-    // Free previous instance data buffer now (we will replace it with the new one)
-    if (m_tlasInstanceBuffer.buffer) {
-        destroyBuffer(m_tlasInstanceBuffer);
-    }
+    // NOTE: the previous instance buffer is intentionally NOT freed here — it is
+    // reused in place below when large enough (see PERF note). Freeing+reallocating
+    // it every call was the per-frame foam-refit stall.
 
     // --- 1) Build VkAccelerationStructureInstanceKHR array ---
     std::vector<VkAccelerationStructureInstanceKHR> vkInstances;
@@ -2634,12 +2636,29 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info) {
     }
 
     // --- 2) Upload instance data to GPU ---
-    BufferCreateInfo instBufInfo;
-    instBufInfo.size = vkInstances.size() * sizeof(VkAccelerationStructureInstanceKHR);
-    instBufInfo.usage = BufferUsage::ACCELERATION | BufferUsage::STORAGE;
-    instBufInfo.location = MemoryLocation::CPU_TO_GPU;
-    instBufInfo.initialData = vkInstances.data();
-    auto instanceBuffer = createBuffer(instBufInfo);
+    // PERF: reuse the persistent instance buffer in place when it is large enough.
+    // createTLAS runs EVERY frame a live instance (foam/particle) moves; the old
+    // free+alloc here did a heavyweight vkAllocateMemory/vkFreeMemory per frame that
+    // serialized the driver and scaled with the foam pool — the foam-on Vulkan-RT
+    // stall. The buffer is CPU_TO_GPU (host-visible), so a map+memcpy refreshes it.
+    const VkDeviceSize neededInstBytes =
+        (VkDeviceSize)vkInstances.size() * sizeof(VkAccelerationStructureInstanceKHR);
+    if (m_tlasInstanceBuffer.buffer != VK_NULL_HANDLE &&
+        m_tlasInstanceBuffer.memory != VK_NULL_HANDLE &&
+        m_tlasInstanceBuffer.size >= neededInstBytes) {
+        uploadBuffer(m_tlasInstanceBuffer, vkInstances.data(), neededInstBytes, 0);
+    } else {
+        // First build, or the instance count grew past the buffer: (re)allocate.
+        if (m_tlasInstanceBuffer.buffer) destroyBuffer(m_tlasInstanceBuffer);
+        BufferCreateInfo instBufInfo;
+        instBufInfo.size = neededInstBytes;
+        instBufInfo.usage = BufferUsage::ACCELERATION | BufferUsage::STORAGE;
+        instBufInfo.location = MemoryLocation::CPU_TO_GPU;
+        instBufInfo.initialData = vkInstances.data();
+        m_tlasInstanceBuffer = createBuffer(instBufInfo);
+        if (!m_tlasInstanceBuffer.buffer) return;
+    }
+    const BufferHandle& instanceBuffer = m_tlasInstanceBuffer;
 
     // --- 3) Build geometry info ---
     VkAccelerationStructureGeometryInstancesDataKHR instancesData{};
@@ -2698,24 +2717,28 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info) {
         m_tlas.deviceAddress = fpGetAccelerationStructureDeviceAddressKHR(m_device, &addrInfo);
     }
 
-    // --- 6) Scratch buffer ---
+    // --- 6) Scratch buffer (persistent; reused across frames, grows on demand) ---
+    // The build completes synchronously (endSingleTimeCommands waits), so the same
+    // scratch is free to reuse next frame — avoids another per-frame GPU alloc.
     uint64_t scratchAlignment = m_capabilities.minScratchAlignment > 0 ? m_capabilities.minScratchAlignment : 128;
     uint64_t scratchSize = performUpdate ? sizeInfo.updateScratchSize : sizeInfo.buildScratchSize;
     uint64_t alignedScratchSize = (scratchSize + scratchAlignment - 1) & ~(scratchAlignment - 1);
 
-    BufferCreateInfo scratchBufInfo;
-    scratchBufInfo.size = alignedScratchSize;
-    scratchBufInfo.usage = BufferUsage::STORAGE;
-    scratchBufInfo.location = MemoryLocation::GPU_ONLY;
-    auto scratchBuffer = createBuffer(scratchBufInfo);
-    if (!scratchBuffer.buffer) {
-        destroyBuffer(instanceBuffer);
-        return;
+    if (m_tlasScratchBuffer.buffer == VK_NULL_HANDLE || m_tlasScratchBuffer.size < alignedScratchSize) {
+        if (m_tlasScratchBuffer.buffer) destroyBuffer(m_tlasScratchBuffer);
+        BufferCreateInfo scratchBufInfo;
+        scratchBufInfo.size = alignedScratchSize;
+        scratchBufInfo.usage = BufferUsage::STORAGE;
+        scratchBufInfo.location = MemoryLocation::GPU_ONLY;
+        m_tlasScratchBuffer = createBuffer(scratchBufInfo);
+        if (!m_tlasScratchBuffer.buffer) {
+            return;
+        }
     }
 
     // --- 7) Build TLAS ---
     buildInfo.dstAccelerationStructure = m_tlas.accel;
-    buildInfo.scratchData.deviceAddress = scratchBuffer.deviceAddress;
+    buildInfo.scratchData.deviceAddress = m_tlasScratchBuffer.deviceAddress;
 
     VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
     rangeInfo.primitiveCount = instanceCount;
@@ -2723,17 +2746,12 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info) {
 
     VkCommandBuffer cmd = beginSingleTimeCommands();
     if (cmd == VK_NULL_HANDLE) {
-        destroyBuffer(scratchBuffer);
-        destroyBuffer(instanceBuffer);
         return;
     }
     fpCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRangeInfo);
     endSingleTimeCommands(cmd);
 
-    destroyBuffer(scratchBuffer);
-    
-    // Store it in the device member `m_tlasInstanceBuffer` (ownership moved here).
-    m_tlasInstanceBuffer = instanceBuffer;
+    // Instance + scratch buffers are persistent device members now — nothing to free.
 
     // Update RT descriptor for TLAS (binding 1) if not performing an update (since it's in-place)
     if (!performUpdate && m_rtDescriptorSet != VK_NULL_HANDLE && m_tlas.accel) {
@@ -10975,6 +10993,18 @@ void VulkanBackendAdapter::syncCamera(const Camera& cam) {
     cp.aperture = cam.aperture;
     cp.focusDistance = cam.focus_dist;
     cp.aspectRatio = cam.aspect;
+
+    // Orthographic / standard-view state -> grid auto-orients to the active plane.
+    cp.orthographic = cam.orthographic;
+    cp.orthoHeight = cam.ortho_height;
+    switch (cam.standard_view) {
+        case Camera::StandardView::Front:
+        case Camera::StandardView::Back:  cp.gridPlane = 1; break; // XY plane
+        case Camera::StandardView::Left:
+        case Camera::StandardView::Right: cp.gridPlane = 2; break; // YZ plane
+        default:                          cp.gridPlane = 0; break; // XZ floor (Top/Bottom/Persp)
+    }
+
     cp.isoPresetIndex = cam.iso_preset_index;
     cp.shutterPresetIndex = cam.shutter_preset_index;
     cp.fstopPresetIndex = cam.fstop_preset_index;
@@ -11114,10 +11144,10 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
 
         if (transform_changed || data_changed) {
             m_vkInstances = updatedInstances;
-            
+
             // [VULKAN] Wait for device to finish any pending ray tracing before modifying AS
             m_device->waitIdle();
-            
+
             { auto merged = m_vkInstances; for (const auto& h : m_hairVkInstances) merged.push_back(h); m_device->updateTLAS(merged); }
             
             if (data_changed) {
@@ -11178,14 +11208,14 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
 
     if (transform_changed || data_changed) {
         m_vkInstances = updated;
-        
+
         // [VULKAN] Must wait idle before modifying AS that is actively being traced
         m_device->waitIdle();
 
-        { 
-            auto merged = m_vkInstances; 
-            for (const auto& h : m_hairVkInstances) merged.push_back(h); 
-            m_device->updateTLAS(merged); 
+        {
+            auto merged = m_vkInstances;
+            for (const auto& h : m_hairVkInstances) merged.push_back(h);
+            m_device->updateTLAS(merged);
         }
         
         if (data_changed) {
@@ -14074,6 +14104,9 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
         mix(c.lookAt.x); mix(c.lookAt.y); mix(c.lookAt.z);
         mix(c.up.x); mix(c.up.y); mix(c.up.z);
         mix(c.fov);
+        mix(c.orthographic ? 1.0f : 0.0f);
+        mix(c.orthoHeight);
+        mix((float)c.gridPlane);
         return h;
     };
     uint64_t camHash = hashCamera(m_camera);
@@ -14138,14 +14171,24 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
         return proj;
     };
 
+    auto makeOrthoMatrix = [&](float orthoHeight, float aspect, float zNear, float zFar) {
+        const float oh = (orthoHeight > 1e-4f) ? orthoHeight : 10.0f;
+        const float ow = oh * aspect;
+        Matrix4x4 proj = Matrix4x4::zero();
+        proj.m[0][0] = 2.0f / ow;
+        proj.m[1][1] = -2.0f / oh;              // Vulkan clip Y flip
+        proj.m[2][2] = 1.0f / (zNear - zFar);   // z_eye[-near,-far] -> NDC z[0,1]
+        proj.m[2][3] = zNear / (zNear - zFar);
+        proj.m[3][3] = 1.0f;
+        return proj;
+    };
+
     Matrix4x4 view = makeViewMatrix(m_camera.origin, m_camera.lookAt, m_camera.up);
     const float aspect = (height > 0) ? ((float)width / (float)height) : 1.0f;
     const float fovDeg = m_camera.fov > 1.0f ? m_camera.fov : 60.0f;
-    Matrix4x4 proj = makePerspectiveMatrix(
-        fovDeg,
-        aspect,
-        0.01f,
-        1000000.0f);
+    Matrix4x4 proj = m_camera.orthographic
+        ? makeOrthoMatrix(m_camera.orthoHeight, aspect, 0.01f, 1000000.0f)
+        : makePerspectiveMatrix(fovDeg, aspect, 0.01f, 1000000.0f);
     Matrix4x4 viewProj = proj * view;
 
     const float tanHalfFov = std::tan(fovDeg * 0.5f * 3.14159265358979f / 180.0f);
@@ -14418,19 +14461,101 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
         }
     }
 
-    // ── Reference Grid (Y=0 plane, ±10m, 1m spacing, colored axes) ──
+    // ── Reference Grid (auto-orients to the active plane, adaptive spacing) ──
     {
-        if (!m_interactiveViewport.gridVertexBuffer.buffer) {
-            const float gridHalf = 10.0f;
-            const float step     = 1.0f;
-            const float thin     = 0.005f;
-            const float axisThin = 0.020f;
+        const int activeGridPlane = m_camera.gridPlane;
+        // Use the camera's perpendicular distance to the active grid plane
+        // instead of orbit distance (origin-lookAt), which is unreliable because
+        // lookAt can jump when the user clicks a new focus point or when orbit
+        // center resets. Perpendicular distance:
+        //  - Stays constant during pan (camera slides parallel to the grid)
+        //  - Changes smoothly during orbit/zoom
+        //  - Directly reflects how much grid the user actually sees
+        float viewScale;
+        if (m_camera.orthographic) {
+            viewScale = (m_camera.orthoHeight > 1e-4f) ? m_camera.orthoHeight : 10.0f;
+        } else {
+            float planeDist;
+            switch (activeGridPlane) {
+                case 1:  planeDist = std::abs(m_camera.origin.z); break; // XY plane
+                case 2:  planeDist = std::abs(m_camera.origin.x); break; // YZ plane
+                default: planeDist = std::abs(m_camera.origin.y); break; // XZ floor
+            }
+            // Scale by FOV so wider lenses get coarser grid (more visible area)
+            const float fovRad = (m_camera.fov > 1.0f ? m_camera.fov : 60.0f) * 3.14159265f / 180.0f;
+            const float fovScale = 2.0f * std::tan(fovRad * 0.5f);
+            viewScale = planeDist * fovScale;
+            // Fallback: when camera is ON the grid plane (planeDist ~ 0), use orbit distance
+            if (viewScale < 0.5f) {
+                const float orbitDist = (m_camera.origin - m_camera.lookAt).length();
+                viewScale = std::max(orbitDist * fovScale, 1.0f);
+            }
+        }
+        // Finer 1-2-5 sub-steps to reduce visible grid "pop" (max ratio ≈ 1.5×).
+        auto niceStep = [](float x) -> float {
+            if (x <= 1e-6f) return 1.0f;
+            const float p = std::pow(10.0f, std::floor(std::log10(x)));
+            const float n = x / p; // 1..10
+            float m;
+            if      (n < 1.25f) m = 1.0f;
+            else if (n < 1.75f) m = 1.5f;
+            else if (n < 2.5f)  m = 2.0f;
+            else if (n < 4.0f)  m = 3.0f;
+            else if (n < 6.0f)  m = 5.0f;
+            else if (n < 8.5f)  m = 7.0f;
+            else                m = 10.0f;
+            return m * p;
+        };
+        // Hysteresis: only switch spacing when the new value differs by >15%
+        // from the currently built spacing. This prevents rapid flip-flopping
+        // at the boundary of two nice-step buckets during camera pan.
+        float candidateSpacing = niceStep(viewScale * 0.1f);
+        const float builtSpacing = m_interactiveViewport.gridBuiltSpacing;
+        if (builtSpacing > 0.0f) {
+            const float ratio = candidateSpacing / builtSpacing;
+            if (ratio > 0.87f && ratio < 1.15f) {
+                candidateSpacing = builtSpacing; // keep current
+            }
+        }
+        const float spacing = candidateSpacing;
+
+        if (!m_interactiveViewport.gridVertexBuffer.buffer ||
+            m_interactiveViewport.gridBuiltPlane != activeGridPlane ||
+            m_interactiveViewport.gridBuiltSpacing != spacing) {
+            if (m_interactiveViewport.gridVertexBuffer.buffer) {
+                m_device->destroyBuffer(m_interactiveViewport.gridVertexBuffer);
+                m_interactiveViewport.gridVertexBuffer = {};
+            }
+            if (m_interactiveViewport.gridNormalBuffer.buffer) {
+                m_device->destroyBuffer(m_interactiveViewport.gridNormalBuffer);
+                m_interactiveViewport.gridNormalBuffer = {};
+            }
+
+            // Scale the number of lines so the total grid extent stays
+            // proportional to the visible area (~4× viewScale on each side).
+            // This prevents the grid from suddenly covering a much larger area
+            // when the spacing bumps up, which made objects look shrunken.
+            const float desiredHalf = viewScale * 4.0f;
+            const int   linesEachSide = std::max(10, (int)std::ceil(desiredHalf / spacing));
+            const float gridHalf = spacing * (float)linesEachSide;
+            const float step     = spacing;
+            const float thin     = spacing * 0.008f; // thicker so 720p (no MSAA) doesn't break lines up
+            const float axisThin = spacing * 0.022f;
+
+            // Plane basis: ax = horizontal axis, ay = vertical axis, nrm = plane normal.
+            Vec3 ax, ay, nrm;
+            switch (activeGridPlane) {
+                case 1: ax = Vec3(1,0,0); ay = Vec3(0,1,0); nrm = Vec3(0,0,1); break; // XY (Front/Back)
+                case 2: ax = Vec3(0,0,1); ay = Vec3(0,1,0); nrm = Vec3(1,0,0); break; // YZ (Left/Right)
+                default: ax = Vec3(1,0,0); ay = Vec3(0,0,1); nrm = Vec3(0,1,0); break; // XZ (Top/Persp floor)
+            }
+            const Vec3 nOff = nrm * (spacing * 0.0002f);
 
             std::vector<float> positions, normals;
             auto addLineQuad = [&](Vec3 a, Vec3 b, Vec3 widthDir) {
                 Vec3 w = widthDir;
                 Vec3 p0 = a - w, p1 = a + w, p2 = b + w, p3 = b - w;
-                Vec3 n(0.0f, 1.0f, 0.0f);
+                Vec3 n = nrm;
                 // Emit triangles (front-facing) and reversed (back-facing) so grid is double-sided
                 for (const Vec3& p : {p0, p1, p2, p0, p2, p3, p2, p1, p0, p3, p2, p0}) {
                     positions.push_back(p.x); positions.push_back(p.y); positions.push_back(p.z);
@@ -14438,34 +14563,36 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                 }
             };
 
-            // Segment 0: regular grid (skip center axes)
+            // Segment 0: regular grid (skip the center lines — those are the colored axes)
             uint32_t seg0Start = 0;
-            for (float x = -gridHalf; x <= gridHalf + 0.001f; x += step) {
-                if (std::abs(x) < 0.01f) continue;
-                addLineQuad(Vec3(x, 0.0f, -gridHalf), Vec3(x, 0.0f, gridHalf), Vec3(thin, 0.0f, 0.0f));
+            for (float u = -gridHalf; u <= gridHalf + step * 0.001f; u += step) {
+                if (std::abs(u) < step * 0.5f) continue;
+                addLineQuad(ax * u - ay * gridHalf, ax * u + ay * gridHalf, ax * thin);
             }
-            for (float z = -gridHalf; z <= gridHalf + 0.001f; z += step) {
-                if (std::abs(z) < 0.01f) continue;
-                addLineQuad(Vec3(-gridHalf, 0.0f, z), Vec3(gridHalf, 0.0f, z), Vec3(0.0f, 0.0f, thin));
+            for (float vv = -gridHalf; vv <= gridHalf + step * 0.001f; vv += step) {
+                if (std::abs(vv) < step * 0.5f) continue;
+                addLineQuad(ay * vv - ax * gridHalf, ay * vv + ax * gridHalf, ay * thin);
             }
             uint32_t seg0Count = (uint32_t)(positions.size() / 3);
 
-            // Segment 1: +X axis (red)
+            // Segment 1: +U axis (red)
             uint32_t seg1Start = (uint32_t)(positions.size() / 3);
-            addLineQuad(Vec3(0.0f, 0.001f, 0.0f), Vec3(gridHalf, 0.001f, 0.0f), Vec3(0.0f, 0.0f, axisThin));
+            addLineQuad(nOff, ax * gridHalf + nOff, ay * axisThin);
             uint32_t seg1Count = (uint32_t)(positions.size() / 3) - seg1Start;
 
-            // Segment 2: +Z axis (blue)
+            // Segment 2: +V axis (blue)
             uint32_t seg2Start = (uint32_t)(positions.size() / 3);
-            // Use same small Y offset as +X axis and slightly larger width so it's visible
-            addLineQuad(Vec3(0.0f, 0.001f, 0.0f), Vec3(0.0f, 0.001f, gridHalf), Vec3(axisThin, 0.0f, 0.0f));
+            addLineQuad(nOff, ay * gridHalf + nOff, ax * axisThin);
             uint32_t seg2Count = (uint32_t)(positions.size() / 3) - seg2Start;
 
-            // Segment 3: -X/-Z axis halves (dim grey)
+            // Segment 3: -U/-V axis halves (dim grey)
             uint32_t seg3Start = (uint32_t)(positions.size() / 3);
-            addLineQuad(Vec3(-gridHalf, 0.001f, 0.0f), Vec3(0.0f, 0.001f, 0.0f), Vec3(0.0f, 0.0f, thin));
-            addLineQuad(Vec3(0.0f, 0.001f, -gridHalf), Vec3(0.0f, 0.001f, 0.0f), Vec3(thin, 0.0f, 0.0f));
+            addLineQuad(ax * -gridHalf + nOff, nOff, ay * thin);
+            addLineQuad(ay * -gridHalf + nOff, nOff, ax * thin);
             uint32_t seg3Count = (uint32_t)(positions.size() / 3) - seg3Start;
+
+            m_interactiveViewport.gridBuiltPlane = activeGridPlane;
+            m_interactiveViewport.gridBuiltSpacing = spacing;
 
             m_interactiveViewport.gridVertexCount = (uint32_t)(positions.size() / 3);
             m_interactiveViewport.gridSegments[0] = seg0Start;  m_interactiveViewport.gridSegments[1] = seg0Count;

@@ -534,6 +534,15 @@ int VDBVolumeManager::registerOrUpdateLiveVolume(int existing_id, const std::str
         if (vol.internal_nano_handle) delete static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol.internal_nano_handle);
         vol.internal_nano_handle = new_nano_handle;
 
+        // 2b. ALSO keep the OpenVDB density grid: the CPU reference renderer samples
+        // through sampleDensityCPU(), which reads internal_openvdb_grid — NOT the
+        // NanoVDB handle (that's the GPU path). Without this the live gas/fluid
+        // volume is hit by the CPU BVH but samples 0 density everywhere and renders
+        // empty/black. Disk VDBs work on CPU precisely because they populate this
+        // member. Replace-and-free old (mirrors the nano handle above).
+        if (vol.internal_openvdb_grid) delete static_cast<openvdb::FloatGrid::Ptr*>(vol.internal_openvdb_grid);
+        vol.internal_openvdb_grid = new openvdb::FloatGrid::Ptr(density_grid);
+
         // 3. Temperature grid (optional)
         if (temp_ptr) {
             openvdb::FloatGrid::Ptr temp_grid = openvdb::FloatGrid::create(0.0f);
@@ -550,6 +559,11 @@ int VDBVolumeManager::registerOrUpdateLiveVolume(int existing_id, const std::str
 
             if (vol.internal_nano_temperature_handle) delete static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol.internal_nano_temperature_handle);
             vol.internal_nano_temperature_handle = new_t_nano_handle;
+
+            // Keep the OpenVDB temperature grid too for CPU blackbody/emission
+            // sampling (sampleTemperatureCPU reads internal_openvdb_temperature).
+            if (vol.internal_openvdb_temperature) delete static_cast<openvdb::FloatGrid::Ptr*>(vol.internal_openvdb_temperature);
+            vol.internal_openvdb_temperature = new openvdb::FloatGrid::Ptr(temp_grid);
         }
 
         // Update bounds

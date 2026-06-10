@@ -31,6 +31,9 @@
 #include "InstanceManager.h"
 #include "InstanceGroup.h"
 #include "Triangle.h"
+#include "HittableInstance.h"
+#include "EmbreeBVH.h"
+#include "ParallelBVHNode.h"
 #include "MaterialManager.h"
 #include "PrincipledBSDF.h"
 #include "PBRMaterialSnapshot.h"
@@ -670,6 +673,8 @@ void SceneData::syncParticleRenderInstances(bool enable_rt_geometry) {
     } else if (motion_change) {
         g_gpu_refit_pending = true;
     }
+    // CPU reference render mirrors the same change on its own rebuild path.
+    if (structural_change || motion_change) g_particle_cpu_geometry_dirty = true;
 
     // Fluid objects (legacy fluid_objects vector) and SimulationGridDomain
     // (type=Fluid, fluid_render_mode=Particles — the active path) both ride
@@ -1021,6 +1026,7 @@ void SceneData::syncFluidParticleRenderInstances(bool enable_rt_geometry) {
     } else if (motion_change) {
         g_gpu_refit_pending = true;
     }
+    if (structural_change || motion_change) g_particle_cpu_geometry_dirty = true;
 }
 
 void SceneData::destroyFluidParticleRenderGroup(RayTrophiSim::Fluid::FluidObject& obj) {
@@ -1265,6 +1271,7 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
     } else if (motion_change) {
         g_gpu_refit_pending = true;
     }
+    if (structural_change || motion_change) g_particle_cpu_geometry_dirty = true;
 }
 
 void SceneData::releaseDomainFluidParticleInstances() {
@@ -1404,17 +1411,21 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
             const std::size_t want_cap   = fluidPoolCapacityFor(live_count, budget);
             std::size_t& cap = system.domain_foam_pool_capacities[d];
             // Grow immediately when foam exceeds the pool; SHRINK once foam has
-            // dropped well below it (4x hysteresis to avoid grow/shrink thrash at a
-            // doubling boundary). Foam is volatile — it spikes during a splash then
-            // dissipates. A grows-only pool kept the post-spike peak forever, and
-            // EVERY surplus slot is a scale-0 instance that still lands in the TLAS
-            // (the backends don't cull degenerate instances), so the whole sequence
-            // traced against a giant TLAS long after the foam was gone — the
-            // "13 frames in it jumps to 15-20s and never recovers" cliff, and the
-            // reason a scrubbed viewport frame (pool sized to THAT frame) was fast.
+            // dropped below it (2x hysteresis — one doubling band — so the pool
+            // tracks the LIVE foam closely instead of the post-spike PEAK). Foam is
+            // volatile — it spikes during a splash then dissipates. A grows-only pool
+            // kept the post-spike peak forever, and EVERY surplus slot is a scale-0
+            // instance that still lands in the TLAS (the backends don't cull
+            // degenerate instances), so per-frame refit+trace cost scaled with the
+            // PEAK, not the current foam — the "32k slower than 38k" non-monotonic
+            // timing (cost followed pool cap = peak history, not live count) and the
+            // "13 frames in it jumps to 15-20s and never recovers" cliff. A tighter
+            // 2x band releases the pool one doubling step after the foam drops, at the
+            // cost of a slightly more frequent shrink-rebuild (rare vs per-frame refit;
+            // grow is still immediate so a re-spike just regrows). Was 4x.
             if (want_cap > cap) {
                 cap = want_cap;
-            } else if (cap > kFluidPoolChunk && want_cap * 4 <= cap) {
+            } else if (cap > kFluidPoolChunk && want_cap * 2 <= cap) {
                 cap = want_cap;
             }
 
@@ -1582,6 +1593,7 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
     } else if (motion_change) {
         g_gpu_refit_pending = true;
     }
+    if (structural_change || motion_change) g_particle_cpu_geometry_dirty = true;
 }
 
 void SceneData::releaseDomainFluidFoamInstances() {
@@ -1592,5 +1604,89 @@ void SceneData::releaseDomainFluidFoamInstances() {
         }
         system.domain_foam_render_group_ids.clear();
         system.domain_foam_pool_capacities.clear();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CPU reference render bridge
+// ─────────────────────────────────────────────────────────────────────────────
+// The GPU backends draw discrete particles by iterating InstanceManager's
+// transient groups directly. The CPU BVH, however, is built only from
+// world.objects (InstanceManager::rebuildSceneObjects deliberately skips
+// transient groups so they don't churn the selection list / get re-centered).
+// So the CPU reference renderer never saw particles. This walks every transient
+// particle/fluid/foam group and expands its live instances into HittableInstances
+// that the caller appends to the CPU-BVH-only snapshot — particles thus reach the
+// CPU render WITHOUT entering world.objects (no GPU double-render, no UI churn).
+//
+// Each primitive ScatterSource already holds origin-centred unit-diameter
+// triangles with the bucket material baked in. We build ONE child EmbreeBVH per
+// source (cached on source.bvh, reused until the bridge clears sources on a
+// config change) and instance it per particle via the same machinery foliage
+// uses. Embree natively instances the child scene; the ParallelBVH fallback uses
+// HittableInstance's object-space ray transform — both work with the same child.
+void SceneData::appendParticleCPUHittables(std::vector<std::shared_ptr<Hittable>>& out) {
+    auto& im = InstanceManager::getInstance();
+    for (auto& group : im.getGroups()) {
+        if (!group.transient) continue;            // particle/fluid/foam bridges only
+        if (group.instances.empty() || group.sources.empty()) continue;
+
+        // Lazily build + cache a child BVH per source. The primitive triangles are
+        // already centred on the origin, so (unlike the foliage path) we build the
+        // BVH directly with no re-centering — instance scale == particle diameter
+        // then places the sphere/cube at the particle position.
+        for (auto& src : group.sources) {
+            if (src.bvh || src.triangles.empty()) continue;
+            std::vector<std::shared_ptr<Hittable>> prim;
+            prim.reserve(src.triangles.size());
+            for (const auto& tri : src.triangles) {
+                if (tri) prim.push_back(tri);
+            }
+            if (prim.empty()) continue;
+            auto embree = std::make_shared<EmbreeBVH>();
+            embree->build(prim);
+            src.bvh = embree;
+            src.has_local_bbox = src.bvh->bounding_box(0.0f, 0.0f, src.local_bbox);
+            // HittableInstance keeps a triangle list for normal/material fallbacks;
+            // the centred primitives double as that list.
+            src.centered_triangles_ptr =
+                std::make_shared<std::vector<std::shared_ptr<Triangle>>>(src.triangles);
+        }
+
+        const int nsrc = static_cast<int>(group.sources.size());
+        out.reserve(out.size() + group.instances.size());
+        for (const auto& inst : group.instances) {
+            // Dead/surplus slots collapse to scale 0 in every bridge — skip them so
+            // the CPU BVH only carries live particles.
+            if (inst.scale.x <= 1e-5f) continue;
+            int si = inst.source_index;
+            if (si < 0 || si >= nsrc) si = 0;
+            ScatterSource& src = group.sources[static_cast<std::size_t>(si)];
+            if (!src.bvh) continue;
+            const Matrix4x4 mat = inst.toMatrix();
+            if (src.has_local_bbox) {
+                out.push_back(std::make_shared<HittableInstance>(
+                    src.bvh, src.centered_triangles_ptr, mat, "[ParticleCPU]", src.local_bbox));
+            } else {
+                out.push_back(std::make_shared<HittableInstance>(
+                    src.bvh, src.centered_triangles_ptr, mat, "[ParticleCPU]"));
+            }
+        }
+    }
+}
+
+void SceneData::rebuildParticleBVH(bool use_embree) {
+    std::vector<std::shared_ptr<Hittable>> parts;
+    appendParticleCPUHittables(parts);
+    if (parts.empty()) {
+        particle_bvh = nullptr;   // composite falls back to the static scene BVH
+        return;
+    }
+    if (use_embree) {
+        auto bvh = std::make_shared<EmbreeBVH>();
+        bvh->build(parts);
+        particle_bvh = bvh;
+    } else {
+        particle_bvh = std::make_shared<ParallelBVHNode>(parts, 0, parts.size(), 0.0f, 1.0f, 0);
     }
 }

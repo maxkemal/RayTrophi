@@ -398,8 +398,15 @@ extern bool g_bvh_rebuild_pending;      // CPU BVH needs rebuild
 extern bool g_gpu_refit_pending;        // GPU Geometry needs update (Deferred)
 extern bool g_vulkan_rebuild_pending;    // GPU Vulkan geometry needs rebuild
 extern bool g_vulkan_geometry_append_pending; // Additive-only mutation hint — Main loop tries incremental TLAS refit before falling back to full rebuild
+extern bool g_vulkan_geometry_deform_pending; // A physics body deformed its source mesh this frame — Main loop refits ONLY those BLAS in place (vs full-scene teardown)
 extern bool g_viewport_raster_rebuild_pending; // Interactive raster viewport needs rebuild
 extern bool g_optix_rebuild_pending;
+// Discrete-particle render bridge changed its instance set (structural or motion).
+// Consumed ONLY when the CPU reference backend is active (Main loop translates it
+// into g_bvh_rebuild_pending) so a moving sim re-expands particle HittableInstances
+// into the CPU BVH each frame. Left unconsumed during GPU sessions (those refit via
+// g_gpu_refit_pending / g_*_rebuild_pending), so it never burns CPU off-path.
+extern bool g_particle_cpu_geometry_dirty;
 extern bool g_solid_viewport_active; // true in Solid/Matcap shading (not Rendered); fluid bridge shows splat-sphere proxy
 // Simulation drive mode for grid-domain gas. true = Timeline (default): the sim
 // is driven by the timeline (play bakes into the memory cache, scrub restores,

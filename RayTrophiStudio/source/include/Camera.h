@@ -60,6 +60,26 @@ public:
     float fov = 45.0f;
     float aspect_ratio = 1.7777f;
     float vfov = 45.0f;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ORTHOGRAPHIC / STANDARD VIEWS (viewport alignment)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // When orthographic is true, primary rays are parallel (no perspective foreshortening),
+    // which removes the depth illusion that makes aligning objects unreliable.
+    enum class StandardView { Perspective, Top, Bottom, Front, Back, Left, Right };
+    bool orthographic = false;       // true = parallel projection
+    float ortho_height = 10.0f;      // full vertical extent (world units) visible at the lookat plane
+    StandardView standard_view = StandardView::Perspective;
+
+    // Snap the camera to a standard axis-aligned view around the current lookat (pivot).
+    // Preserves the current distance and frames the same world span (continuous switch).
+    // setOrtho=true also flips to parallel projection (the usual DCC behaviour for these views).
+    void setStandardView(StandardView v, bool setOrtho = true);
+
+    // Same, but explicitly orbit around `pivot` at `distance` (so the snap can re-centre on the
+    // selection / world origin instead of whatever stale point lookat happened to hold).
+    void setStandardView(StandardView v, const Vec3& pivot, float distance, bool setOrtho = true);
+
     // Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, double vfov, double aspect, double aperture, double focus_dist);
 
     Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, float aperture, float focus_dist, int blade_count);
