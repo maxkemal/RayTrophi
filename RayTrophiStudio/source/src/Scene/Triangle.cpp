@@ -493,7 +493,11 @@ bool Triangle::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool 
 void Triangle::updateTransformedVertices() {
     Matrix4x4 finalTransform = getTransformMatrix();
     Matrix4x4 normalTransform = finalTransform.inverse().transpose();
+    updateTransformedVerticesWith(finalTransform, normalTransform);
+}
 
+void Triangle::updateTransformedVerticesWith(const Matrix4x4& finalTransform,
+                                             const Matrix4x4& normalTransform) {
     for (int i = 0; i < 3; ++i) {
         vertices[i].position = finalTransform.transform_point(vertices[i].original);
         vertices[i].normal = normalTransform.transform_vector(vertices[i].originalNormal).normalize();

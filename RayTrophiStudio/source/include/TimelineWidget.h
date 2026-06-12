@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -32,6 +32,14 @@ enum class TrackGroup {
 };
 
 
+// Timeline editor display mode (combo in the toolbar).
+// Both modes share playhead/zoom/pan/track-selection state, which is why the
+// graph editor lives inside TimelineWidget instead of a separate bottom tab.
+enum class TimelineEditorMode {
+    DopeSheet = 0,   // classic keyframe diamonds per track
+    GraphEditor = 1  // per-channel value curves (transform channels)
+};
+
 // Keyframe insert type for separate L/R/S options
 enum class KeyframeInsertType {
     Location,
@@ -52,7 +60,32 @@ enum class ChannelType {
     // Detailed axis channels
     LocationX, LocationY, LocationZ,
     RotationX, RotationY, RotationZ,
-    ScaleX, ScaleY, ScaleZ
+    ScaleX, ScaleY, ScaleZ,
+
+    // Light sub-channels
+    LightPosX, LightPosY, LightPosZ,
+    LightColR, LightColG, LightColB,
+    LightIntensity,
+    LightDirX, LightDirY, LightDirZ,
+
+    // Camera sub-channels
+    CamPosX, CamPosY, CamPosZ,
+    CamTgtX, CamTgtY, CamTgtZ,
+    CamFOV,
+    CamFocusDist,
+    CamLensRad,
+
+    // Material sub-channels
+    MatAlbedoR, MatAlbedoG, MatAlbedoB,
+    MatOpacity,
+    MatRoughness,
+    MatMetallic,
+    MatClearcoat,
+    MatTransmission,
+    MatIOR,
+    MatEmissionR, MatEmissionG, MatEmissionB,
+    MatNormalStrength,
+    MatEmissionStrength
 };
 
 // Visual representation of a track in the timeline
@@ -83,6 +116,13 @@ public:
     // Public state (for external access)
     int getCurrentFrame() const { return current_frame; }
     void setCurrentFrame(int frame) { current_frame = frame; }
+    TimelineEditorMode getEditorMode() const { return editor_mode; }
+    void setEditorMode(TimelineEditorMode mode) {
+        editor_mode = mode;
+        if (editor_mode == TimelineEditorMode::GraphEditor) {
+            graph_fit_pending = true;
+        }
+    }
     // Timeline frame range — the single source of truth for how long the scene runs.
     // Physics disk-bake uses this (NOT the sequence-render range) so a bake always
     // covers the whole timeline regardless of render output settings.
@@ -111,6 +151,17 @@ public:
         last_selection_.clear();
         selection_sync_force_ = false;
         lastSyncedAnimCount = 0;  // re-sync animation data after project reload
+        // Graph editor state
+        editor_mode = TimelineEditorMode::DopeSheet;
+        for (int i = 0; i < CURVE_CHANNEL_COUNT; ++i) graph_channel_visible[i] = true;
+        graph_value_center = 0.0f;
+        graph_pixels_per_unit = 40.0f;
+        graph_fit_pending = true;
+        graph_sel_channel = -1;
+        graph_sel_frame = -1;
+        graph_drag_mode = 0;
+        anim_reapply_requested_ = false;
+        graph_groups_expanded.clear();
     }
 
 private:
@@ -127,6 +178,13 @@ private:
     void handleZoomPan(ImVec2 canvas_pos, ImVec2 canvas_size);
     void handleKeyframeInteraction(UIContext& ctx, ImVec2 canvas_pos, ImVec2 canvas_size);
     void handleScrubbing(ImVec2 canvas_pos, float canvas_width);
+
+    // ===== GRAPH EDITOR =====
+    void drawGraphChannelList(UIContext& ctx, float list_width);
+    void drawGraphCanvas(UIContext& ctx, float canvas_width, float canvas_height);
+    void fitGraphView(UIContext& ctx, float canvas_height);
+    float valueToPixelY(float value, float canvas_height) const;
+    float pixelYToValue(float y, float canvas_height) const;
     
     // ===== DATA MANAGEMENT =====
     void rebuildTrackList(UIContext& ctx);
@@ -173,11 +231,30 @@ private:
     size_t lastSyncedAnimCount = 0;  // how many AnimationData entries have been synced
     
     // Selection & Interaction
- 
+
     int selected_keyframe_frame = -1;
     bool is_dragging_keyframe = false;
     int drag_start_frame = -1;
     int context_menu_frame = 0;  // Frame for right-click context menu
+
+    // ===== GRAPH EDITOR STATE =====
+    TimelineEditorMode editor_mode = TimelineEditorMode::DopeSheet;
+    bool graph_channel_visible[32] = {
+        true, true, true, true, true, true, true, true, true, true,
+        true, true, true, true, true, true, true, true, true, true,
+        true, true, true, true, true, true, true, true, true, true,
+        true, true
+    };
+    float graph_value_center = 0.0f;      // channel value at the vertical centre of the plot area
+    float graph_pixels_per_unit = 40.0f;  // vertical zoom
+    bool graph_fit_pending = true;        // auto-fit on first open / on request (F)
+    int graph_sel_channel = -1;           // selected curve key: channel index (CURVE_*)
+    int graph_sel_frame = -1;             // selected curve key: frame
+    int graph_drag_mode = 0;              // 0=none 1=key 2=in-handle 3=out-handle
+    // Graph edits (value/handle drags, interp changes) happen at an unchanged
+    // current_frame, so draw()'s "frame changed?" gate would skip re-applying
+    // keyframes to the scene; this flag forces one re-apply pass.
+    bool anim_reapply_requested_ = false;
     
     // Group expansion state
     bool group_objects_expanded = true;
@@ -187,6 +264,7 @@ private:
     bool group_terrain_expanded = true;
     bool group_water_expanded = true;   // NEW: Water track group
     bool group_gas_expanded = true;     // NEW: Gas/Emitter track group
+    std::map<std::string, bool> graph_groups_expanded;
     
     // Colors
     static constexpr ImU32 COLOR_TRANSFORM = IM_COL32(100, 150, 255, 255);  // Blue

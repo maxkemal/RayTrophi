@@ -1,5 +1,6 @@
-﻿#include "scene_ui.h"
+#include "scene_ui.h"
 #include "ui_modern.h"
+#include "imgui_internal.h"
 #include "HittableInstance.h"
 
 #include "MeshModifiers.h"
@@ -2091,6 +2092,10 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                 }
 
                 if (mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit) {
+                    ImGui::Checkbox("X-Ray", &mesh_overlay_settings.xray_mode);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Draw the edit overlay through the mesh (see hidden vertices/edges).");
+                    }
                     ImGui::Checkbox("Soft Selection", &mesh_overlay_settings.proportional_edit);
                     if (mesh_overlay_settings.proportional_edit) {
                         ImGui::SliderFloat("Radius", &mesh_overlay_settings.proportional_radius, 0.05f, 5.0f, "%.2f");
@@ -2282,6 +2287,7 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     UIWidgets::Divider();
                     UIWidgets::ColoredHeader("Face Tools", ImVec4(0.38f, 0.72f, 0.92f, 1.0f));
                     ImGui::SliderFloat("Extrude Distance", &mesh_face_extrude_distance, -2.0f, 2.0f, "%.3f");
+                    ImGui::SliderFloat("Inset Amount", &mesh_face_inset_amount, 0.02f, 0.98f, "%.2f");
                     ImGui::TextDisabled("Build volume or remove caps from the active polygon selection.");
                     const float faceToolSize = 38.0f;
                     if (drawMeshIconButton(
@@ -2293,6 +2299,17 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                             false,
                             ImVec2(faceToolSize, faceToolSize))) {
                         extrudeSelectedMeshFaces(ctx, mesh_face_extrude_distance);
+                    }
+                    ImGui::SameLine();
+                    if (drawMeshIconButton(
+                            "FaceInset",
+                            "Inset Face",
+                            "Inset Face\nShrink a copy of each selected face inward, leaving a border ring.",
+                            getMeshActionIcon("Inset Face"),
+                            ImVec4(0.52f, 0.86f, 0.62f, 1.0f),
+                            false,
+                            ImVec2(faceToolSize, faceToolSize))) {
+                        insetSelectedMeshFaces(ctx, mesh_face_inset_amount);
                     }
                     ImGui::SameLine();
                     if (drawMeshIconButton(
@@ -4654,8 +4671,31 @@ void SceneUI::drawPaintBrushDock(UIContext& ctx) {
 
     ImGuiIO& io = ImGui::GetIO();
     const float menu_height = 19.0f;
-    const bool bottom_visible = show_animation_panel || show_scene_log;
-    const float bottom_margin = bottom_visible ? (bottom_panel_height + 24.0f) : 24.0f;
+    const bool bottom_visible = show_animation_panel || show_scene_log || show_terrain_graph || show_anim_graph || show_asset_browser;
+    
+    bool bottom_docked = false;
+    if (bottom_visible) {
+        if (!docking_enabled) {
+            bottom_docked = true;
+        } else {
+            ImGuiID dockspace_id = ImGui::GetID("RayTrophiDockSpace_v2");
+            for (const char* name : {"Timeline", "Console", "Terrain Graph", "AnimGraph", "Asset Browser"}) {
+                ImGuiWindow* win = ImGui::FindWindowByName(name);
+                if (win && win->Active && win->DockNode) {
+                    ImGuiDockNode* node = win->DockNode;
+                    while (node->ParentNode) {
+                        node = node->ParentNode;
+                    }
+                    if (node->ID == dockspace_id) {
+                        bottom_docked = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    const float bottom_margin = bottom_docked ? (bottom_panel_height + 24.0f) : 24.0f;
     const float dock_width = getPaintBrushDockWidth();
     const float dock_height = (std::max)(260.0f, io.DisplaySize.y - menu_height - bottom_margin);
 

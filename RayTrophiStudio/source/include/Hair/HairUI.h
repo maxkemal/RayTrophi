@@ -1,4 +1,4 @@
-﻿/*
+/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          HairUI.h
@@ -11,6 +11,7 @@
 #include "Hair/HairSystem.h"
 #include "Hair/HairBSDF.h"
 #include <imgui.h>
+#include "ui_modern.h"
 #include <functional>
 #include <string>
 #include <vector>
@@ -594,7 +595,7 @@ inline void HairUI::render(
     // ═══════════════════════════════════════════════════════════════════════════
     
     float sidebar_w = 42.0f;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.07f, 0.09f, 0.12f, 0.82f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ThemeManager::instance().current().colors.secondary);
     ImGui::BeginChild("HairSidebar", ImVec2(sidebar_w, 0), true, ImGuiWindowFlags_NoScrollbar);
     
     auto DrawIconButton = [&](int index, UIWidgets::IconType icon, const char* tooltip) {
@@ -643,7 +644,7 @@ inline void HairUI::render(
             dl->AddRectFilled(
                 ImVec2(pos.x + sidebar_w - 3.0f, pos.y + 4.0f),
                 ImVec2(pos.x + sidebar_w, pos.y + size - 4.0f),
-                ImGui::ColorConvertFloat4ToU32(ImVec4(0.28f, 0.80f, 1.00f, 1.0f)),
+                ImGui::ColorConvertFloat4ToU32(ThemeManager::instance().current().colors.accent),
                 2.0f
             );
         } else if (hover_anim[index] > 0.01f) {
@@ -657,7 +658,7 @@ inline void HairUI::render(
 
         const float iconSize = size * (0.60f + 0.10f * hover_anim[index]);
         ImVec4 idleTint(0.70f, 0.70f, 0.70f, 0.82f);
-        ImVec4 activeTint(0.40f, 0.80f, 1.00f, 1.0f);
+        ImVec4 activeTint = ThemeManager::instance().current().colors.accent;
         ImVec4 hoverTint = getHoverTint(icon);
         ImVec4 iconTint = selected ? activeTint : ImLerp(idleTint, hoverTint, hover_anim[index]);
 
@@ -687,7 +688,7 @@ inline void HairUI::render(
     ImGui::SameLine();
 
     // Main Content Area
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.10f, 0.14f, 0.56f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ThemeManager::instance().current().colors.background);
     ImGui::BeginChild("HairContent", ImVec2(0, 0), false);
     // Reset scroll-Y when the active Hair sub-tab changes so each sub-panel
     // opens at the top instead of inheriting the previous tab's scroll.

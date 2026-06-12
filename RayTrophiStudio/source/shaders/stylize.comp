@@ -93,6 +93,7 @@ struct AOV {
     int   nishita_cloud_seed;
     float depth;
     float edge;
+    float pixel_scale;   // world units per pixel at the hit point (0 = unknown)
     uint  material_id;
     int   valid;
     int   hit;
@@ -272,6 +273,180 @@ float strokeField(int x, int y, AOV a, int frame_index) {
     float long_stroke = fbmNoise(u, v, seed);
     float fiber = fbmNoise(u * 2.8 + 19.0, v * 0.55 - 7.0, seed + 91);
     return (long_stroke - 0.5) * 0.75 + (fiber - 0.5) * 0.25;
+}
+
+// ---- brush daub field (bire-bir with StylizeCore::brushStrokeField) ----
+// Discrete overlapping oriented paint stamps; per-daub random priority gives
+// painter ordering so overlapping daubs keep crisp boundaries.
+struct BrushStrokeSample {
+    float coverage;   // 0..1 paint deposited by the winning daub
+    float tone;       // -1..1 per-daub tonal offset
+    float bristle;    // -1..1 bristle streaks along the daub axis
+    float rim;        // -1..1 signed impasto rim (+ lit top edge, - shadow edge)
+    float gap;        // 0..1 bare canvas between daubs
+};
+
+void evalBrushDaubLayer(float u, float v, int seed, float aspect, float breakup, float edge_rag, out BrushStrokeSample s) {
+    s.coverage = 0.0; s.tone = 0.0; s.bristle = 0.0; s.rim = 0.0; s.gap = 1.0;
+    float spacing = aspect * 0.74;
+    int row0 = int(floor(v));
+    float best_priority = -1.0;
+    float best_cov = 0.0;
+    float best_tone = 0.0;
+    float best_rim = 0.0;
+    float best_bris = 0.0;
+    float total_cov = 0.0;
+    for (int rj = -1; rj <= 1; ++rj) {
+        int row = row0 + rj;
+        float row_shift = hashNoise(row, seed, 11) * spacing;
+        int slot0 = int(floor((u + row_shift) / spacing));
+        for (int sj = -1; sj <= 1; ++sj) {
+            int slot = slot0 + sj;
+            int cell = seed + row * 131 + slot * 977;
+            if (hashNoise(slot, row, cell + 1) < breakup * 0.55) continue;   // dry brush: missing daub
+            float h_cu = hashNoise(slot, row, cell + 2);
+            float h_cv = hashNoise(slot, row, cell + 3);
+            float cu = (float(slot) + 0.5 + (h_cu - 0.5) * 0.55) * spacing - row_shift;
+            float cv = float(row) + 0.5 + (h_cv - 0.5) * 0.40;
+            float du = u - cu;
+            float dv = v - cv;
+            if (abs(du) > aspect * 0.80 || abs(dv) > 1.45) continue;   // cheap reject before trig/noise
+            float ja = (hashNoise(slot, row, cell + 4) - 0.5) * 0.50;
+            float cj = cos(ja);
+            float sn = sin(ja);
+            float ru = du * cj + dv * sn;
+            float rv = -du * sn + dv * cj;
+            float half_len = aspect * (0.40 + hashNoise(slot, row, cell + 5) * 0.24);
+            float half_wid = 0.36 + hashNoise(slot, row, cell + 6) * 0.22;
+            float t = ru / max(1e-4, half_len);              // -1..1 along the stroke
+            float at = abs(t);
+            if (at > 1.15) continue;
+            // wavy spine — real strokes curve a little
+            float wob = (valueNoise(ru * 1.6 + h_cu * 9.0, h_cv * 7.0, cell + 12) - 0.5) * half_wid * 0.55;
+            float rvw = rv - wob;
+            // rounded head, thinning tail
+            float w_local = half_wid * (0.30 + 0.70 * sqrt(max(0.0, 1.0 - t * t)));
+            w_local *= 1.0 - 0.35 * smoothstepf(0.10, 1.0, t);
+            float dn = abs(rvw) / max(1e-4, w_local);
+            float lon = 1.0 - smoothstepf(0.82, 1.06, at);
+            float lat = 1.0 - smoothstepf(0.58, 1.0, dn);
+            float cov = lat * lon;
+            if (cov <= 0.02) continue;
+            // bristle pattern across the width — streaks AND torn ragged ends;
+            // edge_rag tears the stroke wherever the AOV edge runs through it
+            float bris = valueNoise(rvw * 3.1 / max(0.05, half_wid), t * 2.2, cell + 13);
+            float rag_zone = saturatef(smoothstepf(0.35, 0.95, at) + edge_rag);
+            cov *= 1.0 - rag_zone * smoothstepf(0.30, 0.78, bris) * (0.55 + breakup * 0.35);
+            if (cov <= 0.02) continue;
+            total_cov = max(total_cov, cov);
+            float priority = hashNoise(slot, row, cell + 7) + cov * 0.35;
+            if (priority > best_priority) {
+                best_priority = priority;
+                best_cov = cov;
+                best_tone = (hashNoise(slot, row, cell + 8) - 0.5) * 2.0;
+                best_bris = (bris - 0.5) * 2.0;
+                float band = smoothstepf(0.55, 0.95, dn) * lat * lon;
+                best_rim = band * clamp(-rvw / max(1e-4, w_local) * 1.7, -1.0, 1.0);
+            }
+        }
+    }
+    if (best_priority < 0.0) return;
+    s.coverage = best_cov;
+    s.tone = best_tone;
+    s.rim = best_rim;
+    s.bristle = best_bris;
+    s.gap = saturatef(1.0 - total_cov);
+}
+
+BrushStrokeSample brushStrokeField(int x, int y, AOV a, int frame_index) {
+    float brush_scale = max(0.05, mtl0.y);
+    // daub width in pixels — SCREEN-space size, so strokes never blow up or
+    // shrink with surface orientation/distance (depth growth stays knob-gated
+    // through surfacePixelScale only).
+    float daub_px = surfacePixelScale(a, 6.0 + brush_scale * 10.0);
+    float coherent_frame = float(frame_index) * (1.0 - misc2.x);
+
+    float nx = a.hit != 0 ? a.normal.x : 0.0;
+    float ny = a.hit != 0 ? a.normal.y : 1.0;
+    float nz = a.hit != 0 ? a.normal.z : 0.0;
+    float angle = atan(nz + ny * 0.35, nx + 0.001);
+    int sdir = mat_flags.y;
+    if (sdir == SD_Vertical) angle = 1.5707963;
+    else if (sdir == SD_Horizontal) angle = 0.0;
+    else if (sdir == SD_Diagonal) angle = 0.7853982;
+    else if (sdir == SD_CrossHatch) angle = ((x / 48 + y / 48) % 2 != 0) ? 0.7853982 : -0.7853982;
+    float ca = cos(angle), sa = sin(angle);
+    float fx = float(x), fy = float(y);
+    // Stroke-space coordinates. With Surface Lock the daubs are parameterized
+    // on the SURFACE (world tangent plane, rotated by the stroke direction) so
+    // they stay glued to geometry under camera motion — no screen-door sliding.
+    // The scale is depth-normalized and split across two log2-quantized levels
+    // that crossfade, so the on-screen daub size stays ~constant (within ~2x)
+    // without the pattern swimming or popping.
+    float pu, pv, world_per_daub;
+    float surface_lock = a.hit != 0 ? saturatef(mtl2.y) : 0.0;
+    if (surface_lock > 0.001) {
+        vec3 tangent, bitangent;
+        surfaceBasis(a.normal, tangent, bitangent);
+        float tu = dot(a.world_position, tangent);
+        float tv = dot(a.world_position, bitangent);
+        pu = tu * ca + tv * sa;
+        pv = -tu * sa + tv * ca;
+        // exact world-per-pixel from the AOV when the builder filled it; the
+        // 0.0007*depth term is only a legacy fov-guess fallback
+        float wpp = a.pixel_scale > 1e-7
+            ? a.pixel_scale
+            : max(1e-5, a.depth) * 0.0007;
+        world_per_daub = wpp * daub_px;
+    } else {
+        pu = fx * ca + fy * sa;
+        pv = -fx * sa + fy * ca;
+        world_per_daub = daub_px;
+    }
+    int mat_seed = int(a.material_id & 0xFFFFu);
+    float mat_u = (hashNoise(mat_seed, 71, 2) - 0.5) * 4.0 + nx * 1.7;
+    float mat_v = (hashNoise(mat_seed, 97, 3) - 0.5) * 4.0 + ny * 1.1 + nz * 0.7;
+
+    float l = log2(max(1e-6, world_per_daub));
+    int lvl = int(floor(l));
+    float lf = l - float(lvl);
+    float s0 = exp2(float(lvl));
+    float s1 = s0 * 2.0;
+
+    int seed = int(coherent_frame) * 13 + int(a.material_id & 0xFFu) * 53 + 977;
+    float aspect = 3.4;                                     // daub length / width
+    float breakup = saturatef(mtl0.w);                      // dry_brush
+    // AOV edges tear the stroke tips instead of clipping the paint — silhouettes
+    // end in ragged brush starts/stops, not a hard geometric line.
+    float edge_rag = a.hit != 0
+        ? saturatef(a.edge) * (0.35 + saturatef(mtl2.w) * 0.65)
+        : 0.0;
+    // Seeds depend on the LOD level, so when the camera dollies and the level
+    // increments, the incoming fine layer is EXACTLY the previous coarse layer
+    // (no reshuffle at the boundary).
+    BrushStrokeSample lodA;
+    evalBrushDaubLayer(pu / s0 + mat_u, pv / s0 + mat_v, seed + lvl * 101,
+                       aspect, breakup, edge_rag, lodA);
+    BrushStrokeSample lodB;
+    evalBrushDaubLayer(pu / s1 + mat_u, pv / s1 + mat_v, seed + (lvl + 1) * 101,
+                       aspect, breakup, edge_rag, lodB);
+
+    BrushStrokeSample s;
+    float wA = lodA.coverage * (1.0 - lf);
+    float wB = lodB.coverage * lf;
+    float wsum = wA + wB;
+    s.coverage = lerpf(lodA.coverage, lodB.coverage, lf);
+    s.gap = lerpf(lodA.gap, lodB.gap, lf);
+    if (wsum > 1e-4) {
+        s.tone = (lodA.tone * wA + lodB.tone * wB) / wsum;
+        s.bristle = (lodA.bristle * wA + lodB.bristle * wB) / wsum;
+        s.rim = (lodA.rim * wA + lodB.rim * wB) / wsum;
+    } else {
+        s.tone = 0.0;
+        s.bristle = 0.0;
+        s.rim = 0.0;
+    }
+    return s;
 }
 
 struct WetOil { float bristle; float ridge; float drag; float body; };
@@ -549,13 +724,22 @@ vec3 applyPostProcess(vec3 input_color, AOV a, int x, int y, int frame_index) {
         color = simplifyColor(color, strength * color_simplification * 0.48 * edge_guard * material_guard);
 
         float brush_strength = mtl0.x, dry_brush = mtl0.w;
-        if (mat_flags.x != 0 && brush_strength > 0.001) {
+        bool brush_on = mat_flags.x != 0 && brush_strength > 0.001;
+        bool outline_on = out_flags.x != 0 && a.edge > 0.001;
+        BrushStrokeSample daub;
+        daub.coverage = 0.0; daub.tone = 0.0; daub.bristle = 0.0; daub.rim = 0.0; daub.gap = 1.0;
+        if (brush_on || outline_on) daub = brushStrokeField(x, y, a, frame_index);
+
+        if (brush_on) {
             float stroke = strokeField(x, y, a, frame_index);
             float lit_luma = luminance(color);
             float shadow_boost = 1.0 + (1.0 - smoothstepf(0.08, 0.48, lit_luma)) * 0.22;
             float highlight_thin = 1.0 - smoothstepf(0.62, 0.96, lit_luma) * 0.42;
-            float brush_amount = brush_strength * strength * edge_guard * shadow_boost * highlight_thin;
-            float dry_mask = smoothstepf(0.12, 0.62, abs(stroke) + dry_brush * 0.35);
+            // No edge_guard on the daub layer: edges tear the strokes inside the
+            // field (edge_rag) instead of fading the paint into a clean cutout.
+            float brush_amount = brush_strength * strength * shadow_boost * highlight_thin;
+            float guarded_amount = brush_amount * edge_guard;
+            float daub_opacity = saturatef(brush_amount * 2.2);
             vec3 paint_color = dominantPigmentTint(color, 0.42 + palette_influence * 0.18);
             vec3 palette_tint = lerp3(palette_shadow.xyz, palette_highlight.xyz, saturatef(albedo_luma + stroke * 0.28));
             palette_tint = preserveMaterialHue(palette_tint, paint_color, material_color_preservation);
@@ -567,9 +751,9 @@ vec3 applyPostProcess(vec3 input_color, AOV a, int x, int y, int frame_index) {
                 float pickup = saturatef(mtl1.z);
                 float deposit = saturatef(mtl1.w);
                 float wet_visibility = 0.55 + oil_body * 0.62 + paint_load * 0.20;
-                float wet_mask = saturatef(brush_amount * wet_visibility * (0.08 + oil_body * 0.12 + oil.drag * 0.18));
-                float deposit_mask = saturatef(brush_amount * paint_load * deposit * wet_visibility * (0.05 + oil.ridge * 0.10));
-                float bristle_mask = saturatef(brush_amount * (0.10 + oil_body * 0.12 + saturatef(mtl2.x) * 0.10));
+                float wet_mask = saturatef(guarded_amount * wet_visibility * (0.08 + oil_body * 0.12 + oil.drag * 0.18));
+                float deposit_mask = saturatef(guarded_amount * paint_load * deposit * wet_visibility * (0.05 + oil.ridge * 0.10));
+                float bristle_mask = saturatef(guarded_amount * (0.10 + oil_body * 0.12 + saturatef(mtl2.x) * 0.10));
                 vec3 picked_color = lerp3(color, paint_color, 0.28 + pickup * 0.22);
                 vec3 carried_color = lerp3(picked_color, stroke_tint, saturatef(deposit * paint_load * palette_influence * 0.22));
                 float body_luma = (oil.body - 0.5) * (0.045 + oil_body * 0.055);
@@ -579,12 +763,22 @@ vec3 applyPostProcess(vec3 input_color, AOV a, int x, int y, int frame_index) {
                 color = lerp3(color, material_stroke, wet_mask);
                 color = lerp3(color, carried_color, deposit_mask);
                 color = color * (1.0 + (stroke + oil.bristle) * bristle_mask * 0.42);
-                color = lerp3(color, color * (1.0 + 0.045 * oil.ridge), oil.ridge * brush_amount * oil_body * 0.35);
-                color = lerp3(color, color * (0.985 - oil.ridge * 0.015), dry_brush * brush_amount * (1.0 - oil.drag) * 0.32);
+                color = lerp3(color, color * (1.0 + 0.045 * oil.ridge), oil.ridge * guarded_amount * oil_body * 0.35);
+                color = lerp3(color, color * (0.985 - oil.ridge * 0.015), dry_brush * guarded_amount * (1.0 - oil.drag) * 0.32);
+                vec3 wet_daub = clamp01(paint_color * (1.0 + daub.tone * (0.16 + oil_body * 0.10)
+                                                           + (daub.bristle * 0.6 + oil.bristle) * 0.12));
+                wet_daub = lerp3(wet_daub, carried_color, saturatef(palette_influence * 0.20 + deposit * 0.10));
+                color = lerp3(color, wet_daub, daub_opacity * daub.coverage * (0.30 + paint_load * 0.35));
+                color = clamp01(color * (1.0 + daub.rim * daub_opacity * (0.10 + oil_body * 0.14)));
             } else {
-                color = lerp3(color, clamp01(paint_color * (1.0 + stroke * 0.10)), brush_amount * 0.18);
-                color = color * (1.0 + stroke * brush_amount * 0.12);
-                color = lerp3(color, stroke_tint, brush_amount * dry_mask * dry_brush * 0.18);
+                vec3 daub_color = clamp01(paint_color * (1.0 + daub.tone * 0.20 + daub.bristle * 0.12 + stroke * 0.06));
+                daub_color = lerp3(daub_color, stroke_tint, palette_influence * 0.22);
+                color = lerp3(color, daub_color, daub_opacity * daub.coverage * 0.85);
+                color = clamp01(color * (1.0 + daub.rim * daub_opacity
+                                                   * (0.10 + saturatef(mtl0.z) * 0.16)));
+                float gap_amount = daub.gap * daub_opacity * dry_brush * 0.35;
+                color = lerp3(color, lerp3(color, palette_shadow.xyz, 0.45), gap_amount);
+                color = color * (1.0 + stroke * guarded_amount * 0.10);
             }
         }
 
@@ -600,8 +794,11 @@ vec3 applyPostProcess(vec3 input_color, AOV a, int x, int y, int frame_index) {
             color = lerp3(color, lerp3(base_albedo, palette_shadow.xyz * 0.7, palette_influence), pigment * edge_pigment * 0.24);
         }
 
-        if (out_flags.x != 0 && a.edge > 0.001) {
+        if (outline_on) {
             float line = outlineTexture(x, y, a, frame_index);
+            // contour drawn with the same brush: it breaks at daub gaps and
+            // tapers at stroke tips instead of tracing a solid geometric line
+            line *= 0.40 + 0.60 * smoothstepf(0.10, 0.70, daub.coverage + abs(daub.bristle) * 0.25);
             float o_strength = out0.x;
             float edge = saturatef(line * o_strength * strength);
             vec3 ink = outlineColor(a, base_albedo);
@@ -620,7 +817,7 @@ AOV buildAOV(int bx, int by) {
     a.screen_u = 0.0; a.screen_v = 0.0; a.sun_size_degrees = 0.545; a.sun_elevation_degrees = 35.0;
     a.nishita_clouds_enabled = 0; a.nishita_cloud_coverage = 0.45; a.nishita_cloud_density = 0.65;
     a.nishita_cloud_scale = 1.0; a.nishita_cloud_offset_x = 0.0; a.nishita_cloud_offset_z = 0.0;
-    a.nishita_cloud_seed = 0; a.depth = 0.0; a.edge = 0.0; a.material_id = 0xFFFFFFFFu; a.valid = 0; a.hit = 0;
+    a.nishita_cloud_seed = 0; a.depth = 0.0; a.edge = 0.0; a.pixel_scale = 0.0; a.material_id = 0xFFFFFFFFu; a.valid = 0; a.hit = 0;
 
     int w = idims.x, h = idims.y;
     if (bx < 0 || by < 0 || bx >= w || by >= h) return a;
@@ -669,6 +866,12 @@ AOV buildAOV(int bx, int by) {
     a.depth = depth;
     a.material_id = material_id;
     a.hit = (hitRaw && depth > 0.0) ? 1 : 0;
+    float view_len = length(view);
+    if (a.hit != 0 && view_len > 1e-6) {
+        // world units per pixel at the hit — drives screen-constant brush daub sizing
+        a.pixel_scale = depth * length(cam_vertical.xyz)
+                      / (max(1.0, float(idims.y)) * view_len);
+    }
     return a;
 }
 

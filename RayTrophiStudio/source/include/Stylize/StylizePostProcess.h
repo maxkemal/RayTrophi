@@ -27,6 +27,7 @@ struct StylizeAOVSample {
     int nishita_cloud_seed = 0;
     float depth = 0.0f;
     float edge = 0.0f;
+    float pixel_scale = 0.0f;   // world units per pixel at the hit point (0 = unknown)
     uint32_t material_id = 0xFFFFFFFFu;
     bool valid = false;
     bool hit = false;

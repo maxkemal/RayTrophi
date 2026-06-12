@@ -65,8 +65,32 @@ void drainTimelineMutationBackends(UIContext& ctx) {
 }
 
 // Helper to parse entity name and channel from track name
+enum class GraphTrackType {
+    Transform,
+    Light,
+    Camera,
+    Material
+};
+
+static GraphTrackType getGraphTrackType(UIContext& ctx, const std::string& selected_track) {
+    size_t dot_pos = selected_track.find('.');
+    std::string entity_name = (dot_pos == std::string::npos) ? selected_track : selected_track.substr(0, dot_pos);
+    std::string suffix = (dot_pos == std::string::npos) ? "" : selected_track.substr(dot_pos + 1);
+
+    auto track_it = ctx.scene.timeline.tracks.find(entity_name);
+    if (track_it != ctx.scene.timeline.tracks.end() && !track_it->second.keyframes.empty()) {
+        const auto& kf = track_it->second.keyframes[0];
+        if (kf.has_light) return GraphTrackType::Light;
+        if (kf.has_camera) return GraphTrackType::Camera;
+    }
+    if (suffix == "Material" || suffix.rfind("Material.", 0) == 0 || suffix.rfind("Mat.", 0) == 0) {
+        return GraphTrackType::Material;
+    }
+    return GraphTrackType::Transform;
+}
+
 // Returns { "Cube_1", ChannelType::Location } if input is "Cube_1.Location"
-static std::pair<std::string, ChannelType> parseTrackName(const std::string& track_name) {
+static std::pair<std::string, ChannelType> parseTrackName(const SceneData& scene, const std::string& track_name) {
     size_t dot_pos = track_name.find('.');
     if (dot_pos == std::string::npos) {
         return { track_name, ChannelType::None };
@@ -75,16 +99,58 @@ static std::pair<std::string, ChannelType> parseTrackName(const std::string& tra
     std::string entity = track_name.substr(0, dot_pos);
     std::string suffix = track_name.substr(dot_pos + 1);
     
+    bool is_light = false;
+    bool is_camera = false;
+    
+    auto track_it = scene.timeline.tracks.find(entity);
+    if (track_it != scene.timeline.tracks.end() && !track_it->second.keyframes.empty()) {
+        const auto& kf = track_it->second.keyframes[0];
+        if (kf.has_light) is_light = true;
+        else if (kf.has_camera) is_camera = true;
+    }
+    
+    if (!is_light && !is_camera) {
+        for (const auto& l : scene.lights) {
+            if (l && l->nodeName == entity) { is_light = true; break; }
+        }
+    }
+    if (!is_light && !is_camera) {
+        for (const auto& c : scene.cameras) {
+            if (c && c->nodeName == entity) { is_camera = true; break; }
+        }
+    }
+    
     ChannelType channel = ChannelType::None;
     if (suffix == "Location") channel = ChannelType::Location;
-    else if (suffix == "Location.X" || suffix == "X") channel = ChannelType::LocationX;
-    else if (suffix == "Location.Y" || suffix == "Y") channel = ChannelType::LocationY;
-    else if (suffix == "Location.Z" || suffix == "Z") channel = ChannelType::LocationZ;
+    else if (suffix == "Location.X" || suffix == "X") {
+        if (is_light) channel = ChannelType::LightPosX;
+        else if (is_camera) channel = ChannelType::CamPosX;
+        else channel = ChannelType::LocationX;
+    }
+    else if (suffix == "Location.Y" || suffix == "Y") {
+        if (is_light) channel = ChannelType::LightPosY;
+        else if (is_camera) channel = ChannelType::CamPosY;
+        else channel = ChannelType::LocationY;
+    }
+    else if (suffix == "Location.Z" || suffix == "Z") {
+        if (is_light) channel = ChannelType::LightPosZ;
+        else if (is_camera) channel = ChannelType::CamPosZ;
+        else channel = ChannelType::LocationZ;
+    }
     
     else if (suffix == "Rotation") channel = ChannelType::Rotation;
-    else if (suffix == "Rotation.X" || suffix == "X") channel = ChannelType::RotationX;
-    else if (suffix == "Rotation.Y") channel = ChannelType::RotationY;
-    else if (suffix == "Rotation.Z") channel = ChannelType::RotationZ;
+    else if (suffix == "Rotation.X" || suffix == "X") {
+        if (is_light) channel = ChannelType::LightDirX;
+        else channel = ChannelType::RotationX;
+    }
+    else if (suffix == "Rotation.Y") {
+        if (is_light) channel = ChannelType::LightDirY;
+        else channel = ChannelType::RotationY;
+    }
+    else if (suffix == "Rotation.Z") {
+        if (is_light) channel = ChannelType::LightDirZ;
+        else channel = ChannelType::RotationZ;
+    }
     
     else if (suffix == "Scale") channel = ChannelType::Scale;
     else if (suffix == "Scale.X") channel = ChannelType::ScaleX;
@@ -94,18 +160,118 @@ static std::pair<std::string, ChannelType> parseTrackName(const std::string& tra
     else if (suffix == "Material") channel = ChannelType::Material;
     
     // Light/Camera/World specifics
-    else if (suffix == "Position") channel = ChannelType::Location; 
-    else if (suffix == "Color") channel = ChannelType::Material; 
-    else if (suffix == "Intensity") channel = ChannelType::Scale; 
-    else if (suffix == "Direction") channel = ChannelType::Rotation; 
-    else if (suffix == "Target") channel = ChannelType::Rotation; 
-    else if (suffix == "FOV") channel = ChannelType::Scale; 
+    else if (suffix == "Position") {
+        channel = ChannelType::Location; 
+    }
+    else if (suffix == "Color") {
+        channel = ChannelType::Material; 
+    }
+    else if (suffix == "Intensity") {
+        channel = ChannelType::LightIntensity; 
+    }
+    else if (suffix == "Direction") {
+        channel = ChannelType::Rotation; 
+    }
+    else if (suffix == "Target") {
+        channel = ChannelType::Rotation; 
+    }
+    else if (suffix == "FOV") {
+        channel = ChannelType::CamFOV; 
+    }
+
+    // Light/Camera detailed suffixes
+    else if (suffix == "Position.X") {
+        if (is_camera) channel = ChannelType::CamPosX;
+        else channel = ChannelType::LightPosX;
+    }
+    else if (suffix == "Position.Y") {
+        if (is_camera) channel = ChannelType::CamPosY;
+        else channel = ChannelType::LightPosY;
+    }
+    else if (suffix == "Position.Z") {
+        if (is_camera) channel = ChannelType::CamPosZ;
+        else channel = ChannelType::LightPosZ;
+    }
+    else if (suffix == "Color.R") channel = ChannelType::LightColR;
+    else if (suffix == "Color.G") channel = ChannelType::LightColG;
+    else if (suffix == "Color.B") channel = ChannelType::LightColB;
+    else if (suffix == "Direction.X") channel = ChannelType::LightDirX;
+    else if (suffix == "Direction.Y") channel = ChannelType::LightDirY;
+    else if (suffix == "Direction.Z") channel = ChannelType::LightDirZ;
+    
+    else if (suffix == "Target.X") channel = ChannelType::CamTgtX;
+    else if (suffix == "Target.Y") channel = ChannelType::CamTgtY;
+    else if (suffix == "Target.Z") channel = ChannelType::CamTgtZ;
+    else if (suffix == "FocusDistance") channel = ChannelType::CamFocusDist;
+    else if (suffix == "LensRadius") channel = ChannelType::CamLensRad;
+
+    // Material detailed suffixes
+    else if (suffix == "Material.Albedo.R") channel = ChannelType::MatAlbedoR;
+    else if (suffix == "Material.Albedo.G") channel = ChannelType::MatAlbedoG;
+    else if (suffix == "Material.Albedo.B") channel = ChannelType::MatAlbedoB;
+    else if (suffix == "Material.Opacity") channel = ChannelType::MatOpacity;
+    else if (suffix == "Material.Roughness") channel = ChannelType::MatRoughness;
+    else if (suffix == "Material.Metallic") channel = ChannelType::MatMetallic;
+    else if (suffix == "Material.Clearcoat") channel = ChannelType::MatClearcoat;
+    else if (suffix == "Material.Transmission") channel = ChannelType::MatTransmission;
+    else if (suffix == "Material.IOR") channel = ChannelType::MatIOR;
+    else if (suffix == "Material.Emission.R") channel = ChannelType::MatEmissionR;
+    else if (suffix == "Material.Emission.G") channel = ChannelType::MatEmissionG;
+    else if (suffix == "Material.Emission.B") channel = ChannelType::MatEmissionB;
+    else if (suffix == "Material.NormalStrength") channel = ChannelType::MatNormalStrength;
+    else if (suffix == "Material.EmissionStrength") channel = ChannelType::MatEmissionStrength;
     
     if (channel == ChannelType::None) {
         return { track_name, ChannelType::None };
     }
     
     return { entity, channel };
+}
+
+static const char* channelSubtrackSuffix(int ch) {
+    static const char* suffixes[CURVE_CHANNEL_COUNT] = {
+        "Location.X", "Location.Y", "Location.Z",
+        "Rotation.X", "Rotation.Y", "Rotation.Z",
+        "Scale.X", "Scale.Y", "Scale.Z"
+    };
+    return (ch >= 0 && ch < CURVE_CHANNEL_COUNT) ? suffixes[ch] : "";
+}
+
+static const char* channelSubtrackSuffix(GraphTrackType type, int ch) {
+    if (type == GraphTrackType::Light) {
+        static const char* suffixes[CURVE_LIGHT_CHANNEL_COUNT] = {
+            "Position.X", "Position.Y", "Position.Z",
+            "Color.R", "Color.G", "Color.B",
+            "Intensity",
+            "Direction.X", "Direction.Y", "Direction.Z"
+        };
+        return (ch >= 0 && ch < CURVE_LIGHT_CHANNEL_COUNT) ? suffixes[ch] : "";
+    } else if (type == GraphTrackType::Camera) {
+        static const char* suffixes[CURVE_CAM_CHANNEL_COUNT] = {
+            "Position.X", "Position.Y", "Position.Z",
+            "Target.X", "Target.Y", "Target.Z",
+            "FOV",
+            "FocusDistance",
+            "LensRadius"
+        };
+        return (ch >= 0 && ch < CURVE_CAM_CHANNEL_COUNT) ? suffixes[ch] : "";
+    } else if (type == GraphTrackType::Material) {
+        static const char* suffixes[CURVE_MAT_CHANNEL_COUNT] = {
+            "Material.Albedo.R", "Material.Albedo.G", "Material.Albedo.B",
+            "Material.Opacity",
+            "Material.Roughness",
+            "Material.Metallic",
+            "Material.Clearcoat",
+            "Material.Transmission",
+            "Material.IOR",
+            "Material.Emission.R", "Material.Emission.G", "Material.Emission.B",
+            "Material.NormalStrength",
+            "Material.EmissionStrength"
+        };
+        return (ch >= 0 && ch < CURVE_MAT_CHANNEL_COUNT) ? suffixes[ch] : "";
+    } else {
+        return channelSubtrackSuffix(ch);
+    }
 }
 
 static SceneData::ImportedModelContext* findImportedModelContextByName(SceneData& scene, const std::string& name) {
@@ -324,17 +490,41 @@ void TimelineWidget::draw(UIContext& ctx) {
     // Split into track list (left) and canvas (right)
     ImGui::BeginChild("TimelineArea", ImVec2(0, canvas_height), false, ImGuiWindowFlags_NoScrollbar);
     
-    // Left panel: Track list
+    // Left panel: Track list (dope sheet) or channel list (graph editor)
     ImGui::BeginChild("TrackList", ImVec2(legend_width, canvas_height), true, ImGuiWindowFlags_NoScrollbar);
-    drawTrackList(ctx, legend_width, canvas_height);
+    if (editor_mode == TimelineEditorMode::GraphEditor)
+        drawGraphChannelList(ctx, legend_width);
+    else
+        drawTrackList(ctx, legend_width, canvas_height);
     ImGui::EndChild();
-    
+
     ImGui::SameLine();
-    
-    // Right panel: Timeline canvas
-    ImGui::BeginChild("TimelineCanvas", ImVec2(0, canvas_height), true, 
+
+    // Splitting resizer
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.4f, 0.4f, 0.4f, 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.3f, 0.3f));
+    ImGui::Button("##splitter", ImVec2(4.0f, canvas_height));
+    ImGui::PopStyleColor(3);
+    if (ImGui::IsItemActive()) {
+        legend_width += ImGui::GetIO().MouseDelta.x;
+        if (legend_width < 100.0f) legend_width = 100.0f;
+        if (legend_width > 600.0f) legend_width = 600.0f;
+    }
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+
+    ImGui::SameLine();
+
+    // Right panel: Timeline canvas (keyframe diamonds) or curve canvas
+    ImGui::BeginChild("TimelineCanvas", ImVec2(0, canvas_height), true,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
-    drawTimelineCanvas(ctx, region.x - legend_width - 20, canvas_height);
+    float avail_width = ImGui::GetContentRegionAvail().x;
+    if (editor_mode == TimelineEditorMode::GraphEditor)
+        drawGraphCanvas(ctx, avail_width, canvas_height);
+    else
+        drawTimelineCanvas(ctx, avail_width, canvas_height);
     ImGui::EndChild();
     
     ImGui::EndChild();
@@ -420,6 +610,7 @@ void TimelineWidget::draw(UIContext& ctx) {
     } else {
         // Pull worker-set frame so UI scrub indicator tracks the render.
         current_frame = ctx.render_settings.animation_current_frame;
+        UIWidgets::PopControlSurfaceStyle();
         return;
     }
 
@@ -548,7 +739,9 @@ void TimelineWidget::draw(UIContext& ctx) {
     
     if (total_keyframe_count > 0) {
         static int last_anim_update_frame = -1;
-        if (current_frame != last_anim_update_frame) {
+        // anim_reapply_requested_: graph-editor edits change curve shape at an
+        // unchanged current_frame, so force one re-apply pass.
+        if (current_frame != last_anim_update_frame || anim_reapply_requested_) {
             bool needs_bvh_update = false;
             bool needs_light_update = false;
             bool needs_camera_update = false;
@@ -1014,8 +1207,10 @@ void TimelineWidget::draw(UIContext& ctx) {
         }
         
             last_anim_update_frame = current_frame;
+            anim_reapply_requested_ = false;
         }
     } // end if (!ctx.scene.timeline.tracks.empty())
+    UIWidgets::PopControlSurfaceStyle();
 }
 
 void TimelineWidget::drawSelectedAnimGraphInspector(UIContext& ctx) {
@@ -1121,7 +1316,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     // --- TOOLBAR BUTTONS ---
     bool has_selection = !selected_track.empty();
     bool has_keyframe_selected = has_selection && selected_keyframe_frame >= 0;
-    
+
     // Keyframe buttons
     if (UIWidgets::IconActionButton("TimelineAddKey", UIWidgets::IconType::AddKey, "Key",
                                     false, ImVec4(0.42f, 0.86f, 1.0f, 1.0f), ImVec2(76.0f, 28.0f),
@@ -1630,7 +1825,6 @@ void TimelineWidget::drawTimelineCanvas(UIContext& ctx, float canvas_width, floa
     
     // Handle input
     handleZoomPan(canvas_pos, canvas_size);
-    handleScrubbing(canvas_pos, canvas_width);
     
     // Draw frame numbers at top
     drawFrameNumbers(draw_list, canvas_pos, canvas_width);
@@ -1820,6 +2014,9 @@ void TimelineWidget::drawTimelineCanvas(UIContext& ctx, float canvas_width, floa
         }
         is_dragging_keyframe = false;
     }
+    
+    // Process playhead scrubbing after checking keyframe drag/clicks to prevent overlap
+    handleScrubbing(canvas_pos, canvas_width);
     
     // Draw current frame indicator
     drawCurrentFrameIndicator(draw_list, canvas_pos, canvas_height);
@@ -2085,7 +2282,6 @@ void TimelineWidget::drawFrameNumbers(ImDrawList* draw_list, ImVec2 canvas_pos, 
                 IM_COL32(100, 100, 100, 255), 1.0f);
         }
     }
-    UIWidgets::PopControlSurfaceStyle();
 }
 
 // ============================================================================
@@ -2174,21 +2370,34 @@ void TimelineWidget::handleScrubbing(ImVec2 canvas_pos, float canvas_width) {
     ImGuiIO& io = ImGui::GetIO();
     
     // BUGFIX: Don't scrub if ImGui is capturing mouse (e.g., dropdown/popup open)
-    // This prevents clicking on quality preset dropdown from also moving the timeline
     if (ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
         return;
     }
     
-    // Left click in header area to scrub (allow drag continuation outside)
+    // Avoid scrubbing if we are actively dragging keyframes or curve handles
+    if (is_dragging_keyframe || graph_drag_mode != 0) {
+        return;
+    }
+    
     static bool is_scrubbing = false;
     
     if (ImGui::IsMouseClicked(0)) {
         ImVec2 mouse = io.MousePos;
-        // Only start scrubbing if the timeline window is hovered and click is inside the header area
+        float playhead_x = canvas_pos.x + frameToPixelX(current_frame, canvas_width);
+        
+        bool in_header = (mouse.y >= canvas_pos.y && mouse.y <= canvas_pos.y + header_height);
+        // Grab within 8 pixels of playhead (anywhere vertically)
+        bool near_playhead = (std::abs(mouse.x - playhead_x) <= 8.0f);
+        // Alt + click anywhere in canvas
+        bool alt_click = io.KeyAlt;
+        
         if (ImGui::IsWindowHovered() &&
             mouse.x >= canvas_pos.x && mouse.x <= canvas_pos.x + canvas_width &&
-            mouse.y >= canvas_pos.y && mouse.y <= canvas_pos.y + header_height) {
-            is_scrubbing = true;
+            mouse.y >= canvas_pos.y && mouse.y <= canvas_pos.y + ImGui::GetWindowHeight()) {
+            
+            if (in_header || near_playhead || alt_click) {
+                is_scrubbing = true;
+            }
         }
     }
     
@@ -2813,7 +3022,7 @@ void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
 void TimelineWidget::insertKeyframeForTrack(UIContext& ctx, const std::string& track_name, int frame) {
     // Parse the track name to get Entity and Channel
     // Uses the static parseTrackName helper we moved to the top
-    auto [entity_name, channel] = parseTrackName(track_name);
+    auto [entity_name, channel] = parseTrackName(ctx.scene, track_name);
 
     if (findImportedModelContextByName(ctx.scene, entity_name)) {
         Keyframe kf(frame);
@@ -3060,24 +3269,82 @@ void TimelineWidget::insertKeyframeForTrack(UIContext& ctx, const std::string& t
     }
 }
 
-// Helper to parse entity name and channel from track name
-// (Now using the static one at top of file, this definition can be removed or just skipped)
-// Since I defined it at the top, I should REMOVE this duplicate definition if it existed?
-// But it was NOT previously defined, it was just a helper I added in my head?
-// Wait, the "TargetContent" suggests it WAS there?
-// "std::pair<std::string, ChannelType> parseTrackName(const std::string& track_name) {"
-// Yes, it was there at line 1483. I must DELETE it to avoid redefinition error.
-// I will replace it with empty string/comment.
-
 // ============================================================================
-// HELPER MOVED TO TOP OF FILE
+// DELETE KEYFRAME HELPERS
 // ============================================================================
 
 // ============================================================================
 // DELETE KEYFRAME
 // ============================================================================
+static void clearKeyframeChannel(Keyframe& kf, ChannelType channel) {
+    if (kf.has_transform) {
+        if (channel == ChannelType::Location) { kf.transform.has_position = false; kf.transform.has_pos_x = kf.transform.has_pos_y = kf.transform.has_pos_z = false; }
+        else if (channel == ChannelType::Rotation) { kf.transform.has_rotation = false; kf.transform.has_rot_x = kf.transform.has_rot_y = kf.transform.has_rot_z = false; }
+        else if (channel == ChannelType::Scale) { kf.transform.has_scale = false; kf.transform.has_scl_x = kf.transform.has_scl_y = kf.transform.has_scl_z = false; }
+        else if (channel == ChannelType::LocationX) kf.transform.has_pos_x = false;
+        else if (channel == ChannelType::LocationY) kf.transform.has_pos_y = false;
+        else if (channel == ChannelType::LocationZ) kf.transform.has_pos_z = false;
+        else if (channel == ChannelType::RotationX) kf.transform.has_rot_x = false;
+        else if (channel == ChannelType::RotationY) kf.transform.has_rot_y = false;
+        else if (channel == ChannelType::RotationZ) kf.transform.has_rot_z = false;
+        else if (channel == ChannelType::ScaleX) kf.transform.has_scl_x = false;
+        else if (channel == ChannelType::ScaleY) kf.transform.has_scl_y = false;
+        else if (channel == ChannelType::ScaleZ) kf.transform.has_scl_z = false;
+        kf.transform.refreshCompoundFlags();
+    }
+    if (kf.has_light) {
+        if (channel == ChannelType::Location) { kf.light.has_position = false; kf.light.has_pos_x = kf.light.has_pos_y = kf.light.has_pos_z = false; }
+        else if (channel == ChannelType::Material) { kf.light.has_color = false; kf.light.has_col_r = kf.light.has_col_g = kf.light.has_col_b = false; }
+        else if (channel == ChannelType::LightIntensity) { kf.light.has_intensity = kf.light.has_int = false; }
+        else if (channel == ChannelType::Rotation) { kf.light.has_direction = false; kf.light.has_dir_x = kf.light.has_dir_y = kf.light.has_dir_z = false; }
+        else if (channel == ChannelType::LightPosX) kf.light.has_pos_x = false;
+        else if (channel == ChannelType::LightPosY) kf.light.has_pos_y = false;
+        else if (channel == ChannelType::LightPosZ) kf.light.has_pos_z = false;
+        else if (channel == ChannelType::LightColR) kf.light.has_col_r = false;
+        else if (channel == ChannelType::LightColG) kf.light.has_col_g = false;
+        else if (channel == ChannelType::LightColB) kf.light.has_col_b = false;
+        else if (channel == ChannelType::LightDirX) kf.light.has_dir_x = false;
+        else if (channel == ChannelType::LightDirY) kf.light.has_dir_y = false;
+        else if (channel == ChannelType::LightDirZ) kf.light.has_dir_z = false;
+        kf.light.refreshCompoundFlags();
+    }
+    if (kf.has_camera) {
+        if (channel == ChannelType::Location) { kf.camera.has_position = false; kf.camera.has_pos_x = kf.camera.has_pos_y = kf.camera.has_pos_z = false; }
+        else if (channel == ChannelType::Rotation) { kf.camera.has_target = false; kf.camera.has_tgt_x = kf.camera.has_tgt_y = kf.camera.has_tgt_z = false; }
+        else if (channel == ChannelType::CamFOV) { kf.camera.has_fov = kf.camera.has_fv = false; }
+        else if (channel == ChannelType::Material) { kf.camera.has_focus = kf.camera.has_aperture = kf.camera.has_foc_dist = kf.camera.has_lens_rad = false; }
+        else if (channel == ChannelType::CamPosX) kf.camera.has_pos_x = false;
+        else if (channel == ChannelType::CamPosY) kf.camera.has_pos_y = false;
+        else if (channel == ChannelType::CamPosZ) kf.camera.has_pos_z = false;
+        else if (channel == ChannelType::CamTgtX) kf.camera.has_tgt_x = false;
+        else if (channel == ChannelType::CamTgtY) kf.camera.has_tgt_y = false;
+        else if (channel == ChannelType::CamTgtZ) kf.camera.has_tgt_z = false;
+        else if (channel == ChannelType::CamFocusDist) kf.camera.has_foc_dist = false;
+        else if (channel == ChannelType::CamLensRad) kf.camera.has_lens_rad = false;
+        kf.camera.refreshCompoundFlags();
+    }
+    if (kf.has_material) {
+        if (channel == ChannelType::Material) { kf.material.clearAllChannels(); }
+        else if (channel == ChannelType::MatAlbedoR) kf.material.has_alb_r = false;
+        else if (channel == ChannelType::MatAlbedoG) kf.material.has_alb_g = false;
+        else if (channel == ChannelType::MatAlbedoB) kf.material.has_alb_b = false;
+        else if (channel == ChannelType::MatOpacity) kf.material.has_opac = false;
+        else if (channel == ChannelType::MatRoughness) kf.material.has_rough = false;
+        else if (channel == ChannelType::MatMetallic) kf.material.has_metal = false;
+        else if (channel == ChannelType::MatClearcoat) kf.material.has_clear = false;
+        else if (channel == ChannelType::MatTransmission) kf.material.has_transm = false;
+        else if (channel == ChannelType::MatIOR) kf.material.has_ior_val = false;
+        else if (channel == ChannelType::MatEmissionR) kf.material.has_emis_r = false;
+        else if (channel == ChannelType::MatEmissionG) kf.material.has_emis_g = false;
+        else if (channel == ChannelType::MatEmissionB) kf.material.has_emis_b = false;
+        else if (channel == ChannelType::MatNormalStrength) kf.material.has_norm_str = false;
+        else if (channel == ChannelType::MatEmissionStrength) kf.material.has_emis_str = false;
+        kf.material.refreshCompoundFlags();
+    }
+}
+
 void TimelineWidget::deleteKeyframe(UIContext& ctx, const std::string& track_name, int frame) {
-    auto [entity_name, channel] = parseTrackName(track_name);
+    auto [entity_name, channel] = parseTrackName(ctx.scene, track_name);
     
     auto it = ctx.scene.timeline.tracks.find(entity_name);
     if (it != ctx.scene.timeline.tracks.end()) {
@@ -3095,35 +3362,16 @@ void TimelineWidget::deleteKeyframe(UIContext& ctx, const std::string& track_nam
         // Otherwise, clear specific flags
         for (auto it_kf = keyframes.begin(); it_kf != keyframes.end(); ) {
             if (it_kf->frame == frame) {
-                // Clear separate flags based on channel
-                if (it_kf->has_transform) {
-                    if (channel == ChannelType::Location) it_kf->transform.has_position = false;
-                    else if (channel == ChannelType::Rotation) it_kf->transform.has_rotation = false;
-                    else if (channel == ChannelType::Scale) it_kf->transform.has_scale = false;
-                }
-                
-                if (channel == ChannelType::Material) it_kf->has_material = false; // Simplified for material
-                
-                // If light/camera, logic is similar (using mapped reusing types)
-                if (it_kf->has_light) {
-                   if (channel == ChannelType::Location) it_kf->light.has_position = false;
-                   else if (channel == ChannelType::Material) it_kf->light.has_color = false;
-                   else if (channel == ChannelType::Scale) it_kf->light.has_intensity = false;
-                   else if (channel == ChannelType::Rotation) it_kf->light.has_direction = false;
-                }
-                
-                if (it_kf->has_camera) {
-                   if (channel == ChannelType::Location) it_kf->camera.has_position = false;
-                   else if (channel == ChannelType::Rotation) it_kf->camera.has_target = false; // Mapped "Target"
-                   else if (channel == ChannelType::Scale) it_kf->camera.has_fov = false; // Mapped "FOV"
-                }
+                clearKeyframeChannel(*it_kf, channel);
+
+                // Update has_* flags if they no longer have any active keys
+                if (it_kf->has_transform && !it_kf->transform.has_position && !it_kf->transform.has_rotation && !it_kf->transform.has_scale) it_kf->has_transform = false;
+                if (it_kf->has_light && !it_kf->light.has_position && !it_kf->light.has_color && !it_kf->light.has_intensity && !it_kf->light.has_direction) it_kf->has_light = false;
+                if (it_kf->has_camera && !it_kf->camera.has_position && !it_kf->camera.has_target && !it_kf->camera.has_fov && !it_kf->camera.has_focus && !it_kf->camera.has_aperture) it_kf->has_camera = false;
+                if (it_kf->has_material && !it_kf->material.has_albedo && !it_kf->material.has_opacity && !it_kf->material.has_roughness && !it_kf->material.has_metallic && !it_kf->material.has_clearcoat && !it_kf->material.has_transmission && !it_kf->material.has_ior && !it_kf->material.has_emission && !it_kf->material.has_normal) it_kf->has_material = false;
 
                 // Check if keyframe is now completely empty
-                bool has_any_data = 
-                    (it_kf->has_transform && (it_kf->transform.has_position || it_kf->transform.has_rotation || it_kf->transform.has_scale)) ||
-                    it_kf->has_material || 
-                    (it_kf->has_light && (it_kf->light.has_position || it_kf->light.has_color || it_kf->light.has_intensity || it_kf->light.has_direction)) ||
-                    (it_kf->has_camera && (it_kf->camera.has_position || it_kf->camera.has_target || it_kf->camera.has_fov));
+                bool has_any_data = it_kf->has_transform || it_kf->has_material || it_kf->has_light || it_kf->has_camera || it_kf->has_world || it_kf->has_terrain;
                 
                 if (!has_any_data) {
                     // Remove mostly empty keyframe
@@ -3141,7 +3389,7 @@ void TimelineWidget::deleteKeyframe(UIContext& ctx, const std::string& track_nam
 // ============================================================================
 void TimelineWidget::moveKeyframe(UIContext& ctx, const std::string& track_name, int old_frame, int new_frame) {
     if (old_frame == new_frame) return;
-    auto [entity_name, channel] = parseTrackName(track_name);
+    auto [entity_name, channel] = parseTrackName(ctx.scene, track_name);
 
     auto it = ctx.scene.timeline.tracks.find(entity_name);
     if (it != ctx.scene.timeline.tracks.end()) {
@@ -3159,23 +3407,18 @@ void TimelineWidget::moveKeyframe(UIContext& ctx, const std::string& track_name,
         if (!src_kf) return;
         
         // If moving entire row (None), just change frame (and merge if exists?)
-        // Simple implementation: just change frame, simplistic collision handling
         if (channel == ChannelType::None) {
              // Check if target frame exists
              auto it_dst = std::find_if(keyframes.begin(), keyframes.end(), [new_frame](const Keyframe& k) { return k.frame == new_frame; });
              if (it_dst != keyframes.end()) {
-                 // Overwrite/Merge logic or block? For now, we'll just remove dest and move src
-                 keyframes.erase(it_dst);
-                 // Need to re-find src_kf because iterators invalidated? erase invalidates current iterator but src_kf is pointer
-                 // std::vector reallocation invalidates pointers! Danger!
-                 // Safe approach: Indexing or restart
+                  keyframes.erase(it_dst);
              }
              // RESTARTING SEARCH TO BE SAFE
              for (auto& kf : keyframes) { 
-                 if (kf.frame == old_frame) {
-                     kf.frame = new_frame;
-                     break;
-                 }
+                  if (kf.frame == old_frame) {
+                      kf.frame = new_frame;
+                      break;
+                  }
              }
         } 
         else {
@@ -3200,33 +3443,323 @@ void TimelineWidget::moveKeyframe(UIContext& ctx, const std::string& track_name,
              }
              
              // 2. Transfer data from src_kf to dst_kf based on channel
-             if (channel == ChannelType::Location && src_kf->has_transform) {
-                 dst_kf->transform.position = src_kf->transform.position;
-                 dst_kf->transform.has_position = src_kf->transform.has_position;
-                 src_kf->transform.has_position = false; // Clear from old
-                 dst_kf->has_transform = true;
+             if (src_kf->has_transform) {
+                 if (channel == ChannelType::Location) {
+                     dst_kf->transform.position = src_kf->transform.position;
+                     dst_kf->transform.has_position = src_kf->transform.has_position;
+                     dst_kf->transform.has_pos_x = src_kf->transform.has_pos_x;
+                     dst_kf->transform.has_pos_y = src_kf->transform.has_pos_y;
+                     dst_kf->transform.has_pos_z = src_kf->transform.has_pos_z;
+                     for (int c = CURVE_POS_X; c <= CURVE_POS_Z; ++c) dst_kf->transform.curve[c] = src_kf->transform.curve[c];
+                     dst_kf->has_transform = true;
+                 } else if (channel == ChannelType::Rotation) {
+                     dst_kf->transform.rotation = src_kf->transform.rotation;
+                     dst_kf->transform.has_rotation = src_kf->transform.has_rotation;
+                     dst_kf->transform.has_rot_x = src_kf->transform.has_rot_x;
+                     dst_kf->transform.has_rot_y = src_kf->transform.has_rot_y;
+                     dst_kf->transform.has_rot_z = src_kf->transform.has_rot_z;
+                     for (int c = CURVE_ROT_X; c <= CURVE_ROT_Z; ++c) dst_kf->transform.curve[c] = src_kf->transform.curve[c];
+                     dst_kf->has_transform = true;
+                 } else if (channel == ChannelType::Scale) {
+                     dst_kf->transform.scale = src_kf->transform.scale;
+                     dst_kf->transform.has_scale = src_kf->transform.has_scale;
+                     dst_kf->transform.has_scl_x = src_kf->transform.has_scl_x;
+                     dst_kf->transform.has_scl_y = src_kf->transform.has_scl_y;
+                     dst_kf->transform.has_scl_z = src_kf->transform.has_scl_z;
+                     for (int c = CURVE_SCL_X; c <= CURVE_SCL_Z; ++c) dst_kf->transform.curve[c] = src_kf->transform.curve[c];
+                     dst_kf->has_transform = true;
+                 } else if (channel == ChannelType::LocationX) {
+                     dst_kf->transform.position.x = src_kf->transform.position.x;
+                     dst_kf->transform.has_pos_x = src_kf->transform.has_pos_x;
+                     dst_kf->transform.curve[CURVE_POS_X] = src_kf->transform.curve[CURVE_POS_X];
+                     dst_kf->has_transform = true;
+                 } else if (channel == ChannelType::LocationY) {
+                     dst_kf->transform.position.y = src_kf->transform.position.y;
+                     dst_kf->transform.has_pos_y = src_kf->transform.has_pos_y;
+                     dst_kf->transform.curve[CURVE_POS_Y] = src_kf->transform.curve[CURVE_POS_Y];
+                     dst_kf->has_transform = true;
+                 } else if (channel == ChannelType::LocationZ) {
+                     dst_kf->transform.position.z = src_kf->transform.position.z;
+                     dst_kf->transform.has_pos_z = src_kf->transform.has_pos_z;
+                     dst_kf->transform.curve[CURVE_POS_Z] = src_kf->transform.curve[CURVE_POS_Z];
+                     dst_kf->has_transform = true;
+                 } else if (channel == ChannelType::RotationX) {
+                     dst_kf->transform.rotation.x = src_kf->transform.rotation.x;
+                     dst_kf->transform.has_rot_x = src_kf->transform.has_rot_x;
+                     dst_kf->transform.curve[CURVE_ROT_X] = src_kf->transform.curve[CURVE_ROT_X];
+                     dst_kf->has_transform = true;
+                 } else if (channel == ChannelType::RotationY) {
+                     dst_kf->transform.rotation.y = src_kf->transform.rotation.y;
+                     dst_kf->transform.has_rot_y = src_kf->transform.has_rot_y;
+                     dst_kf->transform.curve[CURVE_ROT_Y] = src_kf->transform.curve[CURVE_ROT_Y];
+                     dst_kf->has_transform = true;
+                 } else if (channel == ChannelType::RotationZ) {
+                     dst_kf->transform.rotation.z = src_kf->transform.rotation.z;
+                     dst_kf->transform.has_rot_z = src_kf->transform.has_rot_z;
+                     dst_kf->transform.curve[CURVE_ROT_Z] = src_kf->transform.curve[CURVE_ROT_Z];
+                     dst_kf->has_transform = true;
+                 } else if (channel == ChannelType::ScaleX) {
+                     dst_kf->transform.scale.x = src_kf->transform.scale.x;
+                     dst_kf->transform.has_scl_x = src_kf->transform.has_scl_x;
+                     dst_kf->transform.curve[CURVE_SCL_X] = src_kf->transform.curve[CURVE_SCL_X];
+                     dst_kf->has_transform = true;
+                 } else if (channel == ChannelType::ScaleY) {
+                     dst_kf->transform.scale.y = src_kf->transform.scale.y;
+                     dst_kf->transform.has_scl_y = src_kf->transform.has_scl_y;
+                     dst_kf->transform.curve[CURVE_SCL_Y] = src_kf->transform.curve[CURVE_SCL_Y];
+                     dst_kf->has_transform = true;
+                 } else if (channel == ChannelType::ScaleZ) {
+                     dst_kf->transform.scale.z = src_kf->transform.scale.z;
+                     dst_kf->transform.has_scl_z = src_kf->transform.has_scl_z;
+                     dst_kf->transform.curve[CURVE_SCL_Z] = src_kf->transform.curve[CURVE_SCL_Z];
+                     dst_kf->has_transform = true;
+                 }
              }
-             else if (channel == ChannelType::Rotation && src_kf->has_transform) {
-                 dst_kf->transform.rotation = src_kf->transform.rotation;
-                 dst_kf->transform.has_rotation = src_kf->transform.has_rotation;
-                 src_kf->transform.has_rotation = false;
-                 dst_kf->has_transform = true;
+
+             if (src_kf->has_light) {
+                 if (channel == ChannelType::Location) {
+                     dst_kf->light.position = src_kf->light.position;
+                     dst_kf->light.has_position = src_kf->light.has_position;
+                     dst_kf->light.has_pos_x = src_kf->light.has_pos_x;
+                     dst_kf->light.has_pos_y = src_kf->light.has_pos_y;
+                     dst_kf->light.has_pos_z = src_kf->light.has_pos_z;
+                     for (int c = CURVE_LIGHT_POS_X; c <= CURVE_LIGHT_POS_Z; ++c) dst_kf->light.curve[c] = src_kf->light.curve[c];
+                     dst_kf->has_light = true;
+                 } else if (channel == ChannelType::Material) {
+                     dst_kf->light.color = src_kf->light.color;
+                     dst_kf->light.has_color = src_kf->light.has_color;
+                     dst_kf->light.has_col_r = src_kf->light.has_col_r;
+                     dst_kf->light.has_col_g = src_kf->light.has_col_g;
+                     dst_kf->light.has_col_b = src_kf->light.has_col_b;
+                     for (int c = CURVE_LIGHT_COLOR_R; c <= CURVE_LIGHT_COLOR_B; ++c) dst_kf->light.curve[c] = src_kf->light.curve[c];
+                     dst_kf->has_light = true;
+                 } else if (channel == ChannelType::LightIntensity) {
+                     dst_kf->light.intensity = src_kf->light.intensity;
+                     dst_kf->light.has_intensity = src_kf->light.has_intensity;
+                     dst_kf->light.has_int = src_kf->light.has_int;
+                     dst_kf->light.curve[CURVE_LIGHT_INTENSITY] = src_kf->light.curve[CURVE_LIGHT_INTENSITY];
+                     dst_kf->has_light = true;
+                 } else if (channel == ChannelType::Rotation) {
+                     dst_kf->light.direction = src_kf->light.direction;
+                     dst_kf->light.has_direction = src_kf->light.has_direction;
+                     dst_kf->light.has_dir_x = src_kf->light.has_dir_x;
+                     dst_kf->light.has_dir_y = src_kf->light.has_dir_y;
+                     dst_kf->light.has_dir_z = src_kf->light.has_dir_z;
+                     for (int c = CURVE_LIGHT_DIR_X; c <= CURVE_LIGHT_DIR_Z; ++c) dst_kf->light.curve[c] = src_kf->light.curve[c];
+                     dst_kf->has_light = true;
+                 } else if (channel == ChannelType::LightPosX) {
+                     dst_kf->light.position.x = src_kf->light.position.x;
+                     dst_kf->light.has_pos_x = src_kf->light.has_pos_x;
+                     dst_kf->light.curve[CURVE_LIGHT_POS_X] = src_kf->light.curve[CURVE_LIGHT_POS_X];
+                     dst_kf->has_light = true;
+                 } else if (channel == ChannelType::LightPosY) {
+                     dst_kf->light.position.y = src_kf->light.position.y;
+                     dst_kf->light.has_pos_y = src_kf->light.has_pos_y;
+                     dst_kf->light.curve[CURVE_LIGHT_POS_Y] = src_kf->light.curve[CURVE_LIGHT_POS_Y];
+                     dst_kf->has_light = true;
+                 } else if (channel == ChannelType::LightPosZ) {
+                     dst_kf->light.position.z = src_kf->light.position.z;
+                     dst_kf->light.has_pos_z = src_kf->light.has_pos_z;
+                     dst_kf->light.curve[CURVE_LIGHT_POS_Z] = src_kf->light.curve[CURVE_LIGHT_POS_Z];
+                     dst_kf->has_light = true;
+                 } else if (channel == ChannelType::LightColR) {
+                     dst_kf->light.color.x = src_kf->light.color.x;
+                     dst_kf->light.has_col_r = src_kf->light.has_col_r;
+                     dst_kf->light.curve[CURVE_LIGHT_COLOR_R] = src_kf->light.curve[CURVE_LIGHT_COLOR_R];
+                     dst_kf->has_light = true;
+                 } else if (channel == ChannelType::LightColG) {
+                     dst_kf->light.color.y = src_kf->light.color.y;
+                     dst_kf->light.has_col_g = src_kf->light.has_col_g;
+                     dst_kf->light.curve[CURVE_LIGHT_COLOR_G] = src_kf->light.curve[CURVE_LIGHT_COLOR_G];
+                     dst_kf->has_light = true;
+                 } else if (channel == ChannelType::LightColB) {
+                     dst_kf->light.color.z = src_kf->light.color.z;
+                     dst_kf->light.has_col_b = src_kf->light.has_col_b;
+                     dst_kf->light.curve[CURVE_LIGHT_COLOR_B] = src_kf->light.curve[CURVE_LIGHT_COLOR_B];
+                     dst_kf->has_light = true;
+                 } else if (channel == ChannelType::LightDirX) {
+                     dst_kf->light.direction.x = src_kf->light.direction.x;
+                     dst_kf->light.has_dir_x = src_kf->light.has_dir_x;
+                     dst_kf->light.curve[CURVE_LIGHT_DIR_X] = src_kf->light.curve[CURVE_LIGHT_DIR_X];
+                     dst_kf->has_light = true;
+                 } else if (channel == ChannelType::LightDirY) {
+                     dst_kf->light.direction.y = src_kf->light.direction.y;
+                     dst_kf->light.has_dir_y = src_kf->light.has_dir_y;
+                     dst_kf->light.curve[CURVE_LIGHT_DIR_Y] = src_kf->light.curve[CURVE_LIGHT_DIR_Y];
+                     dst_kf->has_light = true;
+                 } else if (channel == ChannelType::LightDirZ) {
+                     dst_kf->light.direction.z = src_kf->light.direction.z;
+                     dst_kf->light.has_dir_z = src_kf->light.has_dir_z;
+                     dst_kf->light.curve[CURVE_LIGHT_DIR_Z] = src_kf->light.curve[CURVE_LIGHT_DIR_Z];
+                     dst_kf->has_light = true;
+                 }
              }
-             else if (channel == ChannelType::Scale && src_kf->has_transform) {
-                 dst_kf->transform.scale = src_kf->transform.scale;
-                 dst_kf->transform.has_scale = src_kf->transform.has_scale;
-                 src_kf->transform.has_scale = false;
-                 dst_kf->has_transform = true;
+
+             if (src_kf->has_camera) {
+                 if (channel == ChannelType::Location) {
+                     dst_kf->camera.position = src_kf->camera.position;
+                     dst_kf->camera.has_position = src_kf->camera.has_position;
+                     dst_kf->camera.has_pos_x = src_kf->camera.has_pos_x;
+                     dst_kf->camera.has_pos_y = src_kf->camera.has_pos_y;
+                     dst_kf->camera.has_pos_z = src_kf->camera.has_pos_z;
+                     for (int c = CURVE_CAM_POS_X; c <= CURVE_CAM_POS_Z; ++c) dst_kf->camera.curve[c] = src_kf->camera.curve[c];
+                     dst_kf->has_camera = true;
+                 } else if (channel == ChannelType::Rotation) {
+                     dst_kf->camera.target = src_kf->camera.target;
+                     dst_kf->camera.has_target = src_kf->camera.has_target;
+                     dst_kf->camera.has_tgt_x = src_kf->camera.has_tgt_x;
+                     dst_kf->camera.has_tgt_y = src_kf->camera.has_tgt_y;
+                     dst_kf->camera.has_tgt_z = src_kf->camera.has_tgt_z;
+                     for (int c = CURVE_CAM_TGT_X; c <= CURVE_CAM_TGT_Z; ++c) dst_kf->camera.curve[c] = src_kf->camera.curve[c];
+                     dst_kf->has_camera = true;
+                 } else if (channel == ChannelType::CamFOV) {
+                     dst_kf->camera.fov = src_kf->camera.fov;
+                     dst_kf->camera.has_fov = src_kf->camera.has_fov;
+                     dst_kf->camera.has_fv = src_kf->camera.has_fv;
+                     dst_kf->camera.curve[CURVE_CAM_FOV] = src_kf->camera.curve[CURVE_CAM_FOV];
+                     dst_kf->has_camera = true;
+                 } else if (channel == ChannelType::Material) {
+                     dst_kf->camera.focus_distance = src_kf->camera.focus_distance;
+                     dst_kf->camera.lens_radius = src_kf->camera.lens_radius;
+                     dst_kf->camera.has_focus = src_kf->camera.has_focus;
+                     dst_kf->camera.has_aperture = src_kf->camera.has_aperture;
+                     dst_kf->camera.has_foc_dist = src_kf->camera.has_foc_dist;
+                     dst_kf->camera.has_lens_rad = src_kf->camera.has_lens_rad;
+                     dst_kf->camera.curve[CURVE_CAM_FOCUS_DIST] = src_kf->camera.curve[CURVE_CAM_FOCUS_DIST];
+                     dst_kf->camera.curve[CURVE_CAM_LENS_RAD] = src_kf->camera.curve[CURVE_CAM_LENS_RAD];
+                     dst_kf->has_camera = true;
+                 } else if (channel == ChannelType::CamPosX) {
+                     dst_kf->camera.position.x = src_kf->camera.position.x;
+                     dst_kf->camera.has_pos_x = src_kf->camera.has_pos_x;
+                     dst_kf->camera.curve[CURVE_CAM_POS_X] = src_kf->camera.curve[CURVE_CAM_POS_X];
+                     dst_kf->has_camera = true;
+                 } else if (channel == ChannelType::CamPosY) {
+                     dst_kf->camera.position.y = src_kf->camera.position.y;
+                     dst_kf->camera.has_pos_y = src_kf->camera.has_pos_y;
+                     dst_kf->camera.curve[CURVE_CAM_POS_Y] = src_kf->camera.curve[CURVE_CAM_POS_Y];
+                     dst_kf->has_camera = true;
+                 } else if (channel == ChannelType::CamPosZ) {
+                     dst_kf->camera.position.z = src_kf->camera.position.z;
+                     dst_kf->camera.has_pos_z = src_kf->camera.has_pos_z;
+                     dst_kf->camera.curve[CURVE_CAM_POS_Z] = src_kf->camera.curve[CURVE_CAM_POS_Z];
+                     dst_kf->has_camera = true;
+                 } else if (channel == ChannelType::CamTgtX) {
+                     dst_kf->camera.target.x = src_kf->camera.target.x;
+                     dst_kf->camera.has_tgt_x = src_kf->camera.has_tgt_x;
+                     dst_kf->camera.curve[CURVE_CAM_TGT_X] = src_kf->camera.curve[CURVE_CAM_TGT_X];
+                     dst_kf->has_camera = true;
+                 } else if (channel == ChannelType::CamTgtY) {
+                     dst_kf->camera.target.y = src_kf->camera.target.y;
+                     dst_kf->camera.has_tgt_y = src_kf->camera.has_tgt_y;
+                     dst_kf->camera.curve[CURVE_CAM_TGT_Y] = src_kf->camera.curve[CURVE_CAM_TGT_Y];
+                     dst_kf->has_camera = true;
+                 } else if (channel == ChannelType::CamTgtZ) {
+                     dst_kf->camera.target.z = src_kf->camera.target.z;
+                     dst_kf->camera.has_tgt_z = src_kf->camera.has_tgt_z;
+                     dst_kf->camera.curve[CURVE_CAM_TGT_Z] = src_kf->camera.curve[CURVE_CAM_TGT_Z];
+                     dst_kf->has_camera = true;
+                 } else if (channel == ChannelType::CamFocusDist) {
+                     dst_kf->camera.focus_distance = src_kf->camera.focus_distance;
+                     dst_kf->camera.has_foc_dist = src_kf->camera.has_foc_dist;
+                     dst_kf->camera.curve[CURVE_CAM_FOCUS_DIST] = src_kf->camera.curve[CURVE_CAM_FOCUS_DIST];
+                     dst_kf->has_camera = true;
+                 } else if (channel == ChannelType::CamLensRad) {
+                     dst_kf->camera.lens_radius = src_kf->camera.lens_radius;
+                     dst_kf->camera.has_lens_rad = src_kf->camera.has_lens_rad;
+                     dst_kf->camera.curve[CURVE_CAM_LENS_RAD] = src_kf->camera.curve[CURVE_CAM_LENS_RAD];
+                     dst_kf->has_camera = true;
+                 }
              }
-             // ... (Add similar for Light/Camera channels if needed)
+
+             if (src_kf->has_material) {
+                 if (channel == ChannelType::Material) {
+                     dst_kf->material = src_kf->material;
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatAlbedoR) {
+                     dst_kf->material.albedo.x = src_kf->material.albedo.x;
+                     dst_kf->material.has_alb_r = src_kf->material.has_alb_r;
+                     dst_kf->material.curve[CURVE_MAT_ALBEDO_R] = src_kf->material.curve[CURVE_MAT_ALBEDO_R];
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatAlbedoG) {
+                     dst_kf->material.albedo.y = src_kf->material.albedo.y;
+                     dst_kf->material.has_alb_g = src_kf->material.has_alb_g;
+                     dst_kf->material.curve[CURVE_MAT_ALBEDO_G] = src_kf->material.curve[CURVE_MAT_ALBEDO_G];
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatAlbedoB) {
+                     dst_kf->material.albedo.z = src_kf->material.albedo.z;
+                     dst_kf->material.has_alb_b = src_kf->material.has_alb_b;
+                     dst_kf->material.curve[CURVE_MAT_ALBEDO_B] = src_kf->material.curve[CURVE_MAT_ALBEDO_B];
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatOpacity) {
+                     dst_kf->material.opacity = src_kf->material.opacity;
+                     dst_kf->material.has_opac = src_kf->material.has_opac;
+                     dst_kf->material.curve[CURVE_MAT_OPACITY] = src_kf->material.curve[CURVE_MAT_OPACITY];
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatRoughness) {
+                     dst_kf->material.roughness = src_kf->material.roughness;
+                     dst_kf->material.has_rough = src_kf->material.has_rough;
+                     dst_kf->material.curve[CURVE_MAT_ROUGHNESS] = src_kf->material.curve[CURVE_MAT_ROUGHNESS];
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatMetallic) {
+                     dst_kf->material.metallic = src_kf->material.metallic;
+                     dst_kf->material.has_metal = src_kf->material.has_metal;
+                     dst_kf->material.curve[CURVE_MAT_METALLIC] = src_kf->material.curve[CURVE_MAT_METALLIC];
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatClearcoat) {
+                     dst_kf->material.clearcoat = src_kf->material.clearcoat;
+                     dst_kf->material.has_clear = src_kf->material.has_clear;
+                     dst_kf->material.curve[CURVE_MAT_CLEARCOAT] = src_kf->material.curve[CURVE_MAT_CLEARCOAT];
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatTransmission) {
+                     dst_kf->material.transmission = src_kf->material.transmission;
+                     dst_kf->material.has_transm = src_kf->material.has_transm;
+                     dst_kf->material.curve[CURVE_MAT_TRANSMISSION] = src_kf->material.curve[CURVE_MAT_TRANSMISSION];
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatIOR) {
+                     dst_kf->material.ior = src_kf->material.ior;
+                     dst_kf->material.has_ior_val = src_kf->material.has_ior_val;
+                     dst_kf->material.curve[CURVE_MAT_IOR] = src_kf->material.curve[CURVE_MAT_IOR];
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatEmissionR) {
+                     dst_kf->material.emission.x = src_kf->material.emission.x;
+                     dst_kf->material.has_emis_r = src_kf->material.has_emis_r;
+                     dst_kf->material.curve[CURVE_MAT_EMISSION_R] = src_kf->material.curve[CURVE_MAT_EMISSION_R];
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatEmissionG) {
+                     dst_kf->material.emission.y = src_kf->material.emission.y;
+                     dst_kf->material.has_emis_g = src_kf->material.has_emis_g;
+                     dst_kf->material.curve[CURVE_MAT_EMISSION_G] = src_kf->material.curve[CURVE_MAT_EMISSION_G];
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatEmissionB) {
+                     dst_kf->material.emission.z = src_kf->material.emission.z;
+                     dst_kf->material.has_emis_b = src_kf->material.has_emis_b;
+                     dst_kf->material.curve[CURVE_MAT_EMISSION_B] = src_kf->material.curve[CURVE_MAT_EMISSION_B];
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatNormalStrength) {
+                     dst_kf->material.normal_strength = src_kf->material.normal_strength;
+                     dst_kf->material.has_norm_str = src_kf->material.has_norm_str;
+                     dst_kf->material.curve[CURVE_MAT_NORMAL_STRENGTH] = src_kf->material.curve[CURVE_MAT_NORMAL_STRENGTH];
+                     dst_kf->has_material = true;
+                 } else if (channel == ChannelType::MatEmissionStrength) {
+                     dst_kf->material.emission_strength = src_kf->material.emission_strength;
+                     dst_kf->material.has_emis_str = src_kf->material.has_emis_str;
+                     dst_kf->material.curve[CURVE_MAT_EMISSION_STRENGTH] = src_kf->material.curve[CURVE_MAT_EMISSION_STRENGTH];
+                     dst_kf->has_material = true;
+                 }
+             }
+
+             // 3. Clear channel on source
+             clearKeyframeChannel(*src_kf, channel);
              
-             // 3. Clean up empty source keyframe
+             // 4. Clean up empty source keyframe
              bool src_empty = 
                 !(src_kf->has_transform && (src_kf->transform.has_position || src_kf->transform.has_rotation || src_kf->transform.has_scale)) &&
-                !src_kf->has_material && !src_kf->has_light && !src_kf->has_camera && !src_kf->has_world && !src_kf->has_terrain;
+                !(src_kf->has_light && (src_kf->light.has_position || src_kf->light.has_color || src_kf->light.has_intensity || src_kf->light.has_direction)) &&
+                !(src_kf->has_camera && (src_kf->camera.has_position || src_kf->camera.has_target || src_kf->camera.has_fov || src_kf->camera.has_focus || src_kf->camera.has_aperture)) &&
+                !(src_kf->has_material && (src_kf->material.has_albedo || src_kf->material.has_opacity || src_kf->material.has_roughness || src_kf->material.has_metallic || src_kf->material.has_clearcoat || src_kf->material.has_transmission || src_kf->material.has_ior || src_kf->material.has_emission || src_kf->material.has_normal)) &&
+                !src_kf->has_world && !src_kf->has_terrain;
                 
              if (src_empty) {
-                 // Remove src_kf
                   keyframes.erase(
                     std::remove_if(keyframes.begin(), keyframes.end(),
                         [old_frame](const Keyframe& kf) { return kf.frame == old_frame; }),
@@ -3244,7 +3777,7 @@ void TimelineWidget::moveKeyframe(UIContext& ctx, const std::string& track_name,
 // DUPLICATE KEYFRAME
 // ============================================================================
 void TimelineWidget::duplicateKeyframe(UIContext& ctx, const std::string& track_name, int src_frame, int dst_frame) {
-    auto [entity_name, channel] = parseTrackName(track_name);
+    auto [entity_name, channel] = parseTrackName(ctx.scene, track_name);
     
     auto it = ctx.scene.timeline.tracks.find(entity_name);
     if (it != ctx.scene.timeline.tracks.end()) {
@@ -3403,4 +3936,908 @@ void TimelineWidget::insertKeyframeType(UIContext& ctx, const std::string& track
     }
     
     ctx.scene.timeline.insertKeyframe(entity_name, kf);
+}
+
+// ============================================================================
+// GRAPH EDITOR — Value-to-pixel and pixel-to-value helpers
+// ============================================================================
+float TimelineWidget::valueToPixelY(float value, float canvas_height) const {
+    // graph_value_center sits at the vertical centre of the canvas.
+    // graph_pixels_per_unit controls vertical zoom.
+    // Result is in canvas-local coordinates (0 at top, canvas_height at bottom).
+    return canvas_height * 0.5f - (value - graph_value_center) * graph_pixels_per_unit;
+}
+
+float TimelineWidget::pixelYToValue(float y, float canvas_height) const {
+    return graph_value_center - (y - canvas_height * 0.5f) / graph_pixels_per_unit;
+}
+
+// ============================================================================
+// GRAPH EDITOR — Auto-fit the vertical view to the data range
+// ============================================================================
+void TimelineWidget::fitGraphView(UIContext& ctx, float canvas_height) {
+    if (selected_track.empty()) return;
+    auto [entity_name, chan] = parseTrackName(ctx.scene, selected_track);
+    auto it = ctx.scene.timeline.tracks.find(entity_name);
+    if (it == ctx.scene.timeline.tracks.end()) return;
+
+    GraphTrackType track_type = getGraphTrackType(ctx, selected_track);
+    float vmin = 1e18f, vmax = -1e18f;
+    int count = 0;
+    for (const auto& kf : it->second.keyframes) {
+        if (track_type == GraphTrackType::Light) {
+            if (!kf.has_light) continue;
+            for (int ch = 0; ch < CURVE_LIGHT_CHANNEL_COUNT; ++ch) {
+                if (!graph_channel_visible[ch]) continue;
+                if (!kf.light.channelKeyed(ch)) continue;
+                float v = kf.light.channelValue(ch);
+                vmin = std::min(vmin, v);
+                vmax = std::max(vmax, v);
+                ++count;
+            }
+        } else if (track_type == GraphTrackType::Camera) {
+            if (!kf.has_camera) continue;
+            for (int ch = 0; ch < CURVE_CAM_CHANNEL_COUNT; ++ch) {
+                if (!graph_channel_visible[ch]) continue;
+                if (!kf.camera.channelKeyed(ch)) continue;
+                float v = kf.camera.channelValue(ch);
+                vmin = std::min(vmin, v);
+                vmax = std::max(vmax, v);
+                ++count;
+            }
+        } else if (track_type == GraphTrackType::Material) {
+            if (!kf.has_material) continue;
+            for (int ch = 0; ch < CURVE_MAT_CHANNEL_COUNT; ++ch) {
+                if (!graph_channel_visible[ch]) continue;
+                if (!kf.material.channelKeyed(ch)) continue;
+                float v = kf.material.channelValue(ch);
+                vmin = std::min(vmin, v);
+                vmax = std::max(vmax, v);
+                ++count;
+            }
+        } else {
+            if (!kf.has_transform) continue;
+            for (int ch = 0; ch < CURVE_CHANNEL_COUNT; ++ch) {
+                if (!graph_channel_visible[ch]) continue;
+                if (!kf.transform.channelKeyed(ch)) continue;
+                float v = kf.transform.channelValue(ch);
+                vmin = std::min(vmin, v);
+                vmax = std::max(vmax, v);
+                ++count;
+            }
+        }
+    }
+    if (count == 0) { graph_value_center = 0.0f; graph_pixels_per_unit = 40.0f; return; }
+
+    float range = vmax - vmin;
+    if (range < 0.01f) range = 2.0f; // avoid degenerate zoom
+    graph_value_center = (vmin + vmax) * 0.5f;
+    // Leave 15% padding on top and bottom
+    graph_pixels_per_unit = (canvas_height * 0.7f) / range;
+    graph_pixels_per_unit = std::clamp(graph_pixels_per_unit, 0.5f, 2000.0f);
+}
+
+// ============================================================================
+// GRAPH EDITOR — Left panel: per-channel toggles
+// ============================================================================
+void TimelineWidget::drawGraphChannelList(UIContext& ctx, float list_width) {
+    // Track name label
+    if (!selected_track.empty()) {
+        ImGui::TextColored(ImVec4(0.42f, 0.86f, 0.92f, 1.0f), "%s", selected_track.c_str());
+    } else {
+        ImGui::TextDisabled("(select a track)");
+    }
+    ImGui::Separator();
+
+    GraphTrackType track_type = getGraphTrackType(ctx, selected_track);
+
+    struct GraphChannelDef {
+        int channel_index;
+        const char* name;
+        ImU32 color;
+    };
+
+    struct GraphGroupDef {
+        const char* name;
+        std::vector<GraphChannelDef> channels;
+    };
+
+    std::vector<GraphGroupDef> groups;
+    if (track_type == GraphTrackType::Light) {
+        groups = {
+            { "Position", {
+                { CURVE_LIGHT_POS_X, "Pos X", IM_COL32(255, 60, 60, 255) },
+                { CURVE_LIGHT_POS_Y, "Pos Y", IM_COL32(80, 210, 80, 255) },
+                { CURVE_LIGHT_POS_Z, "Pos Z", IM_COL32(60, 120, 255, 255) }
+            }},
+            { "Color", {
+                { CURVE_LIGHT_COLOR_R, "Color R", IM_COL32(255, 60, 60, 255) },
+                { CURVE_LIGHT_COLOR_G, "Color G", IM_COL32(80, 210, 80, 255) },
+                { CURVE_LIGHT_COLOR_B, "Color B", IM_COL32(60, 120, 255, 255) }
+            }},
+            { "Intensity", {
+                { CURVE_LIGHT_INTENSITY, "Intensity", IM_COL32(255, 180, 60, 255) }
+            }},
+            { "Direction", {
+                { CURVE_LIGHT_DIR_X, "Dir X", IM_COL32(255, 60, 60, 255) },
+                { CURVE_LIGHT_DIR_Y, "Dir Y", IM_COL32(80, 210, 80, 255) },
+                { CURVE_LIGHT_DIR_Z, "Dir Z", IM_COL32(60, 120, 255, 255) }
+            }}
+        };
+    } else if (track_type == GraphTrackType::Camera) {
+        groups = {
+            { "Position", {
+                { CURVE_CAM_POS_X, "Pos X", IM_COL32(255, 60, 60, 255) },
+                { CURVE_CAM_POS_Y, "Pos Y", IM_COL32(80, 210, 80, 255) },
+                { CURVE_CAM_POS_Z, "Pos Z", IM_COL32(60, 120, 255, 255) }
+            }},
+            { "Target", {
+                { CURVE_CAM_TGT_X, "Target X", IM_COL32(255, 60, 60, 255) },
+                { CURVE_CAM_TGT_Y, "Target Y", IM_COL32(80, 210, 80, 255) },
+                { CURVE_CAM_TGT_Z, "Target Z", IM_COL32(60, 120, 255, 255) }
+            }},
+            { "Settings", {
+                { CURVE_CAM_FOV, "FOV", IM_COL32(60, 120, 255, 255) },
+                { CURVE_CAM_FOCUS_DIST, "Focus Dist", IM_COL32(200, 150, 255, 255) },
+                { CURVE_CAM_LENS_RAD, "Lens Rad", IM_COL32(255, 120, 200, 255) }
+            }}
+        };
+    } else if (track_type == GraphTrackType::Material) {
+        groups = {
+            { "Albedo & Opacity", {
+                { CURVE_MAT_ALBEDO_R, "Albedo R", IM_COL32(255, 60, 60, 255) },
+                { CURVE_MAT_ALBEDO_G, "Albedo G", IM_COL32(80, 210, 80, 255) },
+                { CURVE_MAT_ALBEDO_B, "Albedo B", IM_COL32(60, 120, 255, 255) },
+                { CURVE_MAT_OPACITY, "Opacity", IM_COL32(200, 200, 200, 255) }
+            }},
+            { "PBR Core", {
+                { CURVE_MAT_ROUGHNESS, "Roughness", IM_COL32(180, 255, 60, 255) },
+                { CURVE_MAT_METALLIC, "Metallic", IM_COL32(160, 160, 160, 255) },
+                { CURVE_MAT_CLEARCOAT, "Clearcoat", IM_COL32(60, 220, 255, 255) },
+                { CURVE_MAT_TRANSMISSION, "Transmission", IM_COL32(60, 120, 255, 255) },
+                { CURVE_MAT_IOR, "IOR", IM_COL32(100, 200, 200, 255) }
+            }},
+            { "Emission", {
+                { CURVE_MAT_EMISSION_R, "Emission R", IM_COL32(255, 100, 100, 255) },
+                { CURVE_MAT_EMISSION_G, "Emission G", IM_COL32(100, 255, 100, 255) },
+                { CURVE_MAT_EMISSION_B, "Emission B", IM_COL32(100, 100, 255, 255) },
+                { CURVE_MAT_EMISSION_STRENGTH, "Emission Strength", IM_COL32(255, 220, 60, 255) }
+            }},
+            { "Other Settings", {
+                { CURVE_MAT_NORMAL_STRENGTH, "Normal Str", IM_COL32(255, 150, 100, 255) }
+            }}
+        };
+    } else {
+        groups = {
+            { "Location", {
+                { CURVE_POS_X, "X", IM_COL32(255, 60, 60, 255) },
+                { CURVE_POS_Y, "Y", IM_COL32(80, 210, 80, 255) },
+                { CURVE_POS_Z, "Z", IM_COL32(60, 120, 255, 255) }
+            }},
+            { "Rotation", {
+                { CURVE_ROT_X, "X", IM_COL32(255, 100, 100, 255) },
+                { CURVE_ROT_Y, "Y", IM_COL32(100, 230, 100, 255) },
+                { CURVE_ROT_Z, "Z", IM_COL32(100, 160, 255, 255) }
+            }},
+            { "Scale", {
+                { CURVE_SCL_X, "X", IM_COL32(255, 180, 60, 255) },
+                { CURVE_SCL_Y, "Y", IM_COL32(180, 255, 60, 255) },
+                { CURVE_SCL_Z, "Z", IM_COL32(60, 220, 255, 255) }
+            }}
+        };
+    }
+
+    for (size_t g = 0; g < groups.size(); ++g) {
+        ImGui::PushID(g);
+        auto& group = groups[g];
+        
+        bool group_vis = false;
+        for (auto& ch_def : group.channels) {
+            if (graph_channel_visible[ch_def.channel_index]) {
+                group_vis = true;
+                break;
+            }
+        }
+        
+        std::string group_key = std::string(group.name) + "##" + std::to_string((int)track_type);
+        if (graph_groups_expanded.find(group_key) == graph_groups_expanded.end()) {
+            graph_groups_expanded[group_key] = true;
+        }
+        bool& expanded = graph_groups_expanded[group_key];
+
+        // 1. Draw bulk checkbox on the left first (avoiding overlap flags)
+        bool bulk_toggle = group_vis;
+        if (ImGui::Checkbox("##bulk", &bulk_toggle)) {
+            for (auto& ch_def : group.channels) {
+                graph_channel_visible[ch_def.channel_index] = bulk_toggle;
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Toggle visibility of all channels in this group");
+        }
+        
+        ImGui::SameLine();
+
+        // 2. Draw collapsible node header
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_FramePadding;
+        if (expanded) flags |= ImGuiTreeNodeFlags_DefaultOpen;
+        
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, 2.0f));
+        bool node_open = ImGui::TreeNodeEx(group.name, flags);
+        ImGui::PopStyleVar();
+        
+        expanded = node_open;
+        if (node_open) {
+            for (auto& ch_def : group.channels) {
+                int ch = ch_def.channel_index;
+                ImGui::PushID(ch);
+                ImGui::Indent(16.0f);
+                ImVec4 col = ImGui::ColorConvertU32ToFloat4(ch_def.color);
+                ImGui::PushStyleColor(ImGuiCol_Text, col);
+                bool vis = graph_channel_visible[ch];
+                if (ImGui::Checkbox(ch_def.name, &vis)) {
+                    graph_channel_visible[ch] = vis;
+                }
+                ImGui::PopStyleColor();
+                ImGui::Unindent(16.0f);
+                ImGui::PopID();
+            }
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+
+    ImGui::Separator();
+
+    // Fit button
+    if (ImGui::Button("Fit (F)", ImVec2(-1, 0))) {
+        graph_fit_pending = true;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Auto-fit curves to view");
+
+    // Interpolation mode for selected key
+    if (graph_sel_channel >= 0 && graph_sel_frame >= 0 && !selected_track.empty()) {
+        auto [ent, _ch] = parseTrackName(ctx.scene, selected_track);
+        auto tit = ctx.scene.timeline.tracks.find(ent);
+        if (tit != ctx.scene.timeline.tracks.end()) {
+            Keyframe* kf = tit->second.getKeyframeAt(graph_sel_frame);
+            if (kf) {
+                ChannelKeyMeta* m = nullptr;
+                const char* chName = "?";
+                if (track_type == GraphTrackType::Light && kf->has_light && graph_sel_channel < CURVE_LIGHT_CHANNEL_COUNT) {
+                    m = &kf->light.curve[graph_sel_channel];
+                    chName = LightKeyframe::channelName(graph_sel_channel);
+                } else if (track_type == GraphTrackType::Camera && kf->has_camera && graph_sel_channel < CURVE_CAM_CHANNEL_COUNT) {
+                    m = &kf->camera.curve[graph_sel_channel];
+                    chName = CameraKeyframe::channelName(graph_sel_channel);
+                } else if (track_type == GraphTrackType::Material && kf->has_material && graph_sel_channel < CURVE_MAT_CHANNEL_COUNT) {
+                    m = &kf->material.curve[graph_sel_channel];
+                    chName = MaterialKeyframe::channelName(graph_sel_channel);
+                } else if (track_type == GraphTrackType::Transform && kf->has_transform && graph_sel_channel < CURVE_CHANNEL_COUNT) {
+                    m = &kf->transform.curve[graph_sel_channel];
+                    chName = TransformKeyframe::channelName(graph_sel_channel);
+                }
+
+                if (m) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Key: %s", chName);
+                    ImGui::TextDisabled("Key Interp:");
+                    int interp_idx = static_cast<int>(m->interp);
+                    const char* interpNames[] = { "Constant", "Linear", "Bezier" };
+                    ImGui::PushItemWidth(-1);
+                    if (ImGui::Combo("##KeyInterp", &interp_idx, interpNames, 3)) {
+                        m->interp = static_cast<KeyInterp>(interp_idx);
+                        m->auto_tangent = (m->interp == KeyInterp::Bezier); // auto on first switch
+                        tit->second.refreshAutoTangents();
+                        anim_reapply_requested_ = true;
+                    }
+                    ImGui::PopItemWidth();
+
+                    if (m->interp == KeyInterp::Bezier) {
+                        if (ImGui::Checkbox("Auto tangent", &m->auto_tangent)) {
+                            if (m->auto_tangent) {
+                                tit->second.refreshAutoTangents();
+                                anim_reapply_requested_ = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// GRAPH EDITOR — Right panel: the curve canvas
+// ============================================================================
+void TimelineWidget::drawGraphCanvas(UIContext& ctx, float canvas_width, float canvas_height) {
+    if (canvas_width <= 0 || canvas_height <= 0) return;
+
+    // --- Auto-fit on first open / when requested ---
+    if (graph_fit_pending) {
+        fitGraphView(ctx, canvas_height);
+        graph_fit_pending = false;
+    }
+
+    // 'F' key = auto-fit
+    if (ImGui::IsWindowFocused() && ImGui::IsKeyPressed(ImGuiKey_F) && !ImGui::GetIO().WantTextInput) {
+        fitGraphView(ctx, canvas_height);
+    }
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
+    ImVec2 canvas_end = ImVec2(canvas_pos.x + canvas_width, canvas_pos.y + canvas_height);
+
+    // Background
+    dl->AddRectFilled(canvas_pos, canvas_end, IM_COL32(28, 28, 32, 255));
+
+    // --- Vertical zoom / pan with mouse wheel ---
+    if (ImGui::IsWindowHovered()) {
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.MouseWheel != 0.0f) {
+            if (io.KeyCtrl) {
+                // Ctrl+Wheel = vertical zoom
+                float factor = (io.MouseWheel > 0) ? 1.15f : (1.0f / 1.15f);
+                graph_pixels_per_unit *= factor;
+                graph_pixels_per_unit = std::clamp(graph_pixels_per_unit, 0.5f, 5000.0f);
+            } else if (io.KeyShift) {
+                // Shift+Wheel = vertical pan
+                float pan_amount = 30.0f / graph_pixels_per_unit;
+                graph_value_center += io.MouseWheel * pan_amount;
+            } else {
+                // Plain wheel = horizontal zoom (same as dope sheet)
+                zoom *= (io.MouseWheel > 0) ? 1.1f : (1.0f / 1.1f);
+                zoom = std::clamp(zoom, 0.1f, 50.0f);
+            }
+        }
+        // Middle-mouse drag = pan
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+            ImVec2 delta = io.MouseDelta;
+            float frame_range = (float)(end_frame - start_frame);
+            if (canvas_width * zoom > 0)
+                pan_offset -= delta.x / (canvas_width * zoom) * frame_range;
+            if (graph_pixels_per_unit > 0)
+                graph_value_center += delta.y / graph_pixels_per_unit;
+        }
+    }
+
+    // --- Draw horizontal grid lines (value axis) ---
+    {
+        // Determine a good spacing for value grid lines
+        float visible_range = canvas_height / graph_pixels_per_unit;
+        float step = 1.0f;
+        if (visible_range > 50.0f) step = 10.0f;
+        else if (visible_range > 20.0f) step = 5.0f;
+        else if (visible_range > 5.0f) step = 1.0f;
+        else if (visible_range > 1.0f) step = 0.5f;
+        else step = 0.1f;
+
+        float v_bottom = pixelYToValue(canvas_height, canvas_height);
+        float v_top = pixelYToValue(0, canvas_height);
+        float v_start = std::floor(std::min(v_bottom, v_top) / step) * step;
+        float v_end = std::ceil(std::max(v_bottom, v_top) / step) * step;
+
+        for (float v = v_start; v <= v_end; v += step) {
+            float py = canvas_pos.y + valueToPixelY(v, canvas_height);
+            if (py < canvas_pos.y || py > canvas_end.y) continue;
+            bool is_zero = std::abs(v) < step * 0.01f;
+            ImU32 lineCol = is_zero ? IM_COL32(100, 100, 100, 180) : IM_COL32(50, 50, 55, 120);
+            dl->AddLine(ImVec2(canvas_pos.x, py), ImVec2(canvas_end.x, py), lineCol);
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.1f", v);
+            dl->AddText(ImVec2(canvas_pos.x + 4, py - 8), IM_COL32(140, 140, 140, 200), buf);
+        }
+    }
+
+    // --- Draw vertical grid lines (frame axis, reusing dope-sheet logic) ---
+    {
+        int frame_range = end_frame - start_frame;
+        if (frame_range > 0) {
+            int step = 1;
+            float px_per_frame = canvas_width * zoom / frame_range;
+            if (px_per_frame < 4) step = 50;
+            else if (px_per_frame < 10) step = 20;
+            else if (px_per_frame < 20) step = 10;
+            else if (px_per_frame < 40) step = 5;
+
+            int f_start = (start_frame / step) * step;
+            for (int f = f_start; f <= end_frame; f += step) {
+                int px = frameToPixelX(f, canvas_width);
+                if (px < 0 || px > (int)canvas_width) continue;
+                float xp = canvas_pos.x + px;
+                dl->AddLine(ImVec2(xp, canvas_pos.y), ImVec2(xp, canvas_end.y), IM_COL32(50, 50, 55, 100));
+                char buf[16]; snprintf(buf, sizeof(buf), "%d", f);
+                dl->AddText(ImVec2(xp + 2, canvas_pos.y + 2), IM_COL32(120, 120, 120, 200), buf);
+            }
+        }
+    }
+
+    // --- Resolve track data ---
+    auto [entity_name, _chan] = parseTrackName(ctx.scene, selected_track);
+    auto track_it = ctx.scene.timeline.tracks.find(entity_name);
+
+    GraphTrackType track_type = getGraphTrackType(ctx, selected_track);
+    int total_channels = CURVE_CHANNEL_COUNT;
+    if (track_type == GraphTrackType::Light) total_channels = CURVE_LIGHT_CHANNEL_COUNT;
+    else if (track_type == GraphTrackType::Camera) total_channels = CURVE_CAM_CHANNEL_COUNT;
+    else if (track_type == GraphTrackType::Material) total_channels = CURVE_MAT_CHANNEL_COUNT;
+
+    auto getChannelColor = [&](GraphTrackType type, int ch) -> ImU32 {
+        if (type == GraphTrackType::Light) {
+            static const ImU32 colors[CURVE_LIGHT_CHANNEL_COUNT] = {
+                IM_COL32(255, 60, 60, 255), IM_COL32(80, 210, 80, 255), IM_COL32(60, 120, 255, 255),
+                IM_COL32(255, 60, 60, 255), IM_COL32(80, 210, 80, 255), IM_COL32(60, 120, 255, 255),
+                IM_COL32(255, 180, 60, 255),
+                IM_COL32(255, 60, 60, 255), IM_COL32(80, 210, 80, 255), IM_COL32(60, 120, 255, 255)
+            };
+            return colors[ch];
+        } else if (type == GraphTrackType::Camera) {
+            static const ImU32 colors[CURVE_CAM_CHANNEL_COUNT] = {
+                IM_COL32(255, 60, 60, 255), IM_COL32(80, 210, 80, 255), IM_COL32(60, 120, 255, 255),
+                IM_COL32(255, 60, 60, 255), IM_COL32(80, 210, 80, 255), IM_COL32(60, 120, 255, 255),
+                IM_COL32(60, 120, 255, 255), IM_COL32(200, 150, 255, 255), IM_COL32(255, 120, 200, 255)
+            };
+            return colors[ch];
+        } else if (type == GraphTrackType::Material) {
+            static const ImU32 colors[CURVE_MAT_CHANNEL_COUNT] = {
+                IM_COL32(255, 60, 60, 255), IM_COL32(80, 210, 80, 255), IM_COL32(60, 120, 255, 255),
+                IM_COL32(200, 200, 200, 255),
+                IM_COL32(180, 255, 60, 255), IM_COL32(160, 160, 160, 255), IM_COL32(60, 220, 255, 255), IM_COL32(60, 120, 255, 255), IM_COL32(100, 200, 200, 255),
+                IM_COL32(255, 100, 100, 255), IM_COL32(100, 255, 100, 255), IM_COL32(100, 100, 255, 255),
+                IM_COL32(255, 150, 100, 255),
+                IM_COL32(255, 220, 60, 255)
+            };
+            return colors[ch];
+        } else {
+            static const ImU32 colors[CURVE_CHANNEL_COUNT] = {
+                IM_COL32(255, 60,  60,  255), IM_COL32(80,  210, 80,  255), IM_COL32(60,  120, 255, 255),
+                IM_COL32(255, 100, 100, 255), IM_COL32(100, 230, 100, 255), IM_COL32(100, 160, 255, 255),
+                IM_COL32(255, 180, 60,  255), IM_COL32(180, 255, 60,  255), IM_COL32(60,  220, 255, 255)
+            };
+            return colors[ch];
+        }
+    };
+
+    auto channelKeyed = [&](const Keyframe& kf, int ch) -> bool {
+        if (track_type == GraphTrackType::Light) return kf.has_light && kf.light.channelKeyed(ch);
+        if (track_type == GraphTrackType::Camera) return kf.has_camera && kf.camera.channelKeyed(ch);
+        if (track_type == GraphTrackType::Material) return kf.has_material && kf.material.channelKeyed(ch);
+        return kf.has_transform && kf.transform.channelKeyed(ch);
+    };
+
+    auto channelValue = [&](const Keyframe& kf, int ch) -> float {
+        if (track_type == GraphTrackType::Light) return kf.light.channelValue(ch);
+        if (track_type == GraphTrackType::Camera) return kf.camera.channelValue(ch);
+        if (track_type == GraphTrackType::Material) return kf.material.channelValue(ch);
+        return kf.transform.channelValue(ch);
+    };
+
+    auto getCurveMeta = [&](const Keyframe& kf, int ch) -> const ChannelKeyMeta& {
+        if (track_type == GraphTrackType::Light) return kf.light.curve[ch];
+        if (track_type == GraphTrackType::Camera) return kf.camera.curve[ch];
+        if (track_type == GraphTrackType::Material) return kf.material.curve[ch];
+        return kf.transform.curve[ch];
+    };
+
+    auto getCurveMetaMutable = [&](Keyframe& kf, int ch) -> ChannelKeyMeta& {
+        if (track_type == GraphTrackType::Light) return kf.light.curve[ch];
+        if (track_type == GraphTrackType::Camera) return kf.camera.curve[ch];
+        if (track_type == GraphTrackType::Material) return kf.material.curve[ch];
+        return kf.transform.curve[ch];
+    };
+
+    auto setChannelVal = [&](Keyframe& kf, int ch, float v) {
+        if (track_type == GraphTrackType::Light) kf.light.setChannelValue(ch, v);
+        else if (track_type == GraphTrackType::Camera) kf.camera.setChannelValue(ch, v);
+        else if (track_type == GraphTrackType::Material) kf.material.setChannelValue(ch, v);
+        else kf.transform.setChannelValue(ch, v);
+    };
+
+    auto setChannelKey = [&](Keyframe& kf, int ch, bool keyed) {
+        if (track_type == GraphTrackType::Light) kf.light.setChannelKeyed(ch, keyed);
+        else if (track_type == GraphTrackType::Camera) kf.camera.setChannelKeyed(ch, keyed);
+        else if (track_type == GraphTrackType::Material) kf.material.setChannelKeyed(ch, keyed);
+        else kf.transform.setChannelKeyed(ch, keyed);
+    };
+
+    auto getChannelName = [&](int ch) -> const char* {
+        if (track_type == GraphTrackType::Light) return LightKeyframe::channelName(ch);
+        if (track_type == GraphTrackType::Camera) return CameraKeyframe::channelName(ch);
+        if (track_type == GraphTrackType::Material) return MaterialKeyframe::channelName(ch);
+        return TransformKeyframe::channelName(ch);
+    };
+
+    if (track_it != ctx.scene.timeline.tracks.end()) {
+        auto& track = track_it->second;
+        const auto& keyframes = track.keyframes;
+
+        // --- Draw curves ---
+        for (int ch = 0; ch < total_channels; ++ch) {
+            if (!graph_channel_visible[ch]) continue;
+            ImU32 curveCol = getChannelColor(track_type, ch);
+            // Dimmer colour when not the selected channel
+            if (graph_sel_channel >= 0 && ch != graph_sel_channel)
+                curveCol = (curveCol & 0x00FFFFFF) | (0x60 << 24); // semi-transparent
+
+            // Collect keyed frames for this channel
+            struct ChKey { int frame; float value; const ChannelKeyMeta* meta; };
+            std::vector<ChKey> keys;
+            for (const auto& kf : keyframes) {
+                if (!channelKeyed(kf, ch)) continue;
+                keys.push_back({ kf.frame, channelValue(kf, ch), &getCurveMeta(kf, ch) });
+            }
+            if (keys.empty()) continue;
+
+            // Draw curve segments between consecutive keys
+            for (size_t i = 0; i + 1 < keys.size(); ++i) {
+                const auto& k0 = keys[i];
+                const auto& k1 = keys[i + 1];
+                int px0 = frameToPixelX(k0.frame, canvas_width);
+                int px1 = frameToPixelX(k1.frame, canvas_width);
+                // Subdivide into small line segments for bezier curves
+                int steps = std::max(2, (px1 - px0) / 3);
+                steps = std::min(steps, 200); // cap to prevent slowdown
+                ImVec2 prev;
+                for (int s = 0; s <= steps; ++s) {
+                    float t = (float)s / (float)steps;
+                    float frame_f = k0.frame + (k1.frame - k0.frame) * t;
+                    float val = evalCurveSegment(
+                        (float)k0.frame, k0.value, *k0.meta,
+                        (float)k1.frame, k1.value, *k1.meta,
+                        frame_f);
+                    float px = canvas_pos.x + frameToPixelX((int)std::round(frame_f), canvas_width);
+                    // More precise X: interpolate linearly in pixel space
+                    px = canvas_pos.x + px0 + (px1 - px0) * t;
+                    float py = canvas_pos.y + valueToPixelY(val, canvas_height);
+                    ImVec2 cur(px, py);
+                    if (s > 0) {
+                        dl->AddLine(prev, cur, curveCol, 2.0f);
+                    }
+                    prev = cur;
+                }
+            }
+
+            // Extrapolation: flat before first key and after last key
+            if (!keys.empty()) {
+                // Before first
+                int px_first = frameToPixelX(keys.front().frame, canvas_width);
+                if (px_first > 0) {
+                    float py = canvas_pos.y + valueToPixelY(keys.front().value, canvas_height);
+                    dl->AddLine(ImVec2(canvas_pos.x, py), ImVec2(canvas_pos.x + px_first, py),
+                                (curveCol & 0x00FFFFFF) | (0x40 << 24), 1.0f);
+                }
+                // After last
+                int px_last = frameToPixelX(keys.back().frame, canvas_width);
+                if (px_last < (int)canvas_width) {
+                    float py = canvas_pos.y + valueToPixelY(keys.back().value, canvas_height);
+                    dl->AddLine(ImVec2(canvas_pos.x + px_last, py), ImVec2(canvas_end.x, py),
+                                (curveCol & 0x00FFFFFF) | (0x40 << 24), 1.0f);
+                }
+            }
+
+            // --- Draw key dots + Bezier handles ---
+            for (size_t ki = 0; ki < keys.size(); ++ki) {
+                const auto& k = keys[ki];
+                float kx = canvas_pos.x + frameToPixelX(k.frame, canvas_width);
+                float ky = canvas_pos.y + valueToPixelY(k.value, canvas_height);
+                bool is_selected = (ch == graph_sel_channel && k.frame == graph_sel_frame);
+
+                // Bezier handles (only for bezier interp and when selected or hovered)
+                if (k.meta->interp == KeyInterp::Bezier || (ki > 0 && keys[ki-1].meta->interp == KeyInterp::Bezier)) {
+                    // In-handle (from previous key)
+                    float in_hx = kx + k.meta->in_dx * (canvas_width * zoom / (float)(end_frame - start_frame));
+                    float in_hy = ky - k.meta->in_dy * graph_pixels_per_unit;
+                    dl->AddLine(ImVec2(kx, ky), ImVec2(in_hx, in_hy), IM_COL32(160, 160, 160, 140), 1.0f);
+                    dl->AddCircleFilled(ImVec2(in_hx, in_hy), is_selected ? 4.0f : 3.0f, IM_COL32(200, 200, 200, 180));
+
+                    // Out-handle
+                    if (k.meta->interp == KeyInterp::Bezier) {
+                        float out_hx = kx + k.meta->out_dx * (canvas_width * zoom / (float)(end_frame - start_frame));
+                        float out_hy = ky - k.meta->out_dy * graph_pixels_per_unit;
+                        dl->AddLine(ImVec2(kx, ky), ImVec2(out_hx, out_hy), IM_COL32(160, 160, 160, 140), 1.0f);
+                        dl->AddCircleFilled(ImVec2(out_hx, out_hy), is_selected ? 4.0f : 3.0f, IM_COL32(200, 200, 200, 180));
+                    }
+                }
+
+                // Key diamond/dot
+                float dot_r = is_selected ? 6.0f : 4.5f;
+                ImU32 dotCol = is_selected ? IM_COL32(255, 255, 255, 255) : curveCol;
+                dl->AddCircleFilled(ImVec2(kx, ky), dot_r, dotCol);
+                if (is_selected) {
+                    dl->AddCircle(ImVec2(kx, ky), dot_r + 2.0f, IM_COL32(255, 255, 100, 200), 0, 2.0f);
+                }
+            }
+        }
+
+        // --- Key interaction (click to select, drag to edit value/handles) ---
+        ImGuiIO& io = ImGui::GetIO();
+        ImVec2 mouse = io.MousePos;
+        bool in_canvas = mouse.x >= canvas_pos.x && mouse.x <= canvas_end.x &&
+                         mouse.y >= canvas_pos.y && mouse.y <= canvas_end.y;
+
+        if (in_canvas && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.KeyCtrl) {
+            bool handle_clicked = false;
+            // 1. Check if we clicked on the selected key's handles
+            if (graph_sel_channel >= 0 && graph_sel_frame >= 0) {
+                Keyframe* kf = track.getKeyframeAt(graph_sel_frame);
+                bool has_data = (track_type == GraphTrackType::Light && kf && kf->has_light) ||
+                                (track_type == GraphTrackType::Camera && kf && kf->has_camera) ||
+                                (track_type == GraphTrackType::Material && kf && kf->has_material) ||
+                                (track_type == GraphTrackType::Transform && kf && kf->has_transform);
+                if (kf && has_data) {
+                    ChannelKeyMeta& m = getCurveMetaMutable(*kf, graph_sel_channel);
+                    float kx = canvas_pos.x + frameToPixelX(graph_sel_frame, canvas_width);
+                    float ky = canvas_pos.y + valueToPixelY(channelValue(*kf, graph_sel_channel), canvas_height);
+                    float scale_x = (canvas_width * zoom / (float)(end_frame - start_frame));
+
+                    if (scale_x > 0.0f) {
+                        // In-handle
+                        float in_hx = kx + m.in_dx * scale_x;
+                        float in_hy = ky - m.in_dy * graph_pixels_per_unit;
+                        float dist_in = std::hypot(mouse.x - in_hx, mouse.y - in_hy);
+
+                        // Out-handle
+                        float out_hx = kx + m.out_dx * scale_x;
+                        float out_hy = ky - m.out_dy * graph_pixels_per_unit;
+                        float dist_out = std::hypot(mouse.x - out_hx, mouse.y - out_hy);
+
+                        if (dist_in < 8.0f) {
+                            graph_drag_mode = 2; // in-handle
+                            handle_clicked = true;
+                        } else if (dist_out < 8.0f && m.interp == KeyInterp::Bezier) {
+                            graph_drag_mode = 3; // out-handle
+                            handle_clicked = true;
+                        }
+                    }
+                }
+            }
+
+            // 2. If no handle was clicked, check closest key dot
+            if (!handle_clicked) {
+                float best_dist = 15.0f; // max click distance in pixels
+                int best_ch = -1, best_frame = -1;
+                for (int ch = 0; ch < total_channels; ++ch) {
+                    if (!graph_channel_visible[ch]) continue;
+                    for (const auto& kf : keyframes) {
+                        if (!channelKeyed(kf, ch)) continue;
+                        float kx = canvas_pos.x + frameToPixelX(kf.frame, canvas_width);
+                        float ky = canvas_pos.y + valueToPixelY(channelValue(kf, ch), canvas_height);
+                        float dist = std::hypot(mouse.x - kx, mouse.y - ky);
+                        if (dist < best_dist) {
+                            best_dist = dist;
+                            best_ch = ch;
+                            best_frame = kf.frame;
+                        }
+                    }
+                }
+                if (best_ch >= 0) {
+                    graph_sel_channel = best_ch;
+                    graph_sel_frame = best_frame;
+                    drag_start_frame = best_frame; // Remember starting frame for horizontal drag
+                    graph_drag_mode = 1; // key drag
+                } else {
+                    graph_sel_channel = -1;
+                    graph_sel_frame = -1;
+                    graph_drag_mode = 0;
+                }
+            }
+        }
+
+        // Drag selected key value & preview horizontal frame move
+        if (graph_drag_mode == 1 && ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
+            graph_sel_channel >= 0 && graph_sel_frame >= 0) {
+            Keyframe* kf = track.getKeyframeAt(graph_sel_frame);
+            bool has_data = (track_type == GraphTrackType::Light && kf && kf->has_light) ||
+                            (track_type == GraphTrackType::Camera && kf && kf->has_camera) ||
+                            (track_type == GraphTrackType::Material && kf && kf->has_material) ||
+                            (track_type == GraphTrackType::Transform && kf && kf->has_transform);
+            if (kf && has_data) {
+                float new_val = pixelYToValue(mouse.y - canvas_pos.y, canvas_height);
+                setChannelVal(*kf, graph_sel_channel, new_val);
+                track.refreshAutoTangents();
+                anim_reapply_requested_ = true;
+
+                // Draw vertical indicator line at target frame
+                int new_frame = pixelXToFrame(mouse.x - canvas_pos.x, canvas_width);
+                new_frame = std::clamp(new_frame, start_frame, end_frame);
+                if (new_frame != drag_start_frame) {
+                    float new_x = canvas_pos.x + frameToPixelX(new_frame, canvas_width);
+                    dl->AddLine(
+                        ImVec2(new_x, canvas_pos.y),
+                        ImVec2(new_x, canvas_pos.y + canvas_height),
+                        IM_COL32(255, 200, 100, 150), 2.0f);
+                }
+            }
+        }
+
+        // Handle dragging curve tangents
+        if ((graph_drag_mode == 2 || graph_drag_mode == 3) && ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
+            graph_sel_channel >= 0 && graph_sel_frame >= 0) {
+            Keyframe* kf = track.getKeyframeAt(graph_sel_frame);
+            bool has_data = (track_type == GraphTrackType::Light && kf && kf->has_light) ||
+                            (track_type == GraphTrackType::Camera && kf && kf->has_camera) ||
+                            (track_type == GraphTrackType::Material && kf && kf->has_material) ||
+                            (track_type == GraphTrackType::Transform && kf && kf->has_transform);
+            if (kf && has_data) {
+                ChannelKeyMeta& m = getCurveMetaMutable(*kf, graph_sel_channel);
+                float kx = canvas_pos.x + frameToPixelX(graph_sel_frame, canvas_width);
+                float ky = canvas_pos.y + valueToPixelY(channelValue(*kf, graph_sel_channel), canvas_height);
+                float scale_x = (canvas_width * zoom / (float)(end_frame - start_frame));
+
+                if (scale_x > 0.0f) {
+                    float delta_x = (mouse.x - kx) / scale_x;
+                    float delta_y = (ky - mouse.y) / graph_pixels_per_unit;
+
+                    if (graph_drag_mode == 2) {
+                        m.auto_tangent = false;
+                        m.in_dx = std::min(delta_x, 0.0f);
+                        m.in_dy = delta_y;
+                        float slope = (m.in_dx != 0.0f) ? (m.in_dy / m.in_dx) : 0.0f;
+                        m.out_dy = slope * m.out_dx; // Align out-handle
+                    } else if (graph_drag_mode == 3) {
+                        m.auto_tangent = false;
+                        m.out_dx = std::max(delta_x, 0.0f);
+                        m.out_dy = delta_y;
+                        float slope = (m.out_dx != 0.0f) ? (m.out_dy / m.out_dx) : 0.0f;
+                        m.in_dy = slope * m.in_dx; // Align in-handle
+                    }
+                    anim_reapply_requested_ = true;
+                }
+            }
+        }
+
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            if (graph_drag_mode == 1 && graph_sel_channel >= 0 && graph_sel_frame >= 0 && track_it != ctx.scene.timeline.tracks.end()) {
+                int new_frame = pixelXToFrame(mouse.x - canvas_pos.x, canvas_width);
+                new_frame = std::clamp(new_frame, start_frame, end_frame);
+                if (new_frame != drag_start_frame) {
+                    std::string specific_track = entity_name + "." + channelSubtrackSuffix(track_type, graph_sel_channel);
+                    moveKeyframe(ctx, specific_track, drag_start_frame, new_frame);
+                    graph_sel_frame = new_frame;
+                    tracks_dirty = true;
+                    anim_reapply_requested_ = true;
+                }
+            }
+            graph_drag_mode = 0;
+        }
+
+        // Keyboard delete shortcut for selected curve key
+        if (ImGui::IsWindowFocused() && (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) &&
+            !ImGui::GetIO().WantTextInput && graph_sel_channel >= 0 && graph_sel_frame >= 0) {
+            Keyframe* kf = track.getKeyframeAt(graph_sel_frame);
+            bool has_data = (track_type == GraphTrackType::Light && kf && kf->has_light && graph_sel_channel < CURVE_LIGHT_CHANNEL_COUNT) ||
+                            (track_type == GraphTrackType::Camera && kf && kf->has_camera && graph_sel_channel < CURVE_CAM_CHANNEL_COUNT) ||
+                            (track_type == GraphTrackType::Material && kf && kf->has_material && graph_sel_channel < CURVE_MAT_CHANNEL_COUNT) ||
+                            (track_type == GraphTrackType::Transform && kf && kf->has_transform && graph_sel_channel < CURVE_CHANNEL_COUNT);
+            if (kf && has_data) {
+                setChannelKey(*kf, graph_sel_channel, false);
+                if (track_type == GraphTrackType::Light) {
+                    kf->light.refreshCompoundFlags();
+                    bool any_keyed = false;
+                    for (int c = 0; c < CURVE_LIGHT_CHANNEL_COUNT; ++c)
+                        if (kf->light.channelKeyed(c)) { any_keyed = true; break; }
+                    if (!any_keyed) kf->has_light = false;
+                } else if (track_type == GraphTrackType::Camera) {
+                    kf->camera.refreshCompoundFlags();
+                    bool any_keyed = false;
+                    for (int c = 0; c < CURVE_CAM_CHANNEL_COUNT; ++c)
+                        if (kf->camera.channelKeyed(c)) { any_keyed = true; break; }
+                    if (!any_keyed) kf->has_camera = false;
+                } else if (track_type == GraphTrackType::Material) {
+                    kf->material.refreshCompoundFlags();
+                    bool any_keyed = false;
+                    for (int c = 0; c < CURVE_MAT_CHANNEL_COUNT; ++c)
+                        if (kf->material.channelKeyed(c)) { any_keyed = true; break; }
+                    if (!any_keyed) kf->has_material = false;
+                } else {
+                    kf->transform.refreshCompoundFlags();
+                    bool any_keyed = false;
+                    for (int c = 0; c < CURVE_CHANNEL_COUNT; ++c)
+                        if (kf->transform.channelKeyed(c)) { any_keyed = true; break; }
+                    if (!any_keyed) kf->has_transform = false;
+                }
+                graph_sel_channel = -1;
+                graph_sel_frame = -1;
+                tracks_dirty = true;
+                anim_reapply_requested_ = true;
+            }
+        }
+
+        // Right-click context menu for key operations
+        if (in_canvas && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && graph_sel_channel >= 0 && graph_sel_frame >= 0) {
+            ImGui::OpenPopup("GraphKeyContextMenu");
+        }
+        if (ImGui::BeginPopup("GraphKeyContextMenu")) {
+            Keyframe* kf = track.getKeyframeAt(graph_sel_frame);
+            bool has_data = (track_type == GraphTrackType::Light && kf && kf->has_light && graph_sel_channel >= 0 && graph_sel_channel < CURVE_LIGHT_CHANNEL_COUNT) ||
+                            (track_type == GraphTrackType::Camera && kf && kf->has_camera && graph_sel_channel >= 0 && graph_sel_channel < CURVE_CAM_CHANNEL_COUNT) ||
+                            (track_type == GraphTrackType::Material && kf && kf->has_material && graph_sel_channel >= 0 && graph_sel_channel < CURVE_MAT_CHANNEL_COUNT) ||
+                            (track_type == GraphTrackType::Transform && kf && kf->has_transform && graph_sel_channel >= 0 && graph_sel_channel < CURVE_CHANNEL_COUNT);
+            if (kf && has_data) {
+                ChannelKeyMeta& m = getCurveMetaMutable(*kf, graph_sel_channel);
+                ImGui::TextDisabled("Key: %s @ %d", getChannelName(graph_sel_channel), graph_sel_frame);
+                ImGui::Separator();
+
+                if (ImGui::MenuItem("Constant", nullptr, m.interp == KeyInterp::Constant)) {
+                    m.interp = KeyInterp::Constant; m.auto_tangent = false;
+                    anim_reapply_requested_ = true;
+                }
+                if (ImGui::MenuItem("Linear", nullptr, m.interp == KeyInterp::Linear)) {
+                    m.interp = KeyInterp::Linear; m.auto_tangent = false;
+                    anim_reapply_requested_ = true;
+                }
+                if (ImGui::MenuItem("Bezier", nullptr, m.interp == KeyInterp::Bezier)) {
+                    m.interp = KeyInterp::Bezier; m.auto_tangent = true;
+                    track.refreshAutoTangents();
+                    anim_reapply_requested_ = true;
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Delete Key")) {
+                    setChannelKey(*kf, graph_sel_channel, false);
+                    if (track_type == GraphTrackType::Light) {
+                        kf->light.refreshCompoundFlags();
+                        bool any_keyed = false;
+                        for (int c = 0; c < CURVE_LIGHT_CHANNEL_COUNT; ++c)
+                            if (kf->light.channelKeyed(c)) { any_keyed = true; break; }
+                        if (!any_keyed) kf->has_light = false;
+                    } else if (track_type == GraphTrackType::Camera) {
+                        kf->camera.refreshCompoundFlags();
+                        bool any_keyed = false;
+                        for (int c = 0; c < CURVE_CAM_CHANNEL_COUNT; ++c)
+                            if (kf->camera.channelKeyed(c)) { any_keyed = true; break; }
+                        if (!any_keyed) kf->has_camera = false;
+                    } else if (track_type == GraphTrackType::Material) {
+                        kf->material.refreshCompoundFlags();
+                        bool any_keyed = false;
+                        for (int c = 0; c < CURVE_MAT_CHANNEL_COUNT; ++c)
+                            if (kf->material.channelKeyed(c)) { any_keyed = true; break; }
+                        if (!any_keyed) kf->has_material = false;
+                    } else {
+                        kf->transform.refreshCompoundFlags();
+                        bool any_keyed = false;
+                        for (int c = 0; c < CURVE_CHANNEL_COUNT; ++c)
+                            if (kf->transform.channelKeyed(c)) { any_keyed = true; break; }
+                        if (!any_keyed) kf->has_transform = false;
+                    }
+                    graph_sel_channel = -1;
+                    graph_sel_frame = -1;
+                    tracks_dirty = true;
+                    anim_reapply_requested_ = true;
+                }
+            }
+            ImGui::EndPopup();
+        }
+    }
+
+    // --- Current frame indicator (vertical red line, same as dope sheet) ---
+    {
+        int px = frameToPixelX(current_frame, canvas_width);
+        float x = canvas_pos.x + px;
+        if (x >= canvas_pos.x && x <= canvas_end.x) {
+            dl->AddLine(ImVec2(x, canvas_pos.y), ImVec2(x, canvas_end.y), COLOR_CURRENT_FRAME, 2.0f);
+            // Triangle indicator at top
+            dl->AddTriangleFilled(
+                ImVec2(x - 5, canvas_pos.y),
+                ImVec2(x + 5, canvas_pos.y),
+                ImVec2(x, canvas_pos.y + 8),
+                COLOR_CURRENT_FRAME);
+        }
+    }
+
+    // --- Scrubbing ---
+    handleScrubbing(canvas_pos, canvas_width);
+
+    // --- Tooltip showing channel value at current frame ---
+    if (ImGui::IsWindowHovered() && !selected_track.empty() && track_it != ctx.scene.timeline.tracks.end()) {
+        ImVec2 mouse = ImGui::GetIO().MousePos;
+        bool in_canvas = mouse.x >= canvas_pos.x && mouse.x <= canvas_end.x &&
+                         mouse.y >= canvas_pos.y && mouse.y <= canvas_end.y;
+        if (in_canvas) {
+            int hover_frame = pixelXToFrame(mouse.x - canvas_pos.x, canvas_width);
+            float hover_val = pixelYToValue(mouse.y - canvas_pos.y, canvas_height);
+            ImGui::BeginTooltip();
+            ImGui::Text("Frame: %d  Value: %.2f", hover_frame, hover_val);
+            ImGui::EndTooltip();
+        }
+    }
 }

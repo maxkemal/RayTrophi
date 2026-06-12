@@ -612,9 +612,21 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
             }
             if (ImGui::IsItemDeactivated()) {
                 if (!moved && hoverFace >= 0) {
-                    float dist = (cam.lookfrom - cam.lookat).length();
+                    // Distance must be measured to the SNAP pivot, not to lookat: fly-look keeps
+                    // lookat at focus_dist (~10) in front of the camera regardless of where the
+                    // framed object actually is, which made the derived ortho_height absurdly
+                    // small (extreme zoom-in showing a sliver of the object).
+                    float dist = (cam.lookfrom - snapPivot).length();
                     if (dist < 1e-3f) dist = 10.0f;
                     cam.setStandardView(faces[hoverFace].view, snapPivot, dist, true);
+                    // With a selection, frame its bounds directly — under parallel projection
+                    // only ortho_height world units are visible, so derive it from object size
+                    // (perspective-equivalent span says nothing about how big the object is).
+                    if (ctx.selection.hasSelection() && ctx.selection.selected.has_cached_aabb) {
+                        const Vec3 ext = ctx.selection.selected.cached_aabb.diagonal();
+                        const float span = std::max({ ext.x, ext.y, ext.z });
+                        if (span > 1e-3f) cam.ortho_height = span * 1.4f; // 40% margin around the object
+                    }
                     refreshViewport();
                     addViewportMessage("View aligned", 1.2f, ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
                 }

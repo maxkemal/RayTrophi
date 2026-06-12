@@ -954,6 +954,49 @@ namespace Backend {
 static constexpr int32_t VULKAN_TEXTURE_CAPACITY = 2048;
 static constexpr int32_t VULKAN_TEXTURE_PURGE_THRESHOLD = VULKAN_TEXTURE_CAPACITY - 64; // 1984
 
+// Draw parameters for the raster-viewport edit-mesh overlay (GPU wireframe /
+// vertex-marker / face-fill passes). Geometry lives in dedicated buffers set
+// via uploadEditMeshOverlay*; this struct only carries per-frame draw state.
+// Positions are uploaded object-local; `model` maps them to world so object
+// transform changes never force a vertex re-upload.
+struct EditMeshOverlayParams {
+    bool enabled = false;
+    bool drawEdges = false;
+    bool drawPoints = false;
+    bool drawFaces = false;        // dim fill of every face (Face select mode)
+    bool softHighlight = false;    // tint unselected elements by soft-selection weight (flag bits 8..15)
+    bool xray = false;             // draw through the mesh (depth test effectively disabled in-shader)
+    Matrix4x4 model;               // object -> world for the uploaded local-space positions
+    float pointRadiusPx = 4.0f;
+    // Relative (distance-proportional) depth pull toward the camera so the
+    // overlay sits on its own surface. Must stay tiny: anything near the
+    // mesh's own NDC depth range acts as accidental x-ray.
+    float depthBias = 0.00002f;
+    float edgeColor[4]       = { 0.61f, 0.65f, 0.69f, 0.89f };
+    float pointColor[4]      = { 0.62f, 0.65f, 0.68f, 0.95f };
+    float faceColor[4]       = { 0.47f, 0.52f, 0.56f, 0.13f };
+    float selectColor[4]     = { 0.28f, 0.73f, 0.84f, 1.0f };
+    float selectFaceColor[4] = { 0.28f, 0.73f, 0.84f, 0.48f };
+};
+
+// Selection-outline overlay (raster viewport GPU silhouette). The backend
+// resolves node names against its own raster instances each frame, re-draws
+// just those instances into an R8G8 mask (G = full silhouette, R =
+// depth-tested visible) and edge-detects the mask over the finished frame —
+// no geometry ever crosses the CPU/GPU boundary for this. The LAST name in
+// nodeNames is the primary selection and gets primaryColor; the rest get
+// secondaryColor; portions hidden behind other geometry use occludedColor.
+struct SelectionOutlineParams {
+    bool enabled = false;
+    std::vector<std::string> nodeNames;
+    // Muted green: the original neon (0,255,128) at 2px read as a thick,
+    // attention-grabbing band — keep the outline informative but quiet.
+    float primaryColor[4]   = { 0.28f, 0.75f, 0.49f, 0.85f };
+    float secondaryColor[4] = { 0.20f, 0.55f, 0.37f, 0.62f };
+    float occludedColor[4]  = { 0.63f, 0.63f, 0.63f, 0.47f };
+    float thicknessPx = 1.0f;
+};
+
 /**
  * @brief Vulkan implementation of IBackend
  *
@@ -987,6 +1030,63 @@ public:
     // Two groups by blend mode: additive and alpha.
     void uploadParticleBillboards(const std::vector<float>& addData, uint32_t addVertexCount,
                                   const std::vector<float>& alphaData, uint32_t alphaVertexCount);
+    // Edit-mesh overlay (raster viewport GPU wireframe/vertex/face passes).
+    // Buffers are split by update frequency so each piece re-uploads only
+    // when its source actually changes:
+    //  - geometry: object-local {x,y,z} per editable vertex (vertex edits / sculpt)
+    //  - flags:    one uint per vertex — bit0 selected, bits 8..15 soft-selection weight (selection changes)
+    //  - topology: uint32 index pairs for every unique edge + triangulated face fan (topology rebuilds)
+    //  - selection indices: index buffers for the currently selected edges/faces
+    void uploadEditMeshOverlayGeometry(const std::vector<float>& positions, uint32_t vertexCount);
+    void uploadEditMeshOverlayFlags(const std::vector<uint32_t>& flags);
+    void uploadEditMeshOverlayTopology(const std::vector<uint32_t>& edgeIndices,
+                                       const std::vector<uint32_t>& faceIndices);
+    void uploadEditMeshOverlaySelectionIndices(const std::vector<uint32_t>& selEdgeIndices,
+                                               const std::vector<uint32_t>& selFaceIndices);
+    void setEditMeshOverlayParams(const EditMeshOverlayParams& params);
+    void clearEditMeshOverlay();
+    // Selection outline (raster viewport GPU silhouette pass). Cheap to call
+    // every frame: only re-renders when something actually changed.
+    void setSelectionOutlineParams(const SelectionOutlineParams& params);
+    void clearSelectionOutline();
+    // True once the outline pipelines + targets are live. The UI gates on
+    // this so a missing SPIR-V / unsupported format degrades to the ImGui
+    // CPU outline instead of silently losing the outline.
+    bool hasGpuSelectionOutline() const;
+    // Rendered-mode support: renders the selection mask standalone (scene
+    // depth prepass + selected-instance mask) and reads the R8G8 mask back
+    // (interleaved R,G per pixel; R = depth-tested visible, G = full
+    // silhouette). The caller draws the boundary as an ImGui overlay on top
+    // of the path-traced image, so this works over any render backend.
+    // The camera comes from the CALLER: in Rendered mode this backend's own
+    // m_camera is not updated (the render backend owns the camera), so using
+    // it would freeze the outline at a stale view. Always renders a
+    // PERSPECTIVE projection — the path tracer ignores orthographic cameras.
+    // width/height may be smaller than the screen (the caller scales the
+    // boundary runs back up). Returns false when raster geometry or the
+    // outline pipelines are unavailable; caller then uses the CPU outline.
+    // camAspect: the projection aspect of the DISPLAYED image (render
+    // width/height, same convention as the gizmo overlay projection) — not
+    // the readback target's aspect.
+    // fullWidth/fullHeight size the GPU targets (keep them constant — e.g.
+    // the screen size — so scale changes don't recreate resources);
+    // maskWidth/maskHeight select the sub-region actually rendered and read
+    // back (the caller scales the boundary runs back up).
+    bool renderSelectionOutlineMaskReadback(const std::vector<std::string>& nodeNames,
+                                            const Vec3& camEye, const Vec3& camLookAt,
+                                            const Vec3& camUp, float camFovDeg,
+                                            float camAspect,
+                                            int fullWidth, int fullHeight,
+                                            int maskWidth, int maskHeight,
+                                            std::vector<uint8_t>& outMaskRG);
+    // Targeted raster-instance transform refresh for the Rendered-mode
+    // outline: updates ONLY the given nodes' raster instances (composed
+    // world matrices, getTransformMatrix convention). Unlike
+    // updateObjectTransform it never writes back to the scene objects —
+    // that one calls setBaseTransform and would corrupt pivot-composed
+    // transforms when fed a composed matrix.
+    void setRasterInstanceTransformsForNodes(
+        const std::vector<std::pair<std::string, Matrix4x4>>& nodes);
     void updateMeshTransform(uint32_t meshHandle, const Matrix4x4& transform) override;
     void rebuildAccelerationStructure() override;
     void showAllInstances() override;
@@ -1245,9 +1345,13 @@ protected:
         VulkanRT::BufferHandle gridNormalBuffer;
         VulkanRT::BufferHandle identityInstanceBuffer;
         uint32_t gridVertexCount = 0;
-        uint32_t gridSegments[8] = {}; // [start,count] pairs: regular, axisU, axisV, negAxis
+        uint32_t gridSegments[10] = {}; // [start,count] pairs: major, minor, axisU, axisV, negAxis
         int gridBuiltPlane = -1;       // plane the cached grid was built for: 0=XZ,1=XY,2=YZ (-1=none)
         float gridBuiltSpacing = 0.0f; // adaptive line spacing the cached grid was built for (0=none)
+        float gridBuiltHalf = 0.0f;    // half-extent the cached grid was built with (world units)
+        float gridBuiltCenterU = 0.0f; // minor-lattice patch centre (camera footprint, major-snapped)
+        float gridBuiltCenterV = 0.0f;
+        float gridBuiltFineHalf = 0.0f; // minor-lattice half-extent (drives the minor fade band)
 
         // Hair polyline overlay (Solid/Matcap viewport)
         VkPipeline hairLinePipeline = VK_NULL_HANDLE;
@@ -1263,6 +1367,50 @@ protected:
         uint32_t particleAddVertexCount = 0;
         VulkanRT::BufferHandle particleAlphaVertexBuffer;
         uint32_t particleAlphaVertexCount = 0;
+
+        // Edit-mesh overlay (Solid/Matcap viewport): GPU wireframe, vertex
+        // markers and face fills for mesh edit mode. Own pipeline layout
+        // (push-constant only, 128 bytes) shared by all three pipelines.
+        VkPipelineLayout editOverlayPipelineLayout = VK_NULL_HANDLE;
+        VkPipeline editLinePipeline = VK_NULL_HANDLE;   // LINE_LIST, indexed
+        VkPipeline editFacePipeline = VK_NULL_HANDLE;   // TRIANGLE_LIST, indexed, alpha blend
+        VkPipeline editPointPipeline = VK_NULL_HANDLE;  // instanced billboard discs
+        VulkanRT::BufferHandle editPositionBuffer;      // vec3 object-local per editable vertex
+        VulkanRT::BufferHandle editFlagBuffer;          // uint per vertex: bit0 selected, bits 8..15 soft weight
+        uint32_t editVertexCount = 0;
+        VulkanRT::BufferHandle editEdgeIndexBuffer;     // all unique edges (uint32 pairs)
+        uint32_t editEdgeIndexCount = 0;
+        VulkanRT::BufferHandle editFaceIndexBuffer;     // triangulated fan of every face
+        uint32_t editFaceIndexCount = 0;
+        VulkanRT::BufferHandle editSelEdgeIndexBuffer;  // selected edges
+        uint32_t editSelEdgeIndexCount = 0;
+        VulkanRT::BufferHandle editSelFaceIndexBuffer;  // triangulated selected faces
+        uint32_t editSelFaceIndexCount = 0;
+        EditMeshOverlayParams editOverlayParams;
+
+        // Selection outline (Solid/Matcap/MaterialPreview viewport): GPU
+        // silhouette mask + screen-space edge composite. Render passes and
+        // pipelines are created once with the other viewport pipelines; the
+        // mask image + framebuffers share the colorImage/depthImage resize
+        // lifecycle. selectionInstanceBuffer holds one mat4 per selected
+        // instance, re-uploaded only on selection/transform change frames
+        // (the viewport only re-renders when dirty anyway).
+        VkRenderPass selectionMaskRenderPass = VK_NULL_HANDLE;
+        VkRenderPass selectionCompositeRenderPass = VK_NULL_HANDLE;
+        VkPipelineLayout selectionMaskPipelineLayout = VK_NULL_HANDLE;
+        VkPipeline selectionMaskFullPipeline = VK_NULL_HANDLE;    // depth test OFF -> writes G
+        VkPipeline selectionMaskVisiblePipeline = VK_NULL_HANDLE; // depth test ON  -> writes R
+        VkPipelineLayout selectionCompositePipelineLayout = VK_NULL_HANDLE;
+        VkPipeline selectionCompositePipeline = VK_NULL_HANDLE;
+        VkDescriptorSetLayout selectionCompositeDescLayout = VK_NULL_HANDLE;
+        VkDescriptorPool selectionCompositeDescPool = VK_NULL_HANDLE;
+        VkDescriptorSet selectionCompositeDescSet = VK_NULL_HANDLE;
+        VkSampler selectionMaskSampler = VK_NULL_HANDLE;
+        VulkanRT::ImageHandle selectionMaskImage; // R8G8_UNORM, viewport-sized
+        VkFramebuffer selectionMaskFramebuffer = VK_NULL_HANDLE;
+        VkFramebuffer selectionCompositeFramebuffer = VK_NULL_HANDLE;
+        VulkanRT::BufferHandle selectionInstanceBuffer;
+        SelectionOutlineParams selectionOutlineParams;
     };
 
     bool shouldUseInteractiveViewport() const;
@@ -1361,6 +1509,12 @@ protected:
     
     // Mesh registry (meshName -> BLAS index)
     std::unordered_map<std::string, uint32_t> m_meshRegistry;
+
+    // CPU mirror of each BLAS's per-triangle material indices (blasIndex -> ids).
+    // The hit shaders read materials through geo.materialAddr (baked into the
+    // BLAS geometry buffer at build); material *assignment* changes must rewrite
+    // that region in place, which requires knowing the current per-triangle ids.
+    std::unordered_map<uint32_t, std::vector<uint32_t>> m_blasMaterialIds;
 
     // Volume instance tracking for Vulkan volume rendering
     uint32_t m_volumeBlasIndex = UINT32_MAX; // Shared AABB BLAS for all volumes
@@ -1522,6 +1676,24 @@ protected:
     void rebuildRasterMeshCullingChunks(RasterMeshBuffer& mesh);
     void setRasterVisibleInstances(RasterMeshBuffer& mesh, const std::vector<uint32_t>& visibleInstanceIndices);
     void uploadVisibleRasterInstances(RasterMeshBuffer& mesh);
+
+    // Selection outline internals shared by the raster-mode composite path
+    // and the Rendered-mode mask readback. Caller must hold m_mutex.
+    struct SelectionOutlineDrawItem {
+        const RasterMeshBuffer* mesh = nullptr;
+        VkDeviceSize instanceByteOffset = 0;
+        float maskValue = 1.0f; // 1.0 = primary selection tier, 0.5 = secondary
+    };
+    // Resolves node names against m_rasterInstances and uploads one matrix
+    // per matched instance into selectionInstanceBuffer (must run before
+    // command recording starts — the upload submits its own transfer).
+    void resolveSelectionOutlineDraws(const std::vector<std::string>& nodeNames,
+                                      std::vector<SelectionOutlineDrawItem>& outDraws);
+    // Records the R8G8 mask render pass (G = depth-test-off silhouette,
+    // R = visible vs the depth already in depthImage) into cmd.
+    void recordSelectionOutlineMaskPass(VkCommandBuffer cmd,
+                                        const std::vector<SelectionOutlineDrawItem>& draws,
+                                        const Matrix4x4& viewProj, int width, int height);
     void invalidateTargetedTransformIndex();
     void rebuildTargetedTransformIndex();
 

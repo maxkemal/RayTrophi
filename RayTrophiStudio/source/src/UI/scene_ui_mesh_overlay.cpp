@@ -232,6 +232,18 @@ unsigned long long makeEditablePackedEdgeKey(int a, int b) {
            static_cast<unsigned long long>(static_cast<unsigned int>(b));
 }
 
+// The cache's half-edge mesh is rebuilt only on topology changes; vertex
+// moves since the last rebuild live in cache.vertices only. Ids are 1:1, so
+// every half-edge operator MUST refresh positions before mutating, or the
+// rebuilt triangle soup snaps the mesh back to its last-rebuild state.
+void syncHalfEdgePositionsFromCache(MeshEdit::HalfEdgeMesh& heMesh,
+                                    const SceneUI::EditableMeshCache& cache) {
+    const size_t count = (std::min)(heMesh.vertices.size(), cache.vertices.size());
+    for (size_t i = 0; i < count; ++i) {
+        heMesh.vertices[i].position = cache.vertices[i].local_position;
+    }
+}
+
 int findEditablePolygonEdgeId(
     const SceneUI::EditableMeshCache& cache,
     const std::unordered_map<unsigned long long, int>& edgeIdByKey,
@@ -913,6 +925,78 @@ void appendTriangulatedEditablePolygon(
         tri->updateTransformedVertices();
         outMesh.push_back(tri);
     }
+}
+
+// Rebuild the whole triangle soup from a (mutated) half-edge mesh. Face ids
+// below originalFaceCount map 1:1 to cache polygon faces; faces created by
+// operators resolve their template (material inheritance) transitively
+// through faceSourceMap. Same planar-UV / flat-normal convention as
+// appendTriangulatedEditablePolygon, but positions come from the half-edge
+// mesh so operator-created vertices are included.
+std::vector<std::shared_ptr<Triangle>> rebuildTriangleSoupFromHalfEdge(
+    const MeshEdit::HalfEdgeMesh& heMesh,
+    const SceneUI::EditableMeshCache& cache,
+    const std::vector<std::shared_ptr<Triangle>>& fallbackMesh,
+    MeshEdit::HEIndex originalFaceCount,
+    const std::unordered_map<MeshEdit::HEIndex, MeshEdit::HEIndex>& faceSourceMap) {
+    auto resolveSourceFaceId = [&](MeshEdit::HEIndex f) -> int {
+        const size_t guard = faceSourceMap.size() + 1;
+        for (size_t step = 0; step < guard && f >= originalFaceCount; ++step) {
+            const auto it = faceSourceMap.find(f);
+            if (it == faceSourceMap.end()) {
+                break;
+            }
+            f = it->second;
+        }
+        return (f >= 0 && f < originalFaceCount) ? static_cast<int>(f) : -1;
+    };
+
+    std::vector<std::shared_ptr<Triangle>> outMesh;
+    outMesh.reserve(heMesh.liveFaceCount() * 2);
+    std::vector<MeshEdit::HEIndex> faceVertexIds;
+    for (MeshEdit::HEIndex f = 0; f < static_cast<MeshEdit::HEIndex>(heMesh.faces.size()); ++f) {
+        if (heMesh.faces[f].removed) {
+            continue;
+        }
+        heMesh.collectFaceVertices(f, faceVertexIds);
+        if (faceVertexIds.size() < 3) {
+            continue;
+        }
+        std::shared_ptr<Triangle> templateTriangle = resolveEditablePolygonTemplateTriangle(
+            cache, fallbackMesh, resolveSourceFaceId(f));
+        if (!templateTriangle) {
+            continue;
+        }
+
+        std::vector<Vec3> faceVertices;
+        faceVertices.reserve(faceVertexIds.size());
+        for (const MeshEdit::HEIndex v : faceVertexIds) {
+            faceVertices.push_back(heMesh.vertices[v].position);
+        }
+        Vec3 faceNormal = heMesh.faceNormal(f);
+        if (faceNormal.length_squared() <= 1e-10f) {
+            faceNormal = Vec3(0.0f, 1.0f, 0.0f);
+        }
+        const std::vector<Vec2> faceUVs = buildPolygonPlanarUVs(faceVertices, faceNormal);
+        for (size_t i = 1; i + 1 < faceVertices.size(); ++i) {
+            auto newTriangle = cloneTriangleForEdit(templateTriangle);
+            if (!newTriangle) {
+                continue;
+            }
+            newTriangle->setOriginalVertexPosition(0, faceVertices[0]);
+            newTriangle->setOriginalVertexPosition(1, faceVertices[i]);
+            newTriangle->setOriginalVertexPosition(2, faceVertices[i + 1]);
+            newTriangle->setOriginalVertexNormal(0, faceNormal);
+            newTriangle->setOriginalVertexNormal(1, faceNormal);
+            newTriangle->setOriginalVertexNormal(2, faceNormal);
+            newTriangle->set_normals(faceNormal, faceNormal, faceNormal);
+            newTriangle->setUVCoordinates(faceUVs[0], faceUVs[i], faceUVs[i + 1]);
+            newTriangle->markAABBDirty();
+            newTriangle->updateTransformedVertices();
+            outMesh.push_back(newTriangle);
+        }
+    }
+    return outMesh;
 }
 
 bool buildMergedEditablePolygonBoundary(
@@ -4114,6 +4198,7 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     invalidateSculptControlGraph(objectName);
     invalidateSculptPBVH(objectName);
     editable_mesh_cache.object_name = objectName;
+    editable_mesh_cache.revision = ++editable_mesh_cache_revision_counter;
     editable_mesh_cache.source_triangle_count = triangleCount;
     editable_mesh_cache.source_object_transform = currentObjectTransform;
     editable_mesh_cache.shade_flat = shading.flat_shading;
@@ -4407,6 +4492,24 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     editable_mesh_cache.vertex_mark_generation = 1u;
     editable_mesh_cache.triangle_mark_stamps.assign(editableSourceTriangles ? editableSourceTriangles->size() : meshEntries.size(), 0u);
     editable_mesh_cache.triangle_mark_generation = 1u;
+
+    // Half-edge topology over the welded vertices + polygon faces. Vertex ids
+    // and polygon-face ids stay 1:1 with this cache, so operators can move
+    // between the two representations without remapping.
+    {
+        std::vector<Vec3> hePositions;
+        hePositions.reserve(editable_mesh_cache.vertices.size());
+        for (const auto& vertex : editable_mesh_cache.vertices) {
+            hePositions.push_back(vertex.local_position);
+        }
+        std::vector<std::vector<int>> hePolygons;
+        hePolygons.reserve(editable_mesh_cache.polygon_faces.size());
+        for (const auto& polygonFace : editable_mesh_cache.polygon_faces) {
+            hePolygons.push_back(polygonFace.vertex_ids);
+        }
+        editable_mesh_cache.half_edge_valid = editable_mesh_cache.half_edge.buildFromPolygons(
+            hePositions, hePolygons, &editable_mesh_cache.half_edge_build);
+    }
 
     return !editable_mesh_cache.vertices.empty();
 }
@@ -5145,16 +5248,49 @@ bool SceneUI::extrudeSelectedMeshFaces(UIContext& ctx, float distance) {
     const bool preserveModifierPreview = hasEnabledSubdivisionPreview(beforeModifierStack);
 
     const std::vector<std::shared_ptr<Triangle>> beforeDisplayMesh = cloneTriangleVectorForEdit(currentDisplayMesh);
-    std::vector<std::shared_ptr<Triangle>> extrudedMesh = preserveModifierPreview
-        ? cloneTriangleVectorForEdit(currentBaseMesh)
-        : cloneTriangleVectorForEdit(currentDisplayMesh);
-    if (extrudedMesh.empty()) {
-        return false;
-    }
 
     std::vector<int> selectedFaceIds = editable_mesh_cache.selection.face_ids;
     std::sort(selectedFaceIds.begin(), selectedFaceIds.end());
     selectedFaceIds.erase(std::unique(selectedFaceIds.begin(), selectedFaceIds.end()), selectedFaceIds.end());
+
+    // The extruded faces' original triangles become the bottom cap INSIDE the
+    // new volume — they must not survive (the old behaviour left them in,
+    // producing hidden internal geometry). Skip them while cloning the rest.
+    std::unordered_set<const Triangle*> extrudedCapTriangles;
+    for (const int faceId : selectedFaceIds) {
+        if (faceId >= 0 && faceId < static_cast<int>(editable_mesh_cache.polygon_faces.size())) {
+            for (const int triangleId : editable_mesh_cache.polygon_faces[faceId].triangle_ids) {
+                if (triangleId >= 0 &&
+                    triangleId < static_cast<int>(editable_mesh_cache.faces.size()) &&
+                    editable_mesh_cache.faces[triangleId].triangle) {
+                    extrudedCapTriangles.insert(editable_mesh_cache.faces[triangleId].triangle.get());
+                }
+            }
+        } else if (faceId >= 0 && faceId < static_cast<int>(editable_mesh_cache.faces.size()) &&
+                   editable_mesh_cache.faces[faceId].triangle) {
+            extrudedCapTriangles.insert(editable_mesh_cache.faces[faceId].triangle.get());
+        }
+    }
+    // The editable cache (and so extrudedCapTriangles) points at the same
+    // source triangles the cache was built from: base_mesh_cache when a
+    // subdivision preview is active, the live display mesh otherwise.
+    const std::vector<std::shared_ptr<Triangle>>* extrudeSourceMesh = &currentDisplayMesh;
+    if (preserveModifierPreview) {
+        auto baseSourceIt = ctx.scene.base_mesh_cache.find(objectName);
+        if (baseSourceIt != ctx.scene.base_mesh_cache.end() && !baseSourceIt->second.empty()) {
+            extrudeSourceMesh = &baseSourceIt->second;
+        }
+    }
+    std::vector<std::shared_ptr<Triangle>> extrudedMesh;
+    extrudedMesh.reserve(extrudeSourceMesh->size());
+    for (const auto& sourceTriangle : *extrudeSourceMesh) {
+        if (!sourceTriangle || extrudedCapTriangles.count(sourceTriangle.get()) > 0) {
+            continue;
+        }
+        if (auto clonedTriangle = cloneTriangleForEdit(sourceTriangle)) {
+            extrudedMesh.push_back(clonedTriangle);
+        }
+    }
 
     struct ExtrudedFaceSelectionTarget {
         Vec3 center = Vec3(0.0f, 0.0f, 0.0f);
@@ -5436,14 +5572,6 @@ bool SceneUI::loopCutSelectedEdges(UIContext& ctx, float t) {
         return false;
     }
 
-    std::unordered_set<int> selectedEdgeSet(ringEdgeIds.begin(), ringEdgeIds.end());
-    std::unordered_map<unsigned long long, int> edgeIdByKey;
-    edgeIdByKey.reserve(editable_mesh_cache.polygon_edges.size() * 2 + 1);
-    for (size_t edgeId = 0; edgeId < editable_mesh_cache.polygon_edges.size(); ++edgeId) {
-        const auto& edge = editable_mesh_cache.polygon_edges[edgeId];
-        edgeIdByKey[makeEditablePackedEdgeKey(edge.v0, edge.v1)] = static_cast<int>(edgeId);
-    }
-
     std::vector<std::shared_ptr<Triangle>> currentDisplayMesh;
     {
         auto meshIt = mesh_cache.find(objectName);
@@ -5480,183 +5608,76 @@ bool SceneUI::loopCutSelectedEdges(UIContext& ctx, float t) {
     const bool preserveModifierPreview = hasEnabledSubdivisionPreview(beforeModifierStack);
     const std::vector<std::shared_ptr<Triangle>> beforeDisplayMesh = cloneTriangleVectorForEdit(currentDisplayMesh);
 
-    struct PolygonBuildInput {
-        std::vector<Vec3> vertices;
-        std::shared_ptr<Triangle> template_triangle;
-    };
+    // ---- half-edge loop cut ----------------------------------------------
+    // The cut is pure topology on the half-edge core: walk the quad ring
+    // from each selected edge, split the ring edges at cutT and connect the
+    // new vertices across each quad. The triangle soup is then rebuilt from
+    // the cut topology with the same planar-UV / flat-normal convention the
+    // legacy rebuild used.
+    if (!editable_mesh_cache.half_edge_valid ||
+        editable_mesh_cache.half_edge_build.skipped_polygons > 0) {
+        addViewportMessage("Loop cut: mesh topology unavailable",
+                           2.4f, ImVec4(1.0f, 0.62f, 0.3f, 1.0f));
+        return false;
+    }
+
     struct LoopCutSelectionTarget {
         Vec3 center = Vec3(0.0f, 0.0f, 0.0f);
         Vec3 direction = Vec3(1.0f, 0.0f, 0.0f);
     };
 
-    std::vector<PolygonBuildInput> polygonsToBuild;
-    polygonsToBuild.reserve(editable_mesh_cache.polygon_faces.size() * 2 + editable_mesh_cache.faces.size());
+    MeshEdit::HalfEdgeMesh heMesh = editable_mesh_cache.half_edge; // mutate a copy
+    syncHalfEdgePositionsFromCache(heMesh, editable_mesh_cache); // pick up vertex edits
+    const MeshEdit::HEIndex originalFaceCount =
+        static_cast<MeshEdit::HEIndex>(heMesh.faces.size());
+
     std::vector<LoopCutSelectionTarget> cutSelectionTargets;
-
-    auto resolveTemplateTriangle = [&](int faceId) -> std::shared_ptr<Triangle> {
-        if (faceId >= 0 && faceId < static_cast<int>(editable_mesh_cache.polygon_faces.size())) {
-            const auto& polygonFace = editable_mesh_cache.polygon_faces[faceId];
-            for (const int triangleId : polygonFace.triangle_ids) {
-                if (triangleId >= 0 &&
-                    triangleId < static_cast<int>(editable_mesh_cache.faces.size()) &&
-                    editable_mesh_cache.faces[triangleId].triangle) {
-                    return editable_mesh_cache.faces[triangleId].triangle;
-                }
-            }
-        }
-        return preserveModifierPreview
-            ? (!currentBaseMesh.empty() ? currentBaseMesh.front() : nullptr)
-            : (!currentDisplayMesh.empty() ? currentDisplayMesh.front() : nullptr);
-    };
-
-    int splitFaceCount = 0;
-    const size_t polygonFaceCount =
-        editable_mesh_cache.polygon_faces.empty()
-            ? editable_mesh_cache.faces.size()
-            : editable_mesh_cache.polygon_faces.size();
-    for (size_t faceId = 0; faceId < polygonFaceCount; ++faceId) {
-        const std::vector<int> vertexIds = getEditablePolygonVertexIds(editable_mesh_cache, static_cast<int>(faceId));
-        if (vertexIds.size() < 3) {
+    std::unordered_map<MeshEdit::HEIndex, MeshEdit::HEIndex> faceSourceMap;
+    int cutRingCount = 0;
+    for (const int edgeId : ringEdgeIds) {
+        if (edgeId < 0 || edgeId >= static_cast<int>(editable_mesh_cache.polygon_edges.size())) {
             continue;
         }
-
-        std::vector<Vec3> faceVertices;
-        faceVertices.reserve(vertexIds.size());
-        bool invalidFace = false;
-        for (const int vertexId : vertexIds) {
-            if (!isEditableVertexIdValid(editable_mesh_cache, vertexId)) {
-                invalidFace = true;
-                break;
-            }
-            faceVertices.push_back(editable_mesh_cache.vertices[vertexId].local_position);
-        }
-        if (invalidFace) {
+        const auto& cacheEdge = editable_mesh_cache.polygon_edges[edgeId];
+        // Cache vertex ids are 1:1 with half-edge vertex ids. findEdge fails
+        // naturally for edges already consumed (split) by a previous ring.
+        const MeshEdit::HEIndex heEdge = heMesh.findEdge(cacheEdge.v0, cacheEdge.v1);
+        if (heEdge == MeshEdit::kHEInvalid) {
             continue;
         }
-
-        std::shared_ptr<Triangle> templateTriangle = resolveTemplateTriangle(static_cast<int>(faceId));
-        if (!templateTriangle) {
+        MeshEdit::HalfEdgeMesh::LoopCutResult cut;
+        if (!heMesh.loopCut(heEdge, cutT, &cut)) {
             continue;
         }
-
-        bool splitThisFace = false;
-        int selectedEdgeIndex = -1;
-        if (vertexIds.size() == 4) {
-            std::vector<int> faceEdgeIds;
-            faceEdgeIds.reserve(4);
-            for (size_t i = 0; i < 4; ++i) {
-                faceEdgeIds.push_back(findEditablePolygonEdgeId(
-                    editable_mesh_cache,
-                    edgeIdByKey,
-                    vertexIds[i],
-                    vertexIds[(i + 1) % 4]));
-            }
-
-            std::vector<int> selectedEdgeIndices;
-            for (int i = 0; i < 4; ++i) {
-                if (faceEdgeIds[i] >= 0 && selectedEdgeSet.count(faceEdgeIds[i]) > 0) {
-                    selectedEdgeIndices.push_back(i);
-                }
-            }
-
-            if (selectedEdgeIndices.size() == 2 &&
-                ((selectedEdgeIndices[0] + 2) % 4 == selectedEdgeIndices[1] ||
-                 (selectedEdgeIndices[1] + 2) % 4 == selectedEdgeIndices[0])) {
-                splitThisFace = true;
-                selectedEdgeIndex = selectedEdgeIndices[0];
-            }
+        ++cutRingCount;
+        for (const auto& split : cut.face_splits) {
+            faceSourceMap[split.second] = split.first;
         }
-
-        if (!splitThisFace) {
-            polygonsToBuild.push_back(PolygonBuildInput{ faceVertices, templateTriangle });
-            continue;
+        for (const MeshEdit::HEIndex cutEdge : cut.new_edges) {
+            const MeshEdit::HEIndex he = heMesh.edges[cutEdge].half_edge;
+            const Vec3 p0 = heMesh.vertices[heMesh.half_edges[he].origin].position;
+            const Vec3 p1 = heMesh.vertices[heMesh.headVertex(he)].position;
+            LoopCutSelectionTarget target;
+            target.center = (p0 + p1) * 0.5f;
+            const Vec3 direction = p1 - p0;
+            const float dirLenSq = direction.length_squared();
+            target.direction =
+                (std::isfinite(dirLenSq) && dirLenSq > 1e-10f)
+                    ? direction / std::sqrt(dirLenSq)
+                    : Vec3(1.0f, 0.0f, 0.0f);
+            cutSelectionTargets.push_back(target);
         }
-
-        auto computeDirectedCutPoint = [&](int startVertexId, int endVertexId) {
-            const Vec3& startPosition = editable_mesh_cache.vertices[startVertexId].local_position;
-            const Vec3& endPosition = editable_mesh_cache.vertices[endVertexId].local_position;
-            const bool followsCanonicalDirection = startVertexId <= endVertexId;
-            const float directedT = followsCanonicalDirection ? cutT : (1.0f - cutT);
-            return startPosition + (endPosition - startPosition) * directedT;
-        };
-
-        const int a = selectedEdgeIndex;
-        const int b = (a + 1) % 4;
-        const int c = (a + 2) % 4;
-        const int d = (a + 3) % 4;
-        const Vec3 cutPointBC = computeDirectedCutPoint(vertexIds[b], vertexIds[c]);
-        const Vec3 cutPointDA = computeDirectedCutPoint(vertexIds[d], vertexIds[a]);
-
-        polygonsToBuild.push_back(PolygonBuildInput{
-            { faceVertices[a], faceVertices[b], cutPointBC, cutPointDA },
-            templateTriangle
-        });
-        polygonsToBuild.push_back(PolygonBuildInput{
-            { cutPointDA, cutPointBC, faceVertices[c], faceVertices[d] },
-            templateTriangle
-        });
-
-        LoopCutSelectionTarget target;
-        target.center = (cutPointBC + cutPointDA) * 0.5f;
-        const Vec3 direction = cutPointBC - cutPointDA;
-        const float dirLenSq = direction.length_squared();
-        target.direction =
-            (std::isfinite(dirLenSq) && dirLenSq > 1e-10f)
-                ? direction / std::sqrt(dirLenSq)
-                : Vec3(1.0f, 0.0f, 0.0f);
-        cutSelectionTargets.push_back(target);
-        ++splitFaceCount;
     }
-
-    if (splitFaceCount <= 0 || polygonsToBuild.empty()) {
+    if (cutRingCount <= 0) {
         return false;
     }
 
-    auto computePolygonNormalFromVertices = [](const std::vector<Vec3>& vertices) {
-        Vec3 normal(0.0f, 0.0f, 0.0f);
-        for (size_t i = 0; i < vertices.size(); ++i) {
-            const Vec3& current = vertices[i];
-            const Vec3& next = vertices[(i + 1) % vertices.size()];
-            normal.x += (current.y - next.y) * (current.z + next.z);
-            normal.y += (current.z - next.z) * (current.x + next.x);
-            normal.z += (current.x - next.x) * (current.y + next.y);
-        }
-        const float lenSq = normal.length_squared();
-        if (!std::isfinite(lenSq) || lenSq <= 1e-10f) {
-            return Vec3(0.0f, 1.0f, 0.0f);
-        }
-        return normal / std::sqrt(lenSq);
-    };
-
-    std::vector<std::shared_ptr<Triangle>> cutMesh;
-    cutMesh.reserve(beforeDisplayMesh.size() + polygonsToBuild.size() * 2);
-    for (const auto& polygon : polygonsToBuild) {
-        if (!polygon.template_triangle || polygon.vertices.size() < 3) {
-            continue;
-        }
-
-        const Vec3 faceNormal = computePolygonNormalFromVertices(polygon.vertices);
-        const std::vector<Vec2> faceUVs = buildPolygonPlanarUVs(polygon.vertices, faceNormal);
-        for (size_t i = 1; i + 1 < polygon.vertices.size(); ++i) {
-            auto newTriangle = cloneTriangleForEdit(polygon.template_triangle);
-            if (!newTriangle) {
-                continue;
-            }
-
-            newTriangle->setOriginalVertexPosition(0, polygon.vertices[0]);
-            newTriangle->setOriginalVertexPosition(1, polygon.vertices[i]);
-            newTriangle->setOriginalVertexPosition(2, polygon.vertices[i + 1]);
-            newTriangle->setOriginalVertexNormal(0, faceNormal);
-            newTriangle->setOriginalVertexNormal(1, faceNormal);
-            newTriangle->setOriginalVertexNormal(2, faceNormal);
-            newTriangle->set_normals(faceNormal, faceNormal, faceNormal);
-            newTriangle->setUVCoordinates(faceUVs[0], faceUVs[i], faceUVs[i + 1]);
-            newTriangle->markAABBDirty();
-            newTriangle->updateTransformedVertices();
-            cutMesh.push_back(newTriangle);
-        }
-    }
-
+    std::vector<std::shared_ptr<Triangle>> cutMesh = rebuildTriangleSoupFromHalfEdge(
+        heMesh,
+        editable_mesh_cache,
+        preserveModifierPreview ? currentBaseMesh : currentDisplayMesh,
+        originalFaceCount,
+        faceSourceMap);
     if (cutMesh.empty()) {
         return false;
     }
@@ -5754,6 +5775,128 @@ bool SceneUI::loopCutSelectedEdges(UIContext& ctx, float t) {
     return true;
 }
 
+bool SceneUI::insetSelectedMeshFaces(UIContext& ctx, float amount) {
+    const float insetT = std::clamp(amount, 0.02f, 0.98f);
+
+    const std::string objectName =
+        (!active_mesh_edit_object_name.empty() ? active_mesh_edit_object_name :
+            (ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object
+                ? ctx.selection.selected.object->getNodeName()
+                : std::string{}));
+    if (objectName.empty() || !ensureEditableMeshCache(ctx, objectName)) {
+        return false;
+    }
+
+    std::vector<int> selectedFaceIds = editable_mesh_cache.selection.face_ids;
+    std::sort(selectedFaceIds.begin(), selectedFaceIds.end());
+    selectedFaceIds.erase(std::unique(selectedFaceIds.begin(), selectedFaceIds.end()), selectedFaceIds.end());
+    if (selectedFaceIds.empty() && editable_mesh_cache.selection.active_face_id >= 0) {
+        selectedFaceIds.push_back(editable_mesh_cache.selection.active_face_id);
+    }
+    if (selectedFaceIds.empty()) {
+        return false;
+    }
+
+    std::vector<std::shared_ptr<Triangle>> currentDisplayMesh;
+    {
+        auto meshIt = mesh_cache.find(objectName);
+        if (meshIt == mesh_cache.end() || meshIt->second.empty()) {
+            return false;
+        }
+        std::unordered_set<const Triangle*> seenTriangles;
+        currentDisplayMesh.reserve(meshIt->second.size());
+        for (const auto& entry : meshIt->second) {
+            if (entry.second && seenTriangles.insert(entry.second.get()).second) {
+                currentDisplayMesh.push_back(entry.second);
+            }
+        }
+    }
+    if (currentDisplayMesh.empty()) {
+        return false;
+    }
+
+    std::vector<std::shared_ptr<Triangle>> currentBaseMesh;
+    {
+        auto baseIt = ctx.scene.base_mesh_cache.find(objectName);
+        currentBaseMesh = (baseIt != ctx.scene.base_mesh_cache.end() && !baseIt->second.empty())
+            ? cloneTriangleVectorForEdit(baseIt->second)
+            : cloneTriangleVectorForEdit(currentDisplayMesh);
+    }
+    const auto modifierIt = ctx.scene.mesh_modifiers.find(objectName);
+    const MeshModifiers::ModifierStack beforeModifierStack =
+        (modifierIt != ctx.scene.mesh_modifiers.end()) ? modifierIt->second : MeshModifiers::ModifierStack{};
+    const bool preserveModifierPreview = hasEnabledSubdivisionPreview(beforeModifierStack);
+    const std::vector<std::shared_ptr<Triangle>> beforeDisplayMesh = cloneTriangleVectorForEdit(currentDisplayMesh);
+
+    if (!editable_mesh_cache.half_edge_valid ||
+        editable_mesh_cache.half_edge_build.skipped_polygons > 0) {
+        addViewportMessage("Inset: mesh topology unavailable",
+                           2.4f, ImVec4(1.0f, 0.62f, 0.3f, 1.0f));
+        return false;
+    }
+
+    MeshEdit::HalfEdgeMesh heMesh = editable_mesh_cache.half_edge;
+    syncHalfEdgePositionsFromCache(heMesh, editable_mesh_cache);
+    const MeshEdit::HEIndex originalFaceCount =
+        static_cast<MeshEdit::HEIndex>(heMesh.faces.size());
+
+    std::unordered_map<MeshEdit::HEIndex, MeshEdit::HEIndex> faceSourceMap;
+    std::vector<MeshEdit::HEIndex> sideFaces;
+    int insetCount = 0;
+    for (const int faceId : selectedFaceIds) {
+        if (faceId < 0 || faceId >= originalFaceCount || heMesh.faces[faceId].removed) {
+            continue;
+        }
+        if (heMesh.insetFace(faceId, insetT, &sideFaces) == MeshEdit::kHEInvalid) {
+            continue;
+        }
+        for (const MeshEdit::HEIndex sideFace : sideFaces) {
+            faceSourceMap[sideFace] = faceId;
+        }
+        ++insetCount;
+    }
+    if (insetCount <= 0) {
+        return false;
+    }
+
+    std::vector<std::shared_ptr<Triangle>> insetMesh = rebuildTriangleSoupFromHalfEdge(
+        heMesh,
+        editable_mesh_cache,
+        preserveModifierPreview ? currentBaseMesh : currentDisplayMesh,
+        originalFaceCount,
+        faceSourceMap);
+    if (insetMesh.empty()) {
+        return false;
+    }
+    for (size_t triangleIndex = 0; triangleIndex < insetMesh.size(); ++triangleIndex) {
+        if (insetMesh[triangleIndex]) {
+            insetMesh[triangleIndex]->setFaceIndex(static_cast<int>(triangleIndex));
+        }
+    }
+
+    const std::vector<std::shared_ptr<Triangle>> afterDisplayMesh = evaluateDisplayMeshFromBase(insetMesh, beforeModifierStack);
+    const std::vector<std::shared_ptr<Triangle>> afterBaseMesh = cloneTriangleVectorForEdit(insetMesh);
+    const MeshModifiers::ModifierStack afterModifierStack = beforeModifierStack;
+    auto command = std::make_unique<ReplaceMeshGeometryCommand>(
+        objectName, beforeDisplayMesh, afterDisplayMesh, currentBaseMesh, afterBaseMesh,
+        beforeModifierStack, afterModifierStack);
+    command->execute(ctx);
+    history.record(std::move(command));
+    rebuildMeshCache(ctx.scene.world.objects);
+    applyMeshShadingSettings(ctx, objectName, true);
+
+    editable_mesh_cache = EditableMeshCache{};
+    mesh_overlay_cache = MeshOverlayCache{};
+    mesh_edit_layer = MeshEditLayer{};
+    pending_serialized_mesh_edit_layer = PendingSerializedMeshEditLayer{};
+    clearEditableMeshSelection();
+    active_mesh_edit_object_name = objectName;
+    ensureMeshEditLayer(ctx, objectName);
+    ensureEditableMeshCache(ctx, objectName);
+    addViewportMessage("Inset faces applied", 2.0f, ImVec4(0.34f, 0.84f, 1.0f, 1.0f));
+    return true;
+}
+
 bool SceneUI::dissolveSelectedEdges(UIContext& ctx) {
     const std::string objectName =
         (!active_mesh_edit_object_name.empty() ? active_mesh_edit_object_name :
@@ -5802,88 +5945,55 @@ bool SceneUI::dissolveSelectedEdges(UIContext& ctx) {
     const bool preserveModifierPreview = hasEnabledSubdivisionPreview(beforeModifierStack);
     const std::vector<std::shared_ptr<Triangle>> beforeDisplayMesh = cloneTriangleVectorForEdit(currentDisplayMesh);
 
-    std::unordered_map<unsigned long long, int> edgeIdByKey;
-    edgeIdByKey.reserve(editable_mesh_cache.polygon_edges.size() * 2 + 1);
-    for (size_t edgeId = 0; edgeId < editable_mesh_cache.polygon_edges.size(); ++edgeId) {
-        const auto& edge = editable_mesh_cache.polygon_edges[edgeId];
-        edgeIdByKey[makeEditablePackedEdgeKey(edge.v0, edge.v1)] = static_cast<int>(edgeId);
-    }
-
-    std::vector<std::vector<int>> edgeToFaces(editable_mesh_cache.polygon_edges.size());
-    for (size_t faceId = 0; faceId < editable_mesh_cache.polygon_faces.size(); ++faceId) {
-        const auto& face = editable_mesh_cache.polygon_faces[faceId];
-        for (size_t i = 0; i < face.vertex_ids.size(); ++i) {
-            const int edgeId = findEditablePolygonEdgeId(
-                editable_mesh_cache,
-                edgeIdByKey,
-                face.vertex_ids[i],
-                face.vertex_ids[(i + 1) % face.vertex_ids.size()]);
-            if (edgeId >= 0) {
-                edgeToFaces[edgeId].push_back(static_cast<int>(faceId));
-            }
-        }
-    }
-
-    std::vector<bool> consumedFaces(editable_mesh_cache.polygon_faces.size(), false);
-    std::vector<std::pair<std::vector<int>, std::shared_ptr<Triangle>>> outputPolygons;
-    bool changed = false;
-
-    for (const int edgeId : selectedEdgeIds) {
-        if (edgeId < 0 || edgeId >= static_cast<int>(edgeToFaces.size())) {
-            continue;
-        }
-        const auto& touchingFaces = edgeToFaces[edgeId];
-        if (touchingFaces.size() != 2) {
-            continue;
-        }
-        const int faceA = touchingFaces[0];
-        const int faceB = touchingFaces[1];
-        if (faceA < 0 || faceB < 0 ||
-            faceA >= static_cast<int>(editable_mesh_cache.polygon_faces.size()) ||
-            faceB >= static_cast<int>(editable_mesh_cache.polygon_faces.size()) ||
-            consumedFaces[faceA] || consumedFaces[faceB]) {
-            continue;
-        }
-
-        std::vector<int> mergedVertexIds;
-        if (!buildMergedEditablePolygonBoundary(
-                { editable_mesh_cache.polygon_faces[faceA].vertex_ids,
-                  editable_mesh_cache.polygon_faces[faceB].vertex_ids },
-                mergedVertexIds)) {
-            continue;
-        }
-
-        const Vec3 mergedNormal = computeEditableFaceNormal(editable_mesh_cache, mergedVertexIds);
-        const Vec3 referenceNormal =
-            computeEditableReferenceNormal(editable_mesh_cache, editable_mesh_cache.polygon_faces[faceA].triangle_ids);
-        if (mergedNormal.dot(referenceNormal) < 0.0f) {
-            std::reverse(mergedVertexIds.begin(), mergedVertexIds.end());
-        }
-
-        outputPolygons.emplace_back(
-            mergedVertexIds,
-            resolveEditablePolygonTemplateTriangle(editable_mesh_cache, currentDisplayMesh, faceA));
-        consumedFaces[faceA] = true;
-        consumedFaces[faceB] = true;
-        changed = true;
-    }
-
-    for (size_t faceId = 0; faceId < editable_mesh_cache.polygon_faces.size(); ++faceId) {
-        if (consumedFaces[faceId]) {
-            continue;
-        }
-        outputPolygons.emplace_back(
-            editable_mesh_cache.polygon_faces[faceId].vertex_ids,
-            resolveEditablePolygonTemplateTriangle(editable_mesh_cache, currentDisplayMesh, static_cast<int>(faceId)));
-    }
-
-    if (!changed) {
+    // ---- half-edge dissolve ------------------------------------------------
+    // Pure topology: dissolveEdge merges the two adjacent faces in the
+    // half-edge core. Chains of selected edges merge transitively; bridges
+    // and multi-shared edges are rejected by the core. No vertices are
+    // created or moved, so surviving face loops still use cache vertex ids
+    // and the soup rebuild reads live cache positions directly.
+    if (!editable_mesh_cache.half_edge_valid ||
+        editable_mesh_cache.half_edge_build.skipped_polygons > 0) {
+        addViewportMessage("Dissolve: mesh topology unavailable",
+                           2.4f, ImVec4(1.0f, 0.62f, 0.3f, 1.0f));
         return false;
     }
 
+    MeshEdit::HalfEdgeMesh heMesh = editable_mesh_cache.half_edge;
+    int dissolvedCount = 0;
+    for (const int edgeId : selectedEdgeIds) {
+        if (edgeId < 0 || edgeId >= static_cast<int>(editable_mesh_cache.polygon_edges.size())) {
+            continue;
+        }
+        const auto& cacheEdge = editable_mesh_cache.polygon_edges[edgeId];
+        const MeshEdit::HEIndex heEdge = heMesh.findEdge(cacheEdge.v0, cacheEdge.v1);
+        if (heEdge == MeshEdit::kHEInvalid) {
+            continue;
+        }
+        if (heMesh.dissolveEdge(heEdge) != MeshEdit::kHEInvalid) {
+            ++dissolvedCount;
+        }
+    }
+    if (dissolvedCount <= 0) {
+        return false;
+    }
+
+    // Dissolve only removes elements, so every surviving face id still maps
+    // 1:1 to its cache polygon face (template/material lookup stays direct).
     std::vector<std::shared_ptr<Triangle>> dissolvedMesh;
-    for (const auto& polygon : outputPolygons) {
-        appendTriangulatedEditablePolygon(editable_mesh_cache, polygon.first, polygon.second, dissolvedMesh);
+    std::vector<MeshEdit::HEIndex> faceVertexIds;
+    std::vector<int> polygonVertexIds;
+    for (MeshEdit::HEIndex f = 0; f < static_cast<MeshEdit::HEIndex>(heMesh.faces.size()); ++f) {
+        if (heMesh.faces[f].removed) {
+            continue;
+        }
+        heMesh.collectFaceVertices(f, faceVertexIds);
+        polygonVertexIds.assign(faceVertexIds.begin(), faceVertexIds.end());
+        appendTriangulatedEditablePolygon(
+            editable_mesh_cache,
+            polygonVertexIds,
+            resolveEditablePolygonTemplateTriangle(
+                editable_mesh_cache, currentDisplayMesh, static_cast<int>(f)),
+            dissolvedMesh);
     }
     if (dissolvedMesh.empty()) {
         return false;
@@ -6800,6 +6910,9 @@ bool SceneUI::weldSelectedVerticesByDistance(UIContext& ctx, float distance) {
 void SceneUI::queueMeshEditGpuSync(const std::string& objectName) {
     mesh_edit_gpu_sync_pending = true;
     mesh_edit_gpu_sync_object_name = objectName;
+    // Every mesh-mutating path funnels through here, so this is also the
+    // single choke point that invalidates the GPU edit-overlay positions.
+    gpu_edit_overlay_sync.geometry_dirty = true;
 }
 
 void SceneUI::handleMeshSculpt(UIContext& ctx) {
@@ -8137,6 +8250,202 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
     ctx.start_render = true;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GPU EDIT-MESH OVERLAY SYNC
+// Pushes editable-mesh wireframe/vertex/face data into the raster viewport
+// backend (Vulkan) so the per-frame overlay cost on the CPU collapses to a
+// params push. Buffers are split by update frequency:
+//   topology (edge/face index buffers)  -> on EditableMeshCache rebuild
+//   geometry (local positions)          -> on vertex edits (queueMeshEditGpuSync)
+//   flags + selection index buffers     -> on selection / soft-select changes
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+void appendEditOverlayFanIndices(std::vector<uint32_t>& out, const std::vector<int>& vertexIds, int vertexCount) {
+    if (vertexIds.size() < 3) {
+        return;
+    }
+    for (size_t i = 1; i + 1 < vertexIds.size(); ++i) {
+        const int a = vertexIds[0];
+        const int b = vertexIds[i];
+        const int c = vertexIds[i + 1];
+        if (a < 0 || b < 0 || c < 0 || a >= vertexCount || b >= vertexCount || c >= vertexCount) {
+            continue;
+        }
+        out.push_back(static_cast<uint32_t>(a));
+        out.push_back(static_cast<uint32_t>(b));
+        out.push_back(static_cast<uint32_t>(c));
+    }
+}
+} // namespace
+
+void SceneUI::releaseGpuEditMeshOverlay() {
+    if (!gpu_edit_overlay_sync.active) {
+        return;
+    }
+    gpu_edit_overlay_sync = GpuEditOverlaySync{};
+    if (auto* vpb = dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get())) {
+        vpb->clearEditMeshOverlay();
+    }
+}
+
+bool SceneUI::syncGpuEditMeshOverlay(UIContext& ctx, const std::string& objectName,
+                                     bool drawVertices, bool drawEdges, bool drawFaces) {
+    (void)ctx;
+    // GPU overlay lives in the raster interactive viewport pass; Rendered
+    // mode (shading_mode == 2) keeps the ImGui fallback.
+    if (viewport_settings.shading_mode == 2) {
+        releaseGpuEditMeshOverlay();
+        return false;
+    }
+    auto* vpb = dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get());
+    if (!vpb) {
+        return false;
+    }
+    if (editable_mesh_cache.object_name.empty() ||
+        editable_mesh_cache.object_name != objectName ||
+        editable_mesh_cache.vertices.empty()) {
+        releaseGpuEditMeshOverlay();
+        return false;
+    }
+
+    auto& sync = gpu_edit_overlay_sync;
+    const int vertexCount = static_cast<int>(editable_mesh_cache.vertices.size());
+    const bool topologyChanged = !sync.active || sync.cache_revision != editable_mesh_cache.revision;
+
+    if (topologyChanged) {
+        // Polygon edges hide triangulation diagonals when available.
+        const auto& edgeList = editable_mesh_cache.polygon_edges.empty()
+            ? editable_mesh_cache.edges
+            : editable_mesh_cache.polygon_edges;
+        std::vector<uint32_t> edgeIndices;
+        edgeIndices.reserve(edgeList.size() * 2);
+        for (const auto& edge : edgeList) {
+            if (edge.v0 < 0 || edge.v1 < 0 || edge.v0 >= vertexCount || edge.v1 >= vertexCount) {
+                continue;
+            }
+            edgeIndices.push_back(static_cast<uint32_t>(edge.v0));
+            edgeIndices.push_back(static_cast<uint32_t>(edge.v1));
+        }
+
+        const size_t faceCount = editable_mesh_cache.polygon_faces.empty()
+            ? editable_mesh_cache.faces.size()
+            : editable_mesh_cache.polygon_faces.size();
+        std::vector<uint32_t> faceIndices;
+        faceIndices.reserve(faceCount * 3);
+        for (size_t faceId = 0; faceId < faceCount; ++faceId) {
+            appendEditOverlayFanIndices(
+                faceIndices,
+                getEditablePolygonVertexIds(editable_mesh_cache, static_cast<int>(faceId)),
+                vertexCount);
+        }
+
+        vpb->uploadEditMeshOverlayTopology(edgeIndices, faceIndices);
+        sync.cache_revision = editable_mesh_cache.revision;
+        sync.geometry_dirty = true;
+        sync.selection_hash = ~0ull; // force flag/selection re-upload for the new vertex set
+    }
+
+    if (sync.geometry_dirty) {
+        std::vector<float> positions;
+        positions.reserve(editable_mesh_cache.vertices.size() * 3);
+        for (const auto& vertex : editable_mesh_cache.vertices) {
+            positions.push_back(vertex.local_position.x);
+            positions.push_back(vertex.local_position.y);
+            positions.push_back(vertex.local_position.z);
+        }
+        vpb->uploadEditMeshOverlayGeometry(positions, static_cast<uint32_t>(vertexCount));
+        sync.geometry_dirty = false;
+    }
+
+    // Fingerprint selection ids + soft-select parameters; rebuild the small
+    // flag/selection buffers only when it changes.
+    const bool softActive =
+        mesh_overlay_settings.edit_mode && mesh_overlay_settings.proportional_edit;
+    uint64_t selectionHash = 1469598103934665603ull; // FNV-1a basis
+    auto mixHash = [&selectionHash](uint64_t value) {
+        selectionHash ^= value;
+        selectionHash *= 1099511628211ull;
+    };
+    for (const int id : editable_mesh_cache.selection.vertex_ids) mixHash(static_cast<uint64_t>(id) + 0x100000ull);
+    for (const int id : editable_mesh_cache.selection.edge_ids)   mixHash(static_cast<uint64_t>(id) + 0x200000ull);
+    for (const int id : editable_mesh_cache.selection.face_ids)   mixHash(static_cast<uint64_t>(id) + 0x300000ull);
+    if (softActive) {
+        mixHash(0x400000ull);
+        mixHash(static_cast<uint64_t>(std::hash<float>{}(mesh_overlay_settings.proportional_radius)));
+        mixHash(static_cast<uint64_t>(std::hash<float>{}(mesh_overlay_settings.proportional_falloff)));
+        mixHash(static_cast<uint64_t>(mesh_overlay_settings.proportional_falloff_type));
+    }
+
+    if (selectionHash != sync.selection_hash) {
+        std::vector<uint32_t> flags(static_cast<size_t>(vertexCount), 0u);
+        std::unordered_set<int> softTargets;
+        for (const int id : editable_mesh_cache.selection.vertex_ids) {
+            if (isEditableVertexIdValid(editable_mesh_cache, id)) {
+                flags[id] |= 1u;
+                softTargets.insert(id);
+            }
+        }
+
+        std::vector<uint32_t> selEdgeIndices;
+        selEdgeIndices.reserve(editable_mesh_cache.selection.edge_ids.size() * 2);
+        for (const int edgeId : editable_mesh_cache.selection.edge_ids) {
+            const auto* edge = getEditableSelectableEdge(editable_mesh_cache, edgeId);
+            if (!edge || edge->v0 < 0 || edge->v1 < 0 ||
+                edge->v0 >= vertexCount || edge->v1 >= vertexCount) {
+                continue;
+            }
+            selEdgeIndices.push_back(static_cast<uint32_t>(edge->v0));
+            selEdgeIndices.push_back(static_cast<uint32_t>(edge->v1));
+            softTargets.insert(edge->v0);
+            softTargets.insert(edge->v1);
+        }
+
+        std::vector<uint32_t> selFaceIndices;
+        for (const int faceId : editable_mesh_cache.selection.face_ids) {
+            const std::vector<int> vertexIds = getEditablePolygonVertexIds(editable_mesh_cache, faceId);
+            appendEditOverlayFanIndices(selFaceIndices, vertexIds, vertexCount);
+            for (const int id : vertexIds) {
+                if (isEditableVertexIdValid(editable_mesh_cache, id)) {
+                    softTargets.insert(id);
+                }
+            }
+        }
+
+        if (softActive && !softTargets.empty()) {
+            const std::vector<float> softWeights = buildSoftSelectionWeights(
+                editable_mesh_cache, mesh_overlay_settings, softTargets);
+            const size_t weightCount = (std::min)(softWeights.size(), flags.size());
+            for (size_t i = 0; i < weightCount; ++i) {
+                const float w = softWeights[i];
+                if (w > 0.0f) {
+                    const uint32_t q = static_cast<uint32_t>(
+                        (std::min)(1.0f, (std::max)(0.0f, w)) * 255.0f + 0.5f);
+                    flags[i] |= (q << 8);
+                }
+            }
+        }
+
+        vpb->uploadEditMeshOverlayFlags(flags);
+        vpb->uploadEditMeshOverlaySelectionIndices(selEdgeIndices, selFaceIndices);
+        sync.selection_hash = selectionHash;
+    }
+
+    Backend::EditMeshOverlayParams params;
+    params.enabled = true;
+    params.drawEdges = drawEdges;
+    params.drawPoints = drawVertices;
+    params.drawFaces = drawFaces;
+    params.softHighlight = softActive;
+    params.xray = mesh_overlay_settings.xray_mode;
+    params.model = getEditableObjectTransform(editable_mesh_cache);
+    params.pointRadiusPx = (std::max)(2.0f, mesh_overlay_settings.vertex_radius + 1.25f);
+    vpb->setEditMeshOverlayParams(params);
+
+    sync.active = true;
+    sync.drawn_this_frame = true;
+    return true;
+}
+
 void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
     if (!mesh_overlay_settings.enabled || !ctx.scene.camera) {
         return;
@@ -8227,6 +8536,12 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
                 ImGui::CloseCurrentPopup();
             }
             if (selectedFaceCount > 0 &&
+                ImGui::MenuItem("Inset Face")) {
+                contextMenuMutatedTopology =
+                    insetSelectedMeshFaces(ctx, mesh_face_inset_amount) || contextMenuMutatedTopology;
+                ImGui::CloseCurrentPopup();
+            }
+            if (selectedFaceCount > 0 &&
                 ImGui::MenuItem("Delete Face")) {
                 contextMenuMutatedTopology = deleteSelectedMeshFaces(ctx) || contextMenuMutatedTopology;
                 ImGui::CloseCurrentPopup();
@@ -8236,6 +8551,7 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
             } else {
                 ImGui::Separator();
                 ImGui::TextDisabled("Extrude distance: %.3f", mesh_face_extrude_distance);
+                ImGui::TextDisabled("Inset amount: %.2f", mesh_face_inset_amount);
             }
         } else if (meshMode == MeshElementSelectMode::Edge) {
             const size_t selectedEdgeCount = editable_mesh_cache.selection.edge_ids.size();
@@ -8268,9 +8584,36 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
         return;
     }
 
+    const MeshElementSelectMode meshMode = ctx.selection.mesh_element_mode;
+    const bool drawVertices =
+        meshMode == MeshElementSelectMode::Vertex ||
+        (meshMode == MeshElementSelectMode::Object && mesh_overlay_settings.show_vertices);
+    // Wireframe draws in every select mode — face mode needs edge outlines to
+    // read face boundaries (the dim fill alone is nearly invisible on a shaded
+    // surface). The old ImGui-only path skipped edges in face mode for CPU
+    // cost; the GPU overlay has no such constraint.
+    const bool drawEdges = true;
+    const bool drawFaces = (meshMode == MeshElementSelectMode::Face);
+
+    // GPU overlay path: the raster viewport backend renders wireframe, vertex
+    // markers, face fills and selection highlights with real depth testing.
+    // Everything below the sync stays as the Rendered-mode ImGui fallback.
+    const bool gpuOverlayActive =
+        syncGpuEditMeshOverlay(ctx, objectName, drawVertices, drawEdges, drawFaces);
+
+    // Rendered (path-traced) viewport: skip the ImGui overlay — wireframe and
+    // soft-select heat over a pathtrace read as noise, and editing feedback
+    // lives in the raster modes on this machine. The ImGui path below remains
+    // only as the fallback for machines without the Vulkan raster viewport.
+    if (!gpuOverlayActive && viewport_settings.shading_mode == 2 &&
+        dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get()) != nullptr) {
+        return;
+    }
+
     const bool needsRebuild =
-        mesh_overlay_cache.object_name != objectName ||
-        mesh_overlay_cache.source_triangle_count != triangleCount;
+        !gpuOverlayActive &&
+        (mesh_overlay_cache.object_name != objectName ||
+         mesh_overlay_cache.source_triangle_count != triangleCount);
 
     if (needsRebuild) {
         mesh_overlay_cache = MeshOverlayCache{};
@@ -8332,16 +8675,6 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
 
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();
     const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
-    const MeshElementSelectMode meshMode = ctx.selection.mesh_element_mode;
-    const bool drawVertices =
-        meshMode == MeshElementSelectMode::Vertex ||
-        (meshMode == MeshElementSelectMode::Object && mesh_overlay_settings.show_vertices);
-    const bool drawEdges =
-        onCagePreview ||
-        meshMode == MeshElementSelectMode::Object ||
-        meshMode == MeshElementSelectMode::Vertex ||
-        meshMode == MeshElementSelectMode::Edge;
-    const bool drawFaces = (meshMode == MeshElementSelectMode::Face);
 
     const ImU32 edgeColor = onCagePreview
         ? ((meshMode == MeshElementSelectMode::Edge)
@@ -8401,7 +8734,7 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
         return true;
     };
 
-    if (drawFaces) {
+    if (!gpuOverlayActive && drawFaces) {
         const size_t overlayFaceCount =
             (!editable_mesh_cache.object_name.empty() && editable_mesh_cache.object_name == objectName &&
              !editable_mesh_cache.polygon_faces.empty())
@@ -8470,7 +8803,7 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
         }
     }
 
-    if (drawEdges) {
+    if (!gpuOverlayActive && drawEdges) {
         const bool usePolygonEdges =
             (meshMode == MeshElementSelectMode::Face ||
              meshMode == MeshElementSelectMode::Edge ||
@@ -8532,7 +8865,7 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
         }
     }
 
-    if (drawVertices) {
+    if (!gpuOverlayActive && drawVertices) {
         const int maxVertexMarkers = (std::max)(1, mesh_overlay_settings.max_vertex_markers);
         if (hasEditableTopologyForObject && !editable_mesh_cache.vertices.empty()) {
             ensureEditableProjectionCache();
@@ -8584,6 +8917,9 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
 
     if (!editable_mesh_cache.object_name.empty() &&
         editable_mesh_cache.object_name == objectName) {
+        // GPU overlay already renders selection highlights + soft-select heat;
+        // only the proportional radius circle further below stays on ImGui.
+        if (!gpuOverlayActive) {
         ensureEditableProjectionCache();
         std::unordered_set<int> softTargets;
         for (const int vertexId : editable_mesh_cache.selection.vertex_ids) {
@@ -8748,6 +9084,8 @@ void SceneUI::drawEditableMeshOverlay(UIContext& ctx) {
                 }
             }
         }
+
+        } // !gpuOverlayActive (ImGui selection/soft-select fallback)
 
         if (mesh_overlay_settings.edit_mode && mesh_overlay_settings.proportional_edit) {
             bool hasCenter = false;

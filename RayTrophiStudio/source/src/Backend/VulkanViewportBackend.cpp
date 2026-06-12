@@ -444,6 +444,22 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
         vkDestroyPipeline(vkDevice, m_interactiveViewport.particleAlphaPipeline, nullptr);
         m_interactiveViewport.particleAlphaPipeline = VK_NULL_HANDLE;
     }
+    if (m_interactiveViewport.editLinePipeline != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyPipeline(vkDevice, m_interactiveViewport.editLinePipeline, nullptr);
+        m_interactiveViewport.editLinePipeline = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.editFacePipeline != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyPipeline(vkDevice, m_interactiveViewport.editFacePipeline, nullptr);
+        m_interactiveViewport.editFacePipeline = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.editPointPipeline != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyPipeline(vkDevice, m_interactiveViewport.editPointPipeline, nullptr);
+        m_interactiveViewport.editPointPipeline = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.editOverlayPipelineLayout != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyPipelineLayout(vkDevice, m_interactiveViewport.editOverlayPipelineLayout, nullptr);
+        m_interactiveViewport.editOverlayPipelineLayout = VK_NULL_HANDLE;
+    }
     if (m_interactiveViewport.materialPreviewPipeline != VK_NULL_HANDLE && !keepPipeline) {
         vkDestroyPipeline(vkDevice, m_interactiveViewport.materialPreviewPipeline, nullptr);
         m_interactiveViewport.materialPreviewPipeline = VK_NULL_HANDLE;
@@ -473,6 +489,36 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
         m_device->destroyBuffer(m_interactiveViewport.particleAlphaVertexBuffer);
         m_interactiveViewport.particleAlphaVertexCount = 0;
     }
+    // Edit overlay buffers are framebuffer-size independent: keep them alive
+    // across viewport resizes (keepPipeline=true), otherwise the UI-side sync
+    // state still believes they are uploaded and the overlay silently
+    // disappears until the next topology/selection change.
+    if (!keepPipeline) {
+        if (m_interactiveViewport.editPositionBuffer.buffer) {
+            m_device->destroyBuffer(m_interactiveViewport.editPositionBuffer);
+            m_interactiveViewport.editVertexCount = 0;
+        }
+        if (m_interactiveViewport.editFlagBuffer.buffer) {
+            m_device->destroyBuffer(m_interactiveViewport.editFlagBuffer);
+        }
+        if (m_interactiveViewport.editEdgeIndexBuffer.buffer) {
+            m_device->destroyBuffer(m_interactiveViewport.editEdgeIndexBuffer);
+            m_interactiveViewport.editEdgeIndexCount = 0;
+        }
+        if (m_interactiveViewport.editFaceIndexBuffer.buffer) {
+            m_device->destroyBuffer(m_interactiveViewport.editFaceIndexBuffer);
+            m_interactiveViewport.editFaceIndexCount = 0;
+        }
+        if (m_interactiveViewport.editSelEdgeIndexBuffer.buffer) {
+            m_device->destroyBuffer(m_interactiveViewport.editSelEdgeIndexBuffer);
+            m_interactiveViewport.editSelEdgeIndexCount = 0;
+        }
+        if (m_interactiveViewport.editSelFaceIndexBuffer.buffer) {
+            m_device->destroyBuffer(m_interactiveViewport.editSelFaceIndexBuffer);
+            m_interactiveViewport.editSelFaceIndexCount = 0;
+        }
+        m_interactiveViewport.editOverlayParams = Backend::EditMeshOverlayParams{};
+    }
     if (m_interactiveViewport.pipelineLayout != VK_NULL_HANDLE && !keepPipeline) {
         vkDestroyPipelineLayout(vkDevice, m_interactiveViewport.pipelineLayout, nullptr);
         m_interactiveViewport.pipelineLayout = VK_NULL_HANDLE;
@@ -482,6 +528,69 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
     }
     if (m_interactiveViewport.depthImage.image) {
         m_device->destroyImage(m_interactiveViewport.depthImage);
+    }
+    // Selection outline: mask image + framebuffers track the viewport size
+    // (destroyed on resize); render passes/pipelines/descriptors follow the
+    // other pipelines' keepPipeline lifecycle.
+    if (m_interactiveViewport.selectionMaskFramebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(vkDevice, m_interactiveViewport.selectionMaskFramebuffer, nullptr);
+        m_interactiveViewport.selectionMaskFramebuffer = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.selectionCompositeFramebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(vkDevice, m_interactiveViewport.selectionCompositeFramebuffer, nullptr);
+        m_interactiveViewport.selectionCompositeFramebuffer = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.selectionMaskImage.image) {
+        m_device->destroyImage(m_interactiveViewport.selectionMaskImage);
+        m_interactiveViewport.selectionMaskImage = {};
+    }
+    if (!keepPipeline) {
+        if (m_interactiveViewport.selectionMaskFullPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(vkDevice, m_interactiveViewport.selectionMaskFullPipeline, nullptr);
+            m_interactiveViewport.selectionMaskFullPipeline = VK_NULL_HANDLE;
+        }
+        if (m_interactiveViewport.selectionMaskVisiblePipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(vkDevice, m_interactiveViewport.selectionMaskVisiblePipeline, nullptr);
+            m_interactiveViewport.selectionMaskVisiblePipeline = VK_NULL_HANDLE;
+        }
+        if (m_interactiveViewport.selectionCompositePipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(vkDevice, m_interactiveViewport.selectionCompositePipeline, nullptr);
+            m_interactiveViewport.selectionCompositePipeline = VK_NULL_HANDLE;
+        }
+        if (m_interactiveViewport.selectionMaskPipelineLayout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(vkDevice, m_interactiveViewport.selectionMaskPipelineLayout, nullptr);
+            m_interactiveViewport.selectionMaskPipelineLayout = VK_NULL_HANDLE;
+        }
+        if (m_interactiveViewport.selectionCompositePipelineLayout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(vkDevice, m_interactiveViewport.selectionCompositePipelineLayout, nullptr);
+            m_interactiveViewport.selectionCompositePipelineLayout = VK_NULL_HANDLE;
+        }
+        if (m_interactiveViewport.selectionMaskRenderPass != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(vkDevice, m_interactiveViewport.selectionMaskRenderPass, nullptr);
+            m_interactiveViewport.selectionMaskRenderPass = VK_NULL_HANDLE;
+        }
+        if (m_interactiveViewport.selectionCompositeRenderPass != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(vkDevice, m_interactiveViewport.selectionCompositeRenderPass, nullptr);
+            m_interactiveViewport.selectionCompositeRenderPass = VK_NULL_HANDLE;
+        }
+        if (m_interactiveViewport.selectionCompositeDescPool != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(vkDevice, m_interactiveViewport.selectionCompositeDescPool, nullptr);
+            m_interactiveViewport.selectionCompositeDescPool = VK_NULL_HANDLE;
+            m_interactiveViewport.selectionCompositeDescSet = VK_NULL_HANDLE;
+        }
+        if (m_interactiveViewport.selectionCompositeDescLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(vkDevice, m_interactiveViewport.selectionCompositeDescLayout, nullptr);
+            m_interactiveViewport.selectionCompositeDescLayout = VK_NULL_HANDLE;
+        }
+        if (m_interactiveViewport.selectionMaskSampler != VK_NULL_HANDLE) {
+            vkDestroySampler(vkDevice, m_interactiveViewport.selectionMaskSampler, nullptr);
+            m_interactiveViewport.selectionMaskSampler = VK_NULL_HANDLE;
+        }
+        if (m_interactiveViewport.selectionInstanceBuffer.buffer) {
+            m_device->destroyBuffer(m_interactiveViewport.selectionInstanceBuffer);
+            m_interactiveViewport.selectionInstanceBuffer = {};
+        }
+        m_interactiveViewport.selectionOutlineParams = Backend::SelectionOutlineParams{};
     }
     if (m_interactiveViewport.stagingBuffer.buffer) {
         m_device->destroyBuffer(m_interactiveViewport.stagingBuffer);
@@ -574,7 +683,11 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         attachments[1].format = VK_FORMAT_D32_SFLOAT;
         attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
         attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        // STORE (not DONT_CARE): the selection-outline mask pass re-loads this
+        // depth right after the main pass to depth-test the visible channel.
+        // Store/load ops don't affect render-pass compatibility, so existing
+        // pipelines are unaffected.
+        attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -753,6 +866,15 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         colorBlendAttachment.colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        // Alpha blend so the grid distance fade can dissolve lines; mesh draws
+        // output alpha 1.0 so their result is unchanged.
+        colorBlendAttachment.blendEnable = VK_TRUE;
+        colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 
         VkPipelineColorBlendStateCreateInfo colorBlending{};
         colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -1528,7 +1650,595 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         }
     }
 
+    // --- Edit-Mesh Overlay Pipelines (wireframe / face fill / vertex markers) ---
+    if (m_interactiveViewport.editOverlayPipelineLayout == VK_NULL_HANDLE) {
+        // Push-constant-only layout: mat4 mvp + 4x vec4 = 128 bytes, vertex stage.
+        VkPushConstantRange ePCR{};
+        ePCR.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        ePCR.offset = 0;
+        ePCR.size = sizeof(float) * 32;
+        VkPipelineLayoutCreateInfo ePLCI{};
+        ePLCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        ePLCI.pushConstantRangeCount = 1;
+        ePLCI.pPushConstantRanges = &ePCR;
+        vkCreatePipelineLayout(vkDevice, &ePLCI, nullptr, &m_interactiveViewport.editOverlayPipelineLayout);
+    }
+    if (m_interactiveViewport.editOverlayPipelineLayout != VK_NULL_HANDLE &&
+        (m_interactiveViewport.editLinePipeline == VK_NULL_HANDLE ||
+         m_interactiveViewport.editFacePipeline == VK_NULL_HANDLE ||
+         m_interactiveViewport.editPointPipeline == VK_NULL_HANDLE)) {
+
+        auto loadModule = [&](const std::string& path) -> VkShaderModule {
+            if (!std::filesystem::exists(path)) return VK_NULL_HANDLE;
+            std::vector<uint32_t> spv = loadViewportSPV(path);
+            if (spv.empty()) return VK_NULL_HANDLE;
+            VkShaderModuleCreateInfo smci{};
+            smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            smci.codeSize = spv.size() * sizeof(uint32_t);
+            smci.pCode = spv.data();
+            VkShaderModule mod = VK_NULL_HANDLE;
+            vkCreateShaderModule(vkDevice, &smci, nullptr, &mod);
+            return mod;
+        };
+        VkShaderModule eVert  = loadModule(shaderDir + "/edit_overlay.spv");
+        VkShaderModule eFrag  = loadModule(shaderDir + "/edit_overlay_frag.spv");
+        VkShaderModule epVert = loadModule(shaderDir + "/edit_overlay_point.spv");
+        VkShaderModule epFrag = loadModule(shaderDir + "/edit_overlay_point_frag.spv");
+
+        // Shared fixed state. Two vertex streams: 0 = vec3 position, 1 = uint flags.
+        // Line/face pipelines consume them per-vertex (indexed); the point
+        // pipeline re-binds the same buffers per-instance and expands a quad
+        // from gl_VertexIndex.
+        auto buildPipeline = [&](VkShaderModule vert, VkShaderModule frag,
+                                 VkPrimitiveTopology topology,
+                                 VkVertexInputRate inputRate,
+                                 VkPipeline* outPipeline) {
+            if (vert == VK_NULL_HANDLE || frag == VK_NULL_HANDLE) return;
+
+            VkPipelineShaderStageCreateInfo eStages[2]{};
+            eStages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            eStages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+            eStages[0].module = vert;
+            eStages[0].pName  = "main";
+            eStages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            eStages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+            eStages[1].module = frag;
+            eStages[1].pName  = "main";
+
+            VkVertexInputBindingDescription eBindings[2]{};
+            eBindings[0].binding = 0;
+            eBindings[0].stride = sizeof(float) * 3;
+            eBindings[0].inputRate = inputRate;
+            eBindings[1].binding = 1;
+            eBindings[1].stride = sizeof(uint32_t);
+            eBindings[1].inputRate = inputRate;
+
+            VkVertexInputAttributeDescription eAttribs[2]{};
+            eAttribs[0].location = 0; eAttribs[0].binding = 0;
+            eAttribs[0].format = VK_FORMAT_R32G32B32_SFLOAT; eAttribs[0].offset = 0;
+            eAttribs[1].location = 1; eAttribs[1].binding = 1;
+            eAttribs[1].format = VK_FORMAT_R32_UINT; eAttribs[1].offset = 0;
+
+            VkPipelineVertexInputStateCreateInfo eVI{};
+            eVI.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            eVI.vertexBindingDescriptionCount = 2;
+            eVI.pVertexBindingDescriptions = eBindings;
+            eVI.vertexAttributeDescriptionCount = 2;
+            eVI.pVertexAttributeDescriptions = eAttribs;
+
+            VkPipelineInputAssemblyStateCreateInfo eIA{};
+            eIA.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            eIA.topology = topology;
+
+            VkPipelineViewportStateCreateInfo eVP{};
+            eVP.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+            eVP.viewportCount = 1;
+            eVP.scissorCount = 1;
+
+            VkPipelineRasterizationStateCreateInfo eRas{};
+            eRas.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            eRas.polygonMode = VK_POLYGON_MODE_FILL;
+            eRas.lineWidth = 1.0f;
+            eRas.cullMode = VK_CULL_MODE_NONE;
+            eRas.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+            VkPipelineMultisampleStateCreateInfo eMS{};
+            eMS.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            eMS.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+            VkPipelineDepthStencilStateCreateInfo eDS{};
+            eDS.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            eDS.depthTestEnable = VK_TRUE;
+            eDS.depthWriteEnable = VK_FALSE; // overlay: test against scene, never occlude it
+            eDS.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+            VkPipelineColorBlendAttachmentState eCBA{};
+            eCBA.blendEnable = VK_TRUE;
+            eCBA.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            eCBA.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            eCBA.colorBlendOp = VK_BLEND_OP_ADD;
+            eCBA.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            eCBA.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            eCBA.alphaBlendOp = VK_BLEND_OP_ADD;
+            eCBA.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                  VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+            VkPipelineColorBlendStateCreateInfo eCB{};
+            eCB.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            eCB.attachmentCount = 1;
+            eCB.pAttachments = &eCBA;
+
+            VkDynamicState eDyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+            VkPipelineDynamicStateCreateInfo eDynState{};
+            eDynState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+            eDynState.dynamicStateCount = 2;
+            eDynState.pDynamicStates = eDyn;
+
+            VkGraphicsPipelineCreateInfo ePI{};
+            ePI.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            ePI.stageCount = 2;
+            ePI.pStages = eStages;
+            ePI.pVertexInputState = &eVI;
+            ePI.pInputAssemblyState = &eIA;
+            ePI.pViewportState = &eVP;
+            ePI.pRasterizationState = &eRas;
+            ePI.pMultisampleState = &eMS;
+            ePI.pDepthStencilState = &eDS;
+            ePI.pColorBlendState = &eCB;
+            ePI.pDynamicState = &eDynState;
+            ePI.layout = m_interactiveViewport.editOverlayPipelineLayout;
+            ePI.renderPass = m_interactiveViewport.renderPass;
+            ePI.subpass = 0;
+
+            vkCreateGraphicsPipelines(vkDevice, VK_NULL_HANDLE, 1, &ePI, nullptr, outPipeline);
+        };
+
+        if (m_interactiveViewport.editLinePipeline == VK_NULL_HANDLE) {
+            buildPipeline(eVert, eFrag, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+                          VK_VERTEX_INPUT_RATE_VERTEX, &m_interactiveViewport.editLinePipeline);
+        }
+        if (m_interactiveViewport.editFacePipeline == VK_NULL_HANDLE) {
+            buildPipeline(eVert, eFrag, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                          VK_VERTEX_INPUT_RATE_VERTEX, &m_interactiveViewport.editFacePipeline);
+        }
+        if (m_interactiveViewport.editPointPipeline == VK_NULL_HANDLE) {
+            buildPipeline(epVert, epFrag, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                          VK_VERTEX_INPUT_RATE_INSTANCE, &m_interactiveViewport.editPointPipeline);
+        }
+
+        if (eVert)  vkDestroyShaderModule(vkDevice, eVert, nullptr);
+        if (eFrag)  vkDestroyShaderModule(vkDevice, eFrag, nullptr);
+        if (epVert) vkDestroyShaderModule(vkDevice, epVert, nullptr);
+        if (epFrag) vkDestroyShaderModule(vkDevice, epFrag, nullptr);
+    }
+
+    // ── Selection outline: render passes + pipelines (created once) ─────────
+    // Mask pass re-draws the selected instances into an R8G8 target
+    // (G = full silhouette via depth-test-off, R = visible via depth-test
+    // against the scene depth left by the main pass), then the composite pass
+    // edge-detects the mask over the finished color image. Everything here is
+    // optional: when the SPIR-V is missing the pipelines stay null and the
+    // draw path simply skips, leaving the UI on its ImGui fallback.
+    if (m_interactiveViewport.selectionMaskRenderPass == VK_NULL_HANDLE) {
+        VkAttachmentDescription mAtt[2]{};
+        mAtt[0].format = VK_FORMAT_R8G8_UNORM;
+        mAtt[0].samples = VK_SAMPLE_COUNT_1_BIT;
+        mAtt[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        mAtt[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        mAtt[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        mAtt[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        mAtt[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        mAtt[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        // Scene depth: loaded read-only (depthWriteEnable=false in both
+        // pipelines); contents are not needed after this pass.
+        mAtt[1].format = VK_FORMAT_D32_SFLOAT;
+        mAtt[1].samples = VK_SAMPLE_COUNT_1_BIT;
+        mAtt[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        mAtt[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        mAtt[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        mAtt[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        mAtt[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        mAtt[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference mColorRef{};
+        mColorRef.attachment = 0;
+        mColorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        VkAttachmentReference mDepthRef{};
+        mDepthRef.attachment = 1;
+        mDepthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription mSub{};
+        mSub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        mSub.colorAttachmentCount = 1;
+        mSub.pColorAttachments = &mColorRef;
+        mSub.pDepthStencilAttachment = &mDepthRef;
+
+        VkSubpassDependency mDeps[2]{};
+        // Main pass depth writes -> our depth test reads.
+        mDeps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+        mDeps[0].dstSubpass = 0;
+        mDeps[0].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        mDeps[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        mDeps[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        mDeps[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        // Mask writes -> composite fragment shader sampling.
+        mDeps[1].srcSubpass = 0;
+        mDeps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+        mDeps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        mDeps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        mDeps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        mDeps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        VkRenderPassCreateInfo mRPCI{};
+        mRPCI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        mRPCI.attachmentCount = 2;
+        mRPCI.pAttachments = mAtt;
+        mRPCI.subpassCount = 1;
+        mRPCI.pSubpasses = &mSub;
+        mRPCI.dependencyCount = 2;
+        mRPCI.pDependencies = mDeps;
+        vkCreateRenderPass(vkDevice, &mRPCI, nullptr, &m_interactiveViewport.selectionMaskRenderPass);
+    }
+    if (m_interactiveViewport.selectionCompositeRenderPass == VK_NULL_HANDLE) {
+        // Composite over the finished color image. The main pass leaves the
+        // color image in GENERAL; keep it there so the staging copy that
+        // follows sees the layout it expects.
+        VkAttachmentDescription cAtt{};
+        cAtt.format = VK_FORMAT_R8G8B8A8_UNORM;
+        cAtt.samples = VK_SAMPLE_COUNT_1_BIT;
+        cAtt.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        cAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        cAtt.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        cAtt.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        cAtt.initialLayout = VK_IMAGE_LAYOUT_GENERAL;
+        cAtt.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkAttachmentReference cColorRef{};
+        cColorRef.attachment = 0;
+        cColorRef.layout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkSubpassDescription cSub{};
+        cSub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        cSub.colorAttachmentCount = 1;
+        cSub.pColorAttachments = &cColorRef;
+
+        VkSubpassDependency cDep{};
+        cDep.srcSubpass = VK_SUBPASS_EXTERNAL;
+        cDep.dstSubpass = 0;
+        cDep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        cDep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        cDep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        cDep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo cRPCI{};
+        cRPCI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        cRPCI.attachmentCount = 1;
+        cRPCI.pAttachments = &cAtt;
+        cRPCI.subpassCount = 1;
+        cRPCI.pSubpasses = &cSub;
+        cRPCI.dependencyCount = 1;
+        cRPCI.pDependencies = &cDep;
+        vkCreateRenderPass(vkDevice, &cRPCI, nullptr, &m_interactiveViewport.selectionCompositeRenderPass);
+    }
+    if (m_interactiveViewport.selectionMaskSampler == VK_NULL_HANDLE) {
+        // Bilinear so the composite's fractional kernel offsets give cheap AA.
+        VkSamplerCreateInfo sci{};
+        sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sci.magFilter = VK_FILTER_LINEAR;
+        sci.minFilter = VK_FILTER_LINEAR;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        vkCreateSampler(vkDevice, &sci, nullptr, &m_interactiveViewport.selectionMaskSampler);
+    }
+    if (m_interactiveViewport.selectionMaskPipelineLayout == VK_NULL_HANDLE) {
+        // mat4 viewProj + vec4 maskValue = 80 bytes, vertex stage.
+        VkPushConstantRange sPCR{};
+        sPCR.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        sPCR.offset = 0;
+        sPCR.size = sizeof(float) * 20;
+        VkPipelineLayoutCreateInfo sPLCI{};
+        sPLCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        sPLCI.pushConstantRangeCount = 1;
+        sPLCI.pPushConstantRanges = &sPCR;
+        vkCreatePipelineLayout(vkDevice, &sPLCI, nullptr, &m_interactiveViewport.selectionMaskPipelineLayout);
+    }
+    if (m_interactiveViewport.selectionCompositeDescLayout == VK_NULL_HANDLE) {
+        VkDescriptorSetLayoutBinding maskBinding{};
+        maskBinding.binding = 0;
+        maskBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        maskBinding.descriptorCount = 1;
+        maskBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo dslci{};
+        dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dslci.bindingCount = 1;
+        dslci.pBindings = &maskBinding;
+        vkCreateDescriptorSetLayout(vkDevice, &dslci, nullptr, &m_interactiveViewport.selectionCompositeDescLayout);
+
+        if (m_interactiveViewport.selectionCompositeDescLayout != VK_NULL_HANDLE) {
+            VkDescriptorPoolSize poolSize{};
+            poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            poolSize.descriptorCount = 1;
+            VkDescriptorPoolCreateInfo dpci{};
+            dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            dpci.poolSizeCount = 1;
+            dpci.pPoolSizes = &poolSize;
+            dpci.maxSets = 1;
+            if (vkCreateDescriptorPool(vkDevice, &dpci, nullptr, &m_interactiveViewport.selectionCompositeDescPool) == VK_SUCCESS) {
+                VkDescriptorSetAllocateInfo dsai{};
+                dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+                dsai.descriptorPool = m_interactiveViewport.selectionCompositeDescPool;
+                dsai.descriptorSetCount = 1;
+                dsai.pSetLayouts = &m_interactiveViewport.selectionCompositeDescLayout;
+                vkAllocateDescriptorSets(vkDevice, &dsai, &m_interactiveViewport.selectionCompositeDescSet);
+            }
+        }
+    }
+    if (m_interactiveViewport.selectionCompositePipelineLayout == VK_NULL_HANDLE &&
+        m_interactiveViewport.selectionCompositeDescLayout != VK_NULL_HANDLE) {
+        // 4x vec4 (primary/secondary/occluded colors + params) fragment stage.
+        VkPushConstantRange cPCR{};
+        cPCR.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        cPCR.offset = 0;
+        cPCR.size = sizeof(float) * 16;
+        VkPipelineLayoutCreateInfo cPLCI{};
+        cPLCI.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        cPLCI.pushConstantRangeCount = 1;
+        cPLCI.pPushConstantRanges = &cPCR;
+        cPLCI.setLayoutCount = 1;
+        cPLCI.pSetLayouts = &m_interactiveViewport.selectionCompositeDescLayout;
+        vkCreatePipelineLayout(vkDevice, &cPLCI, nullptr, &m_interactiveViewport.selectionCompositePipelineLayout);
+    }
+    if (m_interactiveViewport.selectionMaskRenderPass != VK_NULL_HANDLE &&
+        m_interactiveViewport.selectionMaskPipelineLayout != VK_NULL_HANDLE &&
+        (m_interactiveViewport.selectionMaskFullPipeline == VK_NULL_HANDLE ||
+         m_interactiveViewport.selectionMaskVisiblePipeline == VK_NULL_HANDLE)) {
+
+        auto loadSelModule = [&](const std::string& path) -> VkShaderModule {
+            if (!std::filesystem::exists(path)) return VK_NULL_HANDLE;
+            std::vector<uint32_t> spv = loadViewportSPV(path);
+            if (spv.empty()) return VK_NULL_HANDLE;
+            VkShaderModuleCreateInfo smci{};
+            smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            smci.codeSize = spv.size() * sizeof(uint32_t);
+            smci.pCode = spv.data();
+            VkShaderModule mod = VK_NULL_HANDLE;
+            vkCreateShaderModule(vkDevice, &smci, nullptr, &mod);
+            return mod;
+        };
+        VkShaderModule smVert = loadSelModule(shaderDir + "/selection_mask.spv");
+        VkShaderModule smFrag = loadSelModule(shaderDir + "/selection_mask_frag.spv");
+
+        auto buildMaskPipeline = [&](bool depthTest, VkColorComponentFlags writeMask,
+                                     VkPipeline* outPipeline) {
+            if (smVert == VK_NULL_HANDLE || smFrag == VK_NULL_HANDLE) return;
+
+            VkPipelineShaderStageCreateInfo stages[2]{};
+            stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+            stages[0].module = smVert;
+            stages[0].pName  = "main";
+            stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+            stages[1].module = smFrag;
+            stages[1].pName  = "main";
+
+            // Stream 0: raster mesh position buffer (vec3). Stream 1: one
+            // mat4 per selected instance (per-instance rate).
+            VkVertexInputBindingDescription bind[2]{};
+            bind[0].binding = 0;
+            bind[0].stride = sizeof(float) * 3;
+            bind[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+            bind[1].binding = 1;
+            bind[1].stride = sizeof(float) * 16;
+            bind[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+            VkVertexInputAttributeDescription attr[5]{};
+            attr[0].location = 0; attr[0].binding = 0;
+            attr[0].format = VK_FORMAT_R32G32B32_SFLOAT; attr[0].offset = 0;
+            for (int i = 0; i < 4; ++i) {
+                attr[1 + i].location = 1 + i;
+                attr[1 + i].binding = 1;
+                attr[1 + i].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+                attr[1 + i].offset = sizeof(float) * 4 * i;
+            }
+
+            VkPipelineVertexInputStateCreateInfo vi{};
+            vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            vi.vertexBindingDescriptionCount = 2;
+            vi.pVertexBindingDescriptions = bind;
+            vi.vertexAttributeDescriptionCount = 5;
+            vi.pVertexAttributeDescriptions = attr;
+
+            VkPipelineInputAssemblyStateCreateInfo ia{};
+            ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+            VkPipelineViewportStateCreateInfo vp{};
+            vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+            vp.viewportCount = 1;
+            vp.scissorCount = 1;
+
+            VkPipelineRasterizationStateCreateInfo ras{};
+            ras.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            ras.polygonMode = VK_POLYGON_MODE_FILL;
+            ras.lineWidth = 1.0f;
+            ras.cullMode = VK_CULL_MODE_NONE; // silhouette must include backfaces (open meshes)
+            ras.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+            VkPipelineMultisampleStateCreateInfo ms{};
+            ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+            VkPipelineDepthStencilStateCreateInfo ds{};
+            ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            ds.depthTestEnable = depthTest ? VK_TRUE : VK_FALSE;
+            ds.depthWriteEnable = VK_FALSE; // scene depth is read-only here
+            ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+            // MAX blend so overlapping primary (1.0) and secondary (0.5)
+            // silhouettes keep the stronger tier per channel.
+            VkPipelineColorBlendAttachmentState cba{};
+            cba.blendEnable = VK_TRUE;
+            cba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.colorBlendOp = VK_BLEND_OP_MAX;
+            cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.alphaBlendOp = VK_BLEND_OP_MAX;
+            cba.colorWriteMask = writeMask;
+
+            VkPipelineColorBlendStateCreateInfo cb{};
+            cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            cb.attachmentCount = 1;
+            cb.pAttachments = &cba;
+
+            VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+            VkPipelineDynamicStateCreateInfo dynState{};
+            dynState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+            dynState.dynamicStateCount = 2;
+            dynState.pDynamicStates = dyn;
+
+            VkGraphicsPipelineCreateInfo pi{};
+            pi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            pi.stageCount = 2;
+            pi.pStages = stages;
+            pi.pVertexInputState = &vi;
+            pi.pInputAssemblyState = &ia;
+            pi.pViewportState = &vp;
+            pi.pRasterizationState = &ras;
+            pi.pMultisampleState = &ms;
+            pi.pDepthStencilState = &ds;
+            pi.pColorBlendState = &cb;
+            pi.pDynamicState = &dynState;
+            pi.layout = m_interactiveViewport.selectionMaskPipelineLayout;
+            pi.renderPass = m_interactiveViewport.selectionMaskRenderPass;
+            pi.subpass = 0;
+            vkCreateGraphicsPipelines(vkDevice, VK_NULL_HANDLE, 1, &pi, nullptr, outPipeline);
+        };
+
+        if (m_interactiveViewport.selectionMaskFullPipeline == VK_NULL_HANDLE) {
+            buildMaskPipeline(false, VK_COLOR_COMPONENT_G_BIT,
+                              &m_interactiveViewport.selectionMaskFullPipeline);
+        }
+        if (m_interactiveViewport.selectionMaskVisiblePipeline == VK_NULL_HANDLE) {
+            buildMaskPipeline(true, VK_COLOR_COMPONENT_R_BIT,
+                              &m_interactiveViewport.selectionMaskVisiblePipeline);
+        }
+
+        if (smVert) vkDestroyShaderModule(vkDevice, smVert, nullptr);
+        if (smFrag) vkDestroyShaderModule(vkDevice, smFrag, nullptr);
+    }
+    if (m_interactiveViewport.selectionCompositePipeline == VK_NULL_HANDLE &&
+        m_interactiveViewport.selectionCompositeRenderPass != VK_NULL_HANDLE &&
+        m_interactiveViewport.selectionCompositePipelineLayout != VK_NULL_HANDLE) {
+
+        auto loadSelModule = [&](const std::string& path) -> VkShaderModule {
+            if (!std::filesystem::exists(path)) return VK_NULL_HANDLE;
+            std::vector<uint32_t> spv = loadViewportSPV(path);
+            if (spv.empty()) return VK_NULL_HANDLE;
+            VkShaderModuleCreateInfo smci{};
+            smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            smci.codeSize = spv.size() * sizeof(uint32_t);
+            smci.pCode = spv.data();
+            VkShaderModule mod = VK_NULL_HANDLE;
+            vkCreateShaderModule(vkDevice, &smci, nullptr, &mod);
+            return mod;
+        };
+        VkShaderModule soVert = loadSelModule(shaderDir + "/selection_outline.spv");
+        VkShaderModule soFrag = loadSelModule(shaderDir + "/selection_outline_frag.spv");
+
+        if (soVert != VK_NULL_HANDLE && soFrag != VK_NULL_HANDLE) {
+            VkPipelineShaderStageCreateInfo stages[2]{};
+            stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
+            stages[0].module = soVert;
+            stages[0].pName  = "main";
+            stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+            stages[1].module = soFrag;
+            stages[1].pName  = "main";
+
+            VkPipelineVertexInputStateCreateInfo vi{};
+            vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+            VkPipelineInputAssemblyStateCreateInfo ia{};
+            ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+            VkPipelineViewportStateCreateInfo vp{};
+            vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+            vp.viewportCount = 1;
+            vp.scissorCount = 1;
+
+            VkPipelineRasterizationStateCreateInfo ras{};
+            ras.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            ras.polygonMode = VK_POLYGON_MODE_FILL;
+            ras.lineWidth = 1.0f;
+            ras.cullMode = VK_CULL_MODE_NONE;
+            ras.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+            VkPipelineMultisampleStateCreateInfo ms{};
+            ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+            VkPipelineDepthStencilStateCreateInfo ds{};
+            ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+
+            VkPipelineColorBlendAttachmentState cba{};
+            cba.blendEnable = VK_TRUE;
+            cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            cba.colorBlendOp = VK_BLEND_OP_ADD;
+            cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            cba.alphaBlendOp = VK_BLEND_OP_ADD;
+            cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                 VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+            VkPipelineColorBlendStateCreateInfo cb{};
+            cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            cb.attachmentCount = 1;
+            cb.pAttachments = &cba;
+
+            VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+            VkPipelineDynamicStateCreateInfo dynState{};
+            dynState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+            dynState.dynamicStateCount = 2;
+            dynState.pDynamicStates = dyn;
+
+            VkGraphicsPipelineCreateInfo pi{};
+            pi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            pi.stageCount = 2;
+            pi.pStages = stages;
+            pi.pVertexInputState = &vi;
+            pi.pInputAssemblyState = &ia;
+            pi.pViewportState = &vp;
+            pi.pRasterizationState = &ras;
+            pi.pMultisampleState = &ms;
+            pi.pDepthStencilState = &ds;
+            pi.pColorBlendState = &cb;
+            pi.pDynamicState = &dynState;
+            pi.layout = m_interactiveViewport.selectionCompositePipelineLayout;
+            pi.renderPass = m_interactiveViewport.selectionCompositeRenderPass;
+            pi.subpass = 0;
+            vkCreateGraphicsPipelines(vkDevice, VK_NULL_HANDLE, 1, &pi, nullptr,
+                                      &m_interactiveViewport.selectionCompositePipeline);
+        }
+        if (soVert) vkDestroyShaderModule(vkDevice, soVert, nullptr);
+        if (soFrag) vkDestroyShaderModule(vkDevice, soFrag, nullptr);
+    }
+
    // SCENE_LOG_INFO("[MP-init] step=postAllPipelines");
+    // NOTE: selection-outline mask resources are intentionally NOT part of
+    // this early-return: they are created in the same resize pass as the
+    // main framebuffer below, and if their creation ever failed (memory
+    // pressure) re-trying every frame would thrash the whole viewport.
     if (m_interactiveViewport.width == width &&
         m_interactiveViewport.height == height &&
         m_interactiveViewport.framebuffer != VK_NULL_HANDLE &&
@@ -1578,6 +2288,58 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
     if (vkCreateFramebuffer(vkDevice, &framebufferInfo, nullptr, &m_interactiveViewport.framebuffer) != VK_SUCCESS) {
         destroyInteractiveViewportResourcesImpl(true);
         return false;
+    }
+
+    // Selection outline targets share the viewport size; failure here only
+    // disables the outline (the main viewport stays functional).
+    if (m_interactiveViewport.selectionMaskRenderPass != VK_NULL_HANDLE &&
+        m_interactiveViewport.selectionCompositeRenderPass != VK_NULL_HANDLE) {
+        m_interactiveViewport.selectionMaskImage = m_device->createImage2D(
+            (uint32_t)width, (uint32_t)height, VK_FORMAT_R8G8_UNORM,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT);
+        if (m_interactiveViewport.selectionMaskImage.image) {
+            VkImageView maskAttachments[2] = {
+                m_interactiveViewport.selectionMaskImage.view,
+                m_interactiveViewport.depthImage.view
+            };
+            VkFramebufferCreateInfo maskFBI{};
+            maskFBI.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            maskFBI.renderPass = m_interactiveViewport.selectionMaskRenderPass;
+            maskFBI.attachmentCount = 2;
+            maskFBI.pAttachments = maskAttachments;
+            maskFBI.width = (uint32_t)width;
+            maskFBI.height = (uint32_t)height;
+            maskFBI.layers = 1;
+            vkCreateFramebuffer(vkDevice, &maskFBI, nullptr, &m_interactiveViewport.selectionMaskFramebuffer);
+
+            VkFramebufferCreateInfo compFBI{};
+            compFBI.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            compFBI.renderPass = m_interactiveViewport.selectionCompositeRenderPass;
+            compFBI.attachmentCount = 1;
+            compFBI.pAttachments = &m_interactiveViewport.colorImage.view;
+            compFBI.width = (uint32_t)width;
+            compFBI.height = (uint32_t)height;
+            compFBI.layers = 1;
+            vkCreateFramebuffer(vkDevice, &compFBI, nullptr, &m_interactiveViewport.selectionCompositeFramebuffer);
+
+            // (Re)point the composite descriptor at the fresh mask image.
+            if (m_interactiveViewport.selectionCompositeDescSet != VK_NULL_HANDLE &&
+                m_interactiveViewport.selectionMaskSampler != VK_NULL_HANDLE) {
+                VkDescriptorImageInfo di{};
+                di.sampler = m_interactiveViewport.selectionMaskSampler;
+                di.imageView = m_interactiveViewport.selectionMaskImage.view;
+                di.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                VkWriteDescriptorSet wds{};
+                wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                wds.dstSet = m_interactiveViewport.selectionCompositeDescSet;
+                wds.dstBinding = 0;
+                wds.descriptorCount = 1;
+                wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                wds.pImageInfo = &di;
+                vkUpdateDescriptorSets(vkDevice, 1, &wds, 0, nullptr);
+            }
+        }
     }
 
     m_interactiveViewport.width = width;
@@ -1641,6 +2403,12 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         return h;
     };
     uint64_t camHash = hashCamera(m_camera);
+    {
+        // Grid settings join the change hash so slider edits invalidate the cached frame.
+        auto mixGrid = [&](float v) { uint32_t bits; std::memcpy(&bits, &v, 4); camHash ^= bits; camHash *= 1099511628211ull; };
+        mixGrid(::render_settings.grid_fade_distance);
+        mixGrid(::render_settings.grid_opacity);
+    }
     if (!m_interactiveViewport.dirty && camHash == m_lastCameraHash &&
         m_interactiveViewport.width == width && m_interactiveViewport.height == height) {
         std::vector<uint32_t>* framebuffer = static_cast<std::vector<uint32_t>*>(fb);
@@ -1665,6 +2433,10 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         float view[16];
         int useMatcap;
         float overrideR, overrideG, overrideB;
+        // Grid distance fade (world units, around fadeCenter). fadeEnd <= fadeStart disables.
+        float fadeCenterX, fadeCenterY, fadeCenterZ;
+        float fadeStart, fadeEnd;
+        float overrideA; // base opacity for flat-color draws (grid)
     };
 
     auto matrixToGL = [](const Matrix4x4& mat, float out[16]) {
@@ -1819,6 +2591,25 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         // Buffer allocation failed (e.g. old driver / memory pressure) — skip raster frame
         m_interactiveViewport.dirty = true;
         return;
+    }
+
+    // ── Selection outline: resolve node names → raster instances and upload
+    // their matrices BEFORE command recording starts (uploadBuffer submits its
+    // own transfer command buffer).
+    std::vector<SelectionOutlineDrawItem> selectionOutlineDraws;
+    {
+        const Backend::SelectionOutlineParams& sop = m_interactiveViewport.selectionOutlineParams;
+        const bool selectionOutlineReady =
+            sop.enabled && !sop.nodeNames.empty() &&
+            m_interactiveViewport.selectionMaskFullPipeline != VK_NULL_HANDLE &&
+            m_interactiveViewport.selectionMaskVisiblePipeline != VK_NULL_HANDLE &&
+            m_interactiveViewport.selectionCompositePipeline != VK_NULL_HANDLE &&
+            m_interactiveViewport.selectionMaskFramebuffer != VK_NULL_HANDLE &&
+            m_interactiveViewport.selectionCompositeFramebuffer != VK_NULL_HANDLE &&
+            m_interactiveViewport.selectionCompositeDescSet != VK_NULL_HANDLE;
+        if (selectionOutlineReady) {
+            resolveSelectionOutlineDraws(sop.nodeNames, selectionOutlineDraws);
+        }
     }
 
     VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
@@ -2085,9 +2876,43 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     }
     const float gridSpacing = candidateSpacing;
 
+    // The grid stays ORIGIN-centred (the world axes are the visual anchor), but its extent must
+    // not be cropped to the zoom alone: gridHalf ~ viewScale meant a floor close-up far from the
+    // origin shrank the patch away from under the camera and the grid seemed to vanish. The
+    // camera's planar distance from the origin now sets a lower bound on the extent instead.
+    float camU, camV;
+    switch (activeGridPlane) {
+        case 1:  camU = m_camera.origin.x; camV = m_camera.origin.y; break; // XY (Front/Back)
+        case 2:  camU = m_camera.origin.z; camV = m_camera.origin.y; break; // YZ (Left/Right)
+        default: camU = m_camera.origin.x; camV = m_camera.origin.z; break; // XZ floor
+    }
+    const float camPlanarDist = (std::max)(std::abs(camU), std::abs(camV));
+    // User knob: scales the fog horizon (and with it the built extents below). Growth re-triggers
+    // a rebuild via extentStale; shrink may keep oversized geometry, which the draw-side fade
+    // bands simply dissolve earlier.
+    const float gridFadeScale = std::clamp(::render_settings.grid_fade_distance, 0.25f, 4.0f);
+    // 16x viewScale: the major lattice must reach past the fade horizon (~19x viewScale, see
+    // drawSeg fade bands below) so lines dissolve into the fog instead of ending at a visible
+    // geometric edge. With the 1.25x build margin the edge sits at >=20x viewScale.
+    const float requiredHalf = viewScale * 16.0f * gridFadeScale + camPlanarDist;
+    // Minor (fine) lattice is camera-centred (see rebuild below); snap its centre to the major
+    // (10x) lattice so minor lines always land on the global grid as the patch follows the camera.
+    const float coarseSpacing = gridSpacing * 10.0f;
+    const float fineCenterU = std::round(camU / coarseSpacing) * coarseSpacing;
+    const float fineCenterV = std::round(camV / coarseSpacing) * coarseSpacing;
+    // Hysteresis: rebuild when the camera outgrows the built extent, or when the built extent
+    // is so oversized (>2.5x) that the grid should shrink back. The 1.25x build margin below
+    // keeps small camera moves from re-triggering this every frame.
+    const bool extentStale =
+        requiredHalf > m_interactiveViewport.gridBuiltHalf ||
+        requiredHalf < m_interactiveViewport.gridBuiltHalf * 0.4f;
+
     if (!m_interactiveViewport.gridVertexBuffer.buffer ||
         m_interactiveViewport.gridBuiltPlane != activeGridPlane ||
-        m_interactiveViewport.gridBuiltSpacing != gridSpacing) {
+        m_interactiveViewport.gridBuiltSpacing != gridSpacing ||
+        m_interactiveViewport.gridBuiltCenterU != fineCenterU ||
+        m_interactiveViewport.gridBuiltCenterV != fineCenterV ||
+        extentStale) {
         if (m_interactiveViewport.gridVertexBuffer.buffer) {
             m_device->destroyBuffer(m_interactiveViewport.gridVertexBuffer);
             m_interactiveViewport.gridVertexBuffer = {};
@@ -2097,15 +2922,24 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
             m_interactiveViewport.gridNormalBuffer = {};
         }
 
-        // Scale the number of lines so the total grid extent stays
-        // proportional to the visible area (~4× viewScale on each side).
-        // This prevents the grid from suddenly covering a much larger area
-        // when the spacing bumps up, which made objects look shrunken.
-        const float desiredHalf = viewScale * 4.0f;
-        const int   linesEachSide = (std::max)(10, (int)std::ceil(desiredHalf / gridSpacing));
-        const float gridHalf = gridSpacing * (float)linesEachSide;
+        // Two-tier lattice. MINOR lines (current spacing) only span the visible area around the
+        // camera footprint — building them across the whole extended extent made distant lines
+        // collapse below a pixel and moiré badly in perspective (especially at 720p, no MSAA).
+        // MAJOR lines (10x spacing, 10x thickness = every 10th minor) span the full extent from
+        // the origin out past the camera, so the far field stays referenced with far fewer,
+        // fatter lines. Axes are unchanged (origin-anchored, full extent). 25% growth margin so
+        // small camera moves don't immediately re-trigger a rebuild.
+        const float desiredHalf = requiredHalf * 1.25f;
+        const int   coarseEachSide = std::clamp((int)std::ceil(desiredHalf / coarseSpacing), 4, 2048);
+        const float gridHalf = coarseSpacing * (float)coarseEachSide;
+        // 18x viewScale: minor lines reach well past the working area (10x still read as an
+        // early cutoff); the distance fade below dissolves them before the geometric edge and
+        // before they collapse sub-pixel and moiré (~40x viewScale at 720p).
+        const int   fineEachSide = std::clamp((int)std::ceil((viewScale * 18.0f * gridFadeScale) / gridSpacing), 10, 1024);
+        const float fineHalf = gridSpacing * (float)fineEachSide;
         const float step = gridSpacing;
         const float thin = gridSpacing * 0.008f; // thicker so 720p (no MSAA) doesn't break lines up
+        const float coarseThin = coarseSpacing * 0.008f;
         const float axisThin = gridSpacing * 0.022f;
 
         // Plane basis: ax = horizontal axis, ay = vertical axis, nrm = plane normal.
@@ -2129,47 +2963,74 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
             }
         };
 
-        uint32_t seg0Start = 0;
-        for (float u = -gridHalf; u <= gridHalf + step * 0.001f; u += step) {
-            if (std::abs(u) < step * 0.5f) continue;
-            addLineQuad(ax * u - ay * gridHalf, ax * u + ay * gridHalf, ax * thin);
+        // Major lattice (full extent, origin-centred; i==0 is covered by the axis quads).
+        // Kept in its own segment so it can fade at the far horizon while the minor
+        // lattice fades earlier (separate fade bands per drawSeg call).
+        uint32_t segMajorStart = 0;
+        for (int i = -coarseEachSide; i <= coarseEachSide; ++i) {
+            if (i == 0) continue;
+            const float u = coarseSpacing * (float)i;
+            addLineQuad(ax * u - ay * gridHalf, ax * u + ay * gridHalf, ax * coarseThin);
         }
-        for (float v = -gridHalf; v <= gridHalf + step * 0.001f; v += step) {
-            if (std::abs(v) < step * 0.5f) continue;
-            addLineQuad(ay * v - ax * gridHalf, ay * v + ax * gridHalf, ay * thin);
+        for (int i = -coarseEachSide; i <= coarseEachSide; ++i) {
+            if (i == 0) continue;
+            const float v = coarseSpacing * (float)i;
+            addLineQuad(ay * v - ax * gridHalf, ay * v + ax * gridHalf, ay * coarseThin);
         }
-        uint32_t seg0Count = (uint32_t)(positions.size() / 3);
+        uint32_t segMajorCount = (uint32_t)(positions.size() / 3) - segMajorStart;
 
-        uint32_t seg1Start = (uint32_t)(positions.size() / 3);
+        // Minor lattice (visible area, centred on the camera footprint snapped to the major
+        // lattice — every 10th index lands on a major line / the axes and is skipped).
+        uint32_t segMinorStart = (uint32_t)(positions.size() / 3);
+        for (int i = -fineEachSide; i <= fineEachSide; ++i) {
+            if (((int)std::lround(fineCenterU / step) + i) % 10 == 0) continue;
+            const float u = fineCenterU + step * (float)i;
+            addLineQuad(ax * u + ay * (fineCenterV - fineHalf), ax * u + ay * (fineCenterV + fineHalf), ax * thin);
+        }
+        for (int i = -fineEachSide; i <= fineEachSide; ++i) {
+            if (((int)std::lround(fineCenterV / step) + i) % 10 == 0) continue;
+            const float v = fineCenterV + step * (float)i;
+            addLineQuad(ay * v + ax * (fineCenterU - fineHalf), ay * v + ax * (fineCenterU + fineHalf), ay * thin);
+        }
+        uint32_t segMinorCount = (uint32_t)(positions.size() / 3) - segMinorStart;
+
+        uint32_t segAxisUStart = (uint32_t)(positions.size() / 3);
         addLineQuad(nOff, ax * gridHalf + nOff, ay * axisThin);
-        uint32_t seg1Count = (uint32_t)(positions.size() / 3) - seg1Start;
+        uint32_t segAxisUCount = (uint32_t)(positions.size() / 3) - segAxisUStart;
 
-        uint32_t seg2Start = (uint32_t)(positions.size() / 3);
+        uint32_t segAxisVStart = (uint32_t)(positions.size() / 3);
         addLineQuad(nOff, ay * gridHalf + nOff, ax * axisThin);
-        uint32_t seg2Count = (uint32_t)(positions.size() / 3) - seg2Start;
+        uint32_t segAxisVCount = (uint32_t)(positions.size() / 3) - segAxisVStart;
 
-        uint32_t seg3Start = (uint32_t)(positions.size() / 3);
+        uint32_t segNegStart = (uint32_t)(positions.size() / 3);
         addLineQuad(ax * -gridHalf + nOff, nOff, ay * thin);
         addLineQuad(ay * -gridHalf + nOff, nOff, ax * thin);
-        uint32_t seg3Count = (uint32_t)(positions.size() / 3) - seg3Start;
+        uint32_t segNegCount = (uint32_t)(positions.size() / 3) - segNegStart;
 
         m_interactiveViewport.gridBuiltPlane = activeGridPlane;
         m_interactiveViewport.gridBuiltSpacing = gridSpacing;
+        // Store the UNCLAMPED target so a hit line-cap doesn't re-trigger a rebuild every frame.
+        m_interactiveViewport.gridBuiltHalf = (std::max)(gridHalf, desiredHalf);
+        m_interactiveViewport.gridBuiltCenterU = fineCenterU;
+        m_interactiveViewport.gridBuiltCenterV = fineCenterV;
+        m_interactiveViewport.gridBuiltFineHalf = fineHalf;
 
         m_interactiveViewport.gridVertexCount = (uint32_t)(positions.size() / 3);
-        m_interactiveViewport.gridSegments[0] = seg0Start;
-        m_interactiveViewport.gridSegments[1] = seg0Count;
-        m_interactiveViewport.gridSegments[2] = seg1Start;
-        m_interactiveViewport.gridSegments[3] = seg1Count;
-        m_interactiveViewport.gridSegments[4] = seg2Start;
-        m_interactiveViewport.gridSegments[5] = seg2Count;
-        m_interactiveViewport.gridSegments[6] = seg3Start;
-        m_interactiveViewport.gridSegments[7] = seg3Count;
-       
-        if (seg2Count > 0) {
+        m_interactiveViewport.gridSegments[0] = segMajorStart;
+        m_interactiveViewport.gridSegments[1] = segMajorCount;
+        m_interactiveViewport.gridSegments[2] = segMinorStart;
+        m_interactiveViewport.gridSegments[3] = segMinorCount;
+        m_interactiveViewport.gridSegments[4] = segAxisUStart;
+        m_interactiveViewport.gridSegments[5] = segAxisUCount;
+        m_interactiveViewport.gridSegments[6] = segAxisVStart;
+        m_interactiveViewport.gridSegments[7] = segAxisVCount;
+        m_interactiveViewport.gridSegments[8] = segNegStart;
+        m_interactiveViewport.gridSegments[9] = segNegCount;
+
+        if (segAxisVCount > 0) {
             std::string sample = "[Grid] +Z sample:";
-            uint32_t vstart = seg2Start * 3;
-            uint32_t vend = (std::min)((uint32_t)positions.size(), vstart + (std::min)(seg2Count, (uint32_t)6) * 3u);
+            uint32_t vstart = segAxisVStart * 3;
+            uint32_t vend = (std::min)((uint32_t)positions.size(), vstart + (std::min)(segAxisVCount, (uint32_t)6) * 3u);
             for (uint32_t vi = vstart; vi + 2 < vend; vi += 3) {
                 sample += " (" + std::to_string(positions[vi]) + "," + std::to_string(positions[vi+1]) + "," + std::to_string(positions[vi+2]) + ")";
             }
@@ -2218,24 +3079,53 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         VkDeviceSize gridOff[3] = { 0, 0, 0 };
         vkCmdBindVertexBuffers(cmd, 0, 3, gridBufs, gridOff);
 
-        auto drawSeg = [&](uint32_t first, uint32_t count, float r, float g, float b) {
+        // Distance fade is measured IN-PLANE from the built minor-patch centre (not 3D camera
+        // distance — that would wipe the whole grid in ortho, where the camera sits far away).
+        Vec3 fadeAx, fadeAy;
+        switch (m_interactiveViewport.gridBuiltPlane) {
+            case 1:  fadeAx = Vec3(1, 0, 0); fadeAy = Vec3(0, 1, 0); break; // XY
+            case 2:  fadeAx = Vec3(0, 0, 1); fadeAy = Vec3(0, 1, 0); break; // YZ
+            default: fadeAx = Vec3(1, 0, 0); fadeAy = Vec3(0, 0, 1); break; // XZ
+        }
+        const Vec3 fadeCenter = fadeAx * m_interactiveViewport.gridBuiltCenterU +
+                                fadeAy * m_interactiveViewport.gridBuiltCenterV;
+        // Minor lines dissolve just inside their built extent so the geometric edge is never
+        // visible; majors/axes fog out at the far horizon (kept below the >=20x viewScale
+        // major-lattice edge guaranteed by requiredHalf above). The built extent caps the minor
+        // band because shrinking grid_fade_distance doesn't shrink already-built geometry.
+        const float gridOpacity = std::clamp(::render_settings.grid_opacity, 0.0f, 1.0f);
+        const float builtCoarse = m_interactiveViewport.gridBuiltSpacing * 10.0f;
+        const float minorGeomLimit = (std::max)(m_interactiveViewport.gridBuiltFineHalf - 2.0f * builtCoarse, builtCoarse);
+        const float minorFadeEnd = (std::min)(minorGeomLimit, viewScale * 16.0f * gridFadeScale);
+        const float minorFadeStart = minorFadeEnd * 0.45f;
+        const float majorFadeStart = viewScale * 12.0f * gridFadeScale;
+        const float majorFadeEnd = viewScale * 19.0f * gridFadeScale;
+
+        auto drawSeg = [&](uint32_t first, uint32_t count, float r, float g, float b,
+                           float fadeStart, float fadeEnd) {
             if (!count) return;
             SolidPushConstants gp{};
             matrixToGL(gridMvp, gp.viewProj);
             matrixToGL(identity, gp.view);
             gp.useMatcap = -1;
             gp.overrideR = r; gp.overrideG = g; gp.overrideB = b;
+            gp.fadeCenterX = fadeCenter.x; gp.fadeCenterY = fadeCenter.y; gp.fadeCenterZ = fadeCenter.z;
+            gp.fadeStart = fadeStart; gp.fadeEnd = fadeEnd;
+            gp.overrideA = gridOpacity;
             vkCmdPushConstants(cmd, m_interactiveViewport.pipelineLayout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SolidPushConstants), &gp);
             vkCmdDraw(cmd, count, 1, first, 0);
         };
 
-        const auto* segments = m_interactiveViewport.gridSegments;
-        drawSeg(segments[0], segments[1], 0.38f, 0.38f, 0.38f);
-        drawSeg(segments[2], segments[3], 0.75f, 0.15f, 0.15f);
-        // TEMP: brighten +Z axis for debugging
-        drawSeg(segments[4], segments[5], 0.20f, 0.45f, 0.95f);
-        drawSeg(segments[6], segments[7], 0.30f, 0.30f, 0.30f);
+        if (gridOpacity > 0.01f) {
+            const auto* segments = m_interactiveViewport.gridSegments;
+            drawSeg(segments[2], segments[3], 0.38f, 0.38f, 0.38f, minorFadeStart, minorFadeEnd); // minor lattice
+            drawSeg(segments[0], segments[1], 0.38f, 0.38f, 0.38f, majorFadeStart, majorFadeEnd); // major lattice
+            drawSeg(segments[4], segments[5], 0.75f, 0.15f, 0.15f, majorFadeStart, majorFadeEnd); // +X axis
+            // TEMP: brighten +Z axis for debugging
+            drawSeg(segments[6], segments[7], 0.20f, 0.45f, 0.95f, majorFadeStart, majorFadeEnd); // +Z axis
+            drawSeg(segments[8], segments[9], 0.30f, 0.30f, 0.30f, majorFadeStart, majorFadeEnd); // negative axes
+        }
     }
 
     // --- Hair polyline overlay ---
@@ -2291,7 +3181,135 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                           m_interactiveViewport.particleAddVertexCount);
     }
 
+    // --- Edit-mesh overlay (face fills -> edges -> vertex markers) ---
+    {
+        const Backend::EditMeshOverlayParams& eop = m_interactiveViewport.editOverlayParams;
+        if (eop.enabled &&
+            m_interactiveViewport.editOverlayPipelineLayout != VK_NULL_HANDLE &&
+            m_interactiveViewport.editPositionBuffer.buffer &&
+            m_interactiveViewport.editFlagBuffer.buffer &&
+            m_interactiveViewport.editVertexCount > 0) {
+
+            struct EditOverlayPushConstants {
+                float mvp[16];
+                float baseColor[4];
+                float selectColor[4];
+                float params[4];   // x=pointRadiusPx, y=viewportW, z=viewportH, w=mode
+                float params2[4];  // x=depthBiasNDC, y=softHighlight, z/w reserved
+            } epc{};
+
+            const Matrix4x4 mvp = viewProj * eop.model;
+            matrixToGL(mvp, epc.mvp);
+            epc.params[0] = eop.pointRadiusPx;
+            epc.params[1] = (float)width;
+            epc.params[2] = (float)height;
+            epc.params2[0] = eop.depthBias;
+            epc.params2[2] = eop.xray ? 1.0f : 0.0f;
+
+            VkBuffer eVbs[2] = {
+                m_interactiveViewport.editPositionBuffer.buffer,
+                m_interactiveViewport.editFlagBuffer.buffer
+            };
+            VkDeviceSize eOffs[2] = { 0, 0 };
+            vkCmdBindVertexBuffers(cmd, 0, 2, eVbs, eOffs);
+
+            // softAlphaBase mirrors the ImGui weightToColor alpha bases per
+            // element type (faces 110/255, edges 230/255, points 235/255).
+            auto pushEPC = [&](const float base[4], const float select[4], float mode, float softAlphaBase) {
+                std::memcpy(epc.baseColor, base, sizeof(float) * 4);
+                std::memcpy(epc.selectColor, select, sizeof(float) * 4);
+                epc.params[3] = mode;
+                epc.params2[1] = eop.softHighlight ? softAlphaBase : 0.0f;
+                vkCmdPushConstants(cmd, m_interactiveViewport.editOverlayPipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(epc), &epc);
+            };
+            auto drawIndexed = [&](VkPipeline pipeline, const VulkanRT::BufferHandle& indexBuffer,
+                                   uint32_t indexCount) {
+                if (pipeline == VK_NULL_HANDLE || !indexBuffer.buffer || indexCount == 0) return;
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+                vkCmdBindIndexBuffer(cmd, indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
+            };
+
+            // Dim fill of every face (Face select mode), then selected faces on top.
+            if (eop.drawFaces) {
+                pushEPC(eop.faceColor, eop.selectColor, 0.0f, 0.43f);
+                drawIndexed(m_interactiveViewport.editFacePipeline,
+                            m_interactiveViewport.editFaceIndexBuffer,
+                            m_interactiveViewport.editFaceIndexCount);
+            }
+            pushEPC(eop.selectFaceColor, eop.selectFaceColor, 1.0f, 0.0f);
+            drawIndexed(m_interactiveViewport.editFacePipeline,
+                        m_interactiveViewport.editSelFaceIndexBuffer,
+                        m_interactiveViewport.editSelFaceIndexCount);
+
+            // Wireframe, then selected edges on top.
+            if (eop.drawEdges) {
+                pushEPC(eop.edgeColor, eop.selectColor, 0.0f, 0.90f);
+                drawIndexed(m_interactiveViewport.editLinePipeline,
+                            m_interactiveViewport.editEdgeIndexBuffer,
+                            m_interactiveViewport.editEdgeIndexCount);
+            }
+            pushEPC(eop.edgeColor, eop.selectColor, 1.0f, 0.0f);
+            drawIndexed(m_interactiveViewport.editLinePipeline,
+                        m_interactiveViewport.editSelEdgeIndexBuffer,
+                        m_interactiveViewport.editSelEdgeIndexCount);
+
+            // Vertex markers: one billboard disc instance per editable vertex.
+            if (eop.drawPoints && m_interactiveViewport.editPointPipeline != VK_NULL_HANDLE) {
+                pushEPC(eop.pointColor, eop.selectColor, 0.0f, 0.92f);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                  m_interactiveViewport.editPointPipeline);
+                vkCmdDraw(cmd, 6, m_interactiveViewport.editVertexCount, 0, 0);
+            }
+        }
+    }
+
     vkCmdEndRenderPass(cmd);
+
+    // ── Selection outline: mask pass (selected instances only) + fullscreen
+    // edge composite over the finished color image. Render-pass dependencies
+    // order main-pass depth → mask test → composite sampling.
+    if (!selectionOutlineDraws.empty()) {
+        const Backend::SelectionOutlineParams& sop = m_interactiveViewport.selectionOutlineParams;
+
+        recordSelectionOutlineMaskPass(cmd, selectionOutlineDraws, viewProj, width, height);
+
+        VkRenderPassBeginInfo compRPBI{};
+        compRPBI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        compRPBI.renderPass = m_interactiveViewport.selectionCompositeRenderPass;
+        compRPBI.framebuffer = m_interactiveViewport.selectionCompositeFramebuffer;
+        compRPBI.renderArea.offset = { 0, 0 };
+        compRPBI.renderArea.extent = { (uint32_t)width, (uint32_t)height };
+        vkCmdBeginRenderPass(cmd, &compRPBI, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          m_interactiveViewport.selectionCompositePipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                m_interactiveViewport.selectionCompositePipelineLayout,
+                                0, 1, &m_interactiveViewport.selectionCompositeDescSet, 0, nullptr);
+
+        struct SelectionOutlinePush {
+            float primary[4];
+            float secondary[4];
+            float occluded[4];
+            float params[4];
+        };
+        SelectionOutlinePush compPush{};
+        std::memcpy(compPush.primary, sop.primaryColor, sizeof(compPush.primary));
+        std::memcpy(compPush.secondary, sop.secondaryColor, sizeof(compPush.secondary));
+        std::memcpy(compPush.occluded, sop.occludedColor, sizeof(compPush.occluded));
+        compPush.params[0] = sop.thicknessPx;
+        compPush.params[1] = (width > 0) ? (1.0f / (float)width) : 0.0f;
+        compPush.params[2] = (height > 0) ? (1.0f / (float)height) : 0.0f;
+        compPush.params[3] = 0.0f;
+        vkCmdPushConstants(cmd, m_interactiveViewport.selectionCompositePipelineLayout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SelectionOutlinePush), &compPush);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+    }
+
     m_device->endSingleTimeCommands(cmd);
 
     m_device->copyImageToBuffer(m_interactiveViewport.colorImage, m_interactiveViewport.stagingBuffer);
@@ -2775,16 +3793,16 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         const uint64_t curGen = g_scene_geometry_generation.load(std::memory_order_acquire);
         const uint64_t prevGen = m_rasterBuiltGeometryGeneration;
         if (!m_rasterMeshes.empty() && m_rasterBuiltGeometryGeneration == curGen) {
-            SCENE_LOG_INFO("[ViewportRaster] buildRasterGeometry early-out: cache valid. gen=" +
+          /*  SCENE_LOG_INFO("[ViewportRaster] buildRasterGeometry early-out: cache valid. gen=" +
                            std::to_string(curGen) + " meshes=" + std::to_string(m_rasterMeshes.size()) +
-                           " objects=" + std::to_string(objects.size()));
+                           " objects=" + std::to_string(objects.size()));*/
             m_rasterGeometryDirty = false;
             return;
         }
-        SCENE_LOG_INFO("[ViewportRaster] buildRasterGeometry starting: gen " +
+       /* SCENE_LOG_INFO("[ViewportRaster] buildRasterGeometry starting: gen " +
                        std::to_string(prevGen) + " -> " + std::to_string(curGen) +
                        " objects=" + std::to_string(objects.size()) +
-                       " prevMeshes=" + std::to_string(m_rasterMeshes.size()));
+                       " prevMeshes=" + std::to_string(m_rasterMeshes.size()));*/
     }
 
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
@@ -4200,6 +5218,620 @@ void VulkanBackendAdapter::uploadParticleBillboards(const std::vector<float>& ad
         m_interactiveViewport.dirty = true;
         m_currentSamples = 0;
     }
+}
+
+// ============================================================================
+// Edit-Mesh Overlay (raster viewport GPU wireframe / vertex / face passes)
+// ============================================================================
+
+namespace {
+// Grow-only upload shared by every edit-overlay buffer: reallocates only when
+// the existing buffer is too small, otherwise writes in place.
+template <typename T>
+void uploadEditOverlayBuffer(VulkanRT::VulkanDevice* device,
+                             VulkanRT::BufferHandle& buffer,
+                             const std::vector<T>& data,
+                             VulkanRT::BufferUsage usage) {
+    if (data.empty()) {
+        return;
+    }
+    const uint64_t byteSize = data.size() * sizeof(T);
+    if (!buffer.buffer || buffer.size < byteSize) {
+        if (buffer.buffer) {
+            device->destroyBuffer(buffer);
+        }
+        VulkanRT::BufferCreateInfo bci{};
+        bci.size     = byteSize;
+        bci.usage    = usage | VulkanRT::BufferUsage::TRANSFER_DST;
+        bci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        buffer = device->createBuffer(bci);
+    }
+    if (buffer.buffer) {
+        device->uploadBuffer(buffer, data.data(), byteSize, 0);
+    }
+}
+} // namespace
+
+void VulkanBackendAdapter::uploadEditMeshOverlayGeometry(const std::vector<float>& positions, uint32_t vertexCount) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_device) return;
+
+    if (positions.empty() || vertexCount == 0) {
+        m_interactiveViewport.editVertexCount = 0;
+        m_interactiveViewport.dirty = true;
+        return;
+    }
+    uploadEditOverlayBuffer(m_device.get(), m_interactiveViewport.editPositionBuffer,
+                            positions, VulkanRT::BufferUsage::VERTEX);
+    m_interactiveViewport.editVertexCount =
+        m_interactiveViewport.editPositionBuffer.buffer ? vertexCount : 0;
+    m_interactiveViewport.dirty = true;
+    m_currentSamples = 0;
+}
+
+void VulkanBackendAdapter::uploadEditMeshOverlayFlags(const std::vector<uint32_t>& flags) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_device) return;
+
+    uploadEditOverlayBuffer(m_device.get(), m_interactiveViewport.editFlagBuffer,
+                            flags, VulkanRT::BufferUsage::VERTEX);
+    m_interactiveViewport.dirty = true;
+    m_currentSamples = 0;
+}
+
+void VulkanBackendAdapter::uploadEditMeshOverlayTopology(const std::vector<uint32_t>& edgeIndices,
+                                                         const std::vector<uint32_t>& faceIndices) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_device) return;
+
+    uploadEditOverlayBuffer(m_device.get(), m_interactiveViewport.editEdgeIndexBuffer,
+                            edgeIndices, VulkanRT::BufferUsage::INDEX);
+    m_interactiveViewport.editEdgeIndexCount =
+        m_interactiveViewport.editEdgeIndexBuffer.buffer ? (uint32_t)edgeIndices.size() : 0;
+
+    uploadEditOverlayBuffer(m_device.get(), m_interactiveViewport.editFaceIndexBuffer,
+                            faceIndices, VulkanRT::BufferUsage::INDEX);
+    m_interactiveViewport.editFaceIndexCount =
+        m_interactiveViewport.editFaceIndexBuffer.buffer ? (uint32_t)faceIndices.size() : 0;
+
+    m_interactiveViewport.dirty = true;
+    m_currentSamples = 0;
+}
+
+void VulkanBackendAdapter::uploadEditMeshOverlaySelectionIndices(const std::vector<uint32_t>& selEdgeIndices,
+                                                                 const std::vector<uint32_t>& selFaceIndices) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_device) return;
+
+    uploadEditOverlayBuffer(m_device.get(), m_interactiveViewport.editSelEdgeIndexBuffer,
+                            selEdgeIndices, VulkanRT::BufferUsage::INDEX);
+    m_interactiveViewport.editSelEdgeIndexCount =
+        m_interactiveViewport.editSelEdgeIndexBuffer.buffer ? (uint32_t)selEdgeIndices.size() : 0;
+
+    uploadEditOverlayBuffer(m_device.get(), m_interactiveViewport.editSelFaceIndexBuffer,
+                            selFaceIndices, VulkanRT::BufferUsage::INDEX);
+    m_interactiveViewport.editSelFaceIndexCount =
+        m_interactiveViewport.editSelFaceIndexBuffer.buffer ? (uint32_t)selFaceIndices.size() : 0;
+
+    m_interactiveViewport.dirty = true;
+    m_currentSamples = 0;
+}
+
+void VulkanBackendAdapter::setEditMeshOverlayParams(const EditMeshOverlayParams& params) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // Called every frame the overlay is active — only force a re-render when
+    // something actually changed, otherwise the viewport would never settle.
+    // Field-wise compare (NOT memcmp: struct padding is indeterminate).
+    const EditMeshOverlayParams& cur = m_interactiveViewport.editOverlayParams;
+    auto sameColor = [](const float a[4], const float b[4]) {
+        return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3];
+    };
+    const bool unchanged =
+        cur.enabled == params.enabled &&
+        cur.drawEdges == params.drawEdges &&
+        cur.drawPoints == params.drawPoints &&
+        cur.drawFaces == params.drawFaces &&
+        cur.softHighlight == params.softHighlight &&
+        cur.xray == params.xray &&
+        cur.model == params.model &&
+        cur.pointRadiusPx == params.pointRadiusPx &&
+        cur.depthBias == params.depthBias &&
+        sameColor(cur.edgeColor, params.edgeColor) &&
+        sameColor(cur.pointColor, params.pointColor) &&
+        sameColor(cur.faceColor, params.faceColor) &&
+        sameColor(cur.selectColor, params.selectColor) &&
+        sameColor(cur.selectFaceColor, params.selectFaceColor);
+    if (unchanged) {
+        return;
+    }
+    m_interactiveViewport.editOverlayParams = params;
+    m_interactiveViewport.dirty = true;
+    m_currentSamples = 0;
+}
+
+void VulkanBackendAdapter::clearEditMeshOverlay() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_device) return;
+
+    const bool hadContent =
+        m_interactiveViewport.editOverlayParams.enabled ||
+        m_interactiveViewport.editVertexCount > 0;
+
+    if (m_interactiveViewport.editPositionBuffer.buffer) {
+        m_device->destroyBuffer(m_interactiveViewport.editPositionBuffer);
+    }
+    if (m_interactiveViewport.editFlagBuffer.buffer) {
+        m_device->destroyBuffer(m_interactiveViewport.editFlagBuffer);
+    }
+    if (m_interactiveViewport.editEdgeIndexBuffer.buffer) {
+        m_device->destroyBuffer(m_interactiveViewport.editEdgeIndexBuffer);
+    }
+    if (m_interactiveViewport.editFaceIndexBuffer.buffer) {
+        m_device->destroyBuffer(m_interactiveViewport.editFaceIndexBuffer);
+    }
+    if (m_interactiveViewport.editSelEdgeIndexBuffer.buffer) {
+        m_device->destroyBuffer(m_interactiveViewport.editSelEdgeIndexBuffer);
+    }
+    if (m_interactiveViewport.editSelFaceIndexBuffer.buffer) {
+        m_device->destroyBuffer(m_interactiveViewport.editSelFaceIndexBuffer);
+    }
+    m_interactiveViewport.editVertexCount = 0;
+    m_interactiveViewport.editEdgeIndexCount = 0;
+    m_interactiveViewport.editFaceIndexCount = 0;
+    m_interactiveViewport.editSelEdgeIndexCount = 0;
+    m_interactiveViewport.editSelFaceIndexCount = 0;
+    m_interactiveViewport.editOverlayParams = EditMeshOverlayParams{};
+
+    if (hadContent) {
+        m_interactiveViewport.dirty = true;
+        m_currentSamples = 0;
+    }
+}
+
+void VulkanBackendAdapter::setSelectionOutlineParams(const SelectionOutlineParams& params) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // Called every frame while a selection exists — only force a re-render
+    // when something actually changed. Instance transforms are re-resolved
+    // from m_rasterInstances at draw time, so a gizmo drag doesn't need to
+    // flow through here (the transform sync already dirties the viewport).
+    const SelectionOutlineParams& cur = m_interactiveViewport.selectionOutlineParams;
+    auto sameColor = [](const float a[4], const float b[4]) {
+        return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3];
+    };
+    const bool unchanged =
+        cur.enabled == params.enabled &&
+        cur.nodeNames == params.nodeNames &&
+        cur.thicknessPx == params.thicknessPx &&
+        sameColor(cur.primaryColor, params.primaryColor) &&
+        sameColor(cur.secondaryColor, params.secondaryColor) &&
+        sameColor(cur.occludedColor, params.occludedColor);
+    if (unchanged) {
+        return;
+    }
+    m_interactiveViewport.selectionOutlineParams = params;
+    m_interactiveViewport.dirty = true;
+    m_currentSamples = 0;
+}
+
+namespace {
+inline void selectionMatrixToGL(const Matrix4x4& mat, float out[16]) {
+    Matrix4x4 t = mat.transpose();
+    int k = 0;
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            out[k++] = t.m[r][c];
+        }
+    }
+}
+} // namespace
+
+void VulkanBackendAdapter::resolveSelectionOutlineDraws(
+        const std::vector<std::string>& nodeNames,
+        std::vector<SelectionOutlineDrawItem>& outDraws) {
+    outDraws.clear();
+    if (!m_device || nodeNames.empty()) return;
+
+    // One mat4 per matched (mesh, instance) pair; the per-draw byte offset
+    // into selectionInstanceBuffer selects the matrix. The LAST name is the
+    // primary selection (mask value 1.0), the rest are secondary (0.5).
+    constexpr size_t kMaxSelectionOutlineInstances = 256;
+    std::vector<float> selMats;
+    for (size_t ni = 0; ni < nodeNames.size(); ++ni) {
+        const std::string& selName = nodeNames[ni];
+        if (selName.empty()) continue;
+        const float maskValue = (ni + 1 == nodeNames.size()) ? 1.0f : 0.5f;
+        for (const auto& ri : m_rasterInstances) {
+            if (ri.mask == 0) continue;
+            const bool match =
+                ri.nodeName == selName ||
+                viewportMatchesNodeNameForInstance(ri.nodeName, selName) ||
+                viewportMatchesNodeNameForInstance(selName, ri.nodeName);
+            if (!match) continue;
+            auto meshIt = m_rasterMeshes.find(ri.meshKey);
+            if (meshIt == m_rasterMeshes.end()) continue;
+            const RasterMeshBuffer& srmb = meshIt->second;
+            // Scatter pools are huge and have their own proxy logic — out of
+            // scope for the outline (matches the CPU path's semantics).
+            if (srmb.isScatterGroup || srmb.isScatterProxy) continue;
+            if (!srmb.vertexBuffer.buffer || srmb.vertexCount == 0) continue;
+
+            SelectionOutlineDrawItem d;
+            d.mesh = &srmb;
+            d.instanceByteOffset = selMats.size() * sizeof(float);
+            d.maskValue = maskValue;
+            outDraws.push_back(d);
+
+            float gl[16];
+            selectionMatrixToGL(ri.transform, gl);
+            selMats.insert(selMats.end(), gl, gl + 16);
+            if (outDraws.size() >= kMaxSelectionOutlineInstances) break;
+        }
+        if (outDraws.size() >= kMaxSelectionOutlineInstances) break;
+    }
+
+    if (selMats.empty()) {
+        outDraws.clear();
+        return;
+    }
+    const uint64_t byteSize = selMats.size() * sizeof(float);
+    VulkanRT::BufferHandle& selBuf = m_interactiveViewport.selectionInstanceBuffer;
+    if (!selBuf.buffer || selBuf.size < byteSize) {
+        if (selBuf.buffer) {
+            m_device->destroyBuffer(selBuf);
+        }
+        VulkanRT::BufferCreateInfo bci{};
+        bci.size = byteSize;
+        bci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        // Host-visible: uploadBuffer then maps + memcpys directly instead of
+        // submitting a staging copy — this resolve runs per recompute and the
+        // buffer is tiny, so skipping a blocking GPU submit matters more than
+        // device-local read speed. Safe: only the synchronous single-time
+        // renders read it, never an async trace.
+        bci.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
+        selBuf = m_device->createBuffer(bci);
+    }
+    if (selBuf.buffer) {
+        m_device->uploadBuffer(selBuf, selMats.data(), byteSize, 0);
+    } else {
+        outDraws.clear();
+    }
+}
+
+void VulkanBackendAdapter::recordSelectionOutlineMaskPass(
+        VkCommandBuffer cmd,
+        const std::vector<SelectionOutlineDrawItem>& draws,
+        const Matrix4x4& viewProj, int width, int height) {
+    VkClearValue maskClear[2]{};
+    maskClear[0].color = { { 0.0f, 0.0f, 0.0f, 0.0f } };
+    maskClear[1].depthStencil = { 1.0f, 0 }; // ignored (loadOp = LOAD)
+
+    VkRenderPassBeginInfo maskRPBI{};
+    maskRPBI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    maskRPBI.renderPass = m_interactiveViewport.selectionMaskRenderPass;
+    maskRPBI.framebuffer = m_interactiveViewport.selectionMaskFramebuffer;
+    maskRPBI.renderArea.offset = { 0, 0 };
+    maskRPBI.renderArea.extent = { (uint32_t)width, (uint32_t)height };
+    maskRPBI.clearValueCount = 2;
+    maskRPBI.pClearValues = maskClear;
+    vkCmdBeginRenderPass(cmd, &maskRPBI, VK_SUBPASS_CONTENTS_INLINE);
+
+    VkViewport vp{};
+    vp.width = (float)width;
+    vp.height = (float)height;
+    vp.minDepth = 0.0f;
+    vp.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    VkRect2D sc{};
+    sc.extent = { (uint32_t)width, (uint32_t)height };
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+
+    struct SelectionMaskPush {
+        float viewProj[16];
+        float maskValue[4];
+    };
+    SelectionMaskPush maskPush{};
+    selectionMatrixToGL(viewProj, maskPush.viewProj);
+
+    const VkPipeline maskPipelines[2] = {
+        m_interactiveViewport.selectionMaskFullPipeline,    // G: full silhouette
+        m_interactiveViewport.selectionMaskVisiblePipeline  // R: depth-tested visible
+    };
+    for (VkPipeline maskPipeline : maskPipelines) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, maskPipeline);
+        for (const SelectionOutlineDrawItem& d : draws) {
+            maskPush.maskValue[0] = d.maskValue;
+            vkCmdPushConstants(cmd, m_interactiveViewport.selectionMaskPipelineLayout,
+                               VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(SelectionMaskPush), &maskPush);
+            VkBuffer vbs[2] = {
+                d.mesh->vertexBuffer.buffer,
+                m_interactiveViewport.selectionInstanceBuffer.buffer
+            };
+            VkDeviceSize vbOffsets[2] = { 0, d.instanceByteOffset };
+            vkCmdBindVertexBuffers(cmd, 0, 2, vbs, vbOffsets);
+            if (d.mesh->indexBuffer.buffer && d.mesh->indexCount > 0) {
+                vkCmdBindIndexBuffer(cmd, d.mesh->indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd, d.mesh->indexCount, 1, 0, 0, 0);
+            } else {
+                vkCmdDraw(cmd, d.mesh->vertexCount, 1, 0, 0);
+            }
+        }
+    }
+    vkCmdEndRenderPass(cmd);
+}
+
+void VulkanBackendAdapter::setRasterInstanceTransformsForNodes(
+        const std::vector<std::pair<std::string, Matrix4x4>>& nodes) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (nodes.empty() || m_rasterInstances.empty()) return;
+    rebuildTargetedTransformIndex();
+
+    auto applyToInstance = [&](RasterInstance& ri, const Matrix4x4& mtx) {
+        if (ri.transform == mtx) return;
+        ri.transform = mtx;
+        updateRasterInstanceWorldBBox(ri);
+        auto meshIt = m_rasterMeshes.find(ri.meshKey);
+        if (meshIt != m_rasterMeshes.end()) {
+            // Next uploadVisibleRasterInstances re-uploads just this mesh's
+            // instance buffer — the depth prepass then sees the fresh pose.
+            meshIt->second.visibleInstancesDirty = true;
+        }
+    };
+
+    for (const auto& node : nodes) {
+        if (node.first.empty()) continue;
+        auto idxIt = m_rasterNodeIndex.find(node.first);
+        if (idxIt != m_rasterNodeIndex.end()) {
+            for (uint32_t i : idxIt->second) {
+                if (i < m_rasterInstances.size()) {
+                    applyToInstance(m_rasterInstances[i], node.second);
+                }
+            }
+            continue;
+        }
+        // Exact name missing from the index — fall back to the same prefix
+        // matching the outline draw resolution uses.
+        for (auto& ri : m_rasterInstances) {
+            if (ri.nodeName == node.first ||
+                viewportMatchesNodeNameForInstance(ri.nodeName, node.first) ||
+                viewportMatchesNodeNameForInstance(node.first, ri.nodeName)) {
+                applyToInstance(ri, node.second);
+            }
+        }
+    }
+}
+
+bool VulkanBackendAdapter::renderSelectionOutlineMaskReadback(
+        const std::vector<std::string>& nodeNames,
+        const Vec3& camEye, const Vec3& camLookAt,
+        const Vec3& camUp, float camFovDeg,
+        float camAspect,
+        int fullWidth, int fullHeight,
+        int maskWidth, int maskHeight,
+        std::vector<uint8_t>& outMaskRG) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_device || !m_device->isInitialized() || !m_device->supportsGraphicsQueue()) return false;
+    if (nodeNames.empty() || fullWidth <= 0 || fullHeight <= 0) return false;
+    if (maskWidth <= 0 || maskHeight <= 0 || maskWidth > fullWidth || maskHeight > fullHeight) return false;
+    if (m_rasterMeshes.empty() || m_rasterInstances.empty()) return false;
+
+    // Same shader-dir fallback chain as the interactive render path.
+    std::string shaderDir = "shaders";
+    if (!std::filesystem::exists(shaderDir + "/solid.spv")) shaderDir = "source/shaders";
+    if (!std::filesystem::exists(shaderDir + "/solid.spv")) shaderDir = "../shaders";
+    if (!std::filesystem::exists(shaderDir + "/solid.spv")) {
+        shaderDir = std::filesystem::current_path().string() + "/shaders";
+    }
+    // Targets stay at full size; the mask renders into the top-left
+    // maskWidth x maskHeight sub-region. This keeps resource sizes stable
+    // when the caller alternates between coarse (interactive) and full
+    // (settled refine) masks — a resize here would destroy and recreate the
+    // whole interactive viewport every transition.
+    if (!ensureInteractiveViewportResources(shaderDir, fullWidth, fullHeight)) return false;
+    if (m_interactiveViewport.solidPipeline == VK_NULL_HANDLE ||
+        m_interactiveViewport.pipelineLayout == VK_NULL_HANDLE ||
+        m_interactiveViewport.framebuffer == VK_NULL_HANDLE ||
+        m_interactiveViewport.selectionMaskFullPipeline == VK_NULL_HANDLE ||
+        m_interactiveViewport.selectionMaskVisiblePipeline == VK_NULL_HANDLE ||
+        m_interactiveViewport.selectionMaskFramebuffer == VK_NULL_HANDLE ||
+        m_interactiveViewport.selectionMaskImage.image == VK_NULL_HANDLE ||
+        !m_interactiveViewport.stagingBuffer.buffer) {
+        return false;
+    }
+
+    // Camera matrices — PERSPECTIVE always: the Rendered viewport path-traces
+    // in perspective even when the viewport camera is orthographic, and this
+    // overlay must align with that image.
+    auto makeViewMatrix = [](const Vec3& eye, const Vec3& center, const Vec3& up) {
+        Vec3 f = (center - eye).normalize();
+        Vec3 sAxis = Vec3::cross(f, up).normalize();
+        if (sAxis.length() < 0.0001f) sAxis = Vec3(1.0f, 0.0f, 0.0f);
+        Vec3 uAxis = Vec3::cross(sAxis, f);
+        return Matrix4x4(
+            sAxis.x, sAxis.y, sAxis.z, -Vec3::dot(sAxis, eye),
+            uAxis.x, uAxis.y, uAxis.z, -Vec3::dot(uAxis, eye),
+            -f.x,   -f.y,   -f.z,    Vec3::dot(f, eye),
+            0.0f,   0.0f,   0.0f,    1.0f
+        );
+    };
+    // Aspect comes from the caller (render-image aspect, the same convention
+    // the gizmo overlay projection uses) — NOT the readback target's aspect:
+    // the path-traced image is produced at render resolution and stretched
+    // onto the screen, and the overlay must line up with that.
+    const float aspect = (camAspect > 1e-4f)
+        ? camAspect
+        : ((fullHeight > 0) ? ((float)fullWidth / (float)fullHeight) : 1.0f);
+    const float fovDeg = camFovDeg > 1.0f ? camFovDeg : 60.0f;
+    const float zNear = 0.01f, zFar = 1000000.0f;
+    const float f = 1.0f / std::tan(fovDeg * 0.5f * 3.14159265358979f / 180.0f);
+    Matrix4x4 proj = Matrix4x4::zero();
+    proj.m[0][0] = f / aspect;
+    proj.m[1][1] = -f;
+    proj.m[2][2] = zFar / (zNear - zFar);
+    proj.m[2][3] = (zFar * zNear) / (zNear - zFar);
+    proj.m[3][2] = -1.0f;
+    Matrix4x4 view = makeViewMatrix(camEye, camLookAt, camUp);
+    Matrix4x4 viewProj = proj * view;
+
+    // Refresh per-mesh visible-instance buffers for THIS camera — in Rendered
+    // mode the per-frame raster culling upload doesn't run. Scatter pools are
+    // excluded outright: re-culling + re-uploading hundreds of thousands of
+    // foliage instances per recompute caused visible stalls, scatter objects
+    // are not selectable anyway, and their only contribution here would be
+    // the occluded-gray tint behind foliage.
+    extractFrustumPlanes(viewProj);
+    for (auto& [meshKey, mesh] : m_rasterMeshes) {
+        (void)meshKey;
+        if (mesh.isScatterGroup || mesh.isScatterProxy) continue;
+        uploadVisibleRasterInstances(mesh);
+    }
+
+    std::vector<SelectionOutlineDrawItem> draws;
+    resolveSelectionOutlineDraws(nodeNames, draws);
+    if (draws.empty()) return false;
+
+    VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) return false;
+
+    // ── Depth prepass: rasterize the whole scene into depthImage via the
+    // main render pass + solid pipeline. The color result is irrelevant here
+    // (Rendered mode displays the path-traced image); the raster viewport
+    // fully re-renders on its next dirty frame anyway.
+    {
+        VkClearValue clearValues[2]{};
+        clearValues[0].color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+        clearValues[1].depthStencil = { 1.0f, 0 };
+        VkRenderPassBeginInfo rpbi{};
+        rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        rpbi.renderPass = m_interactiveViewport.renderPass;
+        rpbi.framebuffer = m_interactiveViewport.framebuffer;
+        rpbi.renderArea.offset = { 0, 0 };
+        rpbi.renderArea.extent = { (uint32_t)maskWidth, (uint32_t)maskHeight };
+        rpbi.clearValueCount = 2;
+        rpbi.pClearValues = clearValues;
+        vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+
+        VkViewport vp{};
+        vp.width = (float)maskWidth;
+        vp.height = (float)maskHeight;
+        vp.minDepth = 0.0f;
+        vp.maxDepth = 1.0f;
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        VkRect2D sc{};
+        sc.extent = { (uint32_t)maskWidth, (uint32_t)maskHeight };
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.solidPipeline);
+        if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    m_interactiveViewport.pipelineLayout,
+                                    0, 1, &m_interactiveViewport.matcapDescSet, 0, nullptr);
+        }
+        // Must match the layout pushed by the interactive render path.
+        struct SolidPushConstants {
+            float viewProj[16];
+            float view[16];
+            int useMatcap;
+            float overrideR, overrideG, overrideB;
+            float fadeCenterX, fadeCenterY, fadeCenterZ;
+            float fadeStart, fadeEnd;
+            float overrideA;
+        };
+        SolidPushConstants push{};
+        selectionMatrixToGL(viewProj, push.viewProj);
+        selectionMatrixToGL(view, push.view);
+        vkCmdPushConstants(cmd, m_interactiveViewport.pipelineLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(SolidPushConstants), &push);
+
+        for (const auto& [meshKey, rmb] : m_rasterMeshes) {
+            (void)meshKey;
+            // Scatter pools skipped (see the culling loop above) — they don't
+            // occlude the outline, but they also don't stall the recompute.
+            if (rmb.isScatterGroup || rmb.isScatterProxy) continue;
+            if (!rmb.vertexBuffer.buffer || !rmb.instanceBuffer.buffer ||
+                rmb.vertexCount == 0 || rmb.instanceCount == 0) {
+                continue;
+            }
+            VkBuffer vertexBuffers[3] = {
+                rmb.vertexBuffer.buffer,
+                rmb.normalBuffer.buffer ? rmb.normalBuffer.buffer : rmb.vertexBuffer.buffer,
+                rmb.instanceBuffer.buffer
+            };
+            VkDeviceSize offsets[3] = { 0, 0, 0 };
+            vkCmdBindVertexBuffers(cmd, 0, 3, vertexBuffers, offsets);
+            if (rmb.indexBuffer.buffer && rmb.indexCount > 0) {
+                vkCmdBindIndexBuffer(cmd, rmb.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd, rmb.indexCount, rmb.instanceCount, 0, 0, 0);
+            } else {
+                vkCmdDraw(cmd, rmb.vertexCount, rmb.instanceCount, 0, 0);
+            }
+        }
+        vkCmdEndRenderPass(cmd);
+    }
+
+    recordSelectionOutlineMaskPass(cmd, draws, viewProj, maskWidth, maskHeight);
+
+    // ── Mask sub-region → staging buffer (R8G8, rows tightly packed at
+    // maskWidth; the full-size RGBA8 staging buffer is always large enough).
+    // The mask pass left the image in SHADER_READ_ONLY_OPTIMAL.
+    {
+        VkImageMemoryBarrier toSrc{};
+        toSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toSrc.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        toSrc.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toSrc.image = m_interactiveViewport.selectionMaskImage.image;
+        toSrc.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toSrc.subresourceRange.levelCount = 1;
+        toSrc.subresourceRange.layerCount = 1;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &toSrc);
+
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = { (uint32_t)maskWidth, (uint32_t)maskHeight, 1 };
+        vkCmdCopyImageToBuffer(cmd, m_interactiveViewport.selectionMaskImage.image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               m_interactiveViewport.stagingBuffer.buffer, 1, &region);
+        // No restore barrier: the next mask pass enters with initialLayout
+        // UNDEFINED and the composite only samples after a fresh mask pass.
+    }
+    m_device->endSingleTimeCommands(cmd);
+
+    const size_t maskBytes = (size_t)maskWidth * (size_t)maskHeight * 2;
+    outMaskRG.resize(maskBytes);
+    m_device->downloadBuffer(m_interactiveViewport.stagingBuffer, outMaskRG.data(), maskBytes);
+
+    // We trashed colorImage/depthImage; make sure the raster viewport fully
+    // re-renders instead of trusting any cached-frame state on mode switch.
+    m_interactiveViewport.dirty = true;
+    return true;
+}
+
+bool VulkanBackendAdapter::hasGpuSelectionOutline() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    return m_interactiveViewport.selectionMaskFullPipeline != VK_NULL_HANDLE &&
+           m_interactiveViewport.selectionMaskVisiblePipeline != VK_NULL_HANDLE &&
+           m_interactiveViewport.selectionCompositePipeline != VK_NULL_HANDLE &&
+           m_interactiveViewport.selectionMaskFramebuffer != VK_NULL_HANDLE &&
+           m_interactiveViewport.selectionCompositeFramebuffer != VK_NULL_HANDLE &&
+           m_interactiveViewport.selectionCompositeDescSet != VK_NULL_HANDLE;
+}
+
+void VulkanBackendAdapter::clearSelectionOutline() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_interactiveViewport.selectionOutlineParams.enabled &&
+        m_interactiveViewport.selectionOutlineParams.nodeNames.empty()) {
+        return;
+    }
+    m_interactiveViewport.selectionOutlineParams = SelectionOutlineParams{};
+    m_interactiveViewport.dirty = true;
+    m_currentSamples = 0;
 }
 
 } // namespace Backend

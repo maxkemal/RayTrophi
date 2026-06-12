@@ -23,6 +23,7 @@
 #include <Backend/OptixBackend.h>
 #include <array>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -1389,6 +1390,10 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         mixf(cam_right.x);    mixf(cam_right.y);    mixf(cam_right.z);
         mixf(cam_up.x);       mixf(cam_up.y);       mixf(cam_up.z);
         mixf(tan_half_fov); mixf(aspect_ratio);
+        // Ortho zoom changes ONLY ortho_height (lookfrom/basis/fov stay put), so it must be
+        // part of the hash or scroll-zoom replays a stale outline at the old screen size.
+        mix64(gizmoOrtho ? 1ull : 0ull);
+        mixf(gizmoOrtho ? cam.ortho_height : 0.0f);
         mix64(static_cast<uint64_t>(sw)); mix64(static_cast<uint64_t>(sh));
         mixf(thickness); mix64(static_cast<uint64_t>(color));
         mix64(pose_hash);
@@ -1959,6 +1964,273 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
     // �������������������������������������������������������������������������
     // DRAW SELECTION HIGHLIGHTS
     // �������������������������������������������������������������������������
+    // GPU outline gate: in raster viewport modes the Vulkan overlay pass draws
+    // the mesh silhouette (selected-instance mask + screen-space edge
+    // composite) instead of the per-frame CPU raster below. Rendered mode
+    // (shading_mode == 2) and CPU-only builds keep the ImGui fallback. Names
+    // are collected in loop order so the primary (last) selection keeps its
+    // brighter tier on the GPU side too.
+    auto* gpu_outline_backend =
+        dynamic_cast<Backend::VulkanBackendAdapter*>(getGizmoViewportBackend(ctx));
+    // hasGpuSelectionOutline goes false when the SPIR-V is missing or the
+    // pipelines/targets failed to build — the CPU outline below then keeps
+    // working instead of the selection silently losing its highlight.
+    const bool gpu_outline_eligible =
+        gpu_outline_backend != nullptr && viewport_settings.shading_mode != 2 &&
+        gpu_outline_backend->hasGpuSelectionOutline();
+    Backend::SelectionOutlineParams gpu_outline_params;
+
+    // Rendered-mode outline drawer: the Vulkan composite can't blend over the
+    // CPU-presented path-traced image, so the backend renders the selection
+    // mask standalone (scene depth prepass + selected silhouette), we read the
+    // R8G8 mask back, scan its boundary into RLE runs and draw them as an
+    // ImGui overlay. CPU cost scales with resolution, not polygon count, and
+    // the run cache replays for free while the path tracer accumulates with a
+    // held camera.
+    auto DrawGpuMaskOutlineRuns = [&](const std::vector<std::pair<std::string, Matrix4x4>>& nodes,
+                                      bool has_skinned,
+                                      uint64_t state_hash, uint64_t xform_hash) -> bool {
+        const int sw = (int)screen_w, sh = (int)screen_h;
+        if (sw < 4 || sh < 4) return false;
+        static const std::string kCacheKey = "\x01gpu_mask_outline";
+
+        auto replayRuns = [&](const SelectionOutlineFrameCache& ce) {
+            ImDrawList* dl = ImGui::GetBackgroundDrawList();
+            const float pix = (float)ce.scale;
+            const float half = ce.thickness * 0.5f;
+            for (const auto& run : ce.runs) {
+                dl->AddRectFilled(
+                    ImVec2(run.sx - half + 0.5f, run.sy - half + 0.5f),
+                    ImVec2(run.sx + half + 0.5f + (float)run.len * pix, run.sy + half + 0.5f + pix),
+                    run.col);
+            }
+        };
+        static uint64_t s_last_failed_hash = 0;
+        // Adaptive resolution: while the state changes every frame
+        // (drag/orbit) the mask renders at half res for speed; on the first
+        // frame the state holds still, the cached coarse result is refined
+        // once at full res so the resting outline is crisp.
+        static uint64_t s_prev_state_hash = 0;
+        const bool settled = (state_hash == s_prev_state_hash);
+        s_prev_state_hash = state_hash;
+
+        auto cit = selection_outline_frame_cache.find(kCacheKey);
+        const bool cache_hit =
+            cit != selection_outline_frame_cache.end() && cit->second.hash == state_hash;
+        if (cache_hit) {
+            const bool want_refine =
+                settled && cit->second.scale > 1 && state_hash != s_last_failed_hash;
+            if (!want_refine) {
+                replayRuns(cit->second);
+                return true;
+            }
+        } else if (state_hash == s_last_failed_hash) {
+            // Failure memo: when the GPU path failed for this exact state
+            // (e.g. missing SPIR-V), don't re-run the sync + mask attempt
+            // every frame — the CPU outline handles it until something changes.
+            return false;
+        }
+        // Churn throttle: while the state changes EVERY frame (skinned
+        // animation playback, drag), recompute at most every other frame and
+        // replay the one-frame-old runs in between — halves the per-frame
+        // sync + mask + readback load next to a path-trace that's restarting
+        // anyway.
+        static int s_churn_cooldown = 0;
+        if (!cache_hit && !settled && s_churn_cooldown > 0 &&
+            cit != selection_outline_frame_cache.end() && !cit->second.runs.empty()) {
+            --s_churn_cooldown;
+            replayRuns(cit->second);
+            return true;
+        }
+        const int use_scale = cache_hit ? 1 : 2; // refine pass : interactive pass
+        const int mw = (std::max)(2, sw / use_scale);
+        const int mh = (std::max)(2, sh / use_scale);
+
+        // Rendered mode skips the per-frame raster sync that Solid mode does,
+        // but only the SELECTED nodes' transforms matter for the mask — push
+        // just those (O(selection), not a whole-scene walk: dragging a dense
+        // object was paying a full syncRasterInstanceTransforms every frame).
+        static uint64_t s_last_synced_xform_hash = 0;
+        if (xform_hash != s_last_synced_xform_hash) {
+            gpu_outline_backend->setRasterInstanceTransformsForNodes(nodes);
+            if (has_skinned && !ctx.renderer.finalBoneMatrices.empty()) {
+                // Virtual dispatch lands in VulkanViewportBackend's override:
+                // GPU compute skinning of the raster vertex buffers (a cheap
+                // dispatch — NOT the CPU base impl). User-verified this is
+                // what keeps the skinned outline tracking in Rendered mode;
+                // do NOT replace it with a CPU apply_bone_to_vertex pass
+                // (tried once — skinned the whole mesh on the UI thread and
+                // tanked performance).
+                gpu_outline_backend->syncRasterSkinnedVertices(ctx.scene.world.objects,
+                                                               ctx.renderer.finalBoneMatrices);
+            }
+            s_last_synced_xform_hash = xform_hash;
+        }
+        std::vector<std::string> names;
+        names.reserve(nodes.size());
+        for (const auto& node : nodes) names.push_back(node.first);
+
+        static std::vector<uint8_t> mask_rg; // UI-thread scratch, reused across frames
+        if (!gpu_outline_backend->renderSelectionOutlineMaskReadback(
+                names, cam.lookfrom, cam.lookat, cam.vup, cam.vfov, aspect_ratio,
+                sw, sh, mw, mh, mask_rg) ||
+            mask_rg.size() < (size_t)mw * (size_t)mh * 2) {
+            s_last_failed_hash = state_hash;
+            // A failed refine keeps the coarse cached runs on screen instead
+            // of dropping to the CPU path mid-interaction.
+            if (cache_hit) {
+                replayRuns(cit->second);
+                return true;
+            }
+            return false;
+        }
+
+        SelectionOutlineFrameCache& ce = selection_outline_frame_cache[kCacheKey];
+        ce.runs.clear();
+        ce.hash = state_hash;
+        ce.scale = use_scale;
+        // Thinner + muted green, matching the raster-mode composite defaults
+        // (SelectionOutlineParams) so mode switches don't change the style.
+        ce.thickness = 1.0f;
+        const ImU32 col_primary   = IM_COL32(72, 191, 125, 217);
+        const ImU32 col_secondary = IM_COL32(51, 140, 94, 158);
+        const ImU32 col_occluded  = IM_COL32(160, 160, 160, 130);
+        for (int y = 0; y < mh; ++y) {
+            const uint8_t* row  = mask_rg.data() + (size_t)y * mw * 2;
+            const uint8_t* rowU = (y > 0)      ? row - (size_t)mw * 2 : nullptr;
+            const uint8_t* rowD = (y < mh - 1) ? row + (size_t)mw * 2 : nullptr;
+            int run_start = -1;
+            ImU32 run_col = 0;
+            auto flushRun = [&](int x_end) {
+                if (run_start < 0) return;
+                int len = x_end - run_start;
+                int sx = run_start;
+                while (len > 0) {
+                    const int chunk = (std::min)(len, 65535);
+                    // Run coordinates in SCREEN pixels; len in mask pixels
+                    // (replay multiplies by ce.scale).
+                    ce.runs.push_back({ (float)(sx * use_scale), (float)(y * use_scale),
+                                        (uint16_t)chunk, run_col });
+                    sx += chunk;
+                    len -= chunk;
+                }
+                run_start = -1;
+            };
+            for (int x = 0; x < mw; ++x) {
+                const uint8_t g = row[x * 2 + 1];
+                ImU32 col = 0;
+                bool boundary = false;
+                if (g) {
+                    // Silhouette pixel with an empty 4-neighbor (or at the
+                    // image border) = outline pixel.
+                    boundary = (x == 0 || x == mw - 1 || !rowU || !rowD ||
+                                row[(x - 1) * 2 + 1] == 0 || row[(x + 1) * 2 + 1] == 0 ||
+                                rowU[x * 2 + 1] == 0 || rowD[x * 2 + 1] == 0);
+                    if (boundary) {
+                        // R channel = depth-tested visible coverage; none in
+                        // the neighborhood -> this part is hidden behind other
+                        // geometry -> desaturated occluded style.
+                        const bool visible =
+                            row[x * 2] > 0 ||
+                            (x > 0 && row[(x - 1) * 2] > 0) ||
+                            (x < mw - 1 && row[(x + 1) * 2] > 0) ||
+                            (rowU && rowU[x * 2] > 0) ||
+                            (rowD && rowD[x * 2] > 0);
+                        col = !visible ? col_occluded
+                                       : ((g >= 192) ? col_primary : col_secondary);
+                    }
+                }
+                if (boundary && run_start >= 0 && col == run_col) continue;
+                flushRun(x);
+                if (boundary) { run_start = x; run_col = col; }
+            }
+            flushRun(mw);
+        }
+        // Empty runs (selection fully off-screen) still count as handled; the
+        // hash match replays the empty set for free until something changes.
+        // Re-arm the churn throttle only while motion continues.
+        s_churn_cooldown = settled ? 0 : 1;
+        replayRuns(ce);
+        return true;
+    };
+
+    // Pre-pass: in Rendered mode try the GPU mask path for every eligible
+    // mesh item at once; the loop below then skips their CPU raster. Falls
+    // through to the CPU outline when the raster cache isn't built yet
+    // (fresh load straight into Rendered) or the mask render fails.
+    bool gpu_outline_readback_drawn = false;
+    if (gpu_outline_backend && viewport_settings.shading_mode == 2 &&
+        viewport_settings.show_selection_outline && sel.hasSelection()) {
+        extern std::atomic<uint64_t> g_scene_geometry_generation;
+        const uint64_t scene_gen = g_scene_geometry_generation.load(std::memory_order_acquire);
+        if (gpu_outline_backend->hasValidRasterCache(scene_gen)) {
+            if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+            std::vector<std::pair<std::string, Matrix4x4>> readback_nodes;
+            bool readback_has_skinned = false;
+            // xform_hash covers everything that requires re-SYNCING raster
+            // object state (names, transforms, bones, geometry generation);
+            // state_hash additionally folds in the camera/screen so the run
+            // cache invalidates on view changes WITHOUT re-syncing objects.
+            uint64_t xform_hash = 1469598103934665603ull;
+            auto mixh  = [&](uint64_t v) { xform_hash ^= v; xform_hash *= 1099511628211ull; };
+            auto mixhf = [&](float v) { uint32_t b; std::memcpy(&b, &v, 4); mixh(b); };
+            for (const auto& item : sel.multi_selection) {
+                if (item.type != SelectableType::Object || !item.object) continue;
+                const std::string& nm = item.object->nodeName;
+                if (nm.empty()) continue;
+                bool is_body = false;
+                for (const auto& rb : ctx.scene.rigid_bodies) {
+                    if (rb.enabled && rb.source_name == nm) { is_body = true; break; }
+                }
+                if (is_body) continue; // bodies keep their cheap AABB in the loop
+                Matrix4x4 m = item.object->getTransformMatrix();
+                readback_nodes.emplace_back(nm, m);
+                for (const char c : nm) mixh((uint64_t)(unsigned char)c);
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 4; ++c) mixhf(m.m[r][c]);
+                auto mcit = mesh_cache.find(nm);
+                if (mcit != mesh_cache.end() && !mcit->second.empty() &&
+                    mcit->second[0].second && mcit->second[0].second->hasAnySkinWeights()) {
+                    readback_has_skinned = true;
+                }
+            }
+            if (!readback_nodes.empty()) {
+                // Bone-buffer sample joins the hash ONLY when a selected mesh
+                // is actually skinned — otherwise an animated (unrelated)
+                // character would invalidate a rigid selection's mask every
+                // frame and force constant recomputes.
+                const auto& bones = ctx.renderer.finalBoneMatrices;
+                if (readback_has_skinned) {
+                    mixh(bones.size());
+                    if (!bones.empty()) {
+                        const size_t bstep = (bones.size() > 16) ? (bones.size() / 16) : 1;
+                        for (size_t bi = 0; bi < bones.size(); bi += bstep) {
+                            const float* mm = &bones[bi].m[0][0];
+                            mixhf(mm[3]); mixhf(mm[7]); mixhf(mm[11]); mixhf(mm[0]);
+                        }
+                    }
+                }
+                mixh(scene_gen);
+
+                uint64_t state_hash = xform_hash;
+                auto mixs  = [&](uint64_t v) { state_hash ^= v; state_hash *= 1099511628211ull; };
+                auto mixsf = [&](float v) { uint32_t b; std::memcpy(&b, &v, 4); mixs(b); };
+                mixsf(cam.lookfrom.x); mixsf(cam.lookfrom.y); mixsf(cam.lookfrom.z);
+                mixsf(cam.lookat.x);   mixsf(cam.lookat.y);   mixsf(cam.lookat.z);
+                mixsf(cam.vup.x);      mixsf(cam.vup.y);      mixsf(cam.vup.z);
+                mixsf(cam.vfov);
+                mixs((uint64_t)(int)screen_w);
+                mixs((uint64_t)(int)screen_h);
+                // Render resolution drives the projection aspect on the
+                // backend side — a render-size change must re-render the mask.
+                mixs((uint64_t)image_width);
+                mixs((uint64_t)image_height);
+                gpu_outline_readback_drawn = DrawGpuMaskOutlineRuns(
+                    readback_nodes, readback_has_skinned, state_hash, xform_hash);
+            }
+        }
+    }
+
     if (sel.hasSelection()) {
         // Draw bounding box for each selected item (multi-selection support)
         for (size_t idx = 0; idx < sel.multi_selection.size(); ++idx) {
@@ -2100,13 +2372,25 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
                     drew_outline = true;  // cheap bbox (or outline off) — skip raster/hull
                 } else if (viewport_settings.show_selection_outline) {
                     std::string outlineName = item.object->nodeName;
-                    if (outlineName.empty()) outlineName = "Unnamed";
-                    // Prefer  rasterized outline (concave-tight, occlusion
-                    // free of internal geometry). Falls back to convex hull when the mesh
-                    // is too dense for the raster path's cost cap.
-                    drew_outline = DrawSelectionRaster(outlineName, color, thickness);
-                    if (!drew_outline) {
-                        drew_outline = DrawSelectionHull(outlineName, color, thickness);
+                    if (gpu_outline_readback_drawn && !outlineName.empty()) {
+                        // Already drawn by the Rendered-mode GPU mask
+                        // pre-pass above (same eligibility criteria).
+                        drew_outline = true;
+                    } else if (gpu_outline_eligible && !outlineName.empty()) {
+                        // GPU silhouette pass draws this node — collect the
+                        // name, push the whole set to the backend after the
+                        // loop. Skips the CPU raster/hull entirely.
+                        gpu_outline_params.nodeNames.push_back(outlineName);
+                        drew_outline = true;
+                    } else {
+                        if (outlineName.empty()) outlineName = "Unnamed";
+                        // Prefer  rasterized outline (concave-tight, occlusion
+                        // free of internal geometry). Falls back to convex hull when the mesh
+                        // is too dense for the raster path's cost cap.
+                        drew_outline = DrawSelectionRaster(outlineName, color, thickness);
+                        if (!drew_outline) {
+                            drew_outline = DrawSelectionHull(outlineName, color, thickness);
+                        }
                     }
                 } else {
                     // Toggle off → suppress raster/hull and bbox fallback alike
@@ -2122,6 +2406,17 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
                     DrawBoundingBox(bb_min, bb_max, color, thickness);
                 }
             }
+        }
+    }
+    // Push or clear the GPU outline once per frame; the backend only
+    // re-renders when the set actually changed. Cleared in Rendered mode and
+    // when nothing eligible is selected (the names list stays empty then).
+    if (gpu_outline_backend) {
+        if (!gpu_outline_params.nodeNames.empty()) {
+            gpu_outline_params.enabled = true;
+            gpu_outline_backend->setSelectionOutlineParams(gpu_outline_params);
+        } else {
+            gpu_outline_backend->clearSelectionOutline();
         }
     }
     // Force Field Picking Logic (Similar to Gas)
@@ -2466,33 +2761,33 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         projMatrix[14] = -(2.0f * far_plane * near_plane) / (far_plane - near_plane);
     }
 
-    // Gizmo sizing. Perspective keeps ImGuizmo's default constant *screen* size. Orthographic
-    // ties the gizmo to the selected object's *world* size, so it scales together with the
-    // geometry when zooming (ortho zoom changes ortho_height, not camera distance) instead of
-    // staying a fixed screen size that no longer matches a zoomed-in object.
-    if (gizmoUseOrtho) {
-        // Determine a zoom-INVARIANT world size for the selection so the gizmo stays a constant
-        // world size (scales with the geometry on ortho zoom). cached_aabb is world-space and
-        // covers every selection type; bodyWorldAABB is the object fallback; then a fixed default.
-        float worldSize = 0.0f;
-        if (sel.selected.has_cached_aabb) {
-            worldSize = (sel.selected.cached_aabb.max - sel.selected.cached_aabb.min).length();
+    // Gizmo sizing. The gizmo is a FIXED world size, identical for every selection type, so it
+    // scales with zoom (ortho zoom changes ortho_height, perspective dolly changes distance) but
+    // NOT with the selected object: AABB-derived sizing pegged the gizmo huge on terrain/ship
+    // selections and tiny on gizmo-only objects (lights, force fields, domains) whose AABB is
+    // small or absent. The screen-fraction clamps keep it usable at zoom extremes.
+    {
+        constexpr float kGizmoWorldSize = 1.0f; // world units the gizmo axes should span
+
+        // mGizmoSizeClipSpace = worldSize * (NDC-x units per world unit at the gizmo) so
+        // mScreenFactor (= clipSpace / rightLength) resolves to a constant world size.
+        float ndcPerWorldUnit;
+        if (gizmoUseOrtho) {
+            const float orthoW = ((cam.ortho_height > 1e-4f) ? cam.ortho_height : 10.0f) * aspect_ratio;
+            ndcPerWorldUnit = 2.0f / orthoW;
+        } else {
+            // Perspective: 1 world unit at view depth d spans projMatrix[0]/d NDC-x units.
+            const Vec3 gizmoAnchor = sel.selected.has_cached_aabb
+                ? (sel.selected.cached_aabb.min + sel.selected.cached_aabb.max) * 0.5f
+                : sel.selected.position;
+            float depth = (gizmoAnchor - eye).dot(f);
+            if (depth < near_plane) depth = near_plane;
+            ndcPerWorldUnit = 1.0f / (aspect_ratio * tan_half_fov * depth);
         }
-        if (worldSize < 1e-4f && sel.selected.type == SelectableType::Object && sel.selected.object) {
-            Vec3 bmin, bmax;
-            if (bodyWorldAABB(ctx, sel.selected.object->nodeName, bmin, bmax))
-                worldSize = (bmax - bmin).length();
-        }
-        if (worldSize < 1e-4f) worldSize = 1.0f; // last resort — still a fixed world size (scales with zoom)
-        const float orthoW = ((cam.ortho_height > 1e-4f) ? cam.ortho_height : 10.0f) * aspect_ratio;
-        // mGizmoSizeClipSpace = desiredWorldSize * (NDC units per world unit) so mScreenFactor
-        // (= clipSpace / rightLength) resolves to a constant world size that scales with zoom.
-        // Clamp to a sane on-screen fraction so it never vanishes or fills the viewport at zoom
-        // extremes, while still scaling between those bounds.
-        const float gizmoClip = std::clamp((worldSize * 0.6f) * (2.0f / orthoW), 0.04f, 0.45f);
+        // Floor near ImGuizmo's default (0.1) so the gizmo never shrinks into uselessness on
+        // far/zoomed-out views; modest ceiling so close-ups don't turn it into a billboard.
+        const float gizmoClip = std::clamp(kGizmoWorldSize * ndcPerWorldUnit, 0.08f, 0.20f);
         ImGuizmo::SetGizmoSizeClipSpace(gizmoClip);
-    } else {
-        ImGuizmo::SetGizmoSizeClipSpace(0.1f); // ImGuizmo default (constant screen size)
     }
 
     auto Project = [&](Vec3 p) -> ImVec2 {
@@ -4306,12 +4601,23 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
 }
 void SceneUI::drawSelectionGizmos(UIContext& ctx)
 {
+    gpu_edit_overlay_sync.drawn_this_frame = false;
     if (ctx.selection.hasSelection() && ctx.selection.show_gizmo && ctx.scene.camera && viewport_settings.show_gizmos) {
         drawSelectionBoundingBox(ctx);
         if (mesh_overlay_settings.enabled && mesh_workspace_mode == MeshWorkspaceMode::Edit) {
             drawEditableMeshOverlay(ctx);
         }
         drawTransformGizmo(ctx);
+    } else if (auto* outline_vpb =
+                   dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get())) {
+        // Selection/gizmos gone this frame — drop the GPU outline too
+        // (drawSelectionBoundingBox, which normally manages it, didn't run).
+        outline_vpb->clearSelectionOutline();
+    }
+    // GPU edit overlay didn't sync this frame (deselected, edit mode exited,
+    // overlay disabled, sculpt stroke) -> clear it from the viewport backend.
+    if (gpu_edit_overlay_sync.active && !gpu_edit_overlay_sync.drawn_this_frame) {
+        releaseGpuEditMeshOverlay();
     }
 }
 

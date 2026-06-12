@@ -240,7 +240,7 @@ A post-convergence layer that reads the path-traced result + AOV buffers and res
 
 ## 🎞️ Animation & UI
 
-- **Multi-track timeline** with group hierarchy (Objects / Lights / Cameras / World), per-channel Location/Rotation/Scale/Material keyframes, color-coded sub-channels, drag-to-move, zoom/pan/scrub, and context-menu insert/delete/duplicate
+- **Multi-track timeline & Graph Editor** with group hierarchy (Objects / Lights / Cameras / World), independent Bezier curve channel animation (Position, Rotation, Scale, Light settings, Camera parameters, and PBR Material properties), resizable splitter panel, collapsible group headers with bulk visibility toggles, and shortcut-driven keyframe editing (drag handles, delete/fit shortcuts).
 - **Skeletal animation** with quaternion interpolation and GPU compute skinning; **animation graph** (14+ nodes) for state machines and IK blend spaces
 - **Batch / sequence rendering** — export animation to image sequences (with material keyframes), cancellable mid-render, simulation-driven per frame
 - Modern **ImGui** docked dark UI, render quality presets (Low/Medium/High/Ultra), dynamic resolution scaling, scene hierarchy, material editor, performance metrics

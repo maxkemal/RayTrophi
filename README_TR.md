@@ -240,7 +240,7 @@ Yakınsama sonrası, path-traced sonucu + AOV tamponlarını okuyup; sahne geome
 
 ## 🎞️ Animasyon & UI
 
-- Grup hiyerarşili (Obje / Işık / Kamera / Dünya) **çok-track zaman çizelgesi**, kanal bazlı Konum/Dönüş/Ölçek/Materyal keyframe'leri, renk-kodlu alt kanallar, sürükle-taşı, zoom/pan/tarama ve sağ-tık ekle/sil/çoğalt
+- Grup hiyerarşili (Obje / Işık / Kamera / Dünya) **çok-track zaman çizelgesi & Graph Editor**, bağımsız Bezier eğrisi kanal animasyonu (Konum, Dönüş, Ölçek, Işık ayarları, Kamera parametreleri ve PBR Materyal özellikleri), yeniden boyutlandırılabilir splitter panel, toplu görünürlük seçimli katlanabilir grup başlıkları ve kısayol destekli keyframe/tangent düzenleme (sürükleme, silme/sığdırma kısayolları).
 - Quaternion interpolasyonlu **iskelet animasyonu** + GPU compute skinning; durum makineleri ve IK blend uzayları için **animasyon grafiği** (14+ düğüm)
 - **Toplu / sekans render** — animasyonu görüntü dizisine (materyal keyframe'leriyle) aktar, render ortasında iptal edilebilir, kare başına simülasyon sürümlü
 - Modern **ImGui** dock'lu koyu UI, render kalite preset'leri (Low/Medium/High/Ultra), dinamik çözünürlük ölçekleme, sahne hiyerarşisi, materyal editörü, performans metrikleri

@@ -1603,6 +1603,18 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
             ImGui::TextDisabled("Active only in Solid, Material Preview, or Matcap viewport mode.");
         }
 
+        UIWidgets::Divider();
+        UIWidgets::ColoredHeader("Viewport Grid", ImVec4(0.72f, 0.84f, 0.97f, 1.0f));
+        if (!raster_quality_active) ImGui::BeginDisabled();
+        ImGui::SliderFloat("Grid Fade Distance", &ctx.render_settings.grid_fade_distance, 0.25f, 3.0f, "%.2fx");
+        ImGui::SliderFloat("Grid Opacity", &ctx.render_settings.grid_opacity, 0.0f, 1.0f, "%.2f");
+        if (!raster_quality_active) ImGui::EndDisabled();
+        if (raster_quality_active) {
+            ImGui::TextDisabled("Fade scales the fog horizon where grid lines dissolve. Opacity 0 hides the grid.");
+        } else {
+            ImGui::TextDisabled("Grid is drawn only in Solid, Material Preview, or Matcap viewport mode.");
+        }
+
         const bool material_preview_active = (viewport_settings.shading_mode == 1);
         const char* preview_lighting_items[] = { "Classic 3-Point", "Studio", "Outdoor" };
         int preview_lighting = static_cast<int>(ctx.render_settings.material_preview_lighting_preset);
@@ -2033,6 +2045,7 @@ void SceneUI::drawDockSpaceHost(UIContext& ctx)
     // persisted node in imgui.ini, so the correct default rebuilds and any stale
     // user layout (e.g. an old full-width bottom panel) is discarded automatically.
     const ImGuiID dockspace_id = ImGui::GetID("RayTrophiDockSpace_v2");
+    this->dockspace_id = dockspace_id;
 
     // (Re)build the default layout once, or when the user requests a reset.
     if (docking_layout_dirty || ImGui::DockBuilderGetNode(dockspace_id) == nullptr) {
@@ -2052,8 +2065,28 @@ void SceneUI::drawDockSpaceHost(UIContext& ctx)
         ImGuiID dock_bottom = ImGui::DockBuilderSplitNode(dock_main, ImGuiDir_Down, bottom_ratio, nullptr, &dock_main);
 
         ImGui::DockBuilderDockWindow("Properties", dock_left);
-        ImGui::DockBuilderDockWindow("BottomPanel", dock_bottom);
+        ImGui::DockBuilderDockWindow("Timeline", dock_bottom);
+        ImGui::DockBuilderDockWindow("Console", dock_bottom);
+        ImGui::DockBuilderDockWindow("Terrain Graph", dock_bottom);
+        ImGui::DockBuilderDockWindow("AnimGraph", dock_bottom);
+        ImGui::DockBuilderDockWindow("Asset Browser", dock_bottom);
         ImGui::DockBuilderFinish(dockspace_id);
+        dock_bottom_id = dock_bottom;
+    } else {
+        // Fallback: scan active bottom windows to retrieve dock_bottom_id when loaded from ini
+        for (const char* name : {"Timeline", "Console", "Terrain Graph", "AnimGraph", "Asset Browser"}) {
+            ImGuiWindow* win = ImGui::FindWindowByName(name);
+            if (win && win->DockNode) {
+                ImGuiDockNode* node = win->DockNode;
+                while (node->ParentNode && node->ParentNode->ID != dockspace_id) {
+                    node = node->ParentNode;
+                }
+                if (node->ParentNode && node->ParentNode->ID == dockspace_id) {
+                    dock_bottom_id = node->ID;
+                    break;
+                }
+            }
+        }
     }
 
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
@@ -2076,6 +2109,25 @@ void SceneUI::drawDockSpaceHost(UIContext& ctx)
     }
 
     ImGui::End();
+}
+void SceneUI::dockToBottom(const char* window_name)
+{
+    if (docking_enabled && dock_bottom_id != 0) {
+        ImGuiWindow* win = ImGui::FindWindowByName(window_name);
+        bool already_docked = false;
+        if (win && win->DockNode) {
+            ImGuiDockNode* node = win->DockNode;
+            while (node->ParentNode && node->ParentNode->ID != dockspace_id) {
+                node = node->ParentNode;
+            }
+            if (node->ID == dock_bottom_id) {
+                already_docked = true;
+            }
+        }
+        if (!already_docked) {
+            ImGui::DockBuilderDockWindow(window_name, dock_bottom_id);
+        }
+    }
 }
 
 void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
@@ -2150,36 +2202,17 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (tab_to_focus == "Paint")      { active_properties_tab = 10; tab_to_focus = ""; }
         if (tab_to_focus == "System")     { active_properties_tab = 9; tab_to_focus = ""; }
 
-        float sidebar_width = 62.0f;
+        float sidebar_width = 38.0f;
         
         // --- 1. SIDEBAR (Fixed Width) ---
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 4));
         
         // Sidebar background
-        ImVec4 sidebarBg(0.070f, 0.075f, 0.090f, 0.98f);
+        ImVec4 sidebarBg = ThemeManager::instance().current().colors.secondary;
         ImGui::PushStyleColor(ImGuiCol_ChildBg, sidebarBg);
         
         ImGui::BeginChild("PropSidebar", ImVec2(sidebar_width, 0), false, ImGuiWindowFlags_NoScrollbar);
-
-        const ImVec2 sidebar_pos = ImGui::GetWindowPos();
-        const ImVec2 sidebar_size_actual = ImGui::GetWindowSize();
-        const float rail_width = 48.0f;
-        const float rail_x = sidebar_pos.x + (sidebar_width - rail_width) * 0.5f;
-        parent_dl->AddRectFilled(
-            ImVec2(rail_x, sidebar_pos.y + 8.0f),
-            ImVec2(rail_x + rail_width, sidebar_pos.y + sidebar_size_actual.y - 8.0f),
-            ImGui::ColorConvertFloat4ToU32(ImVec4(0.11f, 0.125f, 0.15f, 0.92f)),
-            18.0f
-        );
-        parent_dl->AddRect(
-            ImVec2(rail_x, sidebar_pos.y + 8.0f),
-            ImVec2(rail_x + rail_width, sidebar_pos.y + sidebar_size_actual.y - 8.0f),
-            ImGui::ColorConvertFloat4ToU32(ImVec4(0.72f, 0.80f, 0.90f, 0.07f)),
-            18.0f,
-            0,
-            1.0f
-        );
         
         // Add a vertical line to separate sidebar - Use Parent DL to avoid clipping
         parent_dl->AddLine(
@@ -2193,7 +2226,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             static float hover_anim[16] = {};
             ImGui::PushID(index);
             
-            const float size = 40.0f;
+            const float size = 30.0f;
             float margin = (sidebar_width - size) * 0.5f;
 
             ImGui::SetCursorPosX(margin);
@@ -2219,48 +2252,19 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             };
 
             const ImVec4 accent = getHoverTint(icon);
-            const ImVec4 baseBg(0.13f, 0.145f, 0.17f, 0.86f);
-            const float mix = is_active ? 0.72f : (0.18f + hover_anim[index] * 0.28f);
-            const ImVec4 buttonBg(
-                baseBg.x + (accent.x - baseBg.x) * mix,
-                baseBg.y + (accent.y - baseBg.y) * mix,
-                baseBg.z + (accent.z - baseBg.z) * mix,
-                is_active ? 0.98f : 0.90f);
 
+            // Sleek left-side vertical accent line for active tab (Blender style)
             if (is_active) {
-                // Connection Bridge: Use Parent DL to bleed across the child border
                 parent_dl->AddRectFilled(
-                    ImVec2(rail_x, pos.y),
-                    ImVec2(pos.x + sidebar_width + 2, pos.y + size),
-                    ImGui::ColorConvertFloat4ToU32(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)),
-                    12.0f
-                );
-
-                // Indicator on the right edge of the sidebar
-                parent_dl->AddRectFilled(
-                    ImVec2(win_pos.x + sidebar_width - 3, pos.y + 4),
-                    ImVec2(win_pos.x + sidebar_width, pos.y + size - 4),
-                    ImGui::ColorConvertFloat4ToU32(ImVec4(accent.x, accent.y, accent.z, 1.0f)),
-                    3.0f
+                    ImVec2(win_pos.x + 2.0f, pos.y + 4.0f),
+                    ImVec2(win_pos.x + 4.5f, pos.y + size - 4.0f),
+                    ImGui::ColorConvertFloat4ToU32(accent),
+                    1.25f
                 );
             }
 
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 11.0f);
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-            ImGui::PushStyleColor(ImGuiCol_Button, buttonBg);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(
-                (std::min)(1.0f, buttonBg.x + 0.10f),
-                (std::min)(1.0f, buttonBg.y + 0.10f),
-                (std::min)(1.0f, buttonBg.z + 0.10f),
-                0.96f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(
-                (std::min)(1.0f, buttonBg.x + 0.05f),
-                (std::min)(1.0f, buttonBg.y + 0.05f),
-                (std::min)(1.0f, buttonBg.z + 0.05f),
-                0.98f));
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, is_active ? 0.52f : 0.18f));
-
-            if (ImGui::Button("##tab", ImVec2(size, size))) {
+            // Flat invisible button for interaction
+            if (ImGui::InvisibleButton("##tab", ImVec2(size, size))) {
                 active_properties_tab = index;
                 focus_properties_panel_next_frame = true;
             }
@@ -2270,40 +2274,35 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             const float anim_speed = 12.0f * ImGui::GetIO().DeltaTime;
             hover_anim[index] += (target_hover - hover_anim[index]) * ImClamp(anim_speed, 0.0f, 1.0f);
 
-            ImVec2 item_min = ImGui::GetItemRectMin();
-            ImVec2 item_max = ImGui::GetItemRectMax();
-            parent_dl->AddRectFilled(
-                item_min,
-                item_max,
-                ImGui::ColorConvertFloat4ToU32(ImVec4(accent.x, accent.y, accent.z, 0.04f + hover_anim[index] * 0.10f)),
-                11.0f
-            );
-            parent_dl->AddRect(
-                item_min,
-                item_max,
-                ImGui::ColorConvertFloat4ToU32(ImVec4(accent.x, accent.y, accent.z, 0.16f + hover_anim[index] * 0.24f)),
-                11.0f, 0, 1.0f);
+            // Subtle background highlight for hovered or active tab
+            if (hover_anim[index] > 0.01f) {
+                ImVec4 highlightBg = is_active 
+                    ? ImVec4(1.0f, 1.0f, 1.0f, 0.08f) 
+                    : ImVec4(1.0f, 1.0f, 1.0f, 0.04f * hover_anim[index]);
+                parent_dl->AddRectFilled(
+                    pos,
+                    ImVec2(pos.x + size, pos.y + size),
+                    ImGui::ColorConvertFloat4ToU32(highlightBg),
+                    3.0f
+                );
+            }
 
-            // Hover eases into a larger, colorized icon to make the narrow tab strip more legible.
-            const float iconSize = 24.0f + 4.0f * hover_anim[index];
-            ImVec4 idleTint(0.55f, 0.55f, 0.60f, 1.0f);
-            ImVec4 activeTint(
-                (std::min)(1.0f, accent.x + 0.10f),
-                (std::min)(1.0f, accent.y + 0.10f),
-                (std::min)(1.0f, accent.z + 0.10f),
-                1.0f);
-            ImVec4 hoverTint = accent;
+            // Compact vector icons with thin strokes (20px, scaling to 22px on hover)
+            const float iconSize = 20.0f + 2.0f * hover_anim[index];
+            ImVec4 idleTint(0.55f, 0.55f, 0.60f, 0.75f);
+            ImVec4 activeTint = accent;
             ImVec4 iconTint = is_active
                 ? activeTint
-                : ImLerp(idleTint, hoverTint, hover_anim[index]);
+                : ImLerp(idleTint, accent, hover_anim[index]);
+
             UIWidgets::DrawIcon(
                 icon,
                 ImVec2(
-                    item_min.x + (size - iconSize) * 0.5f,
-                    item_min.y + (size - iconSize) * 0.5f),
+                    pos.x + (size - iconSize) * 0.5f,
+                    pos.y + (size - iconSize) * 0.5f),
                 iconSize,
                 ImGui::ColorConvertFloat4ToU32(iconTint),
-                1.75f + 0.40f * hover_anim[index]
+                1.35f + 0.15f * hover_anim[index]
             );
 
             if (is_hovered) {
@@ -2325,8 +2324,6 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                 ImGui::PopStyleColor(2);
             }
             
-            ImGui::PopStyleColor(4);
-            ImGui::PopStyleVar(2);
             ImGui::PopID();
         };
 
@@ -2353,7 +2350,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         
         // --- 2. CONTENT AREA (Inspector Style) ---
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.105f, 0.12f, 0.98f));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ThemeManager::instance().current().colors.background);
         
         ImGui::BeginChild("PropContentArea", ImVec2(0, 0), false, ImGuiWindowFlags_NoScrollbar);
         
@@ -3508,11 +3505,30 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             show_asset_browser  = (keep_index == 4) ? show_asset_browser : false;
         };
         
-        if (UIWidgets::HorizontalTab("Timeline", UIWidgets::IconType::Timeline, show_animation_panel))
+        bool active_dope = show_animation_panel && (timeline.getEditorMode() == TimelineEditorMode::DopeSheet);
+        if (UIWidgets::HorizontalTab("Dope Sheet", UIWidgets::IconType::Timeline, active_dope))
         {
-            show_animation_panel = !show_animation_panel;
-            if (show_animation_panel) {
-                closeOtherBottomPanels(0);
+            if (active_dope) {
+                show_animation_panel = false;
+                if (docking_enabled) dockToBottom("Timeline");
+            } else {
+                show_animation_panel = true;
+                timeline.setEditorMode(TimelineEditorMode::DopeSheet);
+                if (!docking_enabled) closeOtherBottomPanels(0);
+                focus_bottom_panel_next_frame = true;
+            }
+        }
+
+        bool active_graph = show_animation_panel && (timeline.getEditorMode() == TimelineEditorMode::GraphEditor);
+        if (UIWidgets::HorizontalTab("Graph Editor", UIWidgets::IconType::Graph, active_graph))
+        {
+            if (active_graph) {
+                show_animation_panel = false;
+                if (docking_enabled) dockToBottom("Timeline");
+            } else {
+                show_animation_panel = true;
+                timeline.setEditorMode(TimelineEditorMode::GraphEditor);
+                if (!docking_enabled) closeOtherBottomPanels(0);
                 focus_bottom_panel_next_frame = true;
             }
         }
@@ -3521,8 +3537,10 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         {
             show_scene_log = !show_scene_log;
             if (show_scene_log) { 
-                closeOtherBottomPanels(1);
+                if (!docking_enabled) closeOtherBottomPanels(1);
                 focus_bottom_panel_next_frame = true;
+            } else {
+                if (docking_enabled) dockToBottom("Console");
             }
         }
         
@@ -3530,8 +3548,10 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         {
             show_terrain_graph = !show_terrain_graph;
             if (show_terrain_graph) {
-                closeOtherBottomPanels(2);
+                if (!docking_enabled) closeOtherBottomPanels(2);
                 focus_bottom_panel_next_frame = true;
+            } else {
+                if (docking_enabled) dockToBottom("Terrain Graph");
             }
         }
         
@@ -3539,8 +3559,10 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         {
             show_anim_graph = !show_anim_graph;
             if (show_anim_graph) {
-                closeOtherBottomPanels(3);
+                if (!docking_enabled) closeOtherBottomPanels(3);
                 focus_bottom_panel_next_frame = true;
+            } else {
+                if (docking_enabled) dockToBottom("AnimGraph");
             }
         }
 
@@ -3548,8 +3570,10 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         {
             show_asset_browser = !show_asset_browser;
             if (show_asset_browser) {
-                closeOtherBottomPanels(4);
+                if (!docking_enabled) closeOtherBottomPanels(4);
                 focus_bottom_panel_next_frame = true;
+            } else {
+                if (docking_enabled) dockToBottom("Asset Browser");
             }
         }
 
@@ -3819,84 +3843,211 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
 
     // --- MAIN BOTTOM PANEL ---
     // Legacy: pin to the bottom strip. Docking: the dock node owns geometry.
-    if (!docking_enabled) {
-        ImGui::SetNextWindowPos(ImVec2(0, panel_top), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(screen_x, effective_bottom_panel_height), ImGuiCond_Always);
-    }
-    if (focus_bottom_panel_next_frame) {
-        ImGui::SetNextWindowFocus();
-    }
+    if (docking_enabled) {
+        if (show_animation_panel) {
+            bool open = true;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
+            ImGui::SetNextWindowSize(ImVec2(900, 300), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2((screen_x - 900) * 0.5f, screen_y - 300 - 50), ImGuiCond_FirstUseEver);
+            ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+            if (focus_bottom_panel_next_frame) {
+                ImGui::SetNextWindowFocus();
+            }
+            if (ImGui::Begin("Timeline", &open, flags)) {
+                if (focus_bottom_panel_next_frame) {
+                    ImGui::SetWindowFocus();
+                }
+                drawTimelineContent(ctx);
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+            if (!open) {
+                show_animation_panel = false;
+                dockToBottom("Timeline");
+            }
+        }
 
-    // Use theme color with alpha
-    ImGui::SetNextWindowBgAlpha(panel_alpha);
-    // ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f)); // Removed hardcoded
+        if (show_scene_log) {
+            bool open = true;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
+            ImGui::SetNextWindowSize(ImVec2(800, 400), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2((screen_x - 800) * 0.5f, (screen_y - 400) * 0.5f), ImGuiCond_FirstUseEver);
+            ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+            if (focus_bottom_panel_next_frame) {
+                ImGui::SetNextWindowFocus();
+            }
+            if (ImGui::Begin("Console", &open, flags)) {
+                if (focus_bottom_panel_next_frame) {
+                    ImGui::SetWindowFocus();
+                }
+                drawLogPanelEmbedded();
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+            if (!open) {
+                show_scene_log = false;
+                dockToBottom("Console");
+            }
+        }
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8)); // Added padding to prevent "stuck to left" look
-    ImGuiWindowFlags bottom_flags = ImGuiWindowFlags_NoCollapse;
-    if (!docking_enabled)
-        bottom_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
-    if (ImGui::Begin("BottomPanel", nullptr, bottom_flags))
-    {
+        if (show_terrain_graph) {
+            bool open = true;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
+            ImGui::SetNextWindowSize(ImVec2(950, 450), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2((screen_x - 950) * 0.5f, (screen_y - 450) * 0.5f), ImGuiCond_FirstUseEver);
+            ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+            if (focus_bottom_panel_next_frame) {
+                ImGui::SetNextWindowFocus();
+            }
+            if (ImGui::Begin("Terrain Graph", &open, flags)) {
+                if (focus_bottom_panel_next_frame) {
+                    ImGui::SetWindowFocus();
+                }
+                terrain_brush.enabled = false;
+                TerrainObject* activeTerrain = nullptr;
+                if (terrain_brush.active_terrain_id != -1) {
+                    activeTerrain = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
+                }
+                if (activeTerrain) {
+                    if (!activeTerrain->nodeGraph) {
+                        activeTerrain->nodeGraph = std::make_shared<TerrainNodesV2::TerrainNodeGraphV2>();
+                    }
+                    if (activeTerrain->nodeGraph->nodes.empty()) {
+                        activeTerrain->nodeGraph->createDefaultGraph(activeTerrain);
+                    }
+                    if (!terrainNodeEditorUI.onOpenFileDialog) {
+                         terrainNodeEditorUI.onOpenFileDialog = [](const wchar_t* filter) -> std::string {
+                             return SceneUI::openFileDialogW(filter);
+                         };
+                    }
+                    if (!terrainNodeEditorUI.onSaveFileDialog) {
+                         terrainNodeEditorUI.onSaveFileDialog = [](const wchar_t* filter, const wchar_t* defName) -> std::string {
+                             return SceneUI::saveFileDialogW(filter, L"png");
+                         };
+                    }
+                    terrainNodeEditorUI.draw(ctx, *activeTerrain->nodeGraph, activeTerrain);
+                } else {
+                     ImGui::TextColored(ImVec4(1, 1, 0, 1), "Please select a terrain to edit its node graph.");
+                }
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+            if (!open) {
+                show_terrain_graph = false;
+                dockToBottom("Terrain Graph");
+            }
+        }
+
+        if (show_anim_graph) {
+            bool open = true;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
+            ImGui::SetNextWindowSize(ImVec2(950, 450), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2((screen_x - 950) * 0.5f, (screen_y - 450) * 0.5f), ImGuiCond_FirstUseEver);
+            ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+            if (focus_bottom_panel_next_frame) {
+                ImGui::SetNextWindowFocus();
+            }
+            if (ImGui::Begin("AnimGraph", &open, flags)) {
+                if (focus_bottom_panel_next_frame) {
+                    ImGui::SetWindowFocus();
+                }
+                drawAnimationGraphPanel(ctx);
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+            if (!open) {
+                show_anim_graph = false;
+                dockToBottom("AnimGraph");
+            }
+        }
+
+        if (show_asset_browser) {
+            bool open = true;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
+            ImGui::SetNextWindowSize(ImVec2(900, 400), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2((screen_x - 900) * 0.5f, (screen_y - 400) * 0.5f), ImGuiCond_FirstUseEver);
+            ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+            if (focus_bottom_panel_next_frame) {
+                ImGui::SetNextWindowFocus();
+            }
+            if (ImGui::Begin("Asset Browser", &open, flags)) {
+                if (focus_bottom_panel_next_frame) {
+                    ImGui::SetWindowFocus();
+                }
+                drawAssetBrowser(ctx, true);
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+            if (!open) {
+                show_asset_browser = false;
+                dockToBottom("Asset Browser");
+            }
+        }
+        
         if (focus_bottom_panel_next_frame) {
-            ImGui::SetWindowFocus();
             focus_bottom_panel_next_frame = false;
         }
-        if (show_animation_panel) {
-            drawTimelineContent(ctx);
+    } else {
+        // Legacy single BottomPanel
+        ImGui::SetNextWindowPos(ImVec2(0, panel_top), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(screen_x, effective_bottom_panel_height), ImGuiCond_Always);
+        if (focus_bottom_panel_next_frame) {
+            ImGui::SetNextWindowFocus();
         }
-        else if (show_scene_log) {
-            drawLogPanelEmbedded();
-        }
-        else if (show_terrain_graph) {
-            // Terrain Node Graph Editor
-            // Disable edit tool when using node graph (performance optimization)
-            terrain_brush.enabled = false;
-            
-            TerrainObject* activeTerrain = nullptr;
-            if (terrain_brush.active_terrain_id != -1) {
-                activeTerrain = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
+        ImGui::SetNextWindowBgAlpha(panel_alpha);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
+        ImGuiWindowFlags bottom_flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
+        if (ImGui::Begin("BottomPanel", nullptr, bottom_flags))
+        {
+            if (focus_bottom_panel_next_frame) {
+                ImGui::SetWindowFocus();
+                focus_bottom_panel_next_frame = false;
             }
-
-            if (activeTerrain) {
-                // Ensure graph exists
-                if (!activeTerrain->nodeGraph) {
-                    activeTerrain->nodeGraph = std::make_shared<TerrainNodesV2::TerrainNodeGraphV2>();
-                }
-                
-                // Auto-create default graph if empty
-                if (activeTerrain->nodeGraph->nodes.empty()) {
-                    activeTerrain->nodeGraph->createDefaultGraph(activeTerrain);
-                }
-                
-                // Set callbacks
-                if (!terrainNodeEditorUI.onOpenFileDialog) {
-                     terrainNodeEditorUI.onOpenFileDialog = [](const wchar_t* filter) -> std::string {
-                         return SceneUI::openFileDialogW(filter);
-                     };
-                }
-                if (!terrainNodeEditorUI.onSaveFileDialog) {
-                     terrainNodeEditorUI.onSaveFileDialog = [](const wchar_t* filter, const wchar_t* defName) -> std::string {
-                         return SceneUI::saveFileDialogW(filter, L"png");
-                     };
-                }
-                terrainNodeEditorUI.draw(ctx, *activeTerrain->nodeGraph, activeTerrain);
+            if (show_animation_panel) {
+                drawTimelineContent(ctx);
             }
-            else {
-                 ImGui::TextColored(ImVec4(1, 1, 0, 1), "Please select a terrain to edit its node graph.");
-                 // Fallback to global graph just to show the UI (optional, or just show nothing)
-                 // terrainNodeEditorUI.draw(ctx, terrainNodeGraph, nullptr);
+            else if (show_scene_log) {
+                drawLogPanelEmbedded();
+            }
+            else if (show_terrain_graph) {
+                terrain_brush.enabled = false;
+                TerrainObject* activeTerrain = nullptr;
+                if (terrain_brush.active_terrain_id != -1) {
+                    activeTerrain = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
+                }
+                if (activeTerrain) {
+                    if (!activeTerrain->nodeGraph) {
+                        activeTerrain->nodeGraph = std::make_shared<TerrainNodesV2::TerrainNodeGraphV2>();
+                    }
+                    if (activeTerrain->nodeGraph->nodes.empty()) {
+                        activeTerrain->nodeGraph->createDefaultGraph(activeTerrain);
+                    }
+                    if (!terrainNodeEditorUI.onOpenFileDialog) {
+                         terrainNodeEditorUI.onOpenFileDialog = [](const wchar_t* filter) -> std::string {
+                             return SceneUI::openFileDialogW(filter);
+                         };
+                    }
+                    if (!terrainNodeEditorUI.onSaveFileDialog) {
+                         terrainNodeEditorUI.onSaveFileDialog = [](const wchar_t* filter, const wchar_t* defName) -> std::string {
+                             return SceneUI::saveFileDialogW(filter, L"png");
+                         };
+                    }
+                    terrainNodeEditorUI.draw(ctx, *activeTerrain->nodeGraph, activeTerrain);
+                }
+                else {
+                     ImGui::TextColored(ImVec4(1, 1, 0, 1), "Please select a terrain to edit its node graph.");
+                }
+            }
+            else if (show_anim_graph) {
+                drawAnimationGraphPanel(ctx);
+            }
+            else if (show_asset_browser) {
+                drawAssetBrowser(ctx, true);
             }
         }
-        else if (show_anim_graph) {
-            // Animation Node Graph Editor
-            drawAnimationGraphPanel(ctx);
-        }
-        else if (show_asset_browser) {
-            drawAssetBrowser(ctx, true);
-        }
+        ImGui::End();
+        ImGui::PopStyleVar();
     }
-    ImGui::End();
-    ImGui::PopStyleVar(); // Pop WindowPadding
     // ImGui::PopStyleVar(); // Removed redundant PopStyleVar
     // ImGui::PopStyleColor(); // Removed hardcoded color push
 }
@@ -4025,9 +4176,32 @@ bool SceneUI::drawOverlays(UIContext& ctx)
         const float left_offset = showSidePanel ? side_panel_width : 0.0f;
         const float top = menu_height;
         const float right = ImGui::GetIO().DisplaySize.x;
+
+        bool bottom_docked = false;
+        if (show_bottom) {
+            if (!docking_enabled) {
+                bottom_docked = true;
+            } else {
+                ImGuiID dockspace_id = ImGui::GetID("RayTrophiDockSpace_v2");
+                for (const char* name : {"Timeline", "Console", "Terrain Graph", "AnimGraph", "Asset Browser"}) {
+                    ImGuiWindow* win = ImGui::FindWindowByName(name);
+                    if (win && win->Active && win->DockNode) {
+                        ImGuiDockNode* node = win->DockNode;
+                        while (node->ParentNode) {
+                            node = node->ParentNode;
+                        }
+                        if (node->ID == dockspace_id) {
+                            bottom_docked = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         const float bottom = ImGui::GetIO().DisplaySize.y -
             status_bar_height -
-            (show_bottom ? bottom_panel_height : 0.0f);
+            (bottom_docked ? bottom_panel_height : 0.0f);
         const float width = (std::max)(0.0f, right - left_offset);
         const float height = (std::max)(0.0f, bottom - top);
 
@@ -7525,6 +7699,41 @@ std::string SceneUI::serialize() {
     }
 
     j["show_scene_log"] = show_scene_log;
+    j["show_animation_panel"] = show_animation_panel;
+    j["show_terrain_graph"] = show_terrain_graph;
+    j["show_anim_graph"] = show_anim_graph;
+    j["show_asset_browser"] = show_asset_browser;
+
+    {
+        nlohmann::json floating_panels = nlohmann::json::object();
+        for (const char* name : {"Timeline", "Console", "Terrain Graph", "AnimGraph", "Asset Browser"}) {
+            ImGuiWindow* win = ImGui::FindWindowByName(name);
+            bool is_floating = false; // Default to docked
+            if (win) {
+                if (win->DockNode) {
+                    ImGuiDockNode* node = win->DockNode;
+                    while (node->ParentNode && node->ParentNode->ID != dockspace_id) {
+                        node = node->ParentNode;
+                    }
+                    if (node->ID != dock_bottom_id) {
+                        is_floating = true;
+                    }
+                } else {
+                    is_floating = true;
+                }
+            } else {
+                // If the window is currently null (closed/hidden or not yet submitted), check its settings
+                ImGuiWindowSettings* settings = ImGui::FindWindowSettingsByID(ImHashStr(name));
+                if (settings) {
+                    is_floating = (settings->DockId == 0);
+                } else {
+                    is_floating = false; // Default to docked
+                }
+            }
+            floating_panels[name] = is_floating;
+        }
+        j["bottom_panels_floating"] = floating_panels;
+    }
 
     // Persist terrain subsection open states
     j["terrain_layer_open"] = nlohmann::json::array();
@@ -7668,6 +7877,24 @@ void SceneUI::deserialize(const std::string& data) {
         }
         
         if (j.contains("show_scene_log")) show_scene_log = j["show_scene_log"];
+        if (j.contains("show_animation_panel")) show_animation_panel = j["show_animation_panel"];
+        if (j.contains("show_terrain_graph")) show_terrain_graph = j["show_terrain_graph"];
+        if (j.contains("show_anim_graph")) show_anim_graph = j["show_anim_graph"];
+        if (j.contains("show_asset_browser")) show_asset_browser = j["show_asset_browser"];
+
+        if (j.contains("bottom_panels_floating") && j["bottom_panels_floating"].is_object()) {
+            auto floating_panels = j["bottom_panels_floating"];
+            for (const char* name : {"Timeline", "Console", "Terrain Graph", "AnimGraph", "Asset Browser"}) {
+                if (floating_panels.contains(name)) {
+                    bool is_floating = floating_panels[name].get<bool>();
+                    if (is_floating) {
+                        ImGui::DockBuilderDockWindow(name, 0);
+                    } else {
+                        dockToBottom(name);
+                    }
+                }
+            }
+        }
 
         if (j.contains("side_panel_width")) side_panel_width = j["side_panel_width"];
         if (j.contains("bottom_panel_height")) bottom_panel_height = j["bottom_panel_height"];
@@ -7675,8 +7902,11 @@ void SceneUI::deserialize(const std::string& data) {
         if (j.contains("preferred_bottom_panel_height")) preferred_bottom_panel_height = j["preferred_bottom_panel_height"];
         if (j.contains("hierarchy_panel_height")) hierarchy_panel_height = j["hierarchy_panel_height"];
         if (j.contains("docking_enabled")) {
+            bool old_val = docking_enabled;
             docking_enabled = j["docking_enabled"];
-            docking_layout_dirty = true; // rebuild default layout to match restored preference
+            if (docking_enabled != old_val) {
+                docking_layout_dirty = true; // rebuild default layout to match restored preference
+            }
         }
         // Restore torn-off Properties sub-tabs (positions come from imgui.ini, so no spawn override).
         for (int t = 0; t < 16; ++t) { properties_tab_popped_[t] = false; properties_pop_spawn_pending_[t] = false; }

@@ -170,6 +170,7 @@ struct StylizeAOVCore {
     int   nishita_cloud_seed;
     float depth;
     float edge;
+    float pixel_scale;   // world units per pixel at the hit point (0 = unknown)
     unsigned int material_id;
     int   valid;
     int   hit;
@@ -185,7 +186,7 @@ STYLIZE_HD inline StylizeAOVCore defaultAOV() {
     a.nishita_clouds_enabled = 0; a.nishita_cloud_coverage = 0.45f;
     a.nishita_cloud_density = 0.65f; a.nishita_cloud_scale = 1.0f;
     a.nishita_cloud_offset_x = 0.0f; a.nishita_cloud_offset_z = 0.0f;
-    a.nishita_cloud_seed = 0; a.depth = 0.0f; a.edge = 0.0f;
+    a.nishita_cloud_seed = 0; a.depth = 0.0f; a.edge = 0.0f; a.pixel_scale = 0.0f;
     a.material_id = 0xFFFFFFFFu; a.valid = 0; a.hit = 0;
     return a;
 }
@@ -427,6 +428,213 @@ STYLIZE_HD inline float strokeField(int x, int y, const StylizeAOVCore& aov, con
     const float fiber = fbmNoise(u * 2.8f + 19.0f, v * 0.55f - 7.0f, seed + 91);
     float stroke = (long_stroke - 0.5f) * 0.75f + (fiber - 0.5f) * 0.25f;
     return stroke;
+}
+
+// ---------------------------------------------------------------------------
+// Brush daub field — discrete, overlapping, oriented paint stamps. Each pixel
+// finds the topmost elliptical daub on a jittered grid in stroke space; the
+// winner paints a flat, tonally-offset coat with bristle streaks and a signed
+// impasto rim. Per-daub random priority gives painter ordering, so overlapping
+// daubs keep crisp boundaries instead of averaging into mush.
+// ---------------------------------------------------------------------------
+struct BrushStrokeSample {
+    float coverage;   // 0..1 paint deposited by the winning daub
+    float tone;       // -1..1 per-daub tonal offset
+    float bristle;    // -1..1 bristle streaks along the daub axis
+    float rim;        // -1..1 signed impasto rim (+ lit top edge, - shadow edge)
+    float gap;        // 0..1 bare canvas between daubs
+};
+
+STYLIZE_HD inline void evalBrushDaubLayer(float u, float v, int seed,
+                                          float aspect, float breakup, float edge_rag,
+                                          BrushStrokeSample& s) {
+    s.coverage = 0.0f; s.tone = 0.0f; s.bristle = 0.0f; s.rim = 0.0f; s.gap = 1.0f;
+    const float spacing = aspect * 0.74f;
+    const int row0 = static_cast<int>(floorf(v));
+    float best_priority = -1.0f;
+    float best_cov = 0.0f;
+    float best_tone = 0.0f;
+    float best_rim = 0.0f;
+    float best_bris = 0.0f;
+    float total_cov = 0.0f;
+    for (int rj = -1; rj <= 1; ++rj) {
+        const int row = row0 + rj;
+        const float row_shift = hashNoise(row, seed, 11) * spacing;
+        const int slot0 = static_cast<int>(floorf((u + row_shift) / spacing));
+        for (int sj = -1; sj <= 1; ++sj) {
+            const int slot = slot0 + sj;
+            const int cell = seed + row * 131 + slot * 977;
+            if (hashNoise(slot, row, cell + 1) < breakup * 0.55f) {
+                continue;                                   // dry brush: missing daub
+            }
+            const float h_cu = hashNoise(slot, row, cell + 2);
+            const float h_cv = hashNoise(slot, row, cell + 3);
+            const float cu = (static_cast<float>(slot) + 0.5f + (h_cu - 0.5f) * 0.55f) * spacing - row_shift;
+            const float cv = static_cast<float>(row) + 0.5f + (h_cv - 0.5f) * 0.40f;
+            const float du = u - cu;
+            const float dv = v - cv;
+            if (fabsf(du) > aspect * 0.80f || fabsf(dv) > 1.45f) {
+                continue;                                   // cheap reject before trig/noise
+            }
+            const float ja = (hashNoise(slot, row, cell + 4) - 0.5f) * 0.50f;
+            const float cj = cosf(ja);
+            const float sn = sinf(ja);
+            const float ru = du * cj + dv * sn;
+            const float rv = -du * sn + dv * cj;
+            const float half_len = aspect * (0.40f + hashNoise(slot, row, cell + 5) * 0.24f);
+            const float half_wid = 0.36f + hashNoise(slot, row, cell + 6) * 0.22f;
+            const float t = ru / fmaxf(1e-4f, half_len);    // -1..1 along the stroke
+            const float at = fabsf(t);
+            if (at > 1.15f) {
+                continue;
+            }
+            // wavy spine — real strokes curve a little
+            const float wob = (valueNoise(ru * 1.6f + h_cu * 9.0f, h_cv * 7.0f, cell + 12) - 0.5f) * half_wid * 0.55f;
+            const float rvw = rv - wob;
+            // rounded head, thinning tail
+            float w_local = half_wid * (0.30f + 0.70f * sqrtf(fmaxf(0.0f, 1.0f - t * t)));
+            w_local *= 1.0f - 0.35f * smoothstepf(0.10f, 1.0f, t);
+            const float dn = fabsf(rvw) / fmaxf(1e-4f, w_local);
+            const float lon = 1.0f - smoothstepf(0.82f, 1.06f, at);
+            const float lat = 1.0f - smoothstepf(0.58f, 1.0f, dn);
+            float cov = lat * lon;
+            if (cov <= 0.02f) {
+                continue;
+            }
+            // bristle pattern across the width — streaks AND torn ragged ends;
+            // edge_rag tears the stroke wherever the AOV edge runs through it
+            const float bris = valueNoise(rvw * 3.1f / fmaxf(0.05f, half_wid), t * 2.2f, cell + 13);
+            const float rag_zone = saturate(smoothstepf(0.35f, 0.95f, at) + edge_rag);
+            cov *= 1.0f - rag_zone * smoothstepf(0.30f, 0.78f, bris) * (0.55f + breakup * 0.35f);
+            if (cov <= 0.02f) {
+                continue;
+            }
+            total_cov = fmaxf(total_cov, cov);
+            const float priority = hashNoise(slot, row, cell + 7) + cov * 0.35f;
+            if (priority > best_priority) {
+                best_priority = priority;
+                best_cov = cov;
+                best_tone = (hashNoise(slot, row, cell + 8) - 0.5f) * 2.0f;
+                best_bris = (bris - 0.5f) * 2.0f;
+                const float band = smoothstepf(0.55f, 0.95f, dn) * lat * lon;
+                best_rim = band * clampf(-rvw / fmaxf(1e-4f, w_local) * 1.7f, -1.0f, 1.0f);
+            }
+        }
+    }
+    if (best_priority < 0.0f) {
+        return;
+    }
+    s.coverage = best_cov;
+    s.tone = best_tone;
+    s.rim = best_rim;
+    s.bristle = best_bris;
+    s.gap = saturate(1.0f - total_cov);
+}
+
+STYLIZE_HD inline BrushStrokeSample brushStrokeField(int x, int y,
+                                                     const StylizeAOVCore& aov,
+                                                     const StyleProfileCore& profile,
+                                                     int frame_index) {
+    const float brush_scale = fmaxf(0.05f, profile.material.brush_scale);
+    // daub width in pixels — SCREEN-space size, so strokes never blow up or
+    // shrink with surface orientation/distance (depth growth stays knob-gated
+    // through surfacePixelScale only).
+    const float daub_px = surfacePixelScale(aov, profile, 6.0f + brush_scale * 10.0f);
+    const float coherent_frame = static_cast<float>(frame_index) * (1.0f - profile.temporal_coherence);
+
+    const float nx = aov.hit ? aov.normal.x : 0.0f;
+    const float ny = aov.hit ? aov.normal.y : 1.0f;
+    const float nz = aov.hit ? aov.normal.z : 0.0f;
+    float angle = atan2f(nz + ny * 0.35f, nx + 0.001f);
+    switch (profile.material.stroke_direction) {
+        case SD_Vertical: angle = 1.5707963f; break;
+        case SD_Horizontal: angle = 0.0f; break;
+        case SD_Diagonal: angle = 0.7853982f; break;
+        case SD_CrossHatch:
+            angle = ((x / 48 + y / 48) & 1) ? 0.7853982f : -0.7853982f;
+            break;
+        case SD_SurfaceNormal:
+        default:
+            break;
+    }
+    const float ca = cosf(angle);
+    const float sa = sinf(angle);
+    const float fx = static_cast<float>(x);
+    const float fy = static_cast<float>(y);
+    // Stroke-space coordinates. With Surface Lock the daubs are parameterized
+    // on the SURFACE (world tangent plane, rotated by the stroke direction) so
+    // they stay glued to geometry under camera motion — no screen-door sliding.
+    // The scale is depth-normalized and split across two log2-quantized levels
+    // that crossfade, so the on-screen daub size stays ~constant (within ~2x)
+    // without the pattern swimming or popping.
+    float pu;
+    float pv;
+    float world_per_daub;
+    const float surface_lock = aov.hit ? saturate(profile.material.surface_adherence) : 0.0f;
+    if (surface_lock > 0.001f) {
+        SV3 tangent;
+        SV3 bitangent;
+        surfaceBasis(aov.normal, tangent, bitangent);
+        const float tu = dot3(aov.world_position, tangent);
+        const float tv = dot3(aov.world_position, bitangent);
+        pu = tu * ca + tv * sa;
+        pv = -tu * sa + tv * ca;
+        // exact world-per-pixel from the AOV when the builder filled it; the
+        // 0.0007*depth term is only a legacy fov-guess fallback
+        const float wpp = aov.pixel_scale > 1e-7f
+            ? aov.pixel_scale
+            : fmaxf(1e-5f, aov.depth) * 0.0007f;
+        world_per_daub = wpp * daub_px;
+    } else {
+        pu = fx * ca + fy * sa;
+        pv = -fx * sa + fy * ca;
+        world_per_daub = daub_px;
+    }
+    const int mat_seed = static_cast<int>(aov.material_id & 0xFFFFu);
+    const float mat_u = (hashNoise(mat_seed, 71, 2) - 0.5f) * 4.0f + nx * 1.7f;
+    const float mat_v = (hashNoise(mat_seed, 97, 3) - 0.5f) * 4.0f + ny * 1.1f + nz * 0.7f;
+
+    const float l = log2f(fmaxf(1e-6f, world_per_daub));
+    const int lvl = static_cast<int>(floorf(l));
+    const float lf = l - static_cast<float>(lvl);
+    const float s0 = exp2f(static_cast<float>(lvl));
+    const float s1 = s0 * 2.0f;
+
+    const int seed = static_cast<int>(coherent_frame) * 13
+                   + static_cast<int>(aov.material_id & 0xFFu) * 53 + 977;
+    const float aspect = 3.4f;                              // daub length / width
+    const float breakup = saturate(profile.material.dry_brush);
+    // AOV edges tear the stroke tips instead of clipping the paint — silhouettes
+    // end in ragged brush starts/stops, not a hard geometric line.
+    const float edge_rag = aov.hit
+        ? saturate(aov.edge) * (0.35f + saturate(profile.material.edge_respect) * 0.65f)
+        : 0.0f;
+    // Seeds depend on the LOD level, so when the camera dollies and the level
+    // increments, the incoming fine layer is EXACTLY the previous coarse layer
+    // (no reshuffle at the boundary).
+    BrushStrokeSample lodA;
+    evalBrushDaubLayer(pu / s0 + mat_u, pv / s0 + mat_v, seed + lvl * 101,
+                       aspect, breakup, edge_rag, lodA);
+    BrushStrokeSample lodB;
+    evalBrushDaubLayer(pu / s1 + mat_u, pv / s1 + mat_v, seed + (lvl + 1) * 101,
+                       aspect, breakup, edge_rag, lodB);
+
+    BrushStrokeSample s;
+    const float wA = lodA.coverage * (1.0f - lf);
+    const float wB = lodB.coverage * lf;
+    const float wsum = wA + wB;
+    s.coverage = lerpf(lodA.coverage, lodB.coverage, lf);
+    s.gap = lerpf(lodA.gap, lodB.gap, lf);
+    if (wsum > 1e-4f) {
+        s.tone = (lodA.tone * wA + lodB.tone * wB) / wsum;
+        s.bristle = (lodA.bristle * wA + lodB.bristle * wB) / wsum;
+        s.rim = (lodA.rim * wA + lodB.rim * wB) / wsum;
+    } else {
+        s.tone = 0.0f;
+        s.bristle = 0.0f;
+        s.rim = 0.0f;
+    }
+    return s;
 }
 
 struct WetOilStroke {
@@ -783,13 +991,24 @@ STYLIZE_HD inline SV3 applyPostProcess(const SV3& input_color,
             : 1.0f;
         color = simplifyColor(color, strength * profile.material.color_simplification * 0.48f * edge_guard * material_guard);
 
-        if (profile.material.enabled && profile.material.brush_strength > 0.001f) {
+        const bool brush_on = profile.material.enabled && profile.material.brush_strength > 0.001f;
+        const bool outline_on = profile.outline.enabled && aov.edge > 0.001f;
+        BrushStrokeSample daub;
+        daub.coverage = 0.0f; daub.tone = 0.0f; daub.bristle = 0.0f; daub.rim = 0.0f; daub.gap = 1.0f;
+        if (brush_on || outline_on) {
+            daub = brushStrokeField(x, y, aov, profile, frame_index);
+        }
+
+        if (brush_on) {
             const float stroke = strokeField(x, y, aov, profile, frame_index);
             const float lit_luma = luminance(color);
             const float shadow_boost = 1.0f + (1.0f - smoothstepf(0.08f, 0.48f, lit_luma)) * 0.22f;
             const float highlight_thin = 1.0f - smoothstepf(0.62f, 0.96f, lit_luma) * 0.42f;
-            const float brush_amount = profile.material.brush_strength * strength * edge_guard * shadow_boost * highlight_thin;
-            const float dry_mask = smoothstepf(0.12f, 0.62f, fabsf(stroke) + profile.material.dry_brush * 0.35f);
+            // No edge_guard on the daub layer: edges tear the strokes inside the
+            // field (edge_rag) instead of fading the paint into a clean cutout.
+            const float brush_amount = profile.material.brush_strength * strength * shadow_boost * highlight_thin;
+            const float guarded_amount = brush_amount * edge_guard;
+            const float daub_opacity = saturate(brush_amount * 2.2f);
             const SV3 paint_color = dominantPigmentTint(color, 0.42f + palette_influence * 0.18f);
             SV3 palette_tint = lerp3(profile.palette_shadow, profile.palette_highlight, saturate(albedo_luma + stroke * 0.28f));
             if (aov.hit) {
@@ -806,9 +1025,9 @@ STYLIZE_HD inline SV3 applyPostProcess(const SV3& input_color,
                 const float pickup = saturate(profile.material.pickup_rate);
                 const float deposit = saturate(profile.material.deposit_rate);
                 const float wet_visibility = 0.55f + oil_body * 0.62f + paint_load * 0.20f;
-                const float wet_mask = saturate(brush_amount * wet_visibility * (0.08f + oil_body * 0.12f + oil.drag * 0.18f));
-                const float deposit_mask = saturate(brush_amount * paint_load * deposit * wet_visibility * (0.05f + oil.ridge * 0.10f));
-                const float bristle_mask = saturate(brush_amount * (0.10f + oil_body * 0.12f + profile.material.bristle_buildup * 0.10f));
+                const float wet_mask = saturate(guarded_amount * wet_visibility * (0.08f + oil_body * 0.12f + oil.drag * 0.18f));
+                const float deposit_mask = saturate(guarded_amount * paint_load * deposit * wet_visibility * (0.05f + oil.ridge * 0.10f));
+                const float bristle_mask = saturate(guarded_amount * (0.10f + oil_body * 0.12f + profile.material.bristle_buildup * 0.10f));
                 const SV3 picked_color = lerp3(color, paint_color, 0.28f + pickup * 0.22f);
                 const SV3 carried_color = lerp3(picked_color, stroke_tint, saturate(deposit * paint_load * palette_influence * 0.22f));
                 const float body_luma = (oil.body - 0.5f) * (0.045f + oil_body * 0.055f);
@@ -818,12 +1037,22 @@ STYLIZE_HD inline SV3 applyPostProcess(const SV3& input_color,
                 color = lerp3(color, material_stroke, wet_mask);
                 color = lerp3(color, carried_color, deposit_mask);
                 color = color * (1.0f + (stroke + oil.bristle) * bristle_mask * 0.42f);
-                color = lerp3(color, color * (1.0f + 0.045f * oil.ridge), oil.ridge * brush_amount * oil_body * 0.35f);
-                color = lerp3(color, color * (0.985f - oil.ridge * 0.015f), profile.material.dry_brush * brush_amount * (1.0f - oil.drag) * 0.32f);
+                color = lerp3(color, color * (1.0f + 0.045f * oil.ridge), oil.ridge * guarded_amount * oil_body * 0.35f);
+                color = lerp3(color, color * (0.985f - oil.ridge * 0.015f), profile.material.dry_brush * guarded_amount * (1.0f - oil.drag) * 0.32f);
+                SV3 wet_daub = clamp01(paint_color * (1.0f + daub.tone * (0.16f + oil_body * 0.10f)
+                                                          + (daub.bristle * 0.6f + oil.bristle) * 0.12f));
+                wet_daub = lerp3(wet_daub, carried_color, saturate(palette_influence * 0.20f + deposit * 0.10f));
+                color = lerp3(color, wet_daub, daub_opacity * daub.coverage * (0.30f + paint_load * 0.35f));
+                color = clamp01(color * (1.0f + daub.rim * daub_opacity * (0.10f + oil_body * 0.14f)));
             } else {
-                color = lerp3(color, clamp01(paint_color * (1.0f + stroke * 0.10f)), brush_amount * 0.18f);
-                color = color * (1.0f + stroke * brush_amount * 0.12f);
-                color = lerp3(color, stroke_tint, brush_amount * dry_mask * profile.material.dry_brush * 0.18f);
+                SV3 daub_color = clamp01(paint_color * (1.0f + daub.tone * 0.20f + daub.bristle * 0.12f + stroke * 0.06f));
+                daub_color = lerp3(daub_color, stroke_tint, palette_influence * 0.22f);
+                color = lerp3(color, daub_color, daub_opacity * daub.coverage * 0.85f);
+                color = clamp01(color * (1.0f + daub.rim * daub_opacity
+                                                    * (0.10f + saturate(profile.material.pigment_thickness) * 0.16f)));
+                const float gap_amount = daub.gap * daub_opacity * profile.material.dry_brush * 0.35f;
+                color = lerp3(color, lerp3(color, profile.palette_shadow, 0.45f), gap_amount);
+                color = color * (1.0f + stroke * guarded_amount * 0.10f);
             }
         }
 
@@ -839,8 +1068,11 @@ STYLIZE_HD inline SV3 applyPostProcess(const SV3& input_color,
             color = lerp3(color, lerp3(base_albedo, profile.palette_shadow * 0.7f, palette_influence), pigment * edge_pigment * 0.24f);
         }
 
-        if (profile.outline.enabled && aov.edge > 0.001f) {
-            const float line = outlineTexture(x, y, aov, profile, frame_index);
+        if (outline_on) {
+            float line = outlineTexture(x, y, aov, profile, frame_index);
+            // contour drawn with the same brush: it breaks at daub gaps and
+            // tapers at stroke tips instead of tracing a solid geometric line
+            line *= 0.40f + 0.60f * smoothstepf(0.10f, 0.70f, daub.coverage + fabsf(daub.bristle) * 0.25f);
             const float edge = saturate(line * profile.outline.strength * strength);
             const SV3 ink = outlineColor(profile, aov, base_albedo);
             color = lerp3(color, ink, edge);

@@ -362,6 +362,7 @@
     <ClInclude Include="source\include\Paint\TerrainPaintAdapter.h" />
     <ClInclude Include="source\include\ParticleSimulation.h" />
     <ClInclude Include="source\include\SimCache.h" />
+    <ClInclude Include="source\include\MeshEdit\HalfEdgeMesh.h" />
     <ClInclude Include="source\include\GridFluidSolver.h" />
     <ClInclude Include="source\include\Fluid\FluidParticles.h" />
     <ClInclude Include="source\include\Fluid\APICFluidSolver.h" />
@@ -1189,6 +1190,7 @@
     <ClCompile Include="source\src\Physics\ParticleSimulation.cpp" />
     <ClCompile Include="source\src\Physics\ParticleRenderBridge.cpp" />
     <ClCompile Include="source\src\Physics\SimCache.cpp" />
+    <ClCompile Include="source\src\MeshEdit\HalfEdgeMesh.cpp" />
     <ClCompile Include="source\src\Physics\GridFluidSolver.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidSimulationSystem.cpp" />
