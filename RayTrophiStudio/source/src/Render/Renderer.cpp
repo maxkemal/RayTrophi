@@ -8444,17 +8444,14 @@ void syncViewportMaterialBindingsFromScene(Backend::IBackend* backend,
         return;
     }
 
-    std::vector<std::shared_ptr<Triangle>> triangles;
-    for (const auto& obj : scene.world.objects) {
-        collectRendererTrianglesForNode(obj, nodeName, triangles);
-    }
-
-    if (!triangles.empty() && viewportBackend->updateRasterMeshFromTriangles(nodeName, triangles)) {
-        viewportBackend->resetAccumulation();
-        return;
-    }
-
+    // updateRasterMeshFromTriangles only re-uploads vertex/normal data — it
+    // never touches material bindings, so it must NOT short-circuit this sync.
+    // updateInstanceMaterialBinding rewrites the raster matId buffer AND (for
+    // the Vulkan RT adapter) the BLAS per-triangle material indices + instance
+    // SSBO that the path tracer actually reads. A material assignment change
+    // needs no vertex re-upload at all.
     viewportBackend->updateInstanceMaterialBinding(nodeName, oldMatID, newMatID);
+    viewportBackend->resetAccumulation();
 }
 
 } // namespace

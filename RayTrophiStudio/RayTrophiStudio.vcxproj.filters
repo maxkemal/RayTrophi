@@ -64,6 +64,9 @@
     <Filter Include="Kaynak Dosyalar\Stylize">
       <UniqueIdentifier>{d7f32e31-77d7-4cd0-a104-1a07c6c31447}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Kaynak Dosyalar\MeshEdit">
+      <UniqueIdentifier>{8c5b1f2a-94d3-4e7b-a1c6-3f0e9d27b541}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h">
@@ -155,6 +158,9 @@
     </ClInclude>
     <ClInclude Include="source\include\SimCache.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshEdit\HalfEdgeMesh.h">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClInclude>
     <ClInclude Include="source\include\GridFluidSolver.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
@@ -558,6 +564,9 @@
     </ClCompile>
     <ClCompile Include="source\src\Physics\ParticleRenderBridge.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\HalfEdgeMesh.cpp">
+      <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\SimCache.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>

@@ -92,6 +92,7 @@ StylizeCore::StylizeAOVCore toCoreAOV(const StylizeAOVSample& a) {
     c.nishita_cloud_seed = a.nishita_cloud_seed;
     c.depth = a.depth;
     c.edge = a.edge;
+    c.pixel_scale = a.pixel_scale;
     c.material_id = a.material_id;
     c.valid = a.valid ? 1 : 0;
     c.hit = a.hit ? 1 : 0;

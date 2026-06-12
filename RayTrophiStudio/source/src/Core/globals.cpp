@@ -8,7 +8,7 @@
 std::atomic<int> completed_pixels(0);
 
  float aspect_ratio = 16.0f / 9.0f; // Sabit olarak float türünde tanımlıyoruz
- int image_width = 1280*1;
+ int image_width = 1680;
  int image_height = static_cast<int>(image_width / aspect_ratio);
 constexpr float EPSILON = 1e-7f;
 std::atomic<int> next_row(0);

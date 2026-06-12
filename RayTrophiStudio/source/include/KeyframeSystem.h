@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -14,6 +14,8 @@
 #include <string>
 #include <memory>
 #include <unordered_map>
+#include <algorithm>
+#include <cmath>
 #include "Vec3.h"
 #include "material_gpu.h"  // For GpuMaterial
 #include "json.hpp"
@@ -33,16 +35,82 @@ inline void from_json(const json& j, Vec3& v) {
     }
 }
 
+// Interpolation mode of the segment that STARTS at this key (this key -> next key).
+enum class KeyInterp : uint8_t {
+    Constant = 0,   // hold this key's value until the next key
+    Linear   = 1,   // straight lerp (legacy behavior)
+    Bezier   = 2    // cubic 2D Bezier driven by in/out handles
+};
+
+// Per-channel curve metadata stored on each transform key.
+// Handles are RELATIVE offsets from the key: dx in frames, dy in channel units.
+// in_* is the left handle (dx <= 0), out_* the right handle (dx >= 0).
+// New keys default to Bezier+auto (smooth motion); legacy project files
+// deserialize as Linear so old scenes evaluate bit-identical to before.
+struct ChannelKeyMeta {
+    KeyInterp interp = KeyInterp::Bezier;
+    bool auto_tangent = true;   // handles recomputed from neighbors (auto-clamped Catmull-Rom)
+    float in_dx = 0.0f,  in_dy = 0.0f;
+    float out_dx = 0.0f, out_dy = 0.0f;
+
+    // Legacy-equivalent state: what an old project file (no curve data) loads as.
+    // Used to keep serialization sparse for untouched keys.
+    bool isLegacyLinear() const {
+        return interp == KeyInterp::Linear && auto_tangent &&
+               in_dx == 0.0f && in_dy == 0.0f && out_dx == 0.0f && out_dy == 0.0f;
+    }
+    // Factory state of a freshly authored key (no user customization yet).
+    bool isPristineAuto() const {
+        return interp == KeyInterp::Bezier && auto_tangent &&
+               in_dx == 0.0f && in_dy == 0.0f && out_dx == 0.0f && out_dy == 0.0f;
+    }
+    void resetToLegacyLinear() {
+        interp = KeyInterp::Linear; auto_tangent = true;
+        in_dx = in_dy = out_dx = out_dy = 0.0f;
+    }
+};
+
 // ============================================================================
 // KEYFRAME SYSTEM - Object-based animation with transform + material props
 // ============================================================================
+// Channel counts and indices
+enum : int {
+    CURVE_LIGHT_POS_X = 0, CURVE_LIGHT_POS_Y, CURVE_LIGHT_POS_Z,
+    CURVE_LIGHT_COLOR_R, CURVE_LIGHT_COLOR_G, CURVE_LIGHT_COLOR_B,
+    CURVE_LIGHT_INTENSITY,
+    CURVE_LIGHT_DIR_X, CURVE_LIGHT_DIR_Y, CURVE_LIGHT_DIR_Z,
+    CURVE_LIGHT_CHANNEL_COUNT
+};
+
+enum : int {
+    CURVE_CAM_POS_X = 0, CURVE_CAM_POS_Y, CURVE_CAM_POS_Z,
+    CURVE_CAM_TGT_X, CURVE_CAM_TGT_Y, CURVE_CAM_TGT_Z,
+    CURVE_CAM_FOV,
+    CURVE_CAM_FOCUS_DIST,
+    CURVE_CAM_LENS_RAD,
+    CURVE_CAM_CHANNEL_COUNT
+};
+
+enum : int {
+    CURVE_MAT_ALBEDO_R = 0, CURVE_MAT_ALBEDO_G, CURVE_MAT_ALBEDO_B,
+    CURVE_MAT_OPACITY,
+    CURVE_MAT_ROUGHNESS,
+    CURVE_MAT_METALLIC,
+    CURVE_MAT_CLEARCOAT,
+    CURVE_MAT_TRANSMISSION,
+    CURVE_MAT_IOR,
+    CURVE_MAT_EMISSION_R, CURVE_MAT_EMISSION_G, CURVE_MAT_EMISSION_B,
+    CURVE_MAT_NORMAL_STRENGTH,
+    CURVE_MAT_EMISSION_STRENGTH,
+    CURVE_MAT_CHANNEL_COUNT
+};
 
 // Material property keyframe - ALIGNED WITH GpuMaterial for GPU/CPU compatibility
 struct MaterialKeyframe {
     // Material identification
     uint16_t material_id = 0;
     
-    // Per-Property Flags
+    // Per-Property Flags (compound)
     bool has_albedo = false;
     bool has_opacity = false; // NEW: Separated from albedo
     bool has_roughness = false;
@@ -56,6 +124,18 @@ struct MaterialKeyframe {
     bool has_anisotropic = false;
     bool has_specular = false;
     bool has_normal = false;
+
+    // Detailed per-axis flags
+    bool has_alb_r = true; bool has_alb_g = true; bool has_alb_b = true;
+    bool has_opac = true;
+    bool has_rough = true;
+    bool has_metal = true;
+    bool has_clear = true;
+    bool has_transm = true;
+    bool has_ior_val = true;
+    bool has_emis_r = true; bool has_emis_g = true; bool has_emis_b = true;
+    bool has_norm_str = true;
+    bool has_emis_str = true;
     
     // Block 1: Albedo + opacity
     Vec3 albedo = Vec3(0.8, 0.8, 0.8);
@@ -86,6 +166,9 @@ struct MaterialKeyframe {
     float clearcoat_roughness = 0.0f;
     float normal_strength = 1.0f;
     float emission_strength = 1.0f;
+
+    // Per-channel curve metadata (graph editor)
+    ChannelKeyMeta curve[CURVE_MAT_CHANNEL_COUNT];
     
     MaterialKeyframe() = default;
     
@@ -128,76 +211,204 @@ struct MaterialKeyframe {
         gpu.sheen_tint = sheen_tint;
         gpu.normal_strength = normal_strength;
     }
+
+    // ----- Generic channel access -----
+    float channelValue(int ch) const {
+        switch (ch) {
+        case CURVE_MAT_ALBEDO_R: return albedo.x;
+        case CURVE_MAT_ALBEDO_G: return albedo.y;
+        case CURVE_MAT_ALBEDO_B: return albedo.z;
+        case CURVE_MAT_OPACITY: return opacity;
+        case CURVE_MAT_ROUGHNESS: return roughness;
+        case CURVE_MAT_METALLIC: return metallic;
+        case CURVE_MAT_CLEARCOAT: return clearcoat;
+        case CURVE_MAT_TRANSMISSION: return transmission;
+        case CURVE_MAT_IOR: return ior;
+        case CURVE_MAT_EMISSION_R: return emission.x;
+        case CURVE_MAT_EMISSION_G: return emission.y;
+        case CURVE_MAT_EMISSION_B: return emission.z;
+        case CURVE_MAT_NORMAL_STRENGTH: return normal_strength;
+        case CURVE_MAT_EMISSION_STRENGTH: return emission_strength;
+        }
+        return 0.0f;
+    }
+    void setChannelValue(int ch, float v) {
+        switch (ch) {
+        case CURVE_MAT_ALBEDO_R: albedo.x = v; break;
+        case CURVE_MAT_ALBEDO_G: albedo.y = v; break;
+        case CURVE_MAT_ALBEDO_B: albedo.z = v; break;
+        case CURVE_MAT_OPACITY: opacity = v; break;
+        case CURVE_MAT_ROUGHNESS: roughness = v; break;
+        case CURVE_MAT_METALLIC: metallic = v; break;
+        case CURVE_MAT_CLEARCOAT: clearcoat = v; break;
+        case CURVE_MAT_TRANSMISSION: transmission = v; break;
+        case CURVE_MAT_IOR: ior = v; break;
+        case CURVE_MAT_EMISSION_R: emission.x = v; break;
+        case CURVE_MAT_EMISSION_G: emission.y = v; break;
+        case CURVE_MAT_EMISSION_B: emission.z = v; break;
+        case CURVE_MAT_NORMAL_STRENGTH: normal_strength = v; break;
+        case CURVE_MAT_EMISSION_STRENGTH: emission_strength = v; break;
+        }
+    }
+    bool channelKeyed(int ch) const {
+        switch (ch) {
+        case CURVE_MAT_ALBEDO_R: return has_alb_r;
+        case CURVE_MAT_ALBEDO_G: return has_alb_g;
+        case CURVE_MAT_ALBEDO_B: return has_alb_b;
+        case CURVE_MAT_OPACITY: return has_opac;
+        case CURVE_MAT_ROUGHNESS: return has_rough;
+        case CURVE_MAT_METALLIC: return has_metal;
+        case CURVE_MAT_CLEARCOAT: return has_clear;
+        case CURVE_MAT_TRANSMISSION: return has_transm;
+        case CURVE_MAT_IOR: return has_ior_val;
+        case CURVE_MAT_EMISSION_R: return has_emis_r;
+        case CURVE_MAT_EMISSION_G: return has_emis_g;
+        case CURVE_MAT_EMISSION_B: return has_emis_b;
+        case CURVE_MAT_NORMAL_STRENGTH: return has_norm_str;
+        case CURVE_MAT_EMISSION_STRENGTH: return has_emis_str;
+        }
+        return false;
+    }
+    void setChannelKeyed(int ch, bool on) {
+        switch (ch) {
+        case CURVE_MAT_ALBEDO_R: has_alb_r = on; break;
+        case CURVE_MAT_ALBEDO_G: has_alb_g = on; break;
+        case CURVE_MAT_ALBEDO_B: has_alb_b = on; break;
+        case CURVE_MAT_OPACITY: has_opac = on; break;
+        case CURVE_MAT_ROUGHNESS: has_rough = on; break;
+        case CURVE_MAT_METALLIC: has_metal = on; break;
+        case CURVE_MAT_CLEARCOAT: has_clear = on; break;
+        case CURVE_MAT_TRANSMISSION: has_transm = on; break;
+        case CURVE_MAT_IOR: has_ior_val = on; break;
+        case CURVE_MAT_EMISSION_R: has_emis_r = on; break;
+        case CURVE_MAT_EMISSION_G: has_emis_g = on; break;
+        case CURVE_MAT_EMISSION_B: has_emis_b = on; break;
+        case CURVE_MAT_NORMAL_STRENGTH: has_norm_str = on; break;
+        case CURVE_MAT_EMISSION_STRENGTH: has_emis_str = on; break;
+        }
+    }
+    void refreshCompoundFlags() {
+        has_albedo = has_alb_r || has_alb_g || has_alb_b;
+        has_opacity = has_opac;
+        has_roughness = has_rough;
+        has_metallic = has_metal;
+        has_clearcoat = has_clear;
+        has_transmission = has_transm;
+        has_ior = has_ior_val;
+        has_emission = has_emis_r || has_emis_g || has_emis_b || has_emis_str;
+        has_normal = has_norm_str;
+    }
+    void clearAllChannels() {
+        has_albedo = has_opacity = has_roughness = has_metallic = has_clearcoat = has_transmission = has_ior = has_emission = has_normal = false;
+        has_alb_r = has_alb_g = has_alb_b = false;
+        has_opac = false;
+        has_rough = false;
+        has_metal = false;
+        has_clear = false;
+        has_transm = false;
+        has_ior_val = false;
+        has_emis_r = has_emis_g = has_emis_b = false;
+        has_norm_str = false;
+        has_emis_str = false;
+    }
+    static const char* channelName(int ch) {
+        static const char* names[CURVE_MAT_CHANNEL_COUNT] = {
+            "Albedo R", "Albedo G", "Albedo B",
+            "Opacity",
+            "Roughness",
+            "Metallic",
+            "Clearcoat",
+            "Transmission",
+            "IOR",
+            "Emission R", "Emission G", "Emission B",
+            "Normal Strength",
+            "Emission Strength"
+        };
+        return (ch >= 0 && ch < CURVE_MAT_CHANNEL_COUNT) ? names[ch] : "?";
+    }
     
     static MaterialKeyframe lerp(const MaterialKeyframe& a, const MaterialKeyframe& b, float t) {
         MaterialKeyframe result;
         result.material_id = (t < 0.5f) ? a.material_id : b.material_id;
         
         // Albedo
-        result.has_albedo = a.has_albedo || b.has_albedo;
-        if (a.has_albedo && b.has_albedo) {
-            result.albedo = a.albedo + (b.albedo - a.albedo) * t;
-        } else if (a.has_albedo) {
-            result.albedo = a.albedo;
-        } else if (b.has_albedo) {
-            result.albedo = b.albedo;
-        }
+        if (a.has_alb_r && b.has_alb_r) result.albedo.x = a.albedo.x + (b.albedo.x - a.albedo.x) * t;
+        else if (a.has_alb_r) result.albedo.x = a.albedo.x;
+        else if (b.has_alb_r) result.albedo.x = b.albedo.x;
+        result.has_alb_r = a.has_alb_r || b.has_alb_r;
+
+        if (a.has_alb_g && b.has_alb_g) result.albedo.y = a.albedo.y + (b.albedo.y - a.albedo.y) * t;
+        else if (a.has_alb_g) result.albedo.y = a.albedo.y;
+        else if (b.has_alb_g) result.albedo.y = b.albedo.y;
+        result.has_alb_g = a.has_alb_g || b.has_alb_g;
+
+        if (a.has_alb_b && b.has_alb_b) result.albedo.z = a.albedo.z + (b.albedo.z - a.albedo.z) * t;
+        else if (a.has_alb_b) result.albedo.z = a.albedo.z;
+        else if (b.has_alb_b) result.albedo.z = b.albedo.z;
+        result.has_alb_b = a.has_alb_b || b.has_alb_b;
 
         // Opacity
-        result.has_opacity = a.has_opacity || b.has_opacity;
-        if (a.has_opacity && b.has_opacity) {
-            result.opacity = a.opacity + (b.opacity - a.opacity) * t;
-        } else if (a.has_opacity) {
-            result.opacity = a.opacity;
-        } else if (b.has_opacity) {
-            result.opacity = b.opacity;
-        }
+        if (a.has_opac && b.has_opac) result.opacity = a.opacity + (b.opacity - a.opacity) * t;
+        else if (a.has_opac) result.opacity = a.opacity;
+        else if (b.has_opac) result.opacity = b.opacity;
+        result.has_opac = a.has_opac || b.has_opac;
 
         // Roughness
-        result.has_roughness = a.has_roughness || b.has_roughness;
-        if (a.has_roughness && b.has_roughness) result.roughness = a.roughness + (b.roughness - a.roughness) * t;
-        else if (a.has_roughness) result.roughness = a.roughness;
-        else if (b.has_roughness) result.roughness = b.roughness;
+        if (a.has_rough && b.has_rough) result.roughness = a.roughness + (b.roughness - a.roughness) * t;
+        else if (a.has_rough) result.roughness = a.roughness;
+        else if (b.has_rough) result.roughness = b.roughness;
+        result.has_rough = a.has_rough || b.has_rough;
 
         // Metallic
-        result.has_metallic = a.has_metallic || b.has_metallic;
-        if (a.has_metallic && b.has_metallic) result.metallic = a.metallic + (b.metallic - a.metallic) * t;
-        else if (a.has_metallic) result.metallic = a.metallic;
-        else if (b.has_metallic) result.metallic = b.metallic;
+        if (a.has_metal && b.has_metal) result.metallic = a.metallic + (b.metallic - a.metallic) * t;
+        else if (a.has_metal) result.metallic = a.metallic;
+        else if (b.has_metal) result.metallic = b.metallic;
+        result.has_metal = a.has_metal || b.has_metal;
 
         // Emission
-        result.has_emission = a.has_emission || b.has_emission;
-        if (a.has_emission && b.has_emission) {
-            result.emission = a.emission + (b.emission - a.emission) * t;
-            result.emission_strength = a.emission_strength + (b.emission_strength - a.emission_strength) * t;
-        } else if (a.has_emission) {
-            result.emission = a.emission; result.emission_strength = a.emission_strength;
-        } else if (b.has_emission) {
-            result.emission = b.emission; result.emission_strength = b.emission_strength;
-        }
+        if (a.has_emis_r && b.has_emis_r) result.emission.x = a.emission.x + (b.emission.x - a.emission.x) * t;
+        else if (a.has_emis_r) result.emission.x = a.emission.x;
+        else if (b.has_emis_r) result.emission.x = b.emission.x;
+        result.has_emis_r = a.has_emis_r || b.has_emis_r;
+
+        if (a.has_emis_g && b.has_emis_g) result.emission.y = a.emission.y + (b.emission.y - a.emission.y) * t;
+        else if (a.has_emis_g) result.emission.y = a.emission.y;
+        else if (b.has_emis_g) result.emission.y = b.emission.y;
+        result.has_emis_g = a.has_emis_g || b.has_emis_g;
+
+        if (a.has_emis_b && b.has_emis_b) result.emission.z = a.emission.z + (b.emission.z - a.emission.z) * t;
+        else if (a.has_emis_b) result.emission.z = a.emission.z;
+        else if (b.has_emis_b) result.emission.z = b.emission.z;
+        result.has_emis_b = a.has_emis_b || b.has_emis_b;
+
+        // Emission Strength
+        if (a.has_emis_str && b.has_emis_str) result.emission_strength = a.emission_strength + (b.emission_strength - a.emission_strength) * t;
+        else if (a.has_emis_str) result.emission_strength = a.emission_strength;
+        else if (b.has_emis_str) result.emission_strength = b.emission_strength;
+        result.has_emis_str = a.has_emis_str || b.has_emis_str;
 
         // Transmission
-        result.has_transmission = a.has_transmission || b.has_transmission;
-        if (a.has_transmission && b.has_transmission) result.transmission = a.transmission + (b.transmission - a.transmission) * t;
-        else if (a.has_transmission) result.transmission = a.transmission;
-        else if (b.has_transmission) result.transmission = b.transmission;
+        if (a.has_transm && b.has_transm) result.transmission = a.transmission + (b.transmission - a.transmission) * t;
+        else if (a.has_transm) result.transmission = a.transmission;
+        else if (b.has_transm) result.transmission = b.transmission;
+        result.has_transm = a.has_transm || b.has_transm;
 
         // IOR
-        result.has_ior = a.has_ior || b.has_ior;
-        if (a.has_ior && b.has_ior) result.ior = a.ior + (b.ior - a.ior) * t;
-        else if (a.has_ior) result.ior = a.ior;
-        else if (b.has_ior) result.ior = b.ior;
+        if (a.has_ior_val && b.has_ior_val) result.ior = a.ior + (b.ior - a.ior) * t;
+        else if (a.has_ior_val) result.ior = a.ior;
+        else if (b.has_ior_val) result.ior = b.ior;
+        result.has_ior_val = a.has_ior_val || b.has_ior_val;
 
         // Clearcoat
-        result.has_clearcoat = a.has_clearcoat || b.has_clearcoat;
-        if (a.has_clearcoat && b.has_clearcoat) {
+        if (a.has_clear && b.has_clear) {
              result.clearcoat = a.clearcoat + (b.clearcoat - a.clearcoat) * t;
              result.clearcoat_roughness = a.clearcoat_roughness + (b.clearcoat_roughness - a.clearcoat_roughness) * t;
-        } else if (a.has_clearcoat) {
+        } else if (a.has_clear) {
              result.clearcoat = a.clearcoat; result.clearcoat_roughness = a.clearcoat_roughness;
-        } else if (b.has_clearcoat) {
+        } else if (b.has_clear) {
              result.clearcoat = b.clearcoat; result.clearcoat_roughness = b.clearcoat_roughness;
         }
+        result.has_clear = a.has_clear || b.has_clear;
 
         // Subsurface
         result.has_subsurface = a.has_subsurface || b.has_subsurface;
@@ -239,11 +450,12 @@ struct MaterialKeyframe {
         }
         
         // Normal Strength
-        result.has_normal = a.has_normal || b.has_normal;
-        if (a.has_normal && b.has_normal) result.normal_strength = a.normal_strength + (b.normal_strength - a.normal_strength) * t;
-        else if (a.has_normal) result.normal_strength = a.normal_strength;
-        else if (b.has_normal) result.normal_strength = b.normal_strength;
+        if (a.has_norm_str && b.has_norm_str) result.normal_strength = a.normal_strength + (b.normal_strength - a.normal_strength) * t;
+        else if (a.has_norm_str) result.normal_strength = a.normal_strength;
+        else if (b.has_norm_str) result.normal_strength = b.normal_strength;
+        result.has_norm_str = a.has_norm_str || b.has_norm_str;
 
+        result.refreshCompoundFlags();
         return result;
     }
 };
@@ -253,63 +465,169 @@ struct MaterialKeyframe {
 // ============================================================================
 struct LightKeyframe {
     // Per-property flags - which properties are keyed
-    bool has_position = false;
-    bool has_color = false;
-    bool has_intensity = false;
-    bool has_direction = false;
+    bool has_position = true;
+    bool has_color = true;
+    bool has_intensity = true;
+    bool has_direction = true;
     
+    // Detailed per-axis flags
+    bool has_pos_x = true; bool has_pos_y = true; bool has_pos_z = true;
+    bool has_col_r = true; bool has_col_g = true; bool has_col_b = true;
+    bool has_int = true;
+    bool has_dir_x = true; bool has_dir_y = true; bool has_dir_z = true;
+
     // Property values
     Vec3 position = Vec3(0, 0, 0);
     Vec3 color = Vec3(1, 1, 1);
     float intensity = 1.0f;
     Vec3 direction = Vec3(0, -1, 0);  // For directional/spot lights
     
+    // Per-channel curve metadata (graph editor)
+    ChannelKeyMeta curve[CURVE_LIGHT_CHANNEL_COUNT];
+
     LightKeyframe() = default;
     
+    // ----- Generic channel access -----
+    float channelValue(int ch) const {
+        switch (ch) {
+        case CURVE_LIGHT_POS_X: return position.x;
+        case CURVE_LIGHT_POS_Y: return position.y;
+        case CURVE_LIGHT_POS_Z: return position.z;
+        case CURVE_LIGHT_COLOR_R: return color.x;
+        case CURVE_LIGHT_COLOR_G: return color.y;
+        case CURVE_LIGHT_COLOR_B: return color.z;
+        case CURVE_LIGHT_INTENSITY: return intensity;
+        case CURVE_LIGHT_DIR_X: return direction.x;
+        case CURVE_LIGHT_DIR_Y: return direction.y;
+        case CURVE_LIGHT_DIR_Z: return direction.z;
+        }
+        return 0.0f;
+    }
+    void setChannelValue(int ch, float v) {
+        switch (ch) {
+        case CURVE_LIGHT_POS_X: position.x = v; break;
+        case CURVE_LIGHT_POS_Y: position.y = v; break;
+        case CURVE_LIGHT_POS_Z: position.z = v; break;
+        case CURVE_LIGHT_COLOR_R: color.x = v; break;
+        case CURVE_LIGHT_COLOR_G: color.y = v; break;
+        case CURVE_LIGHT_COLOR_B: color.z = v; break;
+        case CURVE_LIGHT_INTENSITY: intensity = v; break;
+        case CURVE_LIGHT_DIR_X: direction.x = v; break;
+        case CURVE_LIGHT_DIR_Y: direction.y = v; break;
+        case CURVE_LIGHT_DIR_Z: direction.z = v; break;
+        }
+    }
+    bool channelKeyed(int ch) const {
+        switch (ch) {
+        case CURVE_LIGHT_POS_X: return has_pos_x;
+        case CURVE_LIGHT_POS_Y: return has_pos_y;
+        case CURVE_LIGHT_POS_Z: return has_pos_z;
+        case CURVE_LIGHT_COLOR_R: return has_col_r;
+        case CURVE_LIGHT_COLOR_G: return has_col_g;
+        case CURVE_LIGHT_COLOR_B: return has_col_b;
+        case CURVE_LIGHT_INTENSITY: return has_int;
+        case CURVE_LIGHT_DIR_X: return has_dir_x;
+        case CURVE_LIGHT_DIR_Y: return has_dir_y;
+        case CURVE_LIGHT_DIR_Z: return has_dir_z;
+        }
+        return false;
+    }
+    void setChannelKeyed(int ch, bool on) {
+        switch (ch) {
+        case CURVE_LIGHT_POS_X: has_pos_x = on; break;
+        case CURVE_LIGHT_POS_Y: has_pos_y = on; break;
+        case CURVE_LIGHT_POS_Z: has_pos_z = on; break;
+        case CURVE_LIGHT_COLOR_R: has_col_r = on; break;
+        case CURVE_LIGHT_COLOR_G: has_col_g = on; break;
+        case CURVE_LIGHT_COLOR_B: has_col_b = on; break;
+        case CURVE_LIGHT_INTENSITY: has_int = on; break;
+        case CURVE_LIGHT_DIR_X: has_dir_x = on; break;
+        case CURVE_LIGHT_DIR_Y: has_dir_y = on; break;
+        case CURVE_LIGHT_DIR_Z: has_dir_z = on; break;
+        }
+    }
+    void refreshCompoundFlags() {
+        has_position = has_pos_x || has_pos_y || has_pos_z;
+        has_color = has_col_r || has_col_g || has_col_b;
+        has_intensity = has_int;
+        has_direction = has_dir_x || has_dir_y || has_dir_z;
+    }
+    void clearAllChannels() {
+        has_position = has_color = has_intensity = has_direction = false;
+        has_pos_x = has_pos_y = has_pos_z = false;
+        has_col_r = has_col_g = has_col_b = false;
+        has_int = false;
+        has_dir_x = has_dir_y = has_dir_z = false;
+    }
+    static const char* channelName(int ch) {
+        static const char* names[CURVE_LIGHT_CHANNEL_COUNT] = {
+            "Pos X", "Pos Y", "Pos Z",
+            "Color R", "Color G", "Color B",
+            "Intensity",
+            "Dir X", "Dir Y", "Dir Z"
+        };
+        return (ch >= 0 && ch < CURVE_LIGHT_CHANNEL_COUNT) ? names[ch] : "?";
+    }
+
     // Lerp only interpolates properties that are keyed in BOTH keyframes
     static LightKeyframe lerp(const LightKeyframe& a, const LightKeyframe& b, float t) {
         LightKeyframe result;
         
-        // Position - interpolate if both keyed, otherwise use 'a' value
-        result.has_position = a.has_position || b.has_position;
-        if (a.has_position && b.has_position) {
-            result.position = a.position + (b.position - a.position) * t;
-        } else if (a.has_position) {
-            result.position = a.position;
-        } else if (b.has_position) {
-            result.position = b.position;
-        }
+        // Position
+        if (a.has_pos_x && b.has_pos_x) result.position.x = a.position.x + (b.position.x - a.position.x) * t;
+        else if (a.has_pos_x) result.position.x = a.position.x;
+        else if (b.has_pos_x) result.position.x = b.position.x;
+        result.has_pos_x = a.has_pos_x || b.has_pos_x;
+
+        if (a.has_pos_y && b.has_pos_y) result.position.y = a.position.y + (b.position.y - a.position.y) * t;
+        else if (a.has_pos_y) result.position.y = a.position.y;
+        else if (b.has_pos_y) result.position.y = b.position.y;
+        result.has_pos_y = a.has_pos_y || b.has_pos_y;
+
+        if (a.has_pos_z && b.has_pos_z) result.position.z = a.position.z + (b.position.z - a.position.z) * t;
+        else if (a.has_pos_z) result.position.z = a.position.z;
+        else if (b.has_pos_z) result.position.z = b.position.z;
+        result.has_pos_z = a.has_pos_z || b.has_pos_z;
         
         // Color
-        result.has_color = a.has_color || b.has_color;
-        if (a.has_color && b.has_color) {
-            result.color = a.color + (b.color - a.color) * t;
-        } else if (a.has_color) {
-            result.color = a.color;
-        } else if (b.has_color) {
-            result.color = b.color;
-        }
+        if (a.has_col_r && b.has_col_r) result.color.x = a.color.x + (b.color.x - a.color.x) * t;
+        else if (a.has_col_r) result.color.x = a.color.x;
+        else if (b.has_col_r) result.color.x = b.color.x;
+        result.has_col_r = a.has_col_r || b.has_col_r;
+
+        if (a.has_col_g && b.has_col_g) result.color.y = a.color.y + (b.color.y - a.color.y) * t;
+        else if (a.has_col_g) result.color.y = a.color.y;
+        else if (b.has_col_g) result.color.y = b.color.y;
+        result.has_col_g = a.has_col_g || b.has_col_g;
+
+        if (a.has_col_b && b.has_col_b) result.color.z = a.color.z + (b.color.z - a.color.z) * t;
+        else if (a.has_col_b) result.color.z = a.color.z;
+        else if (b.has_col_b) result.color.z = b.color.z;
+        result.has_col_b = a.has_col_b || b.has_col_b;
         
         // Intensity
-        result.has_intensity = a.has_intensity || b.has_intensity;
-        if (a.has_intensity && b.has_intensity) {
-            result.intensity = a.intensity + (b.intensity - a.intensity) * t;
-        } else if (a.has_intensity) {
-            result.intensity = a.intensity;
-        } else if (b.has_intensity) {
-            result.intensity = b.intensity;
-        }
+        if (a.has_int && b.has_int) result.intensity = a.intensity + (b.intensity - a.intensity) * t;
+        else if (a.has_int) result.intensity = a.intensity;
+        else if (b.has_int) result.intensity = b.intensity;
+        result.has_int = a.has_int || b.has_int;
         
         // Direction
-        result.has_direction = a.has_direction || b.has_direction;
-        if (a.has_direction && b.has_direction) {
-            result.direction = a.direction + (b.direction - a.direction) * t;
-        } else if (a.has_direction) {
-            result.direction = a.direction;
-        } else if (b.has_direction) {
-            result.direction = b.direction;
-        }
+        if (a.has_dir_x && b.has_dir_x) result.direction.x = a.direction.x + (b.direction.x - a.direction.x) * t;
+        else if (a.has_dir_x) result.direction.x = a.direction.x;
+        else if (b.has_dir_x) result.direction.x = b.direction.x;
+        result.has_dir_x = a.has_dir_x || b.has_dir_x;
+
+        if (a.has_dir_y && b.has_dir_y) result.direction.y = a.direction.y + (b.direction.y - a.direction.y) * t;
+        else if (a.has_dir_y) result.direction.y = a.direction.y;
+        else if (b.has_dir_y) result.direction.y = b.direction.y;
+        result.has_dir_y = a.has_dir_y || b.has_dir_y;
+
+        if (a.has_dir_z && b.has_dir_z) result.direction.z = a.direction.z + (b.direction.z - a.direction.z) * t;
+        else if (a.has_dir_z) result.direction.z = a.direction.z;
+        else if (b.has_dir_z) result.direction.z = b.direction.z;
+        result.has_dir_z = a.has_dir_z || b.has_dir_z;
         
+        result.refreshCompoundFlags();
         return result;
     }
 };
@@ -319,12 +637,19 @@ struct LightKeyframe {
 // ============================================================================
 struct CameraKeyframe {
     // Per-property flags - which properties are keyed
-    bool has_position = false;
-    bool has_target = false;
-    bool has_fov = false;
-    bool has_focus = false;
-    bool has_aperture = false;
+    bool has_position = true;
+    bool has_target = true;
+    bool has_fov = true;
+    bool has_focus = true;
+    bool has_aperture = true;
     
+    // Detailed per-axis flags
+    bool has_pos_x = true; bool has_pos_y = true; bool has_pos_z = true;
+    bool has_tgt_x = true; bool has_tgt_y = true; bool has_tgt_z = true;
+    bool has_fv = true;
+    bool has_foc_dist = true;
+    bool has_lens_rad = true;
+
     // Property values
     Vec3 position = Vec3(0, 0, 0);
     Vec3 target = Vec3(0, 0, -1);
@@ -332,62 +657,147 @@ struct CameraKeyframe {
     float focus_distance = 10.0f;
     float lens_radius = 0.0f;
     
+    // Per-channel curve metadata (graph editor)
+    ChannelKeyMeta curve[CURVE_CAM_CHANNEL_COUNT];
+
     CameraKeyframe() = default;
     
+    // ----- Generic channel access -----
+    float channelValue(int ch) const {
+        switch (ch) {
+        case CURVE_CAM_POS_X: return position.x;
+        case CURVE_CAM_POS_Y: return position.y;
+        case CURVE_CAM_POS_Z: return position.z;
+        case CURVE_CAM_TGT_X: return target.x;
+        case CURVE_CAM_TGT_Y: return target.y;
+        case CURVE_CAM_TGT_Z: return target.z;
+        case CURVE_CAM_FOV: return fov;
+        case CURVE_CAM_FOCUS_DIST: return focus_distance;
+        case CURVE_CAM_LENS_RAD: return lens_radius;
+        }
+        return 0.0f;
+    }
+    void setChannelValue(int ch, float v) {
+        switch (ch) {
+        case CURVE_CAM_POS_X: position.x = v; break;
+        case CURVE_CAM_POS_Y: position.y = v; break;
+        case CURVE_CAM_POS_Z: position.z = v; break;
+        case CURVE_CAM_TGT_X: target.x = v; break;
+        case CURVE_CAM_TGT_Y: target.y = v; break;
+        case CURVE_CAM_TGT_Z: target.z = v; break;
+        case CURVE_CAM_FOV: fov = v; break;
+        case CURVE_CAM_FOCUS_DIST: focus_distance = v; break;
+        case CURVE_CAM_LENS_RAD: lens_radius = v; break;
+        }
+    }
+    bool channelKeyed(int ch) const {
+        switch (ch) {
+        case CURVE_CAM_POS_X: return has_pos_x;
+        case CURVE_CAM_POS_Y: return has_pos_y;
+        case CURVE_CAM_POS_Z: return has_pos_z;
+        case CURVE_CAM_TGT_X: return has_tgt_x;
+        case CURVE_CAM_TGT_Y: return has_tgt_y;
+        case CURVE_CAM_TGT_Z: return has_tgt_z;
+        case CURVE_CAM_FOV: return has_fv;
+        case CURVE_CAM_FOCUS_DIST: return has_foc_dist;
+        case CURVE_CAM_LENS_RAD: return has_lens_rad;
+        }
+        return false;
+    }
+    void setChannelKeyed(int ch, bool on) {
+        switch (ch) {
+        case CURVE_CAM_POS_X: has_pos_x = on; break;
+        case CURVE_CAM_POS_Y: has_pos_y = on; break;
+        case CURVE_CAM_POS_Z: has_pos_z = on; break;
+        case CURVE_CAM_TGT_X: has_tgt_x = on; break;
+        case CURVE_CAM_TGT_Y: has_tgt_y = on; break;
+        case CURVE_CAM_TGT_Z: has_tgt_z = on; break;
+        case CURVE_CAM_FOV: has_fv = on; break;
+        case CURVE_CAM_FOCUS_DIST: has_foc_dist = on; break;
+        case CURVE_CAM_LENS_RAD: has_lens_rad = on; break;
+        }
+    }
+    void refreshCompoundFlags() {
+        has_position = has_pos_x || has_pos_y || has_pos_z;
+        has_target = has_tgt_x || has_tgt_y || has_tgt_z;
+        has_fov = has_fv;
+        has_focus = has_foc_dist;
+        has_aperture = has_lens_rad;
+    }
+    void clearAllChannels() {
+        has_position = has_target = has_fov = has_focus = has_aperture = false;
+        has_pos_x = has_pos_y = has_pos_z = false;
+        has_tgt_x = has_tgt_y = has_tgt_z = false;
+        has_fv = false;
+        has_foc_dist = false;
+        has_lens_rad = false;
+    }
+    static const char* channelName(int ch) {
+        static const char* names[CURVE_CAM_CHANNEL_COUNT] = {
+            "Pos X", "Pos Y", "Pos Z",
+            "Target X", "Target Y", "Target Z",
+            "FOV",
+            "Focus Dist",
+            "Lens Rad"
+        };
+        return (ch >= 0 && ch < CURVE_CAM_CHANNEL_COUNT) ? names[ch] : "?";
+    }
+
     // Lerp only interpolates properties that are keyed in BOTH keyframes
     static CameraKeyframe lerp(const CameraKeyframe& a, const CameraKeyframe& b, float t) {
         CameraKeyframe result;
         
         // Position
-        result.has_position = a.has_position || b.has_position;
-        if (a.has_position && b.has_position) {
-            result.position = a.position + (b.position - a.position) * t;
-        } else if (a.has_position) {
-            result.position = a.position;
-        } else if (b.has_position) {
-            result.position = b.position;
-        }
+        if (a.has_pos_x && b.has_pos_x) result.position.x = a.position.x + (b.position.x - a.position.x) * t;
+        else if (a.has_pos_x) result.position.x = a.position.x;
+        else if (b.has_pos_x) result.position.x = b.position.x;
+        result.has_pos_x = a.has_pos_x || b.has_pos_x;
+
+        if (a.has_pos_y && b.has_pos_y) result.position.y = a.position.y + (b.position.y - a.position.y) * t;
+        else if (a.has_pos_y) result.position.y = a.position.y;
+        else if (b.has_pos_y) result.position.y = b.position.y;
+        result.has_pos_y = a.has_pos_y || b.has_pos_y;
+
+        if (a.has_pos_z && b.has_pos_z) result.position.z = a.position.z + (b.position.z - a.position.z) * t;
+        else if (a.has_pos_z) result.position.z = a.position.z;
+        else if (b.has_pos_z) result.position.z = b.position.z;
+        result.has_pos_z = a.has_pos_z || b.has_pos_z;
         
         // Target
-        result.has_target = a.has_target || b.has_target;
-        if (a.has_target && b.has_target) {
-            result.target = a.target + (b.target - a.target) * t;
-        } else if (a.has_target) {
-            result.target = a.target;
-        } else if (b.has_target) {
-            result.target = b.target;
-        }
+        if (a.has_tgt_x && b.has_tgt_x) result.target.x = a.target.x + (b.target.x - a.target.x) * t;
+        else if (a.has_tgt_x) result.target.x = a.target.x;
+        else if (b.has_tgt_x) result.target.x = b.target.x;
+        result.has_tgt_x = a.has_tgt_x || b.has_tgt_x;
+
+        if (a.has_tgt_y && b.has_tgt_y) result.target.y = a.target.y + (b.target.y - a.target.y) * t;
+        else if (a.has_tgt_y) result.target.y = a.target.y;
+        else if (b.has_tgt_y) result.target.y = b.target.y;
+        result.has_tgt_y = a.has_tgt_y || b.has_tgt_y;
+
+        if (a.has_tgt_z && b.has_tgt_z) result.target.z = a.target.z + (b.target.z - a.target.z) * t;
+        else if (a.has_tgt_z) result.target.z = a.target.z;
+        else if (b.has_tgt_z) result.target.z = b.target.z;
+        result.has_tgt_z = a.has_tgt_z || b.has_tgt_z;
         
         // FOV
-        result.has_fov = a.has_fov || b.has_fov;
-        if (a.has_fov && b.has_fov) {
-            result.fov = a.fov + (b.fov - a.fov) * t;
-        } else if (a.has_fov) {
-            result.fov = a.fov;
-        } else if (b.has_fov) {
-            result.fov = b.fov;
-        }
+        if (a.has_fv && b.has_fv) result.fov = a.fov + (b.fov - a.fov) * t;
+        else if (a.has_fv) result.fov = a.fov;
+        else if (b.has_fv) result.fov = b.fov;
+        result.has_fv = a.has_fv || b.has_fv;
         
         // Focus Distance
-        result.has_focus = a.has_focus || b.has_focus;
-        if (a.has_focus && b.has_focus) {
-            result.focus_distance = a.focus_distance + (b.focus_distance - a.focus_distance) * t;
-        } else if (a.has_focus) {
-            result.focus_distance = a.focus_distance;
-        } else if (b.has_focus) {
-            result.focus_distance = b.focus_distance;
-        }
+        if (a.has_foc_dist && b.has_foc_dist) result.focus_distance = a.focus_distance + (b.focus_distance - a.focus_distance) * t;
+        else if (a.has_foc_dist) result.focus_distance = a.focus_distance;
+        else if (b.has_foc_dist) result.focus_distance = b.focus_distance;
+        result.has_foc_dist = a.has_foc_dist || b.has_foc_dist;
         
-        // Lens Radius (Aperture)
-        result.has_aperture = a.has_aperture || b.has_aperture;
-        if (a.has_aperture && b.has_aperture) {
-            result.lens_radius = a.lens_radius + (b.lens_radius - a.lens_radius) * t;
-        } else if (a.has_aperture) {
-            result.lens_radius = a.lens_radius;
-        } else if (b.has_aperture) {
-            result.lens_radius = b.lens_radius;
-        }
+        // Lens Radius
+        if (a.has_lens_rad && b.has_lens_rad) result.lens_radius = a.lens_radius + (b.lens_radius - a.lens_radius) * t;
+        else if (a.has_lens_rad) result.lens_radius = a.lens_radius;
+        else if (b.has_lens_rad) result.lens_radius = b.lens_radius;
+        result.has_lens_rad = a.has_lens_rad || b.has_lens_rad;
         
+        result.refreshCompoundFlags();
         return result;
     }
 };
@@ -1179,6 +1589,61 @@ struct AnimGraphKeyframe {
 };
 
 // ============================================================================
+// CURVE INTERPOLATION - per-channel keyframe interpolation (graph editor)
+// ============================================================================
+
+// ChannelKeyMeta and KeyInterp moved to top of file
+
+// Transform channel indices shared by curve storage, evaluation and the graph editor UI.
+enum : int {
+    CURVE_POS_X = 0, CURVE_POS_Y, CURVE_POS_Z,
+    CURVE_ROT_X, CURVE_ROT_Y, CURVE_ROT_Z,
+    CURVE_SCL_X, CURVE_SCL_Y, CURVE_SCL_Z,
+    CURVE_CHANNEL_COUNT
+};
+
+// Evaluate one curve segment between (f0,v0) and (f1,v1) at `frame`.
+// The segment's mode comes from the LEFT key's meta (m0); handles use m0.out / m1.in.
+// Bezier control X is clamped inside [f0,f1] so the curve stays a function of time;
+// the parametric root is found by bisection (robust even for degenerate handles).
+// NOTE: a Bezier key with zero-length handles reduces exactly to Linear (the x and
+// y polynomials share the same basis weights), so un-refreshed keys degrade safely.
+inline float evalCurveSegment(float f0, float v0, const ChannelKeyMeta& m0,
+                              float f1, float v1, const ChannelKeyMeta& m1,
+                              float frame)
+{
+    if (f1 <= f0)   return v0;
+    if (frame <= f0) return v0;
+    if (frame >= f1) return v1;
+
+    switch (m0.interp) {
+    case KeyInterp::Constant:
+        return v0;
+    case KeyInterp::Linear:
+        return v0 + (v1 - v0) * ((frame - f0) / (f1 - f0));
+    case KeyInterp::Bezier:
+    default: {
+        const float seg = f1 - f0;
+        const float x1 = f0 + std::clamp(m0.out_dx, 0.0f, seg);
+        const float y1 = v0 + m0.out_dy;
+        const float x2 = f1 + std::clamp(m1.in_dx, -seg, 0.0f);
+        const float y2 = v1 + m1.in_dy;
+
+        // Solve cubic-bezier x(t) = frame by bisection (x(0)=f0 < frame < f1=x(1)).
+        float lo = 0.0f, hi = 1.0f, t = 0.5f;
+        for (int i = 0; i < 26; ++i) {
+            t = 0.5f * (lo + hi);
+            const float u = 1.0f - t;
+            const float x = u*u*u*f0 + 3.0f*u*u*t*x1 + 3.0f*u*t*t*x2 + t*t*t*f1;
+            if (x < frame) lo = t; else hi = t;
+        }
+        const float u = 1.0f - t;
+        return u*u*u*v0 + 3.0f*u*u*t*y1 + 3.0f*u*t*t*y2 + t*t*t*v1;
+    }
+    }
+}
+
+// ============================================================================
 // TRANSFORM KEYFRAME - Position, rotation (Euler), scale
 // ============================================================================
 
@@ -1198,13 +1663,94 @@ struct TransformKeyframe {
     bool has_pos_x = true; bool has_pos_y = true; bool has_pos_z = true;
     bool has_rot_x = true; bool has_rot_y = true; bool has_rot_z = true;
     bool has_scl_x = true; bool has_scl_y = true; bool has_scl_z = true;
-    
+
+    // Per-channel curve metadata (graph editor): indexed by CURVE_* channel ids.
+    ChannelKeyMeta curve[CURVE_CHANNEL_COUNT];
+
     TransformKeyframe() = default;
-    
+
     TransformKeyframe(const Vec3& pos, const Vec3& rot, const Vec3& scl)
         : position(pos), rotation(rot), scale(scl) {
     };
-    
+
+    // ----- Generic channel access (single authority for axis <-> value mapping) -----
+    float channelValue(int ch) const {
+        switch (ch) {
+        case CURVE_POS_X: return position.x;
+        case CURVE_POS_Y: return position.y;
+        case CURVE_POS_Z: return position.z;
+        case CURVE_ROT_X: return rotation.x;
+        case CURVE_ROT_Y: return rotation.y;
+        case CURVE_ROT_Z: return rotation.z;
+        case CURVE_SCL_X: return scale.x;
+        case CURVE_SCL_Y: return scale.y;
+        case CURVE_SCL_Z: return scale.z;
+        }
+        return 0.0f;
+    }
+    void setChannelValue(int ch, float v) {
+        switch (ch) {
+        case CURVE_POS_X: position.x = v; break;
+        case CURVE_POS_Y: position.y = v; break;
+        case CURVE_POS_Z: position.z = v; break;
+        case CURVE_ROT_X: rotation.x = v; break;
+        case CURVE_ROT_Y: rotation.y = v; break;
+        case CURVE_ROT_Z: rotation.z = v; break;
+        case CURVE_SCL_X: scale.x = v; break;
+        case CURVE_SCL_Y: scale.y = v; break;
+        case CURVE_SCL_Z: scale.z = v; break;
+        }
+    }
+    bool channelKeyed(int ch) const {
+        switch (ch) {
+        case CURVE_POS_X: return has_pos_x;
+        case CURVE_POS_Y: return has_pos_y;
+        case CURVE_POS_Z: return has_pos_z;
+        case CURVE_ROT_X: return has_rot_x;
+        case CURVE_ROT_Y: return has_rot_y;
+        case CURVE_ROT_Z: return has_rot_z;
+        case CURVE_SCL_X: return has_scl_x;
+        case CURVE_SCL_Y: return has_scl_y;
+        case CURVE_SCL_Z: return has_scl_z;
+        }
+        return false;
+    }
+    void setChannelKeyed(int ch, bool on) {
+        switch (ch) {
+        case CURVE_POS_X: has_pos_x = on; break;
+        case CURVE_POS_Y: has_pos_y = on; break;
+        case CURVE_POS_Z: has_pos_z = on; break;
+        case CURVE_ROT_X: has_rot_x = on; break;
+        case CURVE_ROT_Y: has_rot_y = on; break;
+        case CURVE_ROT_Z: has_rot_z = on; break;
+        case CURVE_SCL_X: has_scl_x = on; break;
+        case CURVE_SCL_Y: has_scl_y = on; break;
+        case CURVE_SCL_Z: has_scl_z = on; break;
+        }
+    }
+    // Rebuild compound L/R/S flags from the per-axis flags.
+    void refreshCompoundFlags() {
+        has_position = has_pos_x || has_pos_y || has_pos_z;
+        has_rotation = has_rot_x || has_rot_y || has_rot_z;
+        has_scale    = has_scl_x || has_scl_y || has_scl_z;
+    }
+    // Clear every keyed flag (defaults are all-true for authoring convenience,
+    // so evaluation/result keyframes must start from an unkeyed state).
+    void clearAllChannels() {
+        has_position = has_rotation = has_scale = false;
+        has_pos_x = has_pos_y = has_pos_z = false;
+        has_rot_x = has_rot_y = has_rot_z = false;
+        has_scl_x = has_scl_y = has_scl_z = false;
+    }
+    static const char* channelName(int ch) {
+        static const char* names[CURVE_CHANNEL_COUNT] = {
+            "Pos X", "Pos Y", "Pos Z",
+            "Rot X", "Rot Y", "Rot Z",
+            "Scale X", "Scale Y", "Scale Z"
+        };
+        return (ch >= 0 && ch < CURVE_CHANNEL_COUNT) ? names[ch] : "?";
+    }
+
     // Linear interpolation - respects per-axis flags
     static TransformKeyframe lerp(const TransformKeyframe& a, const TransformKeyframe& b, float t) {
         TransformKeyframe result;
@@ -1555,19 +2101,42 @@ struct ObjectAnimationTrack {
         // If keyframe already exists at this frame, MERGE it (don't overwrite)
         if (it != keyframes.end() && it->frame == kf.frame) {
             if (kf.has_transform) {
-                it->transform = kf.transform;
+                // Preserve curve metadata the user customised on this key: a re-key
+                // (auto-key / Insert Keyframe) carries factory-default meta, which
+                // must not wipe manual interpolation modes or hand-edited tangents.
+                TransformKeyframe merged = kf.transform;
+                for (int ch = 0; ch < CURVE_CHANNEL_COUNT; ++ch) {
+                    if (kf.transform.curve[ch].isPristineAuto())
+                        merged.curve[ch] = it->transform.curve[ch];
+                }
+                it->transform = merged;
                 it->has_transform = true;
             }
             if (kf.has_material) {
-                it->material = kf.material;
+                MaterialKeyframe merged = kf.material;
+                for (int ch = 0; ch < CURVE_MAT_CHANNEL_COUNT; ++ch) {
+                    if (kf.material.curve[ch].isPristineAuto())
+                        merged.curve[ch] = it->material.curve[ch];
+                }
+                it->material = merged;
                 it->has_material = true;
             }
             if (kf.has_light) {
-                it->light = kf.light;
+                LightKeyframe merged = kf.light;
+                for (int ch = 0; ch < CURVE_LIGHT_CHANNEL_COUNT; ++ch) {
+                    if (kf.light.curve[ch].isPristineAuto())
+                        merged.curve[ch] = it->light.curve[ch];
+                }
+                it->light = merged;
                 it->has_light = true;
             }
             if (kf.has_camera) {
-                it->camera = kf.camera;
+                CameraKeyframe merged = kf.camera;
+                for (int ch = 0; ch < CURVE_CAM_CHANNEL_COUNT; ++ch) {
+                    if (kf.camera.curve[ch].isPristineAuto())
+                        merged.curve[ch] = it->camera.curve[ch];
+                }
+                it->camera = merged;
                 it->has_camera = true;
             }
             if (kf.has_world) {
@@ -1603,6 +2172,196 @@ struct ObjectAnimationTrack {
             keyframes.end()
         );
     }
+
+    // Recompute auto handles (auto-clamped Catmull-Rom) for transform keys whose
+    // channel meta has auto_tangent set. Handles only matter where a Bezier
+    // segment touches the key, so Linear-only keys are left untouched (keeps
+    // legacy serialization sparse). Call after any key add/move/value edit.
+    void refreshAutoTangents() {
+        std::vector<Keyframe*> keys;
+        
+        // Transform
+        for (int ch = 0; ch < CURVE_CHANNEL_COUNT; ++ch) {
+            keys.clear();
+            for (auto& kf : keyframes)
+                if (kf.has_transform && kf.transform.channelKeyed(ch)) keys.push_back(&kf);
+            const int count = (int)keys.size();
+            for (int i = 0; i < count; ++i) {
+                ChannelKeyMeta& m = keys[i]->transform.curve[ch];
+                if (!m.auto_tangent) continue;
+                // The in-handle participates in the segment coming FROM the previous
+                // key, so refresh also when only the previous key is Bezier.
+                const bool touches_bezier =
+                    m.interp == KeyInterp::Bezier ||
+                    (i > 0 && keys[i - 1]->transform.curve[ch].interp == KeyInterp::Bezier);
+                if (!touches_bezier) continue;
+
+                const float f  = (float)keys[i]->frame;
+                const float v  = keys[i]->transform.channelValue(ch);
+                const float fp = (i > 0) ? (float)keys[i - 1]->frame : f;
+                const float vp = (i > 0) ? keys[i - 1]->transform.channelValue(ch) : v;
+                const float fn = (i + 1 < count) ? (float)keys[i + 1]->frame : f;
+                const float vn = (i + 1 < count) ? keys[i + 1]->transform.channelValue(ch) : v;
+
+                // Catmull-Rom slope, flattened at local extremes so the curve never
+                // overshoots its neighbouring keys (Blender "Auto Clamped").
+                // Endpoints stay flat: ease in from rest / settle at the end.
+                float slope = 0.0f;
+                if (i > 0 && i + 1 < count && fn > fp) {
+                    const bool is_max = v >= vp && v >= vn;
+                    const bool is_min = v <= vp && v <= vn;
+                    if (!is_max && !is_min) slope = (vn - vp) / (fn - fp);
+                }
+
+                const float in_len  = (i > 0) ? (f - fp) / 3.0f : 0.0f;
+                const float out_len = (i + 1 < count) ? (fn - f) / 3.0f : 0.0f;
+                m.in_dx  = -in_len;  m.in_dy  = -slope * in_len;
+                m.out_dx =  out_len; m.out_dy =  slope * out_len;
+
+                // Clamp handle endpoints into the neighbour value range (no overshoot).
+                if (i > 0) {
+                    const float lo = std::min(vp, v), hi = std::max(vp, v);
+                    m.in_dy = std::clamp(v + m.in_dy, lo, hi) - v;
+                }
+                if (i + 1 < count) {
+                    const float lo = std::min(v, vn), hi = std::max(v, vn);
+                    m.out_dy = std::clamp(v + m.out_dy, lo, hi) - v;
+                }
+            }
+        }
+
+        // Light
+        for (int ch = 0; ch < CURVE_LIGHT_CHANNEL_COUNT; ++ch) {
+            keys.clear();
+            for (auto& kf : keyframes)
+                if (kf.has_light && kf.light.channelKeyed(ch)) keys.push_back(&kf);
+            const int count = (int)keys.size();
+            for (int i = 0; i < count; ++i) {
+                ChannelKeyMeta& m = keys[i]->light.curve[ch];
+                if (!m.auto_tangent) continue;
+                const bool touches_bezier =
+                    m.interp == KeyInterp::Bezier ||
+                    (i > 0 && keys[i - 1]->light.curve[ch].interp == KeyInterp::Bezier);
+                if (!touches_bezier) continue;
+
+                const float f  = (float)keys[i]->frame;
+                const float v  = keys[i]->light.channelValue(ch);
+                const float fp = (i > 0) ? (float)keys[i - 1]->frame : f;
+                const float vp = (i > 0) ? keys[i - 1]->light.channelValue(ch) : v;
+                const float fn = (i + 1 < count) ? (float)keys[i + 1]->frame : f;
+                const float vn = (i + 1 < count) ? keys[i + 1]->light.channelValue(ch) : v;
+
+                float slope = 0.0f;
+                if (i > 0 && i + 1 < count && fn > fp) {
+                    const bool is_max = v >= vp && v >= vn;
+                    const bool is_min = v <= vp && v <= vn;
+                    if (!is_max && !is_min) slope = (vn - vp) / (fn - fp);
+                }
+
+                const float in_len  = (i > 0) ? (f - fp) / 3.0f : 0.0f;
+                const float out_len = (i + 1 < count) ? (fn - f) / 3.0f : 0.0f;
+                m.in_dx  = -in_len;  m.in_dy  = -slope * in_len;
+                m.out_dx =  out_len; m.out_dy =  slope * out_len;
+
+                if (i > 0) {
+                    const float lo = std::min(vp, v), hi = std::max(vp, v);
+                    m.in_dy = std::clamp(v + m.in_dy, lo, hi) - v;
+                }
+                if (i + 1 < count) {
+                    const float lo = std::min(v, vn), hi = std::max(v, vn);
+                    m.out_dy = std::clamp(v + m.out_dy, lo, hi) - v;
+                }
+            }
+        }
+
+        // Camera
+        for (int ch = 0; ch < CURVE_CAM_CHANNEL_COUNT; ++ch) {
+            keys.clear();
+            for (auto& kf : keyframes)
+                if (kf.has_camera && kf.camera.channelKeyed(ch)) keys.push_back(&kf);
+            const int count = (int)keys.size();
+            for (int i = 0; i < count; ++i) {
+                ChannelKeyMeta& m = keys[i]->camera.curve[ch];
+                if (!m.auto_tangent) continue;
+                const bool touches_bezier =
+                    m.interp == KeyInterp::Bezier ||
+                    (i > 0 && keys[i - 1]->camera.curve[ch].interp == KeyInterp::Bezier);
+                if (!touches_bezier) continue;
+
+                const float f  = (float)keys[i]->frame;
+                const float v  = keys[i]->camera.channelValue(ch);
+                const float fp = (i > 0) ? (float)keys[i - 1]->frame : f;
+                const float vp = (i > 0) ? keys[i - 1]->camera.channelValue(ch) : v;
+                const float fn = (i + 1 < count) ? (float)keys[i + 1]->frame : f;
+                const float vn = (i + 1 < count) ? keys[i + 1]->camera.channelValue(ch) : v;
+
+                float slope = 0.0f;
+                if (i > 0 && i + 1 < count && fn > fp) {
+                    const bool is_max = v >= vp && v >= vn;
+                    const bool is_min = v <= vp && v <= vn;
+                    if (!is_max && !is_min) slope = (vn - vp) / (fn - fp);
+                }
+
+                const float in_len  = (i > 0) ? (f - fp) / 3.0f : 0.0f;
+                const float out_len = (i + 1 < count) ? (fn - f) / 3.0f : 0.0f;
+                m.in_dx  = -in_len;  m.in_dy  = -slope * in_len;
+                m.out_dx =  out_len; m.out_dy =  slope * out_len;
+
+                if (i > 0) {
+                    const float lo = std::min(vp, v), hi = std::max(vp, v);
+                    m.in_dy = std::clamp(v + m.in_dy, lo, hi) - v;
+                }
+                if (i + 1 < count) {
+                    const float lo = std::min(v, vn), hi = std::max(v, vn);
+                    m.out_dy = std::clamp(v + m.out_dy, lo, hi) - v;
+                }
+            }
+        }
+
+        // Material
+        for (int ch = 0; ch < CURVE_MAT_CHANNEL_COUNT; ++ch) {
+            keys.clear();
+            for (auto& kf : keyframes)
+                if (kf.has_material && kf.material.channelKeyed(ch)) keys.push_back(&kf);
+            const int count = (int)keys.size();
+            for (int i = 0; i < count; ++i) {
+                ChannelKeyMeta& m = keys[i]->material.curve[ch];
+                if (!m.auto_tangent) continue;
+                const bool touches_bezier =
+                    m.interp == KeyInterp::Bezier ||
+                    (i > 0 && keys[i - 1]->material.curve[ch].interp == KeyInterp::Bezier);
+                if (!touches_bezier) continue;
+
+                const float f  = (float)keys[i]->frame;
+                const float v  = keys[i]->material.channelValue(ch);
+                const float fp = (i > 0) ? (float)keys[i - 1]->frame : f;
+                const float vp = (i > 0) ? keys[i - 1]->material.channelValue(ch) : v;
+                const float fn = (i + 1 < count) ? (float)keys[i + 1]->frame : f;
+                const float vn = (i + 1 < count) ? keys[i + 1]->material.channelValue(ch) : v;
+
+                float slope = 0.0f;
+                if (i > 0 && i + 1 < count && fn > fp) {
+                    const bool is_max = v >= vp && v >= vn;
+                    const bool is_min = v <= vp && v <= vn;
+                    if (!is_max && !is_min) slope = (vn - vp) / (fn - fp);
+                }
+
+                const float in_len  = (i > 0) ? (f - fp) / 3.0f : 0.0f;
+                const float out_len = (i + 1 < count) ? (fn - f) / 3.0f : 0.0f;
+                m.in_dx  = -in_len;  m.in_dy  = -slope * in_len;
+                m.out_dx =  out_len; m.out_dy =  slope * out_len;
+
+                if (i > 0) {
+                    const float lo = std::min(vp, v), hi = std::max(vp, v);
+                    m.in_dy = std::clamp(v + m.in_dy, lo, hi) - v;
+                }
+                if (i + 1 < count) {
+                    const float lo = std::min(v, vn), hi = std::max(v, vn);
+                    m.out_dy = std::clamp(v + m.out_dy, lo, hi) - v;
+                }
+            }
+        }
+    }
     
     // Get keyframe at exact frame (returns nullptr if not found)
     Keyframe* getKeyframeAt(int frame) {
@@ -1626,18 +2385,7 @@ struct ObjectAnimationTrack {
         // channels enabled for authoring convenience, but evaluation must rebuild
         // keyed channels explicitly; otherwise material-only keys look like identity
         // transform keys and raster playback resets object orientation.
-        result.transform.has_position = false;
-        result.transform.has_rotation = false;
-        result.transform.has_scale = false;
-        result.transform.has_pos_x = false;
-        result.transform.has_pos_y = false;
-        result.transform.has_pos_z = false;
-        result.transform.has_rot_x = false;
-        result.transform.has_rot_y = false;
-        result.transform.has_rot_z = false;
-        result.transform.has_scl_x = false;
-        result.transform.has_scl_y = false;
-        result.transform.has_scl_z = false;
+        result.transform.clearAllChannels();
 
         // Lambda to find previous valid keyframe matching a predicate
         auto findPrev = [&](auto predicate) -> const Keyframe* {
@@ -1659,180 +2407,139 @@ struct ObjectAnimationTrack {
             return nullptr;
         };
         
-        // Helper specifically for Transform values (float scalar lerp)
-        auto interpolateScalar = [&](float& result_val, const Keyframe* p, const Keyframe* n, float (TransformKeyframe::*val_ptr), bool (TransformKeyframe::*flag_ptr)) {
+        // --- TRANSFORM CHANNELS (per-axis, curve-aware) ---
+        // Each axis interpolates independently between its own neighbouring keys.
+        // The segment shape (Constant/Linear/Bezier + handles) lives on the keys'
+        // ChannelKeyMeta; a Linear meta reproduces the old lerp exactly.
+        for (int ch = 0; ch < CURVE_CHANNEL_COUNT; ++ch) {
+            auto has = [ch](const Keyframe& k) { return k.has_transform && k.transform.channelKeyed(ch); };
+            const Keyframe* p = findPrev(has);
+            const Keyframe* n = findNext(has);
             if (p && n) {
-                if (p == n) result_val = (p->transform.*val_ptr); // Cast if needed for vector components? using member pointers is tricky for Vec3 struct
-                else {
-                    float t = float(current_frame - p->frame) / float(n->frame - p->frame);
-                    // Manually lerp scalars? no, we can't easily use member pointers for Vec3.x
-                    // Let's just do it manually for each axis to be safe and clear.
+                float v;
+                if (p == n) {
+                    v = p->transform.channelValue(ch);
+                } else {
+                    v = evalCurveSegment(
+                        (float)p->frame, p->transform.channelValue(ch), p->transform.curve[ch],
+                        (float)n->frame, n->transform.channelValue(ch), n->transform.curve[ch],
+                        (float)current_frame);
                 }
+                result.transform.setChannelValue(ch, v);
+                result.transform.setChannelKeyed(ch, true);
+            } else if (p) {
+                result.transform.setChannelValue(ch, p->transform.channelValue(ch));
+                result.transform.setChannelKeyed(ch, true);
+            } else if (n) {
+                result.transform.setChannelValue(ch, n->transform.channelValue(ch));
+                result.transform.setChannelKeyed(ch, true);
             }
-        };
-
-        // --- POSITION X ---
-        {
-            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_pos_x; };
-            const Keyframe* p = findPrev(has);
-            const Keyframe* n = findNext(has);
-            if (p && n) {
-                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
-                 result.transform.position.x = p->transform.position.x + (n->transform.position.x - p->transform.position.x) * t;
-                 result.transform.has_pos_x = true;
-            } else if (p) { result.transform.position.x = p->transform.position.x; result.transform.has_pos_x = true; }
-            else if (n) { result.transform.position.x = n->transform.position.x; result.transform.has_pos_x = true; }
         }
-        // --- POSITION Y ---
-        {
-            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_pos_y; };
-            const Keyframe* p = findPrev(has);
-            const Keyframe* n = findNext(has);
-            if (p && n) {
-                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
-                 result.transform.position.y = p->transform.position.y + (n->transform.position.y - p->transform.position.y) * t;
-                 result.transform.has_pos_y = true;
-            } else if (p) { result.transform.position.y = p->transform.position.y; result.transform.has_pos_y = true; }
-            else if (n) { result.transform.position.y = n->transform.position.y; result.transform.has_pos_y = true; }
-        }
-        // --- POSITION Z ---
-        {
-            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_pos_z; };
-            const Keyframe* p = findPrev(has);
-            const Keyframe* n = findNext(has);
-            if (p && n) {
-                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
-                 result.transform.position.z = p->transform.position.z + (n->transform.position.z - p->transform.position.z) * t;
-                 result.transform.has_pos_z = true;
-            } else if (p) { result.transform.position.z = p->transform.position.z; result.transform.has_pos_z = true; }
-            else if (n) { result.transform.position.z = n->transform.position.z; result.transform.has_pos_z = true; }
-        }
-        result.transform.has_position = result.transform.has_pos_x || result.transform.has_pos_y || result.transform.has_pos_z;
-
-        // --- ROTATION X ---
-        {
-            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_rot_x; };
-            const Keyframe* p = findPrev(has);
-            const Keyframe* n = findNext(has);
-            if (p && n) {
-                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
-                 result.transform.rotation.x = p->transform.rotation.x + (n->transform.rotation.x - p->transform.rotation.x) * t;
-                 result.transform.has_rot_x = true;
-            } else if (p) { result.transform.rotation.x = p->transform.rotation.x; result.transform.has_rot_x = true; }
-            else if (n) { result.transform.rotation.x = n->transform.rotation.x; result.transform.has_rot_x = true; }
-        }
-        // --- ROTATION Y ---
-        {
-            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_rot_y; };
-            const Keyframe* p = findPrev(has);
-            const Keyframe* n = findNext(has);
-            if (p && n) {
-                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
-                 result.transform.rotation.y = p->transform.rotation.y + (n->transform.rotation.y - p->transform.rotation.y) * t;
-                 result.transform.has_rot_y = true;
-            } else if (p) { result.transform.rotation.y = p->transform.rotation.y; result.transform.has_rot_y = true; }
-            else if (n) { result.transform.rotation.y = n->transform.rotation.y; result.transform.has_rot_y = true; }
-        }
-         // --- ROTATION Z ---
-        {
-            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_rot_z; };
-            const Keyframe* p = findPrev(has);
-            const Keyframe* n = findNext(has);
-            if (p && n) {
-                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
-                 result.transform.rotation.z = p->transform.rotation.z + (n->transform.rotation.z - p->transform.rotation.z) * t;
-                 result.transform.has_rot_z = true;
-            } else if (p) { result.transform.rotation.z = p->transform.rotation.z; result.transform.has_rot_z = true; }
-            else if (n) { result.transform.rotation.z = n->transform.rotation.z; result.transform.has_rot_z = true; }
-        }
-        result.transform.has_rotation = result.transform.has_rot_x || result.transform.has_rot_y || result.transform.has_rot_z;
-
-        // --- SCALE X ---
-        {
-            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_scl_x; };
-            const Keyframe* p = findPrev(has);
-            const Keyframe* n = findNext(has);
-            if (p && n) {
-                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
-                 result.transform.scale.x = p->transform.scale.x + (n->transform.scale.x - p->transform.scale.x) * t;
-                 result.transform.has_scl_x = true;
-            } else if (p) { result.transform.scale.x = p->transform.scale.x; result.transform.has_scl_x = true; }
-            else if (n) { result.transform.scale.x = n->transform.scale.x; result.transform.has_scl_x = true; }
-        }
-        // --- SCALE Y ---
-        {
-            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_scl_y; };
-            const Keyframe* p = findPrev(has);
-            const Keyframe* n = findNext(has);
-            if (p && n) {
-                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
-                 result.transform.scale.y = p->transform.scale.y + (n->transform.scale.y - p->transform.scale.y) * t;
-                 result.transform.has_scl_y = true;
-            } else if (p) { result.transform.scale.y = p->transform.scale.y; result.transform.has_scl_y = true; }
-            else if (n) { result.transform.scale.y = n->transform.scale.y; result.transform.has_scl_y = true; }
-        }
-        // --- SCALE Z ---
-        {
-            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_scl_z; };
-            const Keyframe* p = findPrev(has);
-            const Keyframe* n = findNext(has);
-            if (p && n) {
-                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
-                 result.transform.scale.z = p->transform.scale.z + (n->transform.scale.z - p->transform.scale.z) * t;
-                 result.transform.has_scl_z = true;
-            } else if (p) { result.transform.scale.z = p->transform.scale.z; result.transform.has_scl_z = true; }
-            else if (n) { result.transform.scale.z = n->transform.scale.z; result.transform.has_scl_z = true; }
-        }
-        result.transform.has_scale = result.transform.has_scl_x || result.transform.has_scl_y || result.transform.has_scl_z;
+        result.transform.refreshCompoundFlags();
         result.has_transform = result.transform.has_position || result.transform.has_rotation || result.transform.has_scale;
         
-        // --- MATERIAL CHANNEL (Simplified block handling for now, can be updated later) ---
-        {
-             auto has = [](const Keyframe& k) { return k.has_material; };
-             const Keyframe* prev_mat = findPrev(has);
-             const Keyframe* next_mat = findNext(has);
-             if (prev_mat && next_mat) {
-                 if (prev_mat == next_mat) result.material = prev_mat->material;
-                 else {
-                     float t = float(current_frame - prev_mat->frame) / float(next_mat->frame - prev_mat->frame);
-                     result.material = MaterialKeyframe::lerp(prev_mat->material, next_mat->material, t);
-                 }
-                 result.has_material = true;
-             } else if (prev_mat) { result.material = prev_mat->material; result.has_material = true; }
-             else if (next_mat) { result.material = next_mat->material; result.has_material = true; }
-        }
-
-        // --- LIGHT CHANNEL ---
-        {
-            auto has = [](const Keyframe& k) { return k.has_light; };
-            const Keyframe* prev_light = findPrev(has);
-            const Keyframe* next_light = findNext(has);
-            if (prev_light && next_light) {
-                if (prev_light == next_light) result.light = prev_light->light;
-                else {
-                    float t = float(current_frame - prev_light->frame) / float(next_light->frame - prev_light->frame);
-                    result.light = LightKeyframe::lerp(prev_light->light, next_light->light, t);
+        // --- MATERIAL CHANNELS (per-axis, curve-aware) ---
+        result.material.clearAllChannels();
+        result.material.material_id = 0;
+        bool has_any_mat = false;
+        for (int ch = 0; ch < CURVE_MAT_CHANNEL_COUNT; ++ch) {
+            auto has = [ch](const Keyframe& k) { return k.has_material && k.material.channelKeyed(ch); };
+            const Keyframe* p = findPrev(has);
+            const Keyframe* n = findNext(has);
+            if (p && n) {
+                float v;
+                if (p == n) {
+                    v = p->material.channelValue(ch);
+                } else {
+                    v = evalCurveSegment(
+                        (float)p->frame, p->material.channelValue(ch), p->material.curve[ch],
+                        (float)n->frame, n->material.channelValue(ch), n->material.curve[ch],
+                        (float)current_frame);
                 }
-                result.has_light = true;
-            } else if (prev_light) { result.light = prev_light->light; result.has_light = true; }
-            else if (next_light) { result.light = next_light->light; result.has_light = true; }
+                result.material.setChannelValue(ch, v);
+                result.material.setChannelKeyed(ch, true);
+                result.material.material_id = p->material.material_id;
+                has_any_mat = true;
+            } else if (p) {
+                result.material.setChannelValue(ch, p->material.channelValue(ch));
+                result.material.setChannelKeyed(ch, true);
+                result.material.material_id = p->material.material_id;
+                has_any_mat = true;
+            } else if (n) {
+                result.material.setChannelValue(ch, n->material.channelValue(ch));
+                result.material.setChannelKeyed(ch, true);
+                result.material.material_id = n->material.material_id;
+                has_any_mat = true;
+            }
         }
+        result.material.refreshCompoundFlags();
+        result.has_material = has_any_mat;
 
-        // --- CAMERA CHANNEL ---
-        {
-            auto has = [](const Keyframe& k) { return k.has_camera; };
-            const Keyframe* prev_cam = findPrev(has);
-            const Keyframe* next_cam = findNext(has);
-            if (prev_cam && next_cam) {
-                if (prev_cam == next_cam) result.camera = prev_cam->camera;
-                else {
-                    float t = float(current_frame - prev_cam->frame) / float(next_cam->frame - prev_cam->frame);
-                    result.camera = CameraKeyframe::lerp(prev_cam->camera, next_cam->camera, t);
+        // --- LIGHT CHANNELS (per-axis, curve-aware) ---
+        result.light.clearAllChannels();
+        bool has_any_light = false;
+        for (int ch = 0; ch < CURVE_LIGHT_CHANNEL_COUNT; ++ch) {
+            auto has = [ch](const Keyframe& k) { return k.has_light && k.light.channelKeyed(ch); };
+            const Keyframe* p = findPrev(has);
+            const Keyframe* n = findNext(has);
+            if (p && n) {
+                float v;
+                if (p == n) {
+                    v = p->light.channelValue(ch);
+                } else {
+                    v = evalCurveSegment(
+                        (float)p->frame, p->light.channelValue(ch), p->light.curve[ch],
+                        (float)n->frame, n->light.channelValue(ch), n->light.curve[ch],
+                        (float)current_frame);
                 }
-                result.has_camera = true;
-            } else if (prev_cam) { result.camera = prev_cam->camera; result.has_camera = true; }
-            else if (next_cam) { result.camera = next_cam->camera; result.has_camera = true; }
+                result.light.setChannelValue(ch, v);
+                result.light.setChannelKeyed(ch, true);
+                has_any_light = true;
+            } else if (p) {
+                result.light.setChannelValue(ch, p->light.channelValue(ch));
+                result.light.setChannelKeyed(ch, true);
+                has_any_light = true;
+            } else if (n) {
+                result.light.setChannelValue(ch, n->light.channelValue(ch));
+                result.light.setChannelKeyed(ch, true);
+                has_any_light = true;
+            }
         }
+        result.light.refreshCompoundFlags();
+        result.has_light = has_any_light;
+
+        // --- CAMERA CHANNELS (per-axis, curve-aware) ---
+        result.camera.clearAllChannels();
+        bool has_any_cam = false;
+        for (int ch = 0; ch < CURVE_CAM_CHANNEL_COUNT; ++ch) {
+            auto has = [ch](const Keyframe& k) { return k.has_camera && k.camera.channelKeyed(ch); };
+            const Keyframe* p = findPrev(has);
+            const Keyframe* n = findNext(has);
+            if (p && n) {
+                float v;
+                if (p == n) {
+                    v = p->camera.channelValue(ch);
+                } else {
+                    v = evalCurveSegment(
+                        (float)p->frame, p->camera.channelValue(ch), p->camera.curve[ch],
+                        (float)n->frame, n->camera.channelValue(ch), n->camera.curve[ch],
+                        (float)current_frame);
+                }
+                result.camera.setChannelValue(ch, v);
+                result.camera.setChannelKeyed(ch, true);
+                has_any_cam = true;
+            } else if (p) {
+                result.camera.setChannelValue(ch, p->camera.channelValue(ch));
+                result.camera.setChannelKeyed(ch, true);
+                has_any_cam = true;
+            } else if (n) {
+                result.camera.setChannelValue(ch, n->camera.channelValue(ch));
+                result.camera.setChannelKeyed(ch, true);
+                has_any_cam = true;
+            }
+        }
+        result.camera.refreshCompoundFlags();
+        result.has_camera = has_any_cam;
 
         // --- WORLD CHANNEL ---
         {
@@ -2262,14 +2969,21 @@ struct TimelineManager {
     
     // Insert keyframe for object
     void insertKeyframe(const std::string& object_name, const Keyframe& kf) {
-        tracks[object_name].addKeyframe(kf);
+        auto& track = tracks[object_name];
+        track.addKeyframe(kf);
+        // Single-key authoring path: keep neighbouring auto handles in sync.
+        // (Bulk imports go through ObjectAnimationTrack::addKeyframe directly and
+        // skip this; their zero-length handles evaluate as linear, which is correct
+        // for densely baked data.)
+        track.refreshAutoTangents();
     }
-    
+
     // Remove keyframe for object at frame
     void removeKeyframe(const std::string& object_name, int frame) {
         auto it = tracks.find(object_name);
         if (it != tracks.end()) {
             it->second.removeKeyframe(frame);
+            it->second.refreshAutoTangents();
         }
     }
     
@@ -2308,6 +3022,16 @@ inline void to_json(json& j, const MaterialKeyframe& m) {
         {"ior", m.has_ior}, {"fclr", m.has_clearcoat}, {"fsub", m.has_subsurface},
         {"fshe", m.has_sheen}, {"fani", m.has_anisotropic}, {"fspc", m.has_specular},
         {"fnrm", m.has_normal},
+        {"far", m.has_alb_r}, {"fag", m.has_alb_g}, {"fab", m.has_alb_b},
+        {"fop", m.has_opac},
+        {"fro", m.has_rough},
+        {"fme", m.has_metal},
+        {"fcl", m.has_clear},
+        {"ftr", m.has_transm},
+        {"fio", m.has_ior_val},
+        {"fer", m.has_emis_r}, {"feg", m.has_emis_g}, {"feb", m.has_emis_b},
+        {"fns", m.has_norm_str},
+        {"fes", m.has_emis_str},
         {"alb", m.albedo}, {"opa", m.opacity}, {"rgh", m.roughness},
         {"met", m.metallic}, {"clr", m.clearcoat}, {"trn", m.transmission},
         {"ems", m.emission}, {"v_ior", m.ior}, 
@@ -2317,6 +3041,14 @@ inline void to_json(json& j, const MaterialKeyframe& m) {
         {"clr_r", m.clearcoat_roughness}, {"nrm_s", m.normal_strength},
         {"ems_s", m.emission_strength}
     };
+    json crv = json::array();
+    for (int ch = 0; ch < CURVE_MAT_CHANNEL_COUNT; ++ch) {
+        const ChannelKeyMeta& meta = m.curve[ch];
+        if (meta.isLegacyLinear()) continue;
+        crv.push_back(json::array({ ch, (int)meta.interp, meta.auto_tangent ? 1 : 0,
+                                    meta.in_dx, meta.in_dy, meta.out_dx, meta.out_dy }));
+    }
+    if (!crv.empty()) j["crv"] = crv;
 }
 
 inline void from_json(const json& j, MaterialKeyframe& m) {
@@ -2328,6 +3060,21 @@ inline void from_json(const json& j, MaterialKeyframe& m) {
     m.has_subsurface = j.value("fsub", false); m.has_sheen = j.value("fshe", false);
     m.has_anisotropic = j.value("fani", false); m.has_specular = j.value("fspc", false);
     m.has_normal = j.value("fnrm", false);
+
+    m.has_alb_r = j.value("far", m.has_albedo);
+    m.has_alb_g = j.value("fag", m.has_albedo);
+    m.has_alb_b = j.value("fab", m.has_albedo);
+    m.has_opac = j.value("fop", m.has_opacity);
+    m.has_rough = j.value("fro", m.has_roughness);
+    m.has_metal = j.value("fme", m.has_metallic);
+    m.has_clear = j.value("fcl", m.has_clearcoat);
+    m.has_transm = j.value("ftr", m.has_transmission);
+    m.has_ior_val = j.value("fio", m.has_ior);
+    m.has_emis_r = j.value("fer", m.has_emission);
+    m.has_emis_g = j.value("feg", m.has_emission);
+    m.has_emis_b = j.value("feb", m.has_emission);
+    m.has_norm_str = j.value("fns", m.has_normal);
+    m.has_emis_str = j.value("fes", m.has_emission);
     
     if(j.contains("alb")) j.at("alb").get_to(m.albedo);
     m.opacity = j.value("opa", 1.0f);
@@ -2347,20 +3094,49 @@ inline void from_json(const json& j, MaterialKeyframe& m) {
     m.clearcoat_roughness = j.value("clr_r", 0.0f);
     m.normal_strength = j.value("nrm_s", 1.0f);
     m.emission_strength = j.value("ems_s", 1.0f);
+
+    for (auto& meta : m.curve) meta.resetToLegacyLinear();
+    if (j.contains("crv") && j["crv"].is_array()) {
+        for (const auto& e : j["crv"]) {
+            if (!e.is_array() || e.size() < 7) continue;
+            const int ch = e[0].get<int>();
+            if (ch < 0 || ch >= CURVE_MAT_CHANNEL_COUNT) continue;
+            ChannelKeyMeta& meta = m.curve[ch];
+            const int interp = e[1].get<int>();
+            meta.interp = (interp == (int)KeyInterp::Constant) ? KeyInterp::Constant
+                        : (interp == (int)KeyInterp::Bezier)   ? KeyInterp::Bezier
+                                                               : KeyInterp::Linear;
+            meta.auto_tangent = e[2].get<int>() != 0;
+            meta.in_dx = e[3].get<float>();  meta.in_dy = e[4].get<float>();
+            meta.out_dx = e[5].get<float>(); meta.out_dy = e[6].get<float>();
+        }
+    }
 }
 
-// LightKeyframe
 // LightKeyframe
 inline void to_json(json& j, const LightKeyframe& l) {
     j = json{
         {"fpos", l.has_position}, {"fcol", l.has_color},
         {"fint", l.has_intensity}, {"fdir", l.has_direction},
+        {"fpx", l.has_pos_x}, {"fpy", l.has_pos_y}, {"fpz", l.has_pos_z},
+        {"fcr", l.has_col_r}, {"fcg", l.has_col_g}, {"fcb", l.has_col_b},
+        {"fi", l.has_int},
+        {"fdx", l.has_dir_x}, {"fdy", l.has_dir_y}, {"fdz", l.has_dir_z},
         {"int", l.intensity}
     };
     // Manual Vec3 serialization to ensure stability
     j["pos"] = {l.position.x, l.position.y, l.position.z};
     j["col"] = {l.color.x, l.color.y, l.color.z};
     j["dir"] = {l.direction.x, l.direction.y, l.direction.z};
+
+    json crv = json::array();
+    for (int ch = 0; ch < CURVE_LIGHT_CHANNEL_COUNT; ++ch) {
+        const ChannelKeyMeta& meta = l.curve[ch];
+        if (meta.isLegacyLinear()) continue;
+        crv.push_back(json::array({ ch, (int)meta.interp, meta.auto_tangent ? 1 : 0,
+                                    meta.in_dx, meta.in_dy, meta.out_dx, meta.out_dy }));
+    }
+    if (!crv.empty()) j["crv"] = crv;
 }
 
 inline void from_json(const json& j, LightKeyframe& l) {
@@ -2369,6 +3145,17 @@ inline void from_json(const json& j, LightKeyframe& l) {
     l.has_color = j.value("fcol", j.contains("col"));
     l.has_intensity = j.value("fint", j.contains("int")); 
     l.has_direction = j.value("fdir", j.contains("dir"));
+
+    l.has_pos_x = j.value("fpx", l.has_position);
+    l.has_pos_y = j.value("fpy", l.has_position);
+    l.has_pos_z = j.value("fpz", l.has_position);
+    l.has_col_r = j.value("fcr", l.has_color);
+    l.has_col_g = j.value("fcg", l.has_color);
+    l.has_col_b = j.value("fcb", l.has_color);
+    l.has_int   = j.value("fi",  l.has_intensity);
+    l.has_dir_x = j.value("fdx", l.has_direction);
+    l.has_dir_y = j.value("fdy", l.has_direction);
+    l.has_dir_z = j.value("fdz", l.has_direction);
 
     l.intensity = j.value("int", 1.0f);
 
@@ -2381,6 +3168,23 @@ inline void from_json(const json& j, LightKeyframe& l) {
     }
     if(j.contains("dir") && j["dir"].is_array() && j["dir"].size() >= 3) {
         l.direction.x = j["dir"][0]; l.direction.y = j["dir"][1]; l.direction.z = j["dir"][2];
+    }
+
+    for (auto& meta : l.curve) meta.resetToLegacyLinear();
+    if (j.contains("crv") && j["crv"].is_array()) {
+        for (const auto& e : j["crv"]) {
+            if (!e.is_array() || e.size() < 7) continue;
+            const int ch = e[0].get<int>();
+            if (ch < 0 || ch >= CURVE_LIGHT_CHANNEL_COUNT) continue;
+            ChannelKeyMeta& meta = l.curve[ch];
+            const int interp = e[1].get<int>();
+            meta.interp = (interp == (int)KeyInterp::Constant) ? KeyInterp::Constant
+                        : (interp == (int)KeyInterp::Bezier)   ? KeyInterp::Bezier
+                                                               : KeyInterp::Linear;
+            meta.auto_tangent = e[2].get<int>() != 0;
+            meta.in_dx = e[3].get<float>();  meta.in_dy = e[4].get<float>();
+            meta.out_dx = e[5].get<float>(); meta.out_dy = e[6].get<float>();
+        }
     }
 }
 
@@ -2414,9 +3218,20 @@ inline void to_json(json& j, const CameraKeyframe& c) {
     j = json{
         {"fpos", c.has_position}, {"ftgt", c.has_target},
         {"ffov", c.has_fov}, {"ffoc", c.has_focus}, {"fapt", c.has_aperture},
+        {"fpx", c.has_pos_x}, {"fpy", c.has_pos_y}, {"fpz", c.has_pos_z},
+        {"ftx", c.has_tgt_x}, {"fty", c.has_tgt_y}, {"ftz", c.has_tgt_z},
+        {"ffv", c.has_fv}, {"ffd", c.has_foc_dist}, {"flr", c.has_lens_rad},
         {"pos", c.position}, {"tgt", c.target},
         {"fov", c.fov}, {"foc", c.focus_distance}, {"apt", c.lens_radius}
     };
+    json crv = json::array();
+    for (int ch = 0; ch < CURVE_CAM_CHANNEL_COUNT; ++ch) {
+        const ChannelKeyMeta& meta = c.curve[ch];
+        if (meta.isLegacyLinear()) continue;
+        crv.push_back(json::array({ ch, (int)meta.interp, meta.auto_tangent ? 1 : 0,
+                                    meta.in_dx, meta.in_dy, meta.out_dx, meta.out_dy }));
+    }
+    if (!crv.empty()) j["crv"] = crv;
 }
 
 inline void from_json(const json& j, CameraKeyframe& c) {
@@ -2427,12 +3242,39 @@ inline void from_json(const json& j, CameraKeyframe& c) {
     c.has_focus = j.value("ffoc", j.contains("foc"));
     c.has_aperture = j.value("fapt", j.contains("apt"));
 
+    c.has_pos_x = j.value("fpx", c.has_position);
+    c.has_pos_y = j.value("fpy", c.has_position);
+    c.has_pos_z = j.value("fpz", c.has_position);
+    c.has_tgt_x = j.value("ftx", c.has_target);
+    c.has_tgt_y = j.value("fty", c.has_target);
+    c.has_tgt_z = j.value("ftz", c.has_target);
+    c.has_fv = j.value("ffv", c.has_fov);
+    c.has_foc_dist = j.value("ffd", c.has_focus);
+    c.has_lens_rad = j.value("flr", c.has_aperture);
+
     // Safe extraction
     if(j.contains("pos")) j.at("pos").get_to(c.position);
     if(j.contains("tgt")) j.at("tgt").get_to(c.target);
     c.fov = j.value("fov", 40.0f);
     c.focus_distance = j.value("foc", 10.0f);
     c.lens_radius = j.value("apt", 0.0f);
+
+    for (auto& meta : c.curve) meta.resetToLegacyLinear();
+    if (j.contains("crv") && j["crv"].is_array()) {
+        for (const auto& e : j["crv"]) {
+            if (!e.is_array() || e.size() < 7) continue;
+            const int ch = e[0].get<int>();
+            if (ch < 0 || ch >= CURVE_CAM_CHANNEL_COUNT) continue;
+            ChannelKeyMeta& meta = c.curve[ch];
+            const int interp = e[1].get<int>();
+            meta.interp = (interp == (int)KeyInterp::Constant) ? KeyInterp::Constant
+                        : (interp == (int)KeyInterp::Bezier)   ? KeyInterp::Bezier
+                                                               : KeyInterp::Linear;
+            meta.auto_tangent = e[2].get<int>() != 0;
+            meta.in_dx = e[3].get<float>();  meta.in_dy = e[4].get<float>();
+            meta.out_dx = e[5].get<float>(); meta.out_dy = e[6].get<float>();
+        }
+    }
 }
 
 // WorldKeyframe
@@ -2598,20 +3440,50 @@ inline void to_json(json& j, const TransformKeyframe& tk) {
         {"frx", tk.has_rot_x}, {"fry", tk.has_rot_y}, {"frz", tk.has_rot_z},
         {"fsx", tk.has_scl_x}, {"fsy", tk.has_scl_y}, {"fsz", tk.has_scl_z}
     };
+    // Curve metadata (graph editor). Sparse: channels in the legacy-linear state
+    // are omitted entirely, so files from before this feature round-trip unchanged.
+    // Entry layout: [channel, interp, auto, in_dx, in_dy, out_dx, out_dy]
+    json crv = json::array();
+    for (int ch = 0; ch < CURVE_CHANNEL_COUNT; ++ch) {
+        const ChannelKeyMeta& m = tk.curve[ch];
+        if (m.isLegacyLinear()) continue;
+        crv.push_back(json::array({ ch, (int)m.interp, m.auto_tangent ? 1 : 0,
+                                    m.in_dx, m.in_dy, m.out_dx, m.out_dy }));
+    }
+    if (!crv.empty()) j["crv"] = crv;
 }
 
 inline void from_json(const json& j, TransformKeyframe& tk) {
     if(j.contains("pos")) j.at("pos").get_to(tk.position);
     if(j.contains("rot")) j.at("rot").get_to(tk.rotation);
     if(j.contains("scl")) j.at("scl").get_to(tk.scale);
-    
+
     tk.has_position = j.value("fpos", true);
     tk.has_rotation = j.value("frot", true);
     tk.has_scale = j.value("fscl", true);
-    
+
     tk.has_pos_x = j.value("fpx", true); tk.has_pos_y = j.value("fpy", true); tk.has_pos_z = j.value("fpz", true);
     tk.has_rot_x = j.value("frx", true); tk.has_rot_y = j.value("fry", true); tk.has_rot_z = j.value("frz", true);
     tk.has_scl_x = j.value("fsx", true); tk.has_scl_y = j.value("fsy", true); tk.has_scl_z = j.value("fsz", true);
+
+    // BACKWARD COMPAT: keys with no stored curve data must evaluate exactly like
+    // the old system, i.e. pure linear — NOT the Bezier default of new keys.
+    for (auto& m : tk.curve) m.resetToLegacyLinear();
+    if (j.contains("crv") && j["crv"].is_array()) {
+        for (const auto& e : j["crv"]) {
+            if (!e.is_array() || e.size() < 7) continue;
+            const int ch = e[0].get<int>();
+            if (ch < 0 || ch >= CURVE_CHANNEL_COUNT) continue;
+            ChannelKeyMeta& m = tk.curve[ch];
+            const int interp = e[1].get<int>();
+            m.interp = (interp == (int)KeyInterp::Constant) ? KeyInterp::Constant
+                     : (interp == (int)KeyInterp::Bezier)   ? KeyInterp::Bezier
+                                                            : KeyInterp::Linear;
+            m.auto_tangent = e[2].get<int>() != 0;
+            m.in_dx = e[3].get<float>();  m.in_dy = e[4].get<float>();
+            m.out_dx = e[5].get<float>(); m.out_dy = e[6].get<float>();
+        }
+    }
 }
 
 // Keyframe
@@ -2694,8 +3566,10 @@ inline void from_json(const json& j, ObjectAnimationTrack& t) {
     if(j.contains("kfs")) {
         j.at("kfs").get_to(t.keyframes);
         // CRITICAL: Ensure keyframes are sorted, otherwise binary search in evaluate() fails
-        std::sort(t.keyframes.begin(), t.keyframes.end(), 
+        std::sort(t.keyframes.begin(), t.keyframes.end(),
             [](const Keyframe& a, const Keyframe& b){ return a.frame < b.frame; });
+        // Stored auto handles may predate a key that was added later; recompute once.
+        t.refreshAutoTangents();
     }
 }
 

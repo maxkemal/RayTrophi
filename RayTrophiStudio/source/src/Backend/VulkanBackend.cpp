@@ -6905,6 +6905,7 @@ void VulkanBackendAdapter::shutdown() {
     // Reset adapter caches/state.
     m_orderedVDBInstances.clear();
     m_meshRegistry.clear();
+    m_blasMaterialIds.clear();
     m_vkInstances.clear();
     m_lastObjects.clear();
     m_instanceSources.clear();
@@ -7121,6 +7122,7 @@ uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& 
     }
 
     m_meshRegistry[meshName] = blasIndex;
+    m_blasMaterialIds[blasIndex] = std::move(materialIndices);
 
     // Reset geometry data buffer because a new BLAS was added
     if (m_device->m_geometryDataBuffer.buffer) {
@@ -7505,6 +7507,7 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     SCENE_LOG_INFO("[Vulkan] Full scene/project rebuild triggered.");
     m_meshRegistry.clear();
+    m_blasMaterialIds.clear();
     m_vkInstances.clear();
     m_instanceSources.clear();
     m_instance_sync_cache.clear();
@@ -7703,6 +7706,89 @@ void VulkanBackendAdapter::updateInstanceMaterialBinding(const std::string& node
                                mesh.cpuMatIds.data(),
                                mesh.cpuMatIds.size() * sizeof(uint32_t),
                                0);
+        changed = true;
+    }
+
+    // ---- RT path -------------------------------------------------------
+    // The path tracer reads materials from two places the raster matId update
+    // above never touches:
+    //   1) per-triangle material indices baked into each BLAS geometry buffer
+    //      (geo.materialAddr — preferred by closesthit/anyhit when non-zero)
+    //   2) per-instance materialIndex in the instance SSBO (binding 5)
+    // Without rewriting these, a material *assignment* change only appears
+    // after a full backend rebuild (parameter edits worked all along because
+    // they rewrite the material SSBO at the unchanged index).
+    bool instanceDataChanged = false;
+    std::unordered_set<uint32_t> candidateBlasIndices;
+    for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
+        if (!m_instanceSources[i]) continue;
+
+        std::string instName;
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+            instName = inst->node_name;
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+            instName = tri->getNodeName();
+        }
+        if (instName.empty()) continue;
+        if (!matchesNodeNameForInstance(instName, nodeName) &&
+            !matchesNodeNameForInstance(nodeName, instName)) continue;
+
+        auto& vi = m_vkInstances[i];
+        if ((oldMatID < 0 || static_cast<int>(vi.materialIndex) == oldMatID) &&
+            static_cast<int>(vi.materialIndex) != newMatID) {
+            vi.materialIndex = static_cast<uint32_t>(newMatID);
+            instanceDataChanged = true;
+        }
+        candidateBlasIndices.insert(vi.blasIndex);
+    }
+
+    std::vector<uint32_t> blasToUpload;
+    for (uint32_t blasIndex : candidateBlasIndices) {
+        if (blasIndex >= m_device->m_blasList.size()) continue;
+        auto mirrorIt = m_blasMaterialIds.find(blasIndex);
+        if (mirrorIt == m_blasMaterialIds.end() || mirrorIt->second.empty()) continue;
+
+        bool blasChanged = false;
+        for (auto& matId : mirrorIt->second) {
+            if ((oldMatID < 0 || static_cast<int>(matId) == oldMatID) &&
+                static_cast<int>(matId) != newMatID) {
+                matId = static_cast<uint32_t>(newMatID);
+                blasChanged = true;
+            }
+        }
+        if (blasChanged) blasToUpload.push_back(blasIndex);
+    }
+
+    if (instanceDataChanged || !blasToUpload.empty()) {
+        // Serialize with any in-flight trace before rewriting buffers it reads.
+        m_device->waitIdle();
+
+        for (uint32_t blasIndex : blasToUpload) {
+            const auto& blas = m_device->m_blasList[blasIndex];
+            if (!blas.materialIndexBuffer.buffer || !blas.vertexBuffer.buffer) continue;
+            const auto& ids = m_blasMaterialIds[blasIndex];
+            // materialIndexBuffer aliases the combined geometry buffer; its
+            // byte offset is the device-address delta from the buffer start.
+            const uint64_t byteOffset =
+                blas.materialIndexBuffer.deviceAddress - blas.vertexBuffer.deviceAddress;
+            m_device->uploadBuffer(blas.materialIndexBuffer,
+                                   ids.data(),
+                                   ids.size() * sizeof(uint32_t),
+                                   byteOffset);
+        }
+
+        if (instanceDataChanged) {
+            // Refresh instance SSBO (binding 5). The TLAS itself carries no
+            // material data, so no AS update is needed for a binding change.
+            std::vector<VulkanRT::VkInstanceData> instData;
+            instData.reserve(m_vkInstances.size());
+            for (const auto& vi : m_vkInstances) { VulkanRT::VkInstanceData d; d.materialIndex = vi.materialIndex; d.blasIndex = vi.blasIndex; instData.push_back(d); }
+            if (!instData.empty()) {
+                if (m_device->m_instanceDataBuffer.buffer) m_device->destroyBuffer(m_device->m_instanceDataBuffer);
+                ::VulkanRT::BufferCreateInfo ci; ci.size = (uint64_t)instData.size() * sizeof(::VulkanRT::VkInstanceData); ci.usage = (::VulkanRT::BufferUsage)((uint32_t)::VulkanRT::BufferUsage::STORAGE | (uint32_t)::VulkanRT::BufferUsage::TRANSFER_DST); ci.location = ::VulkanRT::MemoryLocation::CPU_TO_GPU; ci.initialData = instData.data(); m_device->m_instanceDataBuffer = m_device->createBuffer(ci);
+                if (m_device->m_rtDescriptorSet != VK_NULL_HANDLE) { VkDescriptorBufferInfo instInfo{}; instInfo.buffer = m_device->m_instanceDataBuffer.buffer; instInfo.offset = 0; instInfo.range = VK_WHOLE_SIZE; VkWriteDescriptorSet w5{}; w5.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w5.dstSet = m_device->m_rtDescriptorSet; w5.dstBinding = 5; w5.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w5.descriptorCount = 1; w5.pBufferInfo = &instInfo; vkUpdateDescriptorSets(m_device->m_device, 1, &w5, 0, nullptr); }
+            }
+        }
         changed = true;
     }
 
@@ -13549,6 +13635,15 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
         colorBlendAttachment.colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        // Alpha blend so the grid distance fade can dissolve lines; mesh draws
+        // output alpha 1.0 so their result is unchanged.
+        colorBlendAttachment.blendEnable = VK_TRUE;
+        colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 
         VkPipelineColorBlendStateCreateInfo colorBlending{};
         colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -14110,6 +14205,12 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
         return h;
     };
     uint64_t camHash = hashCamera(m_camera);
+    {
+        // Grid settings join the change hash so slider edits invalidate the cached frame.
+        auto mixGrid = [&](float v) { uint32_t bits; std::memcpy(&bits, &v, 4); camHash ^= bits; camHash *= 1099511628211ull; };
+        mixGrid(::render_settings.grid_fade_distance);
+        mixGrid(::render_settings.grid_opacity);
+    }
     if (!m_interactiveViewport.dirty && camHash == m_lastCameraHash &&
         m_interactiveViewport.width == width && m_interactiveViewport.height == height) {
         // Nothing changed — just re-present the cached framebuffer
@@ -14135,6 +14236,10 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
         float view[16];
         int useMatcap; // -1 = flat color, 0 = off, 1 = matcap texture, 2..9 procedural
         float overrideR, overrideG, overrideB; // flat color (useMatcap == -1)
+        // Grid distance fade (world units, around fadeCenter). fadeEnd <= fadeStart disables.
+        float fadeCenterX, fadeCenterY, fadeCenterZ;
+        float fadeStart, fadeEnd;
+        float overrideA; // base opacity for flat-color draws (grid)
     };
 
     auto matrixToGL = [](const Matrix4x4& mat, float out[16]) {
@@ -14519,9 +14624,43 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
         }
         const float spacing = candidateSpacing;
 
+        // The grid stays ORIGIN-centred (the world axes are the visual anchor), but its extent
+        // must not be cropped to the zoom alone: gridHalf ~ viewScale meant a floor close-up far
+        // from the origin shrank the patch away from under the camera and the grid seemed to
+        // vanish. The camera's planar distance from the origin now sets a lower bound instead.
+        float camU, camV;
+        switch (activeGridPlane) {
+            case 1:  camU = m_camera.origin.x; camV = m_camera.origin.y; break; // XY (Front/Back)
+            case 2:  camU = m_camera.origin.z; camV = m_camera.origin.y; break; // YZ (Left/Right)
+            default: camU = m_camera.origin.x; camV = m_camera.origin.z; break; // XZ floor
+        }
+        const float camPlanarDist = std::max(std::abs(camU), std::abs(camV));
+        // User knob: scales the fog horizon (and with it the built extents below). Growth
+        // re-triggers a rebuild via extentStale; shrink may keep oversized geometry, which the
+        // draw-side fade bands simply dissolve earlier.
+        const float gridFadeScale = std::clamp(::render_settings.grid_fade_distance, 0.25f, 4.0f);
+        // 16x viewScale: the major lattice must reach past the fade horizon (~19x viewScale, see
+        // drawSeg fade bands below) so lines dissolve into the fog instead of ending at a visible
+        // geometric edge. With the 1.25x build margin the edge sits at >=20x viewScale.
+        const float requiredHalf = viewScale * 16.0f * gridFadeScale + camPlanarDist;
+        // Minor (fine) lattice is camera-centred (see rebuild below); snap its centre to the
+        // major (10x) lattice so minor lines always land on the global grid as it follows the camera.
+        const float coarseSpacing = spacing * 10.0f;
+        const float fineCenterU = std::round(camU / coarseSpacing) * coarseSpacing;
+        const float fineCenterV = std::round(camV / coarseSpacing) * coarseSpacing;
+        // Hysteresis: rebuild when the camera outgrows the built extent, or when the built
+        // extent is so oversized (>2.5x) that the grid should shrink back. The 1.25x build
+        // margin below keeps small camera moves from re-triggering this every frame.
+        const bool extentStale =
+            requiredHalf > m_interactiveViewport.gridBuiltHalf ||
+            requiredHalf < m_interactiveViewport.gridBuiltHalf * 0.4f;
+
         if (!m_interactiveViewport.gridVertexBuffer.buffer ||
             m_interactiveViewport.gridBuiltPlane != activeGridPlane ||
-            m_interactiveViewport.gridBuiltSpacing != spacing) {
+            m_interactiveViewport.gridBuiltSpacing != spacing ||
+            m_interactiveViewport.gridBuiltCenterU != fineCenterU ||
+            m_interactiveViewport.gridBuiltCenterV != fineCenterV ||
+            extentStale) {
             if (m_interactiveViewport.gridVertexBuffer.buffer) {
                 m_device->destroyBuffer(m_interactiveViewport.gridVertexBuffer);
                 m_interactiveViewport.gridVertexBuffer = {};
@@ -14531,15 +14670,24 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                 m_interactiveViewport.gridNormalBuffer = {};
             }
 
-            // Scale the number of lines so the total grid extent stays
-            // proportional to the visible area (~4× viewScale on each side).
-            // This prevents the grid from suddenly covering a much larger area
-            // when the spacing bumps up, which made objects look shrunken.
-            const float desiredHalf = viewScale * 4.0f;
-            const int   linesEachSide = std::max(10, (int)std::ceil(desiredHalf / spacing));
-            const float gridHalf = spacing * (float)linesEachSide;
+            // Two-tier lattice. MINOR lines (current spacing) only span the visible area around
+            // the camera footprint — building them across the whole extended extent made distant
+            // lines collapse below a pixel and moiré badly in perspective (especially at 720p,
+            // no MSAA). MAJOR lines (10x spacing, 10x thickness = every 10th minor) span the full
+            // extent from the origin out past the camera, so the far field stays referenced with
+            // far fewer, fatter lines. Axes are unchanged (origin-anchored, full extent). 25%
+            // growth margin so small camera moves don't immediately re-trigger a rebuild.
+            const float desiredHalf = requiredHalf * 1.25f;
+            const int   coarseEachSide = std::clamp((int)std::ceil(desiredHalf / coarseSpacing), 4, 2048);
+            const float gridHalf = coarseSpacing * (float)coarseEachSide;
+            // 18x viewScale: minor lines reach well past the working area (10x still read as an
+            // early cutoff); the distance fade below dissolves them before the geometric edge and
+            // before they collapse sub-pixel and moiré (~40x viewScale at 720p).
+            const int   fineEachSide = std::clamp((int)std::ceil((viewScale * 18.0f * gridFadeScale) / spacing), 10, 1024);
+            const float fineHalf = spacing * (float)fineEachSide;
             const float step     = spacing;
             const float thin     = spacing * 0.008f; // thicker so 720p (no MSAA) doesn't break lines up
+            const float coarseThin = coarseSpacing * 0.008f;
             const float axisThin = spacing * 0.022f;
 
             // Plane basis: ax = horizontal axis, ay = vertical axis, nrm = plane normal.
@@ -14563,42 +14711,67 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                 }
             };
 
-            // Segment 0: regular grid (skip the center lines — those are the colored axes)
-            uint32_t seg0Start = 0;
-            for (float u = -gridHalf; u <= gridHalf + step * 0.001f; u += step) {
-                if (std::abs(u) < step * 0.5f) continue;
-                addLineQuad(ax * u - ay * gridHalf, ax * u + ay * gridHalf, ax * thin);
+            // Major lattice (full extent, origin-centred; i==0 is covered by the axis quads).
+            // Kept in its own segment so it can fade at the far horizon while the minor
+            // lattice fades earlier (separate fade bands per drawSeg call).
+            uint32_t segMajorStart = 0;
+            for (int i = -coarseEachSide; i <= coarseEachSide; ++i) {
+                if (i == 0) continue;
+                const float u = coarseSpacing * (float)i;
+                addLineQuad(ax * u - ay * gridHalf, ax * u + ay * gridHalf, ax * coarseThin);
             }
-            for (float vv = -gridHalf; vv <= gridHalf + step * 0.001f; vv += step) {
-                if (std::abs(vv) < step * 0.5f) continue;
-                addLineQuad(ay * vv - ax * gridHalf, ay * vv + ax * gridHalf, ay * thin);
+            for (int i = -coarseEachSide; i <= coarseEachSide; ++i) {
+                if (i == 0) continue;
+                const float vv = coarseSpacing * (float)i;
+                addLineQuad(ay * vv - ax * gridHalf, ay * vv + ax * gridHalf, ay * coarseThin);
             }
-            uint32_t seg0Count = (uint32_t)(positions.size() / 3);
+            uint32_t segMajorCount = (uint32_t)(positions.size() / 3) - segMajorStart;
 
-            // Segment 1: +U axis (red)
-            uint32_t seg1Start = (uint32_t)(positions.size() / 3);
+            // Minor lattice (visible area, centred on the camera footprint snapped to the major
+            // lattice — every 10th index lands on a major line / the axes and is skipped).
+            uint32_t segMinorStart = (uint32_t)(positions.size() / 3);
+            for (int i = -fineEachSide; i <= fineEachSide; ++i) {
+                if (((int)std::lround(fineCenterU / step) + i) % 10 == 0) continue;
+                const float u = fineCenterU + step * (float)i;
+                addLineQuad(ax * u + ay * (fineCenterV - fineHalf), ax * u + ay * (fineCenterV + fineHalf), ax * thin);
+            }
+            for (int i = -fineEachSide; i <= fineEachSide; ++i) {
+                if (((int)std::lround(fineCenterV / step) + i) % 10 == 0) continue;
+                const float vv = fineCenterV + step * (float)i;
+                addLineQuad(ay * vv + ax * (fineCenterU - fineHalf), ay * vv + ax * (fineCenterU + fineHalf), ay * thin);
+            }
+            uint32_t segMinorCount = (uint32_t)(positions.size() / 3) - segMinorStart;
+
+            // +U axis (red)
+            uint32_t segAxisUStart = (uint32_t)(positions.size() / 3);
             addLineQuad(nOff, ax * gridHalf + nOff, ay * axisThin);
-            uint32_t seg1Count = (uint32_t)(positions.size() / 3) - seg1Start;
+            uint32_t segAxisUCount = (uint32_t)(positions.size() / 3) - segAxisUStart;
 
-            // Segment 2: +V axis (blue)
-            uint32_t seg2Start = (uint32_t)(positions.size() / 3);
+            // +V axis (blue)
+            uint32_t segAxisVStart = (uint32_t)(positions.size() / 3);
             addLineQuad(nOff, ay * gridHalf + nOff, ax * axisThin);
-            uint32_t seg2Count = (uint32_t)(positions.size() / 3) - seg2Start;
+            uint32_t segAxisVCount = (uint32_t)(positions.size() / 3) - segAxisVStart;
 
-            // Segment 3: -U/-V axis halves (dim grey)
-            uint32_t seg3Start = (uint32_t)(positions.size() / 3);
+            // -U/-V axis halves (dim grey)
+            uint32_t segNegStart = (uint32_t)(positions.size() / 3);
             addLineQuad(ax * -gridHalf + nOff, nOff, ay * thin);
             addLineQuad(ay * -gridHalf + nOff, nOff, ax * thin);
-            uint32_t seg3Count = (uint32_t)(positions.size() / 3) - seg3Start;
+            uint32_t segNegCount = (uint32_t)(positions.size() / 3) - segNegStart;
 
             m_interactiveViewport.gridBuiltPlane = activeGridPlane;
             m_interactiveViewport.gridBuiltSpacing = spacing;
+            // Store the UNCLAMPED target so a hit line-cap doesn't re-trigger a rebuild every frame.
+            m_interactiveViewport.gridBuiltHalf = std::max(gridHalf, desiredHalf);
+            m_interactiveViewport.gridBuiltCenterU = fineCenterU;
+            m_interactiveViewport.gridBuiltCenterV = fineCenterV;
+            m_interactiveViewport.gridBuiltFineHalf = fineHalf;
 
             m_interactiveViewport.gridVertexCount = (uint32_t)(positions.size() / 3);
-            m_interactiveViewport.gridSegments[0] = seg0Start;  m_interactiveViewport.gridSegments[1] = seg0Count;
-            m_interactiveViewport.gridSegments[2] = seg1Start;  m_interactiveViewport.gridSegments[3] = seg1Count;
-            m_interactiveViewport.gridSegments[4] = seg2Start;  m_interactiveViewport.gridSegments[5] = seg2Count;
-            m_interactiveViewport.gridSegments[6] = seg3Start;  m_interactiveViewport.gridSegments[7] = seg3Count;
+            m_interactiveViewport.gridSegments[0] = segMajorStart;  m_interactiveViewport.gridSegments[1] = segMajorCount;
+            m_interactiveViewport.gridSegments[2] = segMinorStart;  m_interactiveViewport.gridSegments[3] = segMinorCount;
+            m_interactiveViewport.gridSegments[4] = segAxisUStart;  m_interactiveViewport.gridSegments[5] = segAxisUCount;
+            m_interactiveViewport.gridSegments[6] = segAxisVStart;  m_interactiveViewport.gridSegments[7] = segAxisVCount;
+            m_interactiveViewport.gridSegments[8] = segNegStart;    m_interactiveViewport.gridSegments[9] = segNegCount;
 
             VulkanRT::BufferCreateInfo vci{};
             vci.size = positions.size() * sizeof(float);
@@ -14629,24 +14802,53 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
             VkDeviceSize gridOff[3] = { 0, 0, 0 };
             vkCmdBindVertexBuffers(cmd, 0, 3, gridBufs, gridOff);
 
-            auto drawSeg = [&](uint32_t first, uint32_t count, float r, float g, float b) {
+            // Distance fade is measured IN-PLANE from the built minor-patch centre (not 3D camera
+            // distance — that would wipe the whole grid in ortho, where the camera sits far away).
+            Vec3 fadeAx, fadeAy;
+            switch (m_interactiveViewport.gridBuiltPlane) {
+                case 1:  fadeAx = Vec3(1, 0, 0); fadeAy = Vec3(0, 1, 0); break; // XY
+                case 2:  fadeAx = Vec3(0, 0, 1); fadeAy = Vec3(0, 1, 0); break; // YZ
+                default: fadeAx = Vec3(1, 0, 0); fadeAy = Vec3(0, 0, 1); break; // XZ
+            }
+            const Vec3 fadeCenter = fadeAx * m_interactiveViewport.gridBuiltCenterU +
+                                    fadeAy * m_interactiveViewport.gridBuiltCenterV;
+            // Minor lines dissolve just inside their built extent so the geometric edge is never
+            // visible; majors/axes fog out at the far horizon (kept below the >=20x viewScale
+            // major-lattice edge guaranteed by requiredHalf above). The built extent caps the
+            // minor band because shrinking grid_fade_distance doesn't shrink built geometry.
+            const float gridOpacity = std::clamp(::render_settings.grid_opacity, 0.0f, 1.0f);
+            const float builtCoarse = m_interactiveViewport.gridBuiltSpacing * 10.0f;
+            const float minorGeomLimit = std::max(m_interactiveViewport.gridBuiltFineHalf - 2.0f * builtCoarse, builtCoarse);
+            const float minorFadeEnd = std::min(minorGeomLimit, viewScale * 16.0f * gridFadeScale);
+            const float minorFadeStart = minorFadeEnd * 0.45f;
+            const float majorFadeStart = viewScale * 12.0f * gridFadeScale;
+            const float majorFadeEnd = viewScale * 19.0f * gridFadeScale;
+
+            auto drawSeg = [&](uint32_t first, uint32_t count, float r, float g, float b,
+                               float fadeStart, float fadeEnd) {
                 if (!count) return;
                 SolidPushConstants gp{};
                 matrixToGL(gridMvp, gp.viewProj);
                 matrixToGL(identity, gp.view);
                 gp.useMatcap = -1;
                 gp.overrideR = r; gp.overrideG = g; gp.overrideB = b;
+                gp.fadeCenterX = fadeCenter.x; gp.fadeCenterY = fadeCenter.y; gp.fadeCenterZ = fadeCenter.z;
+                gp.fadeStart = fadeStart; gp.fadeEnd = fadeEnd;
+                gp.overrideA = gridOpacity;
                 vkCmdPushConstants(cmd, m_interactiveViewport.pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SolidPushConstants), &gp);
                 vkCmdDraw(cmd, count, 1, first, 0);
             };
 
-            const auto* s = m_interactiveViewport.gridSegments;
-            // Draw raster grid (depth-tested) so it is occluded by scene geometry.
-            drawSeg(s[0], s[1], 0.38f, 0.38f, 0.38f);  // regular grid: grey
-            drawSeg(s[2], s[3], 0.75f, 0.15f, 0.15f);  // +X axis: red
-            drawSeg(s[4], s[5], 0.20f, 0.45f, 0.95f);  // +Z axis: bright blue
-            drawSeg(s[6], s[7], 0.30f, 0.30f, 0.30f);  // negative halves: dim grey
+            if (gridOpacity > 0.01f) {
+                const auto* s = m_interactiveViewport.gridSegments;
+                // Draw raster grid (depth-tested) so it is occluded by scene geometry.
+                drawSeg(s[2], s[3], 0.38f, 0.38f, 0.38f, minorFadeStart, minorFadeEnd); // minor lattice: grey
+                drawSeg(s[0], s[1], 0.38f, 0.38f, 0.38f, majorFadeStart, majorFadeEnd); // major lattice: grey
+                drawSeg(s[4], s[5], 0.75f, 0.15f, 0.15f, majorFadeStart, majorFadeEnd); // +X axis: red
+                drawSeg(s[6], s[7], 0.20f, 0.45f, 0.95f, majorFadeStart, majorFadeEnd); // +Z axis: bright blue
+                drawSeg(s[8], s[9], 0.30f, 0.30f, 0.30f, majorFadeStart, majorFadeEnd); // negative halves: dim grey
+            }
         }
     }
 

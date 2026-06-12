@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -129,14 +129,16 @@ namespace {
 
 void SceneUI::drawMainMenuBar(UIContext& ctx)
 {
+    const auto& t = ThemeManager::instance().current();
+
     ImGui::PushStyleColor(ImGuiCol_MenuBarBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.080f, 0.086f, 0.102f, 0.965f));
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.155f, 0.185f, 0.225f, 0.82f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.225f, 0.295f, 0.370f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.26f, 0.35f, 0.45f, 0.995f));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.58f, 0.66f, 0.78f, 0.16f));
-    ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(0.60f, 0.68f, 0.78f, 0.10f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.90f, 0.92f, 0.96f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(t.colors.background.x, t.colors.background.y, t.colors.background.z, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.22f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.48f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.70f));
+    ImGui::PushStyleColor(ImGuiCol_Border, t.colors.border);
+    ImGui::PushStyleColor(ImGuiCol_Separator, t.colors.border);
+    ImGui::PushStyleColor(ImGuiCol_Text, t.colors.text);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 8.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 7.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 14.0f);
@@ -156,16 +158,19 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
         g_main_menu_reserved_height = (menu_max.y - menu_min.y) + 1.0f;
         const ImVec2 shell_min(menu_min.x + 6.0f, menu_min.y + 4.0f);
         const ImVec2 shell_max(menu_max.x - 6.0f, menu_max.y - 4.0f);
+        
+        // Floating shell background matching active theme background
         menu_dl->AddRectFilled(
             shell_min,
             shell_max,
-            ImGui::ColorConvertFloat4ToU32(ImVec4(0.070f, 0.076f, 0.092f, 0.92f)),
+            ImGui::ColorConvertFloat4ToU32(ImVec4(t.colors.background.x, t.colors.background.y, t.colors.background.z, 0.94f)),
             14.0f
         );
+        // Floating shell border matching active theme border / faint accent
         menu_dl->AddRect(
             shell_min,
             shell_max,
-            ImGui::ColorConvertFloat4ToU32(ImVec4(0.70f, 0.78f, 0.90f, 0.12f)),
+            ImGui::ColorConvertFloat4ToU32(ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.14f)),
             14.0f,
             0,
             1.0f
@@ -179,15 +184,15 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
         menu_dl->AddLine(
             ImVec2(shell_min.x + 12.0f, shell_max.y - 1.0f),
             ImVec2(shell_max.x - 12.0f, shell_max.y - 1.0f),
-            ImGui::ColorConvertFloat4ToU32(ImVec4(0.72f, 0.80f, 0.90f, 0.06f)),
+            ImGui::ColorConvertFloat4ToU32(ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.08f)),
             1.0f
         );
 
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.0f);
-        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.16f, 0.24f, 0.32f, 0.86f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.20f, 0.30f, 0.40f, 0.96f));
-        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.24f, 0.36f, 0.48f, 0.98f));
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.22f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.48f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.70f));
         ImGui::Selectable("RayTrophi", false, 0, ImVec2(90.0f, 0.0f));
         ImGui::PopStyleColor(3);
         ImGui::SameLine(0.0f, 14.0f);

@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -246,7 +246,7 @@ inline void drawAnimGraphToolbarLabel(const char* title) {
 }
 
 inline void drawAnimGraphStatusCard(SceneData& scene, const std::string& characterName, AnimationGraph::AnimationNodeGraph* assetGraph) {
-    ImGui::BeginChild("AnimGraphStatusCard", ImVec2(0, 78), true);
+    ImGui::BeginChild("AnimGraphStatusCard", ImVec2(0, 78), true, ImGuiWindowFlags_NoMove);
     drawAnimGraphSectionLabel("Session", "Asset / Runtime summary");
     ImGui::Separator();
 
@@ -430,7 +430,7 @@ inline void drawAnimationParametersPanel(UIContext& ctx,
     const std::string& characterName) {
     if (!assetGraph && !runtimeGraph) return;
     
-    ImGui::BeginChild("AnimParams", ImVec2(0, 240), true);
+    ImGui::BeginChild("AnimParams", ImVec2(0, 240), true, ImGuiWindowFlags_NoMove);
     ImGui::Text("Animation Parameters");
     ImGui::Separator();
     
@@ -562,7 +562,7 @@ inline void drawNodePropertiesPanel(UIContext& ctx,
     AnimationGraph::AnimationNodeGraph* runtimeGraph) {
     if (!graph) return;
     
-    ImGui::BeginChild("NodeProps", ImVec2(0, 0), true);
+    ImGui::BeginChild("NodeProps", ImVec2(0, 0), true, ImGuiWindowFlags_NoMove);
     ImGui::Text("Node Properties");
     ImGui::Separator();
     
@@ -723,7 +723,7 @@ inline void drawAnimationClipsPanel(UIContext& ctx) {
     
     const auto& clips = animCtrl->getAllClips();
     
-    ImGui::BeginChild("AnimClips", ImVec2(0, 140), true);
+    ImGui::BeginChild("AnimClips", ImVec2(0, 140), true, ImGuiWindowFlags_NoMove);
     ImGui::Text("Animations (%zu) - %s", clips.size(), g_animGraphUI.activeCharacter.empty() ? "Global" : g_animGraphUI.activeCharacter.c_str());
     
     // Show scene animation count as well
@@ -806,7 +806,7 @@ inline void drawAnimationPlaybackControls(UIContext& ctx, float panelHeight = 88
     if (!animCtrl) animCtrl = &AnimationController::getInstance();
     
     if (wrapInChild) {
-        ImGui::BeginChild("AnimPlayback", ImVec2(0, panelHeight), true);
+        ImGui::BeginChild("AnimPlayback", ImVec2(0, panelHeight), true, ImGuiWindowFlags_NoMove);
     }
     ImGui::TextDisabled("Playback");
     ImGui::SameLine();
@@ -909,7 +909,7 @@ inline void drawAnimationPlaybackControls(UIContext& ctx, float panelHeight = 88
 inline void drawStateMachinePanel(UIContext& ctx, AnimationGraph::AnimationNodeGraph* graph, const std::string& characterName) {
     if (!graph) return;
     
-    ImGui::BeginChild("StateMachine", ImVec2(0, 220), true);
+    ImGui::BeginChild("StateMachine", ImVec2(0, 220), true, ImGuiWindowFlags_NoMove);
     ImGui::Text("State Machine");
     ImGui::SameLine();
     UIWidgets::HelpMarker("The state list reflects the asset setup. The Flow Map shows which state and transition are active in the runtime instance.");
@@ -1007,7 +1007,7 @@ inline void drawStateMachinePanel(UIContext& ctx, AnimationGraph::AnimationNodeG
 inline void drawRuntimeFlowPanel(AnimationGraph::AnimationNodeGraph* graph) {
     if (!graph) return;
 
-    ImGui::BeginChild("AnimRuntimeFlow", ImVec2(0, 0), true);
+    ImGui::BeginChild("AnimRuntimeFlow", ImVec2(0, 0), true, ImGuiWindowFlags_NoMove);
     ImGui::Text("Runtime Flow");
     ImGui::SameLine();
     UIWidgets::HelpMarker("This panel shows the live runtime instance. The asset graph may change in the editor, but only evaluated runtime results appear here.");
@@ -1718,7 +1718,7 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
         }
 
         const bool runtimeStale = !g_animGraphUI.activeCharacter.empty() && isAnimGraphRuntimeStale(ctx.scene, g_animGraphUI.activeCharacter);
-        ImGui::BeginChild("AnimGraphHeaderCompact", ImVec2(0, activeModelCtx && activeModelCtx->useRootMotion ? 86.0f : 62.0f), true);
+        ImGui::BeginChild("AnimGraphHeaderCompact", ImVec2(0, activeModelCtx && activeModelCtx->useRootMotion ? 86.0f : 62.0f), true, ImGuiWindowFlags_NoMove);
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("Character");
         ImGui::SameLine();
@@ -1983,7 +1983,7 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
 
         // Left panel
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.10f, 0.14f, 0.82f));
-        ImGui::BeginChild("AnimLeftPanel", ImVec2(leftPanelWidth, availHeight), true);
+        ImGui::BeginChild("AnimLeftPanel", ImVec2(leftPanelWidth, availHeight), true, ImGuiWindowFlags_NoMove);
         drawAnimGraphStatusCard(ctx.scene, g_animGraphUI.activeCharacter, currentGraph.get());
         ImGui::Spacing();
         
@@ -1995,7 +1995,7 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
             int boolCount = summaryGraph ? static_cast<int>(summaryGraph->evalContext.boolParams.size()) : 0;
             int triggerCount = summaryGraph ? static_cast<int>(summaryGraph->evalContext.triggerParams.size()) : 0;
 
-            ImGui::BeginChild("AnimLeftSummary", ImVec2(0, 58), true);
+            ImGui::BeginChild("AnimLeftSummary", ImVec2(0, 58), true, ImGuiWindowFlags_NoMove);
             ImGui::TextDisabled("Character");
             ImGui::SameLine();
             ImGui::Text("%s", g_animGraphUI.activeCharacter.empty() ? "(None)" : g_animGraphUI.activeCharacter.c_str());
@@ -2016,13 +2016,13 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
             ImGui::EndChild();
             ImGui::Spacing();
 
-            ImGui::BeginChild("AnimLeftContent", ImVec2(0, 0), false);
+            ImGui::BeginChild("AnimLeftContent", ImVec2(0, 0), false, ImGuiWindowFlags_NoMove);
             if (g_animGraphUI.leftPanelTab == 0) {
                 const float playbackAvailHeight = ImGui::GetContentRegionAvail().y;
                 g_animGraphUI.leftPlaybackSplitY = std::clamp(g_animGraphUI.leftPlaybackSplitY, 120.0f, playbackAvailHeight - 90.0f);
 
                 drawAnimGraphSectionLabel("Playback", "Local preview controls");
-                ImGui::BeginChild("AnimLeftPlaybackTop", ImVec2(0, g_animGraphUI.leftPlaybackSplitY), false);
+                ImGui::BeginChild("AnimLeftPlaybackTop", ImVec2(0, g_animGraphUI.leftPlaybackSplitY), false, ImGuiWindowFlags_NoMove);
                 drawAnimationPlaybackControls(ctx, ImGui::GetContentRegionAvail().y, false);
                 ImGui::EndChild();
 
@@ -2033,7 +2033,7 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
                     g_animGraphUI.leftPlaybackSplitY = std::clamp(g_animGraphUI.leftPlaybackSplitY, 120.0f, playbackAvailHeight - 90.0f);
                 }
 
-                ImGui::BeginChild("AnimLeftPlaybackBottom", ImVec2(0, 0), false);
+                ImGui::BeginChild("AnimLeftPlaybackBottom", ImVec2(0, 0), false, ImGuiWindowFlags_NoMove);
                 if (ImGui::CollapsingHeader("Clip Summary", ImGuiTreeNodeFlags_DefaultOpen)) {
                     drawAnimationClipsPanel(ctx);
                 }
@@ -2086,7 +2086,7 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
         if (canvasWidth < 200.0f) canvasWidth = 200.0f; // Limit to min width
 
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.07f, 0.09f, 0.12f, 0.92f));
-        ImGui::BeginChild("AnimNodeCanvas", ImVec2(canvasWidth, availHeight), true, ImGuiWindowFlags_NoScrollbar);
+        ImGui::BeginChild("AnimNodeCanvas", ImVec2(canvasWidth, availHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
 
         if (currentGraph) {
             // --- CRITICAL LINK: UI Graph -> Renderer Model Context ---
@@ -2133,7 +2133,7 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
         
         // Right panel
         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.10f, 0.14f, 0.82f));
-        ImGui::BeginChild("AnimRightPanel", ImVec2(rightPanelWidth, availHeight), true);
+        ImGui::BeginChild("AnimRightPanel", ImVec2(rightPanelWidth, availHeight), true, ImGuiWindowFlags_NoMove);
         
         if (currentGraph) {
             AnimationGraph::AnimNodeBase* selectedNode = nullptr;
@@ -2155,7 +2155,7 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
             }
 
             const bool runtimeStale = isAnimGraphRuntimeStale(ctx.scene, g_animGraphUI.activeCharacter);
-            ImGui::BeginChild("AnimRightSummary", ImVec2(0, 58), true);
+            ImGui::BeginChild("AnimRightSummary", ImVec2(0, 58), true, ImGuiWindowFlags_NoMove);
             ImGui::TextDisabled("Selected");
             ImGui::SameLine();
             ImGui::Text("%s", selectedNode ? selectedNode->name.c_str() : "(None)");
@@ -2183,7 +2183,7 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
             ImGui::EndChild();
             ImGui::Spacing();
 
-            ImGui::BeginChild("AnimRightContent", ImVec2(0, 0), false);
+            ImGui::BeginChild("AnimRightContent", ImVec2(0, 0), false, ImGuiWindowFlags_NoMove);
             if (g_animGraphUI.rightPanelTab == 0) {
                 drawAnimGraphSectionLabel("Inspector", "Selected node properties");
                 ImGui::Separator();

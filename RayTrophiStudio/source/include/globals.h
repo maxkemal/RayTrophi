@@ -106,6 +106,10 @@ struct RenderSettings {
     QualityPreset quality_preset = QualityPreset::Preview;
     RasterViewportQualityPreset raster_viewport_quality_preset = RasterViewportQualityPreset::Auto;
     MaterialPreviewLightingPreset material_preview_lighting_preset = MaterialPreviewLightingPreset::Classic;
+
+    // Solid/Matcap viewport reference grid
+    float grid_fade_distance = 1.0f; // multiplier on the fog horizon where grid lines dissolve (~19x viewScale at 1.0)
+    float grid_opacity = 0.4f;       // grid line opacity; 0 hides the grid entirely
     
     // Sampling
     int samples_per_pixel = 1;
@@ -161,8 +165,8 @@ struct RenderSettings {
     int render_current_samples = 0;
     int render_target_samples = 256;
     int final_render_samples = 128;
-    int final_render_width = 1280;
-    int final_render_height = 720; // Specific for F12 Output
+    int final_render_width = 1920;
+    int final_render_height = 1080; // Specific for F12 Output
     
     // Resolution Source (Native/Custom/FromAspect)
     ResolutionSource resolution_source = ResolutionSource::Custom;
@@ -184,7 +188,7 @@ struct RenderSettings {
     // Viewport Grid Settings
     bool grid_enabled = false;
     bool show_background = true;       // NEW: Toggle background visibility
-    float grid_fade_distance = 500.0f;  // Units where grid fades out completely
+   // float grid_fade_distance = 500.0f;  // Units where grid fades out completely
     float viewport_near_clip = 0.01f;   // Objects closer than this won't be seen
     float viewport_far_clip = 1000000.0f; // Keep far volumes/clouds visible in large-scale scenes
     bool persistent_tonemap = false;     // NEW: Persistent tonemapping (Renamed from tonemap_auto_apply)

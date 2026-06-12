@@ -24,7 +24,10 @@
 #include "TerrainManager.h"
 
 #include <algorithm>
+#include <cstring>
 #include <functional>
+#include <future>
+#include <thread>
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern std::unique_ptr<Backend::IBackend> g_backend;
@@ -535,28 +538,77 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
         if (g_bvh_rebuild_pending || !picking_vertices_synced || pending_timeline_selection_sync) {
             int synced_objects = 0;
             if (mesh_cache_valid) {
+                // First-click vertex sync used to walk every triangle of every
+                // node single-threaded with a per-triangle matrix fetch + 4x4
+                // inverse — seconds of stall on dense scenes. Restructured:
+                //  - instance sync stays sequential (clones can share source
+                //    triangle arrays — not thread-safe),
+                //  - per node the final/normal matrices are computed ONCE on
+                //    this thread (Transform::getFinal() lazily writes its
+                //    cache, so workers must never touch the handle),
+                //  - the flat triangle work list is then chunked across
+                //    threads with updateTransformedVerticesWith (pure
+                //    per-triangle writes, no shared state).
+                //  - skinned nodes are EXCLUDED here: their world positions
+                //    come from apply_skinning below, and rigid-transforming
+                //    them first would just be overwritten (or worse, clobber
+                //    a still-valid skinned pose when the skin pass skips).
+                std::vector<std::pair<Matrix4x4, Matrix4x4>> sync_xforms;
+                std::vector<std::pair<Triangle*, uint32_t>> sync_work;
                 for (auto& [obj_name, tris] : mesh_cache) {
                     if (tris.empty()) continue;
                     if (!tris[0].second->getTransformPtr()) continue;
-                    bool synced_instance_transform = false;
+                    const bool skinned_bucket = tris[0].second->hasAnySkinWeights();
+                    const Transform* lastHandle = nullptr;
                     for (auto& pair : tris) {
+                        // Triangles with skin data get their world positions
+                        // from the apply_skinning pass below; rigid-syncing
+                        // them here would clobber a still-valid skinned pose.
+                        // Skinned nodes can still carry skinless triangles —
+                        // those keep the rigid path.
+                        if (skinned_bucket && pair.second->hasSkinData()) continue;
                         const int object_index = pair.first;
                         if (object_index >= 0 && static_cast<size_t>(object_index) < ctx.scene.world.objects.size()) {
                             if (auto inst = std::dynamic_pointer_cast<HittableInstance>(ctx.scene.world.objects[object_index])) {
                                 if (inst->syncTransformFromSourceTriangles()) {
-                                    synced_instance_transform = true;
                                     continue;
                                 }
                             }
                         }
-
-                        pair.second->updateTransformedVertices();
-                    }
-                    if (synced_instance_transform) {
-                        ++synced_objects;
-                        continue;
+                        Transform* h = pair.second->getTransformPtr();
+                        if (h != lastHandle) {
+                            Matrix4x4 finalT = pair.second->getTransformMatrix();
+                            sync_xforms.emplace_back(finalT, finalT.inverse().transpose());
+                            lastHandle = h;
+                        }
+                        sync_work.emplace_back(pair.second.get(),
+                                               (uint32_t)(sync_xforms.size() - 1));
                     }
                     ++synced_objects;
+                }
+
+                auto runSyncRange = [&](size_t s, size_t e) {
+                    for (size_t i = s; i < e; ++i) {
+                        const auto& xf = sync_xforms[sync_work[i].second];
+                        sync_work[i].first->updateTransformedVerticesWith(xf.first, xf.second);
+                    }
+                };
+                const size_t kParallelSyncThreshold = 16384;
+                unsigned syncThreads = std::thread::hardware_concurrency();
+                if (syncThreads == 0) syncThreads = 4;
+                if (sync_work.size() < kParallelSyncThreshold || syncThreads < 2) {
+                    runSyncRange(0, sync_work.size());
+                } else {
+                    const size_t chunk = (sync_work.size() + syncThreads - 1) / syncThreads;
+                    std::vector<std::future<void>> futures;
+                    futures.reserve(syncThreads);
+                    for (unsigned t = 0; t < syncThreads; ++t) {
+                        const size_t s = t * chunk;
+                        const size_t e = (std::min)(s + chunk, sync_work.size());
+                        if (s >= e) break;
+                        futures.push_back(std::async(std::launch::async, runSyncRange, s, e));
+                    }
+                    for (auto& f : futures) f.get();
                 }
             } else {
                 // Skip foliage tail: InstanceManager always appends at end
@@ -598,23 +650,70 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
         // ===========================================================================
         // SKINNED MESH FIX: When using GPU rendering with animations,
         // CPU vertices may be out of sync. Force a sync for picking accuracy.
+        // Re-skin ONLY when the pose (or a skinned node's root transform)
+        // actually changed since the last click-sync — repeated clicks on a
+        // paused scene used to re-skin the entire cast every time. The old
+        // loop also RTTI-cast every world object including the 2M+ foliage
+        // tail; the selection cache buckets already exclude foliage.
         // ===========================================================================
-        if (!ctx.scene.animationDataList.empty()) {
-            // We have GPU rendering + animations: sync CPU vertices for skinned meshes
-            // This is a one-time cost per click, acceptable for accurate selection
-            bool synced_any = false;
-            for (auto& obj : ctx.scene.world.objects) {
-                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                if (tri && tri->hasAnySkinWeights()) {
-                    // This is a skinned triangle - apply current bone matrices
-                    if (!ctx.renderer.finalBoneMatrices.empty()) {
-                        tri->apply_skinning(ctx.renderer.finalBoneMatrices);
-                        synced_any = true;
+        if (!ctx.scene.animationDataList.empty() &&
+            !ctx.renderer.finalBoneMatrices.empty() && mesh_cache_valid) {
+            uint64_t skin_hash = 1469598103934665603ull;
+            auto mixSkin = [&](uint64_t v) { skin_hash ^= v; skin_hash *= 1099511628211ull; };
+            auto mixSkinF = [&](float f) { uint32_t b; std::memcpy(&b, &f, 4); mixSkin(b); };
+            const auto& pick_bones = ctx.renderer.finalBoneMatrices;
+            mixSkin(pick_bones.size());
+            {
+                const size_t step = (pick_bones.size() > 16) ? (pick_bones.size() / 16) : 1;
+                for (size_t bi = 0; bi < pick_bones.size(); bi += step) {
+                    const float* mm = &pick_bones[bi].m[0][0];
+                    mixSkinF(mm[3]); mixSkinF(mm[7]); mixSkinF(mm[11]); mixSkinF(mm[0]);
+                }
+            }
+
+            std::vector<Triangle*> skin_work;
+            for (auto& [obj_name, tris] : mesh_cache) {
+                if (tris.empty() || !tris[0].second->hasAnySkinWeights()) continue;
+                // Root transform joins the hash (apply_skinning output depends
+                // on it) and the handle's lazy matrix cache is warmed HERE so
+                // the parallel workers below never write to it.
+                Matrix4x4 m = tris[0].second->getTransformMatrix();
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 4; ++c) mixSkinF(m.m[r][c]);
+                for (auto& pair : tris) {
+                    if (pair.second && pair.second->hasSkinData()) {
+                        skin_work.push_back(pair.second.get());
                     }
                 }
             }
-            if (synced_any) {
-                SCENE_LOG_INFO("Synced skinned mesh vertices for viewport selection");
+
+            static uint64_t s_last_pick_skin_hash = 0;
+            if (!skin_work.empty() && skin_hash != s_last_pick_skin_hash) {
+                auto runSkinRange = [&](size_t s, size_t e) {
+                    for (size_t i = s; i < e; ++i) {
+                        skin_work[i]->apply_skinning(pick_bones);
+                    }
+                };
+                const size_t kParallelSkinThreshold = 8192;
+                unsigned skinThreads = std::thread::hardware_concurrency();
+                if (skinThreads == 0) skinThreads = 4;
+                if (skin_work.size() < kParallelSkinThreshold || skinThreads < 2) {
+                    runSkinRange(0, skin_work.size());
+                } else {
+                    const size_t chunk = (skin_work.size() + skinThreads - 1) / skinThreads;
+                    std::vector<std::future<void>> futures;
+                    futures.reserve(skinThreads);
+                    for (unsigned t = 0; t < skinThreads; ++t) {
+                        const size_t s = t * chunk;
+                        const size_t e = (std::min)(s + chunk, skin_work.size());
+                        if (s >= e) break;
+                        futures.push_back(std::async(std::launch::async, runSkinRange, s, e));
+                    }
+                    for (auto& f : futures) f.get();
+                }
+                s_last_pick_skin_hash = skin_hash;
+                SCENE_LOG_INFO("Synced skinned mesh vertices for viewport selection (" +
+                               std::to_string(skin_work.size()) + " tris)");
             }
         }
 

@@ -121,6 +121,7 @@ file(GLOB_RECURSE SOURCES_CPP
     "source/src/Paint/*.cpp"
     "source/src/Stylize/*.cpp"
     "source/src/Viewport/*.cpp"
+    "source/src/MeshEdit/*.cpp"
 )
 list(APPEND SOURCES_CPP ${SOURCES_CPP_ROOT})
 list(APPEND SOURCES_CPP "source/src/Render/FoliageWindSystem.cpp")

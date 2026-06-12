@@ -148,6 +148,13 @@ public:
     Matrix4x4 getTransformMatrix() const;
     void initialize_transforms();
     void updateTransformedVertices();
+    // Same as updateTransformedVertices but with the (node-shared) matrices
+    // precomputed by the caller: skips the per-triangle getFinal() fetch and
+    // the per-triangle 4x4 inverse, and — because it never touches the
+    // lazily-cached TransformHandle — is safe to run on many triangles of
+    // the same node in parallel.
+    void updateTransformedVerticesWith(const Matrix4x4& finalTransform,
+                                       const Matrix4x4& normalTransform);
 
     // ========================================================================
     // UV Coordinates

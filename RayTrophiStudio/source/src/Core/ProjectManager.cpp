@@ -3151,6 +3151,8 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["quality_preset"] = static_cast<int>(settings.quality_preset);
     j["raster_viewport_quality_preset"] = static_cast<int>(settings.raster_viewport_quality_preset);
     j["material_preview_lighting_preset"] = static_cast<int>(settings.material_preview_lighting_preset);
+    j["grid_fade_distance"] = settings.grid_fade_distance;
+    j["grid_opacity"] = settings.grid_opacity;
     j["resolution_source"] = static_cast<int>(settings.resolution_source);
     j["aspect_base_height"] = settings.aspect_base_height;
     j["aspect_ratio_index"] = settings.aspect_ratio_index;
@@ -3196,6 +3198,8 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
         j.value("raster_viewport_quality_preset", static_cast<int>(RasterViewportQualityPreset::Auto)));
     settings.material_preview_lighting_preset = static_cast<MaterialPreviewLightingPreset>(
         j.value("material_preview_lighting_preset", static_cast<int>(MaterialPreviewLightingPreset::Studio)));
+    settings.grid_fade_distance = std::clamp(j.value("grid_fade_distance", 1.0f), 0.25f, 4.0f);
+    settings.grid_opacity = std::clamp(j.value("grid_opacity", 1.0f), 0.0f, 1.0f);
     settings.resolution_source = static_cast<ResolutionSource>(j.value("resolution_source", static_cast<int>(ResolutionSource::Custom)));
     settings.aspect_base_height = j.value("aspect_base_height", settings.aspect_base_height);
     settings.aspect_ratio_index = j.value("aspect_ratio_index", settings.aspect_ratio_index);

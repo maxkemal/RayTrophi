@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -49,6 +49,7 @@ class GasVolume;
 #include <unordered_map>
 #include <tuple>
 #include "Vec3.h" // For bbox_cache
+#include "MeshEdit/HalfEdgeMesh.h" // Edit mode half-edge core
 #include "instancegroup.h"
 #include "Backend/IBackend.h"
 #include "Backend/OptixBackend.h"
@@ -228,6 +229,12 @@ public:
      void drawMaterialPanel(UIContext& ctx);   // Material/Texture editor for selected object
      void drawPrincipledBSDFEditor(class PrincipledBSDF* pbsdf, uint16_t mat_id, UIContext& ctx); // Reusable editor widget
      void drawEditableMeshOverlay(UIContext& ctx); // Viewport edit overlay for selected mesh
+     // GPU edit overlay: pushes editable-mesh wireframe/vertex/face data to the
+     // raster viewport backend. Returns true when the GPU path is active this
+     // frame (caller then skips the ImGui fallback drawing).
+     bool syncGpuEditMeshOverlay(UIContext& ctx, const std::string& objectName,
+                                 bool drawVertices, bool drawEdges, bool drawFaces);
+     void releaseGpuEditMeshOverlay(); // clear backend buffers + disable the GPU overlay
      bool ensureEditableMeshCache(UIContext& ctx, const std::string& objectName);
      bool ensureSculptControlGraph(UIContext& ctx, const std::string& objectName);
      void invalidateSculptControlGraph(const std::string& objectName = std::string());
@@ -266,6 +273,7 @@ public:
      bool addFaceFromSelectedVertices(UIContext& ctx);
      bool deleteSelectedMeshFaces(UIContext& ctx);
      bool extrudeSelectedMeshFaces(UIContext& ctx, float distance);
+     bool insetSelectedMeshFaces(UIContext& ctx, float amount);
      bool loopCutSelectedEdges(UIContext& ctx, float t);
      bool dissolveSelectedEdges(UIContext& ctx);
      bool dissolveSelectedVertices(UIContext& ctx);
@@ -392,6 +400,7 @@ public:
          bool enabled = false;
          bool edit_mode = false;
          bool show_vertices = false;
+         bool xray_mode = false;          // GPU overlay draws through the mesh (Blender-style x-ray)
          bool proportional_edit = false;
          float proportional_radius = 0.75f;
          float proportional_falloff = 0.65f;
@@ -474,6 +483,10 @@ public:
      };
      struct EditableMeshCache {
          std::string object_name;
+         // Monotonic rebuild stamp (0 = empty cache). Bumped every time the
+         // cache is rebuilt so consumers (GPU edit overlay) can detect
+         // topology changes without fingerprinting counts.
+         uint64_t revision = 0;
          size_t source_triangle_count = 0;
          Matrix4x4 source_object_transform = Matrix4x4::identity();
          bool shade_flat = false;
@@ -494,6 +507,13 @@ public:
          std::vector<uint32_t> triangle_mark_stamps;
          uint32_t triangle_mark_generation = 1;
          EditableMeshSelection selection;
+         // Half-edge topology built from vertices + polygon_faces on every
+         // cache rebuild. Vertex ids and polygon-face ids match this cache
+         // 1:1. half_edge_valid == false => build or validation failed
+         // (operators must keep using the legacy triangle-soup paths).
+         MeshEdit::HalfEdgeMesh half_edge;
+         MeshEdit::HalfEdgeBuildResult half_edge_build;
+         bool half_edge_valid = false;
      };
      struct SculptControlNode {
          Vec3 local_position;
@@ -543,6 +563,20 @@ public:
          std::vector<int> source_vertex_to_leaf_id;
      };
      EditableMeshCache editable_mesh_cache;
+     uint64_t editable_mesh_cache_revision_counter = 0;
+
+     // GPU edit-mesh overlay sync (raster viewport wireframe/vertex/face pass).
+     // Tracks what was last uploaded to the viewport backend so per-frame work
+     // is limited to a params push; buffers re-upload only on real changes.
+     struct GpuEditOverlaySync {
+         bool active = false;            // backend currently holds overlay buffers
+         bool geometry_dirty = true;     // vertex positions need re-upload
+         bool drawn_this_frame = false;  // set by sync, cleared per frame in drawSelectionGizmos
+         uint64_t cache_revision = 0;    // EditableMeshCache::revision last uploaded
+         uint64_t selection_hash = 0;    // selection ids + soft-select params fingerprint
+     };
+     GpuEditOverlaySync gpu_edit_overlay_sync;
+
      SculptControlGraph sculpt_control_graph;
      SculptPBVH sculpt_pbvh;
      std::vector<Vec3> sculpt_updated_local_positions;
@@ -566,6 +600,7 @@ public:
      std::string active_mesh_edit_object_name;
      const class Triangle* active_mesh_edit_object_ptr = nullptr;
      float mesh_face_extrude_distance = 0.2f;
+     float mesh_face_inset_amount = 0.25f;
      float mesh_vertex_weld_distance = 0.05f;
      float mesh_loop_cut_position = 0.5f;
      std::string modifier_panel_exit_object; // Object for which user manually exited edit mode
@@ -893,7 +928,10 @@ private:
     bool pending_project_ui_restore = false;
     // --- Modern dockable panel layout (ImGui docking) ---
     bool docking_enabled = true;        // Master toggle: dockable panels vs. legacy pinned layout
-    bool docking_layout_dirty = true;   // Rebuild the default DockBuilder layout next frame
+    bool docking_layout_dirty = false;   // Rebuild the default DockBuilder layout next frame
+    unsigned int dockspace_id = 0;      // Cached ID of the dockspace
+    unsigned int dock_bottom_id = 0;     // Cached ID of the bottom dock node
+    void dockToBottom(const char* window_name);
     void drawDockSpaceHost(UIContext& ctx); // Hosts the DockSpace + default layout, feeds viewport rect back to legacy offsets
     // --- Detachable (tear-off) Properties sub-tabs ---
     // Side-effect-free editor tabs can be popped into their own dockable window so two
@@ -905,7 +943,7 @@ private:
     void drawPoppedPropertyWindows(UIContext& ctx);     // hosts all currently popped tabs as windows
     void drawHairTabContent(UIContext& ctx);            // hair tab body (shared by main panel + popped window)
     float side_panel_width = 360.0f; // Resizable Left Panel width
-    float bottom_panel_height = 100.0f; // Default to minimum height
+    float bottom_panel_height = 100.0f; // Default height
     float preferred_bottom_panel_height = 100.0f; // Persist desired height; avoid shrinking permanently during minimized/small viewport frames
     float hierarchy_panel_height = 250.0f; // New: Resizable hierarchy list height
     float last_applied_width = 0.0f;

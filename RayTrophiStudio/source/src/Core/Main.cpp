@@ -41,6 +41,7 @@
 #include "Stylize/StylizeKernel.h"
 #include "CameraPresets.h"
 #include "Jolt/JoltSmokeTest.h"  // Faz 0: --jolt-selftest link/runtime proof
+#include "MeshEdit/HalfEdgeMesh.h"  // edit mode Faz 1: --hemesh-selftest
 #include "scene_data.h"       // Added explicit include
 #include "AnimationNodes.h"
 #include "OptixWrapper.h"     // Added explicit include
@@ -880,11 +881,13 @@ void applyToneMappingToSurfaceWithCamera(SDL_Surface* surface, SDL_Surface* orig
         aov.nishita_cloud_offset_x = stylize_world.nishita.cloud_offset_x;
         aov.nishita_cloud_offset_z = stylize_world.nishita.cloud_offset_z;
         aov.nishita_cloud_seed = stylize_world.nishita.cloud_seed;
+        float stylize_view_len = 0.0f;
         if (camera) {
             Vec3 view_dir = camera->lower_left_corner
                 + aov.screen_u * camera->horizontal
                 + aov.screen_v * camera->vertical
                 - camera->origin;
+            stylize_view_len = view_dir.length();
             aov.view_dir = view_dir.length_squared() > 1e-8f ? view_dir.normalize() : Vec3(0.0f, 0.0f, -1.0f);
         }
         const size_t idx = static_cast<size_t>(sy) * static_cast<size_t>(width) + static_cast<size_t>(sx);
@@ -897,6 +900,11 @@ void applyToneMappingToSurfaceWithCamera(SDL_Surface* surface, SDL_Surface* orig
         aov.world_position = Vec3(world_position.x, world_position.y, world_position.z);
         aov.depth = renderer->cpu_depth_accumulation_buffer[idx];
         aov.material_id = renderer->cpu_material_id_buffer[idx];
+        if (aov.hit && stylize_view_len > 1e-6f) {
+            // world units per pixel at the hit — drives screen-constant brush daub sizing
+            aov.pixel_scale = aov.depth * camera->vertical.length()
+                            / (std::max(1.0f, static_cast<float>(height)) * stylize_view_len);
+        }
         return aov;
     };
 
@@ -1055,11 +1063,13 @@ void applyStylizeToSurfaceWithCamera(SDL_Surface* surface, Renderer& renderer, b
         aov.nishita_cloud_offset_x = stylize_world.nishita.cloud_offset_x;
         aov.nishita_cloud_offset_z = stylize_world.nishita.cloud_offset_z;
         aov.nishita_cloud_seed = stylize_world.nishita.cloud_seed;
+        float stylize_view_len = 0.0f;
         if (camera) {
             Vec3 view_dir = camera->lower_left_corner
                 + aov.screen_u * camera->horizontal
                 + aov.screen_v * camera->vertical
                 - camera->origin;
+            stylize_view_len = view_dir.length();
             aov.view_dir = view_dir.length_squared() > 1e-8f ? view_dir.normalize() : Vec3(0.0f, 0.0f, -1.0f);
         }
         const size_t idx = static_cast<size_t>(sy) * static_cast<size_t>(width) + static_cast<size_t>(sx);
@@ -1072,6 +1082,11 @@ void applyStylizeToSurfaceWithCamera(SDL_Surface* surface, Renderer& renderer, b
         aov.world_position = Vec3(world_position.x, world_position.y, world_position.z);
         aov.depth = renderer.cpu_depth_accumulation_buffer[idx];
         aov.material_id = renderer.cpu_material_id_buffer[idx];
+        if (aov.hit && stylize_view_len > 1e-6f) {
+            // world units per pixel at the hit — drives screen-constant brush daub sizing
+            aov.pixel_scale = aov.depth * camera->vertical.length()
+                            / (std::max(1.0f, static_cast<float>(height)) * stylize_view_len);
+        }
         return aov;
     };
 
@@ -1770,6 +1785,18 @@ int main(int argc, char* argv[]) try {
         return 0;
     }
 
+    // Half-edge mesh core self-test (edit mode Faz 1). Builds reference
+    // topologies (cube, grid plane, tetrahedron, non-manifold fans), runs the
+    // Euler operators and full structural validation, then exits. Result goes
+    // to SceneLog.txt so it is visible even with the console closed.
+    if (hasArg(argc, argv, "--hemesh-selftest")) {
+        std::string report;
+        const bool pass = MeshEdit::runHalfEdgeSelfTest(report);
+        if (pass) SCENE_LOG_INFO("[HalfEdge]\n" + report);
+        else      SCENE_LOG_ERROR("[HalfEdge]\n" + report);
+        return pass ? 0 : 1;
+    }
+
     // Register clean-shutdown cleanup: remove StartupCrash.log when the
     // application exits normally. Crashes will not run this handler.
     std::atexit(removeStartupCrashLogIfExists);
@@ -1893,7 +1920,9 @@ int main(int argc, char* argv[]) try {
     startupDiagLog("[Startup] ImGui SDL init done");
 
     // Initialize Theme using ThemeManager (prevents style overriding issues)
-    ThemeManager::instance().setTheme("RayTrophi Pro Dark");
+    if (!ThemeManager::instance().loadThemeSettings("theme.cfg", ui.panel_alpha)) {
+        ThemeManager::instance().setTheme("RayTrophi Pro Dark");
+    }
     ThemeManager::instance().applyCurrentTheme(ui.panel_alpha); 
     startupDiagLog("[Startup] ThemeManager init done");
 

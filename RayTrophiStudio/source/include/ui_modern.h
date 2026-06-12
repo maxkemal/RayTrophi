@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -70,6 +70,8 @@ public:
     void setTheme(int index);
     void setTheme(const std::string& name);
     void applyCurrentTheme(float panelAlpha = 0.75f);
+    void saveThemeSettings(const std::string& filepath, float panelAlpha);
+    bool loadThemeSettings(const std::string& filepath, float& panelAlpha);
 
     const Theme& current() const { return themes_[currentIndex_]; }
     int currentIndex() const { return currentIndex_; }

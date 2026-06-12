@@ -100,24 +100,24 @@ void ThemeManager::registerDefaultThemes() {
     {
         Theme t;
         t.name = "RayTrophi Pro Dark";
-        t.style.frameRounding = 3.0f;
-        t.style.windowRounding = 2.0f;
-        t.style.scrollbarRounding = 3.0f;
-        t.style.grabRounding = 3.0f;
-        t.style.popupRounding = 2.0f;
-        t.style.tabRounding = 3.0f;
+        t.style.frameRounding = 4.0f;
+        t.style.windowRounding = 4.0f;
+        t.style.scrollbarRounding = 9.0f;
+        t.style.grabRounding = 4.0f;
+        t.style.popupRounding = 4.0f;
+        t.style.tabRounding = 4.0f;
 
-        t.colors.primary    = ImVec4(0.25f, 0.25f, 0.27f, 1.0f);
-        t.colors.secondary  = ImVec4(0.22f, 0.22f, 0.24f, 1.0f);
-        t.colors.accent     = ImVec4(0.40f, 0.40f, 0.45f, 1.0f);
-        t.colors.background = ImVec4(0.11f, 0.11f, 0.12f, 0.94f);
-        t.colors.surface    = ImVec4(0.18f, 0.18f, 0.19f, 1.0f);
-        t.colors.text       = ImVec4(0.95f, 0.95f, 0.95f, 1.0f);
-        t.colors.textMuted  = ImVec4(0.45f, 0.45f, 0.45f, 1.0f);
-        t.colors.success    = ImVec4(0.30f, 1.00f, 0.30f, 1.0f);
-        t.colors.warning    = ImVec4(1.00f, 0.80f, 0.00f, 1.0f);
-        t.colors.error      = ImVec4(1.00f, 0.15f, 0.15f, 1.0f);
-        t.colors.border     = ImVec4(0.00f, 0.00f, 0.00f, 0.40f);
+        t.colors.primary    = ImVec4(0.32f, 0.32f, 0.34f, 1.0f); // Button gray, stands out on sandy bg
+        t.colors.secondary  = ImVec4(0.18f, 0.18f, 0.19f, 1.0f); // Headers and active tabs
+        t.colors.accent     = ImVec4(0.90f, 0.52f, 0.18f, 1.0f); // Blender Orange
+        t.colors.background = ImVec4(0.24f, 0.24f, 0.25f, 1.0f); // Blender warm dark sand background
+        t.colors.surface    = ImVec4(0.14f, 0.14f, 0.15f, 1.0f); // Dark recessed inputs/lists/child frames
+        t.colors.text       = ImVec4(0.88f, 0.88f, 0.88f, 1.0f); // Soft grey text (eye-friendly)
+        t.colors.textMuted  = ImVec4(0.55f, 0.55f, 0.56f, 1.0f);
+        t.colors.success    = ImVec4(0.26f, 0.65f, 0.36f, 1.0f);
+        t.colors.warning    = ImVec4(0.85f, 0.60f, 0.15f, 1.0f);
+        t.colors.error      = ImVec4(0.80f, 0.30f, 0.30f, 1.0f);
+        t.colors.border     = ImVec4(0.11f, 0.11f, 0.12f, 0.50f);
         themes_.push_back(t);
     }
 
@@ -191,7 +191,7 @@ void ThemeManager::applyCurrentTheme(float panelAlpha) {
     const Theme& t = themes_[currentIndex_];
     ImGuiStyle& style = ImGui::GetStyle();
     
-    // Ã–nce ImGui'nin varsayÄ±lan stillerini uygula
+    // Once ImGui'nin varsayilan stillerini uygula
     switch (currentIndex_) {
         case 0: ImGui::StyleColorsDark(); break;
         case 1: ImGui::StyleColorsLight(); break;
@@ -199,11 +199,12 @@ void ThemeManager::applyCurrentTheme(float panelAlpha) {
         default: ImGui::StyleColorsDark(); break;
     }
 
-    // Stil ayarlarÄ±
+    // Stil ayarlari
     style.WindowRounding    = t.style.windowRounding;
     style.FrameRounding     = t.style.frameRounding;
     style.GrabRounding      = t.style.grabRounding;
-    style.ScrollbarRounding = t.style.scrollbarRounding;
+    style.ScrollbarSize     = 7.0f; // Blender-like thin width
+    style.ScrollbarRounding = 9.0f; // Blender-like rounded capsule shape
     style.TabRounding       = t.style.tabRounding;
     style.PopupRounding     = t.style.popupRounding;
     style.FramePadding      = t.style.framePadding;
@@ -217,8 +218,10 @@ void ThemeManager::applyCurrentTheme(float panelAlpha) {
                                             t.colors.background.z, panelAlpha);
     c[ImGuiCol_ChildBg]           = ImVec4(t.colors.surface.x, t.colors.surface.y,
                                             t.colors.surface.z, 0.95f);
-    c[ImGuiCol_PopupBg]           = ImVec4(t.colors.surface.x * 1.1f, t.colors.surface.y * 1.1f,
-                                            t.colors.surface.z * 1.1f, 0.98f);
+    c[ImGuiCol_PopupBg]           = ImVec4(t.colors.background.x, t.colors.background.y,
+                                            t.colors.background.z, 0.98f);
+    c[ImGuiCol_MenuBarBg]         = ImVec4(t.colors.secondary.x, t.colors.secondary.y,
+                                            t.colors.secondary.z, 1.0f);
     
     c[ImGuiCol_Text]              = t.colors.text;
     c[ImGuiCol_TextDisabled]      = t.colors.textMuted;
@@ -231,9 +234,9 @@ void ThemeManager::applyCurrentTheme(float panelAlpha) {
     c[ImGuiCol_ButtonHovered]     = UIWidgets::ScaleColor(t.colors.primary, 1.2f);
     c[ImGuiCol_ButtonActive]      = UIWidgets::ScaleColor(t.colors.primary, 0.8f);
     
-    c[ImGuiCol_Header]            = t.colors.secondary;
-    c[ImGuiCol_HeaderHovered]     = UIWidgets::ScaleColor(t.colors.secondary, 1.2f);
-    c[ImGuiCol_HeaderActive]      = UIWidgets::ScaleColor(t.colors.secondary, 1.4f);
+    c[ImGuiCol_Header]            = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.22f);
+    c[ImGuiCol_HeaderHovered]     = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.48f);
+    c[ImGuiCol_HeaderActive]      = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.70f);
     
     c[ImGuiCol_SliderGrab]        = t.colors.accent;
     c[ImGuiCol_SliderGrabActive]  = UIWidgets::ScaleColor(t.colors.accent, 1.2f);
@@ -244,11 +247,26 @@ void ThemeManager::applyCurrentTheme(float panelAlpha) {
     c[ImGuiCol_TabHovered]        = UIWidgets::ScaleColor(t.colors.secondary, 1.3f);
     c[ImGuiCol_TabActive]         = t.colors.secondary;
     
-    c[ImGuiCol_ScrollbarBg]       = ImVec4(t.colors.background.x * 0.8f, t.colors.background.y * 0.8f,
-                                            t.colors.background.z * 0.8f, 0.6f);
-    c[ImGuiCol_ScrollbarGrab]     = UIWidgets::ScaleColor(t.colors.secondary, 1.2f);
-    c[ImGuiCol_ScrollbarGrabHovered] = UIWidgets::ScaleColor(t.colors.secondary, 1.5f);
-    c[ImGuiCol_ScrollbarGrabActive]  = UIWidgets::ScaleColor(t.colors.secondary, 1.8f);
+    c[ImGuiCol_TitleBg]           = t.colors.secondary;
+    c[ImGuiCol_TitleBgActive]     = UIWidgets::ScaleColor(t.colors.secondary, 1.15f);
+    c[ImGuiCol_TitleBgCollapsed]  = UIWidgets::ScaleColor(t.colors.secondary, 0.85f);
+    
+    c[ImGuiCol_CheckMark]         = t.colors.accent;
+    c[ImGuiCol_TextSelectedBg]    = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.35f);
+    
+    c[ImGuiCol_Separator]         = t.colors.border;
+    c[ImGuiCol_SeparatorHovered]  = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.50f);
+    c[ImGuiCol_SeparatorActive]   = t.colors.accent;
+    
+    c[ImGuiCol_ResizeGrip]        = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    c[ImGuiCol_ResizeGripHovered] = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.60f);
+    c[ImGuiCol_ResizeGripActive]  = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.90f);
+    
+    // Blender-like Flat & Thin Scrollbar Styles
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.0f, 0.0f, 0.0f, 0.0f); // Transparent track background
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(t.colors.textMuted.x, t.colors.textMuted.y, t.colors.textMuted.z, 0.30f); // Flat, subtle handle
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(t.colors.textMuted.x, t.colors.textMuted.y, t.colors.textMuted.z, 0.55f); // Highlighted on hover
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(t.colors.accent.x, t.colors.accent.y, t.colors.accent.z, 0.75f); // Active colored grab
 }
 
 const char* ThemeManager::getThemeName(int index) const {
@@ -264,6 +282,25 @@ std::vector<const char*> ThemeManager::getAllThemeNames() const {
         names.push_back(t.name.c_str());
     }
     return names;
+}
+
+void ThemeManager::saveThemeSettings(const std::string& filepath, float panelAlpha) {
+    std::ofstream file(filepath);
+    if (!file.is_open()) return;
+    file << currentIndex_ << " " << panelAlpha << "\n";
+}
+
+bool ThemeManager::loadThemeSettings(const std::string& filepath, float& panelAlpha) {
+    std::ifstream file(filepath);
+    if (!file.is_open()) return false;
+    int index = 4;
+    float alpha = 0.75f;
+    if (file >> index >> alpha) {
+        setTheme(index);
+        panelAlpha = alpha;
+        return true;
+    }
+    return false;
 }
 
 // ============================================================================
@@ -631,12 +668,14 @@ void DrawThemeSelector(float& panel_alpha) {
                          themeNames.data(), static_cast<int>(themeNames.size()))) {
             themeManager.setTheme(currentThemeIdx);
             themeManager.applyCurrentTheme(panel_alpha);
+            themeManager.saveThemeSettings("theme.cfg", panel_alpha);
         }
 
         // Panel Transparency   
         if (ImGui::SliderFloat("Panel Transparency", &panel_alpha, 0.1f, 1.0f, "%.2f")) {
             ImGuiStyle& style = ImGui::GetStyle();
             style.Colors[ImGuiCol_WindowBg].w = panel_alpha;
+            themeManager.saveThemeSettings("theme.cfg", panel_alpha);
         }
 
         EndSection();
@@ -652,30 +691,74 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
 
     switch (type) {
         case IconType::Scene:
-            dl->AddRect(p, ImVec2(p.x + is * 0.7f, p.y + is * 0.7f), col, 0, 0, thickness);
-            dl->AddRect(ImVec2(p.x + is * 0.3f, p.y + is * 0.3f), ImVec2(p.x + is, p.y + is), col, 0, 0, thickness);
-            dl->AddLine(p, ImVec2(p.x + is * 0.3f, p.y + is * 0.3f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.7f, p.y), ImVec2(p.x + is, p.y + is * 0.3f), col, thickness);
-            dl->AddLine(ImVec2(p.x, p.y + is * 0.7f), ImVec2(p.x + is * 0.3f, p.y + is), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.7f, p.y + is * 0.7f), ImVec2(p.x + is, p.y + is), col, thickness);
+            // Hierarchy Tree
+            dl->AddRect(ImVec2(p.x + is * 0.12f, p.y + is * 0.12f), ImVec2(p.x + is * 0.34f, p.y + is * 0.34f), col, 1.0f, 0, thickness);
+            dl->AddRect(ImVec2(p.x + is * 0.56f, p.y + is * 0.44f), ImVec2(p.x + is * 0.78f, p.y + is * 0.66f), col, 1.0f, 0, thickness);
+            dl->AddRect(ImVec2(p.x + is * 0.56f, p.y + is * 0.74f), ImVec2(p.x + is * 0.78f, p.y + is * 0.96f), col, 1.0f, 0, thickness);
+            {
+                float x1 = p.x + is * 0.23f;
+                float y1 = p.y + is * 0.34f;
+                float x2 = p.x + is * 0.56f;
+                dl->AddLine(ImVec2(x1, y1), ImVec2(x1, p.y + is * 0.85f), col, thickness);
+                dl->AddLine(ImVec2(x1, p.y + is * 0.55f), ImVec2(x2, p.y + is * 0.55f), col, thickness);
+                dl->AddLine(ImVec2(x1, p.y + is * 0.85f), ImVec2(x2, p.y + is * 0.85f), col, thickness);
+            }
             break;
         case IconType::Render:
-            dl->AddCircle(cp, is * 0.4f, col, 0, thickness * 1.5f);
-            for(int i=0; i<8; i++) {
-                float ang = i * (6.28f / 8.0f);
-                dl->AddLine(ImVec2(cp.x + cosf(ang)*is*0.35f, cp.y + sinf(ang)*is*0.35f),
-                           ImVec2(cp.x + cosf(ang)*is*0.55f, cp.y + sinf(ang)*is*0.55f), col, thickness * 1.5f);
+            // Camera Aperture / Shutter
+            {
+                float rad = is * 0.45f;
+                dl->AddCircle(cp, rad, col, 24, thickness);
+                for (int i = 0; i < 6; ++i) {
+                    float a = i * (6.28318f / 6.0f);
+                    float x1 = cp.x + cosf(a) * rad;
+                    float y1 = cp.y + sinf(a) * rad;
+                    float inner_a = a + 0.8f;
+                    float x2 = cp.x + cosf(inner_a) * (rad * 0.4f);
+                    float y2 = cp.y + sinf(inner_a) * (rad * 0.4f);
+                    dl->AddLine(ImVec2(x1, y1), ImVec2(x2, y2), col, thickness);
+                }
             }
             break;
         case IconType::Terrain:
-            dl->AddTriangleFilled(ImVec2(p.x, p.y + is), ImVec2(p.x + is*0.5f, p.y), ImVec2(p.x + is, p.y + is), col);
+            // Overlapping Mountains
+            dl->PathClear();
+            dl->PathLineTo(ImVec2(p.x + is * 0.3f, p.y + is * 0.85f));
+            dl->PathLineTo(ImVec2(p.x + is * 0.65f, p.y + is * 0.3f));
+            dl->PathLineTo(ImVec2(p.x + is * 0.95f, p.y + is * 0.85f));
+            dl->PathStroke(col, 0, thickness);
+
+            dl->PathClear();
+            dl->PathLineTo(ImVec2(p.x + is * 0.05f, p.y + is * 0.85f));
+            dl->PathLineTo(ImVec2(p.x + is * 0.40f, p.y + is * 0.42f));
+            dl->PathLineTo(ImVec2(p.x + is * 0.75f, p.y + is * 0.85f));
+            dl->PathStroke(col, 0, thickness);
+
+            dl->AddLine(ImVec2(p.x + is * 0.05f, p.y + is * 0.85f), ImVec2(p.x + is * 0.95f, p.y + is * 0.85f), col, thickness);
             break;
-        case IconType::Sculpt:
-            // Layer stack + accent stroke reads better than another generic brush at 20 px.
-            dl->AddRect(ImVec2(p.x + is*0.14f, p.y + is*0.22f), ImVec2(p.x + is*0.62f, p.y + is*0.46f), col, 2.0f, 0, thickness);
-            dl->AddRect(ImVec2(p.x + is*0.28f, p.y + is*0.50f), ImVec2(p.x + is*0.76f, p.y + is*0.74f), col, 2.0f, 0, thickness);
-            dl->AddLine(ImVec2(p.x + is*0.70f, p.y + is*0.22f), ImVec2(p.x + is*0.90f, p.y + is*0.12f), col, thickness * 1.5f);
-            dl->AddLine(ImVec2(p.x + is*0.70f, p.y + is*0.22f), ImVec2(p.x + is*0.88f, p.y + is*0.34f), col, thickness * 1.5f);
+        case IconType::Sculpt: // Used as Modifiers/Modeling
+            // Wrench
+            {
+                ImVec2 p1 = ImVec2(p.x + is * 0.18f, p.y + is * 0.82f);
+                ImVec2 p2 = ImVec2(p.x + is * 0.62f, p.y + is * 0.38f);
+                dl->AddLine(p1, p2, col, thickness * 2.5f);
+                
+                ImVec2 head_center = ImVec2(p.x + is * 0.72f, p.y + is * 0.28f);
+                float head_rad = is * 0.22f;
+                
+                dl->PathClear();
+                float start_angle = -0.15f * 3.14159f;
+                float end_angle = 1.35f * 3.14159f;
+                dl->PathArcTo(head_center, head_rad, start_angle, end_angle, 12);
+                
+                ImVec2 cut1 = ImVec2(head_center.x + cosf(start_angle) * head_rad, head_center.y + sinf(start_angle) * head_rad);
+                ImVec2 inner_center = ImVec2(head_center.x - cosf(0.6f) * (head_rad * 0.3f), head_center.y + sinf(0.6f) * (head_rad * 0.3f));
+                dl->PathLineTo(inner_center);
+                dl->PathLineTo(cut1);
+                dl->PathStroke(col, ImDrawFlags_Closed, thickness * 1.5f);
+                
+                dl->AddCircle(ImVec2(p.x + is * 0.18f, p.y + is * 0.82f), is * 0.08f, col, 8, thickness);
+            }
             break;
         case IconType::Hair:
             dl->AddBezierQuadratic(ImVec2(p.x + is*0.24f, p.y + is*0.86f),
@@ -691,19 +774,24 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
                                    ImVec2(p.x + is*0.66f, p.y + is*0.18f),
                                    col, thickness);
             break;
-        case IconType::Brush:
+        case IconType::Brush: // Used as Stylize Mode
         {
-            const ImVec2 ferrule_min(p.x + is * 0.54f, p.y + is * 0.16f);
-            const ImVec2 ferrule_max(p.x + is * 0.84f, p.y + is * 0.38f);
-            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.82f),
-                        ImVec2(p.x + is * 0.66f, p.y + is * 0.34f),
-                        col, thickness * 1.8f);
-            dl->AddRect(ferrule_min, ferrule_max, col, 2.0f, 0, thickness * 1.2f);
-            dl->AddTriangleFilled(ImVec2(p.x + is * 0.10f, p.y + is * 0.90f),
-                                  ImVec2(p.x + is * 0.30f, p.y + is * 0.70f),
-                                  ImVec2(p.x + is * 0.36f, p.y + is * 0.98f),
-                                  col);
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.76f, p.y + is * 0.24f), thickness * 1.1f, col);
+            // Magic Wand
+            dl->AddLine(ImVec2(p.x + is * 0.15f, p.y + is * 0.85f), ImVec2(p.x + is * 0.60f, p.y + is * 0.40f), col, thickness * 1.8f);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.60f, p.y + is * 0.40f), thickness * 1.5f, col);
+            
+            ImVec2 sc = ImVec2(p.x + is * 0.75f, p.y + is * 0.25f);
+            float sr = is * 0.18f;
+            dl->PathClear();
+            dl->PathLineTo(ImVec2(sc.x, sc.y - sr));
+            dl->PathBezierQuadraticCurveTo(ImVec2(sc.x + sr*0.2f, sc.y - sr*0.2f), ImVec2(sc.x + sr, sc.y), 6);
+            dl->PathBezierQuadraticCurveTo(ImVec2(sc.x + sr*0.2f, sc.y + sr*0.2f), ImVec2(sc.x, sc.y + sr), 6);
+            dl->PathBezierQuadraticCurveTo(ImVec2(sc.x - sr*0.2f, sc.y + sr*0.2f), ImVec2(sc.x - sr, sc.y), 6);
+            dl->PathBezierQuadraticCurveTo(ImVec2(sc.x - sr*0.2f, sc.y - sr*0.2f), ImVec2(sc.x, sc.y - sr), 6);
+            dl->PathStroke(col, ImDrawFlags_Closed, thickness);
+
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.82f, p.y + is * 0.50f), thickness * 0.8f, col);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.48f, p.y + is * 0.18f), thickness * 0.8f, col);
             break;
         }
         case IconType::Move:
@@ -876,14 +964,22 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
             dl->AddCircle(ImVec2(p.x + is*0.62f, p.y + is*0.58f), is*0.16f, col, 18, thickness);
             dl->AddLine(ImVec2(p.x + is*0.52f, p.y + is*0.48f), ImVec2(p.x + is*0.48f, p.y + is*0.52f), col, thickness);
             break;
-        case IconType::SprayTool:
-            dl->AddLine(ImVec2(p.x + is*0.24f, p.y + is*0.74f), ImVec2(p.x + is*0.50f, p.y + is*0.52f), col, thickness * 1.5f);
-            dl->AddLine(ImVec2(p.x + is*0.50f, p.y + is*0.52f), ImVec2(p.x + is*0.72f, p.y + is*0.30f), col, thickness * 1.5f);
-            dl->AddCircleFilled(ImVec2(p.x + is*0.66f, p.y + is*0.22f), thickness * 1.15f, col);
-            dl->AddCircleFilled(ImVec2(p.x + is*0.82f, p.y + is*0.28f), thickness * 1.05f, col);
-            dl->AddCircleFilled(ImVec2(p.x + is*0.76f, p.y + is*0.42f), thickness * 1.00f, col);
-            dl->AddCircleFilled(ImVec2(p.x + is*0.88f, p.y + is*0.46f), thickness * 1.15f, col);
+        case IconType::SprayTool: // Used as Scatter (Foliage & Mesh)
+        {
+            dl->AddLine(ImVec2(p.x + is * 0.1f, p.y + is * 0.85f), ImVec2(p.x + is * 0.9f, p.y + is * 0.85f), col, thickness);
+            
+            ImVec2 g1 = ImVec2(p.x + is * 0.35f, p.y + is * 0.85f);
+            dl->AddBezierQuadratic(g1, ImVec2(g1.x - is*0.12f, g1.y - is*0.25f), ImVec2(g1.x - is*0.18f, g1.y - is*0.42f), col, thickness);
+            dl->AddBezierQuadratic(g1, ImVec2(g1.x, g1.y - is*0.30f), ImVec2(g1.x - is*0.02f, g1.y - is*0.50f), col, thickness);
+            dl->AddBezierQuadratic(g1, ImVec2(g1.x + is*0.10f, g1.y - is*0.22f), ImVec2(g1.x + is*0.15f, g1.y - is*0.35f), col, thickness);
+
+            dl->AddCircle(ImVec2(p.x + is * 0.70f, p.y + is * 0.77f), is * 0.08f, col, 6, thickness);
+            
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.20f, p.y + is * 0.35f), thickness * 0.8f, col);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.55f, p.y + is * 0.22f), thickness * 0.8f, col);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.80f, p.y + is * 0.40f), thickness * 0.8f, col);
             break;
+        }
         case IconType::GrabTool:
             dl->AddCircle(cp, is * 0.22f, col, 20, thickness);
             dl->AddLine(ImVec2(cp.x, p.y + is * 0.06f), ImVec2(cp.x, p.y + is * 0.30f), col, thickness);
@@ -1075,21 +1171,71 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
                                    col, thickness * 0.9f);
             break;
         case IconType::Water:
-            for(int i=0; i<3; i++) {
-                float yoff = i * (is/3.0f);
-                dl->AddBezierQuadratic(ImVec2(p.x, p.y + yoff), ImVec2(p.x + is*0.25f, p.y + yoff + 5), ImVec2(p.x + is*0.5f, p.y + yoff), col, thickness);
-                dl->AddBezierQuadratic(ImVec2(p.x + is*0.5f, p.y + yoff), ImVec2(p.x + is*0.75f, p.y + yoff - 5), ImVec2(p.x + is, p.y + yoff), col, thickness);
+            {
+                float yoff1 = is * 0.65f;
+                float yoff2 = is * 0.82f;
+                dl->PathClear();
+                for (int i = 0; i <= 16; ++i) {
+                    float t = i / 16.0f;
+                    float x = p.x + t * is;
+                    float y = p.y + yoff1 + sinf(t * 6.28f) * (is * 0.08f);
+                    dl->PathLineTo(ImVec2(x, y));
+                }
+                dl->PathStroke(col, 0, thickness);
+
+                dl->PathClear();
+                for (int i = 0; i <= 16; ++i) {
+                    float t = i / 16.0f;
+                    float x = p.x + t * is;
+                    float y = p.y + yoff2 + sinf(t * 6.28f + 1.5f) * (is * 0.08f);
+                    dl->PathLineTo(ImVec2(x, y));
+                }
+                dl->PathStroke(col, 0, thickness);
+
+                ImVec2 drop_tip = ImVec2(cp.x, p.y + is * 0.14f);
+                float drop_rad = is * 0.14f;
+                dl->PathClear();
+                dl->PathLineTo(drop_tip);
+                dl->PathArcTo(ImVec2(cp.x, p.y + is * 0.38f), drop_rad, -0.1f * 3.1415f, 1.1f * 3.1415f, 10);
+                dl->PathStroke(col, ImDrawFlags_Closed, thickness);
             }
             break;
         case IconType::Volumetric:
-            dl->AddCircleFilled(ImVec2(cp.x - is*0.25f, cp.y + is*0.1f), is*0.25f, col);
-            dl->AddCircleFilled(ImVec2(cp.x + is*0.25f, cp.y + is*0.1f), is*0.25f, col);
-            dl->AddCircleFilled(ImVec2(cp.x, cp.y - is*0.15f), is*0.35f, col);
+            {
+                dl->AddLine(ImVec2(p.x + is * 0.2f, p.y + is * 0.75f), ImVec2(p.x + is * 0.8f, p.y + is * 0.75f), col, thickness);
+                dl->PathArcTo(ImVec2(p.x + is * 0.3f, p.y + is * 0.58f), is * 0.18f, 0.7f * 3.1415f, 1.7f * 3.1415f, 8);
+                dl->PathArcTo(ImVec2(p.x + is * 0.52f, p.y + is * 0.42f), is * 0.24f, 1.3f * 3.1415f, -0.2f * 3.1415f, 8);
+                dl->PathArcTo(ImVec2(p.x + is * 0.72f, p.y + is * 0.58f), is * 0.18f, -0.7f * 3.1415f, 0.3f * 3.1415f, 8);
+                dl->PathStroke(col, 0, thickness);
+            }
             break;
         case IconType::Force:
-            dl->AddCircle(cp, is * 0.45f, col, 0, thickness);
-            dl->AddLine(cp, ImVec2(cp.x, cp.y - is*0.4f), col, thickness * 1.5f);
-            dl->AddTriangleFilled(ImVec2(cp.x - 4, cp.y - is*0.4f), ImVec2(cp.x + 4, cp.y - is*0.4f), ImVec2(cp.x, cp.y - is*0.55f), col);
+            {
+                dl->AddCircleFilled(cp, is * 0.08f, col);
+                dl->PathClear();
+                for (int i = 0; i <= 24; ++i) {
+                    float a = i * (6.28318f / 24.0f);
+                    float rx = is * 0.45f;
+                    float ry = is * 0.15f;
+                    float rot = 0.5f;
+                    float x = cp.x + cosf(a) * rx * cosf(rot) - sinf(a) * ry * sinf(rot);
+                    float y = cp.y + cosf(a) * rx * sinf(rot) + sinf(a) * ry * cosf(rot);
+                    dl->PathLineTo(ImVec2(x, y));
+                }
+                dl->PathStroke(col, 0, thickness);
+                
+                dl->PathClear();
+                for (int i = 0; i <= 24; ++i) {
+                    float a = i * (6.28318f / 24.0f);
+                    float rx = is * 0.45f;
+                    float ry = is * 0.15f;
+                    float rot = -0.5f;
+                    float x = cp.x + cosf(a) * rx * cosf(rot) - sinf(a) * ry * sinf(rot);
+                    float y = cp.y + cosf(a) * rx * sinf(rot) + sinf(a) * ry * cosf(rot);
+                    dl->PathLineTo(ImVec2(x, y));
+                }
+                dl->PathStroke(col, 0, thickness);
+            }
             break;
         case UIWidgets::IconType::World:
             dl->AddCircle(cp, is*0.4f, col, 0, thickness);
@@ -1275,24 +1421,32 @@ bool IconActionButton(const char* id,
 }
 
 void PushControlSurfaceStyle(const ImVec4& accent) {
+    const auto& t = ThemeManager::instance().current();
+
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 10.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 12.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 6.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 8.0f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.135f, 0.16f, 0.96f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.16f, 0.18f, 0.22f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.18f, 0.21f, 0.25f, 1.0f));
+    
+    // Dynamically derive from active theme colors
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, t.colors.surface);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ScaleColor(t.colors.surface, 1.3f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ScaleColor(t.colors.surface, 1.5f));
+    
     ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(accent.x, accent.y, accent.z, 0.92f));
     ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4((std::min)(1.0f, accent.x + 0.10f), (std::min)(1.0f, accent.y + 0.10f), (std::min)(1.0f, accent.z + 0.10f), 1.0f));
     ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4((std::min)(1.0f, accent.x + 0.10f), (std::min)(1.0f, accent.y + 0.10f), (std::min)(1.0f, accent.z + 0.10f), 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.155f, 0.18f, 0.94f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.20f, 0.24f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.22f, 0.24f, 0.28f, 1.0f));
+    
+    ImGui::PushStyleColor(ImGuiCol_Button, t.colors.primary);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ScaleColor(t.colors.primary, 1.2f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ScaleColor(t.colors.primary, 0.8f));
+    
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, 0.18f));
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.14f, 0.16f, 0.19f, 0.92f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.18f, 0.20f, 0.24f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
+    
+    ImGui::PushStyleColor(ImGuiCol_Header, t.colors.secondary);
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ScaleColor(t.colors.secondary, 1.2f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ScaleColor(t.colors.secondary, 1.4f));
 }
 
 void PopControlSurfaceStyle() {

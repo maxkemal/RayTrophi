@@ -1,6 +1,7 @@
 #version 450
 
 layout(location = 0) in vec3 vNormal;
+layout(location = 1) in vec3 vWorldPos;
 layout(location = 0) out vec4 outColor;
 
 layout(binding = 0) uniform sampler2D matcapSampler;
@@ -10,6 +11,9 @@ layout(push_constant) uniform SolidParams {
     mat4 view;
     int useMatcap; // -1 = flat color, 0 = solid clay, 1 = texture, 2..9 = procedural
     float overrideR, overrideG, overrideB; // flat color (useMatcap == -1)
+    float fadeCenterX, fadeCenterY, fadeCenterZ; // world-space fade origin (grid distance fade)
+    float fadeStart, fadeEnd;                    // fade band; fadeEnd <= fadeStart disables
+    float overrideA;                             // base opacity for flat-color draws (grid)
 } solidParams;
 
 // Shared matcap helper: hemisphere shading from colors + specular
@@ -37,7 +41,16 @@ void main() {
 
     // -1: Flat color override (grid axes, wireframe, etc.)
     if (preset == -1) {
-        outColor = vec4(solidParams.overrideR, solidParams.overrideG, solidParams.overrideB, 1.0);
+        // Distance fade (used by the reference grid): lines dissolve toward a soft
+        // fog horizon instead of a hard geometric cutoff, which also suppresses
+        // far-field moiré from sub-pixel lines. Disabled when fadeEnd <= fadeStart.
+        float alpha = clamp(solidParams.overrideA, 0.0, 1.0);
+        if (solidParams.fadeEnd > solidParams.fadeStart) {
+            float d = distance(vWorldPos, vec3(solidParams.fadeCenterX, solidParams.fadeCenterY, solidParams.fadeCenterZ));
+            alpha *= 1.0 - smoothstep(solidParams.fadeStart, solidParams.fadeEnd, d);
+        }
+        if (alpha < 0.004) discard;
+        outColor = vec4(solidParams.overrideR, solidParams.overrideG, solidParams.overrideB, alpha);
         return;
     }
 

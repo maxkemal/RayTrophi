@@ -65,6 +65,7 @@ __device__ inline SC::StylizeAOVCore buildAOV(int bx, int by,
     SC::SV3 vv = SC::mk(kp.cam_vertical.x, kp.cam_vertical.y, kp.cam_vertical.z);
     SC::SV3 og = SC::mk(kp.cam_origin.x, kp.cam_origin.y, kp.cam_origin.z);
     SC::SV3 view = ll + hh * aov.screen_u + vv * aov.screen_v - og;
+    const float view_len = sqrtf(SC::lensq3(view));
     aov.view_dir = SC::lensq3(view) > 1e-8f ? SC::normalize3(view) : SC::mk(0.0f, 0.0f, -1.0f);
 
     const size_t idx = (size_t)by * (size_t)kp.width + (size_t)bx;
@@ -94,6 +95,11 @@ __device__ inline SC::StylizeAOVCore buildAOV(int bx, int by,
     aov.depth = depth;
     aov.material_id = material_id;
     aov.hit = (hitRaw && depth > 0.0f) ? 1 : 0;
+    if (aov.hit && view_len > 1e-6f) {
+        // world units per pixel at the hit — drives screen-constant brush daub sizing
+        aov.pixel_scale = depth * sqrtf(SC::lensq3(vv))
+                        / (fmaxf(1.0f, (float)kp.height) * view_len);
+    }
     return aov;
 }
 
