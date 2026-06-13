@@ -584,7 +584,16 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
 
             // Click snaps to a standard view; drag (>4px) free-orbits around the pivot.
             static bool dragging = false; static bool moved = false; static ImVec2 dragLast;
-            if (ImGui::IsItemActivated()) { dragging = true; moved = false; dragLast = mp; }
+            if (ImGui::IsItemActivated()) {
+                dragging = true; moved = false; dragLast = mp;
+                // Reset stale ortho vup (e.g. Top sets vup=(0,0,-1)) so the first drag
+                // frame uses the correct cam.u for vertical orbit. The fixed fallback in
+                // update_camera_vectors() handles the near-vertical degenerate case.
+                if (cam.orthographic) {
+                    cam.vup = Vec3(0.0f, 1.0f, 0.0f);
+                    cam.update_camera_vectors();
+                }
+            }
             if (active && dragging) {
                 const ImVec2 d(mp.x - dragLast.x, mp.y - dragLast.y);
                 if (std::abs(d.x) + std::abs(d.y) > 4.0f) moved = true;
@@ -600,10 +609,10 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
                     rel = rot(rel, Vec3(0, 1, 0), -d.x * k);
                     rel = rot(rel, cam.u, -d.y * k);
                     cam.lookfrom = pivot + rel;
-                    // Free-orbiting the cube leaves the aligned ortho views and returns to a
-                    // normal perspective camera (this is the way back out of orthographic).
+                    // Free-orbiting the cube leaves the ALIGNED standard view but keeps the
+                    // current projection — orbiting in ortho stays ortho. Switching to
+                    // perspective is left to the user (numpad 5 toggle). orthographic untouched.
                     cam.standard_view = Camera::StandardView::Perspective;
-                    cam.orthographic = false;
                     cam.update_camera_vectors();
                     cam.markDirty();
                     refreshViewport();
@@ -1649,6 +1658,12 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                              ctx.render_settings.avg_total_frame_fps);
                     status_text += perf_text;
                 }
+                // The final (path-traced) render does not support orthographic projection
+                // yet — the device camera always traces a perspective pinhole. Tell the
+                // user instead of silently rendering perspective from an ortho viewport.
+                if (ctx.scene.camera && ctx.scene.camera->orthographic) {
+                    status_text += "  \xc2\xb7  Perspective (ortho not supported in render)";
+                }
             } else {
                 // Solid/Matcap/MaterialPreview: show viewport mode name
                 switch (viewport_settings.shading_mode) {
@@ -1658,6 +1673,27 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                     default: status_text = "Viewport Mode"; break;
                 }
                 text_col = IM_COL32(180, 210, 255, 255);
+
+                // Persistent view + projection indicator (Blender-style). This was only a
+                // transient toast; the view/projection is STATE, not an event, so it stays
+                // on screen. standard_view==Perspective after a free orbit means "User"
+                // (non-aligned) — pair it with the actual projection (ortho stays ortho).
+                if (ctx.scene.camera) {
+                    const Camera& cam = *ctx.scene.camera;
+                    const char* view_name;
+                    switch (cam.standard_view) {
+                        case Camera::StandardView::Top:    view_name = "Top";    break;
+                        case Camera::StandardView::Bottom: view_name = "Bottom"; break;
+                        case Camera::StandardView::Front:  view_name = "Front";  break;
+                        case Camera::StandardView::Back:   view_name = "Back";   break;
+                        case Camera::StandardView::Left:   view_name = "Left";   break;
+                        case Camera::StandardView::Right:  view_name = "Right";  break;
+                        default:                           view_name = "User";   break;
+                    }
+                    status_text += "  \xc2\xb7  "; // " · " (UTF-8 middle dot)
+                    status_text += view_name;
+                    status_text += cam.orthographic ? " Orthographic" : " Perspective";
+                }
             }
 
             const auto drawHudLine = [](const std::string& text, ImU32 color) {

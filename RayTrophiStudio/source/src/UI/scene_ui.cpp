@@ -3368,7 +3368,9 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
         rendering_in_progress.load() ||
         ctx.render_settings.backend_changed;
 
-    if (!io.WantCaptureKeyboard && ctx.selection.hasSelection()) {
+    // Block only while typing in a text field, not whenever a panel has focus, so the
+    // delete shortcut works whenever the app is focused (matches the N/Tab handlers below).
+    if (!io.WantTextInput && ctx.selection.hasSelection()) {
         handleDeleteShortcut(ctx);
     }
 

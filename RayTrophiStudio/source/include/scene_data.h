@@ -1066,6 +1066,7 @@ struct SceneData {
         rigid_timeline_frame_ = -1;
         sim_cache_valid_ = false;
         sim_cache_dir_.clear();
+        sim_cache_valid_system_ids_.clear();
         last_sim_config_sig_ = 0;
         last_fluid_coupling_sig_ = 0;
     }
@@ -1694,6 +1695,7 @@ struct SceneData {
     // by the loader (setSimDiskCache) after validating per-system config hashes.
     std::string sim_cache_dir_;
     bool        sim_cache_valid_ = false;
+    std::unordered_set<uint32_t> sim_cache_valid_system_ids_;
     int         sim_cache_start_frame_ = 0;
     int         sim_cache_end_frame_ = 0;
     // Set when a fluid-affecting edit rewinds the sim to frame 0; the UI consumes
@@ -3405,19 +3407,22 @@ struct SceneData {
         if (!sim_cache_valid_ || sim_cache_dir_.empty()) return false;
         if (frame < sim_cache_start_frame_ || frame > sim_cache_end_frame_) return false;
 
-        // Read all systems first; only commit if every one succeeds so we never
-        // leave the sim in a half-restored state.
-        std::vector<std::vector<RayTrophiSim::SimulationGridDomainState>> loaded(particle_systems.size());
         for (std::size_t i = 0; i < particle_systems.size(); ++i) {
             if (!particle_systems[i].runtime) continue;
-            if (!RayTrophiSim::SimCache::readSystemFrame(
-                    sim_cache_dir_, particle_systems[i].id, frame, loaded[i])) {
-                return false;
-            }
-        }
-        for (std::size_t i = 0; i < particle_systems.size(); ++i) {
-            if (particle_systems[i].runtime) {
-                particle_systems[i].runtime->setGridDomainStates(loaded[i]);
+            if (sim_cache_valid_system_ids_.count(particle_systems[i].id) > 0) {
+                std::vector<RayTrophiSim::SimulationGridDomainState> loaded;
+                if (RayTrophiSim::SimCache::readSystemFrame(
+                        sim_cache_dir_, particle_systems[i].id, frame, loaded)) {
+                    particle_systems[i].runtime->setGridDomainStates(loaded);
+                    invalidateSimulationRenderBindings(particle_systems[i]);
+                } else {
+                    particle_systems[i].runtime->resetGridDomainStates();
+                    particle_systems[i].runtime->clear();
+                    invalidateSimulationRenderBindings(particle_systems[i]);
+                }
+            } else {
+                particle_systems[i].runtime->resetGridDomainStates();
+                particle_systems[i].runtime->clear();
                 invalidateSimulationRenderBindings(particle_systems[i]);
             }
         }
@@ -3972,7 +3977,7 @@ struct SceneData {
         // soft deformation — previously this guard bailed on empty particle_systems
         // so the Bodies-panel bake button did nothing without a fluid domain.
         if (cache_dir.empty() || end_frame < start_frame ||
-            (particle_systems.empty() && rigid_bodies.empty())) return false;
+            (particle_systems.empty() && rigid_bodies.empty() && soft_weld_cache_.empty())) return false;
 
         sim_bake_dir_    = cache_dir;
         sim_bake_start_  = start_frame;
@@ -4121,14 +4126,17 @@ private:
             sim_cache_valid_ = sim_bake_ok_;
             sim_cache_start_frame_ = sim_bake_start_;
             sim_cache_end_frame_ = sim_bake_end_;
-            // Disk now serves every frame (restoreSimFrame falls through to disk on a
-            // RAM miss), so drop the in-memory frame caches and reclaim that RAM — this
-            // is the whole point of baking on a crowded/long scene. The rest/topology
-            // caches (soft_weld_cache_ / rigid_bake_cache_) are NOT touched.
-            if (sim_bake_ok_) clearSimFrameCache();
+            if (sim_bake_ok_) {
+                sim_cache_valid_system_ids_.clear();
+                for (const auto& sys : particle_systems) {
+                    sim_cache_valid_system_ids_.insert(sys.id);
+                }
+                clearSimFrameCache();
+            }
         } else {
             RayTrophiSim::SimCache::clearCache(sim_bake_dir_);  // drop the half-bake
             sim_bake_ok_ = false;
+            sim_cache_valid_system_ids_.clear();
         }
 
         sim_timeline_frame_ = -1;       // back to free-run; disk now serves restores
@@ -4148,30 +4156,136 @@ public:
     bool setSimDiskCache(const std::string& cache_dir) {
         sim_cache_valid_ = false;
         sim_cache_dir_.clear();
+        sim_cache_valid_system_ids_.clear();
+
+        // Sync signatures to loaded baseline scene to prevent false invalidations on first tick
+        last_sim_config_sig_ = computeSimConfigSignature();
+        last_fluid_coupling_sig_ = computeFluidCouplingSignature();
+
+        SCENE_LOG_INFO("[SimDiskCache] Attempting to bind cache directory: " + cache_dir);
 
         RayTrophiSim::SimCache::Manifest m;
-        if (!RayTrophiSim::SimCache::readManifest(cache_dir, m)) return false;
-        if (m.version != RayTrophiSim::SimCache::kVersion) return false;
+        if (!RayTrophiSim::SimCache::readManifest(cache_dir, m)) {
+            SCENE_LOG_WARN("[SimDiskCache] Failed to read manifest.json from: " + cache_dir);
+            return false;
+        }
+        if (m.version != RayTrophiSim::SimCache::kVersion) {
+            SCENE_LOG_WARN("[SimDiskCache] Manifest version mismatch (cache: " + 
+                           std::to_string(m.version) + ", expected: " + 
+                           std::to_string(RayTrophiSim::SimCache::kVersion) + ")");
+            return false;
+        }
+
+        SCENE_LOG_INFO("[SimDiskCache] Manifest loaded successfully. Range: [" + 
+                       std::to_string(m.start_frame) + ", " + std::to_string(m.end_frame) + 
+                       "] at " + std::to_string(m.fps) + " FPS. Systems in manifest: " + 
+                       std::to_string(m.systems.size()));
 
         for (const auto& sys : particle_systems) {
             const uint64_t want = computeSystemConfigHash(sys);
+            char hex_want[32];
+            std::snprintf(hex_want, sizeof(hex_want), "0x%016llx", static_cast<unsigned long long>(want));
+
+            bool found = false;
             bool matched = false;
             for (const auto& sm : m.systems) {
-                if (sm.id == sys.id) { matched = (sm.config_hash == want); break; }
+                if (sm.id == sys.id) {
+                    found = true;
+                    if (sm.config_hash == want) {
+                        matched = true;
+                    } else {
+                        char hex_got[32];
+                        std::snprintf(hex_got, sizeof(hex_got), "0x%016llx", static_cast<unsigned long long>(sm.config_hash));
+                        SCENE_LOG_WARN("[SimDiskCache] System ID " + std::to_string(sys.id) + 
+                                       " config hash mismatch. Scene wants: " + hex_want + 
+                                       ", Cache has: " + hex_got);
+                    }
+                    break;
+                }
             }
-            if (!matched) return false;
+            if (!found) {
+                SCENE_LOG_WARN("[SimDiskCache] System ID " + std::to_string(sys.id) + 
+                               " not found in cache manifest.");
+            }
+
+            if (matched) {
+                // Check if the frame file actually exists on disk!
+                if (RayTrophiSim::SimCache::frameExists(cache_dir, sys.id, m.start_frame)) {
+                    sim_cache_valid_system_ids_.insert(sys.id);
+                    SCENE_LOG_INFO("[SimDiskCache] System ID " + std::to_string(sys.id) + 
+                                   " successfully validated and bound to cache.");
+                } else {
+                    SCENE_LOG_WARN("[SimDiskCache] System ID " + std::to_string(sys.id) + 
+                                   " matched hash but frame files are missing on disk.");
+                }
+            }
+        }
+
+        bool has_any_cache = !sim_cache_valid_system_ids_.empty() || 
+                             RayTrophiSim::SimCache::softFrameExists(cache_dir, m.start_frame);
+
+        if (!has_any_cache) {
+            SCENE_LOG_WARN("[SimDiskCache] No valid fluid or soft frame files found in cache directory.");
+            return false;
         }
 
         sim_cache_dir_ = cache_dir;
         sim_cache_start_frame_ = m.start_frame;
         sim_cache_end_frame_ = m.end_frame;
         sim_cache_valid_ = true;
+        SCENE_LOG_INFO("[SimDiskCache] Cache successfully bound. sim_cache_valid_ = true");
         return true;
     }
 
     void clearSimDiskCacheBinding() {
         sim_cache_valid_ = false;
         sim_cache_dir_.clear();
+        sim_cache_valid_system_ids_.clear();
+    }
+
+    bool hasValidParticleSimDiskCache() const {
+        if (!sim_cache_valid_ || sim_cache_dir_.empty()) return false;
+        if (sim_cache_valid_system_ids_.empty()) return false;
+        uint32_t first_id = *sim_cache_valid_system_ids_.begin();
+        return RayTrophiSim::SimCache::frameExists(sim_cache_dir_, first_id, sim_cache_start_frame_);
+    }
+
+    bool hasValidSoftSimDiskCache() const {
+        if (!sim_cache_valid_ || sim_cache_dir_.empty()) return false;
+        return RayTrophiSim::SimCache::softFrameExists(sim_cache_dir_, sim_cache_start_frame_);
+    }
+
+    void clearParticleSimDiskCache() {
+        if (sim_cache_dir_.empty()) return;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(sim_cache_dir_, ec)) {
+            const std::string name = entry.path().filename().string();
+            if (name.rfind("sys", 0) == 0 && entry.path().extension() == ".rtfc") {
+                std::filesystem::remove(entry.path(), ec);
+            }
+        }
+        sim_cache_valid_system_ids_.clear();
+        if (!hasValidSoftSimDiskCache()) {
+            RayTrophiSim::SimCache::clearCache(sim_cache_dir_);
+            sim_cache_valid_ = false;
+            sim_cache_dir_.clear();
+        }
+    }
+
+    void clearSoftSimDiskCache() {
+        if (sim_cache_dir_.empty()) return;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(sim_cache_dir_, ec)) {
+            const std::string name = entry.path().filename().string();
+            if (name.rfind("soft", 0) == 0 && entry.path().extension() == ".rtfc") {
+                std::filesystem::remove(entry.path(), ec);
+            }
+        }
+        if (sim_cache_valid_system_ids_.empty()) {
+            RayTrophiSim::SimCache::clearCache(sim_cache_dir_);
+            sim_cache_valid_ = false;
+            sim_cache_dir_.clear();
+        }
     }
 
     bool hasValidSimDiskCache() const { return sim_cache_valid_; }
@@ -5922,6 +6036,7 @@ public:
         // loaded scene without a cache doesn't keep streaming the old one.
         sim_cache_valid_ = false;
         sim_cache_dir_.clear();
+        sim_cache_valid_system_ids_.clear();
 
         // Detach the FluidSimulationSystem's raw pointer to fluid_objects
         // BEFORE clearing the vector. This prevents any stale-pointer access
