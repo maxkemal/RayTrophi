@@ -498,6 +498,7 @@ bool dragging = false;
 int last_mouse_x = 0;
 int last_mouse_y = 0;
 float current_nav_dist = 10.0f; // NEW: Dynamic distance for sensitivity scaling
+float current_nav_depth = 10.0f; // UNCAPPED focal depth for screen-correct panning (nav_dist is capped for zoom stability)
 float move_speed = 0.5f;
 HitRecord hit_record;
 Ray ray;
@@ -2865,13 +2866,17 @@ int main(int argc, char* argv[]) try {
                 }
                 
                 if (e.key.keysym.sym == SDLK_DELETE) {
-                    if (!ImGui::GetIO().WantCaptureKeyboard) {
+                    // Gate on WantTextInput (typing) not WantCaptureKeyboard (any focused
+                    // panel) so shortcuts work whenever the app is focused, only blocked
+                    // while editing a text field. SDL already delivers keys to the focused
+                    // window only, so "app focused" is implicit.
+                    if (!ImGui::GetIO().WantTextInput) {
                         ui.triggerDelete(ui_ctx);
                     }
                 }
 
                 if (e.key.keysym.sym == SDLK_h) {
-                    if (!ImGui::GetIO().WantCaptureKeyboard) {
+                    if (!ImGui::GetIO().WantTextInput) {
                         for (auto& obj : scene.world.objects) {
                             if (!obj) continue;
 
@@ -2903,6 +2908,93 @@ int main(int argc, char* argv[]) try {
                         ui.addViewportMessage("All objects visible", 2.0f, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
                     }
                 }
+
+                // ===================================================================
+                // NUMPAD VIEW SHORTCUTS (Blender standard) - viewport nav only
+                // ===================================================================
+                if (!ImGui::GetIO().WantTextInput && scene.camera) {
+                    const bool ctrl = (e.key.keysym.mod & KMOD_CTRL) != 0;
+                    Camera& cam = *scene.camera;
+
+                    // Sync camera to the interactive viewport backend immediately.
+                    // g_camera_dirty alone races with other consumers (see scene_ui_viewport.cpp).
+                    auto refreshNumpadView = [&]() {
+                        g_camera_dirty = true;
+                        start_render   = true;
+                        if (auto* vb = getRasterViewportBackend()) {
+                            vb->syncCamera(cam);
+                            vb->resetAccumulation();
+                        }
+                        ray_renderer.resetCPUAccumulation();
+                        ProjectManager::getInstance().markModified();
+                    };
+
+                    // Snap to a standard axis-aligned view (orthographic)
+                    auto snap_view = [&](Camera::StandardView sv, const char* label) {
+                        Vec3 pivot = cam.lookat;
+                        float dist = (cam.lookfrom - pivot).length();
+                        if (dist < 1e-3f) dist = 10.0f;
+                        cam.setStandardView(sv, pivot, dist, true);
+                        refreshNumpadView();
+                        ui.addViewportMessage(label, 1.2f, ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+                    };
+
+                    // Orbit around lookat by world-Y yaw and cam.u pitch (degrees)
+                    auto orbit_cam = [&](float dyaw_deg, float dpitch_deg) {
+                        Vec3 pivot = cam.lookat;
+                        Vec3 rel   = cam.lookfrom - pivot;
+                        auto rodrigues = [](Vec3 p, Vec3 axis, float ang) {
+                            axis = axis.normalize();
+                            const float c = cosf(ang), s = sinf(ang);
+                            return p * c + Vec3::cross(axis, p) * s + axis * (Vec3::dot(axis, p) * (1.0f - c));
+                        };
+                        const float to_rad = 3.14159265f / 180.0f;
+                        rel = rodrigues(rel, Vec3(0, 1, 0), dyaw_deg  * to_rad);
+                        rel = rodrigues(rel, cam.u,         dpitch_deg * to_rad);
+                        cam.lookfrom = pivot + rel;
+                        cam.update_camera_vectors();
+                        cam.markDirty();
+                        refreshNumpadView();
+                    };
+
+                    switch (e.key.keysym.scancode) {
+                        case SDL_SCANCODE_KP_1:
+                            snap_view(ctrl ? Camera::StandardView::Back  : Camera::StandardView::Front,
+                                      ctrl ? "Back"  : "Front"); break;
+                        case SDL_SCANCODE_KP_3:
+                            snap_view(ctrl ? Camera::StandardView::Left  : Camera::StandardView::Right,
+                                      ctrl ? "Left"  : "Right"); break;
+                        case SDL_SCANCODE_KP_7:
+                            snap_view(ctrl ? Camera::StandardView::Bottom : Camera::StandardView::Top,
+                                      ctrl ? "Bottom" : "Top"); break;
+                        case SDL_SCANCODE_KP_5: {
+                            if (cam.orthographic) {
+                                Vec3 pivot = cam.lookat;
+                                float dist = (cam.lookfrom - pivot).length();
+                                if (dist < 1e-3f) dist = 10.0f;
+                                cam.setStandardView(Camera::StandardView::Perspective, pivot, dist, false);
+                                ui.addViewportMessage("Perspective", 1.2f, ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+                            } else {
+                                Vec3 pivot = cam.lookat;
+                                float dist = (cam.lookfrom - pivot).length();
+                                if (dist < 1e-3f) dist = 10.0f;
+                                const float theta = (cam.vfov > 1.0f ? cam.vfov : 45.0f) * 3.14159265f / 180.0f;
+                                cam.ortho_height = 2.0f * dist * std::tan(theta * 0.5f);
+                                cam.orthographic = true;
+                                cam.update_camera_vectors();
+                                cam.markDirty();
+                                ui.addViewportMessage("Orthographic", 1.2f, ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+                            }
+                            refreshNumpadView();
+                            break;
+                        }
+                        case SDL_SCANCODE_KP_4: orbit_cam( 15.0f,  0.0f); break; // orbit left
+                        case SDL_SCANCODE_KP_6: orbit_cam(-15.0f,  0.0f); break; // orbit right
+                        case SDL_SCANCODE_KP_8: orbit_cam( 0.0f,  15.0f); break; // orbit up
+                        case SDL_SCANCODE_KP_2: orbit_cam( 0.0f, -15.0f); break; // orbit down
+                        default: break;
+                    }
+                }
             }
 
             if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_MIDDLE && !input_locked) {
@@ -2929,13 +3021,24 @@ int main(int argc, char* argv[]) try {
                     // if the camera was moved by presets or other logic since last drag.
                     Vec3 dir = (scene.camera->lookat - scene.camera->lookfrom).normalize();
                     pitch = asinf(std::clamp(dir.y, -0.999f, 0.999f)) * 180.0f / 3.1415926535f;
-                    yaw = atan2f(dir.z, dir.x) * 180.0f / 3.1415926535f;
+                    // Derive yaw from the camera RIGHT vector (cam.u), NOT from dir.
+                    // atan2(dir.z,dir.x) is undefined when looking straight up/down, so
+                    // the old code preserved the stale yaw there — but that stale yaw did
+                    // not match a Top/Bottom view's actual roll (up=(0,0,-1)), so the very
+                    // first rotation snapped the view ~90°. cam.u stays well-defined at the
+                    // pole and encodes the true azimuth: u = (-sin yaw, 0, cos yaw), hence
+                    // yaw = atan2(u.z, u.x) - 90°. This matches the old dir-based value away
+                    // from the pole, so non-pole behaviour is unchanged.
+                    yaw = atan2f(scene.camera->u.z, scene.camera->u.x) * 180.0f / 3.1415926535f - 90.0f;
 
                     if (scene.bvh->hit(r, 0.001f, 10000.0f, rec)) {
                         // Cap the nav distance to something sane for panning/sensitivity (prevents "extreme movement")
                         const float safe_focus_dist = std::max(rec.t, 0.05f);
                         current_nav_dist = std::min(safe_focus_dist, 500.0f);
-                        
+                        // Panning uses the TRUE (uncapped) hit distance so a camera far from
+                        // the scene pans at the right speed (the 500 cap made it crawl).
+                        current_nav_depth = safe_focus_dist;
+
                         // If not in Manual Focus mode (mode 0), sync pivot and focus_dist
                         if (ui.viewport_settings.focus_mode != 0) {
                             scene.camera->focus_dist = safe_focus_dist;
@@ -2947,6 +3050,11 @@ int main(int argc, char* argv[]) try {
                     } else {
                         // Fallback to existing focus distance if hitting background
                         current_nav_dist = std::min(scene.camera->focus_dist, 500.0f);
+                        // For panning over empty space, use whichever is larger: the focus
+                        // distance or the distance to the framed pivot — keeps a far camera
+                        // panning briskly instead of at the (possibly tiny) focus_dist.
+                        current_nav_depth = std::max(scene.camera->focus_dist,
+                            (float)(scene.camera->lookfrom - scene.camera->lookat).length());
                     }
                 }
             }
@@ -2975,24 +3083,34 @@ int main(int argc, char* argv[]) try {
                     bool is_shift_pressed = state[SDL_SCANCODE_LSHIFT] || state[SDL_SCANCODE_RSHIFT];
 
                     if (is_shift_pressed) {
-                        // Very strict clamp on panning logic
-                        // Distances above 100 units get heavily log-scaled
-                        float dist_factor = current_nav_dist;
-                        if (current_nav_dist > 100.0f) {
-                            dist_factor = 100.0f + std::log10(current_nav_dist - 99.0f) * 10.0f;
+                        // Screen-space-correct panning: the world point under the cursor stays
+                        // glued to the cursor at any distance. The old code log-compressed
+                        // distances >100 and capped the depth at 500, so panning far from the
+                        // scene crawled. pan-per-pixel = (visible world height at the focal
+                        // depth) / window_height, applied equally to both axes.
+                        int pan_w = 0, pan_h = 0;
+                        SDL_GetWindowSize(window, &pan_w, &pan_h);
+                        if (pan_h < 1) pan_h = 1;
+
+                        float pan_per_pixel;
+                        if (scene.camera->orthographic) {
+                            pan_per_pixel = scene.camera->ortho_height / (float)pan_h;
+                        } else {
+                            const float vfov_rad = scene.camera->vfov * 3.14159265f / 180.0f;
+                            pan_per_pixel = (2.0f * tanf(vfov_rad * 0.5f) * current_nav_depth) / (float)pan_h;
                         }
-                        
-                        // Extremely small base speeds for panning
-                        float pan_speed = (0.0005f + render_settings.mouse_sensitivity * 0.001f) * dist_factor;
-                        
-                        // Enforce a hard cap of 0.5 units per mouse pixel moved, regardless of distance
-                        pan_speed = std::min(pan_speed, 0.5f);
-                        
-                        // Additional clamp: if dx or dy are somehow massive (e.g. framerate drops), clamp their values
+                        // Screen-correct gives 1:1 cursor tracking, which felt sluggish next
+                        // to the rotate/WASD nav (and slower than the old near-distance pan).
+                        // Add a gain so panning covers ground briskly: ×6 puts the default
+                        // sens (0.4) at ~2.4× tracking; the slider scales it further.
+                        pan_per_pixel *= render_settings.mouse_sensitivity * 6.0f;
+
+                        // Clamp per-event pixel deltas so a framerate hitch can't fling the camera.
                         int safe_dx = std::clamp(dx, -50, 50);
                         int safe_dy = std::clamp(dy, -50, 50);
-                        
-                        Vec3 offset = scene.camera->u * -(float)safe_dx * pan_speed + scene.camera->v * (float)safe_dy * pan_speed;
+
+                        Vec3 offset = scene.camera->u * -(float)safe_dx * pan_per_pixel
+                                    + scene.camera->v *  (float)safe_dy * pan_per_pixel;
                         scene.camera->lookfrom += offset;
                         scene.camera->lookat += offset;
                         scene.camera->update_camera_vectors();
@@ -3021,9 +3139,10 @@ int main(int argc, char* argv[]) try {
                             direction.y = sinf(rad_pitch);
                             direction.z = sinf(rad_yaw) * cosf(rad_pitch);
                             scene.camera->vup = Vec3(0.0f, 1.0f, 0.0f);
-                            // Free rotation leaves an aligned orthographic standard view and
-                            // returns to a normal perspective camera.
-                            scene.camera->orthographic = false;
+                            // Free rotation leaves an ALIGNED standard view (so the grid plane
+                            // falls back to the ground), but keeps the current PROJECTION.
+                            // Rotating in ortho stays ortho — switching to perspective is left
+                            // to the user (numpad 5 / ViewCube). orthographic is untouched.
                             scene.camera->standard_view = Camera::StandardView::Perspective;
                             scene.camera->setLookDirection(direction.normalize());
                         }
@@ -3729,7 +3848,7 @@ int main(int argc, char* argv[]) try {
         bool keyboard_locked = ui_ctx.render_settings.animation_render_locked || 
                               (rendering_in_progress && ui_ctx.is_animation_mode);
 
-        if (mouse_control_enabled && scene.camera && !keyboard_locked && !ImGui::GetIO().WantCaptureKeyboard) {
+        if (mouse_control_enabled && scene.camera && !keyboard_locked && !ImGui::GetIO().WantTextInput) {
 
             Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
             Vec3 right = Vec3::cross(forward, scene.camera->vup).normalize();

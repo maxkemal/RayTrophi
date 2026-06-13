@@ -1,4 +1,4 @@
-// ===============================================================================
+﻿// ===============================================================================
 // SCENE UI - GIZMOS & TRANSFORM
 // ===============================================================================
 // This file handles 3D Gizmos (Move/Rotate/Scale), Bounding Boxes, and overlays.
@@ -2308,21 +2308,7 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
                 color = is_primary ? IM_COL32(255, 128, 0, 255) : IM_COL32(200, 100, 0, 180);
             }
             else if (item.type == SelectableType::ForceField && item.force_field) {
-                // Determine bounds based on shape
-                float r = item.force_field->falloff_radius;
-                Vec3 p = item.force_field->position;
-                
-                if (item.force_field->shape == Physics::ForceFieldShape::Infinite) {
-                    // Just a small box at origin if infinite
-                    bb_min = p - Vec3(0.5f);
-                    bb_max = p + Vec3(0.5f);
-                } else {
-                    bb_min = p - Vec3(r);
-                    bb_max = p + Vec3(r);
-                }
-                has_bounds = true;
-                // Purple/Pink for Force Fields
-                color = is_primary ? IM_COL32(255, 0, 255, 255) : IM_COL32(200, 0, 200, 180);
+                has_bounds = false; // Disable generic bbox drawing for force fields
             }
 
             bool drew_outline = false;
@@ -2415,49 +2401,11 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         if (!gpu_outline_params.nodeNames.empty()) {
             gpu_outline_params.enabled = true;
             gpu_outline_backend->setSelectionOutlineParams(gpu_outline_params);
-        } else {
+        }
+        else {
             gpu_outline_backend->clearSelectionOutline();
         }
     }
-    // Force Field Picking Logic (Similar to Gas)
-    for (const auto& ff : ctx.scene.force_field_manager.force_fields) {
-        if (!ff || !ff->enabled) continue;
-        
-        float r = (ff->shape == Physics::ForceFieldShape::Infinite) ? 0.5f : ff->falloff_radius;
-        Vec3 bounds_min = ff->position - Vec3(r);
-        Vec3 bounds_max = ff->position + Vec3(r);
-        
-        // Ray-AABB Intersection for Picking
-        float mouse_x = io.MousePos.x;
-        float mouse_y = io.MousePos.y;
-        float ndc_x = (mouse_x / screen_w) * 2.0f - 1.0f;
-        float ndc_y = 1.0f - (mouse_y / screen_h) * 2.0f;
-        
-        float view_h = tan_half_fov;
-        float view_w = view_h * aspect_ratio;
-        Vec3 ray_dir_cam(ndc_x * view_w, ndc_y * view_h, -1.0f);
-        ray_dir_cam = ray_dir_cam.normalize();
-        Vec3 ray_dir_world = (cam_right * ray_dir_cam.x + cam_up * ray_dir_cam.y + cam_forward * ray_dir_cam.z).normalize();
-        Vec3 inv_dir(1.0f / ray_dir_world.x, 1.0f / ray_dir_world.y, 1.0f / ray_dir_world.z);
-        
-        float t1 = (bounds_min.x - cam.lookfrom.x) * inv_dir.x;
-        float t2 = (bounds_max.x - cam.lookfrom.x) * inv_dir.x;
-        float t3 = (bounds_min.y - cam.lookfrom.y) * inv_dir.y;
-        float t4 = (bounds_max.y - cam.lookfrom.y) * inv_dir.y;
-        float t5 = (bounds_min.z - cam.lookfrom.z) * inv_dir.z;
-        float t6 = (bounds_max.z - cam.lookfrom.z) * inv_dir.z;
-        
-        float tmin = std::max(std::max(std::min(t1, t2), std::min(t3, t4)), std::min(t5, t6));
-        float tmax = std::min(std::min(std::max(t1, t2), std::max(t3, t4)), std::max(t5, t6));
-        
-        if (tmax >= 0 && tmin <= tmax) {
-             if (ImGui::IsMouseClicked(0) && !ImGuizmo::IsOver()) {
-                ctx.selection.selectForceField(ff, -1, ff->name);
-                ForceFieldUI::selected_force_field = ff;
-            }
-        }
-    }
-    // VDB debug bounds removed (User Request)
 }
 
 void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
@@ -3261,8 +3209,9 @@ mesh_edit_changed_confirmed:
 
     // Keyboard Shortcuts for Transform Mode
     // �������������������������������������������������������������������������
-    // Only process when viewport has focus (not UI panels)
-    if (sel.hasSelection() && !ImGui::GetIO().WantCaptureKeyboard) {
+    // Engage whenever the app is focused; only block while typing in a text field
+    // (WantTextInput), not whenever any UI panel has focus (WantCaptureKeyboard).
+    if (sel.hasSelection() && !ImGui::GetIO().WantTextInput) {
         if (ImGui::IsKeyPressed(ImGuiKey_G)) {
             sel.transform_mode = TransformMode::Translate;
         }
@@ -4543,24 +4492,116 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
         draw_list->AddText(ImVec2(screen_pos.x + size + 5, screen_pos.y - 8), color, label);
 
         if (is_selected) {
-            // Draw Radius for non-infinite
+            // Draw volumetric boundaries based on shape
             if (ff->shape != Physics::ForceFieldShape::Infinite) {
-                float r = ff->falloff_radius;
-                for (int plane = 0; plane < 3; ++plane) {
-                    const int segs = 32;
-                    ImVec2 last_p;
-                    for (int i = 0; i <= segs; ++i) {
-                        float a = i * (6.28318f / segs);
-                        Vec3 p3d;
-                        if (plane == 0) p3d = ff->position + Vec3(cosf(a)*r, sinf(a)*r, 0);
-                        else if (plane == 1) p3d = ff->position + Vec3(cosf(a)*r, 0, sinf(a)*r);
-                        else p3d = ff->position + Vec3(0, cosf(a)*r, sinf(a)*r);
-                        
-                        ImVec2 p_screen = Project(p3d);
-                        if (i > 0 && p_screen.x > -5000 && last_p.x > -5000) {
-                            draw_list->AddLine(last_p, p_screen, IM_COL32(255, 0, 255, 80), 1.0f);
+                // Construct full TRS matrix for the force field
+                Matrix4x4 local_to_world = Matrix4x4::translation(ff->position) * 
+                                           Matrix4x4::rotationX(ff->rotation.x * 0.0174533f) * 
+                                           Matrix4x4::rotationY(ff->rotation.y * 0.0174533f) * 
+                                           Matrix4x4::rotationZ(ff->rotation.z * 0.0174533f) * 
+                                           Matrix4x4::scaling(ff->scale);
+
+                auto TransformAndProject = [&](const Vec3& local_pos) -> ImVec2 {
+                    Vec3 world_pos = local_to_world.transform_point(local_pos);
+                    return Project(world_pos);
+                };
+
+                const ImU32 boundary_color = IM_COL32(255, 0, 255, 120);
+                const float thickness = 1.5f;
+
+                if (ff->shape == Physics::ForceFieldShape::Sphere) {
+                    float r = ff->falloff_radius;
+                    for (int plane = 0; plane < 3; ++plane) {
+                        const int segs = 32;
+                        ImVec2 last_p;
+                        for (int i = 0; i <= segs; ++i) {
+                            float a = i * (6.2831853f / segs);
+                            Vec3 local_p;
+                            if (plane == 0)      local_p = Vec3(cosf(a)*r, sinf(a)*r, 0.0f);
+                            else if (plane == 1) local_p = Vec3(cosf(a)*r, 0.0f, sinf(a)*r);
+                            else                 local_p = Vec3(0.0f, cosf(a)*r, sinf(a)*r);
+                            
+                            ImVec2 p_screen = TransformAndProject(local_p);
+                            if (i > 0 && p_screen.x > -5000 && last_p.x > -5000) {
+                                draw_list->AddLine(last_p, p_screen, boundary_color, thickness);
+                            }
+                            last_p = p_screen;
                         }
-                        last_p = p_screen;
+                    }
+                }
+                else if (ff->shape == Physics::ForceFieldShape::Box) {
+                    float r = ff->falloff_radius;
+                    Vec3 local_corners[8] = {
+                        Vec3(-r, -r, -r), Vec3( r, -r, -r),
+                        Vec3( r,  r, -r), Vec3(-r,  r, -r),
+                        Vec3(-r, -r,  r), Vec3( r, -r,  r),
+                        Vec3( r,  r,  r), Vec3(-r,  r,  r)
+                    };
+                    const int edges[12][2] = {
+                        {0, 1}, {1, 2}, {2, 3}, {3, 0}, // back face
+                        {4, 5}, {5, 6}, {6, 7}, {7, 4}, // front face
+                        {0, 4}, {1, 5}, {2, 6}, {3, 7}  // connections
+                    };
+                    for (const auto& edge : edges) {
+                        ImVec2 a = TransformAndProject(local_corners[edge[0]]);
+                        ImVec2 b = TransformAndProject(local_corners[edge[1]]);
+                        if (a.x > -5000 && b.x > -5000) {
+                            draw_list->AddLine(a, b, boundary_color, thickness);
+                        }
+                    }
+                }
+                else if (ff->shape == Physics::ForceFieldShape::Cylinder) {
+                    float r = ff->falloff_radius;
+                    const int segs = 32;
+                    ImVec2 last_p_top, last_p_bottom;
+                    for (int i = 0; i <= segs; ++i) {
+                        float a = i * (6.2831853f / segs);
+                        Vec3 local_top(cosf(a)*r, r, sinf(a)*r);
+                        Vec3 local_bottom(cosf(a)*r, -r, sinf(a)*r);
+                        
+                        ImVec2 p_top = TransformAndProject(local_top);
+                        ImVec2 p_bottom = TransformAndProject(local_bottom);
+                        
+                        if (i > 0) {
+                            if (p_top.x > -5000 && last_p_top.x > -5000) {
+                                draw_list->AddLine(last_p_top, p_top, boundary_color, thickness);
+                            }
+                            if (p_bottom.x > -5000 && last_p_bottom.x > -5000) {
+                                draw_list->AddLine(last_p_bottom, p_bottom, boundary_color, thickness);
+                            }
+                        }
+                        // Draw 4 connecting lines
+                        if (i % (segs / 4) == 0) {
+                            if (p_top.x > -5000 && p_bottom.x > -5000) {
+                                draw_list->AddLine(p_top, p_bottom, boundary_color, thickness);
+                            }
+                        }
+                        last_p_top = p_top;
+                        last_p_bottom = p_bottom;
+                    }
+                }
+                else if (ff->shape == Physics::ForceFieldShape::Cone) {
+                    float r = ff->falloff_radius;
+                    const int segs = 32;
+                    ImVec2 last_p_base;
+                    ImVec2 tip = TransformAndProject(Vec3(0.0f, 0.0f, 0.0f));
+                    
+                    for (int i = 0; i <= segs; ++i) {
+                        float a = i * (6.2831853f / segs);
+                        Vec3 local_base(cosf(a)*r, r, sinf(a)*r);
+                        ImVec2 p_base = TransformAndProject(local_base);
+                        
+                        if (i > 0 && p_base.x > -5000 && last_p_base.x > -5000) {
+                            draw_list->AddLine(last_p_base, p_base, boundary_color, thickness);
+                        }
+                        
+                        // Draw 4 connecting lines from tip to base
+                        if (i % (segs / 4) == 0) {
+                            if (tip.x > -5000 && p_base.x > -5000) {
+                                draw_list->AddLine(tip, p_base, boundary_color, thickness);
+                            }
+                        }
+                        last_p_base = p_base;
                     }
                 }
             }

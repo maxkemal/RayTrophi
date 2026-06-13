@@ -133,9 +133,10 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     // ─────────────────────────────────────────────────────────────────────────
     // DELETE LOGIC (Keyboard Shortcut)
     // ─────────────────────────────────────────────────────────────────────────
-    // Only process when viewport has focus (not UI panels)
+    // Engage whenever the app is focused; only block while typing in a text field
+    // (WantTextInput) rather than whenever any UI panel has focus.
     if ((ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) &&
-        sel.hasSelection() && !ImGui::GetIO().WantCaptureKeyboard) {
+        sel.hasSelection() && !ImGui::GetIO().WantTextInput) {
         triggerDelete(ctx);
     }
 

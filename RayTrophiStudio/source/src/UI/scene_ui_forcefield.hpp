@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -32,6 +32,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <cstdint>
@@ -187,7 +188,7 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
     // soft/cloth bodies are baked together into <project>.simcache. Shown in both
     // the Domains panel and the Bodies panel so a cloth-only scene (no fluid) can
     // still bake.
-    auto drawSimBakeControls = [&]() {
+    auto drawSimBakeControls = [&](bool soft_only = false) {
         const std::string proj_path = ProjectManager::getInstance().getCurrentFilePath();
         const bool has_project = !proj_path.empty();
         const bool has_systems = !scene.particle_systems.empty() || !scene.rigid_bodies.empty();
@@ -239,10 +240,12 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                     : "Save the project first — the cache is written next to the project file.");
             }
         }
+
         // RAM cache nudge: interactive preview keeps every frame in RAM, which balloons
         // with crowded/long sims. When it grows large, recommend baking to disk (then
         // scrubbing streams from disk and the RAM frame cache is bypassed).
-        if (!scene.hasValidSimDiskCache()) {
+        const bool active = soft_only ? scene.hasValidSoftSimDiskCache() : scene.hasValidParticleSimDiskCache();
+        if (!active && !scene.hasValidSimDiskCache()) {
             const double cache_mb = scene.estimateSimCacheBytes() / (1024.0 * 1024.0);
             if (cache_mb >= 1.0) {
                 const double total_ram_mb = queryTotalPhysicalRamBytes() / (1024.0 * 1024.0);
@@ -265,16 +268,23 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Interactive preview holds every frame in RAM and grows with\n"
                                       "crowded/long sims. Bake to disk (above) — scrubbing then streams\n"
-                                      "from disk and the RAM frame cache is freed automatically.\n"
+                                      "from disk and the RAM frame cache is bypassed.\n"
                                       "(Estimate covers soft/cloth + particles + rigid; excludes fluid grid.)");
             }
         }
-        if (!baking && scene.hasValidSimDiskCache()) {
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Bake cache active (scrub reads from disk).");
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Clear Bake##SimPointBakeClear")) {
-                RayTrophiSim::SimCache::clearCache(scene.simDiskCacheDir());
-                scene.clearSimDiskCacheBinding();
+        if (!baking && active) {
+            if (soft_only) {
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Soft body cache active.");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Clear Soft Cache##SimPointBakeClearSoft")) {
+                    scene.clearSoftSimDiskCache();
+                }
+            } else {
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Fluid cache active.");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Clear Fluid Cache##SimPointBakeClearFluid")) {
+                    scene.clearParticleSimDiskCache();
+                }
             }
         }
     };
@@ -841,52 +851,8 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         ImGui::Checkbox("Visible", &fluid->visible);
         ImGui::Checkbox("Enabled", &fluid->enabled);
 
-        ImGui::SeparatorText("VDB Cache Mode");
-        if (ImGui::Checkbox("Use Baked VDB Sequence##FluidCache", &fluid->use_vdb_cache)) {
-            ui_ctx.start_render = true;
-        }
-        if (fluid->use_vdb_cache) {
-            ImGui::Indent();
-            char cache_path_buf[256];
-            strncpy_s(cache_path_buf, fluid->vdb_cache_pattern.c_str(), sizeof(cache_path_buf) - 1);
-            if (ImGui::InputText("Cache Pattern##FluidCachePattern", cache_path_buf, sizeof(cache_path_buf))) {
-                fluid->vdb_cache_pattern = cache_path_buf;
-                ui_ctx.start_render = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Browse##FluidCacheBrowse")) {
-                std::string path = SceneUI::openFileDialogW(L"VDB Files\0*.vdb;*.nvdb\0All Files\0*.*\0", "", "");
-                if (!path.empty()) {
-                    std::filesystem::path fpath(path);
-                    std::string stem = fpath.stem().string();
-                    std::string directory = fpath.parent_path().string();
-                    std::string ext = fpath.extension().string();
-                    
-                    size_t last_digit = std::string::npos;
-                    size_t first_digit = std::string::npos;
-                    for (size_t i = stem.length(); i > 0; --i) {
-                        if (isdigit(stem[i-1])) {
-                            if (last_digit == std::string::npos) last_digit = i-1;
-                            first_digit = i-1;
-                        } else if (last_digit != std::string::npos) {
-                            break; 
-                        }
-                    }
-                    if (last_digit != std::string::npos) {
-                        int num_len = (int)(last_digit - first_digit + 1);
-                        fluid->vdb_cache_digits = num_len;
-                        std::string prefix = stem.substr(0, first_digit);
-                        std::string suffix = stem.substr(last_digit + 1);
-                        std::string placeholder(num_len, '#');
-                        fluid->vdb_cache_pattern = (std::filesystem::path(directory) / (prefix + placeholder + suffix + ext)).string();
-                    } else {
-                        fluid->vdb_cache_pattern = path;
-                    }
-                    ui_ctx.start_render = true;
-                }
-            }
-            ImGui::Unindent();
-        }
+        ImGui::SeparatorText("Disk Bake");
+        drawSimBakeControls();
 
         // ── Render route -----------------------------------------------------
         // Volume     : APIC density splatted to NanoVDB (fog look — default).
@@ -1154,7 +1120,7 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             ImGui::Columns(1);
         }
         // ── Export & Baking ──────────────────────────────────────────────────
-        if (UIWidgets::BeginSection("Export & Baking##FluidBake", ImVec4(1.0f, 0.5f, 0.2f, 1.0f), false)) {
+        if (false && UIWidgets::BeginSection("Export & Baking##FluidBake", ImVec4(1.0f, 0.5f, 0.2f, 1.0f), false)) {
             static char export_dir[256] = "";
             static bool export_success = false;
             static bool export_error = false;
@@ -1269,6 +1235,44 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", export_message.c_str());
             }
             
+            UIWidgets::EndSection();
+        }
+
+        if (UIWidgets::BeginSection("VDB Export##FluidObjectVDBExport", ImVec4(0.35f, 0.65f, 1.0f, 1.0f), false)) {
+            static char vdb_export_dir[512] = "";
+            static bool vdb_export_success = false;
+            static bool vdb_export_error = false;
+            static std::string vdb_export_message;
+
+            ImGui::InputText("Directory##FluidObjectVDBDir", vdb_export_dir, sizeof(vdb_export_dir));
+            ImGui::SameLine();
+            if (ImGui::Button("Browse##FluidObjectVDBBrowse")) {
+                const std::string path = SceneUI::selectFolderDialogW(L"Select VDB Export Directory");
+                if (!path.empty()) {
+                    std::snprintf(vdb_export_dir, sizeof(vdb_export_dir), "%s", path.c_str());
+                }
+            }
+
+            const bool can_export_vdb = vdb_export_dir[0] != '\0';
+            if (!can_export_vdb) ImGui::BeginDisabled();
+            if (ImGui::Button("Export Current Frame (.vdb)##FluidObjectVDBFrame", ImVec2(-1, 28))) {
+                std::error_code ec;
+                std::filesystem::create_directories(vdb_export_dir, ec);
+                const int current_frame = timeline ? timeline->getCurrentFrame() : 0;
+                const std::string path =
+                    (std::filesystem::path(vdb_export_dir) /
+                     (fluid->name + "_" + std::to_string(current_frame) + ".vdb")).string();
+                const bool result = fluid->exportToVDB(path);
+                vdb_export_success = result;
+                vdb_export_error = !result;
+                vdb_export_message = result ? ("Saved: " + path) : "Export failed";
+            }
+            if (!can_export_vdb) ImGui::EndDisabled();
+            if (vdb_export_success) {
+                ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "%s", vdb_export_message.c_str());
+            } else if (vdb_export_error) {
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", vdb_export_message.c_str());
+            }
             UIWidgets::EndSection();
         }
 
@@ -2008,46 +2012,6 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("How fast the turbulence field animates over time.");
                         }
                     }
-
-                    // Export the current live frame to an OpenVDB file (density /
-                    // temperature / fuel / flame, channel-aware) for DCC interchange.
-                    if (ImGui::CollapsingHeader("VDB Export")) {
-                        ImGui::Spacing();
-                        static char gas_vdb_export_dir[512] = "";
-                        static std::string gas_vdb_export_message;
-                        static bool gas_vdb_export_ok = false;
-                        ImGui::InputText("Export Folder", gas_vdb_export_dir, sizeof(gas_vdb_export_dir));
-                        ImGui::SameLine();
-                        if (ImGui::Button("Browse##GasVdbExport")) {
-                            std::string path = SceneUI::selectFolderDialogW(L"Select VDB Export Directory");
-                            if (!path.empty()) {
-                                strncpy_s(gas_vdb_export_dir, path.c_str(), sizeof(gas_vdb_export_dir) - 1);
-                            }
-                        }
-                        if (ImGui::Button("Export Current Frame (.vdb)", ImVec2(-1, 0))) {
-                            if (strlen(gas_vdb_export_dir) == 0) {
-                                gas_vdb_export_ok = false;
-                                gas_vdb_export_message = "Please choose an export folder first.";
-                            } else {
-                                std::string full_path = std::string(gas_vdb_export_dir) + "/" +
-                                                        domain.name + ".vdb";
-                                gas_vdb_export_ok = particles->exportGridDomainToVDB(
-                                    static_cast<std::size_t>(selected_domain_index), full_path);
-                                gas_vdb_export_message = gas_vdb_export_ok
-                                    ? ("Saved: " + full_path)
-                                    : "Export failed (empty/invalid domain or I/O error).";
-                            }
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Writes the domain's current voxel fields to a single .vdb.\n"
-                                              "Run the simulation to the desired frame first.");
-                        }
-                        if (!gas_vdb_export_message.empty()) {
-                            ImGui::TextColored(gas_vdb_export_ok ? ImVec4(0.4f, 1.0f, 0.4f, 1.0f)
-                                                                 : ImVec4(1.0f, 0.5f, 0.5f, 1.0f),
-                                               "%s", gas_vdb_export_message.c_str());
-                        }
-                    }
                 } else {
                     auto& fp = domain.fluid_params;
                     // Fluid Seeding & Limits
@@ -2574,64 +2538,6 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                         ui_ctx.start_render = true;
                     }
                     }
-
-                    // VDB Export
-                    if (ImGui::CollapsingHeader("OpenVDB File Sequence Exporter", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        ImGui::Spacing();
-
-                    static char vdb_dir[2048] = "";
-                    static char vdb_base[128] = "domain_gas";
-                    static int vdb_start = 0;
-                    static int vdb_end = 100;
-                    ImGui::InputText("Export Directory Path##VDBDir", vdb_dir, sizeof(vdb_dir));
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Local disk path where OpenVDB cache frames will be written.");
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Browse...##VDBDirBrowse")) {
-                        const std::string selected_dir = SceneUI::selectFolderDialogW(L"Select VDB Export Directory");
-                        if (!selected_dir.empty()) {
-                            std::snprintf(vdb_dir, sizeof(vdb_dir), "%s", selected_dir.c_str());
-                        }
-                    }
-                    ImGui::InputText("Sequence Prefix BaseName##VDBBase", vdb_base, sizeof(vdb_base));
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Filename prefix (e.g. 'smoke' outputs smoke_0001.vdb).");
-                    }
-                    
-                    const bool can_export = scene.active_particle_system_index >= 0 &&
-                                             selected_domain_index >= 0 && vdb_dir[0] != '\0';
-                    
-                    if (!can_export) ImGui::BeginDisabled();
-                    if (ImGui::Button("Export Current Frame Only as VDB##VDBFrame", ImVec2(-1, 26))) {
-                        const std::string path = std::string(vdb_dir) + "/" + std::string(vdb_base) + ".vdb";
-                        scene.exportDomainVDB(static_cast<std::size_t>(scene.active_particle_system_index),
-                                              static_cast<std::size_t>(selected_domain_index), path);
-                    }
-                    if (ImGui::IsItemHovered() && can_export) {
-                        ImGui::SetTooltip("Writes the current simulation frame to a single static .vdb file.");
-                    }
-
-                    ImGui::DragInt("Bake Range Start Frame##VDBStart", &vdb_start, 1.0f, 0, 100000);
-                    ImGui::DragInt("Bake Range End Frame##VDBEnd", &vdb_end, 1.0f, 0, 100000);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Frame range limits for animated sequence baking.");
-                    }
-
-                    if (ImGui::Button("Bake Sequence to Disk (.vdb sequence)##VDBSeq", ImVec2(-1, 26))) {
-                        scene.exportDomainVDBSequence(static_cast<std::size_t>(scene.active_particle_system_index),
-                                                      static_cast<std::size_t>(selected_domain_index),
-                                                      std::string(vdb_dir), std::string(vdb_base),
-                                                      vdb_start, vdb_end, 24.0f);
-                    }
-                    if (ImGui::IsItemHovered() && can_export) {
-                        ImGui::SetTooltip("Sequentially steps the solver and exports OpenVDB files. Note: This blocking process temporarily freezes the UI during disk writes.");
-                    }
-                    if (!can_export) ImGui::EndDisabled();
-                    
-                    ImGui::Spacing();
-                    ImGui::TextDisabled("Note: Sequence baking runs from frame 0 to end frame\n(Blocks the main thread during execution).");
-                    }
                 } else {
                     // Fluid Render settings group
                     if (ImGui::CollapsingHeader("Liquid Visualization & Shading", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -3018,12 +2924,84 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             }
         }
 
+        {
+            if (ImGui::CollapsingHeader("VDB Export##DomainVDBExport", ImGuiTreeNodeFlags_DefaultOpen)) {
+                static char vdb_dir[2048] = "";
+                static char vdb_base[128] = "vdb_export";
+                static int vdb_start = 0;
+                static int vdb_end = 100;
+                static bool vdb_range_initialized = false;
+                static std::string vdb_export_message;
+
+                ImGui::Text("Export Directory:");
+                float avail_w = ImGui::GetContentRegionAvail().x;
+                float btn_w = ImGui::CalcTextSize("Browse").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+                float input_w = avail_w - btn_w - ImGui::GetStyle().ItemSpacing.x;
+                ImGui::SetNextItemWidth(input_w);
+                ImGui::InputText("##FluidDomainVDBDir", vdb_dir, sizeof(vdb_dir));
+                ImGui::SameLine();
+                if (ImGui::Button("Browse##FluidDomainVDBBrowse", ImVec2(btn_w, 0))) {
+                    const std::string selected_dir = SceneUI::selectFolderDialogW(L"Select VDB Export Directory");
+                    if (!selected_dir.empty()) {
+                        std::snprintf(vdb_dir, sizeof(vdb_dir), "%s", selected_dir.c_str());
+                    }
+                }
+                
+                ImGui::SetNextItemWidth(avail_w * 0.6f);
+                ImGui::InputText("Base Name##FluidDomainVDBBase", vdb_base, sizeof(vdb_base));
+
+                if (timeline && !vdb_range_initialized) {
+                    vdb_start = std::min(timeline->getStartFrame(), timeline->getEndFrame());
+                    vdb_end = std::max(timeline->getStartFrame(), timeline->getEndFrame());
+                    vdb_range_initialized = true;
+                }
+                ImGui::DragInt("Start Frame##FluidDomainVDBStart", &vdb_start, 1.0f, 0, 100000);
+                ImGui::DragInt("End Frame##FluidDomainVDBEnd", &vdb_end, 1.0f, 0, 100000);
+                if (vdb_end < vdb_start) vdb_end = vdb_start;
+
+                const bool can_export = scene.active_particle_system_index >= 0 &&
+                                        selected_domain_index >= 0 &&
+                                        vdb_dir[0] != '\0' &&
+                                        vdb_base[0] != '\0';
+                if (!can_export) ImGui::BeginDisabled();
+                if (ImGui::Button("Export Current Frame (.vdb)##FluidDomainVDBFrame", ImVec2(-1, 26))) {
+                    std::error_code ec;
+                    std::filesystem::create_directories(vdb_dir, ec);
+                    const int current_frame = timeline ? timeline->getCurrentFrame() : 0;
+                    const std::string filename = std::string(vdb_base) + "_" + std::to_string(current_frame) + ".vdb";
+                    const std::string path = (std::filesystem::path(vdb_dir) / filename).string();
+                    const bool ok = scene.exportDomainVDB(static_cast<std::size_t>(scene.active_particle_system_index),
+                                                          static_cast<std::size_t>(selected_domain_index),
+                                                          path);
+                    vdb_export_message = ok ? ("Saved: " + path) : "Export failed";
+                }
+                if (ImGui::Button("Export Sequence (.vdb)##FluidDomainVDBSeq", ImVec2(-1, 26))) {
+                    std::error_code ec;
+                    std::filesystem::create_directories(vdb_dir, ec);
+                    const float fps = static_cast<float>(std::max(1, ui_ctx.render_settings.animation_fps));
+                    const int written = scene.exportDomainVDBSequence(
+                        static_cast<std::size_t>(scene.active_particle_system_index),
+                        static_cast<std::size_t>(selected_domain_index),
+                        std::string(vdb_dir),
+                        std::string(vdb_base),
+                        vdb_start,
+                        vdb_end,
+                        fps);
+                    vdb_export_message = "Wrote " + std::to_string(written) + " VDB frame(s)";
+                }
+                if (!can_export) ImGui::EndDisabled();
+                if (!vdb_export_message.empty()) {
+                    ImGui::TextDisabled("%s", vdb_export_message.c_str());
+                }
+            }
+        }
+
         // Legacy standalone-FluidObject VDB cache UI. The grid-domain workflow
         // does NOT use FluidObjects (bake is the SimCache path below), so this is
         // muted: it never auto-creates a "Fluid 1" anymore and only shows if a
         // FluidObject already exists in the scene (old projects). Grid-domain-only
         // users never see it.
-        if (is_fluid_domain && !scene.fluid_objects.empty()) {
+        if (false && is_fluid_domain && !scene.fluid_objects.empty()) {
             ImGui::Spacing();
             if (ImGui::CollapsingHeader("Fluid VDB Cache & Threaded Baking##FluidCacheBakeHeader", ImGuiTreeNodeFlags_DefaultOpen)) {
                 if (scene.active_fluid_object_index < 0 ||
@@ -3834,7 +3812,7 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::TextDisabled("Simulation Bake (disk cache)");
-        drawSimBakeControls();
+        drawSimBakeControls(true);
     };
 
     auto drawColliderControls = [&]() {
@@ -4343,6 +4321,7 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
     }
     
     auto& field = selected_force_field;
+    bool ff_changed = false;
     
     if (!ImGui::BeginTabBar("##ForceFieldAuthoringTabs", ImGuiTabBarFlags_FittingPolicyResizeDown)) {
         return;
@@ -4356,9 +4335,12 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
     strncpy_s(name_buf, field->name.c_str(), sizeof(name_buf) - 1);
     if (ImGui::InputText("Field Name##FFName", name_buf, sizeof(name_buf))) {
         field->name = name_buf;
+        if (ui_ctx.selection.selected.type == SelectableType::ForceField && ui_ctx.selection.selected.force_field == field) {
+            ui_ctx.selection.selected.name = field->name;
+        }
     }
     
-    ImGui::Checkbox("Field Enabled##FFActive", &field->enabled);
+    if (ImGui::Checkbox("Field Enabled##FFActive", &field->enabled)) ff_changed = true;
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Enables/disables the physical forces generated by this field.");
     }
@@ -4373,16 +4355,28 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
     float pos[3] = { field->position.x, field->position.y, field->position.z };
     if (ImGui::DragFloat3("Position##FFPos", pos, 0.05f, -10000.0f, 10000.0f, "%.2f")) {
         field->position = Vec3(pos[0], pos[1], pos[2]);
+        if (ui_ctx.selection.selected.type == SelectableType::ForceField && ui_ctx.selection.selected.force_field == field) {
+            ui_ctx.selection.selected.position = field->position;
+        }
+        ff_changed = true;
     }
     
     float rot[3] = { field->rotation.x, field->rotation.y, field->rotation.z };
     if (ImGui::DragFloat3("Rotation##FFRot", rot, 1.0f, -360.0f, 360.0f, "%.1f")) {
         field->rotation = Vec3(rot[0], rot[1], rot[2]);
+        if (ui_ctx.selection.selected.type == SelectableType::ForceField && ui_ctx.selection.selected.force_field == field) {
+            ui_ctx.selection.selected.rotation = field->rotation;
+        }
+        ff_changed = true;
     }
     
     float scale[3] = { field->scale.x, field->scale.y, field->scale.z };
     if (ImGui::DragFloat3("Scale##FFScale", scale, 0.05f, 0.001f, 10000.0f, "%.3f")) {
         field->scale = Vec3(scale[0], scale[1], scale[2]);
+        if (ui_ctx.selection.selected.type == SelectableType::ForceField && ui_ctx.selection.selected.force_field == field) {
+            ui_ctx.selection.selected.scale = field->scale;
+        }
+        ff_changed = true;
     }
         ImGui::EndTabItem();
     }
@@ -4397,18 +4391,20 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
     int current_type = static_cast<int>(field->type);
     if (ImGui::Combo("Force Type##FFType", &current_type, types, IM_ARRAYSIZE(types))) {
         field->type = static_cast<Physics::ForceFieldType>(current_type);
+        ff_changed = true;
     }
     
     const char* shapes[] = { "Infinite (Global)", "Sphere (Radial)", "Box (Oriented)", "Cylinder", "Cone" };
     int current_shape = static_cast<int>(field->shape);
     if (ImGui::Combo("Force Bounds Shape##FFShape", &current_shape, shapes, IM_ARRAYSIZE(shapes))) {
         field->shape = static_cast<Physics::ForceFieldShape>(current_shape);
+        ff_changed = true;
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Limits the volumetric boundary shape within which this force field is active.");
     }
 
-    ImGui::DragFloat("Force Strength##FFStrength", &field->strength, 0.1f, -1000.0f, 1000.0f, "%.2f");
+    if (ImGui::DragFloat("Force Strength##FFStrength", &field->strength, 0.1f, -1000.0f, 1000.0f, "%.2f")) ff_changed = true;
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Luminance or speed acceleration strength applied to affected particles/smoke.");
     }
@@ -4422,13 +4418,14 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             field->direction = Vec3(dir[0], dir[1], dir[2]);
             float len = field->direction.length();
             if (len > 0.001f) field->direction = field->direction * (1.0f / len);
+            ff_changed = true;
         }
     }
     
     // Wind→fluid coupling (liquid only). Other systems always use the body force.
     if (field->type == Physics::ForceFieldType::Wind) {
         ImGui::Separator();
-        ImGui::Checkbox("Fluid Surface Drag##FFWindFluidDrag", &field->fluid_surface_drag);
+        if (ImGui::Checkbox("Fluid Surface Drag##FFWindFluidDrag", &field->fluid_surface_drag)) ff_changed = true;
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Liquid only: drive water as a relative-velocity surface drag\n"
                               "instead of a uniform body push. Water gains 'weight' — it\n"
@@ -4437,13 +4434,13 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                               "With this ON, Strength is read as the target surface speed (m/s).");
         }
         if (field->fluid_surface_drag) {
-            ImGui::DragFloat("Drag Coupling (1/s)##FFWindCoupling", &field->fluid_drag_coupling, 0.05f, 0.0f, 50.0f, "%.2f");
+            if (ImGui::DragFloat("Drag Coupling (1/s)##FFWindCoupling", &field->fluid_drag_coupling, 0.05f, 0.0f, 50.0f, "%.2f")) ff_changed = true;
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("How fast surface water reaches the wind speed. Higher = snappier.");
-            ImGui::DragFloat("Surface Depth (m)##FFWindDepth", &field->fluid_surface_depth, 0.01f, 0.01f, 50.0f, "%.2f");
+            if (ImGui::DragFloat("Surface Depth (m)##FFWindDepth", &field->fluid_surface_depth, 0.01f, 0.01f, 50.0f, "%.2f")) ff_changed = true;
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("How far below the free surface the wind still pushes the liquid.");
-            ImGui::DragFloat("Curl Detail##FFWindCurl", &field->fluid_curl_detail, 0.01f, 0.0f, 1.0f, "%.2f");
+            if (ImGui::DragFloat("Curl Detail##FFWindCurl", &field->fluid_curl_detail, 0.01f, 0.0f, 1.0f, "%.2f")) ff_changed = true;
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Mix divergence-free curl-noise turbulence onto the wind so the\n"
                                   "surface flow swirls instead of moving in a dead-straight line.\n"
@@ -4458,12 +4455,13 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
             field->axis = Vec3(axis[0], axis[1], axis[2]);
             float len = field->axis.length();
             if (len > 0.001f) field->axis = field->axis * (1.0f / len);
+            ff_changed = true;
         }
-        ImGui::DragFloat("Inward Pull Force##FFVortInward", &field->inward_force, 0.05f, -100.0f, 100.0f, "%.2f");
+        if (ImGui::DragFloat("Inward Pull Force##FFVortInward", &field->inward_force, 0.05f, -100.0f, 100.0f, "%.2f")) ff_changed = true;
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Centripetal inward pull strength (attracts particles to the vortex core).");
         }
-        ImGui::DragFloat("Upward Lift Force##FFVortUpward", &field->upward_force, 0.05f, -100.0f, 100.0f, "%.2f");
+        if (ImGui::DragFloat("Upward Lift Force##FFVortUpward", &field->upward_force, 0.05f, -100.0f, 100.0f, "%.2f")) ff_changed = true;
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Upward lift axial velocity along the vortex spine.");
         }
@@ -4471,8 +4469,8 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
     
     // Drag-specific properties
     if (field->type == Physics::ForceFieldType::Drag) {
-        ImGui::DragFloat("Linear Drag Coeff##FFDragLin", &field->linear_drag, 0.01f, 0.0f, 50.0f, "%.2f");
-        ImGui::DragFloat("Quadratic Drag Coeff##FFDragQuad", &field->quadratic_drag, 0.001f, 0.0f, 10.0f, "%.3f");
+        if (ImGui::DragFloat("Linear Drag Coeff##FFDragLin", &field->linear_drag, 0.01f, 0.0f, 50.0f, "%.2f")) ff_changed = true;
+        if (ImGui::DragFloat("Quadratic Drag Coeff##FFDragQuad", &field->quadratic_drag, 0.001f, 0.0f, 10.0f, "%.3f")) ff_changed = true;
     }
 
     // Falloff values inside volumetric bounds
@@ -4484,10 +4482,11 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
         int current_falloff = static_cast<int>(field->falloff_type);
         if (ImGui::Combo("Falloff Blend Mode##FFFalloff", &current_falloff, falloff_types, IM_ARRAYSIZE(falloff_types))) {
             field->falloff_type = static_cast<Physics::FalloffType>(current_falloff);
+            ff_changed = true;
         }
         
-        ImGui::DragFloat("Inner Radius Core##FFFalloffInner", &field->inner_radius, 0.05f, 0.0f, field->falloff_radius, "%.2f");
-        ImGui::DragFloat("Outer Falloff Radius##FFFalloffOuter", &field->falloff_radius, 0.05f, field->inner_radius, 1000.0f, "%.2f");
+        if (ImGui::DragFloat("Inner Radius Core##FFFalloffInner", &field->inner_radius, 0.05f, 0.0f, field->falloff_radius, "%.2f")) ff_changed = true;
+        if (ImGui::DragFloat("Outer Falloff Radius##FFFalloffOuter", &field->falloff_radius, 0.05f, field->inner_radius, 1000.0f, "%.2f")) ff_changed = true;
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Distance from pivot where the force begins to decay (Inner) and drops to zero (Outer).");
         }
@@ -4502,19 +4501,19 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                                     field->type == Physics::ForceFieldType::Wind;
 
         ImGui::BeginDisabled(!supports_noise);
-        ImGui::Checkbox("Enable FBM Noise Modulation##FFUseNoise", &field->use_noise);
+        if (ImGui::Checkbox("Enable FBM Noise Modulation##FFUseNoise", &field->use_noise)) ff_changed = true;
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Applies fractal Brownian motion noise field to produce turbulence fluctuations.");
         }
         
         if (field->use_noise) {
-            ImGui::DragFloat("Frequency##FFNoiseFreq", &field->noise.frequency, 0.01f, 0.001f, 50.0f, "%.3f");
-            ImGui::DragFloat("Amplitude##FFNoiseAmp", &field->noise.amplitude, 0.05f, 0.0f, 100.0f, "%.2f");
-            ImGui::DragInt("Octaves Detail##FFNoiseOct", &field->noise.octaves, 0.1f, 1, 8);
-            ImGui::DragFloat("Lacunarity##FFNoiseLac", &field->noise.lacunarity, 0.05f, 1.0f, 6.0f, "%.2f");
-            ImGui::DragFloat("Persistence##FFNoisePer", &field->noise.persistence, 0.01f, 0.0f, 1.0f, "%.2f");
-            ImGui::DragFloat("Evolution Speed##FFNoiseSpd", &field->noise.speed, 0.01f, 0.0f, 10.0f, "%.2f");
-            ImGui::DragInt("Random Seed##FFNoiseSeed", &field->noise.seed, 1, 0, 99999);
+            if (ImGui::DragFloat("Frequency##FFNoiseFreq", &field->noise.frequency, 0.01f, 0.001f, 50.0f, "%.3f")) ff_changed = true;
+            if (ImGui::DragFloat("Amplitude##FFNoiseAmp", &field->noise.amplitude, 0.05f, 0.0f, 100.0f, "%.2f")) ff_changed = true;
+            if (ImGui::DragInt("Octaves Detail##FFNoiseOct", &field->noise.octaves, 0.1f, 1, 8)) ff_changed = true;
+            if (ImGui::DragFloat("Lacunarity##FFNoiseLac", &field->noise.lacunarity, 0.05f, 1.0f, 6.0f, "%.2f")) ff_changed = true;
+            if (ImGui::DragFloat("Persistence##FFNoisePer", &field->noise.persistence, 0.01f, 0.0f, 1.0f, "%.2f")) ff_changed = true;
+            if (ImGui::DragFloat("Evolution Speed##FFNoiseSpd", &field->noise.speed, 0.01f, 0.0f, 10.0f, "%.2f")) ff_changed = true;
+            if (ImGui::DragInt("Random Seed##FFNoiseSeed", &field->noise.seed, 1, 0, 99999)) ff_changed = true;
         }
         ImGui::EndDisabled();
         if (!supports_noise) {
@@ -4526,23 +4525,31 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
     // Group 4: Activation Bounds & Mask Bindings
     if (ImGui::BeginTabItem("Activation")) {
 
-    ImGui::DragFloat("Start Frame Limit##FFTimeStart", &field->start_frame, 1.0f, 0.0f, 100000.0f, "%.0f");
-    ImGui::DragFloat("End Frame Limit##FFTimeEnd", &field->end_frame, 1.0f, -1.0f, 100000.0f, "%.0f");
+    if (ImGui::DragFloat("Start Frame Limit##FFTimeStart", &field->start_frame, 1.0f, 0.0f, 100000.0f, "%.0f")) ff_changed = true;
+    if (ImGui::DragFloat("End Frame Limit##FFTimeEnd", &field->end_frame, 1.0f, -1.0f, 100000.0f, "%.0f")) ff_changed = true;
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Timeline frame range during which the field exerts forces. Set End Frame to -1 for infinite duration.");
     }
-    ImGui::DragFloat("Phase Velocity##FFTimePhase", &field->phase, 0.01f, 0.0f, 100.0f, "%.2f");
+    if (ImGui::DragFloat("Phase Velocity##FFTimePhase", &field->phase, 0.01f, 0.0f, 100.0f, "%.2f")) ff_changed = true;
     
     ImGui::Separator();
     ImGui::TextDisabled("Affected Targets:");
-    ImGui::Checkbox("Gas/Smoke##FFAffectGas", &field->affects_gas); ImGui::SameLine(120);
-    ImGui::Checkbox("Particles##FFAffectPart", &field->affects_particles); ImGui::SameLine(240);
-    ImGui::Checkbox("Cloth##FFAffectCloth", &field->affects_cloth); ImGui::SameLine(360);
-    ImGui::Checkbox("Rigid Bodies##FFAffectRigid", &field->affects_rigidbody);
+    if (ImGui::Checkbox("Gas/Smoke##FFAffectGas", &field->affects_gas)) ff_changed = true; ImGui::SameLine(120);
+    if (ImGui::Checkbox("Particles##FFAffectPart", &field->affects_particles)) ff_changed = true; ImGui::SameLine(240);
+    if (ImGui::Checkbox("Cloth##FFAffectCloth", &field->affects_cloth)) ff_changed = true; ImGui::SameLine(360);
+    if (ImGui::Checkbox("Rigid Bodies##FFAffectRigid", &field->affects_rigidbody)) ff_changed = true;
         ImGui::EndTabItem();
     }
 
     ImGui::EndTabBar();
+
+    if (ff_changed) {
+        scene.invalidateRigidBodySimulationCache();
+        ui_ctx.renderer.resetCPUAccumulation();
+        if (ui_ctx.backend_ptr) {
+            ui_ctx.backend_ptr->resetAccumulation();
+        }
+    }
 }
 
 } // namespace ForceFieldUI

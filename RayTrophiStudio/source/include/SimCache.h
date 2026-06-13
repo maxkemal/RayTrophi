@@ -34,6 +34,7 @@
 // scene/serializer layer.
 
 #include "ParticleSimulation.h"   // RayTrophiSim::SimulationGridDomainState
+#include "RigidBodySystem.h"      // RayTrophiSim::RigidBodyFrameState
 
 #include <string>
 #include <vector>
@@ -79,6 +80,16 @@ bool writeSoftFrame(const std::string& cache_dir, int frame,
                     const std::vector<SoftBodyFrame>& bodies);
 bool readSoftFrame(const std::string& cache_dir, int frame,
                    std::vector<SoftBodyFrame>& out_bodies);
+
+// Dynamic rigid body poses live beside fluid/soft frames in the same cache dir.
+// This makes disk replay match the RAM timeline cache instead of re-simulating
+// rigid bodies against a restored fluid frame.
+std::string rigidFrameFilePath(const std::string& cache_dir, int frame);
+bool rigidFrameExists(const std::string& cache_dir, int frame);
+bool writeRigidFrame(const std::string& cache_dir, int frame,
+                     const std::vector<RigidBodyFrameState>& bodies);
+bool readRigidFrame(const std::string& cache_dir, int frame,
+                    std::vector<RigidBodyFrameState>& out_bodies);
 
 // ── Manifest ────────────────────────────────────────────────────────────────
 struct SystemManifest {

@@ -84,7 +84,10 @@ void Camera::update_camera_vectors() {
     w = (-view).normalize();
     u = Vec3::cross(vup, w);
     if (u.length_squared() < 1e-10f) {
-        Vec3 fallback_up = std::abs(w.y) > 0.999f ? Vec3(0.0f, 0.0f, 1.0f) : Vec3(0.0f, 1.0f, 0.0f);
+        // vup is parallel to the view direction (looking straight up or down).
+        // w.y > 0 → camera points down  → use (0,0,-1): cross((0,0,-1),(0,1,0))=(+1,0,0) ✓
+        // w.y < 0 → camera points up    → use (0,0,+1): cross((0,0,+1),(0,-1,0))=(+1,0,0) ✓
+        Vec3 fallback_up = (w.y > 0.0f) ? Vec3(0.0f, 0.0f, -1.0f) : Vec3(0.0f, 0.0f, 1.0f);
         u = Vec3::cross(fallback_up, w);
     }
     u = u.normalize();
@@ -151,6 +154,10 @@ void Camera::setStandardView(StandardView view, const Vec3& pivot, float distanc
 
     if (view == StandardView::Perspective) {
         orthographic = false;
+        // Stale ortho vup (e.g. Top view sets vup=(0,0,-1)) rotates the XZ horizon.
+        // Always reset to world-up; update_camera_vectors() handles the near-vertical
+        // degenerate case with a correct fallback (w.y>0 → (0,0,-1), w.y<0 → (0,0,+1)).
+        vup = Vec3(0.0f, 1.0f, 0.0f);
         update_camera_vectors();
         markDirty();
         return;

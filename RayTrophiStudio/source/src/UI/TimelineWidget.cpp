@@ -89,6 +89,51 @@ static GraphTrackType getGraphTrackType(UIContext& ctx, const std::string& selec
     return GraphTrackType::Transform;
 }
 
+// Set a curve key's interpolation so BOTH segments adjacent to the key reflect it.
+// A segment's Constant/Linear/Bezier mode is taken from its LEFT key's meta, so:
+//   - the OUTGOING segment (key -> next) is governed by THIS key's meta, and
+//   - the INCOMING segment (prev -> key) is governed by the PREVIOUS keyed key's meta.
+// Editing both makes the graph-editor interp control produce a visible change for any
+// selected key (including the last one, which has no outgoing segment). This is the
+// user-chosen "both adjacent segments" convention.
+static void applyKeyInterpBothSides(ObjectAnimationTrack& track, GraphTrackType track_type,
+                                    int channel, int frame, KeyInterp mode) {
+    auto curveMeta = [&](Keyframe& kf) -> ChannelKeyMeta* {
+        switch (track_type) {
+            case GraphTrackType::Light:    return (channel < CURVE_LIGHT_CHANNEL_COUNT) ? &kf.light.curve[channel]    : nullptr;
+            case GraphTrackType::Camera:   return (channel < CURVE_CAM_CHANNEL_COUNT)   ? &kf.camera.curve[channel]   : nullptr;
+            case GraphTrackType::Material: return (channel < CURVE_MAT_CHANNEL_COUNT)   ? &kf.material.curve[channel] : nullptr;
+            default:                       return (channel < CURVE_CHANNEL_COUNT)       ? &kf.transform.curve[channel]: nullptr;
+        }
+    };
+    auto channelKeyed = [&](const Keyframe& kf) -> bool {
+        switch (track_type) {
+            case GraphTrackType::Light:    return kf.has_light     && kf.light.channelKeyed(channel);
+            case GraphTrackType::Camera:   return kf.has_camera    && kf.camera.channelKeyed(channel);
+            case GraphTrackType::Material: return kf.has_material  && kf.material.channelKeyed(channel);
+            default:                       return kf.has_transform && kf.transform.channelKeyed(channel);
+        }
+    };
+
+    const bool bez = (mode == KeyInterp::Bezier);
+
+    // Outgoing segment: the selected key's own meta.
+    if (Keyframe* sel = track.getKeyframeAt(frame)) {
+        if (ChannelKeyMeta* m = curveMeta(*sel)) { m->interp = mode; m->auto_tangent = bez; }
+    }
+
+    // Incoming segment: the previous keyed key for this channel governs it.
+    Keyframe* prev = nullptr;
+    for (auto& kf : track.keyframes) {
+        if (kf.frame < frame && channelKeyed(kf) && (!prev || kf.frame > prev->frame)) prev = &kf;
+    }
+    if (prev) {
+        if (ChannelKeyMeta* m = curveMeta(*prev)) { m->interp = mode; m->auto_tangent = bez; }
+    }
+
+    track.refreshAutoTangents();
+}
+
 // Returns { "Cube_1", ChannelType::Location } if input is "Cube_1.Location"
 static std::pair<std::string, ChannelType> parseTrackName(const SceneData& scene, const std::string& track_name) {
     size_t dot_pos = track_name.find('.');
@@ -4226,9 +4271,9 @@ void TimelineWidget::drawGraphChannelList(UIContext& ctx, float list_width) {
                     const char* interpNames[] = { "Constant", "Linear", "Bezier" };
                     ImGui::PushItemWidth(-1);
                     if (ImGui::Combo("##KeyInterp", &interp_idx, interpNames, 3)) {
-                        m->interp = static_cast<KeyInterp>(interp_idx);
-                        m->auto_tangent = (m->interp == KeyInterp::Bezier); // auto on first switch
-                        tit->second.refreshAutoTangents();
+                        // Apply to both adjacent segments so the change is always visible.
+                        applyKeyInterpBothSides(tit->second, track_type, graph_sel_channel,
+                                                graph_sel_frame, static_cast<KeyInterp>(interp_idx));
                         anim_reapply_requested_ = true;
                     }
                     ImGui::PopItemWidth();
@@ -4623,7 +4668,9 @@ void TimelineWidget::drawGraphCanvas(UIContext& ctx, float canvas_width, float c
             }
         }
 
-        // Drag selected key value & preview horizontal frame move
+        // Drag selected key value (Y) AND frame (X) — both applied LIVE so the key
+        // tracks the cursor in real time. Horizontal used to defer its moveKeyframe to
+        // release, which made the X move feel unpredictable next to the live Y move.
         if (graph_drag_mode == 1 && ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
             graph_sel_channel >= 0 && graph_sel_frame >= 0) {
             Keyframe* kf = track.getKeyframeAt(graph_sel_frame);
@@ -4632,21 +4679,24 @@ void TimelineWidget::drawGraphCanvas(UIContext& ctx, float canvas_width, float c
                             (track_type == GraphTrackType::Material && kf && kf->has_material) ||
                             (track_type == GraphTrackType::Transform && kf && kf->has_transform);
             if (kf && has_data) {
+                // 1. Apply value (Y) at the current frame first, so the move below carries it.
                 float new_val = pixelYToValue(mouse.y - canvas_pos.y, canvas_height);
                 setChannelVal(*kf, graph_sel_channel, new_val);
-                track.refreshAutoTangents();
-                anim_reapply_requested_ = true;
 
-                // Draw vertical indicator line at target frame
+                // 2. Commit the horizontal frame move (X) live — one hop per integer-frame
+                //    crossing (cheap; only fires when the frame actually changes). NOTE:
+                //    moveKeyframe() mutates the keyframe vector, so `kf` is dangling after it.
                 int new_frame = pixelXToFrame(mouse.x - canvas_pos.x, canvas_width);
                 new_frame = std::clamp(new_frame, start_frame, end_frame);
-                if (new_frame != drag_start_frame) {
-                    float new_x = canvas_pos.x + frameToPixelX(new_frame, canvas_width);
-                    dl->AddLine(
-                        ImVec2(new_x, canvas_pos.y),
-                        ImVec2(new_x, canvas_pos.y + canvas_height),
-                        IM_COL32(255, 200, 100, 150), 2.0f);
+                if (new_frame != graph_sel_frame && track_it != ctx.scene.timeline.tracks.end()) {
+                    std::string specific_track = entity_name + "." + channelSubtrackSuffix(track_type, graph_sel_channel);
+                    moveKeyframe(ctx, specific_track, graph_sel_frame, new_frame);
+                    graph_sel_frame = new_frame;
+                    drag_start_frame = new_frame; // keeps the release-time move a no-op
+                    tracks_dirty = true;
                 }
+                track.refreshAutoTangents(); // operates on the live track (kf may be stale here)
+                anim_reapply_requested_ = true;
             }
         }
 
@@ -4759,16 +4809,15 @@ void TimelineWidget::drawGraphCanvas(UIContext& ctx, float canvas_width, float c
                 ImGui::Separator();
 
                 if (ImGui::MenuItem("Constant", nullptr, m.interp == KeyInterp::Constant)) {
-                    m.interp = KeyInterp::Constant; m.auto_tangent = false;
+                    applyKeyInterpBothSides(track, track_type, graph_sel_channel, graph_sel_frame, KeyInterp::Constant);
                     anim_reapply_requested_ = true;
                 }
                 if (ImGui::MenuItem("Linear", nullptr, m.interp == KeyInterp::Linear)) {
-                    m.interp = KeyInterp::Linear; m.auto_tangent = false;
+                    applyKeyInterpBothSides(track, track_type, graph_sel_channel, graph_sel_frame, KeyInterp::Linear);
                     anim_reapply_requested_ = true;
                 }
                 if (ImGui::MenuItem("Bezier", nullptr, m.interp == KeyInterp::Bezier)) {
-                    m.interp = KeyInterp::Bezier; m.auto_tangent = true;
-                    track.refreshAutoTangents();
+                    applyKeyInterpBothSides(track, track_type, graph_sel_channel, graph_sel_frame, KeyInterp::Bezier);
                     anim_reapply_requested_ = true;
                 }
                 ImGui::Separator();
