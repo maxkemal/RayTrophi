@@ -1,4 +1,4 @@
-﻿// ===============================================================================
+// ===============================================================================
 // SCENE UI - GIZMOS & TRANSFORM
 // ===============================================================================
 // This file handles 3D Gizmos (Move/Rotate/Scale), Bounding Boxes, and overlays.
@@ -2634,6 +2634,30 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     SceneSelection& sel = ctx.selection;
     ImGuiIO& io = ImGui::GetIO();
 
+    // Sleek and modern ImGuizmo styling
+    ImGuizmo::Style& style = ImGuizmo::GetStyle();
+    style.TranslationLineThickness   = 1.8f;
+    style.TranslationLineArrowSize   = 5.0f;
+    style.RotationLineThickness      = 1.6f;
+    style.RotationOuterLineThickness = 2.0f;
+    style.ScaleLineThickness         = 1.8f;
+    style.ScaleLineCircleSize        = 5.0f;
+    style.CenterCircleSize           = 4.5f;
+
+    // Vibrant modern colors
+    style.Colors[ImGuizmo::DIRECTION_X]           = ImVec4(0.96f, 0.22f, 0.33f, 1.00f); // Sleek Red (X)
+    style.Colors[ImGuizmo::DIRECTION_Y]           = ImVec4(0.33f, 0.84f, 0.12f, 1.00f); // Sleek Green (Y)
+    style.Colors[ImGuizmo::DIRECTION_Z]           = ImVec4(0.18f, 0.52f, 0.98f, 1.00f); // Sleek Blue (Z)
+    style.Colors[ImGuizmo::PLANE_X]               = ImVec4(0.96f, 0.22f, 0.33f, 0.22f);
+    style.Colors[ImGuizmo::PLANE_Y]               = ImVec4(0.33f, 0.84f, 0.12f, 0.22f);
+    style.Colors[ImGuizmo::PLANE_Z]               = ImVec4(0.18f, 0.52f, 0.98f, 0.22f);
+    style.Colors[ImGuizmo::SELECTION]             = ImVec4(1.00f, 0.65f, 0.00f, 0.90f); // Sleek Orange (Selected)
+    style.Colors[ImGuizmo::INACTIVE]              = ImVec4(0.55f, 0.57f, 0.60f, 0.45f);
+    style.Colors[ImGuizmo::TRANSLATION_LINE]      = ImVec4(0.60f, 0.60f, 0.60f, 0.25f);
+    style.Colors[ImGuizmo::SCALE_LINE]            = ImVec4(0.60f, 0.60f, 0.60f, 0.25f);
+    style.Colors[ImGuizmo::ROTATION_USING_BORDER] = ImVec4(1.00f, 0.65f, 0.00f, 1.00f);
+    style.Colors[ImGuizmo::ROTATION_USING_FILL]   = ImVec4(1.00f, 0.65f, 0.00f, 0.15f);
+
     // IMPORTANT: Keep ImGuizmo's per-frame state alive even when we early-out.
     // We hit a bug where deleting an object could clear selection before this
     // function reached Manipulate(), leaving ImGuizmo::IsOver() latched from the
@@ -2715,7 +2739,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     // selections and tiny on gizmo-only objects (lights, force fields, domains) whose AABB is
     // small or absent. The screen-fraction clamps keep it usable at zoom extremes.
     {
-        constexpr float kGizmoWorldSize = 1.0f; // world units the gizmo axes should span
+        constexpr float kGizmoWorldSize = 0.85f; // world units the gizmo axes should span (reduced from 1.0f)
 
         // mGizmoSizeClipSpace = worldSize * (NDC-x units per world unit at the gizmo) so
         // mScreenFactor (= clipSpace / rightLength) resolves to a constant world size.
@@ -2734,10 +2758,10 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         }
         // Floor near ImGuizmo's default (0.1) so the gizmo never shrinks into uselessness on
         // far/zoomed-out views; modest ceiling so close-ups don't turn it into a billboard.
-        const float gizmoClip = std::clamp(kGizmoWorldSize * ndcPerWorldUnit, 0.08f, 0.20f);
+        // Clamped to [0.055f, 0.135f] to make the gizmo smaller and less obtrusive.
+        const float gizmoClip = std::clamp(kGizmoWorldSize * ndcPerWorldUnit, 0.055f, 0.135f);
         ImGuizmo::SetGizmoSizeClipSpace(gizmoClip);
     }
-
     auto Project = [&](Vec3 p) -> ImVec2 {
         float x = p.x, y = p.y, z = p.z;
         float vx = viewMatrix[0] * x + viewMatrix[4] * y + viewMatrix[8] * z + viewMatrix[12];
@@ -4169,18 +4193,22 @@ mesh_edit_changed_confirmed:
             if (active_interactive_viewport_backend) {
                 // Solid viewport already received live transform updates.
                 if (active_vulkan_render_backend) {
-                    extern bool g_vulkan_rebuild_pending;
-                    g_vulkan_rebuild_pending = true;
+                    // Object move is topology-stable and the per-frame
+                    // updateObjectTransform during drag already committed the new
+                    // transform to the TLAS (m_device->updateTLAS = instance refit
+                    // on an allowUpdate TLAS). A full geometry rebuild here is
+                    // redundant and stalls dense scenes (~2s on 4.2M tris). Skip it.
                 } else if (renderBackend) {
                     extern bool g_optix_rebuild_pending;
                     g_optix_rebuild_pending = true;
                 }
             } else {
-                // Rendered/OptiX TLAS mode: commit transform changes
-                ctx.backend_ptr->rebuildAccelerationStructure();
                 if (active_vulkan_render_backend) {
-                    extern bool g_vulkan_rebuild_pending;
-                    g_vulkan_rebuild_pending = true;
+                    // Pure Rendered (Vulkan RT): live TLAS refit during drag already
+                    // committed the move; no full rebuild needed (topology-stable).
+                } else {
+                    // OptiX / other TLAS mode: commit transform changes
+                    ctx.backend_ptr->rebuildAccelerationStructure();
                 }
             }
         } else if (renderBackend) {
@@ -4188,14 +4216,16 @@ mesh_edit_changed_confirmed:
             extern bool g_gpu_refit_pending;
             g_gpu_refit_pending = true;
 
-            extern bool g_bvh_rebuild_pending;
-            g_bvh_rebuild_pending = true;
+            // Object move is topology-stable → a fast CPU BVH refit keeps picking
+            // accurate without the full async rebuild (+ "Rebuilding BVH..." HUD).
+            extern bool g_cpu_bvh_refit_pending;
+            g_cpu_bvh_refit_pending = true;
         } else {
-            // CPU-only mode: trigger BVH rebuild
-            extern bool g_bvh_rebuild_pending;
-            g_bvh_rebuild_pending = true;
+            // CPU-only mode: object move is topology-stable → refit (not full rebuild).
+            extern bool g_cpu_bvh_refit_pending;
+            g_cpu_bvh_refit_pending = true;
         }
-        
+
         is_bvh_dirty = false;
     }
     
@@ -4227,10 +4257,14 @@ mesh_edit_changed_confirmed:
                     any_object_moved = true;
                 }
             }
-            // BVH rebuild needed only when geometry (objects) actually moved — lights/cameras don't affect BVH
-            if (any_object_moved) {
-                extern bool g_bvh_rebuild_pending;
-                g_bvh_rebuild_pending = true;
+            // BVH update needed only when geometry (objects) actually moved — lights/cameras don't affect BVH.
+            // CPU mode only: verts were just updated above, so refit the picking/CPU-render BVH now.
+            // TLAS mode (Vulkan RT / OptiX): verts are deferred to lazy pick-sync, so refitting here
+            // would scan the WHOLE scene (O(all tris)) against STALE verts — wasted work + a multi-second
+            // CPU spike on dense scenes. ensureCPUSyncForPicking() rebuilds the BVH on first pick instead.
+            if (any_object_moved && !using_gpu_tlas) {
+                extern bool g_cpu_bvh_refit_pending;
+                g_cpu_bvh_refit_pending = true;
             }
         } else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
             std::string name = sel.selected.object->nodeName;
@@ -4249,9 +4283,13 @@ mesh_edit_changed_confirmed:
                     }
                 }
             }
-            // BVH rebuild needed for both GPU and CPU - for accurate picking!
-            extern bool g_bvh_rebuild_pending;
-            g_bvh_rebuild_pending = true;
+            // CPU mode only: verts updated above → refit the picking/CPU-render BVH now.
+            // TLAS mode defers verts to lazy pick-sync; an immediate full-scene refit here
+            // would run against stale verts and spike the CPU for seconds on dense scenes.
+            if (!using_gpu_tlas) {
+                extern bool g_cpu_bvh_refit_pending;
+                g_cpu_bvh_refit_pending = true;
+            }
         }
     }
 

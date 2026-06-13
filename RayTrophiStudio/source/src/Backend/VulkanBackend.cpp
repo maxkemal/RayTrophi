@@ -7256,12 +7256,28 @@ bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, co
         return false;
     }
 
+    // CRITICAL: upload positions in the EXACT order the BLAS was built. The caller's
+    // `triangles` (from the editable mesh_cache) is not guaranteed to be in the same
+    // order as the scene-graph traversal that built the solo BLAS, so we prefer the
+    // recorded build-order list when available. Without this, positions land in the
+    // wrong BLAS slots and the mesh corrupts. If no build-order list exists (e.g. an
+    // instance-source BLAS), fall back to the caller order only when counts match.
+    const std::vector<std::shared_ptr<Triangle>>* orderedTris = &triangles;
+    auto buildOrderIt = m_soloBlasBuildTriangles.find(targetBlasIndex);
+    if (buildOrderIt != m_soloBlasBuildTriangles.end()) {
+        if (buildOrderIt->second.size() != triangles.size()) {
+            // Identity mismatch (grouped/changed) — refuse, let the full rebuild run.
+            return false;
+        }
+        orderedTris = &buildOrderIt->second;
+    }
+
     std::vector<float> positions;
     std::vector<float> normals;
     positions.reserve(expectedVertexCount * 3ull);
     normals.reserve(expectedVertexCount * 3ull);
 
-    for (const auto& tri : triangles) {
+    for (const auto& tri : *orderedTris) {
         if (!tri) continue;
         for (int v = 0; v < 3; ++v) {
             const Vec3 p = targetUsesLocalSpace ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
@@ -7876,10 +7892,16 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
 
     std::vector<VulkanRT::TLASInstance> vkInstances;
     std::vector<std::shared_ptr<Hittable>> instanceSources;
+    // Rebuilt below; the interactive refit consults this to upload positions in
+    // BLAS-slot order. Stale across a full rebuild, so clear it up front.
+    m_soloBlasBuildTriangles.clear();
 
     struct SoloTriangleGroup {
         std::string nodeName;
         std::vector<TriangleData> triangles;
+        // Parallel to `triangles` (1:1, same order) — kept so the interactive refit
+        // can re-upload vertex positions in the exact BLAS slot order.
+        std::vector<std::shared_ptr<Triangle>> trianglePtrs;
         Matrix4x4 transform;
         uint16_t materialID = 0;
         std::shared_ptr<Hittable> representative;
@@ -8045,6 +8067,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
 
             auto& targetGroup = soloGroups[found->second];
             targetGroup.triangles.push_back(d);
+            targetGroup.trianglePtrs.push_back(tri);
         }
         // 5. Handle VDB Volumes — create AABB BLAS + TLAS instance for procedural hit group
         else if (auto vdb = std::dynamic_pointer_cast<VDBVolume>(obj)) {
@@ -8155,6 +8178,13 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
 
             std::string meshKey = "[World-Solo]-" + group.nodeName + "-" + std::to_string(groupIndex);
             uint32_t soloBlasIndex = uploadTriangles(group.triangles, meshKey);
+
+            // Record build-order triangle pointers so the interactive refit can
+            // re-upload positions into the exact BLAS slots (mesh_cache order may
+            // differ from this scene-graph traversal order).
+            if (soloBlasIndex != UINT32_MAX) {
+                m_soloBlasBuildTriangles[soloBlasIndex] = group.trianglePtrs;
+            }
 
             VulkanRT::TLASInstance vi;
             vi.blasIndex = soloBlasIndex;

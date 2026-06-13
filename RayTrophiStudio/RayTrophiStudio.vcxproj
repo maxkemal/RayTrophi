@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -166,7 +166,8 @@
       <ForceConformanceInForLoopScope>false</ForceConformanceInForLoopScope>
       <SupportJustMyCode>false</SupportJustMyCode>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
-      <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/bigobj /FS /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <AdditionalIncludeDirectories>$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -214,7 +215,8 @@
       <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
       <OpenMPSupport>true</OpenMPSupport>
       <AdditionalIncludeDirectories>$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
-      <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/bigobj /FS /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -402,667 +404,800 @@
   <ItemGroup>
     <!-- Jolt Physics v5.5.0 (MIT) - compiled in-project for matching flags/runtime/SIMD -->
     <ClCompile Include="external\JoltPhysics\Jolt\AABBTree\AABBTreeBuilder.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Core\Color.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Core\Factory.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Core\IssueReporting.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Core\JobSystemSingleThreaded.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Core\JobSystemThreadPool.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Core\JobSystemWithBarrier.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Core\LinearCurve.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Core\Memory.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Core\Profiler.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Core\RTTI.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Core\Semaphore.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Core\StringTools.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Core\TickCounter.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Geometry\ConvexHullBuilder.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Geometry\ConvexHullBuilder2D.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Geometry\Indexify.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Geometry\OrientedBox.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Math\Vec3.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStream.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamBinaryIn.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamBinaryOut.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamIn.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamOut.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamTextIn.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamTextOut.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\SerializableObject.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\TypeDeclarations.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\Body.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\BodyCreationSettings.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\BodyInterface.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\BodyManager.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\MassProperties.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\MotionProperties.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Character\Character.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Character\CharacterBase.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Character\CharacterVirtual.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\BroadPhase\BroadPhase.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\BroadPhase\BroadPhaseBruteForce.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\BroadPhase\BroadPhaseQuadTree.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\BroadPhase\QuadTree.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CastConvexVsTriangles.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CastSphereVsTriangles.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CollideConvexVsTriangles.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CollideSphereVsTriangles.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CollisionDispatch.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CollisionGroup.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\EstimateCollisionResponse.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\GroupFilter.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\GroupFilterTable.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\ManifoldBetweenTwoFaces.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\NarrowPhaseQuery.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\NarrowPhaseStats.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\PhysicsMaterial.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\PhysicsMaterialSimple.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\BoxShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\CapsuleShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\CompoundShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\ConvexHullShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\ConvexShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\CylinderShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\DecoratedShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\EmptyShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\HeightFieldShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\MeshShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\MutableCompoundShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\OffsetCenterOfMassShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\PlaneShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\RotatedTranslatedShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\ScaledShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\Shape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\SphereShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\StaticCompoundShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\TaperedCapsuleShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\TaperedCylinderShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\TriangleShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\TransformedShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\ConeConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\Constraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\ConstraintManager.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\ContactConstraintManager.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\DistanceConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\FixedConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\GearConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\HingeConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\MotorSettings.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PathConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PathConstraintPath.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PathConstraintPathHermite.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PointConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PulleyConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\RackAndPinionConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\SixDOFConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\SliderConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\SpringSettings.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\SwingTwistConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\TwoBodyConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\DeterminismLog.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\IslandBuilder.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\LargeIslandSplitter.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\PhysicsScene.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\PhysicsSystem.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\PhysicsUpdateContext.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Ragdoll\Ragdoll.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\SoftBody\SoftBodyCreationSettings.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\SoftBody\SoftBodyMotionProperties.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\SoftBody\SoftBodyShape.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\SoftBody\SoftBodySharedSettings.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\StateRecorderImpl.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\MotorcycleController.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\TrackedVehicleController.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleAntiRollBar.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleCollisionTester.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleConstraint.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleController.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleDifferential.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleEngine.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleTrack.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleTransmission.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\Wheel.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\WheeledVehicleController.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\RegisterTypes.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Renderer\DebugRenderer.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Renderer\DebugRendererPlayback.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Renderer\DebugRendererRecorder.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Renderer\DebugRendererSimple.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Skeleton\SkeletalAnimation.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Skeleton\Skeleton.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Skeleton\SkeletonMapper.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\Skeleton\SkeletonPose.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\TriangleSplitter\TriangleSplitter.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\TriangleSplitter\TriangleSplitterBinning.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\TriangleSplitter\TriangleSplitterMean.cpp">
-      <ObjectFileName>$(IntDir)%(RelativeDir)%(Filename).obj</ObjectFileName>
+      <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
+      <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>

@@ -5766,10 +5766,15 @@ int main(int argc, char* argv[]) try {
             g_gpu_refit_pending = false;
         }
 
-        // CPU BVH Fast Refit (Embree only)
+        // CPU BVH Fast Refit (Embree only). Now does a TRUE in-place refit
+        // (RTC_BUILD_QUALITY_REFIT) instead of a full rebuild — cheap for the per-frame
+        // topology-stable updates that drive it (sculpt dabs, rigid/soft/fluid sim body
+        // motion, transform drags). refitBVH falls back to a full rebuild when there is
+        // no Embree BVH, and the Embree refit self-raises g_bvh_rebuild_pending if the
+        // triangle topology actually changed.
         if (g_cpu_bvh_refit_pending && !g_bvh_rebuild_pending) {
             bool use_embree = ui_ctx.render_settings.UI_use_embree;
-            ray_renderer.rebuildBVH(scene, use_embree);
+            ray_renderer.refitBVH(scene, use_embree);
             ray_renderer.resetCPUAccumulation();
             g_cpu_bvh_refit_pending = false;
         }

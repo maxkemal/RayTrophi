@@ -222,8 +222,8 @@ public:
      void drawTerrainPaintPanel(UIContext& ctx, class TerrainObject* terrain);
      void drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<class Triangle>& meshTriangle);
      void drawPaintBrushDock(UIContext& ctx);
-     void drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<class Triangle>& meshTriangle);
-     void drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<class Triangle>& meshTriangle);
+     void drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<class Triangle>& meshTriangle, bool rightDockOnly = false);
+     void drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<class Triangle>& meshTriangle, bool rightDockOnly = false);
      void drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapter);
      void drawPaintChannelTextureSlots(UIContext& ctx, Paint::MeshPaintAdapter* adapter);
      void drawMaterialPanel(UIContext& ctx);   // Material/Texture editor for selected object
@@ -712,6 +712,12 @@ public:
         Vec3 stroke_normal;
         std::unordered_map<int, Vec3> grab_start_local_positions;
         std::unordered_map<int, float> grab_weights_by_vertex;
+        // Grab mirror: per-symmetry-combo (mirrorBits 1..7) FIXED candidate set,
+        // captured on the stroke's first frame. Driving the mirror from this fixed
+        // set (instead of a per-frame PBVH re-gather) keeps it drift-free exactly
+        // like the main grab — otherwise pulled mirror verts drop out of the
+        // start-centred query sphere mid-stroke and freeze into spikes/dents.
+        std::unordered_map<int, std::vector<int>> grab_mirror_candidate_sets;
         std::vector<float> layer_accum;
         std::vector<float> clay_layer_accum;
         std::vector<float> clay_strips_layer_accum;
@@ -1077,4 +1083,7 @@ public:
     TerrainNodesV2::TerrainNodeGraphV2& getTerrainNodeGraph() { return terrainNodeGraph; }
     const TerrainNodesV2::TerrainNodeGraphV2& getTerrainNodeGraph() const { return terrainNodeGraph; }
 };
+
+float getMainMenuReservedHeight();
+
 

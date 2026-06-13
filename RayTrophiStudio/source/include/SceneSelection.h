@@ -59,7 +59,8 @@ enum class MeshElementSelectMode {
     Object,
     Vertex,
     Edge,
-    Face
+    Face,
+    Combined   // Vertex+Edge+Face shown at once; pick resolves to nearest element
 };
 
 // Selectable Item - Base interface for anything that can be selected
@@ -214,6 +215,9 @@ public:
                 break;
             case '4':
                 mesh_element_mode = MeshElementSelectMode::Face;
+                break;
+            case '5':
+                mesh_element_mode = MeshElementSelectMode::Combined;
                 break;
             case 'X': // Delete
             case 127: // Delete key

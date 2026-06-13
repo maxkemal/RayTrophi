@@ -98,10 +98,13 @@ namespace ForceFieldUI {
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 
-bool show_documentation_window = false; // Global toggle (unused now, kept for linkage if needed or remove)
+float g_main_menu_reserved_height = 30.0f;
+
+float getMainMenuReservedHeight() {
+    return (std::max)(28.0f, g_main_menu_reserved_height);
+}
 
 namespace {
-float g_main_menu_reserved_height = 30.0f;
 Backend::IBackend* getSceneUiRenderBackend(UIContext& ctx) {
     if (g_backend) {
         return g_backend.get();
@@ -477,10 +480,6 @@ std::string trimCopy(const std::string& value) {
         --end;
     }
     return value.substr(start, end - start);
-}
-
-float getMainMenuReservedHeight() {
-    return (std::max)(28.0f, g_main_menu_reserved_height);
 }
 
 std::vector<std::string> splitTagString(const std::string& text) {
@@ -2089,6 +2088,12 @@ void SceneUI::drawDockSpaceHost(UIContext& ctx)
         }
     }
 
+    if (dock_bottom_id != 0) {
+        if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(dock_bottom_id)) {
+            node->LocalFlags |= ImGuiDockNodeFlags_AutoHideTabBar;
+        }
+    }
+
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
 
     // Keep viewport picking / gizmos / overlays aligned: the central (empty) node IS
@@ -2153,11 +2158,11 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
     // Legacy pinned layout: hard-anchor at (0, menu_height) with no title bar.
     // Docking layout: let the dock node place/size the window; keep the title bar
     // as the drag/tab handle.
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar;
     if (!docking_enabled) {
         ImGui::SetNextWindowPos(ImVec2(0, menu_height), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2(side_panel_width, target_height), ImGuiCond_FirstUseEver);
-        flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar;
+        flags |= ImGuiWindowFlags_NoMove;
     }
     if (focus_properties_panel_next_frame) {
         ImGui::SetNextWindowFocus();
@@ -2167,7 +2172,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.085f, 0.09f, 0.105f, 0.96f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.085f, 0.09f, 0.105f, panel_alpha));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.46f, 0.54f, 0.64f, 0.18f));
 
     if (ImGui::Begin("Properties", nullptr, flags))
@@ -2202,7 +2207,8 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (tab_to_focus == "Paint")      { active_properties_tab = 10; tab_to_focus = ""; }
         if (tab_to_focus == "System")     { active_properties_tab = 9; tab_to_focus = ""; }
 
-        float sidebar_width = 38.0f;
+        static float s_sidebar_width = 44.0f;
+        float sidebar_width = s_sidebar_width;
         
         // --- 1. SIDEBAR (Fixed Width) ---
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
@@ -2226,7 +2232,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             static float hover_anim[16] = {};
             ImGui::PushID(index);
             
-            const float size = 30.0f;
+            const float size = (std::max)(28.0f, sidebar_width - 8.0f);
             float margin = (sidebar_width - size) * 0.5f;
 
             ImGui::SetCursorPosX(margin);
@@ -2252,44 +2258,137 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             };
 
             const ImVec4 accent = getHoverTint(icon);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            float child_left = ImGui::GetWindowPos().x;
 
             // Sleek left-side vertical accent line for active tab (Blender style)
             if (is_active) {
-                parent_dl->AddRectFilled(
-                    ImVec2(win_pos.x + 2.0f, pos.y + 4.0f),
-                    ImVec2(win_pos.x + 4.5f, pos.y + size - 4.0f),
+                dl->AddRectFilled(
+                    ImVec2(child_left + 2.0f, pos.y + 3.0f),
+                    ImVec2(child_left + 6.0f, pos.y + size - 3.0f),
                     ImGui::ColorConvertFloat4ToU32(accent),
-                    1.25f
+                    2.0f
                 );
             }
 
             // Flat invisible button for interaction
+            static float hold_timers[16] = {};
+            static float flash_timers[16] = {};
+
+            if (flash_timers[index] > 0.0f) {
+                flash_timers[index] -= ImGui::GetIO().DeltaTime * 2.0f;
+                if (flash_timers[index] < 0.0f) flash_timers[index] = 0.0f;
+            }
+
             if (ImGui::InvisibleButton("##tab", ImVec2(size, size))) {
-                active_properties_tab = index;
-                focus_properties_panel_next_frame = true;
+                if (hold_timers[index] < 2.0f) {
+                    active_properties_tab = index;
+                    focus_properties_panel_next_frame = true;
+                }
             }
 
             const bool is_hovered = ImGui::IsItemHovered();
-            const float target_hover = (is_hovered || is_active) ? 1.0f : 0.0f;
-            const float anim_speed = 12.0f * ImGui::GetIO().DeltaTime;
-            hover_anim[index] += (target_hover - hover_anim[index]) * ImClamp(anim_speed, 0.0f, 1.0f);
+            const bool is_held = ImGui::IsItemActive();
 
-            // Subtle background highlight for hovered or active tab
-            if (hover_anim[index] > 0.01f) {
-                ImVec4 highlightBg = is_active 
-                    ? ImVec4(1.0f, 1.0f, 1.0f, 0.08f) 
-                    : ImVec4(1.0f, 1.0f, 1.0f, 0.04f * hover_anim[index]);
-                parent_dl->AddRectFilled(
-                    pos,
-                    ImVec2(pos.x + size, pos.y + size),
-                    ImGui::ColorConvertFloat4ToU32(highlightBg),
+            // 2-second hold-to-pop logic
+            if (is_held && isPoppablePropertyTab(index) && !properties_tab_popped_[index]) {
+                hold_timers[index] += ImGui::GetIO().DeltaTime;
+                if (hold_timers[index] >= 2.0f) {
+                    properties_tab_popped_[index] = true;
+                    properties_pop_spawn_pos_[index] = ImGui::GetIO().MousePos;
+                    properties_pop_spawn_pending_[index] = true;
+                    flash_timers[index] = 1.0f;
+                    hold_timers[index] = 0.0f;
+                }
+            } else {
+                if (hold_timers[index] > 0.0f) {
+                    hold_timers[index] -= ImGui::GetIO().DeltaTime * 4.0f;
+                    if (hold_timers[index] < 0.0f) hold_timers[index] = 0.0f;
+                }
+            }
+
+            // Draw a circular progress arc as the tab is held
+            if (hold_timers[index] > 0.01f && !properties_tab_popped_[index]) {
+                float progress = hold_timers[index] / 2.0f;
+                float endAngle = -1.5707f + progress * 6.2831f;
+                dl->PathClear();
+                dl->PathArcTo(ImVec2(pos.x + size*0.5f, pos.y + size*0.5f), size * 0.44f, -1.5707f, endAngle, 24);
+                dl->PathStroke(IM_COL32(0, 160, 255, 230), false, 2.5f);
+            }
+
+            // Flash the properties panel border when triggered
+            if (flash_timers[index] > 0.0f) {
+                int alpha = (int)(255.0f * flash_timers[index]);
+                parent_dl->AddRect(
+                    win_pos,
+                    ImVec2(win_pos.x + win_size.x, win_pos.y + win_size.y),
+                    IM_COL32(0, 160, 255, alpha),
+                    0.0f,
+                    0,
                     3.0f
                 );
             }
 
-            // Compact vector icons with thin strokes (20px, scaling to 22px on hover)
-            const float iconSize = 20.0f + 2.0f * hover_anim[index];
-            ImVec4 idleTint(0.55f, 0.55f, 0.60f, 0.75f);
+            // Right-click and Double-click popping logic
+            if (is_hovered && isPoppablePropertyTab(index)) {
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    properties_tab_popped_[index] = !properties_tab_popped_[index];
+                    if (properties_tab_popped_[index]) {
+                        properties_pop_spawn_pos_[index] = ImGui::GetIO().MousePos;
+                        properties_pop_spawn_pending_[index] = true;
+                    }
+                }
+                
+                if (ImGui::BeginPopupContextItem("##tab_context")) {
+                    const bool popped = properties_tab_popped_[index];
+                    if (popped) {
+                        if (ImGui::MenuItem("Dock Back to Panel")) {
+                            properties_tab_popped_[index] = false;
+                        }
+                    } else {
+                        if (ImGui::MenuItem("Open in Separate Window")) {
+                            properties_tab_popped_[index] = true;
+                            properties_pop_spawn_pos_[index] = ImGui::GetIO().MousePos;
+                            properties_pop_spawn_pending_[index] = true;
+                        }
+                    }
+                    ImGui::EndPopup();
+                }
+            }
+
+            const float target_hover = (is_hovered || is_active) ? 1.0f : 0.0f;
+            const float anim_speed = 12.0f * ImGui::GetIO().DeltaTime;
+            hover_anim[index] += (target_hover - hover_anim[index]) * ImClamp(anim_speed, 0.0f, 1.0f);
+
+            // Beautiful background highlight using tab's accent color for active, or soft white for hover
+            if (hover_anim[index] > 0.01f) {
+                ImVec4 highlightBg = is_active 
+                    ? ImVec4(accent.x, accent.y, accent.z, 0.24f) 
+                    : ImVec4(1.0f, 1.0f, 1.0f, 0.06f * hover_anim[index]);
+                dl->AddRectFilled(
+                    pos,
+                    ImVec2(pos.x + size, pos.y + size),
+                    ImGui::ColorConvertFloat4ToU32(highlightBg),
+                    6.0f
+                );
+            }
+
+            // Accent-colored subtle border around active tab to guarantee visibility
+            if (is_active) {
+                dl->AddRect(
+                    pos,
+                    ImVec2(pos.x + size, pos.y + size),
+                    ImGui::ColorConvertFloat4ToU32(ImVec4(accent.x, accent.y, accent.z, 0.35f)),
+                    6.0f,
+                    0,
+                    1.2f
+                );
+            }
+
+            // Shaded 3D vector icons (scaled proportionally with sidebar size)
+            const float base_icon_size = size * 0.95f;
+            const float iconSize = base_icon_size + (size * 0.04f) * hover_anim[index];
+            ImVec4 idleTint(0.42f, 0.44f, 0.48f, 0.60f); // Dimmed inactive tabs for high contrast
             ImVec4 activeTint = accent;
             ImVec4 iconTint = is_active
                 ? activeTint
@@ -2314,9 +2413,13 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                 ImGui::BeginTooltip();
                 ImGui::PushTextWrapPos(ImGui::GetFontSize() * 22.0f);
                 ImGui::TextUnformatted(tooltip);
-                if (isPoppablePropertyTab(index) && properties_tab_popped_[index]) {
+                if (isPoppablePropertyTab(index)) {
                     ImGui::Spacing();
-                    ImGui::TextDisabled("(open in a separate window)");
+                    if (properties_tab_popped_[index]) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.20f, 1.0f), "(Separate Window - Hold 2s, Double-click, or Right-click to dock back)");
+                    } else {
+                        ImGui::TextColored(ImVec4(0.40f, 0.80f, 1.00f, 0.85f), "(Hold 2s, Double-click, or Right-click to open in separate window)");
+                    }
                 }
                 ImGui::PopTextWrapPos();
                 ImGui::EndTooltip();
@@ -2345,6 +2448,23 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         ImGui::EndChild();
         ImGui::PopStyleColor();
         ImGui::PopStyleVar(2);
+
+        // Sidebar Splitter / Resizer (Invisible drag line on the right edge of sidebar)
+        ImGui::SameLine(0, 0);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0, 0, 0, 0));
+        ImGui::Button("##sidebar_splitter", ImVec2(4.0f, win_size.y));
+        ImGui::PopStyleColor(3);
+
+        if (ImGui::IsItemActive()) {
+            s_sidebar_width += ImGui::GetIO().MouseDelta.x;
+            if (s_sidebar_width < 36.0f) s_sidebar_width = 36.0f;
+            if (s_sidebar_width > 80.0f) s_sidebar_width = 80.0f;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        }
         
         ImGui::SameLine(0, 0);
         
@@ -2389,15 +2509,10 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         const bool tab_is_popped = tab_is_poppable && properties_tab_popped_[active_properties_tab];
         if (tab_is_popped) {
             ImGui::Spacing();
-            ImGui::TextDisabled("This tab is open in a separate window.");
-            if (ImGui::SmallButton("Dock back to panel")) properties_tab_popped_[active_properties_tab] = false;
-        } else if (tab_is_poppable) {
-            if (ImGui::SmallButton("Open in separate window")) {
-                properties_tab_popped_[active_properties_tab] = true;
-                properties_pop_spawn_pos_[active_properties_tab] = ImGui::GetIO().MousePos;
-                properties_pop_spawn_pending_[active_properties_tab] = true;
-            }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Detach this tab into its own movable/dockable window");
+            ImGui::Indent(10.0f);
+            ImGui::TextDisabled("This tab is active in a separate window.");
+            ImGui::TextDisabled("Double-click or Right-click the tab icon to dock back.");
+            ImGui::Unindent(10.0f);
             ImGui::Spacing();
         }
 
@@ -2832,6 +2947,10 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                 paint_mode_state.enabled = false;
                 paint_mode_state.clearAdapter();
             }
+            // Leaving Modifiers tab -> fully exit sculpt/edit modes (unless popped out & still visible)
+            if (s_last_active_tab == 7 && !properties_tab_popped_[7]) {
+                resetMeshEditState(ctx);
+            }
 
             s_last_active_tab = active_properties_tab;
         }
@@ -3197,7 +3316,7 @@ void SceneUI::draw(UIContext& ctx)
     drawSelectionGizmos(ctx);
     drawCameraGizmos(ctx);  // Draw camera frustum icons
     drawRiverGizmos(ctx, gizmo_hit);  // Draw river spline control points
-    drawViewportControls(ctx);  // Blender-style viewport overlay
+
 
     // [SEQUENCE-RENDER OWNERSHIP] While a sequence render is active the worker
     // thread (Renderer::render_Animation) is the SOLE driver of the sim timeline
@@ -3459,6 +3578,106 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     float screen_y,
     float left_offset)
 {
+    static float bottom_hold_timers[6] = { 0.0f };
+    static float bottom_flash_timers[6] = { 0.0f };
+
+    auto isBottomPanelFloating = [&](const char* window_name) -> bool {
+        if (!docking_enabled) return false;
+        ImGuiWindow* win = ImGui::FindWindowByName(window_name);
+        if (!win) return false;
+        if (!win->DockNode) return true;
+        ImGuiDockNode* node = win->DockNode;
+        while (node->ParentNode && node->ParentNode->ID != dockspace_id) {
+            node = node->ParentNode;
+        }
+        if (node->ParentNode && node->ParentNode->ID == dockspace_id) {
+            if (dock_bottom_id == 0) {
+                dock_bottom_id = node->ID;
+            }
+            return (node->ID != dock_bottom_id);
+        }
+        return true;
+    };
+
+    auto handleBottomTabEvents = [&](int tab_index, const char* window_name, bool& show_var, auto on_activate) {
+        bool hovered = ImGui::IsItemHovered();
+        bool active = ImGui::IsItemActive();
+
+        // Right-click context menu
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            ImGui::OpenPopup(window_name);
+        }
+
+        if (ImGui::BeginPopup(window_name)) {
+            bool is_floating = isBottomPanelFloating(window_name);
+            if (is_floating) {
+                if (ImGui::MenuItem("Dock Back to Bottom")) {
+                    dockToBottom(window_name);
+                    bottom_flash_timers[tab_index] = 1.0f;
+                }
+            } else {
+                if (ImGui::MenuItem("Undock (Float)")) {
+                    ImGui::DockBuilderDockWindow(window_name, 0);
+                    bottom_flash_timers[tab_index] = 1.0f;
+                }
+            }
+            ImGui::EndPopup();
+        }
+
+        // Double-click to toggle float
+        if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            bool is_floating = isBottomPanelFloating(window_name);
+            if (is_floating) {
+                dockToBottom(window_name);
+            } else {
+                show_var = true;
+                on_activate();
+                ImGui::DockBuilderDockWindow(window_name, 0);
+            }
+            bottom_flash_timers[tab_index] = 1.0f;
+            bottom_hold_timers[tab_index] = 0.0f;
+            return;
+        }
+
+        // Hold-to-pop (2 seconds)
+        if (active && hovered) {
+            bottom_hold_timers[tab_index] += ImGui::GetIO().DeltaTime;
+            if (bottom_hold_timers[tab_index] >= 2.0f) {
+                bool is_floating = isBottomPanelFloating(window_name);
+                if (is_floating) {
+                    dockToBottom(window_name);
+                } else {
+                    show_var = true;
+                    on_activate();
+                    ImGui::DockBuilderDockWindow(window_name, 0);
+                }
+                bottom_flash_timers[tab_index] = 1.0f;
+                bottom_hold_timers[tab_index] = 0.0f;
+                ImGui::ClearActiveID();
+            }
+        } else {
+            bottom_hold_timers[tab_index] = (std::max)(0.0f, bottom_hold_timers[tab_index] - ImGui::GetIO().DeltaTime * 2.0f);
+        }
+
+        // Draw progress circle if held
+        if (bottom_hold_timers[tab_index] > 0.0f) {
+            float progress = bottom_hold_timers[tab_index] / 2.0f;
+            ImDrawList* draw_list = ImGui::GetWindowDrawList();
+            ImVec2 min_p = ImGui::GetItemRectMin();
+            ImVec2 max_p = ImGui::GetItemRectMax();
+            ImVec2 center = ImVec2((min_p.x + max_p.x) * 0.5f, (min_p.y + max_p.y) * 0.5f);
+            float radius = (std::min)(max_p.x - min_p.x, max_p.y - min_p.y) * 0.35f;
+            
+            int num_segments = 32;
+            float start_angle = -1.57079f;
+            float end_angle = start_angle + progress * 6.28318f;
+            
+            draw_list->AddCircle(center, radius, IM_COL32(255, 255, 255, 40), num_segments, 1.5f);
+            draw_list->PathArcTo(center, radius, start_angle, end_angle, num_segments);
+            draw_list->PathStroke(IM_COL32(0, 160, 255, 220), 0, 2.5f);
+        }
+    };
+
     // ---------------- STATUS BAR ----------------
     float status_bar_height = 24.0f;
 
@@ -3516,10 +3735,16 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             } else {
                 show_animation_panel = true;
                 timeline.setEditorMode(TimelineEditorMode::DopeSheet);
-                if (!docking_enabled) closeOtherBottomPanels(0);
+                closeOtherBottomPanels(0);
                 focus_bottom_panel_next_frame = true;
             }
         }
+        handleBottomTabEvents(0, "Timeline", show_animation_panel, [&]() {
+            show_animation_panel = true;
+            timeline.setEditorMode(TimelineEditorMode::DopeSheet);
+            closeOtherBottomPanels(0);
+            focus_bottom_panel_next_frame = true;
+        });
 
         bool active_graph = show_animation_panel && (timeline.getEditorMode() == TimelineEditorMode::GraphEditor);
         if (UIWidgets::HorizontalTab("Graph Editor", UIWidgets::IconType::Graph, active_graph))
@@ -3530,54 +3755,80 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             } else {
                 show_animation_panel = true;
                 timeline.setEditorMode(TimelineEditorMode::GraphEditor);
-                if (!docking_enabled) closeOtherBottomPanels(0);
+                closeOtherBottomPanels(0);
                 focus_bottom_panel_next_frame = true;
             }
         }
+        handleBottomTabEvents(1, "Timeline", show_animation_panel, [&]() {
+            show_animation_panel = true;
+            timeline.setEditorMode(TimelineEditorMode::GraphEditor);
+            closeOtherBottomPanels(0);
+            focus_bottom_panel_next_frame = true;
+        });
 
         if (UIWidgets::HorizontalTab("Console", UIWidgets::IconType::Console, show_scene_log))
         {
             show_scene_log = !show_scene_log;
             if (show_scene_log) { 
-                if (!docking_enabled) closeOtherBottomPanels(1);
+                closeOtherBottomPanels(1);
                 focus_bottom_panel_next_frame = true;
             } else {
                 if (docking_enabled) dockToBottom("Console");
             }
         }
+        handleBottomTabEvents(2, "Console", show_scene_log, [&]() {
+            show_scene_log = true;
+            closeOtherBottomPanels(1);
+            focus_bottom_panel_next_frame = true;
+        });
         
         if (UIWidgets::HorizontalTab("Graph", UIWidgets::IconType::Graph, show_terrain_graph))
         {
             show_terrain_graph = !show_terrain_graph;
             if (show_terrain_graph) {
-                if (!docking_enabled) closeOtherBottomPanels(2);
+                closeOtherBottomPanels(2);
                 focus_bottom_panel_next_frame = true;
             } else {
                 if (docking_enabled) dockToBottom("Terrain Graph");
             }
         }
+        handleBottomTabEvents(3, "Terrain Graph", show_terrain_graph, [&]() {
+            show_terrain_graph = true;
+            closeOtherBottomPanels(2);
+            focus_bottom_panel_next_frame = true;
+        });
         
         if (UIWidgets::HorizontalTab("AnimGraph", UIWidgets::IconType::AnimGraph, show_anim_graph))
         {
             show_anim_graph = !show_anim_graph;
             if (show_anim_graph) {
-                if (!docking_enabled) closeOtherBottomPanels(3);
+                closeOtherBottomPanels(3);
                 focus_bottom_panel_next_frame = true;
             } else {
                 if (docking_enabled) dockToBottom("AnimGraph");
             }
         }
+        handleBottomTabEvents(4, "AnimGraph", show_anim_graph, [&]() {
+            show_anim_graph = true;
+            closeOtherBottomPanels(3);
+            focus_bottom_panel_next_frame = true;
+        });
 
         if (UIWidgets::HorizontalTab("Assets", UIWidgets::IconType::Assets, show_asset_browser))
         {
             show_asset_browser = !show_asset_browser;
             if (show_asset_browser) {
-                if (!docking_enabled) closeOtherBottomPanels(4);
+                closeOtherBottomPanels(4);
                 focus_bottom_panel_next_frame = true;
             } else {
                 if (docking_enabled) dockToBottom("Asset Browser");
             }
         }
+        handleBottomTabEvents(5, "Asset Browser", show_asset_browser, [&]() {
+            show_asset_browser = true;
+            closeOtherBottomPanels(4);
+            focus_bottom_panel_next_frame = true;
+        });
 
         ImGui::SameLine();
         
@@ -3852,6 +4103,9 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             ImGui::SetNextWindowSize(ImVec2(900, 300), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowPos(ImVec2((screen_x - 900) * 0.5f, screen_y - 300 - 50), ImGuiCond_FirstUseEver);
             ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+            if (!isBottomPanelFloating("Timeline")) {
+                flags |= ImGuiWindowFlags_NoTitleBar;
+            }
             if (focus_bottom_panel_next_frame) {
                 ImGui::SetNextWindowFocus();
             }
@@ -3875,6 +4129,9 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             ImGui::SetNextWindowSize(ImVec2(800, 400), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowPos(ImVec2((screen_x - 800) * 0.5f, (screen_y - 400) * 0.5f), ImGuiCond_FirstUseEver);
             ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+            if (!isBottomPanelFloating("Console")) {
+                flags |= ImGuiWindowFlags_NoTitleBar;
+            }
             if (focus_bottom_panel_next_frame) {
                 ImGui::SetNextWindowFocus();
             }
@@ -3898,6 +4155,9 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             ImGui::SetNextWindowSize(ImVec2(950, 450), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowPos(ImVec2((screen_x - 950) * 0.5f, (screen_y - 450) * 0.5f), ImGuiCond_FirstUseEver);
             ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+            if (!isBottomPanelFloating("Terrain Graph")) {
+                flags |= ImGuiWindowFlags_NoTitleBar;
+            }
             if (focus_bottom_panel_next_frame) {
                 ImGui::SetNextWindowFocus();
             }
@@ -3946,6 +4206,9 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             ImGui::SetNextWindowSize(ImVec2(950, 450), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowPos(ImVec2((screen_x - 950) * 0.5f, (screen_y - 450) * 0.5f), ImGuiCond_FirstUseEver);
             ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+            if (!isBottomPanelFloating("AnimGraph")) {
+                flags |= ImGuiWindowFlags_NoTitleBar;
+            }
             if (focus_bottom_panel_next_frame) {
                 ImGui::SetNextWindowFocus();
             }
@@ -3969,6 +4232,9 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             ImGui::SetNextWindowSize(ImVec2(900, 400), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowPos(ImVec2((screen_x - 900) * 0.5f, (screen_y - 400) * 0.5f), ImGuiCond_FirstUseEver);
             ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+            if (!isBottomPanelFloating("Asset Browser")) {
+                flags |= ImGuiWindowFlags_NoTitleBar;
+            }
             if (focus_bottom_panel_next_frame) {
                 ImGui::SetNextWindowFocus();
             }
@@ -4052,6 +4318,41 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     }
     // ImGui::PopStyleVar(); // Removed redundant PopStyleVar
     // ImGui::PopStyleColor(); // Removed hardcoded color push
+
+    // Draw flash borders
+    for (int i = 0; i < 6; i++) {
+        if (bottom_flash_timers[i] > 0.0f) {
+            bottom_flash_timers[i] -= ImGui::GetIO().DeltaTime;
+            const char* name = nullptr;
+            if (i == 0 || i == 1) name = "Timeline";
+            else if (i == 2) name = "Console";
+            else if (i == 3) name = "Terrain Graph";
+            else if (i == 4) name = "AnimGraph";
+            else if (i == 5) name = "Asset Browser";
+
+            if (name) {
+                ImGuiWindow* win = ImGui::FindWindowByName(name);
+                if (win && win->Active && !win->Hidden) {
+                    ImVec2 min_p = win->Pos;
+                    ImVec2 max_p = ImVec2(win->Pos.x + win->Size.x, win->Pos.y + win->Size.y);
+                    ImDrawList* fg_list = ImGui::GetForegroundDrawList();
+                    
+                    float alpha = bottom_flash_timers[i];
+                    for (int g = 1; g <= 4; g++) {
+                        float offset = (float)g;
+                        fg_list->AddRect(
+                            ImVec2(min_p.x - offset, min_p.y - offset),
+                            ImVec2(max_p.x + offset, max_p.y + offset),
+                            IM_COL32(0, 160, 255, (int)(alpha * 255 / g)),
+                            4.0f,
+                            0,
+                            1.5f
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 bool SceneUI::drawOverlays(UIContext& ctx)
 {

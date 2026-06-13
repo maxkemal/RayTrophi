@@ -139,7 +139,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
     ImGui::PushStyleColor(ImGuiCol_Border, t.colors.border);
     ImGui::PushStyleColor(ImGuiCol_Separator, t.colors.border);
     ImGui::PushStyleColor(ImGuiCol_Text, t.colors.text);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 8.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 11.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 7.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 14.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
@@ -865,6 +865,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             ImGui::EndMenu();
         }
 
+        drawViewportControls(ctx);
         ImGui::EndMainMenuBar();
     } else {
         g_main_menu_reserved_height = (std::max)(g_main_menu_reserved_height, 30.0f);
