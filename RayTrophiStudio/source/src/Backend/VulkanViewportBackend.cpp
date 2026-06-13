@@ -5777,7 +5777,7 @@ bool VulkanBackendAdapter::renderSelectionOutlineMaskReadback(
     {
         VkImageMemoryBarrier toSrc{};
         toSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        toSrc.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        toSrc.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         toSrc.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -5787,7 +5787,7 @@ bool VulkanBackendAdapter::renderSelectionOutlineMaskReadback(
         toSrc.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         toSrc.subresourceRange.levelCount = 1;
         toSrc.subresourceRange.layerCount = 1;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                              0, nullptr, 0, nullptr, 1, &toSrc);
 
