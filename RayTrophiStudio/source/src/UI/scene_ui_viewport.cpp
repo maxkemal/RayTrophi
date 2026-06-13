@@ -1,4 +1,4 @@
-﻿// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - VIEWPORT OVERLAYS
 // ═══════════════════════════════════════════════════════════════════════════════
 // This file contains viewport overlay components:
@@ -18,6 +18,7 @@
 #include "Triangle.h"
 #include "InstanceManager.h"
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "CameraPresets.h"
 #include "Backend/IViewportBackend.h"
 #include "Backend/OptixBackend.h"
@@ -44,101 +45,139 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
     SceneSelection& sel = ctx.selection;
 
     // ── Layout constants ──
-    const float menu_height = 19.0f;
-    const float btn_h = 24.0f;
+    const float menu_height = getMainMenuReservedHeight();
+    const float btn_h = 28.0f;
     const float pad_x = 6.0f;
 
     const float right_margin = 18.0f + getPaintBrushDockWidth();
     const float top_margin = menu_height + 10.0f;
 
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - right_margin, top_margin), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
-    ImGui::SetNextWindowSize(ImVec2(0, 0)); // auto-size
+    // Calculate dynamic toolbar width for right alignment inside main menu bar
+    const bool can_edit_object_pivot =
+        sel.selected.type == SelectableType::Object &&
+        sel.selected.object && sel.multi_selection.size() == 1;
+    const bool can_edit_volume_pivot =
+        sel.multi_selection.size() == 1 &&
+        ((sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) ||
+            (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume));
+    const bool can_edit_any_pivot = can_edit_object_pivot || can_edit_volume_pivot;
 
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.09f, 0.11f, 0.14f));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.72f, 0.78f, 0.88f, 0.14f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad_x, 3.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    const float shade_btn_w = 54.0f;
+    const float transform_group_w = 4.0f * (btn_h + 6.0f) + 3.0f * 3.0f;
+    const float shading_group_w   = 4.0f * shade_btn_w + 3.0f * 4.0f;
+    const float hud_pro_group_w    = 2.0f * (btn_h + 6.0f) + 3.0f;
+    const float pivot_group_w      = btn_h + 3.0f + 76.0f + 3.0f + btn_h + (can_edit_any_pivot ? (3.0f + btn_h) : 0.0f);
+    const float sensitivity_w      = btn_h + 2.0f;
+    const float separators_w       = 4.0f * 13.0f; // 4 separators (each taking 13px)
+    const float toolbar_width      = transform_group_w + separators_w + shading_group_w + hud_pro_group_w + pivot_group_w + sensitivity_w;
 
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar |
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
-        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
-        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus;
-
-    if (!ImGui::Begin("##ViewportBar", nullptr, flags)) {
-        ImGui::PopStyleVar(4);
-        ImGui::PopStyleColor(2);
-        ImGui::End();
-        return;
+    float right_padding = 18.0f;
+    float target_x = ImGui::GetWindowWidth() - toolbar_width - right_padding;
+    if (target_x < 450.0f) {
+        target_x = 450.0f;
     }
+    ImGui::SetCursorPosX(target_x);
+    ImGui::SetCursorPosY((ImGui::GetWindowHeight() - btn_h) * 0.5f - 1.0f);
 
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3.0f, 0.0f));
+
+    // Modern flat, borderless icon button with smooth hover animation
     auto iconToggleBtn = [&](const char* id, bool active, ImVec2 size, ImVec4 accent, auto&& drawIcon) -> bool {
-        const ImVec2 pos = ImGui::GetCursorScreenPos();
-        const bool hovered_pre = ImGui::IsMouseHoveringRect(pos, ImVec2(pos.x + size.x, pos.y + size.y));
-        const float mix = active ? 0.78f : (hovered_pre ? 0.42f : 0.20f);
-        const ImVec4 base(0.18f, 0.19f, 0.22f, 0.90f);
-        const ImVec4 bg(
-            base.x + (accent.x - base.x) * mix,
-            base.y + (accent.y - base.y) * mix,
-            base.z + (accent.z - base.z) * mix,
-            active ? 0.98f : 0.90f);
-
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-        ImGui::PushStyleColor(ImGuiCol_Button, bg);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(
-            std::min(1.0f, bg.x + 0.10f),
-            std::min(1.0f, bg.y + 0.10f),
-            std::min(1.0f, bg.z + 0.10f),
-            1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(
-            std::min(1.0f, bg.x + 0.05f),
-            std::min(1.0f, bg.y + 0.05f),
-            std::min(1.0f, bg.z + 0.05f),
-            1.0f));
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, active ? 0.75f : 0.25f));
-
-        const bool clicked = ImGui::Button(id, size);
-        const ImVec2 min = ImGui::GetItemRectMin();
-        const ImVec2 max = ImGui::GetItemRectMax();
+        ImGuiIO& io = ImGui::GetIO();
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        drawIcon(dl, min, max, ImGui::ColorConvertFloat4ToU32(ImVec4(0.92f, 0.94f, 0.98f, active ? 1.0f : 0.92f)));
-        dl->AddRect(min, max, ImGui::ColorConvertFloat4ToU32(ImVec4(accent.x, accent.y, accent.z, active ? 0.45f : 0.18f)), 8.0f, 0, 1.0f);
+        const ImVec2 pos = ImGui::GetCursorScreenPos();
 
-        ImGui::PopStyleColor(4);
-        ImGui::PopStyleVar(2);
+        ImGui::PushID(id);
+        const ImGuiID btn_id = ImGui::GetID("##hud_btn");
+        const bool clicked = ImGui::InvisibleButton("##hud_btn", size);
+        const bool hovered = ImGui::IsItemHovered();
+        ImGui::PopID();
+
+        static std::unordered_map<ImGuiID, float> hover_anims;
+        float& anim = hover_anims[btn_id];
+        const float target_hover = (hovered || active) ? 1.0f : 0.0f;
+        const float anim_speed = 12.0f * io.DeltaTime;
+        anim += (target_hover - anim) * ImClamp(anim_speed, 0.0f, 1.0f);
+
+        // Flat background highlighting - shrunk vertically by 1px on top and bottom
+        if (active) {
+            dl->AddRectFilled(ImVec2(pos.x, pos.y + 1.0f), ImVec2(pos.x + size.x, pos.y + size.y - 1.0f),
+                              ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, 0.14f)), 5.0f);
+        } else if (anim > 0.01f) {
+            dl->AddRectFilled(ImVec2(pos.x, pos.y + 1.0f), ImVec2(pos.x + size.x, pos.y + size.y - 1.0f),
+                              ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, 0.09f * anim)), 5.0f);
+        }
+
+        // Tint transitions smoothly to accent color (completely solid when idle)
+        ImVec4 idleCol(0.90f, 0.92f, 0.98f, 1.00f);
+        ImVec4 iconCol = active ? accent : ImLerp(idleCol, accent, anim);
+
+        drawIcon(dl, pos, ImVec2(pos.x + size.x, pos.y + size.y), ImGui::ColorConvertFloat4ToU32(iconCol), anim);
+
+        if (hovered) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        }
+
         return clicked;
     };
+
     auto iconButton = [&](const char* id, ImVec2 size, ImVec4 accent, auto&& drawIcon) -> bool {
         return iconToggleBtn(id, false, size, accent, drawIcon);
     };
-    auto iconToggleTypeBtn = [&](const char* id, bool active, ImVec2 size, ImVec4 accent, UIWidgets::IconType type, float iconSize = 22.0f) -> bool {
+
+    auto iconToggleTypeBtn = [&](const char* id, bool active, ImVec2 size, ImVec4 accent, UIWidgets::IconType type, float baseIconSize = 20.0f) -> bool {
         return iconToggleBtn(id, active, size, accent,
-            [&](ImDrawList*, ImVec2 min, ImVec2 max, ImU32 col) {
-                const ImVec2 pos((min.x + max.x - iconSize) * 0.5f, (min.y + max.y - iconSize) * 0.5f);
-                UIWidgets::DrawIcon(type, pos, iconSize, col, 1.45f);
+            [&](ImDrawList*, ImVec2 min, ImVec2 max, ImU32 col, float anim) {
+                const float scaledSize = baseIconSize + 2.0f * anim;
+                const ImVec2 pos((min.x + max.x - scaledSize) * 0.5f, (min.y + max.y - scaledSize) * 0.5f);
+                UIWidgets::DrawIcon(type, pos, scaledSize, col, 1.55f + 0.15f * anim);
             });
     };
-    auto iconTypeButton = [&](const char* id, ImVec2 size, ImVec4 accent, UIWidgets::IconType type, float iconSize = 22.0f) -> bool {
+
+    auto iconTypeButton = [&](const char* id, ImVec2 size, ImVec4 accent, UIWidgets::IconType type, float iconSize = 20.0f) -> bool {
         return iconToggleTypeBtn(id, false, size, accent, type, iconSize);
     };
+
+    auto drawSeparator = [&]() {
+        ImGui::SameLine(0, 6.0f);
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        float line_h = btn_h - 6.0f;
+        float offset_y = (btn_h - line_h) * 0.5f;
+        dl->AddLine(
+            ImVec2(p.x + 3.0f, p.y + offset_y),
+            ImVec2(p.x + 3.0f, p.y + offset_y + line_h),
+            ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, 0.20f)),
+            1.0f
+        );
+        ImGui::Dummy(ImVec2(7.0f, btn_h));
+        ImGui::SameLine(0, 0.0f);
+    };
+
     auto viewportTooltip = [&](const char* title, const char* body, const ImVec4& accent) {
         if (!ImGui::IsItemHovered()) return;
-        ImGui::SetNextWindowBgAlpha(0.78f);
+        ImGui::SetNextWindowBgAlpha(0.60f);
         ImGui::SetNextWindowSizeConstraints(ImVec2(260.0f, 0.0f), ImVec2(360.0f, 1000.0f));
-        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.07f, 0.08f, 0.10f, 0.82f));
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, 0.22f));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.07f, 0.08f, 0.10f, 0.60f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.72f, 0.78f, 0.88f, 0.15f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
         ImGui::BeginTooltip();
-        ImGui::PushStyleColor(ImGuiCol_Text, accent);
+        
+        // Sleek title style
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.97f, 1.0f, 1.0f));
         ImGui::TextUnformatted(title);
         ImGui::PopStyleColor();
+        
         if (body && body[0]) {
             ImGui::Separator();
             ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24.0f);
+            
+            // Sleek body text style
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.80f, 0.82f, 0.88f, 0.88f));
             ImGui::TextWrapped("%s", body);
+            ImGui::PopStyleColor();
+            
             ImGui::PopTextWrapPos();
         }
         ImGui::EndTooltip();
@@ -146,333 +185,355 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
         ImGui::PopStyleColor(2);
     };
 
-    // ── Transform gizmo mode buttons ──
-    bool is_t = (sel.transform_mode == TransformMode::Translate);
-    bool is_r = (sel.transform_mode == TransformMode::Rotate);
-    bool is_s = (sel.transform_mode == TransformMode::Scale);
-    const ImVec4 tCol(0.3f, 0.7f, 1.0f, 1.0f);
-
-    if (iconToggleTypeBtn("##transform_translate", is_t, ImVec2(btn_h + 8.0f, btn_h), tCol, UIWidgets::IconType::Move, 22.0f)) sel.transform_mode = TransformMode::Translate;
-    viewportTooltip("Move", "Translate the current selection.", tCol);
-    ImGui::SameLine();
-    if (iconToggleTypeBtn("##transform_rotate", is_r, ImVec2(btn_h + 8.0f, btn_h), tCol, UIWidgets::IconType::Rotate, 22.0f)) sel.transform_mode = TransformMode::Rotate;
-    viewportTooltip("Rotate", "Rotate the current selection.", tCol);
-    ImGui::SameLine();
-    if (iconToggleTypeBtn("##transform_scale", is_s, ImVec2(btn_h + 8.0f, btn_h), tCol, UIWidgets::IconType::ScaleAxis, 22.0f)) sel.transform_mode = TransformMode::Scale;
-    viewportTooltip("Scale", "Scale the current selection.", tCol);
-
-    // Gizmo toggle
-    ImGui::SameLine();
-    if (iconToggleTypeBtn("##toggle_gizmo", viewport_settings.show_gizmos, ImVec2(btn_h + 8.0f, btn_h), ImVec4(0.57f, 0.71f, 1.0f, 1.0f), UIWidgets::IconType::Gizmo, 22.0f))
     {
-        viewport_settings.show_gizmos = !viewport_settings.show_gizmos;
-        ProjectManager::getInstance().markModified();
-    }
-    viewportTooltip("Gizmos", "Show or hide transform gizmos in the viewport.\nRight-click for outline options.", ImVec4(0.57f, 0.71f, 1.0f, 1.0f));
-    if (ImGui::BeginPopupContextItem("##gizmo_opts")) {
-        if (ImGui::MenuItem("Selection Outline", nullptr, viewport_settings.show_selection_outline)) {
-            viewport_settings.show_selection_outline = !viewport_settings.show_selection_outline;
+        // ── Transform gizmo mode buttons ──
+        bool is_t = (sel.transform_mode == TransformMode::Translate);
+        bool is_r = (sel.transform_mode == TransformMode::Rotate);
+        bool is_s = (sel.transform_mode == TransformMode::Scale);
+        const ImVec4 tCol(0.35f, 0.75f, 1.0f, 1.0f);
+
+        if (iconToggleTypeBtn("##transform_translate", is_t, ImVec2(btn_h + 6.0f, btn_h), tCol, UIWidgets::IconType::Move, 21.0f)) sel.transform_mode = TransformMode::Translate;
+        viewportTooltip("Move", "Translate the current selection.", tCol);
+        ImGui::SameLine();
+        if (iconToggleTypeBtn("##transform_rotate", is_r, ImVec2(btn_h + 6.0f, btn_h), tCol, UIWidgets::IconType::Rotate, 21.0f)) sel.transform_mode = TransformMode::Rotate;
+        viewportTooltip("Rotate", "Rotate the current selection.", tCol);
+        ImGui::SameLine();
+        if (iconToggleTypeBtn("##transform_scale", is_s, ImVec2(btn_h + 6.0f, btn_h), tCol, UIWidgets::IconType::ScaleAxis, 21.0f)) sel.transform_mode = TransformMode::Scale;
+        viewportTooltip("Scale", "Scale the current selection.", tCol);
+
+        // Gizmo toggle
+        ImGui::SameLine();
+        const ImVec4 gizmoCol(0.58f, 0.72f, 1.0f, 1.0f);
+        if (iconToggleTypeBtn("##toggle_gizmo", viewport_settings.show_gizmos, ImVec2(btn_h + 6.0f, btn_h), gizmoCol, UIWidgets::IconType::Gizmo, 21.0f))
+        {
+            viewport_settings.show_gizmos = !viewport_settings.show_gizmos;
             ProjectManager::getInstance().markModified();
         }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Per-mesh silhouette around the selected object.\nDisable for a large viewport perf win on dense selections.");
+        viewportTooltip("Gizmos", "Show or hide transform gizmos in the viewport.\nRight-click for outline options.", gizmoCol);
+        if (ImGui::BeginPopupContextItem("##gizmo_opts")) {
+            if (ImGui::MenuItem("Selection Outline", nullptr, viewport_settings.show_selection_outline)) {
+                viewport_settings.show_selection_outline = !viewport_settings.show_selection_outline;
+                ProjectManager::getInstance().markModified();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Per-mesh silhouette around the selected object.\nDisable for a large viewport perf win on dense selections.");
+            }
+            ImGui::EndPopup();
         }
-        ImGui::EndPopup();
-    }
 
-    // ── Separator ──
-    ImGui::SameLine(0, 6.0f);
-    ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "|");
-    ImGui::SameLine(0, 6.0f);
+        drawSeparator();
 
-    // ── Viewport Shading Buttons ──
-    {
-        struct ShadingBtn {
-            int mode;
-            const char* id;
-            const char* title;
-            const char* tooltip;
-            ImVec4 accent;
-            bool enabled;
-        };
-        const bool hasRasterViewport = (g_viewport_backend != nullptr) ||
-            (ctx.backend_ptr && ctx.backend_ptr->supportsViewportMode(Backend::ViewportMode::Solid));
-        const ShadingBtn btns[] = {
-            { 0, "##shade_solid",   "Solid",   hasRasterViewport ? "Fast raster preview for layout work." : "Requires Vulkan — not available on this machine.",              ImVec4(0.94f, 0.64f, 0.24f, 1.0f), hasRasterViewport  },
-            { 3, "##shade_matcap",  "Matcap",  hasRasterViewport ? "Studio-style shaded preview with matcap lighting." : "Requires Vulkan — not available on this machine.", ImVec4(0.88f, 0.42f, 0.34f, 1.0f), hasRasterViewport  },
-            { 1, "##shade_preview", "Preview", hasRasterViewport ? "PBR material preview with stable studio/environment lighting." : "Requires Vulkan — not available on this machine.", ImVec4(0.34f, 0.72f, 0.62f, 1.0f), hasRasterViewport },
-            { 2, "##shade_render",  "Render",  "Full rendered viewport using the selected device.",  ImVec4(0.32f, 0.60f, 0.96f, 1.0f), true  },
-        };
-        static float hover_anim[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        const float dt = ImGui::GetIO().DeltaTime;
-        const float shade_btn_w = 50.0f;
-        const float shade_btn_h = btn_h + 4.0f;
-        const float shade_icon_base = 28.0f;
-        const float shade_icon_hover_boost = 2.5f;
+        // ── Viewport Shading Buttons ──
+        {
+            struct ShadingBtn {
+                int mode;
+                const char* id;
+                const char* title;
+                const char* tooltip;
+                ImVec4 accent;
+                bool enabled;
+            };
+            const bool hasRasterViewport = (g_viewport_backend != nullptr) ||
+                (ctx.backend_ptr && ctx.backend_ptr->supportsViewportMode(Backend::ViewportMode::Solid));
+            const ShadingBtn btns[] = {
+                { 0, "##shade_solid",   "Solid",   hasRasterViewport ? "Fast raster preview for layout work." : "Requires Vulkan — not available on this machine.",              ImVec4(0.90f, 0.92f, 0.98f, 1.0f), hasRasterViewport  },
+                { 3, "##shade_matcap",  "Matcap",  hasRasterViewport ? "Studio-style shaded preview with matcap lighting.\nRight-click to select preset." : "Requires Vulkan — not available on this machine.", ImVec4(0.90f, 0.92f, 0.98f, 1.0f), hasRasterViewport  },
+                { 1, "##shade_preview", "Preview", hasRasterViewport ? "PBR material preview with stable studio/environment lighting." : "Requires Vulkan — not available on this machine.", ImVec4(0.90f, 0.92f, 0.98f, 1.0f), hasRasterViewport },
+                { 2, "##shade_render",  "Render",  "Full rendered viewport using the selected device.",  ImVec4(0.90f, 0.92f, 0.98f, 1.0f), true  },
+            };
+            const float shade_btn_w = 54.0f;
 
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 0.0f));
-        for (int i = 0; i < 4; ++i) {
-            if (i > 0) ImGui::SameLine();
-            const bool is_active = (viewport_settings.shading_mode == btns[i].mode);
-            const ImVec4 accent = btns[i].accent;
-            const bool is_enabled = btns[i].enabled;
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 0.0f));
+            for (int i = 0; i < 4; ++i) {
+                if (i > 0) ImGui::SameLine();
+                const bool is_active = (viewport_settings.shading_mode == btns[i].mode);
+                const ImVec4 accent = btns[i].accent;
+                const bool is_enabled = btns[i].enabled;
 
-            const ImVec2 shade_btn_pos = ImGui::GetCursorScreenPos();
-            const bool hovered_pre = ImGui::IsMouseHoveringRect(
-                shade_btn_pos,
-                ImVec2(shade_btn_pos.x + shade_btn_w, shade_btn_pos.y + shade_btn_h));
-            const float hover_target = ((hovered_pre && is_enabled) || is_active) ? 1.0f : 0.0f;
-            hover_anim[i] += (hover_target - hover_anim[i]) * std::min(1.0f, dt * 12.0f);
+                bool clicked = false;
+                if (!is_enabled) ImGui::BeginDisabled();
+                UIWidgets::IconType icon_type = UIWidgets::IconType::ViewRendered;
+                if (btns[i].mode == 0) icon_type = UIWidgets::IconType::ViewSolid;
+                else if (btns[i].mode == 3) icon_type = UIWidgets::IconType::ViewMatcap;
+                else if (btns[i].mode == 1) icon_type = UIWidgets::IconType::ViewPreview;
+                else if (btns[i].mode == 2) icon_type = UIWidgets::IconType::ViewRendered;
+                clicked = iconToggleTypeBtn(
+                    btns[i].id,
+                    is_active,
+                    ImVec2(shade_btn_w, btn_h),
+                    is_enabled ? accent : ImVec4(0.34f, 0.38f, 0.42f, 1.0f),
+                    icon_type,
+                    21.0f);
+                if (!is_enabled) ImGui::EndDisabled();
 
-            bool clicked = false;
-            if (!is_enabled) ImGui::BeginDisabled();
-            UIWidgets::IconType icon_type = UIWidgets::IconType::ViewRendered;
-            if (btns[i].mode == 0) icon_type = UIWidgets::IconType::ViewSolid;
-            else if (btns[i].mode == 3) icon_type = UIWidgets::IconType::ViewMatcap;
-            else if (btns[i].mode == 1) icon_type = UIWidgets::IconType::ViewPreview;
-            else if (btns[i].mode == 2) icon_type = UIWidgets::IconType::ViewRendered;
-            clicked = iconToggleTypeBtn(
-                btns[i].id,
-                is_active,
-                ImVec2(shade_btn_w, shade_btn_h),
-                is_enabled ? accent : ImVec4(0.34f, 0.38f, 0.42f, 1.0f),
-                icon_type,
-                shade_icon_base + hover_anim[i] * shade_icon_hover_boost);
-            if (!is_enabled) ImGui::EndDisabled();
+                // Matcap preset selection context menu
+                if (btns[i].mode == 3 && is_enabled) {
+                    if (ImGui::BeginPopupContextItem("##matcap_preset_popup")) {
+                        static const int pv[] = { 0, 2, 3, 4, 5, 6, 7, 8, 9 };
+                        static const char* pl[] = { "Solid Clay","Default","Clay","Silver","Pearl","Jade","Copper","Obsidian","Skin" };
+                        ImGui::Text("Matcap Preset");
+                        ImGui::Separator();
+                        for (int j = 0; j < IM_ARRAYSIZE(pv); ++j) {
+                            bool s = (viewport_settings.matcap_preset == pv[j]);
+                            if (ImGui::Selectable(pl[j], s)) {
+                                viewport_settings.matcap_preset = pv[j];
+                                Backend::IBackend* matcapBackend = ctx.backend_ptr;
+                                if (viewport_settings.shading_mode != 2 &&
+                                    g_viewport_backend &&
+                                    g_viewport_backend.get() != ctx.backend_ptr) {
+                                    matcapBackend = g_viewport_backend.get();
+                                }
+                                if (matcapBackend) {
+                                    matcapBackend->setInteractiveViewportMatcapPreset(pv[j]);
+                                }
+                                ctx.start_render = true;
+                                ctx.renderer.resetCPUAccumulation();
+                            }
+                            if (s) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndPopup();
+                    }
+                }
 
-            if (clicked && is_enabled) {
-                Backend::ViewportMode requestedMode = Backend::ViewportMode::Rendered;
-                switch (btns[i].mode) {
+                if (clicked && is_enabled) {
+                    Backend::ViewportMode requestedMode = Backend::ViewportMode::Rendered;
+                    switch (btns[i].mode) {
                     case 0: requestedMode = Backend::ViewportMode::Solid; break;
                     case 1: requestedMode = Backend::ViewportMode::MaterialPreview; break;
                     case 3: requestedMode = Backend::ViewportMode::Matcap; break;
                     case 2:
                     default: requestedMode = Backend::ViewportMode::Rendered; break;
-                }
-                const bool supported =
-                    (btns[i].mode == 2) ||
-                    (g_viewport_backend != nullptr) ||
-                    (ctx.backend_ptr && ctx.backend_ptr->supportsViewportMode(requestedMode));
-
-                if (!supported) {
-                    viewport_settings.shading_mode = 2;
-                    addViewportMessage("Interactive viewport is not available right now. Switched to Rendered mode.",
-                        3.0f, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
-                } else {
-                    viewport_settings.shading_mode = btns[i].mode;
-                    if (viewport_settings.shading_mode != 2 && g_viewport_backend != nullptr) {
-                        g_viewport_raster_rebuild_pending = true;
                     }
-                }
-                ctx.start_render = true;
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
-            }
-            const bool hovered = ImGui::IsItemHovered();
+                    const bool supported =
+                        (btns[i].mode == 2) ||
+                        (g_viewport_backend != nullptr) ||
+                        (ctx.backend_ptr && ctx.backend_ptr->supportsViewportMode(requestedMode));
 
-            if (hovered) {
-                std::string tooltip_text = btns[i].tooltip;
-                if (!is_enabled) {
-                    tooltip_text += " Coming soon.";
-                } else if (btns[i].mode == 0 || btns[i].mode == 3) {
-                    tooltip_text += " Early viewport mode.";
-                }
-                viewportTooltip(btns[i].title, tooltip_text.c_str(), accent);
-            }
-        }
-        ImGui::PopStyleVar();
-
-        // Matcap gear popup
-        if (viewport_settings.shading_mode == 3) {
-            ImGui::SameLine(0, 3.0f);
-            if (iconTypeButton("##mcap_preset", ImVec2(btn_h + 4.0f, btn_h), ImVec4(0.94f, 0.58f, 0.38f, 1.0f), UIWidgets::IconType::Settings, 18.0f))
-                ImGui::OpenPopup("MatcapPresetPopup");
-            viewportTooltip("Matcap Preset", "Choose the active matcap surface preset.", ImVec4(0.94f, 0.58f, 0.38f, 1.0f));
-            if (ImGui::BeginPopup("MatcapPresetPopup")) {
-                static const int pv[] = { 0, 2, 3, 4, 5, 6, 7, 8, 9 };
-                static const char* pl[] = { "Solid Clay","Default","Clay","Silver","Pearl","Jade","Copper","Obsidian","Skin" };
-                for (int i = 0; i < IM_ARRAYSIZE(pv); ++i) {
-                    bool s = (viewport_settings.matcap_preset == pv[i]);
-                    if (ImGui::Selectable(pl[i], s)) {
-                        viewport_settings.matcap_preset = pv[i];
-                        Backend::IBackend* matcapBackend = ctx.backend_ptr;
-                        if (viewport_settings.shading_mode != 2 &&
-                            g_viewport_backend &&
-                            g_viewport_backend.get() != ctx.backend_ptr) {
-                            matcapBackend = g_viewport_backend.get();
-                        }
-                        if (matcapBackend) {
-                            matcapBackend->setInteractiveViewportMatcapPreset(pv[i]);
-                        }
-                        ctx.start_render = true;
-                        ctx.renderer.resetCPUAccumulation();
+                    if (!supported) {
+                        viewport_settings.shading_mode = 2;
+                        addViewportMessage("Interactive viewport is not available right now. Switched to Rendered mode.",
+                            3.0f, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
                     }
-                    if (s) ImGui::SetItemDefaultFocus();
+                    else {
+                        viewport_settings.shading_mode = btns[i].mode;
+                        if (viewport_settings.shading_mode != 2 && g_viewport_backend != nullptr) {
+                            g_viewport_raster_rebuild_pending = true;
+                        }
+                    }
+                    ctx.start_render = true;
+                    ctx.renderer.resetCPUAccumulation();
+                    if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                 }
-                ImGui::EndPopup();
+                const bool hovered = ImGui::IsItemHovered();
+
+                if (hovered) {
+                    std::string tooltip_text = btns[i].tooltip;
+                    if (!is_enabled) {
+                        tooltip_text += " Coming soon.";
+                    }
+                    else if (btns[i].mode == 0 || btns[i].mode == 3) {
+                        tooltip_text += " Early viewport mode.";
+                    }
+                    viewportTooltip(btns[i].title, tooltip_text.c_str(), accent);
+                }
             }
+            ImGui::PopStyleVar();
         }
-    }
 
-    // ── Separator ──
-    ImGui::SameLine(0, 6.0f);
-    ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "|");
-    ImGui::SameLine(0, 6.0f);
+        drawSeparator();
 
-    // ── HUD / PRO ──
-    const ImVec4 hudCol(0.2f, 0.6f, 0.4f, 1.0f);
-    if (iconToggleTypeBtn("##toggle_hud", viewport_settings.show_camera_hud, ImVec2(btn_h + 8.0f, btn_h), hudCol, UIWidgets::IconType::CameraHud, 22.0f)) {
-        viewport_settings.show_camera_hud = !viewport_settings.show_camera_hud;
-        ProjectManager::getInstance().markModified();
-    }
-    viewportTooltip("Camera HUD", "Show lens and framing info in the viewport.", hudCol);
-
-    ImGui::SameLine();
-    bool any_pro = viewport_settings.show_histogram || viewport_settings.show_focus_peaking ||
-                   viewport_settings.show_zebra || viewport_settings.show_af_points;
-    if (iconToggleTypeBtn("##toggle_pro", any_pro, ImVec2(btn_h + 8.0f, btn_h), ImVec4(0.6f, 0.3f, 0.5f, 1.0f), UIWidgets::IconType::ViewOverlays, 22.0f))
-        ImGui::OpenPopup("ProCameraPopup");
-    viewportTooltip("Overlays", "Histogram, focus peaking, zebra and AF tools.", ImVec4(0.6f, 0.3f, 0.5f, 1.0f));
-
-    if (ImGui::BeginPopup("ProCameraPopup")) {
-        ImGui::Text("Pro Camera Features");
-        ImGui::Separator();
-        ImGui::Checkbox("Histogram", &viewport_settings.show_histogram);
-        if (viewport_settings.show_histogram) {
-            ImGui::Indent();
-            ImGui::Combo("Mode##Hist", &viewport_settings.histogram_mode, "RGB\0Luma\0");
-            ImGui::SliderFloat("Opacity", &viewport_settings.histogram_opacity, 0.3f, 1.0f);
-            ImGui::Unindent();
+        // ── HUD / PRO ──
+        const ImVec4 hudCol(0.35f, 0.80f, 0.50f, 1.0f);
+        if (iconToggleTypeBtn("##toggle_hud", viewport_settings.show_camera_hud, ImVec2(btn_h + 6.0f, btn_h), hudCol, UIWidgets::IconType::CameraHud, 21.0f)) {
+            viewport_settings.show_camera_hud = !viewport_settings.show_camera_hud;
+            ProjectManager::getInstance().markModified();
         }
-        ImGui::Separator();
-        ImGui::Checkbox("Focus Peaking", &viewport_settings.show_focus_peaking);
-        if (viewport_settings.show_focus_peaking) {
-            ImGui::Indent();
-            ImGui::Combo("Color##Peak", &viewport_settings.focus_peaking_color, "Red\0Yellow\0Green\0Blue\0White\0");
-            ImGui::SliderFloat("Threshold##Peak", &viewport_settings.focus_peaking_threshold, 0.05f, 0.5f);
-            ImGui::Unindent();
-        }
-        ImGui::Separator();
-        ImGui::Checkbox("Zebra Stripes", &viewport_settings.show_zebra);
-        if (viewport_settings.show_zebra) {
-            ImGui::Indent();
-            ImGui::SliderFloat("Threshold##Zebra", &viewport_settings.zebra_threshold, 0.8f, 1.0f, "%.2f");
-            ImGui::Unindent();
-        }
-        ImGui::Separator();
-        ImGui::Checkbox("AF Points", &viewport_settings.show_af_points);
-        if (viewport_settings.show_af_points) {
-            ImGui::Indent();
-            ImGui::Combo("Mode##AF", &viewport_settings.af_mode, "Single\0Zone 9\0Zone 21\0Wide\0Center Weighted\0");
-            ImGui::Combo("Focus Mode", &viewport_settings.focus_mode, "MF (Manual)\0AF-S (Single)\0AF-C (Continuous)\0");
-            ImGui::Unindent();
-        }
-        ImGui::EndPopup();
-    }
-
-    // ── Separator ──
-    ImGui::SameLine(0, 6.0f);
-    ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "|");
-    ImGui::SameLine(0, 6.0f);
-
-    // ── Pivot ──
-    {
-        const bool can_edit_object_pivot =
-            sel.selected.type == SelectableType::Object &&
-            sel.selected.object && sel.multi_selection.size() == 1;
-        const bool can_edit_volume_pivot =
-            sel.multi_selection.size() == 1 &&
-            ((sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) ||
-             (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume));
-        const bool can_edit_any_pivot = can_edit_object_pivot || can_edit_volume_pivot;
-
-        ImGui::SetNextItemWidth(76);
-        const char* pivot_opts[] = { "Median", "Individual" };
-        ImGui::Combo("##Pivot", &pivot_mode, pivot_opts, 2);
-        viewportTooltip("Pivot Mode", "Choose how transforms use pivots.", ImVec4(0.78f, 0.68f, 0.32f, 1.0f));
+        viewportTooltip("Camera HUD", "Show lens and framing info in the viewport.", hudCol);
 
         ImGui::SameLine();
-        if (iconToggleTypeBtn("##toggle_pivot_edit", pivot_edit_mode, ImVec2(btn_h, btn_h), ImVec4(0.85f, 0.55f, 0.18f, 1.0f), UIWidgets::IconType::PivotEdit, 20.0f)) {
-            pivot_edit_mode = can_edit_any_pivot ? !pivot_edit_mode : false;
-        }
-        viewportTooltip("Edit Pivot", "Move the pivot without moving the object.", ImVec4(0.85f, 0.55f, 0.18f, 1.0f));
+        bool any_pro = viewport_settings.show_histogram || viewport_settings.show_focus_peaking ||
+            viewport_settings.show_zebra || viewport_settings.show_af_points;
+        const ImVec4 proCol(0.70f, 0.45f, 0.85f, 1.0f);
+        if (iconToggleTypeBtn("##toggle_pro", any_pro, ImVec2(btn_h + 6.0f, btn_h), proCol, UIWidgets::IconType::ViewOverlays, 21.0f))
+            ImGui::OpenPopup("ProCameraPopup");
+        viewportTooltip("Overlays", "Histogram, focus peaking, zebra and AF tools.", proCol);
 
-        if (can_edit_any_pivot) {
-            ImGui::SameLine();
-            if (iconTypeButton("##center_pivot", ImVec2(btn_h, btn_h), ImVec4(0.95f, 0.72f, 0.28f, 1.0f), UIWidgets::IconType::PivotCenter, 20.0f)) {
-                if (can_edit_object_pivot) {
-                    std::string nm = sel.selected.object->nodeName;
-                    if (nm.empty()) nm = "Unnamed";
-                    recenterObjectPivotToBoundsCenter(ctx, nm);
-                } else if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) {
-                    AABB bounds = sel.selected.vdb_volume->getWorldBounds();
-                    Vec3 local = sel.selected.vdb_volume->getTransform().inverse().transform_point((bounds.min + bounds.max) * 0.5f);
-                    sel.selected.vdb_volume->setPivotOffset(local);
-                    SceneUI::syncVDBVolumesToGPU(ctx);
-                } else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) {
-                    Vec3 bmin, bmax;
-                    sel.selected.gas_volume->getWorldBounds(bmin, bmax);
-                    Vec3 local = sel.selected.gas_volume->getTransform().inverse().transform_point((bmin + bmax) * 0.5f);
-                    sel.selected.gas_volume->setPivotOffset(local);
-                    ctx.renderer.updateBackendGasVolumes(ctx.scene);
-                }
-                pivot_edit_mode = false;
-                addViewportMessage("Pivot centered", 1.6f, ImVec4(1.0f, 0.8f, 0.35f, 1.0f));
-                ProjectManager::getInstance().markModified();
-            }
-            viewportTooltip("Center Pivot", "Place the pivot at the selection center.", ImVec4(0.95f, 0.72f, 0.28f, 1.0f));
-        } else {
-            pivot_edit_mode = false;
-        }
-    }
-
-    // ── Separator ──
-    ImGui::SameLine(0, 6.0f);
-    ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "|");
-    ImGui::SameLine(0, 6.0f);
-
-    // ── Mouse Sensitivity (popup slider) ──
-    {
-        static bool sens_open = false;
-        if (iconToggleTypeBtn("##toggle_sens", sens_open, ImVec2(btn_h + 2.0f, btn_h), ImVec4(0.62f, 0.58f, 0.24f, 1.0f), UIWidgets::IconType::Sensitivity, 21.0f)) {
-            sens_open = !sens_open;
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::BeginTooltip();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.84f, 0.30f, 1.0f));
-            ImGui::TextUnformatted("Sensitivity");
-            ImGui::PopStyleColor();
+        if (ImGui::BeginPopup("ProCameraPopup")) {
+            ImGui::Text("Pro Camera Features");
             ImGui::Separator();
-            ImGui::Text("Current: %.3f", ctx.render_settings.mouse_sensitivity);
-            ImGui::EndTooltip();
+            ImGui::Checkbox("Histogram", &viewport_settings.show_histogram);
+            if (viewport_settings.show_histogram) {
+                ImGui::Indent();
+                ImGui::Combo("Mode##Hist", &viewport_settings.histogram_mode, "RGB\0Luma\0");
+                ImGui::SliderFloat("Opacity", &viewport_settings.histogram_opacity, 0.3f, 1.0f);
+                ImGui::Unindent();
+            }
+            ImGui::Separator();
+            ImGui::Checkbox("Focus Peaking", &viewport_settings.show_focus_peaking);
+            if (viewport_settings.show_focus_peaking) {
+                ImGui::Indent();
+                ImGui::Combo("Color##Peak", &viewport_settings.focus_peaking_color, "Red\0Yellow\0Green\0Blue\0White\0");
+                ImGui::SliderFloat("Threshold##Peak", &viewport_settings.focus_peaking_threshold, 0.05f, 0.5f);
+                ImGui::Unindent();
+            }
+            ImGui::Separator();
+            ImGui::Checkbox("Zebra Stripes", &viewport_settings.show_zebra);
+            if (viewport_settings.show_zebra) {
+                ImGui::Indent();
+                ImGui::SliderFloat("Threshold##Zebra", &viewport_settings.zebra_threshold, 0.8f, 1.0f, "%.2f");
+                ImGui::Unindent();
+            }
+            ImGui::Separator();
+            ImGui::Checkbox("AF Points", &viewport_settings.show_af_points);
+            if (viewport_settings.show_af_points) {
+                ImGui::Indent();
+                ImGui::Combo("Mode##AF", &viewport_settings.af_mode, "Single\0Zone 9\0Zone 21\0Wide\0Center Weighted\0");
+                ImGui::Combo("Focus Mode", &viewport_settings.focus_mode, "MF (Manual)\0AF-S (Single)\0AF-C (Continuous)\0");
+                ImGui::Unindent();
+            }
+            ImGui::EndPopup();
         }
 
-        if (sens_open) {
-            const float popup_w = 190.0f;
-            float popup_x = ImGui::GetItemRectMax().x - popup_w;
-            popup_x = (std::max)(8.0f, (std::min)(popup_x, io.DisplaySize.x - popup_w - 8.0f));
-            const float popup_y = (std::min)(ImGui::GetItemRectMax().y + 6.0f, io.DisplaySize.y - 90.0f);
-            ImGui::SetNextWindowPos(ImVec2(popup_x, popup_y), ImGuiCond_Always);
-            ImGui::SetNextWindowSize(ImVec2(popup_w, 0));
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.11f, 0.13f, 0.92f));
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-            if (ImGui::Begin("##SensPopup", &sens_open,
-                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
-                    ImGuiWindowFlags_NoFocusOnAppearing)) {
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Sensitivity");
-                ImGui::SetNextItemWidth(-1);
-                ImGui::SliderFloat("##sens", &ctx.render_settings.mouse_sensitivity, 0.001f, 5.0f, "%.3f");
+        drawSeparator();
+
+        // ── Pivot ──
+        {
+            const bool can_edit_object_pivot =
+                sel.selected.type == SelectableType::Object &&
+                sel.selected.object && sel.multi_selection.size() == 1;
+            const bool can_edit_volume_pivot =
+                sel.multi_selection.size() == 1 &&
+                ((sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) ||
+                    (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume));
+            const bool can_edit_any_pivot = can_edit_object_pivot || can_edit_volume_pivot;
+
+            const ImVec4 pivotAccentCol(0.95f, 0.80f, 0.30f, 1.0f);
+
+            // Prepend static PivotCenter icon before the combo box
+            iconToggleTypeBtn("##pivot_combo_icon", false, ImVec2(btn_h, btn_h), pivotAccentCol, UIWidgets::IconType::PivotCenter, 19.0f);
+            viewportTooltip("Pivot Mode", "Choose how transforms use pivots.", pivotAccentCol);
+            ImGui::SameLine();
+
+            ImGui::SetNextItemWidth(76);
+            const char* pivot_opts[] = { "Median", "Individual" };
+
+            // Glassmorphic transparent styling for the combo box to match the viewport HUD
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(1.0f, 1.0f, 1.0f, 0.05f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.09f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(1.0f, 1.0f, 1.0f, 0.14f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.72f, 0.78f, 0.88f, 0.18f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.05f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(1.0f, 1.0f, 1.0f, 0.10f));
+            ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.07f, 0.08f, 0.10f, 0.90f));
+            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(1.0f, 1.0f, 1.0f, 0.08f));
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.12f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.82f, 0.84f, 0.90f, 0.96f));
+
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 2.0f));
+
+            ImGui::Combo("##Pivot", &pivot_mode, pivot_opts, 2);
+
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(11);
+
+            viewportTooltip("Pivot Mode", "Choose how transforms use pivots.", pivotAccentCol);
+
+            ImGui::SameLine();
+            const ImVec4 pivotEditCol(0.85f, 0.55f, 0.18f, 1.0f);
+            if (iconToggleTypeBtn("##toggle_pivot_edit", pivot_edit_mode, ImVec2(btn_h, btn_h), pivotEditCol, UIWidgets::IconType::PivotEdit, 19.0f)) {
+                pivot_edit_mode = can_edit_any_pivot ? !pivot_edit_mode : false;
             }
-            ImGui::End();
-            ImGui::PopStyleVar();
-            ImGui::PopStyleColor();
+            viewportTooltip("Edit Pivot", "Move the pivot without moving the object.", pivotEditCol);
+
+            if (can_edit_any_pivot) {
+                ImGui::SameLine();
+                const ImVec4 pivotCenterCol(0.95f, 0.72f, 0.28f, 1.0f);
+                if (iconTypeButton("##center_pivot", ImVec2(btn_h, btn_h), pivotCenterCol, UIWidgets::IconType::PivotCenter, 19.0f)) {
+                    if (can_edit_object_pivot) {
+                        std::string nm = sel.selected.object->nodeName;
+                        if (nm.empty()) nm = "Unnamed";
+                        recenterObjectPivotToBoundsCenter(ctx, nm);
+                    }
+                    else if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) {
+                        AABB bounds = sel.selected.vdb_volume->getWorldBounds();
+                        Vec3 local = sel.selected.vdb_volume->getTransform().inverse().transform_point((bounds.min + bounds.max) * 0.5f);
+                        sel.selected.vdb_volume->setPivotOffset(local);
+                        SceneUI::syncVDBVolumesToGPU(ctx);
+                    }
+                    else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) {
+                        Vec3 bmin, bmax;
+                        sel.selected.gas_volume->getWorldBounds(bmin, bmax);
+                        Vec3 local = sel.selected.gas_volume->getTransform().inverse().transform_point((bmin + bmax) * 0.5f);
+                        sel.selected.gas_volume->setPivotOffset(local);
+                        ctx.renderer.updateBackendGasVolumes(ctx.scene);
+                    }
+                    pivot_edit_mode = false;
+                    addViewportMessage("Pivot centered", 1.6f, ImVec4(1.0f, 0.8f, 0.35f, 1.0f));
+                    ProjectManager::getInstance().markModified();
+                }
+                viewportTooltip("Center Pivot", "Place the pivot at the selection center.", pivotCenterCol);
+            }
+            else {
+                pivot_edit_mode = false;
+            }
         }
+
+        drawSeparator();
+
+        // ── Mouse Sensitivity (popup slider) ──
+        {
+            static bool sens_open = false;
+            const ImVec4 sensCol(0.85f, 0.80f, 0.35f, 1.0f);
+            if (iconToggleTypeBtn("##toggle_sens", sens_open, ImVec2(btn_h + 2.0f, btn_h), sensCol, UIWidgets::IconType::Sensitivity, 20.0f)) {
+                sens_open = !sens_open;
+            }
+            char sens_body[64];
+            std::snprintf(sens_body, sizeof(sens_body), "Current: %.3f", ctx.render_settings.mouse_sensitivity);
+            viewportTooltip("Sensitivity", sens_body, sensCol);
+
+            if (sens_open) {
+                const float popup_w = 130.0f;
+                float popup_x = ImGui::GetItemRectMax().x - popup_w;
+                popup_x = (std::max)(8.0f, (std::min)(popup_x, io.DisplaySize.x - popup_w - 8.0f));
+                const float popup_y = (std::min)(ImGui::GetItemRectMax().y + 6.0f, io.DisplaySize.y - 90.0f);
+                ImGui::SetNextWindowPos(ImVec2(popup_x, popup_y), ImGuiCond_Always);
+                ImGui::SetNextWindowSize(ImVec2(popup_w, 0));
+                
+                // Set window styling constraints (padding, rounding)
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 6.0f));
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+
+                // Push control surface styling to match the rest of the application
+                UIWidgets::PushControlSurfaceStyle(sensCol);
+                ImGuiWindowFlags popupFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                    ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBackground;
+
+                if (ImGui::Begin("##SensPopup", &sens_open, popupFlags)) {
+                    ImVec2 wpos = ImGui::GetWindowPos();
+                    ImVec2 wsz = ImGui::GetWindowSize();
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    
+                    // Draw a custom glassmorphic background & soft border manually to bypass global WindowBg
+                    dl->AddRectFilled(wpos, ImVec2(wpos.x + wsz.x, wpos.y + wsz.y), ImGui::ColorConvertFloat4ToU32(ImVec4(0.07f, 0.08f, 0.10f, 0.45f)), 8.0f);
+                    dl->AddRect(wpos, ImVec2(wpos.x + wsz.x, wpos.y + wsz.y), ImGui::ColorConvertFloat4ToU32(ImVec4(0.72f, 0.78f, 0.88f, 0.15f)), 8.0f, 0, 1.0f);
+
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::SliderFloat("##sens", &ctx.render_settings.mouse_sensitivity, 0.001f, 5.0f, "%.3f");
+                }
+                ImGui::End();
+                UIWidgets::PopControlSurfaceStyle();
+
+                ImGui::PopStyleVar(3);
+            }
+        }
+
     }
 
-    ImGui::PopStyleVar(4);  // WindowBorderSize, ItemSpacing, WindowRounding, WindowPadding
-    ImGui::PopStyleColor(2); // Border, WindowBg
-    ImGui::End();
+    ImGui::PopStyleVar(); // ItemSpacing
     // overlay handled by raster grid (depth-tested) in the Vulkan backend
 
     // ── ViewCube: standard-view navigator (top-right, below the toolbar) ──
@@ -480,172 +541,192 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
     if (ctx.scene.camera) {
         Camera& cam = *ctx.scene.camera;
 
-        const float cube_sz = 92.0f;
+        const float cube_sz = 68.0f; // Compact ViewCube size
         const float cube_x = io.DisplaySize.x - right_margin - cube_sz - 2.0f;
-        const float cube_y = top_margin + 40.0f;
+        extern float g_main_menu_reserved_height;
+        const float cube_y = g_main_menu_reserved_height + 10.0f;
 
-        ImGui::SetNextWindowPos(ImVec2(cube_x, cube_y), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(cube_sz, cube_sz), ImGuiCond_Always);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-        ImGuiWindowFlags cubeFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
-            ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus |
-            ImGuiWindowFlags_NoBackground;
-        if (ImGui::Begin("##ViewCube", nullptr, cubeFlags)) {
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            const ImVec2 wpos = ImGui::GetWindowPos();
-            const ImVec2 wsz = ImGui::GetWindowSize();
-            const ImVec2 center(wpos.x + wsz.x * 0.5f, wpos.y + wsz.y * 0.5f);
-            const float radius = cube_sz * 0.30f;
+            ImGui::SetNextWindowPos(ImVec2(cube_x, cube_y), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(cube_sz, cube_sz), ImGuiCond_Always);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            ImGuiWindowFlags cubeFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                ImGuiWindowFlags_NoBackground;
+            if (ImGui::Begin("##ViewCube", nullptr, cubeFlags)) {
+                ImFont* tinyFont = io.Fonts->Fonts.size() > 1 ? io.Fonts->Fonts.back() : nullptr;
+                if (tinyFont) ImGui::PushFont(tinyFont);
 
-            ImGui::SetCursorScreenPos(wpos);
-            ImGui::InvisibleButton("##viewcube_hit", wsz);
-            const bool hovered = ImGui::IsItemHovered();
-            const bool active = ImGui::IsItemActive();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                const ImVec2 wpos = ImGui::GetWindowPos();
+                const ImVec2 wsz = ImGui::GetWindowSize();
+                const ImVec2 center(wpos.x + wsz.x * 0.5f, wpos.y + wsz.y * 0.5f);
+                const float radius = cube_sz * 0.30f;
 
-            // Camera view basis: right=u, up=v, toward-camera=w (maintained by update_camera_vectors).
-            const Vec3 U = cam.u, Vv = cam.v, W = cam.w;
-            auto project = [&](const Vec3& d) -> ImVec2 {
-                return ImVec2(center.x + (float)Vec3::dot(d, U) * radius,
-                              center.y - (float)Vec3::dot(d, Vv) * radius);
-            };
+                ImGui::SetCursorScreenPos(wpos);
+                ImGui::InvisibleButton("##viewcube_hit", wsz);
+                const bool hovered = ImGui::IsItemHovered();
+                const bool active = ImGui::IsItemActive();
 
-            struct Face { Vec3 n, t0, t1; const char* label; Camera::StandardView view; };
-            const Face faces[6] = {
-                { Vec3( 1,0,0), Vec3(0,1,0), Vec3(0,0,1), "R",   Camera::StandardView::Right  },
-                { Vec3(-1,0,0), Vec3(0,1,0), Vec3(0,0,1), "L",   Camera::StandardView::Left   },
-                { Vec3(0, 1,0), Vec3(1,0,0), Vec3(0,0,1), "TOP", Camera::StandardView::Top    },
-                { Vec3(0,-1,0), Vec3(1,0,0), Vec3(0,0,1), "BOT", Camera::StandardView::Bottom },
-                { Vec3(0,0, 1), Vec3(1,0,0), Vec3(0,1,0), "F",   Camera::StandardView::Front  },
-                { Vec3(0,0,-1), Vec3(1,0,0), Vec3(0,1,0), "BK",  Camera::StandardView::Back   },
-            };
-
-            ImVec2 quad[6][4];
-            float fz[6];
-            for (int i = 0; i < 6; ++i) {
-                fz[i] = (float)Vec3::dot(faces[i].n, W);
-                const Vec3 c = faces[i].n;
-                quad[i][0] = project(c - faces[i].t0 - faces[i].t1);
-                quad[i][1] = project(c + faces[i].t0 - faces[i].t1);
-                quad[i][2] = project(c + faces[i].t0 + faces[i].t1);
-                quad[i][3] = project(c - faces[i].t0 + faces[i].t1);
-            }
-            auto pointInQuad = [](const ImVec2* q, const ImVec2& p) -> bool {
-                bool in = false;
-                for (int a = 0, b = 3; a < 4; b = a++) {
-                    if (((q[a].y > p.y) != (q[b].y > p.y)) &&
-                        (p.x < (q[b].x - q[a].x) * (p.y - q[a].y) / (q[b].y - q[a].y) + q[a].x))
-                        in = !in;
-                }
-                return in;
-            };
-
-            const ImVec2 mp = io.MousePos;
-            int hoverFace = -1; float bestZ = 0.02f;
-            if (hovered) {
-                for (int i = 0; i < 6; ++i)
-                    if (fz[i] > bestZ && pointInQuad(quad[i], mp)) { hoverFace = i; bestZ = fz[i]; }
-            }
-
-            int order[6] = { 0,1,2,3,4,5 };
-            std::sort(order, order + 6, [&](int a, int b) { return fz[a] < fz[b]; });
-            for (int oi = 0; oi < 6; ++oi) {
-                const int i = order[oi];
-                if (fz[i] <= 0.02f) continue; // back-facing
-                const float shade = 0.30f + 0.45f * std::clamp(fz[i], 0.0f, 1.0f);
-                const ImU32 fill = (i == hoverFace)
-                    ? IM_COL32(90, 150, 230, 235)
-                    : IM_COL32((int)(shade * 120), (int)(shade * 135), (int)(shade * 160), 210);
-                dl->AddQuadFilled(quad[i][0], quad[i][1], quad[i][2], quad[i][3], fill);
-                dl->AddQuad(quad[i][0], quad[i][1], quad[i][2], quad[i][3], IM_COL32(18, 22, 30, 220), 1.5f);
-                const ImVec2 lc = project(faces[i].n);
-                const ImVec2 ts = ImGui::CalcTextSize(faces[i].label);
-                dl->AddText(ImVec2(lc.x - ts.x * 0.5f, lc.y - ts.y * 0.5f), IM_COL32(236, 239, 246, 255), faces[i].label);
-            }
-
-            // Refresh the interactive (solid/matcap) viewport. Push the camera straight to the
-            // active shading backend + reset accumulation so it re-renders THIS frame — the
-            // g_camera_dirty signal alone races with other consumers and was unreliable here.
-            auto refreshViewport = [&]() {
-                if (ctx.backend_ptr) {
-                    ctx.backend_ptr->syncCamera(cam);
-                    ctx.backend_ptr->resetAccumulation();
-                }
-                ctx.renderer.resetCPUAccumulation();
-                extern bool g_camera_dirty;
-                g_camera_dirty = true; // also drive the render-backend sync path next frame
-                ProjectManager::getInstance().markModified();
-            };
-
-            // Orbit/snap pivot: selection centre when something is selected, else world origin
-            // (where the reference grid lives) — keeps the view centred and the grid in frame.
-            const Vec3 snapPivot = ctx.selection.hasSelection()
-                ? ctx.selection.selected.position : Vec3(0.0f, 0.0f, 0.0f);
-
-            // Click snaps to a standard view; drag (>4px) free-orbits around the pivot.
-            static bool dragging = false; static bool moved = false; static ImVec2 dragLast;
-            if (ImGui::IsItemActivated()) {
-                dragging = true; moved = false; dragLast = mp;
-                // Reset stale ortho vup (e.g. Top sets vup=(0,0,-1)) so the first drag
-                // frame uses the correct cam.u for vertical orbit. The fixed fallback in
-                // update_camera_vectors() handles the near-vertical degenerate case.
-                if (cam.orthographic) {
-                    cam.vup = Vec3(0.0f, 1.0f, 0.0f);
-                    cam.update_camera_vectors();
-                }
-            }
-            if (active && dragging) {
-                const ImVec2 d(mp.x - dragLast.x, mp.y - dragLast.y);
-                if (std::abs(d.x) + std::abs(d.y) > 4.0f) moved = true;
-                if (moved && (d.x != 0.0f || d.y != 0.0f)) {
-                    const Vec3 pivot = cam.lookat;
-                    Vec3 rel = cam.lookfrom - pivot;
-                    auto rot = [](Vec3 p, Vec3 axis, float ang) {
-                        axis = axis.normalize();
-                        const float c = cosf(ang), s = sinf(ang);
-                        return p * c + Vec3::cross(axis, p) * s + axis * ((float)Vec3::dot(axis, p)) * (1.0f - c);
+                // Camera view basis: right=u, up=v, toward-camera=w (maintained by update_camera_vectors).
+                const Vec3 U = cam.u, Vv = cam.v, W = cam.w;
+                auto project = [&](const Vec3& d) -> ImVec2 {
+                    return ImVec2(center.x + (float)Vec3::dot(d, U) * radius,
+                        center.y - (float)Vec3::dot(d, Vv) * radius);
                     };
-                    const float k = 0.01f;
-                    rel = rot(rel, Vec3(0, 1, 0), -d.x * k);
-                    rel = rot(rel, cam.u, -d.y * k);
-                    cam.lookfrom = pivot + rel;
-                    // Free-orbiting the cube leaves the ALIGNED standard view but keeps the
-                    // current projection — orbiting in ortho stays ortho. Switching to
-                    // perspective is left to the user (numpad 5 toggle). orthographic untouched.
-                    cam.standard_view = Camera::StandardView::Perspective;
-                    cam.update_camera_vectors();
-                    cam.markDirty();
-                    refreshViewport();
-                    dragLast = mp;
+
+                struct Face { Vec3 n, t0, t1; const char* label; Camera::StandardView view; };
+                const Face faces[6] = {
+                    { Vec3(1,0,0), Vec3(0,1,0), Vec3(0,0,1), "R",   Camera::StandardView::Right  },
+                    { Vec3(-1,0,0), Vec3(0,1,0), Vec3(0,0,1), "L",   Camera::StandardView::Left   },
+                    { Vec3(0, 1,0), Vec3(1,0,0), Vec3(0,0,1), "TOP", Camera::StandardView::Top    },
+                    { Vec3(0,-1,0), Vec3(1,0,0), Vec3(0,0,1), "BOT", Camera::StandardView::Bottom },
+                    { Vec3(0,0, 1), Vec3(1,0,0), Vec3(0,1,0), "F",   Camera::StandardView::Front  },
+                    { Vec3(0,0,-1), Vec3(1,0,0), Vec3(0,1,0), "BK",  Camera::StandardView::Back   },
+                };
+
+                ImVec2 quad[6][4];
+                float fz[6];
+                for (int i = 0; i < 6; ++i) {
+                    fz[i] = (float)Vec3::dot(faces[i].n, W);
+                    const Vec3 c = faces[i].n;
+                    quad[i][0] = project(c - faces[i].t0 - faces[i].t1);
+                    quad[i][1] = project(c + faces[i].t0 - faces[i].t1);
+                    quad[i][2] = project(c + faces[i].t0 + faces[i].t1);
+                    quad[i][3] = project(c - faces[i].t0 + faces[i].t1);
                 }
-            }
-            if (ImGui::IsItemDeactivated()) {
-                if (!moved && hoverFace >= 0) {
-                    // Distance must be measured to the SNAP pivot, not to lookat: fly-look keeps
-                    // lookat at focus_dist (~10) in front of the camera regardless of where the
-                    // framed object actually is, which made the derived ortho_height absurdly
-                    // small (extreme zoom-in showing a sliver of the object).
-                    float dist = (cam.lookfrom - snapPivot).length();
-                    if (dist < 1e-3f) dist = 10.0f;
-                    cam.setStandardView(faces[hoverFace].view, snapPivot, dist, true);
-                    // With a selection, frame its bounds directly — under parallel projection
-                    // only ortho_height world units are visible, so derive it from object size
-                    // (perspective-equivalent span says nothing about how big the object is).
-                    if (ctx.selection.hasSelection() && ctx.selection.selected.has_cached_aabb) {
-                        const Vec3 ext = ctx.selection.selected.cached_aabb.diagonal();
-                        const float span = std::max({ ext.x, ext.y, ext.z });
-                        if (span > 1e-3f) cam.ortho_height = span * 1.4f; // 40% margin around the object
+                auto pointInQuad = [](const ImVec2* q, const ImVec2& p) -> bool {
+                    bool in = false;
+                    for (int a = 0, b = 3; a < 4; b = a++) {
+                        if (((q[a].y > p.y) != (q[b].y > p.y)) &&
+                            (p.x < (q[b].x - q[a].x) * (p.y - q[a].y) / (q[b].y - q[a].y) + q[a].x))
+                            in = !in;
                     }
-                    refreshViewport();
-                    addViewportMessage("View aligned", 1.2f, ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+                    return in;
+                    };
+
+                const ImVec2 mp = io.MousePos;
+                int hoverFace = -1; float bestZ = 0.02f;
+                if (hovered) {
+                    for (int i = 0; i < 6; ++i)
+                        if (fz[i] > bestZ && pointInQuad(quad[i], mp)) { hoverFace = i; bestZ = fz[i]; }
                 }
-                dragging = false;
+
+                int order[6] = { 0,1,2,3,4,5 };
+                std::sort(order, order + 6, [&](int a, int b) { return fz[a] < fz[b]; });
+                for (int oi = 0; oi < 6; ++oi) {
+                    const int i = order[oi];
+                    if (fz[i] <= 0.02f) continue; // back-facing
+
+                    // Color-coded base colors for axes: Red (X), Green (Y), Blue (Z)
+                    ImVec4 baseColor;
+                    if (i == 0 || i == 1)      baseColor = ImVec4(0.85f, 0.25f, 0.35f, 1.0f); // X: Red (Right/Left)
+                    else if (i == 2 || i == 3) baseColor = ImVec4(0.30f, 0.75f, 0.35f, 1.0f); // Y: Green (Top/Bottom)
+                    else                       baseColor = ImVec4(0.20f, 0.55f, 0.90f, 1.0f); // Z: Blue (Front/Back)
+
+                    const float shade = 0.40f + 0.50f * std::clamp(fz[i], 0.0f, 1.0f);
+                    ImU32 fill;
+                    if (i == hoverFace) {
+                        fill = IM_COL32((int)(baseColor.x * 255), (int)(baseColor.y * 255), (int)(baseColor.z * 255), 230);
+                    } else {
+                        fill = IM_COL32((int)(baseColor.x * 255 * shade), (int)(baseColor.y * 255 * shade), (int)(baseColor.z * 255 * shade), 170);
+                    }
+
+                    dl->AddQuadFilled(quad[i][0], quad[i][1], quad[i][2], quad[i][3], fill);
+                    dl->AddQuad(quad[i][0], quad[i][1], quad[i][2], quad[i][3], IM_COL32(30, 32, 35, 120), 1.0f);
+                    
+                    const ImVec2 lc = project(faces[i].n);
+                    const ImVec2 ts = ImGui::CalcTextSize(faces[i].label);
+                    // Sleek text shadow + crisp white text
+                    dl->AddText(ImVec2(lc.x - ts.x * 0.5f + 1.0f, lc.y - ts.y * 0.5f + 1.0f), IM_COL32(0, 0, 0, 180), faces[i].label);
+                    dl->AddText(ImVec2(lc.x - ts.x * 0.5f, lc.y - ts.y * 0.5f), IM_COL32(236, 239, 246, 255), faces[i].label);
+                }
+
+                // Refresh the interactive (solid/matcap) viewport. Push the camera straight to the
+                // active shading backend + reset accumulation so it re-renders THIS frame — the
+                // g_camera_dirty signal alone races with other consumers and was unreliable here.
+                auto refreshViewport = [&]() {
+                    if (ctx.backend_ptr) {
+                        ctx.backend_ptr->syncCamera(cam);
+                        ctx.backend_ptr->resetAccumulation();
+                    }
+                    ctx.renderer.resetCPUAccumulation();
+                    extern bool g_camera_dirty;
+                    g_camera_dirty = true; // also drive the render-backend sync path next frame
+                    ProjectManager::getInstance().markModified();
+                    };
+
+                // Orbit/snap pivot: selection centre when something is selected, else world origin
+                // (where the reference grid lives) — keeps the view centred and the grid in frame.
+                const Vec3 snapPivot = ctx.selection.hasSelection()
+                    ? ctx.selection.selected.position : Vec3(0.0f, 0.0f, 0.0f);
+
+                // Click snaps to a standard view; drag (>4px) free-orbits around the pivot.
+                static bool dragging = false; static bool moved = false; static ImVec2 dragLast;
+                if (ImGui::IsItemActivated()) {
+                    dragging = true; moved = false; dragLast = mp;
+                    // Reset stale ortho vup (e.g. Top sets vup=(0,0,-1)) so the first drag
+                    // frame uses the correct cam.u for vertical orbit. The fixed fallback in
+                    // update_camera_vectors() handles the near-vertical degenerate case.
+                    if (cam.orthographic) {
+                        cam.vup = Vec3(0.0f, 1.0f, 0.0f);
+                        cam.update_camera_vectors();
+                    }
+                }
+                if (active && dragging) {
+                    const ImVec2 d(mp.x - dragLast.x, mp.y - dragLast.y);
+                    if (std::abs(d.x) + std::abs(d.y) > 4.0f) moved = true;
+                    if (moved && (d.x != 0.0f || d.y != 0.0f)) {
+                        const Vec3 pivot = cam.lookat;
+                        Vec3 rel = cam.lookfrom - pivot;
+                        auto rot = [](Vec3 p, Vec3 axis, float ang) {
+                            axis = axis.normalize();
+                            const float c = cosf(ang), s = sinf(ang);
+                            return p * c + Vec3::cross(axis, p) * s + axis * ((float)Vec3::dot(axis, p)) * (1.0f - c);
+                            };
+                        const float k = 0.01f;
+                        rel = rot(rel, Vec3(0, 1, 0), -d.x * k);
+                        rel = rot(rel, cam.u, -d.y * k);
+                        cam.lookfrom = pivot + rel;
+                        // Free-orbiting the cube leaves the ALIGNED standard view but keeps the
+                        // current projection — orbiting in ortho stays ortho. Switching to
+                        // perspective is left to the user (numpad 5 toggle). orthographic untouched.
+                        cam.standard_view = Camera::StandardView::Perspective;
+                        cam.update_camera_vectors();
+                        cam.markDirty();
+                        refreshViewport();
+                        dragLast = mp;
+                    }
+                }
+                if (ImGui::IsItemDeactivated()) {
+                    if (!moved && hoverFace >= 0) {
+                        // Distance must be measured to the SNAP pivot, not to lookat: fly-look keeps
+                        // lookat at focus_dist (~10) in front of the camera regardless of where the
+                        // framed object actually is, which made the derived ortho_height absurdly
+                        // small (extreme zoom-in showing a sliver of the object).
+                        float dist = (cam.lookfrom - snapPivot).length();
+                        if (dist < 1e-3f) dist = 10.0f;
+                        cam.setStandardView(faces[hoverFace].view, snapPivot, dist, true);
+                        // With a selection, frame its bounds directly — under parallel projection
+                        // only ortho_height world units are visible, so derive it from object size
+                        // (perspective-equivalent span says nothing about how big the object is).
+                        if (ctx.selection.hasSelection() && ctx.selection.selected.has_cached_aabb) {
+                            const Vec3 ext = ctx.selection.selected.cached_aabb.diagonal();
+                            const float span = std::max({ ext.x, ext.y, ext.z });
+                            if (span > 1e-3f) cam.ortho_height = span * 1.4f; // 40% margin around the object
+                        }
+                        refreshViewport();
+                        addViewportMessage("View aligned", 1.2f, ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+                    }
+                    dragging = false;
+                }
+
+                if (tinyFont) ImGui::PopFont();
             }
+            ImGui::End();
+            ImGui::PopStyleVar();
         }
-        ImGui::End();
-        ImGui::PopStyleVar();
     }
-}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // SPLIT-PRISM FOCUS INDICATOR (Classic SLR Style with Focus Ring)
@@ -1601,7 +1682,6 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
     };
     
     // Position: Top Left of Viewport (respecting Left Panel)
-    // Left Offset + 20px padding (user requested: "panelin solunda" but "viewport içinde", assuming next to panel)
     float x = left_offset + 20.0f;
     float y = 50.0f; // Below menu bar (approx)
 
@@ -1618,13 +1698,15 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
     
     // Transparent window container
     if (ImGui::Begin("##ViewportMessages", nullptr, flags)) {
+        ImFont* tinyFont = io.Fonts->Fonts.size() > 1 ? io.Fonts->Fonts.back() : nullptr;
+        if (tinyFont) ImGui::PushFont(tinyFont);
         
         // 1. Persistent HUD: Render Status (ALWAYS AT TOP)
         if (ctx.scene.initialized) {
             const bool in_rendered_mode = (viewport_settings.shading_mode == 2);
 
             std::string status_text;
-            ImU32 text_col = IM_COL32(220, 220, 220, 255);
+            ImU32 text_col = IM_COL32(190, 192, 195, 220); // Soft grey, translucent
 
             if (in_rendered_mode) {
                 // Path trace mode: show sample progress
@@ -1643,10 +1725,10 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
 
                 if (current >= target && target > 0) {
                      status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples (Done)";
-                     text_col = IM_COL32(100, 255, 100, 255);
+                     text_col = IM_COL32(84, 214, 31, 220); // Soft Green
                 } else if (is_paused) {
                      status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples (Paused)";
-                     text_col = IM_COL32(255, 180, 80, 255);
+                     text_col = IM_COL32(245, 170, 70, 220); // Soft Orange
                 } else {
                      status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples";
                 }
@@ -1658,9 +1740,6 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                              ctx.render_settings.avg_total_frame_fps);
                     status_text += perf_text;
                 }
-                // The final (path-traced) render does not support orthographic projection
-                // yet — the device camera always traces a perspective pinhole. Tell the
-                // user instead of silently rendering perspective from an ortho viewport.
                 if (ctx.scene.camera && ctx.scene.camera->orthographic) {
                     status_text += "  \xc2\xb7  Perspective (ortho not supported in render)";
                 }
@@ -1672,12 +1751,8 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                     case 3: status_text = "Matcap Mode"; break;
                     default: status_text = "Viewport Mode"; break;
                 }
-                text_col = IM_COL32(180, 210, 255, 255);
+                text_col = IM_COL32(185, 195, 210, 220); // Soft grey-blue, translucent
 
-                // Persistent view + projection indicator (Blender-style). This was only a
-                // transient toast; the view/projection is STATE, not an event, so it stays
-                // on screen. standard_view==Perspective after a free orbit means "User"
-                // (non-aligned) — pair it with the actual projection (ortho stays ortho).
                 if (ctx.scene.camera) {
                     const Camera& cam = *ctx.scene.camera;
                     const char* view_name;
@@ -1698,7 +1773,7 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
 
             const auto drawHudLine = [](const std::string& text, ImU32 color) {
                 ImVec2 pos = ImGui::GetCursorScreenPos();
-                ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x + 1, pos.y + 1), IM_COL32(0, 0, 0, 200), text.c_str());
+                ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x + 1, pos.y + 1), IM_COL32(0, 0, 0, 160), text.c_str());
                 ImGui::GetWindowDrawList()->AddText(pos, color, text.c_str());
                 ImGui::Dummy(ImGui::CalcTextSize(text.c_str()));
             };
@@ -1706,13 +1781,13 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
             drawHudLine(status_text, text_col);
 
             if (ctx.render_settings.show_scene_stats_hud) {
-                drawHudLine("Scene tris: " + formatCompactCount(cached_scene_triangle_count), IM_COL32(235, 235, 235, 225));
+                drawHudLine("Scene tris: " + formatCompactCount(cached_scene_triangle_count), IM_COL32(190, 192, 195, 200));
 
                 const size_t instance_count = InstanceManager::getInstance().getTotalInstanceCount();
                 const size_t instance_triangle_count = InstanceManager::getInstance().getTotalTriangleCount();
                 if (instance_count > 0) {
-                    drawHudLine("Instances: " + formatCompactCount(instance_count), IM_COL32(235, 235, 235, 225));
-                    drawHudLine("Instance tris: " + formatCompactCount(instance_triangle_count), IM_COL32(235, 235, 235, 225));
+                    drawHudLine("Instances: " + formatCompactCount(instance_count), IM_COL32(190, 192, 195, 200));
+                    drawHudLine("Instance tris: " + formatCompactCount(instance_triangle_count), IM_COL32(190, 192, 195, 200));
                 }
             }
 
@@ -1725,9 +1800,9 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
             ImVec2 pos = ImGui::GetCursorScreenPos();
             
             // Shadow
-            ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x+1, pos.y+1), IM_COL32(0,0,0,200), sel_text.c_str());
-            // Text (Orange)
-            ImGui::GetWindowDrawList()->AddText(pos, IM_COL32(255, 180, 50, 255), sel_text.c_str());
+            ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x+1, pos.y+1), IM_COL32(0,0,0,160), sel_text.c_str());
+            // Text (Soft Orange, Translucent)
+            ImGui::GetWindowDrawList()->AddText(pos, IM_COL32(245, 170, 70, 220), sel_text.c_str());
             
             // Advance cursor to push messages down
             ImVec2 text_size = ImGui::CalcTextSize(sel_text.c_str());
@@ -1736,7 +1811,6 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
         }
 
         // 3. Dynamic Messages (BELOW SELECTION)
-        // Remove expired messages
         for (auto it = active_messages.begin(); it != active_messages.end();) {
             it->time_remaining -= dt;
             if (it->time_remaining <= 0.0f) {
@@ -1760,11 +1834,13 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
             
             // Add subtle shadow for readability against 3D viewport
             ImVec2 pos = ImGui::GetCursorScreenPos();
-            ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x + 1, pos.y + 1), IM_COL32(0,0,0, (int)(200 * alpha)), msg.text.c_str());
+            ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x + 1, pos.y + 1), IM_COL32(0,0,0, (int)(160 * alpha)), msg.text.c_str());
             
             ImGui::TextUnformatted(msg.text.c_str());
             ImGui::PopStyleColor();
         }
+
+        if (tinyFont) ImGui::PopFont();
     }
     ImGui::End();
     ImGui::PopStyleVar();
@@ -1782,25 +1858,28 @@ void SceneUI::drawLensInfoHUD(UIContext& ctx) {
     
     Camera& cam = *ctx.scene.camera;
     
+    ImFont* tinyFont = io.Fonts->Fonts.size() > 1 ? io.Fonts->Fonts.back() : nullptr;
+    if (tinyFont) ImGui::PushFont(tinyFont);
+    
     // Position: Top-left corner, below menu bar
     float margin_left = 10.0f;
     float margin_top = 45.0f;  // Below menu bar
-    float box_width = 200.0f;
-    float box_height = 105.0f; // Increased for Backend badge
+    float box_width = 160.0f;  // Shrunken width
+    float box_height = 88.0f;  // Shrunken height
     
     ImVec2 box_pos(margin_left, margin_top);
     
-    // Colors
-    ImU32 col_bg = IM_COL32(20, 25, 30, 200);
-    ImU32 col_border = IM_COL32(80, 100, 120, 200);
-    ImU32 col_title = IM_COL32(100, 180, 255, 255);
-    ImU32 col_label = IM_COL32(180, 180, 180, 255);
-    ImU32 col_value = IM_COL32(255, 220, 100, 255);
-    ImU32 col_fov = IM_COL32(100, 255, 150, 255);
+    // Modern colors
+    ImU32 col_bg = IM_COL32(18, 22, 26, 180);       // Darker, softer, translucent
+    ImU32 col_border = IM_COL32(80, 100, 120, 100);  // Fainter border
+    ImU32 col_title = IM_COL32(100, 160, 240, 220);  // Softer blue
+    ImU32 col_label = IM_COL32(180, 185, 190, 220);  // Softer grey
+    ImU32 col_value = IM_COL32(245, 215, 95, 220);   // Softer amber
+    ImU32 col_fov = IM_COL32(95, 235, 145, 220);     // Softer green
     
     // Draw background
-    draw_list->AddRectFilled(box_pos, ImVec2(box_pos.x + box_width, box_pos.y + box_height), col_bg, 5.0f);
-    draw_list->AddRect(box_pos, ImVec2(box_pos.x + box_width, box_pos.y + box_height), col_border, 5.0f, 0, 1.5f);
+    draw_list->AddRectFilled(box_pos, ImVec2(box_pos.x + box_width, box_pos.y + box_height), col_bg, 4.0f);
+    draw_list->AddRect(box_pos, ImVec2(box_pos.x + box_width, box_pos.y + box_height), col_border, 4.0f, 0, 1.0f);
     
     // Calculate focal length from FOV
     float fov = (float)cam.vfov;
@@ -1826,70 +1905,70 @@ void SceneUI::drawLensInfoHUD(UIContext& ctx) {
     
     // Draw icon/title
     float x = box_pos.x + 8.0f;
-    float y = box_pos.y + 5.0f;
+    float y = box_pos.y + 4.0f;
     draw_list->AddText(ImVec2(x, y), col_title, "LENS");
     
     // Line 1: Focal Length + Type
-    y += 18.0f;
+    y += 14.0f;
     char line1[64];
     snprintf(line1, sizeof(line1), "%.0fmm %s", focal_mm, lens_type);
     draw_list->AddText(ImVec2(x, y), col_value, line1);
     
     // Line 2: FOV
-    y += 16.0f;
+    y += 13.0f;
     char line2[32];
     snprintf(line2, sizeof(line2), "FOV: %.1f", fov);
     draw_list->AddText(ImVec2(x, y), col_fov, line2);
-    draw_list->AddText(ImVec2(x + 70, y), col_label, "\xC2\xB0");  // degree symbol
+    draw_list->AddText(ImVec2(x + 55, y), col_label, "\xC2\xB0");  // degree symbol
     
     // Line 3: Aperture and Focus
-    y += 16.0f;
+    y += 13.0f;
     char line3[64];
     snprintf(line3, sizeof(line3), "f/%.1f  Focus: %.2fm", f_stop, (float)cam.focus_dist);
     draw_list->AddText(ImVec2(x, y), col_label, line3);
     
     // Line 4: Badges (Mode and Backend)
-    y += 18.0f;
+    y += 15.0f;
     
     // Camera Mode badge
     const char* mode_label = "AUTO";
-    ImU32 mode_color = IM_COL32(100, 200, 100, 255);
+    ImU32 mode_color = IM_COL32(100, 200, 100, 180);
     
     if (cam.camera_mode == CameraMode::Pro) {
         mode_label = "PRO";
-        mode_color = IM_COL32(100, 150, 255, 255);
+        mode_color = IM_COL32(100, 150, 255, 180);
     } else if (cam.camera_mode == CameraMode::Cinema) {
         mode_label = "CINEMA";
-        mode_color = IM_COL32(255, 180, 80, 255);
+        mode_color = IM_COL32(255, 180, 80, 180);
     }
     
-    draw_list->AddRectFilled(ImVec2(x, y), ImVec2(x + 50, y + 14), mode_color, 3.0f);
-    draw_list->AddText(ImVec2(x + 4, y), IM_COL32(0, 0, 0, 255), mode_label);
+    draw_list->AddRectFilled(ImVec2(x, y), ImVec2(x + 40, y + 12), mode_color, 2.0f);
+    draw_list->AddText(ImVec2(x + 4, y - 1.0f), IM_COL32(0, 0, 0, 230), mode_label);
     
-    // Backend Badge — reads the LIVE backend pointer (ctx.backend_ptr) rather than
-    // the requested-engine flags. During async OptiX compile the flags flip the moment
-    // the user picks OptiX in the combo, but the live backend is still Vulkan until
-    // the worker thread finishes and the main loop swaps. Badge follows reality.
+    // Backend Badge
     const char* backend_label = "CPU";
-    ImU32 backend_color = IM_COL32(150, 150, 150, 255);
+    ImU32 backend_color = IM_COL32(130, 130, 130, 180);
 
     if (ctx.backend_ptr) {
         if (dynamic_cast<Backend::OptixBackend*>(ctx.backend_ptr) != nullptr) {
             backend_label = "OptiX";
-            backend_color = IM_COL32(118, 185, 0, 255); // NVIDIA Green
+            backend_color = IM_COL32(118, 185, 0, 180); // NVIDIA Green
         } else if (dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr) != nullptr) {
             backend_label = "Vulkan";
-            backend_color = IM_COL32(230, 25, 35, 255); // Vulkan Red
+            backend_color = IM_COL32(230, 25, 35, 180); // Vulkan Red
         }
     }
     
-    float bx = x + 55.0f;
-    draw_list->AddRectFilled(ImVec2(bx, y), ImVec2(bx + 45, y + 14), backend_color, 3.0f);
-    draw_list->AddText(ImVec2(bx + 4, y), IM_COL32(255, 255, 255, 255), backend_label);
+    float bx = x + 44.0f;
+    draw_list->AddRectFilled(ImVec2(bx, y), ImVec2(bx + 38, y + 12), backend_color, 2.0f);
+    draw_list->AddText(ImVec2(bx + 4, y - 1.0f), IM_COL32(255, 255, 255, 230), backend_label);
     
     // Shake indicator (if active)
     if (cam.enable_camera_shake) {
-        draw_list->AddRectFilled(ImVec2(x + 55, y), ImVec2(x + 105, y + 14), IM_COL32(200, 100, 50, 255), 3.0f);
-        draw_list->AddText(ImVec2(x + 59, y), IM_COL32(255, 255, 255, 255), "SHAKE");
+        float sx = bx + 42.0f;
+        draw_list->AddRectFilled(ImVec2(sx, y), ImVec2(sx + 38, y + 12), IM_COL32(200, 100, 50, 180), 2.0f);
+        draw_list->AddText(ImVec2(sx + 4, y - 1.0f), IM_COL32(255, 255, 255, 230), "SHAKE");
     }
+    
+    if (tinyFont) ImGui::PopFont();
 }

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * RayTrophi Modern UI System - Implementation
  * ============================================
  * ThemeManager, UIWidgets ve PanelManager implementasyonlarÄ±.
@@ -217,7 +217,7 @@ void ThemeManager::applyCurrentTheme(float panelAlpha) {
     c[ImGuiCol_WindowBg]          = ImVec4(t.colors.background.x, t.colors.background.y, 
                                             t.colors.background.z, panelAlpha);
     c[ImGuiCol_ChildBg]           = ImVec4(t.colors.surface.x, t.colors.surface.y,
-                                            t.colors.surface.z, 0.95f);
+                                            t.colors.surface.z, panelAlpha);
     c[ImGuiCol_PopupBg]           = ImVec4(t.colors.background.x, t.colors.background.y,
                                             t.colors.background.z, 0.98f);
     c[ImGuiCol_MenuBarBg]         = ImVec4(t.colors.secondary.x, t.colors.secondary.y,
@@ -294,10 +294,10 @@ bool ThemeManager::loadThemeSettings(const std::string& filepath, float& panelAl
     std::ifstream file(filepath);
     if (!file.is_open()) return false;
     int index = 4;
-    float alpha = 0.75f;
+    float alpha = 0.90f;
     if (file >> index >> alpha) {
         setTheme(index);
-        panelAlpha = alpha;
+        panelAlpha = (alpha < 0.65f) ? 0.65f : ((alpha > 1.0f) ? 1.0f : alpha);
         return true;
     }
     return false;
@@ -672,11 +672,13 @@ void DrawThemeSelector(float& panel_alpha) {
         }
 
         // Panel Transparency   
-        if (ImGui::SliderFloat("Panel Transparency", &panel_alpha, 0.1f, 1.0f, "%.2f")) {
+        if (ImGui::SliderFloat("Panel Transparency", &panel_alpha, 0.65f, 1.0f, "%.2f")) {
             ImGuiStyle& style = ImGui::GetStyle();
             style.Colors[ImGuiCol_WindowBg].w = panel_alpha;
+            style.Colors[ImGuiCol_ChildBg].w = panel_alpha;
             themeManager.saveThemeSettings("theme.cfg", panel_alpha);
         }
+        //ImGui::TextColored(ImVec4(0.90f, 0.65f, 0.20f, 0.80f), "  * Restart required to apply transparency changes.");
 
         EndSection();
     }
@@ -684,199 +686,469 @@ void DrawThemeSelector(float& panel_alpha) {
 
 void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    float pading = s * 0.2f;
+    float pading = s * 0.08f;
     float is = s - pading * 2;
     ImVec2 cp = ImVec2(p.x + s * 0.5f, p.y + s * 0.5f);
     p.x += pading; p.y += pading;
 
+    // Premium Grayscale Matcap Clay Palette
+    const ImU32 clay_shadow          = IM_COL32(50, 52, 55, 255);    // Dark slate shadow base
+    const ImU32 clay_diffuse         = IM_COL32(130, 134, 140, 255); // Middle neutral gray matcap base
+    const ImU32 clay_specular        = IM_COL32(255, 255, 255, 160); // Specular white highlight
+    const ImU32 clay_buildup         = IM_COL32(150, 154, 160, 255); // Middle-light gray for buildup shapes
+    const ImU32 clay_highlight       = IM_COL32(200, 204, 210, 255); // Edge highlight lines
+    const ImU32 clay_detail_shadow   = IM_COL32(35, 36, 38, 255);    // Deep indent/detail shadow
+    const ImU32 clay_trans_shadow    = IM_COL32(50, 52, 55, 180);    // Semi-transparent shadow
+    const ImU32 clay_trans_shadow_150 = IM_COL32(50, 52, 55, 150);   // Semi-transparent shadow (lighter)
+    const ImU32 clay_trans_highlight = IM_COL32(200, 204, 210, 120); // Semi-transparent highlight
+
+    auto drawBaseClaySphere = [&](ImVec2 center, float radius) {
+        // Clay sphere shadow (dark slate gray base)
+        dl->AddCircleFilled(center, radius, clay_shadow);
+        
+        // Clay sphere diffuse light overlay (middle neutral gray, offset top-left)
+        dl->AddCircleFilled(ImVec2(center.x - radius * 0.12f, center.y - radius * 0.12f), radius * 0.85f, clay_diffuse);
+        
+        // Clay sphere specular highlight (glossy white spot, offset top-left)
+        dl->AddCircleFilled(ImVec2(center.x - radius * 0.25f, center.y - radius * 0.25f), radius * 0.22f, clay_specular);
+    };
+
     switch (type) {
         case IconType::Scene:
-            // Hierarchy Tree
-            dl->AddRect(ImVec2(p.x + is * 0.12f, p.y + is * 0.12f), ImVec2(p.x + is * 0.34f, p.y + is * 0.34f), col, 1.0f, 0, thickness);
-            dl->AddRect(ImVec2(p.x + is * 0.56f, p.y + is * 0.44f), ImVec2(p.x + is * 0.78f, p.y + is * 0.66f), col, 1.0f, 0, thickness);
-            dl->AddRect(ImVec2(p.x + is * 0.56f, p.y + is * 0.74f), ImVec2(p.x + is * 0.78f, p.y + is * 0.96f), col, 1.0f, 0, thickness);
             {
-                float x1 = p.x + is * 0.23f;
-                float y1 = p.y + is * 0.34f;
-                float x2 = p.x + is * 0.56f;
-                dl->AddLine(ImVec2(x1, y1), ImVec2(x1, p.y + is * 0.85f), col, thickness);
-                dl->AddLine(ImVec2(x1, p.y + is * 0.55f), ImVec2(x2, p.y + is * 0.55f), col, thickness);
-                dl->AddLine(ImVec2(x1, p.y + is * 0.85f), ImVec2(x2, p.y + is * 0.85f), col, thickness);
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Glowing orange/cyan node tree hierarchy on top of the sphere
+                ImVec2 n0 = ImVec2(cp.x, cp.y - r * 0.4f);
+                ImVec2 n1 = ImVec2(cp.x - r * 0.4f, cp.y + r * 0.2f);
+                ImVec2 n2 = ImVec2(cp.x + r * 0.4f, cp.y + r * 0.2f);
+                
+                dl->AddLine(n0, ImVec2(n0.x, cp.y), IM_COL32(100, 200, 255, 180), thickness);
+                dl->AddLine(ImVec2(n1.x, cp.y), ImVec2(n2.x, cp.y), IM_COL32(100, 200, 255, 180), thickness);
+                dl->AddLine(ImVec2(n1.x, cp.y), n1, IM_COL32(100, 200, 255, 180), thickness);
+                dl->AddLine(ImVec2(n2.x, cp.y), n2, IM_COL32(100, 200, 255, 180), thickness);
+                
+                dl->AddCircleFilled(n0, 3.5f, IM_COL32(255, 150, 50, 255)); // Orange parent node
+                dl->AddCircleFilled(n1, 3.0f, IM_COL32(100, 220, 255, 255)); // Cyan child 1
+                dl->AddCircleFilled(n2, 3.0f, IM_COL32(100, 220, 255, 255)); // Cyan child 2
             }
             break;
         case IconType::Render:
-            // Camera Aperture / Shutter
             {
-                float rad = is * 0.45f;
-                dl->AddCircle(cp, rad, col, 24, thickness);
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Camera aperture rings and blades in gold/white
+                float apR = r * 0.55f;
+                dl->AddCircle(cp, apR, IM_COL32(255, 200, 50, 200), 16, thickness);
+                
                 for (int i = 0; i < 6; ++i) {
                     float a = i * (6.28318f / 6.0f);
-                    float x1 = cp.x + cosf(a) * rad;
-                    float y1 = cp.y + sinf(a) * rad;
-                    float inner_a = a + 0.8f;
-                    float x2 = cp.x + cosf(inner_a) * (rad * 0.4f);
-                    float y2 = cp.y + sinf(inner_a) * (rad * 0.4f);
-                    dl->AddLine(ImVec2(x1, y1), ImVec2(x2, y2), col, thickness);
+                    ImVec2 p0(cp.x + cosf(a) * apR, cp.y + sinf(a) * apR);
+                    float inner_a = a + 1.1f;
+                    ImVec2 p1(cp.x + cosf(inner_a) * (apR * 0.4f), cp.y + sinf(inner_a) * (apR * 0.4f));
+                    dl->AddLine(p0, p1, IM_COL32(255, 200, 50, 200), thickness * 0.9f);
                 }
+                
+                dl->AddCircleFilled(cp, apR * 0.25f, IM_COL32(255, 255, 255, 120)); // glowing center lens
             }
             break;
         case IconType::Terrain:
-            // Overlapping Mountains
-            dl->PathClear();
-            dl->PathLineTo(ImVec2(p.x + is * 0.3f, p.y + is * 0.85f));
-            dl->PathLineTo(ImVec2(p.x + is * 0.65f, p.y + is * 0.3f));
-            dl->PathLineTo(ImVec2(p.x + is * 0.95f, p.y + is * 0.85f));
-            dl->PathStroke(col, 0, thickness);
-
-            dl->PathClear();
-            dl->PathLineTo(ImVec2(p.x + is * 0.05f, p.y + is * 0.85f));
-            dl->PathLineTo(ImVec2(p.x + is * 0.40f, p.y + is * 0.42f));
-            dl->PathLineTo(ImVec2(p.x + is * 0.75f, p.y + is * 0.85f));
-            dl->PathStroke(col, 0, thickness);
-
-            dl->AddLine(ImVec2(p.x + is * 0.05f, p.y + is * 0.85f), ImVec2(p.x + is * 0.95f, p.y + is * 0.85f), col, thickness);
-            break;
-        case IconType::Sculpt: // Used as Modifiers/Modeling
-            // Wrench
             {
-                ImVec2 p1 = ImVec2(p.x + is * 0.18f, p.y + is * 0.82f);
-                ImVec2 p2 = ImVec2(p.x + is * 0.62f, p.y + is * 0.38f);
-                dl->AddLine(p1, p2, col, thickness * 2.5f);
+                float r = is * 0.48f;
+                // Deformed mountain/terrain shape instead of a clean sphere
+                ImVec2 t_top(cp.x, cp.y - r * 0.6f);
+                ImVec2 t_left(cp.x - r * 0.8f, cp.y + r * 0.6f);
+                ImVec2 t_right(cp.x + r * 0.8f, cp.y + r * 0.6f);
+                ImVec2 t_mid(cp.x - r * 0.2f, cp.y + r * 0.2f);
                 
-                ImVec2 head_center = ImVec2(p.x + is * 0.72f, p.y + is * 0.28f);
-                float head_rad = is * 0.22f;
+                // Base mountain shadow (left side dark, right side light)
+                ImVec2 faceL[] = { t_top, t_mid, t_left };
+                ImVec2 faceR[] = { t_top, t_mid, t_right };
                 
+                dl->AddConvexPolyFilled(faceL, 3, IM_COL32(80, 110, 80, 255)); // Forest green shadow side
+                dl->AddConvexPolyFilled(faceR, 3, IM_COL32(110, 140, 100, 255)); // Lighter green side
+                
+                // Wireframe terrain grid lines on top of the mountain
+                dl->AddTriangle(t_top, t_left, t_mid, IM_COL32(255, 255, 255, 60), 0.8f);
+                dl->AddTriangle(t_top, t_right, t_mid, IM_COL32(255, 255, 255, 80), 0.8f);
+                
+                // Draw mountain outlines
+                dl->AddLine(t_top, t_left, IM_COL32(200, 220, 200, 255), thickness);
+                dl->AddLine(t_top, t_right, IM_COL32(200, 220, 200, 255), thickness);
+                dl->AddLine(t_left, t_right, IM_COL32(150, 180, 150, 255), thickness);
+                dl->AddLine(t_top, t_mid, IM_COL32(200, 220, 200, 255), thickness);
+            }
+            break;
+        case IconType::Sculpt:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Golden carving wire loop tool scraping the sphere
+                ImVec2 loopCenter = ImVec2(cp.x + r * 0.1f, cp.y - r * 0.1f);
+                float loopR = r * 0.45f;
+                
+                // Scraped clay crease/mark
                 dl->PathClear();
-                float start_angle = -0.15f * 3.14159f;
-                float end_angle = 1.35f * 3.14159f;
-                dl->PathArcTo(head_center, head_rad, start_angle, end_angle, 12);
+                dl->PathArcTo(cp, r * 0.8f, 1.8f, 3.5f);
+                dl->PathStroke(clay_detail_shadow, false, thickness * 2.0f);
                 
-                ImVec2 cut1 = ImVec2(head_center.x + cosf(start_angle) * head_rad, head_center.y + sinf(start_angle) * head_rad);
-                ImVec2 inner_center = ImVec2(head_center.x - cosf(0.6f) * (head_rad * 0.3f), head_center.y + sinf(0.6f) * (head_rad * 0.3f));
-                dl->PathLineTo(inner_center);
-                dl->PathLineTo(cut1);
-                dl->PathStroke(col, ImDrawFlags_Closed, thickness * 1.5f);
+                // Tool metal wire loop
+                dl->AddCircle(loopCenter, loopR, IM_COL32(255, 200, 50, 255), 16, thickness * 1.5f);
                 
-                dl->AddCircle(ImVec2(p.x + is * 0.18f, p.y + is * 0.82f), is * 0.08f, col, 8, thickness);
+                // Tool shaft/handle
+                ImVec2 handleStart = ImVec2(loopCenter.x + cosf(0.78f) * loopR, loopCenter.y - sinf(0.78f) * loopR);
+                ImVec2 handleEnd = ImVec2(handleStart.x + r * 0.6f, handleStart.y - r * 0.6f);
+                dl->AddLine(handleStart, handleEnd, IM_COL32(180, 180, 180, 255), thickness * 2.0f);
             }
             break;
         case IconType::Hair:
-            dl->AddBezierQuadratic(ImVec2(p.x + is*0.24f, p.y + is*0.86f),
-                                   ImVec2(p.x + is*0.12f, p.y + is*0.44f),
-                                   ImVec2(p.x + is*0.34f, p.y + is*0.14f),
-                                   col, thickness);
-            dl->AddBezierQuadratic(ImVec2(p.x + is*0.48f, p.y + is*0.88f),
-                                   ImVec2(p.x + is*0.34f, p.y + is*0.48f),
-                                   ImVec2(p.x + is*0.54f, p.y + is*0.12f),
-                                   col, thickness * 1.15f);
-            dl->AddBezierQuadratic(ImVec2(p.x + is*0.74f, p.y + is*0.84f),
-                                   ImVec2(p.x + is*0.88f, p.y + is*0.46f),
-                                   ImVec2(p.x + is*0.66f, p.y + is*0.18f),
-                                   col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Three flowing golden strands wrapping the sphere
+                ImU32 hairCol = IM_COL32(255, 180, 70, 230);
+                dl->AddBezierQuadratic(ImVec2(cp.x - r * 0.8f, cp.y + r * 0.4f),
+                                       ImVec2(cp.x - r * 0.2f, cp.y - r * 0.6f),
+                                       ImVec2(cp.x + r * 0.6f, cp.y - r * 0.4f), hairCol, thickness * 1.5f);
+                                       
+                dl->AddBezierQuadratic(ImVec2(cp.x - r * 0.6f, cp.y + r * 0.7f),
+                                       ImVec2(cp.x + r * 0.1f, cp.y - r * 0.5f),
+                                       ImVec2(cp.x + r * 0.7f, cp.y - r * 0.1f), hairCol, thickness * 1.2f);
+                                       
+                dl->AddBezierQuadratic(ImVec2(cp.x - r * 0.8f, cp.y - r * 0.1f),
+                                       ImVec2(cp.x - r * 0.3f, cp.y - r * 0.8f),
+                                       ImVec2(cp.x + r * 0.4f, cp.y - r * 0.7f), IM_COL32(255, 210, 120, 180), thickness * 0.9f);
+            }
             break;
-        case IconType::Brush: // Used as Stylize Mode
-        {
-            // Magic Wand
-            dl->AddLine(ImVec2(p.x + is * 0.15f, p.y + is * 0.85f), ImVec2(p.x + is * 0.60f, p.y + is * 0.40f), col, thickness * 1.8f);
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.60f, p.y + is * 0.40f), thickness * 1.5f, col);
-            
-            ImVec2 sc = ImVec2(p.x + is * 0.75f, p.y + is * 0.25f);
-            float sr = is * 0.18f;
-            dl->PathClear();
-            dl->PathLineTo(ImVec2(sc.x, sc.y - sr));
-            dl->PathBezierQuadraticCurveTo(ImVec2(sc.x + sr*0.2f, sc.y - sr*0.2f), ImVec2(sc.x + sr, sc.y), 6);
-            dl->PathBezierQuadraticCurveTo(ImVec2(sc.x + sr*0.2f, sc.y + sr*0.2f), ImVec2(sc.x, sc.y + sr), 6);
-            dl->PathBezierQuadraticCurveTo(ImVec2(sc.x - sr*0.2f, sc.y + sr*0.2f), ImVec2(sc.x - sr, sc.y), 6);
-            dl->PathBezierQuadraticCurveTo(ImVec2(sc.x - sr*0.2f, sc.y - sr*0.2f), ImVec2(sc.x, sc.y - sr), 6);
-            dl->PathStroke(col, ImDrawFlags_Closed, thickness);
-
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.82f, p.y + is * 0.50f), thickness * 0.8f, col);
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.48f, p.y + is * 0.18f), thickness * 0.8f, col);
+        case IconType::Brush: // Used as Stylize Mode / Mix Behavior
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Mix blend strokes (Violet and Orange semi-transparent waves)
+                dl->PathClear();
+                dl->PathArcTo(cp, r * 0.65f, 2.2f, 4.2f);
+                dl->PathStroke(IM_COL32(180, 100, 255, 180), false, thickness * 2.2f);
+                
+                dl->PathClear();
+                dl->PathArcTo(cp, r * 0.65f, 3.2f, 5.2f);
+                dl->PathStroke(IM_COL32(255, 170, 50, 180), false, thickness * 2.2f);
+                
+                // Magic Wand overlay (slanted gold stick with white star spark)
+                ImVec2 wandStart = ImVec2(cp.x - r * 0.5f, cp.y + r * 0.5f);
+                ImVec2 wandEnd = ImVec2(cp.x + r * 0.3f, cp.y - r * 0.3f);
+                dl->AddLine(wandStart, wandEnd, IM_COL32(220, 220, 220, 255), thickness * 1.5f); // metal shaft
+                dl->AddLine(ImVec2(wandEnd.x - r * 0.15f, wandEnd.y + r * 0.15f), wandEnd, IM_COL32(255, 215, 0, 255), thickness * 1.5f); // golden tip
+                
+                // Sparkle at wand tip
+                dl->AddCircleFilled(wandEnd, 1.8f, IM_COL32(255, 255, 255, 255));
+                dl->AddCircle(wandEnd, 3.0f, IM_COL32(255, 255, 255, 150), 8, 1.0f);
+            }
             break;
-        }
         case IconType::Move:
-            dl->AddLine(ImVec2(cp.x, p.y + is * 0.14f), ImVec2(cp.x, p.y + is * 0.86f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.14f, cp.y), ImVec2(p.x + is * 0.86f, cp.y), col, thickness);
-            dl->AddTriangleFilled(ImVec2(cp.x, p.y + is * 0.08f), ImVec2(cp.x - is * 0.08f, p.y + is * 0.24f), ImVec2(cp.x + is * 0.08f, p.y + is * 0.24f), col);
-            dl->AddTriangleFilled(ImVec2(cp.x, p.y + is * 0.92f), ImVec2(cp.x - is * 0.08f, p.y + is * 0.76f), ImVec2(cp.x + is * 0.08f, p.y + is * 0.76f), col);
-            dl->AddTriangleFilled(ImVec2(p.x + is * 0.08f, cp.y), ImVec2(p.x + is * 0.24f, cp.y - is * 0.08f), ImVec2(p.x + is * 0.24f, cp.y + is * 0.08f), col);
-            dl->AddTriangleFilled(ImVec2(p.x + is * 0.92f, cp.y), ImVec2(p.x + is * 0.76f, cp.y - is * 0.08f), ImVec2(p.x + is * 0.76f, cp.y + is * 0.08f), col);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // RGB translate axes
+                float axLen = r * 0.80f;
+                float arrSz = is * 0.08f;
+                
+                // X Axis - Red (Right)
+                ImVec2 xEnd(cp.x + axLen, cp.y);
+                dl->AddLine(cp, xEnd, IM_COL32(255, 75, 75, 240), thickness * 1.6f);
+                dl->AddTriangleFilled(xEnd, ImVec2(xEnd.x - arrSz, xEnd.y - arrSz * 0.5f), ImVec2(xEnd.x - arrSz, xEnd.y + arrSz * 0.5f), IM_COL32(255, 75, 75, 240));
+                
+                // Y Axis - Green (Up)
+                ImVec2 yEnd(cp.x, cp.y - axLen);
+                dl->AddLine(cp, yEnd, IM_COL32(75, 220, 75, 240), thickness * 1.6f);
+                dl->AddTriangleFilled(yEnd, ImVec2(yEnd.x - arrSz * 0.5f, yEnd.y + arrSz), ImVec2(yEnd.x + arrSz * 0.5f, yEnd.y + arrSz), IM_COL32(75, 220, 75, 240));
+                
+                // Z Axis - Blue (Down-Left)
+                ImVec2 zEnd(cp.x - axLen * 0.707f, cp.y + axLen * 0.707f);
+                dl->AddLine(cp, zEnd, IM_COL32(75, 140, 255, 240), thickness * 1.6f);
+                float aZ = 2.356f;
+                dl->AddTriangleFilled(zEnd, 
+                    ImVec2(zEnd.x - arrSz * cosf(aZ - 0.4f), zEnd.y - arrSz * sinf(aZ - 0.4f)),
+                    ImVec2(zEnd.x - arrSz * cosf(aZ + 0.4f), zEnd.y - arrSz * sinf(aZ + 0.4f)),
+                    IM_COL32(75, 140, 255, 240));
+            }
             break;
         case IconType::Rotate:
-            dl->PathArcTo(cp, is * 0.28f, 0.35f, 5.5f, 24);
-            dl->PathStroke(col, 0, thickness * 1.1f);
-            dl->AddLine(ImVec2(cp.x + is * 0.18f, p.y + is * 0.20f), ImVec2(cp.x + is * 0.34f, p.y + is * 0.28f), col, thickness);
-            dl->AddLine(ImVec2(cp.x + is * 0.18f, p.y + is * 0.20f), ImVec2(cp.x + is * 0.28f, p.y + is * 0.08f), col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // RGB rotation track rings
+                // X Ring - Red (Horizontal-ish ellipse)
+                dl->AddEllipse(cp, ImVec2(r * 0.85f, r * 0.30f), IM_COL32(255, 75, 75, 200), -0.2f, 0, thickness * 1.4f);
+                
+                // Y Ring - Green (Vertical-ish ellipse)
+                dl->AddEllipse(cp, ImVec2(r * 0.30f, r * 0.85f), IM_COL32(75, 220, 75, 200), 0.2f, 0, thickness * 1.4f);
+                
+                // Z Ring - Blue (Outer circular boundary)
+                dl->AddCircle(cp, r * 0.85f, IM_COL32(75, 140, 255, 220), 32, thickness * 1.4f);
+                
+                // Active rotation arrow on the outer Z ring
+                float arrAngle = -0.5f;
+                ImVec2 arrPt(cp.x + cosf(arrAngle) * r * 0.85f, cp.y + sinf(arrAngle) * r * 0.85f);
+                float headAngle = arrAngle + 1.57f;
+                float arrSz = is * 0.08f;
+                dl->AddTriangleFilled(arrPt,
+                    ImVec2(arrPt.x - arrSz * cosf(headAngle - 0.4f), arrPt.y - arrSz * sinf(headAngle - 0.4f)),
+                    ImVec2(arrPt.x - arrSz * cosf(headAngle + 0.4f), arrPt.y - arrSz * sinf(headAngle + 0.4f)),
+                    IM_COL32(75, 140, 255, 255));
+            }
             break;
         case IconType::ScaleAxis:
-            dl->AddRect(ImVec2(p.x + is * 0.24f, p.y + is * 0.24f), ImVec2(p.x + is * 0.72f, p.y + is * 0.72f), col, 2.0f, 0, thickness);
-            dl->AddRectFilled(ImVec2(p.x + is * 0.12f, p.y + is * 0.68f), ImVec2(p.x + is * 0.26f, p.y + is * 0.82f), col, 1.5f);
-            dl->AddRectFilled(ImVec2(p.x + is * 0.70f, p.y + is * 0.10f), ImVec2(p.x + is * 0.84f, p.y + is * 0.24f), col, 1.5f);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // RGB Scale axes (ending with box handles)
+                float axLen = r * 0.80f;
+                float boxSz = is * 0.08f;
+                
+                // X Axis - Red
+                ImVec2 xEnd(cp.x + axLen, cp.y);
+                dl->AddLine(cp, xEnd, IM_COL32(255, 75, 75, 240), thickness * 1.6f);
+                dl->AddRectFilled(ImVec2(xEnd.x - boxSz*0.5f, xEnd.y - boxSz*0.5f), ImVec2(xEnd.x + boxSz*0.5f, xEnd.y + boxSz*0.5f), IM_COL32(255, 75, 75, 240), 1.0f);
+                
+                // Y Axis - Green
+                ImVec2 yEnd(cp.x, cp.y - axLen);
+                dl->AddLine(cp, yEnd, IM_COL32(75, 220, 75, 240), thickness * 1.6f);
+                dl->AddRectFilled(ImVec2(yEnd.x - boxSz*0.5f, yEnd.y - boxSz*0.5f), ImVec2(yEnd.x + boxSz*0.5f, yEnd.y + boxSz*0.5f), IM_COL32(75, 220, 75, 240), 1.0f);
+                
+                // Z Axis - Blue
+                ImVec2 zEnd(cp.x - axLen * 0.707f, cp.y + axLen * 0.707f);
+                dl->AddLine(cp, zEnd, IM_COL32(75, 140, 255, 240), thickness * 1.6f);
+                dl->AddRectFilled(ImVec2(zEnd.x - boxSz*0.5f, zEnd.y - boxSz*0.5f), ImVec2(zEnd.x + boxSz*0.5f, zEnd.y + boxSz*0.5f), IM_COL32(75, 140, 255, 240), 1.0f);
+            }
             break;
         case IconType::Gizmo:
-            dl->AddCircle(cp, is * 0.12f, col, 18, thickness);
-            dl->AddLine(ImVec2(cp.x, p.y + is * 0.16f), ImVec2(cp.x, p.y + is * 0.84f), col, thickness * 0.9f);
-            dl->AddLine(ImVec2(p.x + is * 0.16f, cp.y), ImVec2(p.x + is * 0.84f, cp.y), col, thickness * 0.9f);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Combined layout: outer white boundary, X/Y axes lines, amber center dot
+                dl->AddCircle(cp, r * 0.85f, IM_COL32(240, 240, 240, 150), 32, thickness * 0.9f);
+                dl->AddLine(ImVec2(cp.x, cp.y - r * 0.85f), ImVec2(cp.x, cp.y + r * 0.85f), IM_COL32(240, 240, 240, 150), thickness * 0.9f);
+                dl->AddLine(ImVec2(cp.x - r * 0.85f, cp.y), ImVec2(cp.x + r * 0.85f, cp.y), IM_COL32(240, 240, 240, 150), thickness * 0.9f);
+                
+                // Center point glow (amber)
+                dl->AddCircleFilled(cp, is * 0.12f, IM_COL32(255, 180, 50, 240));
+                dl->AddCircle(cp, is * 0.12f, IM_COL32(255, 225, 100, 255), 12, 1.0f);
+            }
             break;
         case IconType::ViewSolid:
-            dl->AddCircleFilled(cp, is * 0.40f, IM_COL32(126, 132, 142, 190), 32);
-            dl->AddCircleFilled(ImVec2(cp.x - is * 0.12f, cp.y - is * 0.12f), is * 0.14f, IM_COL32(255, 255, 255, 68), 18);
-            dl->AddCircleFilled(ImVec2(cp.x + is * 0.10f, cp.y + is * 0.11f), is * 0.24f, IM_COL32(36, 40, 48, 96), 20);
-            dl->AddCircle(cp, is * 0.40f, col, 28, thickness);
-            dl->AddLine(ImVec2(cp.x - is * 0.24f, cp.y), ImVec2(cp.x + is * 0.24f, cp.y), IM_COL32(220, 224, 230, 120), thickness * 0.75f);
-            dl->AddLine(ImVec2(cp.x - is * 0.08f, cp.y - is * 0.24f), ImVec2(cp.x - is * 0.08f, cp.y + is * 0.24f), IM_COL32(220, 224, 230, 105), thickness * 0.75f);
-            dl->AddLine(ImVec2(cp.x + is * 0.08f, cp.y - is * 0.24f), ImVec2(cp.x + is * 0.08f, cp.y + is * 0.24f), IM_COL32(220, 224, 230, 105), thickness * 0.75f);
+            {
+                // Solid Mode: 3D Matte Clay Cube
+                ImVec2 V_top(cp.x, cp.y - is * 0.42f);
+                ImVec2 V_bottom(cp.x, cp.y + is * 0.42f);
+                ImVec2 V_tl(cp.x - is * 0.36f, cp.y - is * 0.21f);
+                ImVec2 V_tr(cp.x + is * 0.36f, cp.y - is * 0.21f);
+                ImVec2 V_bl(cp.x - is * 0.36f, cp.y + is * 0.21f);
+                ImVec2 V_br(cp.x + is * 0.36f, cp.y + is * 0.21f);
+
+                ImVec2 top_face[] = { cp, V_tl, V_top, V_tr };
+                ImVec2 left_face[] = { cp, V_tl, V_bl, V_bottom };
+                ImVec2 right_face[] = { cp, V_tr, V_br, V_bottom };
+
+                // Shaded faces using the Matcap Clay Palette
+                dl->AddConvexPolyFilled(top_face, 4, clay_buildup);
+                dl->AddConvexPolyFilled(left_face, 4, clay_diffuse);
+                dl->AddConvexPolyFilled(right_face, 4, clay_shadow);
+
+                // Highlight/Border lines
+                ImVec2 hex[] = { V_top, V_tr, V_br, V_bottom, V_bl, V_tl };
+                dl->AddPolyline(hex, 6, clay_highlight, ImDrawFlags_Closed, thickness * 0.8f);
+                dl->AddLine(cp, V_bottom, clay_highlight, thickness * 0.8f);
+                dl->AddLine(cp, V_tl, clay_highlight, thickness * 0.8f);
+                dl->AddLine(cp, V_tr, clay_highlight, thickness * 0.8f);
+                
+                // Add a small specular highlight dot on the top-left face to simulate the matcap light source
+                dl->AddCircleFilled(ImVec2(cp.x - is * 0.12f, cp.y - is * 0.18f), is * 0.05f, clay_specular);
+            }
             break;
         case IconType::ViewMatcap:
-            dl->AddCircleFilled(cp, is * 0.40f, IM_COL32(152, 156, 168, 210), 32);
-            dl->AddCircleFilled(ImVec2(cp.x - is * 0.13f, cp.y - is * 0.13f), is * 0.15f, IM_COL32(255, 255, 255, 86), 18);
-            dl->AddCircleFilled(ImVec2(cp.x + is * 0.11f, cp.y + is * 0.12f), is * 0.24f, IM_COL32(52, 54, 62, 102), 20);
-            dl->AddCircle(cp, is * 0.40f, col, 28, thickness);
-            dl->AddBezierQuadratic(ImVec2(cp.x - is * 0.22f, cp.y + is * 0.10f), ImVec2(cp.x, cp.y + is * 0.25f), ImVec2(cp.x + is * 0.22f, cp.y + is * 0.10f), IM_COL32(235, 238, 244, 118), thickness * 0.8f);
+            {
+                float rad = is * 0.44f;
+                // Terracotta clay matcap colors
+                const ImU32 terracotta_shadow = IM_COL32(90, 40, 30, 255);
+                const ImU32 terracotta_diffuse = IM_COL32(185, 95, 75, 255);
+                const ImU32 terracotta_specular = IM_COL32(255, 215, 195, 180);
+                
+                // Draw shaded sphere
+                dl->AddCircleFilled(cp, rad, terracotta_shadow);
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.12f, cp.y - rad * 0.12f), rad * 0.85f, terracotta_diffuse);
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.25f, cp.y - rad * 0.25f), rad * 0.22f, terracotta_specular);
+                
+                // Thin golden-orange outline
+                dl->AddCircle(cp, rad, IM_COL32(255, 140, 80, 100), 32, thickness * 0.8f);
+            }
             break;
         case IconType::ViewPreview:
-            dl->AddCircleFilled(cp, is * 0.40f, IM_COL32(118, 126, 136, 182), 32);
-            dl->AddCircleFilled(ImVec2(cp.x + is * 0.08f, cp.y), is * 0.32f, IM_COL32(84, 168, 150, 138), 26);
-            dl->AddCircleFilled(ImVec2(cp.x - is * 0.11f, cp.y - is * 0.11f), is * 0.13f, IM_COL32(255, 255, 255, 68), 16);
-            dl->AddCircle(cp, is * 0.40f, col, 28, thickness);
-            dl->AddLine(ImVec2(cp.x, cp.y - is * 0.26f), ImVec2(cp.x, cp.y + is * 0.26f), IM_COL32(236, 240, 246, 112), thickness * 0.8f);
+            {
+                float rad = is * 0.44f;
+                // Base shadow
+                dl->AddCircleFilled(cp, rad, clay_shadow);
+                
+                // Left half: Glossy blue metallic
+                dl->PathClear();
+                dl->PathArcTo(cp, rad, 0.5f * 3.14159f, 1.5f * 3.14159f);
+                dl->PathFillConvex(IM_COL32(20, 80, 160, 255));
+                
+                dl->PathClear();
+                dl->PathArcTo(ImVec2(cp.x - rad * 0.12f, cp.y - rad * 0.12f), rad * 0.85f, 0.5f * 3.14159f, 1.5f * 3.14159f);
+                dl->PathFillConvex(IM_COL32(60, 160, 250, 255));
+                
+                // Right half: Neutral clay gray
+                dl->PathClear();
+                dl->PathArcTo(ImVec2(cp.x - rad * 0.12f, cp.y - rad * 0.12f), rad * 0.85f, -0.5f * 3.14159f, 0.5f * 3.14159f);
+                dl->PathFillConvex(clay_diffuse);
+                
+                // Grid lines (UV coordinate layout)
+                ImU32 gridCol = IM_COL32(255, 255, 255, 80);
+                dl->AddLine(ImVec2(cp.x - rad, cp.y), ImVec2(cp.x + rad, cp.y), gridCol, thickness * 0.7f);
+                dl->AddLine(ImVec2(cp.x, cp.y - rad), ImVec2(cp.x, cp.y + rad), gridCol, thickness * 0.7f);
+                
+                // Curved longitude grid lines
+                dl->AddBezierQuadratic(ImVec2(cp.x, cp.y - rad), ImVec2(cp.x - rad * 0.4f, cp.y), ImVec2(cp.x, cp.y + rad), gridCol, thickness * 0.7f);
+                dl->AddBezierQuadratic(ImVec2(cp.x, cp.y - rad), ImVec2(cp.x + rad * 0.4f, cp.y), ImVec2(cp.x, cp.y + rad), gridCol, thickness * 0.7f);
+                
+                // Specular highlight overlapping the boundary
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.25f, cp.y - rad * 0.25f), rad * 0.22f, clay_specular);
+                
+                // Outer ring
+                dl->AddCircle(cp, rad, clay_highlight, 32, thickness * 0.8f);
+            }
             break;
         case IconType::ViewRendered:
-            dl->AddCircleFilled(cp, is * 0.40f, IM_COL32(72, 138, 255, 200), 32);
-            dl->AddCircleFilled(ImVec2(cp.x + is * 0.08f, cp.y + is * 0.06f), is * 0.28f, IM_COL32(242, 144, 72, 144), 22);
-            dl->AddCircleFilled(ImVec2(cp.x - is * 0.13f, cp.y - is * 0.13f), is * 0.14f, IM_COL32(255, 255, 255, 96), 18);
-            dl->AddCircle(cp, is * 0.40f, col, 28, thickness);
-            dl->AddBezierQuadratic(ImVec2(cp.x - is * 0.22f, cp.y + is * 0.12f), ImVec2(cp.x + is * 0.02f, cp.y + is * 0.26f), ImVec2(cp.x + is * 0.24f, cp.y + is * 0.04f), IM_COL32(255, 244, 210, 120), thickness * 0.78f);
+            {
+                float rad = is * 0.42f;
+                // Soft ground shadow under the sphere
+                dl->PathClear();
+                const int num_segments = 16;
+                const float rx = is * 0.35f;
+                const float ry = is * 0.08f;
+                const ImVec2 shadow_center(cp.x, cp.y + is * 0.38f);
+                for (int i = 0; i < num_segments; ++i) {
+                    float a = i * (6.283185f / num_segments);
+                    dl->PathLineTo(ImVec2(shadow_center.x + cosf(a) * rx, shadow_center.y + sinf(a) * ry));
+                }
+                dl->PathFillConvex(IM_COL32(0, 0, 0, 150));
+                
+                // Base clay sphere shadow
+                dl->AddCircleFilled(cp, rad, clay_shadow);
+                
+                // Warm studio light diffuse overlay (offset top-left)
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.12f, cp.y - rad * 0.12f), rad * 0.85f, IM_COL32(145, 140, 135, 255));
+                
+                // Cool cyan bounce light on the bottom-right edge
+                dl->PathClear();
+                dl->PathArcTo(cp, rad - 1.0f, 0.0f, 1.57f, 16);
+                dl->PathStroke(IM_COL32(100, 220, 255, 120), false, thickness * 1.8f);
+                
+                // Warm golden-white specular highlight spot (offset top-left)
+                dl->AddCircleFilled(ImVec2(cp.x - rad * 0.25f, cp.y - rad * 0.25f), rad * 0.22f, IM_COL32(255, 245, 220, 200));
+                
+                // Outer ring
+                dl->AddCircle(cp, rad, clay_highlight, 32, thickness * 0.8f);
+                
+                // Beautiful 4-point golden star/sparkle at top-right (monochrome ray reflection)
+                ImVec2 sc = ImVec2(cp.x + rad * 0.45f, cp.y - rad * 0.45f);
+                float sr = is * 0.24f;
+                ImVec2 star_pts[] = {
+                    ImVec2(sc.x, sc.y - sr),
+                    ImVec2(sc.x + sr * 0.22f, sc.y - sr * 0.22f),
+                    ImVec2(sc.x + sr, sc.y),
+                    ImVec2(sc.x + sr * 0.22f, sc.y + sr * 0.22f),
+                    ImVec2(sc.x, sc.y + sr),
+                    ImVec2(sc.x - sr * 0.22f, sc.y + sr * 0.22f),
+                    ImVec2(sc.x - sr, sc.y),
+                    ImVec2(sc.x - sr * 0.22f, sc.y - sr * 0.22f)
+                };
+                dl->AddConvexPolyFilled(star_pts, 8, IM_COL32(255, 220, 100, 240));
+                dl->AddPolyline(star_pts, 8, IM_COL32(255, 240, 180, 200), ImDrawFlags_Closed, 1.0f);
+            }
             break;
         case IconType::CameraHud:
-            dl->AddRect(ImVec2(p.x + is * 0.18f, p.y + is * 0.24f), ImVec2(p.x + is * 0.82f, p.y + is * 0.76f), col, 2.0f, 0, thickness);
-            dl->AddCircle(ImVec2(p.x + is * 0.34f, p.y + is * 0.40f), is * 0.04f, col, 10, thickness * 0.8f);
-            dl->AddLine(ImVec2(p.x + is * 0.24f, p.y + is * 0.62f), ImVec2(p.x + is * 0.76f, p.y + is * 0.62f), col, thickness * 0.85f);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                ImU32 hud_col = IM_COL32(80, 220, 255, 220); // Cyan/blue-green
+                // Camera outer frame (corner ticks or thin rect)
+                float rect_w = r * 0.7f;
+                float rect_h = r * 0.5f;
+                dl->AddRect(ImVec2(cp.x - rect_w * 0.5f, cp.y - rect_h * 0.5f), ImVec2(cp.x + rect_w * 0.5f, cp.y + rect_h * 0.5f), hud_col, 1.0f, 0, thickness * 0.8f);
+                // Lens circle in center
+                dl->AddCircle(cp, r * 0.18f, hud_col, 12, thickness * 0.8f);
+                // Tiny top-right led/dot
+                dl->AddCircleFilled(ImVec2(cp.x + rect_w * 0.35f, cp.y - rect_h * 0.35f), 1.5f, IM_COL32(255, 75, 75, 240));
+            }
             break;
         case IconType::ViewOverlays:
-            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.78f), ImVec2(p.x + is * 0.18f, p.y + is * 0.28f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.40f, p.y + is * 0.78f), ImVec2(p.x + is * 0.40f, p.y + is * 0.18f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.62f, p.y + is * 0.78f), ImVec2(p.x + is * 0.62f, p.y + is * 0.44f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.84f, p.y + is * 0.78f), ImVec2(p.x + is * 0.84f, p.y + is * 0.12f), col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                ImU32 overlay_col = IM_COL32(255, 180, 50, 220); // Orange/Amber
+                // Four vertical bar lines at different heights on the sphere
+                float w = r * 0.5f;
+                dl->AddLine(ImVec2(cp.x - w, cp.y + r * 0.25f), ImVec2(cp.x - w, cp.y - r * 0.1f), overlay_col, thickness * 0.9f);
+                dl->AddLine(ImVec2(cp.x - w * 0.33f, cp.y + r * 0.35f), ImVec2(cp.x - w * 0.33f, cp.y - r * 0.4f), overlay_col, thickness * 0.9f);
+                dl->AddLine(ImVec2(cp.x + w * 0.33f, cp.y + r * 0.35f), ImVec2(cp.x + w * 0.33f, cp.y - r * 0.2f), overlay_col, thickness * 0.9f);
+                dl->AddLine(ImVec2(cp.x + w, cp.y + r * 0.25f), ImVec2(cp.x + w, cp.y - r * 0.5f), overlay_col, thickness * 0.9f);
+            }
             break;
         case IconType::PivotEdit:
-            dl->AddCircle(cp, is * 0.08f, col, 12, thickness);
-            dl->AddLine(ImVec2(cp.x, p.y + is * 0.16f), ImVec2(cp.x, p.y + is * 0.84f), col, thickness * 0.85f);
-            dl->AddLine(ImVec2(p.x + is * 0.16f, cp.y), ImVec2(p.x + is * 0.84f, cp.y), col, thickness * 0.85f);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                ImU32 pivot_col = IM_COL32(255, 215, 0, 240); // Gold
+                float l = r * 0.75f;
+                dl->AddCircle(cp, r * 0.25f, pivot_col, 16, thickness * 0.9f);
+                dl->AddLine(ImVec2(cp.x, cp.y - l), ImVec2(cp.x, cp.y + l), pivot_col, thickness * 0.9f);
+                dl->AddLine(ImVec2(cp.x - l, cp.y), ImVec2(cp.x + l, cp.y), pivot_col, thickness * 0.9f);
+            }
             break;
         case IconType::PivotCenter:
-            dl->AddCircle(cp, is * 0.08f, col, 12, thickness);
-            dl->AddCircle(cp, is * 0.24f, col, 18, thickness * 0.85f);
-            dl->AddLine(ImVec2(cp.x, p.y + is * 0.08f), ImVec2(cp.x, p.y + is * 0.18f), col, thickness * 0.8f);
-            dl->AddLine(ImVec2(cp.x, p.y + is * 0.92f), ImVec2(cp.x, p.y + is * 0.82f), col, thickness * 0.8f);
-            dl->AddLine(ImVec2(p.x + is * 0.08f, cp.y), ImVec2(p.x + is * 0.18f, cp.y), col, thickness * 0.8f);
-            dl->AddLine(ImVec2(p.x + is * 0.92f, cp.y), ImVec2(p.x + is * 0.82f, cp.y), col, thickness * 0.8f);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                ImU32 pivot_col = IM_COL32(255, 215, 0, 240); // Gold
+                dl->AddCircle(cp, r * 0.20f, pivot_col, 12, thickness * 0.9f);
+                dl->AddCircle(cp, r * 0.50f, pivot_col, 18, thickness * 0.8f);
+                // Center ticks
+                float t0 = r * 0.60f;
+                float t1 = r * 0.85f;
+                dl->AddLine(ImVec2(cp.x, cp.y - t1), ImVec2(cp.x, cp.y - t0), pivot_col, thickness * 0.8f);
+                dl->AddLine(ImVec2(cp.x, cp.y + t1), ImVec2(cp.x, cp.y + t0), pivot_col, thickness * 0.8f);
+                dl->AddLine(ImVec2(cp.x - t1, cp.y), ImVec2(cp.x - t0, cp.y), pivot_col, thickness * 0.8f);
+                dl->AddLine(ImVec2(cp.x + t1, cp.y), ImVec2(cp.x + t0, cp.y), pivot_col, thickness * 0.8f);
+            }
             break;
         case IconType::Sensitivity:
-            dl->AddCircle(cp, is * 0.24f, col, 24, thickness);
-            dl->AddLine(cp, ImVec2(cp.x + is * 0.16f, cp.y - is * 0.08f), col, thickness * 1.1f);
-            dl->AddLine(ImVec2(cp.x, p.y + is * 0.16f), ImVec2(cp.x, p.y + is * 0.22f), col, thickness * 0.8f);
-            dl->AddLine(ImVec2(cp.x, p.y + is * 0.84f), ImVec2(cp.x, p.y + is * 0.78f), col, thickness * 0.8f);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                ImU32 sens_col = IM_COL32(230, 230, 230, 240); // Off-white
+                dl->AddCircle(cp, r * 0.65f, sens_col, 24, thickness * 0.8f);
+                // Pointer needle in bright orange/red
+                ImU32 needle_col = IM_COL32(255, 90, 50, 255);
+                dl->AddLine(cp, ImVec2(cp.x + r * 0.45f * cosf(-0.785f), cp.y + r * 0.45f * sinf(-0.785f)), needle_col, thickness * 1.2f);
+                dl->AddCircleFilled(cp, 2.0f, needle_col);
+                // Gauge markings
+                for (int i = 0; i < 4; ++i) {
+                    float angle = -3.14159f * 0.5f + i * (3.14159f * 0.5f);
+                    dl->AddLine(ImVec2(cp.x + r * 0.5f * cosf(angle), cp.y + r * 0.5f * sinf(angle)),
+                                ImVec2(cp.x + r * 0.65f * cosf(angle), cp.y + r * 0.65f * sinf(angle)),
+                                sens_col, thickness * 0.8f);
+                }
+            }
             break;
         case IconType::Settings:
             dl->AddLine(ImVec2(p.x + is * 0.22f, p.y + is * 0.34f), ImVec2(p.x + is * 0.78f, p.y + is * 0.34f), col, thickness);
@@ -887,365 +1159,1011 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
             dl->AddCircleFilled(ImVec2(p.x + is * 0.46f, p.y + is * 0.66f), is * 0.07f, col, 12);
             break;
         case IconType::Play:
-            dl->AddTriangleFilled(ImVec2(p.x + is*0.34f, p.y + is*0.22f),
-                                  ImVec2(p.x + is*0.34f, p.y + is*0.78f),
-                                  ImVec2(p.x + is*0.78f, p.y + is*0.50f),
-                                  col);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                ImU32 play_col = IM_COL32(75, 220, 75, 240); // Bright green
+                dl->AddTriangleFilled(
+                    ImVec2(cp.x - r * 0.30f, cp.y - r * 0.50f),
+                    ImVec2(cp.x - r * 0.30f, cp.y + r * 0.50f),
+                    ImVec2(cp.x + r * 0.55f, cp.y),
+                    play_col
+                );
+            }
             break;
         case IconType::Pause:
-            dl->AddRectFilled(ImVec2(p.x + is*0.28f, p.y + is*0.20f), ImVec2(p.x + is*0.44f, p.y + is*0.80f), col, 2.0f);
-            dl->AddRectFilled(ImVec2(p.x + is*0.56f, p.y + is*0.20f), ImVec2(p.x + is*0.72f, p.y + is*0.80f), col, 2.0f);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                ImU32 pause_col = IM_COL32(75, 220, 75, 240); // Bright green
+                dl->AddRectFilled(ImVec2(cp.x - r * 0.35f, cp.y - r * 0.50f), ImVec2(cp.x - r * 0.08f, cp.y + r * 0.50f), pause_col, 1.5f);
+                dl->AddRectFilled(ImVec2(cp.x + r * 0.08f, cp.y - r * 0.50f), ImVec2(cp.x + r * 0.35f, cp.y + r * 0.50f), pause_col, 1.5f);
+            }
             break;
         case IconType::Stop:
-            dl->AddRectFilled(ImVec2(p.x + is*0.26f, p.y + is*0.26f), ImVec2(p.x + is*0.74f, p.y + is*0.74f), col, 3.0f);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                ImU32 stop_col = IM_COL32(255, 75, 75, 240); // Red
+                dl->AddRectFilled(ImVec2(cp.x - r * 0.40f, cp.y - r * 0.40f), ImVec2(cp.x + r * 0.40f, cp.y + r * 0.40f), stop_col, 2.0f);
+            }
             break;
         case IconType::Duplicate:
-            dl->AddRect(ImVec2(p.x + is*0.18f, p.y + is*0.24f), ImVec2(p.x + is*0.58f, p.y + is*0.64f), col, 2.0f, 0, thickness);
-            dl->AddRect(ImVec2(p.x + is*0.38f, p.y + is*0.38f), ImVec2(p.x + is*0.78f, p.y + is*0.78f), col, 2.0f, 0, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                ImU32 key_col1 = IM_COL32(180, 180, 185, 240); // Back diamond (grayish/silver)
+                ImVec2 cp1 = ImVec2(cp.x - r * 0.18f, cp.y - r * 0.18f);
+                ImVec2 pts1[] = {
+                    ImVec2(cp1.x, cp1.y - r * 0.35f),
+                    ImVec2(cp1.x + r * 0.35f, cp1.y),
+                    ImVec2(cp1.x, cp1.y + r * 0.35f),
+                    ImVec2(cp1.x - r * 0.35f, cp1.y)
+                };
+                dl->AddConvexPolyFilled(pts1, 4, key_col1);
+                dl->AddPolyline(pts1, 4, IM_COL32(255, 255, 255, 180), ImDrawFlags_Closed, thickness * 0.8f);
+                
+                ImU32 key_col2 = IM_COL32(255, 215, 0, 240); // Front diamond (golden)
+                ImVec2 cp2 = ImVec2(cp.x + r * 0.18f, cp.y + r * 0.18f);
+                ImVec2 pts2[] = {
+                    ImVec2(cp2.x, cp2.y - r * 0.35f),
+                    ImVec2(cp2.x + r * 0.35f, cp2.y),
+                    ImVec2(cp2.x, cp2.y + r * 0.35f),
+                    ImVec2(cp2.x - r * 0.35f, cp2.y)
+                };
+                dl->AddConvexPolyFilled(pts2, 4, key_col2);
+                dl->AddPolyline(pts2, 4, IM_COL32(255, 255, 255, 200), ImDrawFlags_Closed, thickness * 0.8f);
+            }
             break;
         case IconType::Help:
-            dl->AddCircle(cp, is*0.34f, col, 20, thickness);
-            dl->AddBezierQuadratic(ImVec2(cp.x - is*0.10f, p.y + is*0.34f),
-                                   ImVec2(cp.x - is*0.02f, p.y + is*0.16f),
-                                   ImVec2(cp.x + is*0.14f, p.y + is*0.28f),
-                                   col, thickness);
-            dl->AddLine(ImVec2(cp.x + is*0.10f, p.y + is*0.44f), ImVec2(cp.x + is*0.02f, p.y + is*0.58f), col, thickness);
-            dl->AddCircleFilled(ImVec2(cp.x, p.y + is*0.74f), thickness * 1.15f, col);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                ImU32 q_col = IM_COL32(255, 255, 255, 240); // White
+                // Top curve of the question mark
+                dl->PathClear();
+                dl->PathArcTo(ImVec2(cp.x, cp.y - r * 0.15f), r * 0.30f, -3.14159f, 0.0f, 16);
+                dl->PathArcTo(ImVec2(cp.x + r * 0.15f, cp.y - r * 0.15f), r * 0.15f, 0.0f, 1.57f, 8);
+                dl->PathLineTo(ImVec2(cp.x, cp.y + r * 0.15f));
+                dl->PathStroke(q_col, false, thickness * 1.2f);
+                
+                // Dot
+                dl->AddCircleFilled(ImVec2(cp.x, cp.y + r * 0.45f), thickness * 1.3f, q_col);
+            }
             break;
         case IconType::AddKey:
-            dl->AddRect(ImVec2(p.x + is*0.16f, p.y + is*0.42f), ImVec2(p.x + is*0.44f, p.y + is*0.58f), col, 2.0f, 0, thickness);
-            dl->AddCircle(cp, is*0.14f, col, 16, thickness);
-            dl->AddLine(ImVec2(p.x + is*0.70f, p.y + is*0.28f), ImVec2(p.x + is*0.70f, p.y + is*0.72f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is*0.48f, cp.y), ImVec2(p.x + is*0.92f, cp.y), col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                ImU32 key_col = IM_COL32(80, 220, 255, 240); // Cyan/blue
+                ImVec2 pts[] = {
+                    ImVec2(cp.x, cp.y - r * 0.45f),
+                    ImVec2(cp.x + r * 0.45f, cp.y),
+                    ImVec2(cp.x, cp.y + r * 0.45f),
+                    ImVec2(cp.x - r * 0.45f, cp.y)
+                };
+                dl->AddConvexPolyFilled(pts, 4, key_col);
+                dl->AddPolyline(pts, 4, IM_COL32(255, 255, 255, 200), ImDrawFlags_Closed, thickness * 0.8f);
+                
+                // Plus sign overlay
+                ImU32 sign_col = IM_COL32(255, 255, 255, 255);
+                float pl = r * 0.18f;
+                dl->AddLine(ImVec2(cp.x, cp.y - pl), ImVec2(cp.x, cp.y + pl), sign_col, thickness * 1.2f);
+                dl->AddLine(ImVec2(cp.x - pl, cp.y), ImVec2(cp.x + pl, cp.y), sign_col, thickness * 1.2f);
+            }
             break;
         case IconType::RemoveKey:
-            dl->AddRect(ImVec2(p.x + is*0.16f, p.y + is*0.42f), ImVec2(p.x + is*0.44f, p.y + is*0.58f), col, 2.0f, 0, thickness);
-            dl->AddCircle(cp, is*0.14f, col, 16, thickness);
-            dl->AddLine(ImVec2(p.x + is*0.48f, cp.y), ImVec2(p.x + is*0.92f, cp.y), col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                ImU32 key_col = IM_COL32(255, 90, 50, 240); // Red-Orange
+                ImVec2 pts[] = {
+                    ImVec2(cp.x, cp.y - r * 0.45f),
+                    ImVec2(cp.x + r * 0.45f, cp.y),
+                    ImVec2(cp.x, cp.y + r * 0.45f),
+                    ImVec2(cp.x - r * 0.45f, cp.y)
+                };
+                dl->AddConvexPolyFilled(pts, 4, key_col);
+                dl->AddPolyline(pts, 4, IM_COL32(255, 255, 255, 200), ImDrawFlags_Closed, thickness * 0.8f);
+                
+                // Minus sign overlay
+                ImU32 sign_col = IM_COL32(255, 255, 255, 255);
+                float pl = r * 0.18f;
+                dl->AddLine(ImVec2(cp.x - pl, cp.y), ImVec2(cp.x + pl, cp.y), sign_col, thickness * 1.2f);
+            }
             break;
         case IconType::PaintTool:
-            dl->AddLine(ImVec2(p.x + is*0.22f, p.y + is*0.80f), ImVec2(p.x + is*0.64f, p.y + is*0.38f), col, thickness * 1.8f);
-            dl->AddRect(ImVec2(p.x + is*0.58f, p.y + is*0.20f), ImVec2(p.x + is*0.82f, p.y + is*0.42f), col, 2.0f, 0, thickness);
-            dl->AddQuadFilled(ImVec2(p.x + is*0.12f, p.y + is*0.90f),
-                              ImVec2(p.x + is*0.24f, p.y + is*0.70f),
-                              ImVec2(p.x + is*0.34f, p.y + is*0.80f),
-                              ImVec2(p.x + is*0.24f, p.y + is*0.98f), col);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Curved paint stroke in vibrant cyan/magenta across the sphere
+                dl->PathClear();
+                dl->PathArcTo(cp, r * 0.65f, 2.5f, 5.0f);
+                dl->PathStroke(IM_COL32(0, 220, 255, 255), false, thickness * 2.2f);
+                
+                // Brush tip at the end of the stroke (top-right)
+                ImVec2 brushPos = ImVec2(cp.x + cosf(5.0f) * r * 0.65f, cp.y + sinf(5.0f) * r * 0.65f);
+                // Paint brush handle and bristle shape
+                dl->AddLine(brushPos, ImVec2(brushPos.x + r * 0.4f, brushPos.y - r * 0.4f), IM_COL32(230, 160, 50, 255), thickness * 1.5f);
+                dl->AddCircleFilled(brushPos, thickness * 1.8f, IM_COL32(0, 220, 255, 255));
+            }
             break;
         case IconType::EraseTool:
-            dl->AddQuadFilled(ImVec2(p.x + is*0.18f, p.y + is*0.68f),
-                              ImVec2(p.x + is*0.38f, p.y + is*0.34f),
-                              ImVec2(p.x + is*0.74f, p.y + is*0.52f),
-                              ImVec2(p.x + is*0.54f, p.y + is*0.86f), col);
-            dl->AddLine(ImVec2(p.x + is*0.54f, p.y + is*0.86f), ImVec2(p.x + is*0.76f, p.y + is*0.86f), col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Faded stroke under the eraser
+                dl->PathClear();
+                dl->PathArcTo(cp, r * 0.65f, 2.2f, 3.8f);
+                dl->PathStroke(IM_COL32(255, 60, 60, 90), false, thickness * 2.0f);
+                
+                // Shaded Eraser block at top-right
+                ImVec2 er = ImVec2(cp.x + r * 0.2f, cp.y - r * 0.2f);
+                float esw = is * 0.24f;
+                float esh = is * 0.14f;
+                
+                ImVec2 p0 = ImVec2(er.x, er.y);
+                ImVec2 p1 = ImVec2(er.x + esw, er.y - esh);
+                ImVec2 p2 = ImVec2(er.x + esw * 0.7f, er.y - esh - esh * 0.5f);
+                ImVec2 p3 = ImVec2(er.x - esw * 0.3f, er.y - esh * 0.5f);
+                
+                ImVec2 topFace[] = { p0, p1, p2, p3 };
+                dl->AddConvexPolyFilled(topFace, 4, IM_COL32(255, 120, 150, 255));
+                dl->AddPolyline(topFace, 4, IM_COL32(255, 150, 180, 255), ImDrawFlags_Closed, 1.0f);
+                
+                ImVec2 p0_b = ImVec2(er.x, er.y + esh * 0.4f);
+                ImVec2 p1_b = ImVec2(er.x + esw, er.y - esh + esh * 0.4f);
+                ImVec2 sideFace[] = { p0, p1, p1_b, p0_b };
+                dl->AddConvexPolyFilled(sideFace, 4, IM_COL32(240, 240, 240, 255));
+                dl->AddPolyline(sideFace, 4, IM_COL32(255, 255, 255, 255), ImDrawFlags_Closed, 1.0f);
+            }
             break;
         case IconType::SoftenTool:
-            dl->AddBezierQuadratic(ImVec2(p.x + is*0.14f, p.y + is*0.62f),
-                                   ImVec2(cp.x, p.y + is*0.24f),
-                                   ImVec2(p.x + is*0.86f, p.y + is*0.62f),
-                                   col, thickness);
-            dl->AddBezierQuadratic(ImVec2(p.x + is*0.18f, p.y + is*0.76f),
-                                   ImVec2(cp.x, p.y + is*0.42f),
-                                   ImVec2(p.x + is*0.82f, p.y + is*0.76f),
-                                   col, thickness * 0.9f);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Soft blue and purple waves representing blending
+                ImVec2 wCenter = ImVec2(cp.x, cp.y + r * 0.1f);
+                float wr = r * 0.65f;
+                
+                dl->AddCircleFilled(wCenter, wr * 0.7f, IM_COL32(100, 120, 255, 50));
+                
+                dl->AddBezierQuadratic(ImVec2(wCenter.x - wr, wCenter.y - wr * 0.2f),
+                                       wCenter,
+                                       ImVec2(wCenter.x + wr, wCenter.y - wr * 0.2f),
+                                       IM_COL32(100, 150, 255, 180), thickness * 1.5f);
+                                       
+                dl->AddBezierQuadratic(ImVec2(wCenter.x - wr * 0.8f, wCenter.y + wr * 0.2f),
+                                       ImVec2(wCenter.x, wCenter.y + wr * 0.4f),
+                                       ImVec2(wCenter.x + wr * 0.8f, wCenter.y + wr * 0.2f),
+                                       IM_COL32(160, 100, 255, 140), thickness * 1.2f);
+            }
             break;
         case IconType::StampTool:
-            dl->AddRect(ImVec2(p.x + is*0.24f, p.y + is*0.40f), ImVec2(p.x + is*0.74f, p.y + is*0.78f), col, 2.0f, 0, thickness);
-            dl->AddRect(ImVec2(p.x + is*0.38f, p.y + is*0.18f), ImVec2(p.x + is*0.60f, p.y + is*0.38f), col, 2.0f, 0, thickness);
-            dl->AddLine(ImVec2(p.x + is*0.49f, p.y + is*0.38f), ImVec2(p.x + is*0.49f, p.y + is*0.24f), col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Star imprint on the sphere in gold
+                ImVec2 starC = cp;
+                float starR = r * 0.4f;
+                ImVec2 star_pts[] = {
+                    ImVec2(starC.x, starC.y - starR),
+                    ImVec2(starC.x + starR * 0.25f, starC.y - starR * 0.25f),
+                    ImVec2(starC.x + starR, starC.y),
+                    ImVec2(starC.x + starR * 0.25f, starC.y + starR * 0.25f),
+                    ImVec2(starC.x, starC.y + starR),
+                    ImVec2(starC.x - starR * 0.25f, starC.y + starR * 0.25f),
+                    ImVec2(starC.x - starR, starC.y),
+                    ImVec2(starC.x - starR * 0.25f, starC.y - starR * 0.25f)
+                };
+                dl->AddConvexPolyFilled(star_pts, 8, IM_COL32(255, 200, 50, 180));
+                
+                // Wooden stamp handle
+                ImVec2 st = ImVec2(cp.x - r * 0.1f, cp.y - r * 0.5f);
+                dl->AddRectFilled(ImVec2(st.x - r * 0.2f, st.y - r * 0.3f), ImVec2(st.x + r * 0.2f, st.y), IM_COL32(160, 100, 60, 255), 3.0f);
+                dl->AddCircleFilled(ImVec2(st.x, st.y - r * 0.35f), r * 0.18f, IM_COL32(130, 80, 40, 255));
+            }
             break;
         case IconType::FillTool:
-            dl->AddRect(ImVec2(p.x + is*0.22f, p.y + is*0.20f), ImVec2(p.x + is*0.70f, p.y + is*0.50f), col, 2.0f, 0, thickness);
-            dl->AddLine(ImVec2(p.x + is*0.70f, p.y + is*0.50f), ImVec2(p.x + is*0.82f, p.y + is*0.62f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is*0.82f, p.y + is*0.62f), ImVec2(p.x + is*0.54f, p.y + is*0.88f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is*0.54f, p.y + is*0.88f), ImVec2(p.x + is*0.42f, p.y + is*0.76f), col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Half filled overlay
+                dl->PathClear();
+                dl->PathArcTo(cp, r, 0.25f * 3.14159f, 1.25f * 3.14159f);
+                dl->PathFillConvex(IM_COL32(255, 140, 0, 130));
+                
+                // Paint bucket pouring paint
+                ImVec2 bucket = ImVec2(cp.x + r * 0.4f, cp.y - r * 0.6f);
+                dl->AddLine(bucket, ImVec2(bucket.x - r * 0.3f, bucket.y + r * 0.3f), IM_COL32(255, 140, 0, 255), 2.5f);
+                
+                ImVec2 b0 = bucket;
+                ImVec2 b1 = ImVec2(bucket.x + r * 0.25f, bucket.y - r * 0.25f);
+                ImVec2 b2 = ImVec2(bucket.x + r * 0.45f, bucket.y - r * 0.05f);
+                ImVec2 b3 = ImVec2(bucket.x + r * 0.20f, bucket.y + r * 0.20f);
+                ImVec2 bFace[] = { b0, b1, b2, b3 };
+                dl->AddConvexPolyFilled(bFace, 4, IM_COL32(200, 200, 200, 255));
+                dl->AddPolyline(bFace, 4, IM_COL32(255, 255, 255, 255), ImDrawFlags_Closed, 1.0f);
+            }
             break;
         case IconType::CloneTool:
-            dl->AddCircle(ImVec2(p.x + is*0.38f, p.y + is*0.42f), is*0.16f, col, 18, thickness);
-            dl->AddCircle(ImVec2(p.x + is*0.62f, p.y + is*0.58f), is*0.16f, col, 18, thickness);
-            dl->AddLine(ImVec2(p.x + is*0.52f, p.y + is*0.48f), ImVec2(p.x + is*0.48f, p.y + is*0.52f), col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImVec2 cSource = ImVec2(cp.x - r * 0.4f, cp.y + r * 0.3f);
+                ImVec2 cTarget = ImVec2(cp.x + r * 0.4f, cp.y - r * 0.3f);
+                float cr = r * 0.24f;
+                
+                // Link line
+                dl->AddLine(cSource, cTarget, IM_COL32(255, 255, 255, 120), thickness * 0.8f);
+                
+                // Source (Green-ish cyan)
+                dl->AddCircle(cSource, cr, IM_COL32(50, 230, 200, 255), 12, thickness * 1.2f);
+                dl->AddLine(ImVec2(cSource.x - cr * 1.4f, cSource.y), ImVec2(cSource.x + cr * 1.4f, cSource.y), IM_COL32(50, 230, 200, 255), thickness * 0.8f);
+                dl->AddLine(ImVec2(cSource.x, cSource.y - cr * 1.4f), ImVec2(cSource.x, cSource.y + cr * 1.4f), IM_COL32(50, 230, 200, 255), thickness * 0.8f);
+                
+                // Target (Orange)
+                dl->AddCircle(cTarget, cr, IM_COL32(255, 140, 50, 255), 12, thickness * 1.2f);
+                dl->AddLine(ImVec2(cTarget.x - cr * 1.4f, cTarget.y), ImVec2(cTarget.x + cr * 1.4f, cTarget.y), IM_COL32(255, 140, 50, 255), thickness * 0.8f);
+                dl->AddLine(ImVec2(cTarget.x, cTarget.y - cr * 1.4f), ImVec2(cTarget.x, cTarget.y + cr * 1.4f), IM_COL32(255, 140, 50, 255), thickness * 0.8f);
+            }
             break;
-        case IconType::SprayTool: // Used as Scatter (Foliage & Mesh)
-        {
-            dl->AddLine(ImVec2(p.x + is * 0.1f, p.y + is * 0.85f), ImVec2(p.x + is * 0.9f, p.y + is * 0.85f), col, thickness);
-            
-            ImVec2 g1 = ImVec2(p.x + is * 0.35f, p.y + is * 0.85f);
-            dl->AddBezierQuadratic(g1, ImVec2(g1.x - is*0.12f, g1.y - is*0.25f), ImVec2(g1.x - is*0.18f, g1.y - is*0.42f), col, thickness);
-            dl->AddBezierQuadratic(g1, ImVec2(g1.x, g1.y - is*0.30f), ImVec2(g1.x - is*0.02f, g1.y - is*0.50f), col, thickness);
-            dl->AddBezierQuadratic(g1, ImVec2(g1.x + is*0.10f, g1.y - is*0.22f), ImVec2(g1.x + is*0.15f, g1.y - is*0.35f), col, thickness);
-
-            dl->AddCircle(ImVec2(p.x + is * 0.70f, p.y + is * 0.77f), is * 0.08f, col, 6, thickness);
-            
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.20f, p.y + is * 0.35f), thickness * 0.8f, col);
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.55f, p.y + is * 0.22f), thickness * 0.8f, col);
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.80f, p.y + is * 0.40f), thickness * 0.8f, col);
+        case IconType::SprayTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Nozzle
+                ImVec2 nozzle = ImVec2(cp.x + r * 0.6f, cp.y - r * 0.6f);
+                dl->AddLine(nozzle, ImVec2(nozzle.x - r * 0.2f, nozzle.y + r * 0.2f), IM_COL32(180, 180, 180, 255), thickness * 2.0f);
+                
+                // Colorful droplets
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.4f, cp.y - r * 0.2f), 1.8f, IM_COL32(255, 80, 80, 230));
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.1f, cp.y + r * 0.3f), 2.2f, IM_COL32(80, 255, 100, 230));
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.5f, cp.y + r * 0.2f), 1.2f, IM_COL32(80, 180, 255, 230));
+                dl->AddCircleFilled(ImVec2(cp.x + r * 0.1f, cp.y - r * 0.1f), 1.5f, IM_COL32(255, 220, 80, 230));
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.2f, cp.y - r * 0.5f), 1.6f, IM_COL32(255, 100, 255, 230));
+                dl->AddCircleFilled(ImVec2(cp.x + r * 0.2f, cp.y + r * 0.4f), 2.0f, IM_COL32(80, 255, 255, 230));
+            }
             break;
-        }
         case IconType::GrabTool:
-            dl->AddCircle(cp, is * 0.22f, col, 20, thickness);
-            dl->AddLine(ImVec2(cp.x, p.y + is * 0.06f), ImVec2(cp.x, p.y + is * 0.30f), col, thickness);
-            dl->AddLine(ImVec2(cp.x, p.y + is * 0.70f), ImVec2(cp.x, p.y + is * 0.94f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.06f, cp.y), ImVec2(p.x + is * 0.30f, cp.y), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.70f, cp.y), ImVec2(p.x + is * 0.94f, cp.y), col, thickness);
-            dl->AddTriangleFilled(ImVec2(cp.x, p.y + is * 0.02f), ImVec2(cp.x - is*0.05f, p.y + is * 0.12f), ImVec2(cp.x + is*0.05f, p.y + is * 0.12f), col);
+            {
+                float r = is * 0.48f;
+                ImVec2 lobeCenter = ImVec2(cp.x - r * 0.2f, cp.y + r * 0.2f);
+                ImVec2 pullPeak = ImVec2(cp.x + r * 1.0f, cp.y - r * 1.0f);
+                
+                // Custom Grab Shape Path (combining lobe and pulled peak)
+                dl->PathClear();
+                dl->PathArcTo(lobeCenter, r, 0.75f * 3.14159f, 1.75f * 3.14159f); // bottom-left arc
+                dl->PathLineTo(pullPeak);
+                // Fill base shadow
+                dl->PathFillConvex(clay_shadow);
+                
+                // Diffuse overlay
+                ImVec2 lobeCenterDiff = ImVec2(lobeCenter.x - r * 0.1f, lobeCenter.y - r * 0.1f);
+                ImVec2 pullPeakDiff = ImVec2(pullPeak.x - r * 0.15f, pullPeak.y + r * 0.15f);
+                dl->PathClear();
+                dl->PathArcTo(lobeCenterDiff, r * 0.82f, 0.75f * 3.14159f, 1.75f * 3.14159f);
+                dl->PathLineTo(pullPeakDiff);
+                dl->PathFillConvex(clay_diffuse);
+                
+                // Specular highlight on the lobe
+                dl->AddCircleFilled(ImVec2(lobeCenter.x - r * 0.25f, lobeCenter.y - r * 0.25f), r * 0.22f, clay_specular);
+                
+                // Yellow grab/pull arrow
+                ImVec2 arrowStart = pullPeak;
+                ImVec2 arrowEnd = ImVec2(pullPeak.x + r * 0.5f, pullPeak.y - r * 0.5f);
+                dl->AddLine(arrowStart, arrowEnd, IM_COL32(255, 215, 0, 255), thickness * 1.5f);
+                
+                float angle = -0.78539f; // -45 deg
+                float arrow_sz = is * 0.15f;
+                dl->AddTriangleFilled(
+                    arrowEnd,
+                    ImVec2(arrowEnd.x - arrow_sz * cosf(angle - 0.5f), arrowEnd.y - arrow_sz * sinf(angle - 0.5f)),
+                    ImVec2(arrowEnd.x - arrow_sz * cosf(angle + 0.5f), arrowEnd.y - arrow_sz * sinf(angle + 0.5f)),
+                    IM_COL32(255, 215, 0, 255)
+                );
+            }
             break;
         case IconType::InflateTool:
-            dl->AddCircle(cp, is * 0.30f, col, 24, thickness);
-            dl->AddLine(ImVec2(cp.x, cp.y - is * 0.16f), ImVec2(cp.x, cp.y + is * 0.16f), col, thickness);
-            dl->AddLine(ImVec2(cp.x - is * 0.16f, cp.y), ImVec2(cp.x + is * 0.16f, cp.y), col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Secondary ballooning sphere in top-right
+                ImVec2 inflateCenter = ImVec2(cp.x + r * 0.4f, cp.y - r * 0.4f);
+                float inflateR = r * 0.65f;
+                
+                // Inflated shadow
+                dl->AddCircleFilled(inflateCenter, inflateR, clay_shadow);
+                // Inflated diffuse
+                dl->AddCircleFilled(ImVec2(inflateCenter.x - inflateR * 0.12f, inflateCenter.y - inflateR * 0.12f), inflateR * 0.85f, clay_diffuse);
+                // Inflated specular
+                dl->AddCircleFilled(ImVec2(inflateCenter.x - inflateR * 0.25f, inflateCenter.y - inflateR * 0.25f), inflateR * 0.22f, clay_specular);
+                
+                // Radial orange arrows pointing outwards
+                float arrowLen = is * 0.22f;
+                for (int i = 0; i < 3; ++i) {
+                    float a = -0.78539f + (i - 1) * 0.6f;
+                    float c = cosf(a);
+                    float s_val = sinf(a);
+                    ImVec2 start(inflateCenter.x + c * inflateR, inflateCenter.y + s_val * inflateR);
+                    ImVec2 end(inflateCenter.x + c * (inflateR + arrowLen), inflateCenter.y + s_val * (inflateR + arrowLen));
+                    dl->AddLine(start, end, IM_COL32(255, 130, 30, 255), thickness);
+                    
+                    float arrow_sz = is * 0.08f;
+                    dl->AddTriangleFilled(
+                        end,
+                        ImVec2(end.x - arrow_sz * cosf(a - 0.4f), end.y - arrow_sz * sinf(a - 0.4f)),
+                        ImVec2(end.x - arrow_sz * cosf(a + 0.4f), end.y - arrow_sz * sinf(a + 0.4f)),
+                        IM_COL32(255, 130, 30, 255)
+                    );
+                }
+            }
             break;
         case IconType::SmoothTool:
-            dl->AddBezierQuadratic(ImVec2(p.x + is * 0.14f, p.y + is * 0.60f),
-                                   ImVec2(cp.x, p.y + is * 0.22f),
-                                   ImVec2(p.x + is * 0.86f, p.y + is * 0.60f),
-                                   col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.16f, p.y + is * 0.74f),
-                        ImVec2(p.x + is * 0.84f, p.y + is * 0.74f),
-                        col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Add rough texture details on the left-bottom of the sphere
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.6f, cp.y + r * 0.3f), 1.5f, clay_detail_shadow);
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.4f, cp.y + r * 0.5f), 1.0f, clay_detail_shadow);
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.5f, cp.y + r * 0.1f), 1.2f, clay_detail_shadow);
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.2f, cp.y + r * 0.6f), 1.3f, clay_detail_shadow);
+                
+                // Curved smoothing action arrow in bright green
+                dl->PathClear();
+                dl->PathArcTo(cp, r * 1.15f, -1.8f, 0.5f);
+                dl->PathStroke(IM_COL32(40, 220, 110, 255), false, thickness * 1.2f);
+                
+                // Arrow head at the end
+                float endAngle = 0.5f;
+                float arrow_sz = is * 0.11f;
+                ImVec2 endPt(cp.x + cosf(endAngle) * r * 1.15f, cp.y + sinf(endAngle) * r * 1.15f);
+                float a_head = endAngle + 1.57f; // perpendicular
+                dl->AddTriangleFilled(
+                    endPt,
+                    ImVec2(endPt.x - arrow_sz * cosf(a_head - 0.4f), endPt.y - arrow_sz * sinf(a_head - 0.4f)),
+                    ImVec2(endPt.x - arrow_sz * cosf(a_head + 0.4f), endPt.y - arrow_sz * sinf(a_head + 0.4f)),
+                    IM_COL32(40, 220, 110, 255)
+                );
+            }
             break;
         case IconType::FlattenTool:
-            dl->AddLine(ImVec2(p.x + is * 0.14f, p.y + is * 0.70f),
-                        ImVec2(p.x + is * 0.86f, p.y + is * 0.70f),
-                        col, thickness * 1.3f);
-            dl->AddTriangle(ImVec2(p.x + is * 0.24f, p.y + is * 0.56f),
-                            ImVec2(cp.x, p.y + is * 0.22f),
-                            ImVec2(p.x + is * 0.76f, p.y + is * 0.56f),
-                            col, thickness);
+            {
+                float r = is * 0.48f;
+                float cutY = cp.y - r * 0.35f;
+                float halfWidth = r * cosf(asinf(-0.35f));
+                
+                // Base shadow (flat top sphere)
+                dl->PathClear();
+                dl->PathLineTo(ImVec2(cp.x - halfWidth, cutY));
+                dl->PathLineTo(ImVec2(cp.x + halfWidth, cutY));
+                dl->PathArcTo(cp, r, -0.357f, 3.14159f + 0.357f);
+                dl->PathFillConvex(clay_shadow);
+                
+                // Diffuse overlay (clipped)
+                ImVec2 diffCp(cp.x - r * 0.12f, cp.y - r * 0.12f);
+                float diffCutY = diffCp.y - r * 0.85f * 0.35f;
+                float diffHalfWidth = r * 0.85f * cosf(asinf(-0.35f));
+                dl->PathClear();
+                dl->PathLineTo(ImVec2(diffCp.x - diffHalfWidth, diffCutY));
+                dl->PathLineTo(ImVec2(diffCp.x + diffHalfWidth, diffCutY));
+                dl->PathArcTo(diffCp, r * 0.85f, -0.357f, 3.14159f + 0.357f);
+                dl->PathFillConvex(clay_diffuse);
+                
+                // Specular highlight
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.25f, cp.y - r * 0.25f), r * 0.22f, clay_specular);
+                
+                // Flat orange tool line resting on flat cut
+                dl->AddLine(ImVec2(cp.x - r * 1.1f, cutY), ImVec2(cp.x + r * 1.1f, cutY), IM_COL32(255, 130, 30, 255), thickness * 1.5f);
+                
+                // Downward pressure arrow
+                ImVec2 arrStart(cp.x, cutY - is * 0.22f);
+                ImVec2 arrEnd(cp.x, cutY - is * 0.04f);
+                dl->AddLine(arrStart, arrEnd, IM_COL32(255, 130, 30, 255), thickness);
+                dl->AddTriangleFilled(arrEnd, ImVec2(arrEnd.x - is * 0.06f, arrEnd.y - is * 0.06f), ImVec2(arrEnd.x + is * 0.06f, arrEnd.y - is * 0.06f), IM_COL32(255, 130, 30, 255));
+            }
             break;
         case IconType::DrawTool:
-            dl->AddLine(ImVec2(p.x + is * 0.24f, p.y + is * 0.82f),
-                        ImVec2(p.x + is * 0.66f, p.y + is * 0.40f),
-                        col, thickness * 1.5f);
-            dl->AddTriangleFilled(ImVec2(p.x + is * 0.68f, p.y + is * 0.18f),
-                                  ImVec2(p.x + is * 0.84f, p.y + is * 0.42f),
-                                  ImVec2(p.x + is * 0.56f, p.y + is * 0.34f),
-                                  col);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Draw smooth curved stroke shadow
+                dl->PathClear();
+                dl->PathLineTo(ImVec2(cp.x - r * 0.6f, cp.y + r * 0.4f));
+                dl->PathBezierQuadraticCurveTo(ImVec2(cp.x - r * 0.1f, cp.y - r * 0.1f), ImVec2(cp.x + r * 0.6f, cp.y - r * 0.4f), 10);
+                dl->PathStroke(clay_trans_shadow, false, r * 0.38f);
+                
+                // Main buildup stroke in light clay
+                dl->PathClear();
+                dl->PathLineTo(ImVec2(cp.x - r * 0.6f, cp.y + r * 0.4f));
+                dl->PathBezierQuadraticCurveTo(ImVec2(cp.x - r * 0.1f, cp.y - r * 0.1f), ImVec2(cp.x + r * 0.6f, cp.y - r * 0.4f), 10);
+                dl->PathStroke(clay_buildup, false, r * 0.28f);
+                
+                // Top stroke highlight
+                dl->PathClear();
+                dl->PathLineTo(ImVec2(cp.x - r * 0.6f, cp.y + r * 0.4f));
+                dl->PathBezierQuadraticCurveTo(ImVec2(cp.x - r * 0.1f, cp.y - r * 0.1f), ImVec2(cp.x + r * 0.6f, cp.y - r * 0.4f), 10);
+                dl->PathStroke(clay_highlight, false, r * 0.10f);
+                
+                // Yellow build up arrow
+                ImVec2 arrStart(cp.x + r * 0.3f, cp.y + r * 0.4f);
+                ImVec2 arrEnd(cp.x + r * 0.6f, cp.y + r * 0.1f);
+                dl->AddLine(arrStart, arrEnd, IM_COL32(255, 190, 40, 255), thickness);
+                
+                float a = -0.78539f; // -45 deg
+                float arrow_sz = is * 0.08f;
+                dl->AddTriangleFilled(
+                    arrEnd,
+                    ImVec2(arrEnd.x - arrow_sz * cosf(a - 0.4f), arrEnd.y - arrow_sz * sinf(a - 0.4f)),
+                    ImVec2(arrEnd.x - arrow_sz * cosf(a + 0.4f), arrEnd.y - arrow_sz * sinf(a + 0.4f)),
+                    IM_COL32(255, 190, 40, 255)
+                );
+            }
             break;
         case IconType::LayerTool:
-            dl->AddRect(ImVec2(p.x + is * 0.18f, p.y + is * 0.28f),
-                        ImVec2(p.x + is * 0.72f, p.y + is * 0.46f),
-                        col, 2.0f, 0, thickness);
-            dl->AddRect(ImVec2(p.x + is * 0.28f, p.y + is * 0.50f),
-                        ImVec2(p.x + is * 0.82f, p.y + is * 0.68f),
-                        col, 2.0f, 0, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.78f, p.y + is * 0.18f),
-                        ImVec2(p.x + is * 0.92f, p.y + is * 0.32f),
-                        col, thickness * 1.2f);
-            dl->AddLine(ImVec2(p.x + is * 0.78f, p.y + is * 0.18f),
-                        ImVec2(p.x + is * 0.86f, p.y + is * 0.08f),
-                        col, thickness * 1.2f);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Plateau polygon (raised step)
+                ImVec2 p0(cp.x - r * 0.5f, cp.y + r * 0.2f);
+                ImVec2 p1(cp.x + r * 0.2f, cp.y - r * 0.5f);
+                ImVec2 p2(cp.x + r * 0.7f, cp.y - r * 0.1f);
+                ImVec2 p3(cp.x + r * 0.1f, cp.y + r * 0.5f);
+                
+                float raiseX = -r * 0.18f;
+                float raiseY = -r * 0.18f;
+                
+                ImVec2 p0_r(p0.x + raiseX, p0.y + raiseY);
+                ImVec2 p1_r(p1.x + raiseX, p1.y + raiseY);
+                ImVec2 p2_r(p2.x + raiseX, p2.y + raiseY);
+                ImVec2 p3_r(p3.x + raiseX, p3.y + raiseY);
+                
+                // Side walls (shadows)
+                dl->PathClear();
+                dl->PathLineTo(p0); dl->PathLineTo(p1); dl->PathLineTo(p1_r); dl->PathLineTo(p0_r);
+                dl->PathFillConvex(clay_shadow);
+                
+                dl->PathClear();
+                dl->PathLineTo(p1); dl->PathLineTo(p2); dl->PathLineTo(p2_r); dl->PathLineTo(p1_r);
+                dl->PathFillConvex(clay_shadow);
+                
+                // Flat top surface
+                dl->PathClear();
+                dl->PathLineTo(p0_r); dl->PathLineTo(p1_r); dl->PathLineTo(p2_r); dl->PathLineTo(p3_r);
+                dl->PathFillConvex(clay_buildup);
+                
+                // Highlight the lips
+                dl->AddLine(p0_r, p1_r, clay_highlight, thickness);
+                dl->AddLine(p1_r, p2_r, clay_highlight, thickness);
+            }
             break;
         case IconType::PinchTool:
-            dl->AddLine(ImVec2(p.x + is * 0.18f, cp.y), ImVec2(p.x + is * 0.82f, cp.y), col, thickness);
-            dl->AddTriangleFilled(ImVec2(p.x + is * 0.18f, cp.y),
-                                  ImVec2(p.x + is * 0.34f, cp.y - is * 0.12f),
-                                  ImVec2(p.x + is * 0.34f, cp.y + is * 0.12f),
-                                  col);
-            dl->AddTriangleFilled(ImVec2(p.x + is * 0.82f, cp.y),
-                                  ImVec2(p.x + is * 0.66f, cp.y - is * 0.12f),
-                                  ImVec2(p.x + is * 0.66f, cp.y + is * 0.12f),
-                                  col);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Vertical pinch line
+                dl->AddLine(ImVec2(cp.x, cp.y - r * 0.8f), ImVec2(cp.x, cp.y + r * 0.8f), IM_COL32(35, 36, 38, 230), thickness * 1.5f);
+                
+                // Soft edges/highlights of pinch
+                dl->AddLine(ImVec2(cp.x - 2.0f, cp.y - r * 0.7f), ImVec2(cp.x - 2.0f, cp.y + r * 0.7f), clay_trans_highlight, 1.0f);
+                dl->AddLine(ImVec2(cp.x + 2.0f, cp.y - r * 0.7f), ImVec2(cp.x + 2.0f, cp.y + r * 0.7f), clay_trans_highlight, 1.0f);
+                
+                // Inward pointing blue arrows
+                float arrowY = cp.y;
+                float arrow_sz = is * 0.10f;
+                
+                ImVec2 arrLeftStart(cp.x - r * 1.1f, arrowY);
+                ImVec2 arrLeftEnd(cp.x - r * 0.2f, arrowY);
+                dl->AddLine(arrLeftStart, arrLeftEnd, IM_COL32(60, 170, 255, 255), thickness * 1.5f);
+                dl->AddTriangleFilled(arrLeftEnd, ImVec2(arrLeftEnd.x - arrow_sz, arrowY - arrow_sz * 0.6f), ImVec2(arrLeftEnd.x - arrow_sz, arrowY + arrow_sz * 0.6f), IM_COL32(60, 170, 255, 255));
+                
+                ImVec2 arrRightStart(cp.x + r * 1.1f, arrowY);
+                ImVec2 arrRightEnd(cp.x + r * 0.2f, arrowY);
+                dl->AddLine(arrRightStart, arrRightEnd, IM_COL32(60, 170, 255, 255), thickness * 1.5f);
+                dl->AddTriangleFilled(arrRightEnd, ImVec2(arrRightEnd.x + arrow_sz, arrowY - arrow_sz * 0.6f), ImVec2(arrRightEnd.x + arrow_sz, arrowY + arrow_sz * 0.6f), IM_COL32(60, 170, 255, 255));
+            }
             break;
         case IconType::ClayTool:
-            dl->AddRect(ImVec2(p.x + is * 0.16f, p.y + is * 0.56f),
-                        ImVec2(p.x + is * 0.84f, p.y + is * 0.78f),
-                        col, 3.0f, 0, thickness);
-            dl->AddBezierQuadratic(ImVec2(p.x + is * 0.18f, p.y + is * 0.56f),
-                                   ImVec2(cp.x, p.y + is * 0.18f),
-                                   ImVec2(p.x + is * 0.82f, p.y + is * 0.56f),
-                                   col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Draw a soft, round organic clay buildup (mound) in the center-right
+                ImVec2 moundCenter(cp.x + r * 0.22f, cp.y - r * 0.15f);
+                float moundR = r * 0.58f;
+                
+                // Mound shadow
+                dl->AddCircleFilled(moundCenter, moundR, clay_trans_shadow);
+                
+                // Mound diffuse (soft build up in light clay color)
+                ImVec2 moundCenterDiff(moundCenter.x - moundR * 0.08f, moundCenter.y - moundR * 0.08f);
+                dl->AddCircleFilled(moundCenterDiff, moundR * 0.88f, clay_buildup);
+                
+                // Mound specular highlight
+                dl->AddCircleFilled(ImVec2(moundCenterDiff.x - moundR * 0.2f, moundCenterDiff.y - moundR * 0.2f), moundR * 0.22f, clay_specular);
+            }
             break;
         case IconType::ClayStripsTool:
-            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.34f), ImVec2(p.x + is * 0.82f, p.y + is * 0.34f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.52f), ImVec2(p.x + is * 0.82f, p.y + is * 0.52f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.70f), ImVec2(p.x + is * 0.82f, p.y + is * 0.70f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.28f, p.y + is * 0.24f), ImVec2(p.x + is * 0.28f, p.y + is * 0.80f), col, thickness * 0.7f);
-            dl->AddLine(ImVec2(p.x + is * 0.54f, p.y + is * 0.24f), ImVec2(p.x + is * 0.54f, p.y + is * 0.80f), col, thickness * 0.7f);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Strip 1
+                {
+                    ImVec2 p0(cp.x - r * 0.6f, cp.y + r * 0.42f);
+                    ImVec2 p1(cp.x + r * 0.05f, cp.y - r * 0.05f);
+                    float dx = r * 0.12f;
+                    float dy = r * 0.18f;
+                    ImVec2 s0(p0.x - dx, p0.y - dy);
+                    ImVec2 s1(p1.x - dx, p1.y - dy);
+                    ImVec2 s2(p1.x + dx, p1.y + dy);
+                    ImVec2 s3(p0.x + dx, p0.y + dy);
+                    
+                    dl->PathClear();
+                    dl->PathLineTo(s0); dl->PathLineTo(s1); dl->PathLineTo(s2); dl->PathLineTo(s3);
+                    dl->PathFillConvex(clay_trans_shadow_150);
+                    
+                    dl->PathClear();
+                    dl->PathLineTo(ImVec2(s0.x+1, s0.y+1)); dl->PathLineTo(ImVec2(s1.x+1, s1.y+1));
+                    dl->PathLineTo(ImVec2(s2.x-1, s2.y-1)); dl->PathLineTo(ImVec2(s3.x-1, s3.y-1));
+                    dl->PathFillConvex(clay_buildup);
+                    dl->AddLine(ImVec2(s0.x+1, s0.y+1), ImVec2(s1.x+1, s1.y+1), clay_highlight, 1.0f);
+                }
+                
+                // Strip 2
+                {
+                    ImVec2 p0(cp.x - r * 0.05f, cp.y + r * 0.05f);
+                    ImVec2 p1(cp.x + r * 0.6f, cp.y - r * 0.42f);
+                    float dx = r * 0.12f;
+                    float dy = r * 0.18f;
+                    ImVec2 s0(p0.x - dx, p0.y - dy);
+                    ImVec2 s1(p1.x - dx, p1.y - dy);
+                    ImVec2 s2(p1.x + dx, p1.y + dy);
+                    ImVec2 s3(p0.x + dx, p0.y + dy);
+                    
+                    dl->PathClear();
+                    dl->PathLineTo(s0); dl->PathLineTo(s1); dl->PathLineTo(s2); dl->PathLineTo(s3);
+                    dl->PathFillConvex(clay_trans_shadow);
+                    
+                    dl->PathClear();
+                    dl->PathLineTo(ImVec2(s0.x+1, s0.y+1)); dl->PathLineTo(ImVec2(s1.x+1, s1.y+1));
+                    dl->PathLineTo(ImVec2(s2.x-1, s2.y-1)); dl->PathLineTo(ImVec2(s3.x-1, s3.y-1));
+                    dl->PathFillConvex(clay_buildup);
+                    dl->AddLine(ImVec2(s0.x+1, s0.y+1), ImVec2(s1.x+1, s1.y+1), clay_highlight, 1.0f);
+                }
+            }
             break;
         case IconType::CreaseTool:
-            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.30f), ImVec2(cp.x, p.y + is * 0.76f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.82f, p.y + is * 0.30f), ImVec2(cp.x, p.y + is * 0.76f), col, thickness);
-            dl->AddLine(ImVec2(cp.x, p.y + is * 0.20f), ImVec2(cp.x, p.y + is * 0.88f), col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Crease valley
+                dl->PathClear();
+                dl->PathLineTo(ImVec2(cp.x - r * 0.6f, cp.y + r * 0.4f));
+                dl->PathBezierQuadraticCurveTo(ImVec2(cp.x, cp.y), ImVec2(cp.x + r * 0.6f, cp.y - r * 0.4f), 10);
+                dl->PathStroke(clay_detail_shadow, false, thickness * 2.0f);
+                
+                // Crease raised lips
+                dl->PathClear();
+                dl->PathLineTo(ImVec2(cp.x - r * 0.6f - 2.0f, cp.y + r * 0.4f - 2.0f));
+                dl->PathBezierQuadraticCurveTo(ImVec2(cp.x - 2.0f, cp.y - 2.0f), ImVec2(cp.x + r * 0.6f - 2.0f, cp.y - r * 0.4f - 2.0f), 10);
+                dl->PathStroke(clay_trans_highlight, false, thickness);
+                
+                // Orange/red action curve
+                dl->PathClear();
+                dl->PathLineTo(ImVec2(cp.x - r * 0.3f, cp.y + r * 0.5f));
+                dl->PathBezierQuadraticCurveTo(ImVec2(cp.x + r * 0.2f, cp.y + r * 0.3f), ImVec2(cp.x + r * 0.5f, cp.y - r * 0.2f), 10);
+                dl->PathStroke(IM_COL32(255, 80, 40, 255), false, thickness * 1.2f);
+            }
             break;
         case IconType::ScrapeTool:
-            dl->AddLine(ImVec2(p.x + is * 0.16f, p.y + is * 0.72f), ImVec2(p.x + is * 0.84f, p.y + is * 0.52f), col, thickness * 1.5f);
-            dl->AddRect(ImVec2(p.x + is * 0.30f, p.y + is * 0.22f), ImVec2(p.x + is * 0.62f, p.y + is * 0.36f), col, 2.0f, 0, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Flat beveled polygon
+                ImVec2 bp0(cp.x - r * 0.2f, cp.y - r * 0.7f);
+                ImVec2 bp1(cp.x + r * 0.7f, cp.y - r * 0.2f);
+                ImVec2 bp2(cp.x + r * 0.3f, cp.y + r * 0.3f);
+                ImVec2 bp3(cp.x - r * 0.5f, cp.y - r * 0.1f);
+                
+                dl->PathClear();
+                dl->PathLineTo(bp0); dl->PathLineTo(bp1); dl->PathLineTo(bp2); dl->PathLineTo(bp3);
+                dl->PathFillConvex(clay_shadow);
+                
+                ImVec2 bp0_in(bp0.x + 1, bp0.y + 1);
+                ImVec2 bp1_in(bp1.x - 1, bp1.y + 1);
+                ImVec2 bp2_in(bp2.x - 1, bp2.y - 1);
+                ImVec2 bp3_in(bp3.x + 1, bp3.y - 1);
+                dl->PathClear();
+                dl->PathLineTo(bp0_in); dl->PathLineTo(bp1_in); dl->PathLineTo(bp2_in); dl->PathLineTo(bp3_in);
+                dl->PathFillConvex(clay_buildup);
+                
+                // Scraper blade line
+                dl->AddLine(ImVec2(bp3.x - r * 0.2f, bp3.y - r * 0.1f), ImVec2(bp1.x + r * 0.1f, bp1.y + r * 0.2f), IM_COL32(255, 255, 255, 230), thickness * 1.5f);
+                
+                // Scraping pressure arrow
+                ImVec2 arrStart(cp.x + r * 0.8f, cp.y + r * 0.5f);
+                ImVec2 arrEnd(cp.x + r * 0.3f, cp.y + r * 0.1f);
+                dl->AddLine(arrStart, arrEnd, IM_COL32(255, 255, 255, 230), thickness);
+                float a = atan2f(arrEnd.y - arrStart.y, arrEnd.x - arrStart.x);
+                float arrow_sz = is * 0.08f;
+                dl->AddTriangleFilled(
+                    arrEnd,
+                    ImVec2(arrEnd.x - arrow_sz * cosf(a - 0.4f), arrEnd.y - arrow_sz * sinf(a - 0.4f)),
+                    ImVec2(arrEnd.x - arrow_sz * cosf(a + 0.4f), arrEnd.y - arrow_sz * sinf(a + 0.4f)),
+                    IM_COL32(255, 255, 255, 230)
+                );
+            }
             break;
         case IconType::VertexMode:
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.22f, p.y + is * 0.72f), is * 0.10f, col, 14);
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.50f, p.y + is * 0.24f), is * 0.10f, col, 14);
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.78f, p.y + is * 0.72f), is * 0.10f, col, 14);
-            dl->AddLine(ImVec2(p.x + is * 0.22f, p.y + is * 0.72f), ImVec2(p.x + is * 0.50f, p.y + is * 0.24f), col, thickness * 0.8f);
-            dl->AddLine(ImVec2(p.x + is * 0.50f, p.y + is * 0.24f), ImVec2(p.x + is * 0.78f, p.y + is * 0.72f), col, thickness * 0.8f);
+            {
+                ImVec2 p0(p.x + is * 0.20f, p.y + is * 0.72f);
+                ImVec2 p1(p.x + is * 0.80f, p.y + is * 0.72f);
+                ImVec2 p2(p.x + is * 0.50f, p.y + is * 0.52f);
+                ImVec2 apex(p.x + is * 0.50f, p.y + is * 0.20f);
+
+                dl->AddLine(p0, p2, IM_COL32(140, 145, 155, 120), thickness * 0.8f);
+                dl->AddLine(p1, p2, IM_COL32(140, 145, 155, 120), thickness * 0.8f);
+                dl->AddLine(apex, p2, IM_COL32(140, 145, 155, 120), thickness * 0.8f);
+
+                dl->AddLine(p0, p1, col, thickness);
+                dl->AddLine(p0, apex, col, thickness);
+                dl->AddLine(p1, apex, col, thickness);
+
+                dl->AddCircleFilled(p0, is * 0.05f, col, 10);
+                dl->AddCircleFilled(p1, is * 0.05f, col, 10);
+
+                dl->AddCircleFilled(apex, is * 0.13f, IM_COL32(245, 145, 30, 80), 12);
+                dl->AddCircleFilled(apex, is * 0.08f, IM_COL32(255, 160, 40, 255), 12);
+                dl->AddCircle(apex, is * 0.08f, IM_COL32(255, 215, 150, 255), 12, 1.0f);
+            }
             break;
         case IconType::EdgeMode:
-            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.78f), ImVec2(p.x + is * 0.50f, p.y + is * 0.22f), col, thickness * 1.3f);
-            dl->AddLine(ImVec2(p.x + is * 0.50f, p.y + is * 0.22f), ImVec2(p.x + is * 0.82f, p.y + is * 0.78f), col, thickness * 1.3f);
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.18f, p.y + is * 0.78f), thickness * 0.9f, col, 10);
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.82f, p.y + is * 0.78f), thickness * 0.9f, col, 10);
+            {
+                ImVec2 vTop(cp.x, cp.y - is * 0.35f);
+                ImVec2 vLeft(cp.x - is * 0.35f, cp.y - is * 0.15f);
+                ImVec2 vRight(cp.x + is * 0.35f, cp.y - is * 0.15f);
+                ImVec2 vCenter(cp.x, cp.y + is * 0.05f);
+                ImVec2 vBLeft(cp.x - is * 0.35f, cp.y + is * 0.30f);
+                ImVec2 vBRight(cp.x + is * 0.35f, cp.y + is * 0.30f);
+                ImVec2 vBottom(cp.x, cp.y + is * 0.45f);
+
+                ImU32 wCol = col;
+                dl->AddLine(vTop, vLeft, wCol, thickness * 0.8f);
+                dl->AddLine(vTop, vRight, wCol, thickness * 0.8f);
+                dl->AddLine(vLeft, vCenter, wCol, thickness * 0.8f);
+                dl->AddLine(vRight, vCenter, wCol, thickness * 0.8f);
+                dl->AddLine(vLeft, vBLeft, wCol, thickness * 0.8f);
+                dl->AddLine(vRight, vBRight, wCol, thickness * 0.8f);
+                dl->AddLine(vBLeft, vBottom, wCol, thickness * 0.8f);
+                dl->AddLine(vBRight, vBottom, wCol, thickness * 0.8f);
+
+                dl->AddLine(vCenter, vBottom, IM_COL32(0, 220, 220, 90), thickness * 3.5f);
+                dl->AddLine(vCenter, vBottom, IM_COL32(40, 255, 255, 255), thickness * 1.8f);
+
+                dl->AddCircleFilled(vCenter, thickness * 0.9f, wCol, 8);
+                dl->AddCircleFilled(vBottom, thickness * 0.9f, wCol, 8);
+            }
             break;
         case IconType::FaceMode:
-            dl->AddQuad(ImVec2(p.x + is * 0.24f, p.y + is * 0.26f),
-                        ImVec2(p.x + is * 0.76f, p.y + is * 0.20f),
-                        ImVec2(p.x + is * 0.82f, p.y + is * 0.74f),
-                        ImVec2(p.x + is * 0.18f, p.y + is * 0.80f),
-                        col, thickness);
+            {
+                ImVec2 vTop(cp.x, cp.y - is * 0.35f);
+                ImVec2 vLeft(cp.x - is * 0.35f, cp.y - is * 0.15f);
+                ImVec2 vRight(cp.x + is * 0.35f, cp.y - is * 0.15f);
+                ImVec2 vCenter(cp.x, cp.y + is * 0.05f);
+                ImVec2 vBLeft(cp.x - is * 0.35f, cp.y + is * 0.30f);
+                ImVec2 vBRight(cp.x + is * 0.35f, cp.y + is * 0.30f);
+                ImVec2 vBottom(cp.x, cp.y + is * 0.45f);
+
+                ImVec2 topFace[] = { vTop, vRight, vCenter, vLeft };
+                dl->AddConvexPolyFilled(topFace, 4, IM_COL32(40, 160, 255, 90));
+                dl->AddPolyline(topFace, 4, IM_COL32(60, 180, 255, 255), ImDrawFlags_Closed, thickness * 1.8f);
+
+                ImU32 wCol = col;
+                dl->AddLine(vLeft, vBLeft, wCol, thickness * 0.8f);
+                dl->AddLine(vRight, vBRight, wCol, thickness * 0.8f);
+                dl->AddLine(vCenter, vBottom, wCol, thickness * 0.8f);
+                dl->AddLine(vBLeft, vBottom, wCol, thickness * 0.8f);
+                dl->AddLine(vBRight, vBottom, wCol, thickness * 0.8f);
+            }
             break;
         case IconType::AddFace:
-            dl->AddQuad(ImVec2(p.x + is * 0.18f, p.y + is * 0.30f),
-                        ImVec2(p.x + is * 0.62f, p.y + is * 0.24f),
-                        ImVec2(p.x + is * 0.68f, p.y + is * 0.68f),
-                        ImVec2(p.x + is * 0.14f, p.y + is * 0.74f),
-                        col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.74f, cp.y), ImVec2(p.x + is * 0.94f, cp.y), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.84f, p.y + is * 0.30f), ImVec2(p.x + is * 0.84f, p.y + is * 0.70f), col, thickness);
+            {
+                ImVec2 p0(p.x + is * 0.15f, p.y + is * 0.25f);
+                ImVec2 p1(p.x + is * 0.65f, p.y + is * 0.20f);
+                ImVec2 p2(p.x + is * 0.55f, p.y + is * 0.70f);
+                ImVec2 p3(p.x + is * 0.10f, p.y + is * 0.75f);
+                
+                ImVec2 pts[] = { p0, p1, p2, p3 };
+                dl->AddConvexPolyFilled(pts, 4, IM_COL32(40, 220, 100, 45));
+                dl->AddPolyline(pts, 4, col, ImDrawFlags_Closed, thickness);
+
+                ImVec2 plusCp(p.x + is * 0.78f, p.y + is * 0.72f);
+                dl->AddCircleFilled(plusCp, is * 0.18f, IM_COL32(30, 40, 50, 200), 12);
+                dl->AddCircle(plusCp, is * 0.18f, IM_COL32(40, 220, 100, 250), 12, 1.2f);
+                dl->AddLine(ImVec2(plusCp.x - is * 0.10f, plusCp.y), ImVec2(plusCp.x + is * 0.10f, plusCp.y), IM_COL32(40, 220, 100, 255), 1.8f);
+                dl->AddLine(ImVec2(plusCp.x, plusCp.y - is * 0.10f), ImVec2(plusCp.x, plusCp.y + is * 0.10f), IM_COL32(40, 220, 100, 255), 1.8f);
+            }
             break;
         case IconType::MergeVertices:
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.24f, cp.y), is * 0.09f, col, 12);
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.76f, cp.y), is * 0.09f, col, 12);
-            dl->AddLine(ImVec2(p.x + is * 0.34f, cp.y), ImVec2(p.x + is * 0.66f, cp.y), col, thickness);
-            dl->AddTriangleFilled(ImVec2(cp.x, p.y + is * 0.34f),
-                                  ImVec2(cp.x - is * 0.08f, p.y + is * 0.52f),
-                                  ImVec2(cp.x + is * 0.08f, p.y + is * 0.52f),
-                                  col);
+            {
+                ImVec2 outer0(cp.x - is * 0.32f, cp.y - is * 0.22f);
+                ImVec2 outer1(cp.x + is * 0.32f, cp.y - is * 0.22f);
+                ImVec2 outer2(cp.x, cp.y + is * 0.34f);
+
+                ImU32 lineCol = IM_COL32(140, 145, 155, 160);
+                dl->AddLine(outer0, cp, lineCol, thickness * 0.8f);
+                dl->AddLine(outer1, cp, lineCol, thickness * 0.8f);
+                dl->AddLine(outer2, cp, lineCol, thickness * 0.8f);
+
+                dl->AddCircleFilled(outer0, is * 0.06f, IM_COL32(255, 140, 40, 255), 10);
+                dl->AddCircleFilled(outer1, is * 0.06f, IM_COL32(255, 140, 40, 255), 10);
+                dl->AddCircleFilled(outer2, is * 0.06f, IM_COL32(255, 140, 40, 255), 10);
+
+                dl->AddCircleFilled(cp, is * 0.12f, IM_COL32(255, 160, 40, 100), 12);
+                dl->AddCircleFilled(cp, is * 0.07f, IM_COL32(255, 215, 0, 255), 12);
+            }
             break;
         case IconType::WeldVertices:
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.28f, p.y + is * 0.68f), is * 0.08f, col, 12);
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.50f, p.y + is * 0.34f), is * 0.08f, col, 12);
-            dl->AddCircleFilled(ImVec2(p.x + is * 0.74f, p.y + is * 0.68f), is * 0.08f, col, 12);
-            dl->AddLine(ImVec2(p.x + is * 0.28f, p.y + is * 0.68f), ImVec2(p.x + is * 0.50f, p.y + is * 0.34f), col, thickness * 0.8f);
-            dl->AddLine(ImVec2(p.x + is * 0.74f, p.y + is * 0.68f), ImVec2(p.x + is * 0.50f, p.y + is * 0.34f), col, thickness * 0.8f);
-            dl->AddCircle(cp, is * 0.30f, col, 20, thickness * 0.8f);
+            {
+                ImVec2 p0(cp.x - is * 0.28f, cp.y);
+                ImVec2 p1(cp.x + is * 0.28f, cp.y);
+
+                dl->AddLine(p0, p1, IM_COL32(140, 145, 155, 180), thickness * 0.9f);
+                
+                dl->AddCircle(cp, is * 0.22f, IM_COL32(40, 180, 255, 160), 16, 1.2f);
+                dl->AddCircleFilled(cp, is * 0.08f, IM_COL32(40, 180, 255, 255), 10);
+
+                dl->AddCircleFilled(p0, is * 0.06f, IM_COL32(255, 140, 40, 255), 10);
+                dl->AddCircleFilled(p1, is * 0.06f, IM_COL32(255, 140, 40, 255), 10);
+            }
             break;
         case IconType::DissolveTopology:
-            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.24f), ImVec2(p.x + is * 0.82f, p.y + is * 0.78f), col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.78f), ImVec2(p.x + is * 0.82f, p.y + is * 0.24f), col, thickness);
-            dl->AddCircle(cp, is * 0.12f, col, 14, thickness);
+            {
+                ImVec2 p0(p.x + is * 0.15f, p.y + is * 0.20f);
+                ImVec2 p2(p.x + is * 0.85f, p.y + is * 0.80f);
+                
+                dl->AddRect(p0, p2, col, 1.0f, 0, thickness);
+                dl->AddLine(p0, p2, IM_COL32(200, 200, 200, 100), thickness * 0.8f);
+
+                dl->AddLine(ImVec2(cp.x - is * 0.15f, cp.y - is * 0.15f), ImVec2(cp.x + is * 0.15f, cp.y + is * 0.15f), IM_COL32(255, 60, 60, 220), 2.0f);
+                dl->AddLine(ImVec2(cp.x + is * 0.15f, cp.y - is * 0.15f), ImVec2(cp.x - is * 0.15f, cp.y + is * 0.15f), IM_COL32(255, 60, 60, 220), 2.0f);
+            }
             break;
         case IconType::LoopCutTool:
-            dl->AddLine(ImVec2(p.x + is * 0.20f, p.y + is * 0.26f), ImVec2(p.x + is * 0.20f, p.y + is * 0.78f), col, thickness * 0.9f);
-            dl->AddLine(ImVec2(p.x + is * 0.50f, p.y + is * 0.20f), ImVec2(p.x + is * 0.50f, p.y + is * 0.84f), col, thickness * 1.5f);
-            dl->AddLine(ImVec2(p.x + is * 0.80f, p.y + is * 0.26f), ImVec2(p.x + is * 0.80f, p.y + is * 0.78f), col, thickness * 0.9f);
-            dl->AddTriangleFilled(ImVec2(p.x + is * 0.50f, p.y + is * 0.08f),
-                                  ImVec2(p.x + is * 0.42f, p.y + is * 0.24f),
-                                  ImVec2(p.x + is * 0.58f, p.y + is * 0.24f),
-                                  col);
+            {
+                float radX = is * 0.32f;
+                float radY = is * 0.10f;
+                ImVec2 topCenter(cp.x, cp.y - is * 0.26f);
+                ImVec2 botCenter(cp.x, cp.y + is * 0.26f);
+
+                dl->AddEllipse(topCenter, ImVec2(radX, radY), col, 0.0f, 0, thickness);
+                dl->AddEllipse(botCenter, ImVec2(radX, radY), col, 0.0f, 0, thickness);
+                dl->AddLine(ImVec2(cp.x - radX, topCenter.y), ImVec2(cp.x - radX, botCenter.y), col, thickness);
+                dl->AddLine(ImVec2(cp.x + radX, topCenter.y), ImVec2(cp.x + radX, botCenter.y), col, thickness);
+
+                dl->AddEllipse(cp, ImVec2(radX, radY), IM_COL32(255, 215, 0, 255), 0.0f, 0, thickness * 2.0f);
+                
+                dl->AddTriangleFilled(ImVec2(cp.x, cp.y - is * 0.08f),
+                                      ImVec2(cp.x - is * 0.04f, cp.y),
+                                      ImVec2(cp.x + is * 0.04f, cp.y),
+                                      IM_COL32(255, 215, 0, 255));
+                dl->AddTriangleFilled(ImVec2(cp.x, cp.y + is * 0.08f),
+                                      ImVec2(cp.x - is * 0.04f, cp.y),
+                                      ImVec2(cp.x + is * 0.04f, cp.y),
+                                      IM_COL32(255, 215, 0, 255));
+            }
             break;
         case IconType::ExtrudeFaceTool:
-            dl->AddQuad(ImVec2(p.x + is * 0.18f, p.y + is * 0.58f),
-                        ImVec2(p.x + is * 0.54f, p.y + is * 0.52f),
-                        ImVec2(p.x + is * 0.58f, p.y + is * 0.84f),
-                        ImVec2(p.x + is * 0.12f, p.y + is * 0.88f),
-                        col, thickness);
-            dl->AddQuad(ImVec2(p.x + is * 0.34f, p.y + is * 0.22f),
-                        ImVec2(p.x + is * 0.70f, p.y + is * 0.16f),
-                        ImVec2(p.x + is * 0.74f, p.y + is * 0.48f),
-                        ImVec2(p.x + is * 0.28f, p.y + is * 0.54f),
-                        col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.20f, p.y + is * 0.58f), ImVec2(p.x + is * 0.36f, p.y + is * 0.22f), col, thickness * 0.9f);
-            dl->AddLine(ImVec2(p.x + is * 0.54f, p.y + is * 0.52f), ImVec2(p.x + is * 0.70f, p.y + is * 0.16f), col, thickness * 0.9f);
+            {
+                ImVec2 bTop(cp.x, cp.y - is * 0.05f);
+                ImVec2 bLeft(cp.x - is * 0.32f, cp.y + is * 0.12f);
+                ImVec2 bRight(cp.x + is * 0.32f, cp.y + is * 0.12f);
+                ImVec2 bCenter(cp.x, cp.y + is * 0.28f);
+
+                float upShift = is * 0.35f;
+                ImVec2 eTop(bTop.x, bTop.y - upShift);
+                ImVec2 eLeft(bLeft.x, bLeft.y - upShift);
+                ImVec2 eRight(bRight.x, bRight.y - upShift);
+                ImVec2 eCenter(bCenter.x, bCenter.y - upShift);
+
+                ImVec2 extFace[] = { eTop, eRight, eCenter, eLeft };
+                dl->AddConvexPolyFilled(extFace, 4, IM_COL32(40, 160, 255, 120));
+                dl->AddPolyline(extFace, 4, IM_COL32(60, 180, 255, 255), ImDrawFlags_Closed, thickness * 1.5f);
+
+                ImVec2 baseFace[] = { bTop, bRight, bCenter, bLeft };
+                dl->AddPolyline(baseFace, 4, col, ImDrawFlags_Closed, thickness * 0.8f);
+
+                dl->AddLine(bLeft, eLeft, IM_COL32(200, 200, 200, 120), thickness * 0.8f);
+                dl->AddLine(bRight, eRight, IM_COL32(200, 200, 200, 120), thickness * 0.8f);
+                dl->AddLine(bCenter, eCenter, IM_COL32(200, 200, 200, 120), thickness * 0.8f);
+
+                dl->AddLine(bCenter, eCenter, IM_COL32(40, 255, 140, 220), thickness * 1.4f);
+                dl->AddTriangleFilled(ImVec2(eCenter.x, eCenter.y - is * 0.06f),
+                                      ImVec2(eCenter.x - is * 0.04f, eCenter.y + is * 0.02f),
+                                      ImVec2(eCenter.x + is * 0.04f, eCenter.y + is * 0.02f),
+                                      IM_COL32(40, 255, 140, 255));
+            }
             break;
         case IconType::DeleteFaceTool:
-            dl->AddQuad(ImVec2(p.x + is * 0.20f, p.y + is * 0.26f),
-                        ImVec2(p.x + is * 0.78f, p.y + is * 0.22f),
-                        ImVec2(p.x + is * 0.82f, p.y + is * 0.78f),
-                        ImVec2(p.x + is * 0.16f, p.y + is * 0.82f),
-                        col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.28f, p.y + is * 0.34f), ImVec2(p.x + is * 0.72f, p.y + is * 0.68f), col, thickness * 1.2f);
-            dl->AddLine(ImVec2(p.x + is * 0.72f, p.y + is * 0.34f), ImVec2(p.x + is * 0.28f, p.y + is * 0.68f), col, thickness * 1.2f);
+            {
+                ImVec2 vTop(cp.x, cp.y - is * 0.35f);
+                ImVec2 vLeft(cp.x - is * 0.35f, cp.y - is * 0.15f);
+                ImVec2 vRight(cp.x + is * 0.35f, cp.y - is * 0.15f);
+                ImVec2 vCenter(cp.x, cp.y + is * 0.05f);
+                ImVec2 vBLeft(cp.x - is * 0.35f, cp.y + is * 0.30f);
+                ImVec2 vBRight(cp.x + is * 0.35f, cp.y + is * 0.30f);
+                ImVec2 vBottom(cp.x, cp.y + is * 0.45f);
+
+                ImVec2 topFace[] = { vTop, vRight, vCenter, vLeft };
+                dl->AddConvexPolyFilled(topFace, 4, IM_COL32(255, 60, 60, 35));
+                dl->AddPolyline(topFace, 4, IM_COL32(255, 80, 80, 180), ImDrawFlags_Closed, thickness * 0.9f);
+
+                ImU32 wCol = col;
+                dl->AddLine(vLeft, vBLeft, wCol, thickness * 0.6f);
+                dl->AddLine(vRight, vBRight, wCol, thickness * 0.6f);
+                dl->AddLine(vCenter, vBottom, wCol, thickness * 0.6f);
+                dl->AddLine(vBLeft, vBottom, wCol, thickness * 0.6f);
+                dl->AddLine(vBRight, vBottom, wCol, thickness * 0.6f);
+
+                ImVec2 fc = cp;
+                fc.y -= is * 0.15f;
+                dl->AddLine(ImVec2(fc.x - is * 0.14f, fc.y - is * 0.10f), ImVec2(fc.x + is * 0.14f, fc.y + is * 0.10f), IM_COL32(255, 50, 50, 255), 2.2f);
+                dl->AddLine(ImVec2(fc.x + is * 0.14f, fc.y - is * 0.10f), ImVec2(fc.x - is * 0.14f, fc.y + is * 0.10f), IM_COL32(255, 50, 50, 255), 2.2f);
+            }
             break;
         case IconType::ShadeFlatTool:
-            dl->AddTriangle(ImVec2(p.x + is * 0.18f, p.y + is * 0.76f),
-                            ImVec2(p.x + is * 0.50f, p.y + is * 0.22f),
-                            ImVec2(p.x + is * 0.82f, p.y + is * 0.76f),
-                            col, thickness);
-            dl->AddLine(ImVec2(p.x + is * 0.50f, p.y + is * 0.22f), ImVec2(p.x + is * 0.50f, p.y + is * 0.76f), col, thickness);
+            {
+                ImVec2 top(cp.x, cp.y - is * 0.38f);
+                ImVec2 bot(cp.x, cp.y + is * 0.38f);
+                ImVec2 left(cp.x - is * 0.38f, cp.y);
+                ImVec2 right(cp.x + is * 0.38f, cp.y);
+
+                ImVec2 triL[] = { top, left, bot };
+                ImVec2 triR[] = { top, right, bot };
+
+                dl->AddConvexPolyFilled(triL, 3, IM_COL32(255, 255, 255, 30));
+                dl->AddConvexPolyFilled(triR, 3, IM_COL32(0, 0, 0, 60));
+
+                dl->AddTriangle(top, left, bot, col, thickness);
+                dl->AddTriangle(top, right, bot, col, thickness);
+                dl->AddLine(top, bot, col, thickness);
+            }
             break;
         case IconType::ShadeSmoothTool:
-            dl->AddBezierQuadratic(ImVec2(p.x + is * 0.16f, p.y + is * 0.72f),
-                                   ImVec2(cp.x, p.y + is * 0.22f),
-                                   ImVec2(p.x + is * 0.84f, p.y + is * 0.72f),
-                                   col, thickness * 1.1f);
-            dl->AddBezierQuadratic(ImVec2(p.x + is * 0.20f, p.y + is * 0.56f),
-                                   ImVec2(cp.x, p.y + is * 0.38f),
-                                   ImVec2(p.x + is * 0.80f, p.y + is * 0.56f),
-                                   col, thickness * 0.9f);
+            {
+                float rad = is * 0.38f;
+                dl->AddCircle(cp, rad, col, 32, thickness);
+                
+                dl->AddBezierQuadratic(ImVec2(cp.x - rad * 0.8f, cp.y - rad * 0.2f),
+                                       ImVec2(cp.x, cp.y + rad * 0.5f),
+                                       ImVec2(cp.x + rad * 0.8f, cp.y - rad * 0.2f),
+                                       IM_COL32(255, 255, 255, 100), thickness * 1.2f);
+                                       
+                dl->AddBezierQuadratic(ImVec2(cp.x - rad * 0.7f, cp.y + rad * 0.2f),
+                                       ImVec2(cp.x, cp.y + rad * 0.75f),
+                                       ImVec2(cp.x + rad * 0.7f, cp.y + rad * 0.2f),
+                                       IM_COL32(255, 255, 255, 60), thickness * 0.8f);
+            }
             break;
         case IconType::Water:
             {
-                float yoff1 = is * 0.65f;
-                float yoff2 = is * 0.82f;
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Draw blue-cyan shaded water waves overlay
                 dl->PathClear();
-                for (int i = 0; i <= 16; ++i) {
-                    float t = i / 16.0f;
-                    float x = p.x + t * is;
-                    float y = p.y + yoff1 + sinf(t * 6.28f) * (is * 0.08f);
+                dl->PathArcTo(cp, r, 0.15f * 3.14159f, 0.85f * 3.14159f);
+                dl->PathFillConvex(IM_COL32(30, 160, 255, 140)); // Blue transparent bottom overlay
+                
+                // Water ripples (curved wave lines)
+                dl->PathClear();
+                for (int i = 0; i <= 10; ++i) {
+                    float t = i / 10.0f;
+                    float x = cp.x - r * 0.8f + t * r * 1.6f;
+                    float y = cp.y + r * 0.2f + sinf(t * 4.5f) * (r * 0.12f);
                     dl->PathLineTo(ImVec2(x, y));
                 }
-                dl->PathStroke(col, 0, thickness);
-
-                dl->PathClear();
-                for (int i = 0; i <= 16; ++i) {
-                    float t = i / 16.0f;
-                    float x = p.x + t * is;
-                    float y = p.y + yoff2 + sinf(t * 6.28f + 1.5f) * (is * 0.08f);
-                    dl->PathLineTo(ImVec2(x, y));
-                }
-                dl->PathStroke(col, 0, thickness);
-
-                ImVec2 drop_tip = ImVec2(cp.x, p.y + is * 0.14f);
-                float drop_rad = is * 0.14f;
+                dl->PathStroke(IM_COL32(100, 220, 255, 200), false, thickness * 1.2f);
+                
+                // Falling water drop in blue-cyan
+                ImVec2 drop_tip = ImVec2(cp.x, cp.y - r * 0.7f);
+                float drop_rad = r * 0.28f;
                 dl->PathClear();
                 dl->PathLineTo(drop_tip);
-                dl->PathArcTo(ImVec2(cp.x, p.y + is * 0.38f), drop_rad, -0.1f * 3.1415f, 1.1f * 3.1415f, 10);
-                dl->PathStroke(col, ImDrawFlags_Closed, thickness);
+                dl->PathArcTo(ImVec2(cp.x, cp.y - r * 0.2f), drop_rad, -0.1f * 3.1415f, 1.1f * 3.1415f, 8);
+                dl->PathFillConvex(IM_COL32(80, 200, 255, 240));
+                dl->PathStroke(IM_COL32(150, 230, 255, 255), true, 1.0f);
             }
             break;
         case IconType::Volumetric:
             {
-                dl->AddLine(ImVec2(p.x + is * 0.2f, p.y + is * 0.75f), ImVec2(p.x + is * 0.8f, p.y + is * 0.75f), col, thickness);
-                dl->PathArcTo(ImVec2(p.x + is * 0.3f, p.y + is * 0.58f), is * 0.18f, 0.7f * 3.1415f, 1.7f * 3.1415f, 8);
-                dl->PathArcTo(ImVec2(p.x + is * 0.52f, p.y + is * 0.42f), is * 0.24f, 1.3f * 3.1415f, -0.2f * 3.1415f, 8);
-                dl->PathArcTo(ImVec2(p.x + is * 0.72f, p.y + is * 0.58f), is * 0.18f, -0.7f * 3.1415f, 0.3f * 3.1415f, 8);
-                dl->PathStroke(col, 0, thickness);
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Soft translucent clouds layered on top of the sphere
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.3f, cp.y + r * 0.2f), r * 0.45f, IM_COL32(255, 255, 255, 90));
+                dl->AddCircleFilled(ImVec2(cp.x + r * 0.3f, cp.y + r * 0.2f), r * 0.40f, IM_COL32(255, 255, 255, 90));
+                dl->AddCircleFilled(ImVec2(cp.x, cp.y - r * 0.2f), r * 0.50f, IM_COL32(255, 255, 255, 120));
+                
+                dl->AddCircle(ImVec2(cp.x, cp.y - r * 0.2f), r * 0.50f, IM_COL32(255, 255, 255, 180), 16, 1.0f);
             }
             break;
         case IconType::Force:
             {
-                dl->AddCircleFilled(cp, is * 0.08f, col);
-                dl->PathClear();
-                for (int i = 0; i <= 24; ++i) {
-                    float a = i * (6.28318f / 24.0f);
-                    float rx = is * 0.45f;
-                    float ry = is * 0.15f;
-                    float rot = 0.5f;
-                    float x = cp.x + cosf(a) * rx * cosf(rot) - sinf(a) * ry * sinf(rot);
-                    float y = cp.y + cosf(a) * rx * sinf(rot) + sinf(a) * ry * cosf(rot);
-                    dl->PathLineTo(ImVec2(x, y));
-                }
-                dl->PathStroke(col, 0, thickness);
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Orbiting / swirling force field rings in glowing orange/red
+                float rx1 = r * 1.1f;
+                float ry1 = r * 0.35f;
                 
                 dl->PathClear();
-                for (int i = 0; i <= 24; ++i) {
-                    float a = i * (6.28318f / 24.0f);
-                    float rx = is * 0.45f;
-                    float ry = is * 0.15f;
-                    float rot = -0.5f;
-                    float x = cp.x + cosf(a) * rx * cosf(rot) - sinf(a) * ry * sinf(rot);
-                    float y = cp.y + cosf(a) * rx * sinf(rot) + sinf(a) * ry * cosf(rot);
+                for (int i = 0; i <= 20; ++i) {
+                    float a = i * (6.28318f / 20.0f);
+                    float rot = 0.6f;
+                    float x = cp.x + cosf(a) * rx1 * cosf(rot) - sinf(a) * ry1 * sinf(rot);
+                    float y = cp.y + cosf(a) * rx1 * sinf(rot) + sinf(a) * ry1 * cosf(rot);
                     dl->PathLineTo(ImVec2(x, y));
                 }
-                dl->PathStroke(col, 0, thickness);
+                dl->PathStroke(IM_COL32(255, 120, 40, 220), false, thickness * 1.2f);
+                
+                dl->PathClear();
+                for (int i = 0; i <= 20; ++i) {
+                    float a = i * (6.28318f / 20.0f);
+                    float rot = -0.6f;
+                    float x = cp.x + cosf(a) * rx1 * cosf(rot) - sinf(a) * ry1 * sinf(rot);
+                    float y = cp.y + cosf(a) * rx1 * sinf(rot) + sinf(a) * ry1 * cosf(rot);
+                    dl->PathLineTo(ImVec2(x, y));
+                }
+                dl->PathStroke(IM_COL32(255, 60, 40, 180), false, thickness * 1.0f);
             }
             break;
         case UIWidgets::IconType::World:
-            dl->AddCircle(cp, is*0.4f, col, 0, thickness);
-            dl->AddEllipse(cp, ImVec2(is*0.2f, is*0.4f), col, 0.0f, 0, thickness*0.8f); // Vertical axis
-            dl->AddLine(ImVec2(cp.x-is*0.4f, cp.y), ImVec2(cp.x+is*0.4f, cp.y), col, thickness*0.8f); // Horizontal
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Latitude/longitude glow lines on the globe
+                dl->AddEllipse(cp, ImVec2(r * 0.4f, r * 0.95f), IM_COL32(0, 220, 255, 130), 0.0f, 0, thickness * 0.8f); // vertical grid
+                dl->AddLine(ImVec2(cp.x - r, cp.y), ImVec2(cp.x + r, cp.y), IM_COL32(0, 220, 255, 130), thickness * 0.8f); // equator
+                
+                // Sun crescent glow on top-right edge
+                dl->PathClear();
+                dl->PathArcTo(cp, r, -1.2f, 0.2f);
+                dl->PathStroke(IM_COL32(255, 220, 60, 240), false, thickness * 1.5f);
+            }
             break;
         case UIWidgets::IconType::System:
-            dl->AddRect(p, ImVec2(p.x + is, p.y + is * 0.7f), col, 2.0f, 0, thickness);
-            dl->AddLine(ImVec2(p.x + is*0.3f, p.y + is), ImVec2(p.x + is*0.7f, p.y + is), col, thickness);
-            dl->AddLine(ImVec2(p.x + is*0.5f, p.y + is*0.7f), ImVec2(p.x + is*0.5f, p.y + is), col, thickness);
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Glowing cyan HUD border/screen overlay
+                dl->AddRect(ImVec2(cp.x - r * 0.7f, cp.y - r * 0.5f), ImVec2(cp.x + r * 0.7f, cp.y + r * 0.5f), IM_COL32(100, 200, 255, 220), 2.0f, 0, thickness);
+                
+                // Monitor stand
+                dl->AddLine(ImVec2(cp.x, cp.y + r * 0.5f), ImVec2(cp.x, cp.y + r * 0.8f), IM_COL32(100, 200, 255, 220), thickness);
+                dl->AddLine(ImVec2(cp.x - r * 0.3f, cp.y + r * 0.8f), ImVec2(cp.x + r * 0.3f, cp.y + r * 0.8f), IM_COL32(100, 200, 255, 220), thickness);
+                
+                // Inner green checkbox/dot
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.3f, cp.y - r * 0.1f), 2.0f, IM_COL32(100, 255, 100, 255));
+                dl->AddLine(ImVec2(cp.x - r * 0.1f, cp.y - r * 0.1f), ImVec2(cp.x + r * 0.4f, cp.y - r * 0.1f), IM_COL32(240, 240, 240, 255), 1.0f);
+            }
             break;
         case IconType::Wind:
             dl->AddLine(ImVec2(p.x, p.y + is*0.3f), ImVec2(p.x + is*0.7f, p.y + is*0.3f), col, thickness);
@@ -1281,9 +2199,31 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
             }
             break;
         case IconType::Mesh:
-            dl->AddRect(p, ImVec2(p.x+is, p.y+is), col, 1.0f, 0, thickness);
-            dl->AddLine(p, ImVec2(p.x+is, p.y+is), col, thickness*0.5f);
-            dl->AddLine(ImVec2(p.x+is, p.y), ImVec2(p.x, p.y+is), col, thickness*0.5f);
+            {
+                ImVec2 vTop(cp.x, cp.y - is * 0.35f);
+                ImVec2 vLeft(cp.x - is * 0.35f, cp.y - is * 0.15f);
+                ImVec2 vRight(cp.x + is * 0.35f, cp.y - is * 0.15f);
+                ImVec2 vCenter(cp.x, cp.y + is * 0.05f);
+                ImVec2 vBLeft(cp.x - is * 0.35f, cp.y + is * 0.30f);
+                ImVec2 vBRight(cp.x + is * 0.35f, cp.y + is * 0.30f);
+                ImVec2 vBottom(cp.x, cp.y + is * 0.45f);
+
+                ImVec2 topFace[] = { vTop, vRight, vCenter, vLeft };
+                dl->AddConvexPolyFilled(topFace, 4, IM_COL32(100, 130, 255, 65));
+                dl->AddPolyline(topFace, 4, col, ImDrawFlags_Closed, thickness * 0.8f);
+
+                dl->AddLine(vCenter, vBottom, IM_COL32(0, 220, 220, 90), thickness * 3.0f);
+                dl->AddLine(vCenter, vBottom, IM_COL32(40, 255, 255, 255), thickness * 1.5f);
+
+                dl->AddCircleFilled(vBottom, is * 0.08f, IM_COL32(255, 140, 40, 255), 10);
+                dl->AddCircle(vBottom, is * 0.08f, IM_COL32(255, 200, 100, 255), 10, 1.0f);
+
+                ImU32 wCol = col;
+                dl->AddLine(vLeft, vBLeft, wCol, thickness * 0.8f);
+                dl->AddLine(vRight, vBRight, wCol, thickness * 0.8f);
+                dl->AddLine(vBLeft, vBottom, wCol, thickness * 0.8f);
+                dl->AddLine(vBRight, vBottom, wCol, thickness * 0.8f);
+            }
             break;
         case UIWidgets::IconType::Timeline:
             for(int i=0; i<3; i++) dl->AddLine(ImVec2(p.x, p.y + is*0.3f*i + 2), ImVec2(p.x + is, p.y + is*0.3f*i + 2), col, thickness);
@@ -1376,19 +2316,19 @@ bool IconActionButton(const char* id,
         active ? 0.98f : (enabled ? 0.92f : 0.50f));
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), ImGui::ColorConvertFloat4ToU32(bg), 10.0f);
+    dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), ImGui::ColorConvertFloat4ToU32(bg), 5.0f);
     dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y),
                 ImGui::ColorConvertFloat4ToU32(ImVec4(accent.x, accent.y, accent.z, active ? 0.58f : (hovered ? 0.32f : 0.14f))),
-                10.0f, 0, active ? 1.4f : 1.0f);
+                5.0f, 0, active ? 1.4f : 1.0f);
     dl->AddRectFilled(ImVec2(pos.x + 1.0f, pos.y + 1.0f),
                       ImVec2(pos.x + size.x - 1.0f, pos.y + size.y * 0.50f),
                       ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, hovered ? 0.028f : 0.016f)),
-                      9.0f, ImDrawFlags_RoundCornersTop);
+                      4.0f, ImDrawFlags_RoundCornersTop);
 
     const bool has_label = label && label[0] != '\0';
     const float icon_size = has_label
         ? ((std::min)(size.y - 12.0f, 24.0f))
-        : ((std::min)(size.x, size.y) - 10.0f);
+        : ((std::min)(size.x, size.y) * 0.84f);
     const ImVec2 icon_pos = has_label
         ? ImVec2(pos.x + 8.0f, pos.y + (size.y - icon_size) * 0.5f)
         : ImVec2(pos.x + (size.x - icon_size) * 0.5f, pos.y + (size.y - icon_size) * 0.5f);

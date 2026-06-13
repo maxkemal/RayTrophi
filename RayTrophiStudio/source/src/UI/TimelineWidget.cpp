@@ -523,13 +523,15 @@ void TimelineWidget::draw(UIContext& ctx) {
     // Get available region
     ImVec2 region = ImGui::GetContentRegionAvail();
     float total_height = region.y;
-    float canvas_height = total_height - header_height - 18.0f; // Reduced spacing for controls
     
     // --- PLAYBACK CONTROLS ---
     drawPlaybackControls(ctx);
     drawSelectedAnimGraphInspector(ctx);
     
     ImGui::Separator();
+    
+    // Calculate remaining height dynamically so we don't need hardcoded layout offsets
+    float canvas_height = ImGui::GetContentRegionAvail().y;
     
     // --- MAIN TIMELINE AREA ---
     // Split into track list (left) and canvas (right)
@@ -1307,6 +1309,9 @@ void TimelineWidget::drawSelectedAnimGraphInspector(UIContext& ctx) {
 // PLAYBACK CONTROLS + TOOLBAR
 // ============================================================================
 void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 0.0f));
+
     // Check if animation render is active - disable most controls
     bool render_locked = ctx.render_settings.animation_render_locked && rendering_in_progress;
     
@@ -1327,14 +1332,14 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
         // PAUSE/RESUME BUTTON
         if (rendering_paused.load()) {
             if (UIWidgets::IconActionButton("TimelineResume", UIWidgets::IconType::Play, "Resume", true,
-                                            ImVec4(0.42f, 0.90f, 0.52f, 1.0f), ImVec2(92.0f, 28.0f),
+                                            ImVec4(0.42f, 0.90f, 0.52f, 1.0f), ImVec2(74.0f, 22.0f),
                                             "Resume animation render")) {
                 rendering_paused = false;
                 SCENE_LOG_INFO("Animation render resumed from Timeline.");
             }
         } else {
             if (UIWidgets::IconActionButton("TimelinePauseRender", UIWidgets::IconType::Pause, "Pause", false,
-                                            ImVec4(0.95f, 0.78f, 0.30f, 1.0f), ImVec2(88.0f, 28.0f),
+                                            ImVec4(0.95f, 0.78f, 0.30f, 1.0f), ImVec2(70.0f, 22.0f),
                                             "Pause animation render")) {
                 rendering_paused = true;
                 SCENE_LOG_INFO("Animation render paused from Timeline.");
@@ -1345,7 +1350,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
         
         // STOP BUTTON - Always accessible during render!
         if (UIWidgets::IconActionButton("TimelineStopRender", UIWidgets::IconType::Stop, "Stop", false,
-                                        ImVec4(1.0f, 0.42f, 0.42f, 1.0f), ImVec2(80.0f, 28.0f),
+                                        ImVec4(1.0f, 0.42f, 0.42f, 1.0f), ImVec2(66.0f, 22.0f),
                                         "Stop animation render")) {
             rendering_stopped_cpu = true;
             rendering_stopped_gpu = true;
@@ -1355,6 +1360,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
         ImGui::SameLine();
         ImGui::TextDisabled("| P=Pause  ESC=Stop");
         
+        ImGui::PopStyleVar(2);
         return;  // Skip all other controls during render
     }
     
@@ -1364,7 +1370,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
 
     // Keyframe buttons
     if (UIWidgets::IconActionButton("TimelineAddKey", UIWidgets::IconType::AddKey, "Key",
-                                    false, ImVec4(0.42f, 0.86f, 1.0f, 1.0f), ImVec2(76.0f, 28.0f),
+                                    false, ImVec4(0.42f, 0.86f, 1.0f, 1.0f), ImVec2(60.0f, 22.0f),
                                     "Insert keyframe", has_selection)) {
         insertKeyframeForTrack(ctx, selected_track, current_frame);
         tracks_dirty = true;
@@ -1373,7 +1379,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     ImGui::SameLine();
     
     if (UIWidgets::IconActionButton("TimelineRemoveKey", UIWidgets::IconType::RemoveKey, "Delete",
-                                    false, ImVec4(1.0f, 0.46f, 0.46f, 1.0f), ImVec2(88.0f, 28.0f),
+                                    false, ImVec4(1.0f, 0.46f, 0.46f, 1.0f), ImVec2(72.0f, 22.0f),
                                     "Delete selected keyframe", has_keyframe_selected)) {
         deleteKeyframe(ctx, selected_track, selected_keyframe_frame);
         selected_keyframe_frame = -1;
@@ -1383,7 +1389,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     ImGui::SameLine();
     
     if (UIWidgets::IconActionButton("TimelineDuplicateKey", UIWidgets::IconType::Duplicate, "Duplicate",
-                                    false, ImVec4(0.86f, 0.68f, 1.0f, 1.0f), ImVec2(110.0f, 28.0f),
+                                    false, ImVec4(0.86f, 0.68f, 1.0f, 1.0f), ImVec2(90.0f, 22.0f),
                                     "Duplicate keyframe (+10 frames)", has_keyframe_selected)) {
         duplicateKeyframe(ctx, selected_track, selected_keyframe_frame, selected_keyframe_frame + 10);
         tracks_dirty = true;
@@ -1395,7 +1401,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     
     // --- HELP BUTTON ---
     if (UIWidgets::IconActionButton("TimelineHelp", UIWidgets::IconType::Help, "",
-                                    false, ImVec4(0.72f, 0.80f, 0.92f, 1.0f), ImVec2(34.0f, 28.0f),
+                                    false, ImVec4(0.72f, 0.80f, 0.92f, 1.0f), ImVec2(28.0f, 22.0f),
                                     "Timeline shortcuts and help")) {
         ImGui::OpenPopup("TimelineHelpPopup");
     }
@@ -1458,7 +1464,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
                                     "",
                                     is_playing,
                                     ImVec4(0.46f, 0.86f, 0.92f, 1.0f),
-                                    ImVec2(34.0f, 28.0f),
+                                    ImVec2(28.0f, 22.0f),
                                     is_playing ? "Pause" : "Play")) {
         is_playing = !is_playing;
         // Pressing Play at the last frame (loop off) restarts from the start —
@@ -1471,7 +1477,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     
     // Stop
     if (UIWidgets::IconActionButton("TimelineStop", UIWidgets::IconType::Stop, "",
-                                    false, ImVec4(1.0f, 0.46f, 0.46f, 1.0f), ImVec2(34.0f, 28.0f),
+                                    false, ImVec4(1.0f, 0.46f, 0.46f, 1.0f), ImVec2(28.0f, 22.0f),
                                     "Stop")) {
         if (ctx.scene.anySimulationRuntimeEnabled()) {
             drainTimelineMutationBackends(ctx);
@@ -1502,7 +1508,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     {
         const bool loop_on = loop_enabled;
         if (loop_on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.46f, 0.86f, 0.92f, 1.0f));
-        if (ImGui::Button(loop_on ? "Loop: On" : "Loop: Off", ImVec2(72.0f, 28.0f)))
+        if (ImGui::Button(loop_on ? "Loop: On" : "Loop: Off", ImVec2(62.0f, 22.0f)))
             loop_enabled = !loop_enabled;
         if (loop_on) ImGui::PopStyleColor();
         if (ImGui::IsItemHovered())
@@ -1556,6 +1562,8 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
         ImGui::SameLine();
         ImGui::TextDisabled("| Track: %s", selected_track.c_str());
     }
+
+    ImGui::PopStyleVar(2);
 }
 
 // ============================================================================

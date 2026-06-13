@@ -175,6 +175,13 @@ public:
 
 
     void rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync = false);
+    // Topology-stable fast path: refit the existing Embree BVH in place
+    // (RTC_BUILD_QUALITY_REFIT) instead of a full rebuild. Falls back to a full
+    // rebuildBVH when there is no Embree BVH (ParallelBVH / not built yet) or when
+    // the triangle topology changed (the Embree refit self-detects that and raises
+    // g_bvh_rebuild_pending). Much cheaper for per-frame dynamic updates (sculpt,
+    // rigid/soft/fluid sim body motion, transform drags).
+    void refitBVH(SceneData& scene, bool use_embree);
     void updateBVH(SceneData& scene, bool use_embree);
    
     void create_scene(SceneData& scene, Backend::IBackend* backend, const std::string& model_path,

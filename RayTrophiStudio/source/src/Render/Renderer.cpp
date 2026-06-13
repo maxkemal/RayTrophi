@@ -3579,6 +3579,57 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync) {
     scene.rebuildParticleBVH(use_embree);
 }
 
+void Renderer::refitBVH(SceneData& scene, bool use_embree) {
+    if (!scene.initialized) {
+        return;
+    }
+
+    // True in-place BVH refit is only available on the Embree path. If we don't have
+    // an Embree BVH (ParallelBVH fallback, or none built yet), there is nothing to
+    // refit — do a full rebuild instead.
+    auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
+    if (!use_embree || !embree_ptr) {
+        rebuildBVH(scene, use_embree);
+        return;
+    }
+
+    // Sync transform-handle / instanced geometry to world space first, so the refit
+    // reads current vertex positions (same pre-pass rebuildBVH does). Sculpt already
+    // writes transformed positions in place, but transform drags / sim body motion
+    // rely on this.
+    std::for_each(std::execution::par_unseq,
+        scene.world.objects.begin(), scene.world.objects.end(),
+        [](std::shared_ptr<Hittable>& obj) {
+            if (!obj) return;
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                if (tri->getTransformPtr() && !tri->hasAnySkinWeights()) {
+                    tri->updateTransformedVertices();
+                }
+                return;
+            }
+            if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                if (inst->syncTransformFromSourceTriangles()) {
+                    return;
+                }
+                if (inst->source_triangles) {
+                    for (auto& srcTri : *inst->source_triangles) {
+                        if (srcTri && srcTri->getTransformPtr() && !srcTri->hasAnySkinWeights()) {
+                            srcTri->updateTransformedVertices();
+                        }
+                    }
+                }
+            }
+        });
+
+    // RTC_BUILD_QUALITY_REFIT update. This self-detects a triangle-count change and
+    // raises g_bvh_rebuild_pending to force a full rebuild on the next frame, so a
+    // topology edit that slipped through to this path stays correct.
+    embree_ptr->updateGeometryFromTrianglesFromSource(scene.world.objects);
+
+    // Keep the separate particle-only BVH coherent, matching rebuildBVH.
+    scene.rebuildParticleBVH(use_embree);
+}
+
 void Renderer::updateBVH(SceneData& scene, bool use_embree) {
     if (scene.world.objects.empty()) {
         scene.bvh = nullptr;

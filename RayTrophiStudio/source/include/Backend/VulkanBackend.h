@@ -1524,6 +1524,13 @@ protected:
     std::vector<std::shared_ptr<Hittable>> m_lastObjects;
     // Instance source pointers for fast sync (parallel to m_vkInstances)
     std::vector<std::shared_ptr<Hittable>> m_instanceSources;
+    // Solo-mesh BLAS build-order triangle pointers (blasIndex -> ordered tris).
+    // Captured during full geometry build so the interactive sculpt/edit refit
+    // (updateMeshBLASPartial) can upload vertex positions in the EXACT slot order
+    // the BLAS was built with — the editable mesh_cache iteration order is not
+    // guaranteed to match the scene-graph traversal order used at build time, and
+    // a mismatch would scatter positions into the wrong BLAS slots (corruption).
+    std::unordered_map<uint32_t, std::vector<std::shared_ptr<Triangle>>> m_soloBlasBuildTriangles;
     struct InstanceTransformCache { int instance_id; std::shared_ptr<Hittable> representative_hittable; };
     std::vector<InstanceTransformCache> m_instance_sync_cache;
     bool m_topology_dirty = false; // set when instances/BLAS list changes
