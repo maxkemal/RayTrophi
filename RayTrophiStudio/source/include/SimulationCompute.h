@@ -192,10 +192,6 @@ struct SimulationComputeVulkanContext;
 std::unique_ptr<ISimulationComputeBackend>
 createVulkanSimulationComputeBackend(const SimulationComputeVulkanContext& ctx);
 
-// One-shot validation of the CUDA buffer + dispatch pipeline (alloc -> upload ->
-// dispatch a scale kernel -> download round-trip). Logs the result.
-bool selfTestCudaSimulationCompute();
-
 void logSimulationComputeInfo(const std::string& message);
 void logSimulationComputeWarning(const std::string& message);
 void logSimulationComputeError(const std::string& message);

@@ -5876,16 +5876,8 @@ public:
     Physics::ForceFieldManager force_field_manager;
     RayTrophiSim::SimulationWorld simulation_world;
 
-    bool sim_compute_selftest_done_ = false;
     void syncSimulationWorld() {
         simulation_world.setForceFieldManager(&force_field_manager);
-        // Phase 2: validate the CUDA compute pipeline once (logs OK/FAILED). The
-        // global compute backend is not switched yet — the GPU solver path lands
-        // in Phase 3.
-        if (!sim_compute_selftest_done_) {
-            sim_compute_selftest_done_ = true;
-            RayTrophiSim::selfTestCudaSimulationCompute();
-        }
 
         // GPU_Compute (value 1) = auto-select: CUDA preferred, Vulkan fallback.
         // GPU_Vulkan  (value 3) = force Vulkan regardless (for explicit testing).
