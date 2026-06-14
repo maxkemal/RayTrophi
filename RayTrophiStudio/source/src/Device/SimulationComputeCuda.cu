@@ -49,12 +49,6 @@ namespace RayTrophiSim {
 
 namespace {
 
-// ── Phase 2 validation kernel ────────────────────────────────────────────────
-struct ScaleConstants {
-    float factor;
-    int count;
-};
-
 struct GridProjectionConstants {
     int nx;
     int ny;
@@ -158,13 +152,6 @@ struct DeviceAffineC {
     DeviceVec3 col1;
     DeviceVec3 col2;
 };
-
-__global__ void sim_scale_kernel(float* data, float factor, int count) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < count) {
-        data[i] *= factor;
-    }
-}
 
 __global__ void fluid_clear_float_kernel(float* values, int count) {
     const int id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1763,20 +1750,6 @@ public:
         if (!cmd.kernel) return false;
         const std::string kernel = cmd.kernel;
 
-        if (kernel == "sim_scale") {
-            if (cmd.buffer_count < 1 || !cmd.constants || cmd.constants_size < sizeof(ScaleConstants)) {
-                return false;
-            }
-            float* ptr = static_cast<float*>(nativeBufferPtr(cmd.buffers[0]));
-            if (!ptr) return false;
-            const ScaleConstants* c = static_cast<const ScaleConstants*>(cmd.constants);
-            const int threads = 256;
-            const int blocks = (c->count + threads - 1) / threads;
-            sim_scale_kernel<<<blocks, threads>>>(ptr, c->factor, c->count);
-            return cudaGetLastError() == cudaSuccess;
-        }
-
-        // Unknown kernel — Phase 3 registers the grid fluid solver stages here.
         if (kernel == "sim_grid_advect_scalar") {
             if (cmd.buffer_count < 5 || !cmd.constants || cmd.constants_size < sizeof(GridScalarAdvectionConstants)) {
                 return false;
@@ -2309,57 +2282,6 @@ std::unique_ptr<ISimulationComputeBackend> createCudaSimulationComputeBackend() 
         return nullptr;
     }
     return std::make_unique<CudaSimulationComputeBackend>();
-}
-
-bool selfTestCudaSimulationCompute() {
-    auto backend = createCudaSimulationComputeBackend();
-    if (!backend) {
-        logSimulationComputeWarning("[SimCompute] CUDA backend self-test: no CUDA device");
-        return false;
-    }
-
-    ComputeBufferDesc desc;
-    desc.debug_name = "sim_compute_selftest";
-    desc.size_bytes = sizeof(float) * 4;
-    ComputeBufferHandle h = backend->createBuffer(desc);
-    if (!h.valid()) {
-        logSimulationComputeError("[SimCompute] CUDA backend self-test: buffer alloc FAILED");
-        return false;
-    }
-
-    const float in[4] = { 1.0f, 2.0f, 3.0f, 4.0f };
-    backend->uploadBuffer(h, in, sizeof(in), 0);
-
-    ScaleConstants constants{ 2.0f, 4 };
-    ComputeDispatch cmd;
-    cmd.kernel = "sim_scale";
-    cmd.buffers = &h;
-    cmd.buffer_count = 1;
-    cmd.constants = &constants;
-    cmd.constants_size = sizeof(constants);
-    cmd.groups.groups_x = 1;
-    const bool dispatched = backend->dispatch(cmd);
-    backend->synchronize();
-
-    float out[4] = { 0, 0, 0, 0 };
-    backend->downloadBuffer(h, out, sizeof(out), 0);
-    backend->destroyBuffer(h);
-
-    const bool pass = dispatched &&
-                      out[0] == 2.0f && out[1] == 4.0f && out[2] == 6.0f && out[3] == 8.0f;
-    const std::string message =
-        std::string("[SimCompute] CUDA backend self-test: ") +
-        (pass ? "OK" : "FAILED") +
-        " (out = " + std::to_string(out[0]) + " " +
-        std::to_string(out[1]) + " " +
-        std::to_string(out[2]) + " " +
-        std::to_string(out[3]) + ")";
-    if (pass) {
-        logSimulationComputeInfo(message);
-    } else {
-        logSimulationComputeError(message);
-    }
-    return pass;
 }
 
 } // namespace RayTrophiSim
