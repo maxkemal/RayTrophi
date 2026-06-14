@@ -52,5 +52,11 @@ void main() {
             col = vec4(heat, max(0.08, pc.params2.y * soft));
         }
     }
+    // Sculpt protection mask (bits 16..23): tint frozen vertex markers cool grey.
+    float mask = float((inFlags >> 16) & 255u) / 255.0;
+    if (mask > 0.01) {
+        col.rgb = mix(col.rgb, vec3(0.20, 0.40, 0.62), mask * 0.85);
+        col.a = max(col.a, mask * 0.9);
+    }
     vColor = col;
 }

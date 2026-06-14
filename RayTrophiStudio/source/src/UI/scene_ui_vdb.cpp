@@ -391,7 +391,11 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
     auto& selection = ctx.selection;
     
     UIWidgets::PushControlSurfaceStyle(ImVec4(0.62f, 0.78f, 1.0f, 1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0f);
+    float vdb_child_round = 4.0f;
+    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+        vdb_child_round = ThemeManager::instance().current().style.windowRounding;
+    }
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, vdb_child_round);
     
     // -------------------------------------------------------------
     // TOP SECTION: CREATION & IMPORT

@@ -10,6 +10,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "ui_modern.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
 #include "ColorProcessingParams.h"
@@ -160,7 +161,11 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
         ImGui::SetNextWindowSizeConstraints(ImVec2(260.0f, 0.0f), ImVec2(360.0f, 1000.0f));
         ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.07f, 0.08f, 0.10f, 0.60f));
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.72f, 0.78f, 0.88f, 0.15f));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+        float tooltip_round = 12.0f;
+        if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+            tooltip_round = ThemeManager::instance().current().style.popupRounding;
+        }
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, tooltip_round);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
         ImGui::BeginTooltip();
         
@@ -430,7 +435,11 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(1.0f, 1.0f, 1.0f, 0.12f));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.82f, 0.84f, 0.90f, 0.96f));
 
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
+            float combo_frame_round = 5.0f;
+            if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+                combo_frame_round = ThemeManager::instance().current().style.frameRounding;
+            }
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, combo_frame_round);
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 2.0f));
 
             ImGui::Combo("##Pivot", &pivot_mode, pivot_opts, 2);
@@ -502,7 +511,11 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
                 ImGui::SetNextWindowSize(ImVec2(popup_w, 0));
                 
                 // Set window styling constraints (padding, rounding)
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+                float sens_round = 8.0f;
+                if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+                    sens_round = ThemeManager::instance().current().style.popupRounding;
+                }
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, sens_round);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 6.0f));
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 
@@ -618,18 +631,16 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
                     const int i = order[oi];
                     if (fz[i] <= 0.02f) continue; // back-facing
 
-                    // Color-coded base colors for axes: Red (X), Green (Y), Blue (Z)
-                    ImVec4 baseColor;
-                    if (i == 0 || i == 1)      baseColor = ImVec4(0.85f, 0.25f, 0.35f, 1.0f); // X: Red (Right/Left)
-                    else if (i == 2 || i == 3) baseColor = ImVec4(0.30f, 0.75f, 0.35f, 1.0f); // Y: Green (Top/Bottom)
-                    else                       baseColor = ImVec4(0.20f, 0.55f, 0.90f, 1.0f); // Z: Blue (Front/Back)
+                    // Classy, simplified gray design for the ViewCube
+                    ImVec4 baseColor = ImVec4(0.35f, 0.37f, 0.40f, 1.0f); // Elegant cool gray
 
-                    const float shade = 0.40f + 0.50f * std::clamp(fz[i], 0.0f, 1.0f);
+                    const float shade = 0.45f + 0.45f * std::clamp(fz[i], 0.0f, 1.0f);
                     ImU32 fill;
                     if (i == hoverFace) {
-                        fill = IM_COL32((int)(baseColor.x * 255), (int)(baseColor.y * 255), (int)(baseColor.z * 255), 230);
+                        ImVec4 accent = ThemeManager::instance().current().colors.accent;
+                        fill = IM_COL32((int)(accent.x * 255), (int)(accent.y * 255), (int)(accent.z * 255), 220);
                     } else {
-                        fill = IM_COL32((int)(baseColor.x * 255 * shade), (int)(baseColor.y * 255 * shade), (int)(baseColor.z * 255 * shade), 170);
+                        fill = IM_COL32((int)(baseColor.x * 255 * shade), (int)(baseColor.y * 255 * shade), (int)(baseColor.z * 255 * shade), 150);
                     }
 
                     dl->AddQuadFilled(quad[i][0], quad[i][1], quad[i][2], quad[i][3], fill);

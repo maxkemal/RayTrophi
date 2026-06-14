@@ -141,9 +141,18 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
     ImGui::PushStyleColor(ImGuiCol_Text, t.colors.text);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 11.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 7.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 14.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f);
+    float pop_round = 14.0f;
+    float frame_round = 12.0f;
+    float win_round = 14.0f;
+    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+        const auto& curTheme = ThemeManager::instance().current();
+        pop_round = curTheme.style.popupRounding;
+        frame_round = curTheme.style.frameRounding;
+        win_round = curTheme.style.windowRounding;
+    }
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, pop_round);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, frame_round);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, win_round);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.0f, 0.5f));

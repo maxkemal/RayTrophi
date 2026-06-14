@@ -3390,9 +3390,41 @@ bool ImGui::SliderScalar(const char* label, ImGuiDataType data_type, void* p_dat
     if (value_changed)
         MarkItemEdited(id);
 
-    // Render grab
+    // Render Blender-style filled bar
     if (grab_bb.Max.x > grab_bb.Min.x)
-        window->DrawList->AddRectFilled(grab_bb.Min, grab_bb.Max, GetColorU32(g.ActiveId == id ? ImGuiCol_SliderGrabActive : ImGuiCol_SliderGrab), style.GrabRounding);
+    {
+        const float grab_padding = 2.0f;
+        const float grab_sz = grab_bb.Max.x - grab_bb.Min.x;
+        const float slider_sz = (frame_bb.Max.x - frame_bb.Min.x) - grab_padding * 2.0f;
+        const float slider_usable_sz = slider_sz - grab_sz;
+        
+        float t = 0.0f;
+        if (slider_usable_sz > 0.0f)
+        {
+            float slider_usable_pos_min = frame_bb.Min.x + grab_padding + grab_sz * 0.5f;
+            float grab_center = (grab_bb.Min.x + grab_bb.Max.x) * 0.5f;
+            t = ImSaturate((grab_center - slider_usable_pos_min) / slider_usable_sz);
+        }
+        
+        float fill_x = ImLerp(frame_bb.Min.x, frame_bb.Max.x, t);
+        ImRect fill_rect(frame_bb.Min.x, frame_bb.Min.y, fill_x, frame_bb.Max.y);
+        
+        ImVec4 grab_col_vec = GetStyleColorVec4(ImGuiCol_SliderGrab);
+        ImU32 fill_col;
+        if (g.ActiveId == id)
+            fill_col = GetColorU32(ImGuiCol_SliderGrabActive);
+        else if (hovered)
+            fill_col = GetColorU32(ImGuiCol_SliderGrab);
+        else
+            fill_col = GetColorU32(ImVec4(grab_col_vec.x, grab_col_vec.y, grab_col_vec.z, 0.35f));
+            
+        ImDrawFlags draw_flags = ImDrawFlags_RoundCornersLeft;
+        if (fill_x >= frame_bb.Max.x - 2.0f)
+            draw_flags = ImDrawFlags_RoundCornersAll;
+            
+        if (t > 0.0f)
+            window->DrawList->AddRectFilled(fill_rect.Min, fill_rect.Max, fill_col, style.FrameRounding, draw_flags);
+    }
 
     // Display value using user-provided display format so user can add prefix/suffix/decorations to the value.
     char value_buf[64];
@@ -3543,9 +3575,41 @@ bool ImGui::VSliderScalar(const char* label, const ImVec2& size, ImGuiDataType d
     if (value_changed)
         MarkItemEdited(id);
 
-    // Render grab
+    // Render Blender-style filled bar (vertical)
     if (grab_bb.Max.y > grab_bb.Min.y)
-        window->DrawList->AddRectFilled(grab_bb.Min, grab_bb.Max, GetColorU32(g.ActiveId == id ? ImGuiCol_SliderGrabActive : ImGuiCol_SliderGrab), style.GrabRounding);
+    {
+        const float grab_padding = 2.0f;
+        const float grab_sz = grab_bb.Max.y - grab_bb.Min.y;
+        const float slider_sz = (frame_bb.Max.y - frame_bb.Min.y) - grab_padding * 2.0f;
+        const float slider_usable_sz = slider_sz - grab_sz;
+        
+        float t = 0.0f;
+        if (slider_usable_sz > 0.0f)
+        {
+            float slider_usable_pos_min = frame_bb.Min.y + grab_padding + grab_sz * 0.5f;
+            float grab_center = (grab_bb.Min.y + grab_bb.Max.y) * 0.5f;
+            t = ImSaturate(1.0f - ((grab_center - slider_usable_pos_min) / slider_usable_sz));
+        }
+        
+        float fill_y = ImLerp(frame_bb.Max.y, frame_bb.Min.y, t);
+        ImRect fill_rect(frame_bb.Min.x, fill_y, frame_bb.Max.x, frame_bb.Max.y);
+        
+        ImVec4 grab_col_vec = GetStyleColorVec4(ImGuiCol_SliderGrab);
+        ImU32 fill_col;
+        if (g.ActiveId == id)
+            fill_col = GetColorU32(ImGuiCol_SliderGrabActive);
+        else if (hovered)
+            fill_col = GetColorU32(ImGuiCol_SliderGrab);
+        else
+            fill_col = GetColorU32(ImVec4(grab_col_vec.x, grab_col_vec.y, grab_col_vec.z, 0.35f));
+            
+        ImDrawFlags draw_flags = ImDrawFlags_RoundCornersBottom;
+        if (fill_y <= frame_bb.Min.y + 2.0f)
+            draw_flags = ImDrawFlags_RoundCornersAll;
+            
+        if (t > 0.0f)
+            window->DrawList->AddRectFilled(fill_rect.Min, fill_rect.Max, fill_col, style.FrameRounding, draw_flags);
+    }
 
     // Display value using user-provided display format so user can add prefix/suffix/decorations to the value.
     // For the vertical slider we allow centered text to overlap the frame padding

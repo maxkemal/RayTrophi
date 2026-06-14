@@ -197,6 +197,17 @@ public:
     bool isPainting() const { return m_paintMode != HairPaintMode::NONE; }
     bool shouldHideChildren() const { return m_paintMode != HairPaintMode::NONE && m_hideChildrenDuringPaint; }
     const HairBrushSettings& getBrushSettings() const { return m_brushSettings; }
+    void setPaintMode(HairPaintMode mode) {
+        if (m_paintMode != mode) {
+            if (mode != HairPaintMode::NONE) {
+                m_selectBrushSettingsTab = true;
+            } else {
+                m_selectGroomsTab = true;
+            }
+            m_paintMode = mode;
+        }
+    }
+    void drawHairBrushDockContent(HairSystem& hairSystem, Renderer* renderer = nullptr);
     
     // ========================================================================
     // Undo / Redo
@@ -277,6 +288,8 @@ private:
     bool m_hideChildrenDuringPaint = true;
     HairPaintMode m_lastPaintMode = HairPaintMode::NONE;
     int m_currentTab = 0; // 0=Gen, 1=Mat, 2=Paint, 3=Presets
+    bool m_selectBrushSettingsTab = false;
+    bool m_selectGroomsTab = false;
 
     std::function<bool(Vec3&, Vec3&)> m_projector = nullptr;
     
@@ -315,10 +328,12 @@ private:
     void restoreState(HairSystem& hairSystem, const HairUndoState& state);
     
     // Internal methods
-    void drawGenerationPanel(HairSystem& hairSystem, 
-                            const std::vector<std::shared_ptr<Triangle>>* triangles,
-                            Renderer* renderer = nullptr,
-                            std::function<void()> onPreGenerate = nullptr);
+    void drawGroomPanel(HairSystem& hairSystem, 
+                        const std::vector<std::shared_ptr<Triangle>>* triangles,
+                        Renderer* renderer = nullptr,
+                        std::function<void()> onPreGenerate = nullptr);
+    void drawGenerationSettingsPanel(HairSystem& hairSystem, Renderer* renderer = nullptr);
+    void drawBrushSettingsPanel(HairSystem& hairSystem);
     void drawMaterialPanel(Renderer* renderer = nullptr);
     void drawGroomList(HairSystem& hairSystem, Renderer* renderer = nullptr);
 
@@ -342,6 +357,7 @@ private:
     // Rename state
     std::string m_renamingGroomName = "";
     char m_renameBuffer[64];
+    float m_groomListHeight = 200.0f;
 };
 
 
@@ -590,125 +606,37 @@ inline void HairUI::render(
         m_lastSelectedMeshName = "";
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // MODERN NARROW SIDEBAR (Icon Based)
-    // ═══════════════════════════════════════════════════════════════════════════
-    
-    float sidebar_w = 42.0f;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ThemeManager::instance().current().colors.secondary);
-    ImGui::BeginChild("HairSidebar", ImVec2(sidebar_w, 0), true, ImGuiWindowFlags_NoScrollbar);
-    
-    auto DrawIconButton = [&](int index, UIWidgets::IconType icon, const char* tooltip) {
-        bool selected = (m_currentTab == index);
-        static float hover_anim[8] = {};
-        ImVec2 pos = ImGui::GetCursorScreenPos();
-        float size = 34.0f;
-        float margin = (sidebar_w - size) * 0.5f;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        
-        ImGui::SetCursorPosX(margin);
-        ImGui::PushID(index);
-        
-        if (selected) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.08f));
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+    if (ImGui::BeginTabBar("##HairMainTabs", ImGuiTabBarFlags_None)) {
+        ImGuiTabItemFlags groomsFlags = ImGuiTabItemFlags_None;
+        if (m_selectGroomsTab) {
+            groomsFlags |= ImGuiTabItemFlags_SetSelected;
+            m_selectGroomsTab = false;
         }
-
-        if (ImGui::Button("##tab", ImVec2(size, size))) {
-            m_currentTab = index;
+        if (ImGui::BeginTabItem("Grooms", nullptr, groomsFlags)) {
+            drawGroomPanel(hairSystem, selectedMeshTriangles, renderer, onPreGenerate);
+            ImGui::EndTabItem();
         }
-        
-        const bool is_hovered = ImGui::IsItemHovered();
-        const float target_hover = (is_hovered || selected) ? 1.0f : 0.0f;
-        const float anim_speed = 12.0f * ImGui::GetIO().DeltaTime;
-        hover_anim[index] += (target_hover - hover_anim[index]) * ImClamp(anim_speed, 0.0f, 1.0f);
-
-        auto getHoverTint = [&](UIWidgets::IconType iconType) -> ImVec4 {
-            switch (iconType) {
-                case UIWidgets::IconType::Mesh:   return ImVec4(0.56f, 0.88f, 1.00f, 1.0f);
-                case UIWidgets::IconType::Render: return ImVec4(1.00f, 0.84f, 0.42f, 1.0f);
-                case UIWidgets::IconType::Magnet: return ImVec4(1.00f, 0.58f, 0.40f, 1.0f);
-                case UIWidgets::IconType::Graph:  return ImVec4(0.60f, 0.92f, 0.62f, 1.0f);
-                default:                          return ImVec4(0.50f, 0.86f, 1.00f, 1.0f);
+        if (ImGui::BeginTabItem("Generation")) {
+            drawGenerationSettingsPanel(hairSystem, renderer);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Material")) {
+            drawMaterialPanel(renderer);
+            ImGui::EndTabItem();
+        }
+        if (m_paintMode != HairPaintMode::NONE) {
+            ImGuiTabItemFlags brushSettingsFlags = ImGuiTabItemFlags_None;
+            if (m_selectBrushSettingsTab) {
+                brushSettingsFlags |= ImGuiTabItemFlags_SetSelected;
+                m_selectBrushSettingsTab = false;
             }
-        };
-
-        if (selected) {
-            dl->AddRectFilled(
-                ImVec2(pos.x - margin, pos.y),
-                ImVec2(pos.x + sidebar_w, pos.y + size),
-                ImGui::ColorConvertFloat4ToU32(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)),
-                0.0f
-            );
-            dl->AddRectFilled(
-                ImVec2(pos.x + sidebar_w - 3.0f, pos.y + 4.0f),
-                ImVec2(pos.x + sidebar_w, pos.y + size - 4.0f),
-                ImGui::ColorConvertFloat4ToU32(ThemeManager::instance().current().colors.accent),
-                2.0f
-            );
-        } else if (hover_anim[index] > 0.01f) {
-            dl->AddRectFilled(
-                ImVec2(pos.x, pos.y),
-                ImVec2(pos.x + size, pos.y + size),
-                ImGui::ColorConvertFloat4ToU32(ImVec4(0.18f, 0.50f, 0.68f, 0.16f * hover_anim[index])),
-                8.0f
-            );
+            if (ImGui::BeginTabItem("Brush Settings", nullptr, brushSettingsFlags)) {
+                drawBrushSettingsPanel(hairSystem);
+                ImGui::EndTabItem();
+            }
         }
-
-        const float iconSize = size * (0.60f + 0.10f * hover_anim[index]);
-        ImVec4 idleTint(0.70f, 0.70f, 0.70f, 0.82f);
-        ImVec4 activeTint = ThemeManager::instance().current().colors.accent;
-        ImVec4 hoverTint = getHoverTint(icon);
-        ImVec4 iconTint = selected ? activeTint : ImLerp(idleTint, hoverTint, hover_anim[index]);
-
-        UIWidgets::DrawIcon(
-            icon,
-            ImVec2(pos.x + (size - iconSize) * 0.5f, pos.y + (size - iconSize) * 0.5f),
-            iconSize,
-            ImGui::ColorConvertFloat4ToU32(iconTint),
-            1.5f + 0.35f * hover_anim[index]
-        );
-        
-        if (is_hovered) ImGui::SetTooltip("%s", tooltip);
-        
-        ImGui::PopStyleColor();
-        ImGui::PopID();
-        ImGui::Spacing();
-    };
-
-    DrawIconButton(0, UIWidgets::IconType::Mesh,    "Groom Management");
-    DrawIconButton(1, UIWidgets::IconType::Render,  "Hair Material");
-    DrawIconButton(2, UIWidgets::IconType::Magnet,  "Interactive Paint");
-    DrawIconButton(3, UIWidgets::IconType::Graph,   "Presets & Styles");
-    
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
-
-    ImGui::SameLine();
-
-    // Main Content Area
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ThemeManager::instance().current().colors.background);
-    ImGui::BeginChild("HairContent", ImVec2(0, 0), false);
-    // Reset scroll-Y when the active Hair sub-tab changes so each sub-panel
-    // opens at the top instead of inheriting the previous tab's scroll.
-    {
-        static int s_last_hair_tab = -1;
-        if (s_last_hair_tab != m_currentTab) {
-            ImGui::SetScrollY(0.0f);
-            s_last_hair_tab = m_currentTab;
-        }
+        ImGui::EndTabBar();
     }
-
-    switch (m_currentTab) {
-        case 0: drawGenerationPanel(hairSystem, selectedMeshTriangles, renderer, onPreGenerate); break;
-        case 1: drawMaterialPanel(renderer); break;
-        case 2: drawPaintPanel(hairSystem); break;
-        case 3: drawPresets(hairSystem, renderer); break;
-    }
-    
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
     
     // Show paint mode indicator if active
     if (m_paintMode != HairPaintMode::NONE) {
@@ -729,8 +657,190 @@ inline void HairUI::render(
     UIWidgets::PopControlSurfaceStyle();
 }
 
+inline void HairUI::drawHairBrushDockContent(HairSystem& hairSystem, Renderer* renderer) {
+    const float avail_w = ImGui::GetContentRegionAvail().x;
+    const float spacing = 3.0f;
+    const float tool_size = 40.0f;
 
-inline void HairUI::drawGenerationPanel(
+    struct BrushInfo {
+        HairPaintMode mode;
+        const char* name;
+        const char* desc;
+        UIWidgets::IconType icon;
+        ImVec4 accent;
+    };
+
+    static const std::vector<BrushInfo> brushes = {
+        { HairPaintMode::ADD,     "Add",     "Add new hair strands", UIWidgets::IconType::HairAddTool,   ImVec4(0.50f, 0.90f, 0.62f, 1.0f) },
+        { HairPaintMode::REMOVE,  "Remove",  "Remove strands", UIWidgets::IconType::HairRemoveTool,   ImVec4(1.00f, 0.58f, 0.50f, 1.0f) },
+        { HairPaintMode::CUT,     "Cut",     "Cut strands shorter", UIWidgets::IconType::HairCutTool,  ImVec4(1.00f, 0.72f, 0.42f, 1.0f) },
+        { HairPaintMode::COMB,    "Comb",    "Comb/style direction", UIWidgets::IconType::HairCombTool,  ImVec4(0.56f, 0.88f, 1.00f, 1.0f) },
+        { HairPaintMode::LENGTH,  "Length",  "Adjust strand length", UIWidgets::IconType::HairLengthTool,   ImVec4(0.92f, 0.76f, 0.42f, 1.0f) },
+        { HairPaintMode::DENSITY, "Density", "Adjust local density", UIWidgets::IconType::HairDensityTool,   ImVec4(0.74f, 0.84f, 1.00f, 1.0f) },
+        { HairPaintMode::CLUMP,   "Clump",   "Increase clumpiness", UIWidgets::IconType::HairClumpTool,    ImVec4(1.00f, 0.66f, 0.52f, 1.0f) },
+        { HairPaintMode::PUFF,    "Puff",    "Add volume and puff", UIWidgets::IconType::HairPuffTool, ImVec4(1.00f, 0.82f, 0.52f, 1.0f) },
+        { HairPaintMode::WAVE,    "Wave",    "Add procedural waves", UIWidgets::IconType::HairWaveTool,    ImVec4(0.50f, 0.84f, 1.00f, 1.0f) },
+        { HairPaintMode::FRIZZ,   "Frizz",   "Add random frizz", UIWidgets::IconType::HairFrizzTool,       ImVec4(0.94f, 0.66f, 1.00f, 1.0f) },
+        { HairPaintMode::SMOOTH,  "Smooth",  "Relax/straighten hair", UIWidgets::IconType::HairSmoothTool,  ImVec4(0.70f, 0.92f, 0.82f, 1.0f) },
+        { HairPaintMode::PINCH,   "Pinch",   "Bunch points together", UIWidgets::IconType::HairPinchTool,   ImVec4(1.00f, 0.74f, 0.58f, 1.0f) },
+        { HairPaintMode::SPREAD,  "Spread",  "Spread points apart", UIWidgets::IconType::HairSpreadTool,        ImVec4(0.64f, 0.80f, 1.00f, 1.0f) },
+        { HairPaintMode::BRAID,   "Braid",   "Braid strands together", UIWidgets::IconType::HairBraidTool,      ImVec4(1.00f, 0.72f, 0.46f, 1.0f) }
+    };
+
+    if (avail_w < 160.0f) {
+        // Slim Grid Mode
+        const int columns = std::max(1, static_cast<int>((avail_w + spacing) / (tool_size + spacing)));
+        int col_idx = 0;
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(spacing, spacing));
+
+        for (const auto& b : brushes) {
+            if (col_idx > 0 && (col_idx % columns) != 0) {
+                ImGui::SameLine(0.0f, spacing);
+            }
+            bool isCurrent = (m_paintMode == b.mode);
+            ImGui::PushID(static_cast<int>(b.mode));
+            if (UIWidgets::IconActionButton("##HairPaintMode", b.icon, "", isCurrent, b.accent, ImVec2(tool_size, tool_size), b.desc, true)) {
+                setPaintMode(isCurrent ? HairPaintMode::NONE : b.mode);
+                m_needsRebuild = true;
+            }
+            ImGui::PopID();
+            col_idx++;
+        }
+        ImGui::PopStyleVar();
+    } else {
+        // Detailed List Mode (Blender style)
+        const float icon_size = 36.0f;
+        const float row_height = icon_size + 6.0f;
+
+        ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.42f, 1.0f), "Hair Paint Brushes");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        for (const auto& b : brushes) {
+            ImGui::PushID(static_cast<int>(b.mode));
+            ImGui::BeginGroup();
+
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            float row_width = ImGui::GetContentRegionAvail().x;
+            bool isCurrent = (m_paintMode == b.mode);
+
+            if (ImGui::InvisibleButton("##row_btn", ImVec2(row_width, row_height))) {
+                setPaintMode(isCurrent ? HairPaintMode::NONE : b.mode);
+                m_needsRebuild = true;
+            }
+            const bool is_hovered = ImGui::IsItemHovered();
+
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (isCurrent) {
+                dl->AddRectFilled(pos, ImVec2(pos.x + row_width, pos.y + row_height), ImGui::ColorConvertFloat4ToU32(ImVec4(b.accent.x, b.accent.y, b.accent.z, 0.22f)), 4.0f);
+                dl->AddRect(pos, ImVec2(pos.x + row_width, pos.y + row_height), ImGui::ColorConvertFloat4ToU32(ImVec4(b.accent.x, b.accent.y, b.accent.z, 0.45f)), 4.0f, 0, 1.0f);
+            } else if (is_hovered) {
+                dl->AddRectFilled(pos, ImVec2(pos.x + row_width, pos.y + row_height), ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, 0.05f)), 4.0f);
+            }
+
+            ImVec2 icon_pos = ImVec2(pos.x + 3.0f, pos.y + 3.0f);
+            UIWidgets::DrawIcon(
+                b.icon,
+                icon_pos,
+                icon_size,
+                ImGui::ColorConvertFloat4ToU32(isCurrent ? b.accent : ImVec4(0.8f, 0.8f, 0.8f, 0.8f)),
+                1.5f
+            );
+
+            ImGui::SetCursorScreenPos(ImVec2(pos.x + icon_size + 10.0f, pos.y + 4.0f));
+            ImGui::Text("%s", b.name);
+            ImGui::SetCursorScreenPos(ImVec2(pos.x + icon_size + 10.0f, pos.y + 20.0f));
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s", b.desc);
+
+            ImGui::EndGroup();
+            ImGui::PopID();
+            ImGui::Spacing();
+        }
+    }
+
+    // Presets dropdown/combo at the bottom
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    auto applyAction = [&](size_t i) {
+        const bool geomChanged = m_presets[i].affectsGeometry;
+        applyPreset(m_presets[i]);
+        syncToGroom(hairSystem);
+        if (geomChanged && !m_selectedGroomName.empty()) {
+            hairSystem.restyleGroom(m_selectedGroomName);
+        }
+        if (renderer) {
+            renderer->setHairMaterial(m_currentMaterial);
+            renderer->resetCPUAccumulation();
+        }
+        m_needsRebuild = true;
+    };
+
+    auto drawPresetGroups = [&]() {
+        // Group 1: Human Hair & Styling
+        ImGui::TextColored(ImVec4(1.0f, 0.73f, 0.42f, 1.0f), "Human Hair & Styling");
+        for (size_t i = 0; i < 5 && i < m_presets.size(); ++i) {
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            std::string label = "    " + m_presets[i].name;
+            if (ImGui::Selectable(label.c_str(), false, 0, ImVec2(0, 22.0f))) {
+                applyAction(i);
+            }
+            UIWidgets::DrawIcon(UIWidgets::IconType::Hair, ImVec2(pos.x + 4.0f, pos.y + 3.0f), 16.0f, IM_COL32(255, 185, 107, 255), 1.2f);
+        }
+        
+        ImGui::Separator();
+        
+        // Group 2: Interior & Nature
+        ImGui::TextColored(ImVec4(0.56f, 0.90f, 0.47f, 1.0f), "Interior & Nature");
+        for (size_t i = 5; i < 8 && i < m_presets.size(); ++i) {
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            std::string label = "    " + m_presets[i].name;
+            if (ImGui::Selectable(label.c_str(), false, 0, ImVec2(0, 22.0f))) {
+                applyAction(i);
+            }
+            UIWidgets::DrawIcon(UIWidgets::IconType::Terrain, ImVec2(pos.x + 4.0f, pos.y + 3.0f), 16.0f, IM_COL32(143, 230, 120, 255), 1.2f);
+        }
+        
+        ImGui::Separator();
+        
+        // Group 3: Fur & Creatures
+        ImGui::TextColored(ImVec4(0.38f, 0.78f, 1.00f, 1.0f), "Fur & Creatures");
+        for (size_t i = 8; i < m_presets.size(); ++i) {
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            std::string label = "    " + m_presets[i].name;
+            if (ImGui::Selectable(label.c_str(), false, 0, ImVec2(0, 22.0f))) {
+                applyAction(i);
+            }
+            UIWidgets::DrawIcon(UIWidgets::IconType::Wind, ImVec2(pos.x + 4.0f, pos.y + 3.0f), 16.0f, IM_COL32(98, 200, 255, 255), 1.2f);
+        }
+    };
+    
+    if (avail_w < 160.0f) {
+        // Slim mode: Draw a neat icon button for presets
+        ImGui::SetCursorPosX((avail_w - tool_size) * 0.5f);
+        if (UIWidgets::IconActionButton("##HairPresetBtn", UIWidgets::IconType::Assets, "", false, ImVec4(1.0f, 0.72f, 0.42f, 1.0f), ImVec2(tool_size, tool_size), "Apply Style Preset...", true)) {
+            ImGui::OpenPopup("HairPresetsPopup");
+        }
+        
+        if (ImGui::BeginPopup("HairPresetsPopup")) {
+            drawPresetGroups();
+            ImGui::EndPopup();
+        }
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.42f, 1.0f), "Style Presets");
+        ImGui::Spacing();
+        
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##HairPresetCombo", "Apply Style Preset...", ImGuiComboFlags_HeightLarge)) {
+            drawPresetGroups();
+            ImGui::EndCombo();
+        }
+    }
+}
+
+
+inline void HairUI::drawGroomPanel(
     HairSystem& hairSystem,
     const std::vector<std::shared_ptr<Triangle>>* triangles,
     Renderer* renderer,
@@ -738,155 +848,6 @@ inline void HairUI::drawGenerationPanel(
 ) {
     ImGui::Text("Target Mesh: %s", 
                 triangles && !triangles->empty() ? "Selected" : "None (select mesh first)");
-    
-    ImGui::Separator();
-    
-    bool structuralChanged = false;
-    bool stylingChanged = false;
-
-    // Strand Count
-    ImGui::Text("Strand Density");
-    int guideCount = static_cast<int>(m_editParams.guideCount);
-    if (ImGui::SliderInt("Guide Strands", &guideCount, 100, 100000)) {
-        m_editParams.guideCount = static_cast<uint32_t>(guideCount);
-        structuralChanged = true;
-    }
-    
-    int interpolated = static_cast<int>(m_editParams.interpolatedPerGuide);
-    // Increased range to support dense fur (DragInt allows manual entry > 128 if needed)
-    if (ImGui::DragInt("Children per Guide", &interpolated, 0.5f, 0, 128)) {
-        m_editParams.interpolatedPerGuide = static_cast<uint32_t>(interpolated);
-        stylingChanged = true;
-    }
-    
-    int points = static_cast<int>(m_editParams.pointsPerStrand);
-    if (ImGui::SliderInt("Points per Strand", &points, 2, 16)) {
-        m_editParams.pointsPerStrand = static_cast<uint32_t>(points);
-        structuralChanged = true;
-    }
-
-    
-    ImGui::Separator();
-    ImGui::Text("Physical Properties");
-    
-    // Length
-    float length_cm = m_editParams.length * 100.0f;
-    if (ImGui::SliderFloat("Length (cm)", &length_cm, 0.1f, 100.0f)) {
-        m_editParams.length = length_cm / 100.0f;
-        stylingChanged = true;
-    }
-    
-    if (ImGui::SliderFloat("Length Variation", &m_editParams.lengthVariation, 0.0f, 1.0f)) stylingChanged = true;
-    
-    // Radius
-    float rootRadius_mm = m_editParams.rootRadius * 1000.0f;
-    if (ImGui::SliderFloat("Root Radius (mm)", &rootRadius_mm, 0.01f, 2.0f)) {
-        m_editParams.rootRadius = rootRadius_mm / 1000.0f;
-        stylingChanged = true;
-    }
-    
-    float tipRadius_mm = m_editParams.tipRadius * 1000.0f;
-    if (ImGui::SliderFloat("Tip Radius (mm)", &tipRadius_mm, 0.001f, 1.0f)) {
-        m_editParams.tipRadius = tipRadius_mm / 1000.0f;
-        stylingChanged = true;
-    }
-
-    
-    ImGui::Separator();
-    ImGui::Text("Styling & Shaping");
-    
-    // Child Radius (Standard control in XGen/Blender)
-    float childRadius_mm = m_editParams.childRadius * 1000.0f;
-    if (ImGui::SliderFloat("Child Spread (mm)", &childRadius_mm, 0.1f, 100.0f)) {
-        m_editParams.childRadius = childRadius_mm / 1000.0f;
-        stylingChanged = true;
-    }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Uniform spread radius of children around guides at clumpiness = 0");
-
-    // Better clumpiness (-1 to 1)
-    if (ImGui::SliderFloat("Clumpiness", &m_editParams.clumpiness, -1.0f, 1.0f, "%.2f")) stylingChanged = true;
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Positive: Tips converge to guide. Negative: Tips flare out.");
-
-    if (ImGui::SliderFloat("Gravity", &m_editParams.gravity, 0.0f, 2.0f)) stylingChanged = true;
-    
-    // Curly / Wavy support
-    if (ImGui::CollapsingHeader("Waves & Curls")) {
-        if (ImGui::SliderFloat("Curl Freq", &m_editParams.curlFrequency, 0.0f, 50.0f)) stylingChanged = true;
-        if (ImGui::SliderFloat("Curl Radius", &m_editParams.curlRadius, 0.0f, 0.1f)) stylingChanged = true;
-        
-        ImGui::Separator();
-        
-        if (ImGui::SliderFloat("Wave Freq", &m_editParams.waveFrequency, 0.0f, 50.0f)) stylingChanged = true;
-        if (ImGui::SliderFloat("Wave Amp", &m_editParams.waveAmplitude, 0.0f, 0.1f)) stylingChanged = true;
-    }
-
-
-    if (ImGui::CollapsingHeader("Noise & Roughness")) {
-        if (ImGui::SliderFloat("Roughness", &m_editParams.roughness, 0.0f, 1.0f)) stylingChanged = true;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Large scale low-frequency noise");
-        
-        if (ImGui::SliderFloat("Frizz", &m_editParams.frizz, 0.0f, 1.0f)) stylingChanged = true;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Small scale high-frequency jitter");
-    }
-
-    if (ImGui::CollapsingHeader("Dynamics & Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
-        if (ImGui::Checkbox("Enable Hair Dynamics (PBD)", &m_editParams.useDynamics)) stylingChanged = true;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Real-time Position Based Dynamics for hair simulation using Verlet integration.");
-
-        if (m_editParams.useDynamics) {
-            ImGui::Indent();
-            if (ImGui::SliderFloat("Damping", &m_editParams.physicsDamping, 0.5f, 1.0f, "%.3f")) stylingChanged = true;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Velocity retention. 1.0 = no friction, 0.5 = heavy drag.");
-
-            if (ImGui::SliderFloat("Stiffness", &m_editParams.physicsStiffness, 0.0f, 1.0f, "%.3f")) stylingChanged = true;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How strongly the hair tries to return to its original groomed shape.");
-
-            if (ImGui::SliderFloat("Mass", &m_editParams.physicsMass, 0.1f, 5.0f, "%.2f")) stylingChanged = true;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Heavier hair reacts slower to wind forces.");
-            ImGui::Unindent();
-        }
-
-        ImGui::Separator();
-        if (ImGui::SliderFloat("Force Influence", &m_editParams.forceInfluence, 0.0f, 2.0f, "%.2f")) stylingChanged = true;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much external force fields (Wind, Turbulence, etc.) affect this groom.\n0 = Ignore forces, 1 = Normal, 2 = Double effect");
-    }
-
-
-    // Live update for styling/structural changes
-    if ((stylingChanged || structuralChanged) && !m_selectedGroomName.empty()) {
-        if (HairGroom* g = hairSystem.getGroom(m_selectedGroomName)) {
-            g->params = m_editParams;
-            g->material = m_currentMaterial; // Sync material changes too
-            
-            // NOTE: restyleGroom handles PointsPerStrand resize and ChildCount changes
-            // For GuideCount changes, one still needs to click "Generate Full" 
-            // but we at least mark it for rebuild if any change happens.
-            hairSystem.restyleGroom(m_selectedGroomName);
-            
-            if (renderer) renderer->resetCPUAccumulation();
-            m_needsRebuild = true;
-        }
-    }
-
-
-    
-    ImGui::Separator();
-    ImGui::Text("Quality & Curves");
-    
-    ImGui::Checkbox("Use B-Spline Interpolation", &m_editParams.useBSpline);
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Use cubic splines for much smoother strands (Requires more CPU/BVH time)");
-    }
-    
-    if (m_editParams.useBSpline) {
-        int subdiv = static_cast<int>(m_editParams.subdivisions);
-        if (ImGui::SliderInt("Subdivisions (Steps)", &subdiv, 0, 4, "%d (Geometric detail)")) {
-            m_editParams.subdivisions = static_cast<uint32_t>(subdiv);
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Tessellation level for cylindrical smoothing.\n0 = Low (Fastest)\n2 = Medium (Balanced)\n4 = High (Ultra smooth)");
-        }
-    }
     
     ImGui::Separator();
     
@@ -969,6 +930,257 @@ inline void HairUI::drawGenerationPanel(
     ImGui::Text("Groom Management");
     drawGroomList(hairSystem, renderer);
 }
+
+inline void HairUI::drawGenerationSettingsPanel(HairSystem& hairSystem, Renderer* renderer) {
+    bool structuralChanged = false;
+    bool stylingChanged = false;
+
+    // Strand Count
+    ImGui::Text("Strand Density");
+    int guideCount = static_cast<int>(m_editParams.guideCount);
+    if (ImGui::SliderInt("Guide Strands", &guideCount, 100, 100000)) {
+        m_editParams.guideCount = static_cast<uint32_t>(guideCount);
+        structuralChanged = true;
+    }
+    
+    int interpolated = static_cast<int>(m_editParams.interpolatedPerGuide);
+    if (ImGui::DragInt("Children per Guide", &interpolated, 0.5f, 0, 128)) {
+        m_editParams.interpolatedPerGuide = static_cast<uint32_t>(interpolated);
+        stylingChanged = true;
+    }
+    
+    int points = static_cast<int>(m_editParams.pointsPerStrand);
+    if (ImGui::SliderInt("Points per Strand", &points, 2, 16)) {
+        m_editParams.pointsPerStrand = static_cast<uint32_t>(points);
+        structuralChanged = true;
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Physical Properties");
+    
+    // Length
+    float length_cm = m_editParams.length * 100.0f;
+    if (ImGui::SliderFloat("Length (cm)", &length_cm, 0.1f, 100.0f)) {
+        m_editParams.length = length_cm / 100.0f;
+        stylingChanged = true;
+    }
+    
+    if (ImGui::SliderFloat("Length Variation", &m_editParams.lengthVariation, 0.0f, 1.0f)) stylingChanged = true;
+    
+    // Radius
+    float rootRadius_mm = m_editParams.rootRadius * 1000.0f;
+    if (ImGui::SliderFloat("Root Radius (mm)", &rootRadius_mm, 0.01f, 2.0f)) {
+        m_editParams.rootRadius = rootRadius_mm / 1000.0f;
+        stylingChanged = true;
+    }
+    
+    float tipRadius_mm = m_editParams.tipRadius * 1000.0f;
+    if (ImGui::SliderFloat("Tip Radius (mm)", &tipRadius_mm, 0.001f, 1.0f)) {
+        m_editParams.tipRadius = tipRadius_mm / 1000.0f;
+        stylingChanged = true;
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Styling & Shaping");
+    
+    // Child Radius
+    float childRadius_mm = m_editParams.childRadius * 1000.0f;
+    if (ImGui::SliderFloat("Child Spread (mm)", &childRadius_mm, 0.1f, 100.0f)) {
+        m_editParams.childRadius = childRadius_mm / 1000.0f;
+        stylingChanged = true;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Uniform spread radius of children around guides at clumpiness = 0");
+
+    // Better clumpiness (-1 to 1)
+    if (ImGui::SliderFloat("Clumpiness", &m_editParams.clumpiness, -1.0f, 1.0f, "%.2f")) stylingChanged = true;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Positive: Tips converge to guide. Negative: Tips flare out.");
+
+    if (ImGui::SliderFloat("Gravity", &m_editParams.gravity, 0.0f, 2.0f)) stylingChanged = true;
+    
+    // Curly / Wavy support
+    if (ImGui::CollapsingHeader("Waves & Curls")) {
+        if (ImGui::SliderFloat("Curl Freq", &m_editParams.curlFrequency, 0.0f, 50.0f)) stylingChanged = true;
+        if (ImGui::SliderFloat("Curl Radius", &m_editParams.curlRadius, 0.0f, 0.1f)) stylingChanged = true;
+        
+        ImGui::Separator();
+        
+        if (ImGui::SliderFloat("Wave Freq", &m_editParams.waveFrequency, 0.0f, 50.0f)) stylingChanged = true;
+        if (ImGui::SliderFloat("Wave Amp", &m_editParams.waveAmplitude, 0.0f, 0.1f)) stylingChanged = true;
+    }
+
+    if (ImGui::CollapsingHeader("Noise & Roughness")) {
+        if (ImGui::SliderFloat("Roughness", &m_editParams.roughness, 0.0f, 1.0f)) stylingChanged = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Large scale low-frequency noise");
+        
+        if (ImGui::SliderFloat("Frizz", &m_editParams.frizz, 0.0f, 1.0f)) stylingChanged = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Small scale high-frequency jitter");
+    }
+
+    if (ImGui::CollapsingHeader("Dynamics & Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::Checkbox("Enable Hair Dynamics (PBD)", &m_editParams.useDynamics)) stylingChanged = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Real-time Position Based Dynamics for hair simulation using Verlet integration.");
+
+        if (m_editParams.useDynamics) {
+            ImGui::Indent();
+            if (ImGui::SliderFloat("Damping", &m_editParams.physicsDamping, 0.5f, 1.0f, "%.3f")) stylingChanged = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Velocity retention. 1.0 = no friction, 0.5 = heavy drag.");
+
+            if (ImGui::SliderFloat("Stiffness", &m_editParams.physicsStiffness, 0.0f, 1.0f, "%.3f")) stylingChanged = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How strongly the hair tries to return to its original groomed shape.");
+
+            if (ImGui::SliderFloat("Mass", &m_editParams.physicsMass, 0.1f, 5.0f, "%.2f")) stylingChanged = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Heavier hair reacts slower to wind forces.");
+            ImGui::Unindent();
+        }
+
+        ImGui::Separator();
+        if (ImGui::SliderFloat("Force Influence", &m_editParams.forceInfluence, 0.0f, 2.0f, "%.2f")) stylingChanged = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much external force fields (Wind, Turbulence, etc.) affect this groom.\n0 = Ignore forces, 1 = Normal, 2 = Double effect");
+    }
+
+    // Live update for styling/structural changes
+    if ((stylingChanged || structuralChanged) && !m_selectedGroomName.empty()) {
+        if (HairGroom* g = hairSystem.getGroom(m_selectedGroomName)) {
+            g->params = m_editParams;
+            g->material = m_currentMaterial; // Sync material changes too
+            hairSystem.restyleGroom(m_selectedGroomName);
+            if (renderer) renderer->resetCPUAccumulation();
+            m_needsRebuild = true;
+        }
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Quality & Curves");
+    
+    ImGui::Checkbox("Use B-Spline Interpolation", &m_editParams.useBSpline);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Use cubic splines for much smoother strands (Requires more CPU/BVH time)");
+    }
+    
+    if (m_editParams.useBSpline) {
+        int subdiv = static_cast<int>(m_editParams.subdivisions);
+        if (ImGui::SliderInt("Subdivisions (Steps)", &subdiv, 0, 4, "%d (Geometric detail)")) {
+            m_editParams.subdivisions = static_cast<uint32_t>(subdiv);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Tessellation level for cylindrical smoothing.\n0 = Low (Fastest)\n2 = Medium (Balanced)\n4 = High (Ultra smooth)");
+        }
+    }
+}
+
+inline void HairUI::drawBrushSettingsPanel(HairSystem& hairSystem) {
+    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.42f, 1.0f), "Brush Parameters");
+    ImGui::Separator();
+    
+    // --- UNDO/REDO ---
+    float undoRedoBtnW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+    {
+        bool canUndoNow = canUndo();
+        if (!canUndoNow) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.4f);
+        if (ImGui::Button("Undo (Ctrl+Z)", ImVec2(undoRedoBtnW, 28)) && canUndoNow) {
+            undo(hairSystem);
+        }
+        if (ImGui::IsItemHovered() && canUndoNow && !m_undoStack.empty()) {
+            ImGui::SetTooltip("Undo: %s (%zu steps)", m_undoStack.back().description.c_str(), m_undoStack.size());
+        }
+        if (!canUndoNow) ImGui::PopStyleVar();
+    }
+    ImGui::SameLine();
+    {
+        bool canRedoNow = canRedo();
+        if (!canRedoNow) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.4f);
+        if (ImGui::Button("Redo (Ctrl+Y)", ImVec2(undoRedoBtnW, 28)) && canRedoNow) {
+            redo(hairSystem);
+        }
+        if (ImGui::IsItemHovered() && canRedoNow && !m_redoStack.empty()) {
+            ImGui::SetTooltip("Redo: %s (%zu steps)", m_redoStack.back().description.c_str(), m_redoStack.size());
+        }
+        if (!canRedoNow) ImGui::PopStyleVar();
+    }
+    ImGui::TextDisabled("History: %zu Undo / %zu Redo", m_undoStack.size(), m_redoStack.size());
+
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Brush Radius
+    float radiusCm = m_brushSettings.radius * 100.0f;
+    if (ImGui::SliderFloat("Radius (cm)", &radiusCm, 0.5f, 50.0f)) {
+        m_brushSettings.radius = radiusCm / 100.0f;
+    }
+    
+    // Brush strength
+    ImGui::SliderFloat("Strength", &m_brushSettings.strength, 0.0f, 1.0f);
+    
+    // Falloff
+    ImGui::SliderFloat("Falloff", &m_brushSettings.falloff, 0.0f, 1.0f, "%.2f (0=Hard, 1=Soft)");
+
+    ImGui::Separator();
+    
+    // Mode-specific options
+    switch (m_paintMode) {
+        case HairPaintMode::CUT:
+            ImGui::Checkbox("Trim at Hit Point (Scissors)", &m_brushSettings.cutAtHitPoint);
+            if (!m_brushSettings.cutAtHitPoint) {
+                ImGui::SliderFloat("Cut Rate", &m_brushSettings.cutLength, 0.1f, 0.9f, "%.2f");
+            }
+            break;
+        case HairPaintMode::COMB:
+            ImGui::Checkbox("Follow Mouse Drag", &m_brushSettings.combFollowDrag);
+            if (!m_brushSettings.combFollowDrag) {
+                float dir[3] = { m_brushSettings.combDirection.x, m_brushSettings.combDirection.y, m_brushSettings.combDirection.z };
+                if (ImGui::SliderFloat3("Comb Direction", dir, -1.0f, 1.0f)) {
+                    m_brushSettings.combDirection = Vec3(dir[0], dir[1], dir[2]).normalize();
+                }
+            }
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Teeth Settings");
+            ImGui::SliderInt("Teeth Count", &m_brushSettings.combTeethCount, 4, 32, "%d teeth");
+            ImGui::SliderFloat("Catch Radius", &m_brushSettings.combCatchRadius, 0.2f, 2.0f, "%.2f");
+            ImGui::SliderFloat("Root Stiffness", &m_brushSettings.combRootStiffness, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Lift", &m_brushSettings.combLift, 0.0f, 1.0f, "%.2f");
+            break;
+        case HairPaintMode::WAVE:
+        case HairPaintMode::FRIZZ:
+            ImGui::SliderFloat("Frequency", &m_brushSettings.frequency, 0.1f, 50.0f);
+            ImGui::SliderFloat("Amplitude", &m_brushSettings.amplitude, 0.0f, 1.0f);
+            break;
+        case HairPaintMode::ADD:
+            ImGui::Checkbox("Affect Only Guides", &m_brushSettings.affectGuides);
+            break;
+        case HairPaintMode::BRAID:
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "Braid Settings");
+            const char* braidTypes[] = { "Standard 3-Strand", "Fishtail", "Rope Twist", "French" };
+            ImGui::Combo("Braid Type", &m_brushSettings.braidType, braidTypes, 4);
+            if (m_brushSettings.braidType == 0) m_brushSettings.braidGroupCount = 3;
+            else if (m_brushSettings.braidType <= 2) m_brushSettings.braidGroupCount = 2;
+            else m_brushSettings.braidGroupCount = 3;
+            ImGui::SliderInt("Groups", &m_brushSettings.braidGroupCount, 2, 5);
+            ImGui::SliderFloat("Tightness", &m_brushSettings.braidTightness, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Twist Frequency", &m_brushSettings.braidFrequency, 1.0f, 10.0f, "%.1f");
+            ImGui::SliderFloat("Width", &m_brushSettings.braidAmplitude, 0.1f, 1.0f, "%.2f");
+            break;
+
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Symmetry:");
+    ImGui::Checkbox("Mirror X", &m_brushSettings.mirrorX); ImGui::SameLine();
+    ImGui::Checkbox("Mirror Y", &m_brushSettings.mirrorY); ImGui::SameLine();
+    ImGui::Checkbox("Mirror Z", &m_brushSettings.mirrorZ);
+
+    ImGui::Separator();
+    ImGui::Text("Target:");
+    ImGui::Checkbox("Affect Guides", &m_brushSettings.affectGuides);
+    ImGui::Checkbox("Affect Children (slower)", &m_brushSettings.affectChildren);
+    ImGui::Checkbox("Hide Children in Stroke", &m_hideChildrenDuringPaint);
+
+    ImGui::Separator();
+    if (ImGui::Button("Exit Paint Mode (ESC)", ImVec2(-1, 32))) {
+        m_paintMode = HairPaintMode::NONE;
+        m_needsRebuild = true;
+    }
+}
+
 
 inline void HairUI::drawMaterialPanel(Renderer* renderer) {
     if (!renderer) return;
@@ -1355,7 +1567,7 @@ inline void HairUI::drawGroomList(HairSystem& hairSystem, Renderer* renderer) {
     std::string groomToDelete;
     std::vector<std::string> groomNames = hairSystem.getGroomNames();
 
-    if (ImGui::BeginChild("GroomScroll", ImVec2(0, 250), true)) {
+    if (ImGui::BeginChild("GroomScroll", ImVec2(0, m_groomListHeight), true)) {
         for (const auto& name : groomNames) {
             HairGroom* g = hairSystem.getGroom(name);
             if (!g) continue;
@@ -1433,6 +1645,22 @@ inline void HairUI::drawGroomList(HairSystem& hairSystem, Renderer* renderer) {
         }
     }
     ImGui::EndChild();
+
+    // Resize handle for Groom list
+    {
+        const float panel_width = ImGui::GetContentRegionAvail().x;
+        const ImVec2 handle_min = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##groom_resize", ImVec2(panel_width, 6.0f));
+        if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+        if (ImGui::IsItemActive()) {
+            m_groomListHeight += ImGui::GetIO().MouseDelta.y;
+            m_groomListHeight = std::clamp(m_groomListHeight, 60.0f, 600.0f);
+        }
+        ImDrawList* hdl = ImGui::GetWindowDrawList();
+        const float cy = handle_min.y + 3.0f;
+        hdl->AddLine(ImVec2(handle_min.x, cy), ImVec2(handle_min.x + panel_width, cy), 
+                     ImGui::IsItemHovered() ? IM_COL32(120, 160, 220, 200) : IM_COL32(80, 80, 90, 150), 2.0f);
+    }
 
     if (!groomToDelete.empty()) {
         hairSystem.removeGroom(groomToDelete);
@@ -1520,21 +1748,21 @@ inline void HairUI::drawPaintPanel(HairSystem& hairSystem) {
         ImGui::PopID();
     };
 
-    DrawSafeBtn(HairPaintMode::ADD,     UIWidgets::IconType::PaintTool,   "Add new hair strands", 0,  ImVec4(0.50f, 0.90f, 0.62f, 1.0f));
-    DrawSafeBtn(HairPaintMode::REMOVE,  UIWidgets::IconType::EraseTool,   "Remove strands", 1,         ImVec4(1.00f, 0.58f, 0.50f, 1.0f));
-    DrawSafeBtn(HairPaintMode::CUT,     UIWidgets::IconType::ScrapeTool,  "Cut strands shorter", 2,    ImVec4(1.00f, 0.72f, 0.42f, 1.0f));
-    DrawSafeBtn(HairPaintMode::COMB,    UIWidgets::IconType::SoftenTool,  "Comb and style strand direction", 3, ImVec4(0.56f, 0.88f, 1.0f, 1.0f));
-    DrawSafeBtn(HairPaintMode::LENGTH,  UIWidgets::IconType::LayerTool,   "Adjust strand length", 4,    ImVec4(0.92f, 0.76f, 0.42f, 1.0f));
-    DrawSafeBtn(HairPaintMode::DENSITY, UIWidgets::IconType::StampTool,   "Adjust local density", 5,    ImVec4(0.74f, 0.84f, 1.0f, 1.0f));
-    DrawSafeBtn(HairPaintMode::CLUMP,   UIWidgets::IconType::ClayTool,    "Increase clumpiness", 6,     ImVec4(1.00f, 0.66f, 0.52f, 1.0f));
-    DrawSafeBtn(HairPaintMode::PUFF,    UIWidgets::IconType::InflateTool, "Add volume and puff", 7,     ImVec4(1.00f, 0.82f, 0.52f, 1.0f));
+    DrawSafeBtn(HairPaintMode::ADD,     UIWidgets::IconType::HairAddTool,   "Add new hair strands", 0,  ImVec4(0.50f, 0.90f, 0.62f, 1.0f));
+    DrawSafeBtn(HairPaintMode::REMOVE,  UIWidgets::IconType::HairRemoveTool,   "Remove strands", 1,         ImVec4(1.00f, 0.58f, 0.50f, 1.0f));
+    DrawSafeBtn(HairPaintMode::CUT,     UIWidgets::IconType::HairCutTool,  "Cut strands shorter", 2,    ImVec4(1.00f, 0.72f, 0.42f, 1.0f));
+    DrawSafeBtn(HairPaintMode::COMB,    UIWidgets::IconType::HairCombTool,  "Comb and style strand direction", 3, ImVec4(0.56f, 0.88f, 1.0f, 1.0f));
+    DrawSafeBtn(HairPaintMode::LENGTH,  UIWidgets::IconType::HairLengthTool,   "Adjust strand length", 4,    ImVec4(0.92f, 0.76f, 0.42f, 1.0f));
+    DrawSafeBtn(HairPaintMode::DENSITY, UIWidgets::IconType::HairDensityTool,   "Adjust local density", 5,    ImVec4(0.74f, 0.84f, 1.0f, 1.0f));
+    DrawSafeBtn(HairPaintMode::CLUMP,   UIWidgets::IconType::HairClumpTool,    "Increase clumpiness", 6,     ImVec4(1.00f, 0.66f, 0.52f, 1.0f));
+    DrawSafeBtn(HairPaintMode::PUFF,    UIWidgets::IconType::HairPuffTool, "Add volume and puff", 7,     ImVec4(1.00f, 0.82f, 0.52f, 1.0f));
     
-    DrawSafeBtn(HairPaintMode::WAVE,    UIWidgets::IconType::DrawTool,    "Add procedural waves", 8,    ImVec4(0.50f, 0.84f, 1.0f, 1.0f));
-    DrawSafeBtn(HairPaintMode::FRIZZ,   UIWidgets::IconType::Noise,       "Add random frizz detail", 9, ImVec4(0.94f, 0.66f, 1.0f, 1.0f));
-    DrawSafeBtn(HairPaintMode::SMOOTH,  UIWidgets::IconType::SmoothTool,  "Relax and straighten hair", 10, ImVec4(0.70f, 0.92f, 0.82f, 1.0f));
-    DrawSafeBtn(HairPaintMode::PINCH,   UIWidgets::IconType::PinchTool,   "Bunch points together", 11,  ImVec4(1.00f, 0.74f, 0.58f, 1.0f));
-    DrawSafeBtn(HairPaintMode::SPREAD,  UIWidgets::IconType::Move,        "Spread points apart", 12,    ImVec4(0.64f, 0.80f, 1.0f, 1.0f));
-    DrawSafeBtn(HairPaintMode::BRAID,   UIWidgets::IconType::Rotate,      "Braid and twist strands together", 13, ImVec4(1.00f, 0.72f, 0.46f, 1.0f));
+    DrawSafeBtn(HairPaintMode::WAVE,    UIWidgets::IconType::HairWaveTool,    "Add procedural waves", 8,    ImVec4(0.50f, 0.84f, 1.00f, 1.0f));
+    DrawSafeBtn(HairPaintMode::FRIZZ,   UIWidgets::IconType::HairFrizzTool,       "Add random frizz detail", 9, ImVec4(0.94f, 0.66f, 1.00f, 1.0f));
+    DrawSafeBtn(HairPaintMode::SMOOTH,  UIWidgets::IconType::HairSmoothTool,  "Relax and straighten hair", 10, ImVec4(0.70f, 0.92f, 0.82f, 1.0f));
+    DrawSafeBtn(HairPaintMode::PINCH,   UIWidgets::IconType::HairPinchTool,   "Bunch points together", 11,  ImVec4(1.00f, 0.74f, 0.58f, 1.0f));
+    DrawSafeBtn(HairPaintMode::SPREAD,  UIWidgets::IconType::HairSpreadTool,        "Spread points apart", 12,    ImVec4(0.64f, 0.80f, 1.00f, 1.0f));
+    DrawSafeBtn(HairPaintMode::BRAID,   UIWidgets::IconType::HairBraidTool,      "Braid and twist strands together", 13, ImVec4(1.00f, 0.72f, 0.46f, 1.0f));
     
     // Exit button
     if (m_paintMode != HairPaintMode::NONE) {

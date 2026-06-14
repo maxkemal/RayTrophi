@@ -218,12 +218,16 @@ public:
      void drawStylizePanel(UIContext& ctx);
      void drawSceneHierarchy(UIContext& ctx);  // Scene hierarchy / outliner panel
      void drawModifiersPanel(UIContext& ctx);  // Modifiers & Sculpting panel
+     void drawSculptPanel(UIContext& ctx);      // Dedicated sculpt panel
+     void activateEditWorkspace(UIContext& ctx);
+     void activateSculptWorkspace(UIContext& ctx);
      void drawPaintPanel(UIContext& ctx);      // Lightweight paint workflow panel
      void drawTerrainPaintPanel(UIContext& ctx, class TerrainObject* terrain);
      void drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<class Triangle>& meshTriangle);
      void drawPaintBrushDock(UIContext& ctx);
      void drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<class Triangle>& meshTriangle, bool rightDockOnly = false);
      void drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<class Triangle>& meshTriangle, bool rightDockOnly = false);
+     void drawEditToolControls(UIContext& ctx, const std::shared_ptr<class Triangle>& meshTriangle, bool rightDockOnly = false);
      void drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapter);
      void drawPaintChannelTextureSlots(UIContext& ctx, Paint::MeshPaintAdapter* adapter);
      void drawMaterialPanel(UIContext& ctx);   // Material/Texture editor for selected object
@@ -404,7 +408,10 @@ public:
          bool proportional_edit = false;
          float proportional_radius = 0.75f;
          float proportional_falloff = 0.65f;
-         int proportional_falloff_type = 0; // 0=Smooth, 1=Linear, 2=Sharp, 3=Sphere, 4=Root
+         int proportional_falloff_type = 0; // 0=Smooth,1=Linear,2=Sharp,3=Sphere,4=Root,5=Custom
+         // Custom falloff curve LUT (y in [0,1] sampled over t in [0,1]); used when
+         // proportional_falloff_type == 5. Empty until the user edits the curve.
+         std::vector<float> custom_falloff_lut;
          float edge_thickness = 1.15f;
          float vertex_radius = 2.75f;
          int max_overlay_triangles = 12000;
@@ -646,6 +653,10 @@ public:
      void handleScatterBrush(UIContext& ctx);  // Viewport brush interaction
      void drawBrushPreview(UIContext& ctx);    // Draw brush circle in viewport
      void drawSculptBrushViewportPreview(UIContext& ctx, const HitRecord& hit, bool ghost = false); // Alpha grid + rings for sculpt
+     // Backend-independent ImGui overlay that tints masked vertices on the
+     // shaded surface. Works in Solid AND Rendered viewport modes and during a
+     // stroke (the GPU edit overlay runs only in Edit mode / Solid shading).
+     void drawSculptMaskViewportOverlay(UIContext& ctx);
     
     // Terrain Brush Settings
     struct TerrainBrushSettings {
@@ -682,8 +693,26 @@ public:
         Clay,
         ClayStrips,
         Crease,
-        Scrape
+        Scrape,
+        // Mask is not a deformer: it paints a per-vertex protection weight
+        // (0 = free, 1 = frozen) that scales down every other brush's effect.
+        // It moves no geometry, so the sculpt commit/BVH-refit tail is skipped.
+        Mask,
+        DrawSharp,   // crisp ridge/crease — Draw with a tightened falloff
+        Nudge,       // tangential push along the stroke direction
+        Blob,        // spherical swell (inflate + lateral gather)
+        Fill,        // directional flatten: fill valleys (Ctrl = deepen)
+        SnakeHook,   // drag the surface along the stroke into a hook/tentacle
+        ElasticDeform // Grab-family: soft, wide, volume-preserving pull
     };
+    // Grab-family tools share the drag-based solve path (primed candidate set +
+    // start positions) rather than the per-dab worldDelta switch. Snake Hook is
+    // included so its pulled region follows the cursor for the whole stroke
+    // (like Grab) instead of dropping out of the per-frame candidate sphere.
+    static inline bool isGrabFamilyTool(SculptBrushTool t) {
+        return t == SculptBrushTool::Grab || t == SculptBrushTool::ElasticDeform ||
+               t == SculptBrushTool::SnakeHook;
+    }
      struct SculptModeState {
         bool enabled = false;
         bool compact_ui = true;
@@ -698,6 +727,11 @@ public:
         bool mirror_x = false;
         bool mirror_y = false;
         bool mirror_z = false;
+        // Radial symmetry: repeat each stroke as N evenly-spaced rotations about
+        // an object-local axis (through the object origin). count >= 2 to apply.
+        bool radial_symmetry = false;
+        int radial_count = 6;     // number of copies including the primary
+        int radial_axis = 1;      // 0 = X, 1 = Y, 2 = Z (object-local)
         // Reserved for the disabled experimental GPU sculpt path.
         bool use_gpu = false;
         SculptModeState() { brush.radius = 0.3f; brush.strength = 1.0f; brush.falloff = 0.75f; }
@@ -710,6 +744,13 @@ public:
         Vec3 start_world_hit;
         Vec3 last_world_hit;
         Vec3 stroke_normal;
+        // Distance-gated dab scheduling (additive brushes only). last_dab_world is
+        // the world position of the last emitted dab; new dabs are placed only every
+        // `spacing` units travelled, with the remainder carried here. This stops the
+        // same spot getting hammered every frame on slow / high-tess meshes (the
+        // "circles piling up" artifact) while keeping even spacing at any speed.
+        Vec3 last_dab_world;
+        bool has_last_dab = false;
         std::unordered_map<int, Vec3> grab_start_local_positions;
         std::unordered_map<int, float> grab_weights_by_vertex;
         // Grab mirror: per-symmetry-combo (mirrorBits 1..7) FIXED candidate set,
@@ -718,6 +759,10 @@ public:
         // like the main grab — otherwise pulled mirror verts drop out of the
         // start-centred query sphere mid-stroke and freeze into spikes/dents.
         std::unordered_map<int, std::vector<int>> grab_mirror_candidate_sets;
+        // Grab radial: per-radial-copy (k = 1..count-1) FIXED candidate set,
+        // captured on the stroke's first frame — same drift-free approach as the
+        // mirror grab, but the start hit/drag are rotated about the radial axis.
+        std::unordered_map<int, std::vector<int>> grab_radial_candidate_sets;
         std::vector<float> layer_accum;
         std::vector<float> clay_layer_accum;
         std::vector<float> clay_strips_layer_accum;
@@ -725,6 +770,22 @@ public:
         std::unordered_map<const class Triangle*, std::shared_ptr<class Triangle>> touched_triangles;
     };
     SculptStrokeState sculpt_stroke_state;
+    // Per-vertex sculpt mask. values[vertexId] in [0,1]: 0 = fully sculptable,
+    // 1 = fully protected. Sized 1:1 with editable_mesh_cache.vertices and
+    // rebuilt whenever the cache revision changes (topology edits invalidate it).
+    struct SculptMaskState {
+        std::string object_name;
+        uint64_t cache_revision = 0;     // editable_mesh_cache.revision this mask was sized against
+        std::vector<float> values;       // per-vertex protection weight, 0..1
+        bool has_any = false;            // fast skip when nothing is masked
+        float paint_strength = 0.5f;     // mask brush deposit scale per stroke
+        bool show_overlay = true;        // tint masked verts in the viewport overlay
+        uint64_t version = 0;            // bumped on any mask change; folds into overlay fingerprint
+        void clear() { object_name.clear(); cache_revision = 0; values.clear(); has_any = false; ++version; }
+    };
+    SculptMaskState sculpt_mask_state;
+    // Mask buffer operations. operation: 0=Clear, 1=Invert, 2=Fill, 3=Smooth, 4=Sharpen.
+    void applySculptMaskOperation(int operation);
     enum class MeshWorkspaceMode : int {
         Edit = 0,
         Sculpt
@@ -737,7 +798,7 @@ public:
     std::vector<PaintBrushPreset> paint_brush_presets;
     char paint_brush_preset_name[64] = "Custom Brush";
     bool paint_brush_presets_initialized = false;
-    float paint_brush_dock_width = 286.0f;
+    float paint_brush_dock_width = 50.0f;
     float paint_layer_list_height = 160.0f; // user-resizable layer list height
     void ensurePaintBrushPresets();
 
@@ -785,7 +846,10 @@ public:
      void handleTerrainBrush(UIContext& ctx);
      void handleTerrainFoliageBrush(UIContext& ctx);  // Foliage paint brush
      void handleHairBrush(UIContext& ctx);            // Hair paint brush
-     void handleMeshSculpt(UIContext& ctx);           // Mesh sculpt brush interaction
+     // overrideHitPoint != nullptr => a single sub-step dab at that world point
+     // (used internally for stroke interpolation on fast strokes; skips mouse
+     // pick, stroke begin/end and re-substepping). Normal callers pass nullptr.
+     void handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint = nullptr); // Mesh sculpt brush interaction
      void handleMeshPaint(UIContext& ctx);            // Mesh texture paint brush
      bool shouldShowPaintBrushDock() const;
      float getPaintBrushDockWidth() const;
@@ -811,6 +875,15 @@ public:
     bool mesh_edit_optix_targeted_sync_enabled = true;
     bool interactive_subdiv_preview_active = false;
     std::string interactive_subdiv_preview_object_name;
+    // Dirty-signature for the steady-state (non-drag) subdivision preview refresh in
+    // syncMeshEditState. Lets the refresh fire ONLY when the subdivision params or base
+    // mesh actually change (was an every-frame full re-evaluate + scene rebuild), and
+    // when it fires it now also queues a GPU sync so Rendered-mode backends update too
+    // (previously only the CPU BVH was flagged → Rendered object stayed stale until some
+    // other op triggered a rebuild/refit).
+    std::size_t subdiv_preview_refresh_signature = 0;
+    std::string subdiv_preview_refresh_object_name;
+    bool subdiv_preview_refresh_valid = false;
     // picking fails because Triangle::hit() reads stale local-space positions.
     bool picking_vertices_synced = false;
 private:

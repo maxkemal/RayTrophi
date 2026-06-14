@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -434,7 +434,11 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(layerColor.x * 0.30f, layerColor.y * 0.30f, layerColor.z * 0.30f, 0.98f));
                     ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(layerColor.x * 0.36f, layerColor.y * 0.36f, layerColor.z * 0.36f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(layerColor.x, layerColor.y, layerColor.z, 0.22f));
-                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
+                    float layer_fr = 10.0f;
+                    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+                        layer_fr = ThemeManager::instance().current().style.frameRounding;
+                    }
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, layer_fr);
                     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
                     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 7.0f));
                     ImGui::SetNextItemOpen(this->terrain_layer_open[i], ImGuiCond_Always);

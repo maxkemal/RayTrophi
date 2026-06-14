@@ -58,6 +58,29 @@ struct Theme {
     ThemeStyle style;
 };
 
+// ============================================================================
+// İKON SİSTEMİ AYARLARI
+// ============================================================================
+
+enum class IconStyle {
+    ClayMatcap = 0,
+    FlatMinimalist = 1,
+    NeonGlow = 2,
+    CustomPalette = 3
+};
+
+struct IconSettings {
+    IconStyle style = IconStyle::ClayMatcap;
+    float scaleMultiplier = 1.0f;
+    float thicknessMultiplier = 1.0f;
+    bool overridePanelAccentsWithTheme = true;
+    
+    ImVec4 customColor = ImVec4(0.90f, 0.52f, 0.18f, 1.0f); // Default to Blender Orange
+    ImVec4 customBgColor = ImVec4(0.18f, 0.18f, 0.19f, 1.0f);
+    ImVec4 customShadowColor = ImVec4(0.0f, 0.0f, 0.0f, 0.5f);
+    ImVec4 matcapColor = ImVec4(0.51f, 0.53f, 0.55f, 1.0f); // Default neutral gray
+};
+
 class ThemeManager {
 public:
     static ThemeManager& instance() {
@@ -67,22 +90,31 @@ public:
 
     void registerDefaultThemes();
     void addTheme(const Theme& theme);
+    void deleteTheme(int index);
     void setTheme(int index);
     void setTheme(const std::string& name);
     void applyCurrentTheme(float panelAlpha = 0.75f);
     void saveThemeSettings(const std::string& filepath, float panelAlpha);
     bool loadThemeSettings(const std::string& filepath, float& panelAlpha);
+    
+    void saveCustomThemes(const std::string& filepath);
+    void loadCustomThemes(const std::string& filepath);
 
     const Theme& current() const { return themes_[currentIndex_]; }
+    Theme& getThemeMutable(int index) { return themes_[index]; }
     int currentIndex() const { return currentIndex_; }
     int themeCount() const { return static_cast<int>(themes_.size()); }
     const char* getThemeName(int index) const;
     std::vector<const char*> getAllThemeNames() const;
 
+    IconSettings& getIconSettings() { return iconSettings_; }
+    const IconSettings& getIconSettings() const { return iconSettings_; }
+
 private:
     ThemeManager() { registerDefaultThemes(); }
     std::vector<Theme> themes_;
-    int currentIndex_ = 4;
+    int currentIndex_ = 0;
+    IconSettings iconSettings_;
 };
 
 // ============================================================================
@@ -203,14 +235,17 @@ namespace UIWidgets {
         Play, Pause, Stop, Duplicate, Help, AddKey, RemoveKey,
         PaintTool, EraseTool, SoftenTool, StampTool, FillTool, CloneTool, SprayTool,
         GrabTool, InflateTool, SmoothTool, FlattenTool, DrawTool, LayerTool,
-        PinchTool, ClayTool, ClayStripsTool, CreaseTool, ScrapeTool,
+        PinchTool, ClayTool, ClayStripsTool, CreaseTool, ScrapeTool, MaskTool, DrawSharpTool, NudgeTool, BlobTool, SculptFillTool, SnakeHookTool, ElasticDeformTool,
         VertexMode, EdgeMode, FaceMode,
         AddFace, MergeVertices, WeldVertices, DissolveTopology,
         LoopCutTool, ExtrudeFaceTool, DeleteFaceTool, ShadeFlatTool, ShadeSmoothTool,
         Wind, Gravity, Physics, Vortex, Noise, Magnet,
         Camera, Light, Mesh,
         Timeline, Console, Graph, AnimGraph, Assets,
-        LightPoint, LightDir, LightSpot, LightArea
+        LightPoint, LightDir, LightSpot, LightArea,
+        HairAddTool, HairRemoveTool, HairCutTool, HairCombTool, HairLengthTool, 
+        HairDensityTool, HairClumpTool, HairPuffTool, HairWaveTool, HairFrizzTool, 
+        HairSmoothTool, HairPinchTool, HairSpreadTool, HairBraidTool
     };
 
     void DrawIcon(IconType type, ImVec2 pos, float size, ImU32 color, float thickness = 1.5f);

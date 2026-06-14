@@ -238,7 +238,11 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
             
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.9f, 0.1f, 0.1f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.2f, 0.2f, 1.0f));
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+            float restart_btn_round = 4.0f;
+            if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+                restart_btn_round = ThemeManager::instance().current().style.frameRounding;
+            }
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, restart_btn_round);
             
             if (ImGui::Button("Apply New Resolution (Restart Simulation)", ImVec2(-1, 35))) {
                 gas->stop();

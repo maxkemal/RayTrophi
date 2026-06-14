@@ -1,4 +1,4 @@
-﻿// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - HIERARCHY PANEL
 // ═══════════════════════════════════════════════════════════════════════════════
 // This file handles the Scene Hierarchy tree view (Outliner).
@@ -104,24 +104,68 @@ static void drawSkeletonHierarchyTree(const SceneData::ImportedModelContext& mod
 // ═══════════════════════════════════════════════════════════════════════════════
 void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     UIWidgets::PushControlSurfaceStyle(ImVec4(0.62f, 0.82f, 1.0f, 1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 14.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 14.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 14.0f);
+    
+    float child_round = 14.0f;
+    float frame_round = 14.0f;
+    float grab_round = 14.0f;
+    float popup_round = 14.0f;
+    
+    ImVec4 child_bg = ImVec4(0.10f, 0.115f, 0.14f, 0.94f);
+    ImVec4 frame_bg = ImVec4(0.13f, 0.145f, 0.17f, 0.98f);
+    ImVec4 frame_bg_hovered = ImVec4(0.16f, 0.18f, 0.215f, 0.99f);
+    ImVec4 frame_bg_active = ImVec4(0.19f, 0.215f, 0.25f, 1.0f);
+    
+    ImVec4 header = ImVec4(0.14f, 0.17f, 0.21f, 0.96f);
+    ImVec4 header_hovered = ImVec4(0.18f, 0.21f, 0.26f, 0.98f);
+    ImVec4 header_active = ImVec4(0.22f, 0.25f, 0.30f, 1.0f);
+    
+    ImVec4 button = ImVec4(0.14f, 0.155f, 0.18f, 0.94f);
+    ImVec4 button_hovered = ImVec4(0.18f, 0.20f, 0.24f, 0.98f);
+    ImVec4 button_active = ImVec4(0.22f, 0.24f, 0.28f, 1.0f);
+    
+    ImVec4 border = ImVec4(0.62f, 0.82f, 1.0f, 0.18f);
+
+    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+        const auto& curTheme = ThemeManager::instance().current();
+        child_round = curTheme.style.windowRounding;
+        frame_round = curTheme.style.frameRounding;
+        grab_round = curTheme.style.grabRounding;
+        popup_round = curTheme.style.popupRounding;
+        
+        child_bg = ImVec4(curTheme.colors.surface.x, curTheme.colors.surface.y, curTheme.colors.surface.z, 0.94f);
+        frame_bg = curTheme.colors.surface;
+        frame_bg_hovered = UIWidgets::ScaleColor(curTheme.colors.surface, 1.3f);
+        frame_bg_active = UIWidgets::ScaleColor(curTheme.colors.surface, 1.5f);
+        
+        header = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.22f);
+        header_hovered = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.48f);
+        header_active = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.70f);
+        
+        button = ImVec4(curTheme.colors.surface.x, curTheme.colors.surface.y, curTheme.colors.surface.z, 0.75f);
+        button_hovered = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.65f);
+        button_active = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.85f);
+        
+        border = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.20f);
+    }
+
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, child_round);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, frame_round);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, grab_round);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, popup_round);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_IndentSpacing, 16.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(8.0f, 6.0f));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.115f, 0.14f, 0.94f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.13f, 0.145f, 0.17f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.16f, 0.18f, 0.215f, 0.99f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.19f, 0.215f, 0.25f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.14f, 0.17f, 0.21f, 0.96f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.18f, 0.21f, 0.26f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.155f, 0.18f, 0.94f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.20f, 0.24f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.22f, 0.24f, 0.28f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.62f, 0.82f, 1.0f, 0.18f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, child_bg);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, frame_bg);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, frame_bg_hovered);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, frame_bg_active);
+    ImGui::PushStyleColor(ImGuiCol_Header, header);
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, header_hovered);
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, header_active);
+    ImGui::PushStyleColor(ImGuiCol_Button, button);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, button_hovered);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, button_active);
+    ImGui::PushStyleColor(ImGuiCol_Border, border);
     // Window creation logic removed - now embedded in tabs
 
     // Check if embedded in another window, if not create child
@@ -1896,13 +1940,32 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 ImGui::Spacing();
                 
                 // ── DISTINCT INPUT FIELD STYLING FOR CAMERA PROPERTIES ────────────────
-                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.18f, 0.20f, 0.25f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.4f, 0.6f, 0.8f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.5f, 0.7f, 0.9f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.38f, 0.45f, 0.8f));
-                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+                ImVec4 camFrameBg = ImVec4(0.12f, 0.12f, 0.15f, 1.0f);
+                ImVec4 camFrameBgHovered = ImVec4(0.18f, 0.20f, 0.25f, 1.0f);
+                ImVec4 camFrameBgActive = ImVec4(0.22f, 0.25f, 0.30f, 1.0f);
+                ImVec4 camSliderGrab = ImVec4(0.4f, 0.6f, 0.8f, 1.0f);
+                ImVec4 camSliderGrabActive = ImVec4(0.5f, 0.7f, 0.9f, 1.0f);
+                ImVec4 camBorder = ImVec4(0.35f, 0.38f, 0.45f, 0.8f);
+                float camFrameRounding = 3.0f;
+                
+                if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+                    const auto& curTheme = ThemeManager::instance().current();
+                    camFrameBg = curTheme.colors.surface;
+                    camFrameBgHovered = UIWidgets::ScaleColor(curTheme.colors.surface, 1.3f);
+                    camFrameBgActive = UIWidgets::ScaleColor(curTheme.colors.surface, 1.5f);
+                    camSliderGrab = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.92f);
+                    camSliderGrabActive = ImVec4((std::min)(1.0f, curTheme.colors.accent.x + 0.10f), (std::min)(1.0f, curTheme.colors.accent.y + 0.10f), (std::min)(1.0f, curTheme.colors.accent.z + 0.10f), 1.0f);
+                    camBorder = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.20f);
+                    camFrameRounding = curTheme.style.frameRounding;
+                }
+
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, camFrameBg);
+                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, camFrameBgHovered);
+                ImGui::PushStyleColor(ImGuiCol_FrameBgActive, camFrameBgActive);
+                ImGui::PushStyleColor(ImGuiCol_SliderGrab, camSliderGrab);
+                ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, camSliderGrabActive);
+                ImGui::PushStyleColor(ImGuiCol_Border, camBorder);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, camFrameRounding);
                 ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
 
                 // ═══════════════════════════════════════════════════════════════════════════
