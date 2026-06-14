@@ -1,4 +1,4 @@
-﻿#include "scene_ui.h"
+#include "scene_ui.h"
 
 #include "Backend/OptixBackend.h"
 #include "Backend/IViewportBackend.h"
@@ -1142,6 +1142,49 @@ bool isSubdivisionPreviewActive(UIContext& ctx, const std::string& objectName) {
         !ctx.scene.base_mesh_cache[objectName].empty();
 }
 
+// Fingerprint of everything the steady-state subdivision preview depends on: the
+// subdivision modifier params and the base (cage) mesh vertex positions. When this
+// changes the display mesh must be re-evaluated AND re-synced to all backends; when it
+// is stable we can skip the (expensive) every-frame rebuild entirely.
+std::size_t computeSubdivisionPreviewSignature(UIContext& ctx, const std::string& objectName) {
+    std::size_t h = std::hash<std::string>{}(objectName);
+    auto mix = [&h](std::size_t v) {
+        h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    };
+
+    const auto stackIt = ctx.scene.mesh_modifiers.find(objectName);
+    if (stackIt != ctx.scene.mesh_modifiers.end()) {
+        for (const auto& mod : stackIt->second.modifiers) {
+            if (mod.type != MeshModifiers::ModifierType::FlatSubdivision &&
+                mod.type != MeshModifiers::ModifierType::SmoothSubdivision) {
+                continue;
+            }
+            mix(mod.enabled ? 1u : 0u);
+            mix(static_cast<std::size_t>(static_cast<int>(mod.type)));
+            mix(static_cast<std::size_t>(mod.levels));
+            mix(std::hash<float>{}(mod.smoothAngle));
+        }
+    }
+
+    const auto baseIt = ctx.scene.base_mesh_cache.find(objectName);
+    if (baseIt != ctx.scene.base_mesh_cache.end()) {
+        mix(baseIt->second.size());
+        for (const auto& tri : baseIt->second) {
+            if (!tri) {
+                continue;
+            }
+            for (int c = 0; c < 3; ++c) {
+                const Vec3& p = tri->getOriginalVertexPosition(c);
+                mix(std::hash<float>{}(p.x));
+                mix(std::hash<float>{}(p.y));
+                mix(std::hash<float>{}(p.z));
+            }
+        }
+    }
+
+    return h;
+}
+
 std::vector<std::shared_ptr<Triangle>> evaluateDisplayMeshFromBase(
     const std::vector<std::shared_ptr<Triangle>>& baseMesh,
     const MeshModifiers::ModifierStack& stack) {
@@ -1416,6 +1459,47 @@ Vec3 computeOrientationPreservingFaceNormal(const Triangle& triangle, const Vec3
     return faceNormal;
 }
 
+// --- Sculpt mask helpers -------------------------------------------------
+// The mask is a per-vertex protection weight (0 = free, 1 = frozen) sized 1:1
+// with the editable mesh cache. It survives across strokes but is rebuilt when
+// the cache revision changes (any topology edit), since vertex ids may shift.
+void ensureSculptMaskSized(SceneUI::SculptMaskState& mask,
+                           const SceneUI::EditableMeshCache& cache,
+                           const std::string& objectName) {
+    const size_t vertexCount = cache.vertices.size();
+    const bool stale = mask.object_name != objectName ||
+                       mask.cache_revision != cache.revision ||
+                       mask.values.size() != vertexCount;
+    if (stale) {
+        mask.object_name = objectName;
+        mask.cache_revision = cache.revision;
+        mask.values.assign(vertexCount, 0.0f);
+        mask.has_any = false;
+    }
+}
+
+// Returns the brush attenuation for a vertex: 1 = full effect, 0 = fully masked.
+inline float sculptMaskFactor(const SceneUI::SculptMaskState& mask, size_t vertexId) {
+    if (!mask.has_any || vertexId >= mask.values.size()) {
+        return 1.0f;
+    }
+    return 1.0f - std::clamp(mask.values[vertexId], 0.0f, 1.0f);
+}
+
+// Rotate an object-local point/vector about a local axis (0=X,1=Y,2=Z) through
+// the object origin. Used for radial symmetry — works for both positions and
+// direction vectors since the rotation is about the origin.
+inline Vec3 rotateLocalAroundAxis(const Vec3& p, int axis, float angleRad) {
+    const float c = std::cos(angleRad);
+    const float s = std::sin(angleRad);
+    switch (axis) {
+    case 0: return Vec3(p.x, c * p.y - s * p.z, s * p.y + c * p.z); // X
+    case 2: return Vec3(c * p.x - s * p.y, s * p.x + c * p.y, p.z); // Z
+    case 1:
+    default: return Vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z); // Y
+    }
+}
+
 void applyClayPolishPass(
     const SceneUI::EditableMeshCache& cache,
     std::vector<Vec3>& updatedLocalPositions,
@@ -1571,6 +1655,13 @@ void applyClayAntiPitPass(
 
 
 
+// Active custom falloff LUT, pointed at MeshOverlaySettings::custom_falloff_lut by
+// the UI thread before each sculpt / soft-select solve. Read-only during the
+// parallel solves (the vector is never resized while a solve runs), so a plain
+// file-static pointer is safe and avoids threading a LUT arg through ~12 call sites.
+static const std::vector<float>* g_activeFalloffLut = nullptr;
+void setActiveFalloffLut(const std::vector<float>* lut) { g_activeFalloffLut = lut; }
+
 float applyFalloffCurve(float t, int falloffType) {
     t = saturateFloat(t);
     switch (falloffType) {
@@ -1582,6 +1673,17 @@ float applyFalloffCurve(float t, int falloffType) {
         return std::sqrt((std::max)(0.0f, 1.0f - (1.0f - t) * (1.0f - t)));
     case 4: // Root
         return std::sqrt(t);
+    case 5: { // Custom LUT (linear interpolation between samples)
+        if (g_activeFalloffLut && g_activeFalloffLut->size() >= 2) {
+            const std::vector<float>& lut = *g_activeFalloffLut;
+            const float ft = t * static_cast<float>(lut.size() - 1);
+            const int i0 = static_cast<int>(ft);
+            const int i1 = (std::min)(i0 + 1, static_cast<int>(lut.size()) - 1);
+            const float frac = ft - static_cast<float>(i0);
+            return saturateFloat(lut[i0] * (1.0f - frac) + lut[i1] * frac);
+        }
+        return t * t * (3.0f - 2.0f * t); // fall back to Smooth until edited
+    }
     case 0: // Smooth
     default:
         return t * t * (3.0f - 2.0f * t);
@@ -1996,6 +2098,18 @@ SculptCandidateSet resolveSculptCandidates(
     return result;
 }
 
+// Grab-family radial weight. Grab uses the user falloff curve (tight, rigid).
+// Elastic uses a soft, wide shoulder (sqrt of smoothstep) so the whole region
+// drags together like soft rubber — a broad, smooth pull instead of a focused one.
+inline float grabFamilyWeight(float planarDistOverRadius, int falloffType, bool elastic) {
+    const float t = saturateFloat(1.0f - saturateFloat(planarDistOverRadius));
+    if (elastic) {
+        const float s = t * t * (3.0f - 2.0f * t); // smoothstep
+        return std::sqrt(s);                        // wider shoulder, 0 at the rim
+    }
+    return applyFalloffCurve(t, falloffType);
+}
+
 void primeGrabStrokeWeights(
     SceneUI::SculptStrokeState& strokeState,
     const SceneUI::EditableMeshCache& editableMeshCache,
@@ -2005,7 +2119,8 @@ void primeGrabStrokeWeights(
     const Vec3& hitNormalWorld,
     float radiusWorld,
     bool frontFacesOnly,
-    int falloffType) {
+    int falloffType,
+    bool elastic) {
     if (!strokeState.grab_weights_by_vertex.empty()) {
         return;
     }
@@ -2037,9 +2152,7 @@ void primeGrabStrokeWeights(
             continue;
         }
 
-        const float weight = applyFalloffCurve(
-            1.0f - saturateFloat(planarDistance / radiusWorld),
-            falloffType);
+        const float weight = grabFamilyWeight(planarDistance / radiusWorld, falloffType, elastic);
         strokeState.grab_weights_by_vertex[vertexIdInt] = weight;
     }
 }
@@ -2350,6 +2463,7 @@ bool applyNonGrabSculptCandidate(
     const Vec3& hitNormalWorld,
     const Vec3& strokeTangentWorld,
     const Vec3& strokeBitangentWorld,
+    const Vec3& strokeStepWorld,
     float brushStrength,
     float clayBrushStrength,
     float clayRadiusCompensation,
@@ -2583,6 +2697,67 @@ bool applyNonGrabSculptCandidate(
         worldDelta = pinchDelta + cutDelta;
         break;
     }
+    case SceneUI::SculptBrushTool::DrawSharp: {
+        // Crisp ridge/crease: square the weight so the falloff edge is much
+        // tighter than Draw, and push along the vertex normal. Ctrl digs inward.
+        Vec3 vertexNormal = hitNormalWorld;
+        if (!vertex.refs.empty() && vertex.refs[0].triangle) {
+            const Vec3 n = vertex.refs[0].triangle->vertices[vertex.refs[0].corner].normal;
+            if (n.length_squared() > 1e-8f) {
+                vertexNormal = safeNormalizeVec3(n, hitNormalWorld);
+            }
+        }
+        const float sharpW = sample.weight * sample.weight;
+        worldDelta = vertexNormal * (radiusWorld * 0.26f * brushStrength * dt * sharpW *
+            (1.0f + normalStrength) * directionSign);
+        break;
+    }
+    case SceneUI::SculptBrushTool::Nudge: {
+        // Move the surface by the actual stroke step this frame (speed-aware),
+        // weighted by falloff. No normal component, so it slides along the surface.
+        worldDelta = strokeStepWorld * (sample.weight * brushStrength * directionSign);
+        break;
+    }
+    case SceneUI::SculptBrushTool::Blob: {
+        // Spherical swell: inflate along the normal + gather laterally toward the
+        // brush center for a rounded bulge. Ctrl deflates/contracts.
+        const Vec3 toCenter = planePoint - sample.world_position;
+        const Vec3 lateral = toCenter - hitNormalWorld * toCenter.dot(hitNormalWorld);
+        const float lateralLen = lateral.length();
+        Vec3 gather(0.0f, 0.0f, 0.0f);
+        if (lateralLen > 1e-8f) {
+            gather = (lateral / lateralLen) * (radiusWorld * 0.10f * brushStrength * dt *
+                sample.weight * directionSign);
+        }
+        worldDelta = hitNormalWorld * (radiusWorld * 0.26f * brushStrength * dt * sample.weight *
+            (1.0f + normalStrength) * directionSign) + gather;
+        break;
+    }
+    case SceneUI::SculptBrushTool::Fill: {
+        // Directional flatten. dirSign > 0: only raise verts BELOW the brush plane
+        // (fill valleys). Ctrl (dirSign < 0): only push down verts above (deepen).
+        const float signedDistance = (sample.world_position - planePoint).dot(hitNormalWorld);
+        if ((directionSign > 0.0f && signedDistance < 0.0f) ||
+            (directionSign < 0.0f && signedDistance > 0.0f)) {
+            worldDelta = hitNormalWorld * (-signedDistance * brushStrength * dt * 12.0f * sample.weight);
+        }
+        break;
+    }
+    case SceneUI::SculptBrushTool::SnakeHook: {
+        // Drag the surface by the actual stroke motion (so the region follows the
+        // cursor and trails into a hook), and pinch laterally toward the center so
+        // the pulled tip narrows. Pinch scales with stroke speed (0 when still).
+        const float stepLen = strokeStepWorld.length();
+        const Vec3 toCenter = planePoint - sample.world_position;
+        const Vec3 lateral = toCenter - hitNormalWorld * toCenter.dot(hitNormalWorld);
+        const float lateralLen = lateral.length();
+        Vec3 pinch(0.0f, 0.0f, 0.0f);
+        if (lateralLen > 1e-8f) {
+            pinch = (lateral / lateralLen) * (stepLen * 0.45f * brushStrength * sample.weight);
+        }
+        worldDelta = strokeStepWorld * (sample.weight * brushStrength) + pinch;
+        break;
+    }
     case SceneUI::SculptBrushTool::Smooth: {
         const Vec3 smoothDeltaLocal = computeBoundarySafeSmoothDelta(
             editableMeshCache,
@@ -2600,6 +2775,9 @@ bool applyNonGrabSculptCandidate(
         return true;
     }
     case SceneUI::SculptBrushTool::Grab:
+    case SceneUI::SculptBrushTool::ElasticDeform:
+        return false;
+    default:
         return false;
     }
 
@@ -2619,7 +2797,15 @@ bool applyNonGrabSculptCandidate(
     // pratikte tetiklenmez; yalnızca yoğun bölgelerde devreye girer.
     const float meshAvgEdgeLocal = sanitizeFiniteFloat(
         sculptControlGraph.avg_edge_length, 0.05f, 1e-6f, 1000000.0f);
-    const float maxLocalStep = (std::max)(meshAvgEdgeLocal * 0.4f, localRadius * 1e-4f);
+    float maxLocalStep = (std::max)(meshAvgEdgeLocal * 0.4f, localRadius * 1e-4f);
+    // Nudge / Snake Hook drag the surface along with the cursor: the tight
+    // anti-flip clamp would make pulled verts lag behind the brush and drop out
+    // of the candidate sphere (the pull "stalls" at the radius edge). Let them
+    // take a much larger per-frame step so the region keeps up with the stroke.
+    if (activeTool == SceneUI::SculptBrushTool::SnakeHook ||
+        activeTool == SceneUI::SculptBrushTool::Nudge) {
+        maxLocalStep = (std::max)(maxLocalStep, localRadius * 0.9f);
+    }
     const float localDeltaLen = std::sqrt(localDeltaLenSq);
     if (std::isfinite(localDeltaLen) && localDeltaLen > maxLocalStep) {
         localDelta *= (maxLocalStep / localDeltaLen);
@@ -3712,6 +3898,8 @@ void SceneUI::resetMeshEditState(UIContext& ctx) {
     mesh_edit_optix_targeted_sync_enabled = true;
     interactive_subdiv_preview_active = false;
     interactive_subdiv_preview_object_name.clear();
+    subdiv_preview_refresh_valid = false;
+    subdiv_preview_refresh_object_name.clear();
     sculpt_stroke_state = SculptStrokeState{};
 }
 
@@ -3771,7 +3959,26 @@ void SceneUI::syncMeshEditState(UIContext& ctx) {
     if (mesh_overlay_settings.edit_mode &&
         mesh_workspace_mode == MeshWorkspaceMode::Edit &&
         isSubdivisionPreviewActive(ctx, active_mesh_edit_object_name)) {
-        refreshEditableDisplayMeshFromBase(ctx, active_mesh_edit_object_name, false);
+        // Interactive vertex drag drives its own live preview from
+        // applySelectedMeshElementTranslation / endInteractiveSubdivisionPreview, so skip
+        // here while a drag is in flight. Outside a drag, re-evaluate ONLY when the
+        // subdivision params or cage mesh actually changed — and when they do, queue a GPU
+        // sync so Rendered-mode backends (Vulkan RT / OptiX) refresh too. Previously this
+        // ran every frame with queueGpuSync=false, which kept the CPU BVH current but left
+        // the GPU object drawn in its old (un-subdivided) state until some other op forced
+        // a backend rebuild/refit.
+        if (!isInteractiveSubdivisionPreviewActiveForObject(active_mesh_edit_object_name)) {
+            const std::size_t signature =
+                computeSubdivisionPreviewSignature(ctx, active_mesh_edit_object_name);
+            if (!subdiv_preview_refresh_valid ||
+                subdiv_preview_refresh_object_name != active_mesh_edit_object_name ||
+                subdiv_preview_refresh_signature != signature) {
+                subdiv_preview_refresh_valid = true;
+                subdiv_preview_refresh_object_name = active_mesh_edit_object_name;
+                subdiv_preview_refresh_signature = signature;
+                refreshEditableDisplayMeshFromBase(ctx, active_mesh_edit_object_name, true);
+            }
+        }
     }
 
     auto activeCacheIt = mesh_cache.find(active_mesh_edit_object_name);
@@ -7046,7 +7253,7 @@ void SceneUI::queueMeshEditGpuSync(const std::string& objectName) {
     gpu_edit_overlay_sync.geometry_dirty = true;
 }
 
-void SceneUI::handleMeshSculpt(UIContext& ctx) {
+void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
     if (terrain_sculpt_proxy_active) {
         return;
     }
@@ -7235,28 +7442,38 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         hit.interpolated_normal = hit.normal;
     }
 
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && didHit) {
-        beginSculptStroke(
-            sculpt_stroke_state,
-            activeTool,
-            objectName,
-            hit,
-            editable_mesh_cache.vertices.size());
-        // Force a full cache->buffer resync on the stroke's first solve frame. The
-        // persistent sculpt_updated_local_positions may be stale from a prior stroke,
-        // an undo, or an external cache edit; clearing it triggers the size-mismatch
-        // rebuild in the solve block exactly once (keeps capacity, no realloc churn).
-        sculpt_updated_local_positions.clear();
+    // Sub-step dab: override the brush center with the interpolated segment point.
+    // The mouse-picked normal is a good-enough surface normal over the short span.
+    if (overrideHitPoint && didHit) {
+        hit.point = sanitizeVec3(*overrideHitPoint, hit.point);
     }
 
-    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        finishStroke();
-        return;
+    // Stroke begin / end and mouse polling only happen on the real (non-substep)
+    // call. Sub-step dabs run mid-stroke with the mouse already held.
+    if (!overrideHitPoint) {
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && didHit) {
+            beginSculptStroke(
+                sculpt_stroke_state,
+                activeTool,
+                objectName,
+                hit,
+                editable_mesh_cache.vertices.size());
+            // Force a full cache->buffer resync on the stroke's first solve frame. The
+            // persistent sculpt_updated_local_positions may be stale from a prior stroke,
+            // an undo, or an external cache edit; clearing it triggers the size-mismatch
+            // rebuild in the solve block exactly once (keeps capacity, no realloc churn).
+            sculpt_updated_local_positions.clear();
+        }
+
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            finishStroke();
+            return;
+        }
     }
 
     if (sculpt_stroke_state.active &&
         sculpt_stroke_state.object_name == objectName &&
-        activeTool == SculptBrushTool::Grab &&
+        isGrabFamilyTool(activeTool) &&
         !didHit) {
         const Vec3 fallbackNormal = sculpt_stroke_state.stroke_normal.length_squared() > 1e-8f
             ? sculpt_stroke_state.stroke_normal.normalize()
@@ -7296,7 +7513,72 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
             radiusWorld = std::clamp(estimatedRadius, 0.0001f, 1000.0f);
         }
     }
-    const float brushStrength = sanitizeFiniteFloat(sculpt_mode_state.brush.strength, 1.0f, 0.0f, 1.0f);
+
+    // --- Stroke dab scheduling (sub-stepping + distance gating) ---
+    // Two distinct problems, two paths, both driven from the real (non-substep)
+    // call. Each emitted sub-dab recurses with overrideHitPoint and advances
+    // last_world_hit so the chain stays seamless.
+    //
+    //  * Grab-family (Grab/Elastic/SnakeHook): an absolute, idempotent solve
+    //    (startLocal + drag*weight). It MUST run every frame to keep following
+    //    the cursor, and re-applying it at the same spot does nothing — so there
+    //    is no pile-up. Only sub-step to seed dynamic verts along fast segments.
+    //
+    //  * Additive brushes (DrawSharp/Clay/Inflate/Fill/Nudge/...): every dab ADDS
+    //    displacement, so applying one per frame hammers the same spot when the
+    //    cursor moves slowly or the frame rate drops on a high-tess mesh — that's
+    //    the "circles piling up / block-block" artifact. Gate dabs by DISTANCE:
+    //    place one only every `spacing` units travelled, carry the remainder, and
+    //    emit nothing on frames that didn't travel a full spacing. Same mechanism
+    //    also interpolates fast strokes (multiple dabs per segment).
+    if (!overrideHitPoint && sculpt_stroke_state.active && sculpt_stroke_state.changed && didHit) {
+        const Vec3 curHit = hitPoint;
+        const float spacing = (std::max)(radiusWorld * 0.25f, 1e-4f);
+
+        if (isGrabFamilyTool(activeTool)) {
+            const Vec3 lastHit = sanitizeVec3(sculpt_stroke_state.last_world_hit, curHit);
+            const float segDist = (curHit - lastHit).length();
+            const int substeps = std::clamp(
+                static_cast<int>(std::ceil(segDist / spacing)), 1, 24);
+            if (substeps > 1) {
+                for (int i = 1; i <= substeps; ++i) {
+                    const Vec3 sub = lastHit + (curHit - lastHit) *
+                        (static_cast<float>(i) / static_cast<float>(substeps));
+                    handleMeshSculpt(ctx, &sub);
+                }
+                return;
+            }
+            // else: single dab this frame — fall through.
+        } else {
+            // Anchor on the last emitted dab (carries the sub-spacing remainder);
+            // on the very first gated frame fall back to last_world_hit (the click).
+            const Vec3 lastDab = sculpt_stroke_state.has_last_dab
+                ? sanitizeVec3(sculpt_stroke_state.last_dab_world, curHit)
+                : sanitizeVec3(sculpt_stroke_state.last_world_hit, curHit);
+            const Vec3 seg = curHit - lastDab;
+            const float segDist = seg.length();
+            if (segDist < spacing) {
+                // Not enough travel for a new dab — skip this frame entirely so
+                // the spot isn't hammered. last_dab_world / last_world_hit unchanged.
+                return;
+            }
+            const Vec3 dir = seg / segDist;
+            const int dabCount = std::clamp(
+                static_cast<int>(std::floor(segDist / spacing)), 1, 24);
+            for (int i = 1; i <= dabCount; ++i) {
+                const Vec3 sub = lastDab + dir * (spacing * static_cast<float>(i));
+                handleMeshSculpt(ctx, &sub);
+            }
+            // Carry: advance the dab anchor to the last placed dab, leaving the
+            // (< spacing) tail for the next frame to accumulate.
+            sculpt_stroke_state.last_dab_world =
+                lastDab + dir * (spacing * static_cast<float>(dabCount));
+            sculpt_stroke_state.has_last_dab = true;
+            return;
+        }
+    }
+
+    const float brushStrength = sanitizeFiniteFloat(sculpt_mode_state.brush.strength, 1.0f, 0.0f, 10.0f);
     const float dt = sanitizeFiniteFloat(io.DeltaTime, 1.0f / 60.0f, 1.0f / 240.0f, 0.25f);
     const float normalStrength = sanitizeFiniteFloat(sculpt_mode_state.normal_strength, 0.35f, 0.0f, 8.0f);
     const float falloff = saturateFloat(sculpt_mode_state.brush.falloff);
@@ -7316,7 +7598,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
     }
 
     Vec3 planeHit = hitPoint;
-    if (activeTool == SculptBrushTool::Grab) {
+    if (isGrabFamilyTool(activeTool)) {
         const Vec3 startWorldHit = sanitizeVec3(sculpt_stroke_state.start_world_hit, hitPoint);
         // Grab drag direction lives in the VIEW plane (perpendicular to the camera
         // forward axis), like Blender/ZBrush — NOT the surface tangent plane. Using
@@ -7347,7 +7629,25 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         inverseTransform.transform_point(sanitizeVec3(sculpt_stroke_state.start_world_hit, planeHit)),
         Vec3(0.0f, 0.0f, 0.0f));
     const Vec3 lastStrokeHit = sanitizeVec3(sculpt_stroke_state.last_world_hit, hitPoint);
-    const Vec3 strokeStepWorld = sanitizeVec3(hitPoint - lastStrokeHit, Vec3(0.0f, 0.0f, 0.0f));
+    // Nudge / Snake Hook derive their motion from the CAMERA-FACING plane (screen
+    // motion), not the raw surface hit. As the mesh deforms under the brush the
+    // ray↔surface intersection drifts, so a surface-based step gives an
+    // inconsistent drag axis and the pull stalls at the radius edge — the exact
+    // axis-inconsistency we already fixed for Grab. Projecting the cursor ray onto
+    // a camera-forward plane anchored at the previous step keeps the axis stable.
+    Vec3 snakePlaneHit = hitPoint;
+    Vec3 strokeStepWorld = sanitizeVec3(hitPoint - lastStrokeHit, Vec3(0.0f, 0.0f, 0.0f));
+    // During sub-stepping the segment is already interpolated, so the step is
+    // simply sub - lastSub (above) — skip the camera-plane projection.
+    if (activeTool == SculptBrushTool::Nudge && !overrideHitPoint && ctx.scene.camera) {
+        const Vec3 camFwd = safeNormalizeVec3(
+            ctx.scene.camera->lookat - ctx.scene.camera->lookfrom, hitNormalWorld);
+        Vec3 projHit;
+        if (intersectRayPlane(ray, lastStrokeHit, camFwd, projHit)) {
+            snakePlaneHit = projHit;
+            strokeStepWorld = sanitizeVec3(projHit - lastStrokeHit, Vec3(0.0f, 0.0f, 0.0f));
+        }
+    }
     const Vec3 projectedStrokeStep = sanitizeVec3(
         strokeStepWorld - hitNormalWorld * strokeStepWorld.dot(hitNormalWorld),
         Vec3(0.0f, 0.0f, 0.0f));
@@ -7392,7 +7692,13 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
     std::vector<int> sculptCandidateVertexIdsStorage;
     Vec3 candidateCenterLocal;
     float candidateCollectionRadius;
-    if (activeTool == SculptBrushTool::Grab) {
+    if (activeTool == SculptBrushTool::SnakeHook) {
+        // Snake Hook gathers along the CURRENT brush position + a capsule sweep of
+        // this frame's motion, so fast strokes keep feeding new verts into the set.
+        candidateCenterLocal = (localHitPoint + localPrevHitPoint) * 0.5f;
+        const float halfSeg = (localHitPoint - localPrevHitPoint).length() * 0.5f;
+        candidateCollectionRadius = localRadius + (std::min)(halfSeg, localRadius * 2.0f);
+    } else if (isGrabFamilyTool(activeTool)) {
         candidateCenterLocal = localGrabStartPoint;
         candidateCollectionRadius = localRadius;
     } else {
@@ -7416,10 +7722,46 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                 expandRings);
         }
     }
-    if (activeTool == SculptBrushTool::Grab) {
+    if (isGrabFamilyTool(activeTool)) {
+        if (activeTool == SculptBrushTool::SnakeHook) {
+            // DYNAMIC prime: every frame add NEW verts under the (swept) brush to the
+            // set so the hook keeps eating geometry and fast strokes don't skip verts.
+            // The set is never cleared mid-stroke. Each new vert's start position is
+            // offset back by the drag already applied (start = pos - localGrabDelta*
+            // grabStrength*w) so the absolute grab solve leaves it in place on the
+            // frame it joins (no jump), then it trails the cursor like the rest.
+            const float grabStrength = std::clamp(brushStrength * 0.5f, 0.0f, 5.0f);
+            for (const int vid : sculptCandidateVertexIdsStorage) {
+                if (vid < 0 || static_cast<size_t>(vid) >= editable_mesh_cache.vertices.size()) {
+                    continue;
+                }
+                if (sculpt_stroke_state.grab_weights_by_vertex.count(vid)) {
+                    continue; // already in the set
+                }
+                const Vec3 localPos = editable_mesh_cache.vertices[vid].local_position;
+                const Vec3 worldPos = sanitizeVec3(transform.transform_point(localPos), hitPoint);
+                const Vec3 toV = worldPos - hitPoint;
+                const float h = toV.dot(hitNormalWorld);
+                const float planarDist = (toV - hitNormalWorld * h).length();
+                if (!std::isfinite(planarDist) || planarDist > radiusWorld) {
+                    continue;
+                }
+                if (sculpt_mode_state.front_faces_only && h < -(radiusWorld * 0.12f)) {
+                    continue;
+                }
+                const float w = grabFamilyWeight(
+                    planarDist / radiusWorld, mesh_overlay_settings.proportional_falloff_type, false);
+                if (w <= 1e-5f) {
+                    continue;
+                }
+                sculpt_stroke_state.grab_weights_by_vertex[vid] = w;
+                sculpt_stroke_state.grab_start_local_positions[vid] =
+                    sanitizeVec3(localPos - localGrabDelta * (grabStrength * w), localPos);
+            }
+        }
         // Prime the grab set once, from the PBVH-gathered candidates at the stroke's
         // first frame.
-        if (sculpt_stroke_state.grab_weights_by_vertex.empty()) {
+        else if (sculpt_stroke_state.grab_weights_by_vertex.empty()) {
             primeGrabStrokeWeights(
                 sculpt_stroke_state,
                 editable_mesh_cache,
@@ -7429,7 +7771,10 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                 hitNormalWorld,
                 radiusWorld,
                 sculpt_mode_state.front_faces_only,
-                mesh_overlay_settings.proportional_falloff_type);
+                mesh_overlay_settings.proportional_falloff_type,
+                activeTool == SculptBrushTool::ElasticDeform);
+            // (Grab honours the protection mask at commit time via the maskFactor
+            // lerp in the commit loop, not by reweighting the primed set here.)
         }
         // Drive the whole stroke from the FIXED primed set, not a per-frame PBVH
         // re-gather. Grab recomputes each vertex as start_local + delta, so it does
@@ -7449,6 +7794,142 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
     const std::vector<int>& sculptCandidateVertexIds = sculptCandidateVertexIdsStorage;
     sculpt_control_graph.last_candidate_node_count = sculpt_pbvh.last_candidate_node_count;
     sculpt_control_graph.last_candidate_vertex_count = sculptCandidateVertexIds.size();
+
+    // Bind the custom falloff LUT for this solve (no-op unless type == Custom and
+    // the user has edited the curve). All brush/mask falloff reads see it.
+    setActiveFalloffLut(mesh_overlay_settings.custom_falloff_lut.empty()
+        ? nullptr : &mesh_overlay_settings.custom_falloff_lut);
+
+    // Keep the protection mask matched to the active object + cache revision so
+    // gating (and the Mask brush itself) read a buffer that aligns with the
+    // current vertex-id space. Switching object or editing topology resets it.
+    ensureSculptMaskSized(sculpt_mask_state, editable_mesh_cache, objectName);
+
+    // --- Mask brush: paint the per-vertex protection weight ----------------
+    // The mask moves no geometry, so it bypasses the whole commit / topology /
+    // PBVH-refit / GPU-geometry-sync tail. It only updates the mask buffer and
+    // bumps its version so the edit overlay re-uploads the tint flags.
+    if (activeTool == SculptBrushTool::Mask) {
+        const float maskFlow = sanitizeFiniteFloat(sculpt_mask_state.paint_strength, 0.5f, 0.0f, 1.0f);
+        // Paint the mask around one brush center (local + world + surface normal).
+        // Reused for the primary hit and every mirror plane so symmetry works.
+        auto paintMaskAt = [&](const Vec3& localCenter, const Vec3& worldCenter,
+                               const Vec3& worldNormal) -> bool {
+            const std::vector<int> cands = collectSculptCandidateVerticesWithPBVHFallback(
+                sculpt_pbvh, editable_mesh_cache, localCenter, localRadius);
+            bool changedLocal = false;
+            for (const int vid : cands) {
+                if (vid < 0 || static_cast<size_t>(vid) >= editable_mesh_cache.vertices.size()) {
+                    continue;
+                }
+                const size_t vmid = static_cast<size_t>(vid);
+                const Vec3 worldPos = sanitizeVec3(
+                    transform.transform_point(editable_mesh_cache.vertices[vmid].local_position),
+                    Vec3(0.0f, 0.0f, 0.0f));
+                const Vec3 toVertex = worldPos - worldCenter;
+                const float h = toVertex.dot(worldNormal);
+                const Vec3 planarOffset = toVertex - worldNormal * h;
+                const float planarDist = computeHybridBrushDistance(
+                    toVertex, worldNormal, planarOffset.length(), radiusWorld);
+                if (!std::isfinite(planarDist) || planarDist > radiusWorld) {
+                    continue;
+                }
+                const float frontFacePenalty = computeFrontFaceBrushPenalty(
+                    h, radiusWorld, sculpt_mode_state.front_faces_only);
+                if (frontFacePenalty <= 1e-5f) {
+                    continue;
+                }
+                float w = computeTerrainLikeBrushWeight(planarDist / radiusWorld, falloff);
+                w *= applyFalloffCurve(
+                    1.0f - saturateFloat(planarDist / radiusWorld),
+                    mesh_overlay_settings.proportional_falloff_type);
+                w *= frontFacePenalty;
+                if (!std::isfinite(w) || w <= 1e-5f) {
+                    continue;
+                }
+                // directionSign < 0 (Ctrl) erases the mask.
+                // Per-dab deposit. Mask dabs are DISTANCE-gated (one per ~0.25·radius of
+                // travel) — NOT one per frame — so scaling by dt was wrong: it tied each
+                // dab's amount to framerate (~0.1·flow at 60fps, even less higher), so even
+                // paint_strength=1 needed many passes to fill. Use a framerate-independent
+                // per-dab amount that reaches full mask in ~1-2 passes at full strength
+                // while still building a soft gradient at lower strengths.
+                const float deposit = w * maskFlow * 0.5f * directionSign;
+                float& mv = sculpt_mask_state.values[vmid];
+                const float nv = std::clamp(mv + deposit, 0.0f, 1.0f);
+                if (nv != mv) {
+                    mv = nv;
+                    changedLocal = true;
+                }
+            }
+            return changedLocal;
+        };
+
+        bool maskChanged = paintMaskAt(localHitPoint, hitPoint, hitNormalWorld);
+
+        // Mirror planes: paint the mirrored center(s) too, mirroring the surface
+        // normal in object-local space exactly like the deformer mirror passes.
+        if (sculpt_mode_state.mirror_x || sculpt_mode_state.mirror_y || sculpt_mode_state.mirror_z) {
+            const Matrix4x4 normalMtx = inverseTransform.transpose();
+            for (int mirrorBits = 1; mirrorBits < 8; ++mirrorBits) {
+                const bool do_mx = (mirrorBits & 1) && sculpt_mode_state.mirror_x;
+                const bool do_my = (mirrorBits & 2) && sculpt_mode_state.mirror_y;
+                const bool do_mz = (mirrorBits & 4) && sculpt_mode_state.mirror_z;
+                if (!do_mx && !do_my && !do_mz) {
+                    continue;
+                }
+                Vec3 mirLocal = localHitPoint;
+                if (do_mx) mirLocal.x = -mirLocal.x;
+                if (do_my) mirLocal.y = -mirLocal.y;
+                if (do_mz) mirLocal.z = -mirLocal.z;
+                const Vec3 mirWorldCenter = sanitizeVec3(transform.transform_point(mirLocal), hitPoint);
+                Vec3 localNormal = sanitizeVec3(inverseTransform.transform_vector(hitNormalWorld), hitNormalWorld);
+                const float lnLen = localNormal.length();
+                if (lnLen > 1e-8f) localNormal = localNormal / lnLen;
+                if (do_mx) localNormal.x = -localNormal.x;
+                if (do_my) localNormal.y = -localNormal.y;
+                if (do_mz) localNormal.z = -localNormal.z;
+                Vec3 mirWorldNormal = sanitizeVec3(normalMtx.transform_vector(localNormal), hitNormalWorld);
+                const float mwnLen = mirWorldNormal.length();
+                mirWorldNormal = mwnLen > 1e-8f ? mirWorldNormal / mwnLen : hitNormalWorld;
+                if (paintMaskAt(mirLocal, mirWorldCenter, mirWorldNormal)) {
+                    maskChanged = true;
+                }
+            }
+        }
+
+        // Radial symmetry: paint each rotated copy of the brush center too.
+        if (sculpt_mode_state.radial_symmetry && sculpt_mode_state.radial_count >= 2) {
+            const Matrix4x4 normalMtx = inverseTransform.transpose();
+            const int radialAxis = std::clamp(sculpt_mode_state.radial_axis, 0, 2);
+            const int radialCount = std::clamp(sculpt_mode_state.radial_count, 2, 64);
+            const Vec3 localHitNormal = safeNormalizeVec3(
+                inverseTransform.transform_vector(hitNormalWorld), hitNormalWorld);
+            for (int k = 1; k < radialCount; ++k) {
+                const float angle = (6.28318530718f * static_cast<float>(k)) /
+                                    static_cast<float>(radialCount);
+                const Vec3 radLocal = rotateLocalAroundAxis(localHitPoint, radialAxis, angle);
+                const Vec3 radWorldCenter = sanitizeVec3(transform.transform_point(radLocal), hitPoint);
+                const Vec3 radLocalNormal = rotateLocalAroundAxis(localHitNormal, radialAxis, angle);
+                const Vec3 radWorldNormal = safeNormalizeVec3(
+                    normalMtx.transform_vector(radLocalNormal), hitNormalWorld);
+                if (paintMaskAt(radLocal, radWorldCenter, radWorldNormal)) {
+                    maskChanged = true;
+                }
+            }
+        }
+
+        if (maskChanged) {
+            sculpt_mask_state.has_any = true;
+            ++sculpt_mask_state.version;
+            // The protection mask only affects the raster edit overlay (which
+            // re-syncs every frame off mask version), so no path-trace reset here.
+        }
+        sculpt_stroke_state.changed = true;
+        sculpt_stroke_state.last_world_hit = hitPoint;
+        return;
+    }
+
     std::vector<int> strokeTouchedVertexIds = sculptCandidateVertexIds;
     strokeTouchedVertexIds.reserve(sculptCandidateVertexIds.size() * 4 + 32);
 
@@ -7501,13 +7982,39 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         }
         const size_t vertexId = static_cast<size_t>(vertexIdInt);
         EditableVertex& vertex = editable_mesh_cache.vertices[vertexId];
-        if (activeTool == SculptBrushTool::Grab) {
+        if (isGrabFamilyTool(activeTool)) {
             if (applyGrabSculptCandidate(
                     sculpt_stroke_state,
                     brushStrength,
                     localGrabDelta,
                     vertexIdInt,
                     sculpt_updated_local_positions[vertexId])) {
+                // Snake Hook narrows the dragged region into a hook tip: pull each
+                // vertex laterally toward the current brush center (perpendicular to
+                // the surface normal), scaled by its grab weight. Grab/Elastic skip this.
+                if (activeTool == SculptBrushTool::SnakeHook) {
+                    const Vec3 vp = sculpt_updated_local_positions[vertexId];
+                    const Vec3 vpWorld = sanitizeVec3(transform.transform_point(vp), vp);
+                    const Vec3 toCenter = planeHit - vpWorld;
+                    const Vec3 lateral = toCenter - hitNormalWorld * toCenter.dot(hitNormalWorld);
+                    const float lateralLen = lateral.length();
+                    if (lateralLen > 1e-6f) {
+                        const auto wIt = sculpt_stroke_state.grab_weights_by_vertex.find(vertexIdInt);
+                        const float wgt = (wIt != sculpt_stroke_state.grab_weights_by_vertex.end())
+                            ? wIt->second : 0.0f;
+                        // Stronger lateral pull toward the tip + a lift along the normal so
+                        // the dragged region curls into a proper hook instead of reading as
+                        // a plain grab. Inverse-weighted so the rim (low weight) pinches more
+                        // than the center, narrowing the tail.
+                        const float tipBias = 0.22f + 0.18f * (1.0f - wgt);
+                        const Vec3 pinchWorld = (lateral / lateralLen) * (lateralLen * tipBias * wgt) +
+                            hitNormalWorld * (lateralLen * 0.10f * wgt);
+                        const Vec3 pinchLocal = sanitizeVec3(
+                            inverseTransform.transform_vector(pinchWorld), Vec3(0.0f, 0.0f, 0.0f));
+                        sculpt_updated_local_positions[vertexId] =
+                            sanitizeVec3(vp + pinchLocal, vp);
+                    }
+                }
                 basePassChanged.store(true, std::memory_order_relaxed);
             }
             return;
@@ -7542,6 +8049,10 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
             return;
         }
 
+        // (Protection mask is applied once at commit time, not here — see the
+        // maskFactor lerp in the commit loop below. This keeps Grab, clay-polish
+        // and mirror passes masked too, without double-attenuating.)
+
         if (applyNonGrabSculptCandidate(
                 activeTool,
                 editable_mesh_cache,
@@ -7555,6 +8066,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                 hitNormalWorld,
                 strokeTangentWorld,
                 strokeBitangentWorld,
+                strokeStepWorld,
                 brushStrength,
                 clayBrushStrength,
                 clayRadiusCompensation,
@@ -7702,7 +8214,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
 
             // Mirror drag delta for Grab (flip each axis in local, then back to world).
             Vec3 mirWorldDrag = worldDragDelta;
-            if (activeTool == SculptBrushTool::Grab) {
+            if (isGrabFamilyTool(activeTool)) {
                 Vec3 localDrag = sanitizeVec3(inverseTransform.transform_vector(worldDragDelta), Vec3(0.0f, 0.0f, 0.0f));
                 if (do_mx) localDrag.x = -localDrag.x;
                 if (do_my) localDrag.y = -localDrag.y;
@@ -7711,7 +8223,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
             }
 
             // Grab: mirror start hit and compute weights on-the-fly.
-            if (activeTool == SculptBrushTool::Grab) {
+            if (isGrabFamilyTool(activeTool)) {
                 Vec3 localStartHit = sanitizeVec3(
                     inverseTransform.transform_point(sanitizeVec3(sculpt_stroke_state.start_world_hit, hitPoint)),
                     Vec3(0.0f, 0.0f, 0.0f));
@@ -7779,9 +8291,10 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                     if (sculpt_mode_state.front_faces_only && h < -(radiusWorld * 0.12f)) {
                         return;
                     }
-                    const float w = applyFalloffCurve(
-                        1.0f - saturateFloat(planarDist / radiusWorld),
-                        mesh_overlay_settings.proportional_falloff_type);
+                    const float w = grabFamilyWeight(
+                        planarDist / radiusWorld,
+                        mesh_overlay_settings.proportional_falloff_type,
+                        activeTool == SculptBrushTool::ElasticDeform);
                     if (w <= 1e-5f) {
                         return;
                     }
@@ -7887,6 +8400,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                     radiusWorld,
                     dt,
                     sculpt_stroke_state.changed);
+                // (Mask applied at commit time via maskFactor lerp, not here.)
                 if (!std::isfinite(w) || w <= 1e-5f) {
                     return;
                 }
@@ -8060,6 +8574,51 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                     wd = pinchDelta + cutDelta;
                     break;
                 }
+                case SculptBrushTool::DrawSharp: {
+                    Vec3 vnSharp = mirWorldNormal;
+                    if (!vertex.refs.empty() && vertex.refs[0].triangle) {
+                        const Vec3 n = vertex.refs[0].triangle->vertices[vertex.refs[0].corner].normal;
+                        if (n.length_squared() > 1e-8f) vnSharp = safeNormalizeVec3(n, mirWorldNormal);
+                    }
+                    const float sharpW = w * w;
+                    wd = vnSharp * (radiusWorld * 0.26f * brushStrength * dt * sharpW * (1.0f + normalStrength) * directionSign);
+                    break;
+                }
+                case SculptBrushTool::Nudge: {
+                    wd = (mirWorldCenter - mirWorldPrevCenter) * (w * brushStrength * directionSign);
+                    break;
+                }
+                case SculptBrushTool::Blob: {
+                    const Vec3 toCenter = mirWorldCenter - worldPos;
+                    const Vec3 lateral = toCenter - mirWorldNormal * toCenter.dot(mirWorldNormal);
+                    const float lateralLen = lateral.length();
+                    Vec3 gather(0.0f, 0.0f, 0.0f);
+                    if (lateralLen > 1e-8f) {
+                        gather = (lateral / lateralLen) * (radiusWorld * 0.10f * brushStrength * dt * w * directionSign);
+                    }
+                    wd = mirWorldNormal * (radiusWorld * 0.26f * brushStrength * dt * w * (1.0f + normalStrength) * directionSign) + gather;
+                    break;
+                }
+                case SculptBrushTool::Fill: {
+                    const float sd = (worldPos - mirWorldCenter).dot(mirWorldNormal);
+                    if ((directionSign > 0.0f && sd < 0.0f) || (directionSign < 0.0f && sd > 0.0f)) {
+                        wd = mirWorldNormal * (-sd * brushStrength * dt * 12.0f * w);
+                    }
+                    break;
+                }
+                case SculptBrushTool::SnakeHook: {
+                    const Vec3 mirStep = mirWorldCenter - mirWorldPrevCenter;
+                    const float stepLen = mirStep.length();
+                    const Vec3 toCenter = mirWorldCenter - worldPos;
+                    const Vec3 lateral = toCenter - mirWorldNormal * toCenter.dot(mirWorldNormal);
+                    const float lateralLen = lateral.length();
+                    Vec3 pinch(0.0f, 0.0f, 0.0f);
+                    if (lateralLen > 1e-8f) {
+                        pinch = (lateral / lateralLen) * (stepLen * 0.45f * brushStrength * w);
+                    }
+                    wd = mirStep * (w * brushStrength) + pinch;
+                    break;
+                }
                 case SculptBrushTool::Smooth: {
                     const Vec3 sld = computeBoundarySafeSmoothDelta(
                         editable_mesh_cache,
@@ -8107,8 +8666,174 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         }
     }
 
+    // Radial symmetry: repeat the stroke as N-1 extra rotated copies about an
+    // object-local axis through the origin. Non-grab tools reuse the primary
+    // solve (computeSculptBrushSampleAtWorldPoint + applyNonGrabSculptCandidate)
+    // with a rotated brush center/normal — no per-tool switch duplication. Grab
+    // gets a rotated copy of the mirror-grab path (primed per-copy candidate set
+    // + rotated start hit / drag).
+    if (sculpt_mode_state.radial_symmetry && sculpt_mode_state.radial_count >= 2) {
+        const Matrix4x4 radialNormalMtx = inverseTransform.transpose();
+        const int radialAxis = std::clamp(sculpt_mode_state.radial_axis, 0, 2);
+        const int radialCount = std::clamp(sculpt_mode_state.radial_count, 2, 64);
+        const Vec3 localHitNormal = safeNormalizeVec3(
+            inverseTransform.transform_vector(hitNormalWorld), hitNormalWorld);
+        for (int k = 1; k < radialCount; ++k) {
+            const float angle = (6.28318530718f * static_cast<float>(k)) /
+                                static_cast<float>(radialCount);
+            const Vec3 radLocalNormal = rotateLocalAroundAxis(localHitNormal, radialAxis, angle);
+            const Vec3 radWorldNormal = safeNormalizeVec3(
+                radialNormalMtx.transform_vector(radLocalNormal), hitNormalWorld);
+
+            // Grab: rotate the start hit + drag, drive a fixed primed candidate set
+            // (drift-free, mirrors the mirror-grab path exactly).
+            if (isGrabFamilyTool(activeTool)) {
+                Vec3 localDrag = sanitizeVec3(inverseTransform.transform_vector(worldDragDelta), Vec3(0.0f, 0.0f, 0.0f));
+                localDrag = rotateLocalAroundAxis(localDrag, radialAxis, angle);
+                const Vec3 radWorldDrag = sanitizeVec3(transform.transform_vector(localDrag), Vec3(0.0f, 0.0f, 0.0f));
+                Vec3 localStartHit = sanitizeVec3(
+                    inverseTransform.transform_point(sanitizeVec3(sculpt_stroke_state.start_world_hit, hitPoint)),
+                    Vec3(0.0f, 0.0f, 0.0f));
+                localStartHit = rotateLocalAroundAxis(localStartHit, radialAxis, angle);
+                const Vec3 radWorldStartHit = sanitizeVec3(transform.transform_point(localStartHit), hitPoint);
+
+                auto& radialSet = sculpt_stroke_state.grab_radial_candidate_sets[k];
+                if (radialSet.empty()) {
+                    radialSet = collectSculptCandidateVerticesWithPBVHFallback(
+                        sculpt_pbvh, editable_mesh_cache, localStartHit, localRadius);
+                    for (const int vid : radialSet) {
+                        if (vid >= 0 && static_cast<size_t>(vid) < editable_mesh_cache.vertices.size()) {
+                            sculpt_stroke_state.grab_start_local_positions.try_emplace(
+                                vid, editable_mesh_cache.vertices[vid].local_position);
+                        }
+                    }
+                }
+                for (const int vid : radialSet) {
+                    if (vid >= 0 && static_cast<size_t>(vid) < editable_mesh_cache.vertices.size()) {
+                        sculpt_updated_local_positions[vid] = editable_mesh_cache.vertices[vid].local_position;
+                    }
+                }
+                strokeTouchedVertexIds.insert(
+                    strokeTouchedVertexIds.end(), radialSet.begin(), radialSet.end());
+
+                std::atomic<bool> radialGrabChanged{ false };
+                forEachEditableCandidate(radialSet, [&](int vertexIdInt) {
+                    if (vertexIdInt < 0) {
+                        return;
+                    }
+                    const size_t vertexId = static_cast<size_t>(vertexIdInt);
+                    auto startIt = sculpt_stroke_state.grab_start_local_positions.find(vertexIdInt);
+                    if (startIt == sculpt_stroke_state.grab_start_local_positions.end()) {
+                        return;
+                    }
+                    const Vec3& startLocalPos = startIt->second;
+                    const Vec3 startWorldPos = sanitizeVec3(
+                        transform.transform_point(startLocalPos), radWorldStartHit);
+                    const Vec3 toVertex = startWorldPos - radWorldStartHit;
+                    const float h = toVertex.dot(radWorldNormal);
+                    const float planarDist = (toVertex - radWorldNormal * h).length();
+                    if (!std::isfinite(h) || !std::isfinite(planarDist) || planarDist > radiusWorld) {
+                        return;
+                    }
+                    if (sculpt_mode_state.front_faces_only && h < -(radiusWorld * 0.12f)) {
+                        return;
+                    }
+                    const float w = grabFamilyWeight(
+                        planarDist / radiusWorld,
+                        mesh_overlay_settings.proportional_falloff_type,
+                        activeTool == SculptBrushTool::ElasticDeform);
+                    if (w <= 1e-5f) {
+                        return;
+                    }
+                    const float grabStrength = std::clamp(brushStrength * 0.5f, 0.0f, 5.0f);
+                    Vec3 wd = radWorldDrag * w * grabStrength;
+                    const float wdLen = wd.length();
+                    if (!std::isfinite(wdLen)) {
+                        return;
+                    }
+                    if (wdLen > radiusWorld * 3.0f) {
+                        wd = wd * (radiusWorld * 3.0f / wdLen);
+                    }
+                    const Vec3 ld = sanitizeVec3(inverseTransform.transform_vector(wd), Vec3(0.0f, 0.0f, 0.0f));
+                    const float ldLenSq = ld.length_squared();
+                    if (!std::isfinite(ldLenSq) || ldLenSq <= 1e-14f) {
+                        return;
+                    }
+                    sculpt_updated_local_positions[vertexId] = sanitizeVec3(
+                        startLocalPos + ld, startLocalPos);
+                    radialGrabChanged.store(true, std::memory_order_relaxed);
+                });
+                changed = changed || radialGrabChanged.load(std::memory_order_relaxed);
+                continue;
+            }
+
+            const Vec3 radLocalCenter = rotateLocalAroundAxis(localHitPoint, radialAxis, angle);
+            const Vec3 radLocalPrev = rotateLocalAroundAxis(localPrevHitPoint, radialAxis, angle);
+            const Vec3 radWorldCenter = sanitizeVec3(transform.transform_point(radLocalCenter), hitPoint);
+            const Vec3 radWorldPrev = sanitizeVec3(transform.transform_point(radLocalPrev), radWorldCenter);
+            const Vec3 radTangent = std::abs(radWorldNormal.y) < 0.95f
+                ? safeNormalizeVec3(radWorldNormal.cross(Vec3(0, 1, 0)), Vec3(1, 0, 0))
+                : safeNormalizeVec3(radWorldNormal.cross(Vec3(1, 0, 0)), Vec3(0, 0, 1));
+            const Vec3 radBitangent = safeNormalizeVec3(radWorldNormal.cross(radTangent), Vec3(0, 0, 1));
+            const Vec3 radClaySample = (clayLikeTool && sculpt_stroke_state.changed)
+                ? sanitizeVec3(radWorldPrev + (radWorldCenter - radWorldPrev) * 0.75f, radWorldCenter)
+                : radWorldCenter;
+
+            const std::vector<int> radialCandidates = collectSculptCandidateVerticesWithPBVHFallback(
+                sculpt_pbvh, editable_mesh_cache, radLocalCenter, localRadius);
+            for (const int vid : radialCandidates) {
+                if (vid >= 0 && static_cast<size_t>(vid) < editable_mesh_cache.vertices.size()) {
+                    sculpt_updated_local_positions[static_cast<size_t>(vid)] =
+                        editable_mesh_cache.vertices[static_cast<size_t>(vid)].local_position;
+                }
+            }
+            strokeTouchedVertexIds.insert(
+                strokeTouchedVertexIds.end(),
+                radialCandidates.begin(),
+                radialCandidates.end());
+
+            std::atomic<bool> radialPassChanged{ false };
+            forEachEditableCandidate(radialCandidates, [&](int vertexIdInt) {
+                if (vertexIdInt < 0) {
+                    return;
+                }
+                const size_t vertexId = static_cast<size_t>(vertexIdInt);
+                const Vec3 snapshotLocalPosition =
+                    editable_mesh_cache.vertices[vertexId].local_position;
+                const Vec3 snapshotWorldPosition = sanitizeVec3(
+                    transform.transform_point(snapshotLocalPosition), Vec3(0.0f, 0.0f, 0.0f));
+                SculptBrushSample sample;
+                if (!computeSculptBrushSampleAtWorldPoint(
+                        snapshotLocalPosition, snapshotWorldPosition,
+                        radWorldCenter, radWorldPrev, radWorldNormal,
+                        radTangent, radBitangent,
+                        sculpt_mode_state.brush,
+                        mesh_overlay_settings.proportional_falloff_type,
+                        activeTool, falloff, brushStrength, radiusWorld,
+                        strokeDistance, strokeSpacing, dt,
+                        sculpt_stroke_state.changed,
+                        sculpt_mode_state.front_faces_only, sample)) {
+                    return;
+                }
+                if (applyNonGrabSculptCandidate(
+                        activeTool, editable_mesh_cache, sculpt_control_graph,
+                        sculpt_stroke_state, kEmptySnapshot, transform, inverseTransform,
+                        radWorldCenter, radClaySample, radWorldNormal,
+                        radTangent, radBitangent, (radWorldCenter - radWorldPrev),
+                        brushStrength, clayBrushStrength, clayRadiusCompensation,
+                        normalStrength, directionSign, radiusWorld, dt, localRadius,
+                        strokeAdvanceFactor, vertexIdInt, sample,
+                        sculpt_updated_local_positions[vertexId])) {
+                    radialPassChanged.store(true, std::memory_order_relaxed);
+                }
+            });
+            changed = changed || radialPassChanged.load(std::memory_order_relaxed);
+        }
+    }
+
     if (!changed) {
-        sculpt_stroke_state.last_world_hit = (activeTool == SculptBrushTool::Grab) ? planeHit : hit.point;
+        sculpt_stroke_state.last_world_hit = (isGrabFamilyTool(activeTool)) ? planeHit
+            : ((activeTool == SculptBrushTool::Nudge) ? snakePlaneHit : hit.point);
         return;
     }
 
@@ -8208,6 +8933,17 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
                 safeLocalPosition)) {
             continue;
         }
+        // Protection mask — single choke point. Pull this frame's motion back
+        // toward the pre-move position by the mask factor (1 = free, 0 = frozen).
+        // Because every brush path (Grab, Clay + clay-polish/anti-pit, Smooth,
+        // and all mirror passes) writes into sculpt_updated_local_positions and
+        // commits through this loop, masking here covers them uniformly — no
+        // per-brush gating needed.
+        const float maskFactor = sculptMaskFactor(sculpt_mask_state, vertexId);
+        if (maskFactor < 0.999f) {
+            safeLocalPosition = vertex.local_position +
+                (safeLocalPosition - vertex.local_position) * maskFactor;
+        }
         vertex.local_position = safeLocalPosition;
         sculpt_updated_local_positions[vertexId] = safeLocalPosition;
         for (const auto& ref : vertex.refs) {
@@ -8302,7 +9038,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx) {
         ctx.start_render = true;
     }
     sculpt_stroke_state.changed = true;
-    sculpt_stroke_state.last_world_hit = (activeTool == SculptBrushTool::Grab) ? planeHit : hit.point;
+    sculpt_stroke_state.last_world_hit = (isGrabFamilyTool(activeTool)) ? planeHit : hit.point;
 }
 
 void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
@@ -8506,6 +9242,66 @@ void SceneUI::releaseGpuEditMeshOverlay() {
     }
 }
 
+void SceneUI::applySculptMaskOperation(int operation) {
+    ensureSculptMaskSized(sculpt_mask_state, editable_mesh_cache, sculpt_mode_state.active_target_name);
+    SculptMaskState& mask = sculpt_mask_state;
+    const size_t n = mask.values.size();
+    if (n == 0) {
+        return;
+    }
+    switch (operation) {
+    case 0: // Clear
+        std::fill(mask.values.begin(), mask.values.end(), 0.0f);
+        break;
+    case 2: // Fill
+        std::fill(mask.values.begin(), mask.values.end(), 1.0f);
+        break;
+    case 1: // Invert
+        for (float& v : mask.values) {
+            v = 1.0f - std::clamp(v, 0.0f, 1.0f);
+        }
+        break;
+    case 3: { // Smooth: one Laplacian pass over the cached vertex neighbours.
+        std::vector<float> out = mask.values;
+        const auto& neighbors = editable_mesh_cache.vertex_neighbors;
+        const size_t cap = (std::min)(n, neighbors.size());
+        for (size_t i = 0; i < cap; ++i) {
+            const std::vector<int>& nb = neighbors[i];
+            if (nb.empty()) {
+                continue;
+            }
+            float sum = mask.values[i];
+            int count = 1;
+            for (int j : nb) {
+                if (j >= 0 && static_cast<size_t>(j) < n) {
+                    sum += mask.values[static_cast<size_t>(j)];
+                    ++count;
+                }
+            }
+            out[i] = sum / static_cast<float>(count);
+        }
+        mask.values.swap(out);
+        break;
+    }
+    case 4: // Sharpen: push values away from 0.5 toward 0/1.
+        for (float& v : mask.values) {
+            const float c = std::clamp(v, 0.0f, 1.0f);
+            v = std::clamp(c + (c - 0.5f) * 0.5f, 0.0f, 1.0f);
+        }
+        break;
+    default:
+        return;
+    }
+    mask.has_any = false;
+    for (float v : mask.values) {
+        if (v > 0.003f) {
+            mask.has_any = true;
+            break;
+        }
+    }
+    ++mask.version;
+}
+
 bool SceneUI::syncGpuEditMeshOverlay(UIContext& ctx, const std::string& objectName,
                                      bool drawVertices, bool drawEdges, bool drawFaces) {
     (void)ctx;
@@ -8597,6 +9393,16 @@ bool SceneUI::syncGpuEditMeshOverlay(UIContext& ctx, const std::string& objectNa
         mixHash(static_cast<uint64_t>(std::hash<float>{}(mesh_overlay_settings.proportional_falloff)));
         mixHash(static_cast<uint64_t>(mesh_overlay_settings.proportional_falloff_type));
     }
+    // Fold the sculpt protection mask in so painting / clearing it re-uploads the
+    // overlay flags. version bumps on every mask edit; show_overlay toggles the tint.
+    const bool maskOverlayActive =
+        sculpt_mode_state.enabled && sculpt_mask_state.show_overlay &&
+        sculpt_mask_state.has_any && sculpt_mask_state.object_name == objectName &&
+        sculpt_mask_state.values.size() == static_cast<size_t>(vertexCount);
+    if (maskOverlayActive) {
+        mixHash(0x500000ull);
+        mixHash(sculpt_mask_state.version);
+    }
 
     if (selectionHash != sync.selection_hash) {
         std::vector<uint32_t> flags(static_cast<size_t>(vertexCount), 0u);
@@ -8643,6 +9449,20 @@ bool SceneUI::syncGpuEditMeshOverlay(UIContext& ctx, const std::string& objectNa
                     const uint32_t q = static_cast<uint32_t>(
                         (std::min)(1.0f, (std::max)(0.0f, w)) * 255.0f + 0.5f);
                     flags[i] |= (q << 8);
+                }
+            }
+        }
+
+        // Sculpt protection mask: pack the per-vertex weight into bits 16..23 so
+        // the overlay shaders can tint frozen regions.
+        if (maskOverlayActive) {
+            const size_t maskCount = (std::min)(sculpt_mask_state.values.size(), flags.size());
+            for (size_t i = 0; i < maskCount; ++i) {
+                const float m = sculpt_mask_state.values[i];
+                if (m > 0.003f) {
+                    const uint32_t q = static_cast<uint32_t>(
+                        (std::min)(1.0f, (std::max)(0.0f, m)) * 255.0f + 0.5f);
+                    flags[i] |= (q << 16);
                 }
             }
         }
@@ -9417,7 +10237,10 @@ void SceneUI::drawSculptBrushViewportPreview(UIContext& ctx, const HitRecord& hi
         const float depth = to_p.dot(cam_forward);
         if (depth <= 0.1f) return ImVec2(-1000.0f, -1000.0f);
         const float half_h = depth * tanf(fov_rad * 0.5f);
-        const float half_w = half_h * (win_w / (std::max)(1.0f, win_h));
+        // Match Camera::get_ray's horizontal frustum (cam.aspect_ratio), not the
+        // window aspect — keeps the brush ring/grid locked to the surface under the
+        // cursor when window aspect != output aspect.
+        const float half_w = half_h * cam.aspect_ratio;
         const float lx = to_p.dot(cam_right);
         const float ly = to_p.dot(cam_up);
         return ImVec2(
@@ -9507,5 +10330,122 @@ void SceneUI::drawSculptBrushViewportPreview(UIContext& ctx, const HitRecord& hi
     // Center dot
     if (!ghost) {
         dl->AddCircleFilled(center_screen, 3.5f, IM_COL32(255, 170, 64, 230));
+    }
+}
+
+void SceneUI::drawSculptMaskViewportOverlay(UIContext& ctx) {
+    if (!ctx.scene.camera) {
+        return;
+    }
+    if (!sculpt_mode_state.enabled || mesh_workspace_mode != MeshWorkspaceMode::Sculpt) {
+        return;
+    }
+    if (!sculpt_mask_state.show_overlay || !sculpt_mask_state.has_any) {
+        return;
+    }
+    const std::vector<EditableVertex>& verts = editable_mesh_cache.vertices;
+    const size_t n = verts.size();
+    if (n == 0 || sculpt_mask_state.values.size() != n) {
+        return;
+    }
+    if (editable_mesh_cache.object_name != sculpt_mode_state.active_target_name) {
+        return;
+    }
+
+    const Matrix4x4 transform = getEditableObjectTransform(editable_mesh_cache);
+    Camera& cam = *ctx.scene.camera;
+    const ImGuiIO& io = ImGui::GetIO();
+    const float win_w = io.DisplaySize.x;
+    const float win_h = io.DisplaySize.y;
+    const Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
+    const Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
+    const Vec3 cam_up = cam_right.cross(cam_forward).normalize();
+    const float fov_rad = cam.vfov * 3.14159265f / 180.0f;
+    auto project = [&](const Vec3& p) -> ImVec2 {
+        const Vec3 to_p = p - cam.lookfrom;
+        const float depth = to_p.dot(cam_forward);
+        if (depth <= 0.1f) {
+            return ImVec2(-10000.0f, -10000.0f);
+        }
+        const float half_h = depth * tanf(fov_rad * 0.5f);
+        // Use the camera's OWN aspect_ratio (the same value Camera::get_ray /
+        // update_camera_vectors use for the horizontal frustum), NOT win_w/win_h.
+        // The picking ray maps mouse px/win over [0,1] then calls get_ray, so the
+        // inverse projection must match the camera frustum exactly — otherwise a
+        // window-vs-output-aspect mismatch skews x and the overlay drifts on rotate.
+        const float half_w = half_h * cam.aspect_ratio;
+        const float lx = to_p.dot(cam_right);
+        const float ly = to_p.dot(cam_up);
+        return ImVec2(
+            (lx / half_w * 0.5f + 0.5f) * win_w,
+            (0.5f - ly / half_h * 0.5f) * win_h);
+    };
+
+    const Vec3 camPos = cam.lookfrom;
+    auto vertexScreen = [&](size_t vid, ImVec2& out) -> bool {
+        const Vec3 world = transform.transform_point(verts[vid].local_position);
+        const ImVec2 sp = project(world);
+        out = sp;
+        return sp.x > -9000.0f &&
+               sp.x >= -64.0f && sp.y >= -64.0f &&
+               sp.x <= win_w + 64.0f && sp.y <= win_h + 64.0f;
+    };
+
+    // Render masked triangles as a per-vertex-coloured fill so the falloff reads
+    // as a continuous gradient on the surface (vertices with mask 0 contribute a
+    // transparent corner). ImGui's low-level PrimVtx interpolates the corner
+    // colours for free. Works in every viewport mode (it's an ImGui overlay).
+    // Use the BACKGROUND draw list (not foreground): the 3D texture is blitted
+    // first, then ImGui draws background list → windows → foreground, so the
+    // background list paints over the 3D viewport but stays BEHIND the panels
+    // (the mask tint lives on the surface, it must not bleed over the UI).
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const ImVec2 uvWhite = dl->_Data->TexUvWhitePixel;
+    const std::vector<EditableFace>& faces = editable_mesh_cache.faces;
+    constexpr int kMaxTris = 120000;
+    int drawnTris = 0;
+    auto maskColor = [](float m) -> ImU32 {
+        const float c = std::clamp(m, 0.0f, 1.0f);
+        // Transparent where unmasked → soft gradient edge; opaque blue at full mask.
+        const int a = static_cast<int>(c * c * 165.0f);
+        return IM_COL32(70, 150, 240, a);
+    };
+    for (const EditableFace& f : faces) {
+        const int i0 = f.v0, i1 = f.v1, i2 = f.v2;
+        if (i0 < 0 || i1 < 0 || i2 < 0 ||
+            static_cast<size_t>(i0) >= n || static_cast<size_t>(i1) >= n || static_cast<size_t>(i2) >= n) {
+            continue;
+        }
+        const float m0 = sculpt_mask_state.values[i0];
+        const float m1 = sculpt_mask_state.values[i1];
+        const float m2 = sculpt_mask_state.values[i2];
+        if (m0 <= 0.02f && m1 <= 0.02f && m2 <= 0.02f) {
+            continue;
+        }
+        // Back-face cull using a vertex shading normal (winding-independent, so a
+        // reversed-winding mesh can't make the whole tint vanish). No depth buffer
+        // on the ImGui overlay, so this keeps far-side tint from bleeding through.
+        if (!verts[i0].refs.empty() && verts[i0].refs[0].triangle) {
+            const Vec3 vnrm = verts[i0].refs[0].triangle->vertices[verts[i0].refs[0].corner].normal;
+            if (vnrm.length_squared() > 1e-8f) {
+                const Vec3 w0 = transform.transform_point(verts[i0].local_position);
+                if (vnrm.dot(camPos - w0) < 0.0f) {
+                    continue;
+                }
+            }
+        }
+        ImVec2 p0, p1, p2;
+        if (!vertexScreen(static_cast<size_t>(i0), p0) ||
+            !vertexScreen(static_cast<size_t>(i1), p1) ||
+            !vertexScreen(static_cast<size_t>(i2), p2)) {
+            continue;
+        }
+        dl->PrimReserve(3, 3);
+        dl->PrimVtx(p0, uvWhite, maskColor(m0));
+        dl->PrimVtx(p1, uvWhite, maskColor(m1));
+        dl->PrimVtx(p2, uvWhite, maskColor(m2));
+        if (++drawnTris >= kMaxTris) {
+            break;
+        }
     }
 }

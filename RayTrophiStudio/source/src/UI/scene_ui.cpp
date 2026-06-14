@@ -1185,7 +1185,7 @@ void SceneUI::drawThemeSelector() {
     // ═══════════════════════════════════════════════════════════
     // LCD WIDGET THEME
     // ═══════════════════════════════════════════════════════════
-    if (ImGui::CollapsingHeader("LCD Widget Theme", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("LCD Widget Theme", 0)) {
         ImGui::Indent();
         
         static bool init_theme = true;
@@ -1426,22 +1426,60 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
     static int deferred_engine_type = -1; // 0=CPU,1=OptiX,2=Vulkan
 
     UIWidgets::PushControlSurfaceStyle(ImVec4(0.68f, 0.78f, 1.0f, 1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 14.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 14.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 14.0f);
+    float child_round = 14.0f;
+    float frame_round = 14.0f;
+    float grab_round = 14.0f;
+    float popup_round = 14.0f;
+    ImVec2 item_spacing = ImVec2(8.0f, 6.0f);
+    
+    ImVec4 child_bg = ImVec4(0.10f, 0.115f, 0.14f, 0.94f);
+    ImVec4 frame_bg = ImVec4(0.13f, 0.145f, 0.17f, 0.98f);
+    ImVec4 frame_bg_hovered = ImVec4(0.16f, 0.18f, 0.215f, 0.99f);
+    ImVec4 frame_bg_active = ImVec4(0.19f, 0.215f, 0.25f, 1.0f);
+    
+    ImVec4 header = ImVec4(0.14f, 0.17f, 0.21f, 0.96f);
+    ImVec4 header_hovered = ImVec4(0.18f, 0.21f, 0.26f, 0.98f);
+    ImVec4 header_active = ImVec4(0.22f, 0.25f, 0.30f, 1.0f);
+    
+    ImVec4 inspectorSliderGrab = ImVec4(0.72f, 0.82f, 1.0f, 0.95f);
+    ImVec4 inspectorSliderGrabActive = ImVec4(0.86f, 0.91f, 1.0f, 1.0f);
+    
+    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+        const auto& curTheme = ThemeManager::instance().current();
+        child_round = curTheme.style.windowRounding;
+        frame_round = curTheme.style.frameRounding;
+        grab_round = curTheme.style.grabRounding;
+        popup_round = curTheme.style.popupRounding;
+        
+        child_bg = ImVec4(curTheme.colors.surface.x, curTheme.colors.surface.y, curTheme.colors.surface.z, 0.94f);
+        frame_bg = curTheme.colors.surface;
+        frame_bg_hovered = UIWidgets::ScaleColor(curTheme.colors.surface, 1.3f);
+        frame_bg_active = UIWidgets::ScaleColor(curTheme.colors.surface, 1.5f);
+        
+        header = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.22f);
+        header_hovered = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.48f);
+        header_active = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.70f);
+        
+        inspectorSliderGrab = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.92f);
+        inspectorSliderGrabActive = ImVec4((std::min)(1.0f, curTheme.colors.accent.x + 0.10f), (std::min)(1.0f, curTheme.colors.accent.y + 0.10f), (std::min)(1.0f, curTheme.colors.accent.z + 0.10f), 1.0f);
+    }
+    
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, child_round);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, frame_round);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, grab_round);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, popup_round);
     ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 14.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(8.0f, 6.0f));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.115f, 0.14f, 0.94f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.13f, 0.145f, 0.17f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.16f, 0.18f, 0.215f, 0.99f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.19f, 0.215f, 0.25f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.14f, 0.17f, 0.21f, 0.96f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.18f, 0.21f, 0.26f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.72f, 0.82f, 1.0f, 0.95f));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.86f, 0.91f, 1.0f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, item_spacing);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, child_bg);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, frame_bg);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, frame_bg_hovered);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, frame_bg_active);
+    ImGui::PushStyleColor(ImGuiCol_Header, header);
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, header_hovered);
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, header_active);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, inspectorSliderGrab);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, inspectorSliderGrabActive);
 
     const bool rendered_viewport_active = (viewport_settings.shading_mode == 2);
     const bool raster_quality_active = (viewport_settings.shading_mode == 0 ||
@@ -1687,8 +1725,15 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
 
     if (UIWidgets::BeginSection("Animation Render & Export", ImVec4(1.0f, 0.4f, 0.7f, 1.0f))) {
         if (rendering_in_progress && ctx.is_animation_mode) {
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.2f, 1.0f));
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
+            ImVec4 status_bg = ImVec4(0.15f, 0.15f, 0.2f, 1.0f);
+            float status_round = 10.0f;
+            if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+                const auto& curTheme = ThemeManager::instance().current();
+                status_bg = ImVec4(curTheme.colors.surface.x, curTheme.colors.surface.y, curTheme.colors.surface.z, 1.0f);
+                status_round = curTheme.style.windowRounding;
+            }
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, status_bg);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, status_round);
             ImGui::BeginChild("AnimRenderStatus", ImVec2(0, 126), true);
 
             const int cur = ctx.render_settings.animation_current_frame;
@@ -1780,8 +1825,15 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
             const bool can_render = !ctx.render_settings.animation_output_folder.empty();
             const bool valid_range = (ctx.render_settings.animation_end_frame >= ctx.render_settings.animation_start_frame);
 
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.11f, 0.15f, 0.95f));
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
+            ImVec4 summary_bg = ImVec4(0.10f, 0.11f, 0.15f, 0.95f);
+            float summary_round = 10.0f;
+            if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+                const auto& curTheme = ThemeManager::instance().current();
+                summary_bg = ImVec4(curTheme.colors.surface.x, curTheme.colors.surface.y, curTheme.colors.surface.z, 0.95f);
+                summary_round = curTheme.style.windowRounding;
+            }
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, summary_bg);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, summary_round);
             ImGui::BeginChild("AnimRenderSummary", ImVec2(0, 72), true);
             UIWidgets::StatusIndicator(
                 can_render && valid_range ? "Sequence is ready to render" : "Sequence needs attention before rendering",
@@ -1831,7 +1883,7 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
 // ─────────────────────────────────────────────────────────────────────────────
 static bool isPoppablePropertyTab(int tab)
 {
-    return tab >= 0 && tab <= 12; // every sidebar tab index
+    return tab >= 0 && tab <= 13; // every sidebar tab index
 }
 
 static const char* poppablePropertyTabName(int tab)
@@ -1844,12 +1896,13 @@ static const char* poppablePropertyTabName(int tab)
         case 4:  return "Volumetric";
         case 5:  return "Simulation";
         case 6:  return "World";
-        case 7:  return "Modifiers";
+        case 7:  return "Modeling";
         case 8:  return "Hair & Fur";
         case 9:  return "System";
         case 10: return "Paint";
         case 11: return "Scatter";
         case 12: return "Stylize";
+        case 13: return "Sculpting";
         default: return "Panel";
     }
 }
@@ -1873,7 +1926,7 @@ void SceneUI::drawPoppedTabContent(UIContext& ctx, int tab)
             }
             break;
         case 4:  if (show_volumetric_tab) drawVolumetricPanel(ctx); break;
-        case 5:  if (show_forcefield_tab) ForceFieldUI::drawForceFieldPanel(ctx, ctx.scene, &timeline); break;
+        case 5:  if (show_forcefield_tab) ForceFieldUI::drawForceFieldPanel(*this, ctx, ctx.scene, &timeline); break;
         case 6:  if (show_world_tab) drawWorldContent(ctx); break;
         case 7:  drawModifiersPanel(ctx); break;
         case 8:  if (show_hair_tab) drawHairTabContent(ctx); break;
@@ -1881,6 +1934,7 @@ void SceneUI::drawPoppedTabContent(UIContext& ctx, int tab)
         case 10: if (show_paint_tab) drawPaintPanel(ctx); break;
         case 11: if (show_scatter_tab) drawScatterBrushPanel(ctx); break;
         case 12: if (show_stylize_tab) drawStylizePanel(ctx); break;
+        case 13: drawSculptPanel(ctx); break;
         default: break;
     }
 }
@@ -2169,11 +2223,22 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
     }
 
     // Panel shell styling
+    float win_rounding = 0.0f;
+    ImVec4 win_bg = ImVec4(0.085f, 0.09f, 0.105f, panel_alpha);
+    ImVec4 win_border = ImVec4(0.46f, 0.54f, 0.64f, 0.18f);
+
+    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+        const auto& curTheme = ThemeManager::instance().current();
+        win_rounding = curTheme.style.windowRounding;
+        win_bg = ImVec4(curTheme.colors.background.x, curTheme.colors.background.y, curTheme.colors.background.z, panel_alpha);
+        win_border = curTheme.colors.border;
+    }
+
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, win_rounding);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.085f, 0.09f, 0.105f, panel_alpha));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.46f, 0.54f, 0.64f, 0.18f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, win_bg);
+    ImGui::PushStyleColor(ImGuiCol_Border, win_border);
 
     if (ImGui::Begin("Properties", nullptr, flags))
     {
@@ -2408,7 +2473,11 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                 ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                 ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.07f, 0.08f, 0.10f, 0.84f));
                 ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(iconTint.x, iconTint.y, iconTint.z, 0.22f));
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+                float tooltip_round = 10.0f;
+                if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+                    tooltip_round = ThemeManager::instance().current().style.popupRounding;
+                }
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, tooltip_round);
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
                 ImGui::BeginTooltip();
                 ImGui::PushTextWrapPos(ImGui::GetFontSize() * 22.0f);
@@ -2431,18 +2500,36 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         };
 
         ImGui::Dummy(ImVec2(0.0f, 10.0f));
+        // 1. Scene Setup & Config
         drawTabButton(0, UIWidgets::IconType::Scene,      "Scene / Hierarchy");
+        if (show_world_tab)      drawTabButton(6, UIWidgets::IconType::World,      "World & Sky");
         drawTabButton(1, UIWidgets::IconType::Render,     "Render Settings");
+        
+        ImGui::Dummy(ImVec2(0.0f, 4.0f)); // Subtle grouping spacing
+        
+        // 2. Geometry Creation & Modeling / Sculpting / Hair
+        drawTabButton(7, UIWidgets::IconType::Mesh, "Modeling");
+        drawTabButton(13, UIWidgets::IconType::Sculpt, "Sculpting");
+        if (show_paint_tab)      drawTabButton(10, UIWidgets::IconType::PaintTool,  "Paint Mode");
+        if (show_hair_tab)       drawTabButton(8, UIWidgets::IconType::Hair,       "Hair & Fur");
+        
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        
+        // 3. Environment & Landscape
         if (show_terrain_tab)    drawTabButton(2, UIWidgets::IconType::Terrain,    "Terrain Editor");
         if (show_water_tab)      drawTabButton(3, UIWidgets::IconType::Water,      active_water_subtab == 0 ? "Water" : "River Spline");
-        if (show_volumetric_tab) drawTabButton(4, UIWidgets::IconType::Volumetric, "Volumetrics");
-        if (show_forcefield_tab) drawTabButton(5, UIWidgets::IconType::Force,      "Physics");
-        if (show_world_tab)      drawTabButton(6, UIWidgets::IconType::World,      "World & Sky");
-        if (show_stylize_tab)    drawTabButton(12, UIWidgets::IconType::Brush,     "Stylize Mode");
-        if (show_hair_tab)       drawTabButton(8, UIWidgets::IconType::Hair,       "Hair & Fur");
         if (show_scatter_tab)    drawTabButton(11, UIWidgets::IconType::SprayTool, "Scatter (Foliage & Mesh)");
-        drawTabButton(7, UIWidgets::IconType::Sculpt, "Modeling");
-        if (show_paint_tab)      drawTabButton(10, UIWidgets::IconType::PaintTool,  "Paint Mode");
+        
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        
+        // 4. Dynamics, Effects & Styling
+        if (show_forcefield_tab) drawTabButton(5, UIWidgets::IconType::Force,      "Physics");
+        if (show_volumetric_tab) drawTabButton(4, UIWidgets::IconType::Volumetric, "Volumetrics");
+        if (show_stylize_tab)    drawTabButton(12, UIWidgets::IconType::Brush,     "Stylize Mode");
+        
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        
+        // 5. System
         if (show_system_tab)     drawTabButton(9, UIWidgets::IconType::System,     "System & UI");
         
         ImGui::EndChild();
@@ -2901,10 +2988,11 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                 }
                 break;
             case 4: if (show_volumetric_tab) drawVolumetricPanel(ctx); break;
-            case 5: if (show_forcefield_tab) ForceFieldUI::drawForceFieldPanel(ctx, ctx.scene, &timeline); break;
+            case 5: if (show_forcefield_tab) ForceFieldUI::drawForceFieldPanel(*this, ctx, ctx.scene, &timeline); break;
             case 6: if (show_world_tab) drawWorldContent(ctx); break;
             case 12: if (show_stylize_tab) drawStylizePanel(ctx); break;
             case 7: drawModifiersPanel(ctx); break;
+            case 13: drawSculptPanel(ctx); break;
             case 11: if (show_scatter_tab) drawScatterBrushPanel(ctx); break;
             case 9: drawThemeSelector(); drawResolutionPanel(ctx); break;
             case 10: if (show_paint_tab) drawPaintPanel(ctx); break;
@@ -2947,9 +3035,29 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                 paint_mode_state.enabled = false;
                 paint_mode_state.clearAdapter();
             }
-            // Leaving Modifiers tab -> fully exit sculpt/edit modes (unless popped out & still visible)
-            if (s_last_active_tab == 7 && !properties_tab_popped_[7]) {
+            // Leaving Modifiers (Modeling) tab -> fully exit sculpt/edit modes (unless popped out or moving to Sculpting)
+            if (s_last_active_tab == 7 && !properties_tab_popped_[7] && active_properties_tab != 13) {
                 resetMeshEditState(ctx);
+            }
+            // Leaving Sculpting tab -> fully exit sculpt/edit modes (unless popped out or moving to Modeling)
+            if (s_last_active_tab == 13 && !properties_tab_popped_[13] && active_properties_tab != 7) {
+                resetMeshEditState(ctx);
+            }
+            // Leaving Physics tab -> fully exit edit/sculpt modes if active (unless popped out or moving to Modeling/Sculpting)
+            if (s_last_active_tab == 5 && !properties_tab_popped_[5] && active_properties_tab != 7 && active_properties_tab != 13) {
+                resetMeshEditState(ctx);
+            }
+            // Leaving Hair & Fur tab -> fully exit hair paint mode (unless popped out)
+            if (s_last_active_tab == 8 && !properties_tab_popped_[8]) {
+                hairUI.setPaintMode(Hair::HairPaintMode::NONE);
+            }
+
+            // Entering hooks
+            if (active_properties_tab == 7) {
+                activateEditWorkspace(ctx);
+            }
+            if (active_properties_tab == 13) {
+                activateSculptWorkspace(ctx);
             }
 
             s_last_active_tab = active_properties_tab;
@@ -3562,9 +3670,17 @@ void SceneUI::drawPanels(UIContext& ctx)
     ImGuiIO& io = ImGui::GetIO();
     float screen_y = io.DisplaySize.y;
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg,
-        ImVec4(0.1f, 0.1f, 0.13f, panel_alpha));
+    float win_rounding = 4.0f;
+    ImVec4 win_bg = ImVec4(0.1f, 0.1f, 0.13f, panel_alpha);
+
+    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+        const auto& curTheme = ThemeManager::instance().current();
+        win_rounding = curTheme.style.windowRounding;
+        win_bg = ImVec4(curTheme.colors.background.x, curTheme.colors.background.y, curTheme.colors.background.z, panel_alpha);
+    }
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, win_rounding);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, win_bg);
 
     if (showSidePanel) {
         drawRenderSettingsPanel(ctx, screen_y);
@@ -4485,7 +4601,7 @@ bool SceneUI::drawOverlays(UIContext& ctx)
             if (!docking_enabled) {
                 bottom_docked = true;
             } else {
-                ImGuiID dockspace_id = ImGui::GetID("RayTrophiDockSpace_v2");
+                ImGuiID dockspace_id = this->dockspace_id;
                 for (const char* name : {"Timeline", "Console", "Terrain Graph", "AnimGraph", "Asset Browser"}) {
                     ImGuiWindow* win = ImGui::FindWindowByName(name);
                     if (win && win->Active && win->DockNode) {
@@ -7716,6 +7832,12 @@ void SceneUI::handleHairBrush(UIContext& ctx) {
                 hairUI.clearDirty();
             }
         }
+
+        // ESC = Exit Paint Mode
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            hairUI.setPaintMode(Hair::HairPaintMode::NONE);
+            ctx.renderer.resetCPUAccumulation();
+        }
     }
 }
 
@@ -8052,7 +8174,7 @@ std::string SceneUI::serialize() {
     // Which Properties sub-tabs are currently torn off into their own windows.
     {
         nlohmann::json popped = nlohmann::json::array();
-        for (int t = 0; t <= 12; ++t)
+        for (int t = 0; t <= 13; ++t)
             if (properties_tab_popped_[t]) popped.push_back(t);
         j["properties_popped_tabs"] = popped;
     }

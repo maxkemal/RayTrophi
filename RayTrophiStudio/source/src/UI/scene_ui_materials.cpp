@@ -65,21 +65,60 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     SceneSelection& sel = ctx.selection;
 
     UIWidgets::PushControlSurfaceStyle(ImVec4(0.98f, 0.72f, 0.42f, 1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 14.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 14.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 14.0f);
+    const auto& themeSettings = ThemeManager::instance().getIconSettings();
+    const auto& curTheme = ThemeManager::instance().current();
+
+    float child_round = 14.0f;
+    float frame_round = 14.0f;
+    float grab_round = 14.0f;
+    float popup_round = 14.0f;
+    ImVec4 child_bg = ImVec4(0.10f, 0.115f, 0.14f, 0.94f);
+    ImVec4 frame_bg = ImVec4(0.13f, 0.145f, 0.17f, 0.98f);
+    ImVec4 frame_bg_hovered = ImVec4(0.16f, 0.18f, 0.215f, 0.99f);
+    ImVec4 frame_bg_active = ImVec4(0.19f, 0.215f, 0.25f, 1.0f);
+
+    ImVec4 finalHeader = ImVec4(0.20f, 0.16f, 0.11f, 0.96f);
+    ImVec4 finalHeaderHovered = ImVec4(0.26f, 0.20f, 0.13f, 0.98f);
+    ImVec4 finalHeaderActive = ImVec4(0.30f, 0.24f, 0.16f, 1.0f);
+    ImVec4 finalSliderGrab = ImVec4(1.0f, 0.78f, 0.48f, 0.95f);
+    ImVec4 finalSliderGrabActive = ImVec4(1.0f, 0.88f, 0.62f, 1.0f);
+
+    if (themeSettings.overridePanelAccentsWithTheme) {
+        child_round = curTheme.style.windowRounding;
+        frame_round = curTheme.style.frameRounding;
+        grab_round = curTheme.style.grabRounding;
+        popup_round = curTheme.style.popupRounding;
+        
+        child_bg = ImVec4(curTheme.colors.surface.x, curTheme.colors.surface.y, curTheme.colors.surface.z, 0.94f);
+        frame_bg = curTheme.colors.surface;
+        frame_bg_hovered = UIWidgets::ScaleColor(curTheme.colors.surface, 1.3f);
+        frame_bg_active = UIWidgets::ScaleColor(curTheme.colors.surface, 1.5f);
+    }
+
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, child_round);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, frame_round);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, grab_round);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, popup_round);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(8.0f, 6.0f));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.115f, 0.14f, 0.94f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.13f, 0.145f, 0.17f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.16f, 0.18f, 0.215f, 0.99f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.19f, 0.215f, 0.25f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.20f, 0.16f, 0.11f, 0.96f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.26f, 0.20f, 0.13f, 0.98f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.30f, 0.24f, 0.16f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(1.0f, 0.78f, 0.48f, 0.95f));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(1.0f, 0.88f, 0.62f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, child_bg);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, frame_bg);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, frame_bg_hovered);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, frame_bg_active);
+
+    if (themeSettings.overridePanelAccentsWithTheme) {
+        finalHeader = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.22f);
+        finalHeaderHovered = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.48f);
+        finalHeaderActive = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.70f);
+        finalSliderGrab = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.92f);
+        finalSliderGrabActive = ImVec4((std::min)(1.0f, curTheme.colors.accent.x + 0.10f), (std::min)(1.0f, curTheme.colors.accent.y + 0.10f), (std::min)(1.0f, curTheme.colors.accent.z + 0.10f), 1.0f);
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_Header, finalHeader);
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, finalHeaderHovered);
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, finalHeaderActive);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, finalSliderGrab);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, finalSliderGrabActive);
 
     // Only show for selected objects
     if (sel.selected.type != SelectableType::Object || !sel.selected.object) {
@@ -153,8 +192,15 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         last_selected_obj_name = obj_name;
     }
 
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.11f, 0.13f, 0.16f, 0.94f));
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.0f);
+    ImVec4 card_bg = ImVec4(0.11f, 0.13f, 0.16f, 0.94f);
+    float card_round = 12.0f;
+    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+        const auto& curTheme = ThemeManager::instance().current();
+        card_bg = ImVec4(curTheme.colors.surface.x, curTheme.colors.surface.y, curTheme.colors.surface.z, 0.94f);
+        card_round = curTheme.style.windowRounding;
+    }
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, card_bg);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, card_round);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
     ImGui::BeginChild("MaterialHeaderCard", ImVec2(0, 64), true);
     ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.52f, 1.0f), "%s", obj_name.c_str());
@@ -708,10 +754,21 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         if (UIWidgets::BeginSection("Volumetric Properties", ImVec4(0.76f, 0.60f, 1.0f, 1.0f))) {
 
         // �� DISTINCT INPUT FIELD STYLING FOR VOLUMETRIC PANEL (For Colors only) ����������������
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.18f, 0.20f, 0.25f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+        ImVec4 v_frame_bg = ImVec4(0.12f, 0.12f, 0.15f, 1.0f);
+        ImVec4 v_frame_hover = ImVec4(0.18f, 0.20f, 0.25f, 1.0f);
+        ImVec4 v_frame_active = ImVec4(0.22f, 0.25f, 0.30f, 1.0f);
+        float v_round = 3.0f;
+        if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+            const auto& curTheme = ThemeManager::instance().current();
+            v_frame_bg = curTheme.colors.surface;
+            v_frame_hover = UIWidgets::ScaleColor(curTheme.colors.surface, 1.3f);
+            v_frame_active = UIWidgets::ScaleColor(curTheme.colors.surface, 1.5f);
+            v_round = curTheme.style.frameRounding;
+        }
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, v_frame_bg);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, v_frame_hover);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, v_frame_active);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, v_round);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 3));
 
@@ -1181,13 +1238,35 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
     };
 
     // Style
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.18f, 0.20f, 0.25f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.35f, 0.65f, 0.45f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.45f, 0.75f, 0.55f, 1.0f));
+    ImVec4 uvFrameBg = ImVec4(0.12f, 0.12f, 0.15f, 1.0f);
+    ImVec4 uvFrameBgHovered = ImVec4(0.18f, 0.20f, 0.25f, 1.0f);
+    ImVec4 uvFrameBgActive = ImVec4(0.22f, 0.25f, 0.30f, 1.0f);
+    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+        const auto& curTheme = ThemeManager::instance().current();
+        uvFrameBg = curTheme.colors.surface;
+        uvFrameBgHovered = UIWidgets::ScaleColor(curTheme.colors.surface, 1.3f);
+        uvFrameBgActive = UIWidgets::ScaleColor(curTheme.colors.surface, 1.5f);
+    }
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, uvFrameBg);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, uvFrameBgHovered);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, uvFrameBgActive);
+    
+    ImVec4 uvSliderGrab = ImVec4(0.35f, 0.65f, 0.45f, 1.0f);
+    ImVec4 uvSliderGrabActive = ImVec4(0.45f, 0.75f, 0.55f, 1.0f);
+    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+        const auto& curTheme = ThemeManager::instance().current();
+        uvSliderGrab = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.92f);
+        uvSliderGrabActive = ImVec4((std::min)(1.0f, curTheme.colors.accent.x + 0.10f), (std::min)(1.0f, curTheme.colors.accent.y + 0.10f), (std::min)(1.0f, curTheme.colors.accent.z + 0.10f), 1.0f);
+    }
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, uvSliderGrab);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, uvSliderGrabActive);
+    
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.40f, 0.38f, 0.8f));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+    float uv_round = 3.0f;
+    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+        uv_round = ThemeManager::instance().current().style.frameRounding;
+    }
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, uv_round);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 3));
 

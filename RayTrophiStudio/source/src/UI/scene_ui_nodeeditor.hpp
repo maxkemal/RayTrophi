@@ -335,13 +335,30 @@ public:
         
         // ── DISTINCT INPUT FIELD STYLING ──────────────────────────────────────
         // Make sliders/inputs visually distinct from panel (darker, with border)
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));        // Dark background
-        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.18f, 0.20f, 0.25f, 1.0f)); // Lighter on hover
-        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));  // Even lighter when active
-        ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.45f, 0.55f, 0.75f, 1.0f));     // Blue-ish slider grab
-        ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.55f, 0.65f, 0.85f, 1.0f));
+        ImVec4 nodeFrameBg = ImVec4(0.12f, 0.12f, 0.15f, 1.0f);
+        ImVec4 nodeFrameBgHovered = ImVec4(0.18f, 0.20f, 0.25f, 1.0f);
+        ImVec4 nodeFrameBgActive = ImVec4(0.22f, 0.25f, 0.30f, 1.0f);
+        float nodeFrameRounding = 3.0f;
+        
+        ImVec4 nodeSliderGrab = ImVec4(0.45f, 0.55f, 0.75f, 1.0f);
+        ImVec4 nodeSliderGrabActive = ImVec4(0.55f, 0.65f, 0.85f, 1.0f);
+        if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+            const auto& curTheme = ThemeManager::instance().current();
+            nodeSliderGrab = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.92f);
+            nodeSliderGrabActive = ImVec4((std::min)(1.0f, curTheme.colors.accent.x + 0.10f), (std::min)(1.0f, curTheme.colors.accent.y + 0.10f), (std::min)(1.0f, curTheme.colors.accent.z + 0.10f), 1.0f);
+            
+            nodeFrameBg = curTheme.colors.surface;
+            nodeFrameBgHovered = UIWidgets::ScaleColor(curTheme.colors.surface, 1.3f);
+            nodeFrameBgActive = UIWidgets::ScaleColor(curTheme.colors.surface, 1.5f);
+            nodeFrameRounding = curTheme.style.frameRounding;
+        }
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, nodeFrameBg);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, nodeFrameBgHovered);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, nodeFrameBgActive);
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, nodeSliderGrab);
+        ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, nodeSliderGrabActive);
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.38f, 0.45f, 0.8f));         // Subtle border
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);      // Rounded corners
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, nodeFrameRounding);      // Rounded corners
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);    // Visible border
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 3)); // Compact padding
         

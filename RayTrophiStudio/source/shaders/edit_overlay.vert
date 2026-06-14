@@ -46,5 +46,14 @@ void main() {
             col = vec4(heat, max(0.08, pc.params2.y * soft));
         }
     }
+    // Sculpt protection mask (bits 16..23): tint frozen regions cool grey so
+    // the user can see what the brush will skip. Suppressed in force-select mode.
+    if (pc.params.w <= 0.5) {
+        float mask = float((inFlags >> 16) & 255u) / 255.0;
+        if (mask > 0.01) {
+            col.rgb = mix(col.rgb, vec3(0.20, 0.40, 0.62), mask * 0.8);
+            col.a = max(col.a, mask * 0.85);
+        }
+    }
     vColor = col;
 }

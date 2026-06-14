@@ -44,7 +44,13 @@ bool BeginWaterSection(const char* title, const ImVec4& accent, bool defaultOpen
     ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(accent.x * 0.38f, accent.y * 0.38f, accent.z * 0.38f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.94f, 0.96f, 0.99f, 1.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 7.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
+    
+    float fr = 10.0f;
+    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+        fr = ThemeManager::instance().current().style.frameRounding;
+    }
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, fr);
+    
     const bool open = ImGui::CollapsingHeader(
         title,
         (defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0) | ImGuiTreeNodeFlags_SpanAvailWidth);

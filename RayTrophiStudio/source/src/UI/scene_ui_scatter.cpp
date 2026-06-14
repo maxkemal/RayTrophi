@@ -1169,7 +1169,7 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
             did_hit = true;
         } else if (sculpt_stroke_state.active &&
                    sculpt_stroke_state.object_name == sculpt_mode_state.active_target_name &&
-                   sculpt_mode_state.tool == SculptBrushTool::Grab) {
+                   SceneUI::isGrabFamilyTool(sculpt_mode_state.tool)) {
             const Vec3 planeNormal = sculpt_stroke_state.stroke_normal.length_squared() > 1e-8f
                 ? sculpt_stroke_state.stroke_normal.normalize()
                 : Vec3(0.0f, 1.0f, 0.0f);
@@ -1244,6 +1244,38 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
                 const Matrix4x4 normalMtx = inv.transpose();
                 mirHit.normal = normalMtx.transform_vector(localN).normalize();
                 drawSculptBrushViewportPreview(ctx, mirHit, true);
+            }
+        }
+        // Radial symmetry ghost previews (rotated copies of the brush).
+        if (sculpt_mode_state.radial_symmetry && sculpt_mode_state.radial_count >= 2) {
+            const Matrix4x4 transform = [&]() -> Matrix4x4 {
+                for (auto& obj : ctx.scene.world.objects) {
+                    if (auto* t = dynamic_cast<Triangle*>(obj.get())) {
+                        if (t->getNodeName() == sculpt_mode_state.active_target_name) {
+                            return t->getTransformMatrix();
+                        }
+                    }
+                }
+                return Matrix4x4{};
+            }();
+            const Matrix4x4 inv = transform.inverse();
+            const Matrix4x4 normalMtx = inv.transpose();
+            const Vec3 localHit = inv.transform_point(hit.point);
+            const Vec3 localN = inv.transform_vector(hit.normal);
+            const int axis = std::clamp(sculpt_mode_state.radial_axis, 0, 2);
+            const int count = std::clamp(sculpt_mode_state.radial_count, 2, 64);
+            auto rotLocal = [](const Vec3& p, int ax, float a) -> Vec3 {
+                const float c = std::cos(a), s = std::sin(a);
+                if (ax == 0) return Vec3(p.x, c * p.y - s * p.z, s * p.y + c * p.z);
+                if (ax == 2) return Vec3(c * p.x - s * p.y, s * p.x + c * p.y, p.z);
+                return Vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+            };
+            for (int k = 1; k < count; ++k) {
+                const float angle = 6.28318530718f * static_cast<float>(k) / static_cast<float>(count);
+                HitRecord radHit = hit;
+                radHit.point = transform.transform_point(rotLocal(localHit, axis, angle));
+                radHit.normal = normalMtx.transform_vector(rotLocal(localN, axis, angle)).normalize();
+                drawSculptBrushViewportPreview(ctx, radHit, true);
             }
         }
         return;

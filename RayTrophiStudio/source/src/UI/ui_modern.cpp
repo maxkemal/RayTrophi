@@ -5,6 +5,7 @@
  */
 
 #include "ui_modern.h"
+#include "globals.h"
 #include <fstream>
 #include <algorithm>
 #include <imgui_internal.h>
@@ -17,86 +18,7 @@
 void ThemeManager::registerDefaultThemes() {
     themes_.clear();
 
-    // --- 0: Dark (ImGui Default) ---
-    {
-        Theme t;
-        t.name = "Dark";
-        t.colors.primary    = ImVec4(0.26f, 0.59f, 0.98f, 1.0f);
-        t.colors.secondary  = ImVec4(0.20f, 0.20f, 0.22f, 1.0f);
-        t.colors.accent     = ImVec4(0.40f, 0.70f, 1.00f, 1.0f);
-        t.colors.background = ImVec4(0.06f, 0.06f, 0.06f, 0.94f);
-        t.colors.surface    = ImVec4(0.10f, 0.10f, 0.10f, 1.0f);
-        t.colors.text       = ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
-        t.colors.textMuted  = ImVec4(0.50f, 0.50f, 0.50f, 1.0f);
-        t.colors.success    = ImVec4(0.30f, 1.00f, 0.30f, 1.0f);
-        t.colors.warning    = ImVec4(1.00f, 0.80f, 0.00f, 1.0f);
-        t.colors.error      = ImVec4(1.00f, 0.30f, 0.30f, 1.0f);
-        t.colors.border     = ImVec4(0.43f, 0.43f, 0.50f, 0.50f);
-        themes_.push_back(t);
-    }
-
-    // --- 1: Light ---
-    {
-        Theme t;
-        t.name = "Light";
-        t.colors.primary    = ImVec4(0.26f, 0.59f, 0.98f, 1.0f);
-        t.colors.secondary  = ImVec4(0.90f, 0.90f, 0.90f, 1.0f);
-        t.colors.accent     = ImVec4(0.20f, 0.50f, 0.90f, 1.0f);
-        t.colors.background = ImVec4(0.94f, 0.94f, 0.94f, 1.0f);
-        t.colors.surface    = ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
-        t.colors.text       = ImVec4(0.00f, 0.00f, 0.00f, 1.0f);
-        t.colors.textMuted  = ImVec4(0.50f, 0.50f, 0.50f, 1.0f);
-        t.colors.success    = ImVec4(0.10f, 0.70f, 0.10f, 1.0f);
-        t.colors.warning    = ImVec4(0.90f, 0.60f, 0.00f, 1.0f);
-        t.colors.error      = ImVec4(0.80f, 0.10f, 0.10f, 1.0f);
-        t.colors.border     = ImVec4(0.00f, 0.00f, 0.00f, 0.30f);
-        themes_.push_back(t);
-    }
-
-    // --- 2: Classic ---
-    {
-        Theme t;
-        t.name = "Classic";
-        t.colors.primary    = ImVec4(0.24f, 0.52f, 0.88f, 1.0f);
-        t.colors.secondary  = ImVec4(0.20f, 0.22f, 0.27f, 1.0f);
-        t.colors.accent     = ImVec4(0.40f, 0.44f, 0.64f, 1.0f);
-        t.colors.background = ImVec4(0.00f, 0.00f, 0.00f, 0.85f);
-        t.colors.surface    = ImVec4(0.11f, 0.11f, 0.14f, 1.0f);
-        t.colors.text       = ImVec4(0.90f, 0.90f, 0.90f, 1.0f);
-        t.colors.textMuted  = ImVec4(0.60f, 0.60f, 0.60f, 1.0f);
-        t.colors.success    = ImVec4(0.40f, 0.80f, 0.40f, 1.0f);
-        t.colors.warning    = ImVec4(0.90f, 0.70f, 0.00f, 1.0f);
-        t.colors.error      = ImVec4(0.90f, 0.40f, 0.40f, 1.0f);
-        t.colors.border     = ImVec4(0.50f, 0.50f, 0.50f, 0.50f);
-        themes_.push_back(t);
-    }
-
-    // --- 3: Studio Dark ---
-    {
-        Theme t;
-        t.name = "Studio Dark";
-        t.style.frameRounding = 3.0f;
-        t.style.windowRounding = 2.0f;
-        t.style.scrollbarRounding = 3.0f;
-        t.style.grabRounding = 3.0f;
-        t.style.popupRounding = 2.0f;
-        t.style.tabRounding = 3.0f;
-
-        t.colors.primary    = ImVec4(0.20f, 0.45f, 0.85f, 0.80f);
-        t.colors.secondary  = ImVec4(0.22f, 0.24f, 0.28f, 1.0f);
-        t.colors.accent     = ImVec4(0.28f, 0.56f, 1.00f, 0.90f);
-        t.colors.background = ImVec4(0.10f, 0.10f, 0.12f, 0.94f);
-        t.colors.surface    = ImVec4(0.16f, 0.16f, 0.18f, 1.0f);
-        t.colors.text       = ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
-        t.colors.textMuted  = ImVec4(0.50f, 0.50f, 0.50f, 1.0f);
-        t.colors.success    = ImVec4(0.30f, 1.00f, 0.30f, 1.0f);
-        t.colors.warning    = ImVec4(1.00f, 1.00f, 0.00f, 1.0f);
-        t.colors.error      = ImVec4(1.00f, 0.00f, 0.00f, 1.0f);
-        t.colors.border     = ImVec4(0.05f, 0.05f, 0.05f, 0.50f);
-        themes_.push_back(t);
-    }
-
-    // --- 4: RayTrophi Pro Dark (VarsayÄ±lan) ---
+    // --- 0: RayTrophi Pro Dark (Varsayılan) ---
     {
         Theme t;
         t.name = "RayTrophi Pro Dark";
@@ -121,55 +43,46 @@ void ThemeManager::registerDefaultThemes() {
         themes_.push_back(t);
     }
 
-    // --- 5: Neon Cyber ---
+    // --- 1: Custom Theme ---
     {
         Theme t;
-        t.name = "Neon Cyber";
-        t.style.windowRounding = 4.0f;
+        t.name = "Custom Theme";
         t.style.frameRounding = 4.0f;
+        t.style.windowRounding = 4.0f;
+        t.style.scrollbarRounding = 9.0f;
         t.style.grabRounding = 4.0f;
+        t.style.popupRounding = 4.0f;
+        t.style.tabRounding = 4.0f;
 
-        t.colors.primary    = ImVec4(0.05f, 0.25f, 0.05f, 1.0f);
-        t.colors.secondary  = ImVec4(0.10f, 0.25f, 0.10f, 1.0f);
-        t.colors.accent     = ImVec4(0.40f, 1.00f, 0.40f, 1.0f);
-        t.colors.background = ImVec4(0.02f, 0.02f, 0.04f, 0.94f);
-        t.colors.surface    = ImVec4(0.05f, 0.13f, 0.05f, 1.0f);
-        t.colors.text       = ImVec4(0.65f, 1.00f, 0.65f, 1.0f);
-        t.colors.textMuted  = ImVec4(0.30f, 0.50f, 0.30f, 1.0f);
-        t.colors.success    = ImVec4(0.40f, 1.00f, 0.40f, 1.0f);
-        t.colors.warning    = ImVec4(1.00f, 1.00f, 0.40f, 1.0f);
-        t.colors.error      = ImVec4(1.00f, 0.40f, 0.40f, 1.0f);
-        t.colors.border     = ImVec4(0.00f, 1.00f, 0.00f, 0.20f);
+        // Initialize to RayTrophi Pro Dark colors as a starting point
+        t.colors.primary    = ImVec4(0.32f, 0.32f, 0.34f, 1.0f);
+        t.colors.secondary  = ImVec4(0.18f, 0.18f, 0.19f, 1.0f);
+        t.colors.accent     = ImVec4(0.90f, 0.52f, 0.18f, 1.0f);
+        t.colors.background = ImVec4(0.24f, 0.24f, 0.25f, 1.0f);
+        t.colors.surface    = ImVec4(0.14f, 0.14f, 0.15f, 1.0f);
+        t.colors.text       = ImVec4(0.88f, 0.88f, 0.88f, 1.0f);
+        t.colors.textMuted  = ImVec4(0.55f, 0.55f, 0.56f, 1.0f);
+        t.colors.success    = ImVec4(0.26f, 0.65f, 0.36f, 1.0f);
+        t.colors.warning    = ImVec4(0.85f, 0.60f, 0.15f, 1.0f);
+        t.colors.error      = ImVec4(0.80f, 0.30f, 0.30f, 1.0f);
+        t.colors.border     = ImVec4(0.11f, 0.11f, 0.12f, 0.50f);
         themes_.push_back(t);
     }
 
-    // --- 6: High Contrast ---
-    {
-        Theme t;
-        t.name = "High Contrast";
-        t.style.windowRounding = 0.0f;
-        t.style.frameRounding = 0.0f;
-        t.style.grabRounding = 0.0f;
-
-        t.colors.primary    = ImVec4(0.00f, 0.00f, 0.00f, 1.0f);
-        t.colors.secondary  = ImVec4(0.20f, 0.20f, 0.20f, 1.0f);
-        t.colors.accent     = ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
-        t.colors.background = ImVec4(0.00f, 0.00f, 0.00f, 0.94f);
-        t.colors.surface    = ImVec4(0.05f, 0.05f, 0.05f, 1.0f);
-        t.colors.text       = ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
-        t.colors.textMuted  = ImVec4(0.60f, 0.60f, 0.60f, 1.0f);
-        t.colors.success    = ImVec4(0.00f, 1.00f, 0.00f, 1.0f);
-        t.colors.warning    = ImVec4(1.00f, 1.00f, 0.00f, 1.0f);
-        t.colors.error      = ImVec4(1.00f, 0.00f, 0.00f, 1.0f);
-        t.colors.border     = ImVec4(1.00f, 1.00f, 1.00f, 0.40f);
-        themes_.push_back(t);
-    }
-
-    currentIndex_ = 4; // RayTrophi Pro Dark varsayÄ±lan
+    currentIndex_ = 0; // RayTrophi Pro Dark varsayılan
+    loadCustomThemes("custom_themes.cfg");
 }
 
 void ThemeManager::addTheme(const Theme& theme) {
     themes_.push_back(theme);
+    SCENE_LOG_INFO("[addTheme] Added theme: " + theme.name + ". themes_.size(): " + std::to_string(themes_.size()));
+}
+
+void ThemeManager::deleteTheme(int index) {
+    if (index >= 2 && index < static_cast<int>(themes_.size())) {
+        themes_.erase(themes_.begin() + index);
+        currentIndex_ = 0; // Reset to RayTrophi Pro Dark
+    }
 }
 
 void ThemeManager::setTheme(int index) {
@@ -191,16 +104,12 @@ void ThemeManager::applyCurrentTheme(float panelAlpha) {
     const Theme& t = themes_[currentIndex_];
     ImGuiStyle& style = ImGui::GetStyle();
     
-    // Once ImGui'nin varsayilan stillerini uygula
-    switch (currentIndex_) {
-        case 0: ImGui::StyleColorsDark(); break;
-        case 1: ImGui::StyleColorsLight(); break;
-        case 2: ImGui::StyleColorsClassic(); break;
-        default: ImGui::StyleColorsDark(); break;
-    }
+    // Always apply dark style as base
+    ImGui::StyleColorsDark();
 
     // Stil ayarlari
     style.WindowRounding    = t.style.windowRounding;
+    style.ChildRounding     = t.style.windowRounding;
     style.FrameRounding     = t.style.frameRounding;
     style.GrabRounding      = t.style.grabRounding;
     style.ScrollbarSize     = 7.0f; // Blender-like thin width
@@ -287,20 +196,169 @@ std::vector<const char*> ThemeManager::getAllThemeNames() const {
 void ThemeManager::saveThemeSettings(const std::string& filepath, float panelAlpha) {
     std::ofstream file(filepath);
     if (!file.is_open()) return;
-    file << currentIndex_ << " " << panelAlpha << "\n";
+    file.imbue(std::locale::classic());
+    
+    std::string themeName = themes_[currentIndex_].name;
+    std::replace(themeName.begin(), themeName.end(), ' ', '_');
+    file << themeName << " " << panelAlpha << "\n";
+    
+    // Save icon settings
+    file << static_cast<int>(iconSettings_.style) << " "
+         << iconSettings_.scaleMultiplier << " "
+         << iconSettings_.thicknessMultiplier << " "
+         << (iconSettings_.overridePanelAccentsWithTheme ? 1 : 0) << "\n";
+         
+    file << iconSettings_.customColor.x << " " << iconSettings_.customColor.y << " "
+         << iconSettings_.customColor.z << " " << iconSettings_.customColor.w << "\n";
+         
+    file << iconSettings_.customBgColor.x << " " << iconSettings_.customBgColor.y << " "
+         << iconSettings_.customBgColor.z << " " << iconSettings_.customBgColor.w << "\n";
+         
+    file << iconSettings_.customShadowColor.x << " " << iconSettings_.customShadowColor.y << " "
+         << iconSettings_.customShadowColor.z << " " << iconSettings_.customShadowColor.w << "\n";
+         
+    file << iconSettings_.matcapColor.x << " " << iconSettings_.matcapColor.y << " "
+         << iconSettings_.matcapColor.z << " " << iconSettings_.matcapColor.w << "\n";
 }
 
 bool ThemeManager::loadThemeSettings(const std::string& filepath, float& panelAlpha) {
     std::ifstream file(filepath);
     if (!file.is_open()) return false;
-    int index = 4;
+    file.imbue(std::locale::classic());
+    
+    std::string themeToken;
     float alpha = 0.90f;
-    if (file >> index >> alpha) {
-        setTheme(index);
+    if (file >> themeToken >> alpha) {
         panelAlpha = (alpha < 0.65f) ? 0.65f : ((alpha > 1.0f) ? 1.0f : alpha);
+        
+        bool isIndex = !themeToken.empty() && std::all_of(themeToken.begin(), themeToken.end(), ::isdigit);
+        if (isIndex) {
+            int idx = std::stoi(themeToken);
+            setTheme(idx);
+        } else {
+            std::replace(themeToken.begin(), themeToken.end(), '_', ' ');
+            setTheme(themeToken);
+        }
+        
+        int styleVal = 0;
+        int overrideAccents = 0;
+        if (file >> styleVal >> iconSettings_.scaleMultiplier >> iconSettings_.thicknessMultiplier >> overrideAccents) {
+            iconSettings_.style = static_cast<IconStyle>(styleVal);
+            iconSettings_.overridePanelAccentsWithTheme = (overrideAccents != 0);
+            
+            file >> iconSettings_.customColor.x >> iconSettings_.customColor.y 
+                 >> iconSettings_.customColor.z >> iconSettings_.customColor.w;
+                 
+            file >> iconSettings_.customBgColor.x >> iconSettings_.customBgColor.y 
+                 >> iconSettings_.customBgColor.z >> iconSettings_.customBgColor.w;
+                 
+            file >> iconSettings_.customShadowColor.x >> iconSettings_.customShadowColor.y 
+                 >> iconSettings_.customShadowColor.z >> iconSettings_.customShadowColor.w;
+
+            file >> iconSettings_.matcapColor.x >> iconSettings_.matcapColor.y 
+                 >> iconSettings_.matcapColor.z >> iconSettings_.matcapColor.w;
+        }
+        applyCurrentTheme(panelAlpha);
         return true;
     }
     return false;
+}
+
+void ThemeManager::saveCustomThemes(const std::string& filepath) {
+    std::ofstream file(filepath);
+    if (!file.is_open()) {
+        SCENE_LOG_ERROR("[saveCustomThemes] Failed to open " + filepath + " for writing.");
+        return;
+    }
+    file.imbue(std::locale::classic());
+    
+    int numCustom = 0;
+    if (themes_.size() > 1) {
+        numCustom = static_cast<int>(themes_.size()) - 1;
+    }
+    file << numCustom << "\n";
+   // SCENE_LOG_INFO("[saveCustomThemes] Saving " + std::to_string(numCustom) + " custom themes to " + filepath);
+    
+    for (size_t i = 1; i < themes_.size(); ++i) {
+        const auto& t = themes_[i];
+        std::string name = t.name;
+        std::replace(name.begin(), name.end(), ' ', '_');
+        file << name << "\n";
+        
+        const auto& tc = t.colors;
+        file << tc.primary.x << " " << tc.primary.y << " " << tc.primary.z << " " << tc.primary.w << " "
+             << tc.secondary.x << " " << tc.secondary.y << " " << tc.secondary.z << " " << tc.secondary.w << " "
+             << tc.accent.x << " " << tc.accent.y << " " << tc.accent.z << " " << tc.accent.w << " "
+             << tc.background.x << " " << tc.background.y << " " << tc.background.z << " " << tc.background.w << " "
+             << tc.surface.x << " " << tc.surface.y << " " << tc.surface.z << " " << tc.surface.w << " "
+             << tc.text.x << " " << tc.text.y << " " << tc.text.z << " " << tc.text.w << " "
+             << tc.textMuted.x << " " << tc.textMuted.y << " " << tc.textMuted.z << " " << tc.textMuted.w << " "
+             << tc.success.x << " " << tc.success.y << " " << tc.success.z << " " << tc.success.w << " "
+             << tc.warning.x << " " << tc.warning.y << " " << tc.warning.z << " " << tc.warning.w << " "
+             << tc.error.x << " " << tc.error.y << " " << tc.error.z << " " << tc.error.w << " "
+             << tc.border.x << " " << tc.border.y << " " << tc.border.z << " " << tc.border.w << "\n";
+             
+        const auto& ts = t.style;
+        file << ts.windowRounding << " " << ts.frameRounding << " " << ts.grabRounding << " "
+             << ts.scrollbarRounding << " " << ts.tabRounding << " " << ts.popupRounding << "\n";
+    }
+}
+
+void ThemeManager::loadCustomThemes(const std::string& filepath) {
+    std::ifstream file(filepath);
+    if (!file.is_open()) return;
+    file.imbue(std::locale::classic());
+    
+    int numCustom = 0;
+    if (file >> numCustom) {
+        SCENE_LOG_INFO("[loadCustomThemes] Loading " + std::to_string(numCustom) + " custom themes from " + filepath);
+        for (int i = 0; i < numCustom; ++i) {
+            Theme t;
+            if (!(file >> t.name)) {
+                SCENE_LOG_ERROR("[loadCustomThemes] Failed to read theme name at index " + std::to_string(i));
+                break;
+            }
+            std::replace(t.name.begin(), t.name.end(), '_', ' ');
+            
+            auto& tc = t.colors;
+            file >> tc.primary.x >> tc.primary.y >> tc.primary.z >> tc.primary.w
+                 >> tc.secondary.x >> tc.secondary.y >> tc.secondary.z >> tc.secondary.w
+                 >> tc.accent.x >> tc.accent.y >> tc.accent.z >> tc.accent.w
+                 >> tc.background.x >> tc.background.y >> tc.background.z >> tc.background.w
+                 >> tc.surface.x >> tc.surface.y >> tc.surface.z >> tc.surface.w
+                 >> tc.text.x >> tc.text.y >> tc.text.z >> tc.text.w
+                 >> tc.textMuted.x >> tc.textMuted.y >> tc.textMuted.z >> tc.textMuted.w
+                 >> tc.success.x >> tc.success.y >> tc.success.z >> tc.success.w
+                 >> tc.warning.x >> tc.warning.y >> tc.warning.z >> tc.warning.w
+                 >> tc.error.x >> tc.error.y >> tc.error.z >> tc.error.w
+                 >> tc.border.x >> tc.border.y >> tc.border.z >> tc.border.w;
+                 
+            auto& ts = t.style;
+            file >> ts.windowRounding >> ts.frameRounding >> ts.grabRounding
+                 >> ts.scrollbarRounding >> ts.tabRounding >> ts.popupRounding;
+                 
+            if (file.fail()) {
+                SCENE_LOG_ERROR("[loadCustomThemes] Failed to read theme values for index " + std::to_string(i) + " (locale mismatch or corrupt file)");
+                break;
+            }
+                 
+            // Check if a theme with this name already exists in default themes (like "Custom Theme"),
+            // and overwrite its properties rather than appending a duplicate theme.
+            bool found = false;
+            for (auto& existing : themes_) {
+                if (existing.name == t.name) {
+                    existing = t;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                themes_.push_back(t);
+            }
+        }
+    } else {
+        SCENE_LOG_WARN("[loadCustomThemes] Failed to read numCustom from " + filepath);
+    }
 }
 
 // ============================================================================
@@ -620,6 +678,7 @@ PanelState& PanelManager::getState(const std::string& panelId) {
 void PanelManager::saveStates(const std::string& filepath) {
     std::ofstream file(filepath);
     if (!file.is_open()) return;
+    file.imbue(std::locale::classic());
     
     for (const auto& [id, state] : states_) {
         file << id << " "
@@ -635,6 +694,7 @@ void PanelManager::saveStates(const std::string& filepath) {
 bool PanelManager::loadStates(const std::string& filepath) {
     std::ifstream file(filepath);
     if (!file.is_open()) return false;
+    file.imbue(std::locale::classic());
     
     std::string id;
     while (file >> id) {
@@ -671,6 +731,48 @@ void DrawThemeSelector(float& panel_alpha) {
             themeManager.saveThemeSettings("theme.cfg", panel_alpha);
         }
 
+        // Duplicate / Delete custom themes controls
+        static char newThemeName[64] = "My Custom Theme";
+        ImGui::PushItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##NewThemeName", "Theme Name...", newThemeName, IM_ARRAYSIZE(newThemeName));
+        ImGui::PopItemWidth();
+
+        float btn_w = ImGui::GetContentRegionAvail().x;
+        bool isDeletable = (currentThemeIdx >= 2);
+        if (isDeletable) {
+            btn_w = (btn_w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        }
+
+        if (ImGui::Button("Duplicate Theme", ImVec2(btn_w, 0.0f))) {
+            std::string nameStr(newThemeName);
+            if (!nameStr.empty()) {
+                Theme newTheme = themeManager.current();
+                newTheme.name = nameStr;
+                themeManager.addTheme(newTheme);
+                
+                int newIdx = themeManager.themeCount() - 1;
+                themeManager.setTheme(newIdx);
+                themeManager.applyCurrentTheme(panel_alpha);
+                themeManager.saveCustomThemes("custom_themes.cfg");
+                themeManager.saveThemeSettings("theme.cfg", panel_alpha);
+                
+                // Clear the theme name input text buffer after a successful duplication
+                newThemeName[0] = '\0';
+            }
+        }
+        if (isDeletable) {
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.20f, 0.20f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.30f, 0.30f, 1.0f));
+            if (ImGui::Button("Delete Theme", ImVec2(btn_w, 0.0f))) {
+                themeManager.deleteTheme(currentThemeIdx);
+                themeManager.applyCurrentTheme(panel_alpha);
+                themeManager.saveCustomThemes("custom_themes.cfg");
+                themeManager.saveThemeSettings("theme.cfg", panel_alpha);
+            }
+            ImGui::PopStyleColor(2);
+        }
+
         // Panel Transparency   
         if (ImGui::SliderFloat("Panel Transparency", &panel_alpha, 0.65f, 1.0f, "%.2f")) {
             ImGuiStyle& style = ImGui::GetStyle();
@@ -678,39 +780,225 @@ void DrawThemeSelector(float& panel_alpha) {
             style.Colors[ImGuiCol_ChildBg].w = panel_alpha;
             themeManager.saveThemeSettings("theme.cfg", panel_alpha);
         }
-        //ImGui::TextColored(ImVec4(0.90f, 0.65f, 0.20f, 0.80f), "  * Restart required to apply transparency changes.");
+
+        // Custom theme editing
+        if (currentThemeIdx >= 1) {
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.90f, 0.65f, 0.20f, 1.0f), "Customize Theme Colors:");
+            ImGui::Indent();
+            
+            auto& customTheme = themeManager.getThemeMutable(currentThemeIdx);
+            bool changed = false;
+            
+            // Allow renaming user-created custom themes (index >= 2)
+            if (currentThemeIdx >= 2) {
+                char renameBuf[64] = "";
+                strncpy(renameBuf, customTheme.name.c_str(), sizeof(renameBuf) - 1);
+                renameBuf[sizeof(renameBuf) - 1] = '\0';
+                if (ImGui::InputText("Theme Name", renameBuf, sizeof(renameBuf))) {
+                    if (strlen(renameBuf) > 0) {
+                        customTheme.name = renameBuf;
+                        changed = true;
+                    }
+                }
+            }
+            
+            // Roundings
+            changed |= ImGui::SliderFloat("Window Rounding", &customTheme.style.windowRounding, 0.0f, 16.0f, "%.0f px");
+            changed |= ImGui::SliderFloat("Frame Rounding", &customTheme.style.frameRounding, 0.0f, 16.0f, "%.0f px");
+            changed |= ImGui::SliderFloat("Tab Rounding", &customTheme.style.tabRounding, 0.0f, 16.0f, "%.0f px");
+            changed |= ImGui::SliderFloat("Grab Rounding", &customTheme.style.grabRounding, 0.0f, 16.0f, "%.0f px");
+            
+            // Colors
+            changed |= ImGui::ColorEdit4("Primary (Buttons)", &customTheme.colors.primary.x);
+            changed |= ImGui::ColorEdit4("Secondary (Tabs)", &customTheme.colors.secondary.x);
+            changed |= ImGui::ColorEdit4("Accent Color", &customTheme.colors.accent.x);
+            changed |= ImGui::ColorEdit4("Background", &customTheme.colors.background.x);
+            changed |= ImGui::ColorEdit4("Surface (Panels)", &customTheme.colors.surface.x);
+            changed |= ImGui::ColorEdit4("Text Color", &customTheme.colors.text.x);
+            changed |= ImGui::ColorEdit4("Muted Text", &customTheme.colors.textMuted.x);
+            changed |= ImGui::ColorEdit4("Border Color", &customTheme.colors.border.x);
+            
+            if (changed) {
+                themeManager.applyCurrentTheme(panel_alpha);
+                themeManager.saveCustomThemes("custom_themes.cfg");
+                themeManager.saveThemeSettings("theme.cfg", panel_alpha);
+            }
+            ImGui::Unindent();
+        }
+
+        // Icon settings
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.40f, 0.80f, 1.00f, 1.0f), "Icon & Accent Settings:");
+        ImGui::Indent();
+        
+        auto& iconSettings = themeManager.getIconSettings();
+        bool iconChanged = false;
+        
+        const char* styleNames[] = { "Clay Matcap (Premium)", "Flat Minimalist", "Neon Glow", "Custom Palette" };
+        int styleIdx = static_cast<int>(iconSettings.style);
+        if (ImGui::Combo("Icon Style", &styleIdx, styleNames, IM_ARRAYSIZE(styleNames))) {
+            iconSettings.style = static_cast<IconStyle>(styleIdx);
+            iconChanged = true;
+        }
+        
+        iconChanged |= ImGui::SliderFloat("Icon Size Scale", &iconSettings.scaleMultiplier, 0.5f, 2.0f, "%.2fx");
+        iconChanged |= ImGui::SliderFloat("Icon Line Width", &iconSettings.thicknessMultiplier, 0.5f, 3.0f, "%.2fx");
+        
+        if (iconSettings.style == IconStyle::CustomPalette || iconSettings.style == IconStyle::FlatMinimalist || iconSettings.style == IconStyle::NeonGlow) {
+            iconChanged |= ImGui::ColorEdit4("Icon Base Color", &iconSettings.customColor.x);
+            if (iconSettings.style == IconStyle::CustomPalette || iconSettings.style == IconStyle::FlatMinimalist) {
+                iconChanged |= ImGui::ColorEdit4("Icon Background", &iconSettings.customBgColor.x);
+            }
+        }
+        else if (iconSettings.style == IconStyle::ClayMatcap) {
+            iconChanged |= ImGui::ColorEdit3("Matcap Tint Color", &iconSettings.matcapColor.x);
+            
+            const char* matcapPresets[] = { "Neutral Gray", "Terracotta Red", "Sculpting Wax", "Jade Green", "Golden Metal" };
+            ImVec4 matcapColors[] = {
+                ImVec4(0.51f, 0.53f, 0.55f, 1.0f),
+                ImVec4(0.70f, 0.32f, 0.24f, 1.0f),
+                ImVec4(0.75f, 0.45f, 0.40f, 1.0f),
+                ImVec4(0.24f, 0.62f, 0.40f, 1.0f),
+                ImVec4(0.85f, 0.65f, 0.22f, 1.0f)
+            };
+            
+            int currentPresetIdx = -1;
+            for (int i = 0; i < 5; ++i) {
+                if (std::abs(iconSettings.matcapColor.x - matcapColors[i].x) < 0.01f &&
+                    std::abs(iconSettings.matcapColor.y - matcapColors[i].y) < 0.01f &&
+                    std::abs(iconSettings.matcapColor.z - matcapColors[i].z) < 0.01f) {
+                    currentPresetIdx = i;
+                    break;
+                }
+            }
+            
+            const char* comboPreviewText = (currentPresetIdx >= 0) ? matcapPresets[currentPresetIdx] : "Custom Tint";
+            
+            if (ImGui::BeginCombo("Matcap Material", comboPreviewText)) {
+                for (int i = 0; i < 5; ++i) {
+                    bool isSelected = (currentPresetIdx == i);
+                    
+                    ImGui::PushID(i);
+                    ImVec2 pos = ImGui::GetCursorScreenPos();
+                    ImGui::Dummy(ImVec2(16.0f, 16.0f));
+                    ImGui::SameLine();
+                    
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    dl->AddCircleFilled(ImVec2(pos.x + 8.0f, pos.y + 8.0f), 6.0f, ImGui::ColorConvertFloat4ToU32(matcapColors[i]));
+                    dl->AddCircle(ImVec2(pos.x + 8.0f, pos.y + 8.0f), 6.0f, IM_COL32(200, 200, 200, 180), 12, 1.0f);
+                    
+                    if (ImGui::Selectable(matcapPresets[i], isSelected)) {
+                        iconSettings.matcapColor = matcapColors[i];
+                        iconChanged = true;
+                    }
+                    if (isSelected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+        }
+
+        // Accent override checkmark
+        iconChanged |= ImGui::Checkbox("Override Panel Accents with Active Theme Accent", &iconSettings.overridePanelAccentsWithTheme);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Unifies checkbox/slider colors across all side panels by matching the active theme's accent color.");
+        }
+        
+        if (iconChanged) {
+            themeManager.saveThemeSettings("theme.cfg", panel_alpha);
+        }
+        ImGui::Unindent();
 
         EndSection();
     }
 }
 
 void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
+    const auto& settings = ThemeManager::instance().getIconSettings();
+    float s_orig = s;
+    s *= settings.scaleMultiplier;
+    float offset = (s_orig - s) * 0.5f;
+    p.x += offset;
+    p.y += offset;
+    thickness *= settings.thicknessMultiplier;
+
     ImDrawList* dl = ImGui::GetWindowDrawList();
     float pading = s * 0.08f;
     float is = s - pading * 2;
     ImVec2 cp = ImVec2(p.x + s * 0.5f, p.y + s * 0.5f);
     p.x += pading; p.y += pading;
 
-    // Premium Grayscale Matcap Clay Palette
-    const ImU32 clay_shadow          = IM_COL32(50, 52, 55, 255);    // Dark slate shadow base
-    const ImU32 clay_diffuse         = IM_COL32(130, 134, 140, 255); // Middle neutral gray matcap base
-    const ImU32 clay_specular        = IM_COL32(255, 255, 255, 160); // Specular white highlight
-    const ImU32 clay_buildup         = IM_COL32(150, 154, 160, 255); // Middle-light gray for buildup shapes
-    const ImU32 clay_highlight       = IM_COL32(200, 204, 210, 255); // Edge highlight lines
-    const ImU32 clay_detail_shadow   = IM_COL32(35, 36, 38, 255);    // Deep indent/detail shadow
-    const ImU32 clay_trans_shadow    = IM_COL32(50, 52, 55, 180);    // Semi-transparent shadow
-    const ImU32 clay_trans_shadow_150 = IM_COL32(50, 52, 55, 150);   // Semi-transparent shadow (lighter)
-    const ImU32 clay_trans_highlight = IM_COL32(200, 204, 210, 120); // Semi-transparent highlight
+    // Define macro-wrapper helper for IM_COL32
+    auto getIconColor = [&](int r, int g, int b, int a) -> ImU32 {
+        if (settings.style == IconStyle::FlatMinimalist) {
+            ImVec4 cVec = ImGui::ColorConvertU32ToFloat4(col);
+            float opacity = a / 255.0f;
+            return ImGui::ColorConvertFloat4ToU32(ImVec4(cVec.x, cVec.y, cVec.z, cVec.w * opacity));
+        }
+        else if (settings.style == IconStyle::NeonGlow) {
+            ImVec4 cVec = ImGui::ColorConvertU32ToFloat4(col);
+            float opacity = a / 255.0f;
+            return ImGui::ColorConvertFloat4ToU32(ImVec4(cVec.x * 1.3f, cVec.y * 1.3f, cVec.z * 1.3f, cVec.w * opacity));
+        }
+        else if (settings.style == IconStyle::CustomPalette) {
+            float opacity = a / 255.0f;
+            return ImGui::ColorConvertFloat4ToU32(ImVec4(settings.customColor.x, settings.customColor.y, settings.customColor.z, settings.customColor.w * opacity));
+        }
+        // ClayMatcap (standard)
+        return (((ImU32)(a)<<24) | ((ImU32)(b)<<16) | ((ImU32)(g)<<8) | ((ImU32)(r)));
+    };
+
+    // Push macro override locally for IM_COL32
+#pragma push_macro("IM_COL32")
+#undef IM_COL32
+#define IM_COL32(r,g,b,a) getIconColor(r,g,b,a)
+
+    // Dynamic Clay Matcap Palette based on settings.matcapColor
+    ImVec4 mc = settings.matcapColor;
+    auto makeColor = [](float r, float g, float b, float a) -> ImU32 {
+        return (((ImU32)(a * 255.0f)<<24) | ((ImU32)(b * 255.0f)<<16) | ((ImU32)(g * 255.0f)<<8) | ((ImU32)(r * 255.0f)));
+    };
+
+    const ImU32 clay_shadow          = makeColor(mc.x * 0.38f, mc.y * 0.39f, mc.z * 0.42f, 1.0f);    // Dark slate shadow base
+    const ImU32 clay_diffuse         = makeColor(mc.x, mc.y, mc.z, 1.0f); // Middle neutral gray matcap base
+    const ImU32 clay_specular        = makeColor(1.0f, 1.0f, 1.0f, 0.63f); // Specular white highlight
+    const ImU32 clay_buildup         = makeColor((std::min)(1.0f, mc.x * 1.15f), (std::min)(1.0f, mc.y * 1.15f), (std::min)(1.0f, mc.z * 1.15f), 1.0f); // Middle-light gray for buildup shapes
+    const ImU32 clay_highlight       = makeColor((std::min)(1.0f, mc.x * 1.54f), (std::min)(1.0f, mc.y * 1.54f), (std::min)(1.0f, mc.z * 1.54f), 1.0f); // Edge highlight lines
+    const ImU32 clay_detail_shadow   = makeColor(mc.x * 0.27f, mc.y * 0.27f, mc.z * 0.29f, 1.0f);    // Deep indent/detail shadow
+    const ImU32 clay_trans_shadow    = makeColor(mc.x * 0.38f, mc.y * 0.39f, mc.z * 0.42f, 0.70f);   // Semi-transparent shadow
+    const ImU32 clay_trans_shadow_150 = makeColor(mc.x * 0.38f, mc.y * 0.39f, mc.z * 0.42f, 0.59f);  // Semi-transparent shadow (lighter)
+    const ImU32 clay_trans_highlight = makeColor((std::min)(1.0f, mc.x * 1.54f), (std::min)(1.0f, mc.y * 1.54f), (std::min)(1.0f, mc.z * 1.54f), 0.47f); // Semi-transparent highlight
+
 
     auto drawBaseClaySphere = [&](ImVec2 center, float radius) {
-        // Clay sphere shadow (dark slate gray base)
-        dl->AddCircleFilled(center, radius, clay_shadow);
-        
-        // Clay sphere diffuse light overlay (middle neutral gray, offset top-left)
-        dl->AddCircleFilled(ImVec2(center.x - radius * 0.12f, center.y - radius * 0.12f), radius * 0.85f, clay_diffuse);
-        
-        // Clay sphere specular highlight (glossy white spot, offset top-left)
-        dl->AddCircleFilled(ImVec2(center.x - radius * 0.25f, center.y - radius * 0.25f), radius * 0.22f, clay_specular);
+        if (settings.style == IconStyle::FlatMinimalist) {
+            dl->AddCircleFilled(center, radius, ImGui::ColorConvertFloat4ToU32(settings.customBgColor));
+            dl->AddCircle(center, radius, col, 32, thickness * 0.7f);
+        }
+        else if (settings.style == IconStyle::NeonGlow) {
+            dl->AddCircleFilled(center, radius, IM_COL32(10, 15, 25, 120));
+            ImVec4 neon = ImGui::ColorConvertU32ToFloat4(col);
+            for (int i = 1; i <= 3; ++i) {
+                dl->AddCircle(center, radius + i * 0.8f, ImGui::ColorConvertFloat4ToU32(ImVec4(neon.x, neon.y, neon.z, 0.18f / i)), 32, thickness * 1.5f);
+            }
+            dl->AddCircle(center, radius, col, 32, thickness);
+        }
+        else if (settings.style == IconStyle::CustomPalette) {
+            dl->AddCircleFilled(center, radius, ImGui::ColorConvertFloat4ToU32(settings.customBgColor));
+            dl->AddCircle(center, radius, ImGui::ColorConvertFloat4ToU32(settings.customColor), 32, thickness);
+        }
+        else {
+            dl->AddCircleFilled(center, radius, clay_shadow);
+            dl->AddCircleFilled(ImVec2(center.x - radius * 0.12f, center.y - radius * 0.12f), radius * 0.85f, clay_diffuse);
+            dl->AddCircleFilled(ImVec2(center.x - radius * 0.25f, center.y - radius * 0.25f), radius * 0.22f, clay_specular);
+        }
     };
 
     switch (type) {
@@ -1809,6 +2097,203 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
                 );
             }
             break;
+        case IconType::MaskTool:
+            {
+                // Clay sphere half-covered by a cool "frozen" mask region.
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                // Masked half: a cool-blue half disc with a soft boundary, evoking
+                // a protected/frozen region of the surface.
+                const ImU32 maskFill = IM_COL32(80, 140, 210, 200);
+                const ImU32 maskEdge = IM_COL32(170, 205, 245, 230);
+                dl->PathClear();
+                dl->PathArcTo(cp, r * 0.92f, IM_PI * 0.5f, IM_PI * 1.5f, 24);
+                dl->PathLineTo(ImVec2(cp.x, cp.y - r * 0.92f));
+                dl->PathFillConvex(maskFill);
+                // Boundary line down the middle.
+                dl->AddLine(ImVec2(cp.x, cp.y - r * 0.92f), ImVec2(cp.x, cp.y + r * 0.92f),
+                            maskEdge, thickness);
+                // Small lock-dot to read as "protected".
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.45f, cp.y), r * 0.16f,
+                                    IM_COL32(255, 255, 255, 230), 12);
+            }
+            break;
+        case IconType::DrawSharpTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Draw a very sharp peak/crease ridge
+                ImVec2 p0(cp.x - r * 0.6f, cp.y + r * 0.4f);
+                ImVec2 p1(cp.x + r * 0.6f, cp.y - r * 0.4f);
+                
+                // Crease valley/ridge shadow
+                dl->PathClear();
+                dl->PathLineTo(p0);
+                dl->PathBezierQuadraticCurveTo(ImVec2(cp.x - r * 0.05f, cp.y - r * 0.05f), p1, 10);
+                dl->PathStroke(clay_detail_shadow, false, r * 0.22f);
+                
+                // Sharp peak line (bright highlight)
+                dl->PathClear();
+                dl->PathLineTo(p0);
+                dl->PathBezierQuadraticCurveTo(ImVec2(cp.x, cp.y), p1, 10);
+                dl->PathStroke(clay_highlight, false, r * 0.10f);
+                
+                // Sharp yellow arrow
+                ImVec2 arrStart(cp.x + r * 0.25f, cp.y + r * 0.42f);
+                ImVec2 arrEnd(cp.x + r * 0.58f, cp.y + r * 0.08f);
+                dl->AddLine(arrStart, arrEnd, IM_COL32(255, 215, 0, 255), thickness * 1.5f);
+                float a = atan2f(arrEnd.y - arrStart.y, arrEnd.x - arrStart.x);
+                float arrow_sz = is * 0.10f;
+                dl->AddTriangleFilled(
+                    arrEnd,
+                    ImVec2(arrEnd.x - arrow_sz * cosf(a - 0.4f), arrEnd.y - arrow_sz * sinf(a - 0.4f)),
+                    ImVec2(arrEnd.x - arrow_sz * cosf(a + 0.4f), arrEnd.y - arrow_sz * sinf(a + 0.4f)),
+                    IM_COL32(255, 215, 0, 255)
+                );
+            }
+            break;
+        case IconType::NudgeTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Draw a wave/nudge deformation
+                // A lateral push representation (curved blue arrow along the sphere's top-right horizon)
+                dl->PathClear();
+                dl->PathArcTo(cp, r * 1.15f, -1.9f, -0.4f);
+                dl->PathStroke(IM_COL32(50, 160, 255, 255), false, thickness * 1.4f);
+                
+                float endAngle = -0.4f;
+                float arrow_sz = is * 0.11f;
+                ImVec2 endPt(cp.x + cosf(endAngle) * r * 1.15f, cp.y + sinf(endAngle) * r * 1.15f);
+                float a_head = endAngle + 1.57f;
+                dl->AddTriangleFilled(
+                    endPt,
+                    ImVec2(endPt.x - arrow_sz * cosf(a_head - 0.4f), endPt.y - arrow_sz * sinf(a_head - 0.4f)),
+                    ImVec2(endPt.x - arrow_sz * cosf(a_head + 0.4f), endPt.y - arrow_sz * sinf(a_head + 0.4f)),
+                    IM_COL32(50, 160, 255, 255)
+                );
+                
+                // Add a small smudge/slide mark on the clay
+                dl->AddCircleFilled(ImVec2(cp.x + r * 0.2f, cp.y - r * 0.2f), r * 0.3f, clay_trans_shadow);
+                dl->AddCircleFilled(ImVec2(cp.x + r * 0.35f, cp.y - r * 0.35f), r * 0.22f, clay_buildup);
+            }
+            break;
+        case IconType::BlobTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Spherical swell overlay in magenta/orange
+                ImVec2 blobC(cp.x + r * 0.3f, cp.y - r * 0.2f);
+                float blobR = r * 0.52f;
+                
+                dl->AddCircleFilled(blobC, blobR, IM_COL32(230, 80, 150, 180));
+                dl->AddCircleFilled(ImVec2(blobC.x - blobR * 0.12f, blobC.y - blobR * 0.12f), blobR * 0.85f, IM_COL32(255, 120, 180, 220));
+                dl->AddCircleFilled(ImVec2(blobC.x - blobR * 0.28f, blobC.y - blobR * 0.28f), blobR * 0.25f, clay_specular);
+            }
+            break;
+        case IconType::SculptFillTool:
+            {
+                float r = is * 0.48f;
+                // Base clay sphere with a flat cut bottom or valley
+                float cutY = cp.y + r * 0.2f;
+                float halfWidth = r * cosf(asinf(0.2f));
+                
+                // Draw base with valley
+                dl->PathClear();
+                dl->PathLineTo(ImVec2(cp.x - halfWidth, cutY));
+                dl->PathLineTo(ImVec2(cp.x + halfWidth, cutY));
+                dl->PathArcTo(cp, r, 0.201f, 3.14159f - 0.201f);
+                dl->PathFillConvex(clay_shadow);
+                
+                // Draw filling material (translucent green/cyan filling up the lower cut)
+                dl->PathClear();
+                dl->PathLineTo(ImVec2(cp.x - r, cp.y + r * 0.2f));
+                dl->PathArcTo(cp, r, 0.2f, 2.94f);
+                dl->PathFillConvex(IM_COL32(50, 220, 140, 140));
+                
+                // Horizontal spade line
+                dl->AddLine(ImVec2(cp.x - r * 0.9f, cp.y + r * 0.2f), ImVec2(cp.x + r * 0.9f, cp.y + r * 0.2f), IM_COL32(50, 220, 140, 240), thickness * 1.5f);
+            }
+            break;
+        case IconType::SnakeHookTool:
+            {
+                float r = is * 0.48f;
+                
+                // Clay base (smaller, since we pull out a long horn)
+                drawBaseClaySphere(cp, r * 0.75f);
+                
+                // Pull a hook/tentacle from center to top right
+                ImVec2 hookStart = cp;
+                ImVec2 hookMid = ImVec2(cp.x + r * 0.4f, cp.y - r * 0.3f);
+                ImVec2 hookEnd = ImVec2(cp.x + r * 1.1f, cp.y - r * 1.1f);
+                
+                dl->PathClear();
+                dl->PathLineTo(ImVec2(cp.x - r * 0.4f, cp.y + r * 0.2f));
+                dl->PathBezierQuadraticCurveTo(hookMid, hookEnd, 10);
+                dl->PathBezierQuadraticCurveTo(hookMid, ImVec2(cp.x + r * 0.2f, cp.y + r * 0.4f), 10);
+                dl->PathFillConvex(clay_shadow);
+                
+                dl->PathClear();
+                dl->PathLineTo(ImVec2(cp.x - r * 0.3f, cp.y + r * 0.1f));
+                dl->PathBezierQuadraticCurveTo(hookMid, hookEnd, 10);
+                dl->PathBezierQuadraticCurveTo(hookMid, ImVec2(cp.x + r * 0.1f, cp.y + r * 0.3f), 10);
+                dl->PathFillConvex(clay_diffuse);
+                
+                // Specular highlight at peak
+                dl->AddCircleFilled(ImVec2(hookMid.x - r * 0.1f, hookMid.y - r * 0.1f), r * 0.15f, clay_specular);
+                
+                // Swirling yellow trajectory line
+                dl->PathClear();
+                dl->PathBezierQuadraticCurveTo(ImVec2(cp.x + r * 0.6f, cp.y - r * 0.1f), hookEnd, 10);
+                dl->PathStroke(IM_COL32(255, 200, 50, 230), false, thickness);
+            }
+            break;
+        case IconType::ElasticDeformTool:
+            {
+                float r = is * 0.48f;
+                // Stretched/distorted clay sphere (drawn as an ellipse or sheared path)
+                ImVec2 ellipseR = ImVec2(r * 1.25f, r * 0.85f);
+                
+                // Draw base sheared ellipse shadow
+                dl->PathClear();
+                for (int i = 0; i <= 24; ++i) {
+                    float a = i * (6.28318f / 24.0f);
+                    float rot = -0.3f; // rotation angle
+                    float x = cp.x + cosf(a) * ellipseR.x * cosf(rot) - sinf(a) * ellipseR.y * sinf(rot);
+                    float y = cp.y + cosf(a) * ellipseR.x * sinf(rot) + sinf(a) * ellipseR.y * cosf(rot);
+                    dl->PathLineTo(ImVec2(x, y));
+                }
+                dl->PathFillConvex(clay_shadow);
+                
+                // Inner stretched body (diffuse)
+                dl->PathClear();
+                ImVec2 diffCp(cp.x - r * 0.12f, cp.y - r * 0.12f);
+                for (int i = 0; i <= 24; ++i) {
+                    float a = i * (6.28318f / 24.0f);
+                    float rot = -0.3f;
+                    float x = diffCp.x + cosf(a) * ellipseR.x * 0.85f * cosf(rot) - sinf(a) * ellipseR.y * 0.85f * sinf(rot);
+                    float y = diffCp.y + cosf(a) * ellipseR.x * 0.85f * sinf(rot) + sinf(a) * ellipseR.y * 0.85f * cosf(rot);
+                    dl->PathLineTo(ImVec2(x, y));
+                }
+                dl->PathFillConvex(clay_diffuse);
+                
+                // Specular highlight
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.3f, cp.y - r * 0.2f), r * 0.22f, clay_specular);
+                
+                // Double-headed green pull arrow
+                ImVec2 pA = ImVec2(cp.x - r * 0.9f, cp.y + r * 0.4f);
+                ImVec2 pB = ImVec2(cp.x + r * 0.9f, cp.y - r * 0.4f);
+                dl->AddLine(pA, pB, IM_COL32(40, 220, 100, 255), thickness * 1.5f);
+                
+                float a = atan2f(pB.y - pA.y, pB.x - pA.x);
+                float arrow_sz = is * 0.08f;
+                dl->AddTriangleFilled(pB, ImVec2(pB.x - arrow_sz * cosf(a - 0.4f), pB.y - arrow_sz * sinf(a - 0.4f)), ImVec2(pB.x - arrow_sz * cosf(a + 0.4f), pB.y - arrow_sz * sinf(a + 0.4f)), IM_COL32(40, 220, 100, 255));
+                dl->AddTriangleFilled(pA, ImVec2(pA.x + arrow_sz * cosf(a - 0.4f), pA.y + arrow_sz * sinf(a - 0.4f)), ImVec2(pA.x + arrow_sz * cosf(a + 0.4f), pA.y + arrow_sz * sinf(a + 0.4f)), IM_COL32(40, 220, 100, 255));
+            }
+            break;
         case IconType::VertexMode:
             {
                 ImVec2 p0(p.x + is * 0.20f, p.y + is * 0.72f);
@@ -2187,6 +2672,20 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
             dl->AddRectFilled(ImVec2(p.x, p.y), ImVec2(p.x+is*0.3f, p.y+is*0.2f), col);
             dl->AddRectFilled(ImVec2(p.x+is*0.7f, p.y), ImVec2(p.x+is, p.y+is*0.2f), col);
             break;
+        case IconType::Noise:
+            {
+                const int steps = 10;
+                ImVec2 prevPt(p.x, cp.y);
+                for (int i = 1; i <= steps; ++i) {
+                    float t = (float)i / (float)steps;
+                    float x = p.x + t * is;
+                    float offset = (i % 2 == 0 ? 1.0f : -1.0f) * (is * 0.22f) * (t > 0.1f && t < 0.9f ? 1.0f : 0.2f);
+                    ImVec2 currPt(x, cp.y + offset);
+                    dl->AddLine(prevPt, currPt, col, thickness * 1.2f);
+                    prevPt = currPt;
+                }
+            }
+            break;
         case IconType::Camera:
             dl->AddRect(ImVec2(p.x, p.y+is*0.2f), ImVec2(p.x+is*0.7f, p.y+is*0.8f), col, 2.0f, 0, thickness);
             dl->AddTriangleFilled(ImVec2(p.x+is*0.7f, cp.y), ImVec2(p.x+is, p.y), ImVec2(p.x+is, p.y+is), col);
@@ -2283,8 +2782,270 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
             dl->AddRect(ImVec2(p.x+is*0.1f, p.y+is*0.2f), ImVec2(p.x+is*0.9f, p.y+is*0.6f), col, 1.0f, 0, thickness);
             for(int i=0; i<4; i++) dl->AddLine(ImVec2(p.x+is*(0.2f+0.2f*i), p.y+is*0.6f), ImVec2(p.x+is*(0.2f+0.2f*i), p.y+is*0.9f), col, thickness*0.5f);
             break;
+        case UIWidgets::IconType::HairAddTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 hairCol = IM_COL32(255, 180, 70, 220);
+                float xs[] = { cp.x - r*0.4f, cp.x, cp.x + r*0.4f };
+                for (int i = 0; i < 3; ++i) {
+                    dl->AddBezierQuadratic(
+                        ImVec2(xs[i], cp.y + r*0.8f),
+                        ImVec2(xs[i] - r*0.2f, cp.y),
+                        ImVec2(xs[i], cp.y - r*0.5f),
+                        hairCol, thickness * 1.2f
+                    );
+                }
+                float px = cp.x + r*0.6f;
+                float py = cp.y - r*0.6f;
+                float sz = r*0.22f;
+                dl->AddLine(ImVec2(px - sz, py), ImVec2(px + sz, py), col, thickness * 1.5f);
+                dl->AddLine(ImVec2(px, py - sz), ImVec2(px, py + sz), col, thickness * 1.5f);
+            }
+            break;
+        case UIWidgets::IconType::HairRemoveTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 hairCol = IM_COL32(255, 180, 70, 220);
+                float xs[] = { cp.x - r*0.4f, cp.x, cp.x + r*0.4f };
+                for (int i = 0; i < 3; ++i) {
+                    if (i == 1) {
+                        dl->AddLine(ImVec2(xs[i], cp.y + r*0.8f), ImVec2(xs[i] - r*0.1f, cp.y + r*0.2f), hairCol, thickness * 1.2f);
+                        dl->AddLine(ImVec2(xs[i] - r*0.15f, cp.y - r*0.2f), ImVec2(xs[i], cp.y - r*0.5f), hairCol, thickness * 1.2f);
+                    } else {
+                        dl->AddBezierQuadratic(
+                            ImVec2(xs[i], cp.y + r*0.8f),
+                            ImVec2(xs[i] - r*0.2f, cp.y),
+                            ImVec2(xs[i], cp.y - r*0.5f),
+                            hairCol, thickness * 1.2f
+                        );
+                    }
+                }
+                float px = cp.x + r*0.6f;
+                float py = cp.y - r*0.6f;
+                float sz = r*0.22f;
+                dl->AddLine(ImVec2(px - sz, py), ImVec2(px + sz, py), col, thickness * 1.5f);
+            }
+            break;
+        case UIWidgets::IconType::HairCutTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 hairCol = IM_COL32(255, 180, 70, 220);
+                float xs[] = { cp.x - r*0.4f, cp.x, cp.x + r*0.4f };
+                for (int i = 0; i < 3; ++i) {
+                    dl->AddLine(ImVec2(xs[i], cp.y + r*0.8f), ImVec2(xs[i], cp.y - r*0.1f), hairCol, thickness * 1.3f);
+                }
+                ImVec2 s_center(cp.x, cp.y - r * 0.35f);
+                float sc = r * 0.42f;
+                float scissorThickness = thickness * 1.8f;
+                dl->AddLine(ImVec2(s_center.x - sc, s_center.y - sc * 0.8f), ImVec2(s_center.x + sc, s_center.y + sc * 0.8f), col, scissorThickness);
+                dl->AddLine(ImVec2(s_center.x + sc, s_center.y - sc * 0.8f), ImVec2(s_center.x - sc, s_center.y + sc * 0.8f), col, scissorThickness);
+                dl->AddCircle(ImVec2(s_center.x - sc * 0.9f, s_center.y + sc * 0.9f), sc * 0.35f, col, 0, scissorThickness);
+                dl->AddCircle(ImVec2(s_center.x + sc * 0.9f, s_center.y + sc * 0.9f), sc * 0.35f, col, 0, scissorThickness);
+            }
+            break;
+        case UIWidgets::IconType::HairCombTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 hairCol = IM_COL32(255, 180, 70, 220);
+                float xs[] = { cp.x - r*0.4f, cp.x, cp.x + r*0.4f };
+                for (int i = 0; i < 3; ++i) {
+                    dl->AddBezierQuadratic(
+                        ImVec2(xs[i], cp.y + r*0.8f),
+                        ImVec2(xs[i] + r*0.3f, cp.y),
+                        ImVec2(xs[i] - r*0.2f, cp.y - r*0.6f),
+                        hairCol, thickness * 1.2f
+                    );
+                }
+                float comb_y = cp.y - r * 0.45f;
+                float combThickness = thickness * 2.0f;
+                dl->AddLine(ImVec2(cp.x - r * 0.75f, comb_y), ImVec2(cp.x + r * 0.75f, comb_y), col, combThickness);
+                for (int i = 0; i < 6; ++i) {
+                    float cx = cp.x - r * 0.6f + r * 0.24f * i;
+                    dl->AddLine(ImVec2(cx, comb_y), ImVec2(cx, comb_y + r * 0.45f), col, thickness * 1.2f);
+                }
+            }
+            break;
+        case UIWidgets::IconType::HairLengthTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 hairCol = IM_COL32(255, 180, 70, 220);
+                float xs[] = { cp.x - r*0.4f, cp.x, cp.x + r*0.4f };
+                float lens[] = { r*0.6f, r*1.1f, r*0.8f };
+                for (int i = 0; i < 3; ++i) {
+                    dl->AddLine(
+                        ImVec2(xs[i], cp.y + r*0.8f),
+                        ImVec2(xs[i], cp.y + r*0.8f - lens[i]),
+                        hairCol, thickness * 1.2f
+                    );
+                }
+                float ax = cp.x + r*0.6f;
+                float ay = cp.y - r*0.5f;
+                dl->AddLine(ImVec2(ax, ay + r*0.4f), ImVec2(ax, ay - r*0.3f), col, thickness * 1.5f);
+                dl->AddLine(ImVec2(ax, ay - r*0.3f), ImVec2(ax - r*0.15f, ay - r*0.1f), col, thickness * 1.5f);
+                dl->AddLine(ImVec2(ax, ay - r*0.3f), ImVec2(ax + r*0.15f, ay - r*0.1f), col, thickness * 1.5f);
+            }
+            break;
+        case UIWidgets::IconType::HairDensityTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 dotCol = IM_COL32(255, 180, 70, 240);
+                for (int i = 0; i < 3; ++i) {
+                    for (int j = 0; j < 3; ++j) {
+                        float dx = cp.x - r*0.4f + r*0.4f*i + (j%2 ? 2.0f : -2.0f);
+                        float dy = cp.y - r*0.4f + r*0.4f*j;
+                        dl->AddCircleFilled(ImVec2(dx, dy), 1.6f, dotCol);
+                        dl->AddLine(ImVec2(dx, dy), ImVec2(dx + 2.0f, dy - r*0.25f), dotCol, thickness);
+                    }
+                }
+            }
+            break;
+        case UIWidgets::IconType::HairClumpTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 hairCol = IM_COL32(255, 180, 70, 220);
+                ImVec2 tip = ImVec2(cp.x, cp.y - r * 0.6f);
+                dl->AddLine(ImVec2(cp.x - r * 0.5f, cp.y + r * 0.8f), tip, hairCol, thickness * 1.2f);
+                dl->AddLine(ImVec2(cp.x, cp.y + r * 0.8f), tip, hairCol, thickness * 1.2f);
+                dl->AddLine(ImVec2(cp.x + r * 0.5f, cp.y + r * 0.8f), tip, hairCol, thickness * 1.2f);
+                
+                dl->AddLine(ImVec2(cp.x - r * 0.22f, cp.y - r * 0.1f), ImVec2(cp.x + r * 0.22f, cp.y - r * 0.1f), col, thickness * 2.0f);
+            }
+            break;
+        case UIWidgets::IconType::HairPuffTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 hairCol = IM_COL32(255, 180, 70, 220);
+                float xs[] = { cp.x - r*0.4f, cp.x, cp.x + r*0.4f };
+                dl->AddBezierQuadratic(ImVec2(xs[0], cp.y + r*0.8f), ImVec2(xs[0] - r*0.5f, cp.y), ImVec2(xs[0], cp.y - r*0.6f), hairCol, thickness*1.2f);
+                dl->AddBezierQuadratic(ImVec2(xs[2], cp.y + r*0.8f), ImVec2(xs[2] + r*0.5f, cp.y), ImVec2(xs[2], cp.y - r*0.6f), hairCol, thickness*1.2f);
+                dl->AddLine(ImVec2(xs[1], cp.y + r*0.8f), ImVec2(xs[1], cp.y - r*0.6f), hairCol, thickness*1.2f);
+                
+                dl->AddLine(ImVec2(cp.x - r*0.4f, cp.y), ImVec2(cp.x - r*0.75f, cp.y), col, thickness);
+                dl->AddLine(ImVec2(cp.x + r*0.4f, cp.y), ImVec2(cp.x + r*0.75f, cp.y), col, thickness);
+            }
+            break;
+        case UIWidgets::IconType::HairWaveTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 hairCol = IM_COL32(255, 180, 70, 220);
+                float xs[] = { cp.x - r*0.4f, cp.x, cp.x + r*0.4f };
+                for (int i = 0; i < 3; ++i) {
+                    ImVec2 p0(xs[i], cp.y + r*0.8f);
+                    ImVec2 p1(xs[i] + r*0.3f, cp.y + r*0.35f);
+                    ImVec2 p2(xs[i] - r*0.3f, cp.y - r*0.1f);
+                    ImVec2 p3(xs[i], cp.y - r*0.6f);
+                    dl->AddBezierCubic(p0, p1, p2, p3, hairCol, thickness * 1.2f);
+                }
+            }
+            break;
+        case UIWidgets::IconType::HairFrizzTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 hairCol = IM_COL32(255, 180, 70, 220);
+                float xs[] = { cp.x - r*0.4f, cp.x, cp.x + r*0.4f };
+                for (int j = 0; j < 3; ++j) {
+                    ImVec2 prev(xs[j], cp.y + r*0.8f);
+                    for (int i = 1; i <= 4; ++i) {
+                        float t = i / 4.f;
+                        float rx = xs[j] + (i%2 ? r*0.18f : -r*0.18f);
+                        ImVec2 curr(rx, cp.y + r*0.8f - t * r*1.3f);
+                        dl->AddLine(prev, curr, hairCol, thickness);
+                        prev = curr;
+                    }
+                }
+            }
+            break;
+        case UIWidgets::IconType::HairSmoothTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 hairCol = IM_COL32(255, 180, 70, 220);
+                float xs[] = { cp.x - r*0.4f, cp.x, cp.x + r*0.4f };
+                for (int i = 0; i < 3; ++i) {
+                    dl->AddLine(ImVec2(xs[i], cp.y + r*0.8f), ImVec2(xs[i], cp.y - r*0.6f), hairCol, thickness * 1.5f);
+                }
+            }
+            break;
+        case UIWidgets::IconType::HairPinchTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 hairCol = IM_COL32(255, 180, 70, 220);
+                float xs[] = { cp.x - r*0.4f, cp.x, cp.x + r*0.4f };
+                dl->AddBezierQuadratic(ImVec2(xs[0], cp.y + r*0.8f), ImVec2(cp.x - 2.0f, cp.y), ImVec2(xs[0], cp.y - r*0.6f), hairCol, thickness*1.2f);
+                dl->AddBezierQuadratic(ImVec2(xs[2], cp.y + r*0.8f), ImVec2(cp.x + 2.0f, cp.y), ImVec2(xs[2], cp.y - r*0.6f), hairCol, thickness*1.2f);
+                dl->AddLine(ImVec2(xs[1], cp.y + r*0.8f), ImVec2(xs[1], cp.y - r*0.6f), hairCol, thickness*1.2f);
+                
+                float ax = r * 0.22f;
+                dl->AddLine(ImVec2(cp.x - r * 0.8f, cp.y), ImVec2(cp.x - r * 0.8f + ax, cp.y), col, thickness * 1.5f);
+                dl->AddLine(ImVec2(cp.x - r * 0.8f + ax, cp.y), ImVec2(cp.x - r * 0.8f + ax - 3, cp.y - 3), col, thickness * 1.5f);
+                dl->AddLine(ImVec2(cp.x - r * 0.8f + ax, cp.y), ImVec2(cp.x - r * 0.8f + ax - 3, cp.y + 3), col, thickness * 1.5f);
+                
+                dl->AddLine(ImVec2(cp.x + r * 0.8f, cp.y), ImVec2(cp.x + r * 0.8f - ax, cp.y), col, thickness * 1.5f);
+                dl->AddLine(ImVec2(cp.x + r * 0.8f - ax, cp.y), ImVec2(cp.x + r * 0.8f - ax + 3, cp.y - 3), col, thickness * 1.5f);
+                dl->AddLine(ImVec2(cp.x + r * 0.8f - ax, cp.y), ImVec2(cp.x + r * 0.8f - ax + 3, cp.y + 3), col, thickness * 1.5f);
+            }
+            break;
+        case UIWidgets::IconType::HairSpreadTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 hairCol = IM_COL32(255, 180, 70, 220);
+                float xs[] = { cp.x - r*0.4f, cp.x, cp.x + r*0.4f };
+                dl->AddBezierQuadratic(ImVec2(xs[0], cp.y + r*0.8f), ImVec2(xs[0] - r*0.2f, cp.y), ImVec2(xs[0], cp.y - r*0.6f), hairCol, thickness*1.2f);
+                dl->AddBezierQuadratic(ImVec2(xs[2], cp.y + r*0.8f), ImVec2(xs[2] + r*0.2f, cp.y), ImVec2(xs[2], cp.y - r*0.6f), hairCol, thickness*1.2f);
+                dl->AddLine(ImVec2(xs[1], cp.y + r*0.8f), ImVec2(xs[1], cp.y - r*0.6f), hairCol, thickness*1.2f);
+                
+                float ax = r * 0.22f;
+                dl->AddLine(ImVec2(cp.x - r * 0.3f, cp.y), ImVec2(cp.x - r * 0.3f - ax, cp.y), col, thickness * 1.5f);
+                dl->AddLine(ImVec2(cp.x - r * 0.3f - ax, cp.y), ImVec2(cp.x - r * 0.3f - ax + 3, cp.y - 3), col, thickness * 1.5f);
+                dl->AddLine(ImVec2(cp.x - r * 0.3f - ax, cp.y), ImVec2(cp.x - r * 0.3f - ax + 3, cp.y + 3), col, thickness * 1.5f);
+                
+                dl->AddLine(ImVec2(cp.x + r * 0.3f, cp.y), ImVec2(cp.x + r * 0.3f + ax, cp.y), col, thickness * 1.5f);
+                dl->AddLine(ImVec2(cp.x + r * 0.3f + ax, cp.y), ImVec2(cp.x + r * 0.3f + ax - 3, cp.y - 3), col, thickness * 1.5f);
+                dl->AddLine(ImVec2(cp.x + r * 0.3f + ax, cp.y), ImVec2(cp.x + r * 0.3f + ax - 3, cp.y + 3), col, thickness * 1.5f);
+            }
+            break;
+        case UIWidgets::IconType::HairBraidTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                ImU32 hairCol = IM_COL32(255, 180, 70, 220);
+                float sc = r * 0.6f;
+                for (int i = 0; i < 3; ++i) {
+                    float dy = cp.y - r * 0.5f + i * r * 0.4f;
+                    dl->AddBezierQuadratic(ImVec2(cp.x - sc, dy), ImVec2(cp.x, dy + r*0.18f), ImVec2(cp.x + sc, dy + r*0.35f), hairCol, thickness * 1.3f);
+                    dl->AddBezierQuadratic(ImVec2(cp.x + sc, dy + r*0.1f), ImVec2(cp.x, dy + r*0.27f), ImVec2(cp.x - sc, dy + r*0.45f), hairCol, thickness * 1.3f);
+                }
+            }
+            break;
         default: break;
     }
+#pragma pop_macro("IM_COL32")
 }
 
 bool IconActionButton(const char* id,
@@ -2362,10 +3123,26 @@ bool IconActionButton(const char* id,
 
 void PushControlSurfaceStyle(const ImVec4& accent) {
     const auto& t = ThemeManager::instance().current();
+    const auto& settings = ThemeManager::instance().getIconSettings();
 
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 10.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 12.0f);
+    ImVec4 finalAccent = accent;
+    if (settings.overridePanelAccentsWithTheme) {
+        finalAccent = t.colors.accent;
+    }
+
+    float frame_round = 10.0f;
+    float grab_round = 10.0f;
+    float popup_round = 12.0f;
+
+    if (settings.overridePanelAccentsWithTheme) {
+        frame_round = t.style.frameRounding;
+        grab_round = t.style.grabRounding;
+        popup_round = t.style.popupRounding;
+    }
+
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, frame_round);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, grab_round);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, popup_round);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 6.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 8.0f));
     
@@ -2374,15 +3151,15 @@ void PushControlSurfaceStyle(const ImVec4& accent) {
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ScaleColor(t.colors.surface, 1.3f));
     ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ScaleColor(t.colors.surface, 1.5f));
     
-    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(accent.x, accent.y, accent.z, 0.92f));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4((std::min)(1.0f, accent.x + 0.10f), (std::min)(1.0f, accent.y + 0.10f), (std::min)(1.0f, accent.z + 0.10f), 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4((std::min)(1.0f, accent.x + 0.10f), (std::min)(1.0f, accent.y + 0.10f), (std::min)(1.0f, accent.z + 0.10f), 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(finalAccent.x, finalAccent.y, finalAccent.z, 0.92f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4((std::min)(1.0f, finalAccent.x + 0.10f), (std::min)(1.0f, finalAccent.y + 0.10f), (std::min)(1.0f, finalAccent.z + 0.10f), 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4((std::min)(1.0f, finalAccent.x + 0.10f), (std::min)(1.0f, finalAccent.y + 0.10f), (std::min)(1.0f, finalAccent.z + 0.10f), 1.0f));
     
     ImGui::PushStyleColor(ImGuiCol_Button, t.colors.primary);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ScaleColor(t.colors.primary, 1.2f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ScaleColor(t.colors.primary, 0.8f));
     
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, 0.18f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(finalAccent.x, finalAccent.y, finalAccent.z, 0.18f));
     
     ImGui::PushStyleColor(ImGuiCol_Header, t.colors.secondary);
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ScaleColor(t.colors.secondary, 1.2f));

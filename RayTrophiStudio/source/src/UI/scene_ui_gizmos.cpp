@@ -4681,6 +4681,10 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
 void SceneUI::drawSelectionGizmos(UIContext& ctx)
 {
     gpu_edit_overlay_sync.drawn_this_frame = false;
+    // Sculpt protection mask tint: backend-independent ImGui overlay so it shows
+    // in both Solid and Rendered viewport modes (the GPU edit overlay is Edit +
+    // Solid only). Self-guards on sculpt mode / mask presence.
+    drawSculptMaskViewportOverlay(ctx);
     if (ctx.selection.hasSelection() && ctx.selection.show_gizmo && ctx.scene.camera && viewport_settings.show_gizmos) {
         drawSelectionBoundingBox(ctx);
         if (mesh_overlay_settings.enabled && mesh_workspace_mode == MeshWorkspaceMode::Edit) {

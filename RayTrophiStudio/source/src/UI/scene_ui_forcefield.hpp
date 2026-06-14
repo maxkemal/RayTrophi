@@ -22,6 +22,7 @@
 #pragma once
 
 #include "scene_ui.h"
+#include "ui_modern.h"
 #include "ForceField.h"
 #include "Backend/IViewportBackend.h"
 #include "MaterialManager.h"
@@ -111,7 +112,7 @@ inline bool drawFluidPresetCombo(const char* id, RayTrophiSim::Fluid::APICSolver
 /**
  * @brief Draw the Force Field panel content
  */
-inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class TimelineWidget* timeline = nullptr) {
+inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene, class TimelineWidget* timeline = nullptr) {
     auto& manager = scene.force_field_manager;
 
     static int simulation_section = 0;
@@ -3563,6 +3564,38 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                     // survives re-import and needs no gizmo alignment. The selection is
                     // published by SceneUI into g_edit_pin_selection (the panel is a free
                     // function, so it can't read SceneUI's edit cache directly).
+                    // Check if edit mode is active on this object
+                    bool is_editing = ui.mesh_overlay_settings.enabled && ui.mesh_overlay_settings.edit_mode &&
+                                      ui.mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit &&
+                                      ui.active_mesh_edit_object_name == rb.source_name &&
+                                      ui_ctx.selection.mesh_element_mode == MeshElementSelectMode::Vertex;
+
+                    if (ImGui::Checkbox("Edit Pin Selection##sbeditpin", &is_editing)) {
+                        if (is_editing) {
+                            // Ensure the object is selected in the viewport first
+                            bool found = false;
+                            for (size_t i = 0; i < scene.world.objects.size(); ++i) {
+                                auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
+                                if (!tri) continue;
+                                std::string nn = tri->getNodeName();
+                                if (nn.empty()) nn = tri->nodeName;
+                                if (nn == rb.source_name) {
+                                    ui_ctx.selection.selectObject(tri, (int)i, nn);
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (found) {
+                                ui.activateEditWorkspace(ui_ctx);
+                            }
+                        } else {
+                            ui.resetMeshEditState(ui_ctx);
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Toggle edit/selection mode for this object's vertices directly in the viewport.");
+                    }
+
                     const bool edit_on_this =
                         ForceFieldUI::g_edit_pin_selection.active &&
                         ForceFieldUI::g_edit_pin_selection.object_name == rb.source_name &&
@@ -3591,9 +3624,11 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                         rb_changed = true;
                     }
                     ImGui::EndDisabled();
-                    if (!edit_on_this) {
-                        ImGui::TextDisabled("Enter Edit Mesh > Vertex mode on this object,");
-                        ImGui::TextDisabled("select vertices, then click Pin.");
+                    if (!is_editing) {
+                        ImGui::TextDisabled("Toggle 'Edit Pin Selection' above to select vertices,");
+                        ImGui::TextDisabled("then click the Pin button.");
+                    } else if (sel_vcount == 0) {
+                        ImGui::TextDisabled("Select vertices in viewport, then click Pin.");
                     }
 
                     // Pin region list: per-pin radius/enable/remove + add empty/clear.
@@ -4176,16 +4211,23 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
     }
     
     if (ImGui::BeginPopup("AddForceFieldPopup")) {
-        const char* types[] = { 
-            "Wind Field", "Gravity Field", "Attractor Field", "Repeller Field", 
-            "Vortex Field", "Turbulence Field", "Curl Noise Field", "Drag Field", "Magnetic Field"
+        ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.42f, 1.0f), "Add Force Field");
+        ImGui::Separator();
+        
+        struct FieldTypeInfo {
+            int index;
+            const char* name;
+            UIWidgets::IconType icon;
+            ImU32 color;
         };
         
-        for (int i = 0; i < 9; ++i) {
-            if (ImGui::MenuItem(types[i])) {
+        auto drawFieldItem = [&](const FieldTypeInfo& info) {
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            std::string label = "    " + std::string(info.name);
+            if (ImGui::Selectable(label.c_str(), false, 0, ImVec2(0, 22.0f))) {
                 auto field = std::make_shared<Physics::ForceField>();
-                field->name = std::string(types[i]) + " " + std::to_string(manager.force_fields.size() + 1);
-                field->type = static_cast<Physics::ForceFieldType>(i);
+                field->name = std::string(info.name) + " " + std::to_string(manager.force_fields.size() + 1);
+                field->type = static_cast<Physics::ForceFieldType>(info.index);
                 
                 // Set defaults based on type
                 switch (field->type) {
@@ -4210,8 +4252,28 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene, class Timel
                 manager.addForceField(field);
                 ui_ctx.selection.selectForceField(field, -1, field->name);
                 selected_force_field = field;
+                ImGui::CloseCurrentPopup();
             }
-        }
+            UIWidgets::DrawIcon(info.icon, ImVec2(pos.x + 4.0f, pos.y + 3.0f), 16.0f, info.color, 1.2f);
+        };
+        
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Basic Forces");
+        drawFieldItem({0, "Wind Field", UIWidgets::IconType::Wind, IM_COL32(180, 220, 255, 255)});
+        drawFieldItem({1, "Gravity Field", UIWidgets::IconType::Gravity, IM_COL32(255, 120, 120, 255)});
+        drawFieldItem({7, "Drag Field", UIWidgets::IconType::Physics, IM_COL32(200, 200, 200, 255)});
+        
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(1.0f, 0.73f, 0.42f, 1.0f), "Attraction & Vortices");
+        drawFieldItem({2, "Attractor Field", UIWidgets::IconType::Magnet, IM_COL32(255, 180, 120, 255)});
+        drawFieldItem({3, "Repeller Field", UIWidgets::IconType::Magnet, IM_COL32(255, 100, 100, 255)});
+        drawFieldItem({4, "Vortex Field", UIWidgets::IconType::Vortex, IM_COL32(220, 150, 255, 255)});
+        drawFieldItem({8, "Magnetic Field", UIWidgets::IconType::Magnet, IM_COL32(120, 180, 255, 255)});
+        
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.56f, 0.90f, 0.47f, 1.0f), "Turbulence & Noise");
+        drawFieldItem({5, "Turbulence Field", UIWidgets::IconType::Noise, IM_COL32(150, 255, 180, 255)});
+        drawFieldItem({6, "Curl Noise Field", UIWidgets::IconType::Noise, IM_COL32(120, 255, 220, 255)});
+        
         ImGui::EndPopup();
     }
 
