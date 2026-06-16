@@ -3567,6 +3567,7 @@ void SceneUI::draw(UIContext& ctx)
     handleTerrainBrush(ctx);
     handleTerrainFoliageBrush(ctx);  // Foliage painting brush
     handleMeshSculpt(ctx);
+    stepWetClayField(ctx);   // dynamic wet-clay: settle + dry the active wet region each frame
     handleMeshPaint(ctx);
     
     // Hair Brush System
@@ -3638,6 +3639,43 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
                 active_mesh_edit_object_ptr = ctx.selection.selected.object.get();
                 ensureMeshEditLayer(ctx, active_mesh_edit_object_name);
             }
+        }
+    }
+
+    // Selection Shortcuts (A=All, Alt+A=None, Ctrl+I=Invert)
+    if (!io.WantTextInput) {
+        const bool edit_mode_active = mesh_overlay_settings.enabled &&
+                                      mesh_overlay_settings.edit_mode &&
+                                      ctx.selection.mesh_element_mode != MeshElementSelectMode::Object;
+
+        if (ImGui::IsKeyPressed(ImGuiKey_A) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
+            if (edit_mode_active) {
+                selectAllMeshElements(ctx);
+            } else {
+                selectAllObjects(ctx);
+            }
+        }
+        else if (ImGui::IsKeyPressed(ImGuiKey_A) && !io.KeyCtrl && !io.KeyShift && io.KeyAlt) {
+            if (edit_mode_active) {
+                clearEditableMeshSelection();
+            } else {
+                ctx.selection.clearSelection();
+            }
+        }
+        else if (ImGui::IsKeyPressed(ImGuiKey_I) && io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
+            if (edit_mode_active) {
+                invertMeshSelection(ctx);
+            } else {
+                invertObjectSelection(ctx);
+            }
+        }
+        else if (ImGui::IsKeyPressed(ImGuiKey_B) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
+            mesh_overlay_settings.selection_tool = 0;
+            addViewportMessage("Selection Tool: Box Select", 2.0f, ImVec4(0.38f, 0.82f, 1.0f, 1.0f));
+        }
+        else if (ImGui::IsKeyPressed(ImGuiKey_L) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
+            mesh_overlay_settings.selection_tool = 1;
+            addViewportMessage("Selection Tool: Lasso Select", 2.0f, ImVec4(0.38f, 0.82f, 1.0f, 1.0f));
         }
     }
 
@@ -4734,7 +4772,10 @@ void SceneUI::drawAuxWindows(UIContext& ctx)
         }
         ImGui::End();
     }
-
+    
+    if (show_procedural_generator) {
+        drawProceduralGeneratorWindow(ctx);
+    }
 }
 
 bool SceneUI::raycastViewportPlacement(UIContext& ctx, const ImVec2& screen_pos, Vec3& hit_point, Vec3& hit_normal) const

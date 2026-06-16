@@ -1,4 +1,4 @@
-﻿#include "EmbreeBVH.h"
+#include "EmbreeBVH.h"
 #include "HittableInstance.h"
 #include "VDBVolume.h" // Add VDB support
 #include "VDBVolumeManager.h"
@@ -139,10 +139,10 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
     }
 
     // 1. Separate objects
-    std::vector<std::shared_ptr<Triangle>> local_triangles;
+    cached_triangles.clear();
     std::vector<std::shared_ptr<HittableInstance>> local_instances;
     
-    local_triangles.reserve(objects.size());
+    cached_triangles.reserve(objects.size());
     local_instances.reserve(objects.size());
     vdb_objects.reserve(objects.size());
 
@@ -150,7 +150,7 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
         if (!obj->visible) continue; // [FIX] Skip invisible objects (e.g. Gizmos)
 
         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-            local_triangles.push_back(tri);
+            cached_triangles.push_back(tri);
         }
         else if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
             local_instances.push_back(inst);
@@ -161,8 +161,8 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
     }
 
     // 2. Build Triangle Geometry (if any)
-    if (!local_triangles.empty()) {
-        size_t tri_count = local_triangles.size();
+    if (!cached_triangles.empty()) {
+        size_t tri_count = cached_triangles.size();
         triangle_data.clear();
         triangle_data.reserve(tri_count);
 
@@ -180,7 +180,7 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
         // Fill buffers
         #pragma omp parallel for
         for (int i = 0; i < (int)tri_count; ++i) {
-            const auto& tri = local_triangles[i];
+            const auto& tri = cached_triangles[i];
             
             // Vertices
             vertex_buffer[i * 3 + 0] = tri->getVertexPosition(0);
@@ -194,7 +194,7 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
         }
 
         // Fill triangle_data serial (or parallel if safe)
-        for (const auto& tri : local_triangles) {
+        for (const auto& tri : cached_triangles) {
             triangle_data.push_back({
                 tri->getVertexPosition(0), tri->getVertexPosition(1), tri->getVertexPosition(2),
                 tri->getVertexNormal(0), tri->getVertexNormal(1), tri->getVertexNormal(2),
@@ -469,6 +469,7 @@ void EmbreeBVH::clearGeometry() {
         rtcSetSceneFlags(scene, RTC_SCENE_FLAG_DYNAMIC);
     }
     triangle_data.clear();
+    cached_triangles.clear(); // [NEW] Önbelleği de temizle
     
     // CRITICAL FIX: Clear instance mappings to prevent stale pointers after rebuild
     instance_objects.clear();
@@ -498,14 +499,7 @@ void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::sha
 
     // Topology changes require a full rebuild. Refit is only safe when the dense
     // triangle set still matches Embree's existing vertex/index buffers.
-    size_t active_triangle_count = 0;
-    for (const auto& obj : objects) {
-        if (!obj || !obj->visible) continue;
-        if (std::dynamic_pointer_cast<Triangle>(obj)) {
-            ++active_triangle_count;
-        }
-    }
-    if (active_triangle_count != triangle_data.size()) {
+    if (cached_triangles.size() != triangle_data.size()) {
         extern bool g_bvh_rebuild_pending;
         g_bvh_rebuild_pending = true;
         return;
@@ -520,49 +514,42 @@ void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::sha
                 // RTC_BUILD_QUALITY_REFIT tells Embree to update existing BVH structure
                 rtcSetGeometryBuildQuality(geom, RTC_BUILD_QUALITY_REFIT);
 
-                // FIX: Ensure perfectly aligned indexing between 'objects' and Embree buffer.
-                // Since 'objects' might contain non-Triangle items (which are skipped in build),
-                // we must first extract all valid Triangles to match the dense buffer layout.
-                std::vector<std::shared_ptr<Triangle>> active_triangles;
-                active_triangles.reserve(objects.size());
-                
-                for (const auto& obj : objects) {
-                    if (!obj->visible) continue; // [FIX] Maintain parity with build()
-
-                    if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-                        active_triangles.push_back(tri);
-                    }
-                }
-                
-                size_t valid_tri_count = active_triangles.size();
+                size_t valid_tri_count = cached_triangles.size();
                 if (valid_tri_count > 0) {
-                     // Parallelize vertex update on the DENSE list (safe indexing)
-                    #pragma omp parallel for
+                    int any_dirty = 0;
+                    // Parallelize vertex update on the DENSE list (safe indexing)
+                    #pragma omp parallel for reduction(+:any_dirty)
                     for (int i = 0; i < (int)valid_tri_count; ++i) {
-                        const auto& tri = active_triangles[i];
-                        
-                        // Direct write to mapped Embree buffer
-                        vertex_buffer[i * 3 + 0] = tri->getVertexPosition(0);
-                        vertex_buffer[i * 3 + 1] = tri->getVertexPosition(1);
-                        vertex_buffer[i * 3 + 2] = tri->getVertexPosition(2);
+                        const auto& tri = cached_triangles[i];
+                        if (tri->vertexPositionsDirty) {
+                            any_dirty += 1;
 
-                        // Update shadow cache in TriangleData if necessary
-                        if (i < triangle_data.size()) {
-                            triangle_data[i].v0 = tri->getVertexPosition(0);
-                            triangle_data[i].v1 = tri->getVertexPosition(1);
-                            triangle_data[i].v2 = tri->getVertexPosition(2);
+                            // Direct write to mapped Embree buffer
+                            vertex_buffer[i * 3 + 0] = tri->getVertexPosition(0);
+                            vertex_buffer[i * 3 + 1] = tri->getVertexPosition(1);
+                            vertex_buffer[i * 3 + 2] = tri->getVertexPosition(2);
 
-                            if (triangle_data[i].n0 != Vec3()) {
-                                triangle_data[i].n0 = tri->getVertexNormal(0);
-                                triangle_data[i].n1 = tri->getVertexNormal(1);
-                                triangle_data[i].n2 = tri->getVertexNormal(2);
+                            // Update shadow cache in TriangleData if necessary
+                            if (i < triangle_data.size()) {
+                                triangle_data[i].v0 = tri->getVertexPosition(0);
+                                triangle_data[i].v1 = tri->getVertexPosition(1);
+                                triangle_data[i].v2 = tri->getVertexPosition(2);
+
+                                if (triangle_data[i].n0 != Vec3()) {
+                                    triangle_data[i].n0 = tri->getVertexNormal(0);
+                                    triangle_data[i].n1 = tri->getVertexNormal(1);
+                                    triangle_data[i].n2 = tri->getVertexNormal(2);
+                                }
                             }
+                            tri->vertexPositionsDirty = false;
                         }
                     }
 
-                    rtcUpdateGeometryBuffer(geom, RTC_BUFFER_TYPE_VERTEX, 0);
-                    rtcCommitGeometry(geom);
-                    geometry_committed = true;
+                    if (any_dirty > 0) {
+                        rtcUpdateGeometryBuffer(geom, RTC_BUFFER_TYPE_VERTEX, 0);
+                        rtcCommitGeometry(geom);
+                        geometry_committed = true;
+                    }
                 }
             }
         }

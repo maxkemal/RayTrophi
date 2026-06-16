@@ -438,6 +438,7 @@ extern std::atomic<bool> g_viewport_rebuild_in_progress; // True while viewport 
 extern std::atomic<bool> g_anim_backend_needs_full_rebuild;
 extern bool g_mesh_cache_dirty;         // UI mesh cache needs rebuild
 extern bool g_cpu_bvh_refit_pending;    // CPU BVH fast refit (Embree only)
+extern bool g_cpu_bvh_stale;            // CPU picking/CPU-render BVH is out of date but refit is DEFERRED until actually consumed (lazy). Sculpt sets this in GPU-viewport mode so brush release never blocks on a whole-mesh Embree refit; the pick fallback / CPU render promote it to g_cpu_bvh_refit_pending on demand.
 extern int g_bvh_rebuild_deferred_frames; // Delay CPU BVH rebuild briefly after heavy topology edits in GPU modes
 
 // ===========================================================================

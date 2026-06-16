@@ -564,6 +564,7 @@ std::atomic<bool> g_anim_backend_needs_full_rebuild{false}; // See globals.h —
 bool g_mesh_cache_dirty = false;         // UI mesh cache needs rebuild
 bool g_cpu_sync_pending = false;         // CPU data needs sync after TLAS mode changes
 bool g_cpu_bvh_refit_pending = false;    // CPU BVH fast refit (Embree only)
+bool g_cpu_bvh_stale = false;            // Lazy CPU BVH refit (see globals.h)
 int g_bvh_rebuild_deferred_frames = 0;
 uint64_t g_cpu_bvh_requested_generation = 0;
 uint64_t g_cpu_bvh_future_generation = 0;
@@ -5895,7 +5896,12 @@ int main(int argc, char* argv[]) try {
                         // causes a massive freeze (blocking GPU commands/UI).
                         auto old_bvh = scene.bvh;
                         scene.bvh = new_bvh;
-                        
+
+                        // A full rebuild produces an up-to-date BVH, so it supersedes any
+                        // deferred (lazy) sculpt refit — clear the debt to avoid a redundant
+                        // whole-mesh refit on the next pick.
+                        g_cpu_bvh_stale = false;
+
                         if (old_bvh) {
                             std::thread([old_bvh]() {
                                 // old_bvh goes out of scope here and is destroyed in background

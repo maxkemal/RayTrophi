@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -38,6 +38,7 @@
 #include <shellapi.h>
 #endif
 #include <scene_ui_gas.hpp>
+#include "perlin.h"
 // extern bool show_controls_window; // Assume defined elsewhere
 
 extern bool g_vulkan_rebuild_pending;
@@ -658,6 +659,217 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             ImGui::EndMenu();
         }
 
+        if (ImGui::BeginMenu("Select")) {
+            const bool edit_mode_active = mesh_overlay_settings.enabled &&
+                                          mesh_overlay_settings.edit_mode &&
+                                          ctx.selection.mesh_element_mode != MeshElementSelectMode::Object;
+
+            if (ImGui::MenuItem("Select All", "A")) {
+                if (edit_mode_active) {
+                    selectAllMeshElements(ctx);
+                } else {
+                    selectAllObjects(ctx);
+                }
+            }
+            if (ImGui::MenuItem("Select None", "Alt+A")) {
+                if (edit_mode_active) {
+                    clearEditableMeshSelection();
+                } else {
+                    ctx.selection.clearSelection();
+                }
+            }
+            if (ImGui::MenuItem("Invert Selection", "Ctrl+I")) {
+                if (edit_mode_active) {
+                    invertMeshSelection(ctx);
+                } else {
+                    invertObjectSelection(ctx);
+                }
+            }
+
+            ImGui::Separator();
+
+            ImGui::TextDisabled("Selection Tool");
+            bool isBox = (mesh_overlay_settings.selection_tool == 0);
+            bool isLasso = (mesh_overlay_settings.selection_tool == 1);
+            if (ImGui::RadioButton("Box Select (B)", isBox)) {
+                mesh_overlay_settings.selection_tool = 0;
+            }
+            if (ImGui::RadioButton("Lasso Select (L)", isLasso)) {
+                mesh_overlay_settings.selection_tool = 1;
+            }
+
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Object")) {
+            bool hasSelection = (ctx.selection.selected.type == SelectableType::Object &&
+                                 ctx.selection.selected.object != nullptr);
+            const std::string selectedNodeName =
+                hasSelection ? ctx.selection.selected.object->getNodeName() : std::string{};
+            const std::string effectiveNodeName =
+                !active_mesh_edit_object_name.empty() ? active_mesh_edit_object_name : selectedNodeName;
+            
+            const bool edit_mode_active = mesh_overlay_settings.enabled &&
+                                          mesh_overlay_settings.edit_mode &&
+                                          ctx.selection.mesh_element_mode != MeshElementSelectMode::Object;
+
+            bool isMesh = false;
+            if (edit_mode_active) {
+                isMesh = !active_mesh_edit_object_name.empty();
+            } else {
+                for (const auto& item : ctx.selection.multi_selection) {
+                    if (item.type == SelectableType::Object && item.object) {
+                        isMesh = true;
+                        break;
+                    }
+                }
+            }
+
+            const bool has_selected_faces = !edit_mode_active || !editable_mesh_cache.selection.face_ids.empty();
+
+            if (ImGui::MenuItem("Shade Flat", nullptr, false, isMesh && has_selected_faces)) {
+                if (edit_mode_active) {
+                    applyShadingToSelectedFaces(ctx, true, false);
+                } else {
+                    for (const auto& item : ctx.selection.multi_selection) {
+                        if (item.type == SelectableType::Object && item.object) {
+                            std::string name = item.object->getNodeName();
+                            auto& shading = ensureMeshShadingSettings(name);
+                            shading.flat_shading = true;
+                            shading.auto_smooth = false;
+                            applyMeshShadingSettings(ctx, name);
+                        }
+                    }
+                }
+            }
+            
+            if (ImGui::MenuItem("Shade Smooth", nullptr, false, isMesh && has_selected_faces)) {
+                if (edit_mode_active) {
+                    applyShadingToSelectedFaces(ctx, false, false);
+                } else {
+                    for (const auto& item : ctx.selection.multi_selection) {
+                        if (item.type == SelectableType::Object && item.object) {
+                            std::string name = item.object->getNodeName();
+                            auto& shading = ensureMeshShadingSettings(name);
+                            shading.flat_shading = false;
+                            shading.auto_smooth = false;
+                            applyMeshShadingSettings(ctx, name);
+                        }
+                    }
+                }
+            }
+
+            bool autoSmoothActive = false;
+            if (edit_mode_active) {
+                if (!active_mesh_edit_object_name.empty()) {
+                    autoSmoothActive = ensureMeshShadingSettings(active_mesh_edit_object_name).auto_smooth;
+                }
+            } else if (hasSelection) {
+                autoSmoothActive = ensureMeshShadingSettings(selectedNodeName).auto_smooth;
+            }
+
+            if (ImGui::MenuItem("Shade Auto Smooth", nullptr, autoSmoothActive, isMesh && has_selected_faces)) {
+                if (edit_mode_active) {
+                    applyShadingToSelectedFaces(ctx, false, true);
+                } else {
+                    for (const auto& item : ctx.selection.multi_selection) {
+                        if (item.type == SelectableType::Object && item.object) {
+                            std::string name = item.object->getNodeName();
+                            auto& shading = ensureMeshShadingSettings(name);
+                            shading.auto_smooth = !shading.auto_smooth;
+                            if (shading.auto_smooth) {
+                                shading.flat_shading = false;
+                            }
+                            applyMeshShadingSettings(ctx, name);
+                        }
+                    }
+                }
+            }
+
+            ImGui::Separator();
+
+            if (ImGui::BeginMenu("Normals", isMesh)) {
+                if (ImGui::MenuItem("Flip", nullptr, false, isMesh)) {
+                    if (edit_mode_active) {
+                        flipSelectedMeshNormals(ctx);
+                    } else {
+                        std::vector<std::pair<std::shared_ptr<Triangle>, int>> targets;
+                        for (const auto& item : ctx.selection.multi_selection) {
+                            if (item.type == SelectableType::Object && item.object) {
+                                targets.emplace_back(item.object, item.object_index);
+                            }
+                        }
+                        auto origMulti = ctx.selection.multi_selection;
+                        auto origSel = ctx.selection.selected;
+                        for (const auto& target : targets) {
+                            ctx.selection.selectObject(target.first, target.second, target.first->getNodeName());
+                            flipSelectedMeshNormals(ctx);
+                        }
+                        ctx.selection.multi_selection = origMulti;
+                        ctx.selection.selected = origSel;
+                        ctx.selection.updatePositionFromSelection();
+                    }
+                }
+                if (ImGui::MenuItem("Recalculate Outside", nullptr, false, isMesh)) {
+                    if (edit_mode_active) {
+                        recalculateMeshNormals(ctx, true);
+                    } else {
+                        std::vector<std::pair<std::shared_ptr<Triangle>, int>> targets;
+                        for (const auto& item : ctx.selection.multi_selection) {
+                            if (item.type == SelectableType::Object && item.object) {
+                                targets.emplace_back(item.object, item.object_index);
+                            }
+                        }
+                        auto origMulti = ctx.selection.multi_selection;
+                        auto origSel = ctx.selection.selected;
+                        for (const auto& target : targets) {
+                            ctx.selection.selectObject(target.first, target.second, target.first->getNodeName());
+                            recalculateMeshNormals(ctx, true);
+                        }
+                        ctx.selection.multi_selection = origMulti;
+                        ctx.selection.selected = origSel;
+                        ctx.selection.updatePositionFromSelection();
+                    }
+                }
+                if (ImGui::MenuItem("Recalculate Inside", nullptr, false, isMesh)) {
+                    if (edit_mode_active) {
+                        recalculateMeshNormals(ctx, false);
+                    } else {
+                        std::vector<std::pair<std::shared_ptr<Triangle>, int>> targets;
+                        for (const auto& item : ctx.selection.multi_selection) {
+                            if (item.type == SelectableType::Object && item.object) {
+                                targets.emplace_back(item.object, item.object_index);
+                            }
+                        }
+                        auto origMulti = ctx.selection.multi_selection;
+                        auto origSel = ctx.selection.selected;
+                        for (const auto& target : targets) {
+                            ctx.selection.selectObject(target.first, target.second, target.first->getNodeName());
+                            recalculateMeshNormals(ctx, false);
+                        }
+                        ctx.selection.multi_selection = origMulti;
+                        ctx.selection.selected = origSel;
+                        ctx.selection.updatePositionFromSelection();
+                    }
+                }
+                ImGui::EndMenu();
+            }
+
+            ImGui::Separator();
+
+            if (ImGui::MenuItem("Duplicate Object", "Shift+D", false, ctx.selection.hasSelection())) {
+                triggerDuplicate(ctx);
+            }
+            if (ImGui::MenuItem("Delete Object", "Del/X", false, ctx.selection.hasSelection())) {
+                triggerDelete(ctx);
+            }
+            if (ImGui::MenuItem("Deselect All", nullptr, false, ctx.selection.hasSelection())) {
+                ctx.selection.clearSelection();
+            }
+
+            ImGui::EndMenu();
+        }
+
         if (ImGui::BeginMenu("Add")) {
              if (ImGui::BeginMenu("Mesh")) {
                  if (ImGui::MenuItem("Plane")) {
@@ -675,6 +887,10 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  if (ImGui::MenuItem("Cylinder")) {
                      addProceduralCylinder(ctx);
                      g_ProjectManager.markModified();
+                 }
+                 ImGui::Separator();
+                 if (ImGui::MenuItem("Procedural Generator...")) {
+                     show_procedural_generator = true;
                  }
                  ImGui::EndMenu();
              }
@@ -1305,6 +1521,653 @@ void SceneUI::addProceduralCylinder(UIContext& ctx) {
 
     SCENE_LOG_INFO("Added Cylinder: " + name);
     addViewportMessage("Added Cylinder: " + name);
+}
+
+inline void addQuadToScene(UIContext& ctx, std::shared_ptr<Transform> t, const std::string& name,
+                           const Vec3& v0, const Vec3& v1, const Vec3& v2, const Vec3& v3,
+                           const Vec3& n0, const Vec3& n1, const Vec3& n2, const Vec3& n3,
+                           const Vec2& uv0, const Vec2& uv1, const Vec2& uv2, const Vec2& uv3,
+                           uint16_t mat_id) {
+    auto tri1 = std::make_shared<Triangle>(v0, v1, v2, n0, n1, n2, uv0, uv1, uv2, mat_id);
+    tri1->setTransformHandle(t);
+    tri1->setNodeName(name);
+    tri1->update_bounding_box();
+    ctx.scene.world.objects.push_back(tri1);
+
+    auto tri2 = std::make_shared<Triangle>(v0, v2, v3, n0, n2, n3, uv0, uv2, uv3, mat_id);
+    tri2->setTransformHandle(t);
+    tri2->setNodeName(name);
+    tri2->update_bounding_box();
+    ctx.scene.world.objects.push_back(tri2);
+}
+
+void SceneUI::drawProceduralGeneratorWindow(UIContext& ctx) {
+    ImGui::SetNextWindowSize(ImVec2(400, 500), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Procedural Mesh Generator", &show_procedural_generator)) {
+        ImGui::End();
+        return;
+    }
+    
+    const char* types[] = { "Rock / Stone", "Brick Wall", "Torus", "Staircase" };
+    ImGui::Combo("Type", &procedural_generator_type, types, IM_ARRAYSIZE(types));
+    ImGui::Separator();
+    
+    auto& mats = MaterialManager::getInstance().getAllMaterials();
+    
+    if (procedural_generator_type == 0) {
+        ImGui::InputText("Name", rock_name, IM_ARRAYSIZE(rock_name));
+        ImGui::SliderInt("Resolution", &rock_resolution, 4, 64);
+        ImGui::SliderFloat("Radius", &rock_radius, 0.1f, 10.0f);
+        ImGui::SliderFloat("Noise Scale", &rock_noise_scale, 0.1f, 5.0f);
+        ImGui::SliderFloat("Noise Strength", &rock_noise_strength, 0.0f, 2.0f);
+        ImGui::SliderInt("Noise Octaves", &rock_noise_octaves, 1, 8);
+        ImGui::SliderFloat("Scale X", &rock_scale_x, 0.1f, 5.0f);
+        ImGui::SliderFloat("Scale Y", &rock_scale_y, 0.1f, 5.0f);
+        ImGui::SliderFloat("Scale Z", &rock_scale_z, 0.1f, 5.0f);
+        ImGui::SliderFloat("Flatness", &rock_flatness, 0.0f, 1.0f);
+        ImGui::InputInt("Seed", &rock_seed);
+        
+        std::string cur_name = "Default";
+        if (rock_material_selection >= 0 && rock_material_selection < (int)mats.size()) {
+            cur_name = mats[rock_material_selection]->materialName;
+        }
+        if (ImGui::BeginCombo("Material", cur_name.c_str())) {
+            for (int i = 0; i < (int)mats.size(); ++i) {
+                bool is_selected = (rock_material_selection == i);
+                if (ImGui::Selectable(mats[i]->materialName.c_str(), is_selected)) {
+                    rock_material_selection = i;
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+    else if (procedural_generator_type == 1) {
+        ImGui::InputText("Name", brick_name, IM_ARRAYSIZE(brick_name));
+        ImGui::SliderInt("Rows", &brick_rows, 1, 50);
+        ImGui::SliderInt("Columns", &brick_cols, 1, 50);
+        ImGui::SliderFloat("Brick Width", &brick_width, 0.1f, 5.0f);
+        ImGui::SliderFloat("Brick Height", &brick_height, 0.1f, 2.0f);
+        ImGui::SliderFloat("Brick Depth", &brick_depth, 0.1f, 5.0f);
+        ImGui::SliderFloat("Mortar Gap", &brick_mortar_gap, 0.0f, 0.5f);
+        ImGui::SliderFloat("Tilt Variation", &brick_tilt_variation, 0.0f, 0.2f);
+        ImGui::SliderFloat("Pos Variation", &brick_pos_variation, 0.0f, 0.2f);
+        ImGui::InputInt("Seed", &brick_seed);
+        
+        std::string cur_name = "Default";
+        if (brick_material_selection >= 0 && brick_material_selection < (int)mats.size()) {
+            cur_name = mats[brick_material_selection]->materialName;
+        }
+        if (ImGui::BeginCombo("Material", cur_name.c_str())) {
+            for (int i = 0; i < (int)mats.size(); ++i) {
+                bool is_selected = (brick_material_selection == i);
+                if (ImGui::Selectable(mats[i]->materialName.c_str(), is_selected)) {
+                    brick_material_selection = i;
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+    else if (procedural_generator_type == 2) {
+        ImGui::InputText("Name", torus_name, IM_ARRAYSIZE(torus_name));
+        ImGui::SliderFloat("Major Radius", &torus_major_radius, 0.1f, 10.0f);
+        ImGui::SliderFloat("Minor Radius", &torus_minor_radius, 0.05f, 5.0f);
+        ImGui::SliderInt("Radial Segments", &torus_radial_segments, 4, 128);
+        ImGui::SliderInt("Tubular Segments", &torus_tubular_segments, 4, 128);
+        
+        std::string cur_name = "Default";
+        if (torus_material_selection >= 0 && torus_material_selection < (int)mats.size()) {
+            cur_name = mats[torus_material_selection]->materialName;
+        }
+        if (ImGui::BeginCombo("Material", cur_name.c_str())) {
+            for (int i = 0; i < (int)mats.size(); ++i) {
+                bool is_selected = (torus_material_selection == i);
+                if (ImGui::Selectable(mats[i]->materialName.c_str(), is_selected)) {
+                    torus_material_selection = i;
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+    else if (procedural_generator_type == 3) {
+        ImGui::InputText("Name", stairs_name, IM_ARRAYSIZE(stairs_name));
+        ImGui::SliderInt("Steps", &stairs_steps, 1, 100);
+        ImGui::SliderFloat("Width", &stairs_step_width, 0.1f, 10.0f);
+        ImGui::SliderFloat("Depth", &stairs_step_depth, 0.1f, 5.0f);
+        ImGui::SliderFloat("Height", &stairs_step_height, 0.1f, 5.0f);
+        ImGui::Checkbox("Solid Support", &stairs_solid);
+        
+        std::string cur_name = "Default";
+        if (stairs_material_selection >= 0 && stairs_material_selection < (int)mats.size()) {
+            cur_name = mats[stairs_material_selection]->materialName;
+        }
+        if (ImGui::BeginCombo("Material", cur_name.c_str())) {
+            for (int i = 0; i < (int)mats.size(); ++i) {
+                bool is_selected = (stairs_material_selection == i);
+                if (ImGui::Selectable(mats[i]->materialName.c_str(), is_selected)) {
+                    stairs_material_selection = i;
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+    
+    if (ImGui::Button("+ Create Material")) {
+        auto new_mat = std::make_shared<PrincipledBSDF>();
+        auto gpu = std::make_shared<GpuMaterial>();
+        gpu->albedo = make_float3(0.7f, 0.7f, 0.7f);
+        gpu->roughness = 0.5f;
+        gpu->metallic = 0.0f;
+        new_mat->gpuMaterial = gpu;
+        std::string m_name = "Procedural_Mat_" + std::to_string(mats.size() + 1);
+        new_mat->materialName = m_name;
+        
+        MaterialManager::getInstance().getOrCreateMaterialID(m_name, new_mat);
+        rock_material_selection = (int)mats.size() - 1;
+        brick_material_selection = (int)mats.size() - 1;
+        torus_material_selection = (int)mats.size() - 1;
+        stairs_material_selection = (int)mats.size() - 1;
+    }
+    
+    ImGui::SameLine();
+    
+    if (ImGui::Button("Generate")) {
+        if (procedural_generator_type == 0) {
+            addProceduralRock(ctx);
+        } else if (procedural_generator_type == 1) {
+            addProceduralBrickWall(ctx);
+        } else if (procedural_generator_type == 2) {
+            addProceduralTorus(ctx);
+        } else if (procedural_generator_type == 3) {
+            addProceduralStaircase(ctx);
+        }
+        g_ProjectManager.markModified();
+        show_procedural_generator = false;
+    }
+    
+    ImGui::End();
+}
+
+void SceneUI::addProceduralRock(UIContext& ctx) {
+    std::shared_ptr<Transform> t = std::make_shared<Transform>();
+    t->setBase(Matrix4x4::translation(Vec3(0,0,0)));
+    
+    uint16_t mat_id = 0;
+    auto& mats = MaterialManager::getInstance().getAllMaterials();
+    if (rock_material_selection >= 0 && rock_material_selection < (int)mats.size()) {
+        mat_id = MaterialManager::getInstance().getMaterialID(mats[rock_material_selection]->materialName);
+    } else {
+        auto def_mat = std::make_shared<PrincipledBSDF>();
+        auto gpu = std::make_shared<GpuMaterial>();
+        gpu->albedo = make_float3(0.8f, 0.8f, 0.8f);
+        gpu->roughness = 0.5f;
+        gpu->metallic = 0.0f;
+        def_mat->gpuMaterial = gpu;
+        mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+    }
+    
+    std::string name = std::string(rock_name) + "_" + std::to_string(g_ProjectManager.getProjectData().next_object_id);
+    
+    int N = (std::max)(4, (std::min)(64, rock_resolution));
+    Perlin perlin(rock_seed);
+    
+    struct FaceData {
+        Vec3 normal;
+        Vec3 tangent;
+        Vec3 bitangent;
+    };
+    FaceData faces[6] = {
+        { Vec3( 1, 0, 0), Vec3( 0, 0,-1), Vec3( 0, 1, 0) }, // +X
+        { Vec3(-1, 0, 0), Vec3( 0, 0, 1), Vec3( 0, 1, 0) }, // -X
+        { Vec3( 0, 1, 0), Vec3( 1, 0, 0), Vec3( 0, 0,-1) }, // +Y
+        { Vec3( 0,-1, 0), Vec3( 1, 0, 0), Vec3( 0, 0, 1) }, // -Y
+        { Vec3( 0, 0, 1), Vec3( 1, 0, 0), Vec3( 0, 1, 0) }, // +Z
+        { Vec3( 0, 0,-1), Vec3(-1, 0, 0), Vec3( 0, 1, 0) }  // -Z
+    };
+    
+    for (int f = 0; f < 6; ++f) {
+        FaceData fd = faces[f];
+        
+        std::vector<std::vector<Vec3>> face_verts(N + 1, std::vector<Vec3>(N + 1));
+        std::vector<std::vector<Vec2>> face_uvs(N + 1, std::vector<Vec2>(N + 1));
+        
+        for (int i = 0; i <= N; ++i) {
+            float u_loc = (float)i / N;
+            float u = -1.0f + 2.0f * u_loc;
+            for (int j = 0; j <= N; ++j) {
+                float v_loc = (float)j / N;
+                float v = -1.0f + 2.0f * v_loc;
+                
+                Vec3 p_cube = fd.normal + fd.tangent * u + fd.bitangent * v;
+                Vec3 p_sphere = p_cube.normalize();
+                
+                float noise_val = 0.0f;
+                float amp = 1.0f;
+                Vec3 noise_p = p_sphere * rock_noise_scale;
+                for (int o = 0; o < rock_noise_octaves; ++o) {
+                    noise_val += amp * perlin.noise(noise_p);
+                    amp *= 0.5f;
+                    noise_p *= 2.0f;
+                }
+                
+                float disp = noise_val * rock_noise_strength;
+                Vec3 pos = p_sphere * (rock_radius + disp);
+                
+                pos.x *= rock_scale_x;
+                pos.y *= rock_scale_y;
+                pos.z *= rock_scale_z;
+                
+                if (rock_flatness > 0.0f) {
+                    float limit = -rock_radius * rock_scale_y * (1.0f - rock_flatness);
+                    if (pos.y < limit) {
+                        pos.y = limit;
+                    }
+                }
+                
+                face_verts[i][j] = pos;
+                
+                int col = f % 3;
+                int row = f / 3;
+                face_uvs[i][j] = Vec2((col + u_loc) / 3.0f, (row + v_loc) / 2.0f);
+            }
+        }
+        
+        for (int i = 0; i < N; ++i) {
+            for (int j = 0; j < N; ++j) {
+                Vec3 p00 = face_verts[i][j];
+                Vec3 p10 = face_verts[i+1][j];
+                Vec3 p11 = face_verts[i+1][j+1];
+                Vec3 p01 = face_verts[i][j+1];
+                
+                Vec2 uv00 = face_uvs[i][j];
+                Vec2 uv10 = face_uvs[i+1][j];
+                Vec2 uv11 = face_uvs[i+1][j+1];
+                Vec2 uv01 = face_uvs[i][j+1];
+                
+                auto get_smooth_normal = [&](int x, int y) {
+                    Vec3 T;
+                    if (x > 0 && x < N) T = face_verts[x+1][y] - face_verts[x-1][y];
+                    else if (x == 0) T = face_verts[1][y] - face_verts[0][y];
+                    else T = face_verts[N][y] - face_verts[N-1][y];
+                    
+                    Vec3 B;
+                    if (y > 0 && y < N) B = face_verts[x][y+1] - face_verts[x][y-1];
+                    else if (y == 0) B = face_verts[x][1] - face_verts[x][0];
+                    else B = face_verts[x][N] - face_verts[x][N-1];
+                    
+                    Vec3 n = T.cross(B);
+                    if (n.length_squared() > 1e-8f) return n.normalize();
+                    return fd.normal;
+                };
+                
+                Vec3 n00 = get_smooth_normal(i, j);
+                Vec3 n10 = get_smooth_normal(i+1, j);
+                Vec3 n11 = get_smooth_normal(i+1, j+1);
+                Vec3 n01 = get_smooth_normal(i, j+1);
+                
+                addQuadToScene(ctx, t, name, p00, p10, p11, p01, n00, n10, n11, n01, uv00, uv10, uv11, uv01, mat_id);
+            }
+        }
+    }
+    
+    ProceduralObjectData proc;
+    proc.id = g_ProjectManager.getProjectData().generateObjectId();
+    proc.mesh_type = ProceduralMeshType::Rock;
+    proc.display_name = name;
+    proc.transform = t->base;
+    proc.material_id = mat_id;
+    g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
+    
+    rebuildMeshCache(ctx.scene.world.objects);
+    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    ctx.renderer.resetCPUAccumulation();
+    if (g_backend) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    g_viewport_raster_rebuild_pending = true;
+    if (sceneUiMenuRenderBackendIsVulkan()) g_vulkan_rebuild_pending = true;
+    
+    extern bool g_geometry_dirty;
+    extern std::atomic<uint64_t> g_scene_geometry_generation;
+    extern std::atomic<bool> g_needs_optix_sync;
+    g_geometry_dirty = true;
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+    g_needs_optix_sync.store(true, std::memory_order_release);
+    
+    SCENE_LOG_INFO("Added Rock: " + name);
+    addViewportMessage("Added Rock: " + name);
+}
+
+void SceneUI::addProceduralBrickWall(UIContext& ctx) {
+    std::shared_ptr<Transform> t = std::make_shared<Transform>();
+    t->setBase(Matrix4x4::translation(Vec3(0,0,0)));
+    
+    uint16_t mat_id = 0;
+    auto& mats = MaterialManager::getInstance().getAllMaterials();
+    if (brick_material_selection >= 0 && brick_material_selection < (int)mats.size()) {
+        mat_id = MaterialManager::getInstance().getMaterialID(mats[brick_material_selection]->materialName);
+    } else {
+        auto def_mat = std::make_shared<PrincipledBSDF>();
+        auto gpu = std::make_shared<GpuMaterial>();
+        gpu->albedo = make_float3(0.8f, 0.8f, 0.8f);
+        gpu->roughness = 0.5f;
+        gpu->metallic = 0.0f;
+        def_mat->gpuMaterial = gpu;
+        mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+    }
+    
+    std::string name = std::string(brick_name) + "_" + std::to_string(g_ProjectManager.getProjectData().next_object_id);
+    
+    int rows = (std::max)(1, brick_rows);
+    int cols = (std::max)(1, brick_cols);
+    float W = brick_width;
+    float H = brick_height;
+    float D = brick_depth;
+    float G = brick_mortar_gap;
+    
+    auto rotate_point = [](const Vec3& pt, float rx, float ry, float rz) {
+        float cosX = cos(rx), sinX = sin(rx);
+        float y1 = pt.y * cosX - pt.z * sinX;
+        float z1 = pt.y * sinX + pt.z * cosX;
+        
+        float cosY = cos(ry), sinY = sin(ry);
+        float x2 = pt.x * cosY + z1 * sinY;
+        float z2 = -pt.x * sinY + z1 * cosY;
+        
+        float cosZ = cos(rz), sinZ = sin(rz);
+        float x3 = x2 * cosZ - y1 * sinZ;
+        float y3 = x2 * sinZ + y1 * cosZ;
+        
+        return Vec3(x3, y3, z2);
+    };
+    
+    auto get_rand = [](unsigned int& state) {
+        state = state * 1664525u + 1013904223u;
+        return (float)state / 4294967295.0f;
+    };
+    
+    unsigned int l_seed = brick_seed;
+    
+    for (int r = 0; r < rows; ++r) {
+        float x_offset = (r % 2 == 1) ? (W + G) * 0.5f : 0.0f;
+        for (int c = 0; c < cols; ++c) {
+            float bx = -((cols - 1) * (W + G)) * 0.5f + c * (W + G) + x_offset;
+            float by = r * (H + G) + H * 0.5f;
+            float bz = 0.0f;
+            
+            float rx = (get_rand(l_seed) * 2.0f - 1.0f) * brick_pos_variation;
+            float ry = (get_rand(l_seed) * 2.0f - 1.0f) * brick_pos_variation;
+            float rz = (get_rand(l_seed) * 2.0f - 1.0f) * brick_pos_variation;
+            
+            float rot_x = (get_rand(l_seed) * 2.0f - 1.0f) * brick_tilt_variation;
+            float rot_y = (get_rand(l_seed) * 2.0f - 1.0f) * brick_tilt_variation;
+            float rot_z = (get_rand(l_seed) * 2.0f - 1.0f) * brick_tilt_variation;
+            
+            Vec3 corners[8] = {
+                Vec3(-W*0.5f, -H*0.5f,  D*0.5f), // 0
+                Vec3( W*0.5f, -H*0.5f,  D*0.5f), // 1
+                Vec3( W*0.5f,  H*0.5f,  D*0.5f), // 2
+                Vec3(-W*0.5f,  H*0.5f,  D*0.5f), // 3
+                Vec3(-W*0.5f, -H*0.5f, -D*0.5f), // 4
+                Vec3( W*0.5f, -H*0.5f, -D*0.5f), // 5
+                Vec3( W*0.5f,  H*0.5f, -D*0.5f), // 6
+                Vec3(-W*0.5f,  H*0.5f, -D*0.5f)  // 7
+            };
+            
+            Vec3 transformed[8];
+            for (int i = 0; i < 8; ++i) {
+                Vec3 rotated = rotate_point(corners[i], rot_x, rot_y, rot_z);
+                transformed[i] = rotated + Vec3(bx + rx, by + ry, bz + rz);
+            }
+            
+            Vec3 n_front  = rotate_point(Vec3(0,0,1), rot_x, rot_y, rot_z).normalize();
+            Vec3 n_back   = rotate_point(Vec3(0,0,-1), rot_x, rot_y, rot_z).normalize();
+            Vec3 n_left   = rotate_point(Vec3(-1,0,0), rot_x, rot_y, rot_z).normalize();
+            Vec3 n_right  = rotate_point(Vec3(1,0,0), rot_x, rot_y, rot_z).normalize();
+            Vec3 n_top    = rotate_point(Vec3(0,1,0), rot_x, rot_y, rot_z).normalize();
+            Vec3 n_bottom = rotate_point(Vec3(0,-1,0), rot_x, rot_y, rot_z).normalize();
+            
+            Vec2 uv0(0,0), uv1(1,0), uv2(1,1), uv3(0,1);
+            
+            addQuadToScene(ctx, t, name, transformed[0], transformed[1], transformed[2], transformed[3], n_front, n_front, n_front, n_front, uv0, uv1, uv2, uv3, mat_id);
+            addQuadToScene(ctx, t, name, transformed[5], transformed[4], transformed[7], transformed[6], n_back, n_back, n_back, n_back, uv0, uv1, uv2, uv3, mat_id);
+            addQuadToScene(ctx, t, name, transformed[4], transformed[0], transformed[3], transformed[7], n_left, n_left, n_left, n_left, uv0, uv1, uv2, uv3, mat_id);
+            addQuadToScene(ctx, t, name, transformed[1], transformed[5], transformed[6], transformed[2], n_right, n_right, n_right, n_right, uv0, uv1, uv2, uv3, mat_id);
+            addQuadToScene(ctx, t, name, transformed[3], transformed[2], transformed[6], transformed[7], n_top, n_top, n_top, n_top, uv0, uv1, uv2, uv3, mat_id);
+            addQuadToScene(ctx, t, name, transformed[4], transformed[5], transformed[1], transformed[0], n_bottom, n_bottom, n_bottom, n_bottom, uv0, uv1, uv2, uv3, mat_id);
+        }
+    }
+    
+    ProceduralObjectData proc;
+    proc.id = g_ProjectManager.getProjectData().generateObjectId();
+    proc.mesh_type = ProceduralMeshType::BrickWall;
+    proc.display_name = name;
+    proc.transform = t->base;
+    proc.material_id = mat_id;
+    g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
+    
+    rebuildMeshCache(ctx.scene.world.objects);
+    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    ctx.renderer.resetCPUAccumulation();
+    if (g_backend) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    g_viewport_raster_rebuild_pending = true;
+    if (sceneUiMenuRenderBackendIsVulkan()) g_vulkan_rebuild_pending = true;
+    
+    extern bool g_geometry_dirty;
+    extern std::atomic<uint64_t> g_scene_geometry_generation;
+    extern std::atomic<bool> g_needs_optix_sync;
+    g_geometry_dirty = true;
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+    g_needs_optix_sync.store(true, std::memory_order_release);
+    
+    SCENE_LOG_INFO("Added Brick Wall: " + name);
+    addViewportMessage("Added Brick Wall: " + name);
+}
+
+void SceneUI::addProceduralTorus(UIContext& ctx) {
+    std::shared_ptr<Transform> t = std::make_shared<Transform>();
+    t->setBase(Matrix4x4::translation(Vec3(0,0,0)));
+    
+    uint16_t mat_id = 0;
+    auto& mats = MaterialManager::getInstance().getAllMaterials();
+    if (torus_material_selection >= 0 && torus_material_selection < (int)mats.size()) {
+        mat_id = MaterialManager::getInstance().getMaterialID(mats[torus_material_selection]->materialName);
+    } else {
+        auto def_mat = std::make_shared<PrincipledBSDF>();
+        auto gpu = std::make_shared<GpuMaterial>();
+        gpu->albedo = make_float3(0.8f, 0.8f, 0.8f);
+        gpu->roughness = 0.5f;
+        gpu->metallic = 0.0f;
+        def_mat->gpuMaterial = gpu;
+        mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+    }
+    
+    std::string name = std::string(torus_name) + "_" + std::to_string(g_ProjectManager.getProjectData().next_object_id);
+    
+    int R_segs = (std::max)(4, torus_radial_segments);
+    int T_segs = (std::max)(4, torus_tubular_segments);
+    float R = torus_major_radius;
+    float r = torus_minor_radius;
+    
+    std::vector<std::vector<Vec3>> positions(R_segs + 1, std::vector<Vec3>(T_segs + 1));
+    std::vector<std::vector<Vec3>> normals(R_segs + 1, std::vector<Vec3>(T_segs + 1));
+    std::vector<std::vector<Vec2>> uvs(R_segs + 1, std::vector<Vec2>(T_segs + 1));
+    
+    for (int i = 0; i <= R_segs; ++i) {
+        float u = (float)i / R_segs * 2.0f * 3.1415926535f;
+        float cosU = cos(u);
+        float sinU = sin(u);
+        
+        for (int j = 0; j <= T_segs; ++j) {
+            float v = (float)j / T_segs * 2.0f * 3.1415926535f;
+            float cosV = cos(v);
+            float sinV = sin(v);
+            
+            float x = (R + r * cosV) * cosU;
+            float y = r * sinV;
+            float z = (R + r * cosV) * sinU;
+            positions[i][j] = Vec3(x, y, z);
+            
+            Vec3 norm(cosV * cosU, sinV, cosV * sinU);
+            normals[i][j] = norm.normalize();
+            
+            uvs[i][j] = Vec2((float)i / R_segs, (float)j / T_segs);
+        }
+    }
+    
+    for (int i = 0; i < R_segs; ++i) {
+        for (int j = 0; j < T_segs; ++j) {
+            Vec3 p00 = positions[i][j];
+            Vec3 p10 = positions[i+1][j];
+            Vec3 p11 = positions[i+1][j+1];
+            Vec3 p01 = positions[i][j+1];
+            
+            Vec3 n00 = normals[i][j];
+            Vec3 n10 = normals[i+1][j];
+            Vec3 n11 = normals[i+1][j+1];
+            Vec3 n01 = normals[i][j+1];
+            
+            Vec2 uv00 = uvs[i][j];
+            Vec2 uv10 = uvs[i+1][j];
+            Vec2 uv11 = uvs[i+1][j+1];
+            Vec2 uv01 = uvs[i][j+1];
+            
+            addQuadToScene(ctx, t, name, p00, p10, p11, p01, n00, n10, n11, n01, uv00, uv10, uv11, uv01, mat_id);
+        }
+    }
+    
+    ProceduralObjectData proc;
+    proc.id = g_ProjectManager.getProjectData().generateObjectId();
+    proc.mesh_type = ProceduralMeshType::Torus;
+    proc.display_name = name;
+    proc.transform = t->base;
+    proc.material_id = mat_id;
+    g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
+    
+    rebuildMeshCache(ctx.scene.world.objects);
+    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    ctx.renderer.resetCPUAccumulation();
+    if (g_backend) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    g_viewport_raster_rebuild_pending = true;
+    if (sceneUiMenuRenderBackendIsVulkan()) g_vulkan_rebuild_pending = true;
+    
+    extern bool g_geometry_dirty;
+    extern std::atomic<uint64_t> g_scene_geometry_generation;
+    extern std::atomic<bool> g_needs_optix_sync;
+    g_geometry_dirty = true;
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+    g_needs_optix_sync.store(true, std::memory_order_release);
+    
+    SCENE_LOG_INFO("Added Torus: " + name);
+    addViewportMessage("Added Torus: " + name);
+}
+
+void SceneUI::addProceduralStaircase(UIContext& ctx) {
+    std::shared_ptr<Transform> t = std::make_shared<Transform>();
+    t->setBase(Matrix4x4::translation(Vec3(0,0,0)));
+    
+    uint16_t mat_id = 0;
+    auto& mats = MaterialManager::getInstance().getAllMaterials();
+    if (stairs_material_selection >= 0 && stairs_material_selection < (int)mats.size()) {
+        mat_id = MaterialManager::getInstance().getMaterialID(mats[stairs_material_selection]->materialName);
+    } else {
+        auto def_mat = std::make_shared<PrincipledBSDF>();
+        auto gpu = std::make_shared<GpuMaterial>();
+        gpu->albedo = make_float3(0.8f, 0.8f, 0.8f);
+        gpu->roughness = 0.5f;
+        gpu->metallic = 0.0f;
+        def_mat->gpuMaterial = gpu;
+        mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+    }
+    
+    std::string name = std::string(stairs_name) + "_" + std::to_string(g_ProjectManager.getProjectData().next_object_id);
+    
+    int steps = (std::max)(1, stairs_steps);
+    float W = stairs_step_width;
+    float D = stairs_step_depth;
+    float H = stairs_step_height;
+    
+    for (int s = 0; s < steps; ++s) {
+        Vec3 tr0(-W*0.5f, (s + 1) * H, s * D);
+        Vec3 tr1( W*0.5f, (s + 1) * H, s * D);
+        Vec3 tr2( W*0.5f, (s + 1) * H, (s + 1) * D);
+        Vec3 tr3(-W*0.5f, (s + 1) * H, (s + 1) * D);
+        
+        Vec3 n_up(0, 1, 0);
+        Vec2 uv_tr0(0, s * D), uv_tr1(W, s * D), uv_tr2(W, (s+1) * D), uv_tr3(0, (s+1) * D);
+        addQuadToScene(ctx, t, name, tr0, tr1, tr2, tr3, n_up, n_up, n_up, n_up, uv_tr0, uv_tr1, uv_tr2, uv_tr3, mat_id);
+        
+        Vec3 ri0(-W*0.5f, s * H, s * D);
+        Vec3 ri1( W*0.5f, s * H, s * D);
+        Vec3 ri2( W*0.5f, (s + 1) * H, s * D);
+        Vec3 ri3(-W*0.5f, (s + 1) * H, s * D);
+        
+        Vec3 n_front(0, 0, -1);
+        Vec2 uv_ri0(0, s * H), uv_ri1(W, s * H), uv_ri2(W, (s+1) * H), uv_ri3(0, (s+1) * H);
+        addQuadToScene(ctx, t, name, ri0, ri1, ri2, ri3, n_front, n_front, n_front, n_front, uv_ri0, uv_ri1, uv_ri2, uv_ri3, mat_id);
+        
+        if (stairs_solid) {
+            Vec3 le0(-W*0.5f, 0, (s + 1) * D);
+            Vec3 le1(-W*0.5f, 0, s * D);
+            Vec3 le2(-W*0.5f, (s + 1) * H, s * D);
+            Vec3 le3(-W*0.5f, (s + 1) * H, (s + 1) * D);
+            
+            Vec3 n_left(-1, 0, 0);
+            Vec2 uv_le0((s+1)*D, 0), uv_le1(s*D, 0), uv_le2(s*D, (s+1)*H), uv_le3((s+1)*D, (s+1)*H);
+            addQuadToScene(ctx, t, name, le0, le1, le2, le3, n_left, n_left, n_left, n_left, uv_le0, uv_le1, uv_le2, uv_le3, mat_id);
+            
+            Vec3 ri_s0(W*0.5f, 0, s * D);
+            Vec3 ri_s1(W*0.5f, 0, (s + 1) * D);
+            Vec3 ri_s2(W*0.5f, (s + 1) * H, (s + 1) * D);
+            Vec3 ri_s3(W*0.5f, (s + 1) * H, s * D);
+            
+            Vec3 n_right(1, 0, 0);
+            Vec2 uv_rs0(s*D, 0), uv_rs1((s+1)*D, 0), uv_rs2((s+1)*D, (s+1)*H), uv_rs3(s*D, (s+1)*H);
+            addQuadToScene(ctx, t, name, ri_s0, ri_s1, ri_s2, ri_s3, n_right, n_right, n_right, n_right, uv_rs0, uv_rs1, uv_rs2, uv_rs3, mat_id);
+        }
+    }
+    
+    if (stairs_solid) {
+        Vec3 bo0(-W*0.5f, 0, steps * D);
+        Vec3 bo1( W*0.5f, 0, steps * D);
+        Vec3 bo2( W*0.5f, 0, 0);
+        Vec3 bo3(-W*0.5f, 0, 0);
+        
+        Vec3 n_down(0, -1, 0);
+        Vec2 uv_bo0(0, steps * D), uv_bo1(W, steps * D), uv_bo2(W, 0), uv_bo3(0, 0);
+        addQuadToScene(ctx, t, name, bo0, bo1, bo2, bo3, n_down, n_down, n_down, n_down, uv_bo0, uv_bo1, uv_bo2, uv_bo3, mat_id);
+        
+        Vec3 ba0( W*0.5f, 0, steps * D);
+        Vec3 ba1(-W*0.5f, 0, steps * D);
+        Vec3 ba2(-W*0.5f, steps * H, steps * D);
+        Vec3 ba3( W*0.5f, steps * H, steps * D);
+        
+        Vec3 n_back(0, 0, 1);
+        Vec2 uv_ba0(W, 0), uv_ba1(0, 0), uv_ba2(0, steps * H), uv_ba3(W, steps * H);
+        addQuadToScene(ctx, t, name, ba0, ba1, ba2, ba3, n_back, n_back, n_back, n_back, uv_ba0, uv_ba1, uv_ba2, uv_ba3, mat_id);
+    }
+    
+    ProceduralObjectData proc;
+    proc.id = g_ProjectManager.getProjectData().generateObjectId();
+    proc.mesh_type = ProceduralMeshType::Staircase;
+    proc.display_name = name;
+    proc.transform = t->base;
+    proc.material_id = mat_id;
+    g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
+    
+    rebuildMeshCache(ctx.scene.world.objects);
+    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    ctx.renderer.resetCPUAccumulation();
+    if (g_backend) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    g_viewport_raster_rebuild_pending = true;
+    if (sceneUiMenuRenderBackendIsVulkan()) g_vulkan_rebuild_pending = true;
+    
+    extern bool g_geometry_dirty;
+    extern std::atomic<uint64_t> g_scene_geometry_generation;
+    extern std::atomic<bool> g_needs_optix_sync;
+    g_geometry_dirty = true;
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+    g_needs_optix_sync.store(true, std::memory_order_release);
+    
+    SCENE_LOG_INFO("Added Staircase: " + name);
+    addViewportMessage("Added Staircase: " + name);
 }
 
 #endif

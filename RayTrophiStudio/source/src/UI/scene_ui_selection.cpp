@@ -1,4 +1,4 @@
-﻿// ===============================================================================
+// ===============================================================================
 // SCENE UI - SELECTION & INTERACTION
 // ===============================================================================
 // This file handles Mouse picking, Marquee selection, and Delete operations.
@@ -19,6 +19,7 @@
 #include "ImGuizmo.h"
 #include "scene_data.h"
 #include <unordered_set>
+#include <unordered_map>
 #include <ProjectManager.h>
 #include "WaterSystem.h"
 #include "TerrainManager.h"
@@ -34,7 +35,7 @@ extern std::unique_ptr<Backend::IBackend> g_backend;
 bool g_timeline_selection_sync_pending = false;
 
 namespace {
-bool projectSelectionPointToScreen(const Camera& cam, const ImVec2& displaySize, const Vec3& point, ImVec2& out) {
+bool projectSelectionPointToScreen(const Camera& cam, const ImVec2& displaySize, const Vec3& point, ImVec2& out, bool isOrtho) {
     if (displaySize.x <= 1.0f || displaySize.y <= 1.0f) {
         return false;
     }
@@ -44,11 +45,11 @@ bool projectSelectionPointToScreen(const Camera& cam, const ImVec2& displaySize,
     const Vec3 cam_up = cam_right.cross(cam_forward).normalize();
     const Vec3 to_point = point - cam.lookfrom;
     const float depth = to_point.dot(cam_forward);
-    if (depth <= 0.01f) {
+    if (!isOrtho && depth <= 0.01f) {
         return false;
     }
 
-    const float aspect = displaySize.x / displaySize.y;
+    const float aspect = cam.aspect_ratio;
     const float tan_half_fov = tanf(cam.vfov * 3.14159265359f / 180.0f * 0.5f);
     if (fabsf(aspect) <= 1e-6f || fabsf(tan_half_fov) <= 1e-6f) {
         return false;
@@ -56,14 +57,113 @@ bool projectSelectionPointToScreen(const Camera& cam, const ImVec2& displaySize,
 
     const float local_x = to_point.dot(cam_right);
     const float local_y = to_point.dot(cam_up);
-    const float half_h = depth * tan_half_fov;
-    const float half_w = half_h * aspect;
+
+    float half_h, half_w;
+    if (isOrtho) {
+        half_h = cam.ortho_height * 0.5f;
+        half_w = half_h * aspect;
+    } else {
+        half_h = depth * tan_half_fov;
+        half_w = half_h * aspect;
+    }
+
     if (fabsf(half_w) <= 1e-6f || fabsf(half_h) <= 1e-6f) {
         return false;
     }
 
     out.x = ((local_x / half_w) * 0.5f + 0.5f) * displaySize.x;
     out.y = (0.5f - (local_y / half_h) * 0.5f) * displaySize.y;
+    return true;
+}
+
+bool projectAABBToScreen(const Camera& cam, const ImVec2& displaySize, const Vec3& bb_min, const Vec3& bb_max, const Matrix4x4& transform, bool has_transform, bool isOrtho, float& out_min_x, float& out_min_y, float& out_max_x, float& out_max_y) {
+    Vec3 world_corners[8];
+    Vec3 local_corners[8] = {
+        Vec3(bb_min.x, bb_min.y, bb_min.z), Vec3(bb_max.x, bb_min.y, bb_min.z),
+        Vec3(bb_min.x, bb_max.y, bb_min.z), Vec3(bb_max.x, bb_max.y, bb_min.z),
+        Vec3(bb_min.x, bb_min.y, bb_max.z), Vec3(bb_max.x, bb_min.y, bb_max.z),
+        Vec3(bb_min.x, bb_max.y, bb_max.z), Vec3(bb_max.x, bb_max.y, bb_max.z)
+    };
+
+    if (has_transform) {
+        for (int i = 0; i < 8; ++i) {
+            world_corners[i] = transform.transform_point(local_corners[i]);
+        }
+    } else {
+        for (int i = 0; i < 8; ++i) {
+            world_corners[i] = local_corners[i];
+        }
+    }
+
+    const Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
+    float depths[8];
+    int behind_count = 0;
+    for (int i = 0; i < 8; ++i) {
+        depths[i] = (world_corners[i] - cam.lookfrom).dot(cam_forward);
+        if (depths[i] <= 0.01f) {
+            behind_count++;
+        }
+    }
+
+    if (behind_count == 8 && !isOrtho) {
+        return false;
+    }
+
+    float min_x = 1e10f, min_y = 1e10f;
+    float max_x = -1e10f, max_y = -1e10f;
+    bool has_point = false;
+
+    auto updateBounds = [&](const ImVec2& sp) {
+        if (sp.x > -9999.0f && sp.y > -9999.0f) {
+            has_point = true;
+            min_x = fminf(min_x, sp.x);
+            min_y = fminf(min_y, sp.y);
+            max_x = fmaxf(max_x, sp.x);
+            max_y = fmaxf(max_y, sp.y);
+        }
+    };
+
+    // Project corners in front of near plane
+    for (int i = 0; i < 8; ++i) {
+        if (isOrtho || depths[i] > 0.01f) {
+            ImVec2 sp;
+            if (projectSelectionPointToScreen(cam, displaySize, world_corners[i], sp, isOrtho)) {
+                updateBounds(sp);
+            }
+        }
+    }
+
+    // Clip edges against near plane (depth = 0.01f) for perspective projection
+    if (!isOrtho && behind_count > 0 && behind_count < 8) {
+        const int edges[12][2] = {
+            {0, 1}, {2, 3}, {4, 5}, {6, 7}, // X
+            {0, 2}, {1, 3}, {4, 6}, {5, 7}, // Y
+            {0, 4}, {1, 5}, {2, 6}, {3, 7}  // Z
+        };
+        for (int i = 0; i < 12; ++i) {
+            int idx0 = edges[i][0];
+            int idx1 = edges[i][1];
+            float d0 = depths[idx0];
+            float d1 = depths[idx1];
+            if ((d0 > 0.01f) != (d1 > 0.01f)) {
+                float t = (0.01f - d0) / (d1 - d0);
+                Vec3 p_intersect = world_corners[idx0] + t * (world_corners[idx1] - world_corners[idx0]);
+                ImVec2 sp;
+                if (projectSelectionPointToScreen(cam, displaySize, p_intersect, sp, isOrtho)) {
+                    updateBounds(sp);
+                }
+            }
+        }
+    }
+
+    if (!has_point) {
+        return false;
+    }
+
+    out_min_x = min_x;
+    out_min_y = min_y;
+    out_max_x = max_x;
+    out_max_y = max_y;
     return true;
 }
 
@@ -199,272 +299,84 @@ void SceneUI::handleMarqueeSelection(UIContext& ctx) {
     ImGuiIO& io = ImGui::GetIO();
 
     // Only handle when not interacting with UI windows and not using gizmo
-    // WantCaptureMouse is true when mouse is over an interactive UI element (button, slider, etc.)
-    // This is less restrictive than IsAnyItemHovered which blocks even when hovering inactive areas
     if (io.WantCaptureMouse || ImGuizmo::IsOver() || ImGuizmo::IsUsing()) {
         return;
     }
 
-    // Start marquee on right mouse button down (or B key + left click for Blender style)
-    bool start_marquee = ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !io.KeyCtrl && !io.KeyShift;
+    const bool edit_mode_active = mesh_overlay_settings.enabled &&
+                                  mesh_overlay_settings.edit_mode &&
+                                  ctx.selection.mesh_element_mode != MeshElementSelectMode::Object;
 
-    if (start_marquee && !is_marquee_selecting) {
-        is_marquee_selecting = true;
-        marquee_start = io.MousePos;
-        marquee_end = io.MousePos;
+    // Start selection on right mouse button down (allowing modifiers for add/remove)
+    bool start_select = ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+
+    if (start_select && !is_marquee_selecting && !is_lasso_selecting) {
+        if (mesh_overlay_settings.selection_tool == 0) { // Box Select
+            is_marquee_selecting = true;
+            marquee_start = io.MousePos;
+            marquee_end = io.MousePos;
+        } else if (mesh_overlay_settings.selection_tool == 1) { // Lasso Select
+            is_lasso_selecting = true;
+            lasso_points.clear();
+            lasso_points.push_back(io.MousePos);
+        }
     }
 
-    // Update marquee while dragging
+    // Update selection shape while dragging
     if (is_marquee_selecting && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
         marquee_end = io.MousePos;
     }
+    if (is_lasso_selecting && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+        ImVec2 currentPos = io.MousePos;
+        if (lasso_points.empty()) {
+            lasso_points.push_back(currentPos);
+        } else {
+            ImVec2 lastPos = lasso_points.back();
+            float dx = currentPos.x - lastPos.x;
+            float dy = currentPos.y - lastPos.y;
+            float distSq = dx * dx + dy * dy;
+            if (distSq > 25.0f) { // 5 pixels min distance
+                lasso_points.push_back(currentPos);
+            }
+        }
+    }
 
-    // Complete marquee on mouse release
+    // Complete selection on mouse release
     if (is_marquee_selecting && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
         is_marquee_selecting = false;
 
-        // Normalize rectangle
         float x1 = fminf(marquee_start.x, marquee_end.x);
         float y1 = fminf(marquee_start.y, marquee_end.y);
         float x2 = fmaxf(marquee_start.x, marquee_end.x);
         float y2 = fmaxf(marquee_start.y, marquee_end.y);
 
-        // Minimum size to prevent accidental selections
-        if ((x2 - x1) < 10 || (y2 - y1) < 10) {
-            return;
-        }
-
-        // Clear current selection if Ctrl is not held
-        if (!io.KeyCtrl) {
-            ctx.selection.clearSelection();
-        }
-
-        if (!ctx.scene.camera) return;
-
-        Camera& cam = *ctx.scene.camera;
-        float screen_w = io.DisplaySize.x;
-        float screen_h = io.DisplaySize.y;
-
-        // Camera basis vectors for projection
-        Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
-        Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
-        Vec3 cam_up = cam_right.cross(cam_forward).normalize();
-        float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
-        float tan_half_fov = tanf(fov_rad * 0.5f);
-
-        // FIX: Use actual screen aspect ratio, not the global render aspect_ratio.
-        // The global aspect_ratio may be locked to e.g. 16:9 for final render but
-        // the viewport can have any size. Mismatch causes horizontal misalignment.
-        const float viewport_aspect = (screen_h > 1.0f) ? (screen_w / screen_h) : 1.0f;
-
-        // Lambda to project 3D world-space point to screen coordinates.
-        // Returns {-10000,-10000} when the point is behind the camera.
-        auto ProjectToScreen = [&](const Vec3& p) -> ImVec2 {
-            Vec3 to_point = p - cam.lookfrom;
-            float depth = to_point.dot(cam_forward);
-            if (depth <= 0.01f) return ImVec2(-10000, -10000);
-
-            float local_x = to_point.dot(cam_right);
-            float local_y = to_point.dot(cam_up);
-
-            float half_height = depth * tan_half_fov;
-            float half_width = half_height * viewport_aspect;
-
-            float ndc_x = local_x / half_width;
-            float ndc_y = local_y / half_height;
-
-            return ImVec2(
-                (ndc_x * 0.5f + 0.5f) * screen_w,
-                (0.5f - ndc_y * 0.5f) * screen_h
-            );
-            };
-
-        // Check which objects are inside the marquee
-        if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
-
-        int skipped_procedural = 0;
-
-        for (auto& [name, triangles] : mesh_cache) {
-            if (triangles.empty()) continue;
-
-            // IMPORTANT: Check if all triangles share the same TransformHandle
-            // Procedural objects may have separate transforms per triangle
-            Transform* firstHandle = triangles[0].second->getTransformPtr();
-            bool all_same_transform = true;
-
-            // Performance: for objects with many triangles, only sample a few
-            const size_t check_limit = std::min(triangles.size(), (size_t)16);
-            for (size_t i = 1; i < check_limit && all_same_transform; ++i) {
-                Transform* handle = triangles[i].second->getTransformPtr();
-                if (handle != firstHandle) {
-                    all_same_transform = false;
-                }
-            }
-
-            if (!all_same_transform) {
-                skipped_procedural++;
-                continue;
-            }
-
-            // Get the object's transform matrix (for converting local AABB to world space)
-            Matrix4x4 obj_transform = Matrix4x4::identity();
-            bool has_transform = false;
-            if (firstHandle) {
-                obj_transform = firstHandle->getMatrix();
-                has_transform = true;
-            }
-
-            // Get AABB - cached is in LOCAL space, fallback computes in WORLD space
-            Vec3 bb_min, bb_max;
-            bool bbox_is_local = false;
-            auto bbox_it = bbox_cache.find(name);
-            if (bbox_it != bbox_cache.end()) {
-                bb_min = bbox_it->second.first;
-                bb_max = bbox_it->second.second;
-                bbox_is_local = true; // cached bbox uses getOriginalVertexPosition (local space)
+        if ((x2 - x1) >= 5 || (y2 - y1) >= 5) {
+            if (edit_mode_active) {
+                performMeshElementMarqueeSelection(ctx, x1, y1, x2, y2);
             } else {
-                // Fallback: calculate from transformed vertices (already world space)
-                bb_min = Vec3(1e10f, 1e10f, 1e10f);
-                bb_max = Vec3(-1e10f, -1e10f, -1e10f);
-                for (auto& pair : triangles) {
-                    auto& tri = pair.second;
-                    Vec3 v0 = tri->getV0();
-                    Vec3 v1 = tri->getV1();
-                    Vec3 v2 = tri->getV2();
-                    bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
-                    bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
-                    bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
-                    bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
-                    bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
-                    bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
-                }
+                performObjectMarqueeSelection(ctx, x1, y1, x2, y2);
             }
-
-            // Build 8 corners of the AABB
-            Vec3 local_corners[8] = {
-                Vec3(bb_min.x, bb_min.y, bb_min.z), Vec3(bb_max.x, bb_min.y, bb_min.z),
-                Vec3(bb_min.x, bb_max.y, bb_min.z), Vec3(bb_max.x, bb_max.y, bb_min.z),
-                Vec3(bb_min.x, bb_min.y, bb_max.z), Vec3(bb_max.x, bb_min.y, bb_max.z),
-                Vec3(bb_min.x, bb_max.y, bb_max.z), Vec3(bb_max.x, bb_max.y, bb_max.z)
-            };
-
-            // FIX: Transform local-space corners to world space when using cached bbox.
-            // bbox_cache stores LOCAL (original) vertex positions. Without this transform,
-            // moved/rotated/scaled objects would be tested at their untransformed position,
-            // causing "select all" or "select none" bugs in crowded scenes.
-            Vec3 world_corners[8];
-            if (bbox_is_local && has_transform) {
-                for (int ci = 0; ci < 8; ++ci) {
-                    world_corners[ci] = obj_transform.transform_point(local_corners[ci]);
-                }
-            } else {
-                for (int ci = 0; ci < 8; ++ci) {
-                    world_corners[ci] = local_corners[ci];
-                }
-            }
-
-            // Early rejection: check if the object center is entirely behind the camera
-            // (all 8 corners behind camera → skip entirely)
-            int behind_count = 0;
-            for (int ci = 0; ci < 8; ++ci) {
-                Vec3 to_corner = world_corners[ci] - cam.lookfrom;
-                if (to_corner.dot(cam_forward) <= 0.01f) {
-                    behind_count++;
-                }
-            }
-            if (behind_count == 8) {
-                continue; // entire object behind camera
-            }
-
-            float proj_min_x = 1e10f, proj_min_y = 1e10f;
-            float proj_max_x = -1e10f, proj_max_y = -1e10f;
-            bool has_projected_point = false;
-            bool has_behind_corner = (behind_count > 0);
-
-            for (int ci = 0; ci < 8; ++ci) {
-                ImVec2 sp = ProjectToScreen(world_corners[ci]);
-                if (sp.x <= -9999.0f || sp.y <= -9999.0f) {
-                    continue;
-                }
-
-                has_projected_point = true;
-                proj_min_x = fminf(proj_min_x, sp.x);
-                proj_min_y = fminf(proj_min_y, sp.y);
-                proj_max_x = fmaxf(proj_max_x, sp.x);
-                proj_max_y = fmaxf(proj_max_y, sp.y);
-            }
-
-            // FIX: When some corners are behind the camera, the projected AABB can be
-            // too small (missing corners shrink it). Expand to full screen extent because
-            // the object straddles the camera plane and could fill much of the viewport.
-            if (has_projected_point && has_behind_corner) {
-                proj_min_x = fminf(proj_min_x, 0.0f);
-                proj_min_y = fminf(proj_min_y, 0.0f);
-                proj_max_x = fmaxf(proj_max_x, screen_w);
-                proj_max_y = fmaxf(proj_max_y, screen_h);
-            }
-
-            if (!has_projected_point) {
-                // All corners behind camera but center might be in front (shouldn't happen
-                // after the behind_count==8 early-out, but kept as safety)
-                Vec3 center = (world_corners[0] + world_corners[7]) * 0.5f;
-                ImVec2 center_screen = ProjectToScreen(center);
-                if (center_screen.x > -9999.0f && center_screen.y > -9999.0f) {
-                    has_projected_point = true;
-                    proj_min_x = proj_max_x = center_screen.x;
-                    proj_min_y = proj_max_y = center_screen.y;
-                }
-            }
-
-            bool overlaps_marquee = has_projected_point &&
-                proj_max_x >= x1 && proj_min_x <= x2 &&
-                proj_max_y >= y1 && proj_min_y <= y2;
-
-            if (overlaps_marquee) {
-                SelectableItem item;
-                item.type = SelectableType::Object;
-                item.object = triangles[0].second;
-                item.object_index = triangles[0].first;
-                item.name = name;
-
-                if (!ctx.selection.isSelected(item)) {
-                    ctx.selection.addToSelection(item);
-                }
-            }
-        }
-
-        if (skipped_procedural > 0) {
-            SCENE_LOG_WARN("Skipped " + std::to_string(skipped_procedural) + " objects with mixed transforms (use Ctrl+Click)");
-            addViewportMessage("Skipped " + std::to_string(skipped_procedural) + " objects (Mixed Transforms)", 3.0f, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
-        }
-
-        // Also check lights
-        for (size_t i = 0; i < ctx.scene.lights.size(); ++i) {
-            auto& light = ctx.scene.lights[i];
-            if (!light) continue;
-
-            ImVec2 screenPos = ProjectToScreen(light->position);
-
-            if (screenPos.x >= x1 && screenPos.x <= x2 && screenPos.y >= y1 && screenPos.y <= y2) {
-                SelectableItem item;
-                item.type = SelectableType::Light;
-                item.light = light;
-                item.light_index = (int)i;
-                item.name = "Light_" + std::to_string(i);
-
-                if (!ctx.selection.isSelected(item)) {
-                    ctx.selection.addToSelection(item);
-                }
-            }
-        }
-
-        if (ctx.selection.multi_selection.size() > 0) {
-            // [VERBOSE] SCENE_LOG_INFO("Marquee selected " + std::to_string(ctx.selection.multi_selection.size()) + " items");
         }
     }
+    if (is_lasso_selecting && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        is_lasso_selecting = false;
+        if (lasso_points.size() >= 3) {
+            if (edit_mode_active) {
+                performMeshElementLassoSelection(ctx, lasso_points);
+            } else {
+                performObjectLassoSelection(ctx, lasso_points);
+            }
+        }
+        lasso_points.clear();
+    }
 
-    // Draw the marquee rectangle while selecting
-    drawMarqueeRect();
+    // Draw selection guides
+    if (is_marquee_selecting) {
+        drawMarqueeRect();
+    }
+    if (is_lasso_selecting) {
+        drawLassoOutline();
+    }
 }
 
 void SceneUI::handleDeleteShortcut(UIContext& ctx)
@@ -883,11 +795,12 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     return std::sqrt(dx * dx + dy * dy);
                 };
 
+                const bool isOrtho = ctx.scene.camera->orthographic && viewport_settings.shading_mode != 2;
                 float closest_screen_distance = 1e9f;
                 for (const auto& edge : edges) {
                     ImVec2 a, b;
-                    if (!projectSelectionPointToScreen(*ctx.scene.camera, display_size, corners[edge[0]], a) ||
-                        !projectSelectionPointToScreen(*ctx.scene.camera, display_size, corners[edge[1]], b)) {
+                    if (!projectSelectionPointToScreen(*ctx.scene.camera, display_size, corners[edge[0]], a, isOrtho) ||
+                        !projectSelectionPointToScreen(*ctx.scene.camera, display_size, corners[edge[1]], b, isOrtho)) {
                         continue;
                     }
                     closest_screen_distance = std::min(closest_screen_distance, distanceToSegment(mouse_pos, a, b));
@@ -996,6 +909,17 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             // CPU BVH PICKING: Faster fallback for large scenes (e.g. 1.2M triangles)
             // =======================================================================
             if (!gpu_pick_success) {
+                // Lazy CPU BVH refit. Sculpt defers the whole-mesh Embree refit to avoid a
+                // freeze on brush release (see g_cpu_bvh_stale); the picking fallback is the
+                // first consumer that actually needs an up-to-date BVH, so bring it current
+                // here — once — right before we query it. GPU pick handles the common case,
+                // so this rarely fires; when it does it's a one-time cost on a click rather
+                // than a stall on every brush stroke.
+                extern bool g_cpu_bvh_stale;
+                if (g_cpu_bvh_stale && ctx.scene.bvh) {
+                    ctx.renderer.refitBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                    g_cpu_bvh_stale = false;
+                }
                 // Use BVH in ALL viewport modes. After the vertex sync above,
                 // Triangle::hit() uses world-space positions so the BVH's internal
                 // AABB pruning may be slightly stale (local-space) but can still
@@ -2152,4 +2076,510 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
         
         ProjectManager::getInstance().markModified();
     }
+}
+
+void SceneUI::performObjectMarqueeSelection(UIContext& ctx, float x1, float y1, float x2, float y2) {
+    ImGuiIO& io = ImGui::GetIO();
+    if (!ctx.scene.camera) return;
+
+    Camera& cam = *ctx.scene.camera;
+    float screen_w = io.DisplaySize.x;
+    float screen_h = io.DisplaySize.y;
+
+    const bool isOrtho = cam.orthographic && viewport_settings.shading_mode != 2;
+
+    std::vector<SelectableItem> itemsInRegion;
+
+    if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+    // 1. Mesh Objects
+    struct InstanceGroup {
+        int object_index = -1;
+        std::shared_ptr<Triangle> representative_tri = nullptr;
+        std::shared_ptr<HittableInstance> instance = nullptr;
+        std::vector<std::shared_ptr<Triangle>> tris;
+    };
+
+    for (auto& [name, triangles] : mesh_cache) {
+        if (triangles.empty()) continue;
+
+        // Group triangles in this entry by their unique instance key
+        std::unordered_map<void*, InstanceGroup> groups;
+        for (auto& pair : triangles) {
+            int obj_idx = pair.first;
+            auto& tri = pair.second;
+            if (!tri) continue;
+
+            std::shared_ptr<HittableInstance> inst = nullptr;
+            if (obj_idx >= 0 && obj_idx < (int)ctx.scene.world.objects.size()) {
+                inst = std::dynamic_pointer_cast<HittableInstance>(ctx.scene.world.objects[obj_idx]);
+            }
+
+            void* key = nullptr;
+            if (inst) {
+                key = (void*)inst.get();
+            } else {
+                key = (void*)tri->getTransformPtr();
+                if (!key) {
+                    key = (void*)(uintptr_t)(obj_idx + 1);
+                }
+            }
+
+            auto& group = groups[key];
+            if (group.object_index == -1) {
+                group.object_index = obj_idx;
+                group.representative_tri = tri;
+                group.instance = inst;
+            }
+            group.tris.push_back(tri);
+        }
+
+        // Process each instance group independently
+        for (auto& [key, group] : groups) {
+            Vec3 bb_min, bb_max;
+            Matrix4x4 obj_transform;
+            bool has_transform = false;
+
+            if (group.instance) {
+                // For HittableInstance, use its world bounding box directly
+                AABB box;
+                group.instance->bounding_box(0, 0, box);
+                bb_min = box.min;
+                bb_max = box.max;
+            } else {
+                // Get pre-calculated local bounds from cache
+                auto bbox_it = bbox_cache.find(name);
+                if (bbox_it != bbox_cache.end()) {
+                    bb_min = bbox_it->second.first;
+                    bb_max = bbox_it->second.second;
+                } else {
+                    // Fallback to manual computation if missing
+                    bb_min = Vec3(1e10f, 1e10f, 1e10f);
+                    bb_max = Vec3(-1e10f, -1e10f, -1e10f);
+                    for (auto& tri : group.tris) {
+                        Vec3 v0 = tri->getOriginalVertexPosition(0);
+                        Vec3 v1 = tri->getOriginalVertexPosition(1);
+                        Vec3 v2 = tri->getOriginalVertexPosition(2);
+                        bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
+                        bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
+                        bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
+                        bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
+                        bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
+                        bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
+                    }
+                }
+
+                Transform* th = group.representative_tri->getTransformPtr();
+                if (th) {
+                    obj_transform = th->getMatrix();
+                    has_transform = true;
+                }
+            }
+
+            float proj_min_x, proj_min_y, proj_max_x, proj_max_y;
+            bool success = projectAABBToScreen(cam, ImVec2(screen_w, screen_h), bb_min, bb_max, obj_transform, has_transform, isOrtho, proj_min_x, proj_min_y, proj_max_x, proj_max_y);
+            if (!success) {
+                continue;
+            }
+
+            bool overlaps_marquee = proj_max_x >= x1 && proj_min_x <= x2 &&
+                                    proj_max_y >= y1 && proj_min_y <= y2;
+
+            if (overlaps_marquee) {
+                SelectableItem item;
+                item.type = SelectableType::Object;
+                item.object = group.representative_tri;
+                item.object_index = group.object_index;
+                item.name = name;
+                itemsInRegion.push_back(item);
+            }
+        }
+    }
+
+    // 2. Lights
+    for (size_t i = 0; i < ctx.scene.lights.size(); ++i) {
+        auto& light = ctx.scene.lights[i];
+        if (!light) continue;
+
+        ImVec2 screenPos;
+        if (projectSelectionPointToScreen(cam, ImVec2(screen_w, screen_h), light->position, screenPos, isOrtho)) {
+            if (screenPos.x >= x1 && screenPos.x <= x2 && screenPos.y >= y1 && screenPos.y <= y2) {
+                SelectableItem item;
+                item.type = SelectableType::Light;
+                item.light = light;
+                item.light_index = (int)i;
+                item.name = "Light_" + std::to_string(i);
+                itemsInRegion.push_back(item);
+            }
+        }
+    }
+
+    // 3. Cameras
+    for (size_t i = 0; i < ctx.scene.cameras.size(); ++i) {
+        auto& camera = ctx.scene.cameras[i];
+        if (!camera || camera == ctx.scene.camera) continue;
+
+        ImVec2 screenPos;
+        if (projectSelectionPointToScreen(cam, ImVec2(screen_w, screen_h), camera->lookfrom, screenPos, isOrtho)) {
+            if (screenPos.x >= x1 && screenPos.x <= x2 && screenPos.y >= y1 && screenPos.y <= y2) {
+                SelectableItem item;
+                item.type = SelectableType::Camera;
+                item.camera = camera;
+                item.name = camera->nodeName.empty() ? "Camera" : camera->nodeName;
+                itemsInRegion.push_back(item);
+            }
+        }
+    }
+
+    // 4. Force Fields
+    for (size_t i = 0; i < ctx.scene.force_field_manager.force_fields.size(); ++i) {
+        auto& field = ctx.scene.force_field_manager.force_fields[i];
+        if (!field || !field->visible) continue;
+
+        ImVec2 screenPos;
+        if (projectSelectionPointToScreen(cam, ImVec2(screen_w, screen_h), field->position, screenPos, isOrtho)) {
+            if (screenPos.x >= x1 && screenPos.x <= x2 && screenPos.y >= y1 && screenPos.y <= y2) {
+                SelectableItem item;
+                item.type = SelectableType::ForceField;
+                item.force_field = field;
+                item.name = field->name;
+                itemsInRegion.push_back(item);
+            }
+        }
+    }
+
+    // 5. Simulation Domains
+    for (size_t i = 0; i < ctx.scene.particle_systems.size(); ++i) {
+        auto& system = ctx.scene.particle_systems[i];
+        if (!system.runtime) continue;
+
+        for (size_t j = 0; j < system.runtime->gridDomains().size(); ++j) {
+            auto& domain = system.runtime->gridDomains()[j];
+            const Vec3 mn = Vec3::min(domain.bounds_min, domain.bounds_max);
+            const Vec3 mx = Vec3::max(domain.bounds_min, domain.bounds_max);
+            Vec3 center = (mn + mx) * 0.5f;
+
+            ImVec2 screenPos;
+            if (projectSelectionPointToScreen(cam, ImVec2(screen_w, screen_h), center, screenPos, isOrtho)) {
+                if (screenPos.x >= x1 && screenPos.x <= x2 && screenPos.y >= y1 && screenPos.y <= y2) {
+                    SelectableItem item;
+                    item.type = SelectableType::SimulationDomain;
+                    item.particle_system_index = (int)i;
+                    item.simulation_domain_index = (int)j;
+                    item.name = domain.name;
+                    item.position = center;
+                    item.scale = mx - mn;
+                    itemsInRegion.push_back(item);
+                }
+            }
+        }
+    }
+
+    // Apply Modifiers: Shift = Add, Ctrl = Subtract, None = Replace
+    bool shift_held = io.KeyShift;
+    bool ctrl_held = io.KeyCtrl;
+
+    if (ctrl_held) {
+        for (const auto& item : itemsInRegion) {
+            ctx.selection.removeFromSelection(item);
+        }
+    } else if (shift_held) {
+        for (const auto& item : itemsInRegion) {
+            if (!ctx.selection.isSelected(item)) {
+                ctx.selection.addToSelection(item);
+            }
+        }
+    } else {
+        ctx.selection.clearSelection();
+        for (const auto& item : itemsInRegion) {
+            ctx.selection.addToSelection(item);
+        }
+    }
+
+    ctx.renderer.resetCPUAccumulation();
+    if (ctx.backend_ptr) {
+        ctx.backend_ptr->resetAccumulation();
+    }
+    ctx.start_render = true;
+}
+
+void SceneUI::performObjectLassoSelection(UIContext& ctx, const std::vector<ImVec2>& points) {
+    if (points.size() < 3) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    if (!ctx.scene.camera) return;
+
+    Camera& cam = *ctx.scene.camera;
+    float screen_w = io.DisplaySize.x;
+    float screen_h = io.DisplaySize.y;
+
+    const bool isOrtho = cam.orthographic && viewport_settings.shading_mode != 2;
+
+    auto isPointInPolygon = [](const ImVec2& p, const std::vector<ImVec2>& polygon) -> bool {
+        bool inside = false;
+        for (size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
+            if (((polygon[i].y > p.y) != (polygon[j].y > p.y)) &&
+                (p.x < (polygon[j].x - polygon[i].x) * (p.y - polygon[i].y) / (polygon[j].y - polygon[i].y) + polygon[i].x)) {
+                inside = !inside;
+            }
+        }
+        return inside;
+    };
+
+    std::vector<SelectableItem> itemsInRegion;
+
+    if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+    // 1. Mesh Objects
+    struct InstanceGroup {
+        int object_index = -1;
+        std::shared_ptr<Triangle> representative_tri = nullptr;
+        std::shared_ptr<HittableInstance> instance = nullptr;
+        std::vector<std::shared_ptr<Triangle>> tris;
+    };
+
+    for (auto& [name, triangles] : mesh_cache) {
+        if (triangles.empty()) continue;
+
+        // Group triangles in this entry by their unique instance key
+        std::unordered_map<void*, InstanceGroup> groups;
+        for (auto& pair : triangles) {
+            int obj_idx = pair.first;
+            auto& tri = pair.second;
+            if (!tri) continue;
+
+            std::shared_ptr<HittableInstance> inst = nullptr;
+            if (obj_idx >= 0 && obj_idx < (int)ctx.scene.world.objects.size()) {
+                inst = std::dynamic_pointer_cast<HittableInstance>(ctx.scene.world.objects[obj_idx]);
+            }
+
+            void* key = nullptr;
+            if (inst) {
+                key = (void*)inst.get();
+            } else {
+                key = (void*)tri->getTransformPtr();
+                if (!key) {
+                    key = (void*)(uintptr_t)(obj_idx + 1);
+                }
+            }
+
+            auto& group = groups[key];
+            if (group.object_index == -1) {
+                group.object_index = obj_idx;
+                group.representative_tri = tri;
+                group.instance = inst;
+            }
+            group.tris.push_back(tri);
+        }
+
+        // Process each instance group independently
+        for (auto& [key, group] : groups) {
+            Vec3 bb_min, bb_max;
+            Matrix4x4 obj_transform;
+            bool has_transform = false;
+
+            if (group.instance) {
+                // For HittableInstance, use its world bounding box directly
+                AABB box;
+                group.instance->bounding_box(0, 0, box);
+                bb_min = box.min;
+                bb_max = box.max;
+            } else {
+                // Get pre-calculated local bounds from cache
+                auto bbox_it = bbox_cache.find(name);
+                if (bbox_it != bbox_cache.end()) {
+                    bb_min = bbox_it->second.first;
+                    bb_max = bbox_it->second.second;
+                } else {
+                    // Fallback to manual computation if missing
+                    bb_min = Vec3(1e10f, 1e10f, 1e10f);
+                    bb_max = Vec3(-1e10f, -1e10f, -1e10f);
+                    for (auto& tri : group.tris) {
+                        Vec3 v0 = tri->getOriginalVertexPosition(0);
+                        Vec3 v1 = tri->getOriginalVertexPosition(1);
+                        Vec3 v2 = tri->getOriginalVertexPosition(2);
+                        bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
+                        bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
+                        bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
+                        bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
+                        bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
+                        bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
+                    }
+                }
+
+                Transform* th = group.representative_tri->getTransformPtr();
+                if (th) {
+                    obj_transform = th->getMatrix();
+                    has_transform = true;
+                }
+            }
+
+            // Compute projected corners
+            Vec3 world_corners[8];
+            Vec3 local_corners[8] = {
+                Vec3(bb_min.x, bb_min.y, bb_min.z), Vec3(bb_max.x, bb_min.y, bb_min.z),
+                Vec3(bb_min.x, bb_max.y, bb_min.z), Vec3(bb_max.x, bb_max.y, bb_min.z),
+                Vec3(bb_min.x, bb_min.y, bb_max.z), Vec3(bb_max.x, bb_min.y, bb_max.z),
+                Vec3(bb_min.x, bb_max.y, bb_max.z), Vec3(bb_max.x, bb_max.y, bb_max.z)
+            };
+            if (has_transform) {
+                for (int ci = 0; ci < 8; ++ci) {
+                    world_corners[ci] = obj_transform.transform_point(local_corners[ci]);
+                }
+            } else {
+                for (int ci = 0; ci < 8; ++ci) {
+                    world_corners[ci] = local_corners[ci];
+                }
+            }
+
+            bool overlaps_lasso = false;
+            // 1. Check if any AABB corner projects inside the lasso polygon
+            for (int ci = 0; ci < 8; ++ci) {
+                ImVec2 sp;
+                if (projectSelectionPointToScreen(cam, ImVec2(screen_w, screen_h), world_corners[ci], sp, isOrtho)) {
+                    if (isPointInPolygon(sp, points)) {
+                        overlaps_lasso = true;
+                        break;
+                    }
+                }
+            }
+
+            // 2. Check if center projects inside the lasso polygon
+            if (!overlaps_lasso) {
+                Vec3 center = (world_corners[0] + world_corners[7]) * 0.5f;
+                ImVec2 center_screen;
+                if (projectSelectionPointToScreen(cam, ImVec2(screen_w, screen_h), center, center_screen, isOrtho)) {
+                    if (isPointInPolygon(center_screen, points)) {
+                        overlaps_lasso = true;
+                    }
+                }
+            }
+
+            // 3. Check if any lasso point is inside the 2D projected bounding box
+            if (!overlaps_lasso) {
+                float proj_min_x, proj_min_y, proj_max_x, proj_max_y;
+                if (projectAABBToScreen(cam, ImVec2(screen_w, screen_h), bb_min, bb_max, obj_transform, has_transform, isOrtho, proj_min_x, proj_min_y, proj_max_x, proj_max_y)) {
+                    for (const auto& pt : points) {
+                        if (pt.x >= proj_min_x && pt.x <= proj_max_x && pt.y >= proj_min_y && pt.y <= proj_max_y) {
+                            overlaps_lasso = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (overlaps_lasso) {
+                SelectableItem item;
+                item.type = SelectableType::Object;
+                item.object = group.representative_tri;
+                item.object_index = group.object_index;
+                item.name = name;
+                itemsInRegion.push_back(item);
+            }
+        }
+    }
+
+    // 2. Lights
+    for (size_t i = 0; i < ctx.scene.lights.size(); ++i) {
+        auto& light = ctx.scene.lights[i];
+        if (!light) continue;
+
+        ImVec2 screenPos;
+        if (projectSelectionPointToScreen(cam, ImVec2(screen_w, screen_h), light->position, screenPos, isOrtho)) {
+            if (isPointInPolygon(screenPos, points)) {
+                SelectableItem item;
+                item.type = SelectableType::Light;
+                item.light = light;
+                item.light_index = (int)i;
+                item.name = "Light_" + std::to_string(i);
+                itemsInRegion.push_back(item);
+            }
+        }
+    }
+
+    // 3. Cameras
+    for (size_t i = 0; i < ctx.scene.cameras.size(); ++i) {
+        auto& camera = ctx.scene.cameras[i];
+        if (!camera || camera == ctx.scene.camera) continue;
+
+        ImVec2 screenPos;
+        if (projectSelectionPointToScreen(cam, ImVec2(screen_w, screen_h), camera->lookfrom, screenPos, isOrtho)) {
+            if (isPointInPolygon(screenPos, points)) {
+                SelectableItem item;
+                item.type = SelectableType::Camera;
+                item.camera = camera;
+                item.name = camera->nodeName.empty() ? "Camera" : camera->nodeName;
+                itemsInRegion.push_back(item);
+            }
+        }
+    }
+
+    // 4. Force Fields
+    for (size_t i = 0; i < ctx.scene.force_field_manager.force_fields.size(); ++i) {
+        auto& field = ctx.scene.force_field_manager.force_fields[i];
+        if (!field || !field->visible) continue;
+
+        ImVec2 screenPos;
+        if (projectSelectionPointToScreen(cam, ImVec2(screen_w, screen_h), field->position, screenPos, isOrtho)) {
+            if (isPointInPolygon(screenPos, points)) {
+                SelectableItem item;
+                item.type = SelectableType::ForceField;
+                item.force_field = field;
+                item.name = field->name;
+                itemsInRegion.push_back(item);
+            }
+        }
+    }
+
+    // 5. Simulation Domains
+    for (size_t i = 0; i < ctx.scene.particle_systems.size(); ++i) {
+        auto& system = ctx.scene.particle_systems[i];
+        if (!system.runtime) continue;
+
+        for (size_t j = 0; j < system.runtime->gridDomains().size(); ++j) {
+            auto& domain = system.runtime->gridDomains()[j];
+            const Vec3 mn = Vec3::min(domain.bounds_min, domain.bounds_max);
+            const Vec3 mx = Vec3::max(domain.bounds_min, domain.bounds_max);
+            Vec3 center = (mn + mx) * 0.5f;
+
+            ImVec2 screenPos;
+            if (projectSelectionPointToScreen(cam, ImVec2(screen_w, screen_h), center, screenPos, isOrtho)) {
+                if (isPointInPolygon(screenPos, points)) {
+                    SelectableItem item;
+                    item.type = SelectableType::SimulationDomain;
+                    item.particle_system_index = (int)i;
+                    item.simulation_domain_index = (int)j;
+                    item.name = domain.name;
+                    item.position = center;
+                    item.scale = mx - mn;
+                    itemsInRegion.push_back(item);
+                }
+            }
+        }
+    }
+
+    // Apply Modifiers: Shift = Add, Ctrl = Subtract, None = Replace
+    bool shift_held = io.KeyShift;
+    bool ctrl_held = io.KeyCtrl;
+
+    if (ctrl_held) {
+        for (const auto& item : itemsInRegion) {
+            ctx.selection.removeFromSelection(item);
+        }
+    } else if (shift_held) {
+        for (const auto& item : itemsInRegion) {
+            if (!ctx.selection.isSelected(item)) {
+                ctx.selection.addToSelection(item);
+            }
+        }
+    } else {
+        ctx.selection.clearSelection();
+        for (const auto& item : itemsInRegion) {
+            ctx.selection.addToSelection(item);
+        }
+    }
+
+    ctx.renderer.resetCPUAccumulation();
+    if (ctx.backend_ptr) {
+        ctx.backend_ptr->resetAccumulation();
+    }
+    ctx.start_render = true;
 }

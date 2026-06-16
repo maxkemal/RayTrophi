@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -72,6 +72,7 @@ class Mesh;
 class AABB;
 class Ray;
 class Hittable;
+class HittableInstance;
 struct HitRecord;
 class ParallelBVHNode;
 class AnimatedObject;
@@ -380,6 +381,8 @@ private:
     // backend update path (per-node) instead of the full scene scan that
     // updateInstanceTransforms does.
     std::vector<std::pair<std::string, Matrix4x4>> pending_anim_transform_updates;
+    std::vector<std::shared_ptr<Triangle>> m_dynamic_triangles;           // [NEW] Transformu olan dinamik üçgenler önbelleği
+    std::vector<std::shared_ptr<HittableInstance>> m_dynamic_instances;   // [NEW] Tüm instanced nesneler önbelleği
 
 public:
     SDL_Window* window;

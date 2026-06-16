@@ -14,6 +14,7 @@
 #include <future>
 #include <thread>
 #include <functional>
+#include <unordered_set>
 #include <atomic>
 #include <vector_types.h>  // CUDA float4, float3 types for hair GPU upload
 #include <cuda_runtime.h>  // cudaGetDevice, cudaStreamSynchronize (OIDN GPU path)
@@ -3499,28 +3500,37 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync) {
     // Caller may pass skip_sync=true when it has just performed this work
     // (e.g. the GPU->CPU switch path) to avoid duplicating millions of
     // dynamic_pointer_cast + matrix-inverse + AABB-rebuild iterations.
+    // Always rebuild dynamic object caches when rebuilding BVH
+    m_dynamic_triangles.clear();
+    m_dynamic_instances.clear();
+    for (const auto& obj : scene.world.objects) {
+        if (!obj) continue;
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            if (tri->getTransformPtr() && !tri->hasAnySkinWeights()) {
+                m_dynamic_triangles.push_back(tri);
+            }
+        } else if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+            m_dynamic_instances.push_back(inst);
+        }
+    }
+
     if (!skip_sync) {
         std::for_each(std::execution::par_unseq,
-            scene.world.objects.begin(), scene.world.objects.end(),
-            [](std::shared_ptr<Hittable>& obj) {
-                if (!obj) return;
+            m_dynamic_triangles.begin(), m_dynamic_triangles.end(),
+            [](std::shared_ptr<Triangle>& tri) {
+                tri->updateTransformedVertices();
+            });
 
-                if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-                    if (tri->getTransformPtr() && !tri->hasAnySkinWeights()) {
-                        tri->updateTransformedVertices();
-                    }
+        std::for_each(std::execution::par_unseq,
+            m_dynamic_instances.begin(), m_dynamic_instances.end(),
+            [](std::shared_ptr<HittableInstance>& inst) {
+                if (inst->syncTransformFromSourceTriangles()) {
                     return;
                 }
-
-                if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
-                    if (inst->syncTransformFromSourceTriangles()) {
-                        return;
-                    }
-                    if (inst->source_triangles) {
-                        for (auto& srcTri : *inst->source_triangles) {
-                            if (srcTri && srcTri->getTransformPtr() && !srcTri->hasAnySkinWeights()) {
-                                srcTri->updateTransformedVertices();
-                            }
+                if (inst->source_triangles) {
+                    for (auto& srcTri : *inst->source_triangles) {
+                        if (srcTri && srcTri->getTransformPtr() && !srcTri->hasAnySkinWeights()) {
+                            srcTri->updateTransformedVertices();
                         }
                     }
                 }
@@ -3593,27 +3603,53 @@ void Renderer::refitBVH(SceneData& scene, bool use_embree) {
         return;
     }
 
-    // Sync transform-handle / instanced geometry to world space first, so the refit
-    // reads current vertex positions (same pre-pass rebuildBVH does). Sculpt already
-    // writes transformed positions in place, but transform drags / sim body motion
-    // rely on this.
-    std::for_each(std::execution::par_unseq,
-        scene.world.objects.begin(), scene.world.objects.end(),
-        [](std::shared_ptr<Hittable>& obj) {
-            if (!obj) return;
-            if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-                if (tri->getTransformPtr() && !tri->hasAnySkinWeights()) {
-                    tri->updateTransformedVertices();
+    // 1. Adım: Hangi transformların gerçekten değiştiğini (dirty) tespit et ve matrislerini güncelle (Pre-pass)
+    std::unordered_set<Transform*> dirty_transforms;
+    for (auto& tri : m_dynamic_triangles) {
+        if (tri) {
+            auto tf = tri->getTransformPtr();
+            if (tf && tf->isDirty()) {
+                if (dirty_transforms.insert(tf).second) {
+                    tf->getFinal(); // Matrisi güncelle ve dirty=false yap
                 }
+            }
+        }
+    }
+    for (auto& inst : m_dynamic_instances) {
+        if (inst && inst->source_triangles) {
+            for (auto& srcTri : *inst->source_triangles) {
+                if (srcTri) {
+                    auto tf = srcTri->getTransformPtr();
+                    if (tf && tf->isDirty()) {
+                        if (dirty_transforms.insert(tf).second) {
+                            tf->getFinal();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Adım: Sadece transformu değişen dinamik üçgenleri dünya uzayına senkronize et
+    std::for_each(std::execution::par_unseq,
+        m_dynamic_triangles.begin(), m_dynamic_triangles.end(),
+        [&dirty_transforms](std::shared_ptr<Triangle>& tri) {
+            auto tf = tri->getTransformPtr();
+            if (tf && dirty_transforms.count(tf) > 0) {
+                tri->updateTransformedVertices();
+            }
+        });
+
+    std::for_each(std::execution::par_unseq,
+        m_dynamic_instances.begin(), m_dynamic_instances.end(),
+        [&dirty_transforms](std::shared_ptr<HittableInstance>& inst) {
+            if (inst->syncTransformFromSourceTriangles()) {
                 return;
             }
-            if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
-                if (inst->syncTransformFromSourceTriangles()) {
-                    return;
-                }
-                if (inst->source_triangles) {
-                    for (auto& srcTri : *inst->source_triangles) {
-                        if (srcTri && srcTri->getTransformPtr() && !srcTri->hasAnySkinWeights()) {
+            if (inst->source_triangles) {
+                for (auto& srcTri : *inst->source_triangles) {
+                    if (srcTri && srcTri->getTransformPtr() && !srcTri->hasAnySkinWeights()) {
+                        if (dirty_transforms.count(srcTri->getTransformPtr()) > 0) {
                             srcTri->updateTransformedVertices();
                         }
                     }
@@ -3621,9 +3657,7 @@ void Renderer::refitBVH(SceneData& scene, bool use_embree) {
             }
         });
 
-    // RTC_BUILD_QUALITY_REFIT update. This self-detects a triangle-count change and
-    // raises g_bvh_rebuild_pending to force a full rebuild on the next frame, so a
-    // topology edit that slipped through to this path stays correct.
+    // 3. Adım: Embree BVH Refit Güncellemesi (Sadece dirty olan üçgenleri işler)
     embree_ptr->updateGeometryFromTrianglesFromSource(scene.world.objects);
 
     // Keep the separate particle-only BVH coherent, matching rebuildBVH.

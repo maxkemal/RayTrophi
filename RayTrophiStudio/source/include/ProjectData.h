@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -27,7 +27,10 @@ enum class ProceduralMeshType {
     Plane,
     Sphere,
     Cylinder,
-    // Add more as needed
+    Rock,
+    BrickWall,
+    Torus,
+    Staircase
 };
 
 // Represents an imported 3D model file

@@ -1,4 +1,4 @@
-﻿#include "SceneSelection.h"
+#include "SceneSelection.h"
 #include "Light.h"
 #include "Camera.h"
 #include "Triangle.h"
@@ -333,10 +333,14 @@ bool SceneSelection::isSelected(const SelectableItem& item) const {
     for (const auto& s : multi_selection) {
         if (s.type != item.type) continue;
         
-        // For objects, compare by name (since same object may have different triangle pointers)
+        // For objects, compare by unique identifiers (index or transform pointer) to support duplicate names
         if (s.type == SelectableType::Object) {
-            if (!s.name.empty() && s.name == item.name) return true;
-            // Fallback to pointer comparison if names are empty
+            if (s.object_index >= 0 && s.object_index == item.object_index) return true;
+            if (s.object && item.object) {
+                Transform* s_trans = s.object->getTransformPtr();
+                Transform* item_trans = item.object->getTransformPtr();
+                if (s_trans && s_trans == item_trans) return true;
+            }
             if (s.object == item.object) return true;
         }
         else if (s.type == SelectableType::Light) {
@@ -379,14 +383,18 @@ void SceneSelection::addToSelection(const SelectableItem& item) {
 }
 
 void SceneSelection::removeFromSelection(const SelectableItem& item) {
-    // Custom removal with name-based comparison for objects
+    // Custom removal with name-independent comparison for objects
     auto it = std::remove_if(multi_selection.begin(), multi_selection.end(), 
         [&item](const SelectableItem& s) {
             if (s.type != item.type) return false;
             
             if (s.type == SelectableType::Object) {
-                // Compare by name for objects
-                if (!s.name.empty() && s.name == item.name) return true;
+                if (s.object_index >= 0 && s.object_index == item.object_index) return true;
+                if (s.object && item.object) {
+                    Transform* s_trans = s.object->getTransformPtr();
+                    Transform* item_trans = item.object->getTransformPtr();
+                    if (s_trans && s_trans == item_trans) return true;
+                }
                 return s.object == item.object;
             }
             else if (s.type == SelectableType::Light) {
