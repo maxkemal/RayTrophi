@@ -1,4 +1,4 @@
-﻿#include "Triangle.h"
+#include "Triangle.h"
 #include "Ray.h"
 #include "AABB.h"
 #include "globals.h"
@@ -178,6 +178,7 @@ void Triangle::set_normals(const Vec3& normal0, const Vec3& normal1, const Vec3&
     vertices[0].normal = normal0.normalize();
     vertices[1].normal = normal1.normalize();
     vertices[2].normal = normal2.normalize();
+    vertexPositionsDirty = true;
 }
 
 // ============================================================================
@@ -384,6 +385,7 @@ void Triangle::apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices) {
     }
 
     aabbDirty = true;
+    vertexPositionsDirty = true;
 }
 
 Vec3 Triangle::apply_bone_to_normal(const Vec3& originalNormal,
@@ -504,6 +506,7 @@ void Triangle::updateTransformedVerticesWith(const Matrix4x4& finalTransform,
     }
 
     aabbDirty = true;
+    vertexPositionsDirty = true;
     update_bounding_box();
 }
 

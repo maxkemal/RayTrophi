@@ -1096,6 +1096,9 @@ public:
     void updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) override;
     bool updateTerrainBLASPartial(const std::string& nodeName, const TerrainObject* terrain);
     bool updateMeshBLASPartial(const std::string& nodeName, const std::vector<std::shared_ptr<Triangle>>& triangles);
+    int64_t updateMeshBLASPartial(const std::string& nodeName,
+                                  const std::vector<size_t>& dirtyIndices,
+                                  const std::vector<std::pair<int, std::shared_ptr<Triangle>>>& meshEntries);
     // Append-only fast path for scatter/instance-add mutations: reuses existing BLASes and
     // only refits the TLAS + appends new HittableInstance TLAS records. Falls back to false
     // when topology shape changes in a way the incremental path cannot safely diff (removal,
@@ -1531,6 +1534,7 @@ protected:
     // guaranteed to match the scene-graph traversal order used at build time, and
     // a mismatch would scatter positions into the wrong BLAS slots (corruption).
     std::unordered_map<uint32_t, std::vector<std::shared_ptr<Triangle>>> m_soloBlasBuildTriangles;
+    std::unordered_map<uint32_t, std::unordered_map<const Triangle*, uint32_t>> m_soloBlasBuildTriangleSlots;
     struct InstanceTransformCache { int instance_id; std::shared_ptr<Hittable> representative_hittable; };
     std::vector<InstanceTransformCache> m_instance_sync_cache;
     bool m_topology_dirty = false; // set when instances/BLAS list changes

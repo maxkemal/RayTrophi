@@ -1204,7 +1204,14 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
         // Standard raycast for generic scatter brush
         did_hit = ctx.scene.bvh->hit(ray, 0.001f, 1e10f, hit);
     }
-    
+
+    // Match the brush's own picking: refine against the live sculpt PBVH so the overlay
+    // ring tracks geometry the deferred scene-BVH refit has not caught up to (regions
+    // pushed far out mid-stroke). Otherwise the ring vanishes / mis-aligns over the bulge.
+    if (is_sculpt) {
+        did_hit = refineSculptHitWithPBVH(ray, sculpt_mode_state.active_target_name, hit, did_hit);
+    }
+
     if (!did_hit) return;
 
     // Sculpt: delegate to the full alpha-grid + dual-ring preview

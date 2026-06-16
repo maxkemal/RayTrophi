@@ -7324,6 +7324,194 @@ bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, co
     return true;
 }
 
+int64_t VulkanBackendAdapter::updateMeshBLASPartial(
+    const std::string& nodeName,
+    const std::vector<size_t>& dirtyIndices,
+    const std::vector<std::pair<int, std::shared_ptr<Triangle>>>& meshEntries) {
+
+    if (!m_device || !m_device->isInitialized() || !m_device->hasHardwareRT()) return -1;
+    if (dirtyIndices.empty() || meshEntries.empty() || m_vkInstances.empty() || m_instanceSources.empty()) return -1;
+
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    uint32_t targetBlasIndex = UINT32_MAX;
+    bool targetUsesLocalSpace = false;
+    const Triangle* firstTriangle = nullptr;
+    for (const auto& entry : meshEntries) {
+        if (entry.second) {
+            firstTriangle = entry.second.get();
+            break;
+        }
+    }
+    const size_t expectedTriangleCount = meshEntries.size();
+    for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
+        if (!m_instanceSources[i]) continue;
+
+        std::string instName;
+        bool strongMatch = false;
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+            instName = inst->node_name;
+            if (inst->source_triangles &&
+                !inst->source_triangles->empty() &&
+                inst->source_triangles->size() == expectedTriangleCount &&
+                inst->source_triangles->front().get() == firstTriangle) {
+                strongMatch = true;
+                targetUsesLocalSpace = true;
+            }
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+            instName = tri->getNodeName();
+            if (tri.get() == firstTriangle) {
+                strongMatch = true;
+                targetUsesLocalSpace = (tri->getTransformPtr() != nullptr) && !isWaterTriangleMaterial(tri);
+            }
+        }
+
+        if (strongMatch) {
+            targetBlasIndex = m_vkInstances[i].blasIndex;
+            break;
+        }
+
+        if (matchesNodeNameForInstance(instName, nodeName)) {
+            targetBlasIndex = m_vkInstances[i].blasIndex;
+            if (std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+                targetUsesLocalSpace = true;
+            } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+                targetUsesLocalSpace = (tri->getTransformPtr() != nullptr) && !isWaterTriangleMaterial(tri);
+            }
+            break;
+        }
+    }
+
+    if (targetBlasIndex == UINT32_MAX || targetBlasIndex >= m_device->m_blasList.size()) {
+        return -1;
+    }
+
+    const auto& blasHandle = m_device->m_blasList[targetBlasIndex];
+    if (blasHandle.vertexCount == 0 || !blasHandle.allowUpdate) {
+        return -1;
+    }
+
+    auto buildOrderIt = m_soloBlasBuildTriangles.find(targetBlasIndex);
+    if (buildOrderIt == m_soloBlasBuildTriangles.end()) {
+        return -1;
+    }
+    const auto& orderedTris = buildOrderIt->second;
+
+    auto slotIt = m_soloBlasBuildTriangleSlots.find(targetBlasIndex);
+    if (slotIt == m_soloBlasBuildTriangleSlots.end()) {
+        return -1;
+    }
+    const auto& slots = slotIt->second;
+
+    if (orderedTris.size() != meshEntries.size()) {
+        return -1;
+    }
+
+    uint32_t minSlot = UINT32_MAX;
+    uint32_t maxSlot = 0;
+
+    for (const size_t triIdx : dirtyIndices) {
+        if (triIdx >= meshEntries.size()) continue;
+        const auto& tri = meshEntries[triIdx].second;
+        if (!tri) continue;
+
+        auto it = slots.find(tri.get());
+        if (it != slots.end()) {
+            uint32_t slot = it->second;
+            if (slot < minSlot) minSlot = slot;
+            if (slot > maxSlot) maxSlot = slot;
+        }
+    }
+
+    if (minSlot > maxSlot) {
+        return 0; // No valid dirty slots found, 0 bytes uploaded
+    }
+
+    uint32_t numSlots = maxSlot - minSlot + 1;
+    uint32_t numVertices = numSlots * 3;
+
+    std::vector<float> rangePositions;
+    std::vector<float> rangeNormals;
+    rangePositions.reserve(numVertices * 3);
+    rangeNormals.reserve(numVertices * 3);
+
+    for (uint32_t slot = minSlot; slot <= maxSlot; ++slot) {
+        if (slot >= orderedTris.size()) break;
+        const auto& tri = orderedTris[slot];
+        if (!tri) {
+            for (int v = 0; v < 9; ++v) {
+                rangePositions.push_back(0.0f);
+                rangeNormals.push_back(0.0f);
+            }
+            continue;
+        }
+        for (int v = 0; v < 3; ++v) {
+            const Vec3 p = targetUsesLocalSpace ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
+            const Vec3 n = targetUsesLocalSpace ? tri->getOriginalVertexNormal(v) : tri->getVertexNormal(v);
+            rangePositions.push_back(p.x);
+            rangePositions.push_back(p.y);
+            rangePositions.push_back(p.z);
+            rangeNormals.push_back(n.x);
+            rangeNormals.push_back(n.y);
+            rangeNormals.push_back(n.z);
+        }
+    }
+
+    const uint64_t positionByteOffset = (uint64_t)minSlot * 3 * 12;
+    const uint64_t positionByteSize = (uint64_t)numVertices * 12;
+
+    m_device->uploadBuffer(blasHandle.vertexBuffer, rangePositions.data(), positionByteSize, positionByteOffset);
+
+    uint64_t totalUploadedBytes = positionByteSize;
+
+    if (blasHandle.normalBuffer.buffer) {
+        const bool normalSharesGeometryBuffer =
+            blasHandle.normalBuffer.buffer == blasHandle.vertexBuffer.buffer &&
+            blasHandle.normalBuffer.deviceAddress >= blasHandle.vertexBuffer.deviceAddress;
+        
+        const uint64_t normalBaseOffset = normalSharesGeometryBuffer
+            ? (uint64_t)(blasHandle.normalBuffer.deviceAddress - blasHandle.vertexBuffer.deviceAddress)
+            : 0ull;
+        
+        const uint64_t normalByteOffset = normalBaseOffset + (uint64_t)minSlot * 3 * 12;
+        const uint64_t normalByteSize = (uint64_t)numVertices * 12;
+
+        m_device->uploadBuffer(
+            normalSharesGeometryBuffer ? blasHandle.vertexBuffer : blasHandle.normalBuffer,
+            rangeNormals.data(),
+            normalByteSize,
+            normalByteOffset);
+
+        totalUploadedBytes += normalByteSize;
+    }
+
+    // Trigger local refit/update of the bottom-level acceleration structure (BLAS)
+    // with vertices/normals arrays set to nullptr (to skip full buffers upload)
+    m_device->updateBLAS(targetBlasIndex, nullptr, nullptr);
+
+    // Refresh the TLAS instance transforms
+    for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
+        if (m_vkInstances[i].blasIndex != targetBlasIndex) continue;
+
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+            m_vkInstances[i].transform = inst->transform;
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+            if (tri->getTransformPtr()) {
+                m_vkInstances[i].transform = tri->getTransformPtr()->getFinal();
+            }
+        }
+    }
+
+    auto merged = m_vkInstances;
+    for (const auto& h : m_hairVkInstances) merged.push_back(h);
+    if (!merged.empty()) {
+        m_device->updateTLAS(merged);
+    }
+
+    resetAccumulation();
+    return (int64_t)totalUploadedBytes;
+}
+
 bool VulkanBackendAdapter::updateInteractiveMesh(const std::string& nodeName,
                                                  const std::vector<std::shared_ptr<Triangle>>& triangles) {
     return updateMeshBLASPartial(nodeName, triangles);
@@ -7895,6 +8083,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     // Rebuilt below; the interactive refit consults this to upload positions in
     // BLAS-slot order. Stale across a full rebuild, so clear it up front.
     m_soloBlasBuildTriangles.clear();
+    m_soloBlasBuildTriangleSlots.clear();
 
     struct SoloTriangleGroup {
         std::string nodeName;
@@ -8184,6 +8373,14 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
             // differ from this scene-graph traversal order).
             if (soloBlasIndex != UINT32_MAX) {
                 m_soloBlasBuildTriangles[soloBlasIndex] = group.trianglePtrs;
+                auto& slots = m_soloBlasBuildTriangleSlots[soloBlasIndex];
+                slots.clear();
+                slots.reserve(group.trianglePtrs.size());
+                for (uint32_t slotIdx = 0; slotIdx < group.trianglePtrs.size(); ++slotIdx) {
+                    if (group.trianglePtrs[slotIdx]) {
+                        slots[group.trianglePtrs[slotIdx].get()] = slotIdx;
+                    }
+                }
             }
 
             VulkanRT::TLASInstance vi;

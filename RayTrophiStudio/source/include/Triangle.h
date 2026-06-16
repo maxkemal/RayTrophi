@@ -97,10 +97,14 @@ public:
     inline void setVertexPosition(int i, const Vec3& pos) { 
         vertices[i].position = pos; 
         aabbDirty = true;
+        vertexPositionsDirty = true;
     }
     
     inline const Vec3& getVertexNormal(int i) const { return vertices[i].normal; }
-    inline void setVertexNormal(int i, const Vec3& normal) { vertices[i].normal = normal; }
+    inline void setVertexNormal(int i, const Vec3& normal) { 
+        vertices[i].normal = normal; 
+        vertexPositionsDirty = true;
+    }
     
     inline const Vec3& getOriginalVertexPosition(int i) const { return vertices[i].original; }
     inline void setOriginalVertexPosition(int i, const Vec3& pos) { vertices[i].original = pos; }
@@ -236,7 +240,10 @@ public:
     // ========================================================================
     
     void update_bounding_box() const;
-    void markAABBDirty() { aabbDirty = true; }
+    inline void markAABBDirty() { 
+        aabbDirty = true; 
+        vertexPositionsDirty = true;
+    }
 
     // ========================================================================
     // Legacy Compatibility (Direct vertex access - use accessors instead)
@@ -260,7 +267,10 @@ public:
     const Vec3& n2_cref() const { return vertices[2].normal; }
     std::string nodeName;
     TriangleVertexData vertices[3];           // Consolidated vertex data (144 bytes)
-    int terrain_id = -1;                                // Terrain ID if this is a terrain triangle
+    int terrain_id = -1;
+    mutable bool vertexPositionsDirty = false;
+    std::vector<std::array<Vec2, 3>> uv_sets;
+    // Terrain ID if this is a terrain triangle
 private:
     // ========================================================================
     // Optimized Data Members
@@ -268,7 +278,7 @@ private:
     
    
     uint16_t materialID = 0xFFFF;                       // Material lookup ID (2 bytes)
-    std::vector<std::array<Vec2, 3>> uv_sets;
+   
   
     std::shared_ptr<Transform> transformHandle; // Shared transform (8 bytes)
     std::optional<SkinnedTriangleData> skinData; // Optional skinning data (1 byte when empty)
@@ -280,6 +290,7 @@ private:
     // AABB Caching
     mutable AABB cachedAABB;                  // 24 bytes
     mutable bool aabbDirty = true;            // 1 byte
+  
     mutable Material* cachedMaterial = nullptr; // Performance cache
 
     // Scratch buffers for apply_skinning (reused across calls)

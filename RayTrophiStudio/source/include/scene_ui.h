@@ -244,6 +244,8 @@ public:
      void invalidateSculptControlGraph(const std::string& objectName = std::string());
      bool ensureSculptPBVH(UIContext& ctx, const std::string& objectName);
      void invalidateSculptPBVH(const std::string& objectName = std::string());
+     bool refineSculptHitWithPBVH(const Ray& ray, const std::string& objectName,
+                                  HitRecord& hit, bool didHit);
      bool handleMeshElementSelection(UIContext& ctx, const ImVec2& mousePos);
      Vec3 getSelectedMeshElementWorldPosition(UIContext& ctx, bool* valid = nullptr);
      bool applySelectedMeshElementTranslation(UIContext& ctx, const Vec3& worldDelta);
@@ -251,6 +253,9 @@ public:
      struct MeshShadingSettings;
      MeshShadingSettings& ensureMeshShadingSettings(const std::string& objectName);
      bool applyMeshShadingSettings(UIContext& ctx, const std::string& objectName, bool queueGpuSync = true);
+     // Sculpt entry: repair only ZERO/non-finite shading normals (the dense-mesh black-shading
+     // bug) WITHOUT rewriting valid ones — preserves the object's current flat/smooth look.
+     bool repairSculptEntryShadingNormals(UIContext& ctx, const std::string& objectName, bool queueGpuSync = true);
      bool refreshEditableDisplayMeshFromBase(UIContext& ctx, const std::string& objectName, bool queueGpuSync = true);
      void beginInteractiveSubdivisionPreview(const std::string& objectName);
      void endInteractiveSubdivisionPreview(UIContext& ctx, const std::string& objectName, bool rebuildFull = true);
@@ -281,6 +286,25 @@ public:
      bool loopCutSelectedEdges(UIContext& ctx, float t);
      bool dissolveSelectedEdges(UIContext& ctx);
      bool dissolveSelectedVertices(UIContext& ctx);
+     // Mesh-edit ops + selection helpers (restored: these working-tree declarations were
+     // lost when a concurrent edit clobbered scene_ui.h; definitions live in the .cpp).
+     void applyCreaseToSelectedEdges(UIContext& ctx, float weight);
+     float getSelectedEdgesAverageCrease(UIContext& ctx) const;
+     bool applyShadingToSelectedFaces(UIContext& ctx, bool flat, bool autoSmooth);
+     bool flipSelectedMeshNormals(UIContext& ctx);
+     bool recalculateMeshNormals(UIContext& ctx, bool outside);
+     bool ensureEditableHalfEdge();
+     void selectAllObjects(UIContext& ctx);
+     void invertObjectSelection(UIContext& ctx);
+     void selectAllMeshElements(UIContext& ctx);
+     void invertMeshSelection(UIContext& ctx);
+     void performObjectMarqueeSelection(UIContext& ctx, float x1, float y1, float x2, float y2);
+     void performObjectLassoSelection(UIContext& ctx, const std::vector<ImVec2>& points);
+     void performMeshElementMarqueeSelection(UIContext& ctx, float x1, float y1, float x2, float y2);
+     void performMeshElementLassoSelection(UIContext& ctx, const std::vector<ImVec2>& points);
+     void drawLassoOutline();
+     size_t telemetry_candidate_vertices = 0; // HUD: verts gathered by the last sculpt dab
+     size_t telemetry_pcie_upload_bytes = 0;  // HUD: bytes uploaded to GPU last mesh sync
      void drawSelectionBoundingBox(UIContext& ctx);  // Draw bounding box for selected object
      void drawTransformGizmo(UIContext& ctx);  // ImGuizmo transform gizmo   
      void drawCameraGizmos(UIContext& ctx);    // Draw camera icons in viewport
@@ -330,6 +354,65 @@ public:
     void performNewProject(UIContext& ctx);
     void performOpenProject(UIContext& ctx);
     void resetMaterialUI(); // Reset material editor state
+    void addProceduralPlane(UIContext& ctx);      // Add a procedural plane mesh
+    void addProceduralCube(UIContext& ctx);       // Add a procedural cube mesh
+    void addProceduralSphere(UIContext& ctx);     // Add a procedural UV sphere mesh
+    void addProceduralCylinder(UIContext& ctx);   // Add a procedural cylinder mesh
+    void addProceduralRock(UIContext& ctx);       // Add a procedural rock mesh (quad-based)
+    void addProceduralBrickWall(UIContext& ctx);  // Add a procedural brick wall mesh (quad-based)
+    void addProceduralTorus(UIContext& ctx);      // Add a procedural torus mesh (quad-based)
+    void addProceduralStaircase(UIContext& ctx);  // Add a procedural staircase mesh (quad-based)
+    void drawProceduralGeneratorWindow(UIContext& ctx);
+    
+    // Procedural generator window state
+    bool show_procedural_generator = false;
+    int procedural_generator_type = 0; // 0 = Rock, 1 = Brick Wall, 2 = Torus, 3 = Staircase
+    
+    // Rock parameters
+    char rock_name[64] = "Rock";
+    int rock_resolution = 16;
+    float rock_radius = 1.0f;
+    float rock_noise_scale = 1.5f;
+    float rock_noise_strength = 0.3f;
+    int rock_noise_octaves = 4;
+    float rock_scale_x = 1.0f;
+    float rock_scale_y = 1.0f;
+    float rock_scale_z = 1.0f;
+    float rock_flatness = 0.0f; // 0.0 = none
+    int rock_seed = 1337;
+    int rock_material_selection = 0;
+
+    // Brick wall parameters
+    char brick_name[64] = "Brick_Wall";
+    int brick_rows = 5;
+    int brick_cols = 8;
+    float brick_width = 1.0f;
+    float brick_height = 0.3f;
+    float brick_depth = 0.5f;
+    float brick_mortar_gap = 0.05f;
+    float brick_tilt_variation = 0.02f;
+    float brick_pos_variation = 0.01f;
+    int brick_seed = 42;
+    int brick_material_selection = 0;
+
+    // Torus parameters
+    char torus_name[64] = "Torus";
+    float torus_major_radius = 1.0f;
+    float torus_minor_radius = 0.3f;
+    int torus_radial_segments = 32;
+    int torus_tubular_segments = 16;
+    int torus_material_selection = 0;
+
+    // Staircase parameters
+    char stairs_name[64] = "Staircase";
+    int stairs_steps = 10;
+    float stairs_step_width = 2.0f;
+    float stairs_step_depth = 0.3f;
+    float stairs_step_height = 0.2f;
+    bool stairs_solid = true;
+    int stairs_material_selection = 0;
+
+    float panel_alpha = 0.9f; // Default transparency (0.9 = mostly opaque)
     void setSceneLoadingStage(const std::string& stage);
     std::string getSceneLoadingStage() const;
     
@@ -348,12 +431,7 @@ public:
      
      // Project System Helpers
      void updateProjectFromScene(UIContext& ctx);  // Sync scene state to project data
-     void addProceduralPlane(UIContext& ctx);      // Add a procedural plane mesh
-     void addProceduralCube(UIContext& ctx);       // Add a procedural cube mesh
-     void addProceduralSphere(UIContext& ctx);     // Add a procedural UV sphere mesh
-     void addProceduralCylinder(UIContext& ctx);   // Add a procedural cylinder mesh
-     float panel_alpha = 0.9f; // Default transparency (0.9 = mostly opaque)
-     
+
      // Scene loading state (public for Main.cpp popup access)
      std::atomic<bool> scene_loading{false};
      std::atomic<bool> scene_loading_done{false};
@@ -416,6 +494,9 @@ public:
          float vertex_radius = 2.75f;
          int max_overlay_triangles = 12000;
          int max_vertex_markers = 1200;
+         int selection_tool = 0;        // 0 = Box/marquee select, 1 = Lasso select
+         bool show_normals = false;     // draw per-face normal lines in the overlay
+         float normals_length = 0.25f;  // length of the drawn normal lines (world units)
      };
      MeshOverlaySettings mesh_overlay_settings;
      struct MeshShadingSettings {
@@ -500,6 +581,8 @@ public:
          bool auto_smooth = true;
          float auto_smooth_angle_degrees = 60.0f;
          std::vector<EditableVertex> vertices;
+         std::vector<Vec3> vertex_positions;      // Aligned flat position buffer (1:1 with vertices)
+         std::vector<uint8_t> vertex_is_boundary; // Fast per-vertex boundary flags (1:1 with vertices)
          std::vector<EditableEdge> edges;
          std::vector<EditableEdge> polygon_edges;
          std::vector<EditableFace> faces;
@@ -521,6 +604,9 @@ public:
          MeshEdit::HalfEdgeMesh half_edge;
          MeshEdit::HalfEdgeBuildResult half_edge_build;
          bool half_edge_valid = false;
+         // True when the cache was built in the cheaper sculpt-only layout (skips some
+         // edit-mode topology). Lets ensureEditableMeshCache avoid a needless rebuild.
+         bool built_minimal_for_sculpt = false;
      };
      struct SculptControlNode {
          Vec3 local_position;
@@ -732,6 +818,23 @@ public:
         bool radial_symmetry = false;
         int radial_count = 6;     // number of copies including the primary
         int radial_axis = 1;      // 0 = X, 1 = Y, 2 = Z (object-local)
+        // --- Dynamic "wet clay" brush (deposit wet → settle → flow → dry) ---
+        bool wet_clay_enabled = false;
+        float wet_clay_wetness = 0.7f;   // wetness injected at each deposit (0..1)
+        float wet_clay_dry_rate = 0.5f;  // wetness lost per second (higher = sets faster)
+        float wet_clay_settle = 0.6f;    // settle/relax rate while wet (0..1, surface tension)
+        float wet_clay_flow = 0.0f;      // gravity flow rate while wet (0..1; 0 = off)
+        float wet_clay_yield = 0.15f;    // min slope (rel. edge len) before clay flows
+        bool wet_clay_water_only = false; // paint wetness only, no geometry deposit (re-wet)
+        // Phase 4 — heterogeneous density: when on, a spatial noise field varies the local
+        // flow mobility, so the mud creeps down at different rates (marbled flow) instead
+        // of one uniform sheet. Off = homogeneous (uniform mobility).
+        bool wet_clay_hetero = false;
+        float wet_clay_hetero_scale = 2.0f; // density-noise frequency (higher = finer)
+        // Cohesion/viscosity: how strongly the FLOWING region stays bonded. High = smooth
+        // viscous tongue (putty); low = the flow keeps its roughness and breaks into chunks
+        // (mud), especially with heterogeneous density on.
+        float wet_clay_cohesion = 0.6f;
         // Reserved for the disabled experimental GPU sculpt path.
         bool use_gpu = false;
         SculptModeState() { brush.radius = 0.3f; brush.strength = 1.0f; brush.falloff = 0.75f; }
@@ -786,6 +889,26 @@ public:
     SculptMaskState sculpt_mask_state;
     // Mask buffer operations. operation: 0=Clear, 1=Invert, 2=Fill, 3=Smooth, 4=Sharpen.
     void applySculptMaskOperation(int operation);
+    // --- Dynamic wet-clay field ---------------------------------------------------
+    // Per-vertex wetness, sized 1:1 with editable_mesh_cache.vertices and reset on cache
+    // revision change. Brushes inject wetness into the verts they deposit into;
+    // stepWetClayField() (run once per frame in sculpt mode) settles + flows the wet
+    // region, decays the wetness, and evicts dried verts so cost is bounded to the
+    // still-active set.
+    struct SculptWetClayState {
+        std::string object_name;
+        uint64_t cache_revision = 0;
+        std::vector<float> wetness;      // per-vertex, 0 = dry/locked, 1 = freshly wet
+        std::vector<int> active_list;    // compact list of verts with wetness > 0 (deduped)
+        bool has_any = false;
+        void clear() { object_name.clear(); cache_revision = 0; wetness.clear(); active_list.clear(); has_any = false; }
+    };
+    SculptWetClayState sculpt_wet_clay_state;
+    // Mark the given editable-cache vertex ids as freshly wet (from the deposit path).
+    void depositWetClay(const std::vector<int>& vertexIds, float wetnessInject);
+    // Per-frame evolution of the wet-clay field: settle + flow + dry + evict. No-op when
+    // the active set is empty.
+    void stepWetClayField(UIContext& ctx);
     enum class MeshWorkspaceMode : int {
         Edit = 0,
         Sculpt
@@ -1126,6 +1249,13 @@ private:
     ImVec2 marquee_end;
     void handleMarqueeSelection(UIContext& ctx);  // Box selection implementation
     void drawMarqueeRect();  // Draw the selection rectangle
+
+    // Lasso selection + mesh-edit UI state (restored: lost when a concurrent edit
+    // clobbered scene_ui.h).
+    bool is_lasso_selecting = false;
+    std::vector<ImVec2> lasso_points;
+    int mesh_cc_bake_levels = 2;          // Catmull-Clark "Apply" subdivision levels
+    float mesh_edge_crease_value = 1.0f;  // crease weight written by the Crease slider
     
    
     

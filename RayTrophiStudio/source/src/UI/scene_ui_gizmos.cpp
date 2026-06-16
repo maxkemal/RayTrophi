@@ -3776,33 +3776,28 @@ mesh_edit_changed_confirmed:
                         std::string targetName = item.object->nodeName;
                         if (targetName.empty()) targetName = "Unnamed";
 
-                        auto it = mesh_cache.find(targetName);
-                        if (it != mesh_cache.end() && !it->second.empty()) {
-                            auto& firstTri = it->second[0].second;
-                            auto th = firstTri->getTransformHandle();
-                            
-                            if (th) {
-                                Matrix4x4 pivotMat = th->getPivotMatrix();
-                                // Apply transform to the shared handle (most objects share one)
-                                if (pivot_mode == 1) {
-                                    // Individual Origins
-                                    Vec3 pos(pivotMat.m[0][3], pivotMat.m[1][3], pivotMat.m[2][3]);
-                                    pivotMat.m[0][3] = 0; pivotMat.m[1][3] = 0; pivotMat.m[2][3] = 0;
-                                    Matrix4x4 updated = deltaRotScale * pivotMat;
-                                    updated.m[0][3] = pos.x + deltaTranslation.x;
-                                    updated.m[1][3] = pos.y + deltaTranslation.y;
-                                    updated.m[2][3] = pos.z + deltaTranslation.z;
-                                    th->setPivotMatrix(updated);
-                                }
-                                else {
-                                    // Median Point
-                                    th->setPivotMatrix(deltaMat * pivotMat);
-                                }
-                                
-                                // GPU INSTANCE UPDATE (TLAS + Raster)
-                                updateGizmoObjectTransformOnActiveBackends(ctx, targetName, th->base);
-                                // CPU mode handled on release
+                        auto th = item.object->getTransformHandle();
+                        if (th) {
+                            Matrix4x4 pivotMat = th->getPivotMatrix();
+                            // Apply transform to the shared handle
+                            if (pivot_mode == 1) {
+                                // Individual Origins
+                                Vec3 pos(pivotMat.m[0][3], pivotMat.m[1][3], pivotMat.m[2][3]);
+                                pivotMat.m[0][3] = 0; pivotMat.m[1][3] = 0; pivotMat.m[2][3] = 0;
+                                Matrix4x4 updated = deltaRotScale * pivotMat;
+                                updated.m[0][3] = pos.x + deltaTranslation.x;
+                                updated.m[1][3] = pos.y + deltaTranslation.y;
+                                updated.m[2][3] = pos.z + deltaTranslation.z;
+                                th->setPivotMatrix(updated);
                             }
+                            else {
+                                // Median Point
+                                th->setPivotMatrix(deltaMat * pivotMat);
+                            }
+                            
+                            // GPU INSTANCE UPDATE (TLAS + Raster)
+                            updateGizmoObjectTransformOnActiveBackends(ctx, targetName, th->base);
+                            // CPU mode handled on release
                         }
                         item.has_cached_aabb = false;
                     }
@@ -4067,90 +4062,30 @@ mesh_edit_changed_confirmed:
                     sel.selected.position = newPos;
                     sel.selected.has_cached_aabb = false;
                 } else {
-                    auto it = mesh_cache.find(targetName);
-                    if (it != mesh_cache.end() && !it->second.empty()) {
-                        auto& firstTri = it->second[0].second;
-                        auto t_handle = firstTri->getTransformHandle();
+                    auto t_handle = sel.selected.object->getTransformHandle();
+                    if (t_handle) {
+                        // Apply full matrix from gizmo (supports translate, rotate, scale)
+                        t_handle->setPivotMatrix(newMat);
 
-                        // Safety check for mixed transforms - OPTIMIZED: Only check first few triangles
-                        // Most objects either share one transform or have completely different ones
-                        bool all_same_transform = true;
-                        const size_t MAX_CHECK = std::min((size_t)100, it->second.size()); // Check up to 100, not 2M
-                        for (size_t i = 1; i < MAX_CHECK && all_same_transform; ++i) {
-                            auto h = it->second[i].second->getTransformHandle();
-                            if (h.get() != t_handle.get()) all_same_transform = false;
-                        }
+                        // GPU INSTANCE UPDATE (TLAS + Raster)
+                        updateGizmoObjectTransformOnActiveBackends(ctx, targetName, t_handle->base);
 
-                        if (all_same_transform && t_handle) {
-                            // Apply full matrix from gizmo (supports translate, rotate, scale)
-                            t_handle->setPivotMatrix(newMat);
-
-                            // GPU INSTANCE UPDATE (TLAS + Raster)
-                            // updateObjectTransform handles both TLAS instances and raster instances,
-                            // so it works for Rendered mode (RT) AND Solid/Matcap mode (raster).
-                            updateGizmoObjectTransformOnActiveBackends(ctx, targetName, t_handle->base);
-
-                            if (!getGizmoRenderBackend(ctx) || !getGizmoRenderBackend(ctx)->isUsingTLAS()) {
-                                // CPU/GAS MODE: Update CPU vertices (required for BVH/picking)
-                                // Note: viewport backend (raster preview) may exist but does NOT
-                                // handle CPU raytracing — always update vertices for CPU path.
+                        if (!getGizmoRenderBackend(ctx) || !getGizmoRenderBackend(ctx)->isUsingTLAS()) {
+                            // CPU/GAS MODE: Update CPU vertices for triangles sharing this transform handle
+                            auto it = mesh_cache.find(targetName);
+                            if (it != mesh_cache.end()) {
                                 for (auto& pair : it->second) {
-                                    pair.second->updateTransformedVertices();
-                                }
-
-                                is_bvh_dirty = true;
-
-                                // Trigger Fast Refit during interaction (CPU Mode only)
-                                extern bool g_cpu_bvh_refit_pending;
-                                g_cpu_bvh_refit_pending = true;
-                            }
-                        }
-                        else {
-                            // Fallback: Mixed transforms, apply delta MATRIX to each unique transform (Supports all ops)
-                            Matrix4x4 newMat;
-                            newMat.m[0][0] = objectMatrix[0]; newMat.m[1][0] = objectMatrix[1]; newMat.m[2][0] = objectMatrix[2]; newMat.m[3][0] = objectMatrix[3];
-                            newMat.m[0][1] = objectMatrix[4]; newMat.m[1][1] = objectMatrix[5]; newMat.m[2][1] = objectMatrix[6]; newMat.m[3][1] = objectMatrix[7];
-                            newMat.m[0][2] = objectMatrix[8]; newMat.m[1][2] = objectMatrix[9]; newMat.m[2][2] = objectMatrix[10]; newMat.m[3][2] = objectMatrix[11];
-                            newMat.m[0][3] = objectMatrix[12]; newMat.m[1][3] = objectMatrix[13]; newMat.m[2][3] = objectMatrix[14]; newMat.m[3][3] = objectMatrix[15];
-
-                            Matrix4x4 deltaMat = newMat * oldMat.inverse();
-
-                            // Decompose for Individual Origins logic
-                            Vec3 deltaTranslation(deltaMat.m[0][3], deltaMat.m[1][3], deltaMat.m[2][3]);
-                            Matrix4x4 deltaRotScale = deltaMat;
-                            deltaRotScale.m[0][3] = 0; deltaRotScale.m[1][3] = 0; deltaRotScale.m[2][3] = 0;
-
-                            std::unordered_set<Transform*> processed_transforms;
-                            for (auto& pair : it->second) {
-                                auto tri = pair.second;
-                                auto th = tri->getTransformHandle();
-                                if (th && processed_transforms.find(th.get()) == processed_transforms.end()) {
-                                    Matrix4x4 pivotMat = th->getPivotMatrix();
-                                    if (pivot_mode == 1) {
-                                        // Individual Origins
-                                        Vec3 pos(pivotMat.m[0][3], pivotMat.m[1][3], pivotMat.m[2][3]);
-                                        pivotMat.m[0][3] = 0; pivotMat.m[1][3] = 0; pivotMat.m[2][3] = 0;
-                                        Matrix4x4 updated = deltaRotScale * pivotMat;
-                                        updated.m[0][3] = pos.x + deltaTranslation.x;
-                                        updated.m[1][3] = pos.y + deltaTranslation.y;
-                                        updated.m[2][3] = pos.z + deltaTranslation.z;
-                                        th->setPivotMatrix(updated);
-                                    }
-                                    else {
-                                        // Median Point
-                                        th->setPivotMatrix(deltaMat * pivotMat);
-                                    }
-                                    processed_transforms.insert(th.get());
-
-                                    // TLAS INSTANCING UPDATE (Fast Path for Multi-Select)
-                                    // Always push to active backends (raster + render)
-                                    updateGizmoObjectTransformOnActiveBackends(ctx, targetName, th->base);
-                                    if (!getGizmoRenderBackend(ctx) || !getGizmoRenderBackend(ctx)->isUsingTLAS()) {
-                                        // CPU Mode: MUST update vertices for BVH refit/rebuild to see changes
-                                        tri->updateTransformedVertices();
+                                    if (pair.second && pair.second->getTransformHandle().get() == t_handle.get()) {
+                                        pair.second->updateTransformedVertices();
                                     }
                                 }
                             }
+
+                            is_bvh_dirty = true;
+
+                            // Trigger Fast Refit during interaction (CPU Mode only)
+                            extern bool g_cpu_bvh_refit_pending;
+                            g_cpu_bvh_refit_pending = true;
                         }
                     }
                 }
@@ -4685,7 +4620,17 @@ void SceneUI::drawSelectionGizmos(UIContext& ctx)
     // in both Solid and Rendered viewport modes (the GPU edit overlay is Edit +
     // Solid only). Self-guards on sculpt mode / mask presence.
     drawSculptMaskViewportOverlay(ctx);
-    if (ctx.selection.hasSelection() && ctx.selection.show_gizmo && ctx.scene.camera && viewport_settings.show_gizmos) {
+    // While a sculpt session owns the selected object, suppress the selection bbox /
+    // outline / transform gizmo: the brush draws its own cursor + mask overlay, and the
+    // selection outline kept re-tracing the brush-deformed dab edges (distracting + it
+    // steals clicks). The GPU outline is cleared below so nothing lingers.
+    const bool sculpt_session_active =
+        sculpt_mode_state.enabled &&
+        mesh_workspace_mode == MeshWorkspaceMode::Sculpt &&
+        mesh_overlay_settings.edit_mode &&
+        !sculpt_mode_state.active_target_name.empty();
+    if (!sculpt_session_active &&
+        ctx.selection.hasSelection() && ctx.selection.show_gizmo && ctx.scene.camera && viewport_settings.show_gizmos) {
         drawSelectionBoundingBox(ctx);
         if (mesh_overlay_settings.enabled && mesh_workspace_mode == MeshWorkspaceMode::Edit) {
             drawEditableMeshOverlay(ctx);

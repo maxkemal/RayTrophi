@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - VIEWPORT OVERLAYS
 // ═══════════════════════════════════════════════════════════════════════════════
 // This file contains viewport overlay components:
@@ -1801,6 +1801,33 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
                     drawHudLine("Instance tris: " + formatCompactCount(instance_triangle_count), IM_COL32(190, 192, 195, 200));
                 }
             }
+
+            const bool is_sculpt_active = (mesh_workspace_mode == MeshWorkspaceMode::Sculpt) &&
+                                          mesh_overlay_settings.edit_mode &&
+                                          !sculpt_mode_state.active_target_name.empty();
+            //if (is_sculpt_active && show_sculpt_telemetry_hud) {
+            //    ImGui::Dummy(ImVec2(0, 4)); // Spacing
+            //    drawHudLine("=== Sculpt Telemetry ===", IM_COL32(100, 200, 255, 220));
+            //    drawHudLine("Candidates Verts: " + formatCompactCount(telemetry_candidate_vertices), IM_COL32(190, 192, 195, 200));
+            //    drawHudLine("Touched Triangles: " + formatCompactCount(telemetry_touched_triangles), IM_COL32(190, 192, 195, 200));
+            //    
+            //    std::string sync_type = telemetry_partial_upload_active ? "Partial VBO/BLAS" : "Full Rebuild";
+            //    drawHudLine("GPU Sync Path: " + sync_type, telemetry_partial_upload_active ? IM_COL32(84, 214, 31, 220) : IM_COL32(245, 170, 70, 220));
+
+            //    std::string bytes_str;
+            //    if (telemetry_pcie_upload_bytes >= 1024 * 1024) {
+            //        char buf[32];
+            //        snprintf(buf, sizeof(buf), "%.2f MB", (float)telemetry_pcie_upload_bytes / (1024.0f * 1024.0f));
+            //        bytes_str = buf;
+            //    } else if (telemetry_pcie_upload_bytes >= 1024) {
+            //        char buf[32];
+            //        snprintf(buf, sizeof(buf), "%.2f KB", (float)telemetry_pcie_upload_bytes / 1024.0f);
+            //        bytes_str = buf;
+            //    } else {
+            //        bytes_str = std::to_string(telemetry_pcie_upload_bytes) + " Bytes";
+            //    }
+            //    drawHudLine("PCIe Upload Size: " + bytes_str, IM_COL32(190, 192, 195, 200));
+            //}
 
             ImGui::Dummy(ImVec2(0, 2)); // Small spacing
         }

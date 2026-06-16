@@ -2021,11 +2021,74 @@ void SceneUI::activateSculptWorkspace(UIContext& ctx) {
     } else {
         ctx.selection.mesh_element_mode = MeshElementSelectMode::Object;
         ensureMeshEditLayer(ctx, selectedNodeName);
+
+        // Repair degenerate shading normals on sculpt entry. A dense/subdivided mesh
+        // whose stored per-vertex normals collapsed to zero (modifier averaging) enters
+        // sculpt with zero-length normals: shading goes black in every mode and the brush
+        // hit normal falls back to world-up (0,1,0), so the brush disc lies flat instead
+        // of following the surface. This used to call applyMeshShadingSettings, but that
+        // REWRITES every normal from the per-object MeshShadingSettings (default =
+        // auto-smooth), silently flipping flat/custom-shaded meshes to smooth on entry.
+        // repairSculptEntryShadingNormals fixes ONLY the broken normals and leaves valid
+        // ones alone, so the object stays in whatever shading mode it already had.
+        repairSculptEntryShadingNormals(ctx, selectedNodeName, true);
     }
 }
 
 void SceneUI::drawModifiersPanel(UIContext& ctx) {
     UIWidgets::PushControlSurfaceStyle(ImVec4(0.92f, 0.56f, 0.38f, 1.0f));
+
+    if (UIWidgets::BeginSection("Overlays & Selection", ImVec4(0.5f, 0.8f, 1.0f, 1.0f))) {
+        ImGui::Checkbox("Viewport Mesh Overlay", &mesh_overlay_settings.enabled);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Render edit cage overlays in the viewport.");
+        }
+
+        ImGui::Checkbox("X-Ray View Mode", &mesh_overlay_settings.xray_mode);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Render edit overlay lines through opaque geometry.");
+        }
+
+        ImGui::Checkbox("Show Face Normals", &mesh_overlay_settings.show_normals);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Render outward face normals for selected faces.");
+        }
+        if (mesh_overlay_settings.show_normals) {
+            ImGui::SliderFloat("Normals Length", &mesh_overlay_settings.normals_length, 0.05f, 2.0f, "%.2f m");
+        }
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Selection Tool:");
+        bool isBox = (mesh_overlay_settings.selection_tool == 0);
+        bool isLasso = (mesh_overlay_settings.selection_tool == 1);
+        if (ImGui::RadioButton("Box Select##sidebar", isBox)) {
+            mesh_overlay_settings.selection_tool = 0;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Switch to Box Select (Shortcut: B)");
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Lasso Select##sidebar", isLasso)) {
+            mesh_overlay_settings.selection_tool = 1;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Switch to Lasso Select (Shortcut: L)");
+        }
+        ImGui::Spacing();
+
+        ImGui::Checkbox("Soft Selection (Proportional)", &mesh_overlay_settings.proportional_edit);
+        if (mesh_overlay_settings.proportional_edit) {
+            ImGui::SliderFloat("Soft Radius", &mesh_overlay_settings.proportional_radius, 0.05f, 5.0f, "%.2f");
+            static const char* falloffTypes[] = { "Smooth", "Linear", "Sharp", "Sphere", "Root" };
+            ImGui::Combo("Falloff Shape", &mesh_overlay_settings.proportional_falloff_type, falloffTypes, IM_ARRAYSIZE(falloffTypes));
+            ImGui::SliderFloat("Falloff Bias", &mesh_overlay_settings.proportional_falloff, 0.05f, 1.0f, "%.2f");
+        }
+
+        UIWidgets::EndSection();
+    }
+
+    UIWidgets::Divider();
+
     if (UIWidgets::BeginSection("Modeling", ImVec4(0.8f, 0.4f, 0.9f, 1.0f))) {
         bool hasSelection = (ctx.selection.selected.type == SelectableType::Object &&
                              ctx.selection.selected.object != nullptr);
@@ -2142,6 +2205,33 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                         if (hasAnyOptions) ImGui::Spacing();
                         ImGui::SliderFloat("Loop Cut Pos", &mesh_loop_cut_position, 0.05f, 0.95f, "%.2f");
                         ImGui::TextDisabled("Relative position of the loop cut along ring edges.");
+
+                        // Catmull-Clark edge crease authoring (like Blender's Shift+E).
+                        // The slider is a free "value to apply" (not bound to the selection,
+                        // so dragging is never clobbered); the selection's current crease is
+                        // shown as text and applied on release / via the buttons.
+                        ImGui::Spacing();
+                        const float selCrease = getSelectedEdgesAverageCrease(ctx);
+                        const bool hasEdgeSelection = (selCrease >= 0.0f);
+                        ImGui::BeginDisabled(!hasEdgeSelection);
+                        ImGui::SliderFloat("Crease", &mesh_edge_crease_value, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemDeactivatedAfterEdit() && hasEdgeSelection) {
+                            applyCreaseToSelectedEdges(ctx, mesh_edge_crease_value);
+                        }
+                        if (ImGui::Button("Apply Crease##edge") && hasEdgeSelection) {
+                            applyCreaseToSelectedEdges(ctx, mesh_edge_crease_value);
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Clear Crease##edge") && hasEdgeSelection) {
+                            applyCreaseToSelectedEdges(ctx, 0.0f);
+                        }
+                        ImGui::EndDisabled();
+                        if (hasEdgeSelection) {
+                            ImGui::TextDisabled("Selected edge crease: %.2f", selCrease);
+                            ImGui::TextDisabled("Crease is applied when you bake Catmull-Clark (below).");
+                        } else {
+                            ImGui::TextDisabled("Select edge(s) to author crease sharpness.");
+                        }
                         hasAnyOptions = true;
                     }
 
@@ -2180,29 +2270,7 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     UIWidgets::EndSection();
                 }
 
-                // Overlays & Soft Selection
-                UIWidgets::Divider();
-                if (UIWidgets::BeginSection("Overlays & Selection", ImVec4(0.5f, 0.8f, 1.0f, 1.0f))) {
-                    ImGui::Checkbox("Viewport Mesh Overlay", &mesh_overlay_settings.enabled);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Render edit cage overlays in the viewport.");
-                    }
 
-                    ImGui::Checkbox("X-Ray View Mode", &mesh_overlay_settings.xray_mode);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Render edit overlay lines through opaque geometry.");
-                    }
-
-                    ImGui::Checkbox("Soft Selection (Proportional)", &mesh_overlay_settings.proportional_edit);
-                    if (mesh_overlay_settings.proportional_edit) {
-                        ImGui::SliderFloat("Soft Radius", &mesh_overlay_settings.proportional_radius, 0.05f, 5.0f, "%.2f");
-                        static const char* falloffTypes[] = { "Smooth", "Linear", "Sharp", "Sphere", "Root" };
-                        ImGui::Combo("Falloff Shape", &mesh_overlay_settings.proportional_falloff_type, falloffTypes, IM_ARRAYSIZE(falloffTypes));
-                        ImGui::SliderFloat("Falloff Bias", &mesh_overlay_settings.proportional_falloff, 0.05f, 1.0f, "%.2f");
-                    }
-
-                    UIWidgets::EndSection();
-                }
             }
 
             UIWidgets::Divider();
@@ -2277,11 +2345,33 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     ctx.renderer.resetCPUAccumulation();
                     if (ctx.backend_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
 
+                    // Replacing the object's triangles is a STRUCTURAL change (triangle
+                    // count changes), so the Rendered-mode backends (OptiX / Vulkan RT)
+                    // must do a full geometry rebuild — not an in-place refit. Without
+                    // bumping the geometry generation + rebuild flags, the GPU kept the
+                    // OLD BLAS alongside the new one, so the pre- and post-bake meshes
+                    // rendered on top of each other until the next edit forced a rebuild.
+                    g_geometry_dirty = true;
+                    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+                    g_bvh_rebuild_pending = true;
+                    g_optix_rebuild_pending = true;
+                    g_vulkan_rebuild_pending = true;
+
                     addViewportMessage(message);
                     g_ProjectManager.markModified();
                 };
 
+                // Steady-state safety net: if the visible mesh's triangle count drifts
+                // from a fresh full-stack evaluation, resync it. This MUST be skipped
+                // during an interactive subdivision drag: the live preview deliberately
+                // runs at a clamped level (so its count differs from the full evaluation),
+                // and replaceEvaluatedMesh resets editable_mesh_cache + the element
+                // selection — doing that every drag frame yanked the gizmo's target away,
+                // so a cage vertex/edge/face would nudge once and snap back. The drag's own
+                // path (applySelectedMeshElementTranslation → refreshEditableDisplayMeshFromBase,
+                // then endInteractiveSubdivisionPreview on release) keeps the display in sync.
                 if (!selectedNodeName.empty() &&
+                    !isInteractiveSubdivisionPreviewActiveForObject(selectedNodeName) &&
                     ctx.scene.base_mesh_cache.find(selectedNodeName) != ctx.scene.base_mesh_cache.end() &&
                     !ctx.scene.base_mesh_cache[selectedNodeName].empty() &&
                     !modifierStack.modifiers.empty()) {
@@ -2321,7 +2411,7 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                         }
 
                         if (mod.type == MeshModifiers::ModifierType::FlatSubdivision || mod.type == MeshModifiers::ModifierType::SmoothSubdivision) {
-                            if (ImGui::SliderInt("Levels", &mod.levels, 1, 4)) stackChanged = true;
+                            if (ImGui::SliderInt("Levels", &mod.levels, 1, 10)) stackChanged = true;
                         }
 
                         if (mod.type == MeshModifiers::ModifierType::SmoothSubdivision) {
@@ -2351,6 +2441,56 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     modifierStack.modifiers.push_back(newMod);
                     stackChanged = true;
                 }
+
+                // True Catmull-Clark as a DESTRUCTIVE bake (not a live modifier). Editing a
+                // CC limit surface live (gizmo move/scale while previewing) proved fragile,
+                // so CC is applied on demand: it subdivides the cage (with authored creases)
+                // and replaces the editable base with the result. After this you edit the
+                // baked dense mesh directly — stable, no per-frame re-evaluation.
+                UIWidgets::Divider();
+                UIWidgets::ColoredHeader("Catmull-Clark (Bake)", ImVec4(0.55f, 0.8f, 1.0f, 1.0f));
+                ImGui::SliderInt("CC Levels##ccbake", &mesh_cc_bake_levels, 1, 10);
+                if (UIWidgets::SecondaryButton("Apply Catmull-Clark", ImVec2(-1, 0))) {
+                    // Bake from the cage (base) so position-keyed creases line up; fall back
+                    // to the current visible mesh if no base was captured.
+                    std::vector<std::shared_ptr<Triangle>> src;
+                    auto baseSrcIt = ctx.scene.base_mesh_cache.find(selectedNodeName);
+                    if (baseSrcIt != ctx.scene.base_mesh_cache.end() && !baseSrcIt->second.empty()) {
+                        src = baseSrcIt->second;
+                    } else if (hasMeshEntries) {
+                        for (const auto& entry : meshEntriesIt->second) {
+                            if (entry.second) src.push_back(entry.second);
+                        }
+                    }
+                    if (!src.empty()) {
+                        MeshModifiers::EdgeCreaseFn creaseFn;
+                        if (!modifierStack.edgeCreases.empty()) {
+                            creaseFn = [&modifierStack](const Vec3& a, const Vec3& b) {
+                                return modifierStack.getEdgeCrease(a, b);
+                            };
+                        }
+                        auto ccMesh = MeshModifiers::CatmullClarkSubD(src, mesh_cc_bake_levels, creaseFn);
+                        if (!ccMesh.empty()) {
+                            // Baked CC becomes the new editable base; drop subdivision
+                            // modifiers (they would re-subdivide an already-CC cage) and
+                            // the now-stale crease keys.
+                            ctx.scene.base_mesh_cache[selectedNodeName] = ccMesh;
+                            modifierStack.modifiers.erase(
+                                std::remove_if(modifierStack.modifiers.begin(), modifierStack.modifiers.end(),
+                                    [](const MeshModifiers::ModifierData& m) {
+                                        return m.type == MeshModifiers::ModifierType::FlatSubdivision ||
+                                               m.type == MeshModifiers::ModifierType::SmoothSubdivision;
+                                    }),
+                                modifierStack.modifiers.end());
+                            modifierStack.edgeCreases.clear();
+                            const auto displayMesh = modifierStack.modifiers.empty()
+                                ? ccMesh
+                                : modifierStack.evaluate(ccMesh);
+                            replaceEvaluatedMesh(displayMesh, ccMesh, "Catmull-Clark Baked");
+                        }
+                    }
+                }
+                ImGui::TextDisabled("Bakes a true Catmull-Clark surface from the cage (uses edge creases).");
 
                 if (applyModifierIndex >= 0) {
                     SCENE_LOG_INFO("Applying Modifier Stack up to index " + std::to_string(applyModifierIndex) + " for '" + selectedNodeName + "'...");
@@ -4360,9 +4500,9 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
             // { "SculptNudge", "Nudge\nPushes the surface along the stroke direction.", SceneUI::SculptBrushTool::Nudge },
             { "SculptBlob", "Blob\nSpherical swell; builds rounded bulges.", SceneUI::SculptBrushTool::Blob },
             { "SculptFill", "Fill\nFills valleys toward a plane (Ctrl deepens).", SceneUI::SculptBrushTool::Fill },
-            // Snake Hook temporarily hidden from the UI: the tip still grabs verts
-            // BEHIND the touched surface (dynamic capsule-sweep prime scans the back
-            // face) and its follow isn't clean. Tool code/enum/icon all stay live so
+            // Snake Hook temporarily hidden from the UI again (2026-06-16): the tip still
+            // grabs verts BEHIND the touched surface (dynamic capsule-sweep prime scans the
+            // back face) and its follow isn't clean. Tool code/enum/icon all stay live, so
             // re-enabling is a one-line restore once the back-face capture is fixed.
             // { "SculptSnakeHook", "Snake Hook\nDrags the surface into hooks and tentacles.", SceneUI::SculptBrushTool::SnakeHook },
             { "SculptElastic", "Elastic Deform\nSoft, wide grab-style pull.", SceneUI::SculptBrushTool::ElasticDeform },
@@ -4520,6 +4660,85 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
             }
             if (ImGui::Button("Sharpen##mask", ImVec2(fullW, 0.0f))) {
                 applySculptMaskOperation(4);
+            }
+        }
+
+        if (beginBrushDockSection("Dynamic Clay")) {
+            ImGui::Checkbox("Wet Clay", &sculpt_mode_state.wet_clay_enabled);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Additive brushes deposit WET clay: it keeps settling toward the\n"
+                                  "surrounding surface after the stroke, then dries and locks.\n"
+                                  "Off = instant, rigid deposits (classic behaviour).");
+            }
+            if (sculpt_mode_state.wet_clay_enabled) {
+                // Presets bundle the knobs into recognizable materials. Tweak any slider
+                // afterwards to fine-tune. (wetness, dry, settle, flow, yield, hetero, cohesion)
+                auto applyWetPreset = [&](float wetness, float dry, float settleV, float flowV,
+                                          float yieldV, bool het, float coh) {
+                    sculpt_mode_state.wet_clay_wetness = wetness;
+                    sculpt_mode_state.wet_clay_dry_rate = dry;
+                    sculpt_mode_state.wet_clay_settle = settleV;
+                    sculpt_mode_state.wet_clay_flow = flowV;
+                    sculpt_mode_state.wet_clay_yield = yieldV;
+                    sculpt_mode_state.wet_clay_hetero = het;
+                    sculpt_mode_state.wet_clay_cohesion = coh;
+                };
+                ImGui::TextDisabled("Preset:");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Clay"))  applyWetPreset(0.70f, 0.50f, 0.60f, 0.40f, 0.15f, false, 0.60f);
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Water")) applyWetPreset(0.90f, 0.20f, 0.20f, 1.00f, 0.00f, false, 0.20f);
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Mud"))   applyWetPreset(0.80f, 0.40f, 0.30f, 0.70f, 0.25f, true,  0.40f);
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Putty")) applyWetPreset(0.60f, 0.70f, 0.25f, 0.35f, 0.50f, false, 0.85f);
+
+                ImGui::SliderFloat("Wetness", &sculpt_mode_state.wet_clay_wetness, 0.0f, 1.0f, "%.2f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("How soft fresh clay starts. Higher = settles/flows more before it dries.");
+                }
+                ImGui::SliderFloat("Dry Rate", &sculpt_mode_state.wet_clay_dry_rate, 0.05f, 4.0f, "%.2f /s");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("How fast the clay sets. Higher = locks sooner.");
+                }
+                ImGui::SliderFloat("Settle", &sculpt_mode_state.wet_clay_settle, 0.0f, 1.0f, "%.2f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Surface tension: how strongly wet clay relaxes toward the surrounding surface.");
+                }
+                ImGui::SliderFloat("Cohesion", &sculpt_mode_state.wet_clay_cohesion, 0.0f, 1.0f, "%.2f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Viscosity of the FLOWING clay. High = smooth bonded tongue (putty);\n"
+                                      "low = rough, breaks into chunks (mud, esp. with Heterogeneous Density).");
+                }
+                ImGui::SliderFloat("Gravity Flow", &sculpt_mode_state.wet_clay_flow, 0.0f, 1.0f, "%.2f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Wet clay descends as a body along world-down, creeping down\n"
+                                      "slopes and pooling in low spots. 0 = no gravity.");
+                }
+                if (sculpt_mode_state.wet_clay_flow > 0.0f) {
+                    ImGui::SliderFloat("Yield", &sculpt_mode_state.wet_clay_yield, 0.0f, 1.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("How steep a slope must be before clay flows. Higher = holds its\n"
+                                          "shape more (viscous clay); 0 = runs freely like water.");
+                    }
+                    ImGui::Checkbox("Heterogeneous Density", &sculpt_mode_state.wet_clay_hetero);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Vary flow speed across the surface (a density field) so the mud\n"
+                                          "creeps down unevenly / marbled. Off = uniform sheet.");
+                    }
+                    if (sculpt_mode_state.wet_clay_hetero) {
+                        ImGui::SliderFloat("Density Scale", &sculpt_mode_state.wet_clay_hetero_scale, 0.2f, 8.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Density-noise frequency: higher = finer marbling.");
+                        }
+                    }
+                }
+                ImGui::Checkbox("Water Only (re-wet, no deposit)", &sculpt_mode_state.wet_clay_water_only);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Paint wetness onto existing geometry WITHOUT adding clay, so dried\n"
+                                      "areas soften and settle/flow again (like adding water in pottery).");
+                }
+                ImGui::TextDisabled("Active wet verts: %zu", sculpt_wet_clay_state.active_list.size());
             }
         }
 
@@ -4750,6 +4969,12 @@ void SceneUI::drawEditToolControls(UIContext& ctx, const std::shared_ptr<Triangl
             shading.flat_shading = false;
             shading.auto_smooth = false;
             applyMeshShadingSettings(ctx, effectiveNodeName);
+        } else if (action_type == 11) {
+            flipSelectedMeshNormals(ctx);
+        } else if (action_type == 12) {
+            recalculateMeshNormals(ctx, true);
+        } else if (action_type == 13) {
+            recalculateMeshNormals(ctx, false);
         }
     };
 
@@ -4776,10 +5001,7 @@ void SceneUI::drawEditToolControls(UIContext& ctx, const std::shared_ptr<Triangl
         { "FaceDelete", "Delete Face", "Delete Face\nRemove selected faces, leaving an open boundary.", "Disabled: Requires selected face(s).", UIWidgets::IconType::DeleteFaceTool, ImVec4(1.0f, 0.48f, 0.42f, 1.0f), hasSelectedFaces, 8 }
     };
 
-    if (!effectiveNodeName.empty()) {
-        edit_actions.push_back({ "ShadeFlat", "Shade Flat", "Shade Flat\nUse split normals for a faceted look.", "", UIWidgets::IconType::ShadeFlatTool, ImVec4(0.86f, 0.72f, 0.52f, 1.0f), true, 9 });
-        edit_actions.push_back({ "ShadeSmooth", "Shade Smooth", "Shade Smooth\nSmooth normals across the mesh surface.", "", UIWidgets::IconType::ShadeSmoothTool, ImVec4(0.52f, 0.82f, 0.88f, 1.0f), true, 10 });
-    }
+
 
     if (rightDockOnly) {
         const float avail_w = ImGui::GetContentRegionAvail().x;
