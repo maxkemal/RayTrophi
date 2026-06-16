@@ -806,7 +806,7 @@ public:
         SculptBrushTool tool = SculptBrushTool::Draw;
         Paint::BrushSettings brush;
         float normal_strength = 0.35f;
-        bool front_faces_only = true;
+        bool front_faces_only = false;
         bool accumulate_live = true;
         bool use_screen_space_radius = true;
         float screen_radius_px = 72.0f;
@@ -873,6 +873,20 @@ public:
         std::unordered_map<const class Triangle*, std::shared_ptr<class Triangle>> touched_triangles;
     };
     SculptStrokeState sculpt_stroke_state;
+
+    // Idle cache for the sculpt brush viewport preview. The preview re-raycasts the scene BVH
+    // and the sculpt PBVH every frame to place the cursor; when the cursor and camera are
+    // parked and no stroke is running, the result can't change, so we reuse the last hit and
+    // skip both raycasts (was a constant idle CPU draw with the brush stationary).
+    int sculpt_preview_cache_mx = 0;
+    int sculpt_preview_cache_my = 0;
+    bool sculpt_preview_cache_valid = false;
+    bool sculpt_preview_cache_did_hit = false;
+    Vec3 sculpt_preview_cache_point;   // HitRecord is forward-declared here, so cache the
+    Vec3 sculpt_preview_cache_normal;  // two fields the preview actually reads, not the record.
+    Vec3 sculpt_preview_cache_cam_from;
+    Vec3 sculpt_preview_cache_cam_at;
+
     // Per-vertex sculpt mask. values[vertexId] in [0,1]: 0 = fully sculptable,
     // 1 = fully protected. Sized 1:1 with editable_mesh_cache.vertices and
     // rebuilt whenever the cache revision changes (topology edits invalidate it).
@@ -900,12 +914,20 @@ public:
         uint64_t cache_revision = 0;
         std::vector<float> wetness;      // per-vertex, 0 = dry/locked, 1 = freshly wet
         std::vector<int> active_list;    // compact list of verts with wetness > 0 (deduped)
+        // Flow operates on the NORMAL-protrusion above the surface the vertex had when it
+        // first got wet (the "wall"): anchor = that rest position, normal = that surface
+        // normal. material m = (pos-anchor)·normal. Flow transports m downhill and moves the
+        // vertex along its normal, so a blob slides DOWN a vertical wall (not just levels Y).
+        std::vector<Vec3> flow_anchor;
+        std::vector<Vec3> flow_normal;
         bool has_any = false;
-        void clear() { object_name.clear(); cache_revision = 0; wetness.clear(); active_list.clear(); has_any = false; }
+        void clear() { object_name.clear(); cache_revision = 0; wetness.clear(); active_list.clear(); flow_anchor.clear(); flow_normal.clear(); has_any = false; }
     };
     SculptWetClayState sculpt_wet_clay_state;
     // Mark the given editable-cache vertex ids as freshly wet (from the deposit path).
-    void depositWetClay(const std::vector<int>& vertexIds, float wetnessInject);
+    // anchors[k] is the PRE-deposit position of vertexIds[k] (the wall reference).
+    void depositWetClay(const std::vector<int>& vertexIds, const std::vector<Vec3>& anchors, float wetnessInject,
+                        const std::vector<float>* injectWeights = nullptr);
     // Per-frame evolution of the wet-clay field: settle + flow + dry + evict. No-op when
     // the active set is empty.
     void stepWetClayField(UIContext& ctx);
@@ -1007,6 +1029,15 @@ public:
     std::size_t subdiv_preview_refresh_signature = 0;
     std::string subdiv_preview_refresh_object_name;
     bool subdiv_preview_refresh_valid = false;
+    // Subdivision signature the editable display mesh in mesh_cache was last BUILT with.
+    // ensureEditableMeshCache used to decide "preview out of date" by comparing the cached
+    // triangle count to base*4^levels — a guess that Catmull-Clark / quad-recovery never
+    // matches, so it re-evaluated the display mesh EVERY frame after a subdivide (bumping the
+    // cache revision, re-uploading the GPU edit overlay, raising g_bvh_rebuild_pending) and
+    // pinned the viewport in a permanent re-render. Gate on this signature instead.
+    std::size_t editable_subdiv_display_signature = 0;
+    std::string editable_subdiv_display_signature_object;
+    bool editable_subdiv_display_signature_valid = false;
     // picking fails because Triangle::hit() reads stale local-space positions.
     bool picking_vertices_synced = false;
 private:

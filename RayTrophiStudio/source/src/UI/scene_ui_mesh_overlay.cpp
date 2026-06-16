@@ -29,6 +29,9 @@ extern std::unique_ptr<Backend::IBackend> g_backend;
 
 // Forward declarations from scene_ui_modifiers.cpp
 float uiSampleBrushMask(const Paint::BrushSettings& brush, float nx, float ny);
+float uiSampleBrushFootprintWeight(const Paint::BrushSettings& brush, float nx, float ny);
+float uiBrushFootprintBoundScale(const Paint::BrushSettings& brush);
+float uiBrushFootprintDistNorm(const Paint::BrushSettings& brush, float nx, float ny);
 
 namespace {
 // Grab-family (Grab/Elastic/SnakeHook) cursor-follow ratio. FIXED on purpose — the
@@ -1505,9 +1508,26 @@ void ensureSculptWetClaySized(SceneUI::SculptWetClayState& wet,
         wet.object_name = objectName;
         wet.cache_revision = cache.revision;
         wet.wetness.assign(vertexCount, 0.0f);
+        wet.flow_anchor.assign(vertexCount, Vec3(0.0f, 0.0f, 0.0f));
+        wet.flow_normal.assign(vertexCount, Vec3(0.0f, 1.0f, 0.0f));
         wet.active_list.clear();
         wet.has_any = false;
     }
+}
+
+// Smooth (averaged) shading normal of an editable-cache vertex, read from its incident
+// triangle corner normals. Used to anchor a wet vertex's flow direction at wetting time.
+inline Vec3 editableVertexNormal(const SceneUI::EditableMeshCache& cache, size_t vid) {
+    if (vid >= cache.vertices.size()) {
+        return Vec3(0.0f, 1.0f, 0.0f);
+    }
+    Vec3 nsum(0.0f, 0.0f, 0.0f);
+    for (const auto& ref : cache.vertices[vid].refs) {
+        if (ref.triangle) {
+            nsum += ref.triangle->getOriginalVertexNormal(ref.corner);
+        }
+    }
+    return safeNormalizeVec3(nsum, Vec3(0.0f, 1.0f, 0.0f));
 }
 
 // Per-vertex flow mobility for wet-clay gravity flow. Homogeneous = 1.0 everywhere
@@ -2535,6 +2555,7 @@ struct SIMDSculptParams {
     Vec3 tangent;
     Vec3 bitangent;
     float radius;
+    float cullRadius = 0.0f; // geometric inclusion radius (≥ radius for shaped brushes); 0 ⇒ use radius
     float falloff;
     float strokeDistance;
     float strokeSpacing;
@@ -2615,6 +2636,10 @@ std::vector<EvaluatedSculptVertex> evaluateActiveSculptVerticesSIMD(
     __m256 hn_z = _mm256_set1_ps(params.normal.z);
 
     __m256 radius_vec = _mm256_set1_ps(params.radius);
+    // Geometric inclusion radius — widened for non-circular/aspect shapes so their corners
+    // (e.g. a square's, at sqrt(2)·radius) survive the cull and reach the per-vertex footprint
+    // test in the scalar tail. Falloff/UV normalization still use the nominal params.radius.
+    __m256 cull_vec = _mm256_set1_ps(params.cullRadius > params.radius ? params.cullRadius : params.radius);
 
     // Repeated stroke damping factor
     float damp_factor = computeRepeatedStrokeDamping(
@@ -2726,7 +2751,7 @@ std::vector<EvaluatedSculptVertex> evaluateActiveSculptVerticesSIMD(
             heightOver = _mm256_max_ps(_mm256_setzero_ps(), heightOver);
             __m256 planar_distance = _mm256_sqrt_ps(_mm256_add_ps(_mm256_mul_ps(heightOver, heightOver), planarDistanceSq));
 
-            __m256 in_radius_mask = _mm256_cmp_ps(planar_distance, radius_vec, _CMP_LE_OQ);
+            __m256 in_radius_mask = _mm256_cmp_ps(planar_distance, cull_vec, _CMP_LE_OQ);
 
             __m256 penalty = _mm256_set1_ps(1.0f);
             if (params.frontFacesOnly) {
@@ -2827,6 +2852,7 @@ std::vector<EvaluatedSculptVertex> evaluateActiveSculptVerticesSIMD(
             alignas(32) float pox_res[8];
             alignas(32) float poy_res[8];
             alignas(32) float poz_res[8];
+            alignas(32) float pen_res[8];
 
             _mm256_store_ps(w_res, weight);
             _mm256_store_ps(h_res, height_from_plane);
@@ -2838,6 +2864,7 @@ std::vector<EvaluatedSculptVertex> evaluateActiveSculptVerticesSIMD(
             _mm256_store_ps(pox_res, pox);
             _mm256_store_ps(poy_res, poy);
             _mm256_store_ps(poz_res, poz);
+            _mm256_store_ps(pen_res, penalty);
 
             for (size_t k = 0; k < count; ++k) {
                 if (!(activeBits & (1 << k))) {
@@ -2849,7 +2876,13 @@ std::vector<EvaluatedSculptVertex> evaluateActiveSculptVerticesSIMD(
                 if (params.useMask && !fastSIMD) {
                     float nxAlpha = (pox_res[k] * params.tangent.x + poy_res[k] * params.tangent.y + poz_res[k] * params.tangent.z) / params.radius;
                     float nyAlpha = (pox_res[k] * params.bitangent.x + poy_res[k] * params.bitangent.y + poz_res[k] * params.bitangent.z) / params.radius;
-                    final_w *= uiSampleBrushMask(params.brushSettings, nxAlpha, nyAlpha);
+                    // Shaped/aspect/alpha brush: REPLACE the circular radial profile
+                    // (weight_base × falloff_val, baked into w_res) with the footprint weight so
+                    // the deform matches the Alpha Preview. Front-face penalty + repeated-stroke
+                    // damping are preserved (penalty × damp_factor). Circle + round preset takes
+                    // the fastSIMD path above and never reaches here, so it is unchanged.
+                    final_w = pen_res[k] * damp_factor *
+                              uiSampleBrushFootprintWeight(params.brushSettings, nxAlpha, nyAlpha);
                 }
 
                 if (std::isfinite(final_w) && final_w > 1e-5f &&
@@ -2951,7 +2984,7 @@ std::vector<EvaluatedSculptVertex> evaluateActiveSculptVerticesSIMD(
             heightOver = _mm256_max_ps(_mm256_setzero_ps(), heightOver);
             __m256 planar_distance = _mm256_sqrt_ps(_mm256_add_ps(_mm256_mul_ps(heightOver, heightOver), planarDistanceSq));
 
-            __m256 in_radius_mask = _mm256_cmp_ps(planar_distance, radius_vec, _CMP_LE_OQ);
+            __m256 in_radius_mask = _mm256_cmp_ps(planar_distance, cull_vec, _CMP_LE_OQ);
 
             __m256 penalty = _mm256_set1_ps(1.0f);
             if (params.frontFacesOnly) {
@@ -3052,6 +3085,7 @@ std::vector<EvaluatedSculptVertex> evaluateActiveSculptVerticesSIMD(
             alignas(32) float pox_res[8];
             alignas(32) float poy_res[8];
             alignas(32) float poz_res[8];
+            alignas(32) float pen_res[8];
 
             _mm256_store_ps(w_res, weight);
             _mm256_store_ps(h_res, height_from_plane);
@@ -3063,6 +3097,7 @@ std::vector<EvaluatedSculptVertex> evaluateActiveSculptVerticesSIMD(
             _mm256_store_ps(pox_res, pox);
             _mm256_store_ps(poy_res, poy);
             _mm256_store_ps(poz_res, poz);
+            _mm256_store_ps(pen_res, penalty);
 
             for (size_t k = 0; k < count; ++k) {
                 if (!(activeBits & (1 << k))) {
@@ -3074,7 +3109,13 @@ std::vector<EvaluatedSculptVertex> evaluateActiveSculptVerticesSIMD(
                 if (params.useMask && !fastSIMD) {
                     float nxAlpha = (pox_res[k] * params.tangent.x + poy_res[k] * params.tangent.y + poz_res[k] * params.tangent.z) / params.radius;
                     float nyAlpha = (pox_res[k] * params.bitangent.x + poy_res[k] * params.bitangent.y + poz_res[k] * params.bitangent.z) / params.radius;
-                    final_w *= uiSampleBrushMask(params.brushSettings, nxAlpha, nyAlpha);
+                    // Shaped/aspect/alpha brush: REPLACE the circular radial profile
+                    // (weight_base × falloff_val, baked into w_res) with the footprint weight so
+                    // the deform matches the Alpha Preview. Front-face penalty + repeated-stroke
+                    // damping are preserved (penalty × damp_factor). Circle + round preset takes
+                    // the fastSIMD path above and never reaches here, so it is unchanged.
+                    final_w = pen_res[k] * damp_factor *
+                              uiSampleBrushFootprintWeight(params.brushSettings, nxAlpha, nyAlpha);
                 }
 
                 if (std::isfinite(final_w) && final_w > 1e-5f &&
@@ -5263,7 +5304,10 @@ bool SceneUI::repairSculptEntryShadingNormals(UIContext& ctx, const std::string&
     return true;
 }
 
-void SceneUI::depositWetClay(const std::vector<int>& vertexIds, float wetnessInject) {
+void SceneUI::depositWetClay(const std::vector<int>& vertexIds,
+                            const std::vector<Vec3>& anchors,
+                            float wetnessInject,
+                            const std::vector<float>* injectWeights) {
     if (vertexIds.empty()) {
         return;
     }
@@ -5273,15 +5317,36 @@ void SceneUI::depositWetClay(const std::vector<int>& vertexIds, float wetnessInj
     }
     ensureSculptWetClaySized(sculpt_wet_clay_state, editable_mesh_cache, sculpt_mode_state.active_target_name);
     auto& wet = sculpt_wet_clay_state;
-    for (const int vid : vertexIds) {
+    const bool haveAnchors = anchors.size() == vertexIds.size();
+    // Optional per-vertex feather (1 in the brush core → 0 at the rim). Without it the
+    // footprint injects a FLAT wetness, so the brush boundary is a hard wet/dry cliff:
+    // fully-mobile clay sits right next to a frozen ring, and at high fluidity (Water,
+    // flow≈1) the flow piles material against that ring into a sharp lower ridge. The
+    // feather turns the boundary into a gradient so the mobility tapers off smoothly.
+    const bool haveWeights = injectWeights && injectWeights->size() == vertexIds.size();
+    for (size_t k = 0; k < vertexIds.size(); ++k) {
+        const int vid = vertexIds[k];
         if (vid < 0 || static_cast<size_t>(vid) >= wet.wetness.size()) {
             continue;
         }
-        float& w = wet.wetness[static_cast<size_t>(vid)];
-        if (w <= 1e-4f) {
-            wet.active_list.push_back(vid); // newly wet → joins the active set
+        const size_t vIndex = static_cast<size_t>(vid);
+        const float vInject = haveWeights
+            ? inject * std::clamp((*injectWeights)[k], 0.0f, 1.0f)
+            : inject;
+        // Below the evict threshold the vertex would dry out the very next frame, so
+        // adding it just churns the active set — skip it and leave the rim un-wetted.
+        if (vInject < 0.02f) {
+            continue;
         }
-        w = (std::max)(w, inject);
+        float& w = wet.wetness[vIndex];
+        if (w <= 1e-4f) {
+            // Newly wet → joins the active set; anchor the flow at the PRE-deposit surface
+            // (the wall) and capture its normal so the deposited protrusion can flow down it.
+            wet.active_list.push_back(vid);
+            wet.flow_anchor[vIndex] = haveAnchors ? anchors[k] : editable_mesh_cache.vertex_positions[vIndex];
+            wet.flow_normal[vIndex] = editableVertexNormal(editable_mesh_cache, vIndex);
+        }
+        w = (std::max)(w, vInject);
     }
     wet.has_any = !wet.active_list.empty();
 }
@@ -5362,8 +5427,13 @@ void SceneUI::stepWetClayField(UIContext& ctx) {
                     // Carry MOST of the source wetness into the downhill path so the front
                     // stays wet enough to reach the bottom of a tall/steep surface instead
                     // of drying out partway and piling at the wet/dry boundary. Drying +
-                    // the yield gate (flats stop it) still bound the spread.
-                    wet.wetness[static_cast<size_t>(nb)] = (std::max)(wet.wetness[static_cast<size_t>(nb)], wi * 0.9f);
+                    // the yield gate (flats stop it) still bound the spread. Anchor the new
+                    // front vertex at its CURRENT surface (no protrusion yet) so material
+                    // flowing into it from above builds a fresh bulge there.
+                    const size_t nbI = static_cast<size_t>(nb);
+                    wet.wetness[nbI] = (std::max)(wet.wetness[nbI], wi * 0.9f);
+                    wet.flow_anchor[nbI] = cache.vertex_positions[nbI];
+                    wet.flow_normal[nbI] = editableVertexNormal(cache, nbI);
                     frontAdds.push_back(nb);
                 }
             }
@@ -5406,45 +5476,65 @@ void SceneUI::stepWetClayField(UIContext& ctx) {
             const auto curIt = oldPos.find(vid);
             const Vec3 cur = curIt != oldPos.end() ? curIt->second : cache.vertex_positions[vIndex];
             const float hCur = cur.dot(localUp);
+            const Vec3 nI = wet.flow_normal[vIndex];
+            const Vec3 anchorI = wet.flow_anchor[vIndex];
+            const float mI = (std::max)(0.0f, (cur - anchorI).dot(nI)); // protrusion above the wall
             const float mobSelf = (flow > 0.0f) ? wetClayFlowMobility(cur, hetero, heteroScale) : 1.0f;
 
             Vec3 avg(0.0f, 0.0f, 0.0f);
             int n = 0;
-            float netFlux = 0.0f;   // + = receives (rises), - = sheds (sinks); conservative per edge
-            float maxExcess = 0.0f; // local relief past yield, for the stability clamp
+            // Per-EDGE symmetric flux. flowRate is small so the TOTAL a vertex sheds to ALL
+            // its lower neighbours (rate * degree * m) stays well under its own material m —
+            // this is conservative (each edge moves the same amount both ways) and CANNOT
+            // create mass. (The runaway spikes were the old version handing EACH lower
+            // neighbour the FULL donor material, multiplying it by the neighbour count.)
+            const float flowRate = flow * dt * 2.0f;
+            float inflow = 0.0f, outflow = 0.0f;
+            // Geometric slope-limiter ceiling: the highest this vertex may sit ALONG ITS OWN
+            // NORMAL while keeping the slope to EVERY neighbour (wet or dry) under ~kFlowMaxSlope:1.
+            // The dry downhill neighbour at the flow front pins this low, so material driven down
+            // the wall cannot pile into a vertical cliff/ridge there. (4.4's ceiling only looked at
+            // the tallest WET neighbour, which is uphill — it never restrained the front, so the
+            // directional pile-up against the dry boundary survived.) Built from neighbour
+            // positions, so it is independent of wetness/anchors.
+            constexpr float kFlowMaxSlope = 1.5f;
+            float slopeCeilN = 1e30f;
             for (const int nb : neighbors) {
                 if (nb < 0 || static_cast<size_t>(nb) >= vertexCount) {
                     continue;
                 }
+                const size_t nbI = static_cast<size_t>(nb);
                 const auto it = oldPos.find(nb);
-                const Vec3 pj = (it != oldPos.end()) ? it->second : cache.vertex_positions[static_cast<size_t>(nb)];
+                const Vec3 pj = (it != oldPos.end()) ? it->second : cache.vertex_positions[nbI];
                 avg += pj;
                 ++n;
                 if (flow > 0.0f) {
-                    const float d = pj.dot(localUp) - hCur; // > 0 = neighbour is higher
-                    const float ad = std::abs(d);
-                    if (ad > yieldDrop) { // Phase 3 yield: hold gentle slopes
-                        const float excess = ad - yieldDrop;
-                        // Conservative downhill transport: each edge's flux is scaled by the
-                        // HIGHER endpoint's wetness + mobility, so both endpoints compute the
-                        // SAME magnitude (mass is MOVED, not created/destroyed) and dry clay
-                        // stops flowing. Heterogeneous mobility makes regions creep at
-                        // different rates ("different densities inside the mud").
-                        if (d > 0.0f) {
-                            const float wj = wet.wetness[static_cast<size_t>(nb)];
-                            netFlux += wj * wetClayFlowMobility(pj, hetero, heteroScale) * excess;
-                        } else {
-                            netFlux -= w * mobSelf * excess;
-                        }
-                        if (excess > maxExcess) {
-                            maxExcess = excess;
+                    // Slope ceiling from this neighbour: its height along nI plus the lateral
+                    // (in-plane) gap times the max slope. min over all neighbours = binding limit.
+                    const Vec3 d = pj - cur;
+                    const float along = d.dot(nI);
+                    const float inPlane = (d - nI * along).length();
+                    slopeCeilN = (std::min)(slopeCeilN, pj.dot(nI) + kFlowMaxSlope * inPlane);
+                    // Flow transports the NORMAL-protrusion (the deposited material), not the
+                    // gravity-height — so it works on a vertical wall, where the bump sticks out
+                    // along the normal and has no Y-height variation. Only WET neighbours exchange
+                    // material; the front-expansion wets the downhill path ahead so the blob
+                    // slides down it. Each edge is scaled by the HIGHER (donor) endpoint's
+                    // wetness + mobility + available material → dry/empty clay stops flowing.
+                    if (wet.wetness[nbI] > 1e-4f) {
+                        const float mJ = (std::max)(0.0f, (pj - wet.flow_anchor[nbI]).dot(wet.flow_normal[nbI]));
+                        const float dY = pj.dot(localUp) - hCur; // > 0 = neighbour is higher
+                        if (dY > yieldDrop) { // higher neighbour drains its material DOWN into us
+                            inflow += flowRate * wet.wetness[nbI] * wetClayFlowMobility(pj, hetero, heteroScale) * mJ;
+                        } else if (-dY > yieldDrop) { // we drain our material down into a lower neighbour
+                            outflow += flowRate * w * mobSelf * mI;
                         }
                     }
                 }
             }
             if (n > 0) {
                 avg /= static_cast<float>(n);
-                const bool flowing = (flow > 0.0f && maxExcess > 0.0f);
+                const bool flowing = (flow > 0.0f && (inflow > 0.0f || outflow > 0.0f));
                 // Phase 1 — settle (surface tension): full-vector Laplacian toward the
                 // neighbour average. Coefficient < 0.5 (stable) and scaled by wetness, so
                 // settling fades as the clay dries. Phase 4 cohesion: a FLOWING vertex gets
@@ -5454,14 +5544,44 @@ void SceneUI::stepWetClayField(UIContext& ctx) {
                 const float settleCoef = settle + (flowing ? cohesion * flow : 0.0f);
                 const float lambdaSettle = std::clamp(w * settleCoef * dt * 8.0f, 0.0f, 0.5f);
                 Vec3 newPos = cur + (avg - cur) * lambdaSettle;
-                // Phase 4 — advective gravity flow: move along the gravity axis by the net
-                // (conservative) downhill flux so the mud descends as a BODY and pools below,
-                // clamped to half the local relief so it can't overshoot / oscillate.
-                if (flow > 0.0f && maxExcess > 0.0f) {
-                    float disp = flow * dt * 6.0f * netFlux;
-                    const float lim = 0.5f * maxExcess;
-                    disp = std::clamp(disp, -lim, lim);
-                    newPos += localUp * disp;
+                // Phase 4 — advective gravity flow along the NORMAL: shift this vertex's
+                // protrusion by the net (down-in − down-out) flux so the blob descends as a
+                // BODY and pools below. Clamp the RESULT to [0, mMax] so material can never go
+                // negative or grow into a runaway spike, then move along the normal by the
+                // actual delta.
+                if (flowing) {
+                    const float mMax = (std::max)(avgEdgeLen * 4.0f, 1e-4f);
+                    const float targetM = std::clamp(mI + (inflow - outflow), 0.0f, mMax);
+                    // Scale the protrusion step by this vertex's own wetness so a drying vertex
+                    // tapers its motion to a stop instead of getting one last kick the instant
+                    // before it locks. That final kick — fired against neighbours that have
+                    // ALREADY dried and frozen — was what flung the thin ribbons/spikes off the
+                    // wall (the moving vertex stretched the incident triangles into splinters).
+                    newPos += nI * ((targetM - mI) * w);
+                    // Geometric slope limiter: if the moved vertex now sits above the
+                    // neighbour-derived ceiling along its normal, pull it back down. This is what
+                    // stops the directional pile-up — at the flow front the dry downhill neighbour
+                    // pins the ceiling, so the descending material spreads down the slope instead
+                    // of stacking into the sharp line against the dry boundary. Lets the tongue
+                    // descend as a 45°-ish ramp; the residual is smoothed by settle.
+                    const float hN = newPos.dot(nI);
+                    if (hN > slopeCeilN) {
+                        newPos -= nI * (hN - slopeCeilN);
+                    }
+                }
+                // Stretch guard (kills the remaining sharp ribbons): a vertex must not pull away
+                // from its neighbour centroid by more than a small multiple of the local edge
+                // length. When surrounding verts dry and freeze while this one keeps flowing the
+                // incident triangles stretch into thin spikes; clamping the deviation from the
+                // centroid keeps the surface coherent (C0) and lets the whole tongue descend as a
+                // body rather than spitting out splinters. Cheap, runs only for flowing clay.
+                if (flow > 0.0f && avgEdgeLen > 0.0f) {
+                    const float maxDev = avgEdgeLen * 2.0f;
+                    const Vec3 devFromAvg = newPos - avg;
+                    const float devLen = devFromAvg.length();
+                    if (devLen > maxDev && devLen > 1e-6f) {
+                        newPos = avg + devFromAvg * (maxDev / devLen);
+                    }
                 }
                 if (isFiniteVec3(newPos) &&
                     (newPos - cache.vertex_positions[vIndex]).length_squared() > 1e-16f) {
@@ -5824,35 +5944,30 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     if (modifierStack &&
         hasEnabledSubdivisionPreview(*modifierStack) &&
         ctx.scene.base_mesh_cache.find(objectName) != ctx.scene.base_mesh_cache.end()) {
-        const MeshModifiers::ModifierStack evalStack =
-            buildSubdivisionPreviewEvaluationStack(
-                *modifierStack,
-                isInteractiveSubdivisionPreviewActiveForObject(objectName));
-        size_t expectedTriangleCount = ctx.scene.base_mesh_cache[objectName].size();
-        for (const auto& mod : evalStack.modifiers) {
-            if (!mod.enabled) {
-                continue;
-            }
-            if (mod.type != MeshModifiers::ModifierType::FlatSubdivision &&
-                mod.type != MeshModifiers::ModifierType::SmoothSubdivision) {
-                continue;
-            }
-            for (int level = 0; level < mod.levels; ++level) {
-                if (expectedTriangleCount > ((std::numeric_limits<size_t>::max)() / 4u)) {
-                    expectedTriangleCount = (std::numeric_limits<size_t>::max)();
-                    break;
-                }
-                expectedTriangleCount *= 4u;
-            }
-        }
-
+        // Re-evaluate the display mesh ONLY when the subdivision actually changed. The old
+        // test compared the cached triangle count to base*4^levels, but Catmull-Clark /
+        // quad-recovery subdivision does not produce exactly base*4^levels triangles, so the
+        // count never matched and this re-evaluated EVERY frame after a subdivide — bumping the
+        // cache revision, re-uploading the GPU edit overlay (m_interactiveViewport.dirty), and
+        // raising g_bvh_rebuild_pending, which pinned the viewport in a permanent re-render
+        // (constant CPU until a Rendered round-trip released the overlay). The signature folds
+        // the modifier params + cage vertex positions, so it is stable in steady state and
+        // changes every frame only during an actual cage drag (where re-eval IS wanted).
+        const std::size_t subdivSignature = computeSubdivisionPreviewSignature(ctx, objectName);
+        const bool signatureCurrent =
+            editable_subdiv_display_signature_valid &&
+            editable_subdiv_display_signature_object == objectName &&
+            editable_subdiv_display_signature == subdivSignature;
         const bool previewOutOfDate =
             cacheIt == mesh_cache.end() ||
             cacheIt->second.empty() ||
-            cacheIt->second.size() != expectedTriangleCount;
+            !signatureCurrent;
         if (previewOutOfDate) {
             refreshEditableDisplayMeshFromBase(ctx, objectName, false);
             cacheIt = mesh_cache.find(objectName);
+            editable_subdiv_display_signature = subdivSignature;
+            editable_subdiv_display_signature_object = objectName;
+            editable_subdiv_display_signature_valid = true;
         }
     }
     if (cacheIt == mesh_cache.end() || cacheIt->second.empty()) {
@@ -9522,6 +9637,19 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         return;
     }
 
+    // Idle early-out: with no stroke running and the left button neither held nor just
+    // clicked this frame, there is nothing to sculpt — so skip the per-frame CPU picking
+    // sync + scene-BVH raycast + PBVH refine below. Those ran EVERY frame even with the
+    // cursor parked off the object (the mouse-state check used to come only AFTER them),
+    // which was a constant idle CPU draw. The brush PREVIEW does its own cached raycast, so
+    // the cursor ring is unaffected. (active==false here ⇒ no stroke to finish.)
+    if (!overrideHitPoint &&
+        !sculpt_stroke_state.active &&
+        !ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        !ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        return;
+    }
+
     auto meshEntryIt = mesh_cache.find(objectName);
     const bool objectHadPendingCpuSync = objects_needing_cpu_sync.count(objectName) > 0;
     if (!sculpt_stroke_state.active &&
@@ -9795,14 +9923,43 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
     const float clayBrushStrength = computeSafeClayStrength(brushStrength, brushFlow);
     const float clayRadiusCompensation = computeClayRadiusCompensation(radiusWorld);
 
-    // Tangent frame for alpha mask UV sampling (nx/ny in brush-local [-1,1] space)
-    Vec3 tangentWorld = std::abs(hitNormalWorld.y) < 0.95f
-        ? safeNormalizeVec3(hitNormalWorld.cross(Vec3(0, 1, 0)), Vec3(1, 0, 0))
-        : safeNormalizeVec3(hitNormalWorld.cross(Vec3(1, 0, 0)), Vec3(0, 0, 1));
-    Vec3 bitangentWorld = safeNormalizeVec3(hitNormalWorld.cross(tangentWorld), Vec3(0, 0, 1));
-    if (!isFiniteVec3(tangentWorld) || !isFiniteVec3(bitangentWorld)) {
-        tangentWorld = Vec3(1, 0, 0);
-        bitangentWorld = Vec3(0, 0, 1);
+    // Tangent frame for alpha-mask / shape UV sampling (nx/ny in brush-local [-1,1] space).
+    // VIEW-STABLE: derived from the camera right/up projected onto the surface tangent plane,
+    // NOT from normal×worldUp. The old frame spun with the surface normal, so a directional
+    // shape or alpha mask rotated arbitrarily as you moved across a curved surface (invisible
+    // for a circle, wrong for Rectangle/Capsule/Flat and any alpha texture). Projecting the
+    // camera axes keeps the footprint screen-stable; alpha_rotation_degrees still offsets it.
+    Vec3 tangentWorld;
+    Vec3 bitangentWorld;
+    {
+        Vec3 camRight(1.0f, 0.0f, 0.0f);
+        Vec3 camUp(0.0f, 1.0f, 0.0f);
+        if (ctx.scene.camera) {
+            const Vec3 fwdRaw = ctx.scene.camera->lookat - ctx.scene.camera->lookfrom;
+            const Vec3 fwd = fwdRaw.length_squared() > 1e-12f
+                ? fwdRaw.normalize() : Vec3(0.0f, 0.0f, -1.0f);
+            Vec3 r = fwd.cross(ctx.scene.camera->vup);
+            if (r.length_squared() < 1e-12f) r = Vec3(1.0f, 0.0f, 0.0f);
+            camRight = r.normalize();
+            camUp = camRight.cross(fwd).normalize();
+        }
+        // Project the camera right onto the tangent plane; fall back to camera up at grazing
+        // angles, then to the old normal-cross method if both are parallel to the normal.
+        Vec3 t = camRight - hitNormalWorld * camRight.dot(hitNormalWorld);
+        if (t.length_squared() < 1e-8f) {
+            t = camUp - hitNormalWorld * camUp.dot(hitNormalWorld);
+        }
+        if (t.length_squared() < 1e-8f) {
+            t = std::abs(hitNormalWorld.y) < 0.95f
+                ? hitNormalWorld.cross(Vec3(0.0f, 1.0f, 0.0f))
+                : hitNormalWorld.cross(Vec3(1.0f, 0.0f, 0.0f));
+        }
+        tangentWorld = safeNormalizeVec3(t, Vec3(1.0f, 0.0f, 0.0f));
+        bitangentWorld = safeNormalizeVec3(hitNormalWorld.cross(tangentWorld), Vec3(0.0f, 0.0f, 1.0f));
+        if (!isFiniteVec3(tangentWorld) || !isFiniteVec3(bitangentWorld)) {
+            tangentWorld = Vec3(1.0f, 0.0f, 0.0f);
+            bitangentWorld = Vec3(0.0f, 0.0f, 1.0f);
+        }
     }
 
     Vec3 planeHit = hitPoint;
@@ -9901,6 +10058,24 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         inverseTransform.transform_point(sanitizeVec3(sculpt_stroke_state.start_world_hit, hitPoint)),
         localHitPoint);
     const Vec3 localPrevHitPoint = sanitizeVec3(inverseTransform.transform_point(lastStrokeHit), localHitPoint);
+
+    // Advanced brush footprint (shape / aspect / roundness / rotation / alpha). The SIMD
+    // evaluator reads these off params.brushSettings; follow_stroke_angle adds the live stroke
+    // direction (measured in the surface tangent frame) to the rotation so directional shapes
+    // trail the cursor like in mesh paint. boundScale widens the gather + cull so non-circular
+    // footprints aren't clipped to the radius circle. Circle@aspect1 ⇒ boundScale 1 (unchanged).
+    Paint::BrushSettings effectiveBrush = sculpt_mode_state.brush;
+    if (effectiveBrush.follow_stroke_angle) {
+        const float su = strokeStepWorld.dot(tangentWorld);
+        const float sv = strokeStepWorld.dot(bitangentWorld);
+        if (su * su + sv * sv > 1e-12f) {
+            effectiveBrush.alpha_rotation_degrees +=
+                std::atan2(sv, su) * (180.0f / 3.14159265358979f);
+        }
+    }
+    const float brushFootprintBoundScale = uiBrushFootprintBoundScale(effectiveBrush);
+    const float brushCullRadiusWorld = radiusWorld * brushFootprintBoundScale;
+
     // Candidate gathering now prefers PBVH traversal for broad-phase culling,
     // but the actual brush solve remains vertex-based for consistent quality.
     // Capsule sweep: non-Grab tool'larda toplama küresini [prevHit, currentHit]
@@ -9920,10 +10095,12 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         candidateCenterLocal = localGrabStartPoint;
         candidateCollectionRadius = localRadius;
     } else {
+        // Widen the additive gather so shaped/elongated footprints reach their corners.
+        const float gatherLocalRadius = localRadius * brushFootprintBoundScale;
         candidateCenterLocal = (localClaySamplePoint + localPrevHitPoint) * 0.5f;
         const float halfSeg = (localClaySamplePoint - localPrevHitPoint).length() * 0.5f;
-        const float cappedHalf = (std::min)(halfSeg, localRadius * 2.0f);
-        candidateCollectionRadius = localRadius + cappedHalf;
+        const float cappedHalf = (std::min)(halfSeg, gatherLocalRadius * 2.0f);
+        candidateCollectionRadius = gatherLocalRadius + cappedHalf;
     }
     // Grab/Elastic drive the whole stroke from the FIXED primed weight set (rebuilt
     // from grab_weights_by_vertex below), so once primed the spatial gather result is
@@ -10188,13 +10365,152 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
     std::vector<int> strokeTouchedVertexIds = sculptCandidateVertexIds;
     strokeTouchedVertexIds.reserve(sculptCandidateVertexIds.size() * 4 + 32);
 
+    // Per-vertex wetness feather: 1 in the brush core, smoothly ramping to 0 across the
+    // outer band of the footprint. Injecting a FLAT wetness makes the brush boundary a hard
+    // wet/dry cliff — fully-mobile clay against a frozen ring — and at high fluidity the flow
+    // piles material into a sharp ridge along it (worst with Water, flow≈1, on a vertical
+    // wall). Feathering the injected wetness turns that boundary into a gradient so the clay's
+    // mobility tapers off instead of stopping at a wall. Uses planar (cylinder) distance from
+    // the brush hit, matching the footprint-clip test the candidate gather already uses.
+    // Brush centers (primary hit + each enabled mirror plane) in WORLD space, used by the
+    // wetness feather. A deposited vertex can belong to ANY of these footprints (the mirror
+    // side included), so the feather must be measured against the NEAREST center. Measuring
+    // only the primary hit zeroed the feather for mirror-side verts (planarDist ≫ radius →
+    // feather 0 → vInject < threshold → skipped), which silently stopped the mirror side from
+    // ever getting wet — i.e. mirror "didn't support" the wet system.
+    std::vector<std::pair<Vec3, Vec3>> brushWetCenters;
+    brushWetCenters.emplace_back(hitPoint, hitNormalWorld);
+    if (sculpt_mode_state.mirror_x || sculpt_mode_state.mirror_y || sculpt_mode_state.mirror_z) {
+        const Matrix4x4 normalMtxW = inverseTransform.transpose();
+        for (int mirrorBits = 1; mirrorBits < 8; ++mirrorBits) {
+            const bool do_mx = (mirrorBits & 1) && sculpt_mode_state.mirror_x;
+            const bool do_my = (mirrorBits & 2) && sculpt_mode_state.mirror_y;
+            const bool do_mz = (mirrorBits & 4) && sculpt_mode_state.mirror_z;
+            if (!do_mx && !do_my && !do_mz) {
+                continue;
+            }
+            Vec3 localHit = sanitizeVec3(inverseTransform.transform_point(hitPoint), Vec3(0.0f, 0.0f, 0.0f));
+            if (do_mx) localHit.x = -localHit.x;
+            if (do_my) localHit.y = -localHit.y;
+            if (do_mz) localHit.z = -localHit.z;
+            const Vec3 mCenter = sanitizeVec3(transform.transform_point(localHit), hitPoint);
+            Vec3 localNormal = sanitizeVec3(inverseTransform.transform_vector(hitNormalWorld), hitNormalWorld);
+            const float lnLen = localNormal.length();
+            if (lnLen > 1e-8f) localNormal = localNormal / lnLen;
+            if (do_mx) localNormal.x = -localNormal.x;
+            if (do_my) localNormal.y = -localNormal.y;
+            if (do_mz) localNormal.z = -localNormal.z;
+            Vec3 mNormal = sanitizeVec3(normalMtxW.transform_vector(localNormal), hitNormalWorld);
+            const float mnLen = mNormal.length();
+            mNormal = mnLen > 1e-8f ? mNormal / mnLen : hitNormalWorld;
+            brushWetCenters.emplace_back(mCenter, mNormal);
+        }
+    }
+    auto wetClayFeatherWeight = [&](int vid) -> float {
+        if (vid < 0 || static_cast<size_t>(vid) >= editable_mesh_cache.vertices.size() ||
+            radiusWorld <= 1e-6f) {
+            return 1.0f;
+        }
+        const Vec3 worldPos = sanitizeVec3(
+            transform.transform_point(editable_mesh_cache.vertices[static_cast<size_t>(vid)].local_position),
+            hitPoint);
+        // Max feather over all footprints → a vertex in ANY footprint's core stays fully wet,
+        // only the rims feather. Fixes the mirror side being skipped.
+        float best = 0.0f;
+        for (const auto& c : brushWetCenters) {
+            const Vec3 toV = worldPos - c.first;
+            const float h = toV.dot(c.second);
+            const float planarDist = (toV - c.second * h).length();
+            if (!std::isfinite(planarDist)) {
+                continue;
+            }
+            const float t = saturateFloat(planarDist / radiusWorld);
+            const float s = saturateFloat((t - 0.55f) / 0.45f);
+            best = (std::max)(best, 1.0f - s * s * (3.0f - 2.0f * s));
+        }
+        return best;
+    };
+
     // Phase 3 — "Water" brush: paint WETNESS onto the footprint without depositing any
     // geometry, re-softening dried clay so settle/flow act on it again (like adding water
     // in pottery). Short-circuit before the deposit so no clay is added; per-frame
     // stepWetClayField does the rest. Keep the stroke bookkeeping current so the dab
     // scheduler keeps advancing along the stroke.
     if (sculpt_mode_state.wet_clay_enabled && sculpt_mode_state.wet_clay_water_only) {
-        depositWetClay(strokeTouchedVertexIds, sculpt_mode_state.wet_clay_wetness);
+        // Paint feathered wetness around ONE brush center (local + world + surface normal).
+        // Factored out so the primary hit AND every mirror plane share it — exactly like the
+        // Mask brush's paintMaskAt. (Water used to return before the mirror passes, so it never
+        // mirrored; this restores symmetry for the wet field.) No geometry deposit → empty
+        // anchors → settle re-softens. Feather so the rim doesn't leave a frozen cliff for the
+        // (highly mobile) water to ridge against.
+        auto wetPaintAt = [&](const Vec3& localCenter, const Vec3& worldCenter,
+                              const Vec3& worldNormal) {
+            const std::vector<int> cands = collectSculptCandidateVerticesWithPBVHFallback(
+                sculpt_pbvh, editable_mesh_cache, localCenter, localRadius);
+            if (cands.empty()) {
+                return;
+            }
+            std::vector<int> ids;
+            std::vector<float> feather;
+            ids.reserve(cands.size());
+            feather.reserve(cands.size());
+            for (const int vid : cands) {
+                if (vid < 0 || static_cast<size_t>(vid) >= editable_mesh_cache.vertex_positions.size()) {
+                    continue;
+                }
+                const Vec3 worldPos = sanitizeVec3(
+                    transform.transform_point(editable_mesh_cache.vertex_positions[static_cast<size_t>(vid)]),
+                    worldCenter);
+                const Vec3 toV = worldPos - worldCenter;
+                const float h = toV.dot(worldNormal);
+                const float planarDist = (toV - worldNormal * h).length();
+                if (!std::isfinite(planarDist) || planarDist > radiusWorld) {
+                    continue;
+                }
+                if (sculpt_mode_state.front_faces_only && h < -(radiusWorld * 0.12f)) {
+                    continue;
+                }
+                const float t = saturateFloat(radiusWorld > 1e-6f ? planarDist / radiusWorld : 0.0f);
+                const float s = saturateFloat((t - 0.55f) / 0.45f);
+                ids.push_back(vid);
+                feather.push_back(1.0f - s * s * (3.0f - 2.0f * s));
+            }
+            if (!ids.empty()) {
+                depositWetClay(ids, {}, sculpt_mode_state.wet_clay_wetness, &feather);
+            }
+        };
+
+        wetPaintAt(localHitPoint, hitPoint, hitNormalWorld);
+
+        // Mirror planes: re-wet the mirrored center(s) too, mirroring the surface normal in
+        // object-local space exactly like the deformer/Mask mirror passes.
+        if (sculpt_mode_state.mirror_x || sculpt_mode_state.mirror_y || sculpt_mode_state.mirror_z) {
+            const Matrix4x4 normalMtx = inverseTransform.transpose();
+            for (int mirrorBits = 1; mirrorBits < 8; ++mirrorBits) {
+                const bool do_mx = (mirrorBits & 1) && sculpt_mode_state.mirror_x;
+                const bool do_my = (mirrorBits & 2) && sculpt_mode_state.mirror_y;
+                const bool do_mz = (mirrorBits & 4) && sculpt_mode_state.mirror_z;
+                if (!do_mx && !do_my && !do_mz) {
+                    continue;
+                }
+                Vec3 localHit = sanitizeVec3(inverseTransform.transform_point(hitPoint), Vec3(0.0f, 0.0f, 0.0f));
+                if (do_mx) localHit.x = -localHit.x;
+                if (do_my) localHit.y = -localHit.y;
+                if (do_mz) localHit.z = -localHit.z;
+                const Vec3 mWorldCenter = sanitizeVec3(transform.transform_point(localHit), hitPoint);
+                Vec3 localNormal = sanitizeVec3(inverseTransform.transform_vector(hitNormalWorld), hitNormalWorld);
+                const float lnLen = localNormal.length();
+                if (lnLen > 1e-8f) localNormal = localNormal / lnLen;
+                if (do_mx) localNormal.x = -localNormal.x;
+                if (do_my) localNormal.y = -localNormal.y;
+                if (do_mz) localNormal.z = -localNormal.z;
+                Vec3 mWorldNormal = sanitizeVec3(normalMtx.transform_vector(localNormal), hitNormalWorld);
+                const float mwnLen = mWorldNormal.length();
+                mWorldNormal = mwnLen > 1e-8f ? mWorldNormal / mwnLen : hitNormalWorld;
+                wetPaintAt(localHit, mWorldCenter, mWorldNormal);
+            }
+        }
+
         sculpt_stroke_state.changed = true;
         sculpt_stroke_state.last_world_hit = hitPoint;
         return;
@@ -10292,6 +10608,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         params.tangent = tangentWorld;
         params.bitangent = bitangentWorld;
         params.radius = radiusWorld;
+        params.cullRadius = brushCullRadiusWorld;
         params.falloff = falloff;
         params.strokeDistance = strokeDistance;
         params.strokeSpacing = strokeSpacing;
@@ -10301,7 +10618,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         params.falloffType = mesh_overlay_settings.proportional_falloff_type;
         params.activeTool = activeTool;
         params.useMask = true;
-        params.brushSettings = sculpt_mode_state.brush;
+        params.brushSettings = effectiveBrush;
 
         std::vector<EvaluatedSculptVertex> activeVerts = evaluateActiveSculptVerticesSIMD(
             sculptCandidateVertexIds,
@@ -10497,6 +10814,26 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
             const float mwnLen = mirWorldNormal.length();
             mirWorldNormal = mwnLen > 1e-8f ? mirWorldNormal / mwnLen : hitNormalWorld;
 
+            // Mirror the brush tangent frame the SAME way (local axis flip) so directional
+            // shapes / alpha masks become a true mirror image. Because the vertex offset,
+            // tangent and bitangent are all mirrored consistently, a mirror vertex's (nx,ny)
+            // equals its primary counterpart's → the SAME brushSettings yield the mirror image,
+            // no rotation flip needed. This is what lets the mirror SIMD pass apply the shape
+            // for free (just turn its footprint mask on below).
+            auto mirrorBrushAxis = [&](const Vec3& worldVec) -> Vec3 {
+                Vec3 lv = sanitizeVec3(inverseTransform.transform_vector(worldVec), worldVec);
+                const float l = lv.length();
+                if (l > 1e-8f) lv = lv / l;
+                if (do_mx) lv.x = -lv.x;
+                if (do_my) lv.y = -lv.y;
+                if (do_mz) lv.z = -lv.z;
+                Vec3 wv = sanitizeVec3(normalMtx.transform_vector(lv), worldVec);
+                const float wl = wv.length();
+                return wl > 1e-8f ? wv / wl : worldVec;
+            };
+            const Vec3 mirBrushTangent = mirrorBrushAxis(tangentWorld);
+            const Vec3 mirBrushBitangent = mirrorBrushAxis(bitangentWorld);
+
             // Mirror drag delta for Grab (flip each axis in local, then back to world).
             Vec3 mirWorldDrag = worldDragDelta;
             if (isGrabFamilyTool(activeTool)) {
@@ -10629,7 +10966,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
                 sculpt_pbvh,
                 editable_mesh_cache,
                 mirrorClaySampleCenter,
-                localRadius);
+                localRadius * brushFootprintBoundScale);
             // Re-seed persistent buffer for mirror candidates from the cache (frame-start).
             for (const int vid : mirrorCandidateVertexIds) {
                 if (vid >= 0 && static_cast<size_t>(vid) < editable_mesh_cache.vertex_positions.size()) {
@@ -10646,9 +10983,10 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
             params.center = mirWorldCenter;
             params.prevCenter = mirWorldPrevCenter;
             params.normal = mirWorldNormal;
-            params.tangent = strokeTangentWorld;
-            params.bitangent = strokeBitangentWorld;
+            params.tangent = mirBrushTangent;
+            params.bitangent = mirBrushBitangent;
             params.radius = radiusWorld;
+            params.cullRadius = brushCullRadiusWorld;
             params.falloff = falloff;
             params.strokeDistance = strokeDistance;
             params.strokeSpacing = strokeSpacing;
@@ -10657,8 +10995,11 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
             params.frontFacesOnly = sculpt_mode_state.front_faces_only;
             params.falloffType = mesh_overlay_settings.proportional_falloff_type;
             params.activeTool = activeTool;
-            params.useMask = false;
-            params.brushSettings = sculpt_mode_state.brush;
+            // Apply the brush footprint (shape/aspect/roundness/rotation/alpha) on the mirror
+            // too. Free: the mirror SIMD pass already runs; this just enables the scalar-tail
+            // mask. The mirrored tangent frame above makes it a correct mirror image.
+            params.useMask = true;
+            params.brushSettings = effectiveBrush;
 
             std::vector<EvaluatedSculptVertex> activeMirrorVerts = evaluateActiveSculptVerticesSIMD(
                 mirrorCandidateVertexIds,
@@ -11072,7 +11413,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
                 : radWorldCenter;
 
             const std::vector<int> radialCandidates = collectSculptCandidateVerticesWithPBVHFallback(
-                sculpt_pbvh, editable_mesh_cache, radLocalCenter, localRadius);
+                sculpt_pbvh, editable_mesh_cache, radLocalCenter, localRadius * brushFootprintBoundScale);
             for (const int vid : radialCandidates) {
                 if (vid >= 0 && static_cast<size_t>(vid) < editable_mesh_cache.vertex_positions.size()) {
                     sculpt_updated_local_positions[static_cast<size_t>(vid)] =
@@ -11092,6 +11433,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
             params.tangent = radTangent;
             params.bitangent = radBitangent;
             params.radius = radiusWorld;
+            params.cullRadius = brushCullRadiusWorld;
             params.falloff = falloff;
             params.strokeDistance = strokeDistance;
             params.strokeSpacing = strokeSpacing;
@@ -11101,7 +11443,7 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
             params.falloffType = mesh_overlay_settings.proportional_falloff_type;
             params.activeTool = activeTool;
             params.useMask = true;
-            params.brushSettings = sculpt_mode_state.brush;
+            params.brushSettings = effectiveBrush;
 
             std::vector<EvaluatedSculptVertex> activeRadVerts = evaluateActiveSculptVerticesSIMD(
                 radialCandidates,
@@ -11329,8 +11671,10 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         activeTool != SculptBrushTool::Smooth &&
         activeTool != SculptBrushTool::Mask;
     std::vector<int> wetDepositIds;
+    std::vector<Vec3> wetDepositAnchors; // pre-deposit position (wall reference) per id
     if (wetClayActive) {
         wetDepositIds.reserve(strokeTouchedVertexIds.size());
+        wetDepositAnchors.reserve(strokeTouchedVertexIds.size());
     }
 
     for (const int vertexIdInt : strokeTouchedVertexIds) {
@@ -11381,11 +11725,13 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
             safeLocalPosition = editable_mesh_cache.vertex_positions[vertexId] +
                 (safeLocalPosition - editable_mesh_cache.vertex_positions[vertexId]) * maskFactor;
         }
+        const Vec3 preDepositPos = editable_mesh_cache.vertex_positions[vertexId];
         vertex.local_position = safeLocalPosition;
         editable_mesh_cache.vertex_positions[vertexId] = safeLocalPosition;
         sculpt_updated_local_positions[vertexId] = safeLocalPosition;
         if (wetClayActive) {
             wetDepositIds.push_back(vertexIdInt);
+            wetDepositAnchors.push_back(preDepositPos); // wall reference, before this dab pushed out
         }
         for (const auto& ref : vertex.refs) {
             if (!ref.triangle) {
@@ -11409,7 +11755,15 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
         }
     }
     if (wetClayActive && !wetDepositIds.empty()) {
-        depositWetClay(wetDepositIds, sculpt_mode_state.wet_clay_wetness);
+        // Same boundary feather as the Water brush so the deposited clay's wetness fades at
+        // the footprint rim instead of cutting off into a frozen ring (the flow ridges
+        // against that cliff at high fluidity).
+        std::vector<float> depositFeather;
+        depositFeather.reserve(wetDepositIds.size());
+        for (const int vid : wetDepositIds) {
+            depositFeather.push_back(wetClayFeatherWeight(vid));
+        }
+        depositWetClay(wetDepositIds, wetDepositAnchors, sculpt_mode_state.wet_clay_wetness, &depositFeather);
     }
     // Restore the cache-mirror invariant for verts the clay polish / anti-pit passes
     // wrote but the commit loop did NOT push to the cache: those passes operate on
@@ -12835,12 +13189,28 @@ void SceneUI::drawSculptBrushViewportPreview(UIContext& ctx, const HitRecord& hi
         }
     }
 
-    // Build tangent frame from the hit normal
+    // Build a VIEW-STABLE tangent frame (camera right/up projected onto the surface tangent
+    // plane), matching handleMeshSculpt so the cursor outline orients exactly as the deform.
     const Vec3 normal = hit.normal.length_squared() > 1e-8f ? hit.normal.normalize() : Vec3(0, 1, 0);
-    Vec3 tangent = std::abs(normal.y) < 0.95f
-        ? normal.cross(Vec3(0, 1, 0)).normalize()
-        : normal.cross(Vec3(1, 0, 0)).normalize();
-    Vec3 bitangent = normal.cross(tangent).normalize();
+    Vec3 tangent;
+    Vec3 bitangent;
+    {
+        Vec3 camRight(1.0f, 0.0f, 0.0f);
+        Vec3 camUp(0.0f, 1.0f, 0.0f);
+        const Vec3 fwdRaw = ctx.scene.camera->lookat - ctx.scene.camera->lookfrom;
+        const Vec3 fwd = fwdRaw.length_squared() > 1e-12f ? fwdRaw.normalize() : Vec3(0.0f, 0.0f, -1.0f);
+        Vec3 r = fwd.cross(ctx.scene.camera->vup);
+        if (r.length_squared() < 1e-12f) r = Vec3(1.0f, 0.0f, 0.0f);
+        camRight = r.normalize();
+        camUp = camRight.cross(fwd).normalize();
+        Vec3 t = camRight - normal * camRight.dot(normal);
+        if (t.length_squared() < 1e-8f) t = camUp - normal * camUp.dot(normal);
+        if (t.length_squared() < 1e-8f) {
+            t = std::abs(normal.y) < 0.95f ? normal.cross(Vec3(0, 1, 0)) : normal.cross(Vec3(1, 0, 0));
+        }
+        tangent = t.normalize();
+        bitangent = normal.cross(tangent).normalize();
+    }
 
     ImGuiIO& io = ImGui::GetIO();
     Camera& cam = *ctx.scene.camera;
@@ -12890,28 +13260,25 @@ void SceneUI::drawSculptBrushViewportPreview(UIContext& ctx, const HitRecord& hi
             (radius_screen.x - center_screen.x) * (radius_screen.x - center_screen.x) +
             (radius_screen.y - center_screen.y) * (radius_screen.y - center_screen.y));
 
+    // Footprint bound: the preview grid + rings must reach the shape's corners (a square at
+    // sqrt(2), aspect-elongated further), otherwise the display clips back to a circle — which
+    // is exactly the "brush display stays circular" the user saw. boundScale = 1 for Circle.
+    const float previewBoundScale = uiBrushFootprintBoundScale(brush);
+
     // --- Alpha grid (skip for ghost pass to keep it lightweight) ---
     if (!ghost) {
         const int grid = std::clamp(static_cast<int>(approx_screen_radius * 1.1f), 24, 80);
-        const float cell_span = 2.0f / static_cast<float>(grid);
-        const float falloff_val = std::clamp(brush.falloff, 0.0f, 1.0f);
-        const float inner = std::clamp(1.0f - falloff_val, 0.0f, 1.0f);
+        const float cell_span = (2.0f * previewBoundScale) / static_cast<float>(grid);
 
         for (int gy = 0; gy < grid; ++gy) {
             for (int gx = 0; gx < grid; ++gx) {
-                const float nx = ((static_cast<float>(gx) + 0.5f) / static_cast<float>(grid)) * 2.0f - 1.0f;
-                const float ny = ((static_cast<float>(gy) + 0.5f) / static_cast<float>(grid)) * 2.0f - 1.0f;
-                const float rr = std::sqrt(nx * nx + ny * ny);
-                if (rr > 1.0f) continue;
+                // Span [-boundScale, boundScale] so elongated/cornered footprints are covered.
+                const float nx = (((static_cast<float>(gx) + 0.5f) / static_cast<float>(grid)) * 2.0f - 1.0f) * previewBoundScale;
+                const float ny = (((static_cast<float>(gy) + 0.5f) / static_cast<float>(grid)) * 2.0f - 1.0f) * previewBoundScale;
 
-                float base = 1.0f;
-                if (rr > inner) {
-                    const float t = std::clamp((rr - inner) / (std::max)(0.001f, 1.0f - inner), 0.0f, 1.0f);
-                    base = 1.0f - (t * t * (3.0f - 2.0f * t));
-                }
-
-                const float mask_alpha = uiSampleBrushMask(brush, nx, ny);
-                const float alpha = base * mask_alpha;
+                // Exact deform weight: shape cutoff + shape-edge falloff × alpha. Matches the
+                // SIMD evaluator and the Alpha Preview pixel-for-pixel.
+                const float alpha = uiSampleBrushFootprintWeight(brush, nx, ny);
                 if (alpha <= 0.025f) continue;
 
                 const float local_x = nx * world_radius;
@@ -12932,13 +13299,25 @@ void SceneUI::drawSculptBrushViewportPreview(UIContext& ctx, const HitRecord& hi
         }
     }
 
-    // --- Rings (outer + inner falloff) ---
-    auto draw_ring = [&](float radius, ImU32 color, float thickness) {
+    // --- Rings: trace the actual shape boundary (outer = dist_norm 1, inner = falloff edge) ---
+    // so the outline matches the deformed footprint instead of always drawing a circle. Same
+    // brush-local→world mapping as the grid (tangent·u − bitangent·v). Circle is unchanged
+    // (dist_norm == r), so circular brushes look exactly as before.
+    auto draw_shape_ring = [&](float targetDist, ImU32 color, float thickness) {
         ImVec2 prev;
         bool has_prev = false;
         for (int i = 0; i <= segments; ++i) {
             const float angle = (static_cast<float>(i) / static_cast<float>(segments)) * 6.2831853f;
-            const Vec3 offset = tangent * std::cos(angle) * radius + bitangent * std::sin(angle) * radius;
+            const float du = std::cos(angle), dv = std::sin(angle);
+            // Binary-search the radius along this ray where the footprint distance hits target
+            // (dist_norm is monotonic in r for these convex shapes).
+            float lo = 0.0f, hi = previewBoundScale * 1.25f + 0.05f;
+            for (int it = 0; it < 22; ++it) {
+                const float mid = 0.5f * (lo + hi);
+                if (uiBrushFootprintDistNorm(brush, mid * du, mid * dv) < targetDist) lo = mid; else hi = mid;
+            }
+            const float r = 0.5f * (lo + hi);
+            const Vec3 offset = tangent * (r * du * world_radius) - bitangent * (r * dv * world_radius);
             const ImVec2 p = project(hit.point + offset + normal * 0.002f);
             if (p.x > -900.0f) {
                 if (has_prev) dl->AddLine(prev, p, color, thickness);
@@ -12950,11 +13329,11 @@ void SceneUI::drawSculptBrushViewportPreview(UIContext& ctx, const HitRecord& hi
         }
     };
 
-    const float inner_radius = world_radius * std::clamp(1.0f - brush.falloff, 0.15f, 0.95f);
+    const float inner_target = std::clamp(1.0f - brush.falloff, 0.15f, 0.95f);
     const ImU32 outer_color = ghost ? IM_COL32(255, 170, 64, 100) : IM_COL32(255, 170, 64, 230);
     const ImU32 inner_color = ghost ? IM_COL32(255, 170, 64,  60) : IM_COL32(255, 170, 64, 120);
-    draw_ring(world_radius,  outer_color, ghost ? 1.2f : 2.0f);
-    draw_ring(inner_radius,  inner_color, 1.0f);
+    draw_shape_ring(1.0f,         outer_color, ghost ? 1.2f : 2.0f);
+    draw_shape_ring(inner_target, inner_color, 1.0f);
 
     // Center dot
     if (!ghost) {

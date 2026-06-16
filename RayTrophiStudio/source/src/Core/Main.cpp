@@ -3704,6 +3704,24 @@ int main(int argc, char* argv[]) try {
         ui_ctx.ray_texture = raytrace_texture;
         
         ui_ctx.backend_ptr = getActiveViewportBackendForShading(ui.viewport_settings.shading_mode);
+
+        // Sync the backend's viewport mode to the UI shading mode as soon as a backend instance
+        // appears (startup, or after a backend recreation). The Vulkan backend defaults
+        // m_viewportMode = Rendered, but the app opens in Solid — and setViewportMode otherwise
+        // runs ONLY inside the start_render render block. Until then, needsViewportRender() for
+        // the raster viewport falls through to `m_currentSamples < m_targetSamples` (0 < 1000 =
+        // true), so the Solid idle gate below re-armed start_render EVERY frame and the viewport
+        // rendered nonstop — a constant idle CPU draw until a Rendered round-trip happened to
+        // sync the mode. Doing it on backend-pointer change keeps it one-shot per instance (no
+        // per-frame setViewportMode side effects). Mode *switches* are still handled in-render.
+        {
+            static Backend::IBackend* s_lastViewportModeSyncedBackend = nullptr;
+            if (ui_ctx.backend_ptr && ui_ctx.backend_ptr != s_lastViewportModeSyncedBackend) {
+                ui_ctx.backend_ptr->setViewportMode(
+                    viewportModeFromShadingMode(ui.viewport_settings.shading_mode));
+                s_lastViewportModeSyncedBackend = ui_ctx.backend_ptr;
+            }
+        }
         // Solid/Matcap (not Rendered=2): fluid bridge renders a splat-sphere proxy
         // even for SurfaceSDF fluids, since the raster viewport can't draw the volume.
         g_solid_viewport_active = isInteractiveViewportShadingMode(ui.viewport_settings.shading_mode);
@@ -5620,12 +5638,21 @@ int main(int argc, char* argv[]) try {
         const bool scene_load_active =
             ui.scene_loading.load() ||
             ui.scene_loading_done.load();
+        // The OptiX / Vulkan-RT RENDER-backend rebuilds only affect Rendered-mode output and
+        // are deliberately deferred while the interactive (Solid/Matcap) viewport is active —
+        // they fire only on the switch back to Rendered (see the `!interactive_viewport_active`
+        // gates below). But when OptiX / Vulkan RT is the active render backend, the inactive-
+        // backend cleanup does NOT drop them, so in Solid mode they stay pending indefinitely
+        // (e.g. set once by a subdivide / modifier resync) and used to keep pending_scene_refresh
+        // — and thus rendering_active / tier0 — true every frame, pinning the CPU at full speed
+        // until a Rendered round-trip consumed them. They cannot change the Solid raster image,
+        // so don't let a deferred render-backend rebuild hold the interactive viewport awake.
         const bool pending_scene_refresh =
             scene_load_active ||
             g_viewport_raster_rebuild_pending ||
-            g_vulkan_rebuild_pending ||
-            g_vulkan_geometry_append_pending ||
-            g_optix_rebuild_pending ||
+            (!g_solid_viewport_active && g_vulkan_rebuild_pending) ||
+            (!g_solid_viewport_active && g_vulkan_geometry_append_pending) ||
+            (!g_solid_viewport_active && g_optix_rebuild_pending) ||
             g_bvh_rebuild_pending;
         const bool rendering_active = did_render_this_frame || start_render ||
                            autonomous_anim_graph_playing || pending_scene_refresh ||
