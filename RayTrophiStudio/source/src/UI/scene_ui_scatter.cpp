@@ -1160,7 +1160,26 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
     HitRecord hit;
     bool did_hit = false;
 
+    // Sculpt idle guard: the preview re-raycasts the scene BVH + sculpt PBVH every frame to
+    // place the cursor, which burns CPU even with the brush parked. When the cursor and camera
+    // haven't moved and no stroke is running, the hit can't change — reuse it and skip both
+    // raycasts; only the (cheap) redraw runs.
+    bool sculptUseCache = false;
     if (is_sculpt) {
+        const bool cursorSame = sculpt_preview_cache_valid &&
+            mx == sculpt_preview_cache_mx && my == sculpt_preview_cache_my;
+        const bool camSame = sculpt_preview_cache_valid &&
+            (ctx.scene.camera->lookfrom - sculpt_preview_cache_cam_from).length_squared() < 1e-12f &&
+            (ctx.scene.camera->lookat - sculpt_preview_cache_cam_at).length_squared() < 1e-12f;
+        if (cursorSame && camSame && !sculpt_stroke_state.active) {
+            sculptUseCache = true;
+            hit.point = sculpt_preview_cache_point;
+            hit.normal = sculpt_preview_cache_normal;
+            did_hit = sculpt_preview_cache_did_hit;
+        }
+    }
+
+    if (is_sculpt && !sculptUseCache) {
         HitRecord sculptHit;
         if (ctx.scene.bvh->hit(ray, 0.001f, 1e10f, sculptHit) &&
             sculptHit.triangle &&
@@ -1200,7 +1219,7 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
                 }
             }
         }
-    } else {
+    } else if (is_scatter) {
         // Standard raycast for generic scatter brush
         did_hit = ctx.scene.bvh->hit(ray, 0.001f, 1e10f, hit);
     }
@@ -1208,8 +1227,17 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
     // Match the brush's own picking: refine against the live sculpt PBVH so the overlay
     // ring tracks geometry the deferred scene-BVH refit has not caught up to (regions
     // pushed far out mid-stroke). Otherwise the ring vanishes / mis-aligns over the bulge.
-    if (is_sculpt) {
+    if (is_sculpt && !sculptUseCache) {
         did_hit = refineSculptHitWithPBVH(ray, sculpt_mode_state.active_target_name, hit, did_hit);
+        // Refresh the idle cache with this frame's fresh raycast result.
+        sculpt_preview_cache_mx = mx;
+        sculpt_preview_cache_my = my;
+        sculpt_preview_cache_cam_from = ctx.scene.camera->lookfrom;
+        sculpt_preview_cache_cam_at = ctx.scene.camera->lookat;
+        sculpt_preview_cache_point = hit.point;
+        sculpt_preview_cache_normal = hit.normal;
+        sculpt_preview_cache_did_hit = did_hit;
+        sculpt_preview_cache_valid = true;
     }
 
     if (!did_hit) return;

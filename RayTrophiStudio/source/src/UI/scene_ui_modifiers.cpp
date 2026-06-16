@@ -1205,6 +1205,54 @@ float uiSampleBrushMask(const Paint::BrushSettings& brush, float nx, float ny) {
     return uiSampleBrushAlpha(brush.alpha_preset, nx, ny, brush.alpha_scale, brush.alpha_rotation_degrees, radial_gate);
 }
 
+// Combined footprint weight = shape cutoff + shape-edge falloff (brush.falloff) × alpha mask.
+// Returns 0 outside the shape. This is exactly the value drawBrushAlphaPreview shows per texel,
+// so the sculpt SIMD evaluator deforms with the same shape/aspect/roundness/rotation/alpha the
+// user sees in the preview. nx/ny are the vertex's planar offset in brush-local space, each
+// normalized so the brush's nominal radius maps to magnitude 1 BEFORE aspect scaling.
+float uiSampleBrushFootprintWeight(const Paint::BrushSettings& brush, float nx, float ny) {
+    const UIBrushFootprintSample fp = uiSampleBrushFootprint(brush, nx, ny);
+    if (fp.dist_norm > 1.0f) {
+        return 0.0f;
+    }
+    const float falloff = std::clamp(brush.falloff, 0.0f, 1.0f);
+    const float inner = std::clamp(1.0f - falloff, 0.0f, 1.0f);
+    float base = 1.0f;
+    if (fp.dist_norm > inner) {
+        const float t = std::clamp((fp.dist_norm - inner) / std::max(0.001f, 1.0f - inner), 0.0f, 1.0f);
+        base = 1.0f - (t * t * (3.0f - 2.0f * t));
+    }
+    return std::clamp(base * uiSampleBrushMask(brush, nx, ny), 0.0f, 1.0f);
+}
+
+// Footprint shape distance for a brush-local sample (1 = on the shape boundary). Lets the
+// viewport brush preview trace the actual shape outline (rectangle/capsule/flat/aspect/rotation)
+// instead of a hard-coded circle.
+float uiBrushFootprintDistNorm(const Paint::BrushSettings& brush, float nx, float ny) {
+    return uiSampleBrushFootprint(brush, nx, ny).dist_norm;
+}
+
+// How far (in nominal-radius units) the brush footprint can reach from the center, so the
+// candidate gather and the radius cull are widened enough not to clip non-circular shapes
+// (a square's corner is at sqrt(2); a capsule's cap at ~1.55) or aspect-elongated footprints.
+// Circle returns 1 → the fast path and circular brushes are byte-identical to before.
+float uiBrushFootprintBoundScale(const Paint::BrushSettings& brush) {
+    if (brush.shape == Paint::BrushShape::Circle &&
+        std::abs(brush.shape_aspect - 1.0f) <= 0.01f) {
+        return 1.0f;
+    }
+    const float aspectScale = uiBrushShapeAspectScale(brush);
+    const float aspectExtent = std::max(aspectScale, 1.0f / std::max(aspectScale, 1e-4f));
+    // Per-shape corner reach (in pre-aspect units): rect/flat corner ≈ sqrt(2), capsule cap 1.55.
+    float cornerReach = 1.0f;
+    if (brush.shape == Paint::BrushShape::Rectangle || brush.shape == Paint::BrushShape::Flat) {
+        cornerReach = 1.4143f;
+    } else if (brush.shape == Paint::BrushShape::Capsule) {
+        cornerReach = 1.55f;
+    }
+    return std::clamp(cornerReach * aspectExtent, 1.0f, 8.0f);
+}
+
 void drawBrushAlphaPreview(const Paint::BrushSettings& brush) {
     const ImVec2 size(92.0f, 92.0f);
     ImGui::TextDisabled("Alpha Preview");
@@ -2375,13 +2423,41 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     ctx.scene.base_mesh_cache.find(selectedNodeName) != ctx.scene.base_mesh_cache.end() &&
                     !ctx.scene.base_mesh_cache[selectedNodeName].empty() &&
                     !modifierStack.modifiers.empty()) {
-                    const auto evaluatedPreview = modifierStack.evaluate(ctx.scene.base_mesh_cache[selectedNodeName]);
-                    const bool previewMismatch =
-                        !hasMeshEntries ||
-                        meshEntriesIt->second.size() != evaluatedPreview.size();
-                    if (previewMismatch) {
-                        replaceEvaluatedMesh(evaluatedPreview, ctx.scene.base_mesh_cache[selectedNodeName], "Modifier Preview Synced");
-                        meshEntriesIt = mesh_cache.find(effectiveNodeName);
+                    // Gate the full-stack evaluation behind a cheap signature. Running
+                    // modifierStack.evaluate() EVERY frame the panel is open — purely to compare
+                    // triangle counts — re-subdivides the cage (e.g. 3 subdivide levels) on the
+                    // UI thread every frame. In steady state the count already matches, so the
+                    // result is thrown away; and when it drifts, replaceEvaluatedMesh raises
+                    // optix/vulkan rebuild-pending, which in Solid mode is never consumed → the
+                    // viewport stays in tier0 and CPU is pinned until a Rendered round-trip clears
+                    // it. The drift check only needs topology (counts), so the signature folds the
+                    // stack params + cage size + current visible count — no positions, no eval.
+                    std::size_t driftSig = std::hash<std::string>{}(selectedNodeName);
+                    auto mixSig = [&driftSig](std::size_t v) {
+                        driftSig ^= v + 0x9e3779b97f4a7c15ull + (driftSig << 6) + (driftSig >> 2);
+                    };
+                    mixSig(ctx.scene.base_mesh_cache[selectedNodeName].size());
+                    mixSig(hasMeshEntries ? meshEntriesIt->second.size() : 0u);
+                    for (const auto& mod : modifierStack.modifiers) {
+                        mixSig(static_cast<std::size_t>(static_cast<int>(mod.type)));
+                        mixSig(mod.enabled ? 1u : 0u);
+                        mixSig(static_cast<std::size_t>(mod.levels));
+                    }
+                    static std::string s_driftNode;
+                    static std::size_t s_driftSig = 0;
+                    static bool s_driftValid = false;
+                    if (!s_driftValid || s_driftNode != selectedNodeName || s_driftSig != driftSig) {
+                        s_driftValid = true;
+                        s_driftNode = selectedNodeName;
+                        s_driftSig = driftSig;
+                        const auto evaluatedPreview = modifierStack.evaluate(ctx.scene.base_mesh_cache[selectedNodeName]);
+                        const bool previewMismatch =
+                            !hasMeshEntries ||
+                            meshEntriesIt->second.size() != evaluatedPreview.size();
+                        if (previewMismatch) {
+                            replaceEvaluatedMesh(evaluatedPreview, ctx.scene.base_mesh_cache[selectedNodeName], "Modifier Preview Synced");
+                            meshEntriesIt = mesh_cache.find(effectiveNodeName);
+                        }
                     }
                 }
 
@@ -4847,9 +4923,28 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
         }
 
         if (beginBrushDockSection("Alpha Mask")) {
+            int brush_shape = static_cast<int>(sculpt_mode_state.brush.shape);
+            const char* shape_labels[] = { "Circle", "Rectangle", "Capsule", "Flat" };
+            if (ImGui::Combo("Brush Shape##sculpt", &brush_shape, shape_labels, IM_ARRAYSIZE(shape_labels))) {
+                sculpt_mode_state.brush.shape = static_cast<Paint::BrushShape>(brush_shape);
+                if (sculpt_mode_state.brush.shape == Paint::BrushShape::Circle) {
+                    sculpt_mode_state.brush.shape_aspect = 1.0f;
+                } else if (sculpt_mode_state.brush.shape == Paint::BrushShape::Flat &&
+                           sculpt_mode_state.brush.shape_aspect < 2.0f) {
+                    sculpt_mode_state.brush.shape_aspect = 4.0f;
+                }
+            }
+            if (sculpt_mode_state.brush.shape != Paint::BrushShape::Circle) {
+                ImGui::SliderFloat("Aspect##sculpt", &sculpt_mode_state.brush.shape_aspect, 0.25f, 8.0f, "%.2f");
+                ImGui::SliderFloat("Roundness##sculpt", &sculpt_mode_state.brush.shape_roundness, 0.0f, 1.0f, "%.2f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Rectangle/Capsule/Flat carve a non-circular footprint; Aspect elongates it, Roundness softens the corners. Use Brush/Alpha Rotation (or Follow Stroke Angle) to orient it.");
+                }
+            }
+            ImGui::Separator();
             int alpha_preset = static_cast<int>(sculpt_mode_state.brush.alpha_preset);
             const char* alpha_labels[] = { "Soft Round", "Hard Round", "Noise", "Scratch", "Cloud" };
-            if (ImGui::Combo("Shape##sculpt", &alpha_preset, alpha_labels, IM_ARRAYSIZE(alpha_labels))) {
+            if (ImGui::Combo("Alpha##sculpt", &alpha_preset, alpha_labels, IM_ARRAYSIZE(alpha_labels))) {
                 sculpt_mode_state.brush.alpha_preset = static_cast<Paint::BrushAlphaPreset>(alpha_preset);
                 sculpt_mode_state.brush.use_imported_alpha = false;
             }
@@ -4886,7 +4981,11 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
                 ImGui::SliderFloat("Alpha Scale##sculpt", &sculpt_mode_state.brush.alpha_scale, 0.25f, 8.0f, "%.2f");
             }
             ImGui::SliderFloat("Alpha Rotation##sculpt", &sculpt_mode_state.brush.alpha_rotation_degrees, -180.0f, 180.0f, "%.0f deg");
-            
+            ImGui::Checkbox("Follow Stroke Angle##sculpt", &sculpt_mode_state.brush.follow_stroke_angle);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Rotate the shape/alpha to trail the stroke direction (like mesh paint).");
+            }
+
             ImGui::Spacing();
             drawBrushAlphaPreview(sculpt_mode_state.brush);
         }
