@@ -342,12 +342,15 @@ STYLIZE_HD inline void surfaceLockedPixel(float& fx, float& fy, const StylizeAOV
 
 STYLIZE_HD inline void surfaceBasis(const SV3& normal, SV3& tangent, SV3& bitangent) {
     SV3 n = length3(normal) > 1e-5f ? normalize3(normal) : mk(0.0f, 1.0f, 0.0f);
-    SV3 up = fabsf(n.y) < 0.82f ? mk(0.0f, 1.0f, 0.0f) : mk(1.0f, 0.0f, 0.0f);
-    tangent = normalize3(cross3(up, n));
-    if (length3(tangent) <= 1e-5f) {
-        tangent = mk(1.0f, 0.0f, 0.0f);
-    }
-    bitangent = normalize3(cross3(n, tangent));
+    // Duff et al. 2017 branchless orthonormal basis — continuous everywhere
+    // except n.z=-1, so the stroke frame no longer snaps when the normal crosses
+    // an axis (kills the sudden brush rotation on curved surfaces; the old
+    // |n.y|<0.82 up-vector switch produced a hard seam there).
+    const float s = n.z >= 0.0f ? 1.0f : -1.0f;
+    const float a = -1.0f / (s + n.z);
+    const float b = n.x * n.y * a;
+    tangent   = mk(1.0f + s * n.x * n.x * a, s * b, -s * n.x);
+    bitangent = mk(b, s + n.y * n.y * a, -n.y);
 }
 
 STYLIZE_HD inline bool surfaceStrokeCoordinates(float screen_u,
@@ -482,7 +485,7 @@ STYLIZE_HD inline void evalBrushDaubLayer(float u, float v, int seed,
             const float ru = du * cj + dv * sn;
             const float rv = -du * sn + dv * cj;
             const float half_len = aspect * (0.40f + hashNoise(slot, row, cell + 5) * 0.24f);
-            const float half_wid = 0.36f + hashNoise(slot, row, cell + 6) * 0.22f;
+            const float half_wid = 0.46f + hashNoise(slot, row, cell + 6) * 0.26f;
             const float t = ru / fmaxf(1e-4f, half_len);    // -1..1 along the stroke
             const float at = fabsf(t);
             if (at > 1.15f) {
@@ -492,8 +495,9 @@ STYLIZE_HD inline void evalBrushDaubLayer(float u, float v, int seed,
             const float wob = (valueNoise(ru * 1.6f + h_cu * 9.0f, h_cv * 7.0f, cell + 12) - 0.5f) * half_wid * 0.55f;
             const float rvw = rv - wob;
             // rounded head, thinning tail
-            float w_local = half_wid * (0.30f + 0.70f * sqrtf(fmaxf(0.0f, 1.0f - t * t)));
-            w_local *= 1.0f - 0.35f * smoothstepf(0.10f, 1.0f, t);
+            // directional brush: loaded rounded head (t<0), dragged thinning tail (t>0)
+            float w_local = half_wid * (0.40f + 0.60f * sqrtf(fmaxf(0.0f, 1.0f - t * t)));
+            w_local *= 1.0f - 0.42f * smoothstepf(-0.15f, 1.0f, t);
             const float dn = fabsf(rvw) / fmaxf(1e-4f, w_local);
             const float lon = 1.0f - smoothstepf(0.82f, 1.06f, at);
             const float lat = 1.0f - smoothstepf(0.58f, 1.0f, dn);
@@ -503,9 +507,11 @@ STYLIZE_HD inline void evalBrushDaubLayer(float u, float v, int seed,
             }
             // bristle pattern across the width — streaks AND torn ragged ends;
             // edge_rag tears the stroke wherever the AOV edge runs through it
-            const float bris = valueNoise(rvw * 3.1f / fmaxf(0.05f, half_wid), t * 2.2f, cell + 13);
-            const float rag_zone = saturate(smoothstepf(0.35f, 0.95f, at) + edge_rag);
-            cov *= 1.0f - rag_zone * smoothstepf(0.30f, 0.78f, bris) * (0.55f + breakup * 0.35f);
+            const float bris = valueNoise(rvw * 4.6f / fmaxf(0.05f, half_wid), t * 1.5f, cell + 13);
+            // body stays solid; tips and the dragged tail split into frayed strands
+            const float tip_fray = saturate(smoothstepf(0.45f, 1.0f, at)
+                                            + smoothstepf(0.25f, 1.0f, t) * 0.5f + edge_rag);
+            cov *= 1.0f - tip_fray * smoothstepf(0.32f, 0.82f, bris) * (0.62f + breakup * 0.38f);
             if (cov <= 0.02f) {
                 continue;
             }
@@ -602,7 +608,7 @@ STYLIZE_HD inline BrushStrokeSample brushStrokeField(int x, int y,
 
     const int seed = static_cast<int>(coherent_frame) * 13
                    + static_cast<int>(aov.material_id & 0xFFu) * 53 + 977;
-    const float aspect = 3.4f;                              // daub length / width
+    const float aspect = 2.6f;                              // daub length / width (chunkier = bolder hand-daub, less hair)
     const float breakup = saturate(profile.material.dry_brush);
     // AOV edges tear the stroke tips instead of clipping the paint — silhouettes
     // end in ragged brush starts/stops, not a hard geometric line.
@@ -906,8 +912,31 @@ STYLIZE_HD inline float outlineTexture(int x, int y, const StylizeAOVCore& aov, 
         fy += (aov.normal.y + aov.normal.z * 0.35f) * push;
     }
 
-    const float grain = fbmNoise(fx / (12.0f + width * 8.0f), fy / (7.0f + width * 5.0f), mat_seed + 503);
-    const float fiber = fbmNoise(fx / (4.0f + width * 3.0f) + 17.0f, fy / (18.0f + width * 9.0f) - 5.0f, mat_seed + 719);
+    // Sample the bristle/grain noise in screen space by default, but when the
+    // material adheres to the surface, warp the coordinates into a world-locked
+    // tangent frame so the silhouette texture stays glued to the geometry under
+    // camera motion (matches the surface-locked fill brush instead of crawling
+    // across the screen). Reuses surface_adherence so lock==0 == old behavior.
+    float gx = fx / (12.0f + width * 8.0f);
+    float gy = fy / (7.0f + width * 5.0f);
+    float hx = fx / (4.0f + width * 3.0f) + 17.0f;
+    float hy = fy / (18.0f + width * 9.0f) - 5.0f;
+    const float outline_lock = aov.hit ? saturate(profile.material.surface_adherence) : 0.0f;
+    if (outline_lock > 0.001f) {
+        SV3 tangent;
+        SV3 bitangent;
+        surfaceBasis(aov.normal, tangent, bitangent);
+        const float world_scale = fmaxf(0.01f, 0.06f + width * 0.05f);
+        const float su = dot3(aov.world_position, tangent) / world_scale;
+        const float sv = dot3(aov.world_position, bitangent) / world_scale;
+        // grain runs along the rim, fiber across it (axes swapped, like the screen layout)
+        gx = lerpf(gx, su * 0.85f, outline_lock);
+        gy = lerpf(gy, sv * 1.45f, outline_lock);
+        hx = lerpf(hx, sv * 0.65f + 17.0f, outline_lock);
+        hy = lerpf(hy, su * 1.90f - 5.0f, outline_lock);
+    }
+    const float grain = fbmNoise(gx, gy, mat_seed + 503);
+    const float fiber = fbmNoise(hx, hy, mat_seed + 719);
     const float taper = smoothstepf(0.02f, 0.90f, edge) * (1.0f - outline.taper * smoothstepf(0.55f, 1.0f, edge));
     float coverage = saturate(edge * (0.75f + width * 0.45f));
     const float fine_detail = saturate((1.0f - distance_factor) * (1.0f - smoothstepf(0.45f, 1.0f, edge)));
@@ -944,6 +973,40 @@ STYLIZE_HD inline float outlineTexture(int x, int y, const StylizeAOVCore& aov, 
     }
 
     return saturate(coverage * (0.55f + taper * 0.45f));
+}
+
+// Cel band the LIGHTING (not the final RGB): split the lit colour from its
+// albedo, quantise the shading term into a few hard bands, then re-light the
+// albedo with it. This collapses the smooth 3D gradient into flat toon zones —
+// the RGB posterise (simplifyColor) cannot do this because it keeps the lighting
+// ramp inside each channel, which is why surfaces still read as full 3D.
+STYLIZE_HD inline SV3 celShadeLighting(const SV3& color,
+                                       const SV3& albedo,
+                                       const StyleProfileCore& profile,
+                                       float amount) {
+    amount = saturate(amount);
+    if (amount <= 0.001f) {
+        return color;
+    }
+    const float lit = luminance(color);
+    const float alb = fmaxf(0.06f, luminance(albedo));
+    const float shade = saturate(lit / alb * 0.9f);
+
+    // higher simplification -> fewer, harder steps
+    const float bands = fmaxf(2.0f, roundf(lerpf(5.0f, 2.0f, amount)));
+    const float soft  = lerpf(0.16f, 0.03f, amount);   // band-edge softness
+    const float scaled = shade * bands;
+    const float idx = floorf(scaled);
+    const float frac = scaled - idx;
+    const float stepped = saturate((idx + smoothstepf(0.5f - soft, 0.5f + soft, frac)) / bands);
+
+    // keep the albedo hue, replace its brightness with the banded lighting
+    SV3 lit_albedo = clamp01(albedo * (0.22f + stepped * 1.20f));
+    // tint the band ends toward the style palette (shadow..highlight)
+    SV3 palette_band = paletteRamp(stepped, profile);
+    palette_band = preserveMaterialHue(palette_band, albedo, 0.65f);
+    const SV3 toon = lerp3(lit_albedo, palette_band, saturate(profile.material.palette_influence));
+    return lerp3(color, clamp01(toon), amount);
 }
 
 // ---------------------------------------------------------------------------
@@ -990,6 +1053,11 @@ STYLIZE_HD inline SV3 applyPostProcess(const SV3& input_color,
             ? (0.35f + 0.65f * (1.0f - saturate(profile.material.material_color_preservation)))
             : 1.0f;
         color = simplifyColor(color, strength * profile.material.color_simplification * 0.48f * edge_guard * material_guard);
+
+        // Real toon: band the lighting itself. Only engages for simplification-
+        // leaning (toon) profiles, so painterly profiles stay smooth.
+        const float cel_amount = smoothstepf(0.35f, 1.0f, profile.material.color_simplification) * strength;
+        color = celShadeLighting(color, base_albedo, profile, cel_amount);
 
         const bool brush_on = profile.material.enabled && profile.material.brush_strength > 0.001f;
         const bool outline_on = profile.outline.enabled && aov.edge > 0.001f;
@@ -1045,11 +1113,11 @@ STYLIZE_HD inline SV3 applyPostProcess(const SV3& input_color,
                 color = lerp3(color, wet_daub, daub_opacity * daub.coverage * (0.30f + paint_load * 0.35f));
                 color = clamp01(color * (1.0f + daub.rim * daub_opacity * (0.10f + oil_body * 0.14f)));
             } else {
-                SV3 daub_color = clamp01(paint_color * (1.0f + daub.tone * 0.20f + daub.bristle * 0.12f + stroke * 0.06f));
+                SV3 daub_color = clamp01(paint_color * (1.0f + daub.tone * 0.30f + daub.bristle * 0.10f + stroke * 0.06f));
                 daub_color = lerp3(daub_color, stroke_tint, palette_influence * 0.22f);
-                color = lerp3(color, daub_color, daub_opacity * daub.coverage * 0.85f);
+                color = lerp3(color, daub_color, daub_opacity * daub.coverage * 0.92f);
                 color = clamp01(color * (1.0f + daub.rim * daub_opacity
-                                                    * (0.10f + saturate(profile.material.pigment_thickness) * 0.16f)));
+                                                    * (0.16f + saturate(profile.material.pigment_thickness) * 0.22f)));
                 const float gap_amount = daub.gap * daub_opacity * profile.material.dry_brush * 0.35f;
                 color = lerp3(color, lerp3(color, profile.palette_shadow, 0.45f), gap_amount);
                 color = color * (1.0f + stroke * guarded_amount * 0.10f);
