@@ -225,10 +225,13 @@ void surfaceLockedPixel(inout float fx, inout float fy, AOV a, float pixel_scale
 }
 void surfaceBasis(vec3 normal, out vec3 tangent, out vec3 bitangent) {
     vec3 n = length(normal) > 1e-5 ? normalize3(normal) : vec3(0.0, 1.0, 0.0);
-    vec3 up = abs(n.y) < 0.82 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-    tangent = normalize3(cross(up, n));
-    if (length(tangent) <= 1e-5) tangent = vec3(1.0, 0.0, 0.0);
-    bitangent = normalize3(cross(n, tangent));
+    // Duff et al. 2017 branchless ONB (parity with StylizeCore.h surfaceBasis):
+    // continuous except n.z=-1, so the stroke frame no longer snaps on curves.
+    float s = n.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (s + n.z);
+    float b = n.x * n.y * a;
+    tangent   = vec3(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
+    bitangent = vec3(b, s + n.y * n.y * a, -n.y);
 }
 bool surfaceStrokeCoordinates(float screen_u, float screen_v, AOV a, float v_scale, out float u, out float v) {
     u = screen_u; v = screen_v;
@@ -317,7 +320,7 @@ void evalBrushDaubLayer(float u, float v, int seed, float aspect, float breakup,
             float ru = du * cj + dv * sn;
             float rv = -du * sn + dv * cj;
             float half_len = aspect * (0.40 + hashNoise(slot, row, cell + 5) * 0.24);
-            float half_wid = 0.36 + hashNoise(slot, row, cell + 6) * 0.22;
+            float half_wid = 0.46 + hashNoise(slot, row, cell + 6) * 0.26;
             float t = ru / max(1e-4, half_len);              // -1..1 along the stroke
             float at = abs(t);
             if (at > 1.15) continue;
@@ -325,8 +328,9 @@ void evalBrushDaubLayer(float u, float v, int seed, float aspect, float breakup,
             float wob = (valueNoise(ru * 1.6 + h_cu * 9.0, h_cv * 7.0, cell + 12) - 0.5) * half_wid * 0.55;
             float rvw = rv - wob;
             // rounded head, thinning tail
-            float w_local = half_wid * (0.30 + 0.70 * sqrt(max(0.0, 1.0 - t * t)));
-            w_local *= 1.0 - 0.35 * smoothstepf(0.10, 1.0, t);
+            // directional brush: loaded rounded head (t<0), dragged thinning tail (t>0)
+            float w_local = half_wid * (0.40 + 0.60 * sqrt(max(0.0, 1.0 - t * t)));
+            w_local *= 1.0 - 0.42 * smoothstepf(-0.15, 1.0, t);
             float dn = abs(rvw) / max(1e-4, w_local);
             float lon = 1.0 - smoothstepf(0.82, 1.06, at);
             float lat = 1.0 - smoothstepf(0.58, 1.0, dn);
@@ -334,9 +338,10 @@ void evalBrushDaubLayer(float u, float v, int seed, float aspect, float breakup,
             if (cov <= 0.02) continue;
             // bristle pattern across the width — streaks AND torn ragged ends;
             // edge_rag tears the stroke wherever the AOV edge runs through it
-            float bris = valueNoise(rvw * 3.1 / max(0.05, half_wid), t * 2.2, cell + 13);
-            float rag_zone = saturatef(smoothstepf(0.35, 0.95, at) + edge_rag);
-            cov *= 1.0 - rag_zone * smoothstepf(0.30, 0.78, bris) * (0.55 + breakup * 0.35);
+            float bris = valueNoise(rvw * 4.6 / max(0.05, half_wid), t * 1.5, cell + 13);
+            // body stays solid; tips and the dragged tail split into frayed strands
+            float tip_fray = saturatef(smoothstepf(0.45, 1.0, at) + smoothstepf(0.25, 1.0, t) * 0.5 + edge_rag);
+            cov *= 1.0 - tip_fray * smoothstepf(0.32, 0.82, bris) * (0.62 + breakup * 0.38);
             if (cov <= 0.02) continue;
             total_cov = max(total_cov, cov);
             float priority = hashNoise(slot, row, cell + 7) + cov * 0.35;
@@ -414,7 +419,7 @@ BrushStrokeSample brushStrokeField(int x, int y, AOV a, int frame_index) {
     float s1 = s0 * 2.0;
 
     int seed = int(coherent_frame) * 13 + int(a.material_id & 0xFFu) * 53 + 977;
-    float aspect = 3.4;                                     // daub length / width
+    float aspect = 2.6;                                     // daub length / width (chunkier = bolder hand-daub, less hair)
     float breakup = saturatef(mtl0.w);                      // dry_brush
     // AOV edges tear the stroke tips instead of clipping the paint — silhouettes
     // end in ragged brush starts/stops, not a hard geometric line.
@@ -669,8 +674,27 @@ float outlineTexture(int x, int y, AOV a, int frame_index) {
         fx += a.normal.x * push;
         fy += (a.normal.y + a.normal.z * 0.35) * push;
     }
-    float grain = fbmNoise(fx / (12.0 + width * 8.0), fy / (7.0 + width * 5.0), mat_seed + 503);
-    float fiber = fbmNoise(fx / (4.0 + width * 3.0) + 17.0, fy / (18.0 + width * 9.0) - 5.0, mat_seed + 719);
+    // Surface-locked bristle warp (parity with StylizeCore.h outlineTexture):
+    // anchor the silhouette texture to world geometry so it doesn't crawl in
+    // screen space when the camera moves. mtl2.y == surface_adherence.
+    float gx = fx / (12.0 + width * 8.0);
+    float gy = fy / (7.0 + width * 5.0);
+    float hx = fx / (4.0 + width * 3.0) + 17.0;
+    float hy = fy / (18.0 + width * 9.0) - 5.0;
+    float outline_lock = a.hit != 0 ? saturatef(mtl2.y) : 0.0;
+    if (outline_lock > 0.001) {
+        vec3 tangent, bitangent;
+        surfaceBasis(a.normal, tangent, bitangent);
+        float world_scale = max(0.01, 0.06 + width * 0.05);
+        float su = dot(a.world_position, tangent) / world_scale;
+        float sv = dot(a.world_position, bitangent) / world_scale;
+        gx = lerpf(gx, su * 0.85, outline_lock);
+        gy = lerpf(gy, sv * 1.45, outline_lock);
+        hx = lerpf(hx, sv * 0.65 + 17.0, outline_lock);
+        hy = lerpf(hy, su * 1.90 - 5.0, outline_lock);
+    }
+    float grain = fbmNoise(gx, gy, mat_seed + 503);
+    float fiber = fbmNoise(hx, hy, mat_seed + 719);
     float taper = smoothstepf(0.02, 0.90, edge) * (1.0 - o_taper * smoothstepf(0.55, 1.0, edge));
     float coverage = saturatef(edge * (0.75 + width * 0.45));
     float fine_detail = saturatef((1.0 - distance_factor) * (1.0 - smoothstepf(0.45, 1.0, edge)));
@@ -698,6 +722,28 @@ float outlineTexture(int x, int y, AOV a, int frame_index) {
     return saturatef(coverage * (0.55 + taper * 0.45));
 }
 
+// Cel band the LIGHTING (parity with StylizeCore.h celShadeLighting): split lit
+// colour from albedo, quantise the shading term, re-light albedo with it.
+vec3 celShadeLighting(vec3 color, vec3 albedo, float amount) {
+    amount = saturatef(amount);
+    if (amount <= 0.001) return color;
+    float lit = luminance(color);
+    float alb = max(0.06, luminance(albedo));
+    float shade = saturatef(lit / alb * 0.9);
+    float bands = max(2.0, round(lerpf(5.0, 2.0, amount)));
+    float soft = lerpf(0.16, 0.03, amount);
+    float scaled = shade * bands;
+    float idx = floor(scaled);
+    float frac = scaled - idx;
+    float stepped = saturatef((idx + smoothstepf(0.5 - soft, 0.5 + soft, frac)) / bands);
+    vec3 lit_albedo = clamp01(albedo * (0.22 + stepped * 1.20));
+    vec3 palette_band = paletteRamp(stepped);
+    palette_band = preserveMaterialHue(palette_band, albedo, 0.65);
+    float palette_influence = saturatef(mtl3.x);
+    vec3 toon = lerp3(lit_albedo, palette_band, palette_influence);
+    return lerp3(color, clamp01(toon), amount);
+}
+
 vec3 applyPostProcess(vec3 input_color, AOV a, int x, int y, int frame_index) {
     float strength = saturatef(misc1.w);            // global_strength
     if (strength <= 0.0001) return input_color;
@@ -722,6 +768,10 @@ vec3 applyPostProcess(vec3 input_color, AOV a, int x, int y, int frame_index) {
 
         float material_guard = 0.35 + 0.65 * (1.0 - saturatef(material_color_preservation));
         color = simplifyColor(color, strength * color_simplification * 0.48 * edge_guard * material_guard);
+
+        // Real toon: band the lighting itself (only for simplification-leaning profiles).
+        float cel_amount = smoothstepf(0.35, 1.0, color_simplification) * strength;
+        color = celShadeLighting(color, base_albedo, cel_amount);
 
         float brush_strength = mtl0.x, dry_brush = mtl0.w;
         bool brush_on = mat_flags.x != 0 && brush_strength > 0.001;
@@ -771,11 +821,11 @@ vec3 applyPostProcess(vec3 input_color, AOV a, int x, int y, int frame_index) {
                 color = lerp3(color, wet_daub, daub_opacity * daub.coverage * (0.30 + paint_load * 0.35));
                 color = clamp01(color * (1.0 + daub.rim * daub_opacity * (0.10 + oil_body * 0.14)));
             } else {
-                vec3 daub_color = clamp01(paint_color * (1.0 + daub.tone * 0.20 + daub.bristle * 0.12 + stroke * 0.06));
+                vec3 daub_color = clamp01(paint_color * (1.0 + daub.tone * 0.30 + daub.bristle * 0.10 + stroke * 0.06));
                 daub_color = lerp3(daub_color, stroke_tint, palette_influence * 0.22);
-                color = lerp3(color, daub_color, daub_opacity * daub.coverage * 0.85);
+                color = lerp3(color, daub_color, daub_opacity * daub.coverage * 0.92);
                 color = clamp01(color * (1.0 + daub.rim * daub_opacity
-                                                   * (0.10 + saturatef(mtl0.z) * 0.16)));
+                                                   * (0.16 + saturatef(mtl0.z) * 0.22)));
                 float gap_amount = daub.gap * daub_opacity * dry_brush * 0.35;
                 color = lerp3(color, lerp3(color, palette_shadow.xyz, 0.45), gap_amount);
                 color = color * (1.0 + stroke * guarded_amount * 0.10);
