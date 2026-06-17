@@ -1890,6 +1890,7 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
     // If the result differs from the cached flag, request a TLAS rebuild so
     // OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT is added/removed consistently.
     // Conservative on unknown material_id (keeps anyhit enabled).
+    bool opacity_classification_changed = false;
     for (size_t i = 0; i < mesh_blas_list.size(); ++i) {
         MeshBLAS& blas = mesh_blas_list[i];
         size_t rec_idx_rad = 2 * i;
@@ -1904,11 +1905,25 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
         if (blas.is_opaque != opaque) {
             blas.is_opaque = opaque;
             tlas_needs_rebuild = true;
+            opacity_classification_changed = true;
         }
     }
 
     if (modified) {
         uploadHitGroupRecords();
+    }
+
+    // CRITICAL: a flipped opaque<->cutout classification only changes the rendered
+    // result once the TLAS is rebuilt (the DISABLE_ANYHIT instance flag is baked
+    // into the TLAS, not read live). No material-sync path triggers a rebuild, and
+    // launch() does not consume tlas_needs_rebuild, so a BLAS built before its
+    // opacity map was resolvable (e.g. the first OptiX build right after a Vulkan
+    // RT -> OptiX swap) would keep anyhit disabled and ignore cutout opacity until
+    // an unrelated transform/geometry rebuild. Consume it here so the reclassify
+    // applies immediately. Gated on an actual flip so routine material edits that
+    // don't touch opacity classification stay free.
+    if (opacity_classification_changed) {
+        updateTLAS();
     }
 }
 
