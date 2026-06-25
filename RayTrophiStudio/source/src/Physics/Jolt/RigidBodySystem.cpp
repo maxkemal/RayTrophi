@@ -581,14 +581,46 @@ void RigidBodySystem::step(const SimulationContext& ctx) {
     world_->setContactCaptureEnabled(contact_events_enabled_);
 
     // Create any bodies that aren't live yet (new this frame or after a reset).
+    // Track which SOFT bodies were freshly created so only those get resumed below
+    // (an already-live soft body must keep its own state, not be teleported back).
     bool any_new = false;
+    std::vector<RigidBodyObject*> resumed_soft;
     for (RigidBodyObject& rb : *bodies_) {
         if (rb.enabled && !rb.created) {
             ensureBodyCreated(rb);
             any_new = any_new || rb.created;
+            if (rb.created && rb.kind != BodyKind::Rigid) resumed_soft.push_back(&rb);
         }
     }
     if (any_new) world_->optimizeBroadPhase();
+
+    // Resume soft bodies that were just (re)created from REST onto the cached
+    // deformed frame the timeline last replayed, so playing past the RAM cache
+    // continues the motion instead of restarting it from rest. The rest-length
+    // constraints were already built from the rest mesh at creation; this only moves
+    // the live particle state. The provider returns false on a first bake / when the
+    // resume frame isn't cached, leaving the body at its (correct) rest.
+    if (soft_resume_ && !resumed_soft.empty()) {
+        std::vector<Vec3> resume_pos, resume_vel;
+        for (RigidBodyObject* rb : resumed_soft) {
+            if (soft_resume_(rb->source_name, resume_pos, resume_vel) && !resume_pos.empty()) {
+                world_->setSoftBodyVertices(rb->handle, resume_pos,
+                                            resume_vel.empty() ? nullptr : &resume_vel);
+                rb->has_written = true;
+            }
+        }
+    }
+
+    // Launch freshly-broken fracture shards: when a breakable group shatters, the
+    // shards flip Static->Dynamic (recreated above) and carry a one-shot blast
+    // velocity set at break time. Apply it now, right after (re)creation.
+    for (RigidBodyObject& rb : *bodies_) {
+        if (rb.created && rb.has_pending_launch && rb.kind == BodyKind::Rigid) {
+            world_->setBodyLinearVelocity(rb.handle, rb.pending_launch_velocity);
+            rb.has_pending_launch = false;
+            rb.pending_launch_velocity = Vec3(0.0f, 0.0f, 0.0f);
+        }
+    }
 
     // Advance. Jolt wants dt/collision_steps <= 1/60, so split big ticks.
     float dt = ctx.dt;
@@ -769,7 +801,10 @@ bool RigidBodySystem::restoreFrameState(const std::vector<RigidBodyFrameState>& 
     // current — the REST pose right after a loop-back reset — so a live resume
     // would step it from rest and re-animate the whole motion from the start (the
     // "body re-sims from frame 0 while fluid is fine" bug). Leaving it uncreated
-    // lets the live resume rebuild it from the already-replayed (correct) mesh.
+    // lets the live resume rebuild it. The rebuild seeds from the REST mesh (so the
+    // edge rest-lengths are correct), then step() teleports it onto the last
+    // replayed frame via the SoftResumeProvider (setSoftBodyVertices) so playing
+    // PAST the cache continues the motion instead of restarting it from rest.
     bool any_new = false;
     for (RigidBodyObject& rb : *bodies_) {
         if (rb.enabled && !rb.created && rb.kind == BodyKind::Rigid) {

@@ -85,14 +85,47 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
     // Block 16: Specular controls (16 bytes)
     float specular;              // Blender-style dielectric F0 = 0.08 * specular
     VkGpuTextureHandle specular_tex;
-    uint32_t _pad_specular0;
-    uint32_t _pad_specular1;
+    float bubble_ior;            // Thin-shell bubble rim Fresnel IOR (when VK_MAT_FLAG_BUBBLE set)
+    float bubble_film;           // Thin-film interference strength (soap iridescence)
+
+    // Block 17: Resin (thick glass / glass-marble) interior absorption (16 bytes)
+    float resin_color_r;         // resin absorption tint (separate from albedo); white = clear
+    float resin_color_g;
+    float resin_color_b;
+    float transmission_density;  // 0 = legacy constant-thickness glass; >0 = real-distance Beer-Lambert
+
+    // Block 18: Resin coat layer params (16 bytes)
+    float resin_roughness;       // resin coat gloss (reflect-lobe roughness), independent of base
+    float _resin_pad0;           // reserved: resin IOR
+    float _resin_pad1;           // reserved: resin roughness texture handle
+    float _resin_pad2;           // reserved: resin normal texture handle
+
+    // Block 19: Resin internal inclusions — dust/dirt march (16 bytes)
+    float resin_inclusion;       // dust cloudiness amount (0 = off, analytic fallback)
+    float resin_dirt;            // dirt speck amount (opaque early-return)
+    float resin_inclusion_scale; // procedural feature size
+    float resin_dirt_color_r;
+
+    // Block 20: Resin dirt colour tail + iridescent clearcoat (16 bytes)
+    float resin_dirt_color_g;
+    float resin_dirt_color_b;
+    float clearcoat_iridescence;    // thin-film tint on clearcoat lobe (0 = plain white)
+    float clearcoat_film_thickness; // hue cycle / film thickness (OPD scale)
 };
+
+// Single source of truth for the GPU material stride. Every material-reading shader
+// includes shaders/material_struct.glsl which must mirror THIS struct exactly. If
+// this assert fires after adding a field, update material_struct.glsl too — a shader
+// copy that is shorter makes materials[idx] for idx>=1 read a shifted offset (wrong
+// textures / missing shadows / vanished objects). See bugfix history 2026-06-22.
+static_assert(sizeof(VkGpuMaterial) == 320, "VkGpuMaterial must stay 320 bytes (20x16); update shaders/material_struct.glsl to match");
 
 // Flag bits for VkGpuMaterial::flags
 static constexpr uint32_t VK_MAT_FLAG_TERRAIN = (1u << 16); // Splat-blended terrain material
 static constexpr uint32_t VK_MAT_FLAG_WATER   = (1u << 17); // Explicit water surface material
 static constexpr uint32_t VK_MAT_FLAG_WATER_FFT_READY = (1u << 18); // height/normal slots contain FFT textures
+static constexpr uint32_t VK_MAT_FLAG_BUBBLE  = (1u << 19); // Thin-shell bubble (Fresnel rim + pass-through)
+static constexpr uint32_t VK_MAT_FLAG_MARBLE_VOLUME = (1u << 20); // Glass marble full-volume medium march (raygen)
 
 /**
  * @brief Per-terrain splat-layer descriptor uploaded to binding 12.

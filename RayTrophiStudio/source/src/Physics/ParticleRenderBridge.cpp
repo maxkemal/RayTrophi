@@ -823,21 +823,22 @@ uint16_t ensureFoamParticleMaterial(RayTrophiSim::Fluid::FoamType type, const st
         pbsdf->setTransmission(1.0f, 1.333f); // 100% transmissive, water refractive index (1.333)
         pbsdf->emissionProperty = MaterialProperty(Vec3(0.0f), 0.0f);
     } else if (type == RayTrophiSim::Fluid::FoamType::Bubble) {
-        // Bubble: Air bubbles (bright, semi-transmissive, low IOR, slight emission)
+        // Bubble: thin-shell dielectric film (the new model). Light Fresnel-reflects
+        // off the shell (bright silver rim) or passes straight through — no roughness,
+        // no emission, no transmission TIR. The bubble BSDF branch handles everything;
+        // the old IOR-1.1 / 0.12-emission hacks are gone (they masked the wrong model).
         const Vec3 bubble_color(0.95f, 0.98f, 1.0f);
-        const float rough = 0.02f;
         pbsdf->albedoProperty = MaterialProperty(bubble_color, 1.0f);
-        pbsdf->roughnessProperty = MaterialProperty(Vec3(rough), rough);
+        pbsdf->roughnessProperty = MaterialProperty(Vec3(0.0f), 0.0f);
         pbsdf->metallicProperty = MaterialProperty(Vec3(0.0f), 0.0f);
-        pbsdf->specularProperty = MaterialProperty(Vec3(1.0f), 1.0f); // High specularity for silver border
+        pbsdf->specularProperty = MaterialProperty(Vec3(1.0f), 1.0f);
         pbsdf->opacityProperty.alpha = 1.0f;
-        pbsdf->setRoughness(rough);
-        // Reduce transmission to 0.65 to allow 35% specular/diffuse reflection of the bright color,
-        // and set IOR to 1.1 to prevent TIR ray-trapping.
-        pbsdf->setTransmission(0.65f, 1.1f);
-        // Add a small emission to simulate light scattering inside the bubble
-        // and prevent it from looking completely dark/black under water.
-        pbsdf->emissionProperty = MaterialProperty(bubble_color * 0.12f, 0.12f);
+        pbsdf->setRoughness(0.0f);
+        pbsdf->setTransmission(0.0f, 1.33f);
+        pbsdf->emissionProperty = MaterialProperty(Vec3(0.0f), 0.0f);
+        pbsdf->isBubble   = true;     // thin-shell bubble model
+        pbsdf->bubbleIor  = 1.33f;    // air/water rim Fresnel
+        pbsdf->bubbleFilm = 0.0f;     // clean air bubble by default (user dials soap shimmer)
     } else {
         // Foam: Scattering surface foam (diffuse, rough white)
         const Vec3 white(0.93f, 0.95f, 0.98f);
@@ -1344,10 +1345,22 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
                 system.visible && system.enabled && state.valid && is_fluid &&
                 d < domains.size() &&
                 domains[d].fluid_foam_params.enabled;
-            // Foam ALWAYS renders as instanced spheres (render_mode is ignored).
-            // The marching-cubes "Surface" mode was removed — see the SPHERES
-            // note below for why.
-            const bool is_spheres = base_ok;
+            // Foam renders as instanced spheres EXCEPT in Volume mode, where it is
+            // splatted into the fluid surface volume's temperature channel by
+            // SceneData::syncSimulationRenderVolumes (no per-particle geometry). The
+            // two paths are mutually exclusive — when Volume is selected we tear the
+            // sphere group down so the foam isn't drawn twice.
+            // Volume foam rides the fluid SURFACE volume's temperature channel, so it
+            // only applies when the fluid is in Surface SDF render mode. With any other
+            // fluid mode there is no host volume → fall back to spheres instead of
+            // silently drawing nothing.
+            const bool is_volume_foam =
+                base_ok &&
+                domains[d].fluid_foam_params.render_mode ==
+                    RayTrophiSim::Fluid::FoamRenderMode::Volume &&
+                domains[d].fluid_render_mode ==
+                    RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
+            const bool is_spheres = base_ok && !is_volume_foam;
             const bool wants = is_spheres;
 
             int& group_id = system.domain_foam_render_group_ids[d];
@@ -1376,6 +1389,10 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
                 g_fluid_source_state.erase(group_id);
             }
             group->transient = true;
+            // OptiX renders foam as analytic sphere GAS (one per type) instead of
+            // one TLAS instance per particle — see InstanceGroup::point_sphere_mode.
+            // Vulkan / CPU ignore the flag and keep the icosphere instance path.
+            group->point_sphere_mode = true;
             FluidSourceState& st = g_fluid_source_state[group_id];
 
             // ── SPHERES: three instanced sources per foam type. ──

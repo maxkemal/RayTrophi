@@ -1,4 +1,4 @@
-﻿#include <optix.h>
+#include <optix.h>
 #include <optix_device.h>
 #include <cuda_runtime.h>
 #include <cuda_texture_types.h>
@@ -104,15 +104,30 @@ extern "C" __global__ void __raygen__rg() {
             float ca_amount = optixLaunchParams.camera.chromatic_aberration;
             float r_scale = optixLaunchParams.camera.chromatic_aberration_r;
             float b_scale = optixLaunchParams.camera.chromatic_aberration_b;
-            float2 uv_r = apply_chromatic_aberration(u, v, ca_amount, r_scale);
-            Ray ray_r = get_ray_from_camera(optixLaunchParams.camera, uv_r.x, uv_r.y, &rng);
-            float3 color_r = ray_color(ray_r, &rng);
-            Ray ray_g = get_ray_from_camera(optixLaunchParams.camera, u, v, &rng);
-            float3 color_g = ray_color(ray_g, &rng, &primary_albedo, &primary_normal, &primary_hit, &primary_world_pos, &primary_material_id);
-            float2 uv_b = apply_chromatic_aberration(u, v, ca_amount, b_scale);
-            Ray ray_b = get_ray_from_camera(optixLaunchParams.camera, uv_b.x, uv_b.y, &rng);
-            float3 color_b = ray_color(ray_b, &rng);
-            color_sum += make_float3(color_r.x, color_g.y, color_b.z);
+            
+            // Stochastic Chromatic Aberration: randomly pick one channel per sample
+            float channel_rnd = pcg_float(&pcg_rng);
+            int selected_channel = (channel_rnd < 0.3333f) ? 0 : ((channel_rnd < 0.6666f) ? 1 : 2);
+            
+            float2 uv_ca = make_float2(u, v);
+            if (selected_channel == 0) {
+                uv_ca = apply_chromatic_aberration(u, v, ca_amount, r_scale);
+            } else if (selected_channel == 2) {
+                uv_ca = apply_chromatic_aberration(u, v, ca_amount, b_scale);
+            }
+            
+            Ray ray = get_ray_from_camera(optixLaunchParams.camera, uv_ca.x, uv_ca.y, &rng);
+            float3 sample = ray_color(ray, &rng, &primary_albedo, &primary_normal, &primary_hit, &primary_world_pos, &primary_material_id);
+            
+            // Mask the color: only keep the selected channel, scaled by 3.0f to conserve energy
+            if (selected_channel == 0) {
+                sample = make_float3(sample.x * 3.0f, 0.0f, 0.0f);
+            } else if (selected_channel == 1) {
+                sample = make_float3(0.0f, sample.y * 3.0f, 0.0f);
+            } else {
+                sample = make_float3(0.0f, 0.0f, sample.z * 3.0f);
+            }
+            color_sum += sample;
         } else {
             Ray ray = get_ray_from_camera(optixLaunchParams.camera, u, v, &rng);
             float3 sample = ray_color(ray, &rng, &primary_albedo, &primary_normal, &primary_hit, &primary_world_pos, &primary_material_id);

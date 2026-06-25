@@ -1,0 +1,39 @@
+// NOTE: This compute shader is currently UNUSED. Kept for reference or future GPU sculpt implementation.
+#version 460
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) buffer PosBuffer { float positions[]; };
+layout(std430, binding = 1) buffer NrmBuffer { float normals[]; };
+layout(std430, binding = 2) buffer WeightBuffer { float weights[]; };
+
+layout(push_constant) uniform PC {
+    float cx;
+    float cy;
+    float cz;
+    float radius;
+    float strength;
+    float dt;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint maxIdx = positions.length() / 3;
+    if (idx >= maxIdx) return;
+    
+    float w = weights[idx];
+    if (w <= 1e-6) return;
+    
+    uint base = idx * 3;
+    vec3 p = vec3(positions[base], positions[base+1], positions[base+2]);
+    vec3 n = vec3(normals[base], normals[base+1], normals[base+2]);
+    
+    // Draw brush CPU mantığıyla aynı oranda yer değiştirme uygula
+    // (radius * 0.22 * strength * dt * w)
+    vec3 displacement = n * (pc.radius * 0.22f * pc.strength * pc.dt * w);
+    
+    p += displacement;
+    
+    positions[base] = p.x;
+    positions[base+1] = p.y;
+    positions[base+2] = p.z;
+}

@@ -852,8 +852,23 @@ __device__ bool clearcoat_scatter(
     float k = alpha * 0.5f;
     float G1L = NdotL / (NdotL * (1.0f - k) + k);
 
+    // Iridescent thin-film tint (same OPD/cos model as the bubble path). iridescence=0 →
+    // white (plain clearcoat, no change). At grazing the optical path difference grows,
+    // cycling the interference hue (oil-slick / beetle-shell / candy paint).
+    float3 cc_tint = make_float3(1.0f, 1.0f, 1.0f);
+    float iridescence = fminf(fmaxf(material.clearcoat_iridescence, 0.0f), 1.0f);
+    if (iridescence > 1e-3f) {
+        float opd = material.clearcoat_film_thickness * (1.0f / fmaxf(VdotH, 0.15f));
+        float3 film = make_float3(0.55f + 0.45f * cosf(opd * 6.2831853f),
+                                  0.55f + 0.45f * cosf(opd * 6.2831853f + 2.0944f),
+                                  0.55f + 0.45f * cosf(opd * 6.2831853f + 4.18879f));
+        cc_tint = make_float3(1.0f - iridescence + iridescence * film.x,
+                              1.0f - iridescence + iridescence * film.y,
+                              1.0f - iridescence + iridescence * film.z);
+    }
+
     // Return white specular scaled by Fresnel*G1L (caller will compensate selection probability)
-    *attenuation = make_float3(fresnel * G1L, fresnel * G1L, fresnel * G1L) * fmaxf(clearcoat_strength, 0.0f);
+    *attenuation = make_float3(fresnel * G1L, fresnel * G1L, fresnel * G1L) * fmaxf(clearcoat_strength, 0.0f) * cc_tint;
     *scattered = Ray(offset_ray(payload.position, N), L);
 
     // PDF approximation using microfacet half-vector formulation
@@ -937,6 +952,9 @@ __device__ bool transmission_scatter(
 
     float ior = material.ior;
     if (payload.use_blended_data) ior = payload.blended_ior;
+    // Resin needs real refraction to read as a solid volume — with IOR≈1 the ray
+    // passes straight through and only darkens (no lensing / thickness cue).
+    if (material.transmission_density > 1e-4f) ior = fmaxf(ior, 1.45f);
     bool front_face = payload.front_face != 0;
     float3 macro_normal = N;
     float eta = front_face ? (1.0f / ior) : ior;
@@ -1009,6 +1027,26 @@ __device__ bool transmission_scatter(
             make_float3(tex.x, tex.y, tex.z);
     }
 
+    const bool real_depth = (material.transmission_density > 1e-4f);
+
+    // ── RESIN terminate-on-base (parity with Vulkan scatterGlass): the refraction
+    // lobe travels the resin THICKNESS, hits the base albedo at that depth, and
+    // scatters back out through the resin (absorb in + out). Opaque under a refractive
+    // absorbing resin layer; the reflection lobe stays the glossy resin top. A small
+    // base extinction (0.25) makes Resin Depth darken even for a white resin;
+    // resin_color tints which channels survive.
+    if (real_depth && !do_reflect) {
+        float3 ct      = clamp3f(material.resin_color, 0.0f, 1.0f);
+        float  cosV    = fmaxf(fabsf(dot(-unit_direction, macro_normal)), 0.25f);
+        float  pathLen = 2.0f * material.transmission_density / cosV;
+        float3 ext     = make_float3((1.0f - ct.x) + 0.25f, (1.0f - ct.y) + 0.25f, (1.0f - ct.z) + 0.25f);
+        float3 absorb  = make_float3(expf(-pathLen * ext.x), expf(-pathLen * ext.y), expf(-pathLen * ext.z));
+        float3 baseDir = cosine_sample_hemisphere(rng, macro_normal);
+        *attenuation   = clamp3f(tint, 0.0f, 1.0f) * absorb;
+        *scattered     = Ray(offset_ray(payload.position, macro_normal), normalize(baseDir));
+        return true;
+    }
+
     if (do_reflect) {
         *attenuation = make_float3(1.0f, 1.0f, 1.0f);
     }
@@ -1029,7 +1067,7 @@ __device__ bool transmission_scatter(
     }
 
     *scattered = Ray(offset_ray(payload.position, offset_n), normalize(direction));
-    
+
     return true;
 }
 
@@ -1084,6 +1122,49 @@ __device__ __noinline__ bool scatter_material(
             return true;
         }
     }
+
+    // ── Thin-shell BUBBLE (champagne / soda / soap-foam close-up) ──────────────
+    // A bubble is a THIN dielectric film: light either Fresnel-reflects off the
+    // shell — the bright silver rim, strong at grazing — or passes STRAIGHT through
+    // (a thin shell enters and exits parallel, no net refraction bending). So it
+    // reads as a bright-rimmed transparent sphere regardless of the medium around
+    // it (no nested-dielectric needed). bubble_ior drives the rim Fresnel.
+    if (material.flags & GPU_MAT_FLAG_BUBBLE) {
+        const float3 Nb = (length(N) > 1e-4f) ? normalize(N) : make_float3(0.0f, 0.0f, 1.0f);
+        const float3 wi = normalize(ray_in.direction);
+        float cosT = fminf(fabsf(dot(wi, Nb)), 1.0f);
+        float bio  = (material.bubble_ior > 1.0001f) ? material.bubble_ior : 1.33f;
+        float r0   = (1.0f - bio) / (1.0f + bio);
+        r0 = r0 * r0;
+        float fres = r0 + (1.0f - r0) * powf(1.0f - cosT, 5.0f);
+        float3 dir, att;
+        if (random_float(rng) < fres) {
+            dir = reflect(wi, Nb);                       // bright Fresnel rim
+            // Thin-film interference (soap iridescence): optical path through the
+            // film scales with view angle (~1/cosT), tinting the reflected rim with
+            // a wavelength-dependent rainbow. bubble_film = thickness/cycle count.
+            if (material.bubble_film > 1e-3f) {
+                float opd = material.bubble_film * (1.0f / fmaxf(cosT, 0.15f));
+                att = make_float3(0.55f + 0.45f * cosf(opd * 6.2831853f),
+                                  0.55f + 0.45f * cosf(opd * 6.2831853f + 2.0944f),
+                                  0.55f + 0.45f * cosf(opd * 6.2831853f + 4.1888f));
+            } else {
+                att = make_float3(1.0f, 1.0f, 1.0f);
+            }
+        } else {
+            dir = wi;                                    // straight pass-through (thin shell)
+            att = make_float3(0.85f + 0.15f * material.albedo.x,   // faint film tint, mostly clear
+                              0.85f + 0.15f * material.albedo.y,
+                              0.85f + 0.15f * material.albedo.z);
+        }
+        *scattered    = Ray(offset_ray(payload.position, dir), dir);
+        *attenuation  = att;
+        *pdf          = 1.0f;
+        *is_specular  = true;
+        *bounce_type  = PATH_BOUNCE_SPECULAR;
+        return true;
+    }
+
     float3 albedo = material.albedo;
     if (payload.use_blended_data) {
         albedo = payload.blended_albedo;
@@ -1189,19 +1270,25 @@ __device__ __noinline__ bool scatter_material(
         }
         // If not chosen, continue to base layer (no change here)
     }
-    
+
     // 2. TRANSMISSION (Glass/Water)
     // Always mark transmission bounces as specular to skip NEE.
     // roughness is clamped >= 0.02f above, so (roughness < 0.02f) is always false —
     // meaning NEE ran for every refraction. evaluate_brdf gives (diffuse*0 + spec) for
     // high-transmission glass, causing bright specular fireflies on the refracted path.
-    if (transmission > 0.01f) {
-        if (random_float(rng) < transmission) {
+    //
+    // Resin: a thick resin/glass IS a transmissive body — the depth-absorption look
+    // only reads if (almost) every ray travels through it. So when transmission_density
+    // is set, force the glass path regardless of the Transmission slider (self-contained).
+    float eff_transmission = transmission;
+    if (material.transmission_density > 1e-4f) eff_transmission = 1.0f;
+    if (eff_transmission > 0.01f) {
+        if (random_float(rng) < eff_transmission) {
             *is_specular = true;
             *bounce_type = PATH_BOUNCE_TRANSMISSION;
             return transmission_scatter(material, payload, ray_in, rng, scattered, attenuation);
         }
-        albedo *= 1.0f / fmaxf(1.0f - transmission, 0.01f);
+        albedo *= 1.0f / fmaxf(1.0f - eff_transmission, 0.01f);
         transmission = 0.0f;
     }
     

@@ -1,4 +1,4 @@
-#include "SceneCommand.h"
+﻿#include "SceneCommand.h"
 #include "scene_ui.h"
 #include "Renderer.h"
 #include "ProjectManager.h"
@@ -217,7 +217,7 @@ void DeleteObjectCommand::execute(UIContext& ctx) {
     for (const auto& tri : deleted_triangles_) {
         if (tri) {
             tri->visible = false;
-            ctx.scene.markObjectPendingDelete(tri->nodeName);
+            ctx.scene.markObjectPendingDelete(tri->getNodeName());
             needs_update = true;
         }
     }
@@ -372,7 +372,7 @@ void TransformCommand::applyState(UIContext& ctx, const TransformState& state) {
     bool found = false;
     for (auto& obj : ctx.scene.world.objects) {
         auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-        if (tri && tri->nodeName == object_name_) {
+        if (tri && tri->getNodeName() == object_name_) {
              Transform* t = tri->getTransformPtr();
              if (t) {
                  t->setBase(state.matrix);

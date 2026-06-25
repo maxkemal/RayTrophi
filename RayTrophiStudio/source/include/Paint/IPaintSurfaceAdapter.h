@@ -63,6 +63,15 @@ enum class PaintTextureTintMode : unsigned char {
     Overlay
 };
 
+enum class StrokeMethod : unsigned char {
+    Space = 0,
+    Airbrush,
+    Anchored,
+    Dots,
+    Line,
+    Curve
+};
+
 struct BrushChannelInput {
     bool enabled = false;
     Vec3 color = Vec3(1.0f, 1.0f, 1.0f);
@@ -88,6 +97,7 @@ struct BrushSettings {
     float alpha_scale = 1.0f;
     float alpha_rotation_degrees = 0.0f;
     bool follow_stroke_angle = false;
+    StrokeMethod stroke_method = StrokeMethod::Space;
     StampPlacementMode stamp_mode = StampPlacementMode::Single;
     bool stamp_random_rotation = false;
     float stamp_scale_jitter = 0.0f;

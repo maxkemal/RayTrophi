@@ -188,6 +188,10 @@ public:
     // Clear Coat
     float clearcoat = 0.0f;                             // Clear coat amount (0-1)
     float clearcoatRoughness = 0.03f;                   // Clear coat roughness
+    // Iridescent clearcoat: thin-film tint on the clearcoat lobe (oil-slick / beetle-shell /
+    // candy paint). 0 = plain white clearcoat. clearcoatFilmThickness drives the hue cycle.
+    float clearcoatIridescence = 0.0f;                  // thin-film tint strength (0-1)
+    float clearcoatFilmThickness = 0.55f;               // hue cycle / film thickness (OPD scale)
     
     // Translucent (thin surface light pass-through)
     float translucent = 0.0f;                           // Translucency amount (0-1)
@@ -205,6 +209,37 @@ public:
     float micro_detail_strength = 0.0f;  // 0 = disabled; world-space color+dirt+roughness
     float micro_detail_scale    = 2.0f;  // World-space frequency (1–5 typical)
     float tile_break_strength   = 0.0f;  // UV tile-break (0 = off; 0.1–0.3 typical)
+
+    // Thin-shell BUBBLE (champagne / soda / soap-foam close-up). When on, the BSDF
+    // renders the surface as a thin dielectric film: Fresnel rim reflection vs a
+    // straight pass-through (no net refraction), so it reads as a bright-rimmed
+    // transparent bubble independent of the surrounding medium. bubbleFilm is the
+    // thin-film interference strength (soap iridescence) — reserved for Faz 2.
+    bool  isBubble   = false;
+    float bubbleIor  = 1.33f;
+    float bubbleFilm = 0.0f;
+
+    // Transmission interior absorption density (thick resin / glass-marble depth).
+    // 0 = legacy constant-thickness glass tint; >0 = Beer-Lambert over the REAL
+    // in-medium ray distance, so colour deepens with geometric thickness.
+    float transmissionDensity = 0.0f;
+    // Resin absorption colour (the tint that builds with depth). Separate from albedo
+    // so the resin can be coloured independently. White = clear (no colour, lensing only).
+    Vec3  resinColor = Vec3(1.0f, 1.0f, 1.0f);
+    // Resin coat gloss — the reflection-lobe roughness of the resin LAYER itself,
+    // independent of the base material roughness (a glossy coat over a matte base).
+    float resinRoughness = 0.1f;
+    // Resin INTERNAL inclusions (procedural march through the resin thickness):
+    //  - resinInclusion: dust cloudiness amount (heterogeneous absorption at depth)
+    //  - resinDirt: opaque dirt-speck amount (ray terminates early inside the resin)
+    //  - resinInclusionScale: procedural feature size; resinDirtColor: speck tint
+    float resinInclusion = 0.0f;
+    float resinDirt = 0.0f;
+    float resinInclusionScale = 8.0f;
+    Vec3  resinDirtColor = Vec3(0.18f, 0.14f, 0.10f);
+    // Glass Marble FULL VOLUME: integrate the inclusions along the REAL interior path
+    // (front→back) in the path tracer instead of the cheap front-shell approximation.
+    bool  glassMarbleVolume = false;
 
 private:
   

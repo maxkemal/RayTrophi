@@ -73,6 +73,7 @@ public:
     void updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects); // Auto-decides based on mode
     void updateTLASGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices = {}); // BLAS+TLAS update
     void updateTLASMatricesOnly(const std::vector<std::shared_ptr<Hittable>>& objects); // Transform-only update
+    void refitSphereGroups(); // Foam point-sphere GAS in-place refit (motion path)
     void launch(SDL_Surface* surface, SDL_Window* window, int w, int h);
     void launch(int w, int h); // Overload for internal use (renderer)
 
@@ -390,6 +391,8 @@ private:
     OptixProgramGroup hit_shadow_pg = nullptr;
     OptixProgramGroup hair_hit_pg = nullptr;      // Hair curve radiance
     OptixProgramGroup hair_shadow_pg = nullptr;   // Hair curve shadow
+    OptixProgramGroup sphere_hit_pg = nullptr;    // Point-sphere (foam) radiance
+    OptixProgramGroup sphere_shadow_pg = nullptr; // Point-sphere (foam) shadow
     OptixPipeline pipeline = nullptr;
     OptixShaderBindingTable sbt = {};
     GpuMaterial* d_materials = nullptr;

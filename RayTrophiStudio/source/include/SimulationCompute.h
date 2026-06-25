@@ -22,7 +22,12 @@ enum class ComputeBufferUsage : uint32_t {
     Download = 1u << 2,
     Uniform = 1u << 3,
     ReadOnly = 1u << 4,
-    ReadWrite = 1u << 5
+    ReadWrite = 1u << 5,
+    // Phase 3d zero-copy: also usable as RT acceleration-structure build input
+    // (vertex/index) on a backend sharing the RT VkDevice. Adds the accel-input +
+    // vertex + shader-device-address usages and an address-capable allocation so the
+    // RT backend can build a BLAS straight from this buffer (no host round-trip).
+    AccelInput = 1u << 6
 };
 
 ComputeBufferUsage operator|(ComputeBufferUsage lhs, ComputeBufferUsage rhs);
@@ -102,6 +107,14 @@ public:
     virtual void* nativeBufferPtr(ComputeBufferHandle handle) const {
         (void)handle;
         return nullptr;
+    }
+
+    // GPU device address of a buffer created with ComputeBufferUsage::AccelInput, for
+    // zero-copy interop with the RT backend's BLAS build (Phase 3d; both share one
+    // VkDevice). Returns 0 when unsupported or the buffer is not address-capable.
+    virtual uint64_t bufferDeviceAddress(ComputeBufferHandle handle) const {
+        (void)handle;
+        return 0;
     }
 
     // Dispatch a registered compute kernel. Default: unsupported (CPU path).
@@ -191,6 +204,17 @@ std::unique_ptr<ISimulationComputeBackend> createCudaSimulationComputeBackend();
 struct SimulationComputeVulkanContext;
 std::unique_ptr<ISimulationComputeBackend>
 createVulkanSimulationComputeBackend(const SimulationComputeVulkanContext& ctx);
+
+// Lazily-created, process-wide compute backend shared by non-simulation GPU work
+// (e.g. mesh subdivision), independent of any active GPU simulation domain. Created
+// once from g_vulkan_sim_compute_ctx on first use; returns nullptr (caller falls
+// back to CPU) when no Vulkan compute device is available. Implemented in
+// SimulationComputeVulkan.cpp.
+ISimulationComputeBackend* acquireSharedMeshComputeBackend();
+
+// Tear down the shared mesh compute backend. Call while its VkDevice is still valid
+// (before vkDestroyDevice on a backend switch / shutdown); acquire rebuilds on next use.
+void releaseSharedMeshComputeBackend();
 
 void logSimulationComputeInfo(const std::string& message);
 void logSimulationComputeWarning(const std::string& message);

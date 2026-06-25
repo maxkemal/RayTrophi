@@ -7,6 +7,9 @@
 #include <iostream>
 #include <algorithm>
 #include <unordered_set>
+#include <execution>
+#include <numeric>
+#include <cmath>
 #include "TerrainManager.h"
 #include "Texture.h"
 #include "TerrainManager.h"
@@ -27,6 +30,156 @@ bool triangleHasEffectiveSkinData(const Triangle& tri) {
         }
     }
     return false;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// P-render G1: wedge-aware vertex weld for BLAS geometry
+// ───────────────────────────────────────────────────────────────────────────
+// All buildBLAS call sites hand us a NON-indexed (expanded) triangle soup:
+// 3 vertices per triangle, sequential indices. For a dense smooth/subdivided
+// mesh that is ~6x more GPU vertices than necessary. weldMeshGeometryForBlas
+// collapses corners that share quantized position+normal+uv into one vertex
+// (seams — uv/normal discontinuities — stay split, so shading is identical),
+// emits a real index buffer, and records cornerMap (orig corner -> welded id)
+// so the hot sculpt refit path can scatter updated positions/normals into the
+// smaller welded buffers without re-welding. Skinned soup is left untouched
+// (bone buffers complicate the weld key; skinned meshes aren't the dense
+// sculpt target). Toggle below lets us A/B against the legacy path.
+static bool g_optix_blas_weld = true;
+
+struct WeldKey {
+    int32_t px, py, pz;   // quantized position (1e-5)
+    int32_t nx, ny, nz;   // quantized normal   (1e-3)
+    int32_t u, v;         // quantized uv       (1e-4)
+    bool operator==(const WeldKey& o) const {
+        return px == o.px && py == o.py && pz == o.pz &&
+               nx == o.nx && ny == o.ny && nz == o.nz &&
+               u == o.u && v == o.v;
+    }
+    bool operator<(const WeldKey& o) const {
+        if (px != o.px) return px < o.px;
+        if (py != o.py) return py < o.py;
+        if (pz != o.pz) return pz < o.pz;
+        if (nx != o.nx) return nx < o.nx;
+        if (ny != o.ny) return ny < o.ny;
+        if (nz != o.nz) return nz < o.nz;
+        if (u != o.u) return u < o.u;
+        return v < o.v;
+    }
+};
+
+inline int32_t quantizeScalar(float x, float scale) {
+    return static_cast<int32_t>(std::lround(x * scale));
+}
+
+// Returns true and fills out/cornerMap when the geometry was welded; false
+// (no-op, caller keeps the original) for skinned / already-indexed / empty input.
+bool weldMeshGeometryForBlas(const MeshGeometry& in, MeshGeometry& out,
+                             std::vector<uint32_t>& cornerMap) {
+    const size_t N = in.vertices.size();
+    if (N == 0) return false;
+    if (in.indices.size() * 3 != N) return false;   // not the expanded form we expect
+    if (!in.boneIndices.empty()) return false;       // skip skinned (safe)
+
+    const bool hasN = (in.normals.size() == N);
+    const bool hasUV = (in.uvs.size() == N);
+    const bool hasT = (in.tangents.size() == N);
+    const bool hasC = (in.colors.size() == N);
+
+    // Pass 1 (parallel): quantize every corner into a flat key array.
+    std::vector<WeldKey> keys(N);
+    {
+        std::vector<size_t> iota(N);
+        std::iota(iota.begin(), iota.end(), size_t{ 0 });
+        std::for_each(std::execution::par, iota.begin(), iota.end(), [&](size_t c) {
+            const float3& p = in.vertices[c];
+            WeldKey k;
+            k.px = quantizeScalar(p.x, 1e5f);
+            k.py = quantizeScalar(p.y, 1e5f);
+            k.pz = quantizeScalar(p.z, 1e5f);
+            if (hasN) {
+                const float3& n = in.normals[c];
+                k.nx = quantizeScalar(n.x, 1e3f);
+                k.ny = quantizeScalar(n.y, 1e3f);
+                k.nz = quantizeScalar(n.z, 1e3f);
+            } else { k.nx = k.ny = k.nz = 0; }
+            if (hasUV) {
+                const float2& uv = in.uvs[c];
+                k.u = quantizeScalar(uv.x, 1e4f);
+                k.v = quantizeScalar(uv.y, 1e4f);
+            } else { k.u = k.v = 0; }
+            keys[c] = k;
+        });
+    }
+
+    // Pass 2: dedup via parallel sort of an index permutation, then a cheap
+    // serial scan that assigns welded ids in sorted-key order.
+    std::vector<uint32_t> order(N);
+    std::iota(order.begin(), order.end(), uint32_t{ 0 });
+    std::sort(std::execution::par, order.begin(), order.end(),
+        [&](uint32_t a, uint32_t b) { return keys[a] < keys[b]; });
+
+    cornerMap.assign(N, 0u);
+    out = MeshGeometry{};
+    out.mesh_name = in.mesh_name;
+    out.original_name = in.original_name;
+    out.material_id = in.material_id;
+    out.vertices.reserve(N / 4 + 1);
+    if (hasN) out.normals.reserve(N / 4 + 1);
+    if (hasUV) out.uvs.reserve(N / 4 + 1);
+    if (hasT) out.tangents.reserve(N / 4 + 1);
+    if (hasC) out.colors.reserve(N / 4 + 1);
+
+    for (size_t k = 0; k < N; ++k) {
+        const uint32_t c = order[k];
+        if (k == 0 || !(keys[c] == keys[order[k - 1]])) {
+            out.vertices.push_back(in.vertices[c]);
+            if (hasN) out.normals.push_back(in.normals[c]);
+            if (hasUV) out.uvs.push_back(in.uvs[c]);
+            if (hasT) out.tangents.push_back(in.tangents[c]);
+            if (hasC) out.colors.push_back(in.colors[c]);
+        }
+        cornerMap[c] = static_cast<uint32_t>(out.vertices.size()) - 1u;
+    }
+
+    // Build the real index buffer (one uint3 per triangle).
+    const size_t triCount = in.indices.size();
+    out.indices.resize(triCount);
+    for (size_t t = 0; t < triCount; ++t) {
+        out.indices[t] = make_uint3(cornerMap[3 * t + 0],
+                                    cornerMap[3 * t + 1],
+                                    cornerMap[3 * t + 2]);
+    }
+    return true;
+}
+
+// Refit helper: scatter an incoming non-indexed (expanded) geometry's positions
+// and normals into welded-vertex order using a BLAS's stored cornerMap. Only the
+// attributes the refit path actually re-uploads (positions + normals) are
+// scattered; static attributes (uv/tangent/color) keep their build-time welded
+// values. Returns false (caller falls back) if the map size no longer matches
+// (topology changed -> a full rebuild is required anyway).
+bool scatterWeldedRefit(const MeshGeometry& in, const std::vector<uint32_t>& cornerMap,
+                        size_t weldedVertexCount, MeshGeometry& out) {
+    const size_t N = in.vertices.size();
+    if (cornerMap.size() != N || N == 0) return false;
+
+    out = MeshGeometry{};
+    out.mesh_name = in.mesh_name;
+    out.original_name = in.original_name;
+    out.material_id = in.material_id;
+    out.vertices.assign(weldedVertexCount, make_float3(0.0f, 0.0f, 0.0f));
+    const bool hasN = (in.normals.size() == N);
+    if (hasN) out.normals.assign(weldedVertexCount, make_float3(0.0f, 0.0f, 0.0f));
+
+    for (size_t c = 0; c < N; ++c) {
+        const uint32_t w = cornerMap[c];
+        if (w >= weldedVertexCount) return false;  // stale map guard
+        out.vertices[w] = in.vertices[c];
+        if (hasN) out.normals[w] = in.normals[c];
+    }
+    // Indices unchanged on refit (topology stable); device already holds them.
+    return true;
 }
 
 void computeGeometryBounds(const MeshGeometry& geometry, float3& outMin, float3& outMax) {
@@ -139,15 +292,18 @@ cudaTextureObject_t resolveSharedOptixTexture(const std::shared_ptr<Texture>& te
     } while (0)
 #endif
 
-void OptixAccelManager::initialize(OptixDeviceContext ctx, CUstream str, 
+void OptixAccelManager::initialize(OptixDeviceContext ctx, CUstream str,
                                    OptixProgramGroup hit_pg, OptixProgramGroup hit_shadow_pg,
-                                   OptixProgramGroup hair_hit_pg, OptixProgramGroup hair_shadow_pg) {
+                                   OptixProgramGroup hair_hit_pg, OptixProgramGroup hair_shadow_pg,
+                                   OptixProgramGroup sphere_hit_pg, OptixProgramGroup sphere_shadow_pg) {
     context = ctx;
     stream = str;
     hit_program_group = hit_pg;
     hit_shadow_program_group = hit_shadow_pg;
     hair_hit_program_group = hair_hit_pg;
     hair_shadow_program_group = hair_shadow_pg;
+    sphere_hit_program_group = sphere_hit_pg;
+    sphere_shadow_program_group = sphere_shadow_pg;
     // SCENE_LOG_INFO("[OptixAccelManager] Initialized with OptiX context");
 }
 // Helper: Convert Vec3 to float3
@@ -212,15 +368,26 @@ std::vector<MeshData> OptixAccelManager::groupTrianglesByMesh(
 // BLAS BUILDING
 // ═══════════════════════════════════════════════════════════════════════════
 
-int OptixAccelManager::buildMeshBLAS(const MeshGeometry& geometry) {
-    if (geometry.vertices.empty() || geometry.indices.empty()) {
+int OptixAccelManager::buildMeshBLAS(const MeshGeometry& geometryIn) {
+    if (geometryIn.vertices.empty() || geometryIn.indices.empty()) {
         std::string msg = "[OptixAccelManager] Cannot build BLAS: empty geometry";
         SCENE_LOG_ERROR(msg);
         if (m_messageCallback) m_messageCallback(msg, 2);
         return -1;
     }
-    
+
+    // P-render G1: weld the expanded soup into an indexed mesh before upload.
+    // On success `geometry` aliases the smaller welded geometry and weldCornerMap
+    // is stored on the BLAS for the refit path; on failure (skinned/non-expanded)
+    // we keep the original geometry and the legacy non-indexed path.
+    MeshGeometry weldedStorage;
+    std::vector<uint32_t> weldCornerMap;
+    const bool didWeld = g_optix_blas_weld &&
+        weldMeshGeometryForBlas(geometryIn, weldedStorage, weldCornerMap);
+    const MeshGeometry& geometry = didWeld ? weldedStorage : geometryIn;
+
     MeshBLAS blas;
+    if (didWeld) blas.weld_corner_map = std::move(weldCornerMap);
     blas.mesh_name = geometry.mesh_name;
     blas.original_name = geometry.original_name.empty() ? geometry.mesh_name : geometry.original_name;  // Base name for GPU picking
     blas.material_id = geometry.material_id;  // Store material ID for SBT
@@ -613,13 +780,203 @@ void OptixAccelManager::updateCurveMaterial(int curve_id, const GpuHairMaterial&
     }
 }
 
-bool OptixAccelManager::updateMeshBLAS(int mesh_id, const MeshGeometry& geometry, bool skipCpuUpload, bool sync) {
+// ═══════════════════════════════════════════════════════════════════════════
+// SPHERE BLAS — analytic point-sphere GAS (built-in OptiX sphere primitive)
+// ═══════════════════════════════════════════════════════════════════════════
+int OptixAccelManager::findSphereBLAS(const std::string& name) const {
+    for (size_t i = 0; i < sphere_blas_list.size(); ++i) {
+        if (sphere_blas_list[i].name == name) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+int OptixAccelManager::buildSphereBLAS(const std::string& name, int material_id,
+                                       const std::vector<float3>& centers,
+                                       const std::vector<float>& radii,
+                                       size_t capacity) {
+    if (!context) return -1;
+    const size_t count = (std::min)(centers.size(), radii.size());
+    capacity = (std::max)(capacity, count);
+    if (capacity == 0) return -1;
+
+    SphereBLAS blas;
+    blas.name = name;
+    blas.material_id = material_id;
+    blas.sphere_capacity = capacity;
+    blas.sphere_count = count;
+
+    // Allocate device buffers at the pool capacity; the active GAS only covers
+    // `count` primitives but the surplus is kept so a later grow re-uses them.
+    const size_t centers_bytes = capacity * sizeof(float3);
+    const size_t radii_bytes   = capacity * sizeof(float);
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&blas.d_centers), centers_bytes));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&blas.d_radii),   radii_bytes));
+    if (count > 0) {
+        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_centers), centers.data(),
+                                   count * sizeof(float3), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_radii), radii.data(),
+                                   count * sizeof(float), cudaMemcpyHostToDevice, stream));
+    }
+
+    OptixBuildInput sphere_input = {};
+    sphere_input.type = OPTIX_BUILD_INPUT_TYPE_SPHERES;
+    sphere_input.sphereArray.vertexBuffers = &blas.d_centers;
+    sphere_input.sphereArray.numVertices = static_cast<unsigned int>(count);
+    sphere_input.sphereArray.vertexStrideInBytes = sizeof(float3);
+    sphere_input.sphereArray.radiusBuffers = &blas.d_radii;
+    sphere_input.sphereArray.radiusStrideInBytes = sizeof(float);
+    sphere_input.sphereArray.singleRadius = 0;   // per-sphere radius
+    unsigned int sphere_flags[1] = { OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT };
+    sphere_input.sphereArray.flags = sphere_flags;
+    sphere_input.sphereArray.numSbtRecords = 1;
+
+    OptixAccelBuildOptions accel_options = {};
+    accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_UPDATE | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
+
+    OptixAccelBufferSizes gas_buffer_sizes;
+    OptixResult cres = optixAccelComputeMemoryUsage(context, &accel_options, &sphere_input, 1, &gas_buffer_sizes);
+    if (cres != OPTIX_SUCCESS) {
+        SCENE_LOG_ERROR("[OptixAccelManager] Failed to compute sphere GAS memory: " + std::to_string(cres));
+        blas.cleanup();
+        return -1;
+    }
+
+    CUdeviceptr d_temp = 0;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_temp), gas_buffer_sizes.tempSizeInBytes));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&blas.d_gas_output), gas_buffer_sizes.outputSizeInBytes));
+    blas.gas_output_size = gas_buffer_sizes.outputSizeInBytes;
+
+    CUDA_CHECK(cudaStreamSynchronize(stream));   // uploads must complete before build
+
+    OptixResult bres = optixAccelBuild(context, stream, &accel_options, &sphere_input, 1,
+                                       d_temp, gas_buffer_sizes.tempSizeInBytes,
+                                       blas.d_gas_output, gas_buffer_sizes.outputSizeInBytes,
+                                       &blas.handle, nullptr, 0);
+    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_temp)));
+    if (bres != OPTIX_SUCCESS) {
+        SCENE_LOG_ERROR("[OptixAccelManager] Failed to build sphere BLAS: " + std::to_string(bres));
+        blas.cleanup();
+        return -1;
+    }
+
+    int sphere_id = static_cast<int>(sphere_blas_list.size());
+    sphere_blas_list.push_back(std::move(blas));
+    return sphere_id;
+}
+
+bool OptixAccelManager::refitSphereBLAS(int sphere_id,
+                                        const std::vector<float3>& centers,
+                                        const std::vector<float>& radii,
+                                        bool sync, bool rebuild) {
+    if (sphere_id < 0 || sphere_id >= static_cast<int>(sphere_blas_list.size())) return false;
+    SphereBLAS& blas = sphere_blas_list[sphere_id];
+    const size_t count = (std::min)(centers.size(), radii.size());
+
+    // A REFIT (UPDATE) cannot change the primitive count. A REBUILD can — it
+    // only needs to stay within the allocated buffer capacity. Either way, a
+    // grow past capacity means the caller must reallocate via buildSphereBLAS.
+    if (blas.handle == 0 || count > blas.sphere_capacity) {
+        return false;
+    }
+    if (!rebuild && count != blas.sphere_count) {
+        return false;   // UPDATE requires the same AABB count
+    }
+
+    if (count > 0) {
+        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_centers), centers.data(),
+                                   count * sizeof(float3), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_radii), radii.data(),
+                                   count * sizeof(float), cudaMemcpyHostToDevice, stream));
+    }
+
+    blas.d_refit_centers = blas.d_centers;
+    blas.d_refit_radii   = blas.d_radii;
+
+    OptixBuildInput sphere_input = {};
+    sphere_input.type = OPTIX_BUILD_INPUT_TYPE_SPHERES;
+    sphere_input.sphereArray.vertexBuffers = &blas.d_refit_centers;
+    sphere_input.sphereArray.numVertices = static_cast<unsigned int>(count);
+    sphere_input.sphereArray.vertexStrideInBytes = sizeof(float3);
+    sphere_input.sphereArray.radiusBuffers = &blas.d_refit_radii;
+    sphere_input.sphereArray.radiusStrideInBytes = sizeof(float);
+    sphere_input.sphereArray.singleRadius = 0;
+    unsigned int sphere_flags[1] = { OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT };
+    sphere_input.sphereArray.flags = sphere_flags;
+    sphere_input.sphereArray.numSbtRecords = 1;
+
+    OptixAccelBuildOptions accel_options = {};
+    accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_UPDATE | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    // A REFIT (UPDATE) keeps the tree topology that was built at the particles'
+    // ORIGINAL positions. Foam moves drastically every frame, so after a few
+    // frames that tree is meaningless → bloated/overlapping AABBs → trace cost
+    // explodes (this is the "playback gets 10x slower until a Solid→Rendered
+    // toggle rebuilds it" symptom). For such high-motion geometry OptiX itself
+    // recommends a REBUILD, not a refit. Because the sphere GAS made the TLAS
+    // tiny (3 foam instances, not N), a fresh per-frame BUILD is cheap and keeps
+    // the BVH optimal every frame — no degradation, no toggle needed.
+    accel_options.operation = rebuild ? OPTIX_BUILD_OPERATION_BUILD
+                                      : OPTIX_BUILD_OPERATION_UPDATE;
+
+    OptixAccelBufferSizes buffer_sizes;
+    OptixResult res = optixAccelComputeMemoryUsage(context, &accel_options, &sphere_input, 1, &buffer_sizes);
+    if (res != OPTIX_SUCCESS) return false;
+
+    // A BUILD writes the full output; grow the cached GAS buffer if the build
+    // needs more room than the original (rare — same count, so usually equal).
+    if (rebuild && buffer_sizes.outputSizeInBytes > blas.gas_output_size) {
+        if (blas.d_gas_output) cudaFree(reinterpret_cast<void*>(blas.d_gas_output));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&blas.d_gas_output), buffer_sizes.outputSizeInBytes));
+        blas.gas_output_size = buffer_sizes.outputSizeInBytes;
+    }
+    const size_t temp_bytes = rebuild ? buffer_sizes.tempSizeInBytes
+                                      : buffer_sizes.tempUpdateSizeInBytes;
+
+    CUdeviceptr d_temp = 0;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_temp), temp_bytes));
+    res = optixAccelBuild(context, stream, &accel_options, &sphere_input, 1,
+                          d_temp, temp_bytes,
+                          blas.d_gas_output, blas.gas_output_size,
+                          &blas.handle, nullptr, 0);
+    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_temp)));
+
+    // A rebuild may have changed the live primitive count.
+    if (rebuild && res == OPTIX_SUCCESS) blas.sphere_count = count;
+
+    if (sync) cudaStreamSynchronize(stream);
+    return (res == OPTIX_SUCCESS);
+}
+
+void OptixAccelManager::clearSpheres() {
+    for (auto& blas : sphere_blas_list) blas.cleanup();
+    sphere_blas_list.clear();
+    // Drop any sphere instances; mesh/curve instances are preserved.
+    instances.erase(std::remove_if(instances.begin(), instances.end(),
+                    [](const SceneInstance& s) { return s.type == InstanceType::Sphere; }),
+                    instances.end());
+    tlas_needs_rebuild = true;
+}
+
+bool OptixAccelManager::updateMeshBLAS(int mesh_id, const MeshGeometry& geometryIn, bool skipCpuUpload, bool sync) {
     if (mesh_id < 0 || mesh_id >= static_cast<int>(mesh_blas_list.size())) {
         return false;
     }
-    
+
     MeshBLAS& blas = mesh_blas_list[mesh_id];
-    
+
+    // P-render G1: if this BLAS was built welded, scatter the incoming expanded
+    // soup into welded-vertex order so the refit sees the smaller buffer it
+    // expects. On stale map (topology changed) the scatter fails and we fall
+    // through to the legacy count-mismatch path (-> caller rebuilds).
+    MeshGeometry scatteredStorage;
+    const MeshGeometry* geomPtr = &geometryIn;
+    if (!blas.weld_corner_map.empty()) {
+        if (scatterWeldedRefit(geometryIn, blas.weld_corner_map, blas.vertex_count, scatteredStorage)) {
+            geomPtr = &scatteredStorage;
+        }
+    }
+    const MeshGeometry& geometry = *geomPtr;
+
     // Check if vertex count matches (required for refit)
     if (geometry.vertices.size() != blas.vertex_count) {
         if (!m_topology_dirty) {
@@ -696,12 +1053,23 @@ bool OptixAccelManager::updateMeshBLAS(int mesh_id, const MeshGeometry& geometry
     return true;
 }
 
-bool OptixAccelManager::rebuildMeshBLAS(int mesh_id, const MeshGeometry& geometry, bool skipCpuUpload, bool sync) {
+bool OptixAccelManager::rebuildMeshBLAS(int mesh_id, const MeshGeometry& geometryIn, bool skipCpuUpload, bool sync) {
     if (mesh_id < 0 || mesh_id >= static_cast<int>(mesh_blas_list.size())) {
         return false;
     }
 
     MeshBLAS& blas = mesh_blas_list[mesh_id];
+
+    // P-render G1: scatter expanded soup into welded order when this BLAS is welded
+    // (same in-place vertex-count contract as updateMeshBLAS).
+    MeshGeometry scatteredStorage;
+    const MeshGeometry* geomPtr = &geometryIn;
+    if (!blas.weld_corner_map.empty()) {
+        if (scatterWeldedRefit(geometryIn, blas.weld_corner_map, blas.vertex_count, scatteredStorage)) {
+            geomPtr = &scatteredStorage;
+        }
+    }
+    const MeshGeometry& geometry = *geomPtr;
 
     if (geometry.vertices.size() != blas.vertex_count) {
         if (!m_topology_dirty) {
@@ -1092,7 +1460,14 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
             liveGeom.normals.push_back(toFloat3(tri->getVertexNormal(2)));
         }
 
-        if (liveGeom.vertices.size() == blas.vertex_count) {
+        // liveGeom is non-indexed (3 per tri). For a welded BLAS the vertex
+        // count is smaller, but updateMeshBLAS scatters via the stored corner
+        // map, so accept either the legacy 1:1 size or the original corner
+        // count (== weld map size).
+        const bool liveSizeOk =
+            (liveGeom.vertices.size() == blas.vertex_count) ||
+            (!blas.weld_corner_map.empty() && liveGeom.vertices.size() == blas.weld_corner_map.size());
+        if (liveSizeOk) {
             updateMeshBLAS(group.blas_idx, liveGeom, false, false);
         }
     }
@@ -1124,6 +1499,12 @@ int OptixAccelManager::addInstance(int blas_id, const float transform[12], int m
             valid_blas = true;
             sbt_offset = mesh_blas_list[blas_id].sbt_offset;
             handle = mesh_blas_list[blas_id].handle;
+        }
+    } else if (type == InstanceType::Sphere) {
+        if (blas_id >= 0 && blas_id < static_cast<int>(sphere_blas_list.size())) {
+            valid_blas = true;
+            // sbt_offset will be updated during buildTLAS/buildSBT
+            handle = sphere_blas_list[blas_id].handle;
         }
     } else {
         if (blas_id >= 0 && blas_id < static_cast<int>(curve_blas_list.size())) {
@@ -1311,6 +1692,10 @@ void OptixAccelManager::buildTLAS() {
             if (inst.blas_id < static_cast<int>(mesh_blas_list.size())) {
                 handle = mesh_blas_list[inst.blas_id].handle;
             }
+        } else if (inst.type == InstanceType::Sphere) {
+            if (inst.blas_id < static_cast<int>(sphere_blas_list.size())) {
+                handle = sphere_blas_list[inst.blas_id].handle;
+            }
         } else {
             if (inst.blas_id < static_cast<int>(curve_blas_list.size())) {
                 handle = curve_blas_list[inst.blas_id].handle;
@@ -1331,10 +1716,12 @@ void OptixAccelManager::buildTLAS() {
         // they get the correct offset in the final TLAS.
         if (inst.type == InstanceType::Mesh) {
             optix_inst.sbtOffset = mesh_blas_list[inst.blas_id].sbt_offset;
+        } else if (inst.type == InstanceType::Sphere) {
+            optix_inst.sbtOffset = sphere_blas_list[inst.blas_id].sbt_offset;
         } else {
             optix_inst.sbtOffset = curve_blas_list[inst.blas_id].sbt_offset;
         }
-        
+
         optix_inst.visibilityMask = inst.visibility_mask;
         
         if (inst.type == InstanceType::Mesh) {
@@ -1394,6 +1781,13 @@ void OptixAccelManager::buildTLAS() {
     static size_t last_num_instances = 0;
     can_update = (tlas_handle != 0) && (optix_instances.size() == last_num_instances);
     last_num_instances = optix_instances.size();
+
+    // A sphere GAS REBUILD (foam) changed a child traversable handle, which a
+    // TLAS UPDATE cannot absorb — force a full BUILD this time.
+    if (m_force_tlas_build) {
+        can_update = false;
+        m_force_tlas_build = false;
+    }
 
     OptixAccelBuildOptions accel_options = {};
     accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_UPDATE | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
@@ -1677,7 +2071,33 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
         OPTIX_CHECK_ACCEL(optixSbtRecordPackHeader(hair_shadow_program_group, &rec));
         hitgroup_records.push_back(rec);
     }
-    
+
+    // SBT Records for Sphere GAS (foam / fluid splat points). One radiance +
+    // one shadow record per sphere BLAS. Spheres carry NO interpolated vertex
+    // attributes — __closesthit__sphere derives the normal analytically from the
+    // built-in sphere data and shades from the flat material — so only the
+    // material/emission/object id are meaningful here (all texture flags 0).
+    if (sphere_hit_program_group && sphere_shadow_program_group) {
+        for (size_t sphere_idx = 0; sphere_idx < sphere_blas_list.size(); ++sphere_idx) {
+            SphereBLAS& blas = sphere_blas_list[sphere_idx];
+            blas.sbt_offset = static_cast<int>(hitgroup_records.size());
+
+            SbtRecord<HitGroupData> rec = {};
+            rec.data.material_id = blas.material_id;
+            rec.data.object_id = static_cast<int>(mesh_blas_list.size() + curve_blas_list.size() + sphere_idx);
+            if (blas.material_id >= 0 && blas.material_id < static_cast<int>(materials.size())) {
+                rec.data.emission = materials[blas.material_id].emission;
+            }
+
+            // Record 0: Radiance
+            OPTIX_CHECK_ACCEL(optixSbtRecordPackHeader(sphere_hit_program_group, &rec));
+            hitgroup_records.push_back(rec);
+            // Record 1: Shadow
+            OPTIX_CHECK_ACCEL(optixSbtRecordPackHeader(sphere_shadow_program_group, &rec));
+            hitgroup_records.push_back(rec);
+        }
+    }
+
     uploadHitGroupRecords();
 }
 
@@ -2035,7 +2455,12 @@ void OptixAccelManager::cleanup() {
         blas.cleanup();
     }
     curve_blas_list.clear();
-    
+
+    for (auto& blas : sphere_blas_list) {
+        blas.cleanup();
+    }
+    sphere_blas_list.clear();
+
     // Cleanup instances
     instances.clear();
     free_instance_slots.clear();

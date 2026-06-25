@@ -402,7 +402,7 @@ extern bool g_bvh_rebuild_pending;      // CPU BVH needs rebuild
 extern bool g_gpu_refit_pending;        // GPU Geometry needs update (Deferred)
 extern bool g_vulkan_rebuild_pending;    // GPU Vulkan geometry needs rebuild
 extern bool g_vulkan_geometry_append_pending; // Additive-only mutation hint — Main loop tries incremental TLAS refit before falling back to full rebuild
-extern bool g_vulkan_geometry_deform_pending; // A physics body deformed its source mesh this frame — Main loop refits ONLY those BLAS in place (vs full-scene teardown)
+extern bool g_geometry_deform_pending; // A physics body baked new verts into its source mesh this frame — Main loop refits ONLY those nodes in place on the active path (raster Solid / OptiX / Vulkan RT) + a cheap CPU Embree refit, instead of a full-scene teardown every frame
 extern bool g_viewport_raster_rebuild_pending; // Interactive raster viewport needs rebuild
 extern bool g_optix_rebuild_pending;
 // Discrete-particle render bridge changed its instance set (structural or motion).
@@ -421,6 +421,14 @@ extern bool g_sim_timeline_mode;
 // NanoVDB density bridge, ...) through the GPU backend. CUDA today, additional
 // backends later. Default off; CPU is the reference path.
 extern bool g_sim_use_gpu_solver;
+// GPU mesh subdivision (Flat/linear path today). When true and the input is large
+// enough to amortize the GPU round-trip, MeshModifiers::SubdivideSubD runs the
+// subdivision on the shared Vulkan compute backend instead of the CPU loop; it falls
+// back to CPU when the backend is unavailable or any GPU step fails. Default on.
+extern bool g_gpu_subdivide_enabled;
+// Below this output triangle count the GPU upload/download overhead loses to the CPU
+// arithmetic, so subdivision stays on the CPU.
+constexpr size_t kGpuSubdivideMinTris = 50000;
 // Populated by VulkanBackend when the Vulkan device is initialized.
 // Used by scene_data::syncSimulationWorld to create the Vulkan sim compute backend.
 extern RayTrophiSim::SimulationComputeVulkanContext g_vulkan_sim_compute_ctx;

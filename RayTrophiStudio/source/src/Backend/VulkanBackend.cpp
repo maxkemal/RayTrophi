@@ -10,6 +10,8 @@
 #include "Backend/vulkan_world_data.h"
 #include "Core/RenderStateManager.h"
 #include "Stylize/StylizeKernel.h"
+#include "MeshModifiers.h"   // Phase 3d: CCDeviceGeometry release for device-resident meshes
+#include "SimulationCompute.h" // Phase 3d: release shared mesh compute backend before device destroy
 #include "globals.h"
 #include <SDL_surface.h>
 #include <iostream>
@@ -798,11 +800,15 @@ void VulkanDevice::shutdown() {
                 }
                 bh = {};
             };
-            safeDestroy(blas.vertexBuffer);
-            safeDestroy(blas.normalBuffer);
-            safeDestroy(blas.uvBuffer);
-            safeDestroy(blas.indexBuffer);
-            safeDestroy(blas.materialIndexBuffer);
+            // Device-resident geometry (Phase 3d) is owned by the CC system, not the BLAS;
+            // its attribute handles carry only addresses (null VkBuffer), so skip them.
+            if (!blas.externalGeometry) {
+                safeDestroy(blas.vertexBuffer);
+                safeDestroy(blas.normalBuffer);
+                safeDestroy(blas.uvBuffer);
+                safeDestroy(blas.indexBuffer);
+                safeDestroy(blas.materialIndexBuffer);
+            }
             safeDestroy(blas.baseVertexBuffer);
             safeDestroy(blas.baseNormalBuffer);
             safeDestroy(blas.boneIndexBuffer);
@@ -854,6 +860,17 @@ void VulkanDevice::shutdown() {
 
         if (m_descriptorPool) vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
         if (m_commandPool) vkDestroyCommandPool(m_device, m_commandPool, nullptr);
+
+        // The process-wide shared mesh compute backend (subdivision, CC device-resident)
+        // uses THIS VkDevice. Tear it down now, while the device is still valid, and clear
+        // the context — otherwise a later Vulkan re-init would leave the cached backend
+        // pointing at this freed device and crash in createBuffer on the next mesh op
+        // (OptiX -> Vulkan -> bake access violation).
+        RayTrophiSim::releaseSharedMeshComputeBackend();
+        if (g_vulkan_sim_compute_ctx.device == static_cast<void*>(m_device)) {
+            g_vulkan_sim_compute_ctx = RayTrophiSim::SimulationComputeVulkanContext{};
+        }
+
         vkDestroyDevice(m_device, nullptr);
         m_device = VK_NULL_HANDLE;
     }
@@ -1980,41 +1997,59 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
         VK_ERROR() << "[VulkanDevice] Hardware RT not available for BLAS creation" << std::endl;
         return UINT32_MAX;
     }
-    if (!info.vertexData || info.vertexCount == 0) return UINT32_MAX;
+    // Device-resident mode (Phase 3d) supplies geometry by address, so vertexData may be
+    // null; otherwise a host vertex pointer is required.
+    if (info.vertexCount == 0) return UINT32_MAX;
+    if (!info.useDeviceGeometry && !info.vertexData) return UINT32_MAX;
+    if (info.useDeviceGeometry && info.geometryDeviceAddress == 0) return UINT32_MAX;
 
     // --- 1) Combine all geometry data into ONE GPU buffer to reduce allocation count ---
     // This is critical for large scenes to avoid hitting maxMemoryAllocationCount limits.
+    // In device-resident mode the combined buffer already exists on the GPU (written by
+    // the CC compute refine in this exact layout); we only derive the sub-offsets.
     uint64_t vertSize = (uint64_t)info.vertexCount * info.vertexStride;
-    uint64_t normSize = info.normalData ? (uint64_t)info.vertexCount * sizeof(float) * 3 : 0;
-    uint64_t uvSize   = info.uvData ? (uint64_t)info.vertexCount * sizeof(float) * 2 : 0;
-    
-    bool hasIndices = (info.indexData && info.indexCount > 0);
+    // Device-resident CC geometry always carries a normal + uv block (the compute expand
+    // writes them), so derive their sizes unconditionally in that mode.
+    uint64_t normSize = (info.normalData || info.useDeviceGeometry) ? (uint64_t)info.vertexCount * sizeof(float) * 3 : 0;
+    uint64_t uvSize   = (info.uvData   || info.useDeviceGeometry) ? (uint64_t)info.vertexCount * sizeof(float) * 2 : 0;
+
+    bool hasIndices = (info.indexData && info.indexCount > 0) || (info.useDeviceGeometry && info.indexCount > 0);
     uint64_t idxSize = hasIndices ? (uint64_t)info.indexCount * sizeof(uint32_t) : 0;
-    
-    bool hasMaterials = (info.materialIndexData && info.materialIndexCount > 0);
+
+    bool hasMaterials = (info.materialIndexData && info.materialIndexCount > 0) || (info.useDeviceGeometry && info.materialIndexCount > 0);
     uint64_t matSize = hasMaterials ? (uint64_t)info.materialIndexCount * sizeof(uint32_t) : 0;
 
     uint64_t totalGeomSize = vertSize + normSize + uvSize + idxSize + matSize;
 
-    BufferCreateInfo geomBufInfo;
-    geomBufInfo.size = totalGeomSize;
-    geomBufInfo.usage = BufferUsage::ACCELERATION | BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::VERTEX;
-    geomBufInfo.location = MemoryLocation::GPU_ONLY;
-    geomBufInfo.initialData = nullptr; 
+    // Base device address of the (combined) geometry: a buffer we allocate+upload in host
+    // mode, or the caller's pre-written GPU buffer in device-resident mode.
+    BufferHandle geometryBuffer;     // owned only in host mode
+    VkDeviceAddress geomBase = 0;
 
-    auto geometryBuffer = createBuffer(geomBufInfo);
-    if (!geometryBuffer.buffer) {
-        VK_ERROR() << "[VulkanDevice] Failed to allocate combined geometry buffer for BLAS" << std::endl;
-        return UINT32_MAX;
+    if (info.useDeviceGeometry) {
+        geomBase = (VkDeviceAddress)info.geometryDeviceAddress;
+    } else {
+        BufferCreateInfo geomBufInfo;
+        geomBufInfo.size = totalGeomSize;
+        geomBufInfo.usage = BufferUsage::ACCELERATION | BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::VERTEX;
+        geomBufInfo.location = MemoryLocation::GPU_ONLY;
+        geomBufInfo.initialData = nullptr;
+
+        geometryBuffer = createBuffer(geomBufInfo);
+        if (!geometryBuffer.buffer) {
+            VK_ERROR() << "[VulkanDevice] Failed to allocate combined geometry buffer for BLAS" << std::endl;
+            return UINT32_MAX;
+        }
+        geomBase = geometryBuffer.deviceAddress;
+
+        // Upload geometry via staging path (keeps persistent buffer device-local).
+        uint64_t off = 0;
+        uploadBuffer(geometryBuffer, info.vertexData, vertSize, off); off += vertSize;
+        if (normSize && info.normalData) { uploadBuffer(geometryBuffer, info.normalData, normSize, off); off += normSize; }
+        if (uvSize && info.uvData)       { uploadBuffer(geometryBuffer, info.uvData, uvSize, off); off += uvSize; }
+        if (idxSize && info.indexData)   { uploadBuffer(geometryBuffer, info.indexData, idxSize, off); off += idxSize; }
+        if (matSize && info.materialIndexData) { uploadBuffer(geometryBuffer, info.materialIndexData, matSize, off); }
     }
-
-    // Upload geometry via staging path (keeps persistent buffer device-local).
-    uint64_t off = 0;
-    uploadBuffer(geometryBuffer, info.vertexData, vertSize, off); off += vertSize;
-    if (normSize && info.normalData) { uploadBuffer(geometryBuffer, info.normalData, normSize, off); off += normSize; }
-    if (uvSize && info.uvData)       { uploadBuffer(geometryBuffer, info.uvData, uvSize, off); off += uvSize; }
-    if (idxSize && info.indexData)   { uploadBuffer(geometryBuffer, info.indexData, idxSize, off); off += idxSize; }
-    if (matSize && info.materialIndexData) { uploadBuffer(geometryBuffer, info.materialIndexData, matSize, off); }
     
     // Build skinning separate buffers if required
     BufferHandle baseVertBuf, baseNormBuf, boneIdxBuf, boneWtBuf;
@@ -2044,12 +2079,12 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
     VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
     triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
     triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-    triangles.vertexData.deviceAddress = geometryBuffer.deviceAddress;
+    triangles.vertexData.deviceAddress = geomBase;
     triangles.vertexStride = info.vertexStride;
     triangles.maxVertex = info.vertexCount - 1;
     if (hasIndices) {
         triangles.indexType = VK_INDEX_TYPE_UINT32;
-        triangles.indexData.deviceAddress = geometryBuffer.deviceAddress + vertSize + normSize + uvSize;
+        triangles.indexData.deviceAddress = geomBase + vertSize + normSize + uvSize;
     } else {
         triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
     }
@@ -2185,26 +2220,29 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
     addrInfo.accelerationStructure = blasHandle.accel;
     blasHandle.deviceAddress = fpGetAccelerationStructureDeviceAddressKHR(m_device, &addrInfo);
     
-    // Store attribute buffer segments in handle for shader access (binding 4)
-    // All point to the same VkBuffer but with staggered deviceAddresses.
-    blasHandle.vertexBuffer = geometryBuffer;
-    blasHandle.vertexBuffer.deviceAddress = geometryBuffer.deviceAddress;
+    // Store attribute buffer segments in handle for shader access (binding 4).
+    // All point to the same VkBuffer (host mode) or carry only staggered addresses into
+    // the caller's device-resident buffer (Phase 3d) — in which case the BLAS does NOT
+    // own them and cleanup must skip the destroy.
+    blasHandle.externalGeometry = info.useDeviceGeometry;
+    blasHandle.vertexBuffer = geometryBuffer;          // empty handle in device mode
+    blasHandle.vertexBuffer.deviceAddress = geomBase;
 
     if (normSize) {
         blasHandle.normalBuffer = geometryBuffer;
-        blasHandle.normalBuffer.deviceAddress = geometryBuffer.deviceAddress + vertSize;
+        blasHandle.normalBuffer.deviceAddress = geomBase + vertSize;
     }
     if (uvSize) {
         blasHandle.uvBuffer = geometryBuffer;
-        blasHandle.uvBuffer.deviceAddress = geometryBuffer.deviceAddress + vertSize + normSize;
+        blasHandle.uvBuffer.deviceAddress = geomBase + vertSize + normSize;
     }
     if (idxSize) {
         blasHandle.indexBuffer = geometryBuffer;
-        blasHandle.indexBuffer.deviceAddress = geometryBuffer.deviceAddress + vertSize + normSize + uvSize;
+        blasHandle.indexBuffer.deviceAddress = geomBase + vertSize + normSize + uvSize;
     }
     if (matSize) {
         blasHandle.materialIndexBuffer = geometryBuffer;
-        blasHandle.materialIndexBuffer.deviceAddress = geometryBuffer.deviceAddress + vertSize + normSize + uvSize + idxSize;
+        blasHandle.materialIndexBuffer.deviceAddress = geomBase + vertSize + normSize + uvSize + idxSize;
     }
     
     // Store dynamic update / skinning state.
@@ -2842,7 +2880,9 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
                                      const std::vector<std::uint32_t>& hairClosestHitSPV,
                                      const std::vector<std::uint32_t>& hairIntersectionSPV,
                                      const std::vector<std::uint32_t>& shadowMissSPV,
-                                     const std::vector<std::uint32_t>& hairAnyHitSPV) {
+                                     const std::vector<std::uint32_t>& hairAnyHitSPV,
+                                     const std::vector<std::uint32_t>& sphereClosestHitSPV,
+                                     const std::vector<std::uint32_t>& sphereIntersectionSPV) {
     if (!hasHardwareRT() || !fpCreateRayTracingPipelinesKHR) {
         VK_ERROR() << "[VulkanDevice] Hardware RT not available" << std::endl;
         return false;
@@ -2871,9 +2911,12 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     VkShaderModule hairIntModule = hairIntersectionSPV.empty()    ? VK_NULL_HANDLE : createModule(hairIntersectionSPV);
     VkShaderModule shadowMissModule = shadowMissSPV.empty()       ? VK_NULL_HANDLE : createModule(shadowMissSPV);
     VkShaderModule hairAnyHitModule = hairAnyHitSPV.empty()       ? VK_NULL_HANDLE : createModule(hairAnyHitSPV);
+    VkShaderModule sphereChitModule = sphereClosestHitSPV.empty()   ? VK_NULL_HANDLE : createModule(sphereClosestHitSPV);
+    VkShaderModule sphereIntModule  = sphereIntersectionSPV.empty() ? VK_NULL_HANDLE : createModule(sphereIntersectionSPV);
 
     bool hasVolume     = (volChitModule  != VK_NULL_HANDLE && volIntModule  != VK_NULL_HANDLE);
     bool hasHair       = (hairChitModule != VK_NULL_HANDLE && hairIntModule != VK_NULL_HANDLE);
+    bool hasSphere     = (sphereChitModule != VK_NULL_HANDLE && sphereIntModule != VK_NULL_HANDLE);
     bool hasShadowMiss = (shadowMissModule != VK_NULL_HANDLE);
 
     if (raygenModule == VK_NULL_HANDLE || missModule == VK_NULL_HANDLE || chitModule == VK_NULL_HANDLE) {
@@ -2958,9 +3001,21 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
             stages.push_back(makeStage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, hairAnyHitModule));
         }
 
-        VK_INFO() << "[VulkanDevice] Hair shaders loaded (closesthit stage=" << hairChitStageIdx 
-                  << ", intersection stage=" << hairIntStageIdx 
+        VK_INFO() << "[VulkanDevice] Hair shaders loaded (closesthit stage=" << hairChitStageIdx
+                  << ", intersection stage=" << hairIntStageIdx
                   << (hairAnyHitModule != VK_NULL_HANDLE ? ", anyhit stage=" + std::to_string(hairAnyHitStageIdx) : "") << ")" << std::endl;
+    }
+
+    // Foam point-sphere shader stages (appended last)
+    uint32_t sphereChitStageIdx = VK_SHADER_UNUSED_KHR;
+    uint32_t sphereIntStageIdx  = VK_SHADER_UNUSED_KHR;
+    if (hasSphere) {
+        sphereChitStageIdx = (uint32_t)stages.size();
+        stages.push_back(makeStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, sphereChitModule));
+        sphereIntStageIdx = (uint32_t)stages.size();
+        stages.push_back(makeStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, sphereIntModule));
+        VK_INFO() << "[VulkanDevice] Foam sphere shaders loaded (closesthit stage=" << sphereChitStageIdx
+                  << ", intersection stage=" << sphereIntStageIdx << ")" << std::endl;
     }
 
     // --- 3) Shader groups ---
@@ -3054,6 +3109,21 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
         VK_INFO() << "[VulkanDevice] Hair procedural hit group added (group index " << hairHitGroupIdx << ")" << std::endl;
     }
 
+    // Foam point-sphere procedural hit group (optional, always last)
+    uint32_t sphereHitGroupIdx = triHitGroupIdx; // fallback
+    if (hasSphere) {
+        sphereHitGroupIdx = (uint32_t)groups.size();
+        VkRayTracingShaderGroupCreateInfoKHR g{};
+        g.sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        g.type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR;
+        g.generalShader      = VK_SHADER_UNUSED_KHR;
+        g.closestHitShader   = sphereChitStageIdx;
+        g.anyHitShader       = VK_SHADER_UNUSED_KHR;
+        g.intersectionShader = sphereIntStageIdx;
+        groups.push_back(g);
+        VK_INFO() << "[VulkanDevice] Foam sphere procedural hit group added (group index " << sphereHitGroupIdx << ")" << std::endl;
+    }
+
     // --- 4) Descriptor set layout ---
     // Binding  0: Output Image
     // Binding  1: TLAS
@@ -3071,7 +3141,9 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     // Binding 13: Denoiser Beauty AOV
     // Binding 14: Denoiser Albedo AOV
     // Binding 15: Denoiser Normal AOV
-    VkDescriptorSetLayoutBinding bindings[18] = {};
+    // Binding 17: Stylize AOV
+    // Binding 18: Foam sphere SSBO (intersection + closest-hit)
+    VkDescriptorSetLayoutBinding bindings[19] = {};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[0].descriptorCount = 1;
@@ -3166,9 +3238,16 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     bindings[17].descriptorCount = 1;
     bindings[17].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
 
+    // Binding 18: Foam point-sphere SSBO (centre+radius+matId), read by the
+    // sphere intersection + closest-hit shaders.
+    bindings[18].binding = 18;
+    bindings[18].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[18].descriptorCount = 1;
+    bindings[18].stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
     VkDescriptorSetLayoutCreateInfo dslCI{};
     dslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslCI.bindingCount = 18;
+    dslCI.bindingCount = 19;
     dslCI.pBindings = bindings;
     vkCreateDescriptorSetLayout(m_device, &dslCI, nullptr, &m_rtDescriptorSetLayout);
 
@@ -3239,6 +3318,15 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
             hasHair = false;
         }
 
+        // Re-add foam sphere stages with corrected indices
+        uint32_t s2SphereChitIdx = VK_SHADER_UNUSED_KHR, s2SphereIntIdx = VK_SHADER_UNUSED_KHR;
+        if (hasSphere && sphereChitModule != VK_NULL_HANDLE && sphereIntModule != VK_NULL_HANDLE) {
+            s2SphereChitIdx = (uint32_t)stages2.size(); stages2.push_back(makeStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, sphereChitModule));
+            s2SphereIntIdx  = (uint32_t)stages2.size(); stages2.push_back(makeStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, sphereIntModule));
+        } else if (hasSphere) {
+            hasSphere = false;
+        }
+
         // Rebuild groups with corrected stage indices
         groups.clear();
         uint32_t r2RaygenGroup = (uint32_t)groups.size(); groups.push_back(makeGeneralGroup(s2RaygenIdx));
@@ -3248,6 +3336,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
         { VkRayTracingShaderGroupCreateInfoKHR g{}; g.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR; g.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR; g.generalShader = VK_SHADER_UNUSED_KHR; g.closestHitShader = s2ChitIdx; g.anyHitShader = s2AnyHitIdx; g.intersectionShader = VK_SHADER_UNUSED_KHR; groups.push_back(g); }
         if (hasVolume) { volHitGroupIdx = (uint32_t)groups.size(); VkRayTracingShaderGroupCreateInfoKHR g{}; g.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR; g.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR; g.generalShader = VK_SHADER_UNUSED_KHR; g.closestHitShader = s2VolChitIdx; g.anyHitShader = VK_SHADER_UNUSED_KHR; g.intersectionShader = s2VolIntIdx; groups.push_back(g); }
         if (hasHair)   { hairHitGroupIdx = (uint32_t)groups.size(); VkRayTracingShaderGroupCreateInfoKHR g{}; g.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR; g.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR; g.generalShader = VK_SHADER_UNUSED_KHR; g.closestHitShader = s2HairChitIdx; g.anyHitShader = VK_SHADER_UNUSED_KHR; g.intersectionShader = s2HairIntIdx; groups.push_back(g); }
+        if (hasSphere) { sphereHitGroupIdx = (uint32_t)groups.size(); VkRayTracingShaderGroupCreateInfoKHR g{}; g.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR; g.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR; g.generalShader = VK_SHADER_UNUSED_KHR; g.closestHitShader = s2SphereChitIdx; g.anyHitShader = VK_SHADER_UNUSED_KHR; g.intersectionShader = s2SphereIntIdx; groups.push_back(g); }
         (void)r2RaygenGroup; (void)r2MissGroup;
 
         rtCI.stageCount = (uint32_t)stages2.size();
@@ -3272,6 +3361,8 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     if (hairIntModule)    vkDestroyShaderModule(m_device, hairIntModule, nullptr);
     if (shadowMissModule) vkDestroyShaderModule(m_device, shadowMissModule, nullptr);
     if (hairAnyHitModule) vkDestroyShaderModule(m_device, hairAnyHitModule, nullptr);
+    if (sphereChitModule) vkDestroyShaderModule(m_device, sphereChitModule, nullptr);
+    if (sphereIntModule)  vkDestroyShaderModule(m_device, sphereIntModule, nullptr);
 
     if (result != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] vkCreateRayTracingPipelinesKHR failed: " << result << std::endl;
@@ -3282,6 +3373,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     // Store hair/shadow/volume state as members for consistent use during rendering
     m_hasVolumeShaders = hasVolume;
     m_hasHairShaders   = hasHair;
+    m_hasSphereShaders = hasSphere;
     m_hasShadowMiss    = hasShadowMiss;
 
     uint32_t handleSize = m_capabilities.shaderGroupHandleSize;
@@ -3336,8 +3428,8 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     m_sbtMissRegion.stride = alignedHandleSize;
     m_sbtMissRegion.size   = (VkDeviceSize)numMissGroups * alignedHandleSize;
 
-    // Hit region: triangle + optional volume + optional hair (contiguous)
-    uint32_t numHitGroups = 1u + (hasVolume ? 1u : 0u) + (hasHair ? 1u : 0u);
+    // Hit region: triangle + optional volume + optional hair + optional sphere (contiguous)
+    uint32_t numHitGroups = 1u + (hasVolume ? 1u : 0u) + (hasHair ? 1u : 0u) + (hasSphere ? 1u : 0u);
     m_sbtHitRegion.deviceAddress = sbtAddr + (VkDeviceAddress)triHitGroupIdx * alignedHandleSize;
     m_sbtHitRegion.stride = alignedHandleSize;
     m_sbtHitRegion.size   = (VkDeviceSize)numHitGroups * alignedHandleSize;
@@ -3680,6 +3772,21 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
     w17.descriptorCount = 1;
     w17.pImageInfo = &denoiserPositionInfo;
     writes.push_back(w17);
+
+    // Binding 18: Foam point-sphere SSBO (fallback to materialBuffer when no foam
+    // exists yet, so the binding is always valid; the foam consumer re-uploads it).
+    VkDescriptorBufferInfo foamSphereInfo{};
+    foamSphereInfo.buffer = m_foamSphereBuffer.buffer ? m_foamSphereBuffer.buffer : m_materialBuffer.buffer;
+    foamSphereInfo.offset = 0;
+    foamSphereInfo.range  = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet w18{};
+    w18.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w18.dstSet = m_rtDescriptorSet;
+    w18.dstBinding = 18;
+    w18.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w18.descriptorCount = 1;
+    w18.pBufferInfo = &foamSphereInfo;
+    writes.push_back(w18);
 
     // Update bindings immediately (safe local buffers)
     if (!writes.empty()) {
@@ -4125,6 +4232,225 @@ uint32_t VulkanDevice::createHairAABB_BLAS(const std::vector<VkAabbPositionsKHR>
               << ", segments=" << primitiveCount
               << ", size=" << (sizeInfo.accelerationStructureSize / 1024) << " KB)" << std::endl;
     return idx;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Foam point-sphere AABB BLAS (binding-18 buffer holds centre/radius/matId)
+// ════════════════════════════════════════════════════════════════════════════════
+// One combined AABB BLAS for the whole foam cloud, with a HOST-visible AABB buffer
+// so updateFoamSphereBLAS() can MODE_BUILD it in place every frame. The AS + buffer
+// are sized for the pool capacity but only the COMPACT live spheres are built each
+// frame (dead pool slots are dropped, not padded with degenerate AABBs — that
+// bloated the BVH and made the build slower than OptiX). This is the N→1-instance
+// Vulkan analogue of the OptiX compact sphere GAS.
+uint32_t VulkanDevice::createFoamSphereBLAS(const std::vector<VkAabbPositionsKHR>& aabbs, uint32_t poolCapacity) {
+    if (!hasHardwareRT() || !fpCreateAccelerationStructureKHR) return UINT32_MAX;
+    if (aabbs.empty()) return UINT32_MAX;
+
+    // Size the AABB buffer + AS for the POOL capacity (>= current live count) so the
+    // per-frame rebuild can grow the live count up to it without reallocating. Only
+    // the live `aabbs` are uploaded + built now.
+    const uint32_t capPrims = (std::max)(poolCapacity, (uint32_t)aabbs.size());
+    const uint64_t aabbBufBytes = (uint64_t)capPrims * sizeof(VkAabbPositionsKHR);
+    BufferCreateInfo aabbBufInfo;
+    aabbBufInfo.size = aabbBufBytes;
+    aabbBufInfo.usage = BufferUsage::ACCELERATION | BufferUsage::STORAGE;
+    aabbBufInfo.location = MemoryLocation::CPU_TO_GPU;   // host-writable for per-frame rebuild
+    aabbBufInfo.initialData = nullptr;
+    auto aabbBuffer = createBuffer(aabbBufInfo);
+    if (!aabbBuffer.buffer) return UINT32_MAX;
+    uploadBuffer(aabbBuffer, aabbs.data(), aabbs.size() * sizeof(VkAabbPositionsKHR)); // live spheres
+
+    VkAccelerationStructureGeometryAabbsDataKHR aabbsData{};
+    aabbsData.sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+    aabbsData.data.deviceAddress = aabbBuffer.deviceAddress;
+    aabbsData.stride = sizeof(VkAabbPositionsKHR);
+
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+    geometry.flags        = 0; // intersection shader decides
+    geometry.geometry.aabbs = aabbsData;
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries   = &geometry;
+
+    // Size the AS + scratch for the POOL capacity (worst case); build only the live
+    // primitives below. A later per-frame rebuild with up to capPrims spheres fits.
+    uint32_t sizePrims = capPrims;
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+    sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    fpGetAccelerationStructureBuildSizesKHR(m_device,
+        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &sizePrims, &sizeInfo);
+
+    AccelStructHandle blasHandle{};
+    BufferCreateInfo asBufInfo;
+    asBufInfo.size     = sizeInfo.accelerationStructureSize;
+    asBufInfo.usage    = BufferUsage::ACCELERATION | BufferUsage::STORAGE;
+    asBufInfo.location = MemoryLocation::GPU_ONLY;
+    blasHandle.buffer  = createBuffer(asBufInfo);
+    if (!blasHandle.buffer.buffer) { destroyBuffer(aabbBuffer); return UINT32_MAX; }
+
+    VkAccelerationStructureCreateInfoKHR asCI{};
+    asCI.sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    asCI.buffer = blasHandle.buffer.buffer;
+    asCI.size   = sizeInfo.accelerationStructureSize;
+    asCI.type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    if (fpCreateAccelerationStructureKHR(m_device, &asCI, nullptr, &blasHandle.accel) != VK_SUCCESS ||
+        blasHandle.accel == VK_NULL_HANDLE) {
+        destroyBuffer(blasHandle.buffer); destroyBuffer(aabbBuffer); return UINT32_MAX;
+    }
+
+    uint64_t scratchAlignment = m_capabilities.minScratchAlignment > 0 ? m_capabilities.minScratchAlignment : 128;
+    uint64_t alignedScratchSize = (sizeInfo.buildScratchSize + scratchAlignment - 1) & ~(scratchAlignment - 1);
+    BufferCreateInfo scratchCI;
+    scratchCI.size = alignedScratchSize;
+    scratchCI.usage = BufferUsage::STORAGE;
+    scratchCI.location = MemoryLocation::GPU_ONLY;
+    auto scratchBuffer = createBuffer(scratchCI);
+    if (!scratchBuffer.buffer) {
+        if (fpDestroyAccelerationStructureKHR) fpDestroyAccelerationStructureKHR(m_device, blasHandle.accel, nullptr);
+        destroyBuffer(blasHandle.buffer); destroyBuffer(aabbBuffer); return UINT32_MAX;
+    }
+
+    buildInfo.dstAccelerationStructure  = blasHandle.accel;
+    buildInfo.scratchData.deviceAddress = scratchBuffer.deviceAddress;
+    VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
+    rangeInfo.primitiveCount = (uint32_t)aabbs.size();   // build only the LIVE spheres
+    const VkAccelerationStructureBuildRangeInfoKHR* pRange = &rangeInfo;
+
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) {
+        destroyBuffer(scratchBuffer);
+        if (fpDestroyAccelerationStructureKHR) fpDestroyAccelerationStructureKHR(m_device, blasHandle.accel, nullptr);
+        destroyBuffer(blasHandle.buffer); destroyBuffer(aabbBuffer); return UINT32_MAX;
+    }
+    fpCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRange);
+    endSingleTimeCommands(cmd);
+
+    VkAccelerationStructureDeviceAddressInfoKHR addrInfo{};
+    addrInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+    addrInfo.accelerationStructure = blasHandle.accel;
+    blasHandle.deviceAddress = fpGetAccelerationStructureDeviceAddressKHR(m_device, &addrInfo);
+
+    destroyBuffer(scratchBuffer);
+    blasHandle.vertexBuffer = aabbBuffer;   // keep AABB buffer alive (host-writable)
+    blasHandle.allowUpdate  = true;
+
+    uint32_t idx = (uint32_t)m_blasList.size();
+    m_blasList.push_back(blasHandle);
+    return idx;
+}
+
+// In-place foam BLAS REBUILD (MODE_BUILD on the existing AS handle/buffer — NOT a
+// MODE_UPDATE refit). Foam is highly mobile: a refit keeps the frame-0 BVH topology
+// so the tree degenerates as particles disperse and path tracing chokes (the exact
+// "degenerate BVH" symptom seen on OptiX, which we likewise fixed by per-frame
+// rebuild). Rebuilding into the SAME accel + backing buffer gives optimal BVH every
+// frame with NO destroy/recreate (lifecycle-safe). `aabbs` is the COMPACT live set
+// (variable count, ≤ the pool capacity the AS + AABB buffer were sized for in
+// createFoamSphereBLAS), so it always fits; the caller forces a full rebuild only
+// when the POOL itself grows past that capacity.
+bool VulkanDevice::updateFoamSphereBLAS(uint32_t blasIndex, const std::vector<VkAabbPositionsKHR>& aabbs) {
+    if (blasIndex >= m_blasList.size() || aabbs.empty()) return false;
+    AccelStructHandle& blas = m_blasList[blasIndex];
+    if (!blas.allowUpdate || blas.accel == VK_NULL_HANDLE || !blas.vertexBuffer.buffer) return false;
+
+    // Re-upload the AABBs to the existing host-visible buffer.
+    uploadBuffer(blas.vertexBuffer, aabbs.data(), aabbs.size() * sizeof(VkAabbPositionsKHR));
+
+    VkAccelerationStructureGeometryAabbsDataKHR aabbsData{};
+    aabbsData.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+    aabbsData.data.deviceAddress = blas.vertexBuffer.deviceAddress;
+    aabbsData.stride = sizeof(VkAabbPositionsKHR);
+
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+    geometry.flags        = 0;
+    geometry.geometry.aabbs = aabbsData;
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    // Keep ALLOW_UPDATE so the build size matches the pre-sized AS from createFoamSphereBLAS.
+    buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    buildInfo.mode          = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR; // full rebuild, optimal BVH
+    buildInfo.srcAccelerationStructure = VK_NULL_HANDLE;                      // build (not update)
+    buildInfo.dstAccelerationStructure = blas.accel;                         // same handle/buffer
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries   = &geometry;
+
+    uint32_t primitiveCount = (uint32_t)aabbs.size();
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+    sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    fpGetAccelerationStructureBuildSizesKHR(m_device,
+        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &primitiveCount, &sizeInfo);
+
+    uint64_t scratchAlignment = m_capabilities.minScratchAlignment > 0 ? m_capabilities.minScratchAlignment : 128;
+    uint64_t bldScratch = (sizeInfo.buildScratchSize + scratchAlignment - 1) & ~(scratchAlignment - 1);
+    BufferCreateInfo scratchCI;
+    scratchCI.size = bldScratch;
+    scratchCI.usage = BufferUsage::STORAGE;
+    scratchCI.location = MemoryLocation::GPU_ONLY;
+    auto scratchBuffer = createBuffer(scratchCI);
+    if (!scratchBuffer.buffer) return false;
+    buildInfo.scratchData.deviceAddress = scratchBuffer.deviceAddress;
+
+    VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
+    rangeInfo.primitiveCount = primitiveCount;
+    const VkAccelerationStructureBuildRangeInfoKHR* pRange = &rangeInfo;
+
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) { destroyBuffer(scratchBuffer); return false; }
+    fpCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRange);
+    endSingleTimeCommands(cmd);
+    destroyBuffer(scratchBuffer);
+    return true;
+}
+
+// Upload the combined foam sphere buffer (centre/radius/matId per sphere) to
+// binding 18 and (re)point the descriptor at it. `data` is FoamSphereGPU[count]
+// (32 bytes each, see sphere_intersection.rint).
+void VulkanDevice::updateFoamSphereBuffer(const void* data, uint32_t count) {
+    if (count == 0) return;
+    const uint64_t bytes = (uint64_t)count * 32ull;   // sizeof(FoamSphereGPU)
+    bool recreated = false;
+    if (!m_foamSphereBuffer.buffer || m_foamSphereBuffer.size < bytes) {
+        if (m_foamSphereBuffer.buffer) destroyBuffer(m_foamSphereBuffer);
+        BufferCreateInfo ci;
+        ci.size = bytes;
+        ci.usage = BufferUsage::STORAGE;
+        ci.location = MemoryLocation::CPU_TO_GPU;
+        ci.initialData = const_cast<void*>(data);
+        m_foamSphereBuffer = createBuffer(ci);
+        recreated = true;
+    } else {
+        uploadBuffer(m_foamSphereBuffer, data, bytes);
+    }
+    m_foamSphereCount = count;
+
+    // Re-point binding 18 at the (possibly reallocated) buffer.
+    if (recreated && m_rtDescriptorSet != VK_NULL_HANDLE && m_foamSphereBuffer.buffer) {
+        VkDescriptorBufferInfo info{};
+        info.buffer = m_foamSphereBuffer.buffer;
+        info.offset = 0;
+        info.range  = VK_WHOLE_SIZE;
+        VkWriteDescriptorSet w{};
+        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w.dstSet = m_rtDescriptorSet;
+        w.dstBinding = 18;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w.descriptorCount = 1;
+        w.pBufferInfo = &info;
+        vkUpdateDescriptorSets(m_device, 1, &w, 0, nullptr);
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -6903,6 +7229,19 @@ void VulkanBackendAdapter::shutdown() {
     m_vdbTempBuffers.clear();
 
     // Reset adapter caches/state.
+    // Phase 3d: free device-resident CC geometry buffers (BLASes are being torn down in
+    // this shutdown; the shared compute backend still owns the same VkDevice here).
+    for (auto& e : m_deviceResidentMeshes) {
+        MeshModifiers::CCDeviceGeometry g; g.bufferId = e.bufferId;
+        MeshModifiers::releaseCCDeviceGeometry(g);
+    }
+    m_deviceResidentMeshes.clear();
+    for (uint64_t bufId : m_deviceResidentReleaseQueue) {
+        MeshModifiers::CCDeviceGeometry g; g.bufferId = bufId;
+        MeshModifiers::releaseCCDeviceGeometry(g);
+    }
+    m_deviceResidentReleaseQueue.clear();
+
     m_orderedVDBInstances.clear();
     m_meshRegistry.clear();
     m_blasMaterialIds.clear();
@@ -7131,6 +7470,187 @@ uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& 
     
    // SCENE_LOG_INFO("[Vulkan] Uploaded mesh: " + meshName + " (" + std::to_string(triangles.size()) + " tris)");
     return blasIndex;
+}
+
+uint32_t VulkanBackendAdapter::uploadDeviceResidentMesh(const std::string& meshName,
+                                                        uint64_t geometryDeviceAddress,
+                                                        uint32_t vertexCount,
+                                                        uint32_t triCount,
+                                                        const std::vector<uint32_t>& materialIds,
+                                                        bool opaqueGeometry) {
+    if (!m_device || !m_device->isInitialized()) return UINT32_MAX;
+    if (!m_device->hasHardwareRT()) return UINT32_MAX;
+    if (geometryDeviceAddress == 0 || vertexCount == 0 || triCount == 0) return UINT32_MAX;
+
+    // Cache like uploadTriangles — a rebuild reuses the existing BLAS for this mesh.
+    auto it = m_meshRegistry.find(meshName);
+    if (it != m_meshRegistry.end()) return it->second;
+
+    // Build straight from the device buffer (non-indexed expanded soup; the mat block
+    // lives in the buffer, declared via materialIndexCount so createBLAS sizes it).
+    VulkanRT::BLASCreateInfo blasInfo;
+    blasInfo.useDeviceGeometry = true;
+    blasInfo.geometryDeviceAddress = geometryDeviceAddress;
+    blasInfo.vertexCount = vertexCount;       // triCount * 3
+    blasInfo.vertexStride = 12;               // 3 * float, non-indexed
+    blasInfo.indexCount = 0;
+    blasInfo.materialIndexCount = triCount;
+    blasInfo.opaqueGeometry = opaqueGeometry;
+    blasInfo.allowUpdate = true;              // Slice 4: position-only cage edits MODE_UPDATE-refit this BLAS
+
+    uint32_t blasIndex = m_device->createBLAS(blasInfo);
+    if (blasIndex == UINT32_MAX) {
+        SCENE_LOG_ERROR("[Vulkan] Failed to create device-resident BLAS for mesh: " + meshName);
+        return UINT32_MAX;
+    }
+
+    m_meshRegistry[meshName] = blasIndex;
+    // Host material-id copy for shader lookup (the CC plan's per-triangle materials).
+    m_blasMaterialIds[blasIndex] = materialIds.empty()
+        ? std::vector<uint32_t>(triCount, 0u)
+        : materialIds;
+
+    if (m_device->m_geometryDataBuffer.buffer) {
+        m_device->destroyBuffer(m_device->m_geometryDataBuffer);
+    }
+    return blasIndex;
+}
+
+void VulkanBackendAdapter::registerDeviceResidentCCMesh(const DeviceResidentCCMesh& mesh) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    for (auto& e : m_deviceResidentMeshes) {
+        if (e.meshKey == mesh.meshKey) {
+            // Replacing this key — the old GPU buffer may still be referenced by a live
+            // BLAS, so defer its release until the next BLAS teardown (GPU idle).
+            if (e.bufferId != 0 && e.bufferId != mesh.bufferId) {
+                m_deviceResidentReleaseQueue.push_back(e.bufferId);
+            }
+            e = mesh;
+            return;
+        }
+    }
+    m_deviceResidentMeshes.push_back(mesh);
+}
+
+void VulkanBackendAdapter::removeDeviceResidentCCMesh(const std::string& meshKey) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    for (size_t i = 0; i < m_deviceResidentMeshes.size(); ++i) {
+        if (m_deviceResidentMeshes[i].meshKey == meshKey) {
+            if (m_deviceResidentMeshes[i].bufferId != 0) {
+                m_deviceResidentReleaseQueue.push_back(m_deviceResidentMeshes[i].bufferId);
+            }
+            m_deviceResidentMeshes.erase(m_deviceResidentMeshes.begin() + i);
+            return;
+        }
+    }
+}
+
+bool VulkanBackendAdapter::hasDeviceResidentCCNode(const std::string& cageNodeName) const {
+    if (cageNodeName.empty()) return false;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    for (const auto& e : m_deviceResidentMeshes) {
+        if (e.cageNodeName == cageNodeName) return true;
+    }
+    return false;
+}
+
+void VulkanBackendAdapter::queueDeviceResidentCCRefit(const std::string& meshKey, uint64_t newGeomBase,
+                                                      uint64_t newBufferId, uint32_t vertexCount) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // Coalesce: if a refit for this key is already pending (rapid sculpt before the render
+    // thread drains), the earlier buffer was never bound to a BLAS — release it and keep
+    // only the latest. The buffer the caller passes is the registered entry's current one.
+    for (auto& req : m_deviceResidentRefitQueue) {
+        if (req.meshKey == meshKey) {
+            if (req.newBufferId != 0 && req.newBufferId != newBufferId)
+                m_deviceResidentReleaseQueue.push_back(req.newBufferId);
+            req.newGeomBase = newGeomBase;
+            req.newBufferId = newBufferId;
+            req.vertexCount = vertexCount;
+            return;
+        }
+    }
+    m_deviceResidentRefitQueue.push_back({ meshKey, newGeomBase, newBufferId, vertexCount });
+}
+
+bool VulkanBackendAdapter::drainDeviceResidentCCRefits() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (m_deviceResidentRefitQueue.empty()) return true;
+    if (!m_device || !m_device->isInitialized() || !m_device->hasHardwareRT()) {
+        m_deviceResidentRefitQueue.clear();
+        return false;   // can't refit -> let the caller full-rebuild
+    }
+
+    bool allOk = true;
+    bool anyRefit = false;
+    for (const auto& req : m_deviceResidentRefitQueue) {
+        // Locate the registered entry + its current BLAS slot.
+        auto regIt = m_meshRegistry.find(req.meshKey);
+        DeviceResidentCCMesh* entry = nullptr;
+        for (auto& e : m_deviceResidentMeshes) if (e.meshKey == req.meshKey) { entry = &e; break; }
+        if (regIt == m_meshRegistry.end() || !entry) {
+            // Entry vanished (e.g. modifier removed the same frame) — don't leak the new buffer.
+            if (req.newBufferId != 0) m_deviceResidentReleaseQueue.push_back(req.newBufferId);
+            allOk = false; continue;
+        }
+
+        const uint32_t blasIndex = regIt->second;
+        if (blasIndex >= m_device->m_blasList.size()) { allOk = false; continue; }
+        auto& h = m_device->m_blasList[blasIndex];
+        // Topology must match the built BLAS (vertexCount) and it must be updatable; else the
+        // caller's fallback full rebuild re-creates it from the entry (updated just below).
+        if (!h.allowUpdate || h.vertexCount != req.vertexCount) { allOk = false;
+            // still adopt the new buffer into the entry so the full rebuild uses fresh geometry
+            if (entry->bufferId != 0 && entry->bufferId != req.newBufferId)
+                m_deviceResidentReleaseQueue.push_back(entry->bufferId);
+            entry->bufferId = req.newBufferId; entry->deviceAddress = req.newGeomBase;
+            continue;
+        }
+
+        // Repoint the BLAS geometry-buffer addresses at the freshly-evaluated combined buffer
+        // (same non-indexed layout: pos | norm | uv | mat). The hit shader reads norm/uv via
+        // these addresses; materials come from m_blasMaterialIds (unchanged: same topology).
+        const uint64_t vertSize = (uint64_t)req.vertexCount * 12;
+        const uint64_t normSize = (uint64_t)req.vertexCount * 12;
+        const uint64_t uvSize   = (uint64_t)req.vertexCount * 8;
+        h.vertexBuffer.deviceAddress        = req.newGeomBase;
+        h.normalBuffer.deviceAddress        = req.newGeomBase + vertSize;
+        h.uvBuffer.deviceAddress            = req.newGeomBase + vertSize + normSize;
+        h.materialIndexBuffer.deviceAddress = req.newGeomBase + vertSize + normSize + uvSize;
+
+        // MODE_UPDATE refit reads positions from the (now-updated) vertexBuffer.deviceAddress.
+        m_device->updateBLAS(blasIndex, nullptr, nullptr);
+
+        // Adopt the new buffer into the entry; queue the old one for release after GPU idle.
+        if (entry->bufferId != 0 && entry->bufferId != req.newBufferId)
+            m_deviceResidentReleaseQueue.push_back(entry->bufferId);
+        entry->bufferId = req.newBufferId;
+        entry->deviceAddress = req.newGeomBase;
+        anyRefit = true;
+    }
+    m_deviceResidentRefitQueue.clear();
+
+    if (anyRefit) {
+        // Propagate the new norm/uv addresses to the shader geometry-data SSBO and refit the
+        // TLAS over the updated BLAS (transforms unchanged — geometry-only edit).
+        refreshVulkanGeometryDataBinding(m_device.get());
+        std::vector<VulkanRT::TLASInstance> merged = m_vkInstances;
+        for (const auto& hi : m_hairVkInstances) merged.push_back(hi);
+        m_device->updateTLAS(merged);
+        resetAccumulation();
+    }
+
+    // Free superseded / replaced buffers now that the GPU is done with the refit submits and
+    // no in-flight frame still references them (we are between frames on the render thread).
+    if (!m_deviceResidentReleaseQueue.empty()) {
+        m_device->waitIdle();
+        for (uint64_t bufId : m_deviceResidentReleaseQueue) {
+            MeshModifiers::CCDeviceGeometry g; g.bufferId = bufId;
+            MeshModifiers::releaseCCDeviceGeometry(g);
+        }
+        m_deviceResidentReleaseQueue.clear();
+    }
+    return allOk;
 }
 
 bool VulkanBackendAdapter::updateTerrainBLASPartial(const std::string& nodeName, const TerrainObject* terrain) {
@@ -7752,7 +8272,16 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
             m_device->destroyBuffer(blas.boneWeightBuffer);
         }
         m_device->m_blasList.clear();
-        
+
+        // Phase 3d: every BLAS is now destroyed and the GPU is idle (waitIdle above), so
+        // it is finally safe to free device-resident CC buffers queued for release — the
+        // closest-hit shader read their normal/uv/mat blocks through the (now-gone) BLAS.
+        for (uint64_t bufId : m_deviceResidentReleaseQueue) {
+            MeshModifiers::CCDeviceGeometry g; g.bufferId = bufId;
+            MeshModifiers::releaseCCDeviceGeometry(g);
+        }
+        m_deviceResidentReleaseQueue.clear();
+
         if (m_device->m_geometryDataBuffer.buffer) m_device->destroyBuffer(m_device->m_geometryDataBuffer);
 
         // Destroy existing TLAS
@@ -7784,6 +8313,12 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
         m_vdbTempBuffers.clear();
         m_orderedVDBInstances.clear();
         m_volumeBlasIndex = UINT32_MAX;
+        // Foam sphere BLAS lived in m_blasList (just cleared above) — drop the stale
+        // index so the next updateGeometry() rebuilds it fresh and the motion hook
+        // doesn't refit a freed slot.
+        m_foamSphereBlasIndex   = UINT32_MAX;
+        m_foamSphereGroupId     = -1;
+        m_foamSpherePoolCapacity = 0;
 
         // [CRASH GUARD] Disable ray tracing until updateGeometry() rebuilds a valid TLAS.
         // traceRays() checks m_tlas.accel (Fix 1) but also gate m_rtPipelineReady so legacy
@@ -8059,6 +8594,12 @@ void VulkanBackendAdapter::setVisibilityByNodeName(const std::string& nodeName, 
     }
 }
 
+// NOTE: foam (point_sphere_mode) is rendered on Vulkan through the per-particle
+// InstanceTransform scatter path (real material/closest-hit shader). The native
+// sphere-AABB BLAS path (createFoamSphereBLAS / sphere_*.rint|rchit / binding 18)
+// is OptiX-only on this backend; the Vulkan device methods + shaders remain built
+// but unused so the approach can be revisited without re-plumbing the pipeline.
+
 void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) {
     if (!m_device || !m_device->isInitialized()) return;
 
@@ -8097,7 +8638,16 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     };
     std::vector<SoloTriangleGroup> soloGroups;
     std::unordered_map<void*, size_t> soloGroupByTransform;
-    
+
+    // Phase 3d: nodes that render via a device-resident CC BLAS keep only their low-poly
+    // CAGE in world.objects (for Solid raster + picking + CPU). Their host triangles must
+    // be EXCLUDED from the RT geometry gather, else the cage would render on top of the
+    // GPU CC. Empty set => no exclusions (zero behaviour change).
+    std::unordered_set<std::string> deviceResidentCageNodes;
+    for (const auto& drm : m_deviceResidentMeshes) {
+        if (!drm.cageNodeName.empty()) deviceResidentCageNodes.insert(drm.cageNodeName);
+    }
+
     // Helper to find and upload all unique meshes recursively
     std::function<void(const std::shared_ptr<Hittable>&)> processObj;
     processObj = [&](const std::shared_ptr<Hittable>& obj) {
@@ -8187,6 +8737,10 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         // 4. Handle Solo Triangles (if any are directly in the world)
         else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             if (!tri->visible) return;
+            // Phase 3d: this node's dense CC lives in a device-resident BLAS; skip its cage
+            // triangles here so RT renders only the GPU CC (cage stays for Solid/picking).
+            if (!deviceResidentCageNodes.empty() &&
+                deviceResidentCageNodes.count(tri->getNodeName())) return;
             TriangleData d;
             // Use the live vertex state here so deformed standalone meshes such as
             // animated water surfaces reach Vulkan BLAS rebuilds correctly.
@@ -8513,6 +9067,13 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     for (size_t gi = 0; gi < instanceGroups.size(); ++gi) {
         const auto& group = instanceGroups[gi];
         if (group.instances.empty() || group.sources.empty()) continue;
+
+        // NOTE: point_sphere_mode (foam) groups are rendered on Vulkan via the SAME
+        // per-particle InstanceTransform scatter path as foliage — one TLAS instance
+        // per particle using the real material/closest-hit shader (correct foam
+        // materials + NEE). The flag is honoured only by the OptiX backend (native
+        // sphere GAS). BVH degradation from foam motion is handled by a per-frame
+        // full TLAS rebuild in updateInstanceTransforms() (see foamPresent there).
         const auto& meta = scatterMeta[gi];
         if (meta.blasBySource.empty()) continue;
 
@@ -8562,6 +9123,30 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         }
     }
     
+    // Phase 3d: device-resident CC meshes (static / render-only). Geometry is already on
+    // the GPU, so register a BLAS straight from its address and append a TLAS instance —
+    // no host triangles, no upload. This only APPENDS; existing instance logic is
+    // untouched, and an empty list is a complete no-op. Runs inside the batched BLAS
+    // region (flushed just below). instanceSources push nullptr: these are not pickable
+    // as triangles — picking / Solid raster use the editable cage instead.
+    for (const auto& drm : m_deviceResidentMeshes) {
+        if (drm.deviceAddress == 0 || drm.triCount == 0) continue;
+        uint32_t blasIndex = uploadDeviceResidentMesh(drm.meshKey, drm.deviceAddress,
+                                                      drm.vertexCount, drm.triCount,
+                                                      drm.materialIds, drm.opaque);
+        if (blasIndex == UINT32_MAX) continue;
+
+        VulkanRT::TLASInstance vi;
+        vi.blasIndex = blasIndex;
+        vi.transform = drm.transform;
+        vi.materialIndex = drm.materialID;
+        vi.customIndex = 0;
+        vi.mask = 0xFF;
+        vi.frontFaceCCW = true;
+        vkInstances.push_back(vi);
+        instanceSources.push_back(nullptr);
+    }
+
     // Flush all pending BLAS builds in one GPU submit before TLAS creation
     if (m_device->hasHardwareRT()) {
         m_device->endBatchedBLASBuild();
@@ -9302,6 +9887,23 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         gm.sheen = m.sheen;
         gm.sheen_tint = m.sheenTint;
         gm.flags = (uint32_t)m.flags;
+        gm.bubble_ior = m.bubble_ior;
+        gm.bubble_film = m.bubble_film;
+        gm.clearcoat_iridescence = m.clearcoat_iridescence;
+        gm.clearcoat_film_thickness = m.clearcoat_film_thickness;
+        if (m.is_bubble) gm.flags |= VulkanRT::VK_MAT_FLAG_BUBBLE;
+        gm.resin_color_r = static_cast<float>(m.resin_color.x);
+        gm.resin_color_g = static_cast<float>(m.resin_color.y);
+        gm.resin_color_b = static_cast<float>(m.resin_color.z);
+        gm.transmission_density = m.transmission_density;
+        gm.resin_roughness = m.resin_roughness;
+        gm.resin_inclusion = m.resin_inclusion;
+        gm.resin_dirt = m.resin_dirt;
+        gm.resin_inclusion_scale = m.resin_inclusion_scale;
+        gm.resin_dirt_color_r = static_cast<float>(m.resin_dirt_color.x);
+        gm.resin_dirt_color_g = static_cast<float>(m.resin_dirt_color.y);
+        gm.resin_dirt_color_b = static_cast<float>(m.resin_dirt_color.z);
+        if (m.glass_marble_volume) gm.flags |= VulkanRT::VK_MAT_FLAG_MARBLE_VOLUME;
         gm.uv_scale_x = static_cast<float>(m.uvScale.x);
         gm.uv_scale_y = static_cast<float>(m.uvScale.y);
         gm.uv_offset_x = static_cast<float>(m.uvOffset.x);
@@ -10022,6 +10624,23 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
     gm.sheen = m.sheen;
     gm.sheen_tint = m.sheenTint;
     gm.flags = (uint32_t)m.flags;
+    gm.bubble_ior = m.bubble_ior;
+    gm.bubble_film = m.bubble_film;
+    gm.clearcoat_iridescence = m.clearcoat_iridescence;
+    gm.clearcoat_film_thickness = m.clearcoat_film_thickness;
+    if (m.is_bubble) gm.flags |= VulkanRT::VK_MAT_FLAG_BUBBLE;
+    gm.resin_color_r = static_cast<float>(m.resin_color.x);
+    gm.resin_color_g = static_cast<float>(m.resin_color.y);
+    gm.resin_color_b = static_cast<float>(m.resin_color.z);
+    gm.transmission_density = m.transmission_density;
+    gm.resin_roughness = m.resin_roughness;
+    gm.resin_inclusion = m.resin_inclusion;
+    gm.resin_dirt = m.resin_dirt;
+    gm.resin_inclusion_scale = m.resin_inclusion_scale;
+    gm.resin_dirt_color_r = static_cast<float>(m.resin_dirt_color.x);
+    gm.resin_dirt_color_g = static_cast<float>(m.resin_dirt_color.y);
+    gm.resin_dirt_color_b = static_cast<float>(m.resin_dirt_color.z);
+    if (m.glass_marble_volume) gm.flags |= VulkanRT::VK_MAT_FLAG_MARBLE_VOLUME;
     gm.uv_scale_x = static_cast<float>(m.uvScale.x);
     gm.uv_scale_y = static_cast<float>(m.uvScale.y);
     gm.uv_offset_x = static_cast<float>(m.uvOffset.x);
@@ -11371,6 +11990,36 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
     // Rebuild the mapping here to avoid syncing TLAS against stale representatives.
     syncInstanceTransforms(objects, true);
 
+    // ── Foam BVH-degradation guard ───────────────────────────────────────────────
+    // Foam (point_sphere_mode) groups scatter as MANY fast-moving per-particle TLAS
+    // instances. A per-frame TLAS REFIT keeps the frame-0 tree topology, so as the
+    // foam disperses the BVH degenerates and path tracing chokes (the 10x slowdown
+    // that a Solid→Rendered toggle — i.e. a full rebuild — cured). When foam is
+    // present we therefore REBUILD the TLAS from scratch each frame instead of
+    // refitting it: optimal BVH every frame, which is what made the toggle fast.
+    bool foamPresent = false;
+    for (const auto& g : InstanceManager::getInstance().getGroups()) {
+        if (g.point_sphere_mode && !g.instances.empty()) { foamPresent = true; break; }
+    }
+
+    // Commit the merged instance list to the TLAS: a full rebuild when foam is
+    // present (optimal BVH every frame, no degradation), else a cheap refit.
+    // NOTE: createTLAS() does an in-place REFIT when allowUpdate==true AND the
+    // instance count is unchanged — which is exactly the degradation we must avoid.
+    // Passing allowUpdate=false forces its full-rebuild branch (old TLAS destroyed,
+    // built fresh; the instance buffer is still reused in place, so no per-frame
+    // alloc churn). This is what the Solid→Rendered toggle did to cure the slowdown.
+    auto commitTLAS = [this](std::vector<VulkanRT::TLASInstance>& merged, bool rebuild) {
+        if (rebuild) {
+            VulkanRT::TLASCreateInfo ci;
+            ci.instances   = merged;
+            ci.allowUpdate = false;       // force a FULL BUILD → optimal BVH under foam motion
+            m_device->createTLAS(ci);
+        } else {
+            m_device->updateTLAS(merged); // refit (cheap) for static / slow-moving scenes
+        }
+    };
+
     const auto& scatterGroups = InstanceManager::getInstance().getGroups();
     std::unordered_map<int, const InstanceGroup*> scatterGroupsById;
     scatterGroupsById.reserve(scatterGroups.size());
@@ -11461,8 +12110,8 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
             // [VULKAN] Wait for device to finish any pending ray tracing before modifying AS
             m_device->waitIdle();
 
-            { auto merged = m_vkInstances; for (const auto& h : m_hairVkInstances) merged.push_back(h); m_device->updateTLAS(merged); }
-            
+            { auto merged = m_vkInstances; for (const auto& h : m_hairVkInstances) merged.push_back(h); commitTLAS(merged, foamPresent); }
+
             if (data_changed) {
                 // update instance SSBO (Binding 5)
                 std::vector<VulkanRT::VkInstanceData> instData;
@@ -11528,9 +12177,9 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
         {
             auto merged = m_vkInstances;
             for (const auto& h : m_hairVkInstances) merged.push_back(h);
-            m_device->updateTLAS(merged);
+            commitTLAS(merged, foamPresent);
         }
-        
+
         if (data_changed) {
             // update instance SSBO (Binding 5)
             std::vector<VulkanRT::VkInstanceData> instData;
@@ -15550,6 +16199,18 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             SCENE_LOG_INFO("[Vulkan] Hair shaders not found — hair rendering disabled.");
         }
 
+        // Load Foam point-sphere shaders (optional — N→1 instance foam path)
+        std::vector<std::uint32_t> sphereChitSPV;
+        std::vector<std::uint32_t> sphereIntSPV;
+        if (std::filesystem::exists(shaderDir + "/sphere_closesthit.spv") &&
+            std::filesystem::exists(shaderDir + "/sphere_intersection.spv")) {
+            sphereChitSPV = loadSPV(shaderDir + "/sphere_closesthit.spv");
+            sphereIntSPV  = loadSPV(shaderDir + "/sphere_intersection.spv");
+            SCENE_LOG_INFO("[Vulkan] Foam sphere shaders loaded successfully.");
+        } else {
+            SCENE_LOG_INFO("[Vulkan] Foam sphere shaders not found — foam falls back to instanced spheres.");
+        }
+
         // Load Shadow Miss Shader (optional — enables shadow rays from hit shaders)
         std::vector<std::uint32_t> shadowMissSPV;
         if (std::filesystem::exists(shaderDir + "/shadow_miss.spv")) {
@@ -15627,7 +16288,8 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         // Only create the heavy RT pipeline when the viewport mode requires it.
         if (m_viewportMode == ViewportMode::Rendered) {
             if (!m_device->createRTPipeline(raygenSPV, missSPV, chitSPV, ahitSPV,
-                    volChitSPV, volIntSPV, hairChitSPV, hairIntSPV, shadowMissSPV, hairAhitSPV)) {
+                    volChitSPV, volIntSPV, hairChitSPV, hairIntSPV, shadowMissSPV, hairAhitSPV,
+                    sphereChitSPV, sphereIntSPV)) {
                 SCENE_LOG_ERROR("[Vulkan] Failed to create RT Pipeline.");
                 return;
             }

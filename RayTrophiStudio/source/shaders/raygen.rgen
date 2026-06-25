@@ -34,54 +34,8 @@ const float T_MAX       = 1e6;
 layout(set = 0, binding = 0, rgba32f) uniform image2D accumImage;
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 
-struct Material {
-    // Block 1: Albedo + opacity
-    float albedo_r, albedo_g, albedo_b, opacity;
-    // Block 2: Emission + strength
-    float emission_r, emission_g, emission_b, emission_strength;
-    // Block 3: PBR properties
-    float roughness, metallic, ior, transmission;
-    // Block 4: Subsurface color + amount
-    float subsurface_r, subsurface_g, subsurface_b, subsurface_amount;
-    // Block 5: Subsurface radius + scale
-    float subsurface_radius_r, subsurface_radius_g, subsurface_radius_b, subsurface_scale;
-    // Block 6: Coatings & Translucency
-    float clearcoat, clearcoat_roughness, translucent, subsurface_anisotropy;
-    // Block 7: Additional properties
-    float anisotropic, sheen, sheen_tint;
-    uint flags;
-    // Block 8: Water/Extra params
-    float fft_amplitude, fft_time_scale, micro_detail_strength, micro_detail_scale;
-    // Block 9: Extra water params
-    float foam_threshold, fft_ocean_size, fft_choppiness, fft_wind_speed;
-    // Block 10: Extra water animation params
-    float micro_anim_speed, micro_morph_speed, foam_noise_scale, fft_wind_direction;
-    // Block 11: UV transform core
-    float uv_scale_x, uv_scale_y, uv_offset_x, uv_offset_y;
-    // Block 12: UV transform extra
-    float uv_rotation_degrees, uv_tiling_x, uv_tiling_y;
-    uint uv_wrap_mode;
-    // Block 13: Standard Textures (first 4)
-    uint albedo_tex;
-    uint normal_tex;
-    uint roughness_tex;
-    uint metallic_tex;
-    // Block 14: Standard Textures (second 4)
-    uint emission_tex;
-    uint height_tex;
-    uint opacity_tex;
-    uint transmission_tex;
-    // Block 15: Reserved
-    float subsurface_ior;
-    uint _terrain_layer_idx;
-    float normal_strength;
-    float tile_break_strength;
-    // Block 16: Specular controls
-    float specular;
-    uint specular_tex;
-    uint _pad_specular0;
-    uint _pad_specular1;
-};
+// Material struct — single source of truth shared by every material-reading shader.
+#include "material_struct.glsl"
 
 struct LightData {
     vec4 position;
@@ -330,6 +284,9 @@ const uint BOUNCE_SPECULAR = 0u;
 const uint BOUNCE_DIFFUSE = 1u;
 const uint BOUNCE_TRANSMISSION = 2u;
 const uint BOUNCE_TRANSPARENT = 3u;
+const uint BOUNCE_RESIN = 4u; // resin coat reflect + absorbing base (own small budget)
+const uint BOUNCE_MARBLE = 5u; // glass marble full-volume entry → integrate interior medium
+const uint MAT_FLAG_MARBLE_VOLUME = (1u << 20);
 
 struct RayPayload {
     vec3  radiance;
@@ -564,6 +521,63 @@ vec3 softClipFireflies(vec3 c, float maxLuma) {
     return c * scale;
 }
 
+// ============================================================
+// Marble medium procedural fields (mirror closesthit rh_* exactly) — used to
+// integrate dust/dirt along the REAL interior segment of a full-volume glass marble.
+// ============================================================
+float rh_hash13(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+vec3 rh_hash33(vec3 p) {
+    p = vec3(dot(p, vec3(127.1, 311.7, 74.7)),
+             dot(p, vec3(269.5, 183.3, 246.1)),
+             dot(p, vec3(113.5, 271.9, 124.6)));
+    return fract(sin(p) * 43758.5453);
+}
+float rh_vnoise(vec3 x) {
+    vec3 i = floor(x);
+    vec3 f = fract(x);
+    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float n000 = rh_hash13(i + vec3(0,0,0));
+    float n100 = rh_hash13(i + vec3(1,0,0));
+    float n010 = rh_hash13(i + vec3(0,1,0));
+    float n110 = rh_hash13(i + vec3(1,1,0));
+    float n001 = rh_hash13(i + vec3(0,0,1));
+    float n101 = rh_hash13(i + vec3(1,0,1));
+    float n011 = rh_hash13(i + vec3(0,1,1));
+    float n111 = rh_hash13(i + vec3(1,1,1));
+    float nx00 = mix(n000, n100, f.x);
+    float nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x);
+    float nx11 = mix(n011, n111, f.x);
+    return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
+}
+float rh_fbm(vec3 p) {
+    float v = 0.0, a = 0.5, tot = 0.0;
+    for (int i = 0; i < 5; ++i) {
+        v   += a * abs(2.0 * rh_vnoise(p) - 1.0);
+        tot += a;
+        p = p * 2.03 + vec3(7.1, 3.7, 11.3);
+        a *= 0.5;
+    }
+    return v / max(tot, 1e-4);
+}
+float rh_worley(vec3 p) {
+    vec3 ip = floor(p);
+    vec3 fp = fract(p);
+    float d = 1.0;
+    for (int z = -1; z <= 1; ++z)
+    for (int y = -1; y <= 1; ++y)
+    for (int x = -1; x <= 1; ++x) {
+        vec3 g = vec3(x, y, z);
+        vec3 o = rh_hash33(ip + g);
+        d = min(d, length(g + o - fp));
+    }
+    return d;
+}
+
 float godRaysAnisotropyFade(float sunDot, float g) {
     float base = max(0.0, sunDot);
     return pow(base, 1.0 + (1.0 - g) * 10.0);
@@ -712,13 +726,14 @@ void main() {
     }
 
     // 2. Stochastic Chromatic Aberration
+    uint caChannel = 1u; // Default to Green (no CA shift)
     float caFactor = 1.0;
     if (cam.caEnabled != 0 && cam.caAmount > 0.0001) {
         float r2 = (u - 0.5) * (u - 0.5) + (v - 0.5) * (v - 0.5);
         // Randomly choose a channel to sample for this pass
-        uint channel = pcgNext(seed) % 3;
-        if (channel == 0) caFactor = 1.0 + cam.caAmount * r2 * (cam.caRScale - 1.0);
-        else if (channel == 2) caFactor = 1.0 + cam.caAmount * r2 * (cam.caBScale - 1.0);
+        caChannel = pcgNext(seed) % 3u;
+        if (caChannel == 0u) caFactor = 1.0 + cam.caAmount * r2 * (cam.caRScale - 1.0);
+        else if (caChannel == 2u) caFactor = 1.0 + cam.caAmount * r2 * (cam.caBScale - 1.0);
         
         u = (u - 0.5) * caFactor + 0.5;
         v = (v - 0.5) * caFactor + 0.5;
@@ -802,6 +817,13 @@ void main() {
     int effectiveTransmissionBounces = int(cam.transmissionBounces);
     int diffuseBounceCount = 0;
     int transmissionBounceCount = 0;
+    int resinBounceCount = 0;
+    // Resin is energy-preserving (thin/white coats don't decay throughput), so RR
+    // can't terminate its paths and a full-depth GI run in a crowded scene blows the
+    // GPU watchdog (TDR). Cap resin interactions to a small fixed budget — the base
+    // still gets full direct lighting (NEE); only deep indirect GI under the glossy
+    // coat (which is barely visible) is dropped.
+    const int RESIN_MAX_BOUNCES = 2;
     int maxTotalPasses = effectiveBounces + 32; // Allow up to 32 extra passes for transparent/volume skipping
 
     for (int bounce = 0, totalPasses = 0; bounce < effectiveBounces && totalPasses < maxTotalPasses; totalPasses++) {
@@ -844,6 +866,10 @@ void main() {
         );
 
         seed = payload.seed;
+
+        // (Glass-marble FULL VOLUME interior medium march was removed — the feature was too
+        // camera-angle dependent and the interior dust/dirt never read as intended. Inclusion
+        // glass now uses the closesthit shell march. BOUNCE_MARBLE is no longer emitted.)
 
         if (bounce == 0 && !primaryHitValid && payload.primaryHit != 0u) {
             primaryAlbedo = payload.primaryAlbedo;
@@ -903,6 +929,9 @@ void main() {
             } else if (payload.bounceType == BOUNCE_TRANSMISSION) {
                 transmissionBounceCount++;
                 if (transmissionBounceCount > effectiveTransmissionBounces) break;
+            } else if (payload.bounceType == BOUNCE_RESIN) {
+                resinBounceCount++;
+                if (resinBounceCount > RESIN_MAX_BOUNCES) break;
             }
             bounce++;
         }
@@ -1024,6 +1053,17 @@ void main() {
         weatherDist *= (1.0 - clamp(firstHitTransmission, 0.0, 1.0));
         radiance = applyWeatherAtmosphere(radiance, normalize(primaryRayDir), weatherDist);
         radiance = applyWeatherPrecipitationOverlay(radiance, normalize(primaryRayDir), weatherDist);
+    }
+
+    // Stochastic CA Channel Masking and Energy Conservation
+    if (cam.caEnabled != 0 && cam.caAmount > 0.0001) {
+        if (caChannel == 0u) {
+            radiance = vec3(radiance.r * 3.0, 0.0, 0.0);
+        } else if (caChannel == 1u) {
+            radiance = vec3(0.0, radiance.g * 3.0, 0.0);
+        } else {
+            radiance = vec3(0.0, 0.0, radiance.b * 3.0);
+        }
     }
 
     // Apply exposure factor

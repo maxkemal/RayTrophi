@@ -85,9 +85,27 @@ public:
 
     // -------- initialisation helpers --------
 
+    struct PaintUVParams {
+        float scale_x = 1.0f;
+        float scale_y = 1.0f;
+        float offset_x = 0.0f;
+        float offset_y = 0.0f;
+        float tiling_x = 1.0f;
+        float tiling_y = 1.0f;
+        float rotation_degrees = 0.0f;
+        int wrap_mode = 0; // 0=Repeat, 1=Mirror, 2=Clamp, 3=None
+
+        bool isDefault() const {
+            return scale_x == 1.0f && scale_y == 1.0f &&
+                   offset_x == 0.0f && offset_y == 0.0f &&
+                   tiling_x == 1.0f && tiling_y == 1.0f &&
+                   rotation_degrees == 0.0f;
+        }
+    };
+
     // Seed layer 0 from an existing PaintTextureSet (copies pixel data
     // from each channel texture into the bottom layer's buffers).
-    void seedFromTextureSet(const PaintTextureSet& src);
+    void seedFromTextureSet(const PaintTextureSet& src, const PaintUVParams& uv_params = PaintUVParams());
 
     // Convenience: ensure at least one layer exists.
     void ensureBaseLayer();
@@ -109,6 +127,10 @@ private:
     uint32_t next_id_ = 1;
     int width_  = 0;
     int height_ = 0;
+
+public:
+    PaintUVParams baked_uv_params;
+    bool has_baked_uv_params = false;
 };
 
 } // namespace Paint

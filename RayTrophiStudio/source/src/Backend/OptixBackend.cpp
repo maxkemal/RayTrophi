@@ -125,6 +125,23 @@ namespace {
         gpuMat.sheen_tint = mat.sheenTint;
         gpuMat.anisotropic = mat.anisotropic;
         gpuMat.flags = static_cast<int>(mat.flags);
+        // Thin-shell bubble: stamp the flag + params onto the final GpuMaterial so
+        // the BSDF (transmission_scatter) takes the bubble branch.
+        if (mat.is_bubble) {
+            gpuMat.flags |= GPU_MAT_FLAG_BUBBLE;
+            gpuMat.bubble_ior  = mat.bubble_ior;
+            gpuMat.bubble_film = mat.bubble_film;
+        }
+        // Iridescent clearcoat: unconditional (not bubble-gated), default 0 = plain white.
+        gpuMat.clearcoat_iridescence = mat.clearcoat_iridescence;
+        gpuMat.clearcoat_film_thickness = mat.clearcoat_film_thickness;
+        gpuMat.transmission_density = mat.transmission_density;
+        gpuMat.resin_color = make_float3(mat.resin_color.x, mat.resin_color.y, mat.resin_color.z);
+        gpuMat.resin_roughness = mat.resin_roughness;
+        gpuMat.resin_inclusion = mat.resin_inclusion;
+        gpuMat.resin_dirt = mat.resin_dirt;
+        gpuMat.resin_inclusion_scale = mat.resin_inclusion_scale;
+        gpuMat.resin_dirt_color = make_float3(mat.resin_dirt_color.x, mat.resin_dirt_color.y, mat.resin_dirt_color.z);
         gpuMat.tile_break_strength = mat.tile_break_strength;
         gpuMat.micro_detail_strength = mat.micro_detail_strength;
         gpuMat.micro_detail_scale = mat.micro_detail_scale;

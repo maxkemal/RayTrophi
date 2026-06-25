@@ -677,18 +677,55 @@ __device__ float3 raymarch_vdb_volume(
                 const float3 up = make_float3(0.0f, 1.0f, 0.0f);
                 const float3 sky_amb = gpu_get_sky_radiance(optixLaunchParams.world, up);
                 const float jitf = curand_uniform(rng);
+                // ── Ray-constant shading terms (HOISTED out of the per-step loop) ──
+                // The view/sun geometry is identical for every foam sample on this
+                // ray, so the HG phase + thin-film cos() are evaluated ONCE per ray
+                // instead of per sample (was per-step before — the OptiX cost the
+                // user noticed). Only fd / position terms stay in the loop.
+                const float3 sunDir = optixLaunchParams.world.nishita.sun_direction;
+                const float  vlen   = fmaxf(dir_length, 1e-6f);
+                const float  cosVS  = (ray_dir.x * sunDir.x + ray_dir.y * sunDir.y + ray_dir.z * sunDir.z) / vlen;
+                const float  g = 0.35f, g2 = g * g;
+                const float  hgd       = 1.0f + g2 - 2.0f * g * cosVS;
+                const float  foamPhase = (1.0f - g2) / fmaxf(4.0f * 3.14159265f * hgd * sqrtf(fmaxf(hgd, 1e-6f)), 1e-6f);
+                const float  powderCos = 0.5f + 0.5f * fmaxf(0.0f, cosVS);   // constant part of powder
+                // Thin-film iridescence (soap-bubble shimmer): pearlescent tint on the
+                // silver lining — also ray-constant.
+                const float3 silver = make_float3(
+                    1.0f - 0.15f + 0.15f * (0.5f + 0.5f * cosf(cosVS * 9.0f + 0.0f)),
+                    1.0f - 0.15f + 0.15f * (0.5f + 0.5f * cosf(cosVS * 9.0f + 2.0f)),
+                    1.0f - 0.15f + 0.15f * (0.5f + 0.5f * cosf(cosVS * 9.0f + 4.0f)));
+                // Foam shares the volume's Edge Cutoff (density_pad) so the faint
+                // low-density foam fringe is clipped just like the water density —
+                // otherwise it leaves a grey haze the density cutoff can't reach.
+                const float foamCutoff = fmaxf(vol.density_pad, 1e-4f);
                 for (int fs = 0; fs < fsteps && foam_T > 0.01f; ++fs) {
                     float ft = t_enter + ((float)fs + jitf) * fstep;
                     float fd = sample_foam(local_origin + local_dir * ft);
-                    if (fd <= 1e-4f) continue;
+                    if (fd <= foamCutoff) continue;
                     float a = 1.0f - expf(-fd * FOAM_OPTICAL * (fstep / fmaxf(dir_length, 1e-6f)));
+                    // Soft edge falloff over [cutoff, 2·cutoff] so the clip is a clean
+                    // fade, not a hard ring (smoothstep, manual for CUDA).
+                    float fe = fminf(fmaxf((fd - foamCutoff) / fmaxf(foamCutoff, 1e-6f), 0.0f), 1.0f);
+                    a *= fe * fe * (3.0f - 2.0f * fe);
                     float3 wp = ray_origin + ray_dir * (ft / fmaxf(dir_length, 1e-6f));
-                    float3 sun_tr = gpu_get_transmittance(
-                        optixLaunchParams.world, wp, optixLaunchParams.world.nishita.sun_direction);
+                    float3 sun_tr = gpu_get_transmittance(optixLaunchParams.world, wp, sunDir);
+                    // Forward-scatter silver lining (HG toward sun → backlit crests
+                    // glow) + gentle powder (edge-dark/core-bright). Sky ambient is an
+                    // un-powdered fill so foam never goes black.
+                    float powder   = 0.75f + 0.25f * ((1.0f - expf(-fd * 2.0f)) * powderCos);
+                    float sunBoost = sun_intensity * 0.5f * (1.0f + foamPhase * 4.0f) * powder;
+                    // Multiple scattering: packed bubbles diffuse light through the mass
+                    // → thick foam reads as a bright FILLED white, not a thin wisp.
+                    float ms = 1.0f - expf(-fd * 6.0f);                  // 0 thin → 1 thick
+                    float3 msL = make_float3(
+                        sky_amb.x + 0.4f * sun_tr.x * sun_intensity,
+                        sky_amb.y + 0.4f * sun_tr.y * sun_intensity,
+                        sky_amb.z + 0.4f * sun_tr.z * sun_intensity);
                     float3 Li = make_float3(
-                        foam_albedo.x * (sky_amb.x + sun_tr.x * sun_intensity * 0.5f),
-                        foam_albedo.y * (sky_amb.y + sun_tr.y * sun_intensity * 0.5f),
-                        foam_albedo.z * (sky_amb.z + sun_tr.z * sun_intensity * 0.5f));
+                        foam_albedo.x * (sky_amb.x + sun_tr.x * sunBoost * silver.x + 1.2f * ms * msL.x),
+                        foam_albedo.y * (sky_amb.y + sun_tr.y * sunBoost * silver.y + 1.2f * ms * msL.y),
+                        foam_albedo.z * (sky_amb.z + sun_tr.z * sunBoost * silver.z + 1.2f * ms * msL.z));
                     foam_inscatter.x += foam_T * a * Li.x;
                     foam_inscatter.y += foam_T * a * Li.y;
                     foam_inscatter.z += foam_T * a * Li.z;
@@ -1919,7 +1956,10 @@ __device__ float3 calculate_light_contribution(
     const OptixHitResult& payload,
     const float3& wo,
     curandState* rng,
-    float pdf_select = 1.0f
+    float pdf_select = 1.0f,
+    bool   resin_active  = false,
+    float  resin_density = 0.0f,
+    float3 resin_ext     = make_float3(0.0f, 0.0f, 0.0f)
 ) {
     float3 wi;
     float distance = 1.0f;
@@ -1993,6 +2033,17 @@ __device__ float3 calculate_light_contribution(
     float pdf_brdf_val_mis = clamp(pdf_brdf_val, 0.001f, 5000.0f);
 
     float3 Li = light.color * light.intensity * attenuation * vdb_transmittance * shadow_visibility;
+
+    // Resin: the direct light also travels through the coat to reach the base.
+    // Absorb it over its ENTRY path (light-angle slant) so thick/tinted resin
+    // visibly dims direct lighting too — parity with the Vulkan NEE block.
+    if (resin_active) {
+        float cosL  = fmaxf(NdotL, 0.05f);
+        float pLen  = resin_density / cosL;
+        Li = Li * make_float3(expf(-pLen * resin_ext.x),
+                              expf(-pLen * resin_ext.y),
+                              expf(-pLen * resin_ext.z));
+    }
 
     // Vulkan parity: Delta ışıklar (point/directional) için MIS uygulanmaz
     bool isDelta = (light.type == 0 || light.type == 1);
@@ -2686,6 +2737,12 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
     const int max_transmission_depth = max(0, optixLaunchParams.transmission_depth);
     int diffuse_depth = 0;
     int transmission_depth = 0;
+    // Resin is energy-preserving (thin/white coats don't decay throughput), so RR
+    // can't kill its paths and a full-depth GI run gets very expensive. Cap resin
+    // interactions to a small budget — base keeps full direct lighting (NEE); only
+    // barely-visible deep indirect GI under the glossy coat is dropped. Vulkan parity.
+    int resin_depth = 0;
+    const int RESIN_MAX_DEPTH = 2;
     
     // Firefly önleme için maksimum katkı limiti (Vulkan parity: 1e4)
     const float MAX_CONTRIBUTION = 10000.0f;
@@ -2870,6 +2927,26 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
                     if (bounce == 0) {
                         if (vol_depth < 0.0f || entry_distances[i] < vol_depth)
                             vol_depth = entry_distances[i];
+                        // Aerial perspective fix: when the primary ray refracts THROUGH
+                        // the fluid surface, the water IS the nearest hit. first_hit_t
+                        // was only set from the geometry behind (farther) — or left -1
+                        // when nothing is behind, which the post-process turns into a
+                        // 10000 fallback. Either way Nishita aerial perspective then
+                        // fogs the surface at a huge distance and the water washes out /
+                        // disappears. Pin the fog distance to the actual surface entry
+                        // (matches the CPU reference backend's SDF dielectric fix).
+                        if (first_hit_t < 0.0f || entry_distances[i] < first_hit_t)
+                            first_hit_t = entry_distances[i];
+                        // ...and mark it FULLY transmissive (1.0) — EXACT parity with
+                        // the Vulkan path, whose fluid-surface closesthit sets
+                        // payload.primaryTransmission = 1.0, so Vulkan's raygen scales
+                        // its aerial/fog distance by (1 - 1) = 0 and applies NO aerial
+                        // perspective to the water. OptiX must do the same or the post-
+                        // process hazes the water (more so at grazing side views with a
+                        // large entry distance) and it reads THINNER than Vulkan's
+                        // filled body. aerial_dist *= (1 - first_hit_transmission) = 0 →
+                        // water stays fully visible at every angle, matching Vulkan.
+                        first_hit_transmission = fmaxf(first_hit_transmission, 1.0f);
                     }
                     break;  // stop processing further volumes this bounce
                 }
@@ -2975,7 +3052,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
                 
                 color += throughput * vol_color;
                 throughput *= vol_transmittance;
-                
+
                 // NEW: Update depth for fogging calculation
                 if (bounce == 0) {
                     float3 local_origin = transform_point_affine(ray.origin, vol.inv_transform);
@@ -3113,6 +3190,61 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
             emission = make_float3(tex.x, tex.y, tex.z) * em_strength;
         }
 
+        // ----------------------------------------------------------
+        // RESIN (Vulkan parity): a refractive ABSORBING coat over an OPAQUE base.
+        // Fresnel-split — the reflect lobe is the glossy resin top (specular, skips
+        // NEE); the base lobe tints the LOCAL albedo by the coat absorption (round
+        // trip) and shades as a plain diffuse surface, so the base gets full direct
+        // (NEE) + indirect light. The NEE direct contribution is additionally
+        // absorbed over its own light-angle entry path (resin_* handed to
+        // calculate_light_contribution below). Keeps OptiX == Vulkan.
+        // ----------------------------------------------------------
+        bool   resin_active  = false;
+        float  resin_density = 0.0f;
+        float3 resin_ext     = make_float3(0.0f, 0.0f, 0.0f);
+        if (mat.transmission_density > 1e-4f) {
+            float3 N    = payload.normal;
+            float3 unit = normalize(ray.direction);
+            float3 V    = -unit;
+            float  effIor = fmaxf(mat.ior, 1.45f);
+            float  cosT = clamp(dot(V, N), 0.0f, 1.0f);
+            float  fres = schlick(cosT, effIor);
+            if (random_float(rng) < fres) {
+                // Glossy resin top — specular reflection, no NEE/diffuse.
+                float3 refl;
+                if (mat.roughness < 0.02f) {
+                    refl = reflect(unit, N);
+                } else {
+                    float alpha = fmaxf(mat.roughness * mat.roughness, 1e-4f);
+                    refl = ggxSampleVNDF(N, V, alpha, random_float(rng), random_float(rng));
+                    if (dot(refl, N) <= 0.0f) refl = reflect(unit, N);
+                }
+                // Emissive resin still emits (usually 0); white specular throughput.
+                color += soft_clip_fireflies(throughput * emission, 64.0f);
+                if (++resin_depth > RESIN_MAX_DEPTH) break;  // bound resin cost
+                ray = Ray(offset_ray(payload.position, N), normalize(refl));
+                continue;   // skip scatter_material + NEE this bounce
+            }
+            // Base under the resin: absorb over the thickness (round trip) into albedo,
+            // then shade as opaque diffuse. A small base extinction (0.25) darkens with
+            // Resin Depth even for white resin; resin_color tints which channels survive.
+            float3 ct      = clamp3f(mat.resin_color, 0.0f, 1.0f);
+            float  cosV    = fmaxf(fabsf(cosT), 0.25f);
+            float  pathLen = 2.0f * mat.transmission_density / cosV;
+            resin_ext = make_float3((1.0f - ct.x) + 0.25f,
+                                    (1.0f - ct.y) + 0.25f,
+                                    (1.0f - ct.z) + 0.25f);
+            mat.albedo = mat.albedo * make_float3(expf(-pathLen * resin_ext.x),
+                                                  expf(-pathLen * resin_ext.y),
+                                                  expf(-pathLen * resin_ext.z));
+            resin_density            = mat.transmission_density;
+            mat.roughness            = 1.0f;
+            mat.metallic             = 0.0f;
+            mat.transmission         = 0.0f;
+            mat.transmission_density = 0.0f;  // now a plain diffuse base for scatter + NEE
+            resin_active             = true;
+        }
+
         // --- Scatter başarısızsa: emission'ı ekle ve çık ---
         if (!scatter_material(mat, payload, ray, rng, &scattered, &attenuation, &pdf, &is_specular, &bounce_type)) {
             // Vulkan parity: emissive-only yüzeyler hala ışık yayar.
@@ -3220,8 +3352,12 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         if (light_count == 0) {
             // Use pre-attenuation throughput: emission is self-emitted, not BRDF-filtered
             color += soft_clip_fireflies(throughput_for_nee * emission, 64.0f);
-            if (bounce_type == PATH_BOUNCE_DIFFUSE && ++diffuse_depth > max_diffuse_depth) break;
-            if (bounce_type == PATH_BOUNCE_TRANSMISSION && ++transmission_depth > max_transmission_depth) break;
+            if (resin_active) {
+                if (++resin_depth > RESIN_MAX_DEPTH) break;
+            } else {
+                if (bounce_type == PATH_BOUNCE_DIFFUSE && ++diffuse_depth > max_diffuse_depth) break;
+                if (bounce_type == PATH_BOUNCE_TRANSMISSION && ++transmission_depth > max_transmission_depth) break;
+            }
             ray = scattered;
             continue;
         }
@@ -3233,7 +3369,8 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         float3 direct = make_float3(0.0f, 0.0f, 0.0f);
         if (!is_specular && light_index >= 0 && pdf_select > 1e-6f) {
             direct = calculate_light_contribution(
-                optixLaunchParams.lights[light_index], mat, payload, wo, rng, pdf_select
+                optixLaunchParams.lights[light_index], mat, payload, wo, rng, pdf_select,
+                resin_active, resin_density, resin_ext
             );
             // Vulkan parity: pdf_select ile böl (unbiased Monte Carlo estimator)
             // Işık daha az seçiliyorsa katkısı orantılı artırılmalı
@@ -3280,9 +3417,13 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
             throughput /= p;
         }
 
-        if (bounce_type == PATH_BOUNCE_DIFFUSE && ++diffuse_depth > max_diffuse_depth) break;
-        if (bounce_type == PATH_BOUNCE_TRANSMISSION && ++transmission_depth > max_transmission_depth) break;
-       
+        if (resin_active) {
+            if (++resin_depth > RESIN_MAX_DEPTH) break;
+        } else {
+            if (bounce_type == PATH_BOUNCE_DIFFUSE && ++diffuse_depth > max_diffuse_depth) break;
+            if (bounce_type == PATH_BOUNCE_TRANSMISSION && ++transmission_depth > max_transmission_depth) break;
+        }
+
         ray = scattered;
     }
 

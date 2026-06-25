@@ -128,7 +128,19 @@ struct RigidBodyObject {
     bool  force_field_enabled = true;
     float force_field_scale = 1.0f;
 
+    // ---- destruction / fracture (Faz 2) --------------------------------------
+    // A breakable body sits STATIC (intact) until an impact impulse exceeds
+    // break_impulse, then the whole fracture_group flips to Dynamic and shatters.
+    // Shards generated from one source mesh share fracture_group so a hit on any
+    // shard breaks them all. Authored via the Fracture panel ("Make Breakable").
+    bool        breakable = false;
+    float       break_impulse = 5.0f;   // impact impulse (kg·m/s) that triggers a break
+    std::string fracture_group;         // shards of one source share this id (= source node)
+
     // ---- runtime state (not serialized) ----
+    bool broken = false;                                    // group has shattered (now dynamic)
+    Vec3 pending_launch_velocity = Vec3(0.0f, 0.0f, 0.0f);  // applied right after the post-break (re)create
+    bool has_pending_launch = false;
     uint32_t handle = 0xffffffffu;    // JoltBodyHandle once created
     bool created = false;
     bool rest_captured = false;       // rest pose (initial_pivot/body_xf/half) is valid
@@ -244,9 +256,20 @@ public:
     // resetRuntime so a replay/respawn starts from the clean shape).
     using SoftMeshResetToRest = std::function<void(const std::string& node)>;
 
+    // resumeState(): when the timeline plays PAST the RAM cache, a soft body was
+    // left uncreated during the cached replay and is rebuilt here at its REST shape.
+    // This hands back the cached deformed WORLD positions (+ optional velocities) of
+    // the last replayed frame so the freshly created body is teleported there and
+    // CONTINUES instead of re-animating from rest (the "sim restarts past the cache"
+    // bug). Return false when there's nothing to resume (first bake / no cache).
+    using SoftResumeProvider = std::function<bool(const std::string& node,
+                                                  std::vector<Vec3>& out_positions,
+                                                  std::vector<Vec3>& out_velocities)>;
+
     void setSoftMeshResolver(SoftMeshResolver r) { soft_resolver_ = std::move(r); }
     void setSoftMeshWriter(SoftMeshWriter w) { soft_writer_ = std::move(w); }
     void setSoftMeshResetToRest(SoftMeshResetToRest r) { soft_reset_ = std::move(r); }
+    void setSoftResumeProvider(SoftResumeProvider p) { soft_resume_ = std::move(p); }
 
     // ---- Rigid-fluid coupling (buoyancy + drag) -----------------------------
     // Result of querying the fluid state at a world point. signed_distance is the
@@ -327,6 +350,7 @@ private:
     SoftMeshResolver soft_resolver_;
     SoftMeshWriter soft_writer_;
     SoftMeshResetToRest soft_reset_;
+    SoftResumeProvider soft_resume_;
     FluidSampler fluid_sampler_;
     FluidCouplingPrepare fluid_prepare_;
 

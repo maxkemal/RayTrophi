@@ -3053,9 +3053,6 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             }
 
             // Entering hooks
-            if (active_properties_tab == 7) {
-                activateEditWorkspace(ctx);
-            }
             if (active_properties_tab == 13) {
                 activateSculptWorkspace(ctx);
             }
@@ -3092,7 +3089,7 @@ void SceneUI::validateSelectionAgainstScene(UIContext& ctx) {
         if (!tri) continue;
 
         std::string node_name = tri->getNodeName();
-        if (node_name.empty()) node_name = tri->nodeName;
+        if (node_name.empty()) node_name = tri->getNodeName();
         if (node_name.empty()) continue;
 
         live_objects_by_name.emplace(node_name, std::make_pair(static_cast<int>(i), tri));
@@ -3104,7 +3101,6 @@ void SceneUI::validateSelectionAgainstScene(UIContext& ctx) {
                 std::string node_name = item.name;
                 if (node_name.empty() && item.object) {
                     node_name = item.object->getNodeName();
-                    if (node_name.empty()) node_name = item.object->nodeName;
                 }
                 if (node_name.empty()) return false;
 
@@ -3623,21 +3619,10 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
             ctx.selection.selected.object != nullptr;
 
         if (hasSelectedObject) {
-            showSidePanel = true;
-            show_modifiers_tab = true;
-            active_properties_tab = 7;
-            focus_properties_panel_next_frame = true;
-            tab_to_focus = "Modeling";
-
-            if (mesh_overlay_settings.enabled && mesh_overlay_settings.edit_mode) {
+            if (mesh_overlay_settings.edit_mode) {
                 resetMeshEditState(ctx);
             } else {
-                mesh_overlay_settings.enabled = true;
-                mesh_overlay_settings.edit_mode = true;
-                ctx.selection.mesh_element_mode = MeshElementSelectMode::Vertex;
-                active_mesh_edit_object_name = ctx.selection.selected.object->getNodeName();
-                active_mesh_edit_object_ptr = ctx.selection.selected.object.get();
-                ensureMeshEditLayer(ctx, active_mesh_edit_object_name);
+                activateEditWorkspace(ctx);
             }
         }
     }
@@ -5169,13 +5154,13 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
         }
 
         if (first_new_triangle) {
-            ctx.selection.selectObject(first_new_triangle, -1, first_new_triangle->nodeName);
+            ctx.selection.selectObject(first_new_triangle, -1, first_new_triangle->getNodeName());
         }
     }
     else if (ctx.scene.world.objects.size() > objects_before) {
         for (size_t i = objects_before; i < ctx.scene.world.objects.size(); ++i) {
             if (auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i])) {
-                ctx.selection.selectObject(tri, -1, tri->nodeName);
+                ctx.selection.selectObject(tri, -1, tri->getNodeName());
                 break;
             }
         }
@@ -6436,6 +6421,24 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
     mesh_cache.clear();
     mesh_ui_cache.clear();
     mesh_overlay_cache = MeshOverlayCache{};
+    // Preserve the editable cache (and its sub-element selection) for the object that is
+    // actively being edited. rebuildMeshCache historically wiped editable_mesh_cache
+    // unconditionally, assuming a geometry change invalidates it — but the editable cache OWNS
+    // its own source_triangles (independent of world.objects / mesh_cache) and self-validates
+    // in ensureEditableMeshCache (needsRebuild on object/count/transform change). The blanket
+    // wipe meant any of the ~30 `if (!mesh_cache_valid) rebuildMeshCache()` call sites (and the
+    // modifier-stack re-eval) firing mid-edit silently dropped the selection — e.g. dragging the
+    // live Catmull-Clark Crease slider creased once then lost the edge selection ("unusable").
+    // Keep it for the active edit object; ensureEditableMeshCache still rebuilds it on demand if
+    // the cage topology actually changed, and topology operators wipe it explicitly themselves.
+    const bool preserveEditable =
+        !active_mesh_edit_object_name.empty() &&
+        editable_mesh_cache.object_name == active_mesh_edit_object_name &&
+        !editable_mesh_cache.vertices.empty();
+    EditableMeshCache preservedEditable;
+    if (preserveEditable) {
+        preservedEditable = std::move(editable_mesh_cache);
+    }
     editable_mesh_cache = EditableMeshCache{};
     this->tri_to_index.clear(); // Clear the lookup map
     cached_triangle_count_by_object.clear();
@@ -6449,9 +6452,9 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
     tri_to_index.reserve(selectable_count);
 
     for (size_t i = 0; i < selectable_count; ++i) {
-        auto tri = std::dynamic_pointer_cast<Triangle>(objects[i]);
-        if (tri) {
-            std::string name = tri->nodeName.empty() ? "Unnamed" : tri->nodeName;
+        if (objects[i]->isTriangle()) {
+            auto tri = std::static_pointer_cast<Triangle>(objects[i]);
+            std::string name = tri->getNodeName().empty() ? "Unnamed" : tri->getNodeName();
             mesh_cache[name].push_back({(int)i, tri});
             this->tri_to_index[tri.get()] = (int)i; // Store const pointer to index mapping
             continue;
@@ -6462,7 +6465,7 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
             std::string inst_name = inst->node_name.empty() ? "Unnamed" : inst->node_name;
             for (const auto& srcTri : *inst->source_triangles) {
                 if (!srcTri) continue;
-                std::string tri_name = srcTri->nodeName.empty() ? inst_name : srcTri->nodeName;
+                std::string tri_name = srcTri->getNodeName().empty() ? inst_name : srcTri->getNodeName();
                 mesh_cache[tri_name].push_back({(int)i, srcTri});
                 this->tri_to_index[srcTri.get()] = (int)i;
             }
@@ -6514,6 +6517,13 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
     mesh_cache_valid = true;
     last_scene_obj_count = objects.size();
 
+    // Restore the active edit object's editable cache (see preserve note above). Only if the
+    // object still exists in the rebuilt cache — otherwise it was genuinely removed and the
+    // empty cache is correct.
+    if (preserveEditable && mesh_cache.find(active_mesh_edit_object_name) != mesh_cache.end()) {
+        editable_mesh_cache = std::move(preservedEditable);
+    }
+
    /* SCENE_LOG_INFO("Selection cache built: " + std::to_string(mesh_cache.size()) +
                    " mesh groups, " + std::to_string(cached_scene_triangle_count) +
                    " triangles cached");*/
@@ -6531,8 +6541,8 @@ void SceneUI::rebuildTriToIndex(const std::vector<std::shared_ptr<Hittable>>& ob
     tri_to_index.clear();
     tri_to_index.reserve(selectable_count);
     for (size_t i = 0; i < selectable_count; ++i) {
-        auto tri = std::dynamic_pointer_cast<Triangle>(objects[i]);
-        if (tri) {
+        if (objects[i]->isTriangle()) {
+            auto tri = std::static_pointer_cast<Triangle>(objects[i]);
             tri_to_index[tri.get()] = (int)i;
             continue;
         }
@@ -7073,6 +7083,7 @@ void SceneUI::performNewProject(UIContext& ctx) {
      timeline.reset();
      active_messages.clear();
      invalidateCache();
+     paint_mode_state = Paint::PaintModeState();
      
      // 3. Reset Viewport & Guide Settings
      viewport_settings = ViewportDisplaySettings();
@@ -7191,8 +7202,8 @@ void SceneUI::performOpenProject(UIContext& ctx) {
         history.clear();
         timeline.reset();
         active_messages.clear();
-        active_messages.clear();
         invalidateCache();
+        paint_mode_state = Paint::PaintModeState();
         
         // Reset Animation Graph UI
         g_animGraphUI = AnimGraphUIState();

@@ -1,0 +1,28 @@
+// sim_fluid_p2g_normalize.comp
+// Divides velocity field by weight field in-place. One thread per face.
+#version 450
+layout(local_size_x = 256) in;
+
+// push constant layout matches FluidP2GGpuConstants exactly.
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    int particle_count; // field 4 (unused here)
+    int component;
+    float origin_x; float origin_y; float origin_z;
+    float voxel_size;
+} pc;
+
+layout(set = 0, binding = 0) buffer VelField    { float vel_field[]; };
+layout(set = 0, binding = 1) buffer WeightField { float wt_field[];  };
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    // face_count derived from grid dims and component (matches CUDA path)
+    int face_count;
+    if      (pc.component == 0) face_count = (pc.nx+1)*pc.ny*pc.nz;
+    else if (pc.component == 1) face_count = pc.nx*(pc.ny+1)*pc.nz;
+    else                        face_count = pc.nx*pc.ny*(pc.nz+1);
+    if (int(id) >= face_count) return;
+    float w = wt_field[id];
+    vel_field[id] = (w > 1e-8) ? (vel_field[id] / w) : 0.0;
+}

@@ -1,4 +1,4 @@
-// ===============================================================================
+﻿// ===============================================================================
 // SCENE UI - GIZMOS & TRANSFORM
 // ===============================================================================
 // This file handles 3D Gizmos (Move/Rotate/Scale), Bounding Boxes, and overlays.
@@ -999,7 +999,7 @@ void SceneUI::moveObjectPivot(UIContext& ctx, const std::string& objectName, con
 
     if (ctx.selection.selected.type == SelectableType::Object &&
         ctx.selection.selected.object &&
-        ctx.selection.selected.object->nodeName == objectName) {
+        ctx.selection.selected.object->getNodeName() == objectName) {
         Matrix4x4 pivotMat = transform->getPivotMatrix();
         Vec3 p, r, s;
         pivotMat.decompose(p, r, s);
@@ -2176,7 +2176,7 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
             auto mixhf = [&](float v) { uint32_t b; std::memcpy(&b, &v, 4); mixh(b); };
             for (const auto& item : sel.multi_selection) {
                 if (item.type != SelectableType::Object || !item.object) continue;
-                const std::string& nm = item.object->nodeName;
+                const std::string& nm = item.object->getNodeName();
                 if (nm.empty()) continue;
                 bool is_body = false;
                 for (const auto& rb : ctx.scene.rigid_bodies) {
@@ -2248,7 +2248,7 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
             bool has_obb = false;
 
             if (item.type == SelectableType::Object && item.object) {
-                std::string selectedName = item.object->nodeName;
+                std::string selectedName = item.object->getNodeName();
                 if (selectedName.empty()) selectedName = "Unnamed";
 
                 if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
@@ -2322,7 +2322,7 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
                 // costs effectively nothing when static. Applies whether playing or not.
                 bool is_body = false;
                 {
-                    const std::string& bn = item.object->nodeName;
+                    const std::string& bn = item.object->getNodeName();
                     for (const auto& rb : ctx.scene.rigid_bodies) {
                         if (rb.enabled && rb.source_name == bn) { is_body = true; break; }
                     }
@@ -2333,7 +2333,7 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
                         // Memoized world-AABB: a STOPPED body recomputes only when its
                         // geometry version changes, so it costs O(1)/frame at idle (the
                         // per-frame triangle walk was the ~6% idle CPU the user saw).
-                        if (bodyWorldAABB(ctx, item.object->nodeName, mn, mx)) {
+                        if (bodyWorldAABB(ctx, item.object->getNodeName(), mn, mx)) {
                             // Plain, occlusion-FREE border. DrawBoundingBox/DrawOrientedBox
                             // run per-edge BVH occlusion ray casts (96/frame for a small
                             // box) even when static — exactly the constant CPU we're
@@ -2357,7 +2357,7 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
                     }
                     drew_outline = true;  // cheap bbox (or outline off) — skip raster/hull
                 } else if (viewport_settings.show_selection_outline) {
-                    std::string outlineName = item.object->nodeName;
+                    std::string outlineName = item.object->getNodeName();
                     if (gpu_outline_readback_drawn && !outlineName.empty()) {
                         // Already drawn by the Rendered-mode GPU mask
                         // pre-pass above (same eligibility criteria).
@@ -3105,7 +3105,7 @@ mesh_edit_changed_confirmed:
         is_mixed_group = true;
     }
     else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
-        std::string name = sel.selected.object->nodeName;
+        std::string name = sel.selected.object->getNodeName();
         if (name.empty()) name = "Unnamed";
         auto it = mesh_cache.find(name);
         if (it != mesh_cache.end()) {
@@ -3261,7 +3261,7 @@ mesh_edit_changed_confirmed:
         // Shift + D = Duplicate Object
         if (ImGui::IsKeyPressed(ImGuiKey_D) && ImGui::GetIO().KeyShift) {
             if (sel.selected.type == SelectableType::Object && sel.selected.object) {
-                std::string targetName = sel.selected.object->nodeName;
+                std::string targetName = sel.selected.object->getNodeName();
                 if (targetName.empty()) targetName = "Unnamed";
 
                 // Ensure mesh cache is valid
@@ -3516,7 +3516,7 @@ mesh_edit_changed_confirmed:
                 auto transform = sel.selected.object->getTransformHandle();
                 if (transform) {
                     drag_start_state.matrix = transform->base;
-                    drag_object_name = sel.selected.object->nodeName;
+                    drag_object_name = sel.selected.object->getNodeName();
                 }
             }
         }
@@ -3601,11 +3601,11 @@ mesh_edit_changed_confirmed:
     if (manipulated) {
         // Mark objects for lazy CPU sync (re-enable picking accuracy later)
         if (sel.selected.type == SelectableType::Object && sel.selected.object) {
-            objects_needing_cpu_sync.insert(sel.selected.object->nodeName);
+            objects_needing_cpu_sync.insert(sel.selected.object->getNodeName());
         }
         for (const auto& item : sel.multi_selection) {
             if (item.type == SelectableType::Object && item.object) {
-                objects_needing_cpu_sync.insert(item.object->nodeName);
+                objects_needing_cpu_sync.insert(item.object->getNodeName());
             }
         }
 
@@ -3773,7 +3773,7 @@ mesh_edit_changed_confirmed:
 
                 for (auto& item : sel.multi_selection) {
                     if (item.type == SelectableType::Object && item.object) {
-                        std::string targetName = item.object->nodeName;
+                        std::string targetName = item.object->getNodeName();
                         if (targetName.empty()) targetName = "Unnamed";
 
                         auto th = item.object->getTransformHandle();
@@ -3991,13 +3991,19 @@ mesh_edit_changed_confirmed:
              sel.selected.rotation = r;
              sel.selected.scale = s;
              
-             // VDB uses BVH, so we need a rebuild/refit
-             // Since it's a box, refit is usually enough, but rebuild is safer for topology changes (though box just moves)
-             extern bool g_bvh_rebuild_pending;
-             g_bvh_rebuild_pending = true;
-             
+             // VDB is a BOX: a transform move only SHIFTS its AABB — topology is
+             // stable — so a cheap CPU-BVH REFIT (Embree RTC_BUILD_QUALITY_REFIT)
+             // suffices for picking. The old full rebuild (g_bvh_rebuild_pending)
+             // rebuilt the WHOLE scene BVH every drag frame, which stalled dense
+             // (foam/sim) scenes. The GPU side only needs the volume-table transform
+             // refreshed (syncVDBVolumesToGPU → updateVDBVolumeBuffer = a small device
+             // memcpy; NO grid re-upload, NO acceleration-structure rebuild). This
+             // mirrors the mesh-object move fast path.
+             extern bool g_cpu_bvh_refit_pending;
+             g_cpu_bvh_refit_pending = true;
+
              ctx.renderer.resetCPUAccumulation();
-             
+
              if (ctx.backend_ptr) {
                  SceneUI::syncVDBVolumesToGPU(ctx);
                  ctx.backend_ptr->resetAccumulation();
@@ -4054,7 +4060,7 @@ mesh_edit_changed_confirmed:
             if (deltaMagnitude >= 0.0001f || operation != ImGuizmo::TRANSLATE) {
                 if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
 
-                std::string targetName = sel.selected.object->nodeName;
+                std::string targetName = sel.selected.object->getNodeName();
                 if (targetName.empty()) targetName = "Unnamed";
 
                 if (pivot_edit_mode) {
@@ -4174,7 +4180,7 @@ mesh_edit_changed_confirmed:
             bool any_object_moved = false;
             for (auto& item : sel.multi_selection) {
                 if (item.type == SelectableType::Object && item.object) {
-                    std::string name = item.object->nodeName;
+                    std::string name = item.object->getNodeName();
                     if (name.empty()) name = "Unnamed";
 
                     if (using_gpu_tlas) {
@@ -4202,7 +4208,7 @@ mesh_edit_changed_confirmed:
                 g_cpu_bvh_refit_pending = true;
             }
         } else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
-            std::string name = sel.selected.object->nodeName;
+            std::string name = sel.selected.object->getNodeName();
             if (name.empty()) name = "Unnamed";
             
             if (using_gpu_tlas) {

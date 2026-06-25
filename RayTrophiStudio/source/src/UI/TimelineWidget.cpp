@@ -814,15 +814,15 @@ void TimelineWidget::draw(UIContext& ctx) {
                 object_cache.clear();
                 for (auto& obj : ctx.scene.world.objects) {
                     auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                    if (tri && !tri->nodeName.empty()) {
-                        object_cache[tri->nodeName] = { tri, nullptr };
+                    if (tri && !tri->getNodeName().empty()) {
+                        object_cache[tri->getNodeName()] = { tri, nullptr };
                     } else {
                         // Also check HittableInstance objects (e.g., default scene cube)
                         auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
                         if (inst && inst->source_triangles && !inst->source_triangles->empty()) {
                             auto& first_tri = inst->source_triangles->at(0);
-                            if (first_tri && !first_tri->nodeName.empty()) {
-                                object_cache[first_tri->nodeName] = { first_tri, inst };
+                            if (first_tri && !first_tri->getNodeName().empty()) {
+                                object_cache[first_tri->getNodeName()] = { first_tri, inst };
                             } else if (!inst->node_name.empty()) {
                                 object_cache[inst->node_name] = { first_tri, inst };
                             }
@@ -882,7 +882,7 @@ void TimelineWidget::draw(UIContext& ctx) {
                                 // Raw triangles in scene: update all with same nodeName
                                 for (auto& obj : ctx.scene.world.objects) {
                                     auto mesh_tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                    if (mesh_tri && mesh_tri->nodeName == track_name) {
+                                    if (mesh_tri && mesh_tri->getNodeName() == track_name) {
                                         mesh_tri->updateTransformedVertices();
                                     }
                                 }
@@ -2496,7 +2496,7 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
     
     if (ctx.selection.hasSelection()) {
         if (ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object) {
-            selected_entity = ctx.selection.selected.object->nodeName;
+            selected_entity = ctx.selection.selected.object->getNodeName();
             if (selected_entity.empty()) {
                 selected_entity = "Object_" + std::to_string(ctx.selection.selected.object_index);
             }
@@ -2890,7 +2890,7 @@ void TimelineWidget::handleSelectionSync(UIContext& ctx) {
     std::string viewport_selection;
     if (ctx.selection.hasSelection()) {
         if (ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object) {
-            viewport_selection = ctx.selection.selected.object->nodeName;
+            viewport_selection = ctx.selection.selected.object->getNodeName();
             if (viewport_selection.empty()) {
                 viewport_selection = "Object_" + std::to_string(ctx.selection.selected.object_index);
             }
@@ -3093,7 +3093,7 @@ void TimelineWidget::insertKeyframeForTrack(UIContext& ctx, const std::string& t
     // Check if the track entity matches the selected object
     bool match = false;
     if (ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object) {
-        std::string sel_name = ctx.selection.selected.object->nodeName;
+        std::string sel_name = ctx.selection.selected.object->getNodeName();
         if (sel_name.empty()) sel_name = "Object_" + std::to_string(ctx.selection.selected.object_index);
         
         if (sel_name == entity_name) match = true;
@@ -3106,7 +3106,7 @@ void TimelineWidget::insertKeyframeForTrack(UIContext& ctx, const std::string& t
     
     if (ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object) {
         auto& obj = ctx.selection.selected.object;
-        std::string sel_name = obj->nodeName.empty() ? "Object_" + std::to_string(ctx.selection.selected.object_index) : obj->nodeName;
+        std::string sel_name = obj->getNodeName().empty() ? "Object_" + std::to_string(ctx.selection.selected.object_index) : obj->getNodeName();
         
         if (sel_name == entity_name) {
             kf.has_transform = true;
@@ -3162,8 +3162,8 @@ void TimelineWidget::insertKeyframeForTrack(UIContext& ctx, const std::string& t
             
             // CRITICAL FIX: Ensure object has a permanent name if we are keying it
             // Otherwise SceneSerializer might skip it or it relies on unstable indices
-            if (obj->nodeName.empty()) {
-                obj->nodeName = sel_name;
+            if (obj->getNodeName().empty()) {
+                obj->setNodeName(sel_name);
             }
         }
     }
@@ -3900,9 +3900,9 @@ void TimelineWidget::insertKeyframeType(UIContext& ctx, const std::string& track
     }
     
     auto& obj = ctx.selection.selected.object;
-    std::string entity_name = obj->nodeName.empty() ? 
+    std::string entity_name = obj->getNodeName().empty() ? 
         "Object_" + std::to_string(ctx.selection.selected.object_index) : 
-        obj->nodeName;
+        obj->getNodeName();
     
     if (entity_name != track_name) return;
     

@@ -1,0 +1,189 @@
+/*
+ * RayTrophi Studio — Vulkan Hair Intersection Shader
+ * Linear Swept Sphere (LSS) Ray Intersection
+ *
+ * Her AABB primitive bir hair segmentine karşılık gelir. Eskiden cubic B-spline
+ * Newton-iterasyonlu intersection yapılıyordu (~22 polinom eval/AABB hit).
+ * Şimdi her segment LSS olarak ele alınıyor: tabela noktalarından (curve(u=0),
+ * curve(u=1)) doğrusal eksen + lineer interpolate edilen yarıçap = rounded cone.
+ *
+ * Algoritma (tamamen analitik, iteration yok):
+ *   1. cp0..cp3 cubic B-spline kontrol noktalarından segment endpoint'lerini al
+ *      (uniform B-spline basis u=0 ve u=1'de değerlendirilerek).
+ *   2. Ray vs rounded-cone (kapsül) quadratic çözümü.
+ *   3. Body + iki cap (uç küre) hit'lerinden en yakını seç.
+ *   4. hitAttributeEXT ile tangent (eksen) ve u parametresi raporla.
+ *
+ * Görsel kayıp: segment içi cubic eğrilik kaybolur; tipik dense hair'de (32+
+ * segment/strand) imperceptible. Tangent süreksizliği segment sınırlarında C0
+ * (eski C2 değil) — closesthit içinde komşu tangent harmanlanırsa C1 elde edilir.
+ *
+ * SBT offset = m_hasVolumeShaders ? 2 : 1
+ * Bu shader VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR ile çalışır.
+ */
+
+#version 460
+#extension GL_EXT_ray_tracing         : require
+#extension GL_EXT_scalar_block_layout : require
+
+hitAttributeEXT vec4 hairAttrib;
+
+struct HairSegmentGPU {
+    vec4 cp0;
+    vec4 cp1;
+    vec4 cp2;
+    vec4 cp3;
+    uint strandID;
+    uint groomID;
+    uint materialID;
+    uint padding;
+};
+
+layout(set = 0, binding = 10, scalar) readonly buffer HairSegmentSSBO {
+    HairSegmentGPU hairSegs[];
+};
+
+// Sphere(O, R) ile ray O+t*D kesişimi. En küçük pozitif t (ya da -1).
+float intersectSphere(vec3 sphereCenter, float sphereR, vec3 rO, vec3 rD,
+                      float tMin, float tMax)
+{
+    vec3 oc = rO - sphereCenter;
+    float a = dot(rD, rD);
+    float b = 2.0 * dot(oc, rD);
+    float c = dot(oc, oc) - sphereR * sphereR;
+    float disc = b*b - 4.0*a*c;
+    if (disc < 0.0) return -1.0;
+    float sd = sqrt(disc);
+    float t0 = (-b - sd) / (2.0 * a);
+    float t1 = (-b + sd) / (2.0 * a);
+    if (t0 >= tMin && t0 <= tMax) return t0;
+    if (t1 >= tMin && t1 <= tMax) return t1;
+    return -1.0;
+}
+
+void main()
+{
+    uint segIdx = uint(gl_PrimitiveID);
+    if (segIdx >= hairSegs.length()) {
+        return;
+    }
+    HairSegmentGPU seg = hairSegs[segIdx];
+
+    // ─── Cubic B-spline kontrol noktalarından segment endpoint'lerine ───────
+    // Uniform cubic B-spline basis u=0 ve u=1'de değerlendirilerek elde edilen
+    // gerçek eğri noktaları. Bu LSS approximation orijinal curve geometrisine
+    // sınırlarda tam denk gelir, sadece içerde lineer.
+    //   curve(0) = (cp0 + 4*cp1 + cp2) / 6
+    //   curve(1) = (cp1 + 4*cp2 + cp3) / 6
+    const float oneSixth = 1.0 / 6.0;
+    vec3 P0 = (seg.cp0.xyz + 4.0 * seg.cp1.xyz + seg.cp2.xyz) * oneSixth;
+    vec3 P1 = (seg.cp1.xyz + 4.0 * seg.cp2.xyz + seg.cp3.xyz) * oneSixth;
+    float R0 = (seg.cp0.w   + 4.0 * seg.cp1.w   + seg.cp2.w)   * oneSixth;
+    float R1 = (seg.cp1.w   + 4.0 * seg.cp2.w   + seg.cp3.w)   * oneSixth;
+
+    vec3 axis = P1 - P0;
+    float axisLen = length(axis);
+    if (axisLen < 1e-6) {
+        // Dejenere segment — sadece küre olarak ele al.
+        float tSphere = intersectSphere(P0, R0, gl_WorldRayOriginEXT, gl_WorldRayDirectionEXT,
+                                        gl_RayTminEXT, gl_RayTmaxEXT);
+        if (tSphere > 0.0) {
+            // Tangent yok, ray yönünü tangent olarak ver (closesthit'te yumuşak fallback)
+            hairAttrib = vec4(normalize(gl_WorldRayDirectionEXT), 0.5);
+            reportIntersectionEXT(tSphere, 0u);
+        }
+        return;
+    }
+    vec3 axisDir = axis / axisLen;
+    float radSlope = (R1 - R0) / axisLen; // dR/dp boyunca eksen
+
+    // ─── Ray bileşenleri (eksen yönüne paralel/dik) ─────────────────────────
+    vec3 rO = gl_WorldRayOriginEXT;
+    vec3 rD = gl_WorldRayDirectionEXT;
+    vec3 oA = rO - P0;
+
+    float paO = dot(oA, axisDir);    // axial offset of origin
+    float paD = dot(rD, axisDir);    // axial component of direction
+    vec3  peO = oA - paO * axisDir;  // perpendicular offset of origin
+    vec3  peD = rD  - paD * axisDir; // perpendicular component of direction
+
+    // Body quadratic: |peO + t*peD|^2 = (R0 + radSlope*(paO + t*paD))^2
+    // → A t^2 + B t + C = 0
+    float m  = R0 + radSlope * paO;
+    float A  = dot(peD, peD) - radSlope * radSlope * paD * paD;
+    float B  = 2.0 * (dot(peO, peD) - m * radSlope * paD);
+    float C  = dot(peO, peO) - m * m;
+
+    float bestT = -1.0;
+    float bestU = 0.0;
+    vec3  bestTangent = axisDir;
+
+    // ─── Cone body kesişimi ─────────────────────────────────────────────────
+    // A ~ 0 ise (silindir, R0 == R1) lineer: B*t + C = 0
+    float tBody = -1.0;
+    if (abs(A) < 1e-8) {
+        if (abs(B) > 1e-8) {
+            float t = -C / B;
+            if (t >= gl_RayTminEXT && t <= gl_RayTmaxEXT) tBody = t;
+        }
+    } else {
+        float disc = B*B - 4.0*A*C;
+        if (disc >= 0.0) {
+            float sd = sqrt(disc);
+            float t0 = (-B - sd) / (2.0 * A);
+            float t1 = (-B + sd) / (2.0 * A);
+            // İki kökten body içinde (axial 0..axisLen) olan en küçük geçerli olanı seç.
+            float tCandidates[2] = float[2](t0, t1);
+            for (int i = 0; i < 2; i++) {
+                float t = tCandidates[i];
+                if (t < gl_RayTminEXT || t > gl_RayTmaxEXT) continue;
+                float p = paO + t * paD;
+                if (p < 0.0 || p > axisLen) continue;
+                if (tBody < 0.0 || t < tBody) {
+                    tBody = t;
+                    bestU = p / axisLen;
+                }
+            }
+        }
+    }
+    if (tBody > 0.0) {
+        bestT = tBody;
+        bestTangent = axisDir;
+    }
+
+    // ─── Cap A (P0 küresi) ──────────────────────────────────────────────────
+    // Sadece axial p < 0 bölgesinde geçerli (body'i kesmiyorsa kürede arıyoruz).
+    {
+        float t = intersectSphere(P0, R0, rO, rD, gl_RayTminEXT, gl_RayTmaxEXT);
+        if (t > 0.0) {
+            float p = paO + t * paD;
+            if (p <= 0.0) {
+                if (bestT < 0.0 || t < bestT) {
+                    bestT = t;
+                    bestU = 0.0;
+                    bestTangent = axisDir;
+                }
+            }
+        }
+    }
+
+    // ─── Cap B (P1 küresi) ──────────────────────────────────────────────────
+    {
+        float t = intersectSphere(P1, R1, rO, rD, gl_RayTminEXT, gl_RayTmaxEXT);
+        if (t > 0.0) {
+            float p = paO + t * paD;
+            if (p >= axisLen) {
+                if (bestT < 0.0 || t < bestT) {
+                    bestT = t;
+                    bestU = 1.0;
+                    bestTangent = axisDir;
+                }
+            }
+        }
+    }
+
+    if (bestT > 0.0) {
+        hairAttrib = vec4(bestTangent, bestU);
+        reportIntersectionEXT(bestT, 0u);
+    }
+}

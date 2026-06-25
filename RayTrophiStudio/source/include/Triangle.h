@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -32,6 +32,25 @@
 class Material;
 class Texture;
 
+// Copyable owning pointer with value (deep-copy) semantics. Used so optional/rare-payload
+// members (e.g. skinning data) cost only 8 bytes when absent — instead of reserving the full
+// payload inline like std::optional — while keeping Triangle copyable (it is duplicated via
+// make_shared<Triangle>(*src) in a few edit paths).
+template <typename T>
+struct deep_ptr {
+    std::unique_ptr<T> p;
+    deep_ptr() = default;
+    deep_ptr(const deep_ptr& o) : p(o.p ? std::make_unique<T>(*o.p) : nullptr) {}
+    deep_ptr(deep_ptr&&) noexcept = default;
+    deep_ptr& operator=(const deep_ptr& o) { p = o.p ? std::make_unique<T>(*o.p) : nullptr; return *this; }
+    deep_ptr& operator=(deep_ptr&&) noexcept = default;
+    T* operator->() const { return p.get(); }
+    T& operator*() const { return *p; }
+    explicit operator bool() const { return static_cast<bool>(p); }
+    T* get() const { return p.get(); }
+    void reset(T* x = nullptr) { p.reset(x); }
+};
+
 /**
  * @brief Consolidated vertex data structure for memory optimization
  * Replaces 9 separate Vec3 members (original, transformed, current) with this
@@ -42,7 +61,6 @@ struct TriangleVertexData {
     Vec3 original;       // Bind-pose original position
     Vec3 normal;         // Current/transformed normal
     Vec3 originalNormal; // Bind-pose normal
-    Vec3 color;          // Vertex color (e.g. for wind stiffness, 1=Rigid, 0=Flexible)
 };
 
 /**
@@ -111,9 +129,11 @@ public:
     
     inline const Vec3& getOriginalVertexNormal(int i) const { return vertices[i].originalNormal; }
     inline void setOriginalVertexNormal(int i, const Vec3& normal) { vertices[i].originalNormal = normal; }
-    
-    inline const Vec3& getVertexColor(int i) const { return vertices[i].color; }
-    inline void setVertexColor(int i, const Vec3& color) { vertices[i].color = color; }
+
+    // Source polygon (quad/ngon) id this triangle was split from, or -1 if none. Lets sculpt /
+    // shading compute one normal per polygon (loop normals) instead of per split triangle.
+    inline int getFaceIndex() const { return faceIndex; }
+    inline void setFaceIndex(int idx) { faceIndex = idx; }
 
     // Convenience accessors for backward compatibility
     inline Vec3 getV0() const { return vertices[0].position; }
@@ -165,12 +185,24 @@ public:
     // ========================================================================
     
     Vec2 t0, t1, t2; // Texture coordinates (kept as-is, essential for rendering)
-    
+
+    // Transient index into the active editable-mesh cache's source_triangles (SoA migration;
+    // -1 = not in the current edit/sculpt cache). Lets the cache map a Triangle* back to its
+    // face index in O(1) without a per-triangle hash map (triangle_vertex_ids /
+    // triangle_to_mesh_index). Runtime-only, never serialized; a consumer confirms validity
+    // with source_triangles[editable_index].get() == this before trusting it.
+    int editable_index = -1;
+
     void setUVCoordinates(const Vec2& uv0, const Vec2& uv1, const Vec2& uv2);
     std::tuple<Vec2, Vec2, Vec2> getUVCoordinates() const;
     void setUVSetCoordinates(size_t set_index, const Vec2& uv0, const Vec2& uv1, const Vec2& uv2);
     std::tuple<Vec2, Vec2, Vec2> getUVSetCoordinates(size_t set_index) const;
-    size_t getUVSetCount() const { return uv_sets.size(); }
+    // UV set 0 lives in t0/t1/t2 (always present); uv_sets holds ONLY the EXTRA sets and is
+    // empty for the common single-set case — so a single-set triangle no longer pays a
+    // per-triangle heap allocation (the 12.5M-allocation spike that dominated dense-subdivide
+    // materialize). When uv_sets is non-empty it is the full set list (uv_sets[0] == set 0
+    // backup), so the rare multi-UV workflow (active-set switching via applyUVSet) round-trips.
+    size_t getUVSetCount() const { return uv_sets.empty() ? size_t{ 1 } : uv_sets.size(); }
     void applyUVSet(size_t set_index);
 
     // ========================================================================
@@ -178,7 +210,7 @@ public:
     // ========================================================================
     
     void initializeSkinData();
-    bool hasSkinData() const { return skinData.has_value(); }
+    bool hasSkinData() const { return static_cast<bool>(skinData); }
     bool hasAnySkinWeights() const;
     
     void setSkinBoneWeights(int vertexIndex, const std::vector<std::pair<int, float>>& weights);
@@ -214,12 +246,13 @@ public:
     // ========================================================================
     // Mesh/Node Information
     // ========================================================================
-    
-    inline void setFaceIndex(int idx) { faceIndex = idx; }
-    inline int getFaceIndex() const { return faceIndex; }
-    
-    inline const std::string& getNodeName() const { return nodeName; }
+   
+    inline const std::string& getNodeName() const { 
+        static const std::string emptyString = "";
+        return nodeNamePtr ? *nodeNamePtr : emptyString; 
+    }
     void setNodeName(const std::string& name);
+    bool isTriangle() const override { return true; }
     
     void setAssimpVertexIndices(unsigned int i0, unsigned int i1, unsigned int i2) {
         assimpVertexIndices = { i0, i1, i2 };
@@ -232,7 +265,12 @@ public:
     // GPU/Texture Bundle (for OptiX integration)
     // ========================================================================
     
-    OptixGeometryData::TextureBundle textureBundle;
+    // Heap-allocated ONLY when the mesh actually carries textures (set at import / material
+    // assignment). 8 bytes when absent vs the 104-byte inline struct — procedural / dense
+    // subdivided meshes (the 32M case) have no textures, so this is the single biggest soup
+    // saving. The modern GPU path binds textures per-material (unified_converters), so nothing
+    // reads this per-triangle; it only keeps imported CUDA texture handles alive.
+    deep_ptr<OptixGeometryData::TextureBundle> textureBundle;
     std::shared_ptr<Texture> texture;
 
     // ========================================================================
@@ -265,7 +303,7 @@ public:
     const Vec3& n0_cref() const { return vertices[0].normal; }
     const Vec3& n1_cref() const { return vertices[1].normal; }
     const Vec3& n2_cref() const { return vertices[2].normal; }
-    std::string nodeName;
+    const std::string* nodeNamePtr = nullptr;
     TriangleVertexData vertices[3];           // Consolidated vertex data (144 bytes)
     int terrain_id = -1;
     mutable bool vertexPositionsDirty = false;
@@ -281,7 +319,8 @@ private:
    
   
     std::shared_ptr<Transform> transformHandle; // Shared transform (8 bytes)
-    std::optional<SkinnedTriangleData> skinData; // Optional skinning data (1 byte when empty)
+    deep_ptr<SkinnedTriangleData> skinData;      // Skinning data — 8 bytes when absent (was
+                                                 // std::optional, which reserved ~56 B inline)
     
                      // 32 bytes avg
     int faceIndex = -1;                        // 4 bytes
@@ -292,9 +331,6 @@ private:
     mutable bool aabbDirty = true;            // 1 byte
   
     mutable Material* cachedMaterial = nullptr; // Performance cache
-
-    // Scratch buffers for apply_skinning (reused across calls)
-    mutable Vec3 blendedPos, blendedNorm;     // 24 bytes
 
     // ========================================================================
     // Internal Methods

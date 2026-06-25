@@ -152,6 +152,15 @@ public:
     // tear them off their pin. `dv` shorter than the vertex count leaves the rest
     // untouched. Used to drive soft bodies / cloth with external force fields.
     void addSoftBodyVertexVelocities(JoltBodyHandle handle, const std::vector<Vec3>& dv);
+    // Teleport a soft body's particles to absolute WORLD positions (same vertex
+    // order/count as createSoftBody), optionally setting their WORLD velocities.
+    // Used to RESUME a cached soft-body frame when the timeline plays past the RAM
+    // cache: a freshly (re)created soft body is built at its REST shape, so without
+    // this it would re-animate from rest. The edge rest-lengths stay intact (built
+    // from the rest mesh at creation); only the live particle state is moved. Pinned
+    // vertices (invMass==0) are left on their pin. velocities==nullptr zeroes them.
+    void setSoftBodyVertices(JoltBodyHandle handle, const std::vector<Vec3>& positions,
+                             const std::vector<Vec3>* velocities = nullptr);
     void removeBody(JoltBodyHandle handle);
     void clearBodies();
     std::size_t bodyCount() const;

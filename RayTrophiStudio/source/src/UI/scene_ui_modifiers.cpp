@@ -4,11 +4,13 @@
 #include "HittableInstance.h"
 
 #include "MeshModifiers.h"
+#include "MeshProfileTimer.h"
 #include "ProjectManager.h"
 #include "globals.h"
 #include "Triangle.h"
 #include "Renderer.h"
 #include "Backend/IViewportBackend.h"
+#include "Backend/VulkanBackend.h"   // Phase 3d: device-resident CC bake registration
 #include "scene_data.h"
 #include <SceneSelection.h>
 #include "Paint/TerrainPaintAdapter.h"
@@ -30,6 +32,180 @@
 #include <SDL.h>
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+extern std::unique_ptr<Backend::IBackend> g_backend;   // Phase 3d: active render backend
+extern bool g_vulkan_device_cc_refit_pending;          // Slice 4: cheap CC BLAS refit (vs full rebuild)
+
+// ---- Slice 4: live device-resident GPU Catmull-Clark (render level) ----
+// Drives a Subdivision modifier's RENDER level straight onto the GPU as a
+// device-resident BLAS (no host download): a cage edit/sculpt re-applies the CC
+// stencils on the GPU and refits the BLAS, with no "Apply" and no host triangles
+// for the dense mesh. This is what makes GPU subdivide LIVE outside edit mode —
+// the host path only re-evaluates CC on the edit-mode display refresh, so in
+// object mode the GPU subdivide never kicked in. Here it tracks any cage change.
+//
+// Scope (this first increment): Vulkan RT + Rendered mode only, and exactly one
+// enabled subdivision modifier of type Catmull-Clark (so the cage is the object's
+// base mesh). OptiX / CPU / Solid keep the proven host path. Device-resident is a
+// Rendered-mode optimization: in Solid the RT rebuild flag can't be consumed
+// (idle-CPU trap), so it is gated off there. Returns true when it has taken over
+// the node's RT geometry (the host cage is excluded from the RT gather by key).
+struct LiveDeviceResidentCCState {
+    std::size_t geoSig = 0;     // cage positions + render level + crease generation
+    std::size_t xformSig = 0;   // world transform of the instance
+    MeshModifiers::CCDeviceGeometry geo;  // reused across transform-only changes
+    std::vector<uint16_t> materialIds;    // per-triangle material ids (shader lookup)
+    bool valid = false;
+};
+
+bool driveLiveDeviceResidentCC(const std::string& nodeName,
+                               const std::vector<std::shared_ptr<Triangle>>& cage,
+                               const MeshModifiers::ModifierStack& stack) {
+    using namespace MeshModifiers;
+    static std::unordered_map<std::string, LiveDeviceResidentCCState> s_state;
+
+    auto dropState = [&](Backend::VulkanBackendAdapter* vk, const std::string& key) {
+        // The registered device buffer is owned by the backend, which releases it via its
+        // deferred queue (it may still back a live BLAS) — do NOT free it here (double free).
+        // A freshly-evaluated geo is always registered in the same call before any drop, so
+        // st.geo is never an orphan; just forget our cache copy.
+        auto it = s_state.find(nodeName);
+        const bool wasActive = (it != s_state.end() && it->second.valid);
+        if (vk) {
+            vk->removeDeviceResidentCCMesh(key);
+            // Only kick a rebuild when we actually TRANSITION a live device-resident mesh back
+            // to the host path (e.g. CC modifier disabled). For a node that was never
+            // device-resident (a Simple/Flat subdivision object, or the first call) this is a
+            // no-op — raising g_vulkan_rebuild_pending there would force a full rebuild on
+            // every host-path sculpt dab, the very thing this fast path avoids. Rendered only
+            // (Solid can't consume the flag -> idle-CPU trap).
+            if (wasActive && !g_solid_viewport_active) g_vulkan_rebuild_pending = true;
+        }
+        if (it != s_state.end()) s_state.erase(it);
+    };
+
+    const std::string meshKey = "[CCDev]-" + nodeName;
+    auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
+
+    // Device-resident CC is a Vulkan-RT, Rendered-mode optimization. OptiX / CPU
+    // and Solid mode keep the host path; tear down any stale registration.
+    if (!vk || g_solid_viewport_active || !g_gpu_subdivide_enabled) {
+        dropState(vk, meshKey);
+        return false;
+    }
+
+    // First increment: exactly one enabled subdivision modifier, Catmull-Clark.
+    const ModifierData* ccMod = nullptr;
+    int enabledCount = 0;
+    for (const auto& m : stack.modifiers) {
+        if (!m.enabled) continue;
+        ++enabledCount;
+        if (m.type == ModifierType::CatmullClark) ccMod = &m;
+    }
+    if (!ccMod || enabledCount != 1 || cage.empty()) {
+        dropState(vk, meshKey);
+        return false;
+    }
+
+    auto mix = [](std::size_t& s, std::size_t v) {
+        s ^= v + 0x9e3779b97f4a7c15ull + (s << 6) + (s >> 2);
+    };
+
+    // Geometry signature: cage LOCAL positions + render level + crease set size.
+    std::size_t geoSig = std::hash<std::string>{}(nodeName);
+    mix(geoSig, static_cast<std::size_t>(ccMod->renderLevels));
+    mix(geoSig, cage.size());
+    mix(geoSig, stack.edgeCreases.size());
+    std::shared_ptr<Triangle> rep;
+    for (const auto& tri : cage) {
+        if (!tri) continue;
+        if (!rep) rep = tri;
+        for (int c = 0; c < 3; ++c) {
+            const Vec3 p = tri->getOriginalVertexPosition(c);
+            mix(geoSig, std::hash<float>{}(p.x));
+            mix(geoSig, std::hash<float>{}(p.y));
+            mix(geoSig, std::hash<float>{}(p.z));
+        }
+    }
+    if (!rep) { dropState(vk, meshKey); return false; }
+
+    // Transform signature: the instance world matrix (object-mode moves refit cheaply).
+    const Matrix4x4 world = rep->getTransformMatrix();
+    std::size_t xformSig = 1469598103934665603ull;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) mix(xformSig, std::hash<float>{}(world.m[i][j]));
+
+    LiveDeviceResidentCCState& st = s_state[nodeName];
+    const bool geoChanged   = !st.valid || st.geoSig != geoSig;
+    const bool xformChanged = !st.valid || st.xformSig != xformSig;
+    if (st.valid && !geoChanged && !xformChanged) return true;  // up to date
+
+    // A BLAS already exists for this node iff it was registered before — needed to decide
+    // whether a position-only edit can take the cheap MODE_UPDATE refit (same triangle count).
+    const bool wasRegistered = st.valid && st.geo.valid();
+    const uint32_t prevTriCount = wasRegistered ? st.geo.triCount : 0u;
+
+    // Re-evaluate the dense geometry on the GPU only when the cage actually changed;
+    // a pure object-mode move reuses the cached device buffer and just refits the TLAS.
+    if (geoChanged) {
+        EdgeCreaseFn creaseFn;
+        if (!stack.edgeCreases.empty())
+            creaseFn = [&stack](const Vec3& a, const Vec3& b) { return stack.getEdgeCrease(a, b); };
+        CCSubdivPlan plan = buildCCSubdivPlan(cage, ccMod->renderLevels, creaseFn);
+        if (!plan.valid()) { dropState(vk, meshKey); return false; }
+
+        CCDeviceGeometry newGeo;
+        if (!evaluateCCToDeviceGeometry(plan, plan.cageP0, newGeo) || !newGeo.valid()) {
+            // GPU path unavailable / failed -> fall back to the host render mesh.
+            dropState(vk, meshKey);
+            return false;
+        }
+        // The backend defers release of the previously-registered buffer (it may still
+        // back a live BLAS); our own cached handle is replaced, so just overwrite it.
+        st.geo = newGeo;
+        // Stash per-triangle material ids alongside the geo for the descriptor.
+        st.materialIds.assign(plan.triMat.begin(), plan.triMat.end());
+    }
+
+    Backend::VulkanBackendAdapter::DeviceResidentCCMesh drm;
+    drm.meshKey       = meshKey;
+    drm.bufferId      = st.geo.bufferId;
+    drm.deviceAddress = st.geo.deviceAddress;
+    drm.vertexCount   = st.geo.vertexCount;
+    drm.triCount      = st.geo.triCount;
+    drm.transform     = world;
+    drm.materialID    = rep->getMaterialID();
+    drm.materialIds.assign(st.materialIds.begin(), st.materialIds.end());  // uint16 -> uint32
+    drm.opaque        = false;  // conservative: keep anyhit so opacity/cutout stays correct
+    drm.cageNodeName  = nodeName;
+
+    // registerDeviceResidentCCMesh always updates the entry (and queues the old buffer for
+    // release), so a fallback full rebuild stays correct whichever path we take below.
+    vk->registerDeviceResidentCCMesh(drm);
+
+    st.geoSig = geoSig;
+    st.xformSig = xformSig;
+    st.valid = true;
+
+    // Fast path: a position-only edit (same triangle count, transform unchanged) refits the
+    // existing BLAS in place (MODE_UPDATE) + TLAS — no full scene rebuild. The first build, a
+    // topology change, or an object-mode move take the full rebuild (BLAS (re)created there).
+    const bool canRefit = wasRegistered && geoChanged && !xformChanged &&
+                          st.geo.triCount == prevTriCount && st.geo.vertexCount > 0;
+    if (canRefit) {
+        vk->queueDeviceResidentCCRefit(meshKey, st.geo.deviceAddress, st.geo.bufferId, st.geo.vertexCount);
+        g_vulkan_device_cc_refit_pending = true;
+    } else {
+        g_vulkan_rebuild_pending = true;
+    }
+
+    if (geoChanged) {
+        SCENE_LOG_INFO(std::string("[CCDevResident] ") + (canRefit ? "refit" : "rebuild") +
+                       " GPU Catmull-Clark '" + nodeName +
+                       "' tris=" + std::to_string(st.geo.triCount) +
+                       " renderLvl=" + std::to_string(ccMod->renderLevels));
+    }
+    return true;
+}
 
 namespace {
 
@@ -322,6 +498,7 @@ UIWidgets::IconType getSculptToolIcon(SceneUI::SculptBrushTool tool) {
         case SceneUI::SculptBrushTool::Fill:       return UIWidgets::IconType::SculptFillTool;
         case SceneUI::SculptBrushTool::SnakeHook:  return UIWidgets::IconType::SnakeHookTool;
         case SceneUI::SculptBrushTool::ElasticDeform: return UIWidgets::IconType::ElasticDeformTool;
+        case SceneUI::SculptBrushTool::Stamp:      return UIWidgets::IconType::StampTool;
     }
     return UIWidgets::IconType::Sculpt;
 }
@@ -2020,9 +2197,14 @@ void SceneUI::activateEditWorkspace(UIContext& ctx) {
     clearEditableMeshSelection();
     active_mesh_edit_object_name = selectedNodeName;
     active_mesh_edit_object_ptr = ctx.selection.selected.object.get();
-    editable_mesh_cache = EditableMeshCache{};
+    // Only wipe the editable cache when switching to a DIFFERENT object (or there is none).
+    // For the same object, ensureEditableMeshCache's needsRebuild logic decides reuse vs
+    // rebuild: a sculpt-minimal cache is rebuilt to full for Edit, but a full cache (or an
+    // already-Edit cache) is reused — avoiding a redundant multi-second rebuild on entry.
+    if (editable_mesh_cache.object_name != selectedNodeName || editable_mesh_cache.vertices.empty()) {
+        editable_mesh_cache = EditableMeshCache{};
+    }
     mesh_overlay_cache = MeshOverlayCache{};
-    ensureMeshEditLayer(ctx, selectedNodeName);
 }
 
 void SceneUI::activateSculptWorkspace(UIContext& ctx) {
@@ -2042,7 +2224,12 @@ void SceneUI::activateSculptWorkspace(UIContext& ctx) {
     active_mesh_edit_object_ptr = ctx.selection.selected.object.get();
     sculpt_mode_state.active_target_name = selectedNodeName;
     clearEditableMeshSelection();
-    editable_mesh_cache = EditableMeshCache{};
+    // Entering sculpt from Edit, the full Edit cache is a SUPERSET of the sculpt build, so
+    // keep it for the same object and let ensureEditableMeshCache reuse it (needsRebuild =
+    // false) instead of paying a second multi-second rebuild. Only wipe on object change.
+    if (editable_mesh_cache.object_name != selectedNodeName || editable_mesh_cache.vertices.empty()) {
+        editable_mesh_cache = EditableMeshCache{};
+    }
     mesh_overlay_cache = MeshOverlayCache{};
     terrain_sculpt_proxy_active = selectedIsTerrain;
 
@@ -2175,16 +2362,24 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
             const bool isEdgeMode = (ctx.selection.mesh_element_mode == MeshElementSelectMode::Edge);
             const bool isFaceMode = (ctx.selection.mesh_element_mode == MeshElementSelectMode::Face);
             const bool isCombinedMode = (ctx.selection.mesh_element_mode == MeshElementSelectMode::Combined);
-            // Auto-enter edit workspace only for newly-selected objects.
-            // If the user manually exited edit mode for this object, respect that.
-            if (hasSelection && !mesh_overlay_settings.edit_mode) {
-                if (modifier_panel_exit_object != selectedNodeName) {
-                    activateEditWorkspace(ctx);
-                }
-            }
             // Reset the exit flag when a different object is selected.
             if (!modifier_panel_exit_object.empty() && modifier_panel_exit_object != selectedNodeName) {
                 modifier_panel_exit_object.clear();
+            }
+
+            if (hasSelection) {
+                if (mesh_overlay_settings.edit_mode) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.4f, 0.1f, 1.0f));
+                    if (ImGui::Button("Exit Edit Mode (TAB)", ImVec2(-1, 30))) {
+                        resetMeshEditState(ctx);
+                    }
+                    ImGui::PopStyleColor();
+                } else {
+                    if (ImGui::Button("Enter Edit Mode (TAB)", ImVec2(-1, 30))) {
+                        activateEditWorkspace(ctx);
+                    }
+                }
+                ImGui::Spacing();
             }
 
             if (mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit) {
@@ -2253,33 +2448,6 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                         if (hasAnyOptions) ImGui::Spacing();
                         ImGui::SliderFloat("Loop Cut Pos", &mesh_loop_cut_position, 0.05f, 0.95f, "%.2f");
                         ImGui::TextDisabled("Relative position of the loop cut along ring edges.");
-
-                        // Catmull-Clark edge crease authoring (like Blender's Shift+E).
-                        // The slider is a free "value to apply" (not bound to the selection,
-                        // so dragging is never clobbered); the selection's current crease is
-                        // shown as text and applied on release / via the buttons.
-                        ImGui::Spacing();
-                        const float selCrease = getSelectedEdgesAverageCrease(ctx);
-                        const bool hasEdgeSelection = (selCrease >= 0.0f);
-                        ImGui::BeginDisabled(!hasEdgeSelection);
-                        ImGui::SliderFloat("Crease", &mesh_edge_crease_value, 0.0f, 1.0f, "%.2f");
-                        if (ImGui::IsItemDeactivatedAfterEdit() && hasEdgeSelection) {
-                            applyCreaseToSelectedEdges(ctx, mesh_edge_crease_value);
-                        }
-                        if (ImGui::Button("Apply Crease##edge") && hasEdgeSelection) {
-                            applyCreaseToSelectedEdges(ctx, mesh_edge_crease_value);
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Clear Crease##edge") && hasEdgeSelection) {
-                            applyCreaseToSelectedEdges(ctx, 0.0f);
-                        }
-                        ImGui::EndDisabled();
-                        if (hasEdgeSelection) {
-                            ImGui::TextDisabled("Selected edge crease: %.2f", selCrease);
-                            ImGui::TextDisabled("Crease is applied when you bake Catmull-Clark (below).");
-                        } else {
-                            ImGui::TextDisabled("Select edge(s) to author crease sharpness.");
-                        }
                         hasAnyOptions = true;
                     }
 
@@ -2288,6 +2456,49 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                         ImGui::SliderFloat("Extrude Dist", &mesh_face_extrude_distance, -2.0f, 2.0f, "%.3f");
                         ImGui::SliderFloat("Inset Amount", &mesh_face_inset_amount, 0.02f, 0.98f, "%.2f");
                         ImGui::TextDisabled("Distance and inset scaling factor for mesh extrusion.");
+                        hasAnyOptions = true;
+                    }
+
+                    // Catmull-Clark crease authoring (like Blender's Shift+E). Works from ANY
+                    // sub-element mode: an edge selection creases those edges, a face selection
+                    // creases all of the face's edges, a vertex selection creases edges whose
+                    // both endpoints are selected (getSelectedEdgesAverageCrease returns >= 0
+                    // when the current selection maps to at least one creasable edge).
+                    //
+                    // The slider is LIVE, but it MUST drive the same interactive-preview bracket
+                    // that a cage gizmo drag uses: while the slider is held we mark the object as
+                    // interactively previewing, so every per-frame re-eval is the CHEAP level-1
+                    // clamp (buildSubdivisionPreviewEvaluationStack) instead of a full N-level
+                    // Catmull-Clark rebuild. Without this, each slider tick re-subdivided the cage
+                    // at full depth (seconds-long on a few levels) — the drag became janky and the
+                    // selection/interaction "fell apart". On release endInteractiveSubdivisionPreview
+                    // does one full-quality rebuild. (The sub-element selection itself is never
+                    // touched — preserved across rebuildMeshCache — so it stays put either way.)
+                    {
+                        const float selCrease = getSelectedEdgesAverageCrease(ctx);
+                        const bool hasCreasable = (selCrease >= 0.0f);
+                        if (hasAnyOptions) ImGui::Spacing();
+                        ImGui::BeginDisabled(!hasCreasable);
+                        const bool creaseChanged =
+                            ImGui::SliderFloat("Crease", &mesh_edge_crease_value, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemActivated() && hasCreasable && !active_mesh_edit_object_name.empty()) {
+                            beginInteractiveSubdivisionPreview(active_mesh_edit_object_name);
+                        }
+                        if (creaseChanged && hasCreasable) {
+                            applyCreaseToSelectedEdges(ctx, mesh_edge_crease_value);
+                        }
+                        if (ImGui::IsItemDeactivated() && !active_mesh_edit_object_name.empty()) {
+                            endInteractiveSubdivisionPreview(ctx, active_mesh_edit_object_name, true);
+                        }
+                        if (ImGui::Button("Clear Crease##crease") && hasCreasable) {
+                            applyCreaseToSelectedEdges(ctx, 0.0f);
+                        }
+                        ImGui::EndDisabled();
+                        if (hasCreasable) {
+                            ImGui::TextDisabled("Current crease: %.2f (live — drag to set sharpness)", selCrease);
+                        } else {
+                            ImGui::TextDisabled("Select edge(s), face(s) or 2+ vertices to author crease.");
+                        }
                         hasAnyOptions = true;
                     }
 
@@ -2352,8 +2563,12 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     std::vector<std::shared_ptr<Hittable>> remainingObjects;
                     remainingObjects.reserve(ctx.scene.world.objects.size() + meshToShow.size());
                     for (const auto& obj : ctx.scene.world.objects) {
-                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                        if (!tri || tri->getNodeName() != selectedNodeName) {
+                        if (obj->isTriangle()) {
+                            auto tri = std::static_pointer_cast<Triangle>(obj);
+                            if (tri->getNodeName() != selectedNodeName) {
+                                remainingObjects.push_back(obj);
+                            }
+                        } else {
                             remainingObjects.push_back(obj);
                         }
                     }
@@ -2382,16 +2597,34 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                         mesh_edit_layer = MeshEditLayer{};
                     }
 
-                    rebuildMeshCache(ctx.scene.world.objects);
+                    { MESH_PROFILE_SCOPE("replaceEvaluatedMesh.rebuildMeshCache");
+                      rebuildMeshCache(ctx.scene.world.objects); }
+
+                    if (hasEnabledSubdivisionPreview(modifierStack)) {
+                        const std::size_t subdivSignature = computeSubdivisionPreviewSignature(ctx, selectedNodeName);
+                        
+                        editable_subdiv_display_signature = subdivSignature;
+                        editable_subdiv_display_signature_object = selectedNodeName;
+                        editable_subdiv_display_signature_valid = true;
+                        
+                        subdiv_preview_refresh_signature = subdivSignature;
+                        subdiv_preview_refresh_object_name = selectedNodeName;
+                        subdiv_preview_refresh_valid = true;
+                    }
+
                     if (mesh_overlay_settings.edit_mode &&
                         mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit &&
                         !selectedNodeName.empty()) {
+                        MESH_PROFILE_SCOPE("replaceEvaluatedMesh.ensureEditableMeshCache");
                         ensureEditableMeshCache(ctx, selectedNodeName);
-                        ensureMeshEditLayer(ctx, selectedNodeName);
                     }
-                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                    { MESH_PROFILE_SCOPE("replaceEvaluatedMesh.rebuildBVH(Embree)");
+                      ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree); }
                     ctx.renderer.resetCPUAccumulation();
-                    if (ctx.backend_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+                    if (ctx.backend_ptr) {
+                        MESH_PROFILE_SCOPE("replaceEvaluatedMesh.rebuildBackendGeometry(GPU)");
+                        ctx.renderer.rebuildBackendGeometry(ctx.scene);
+                    }
 
                     // Replacing the object's triangles is a STRUCTURAL change (triangle
                     // count changes), so the Rendered-mode backends (OptiX / Vulkan RT)
@@ -2401,9 +2634,19 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     // rendered on top of each other until the next edit forced a rebuild.
                     g_geometry_dirty = true;
                     g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
-                    g_bvh_rebuild_pending = true;
+                    // The CPU Embree BVH was just rebuilt SYNCHRONOUSLY above
+                    // (rebuildBVH). Leaving g_bvh_rebuild_pending set here forced a SECOND
+                    // full async rebuild of the same 3M-triangle BVH (~3s wasted on a heavy
+                    // apply) — clear it instead, mirroring the post-sync cancel in Main.cpp.
+                    // The GPU/Rendered flags below are still needed (structural change).
+                    g_bvh_rebuild_pending = false;
                     g_optix_rebuild_pending = true;
                     g_vulkan_rebuild_pending = true;
+                    // The Rendered-mode flags above are gated off in Solid/Matcap mode
+                    // (interactive viewport), so without this the raster viewport kept
+                    // showing the PRE-bake mesh on top of the new one until the next edit
+                    // forced a raster rebuild. Trigger the raster path explicitly.
+                    g_viewport_raster_rebuild_pending = true;
 
                     addViewportMessage(message);
                     g_ProjectManager.markModified();
@@ -2436,12 +2679,18 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     auto mixSig = [&driftSig](std::size_t v) {
                         driftSig ^= v + 0x9e3779b97f4a7c15ull + (driftSig << 6) + (driftSig >> 2);
                     };
+                    // Blender Viewport/Render level: Rendered viewport evaluates the render
+                    // level, Solid/edit the viewport level — fold the mode + both levels in
+                    // so a mode switch or render-level change re-syncs the display mesh.
+                    const bool forRenderEval = !g_solid_viewport_active;
                     mixSig(ctx.scene.base_mesh_cache[selectedNodeName].size());
                     mixSig(hasMeshEntries ? meshEntriesIt->second.size() : 0u);
+                    mixSig(forRenderEval ? 7u : 11u);
                     for (const auto& mod : modifierStack.modifiers) {
                         mixSig(static_cast<std::size_t>(static_cast<int>(mod.type)));
                         mixSig(mod.enabled ? 1u : 0u);
                         mixSig(static_cast<std::size_t>(mod.levels));
+                        mixSig(static_cast<std::size_t>(mod.renderLevels));
                     }
                     static std::string s_driftNode;
                     static std::size_t s_driftSig = 0;
@@ -2450,7 +2699,7 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                         s_driftValid = true;
                         s_driftNode = selectedNodeName;
                         s_driftSig = driftSig;
-                        const auto evaluatedPreview = modifierStack.evaluate(ctx.scene.base_mesh_cache[selectedNodeName]);
+                        const auto evaluatedPreview = modifierStack.evaluate(ctx.scene.base_mesh_cache[selectedNodeName], forRenderEval);
                         const bool previewMismatch =
                             !hasMeshEntries ||
                             meshEntriesIt->second.size() != evaluatedPreview.size();
@@ -2459,6 +2708,19 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                             meshEntriesIt = mesh_cache.find(effectiveNodeName);
                         }
                     }
+                }
+
+                // Slice 4: keep the GPU device-resident render mesh LIVE (Rendered mode,
+                // Vulkan RT). Called every frame the panel is open — its own signature gate
+                // makes the steady state cheap and only re-applies the CC stencils on the GPU
+                // when the cage (edit/sculpt) or render level actually changes. This is what
+                // lets GPU subdivide work in object mode too, not just the edit-mode refresh.
+                if (!selectedNodeName.empty() &&
+                    ctx.scene.base_mesh_cache.find(selectedNodeName) != ctx.scene.base_mesh_cache.end() &&
+                    !ctx.scene.base_mesh_cache[selectedNodeName].empty()) {
+                    driveLiveDeviceResidentCC(selectedNodeName,
+                                              ctx.scene.base_mesh_cache[selectedNodeName],
+                                              modifierStack);
                 }
 
                 // 2. Draw existing modifiers
@@ -2481,15 +2743,41 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
 
                         ImGui::SameLine();
                         if ((mod.type == MeshModifiers::ModifierType::FlatSubdivision ||
-                             mod.type == MeshModifiers::ModifierType::SmoothSubdivision) &&
+                             mod.type == MeshModifiers::ModifierType::SmoothSubdivision ||
+                             mod.type == MeshModifiers::ModifierType::CatmullClark) &&
                             UIWidgets::PrimaryButton("Apply")) {
                             applyModifierIndex = static_cast<int>(i);
                         }
 
-                        if (mod.type == MeshModifiers::ModifierType::FlatSubdivision || mod.type == MeshModifiers::ModifierType::SmoothSubdivision) {
-                            if (ImGui::SliderInt("Levels", &mod.levels, 1, 10)) stackChanged = true;
+                        if (mod.type == MeshModifiers::ModifierType::FlatSubdivision ||
+                            mod.type == MeshModifiers::ModifierType::SmoothSubdivision ||
+                            mod.type == MeshModifiers::ModifierType::CatmullClark) {
+                            // Blender-style mode toggle: Catmull-Clark (smooth limit surface)
+                            // vs Simple (linear/flat midpoint split). One modifier, two modes.
+                            const bool isCC = (mod.type == MeshModifiers::ModifierType::CatmullClark);
+                            ImGui::TextUnformatted("Type");
+                            ImGui::SameLine();
+                            if (ImGui::RadioButton("Catmull-Clark", isCC) &&
+                                mod.type != MeshModifiers::ModifierType::CatmullClark) {
+                                mod.type = MeshModifiers::ModifierType::CatmullClark;
+                                stackChanged = true;
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::RadioButton("Simple", !isCC) &&
+                                mod.type != MeshModifiers::ModifierType::FlatSubdivision) {
+                                mod.type = MeshModifiers::ModifierType::FlatSubdivision;
+                                stackChanged = true;
+                            }
+
+                            // Blender-style split: Viewport level (Solid/edit) + Render level
+                            // (Rendered viewport / final). Render clamped >= viewport is not
+                            // enforced — authors may want a lower-cost render in rare cases.
+                            if (ImGui::SliderInt("Viewport", &mod.levels, 1, 10)) stackChanged = true;
+                            if (ImGui::SliderInt("Render", &mod.renderLevels, 1, 10)) stackChanged = true;
                         }
 
+                        // Legacy Smooth Subdivision modifiers keep their weight control; new
+                        // ones aren't offered (folded into the Catmull-Clark / Simple toggle).
                         if (mod.type == MeshModifiers::ModifierType::SmoothSubdivision) {
                             if (ImGui::SliderFloat("Smooth Weight", &mod.smoothAngle, 0.0f, 1.0f)) stackChanged = true;
                         }
@@ -2501,72 +2789,24 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
 
                 UIWidgets::Divider();
 
-                // 3. Add new modifier
+                // 3. Add new modifier — Blender-style single Subdivision modifier; the
+                // Catmull-Clark / Simple mode is toggled per-modifier below (defaults to
+                // Catmull-Clark, like Blender). Smooth/Flat are reachable via that toggle.
                 UIWidgets::ColoredHeader("Add Modifier", ImVec4(0.5f, 0.8f, 1.0f, 1.0f));
-                if (UIWidgets::SecondaryButton("Flat Subdivision", ImVec2(-1, 0))) {
+                if (UIWidgets::SecondaryButton("Subdivision", ImVec2(-1, 0))) {
                     MeshModifiers::ModifierData newMod;
-                    newMod.name = "Flat Subdivision";
-                    newMod.type = MeshModifiers::ModifierType::FlatSubdivision;
-                    modifierStack.modifiers.push_back(newMod);
-                    stackChanged = true;
-                }
-                if (UIWidgets::SecondaryButton("Smooth Subdivision", ImVec2(-1, 0))) {
-                    MeshModifiers::ModifierData newMod;
-                    newMod.name = "Smooth Subdivision";
-                    newMod.type = MeshModifiers::ModifierType::SmoothSubdivision;
+                    newMod.name = "Subdivision";
+                    newMod.type = MeshModifiers::ModifierType::CatmullClark;
                     modifierStack.modifiers.push_back(newMod);
                     stackChanged = true;
                 }
 
-                // True Catmull-Clark as a DESTRUCTIVE bake (not a live modifier). Editing a
-                // CC limit surface live (gizmo move/scale while previewing) proved fragile,
-                // so CC is applied on demand: it subdivides the cage (with authored creases)
-                // and replaces the editable base with the result. After this you edit the
-                // baked dense mesh directly — stable, no per-frame re-evaluation.
-                UIWidgets::Divider();
-                UIWidgets::ColoredHeader("Catmull-Clark (Bake)", ImVec4(0.55f, 0.8f, 1.0f, 1.0f));
-                ImGui::SliderInt("CC Levels##ccbake", &mesh_cc_bake_levels, 1, 10);
-                if (UIWidgets::SecondaryButton("Apply Catmull-Clark", ImVec2(-1, 0))) {
-                    // Bake from the cage (base) so position-keyed creases line up; fall back
-                    // to the current visible mesh if no base was captured.
-                    std::vector<std::shared_ptr<Triangle>> src;
-                    auto baseSrcIt = ctx.scene.base_mesh_cache.find(selectedNodeName);
-                    if (baseSrcIt != ctx.scene.base_mesh_cache.end() && !baseSrcIt->second.empty()) {
-                        src = baseSrcIt->second;
-                    } else if (hasMeshEntries) {
-                        for (const auto& entry : meshEntriesIt->second) {
-                            if (entry.second) src.push_back(entry.second);
-                        }
-                    }
-                    if (!src.empty()) {
-                        MeshModifiers::EdgeCreaseFn creaseFn;
-                        if (!modifierStack.edgeCreases.empty()) {
-                            creaseFn = [&modifierStack](const Vec3& a, const Vec3& b) {
-                                return modifierStack.getEdgeCrease(a, b);
-                            };
-                        }
-                        auto ccMesh = MeshModifiers::CatmullClarkSubD(src, mesh_cc_bake_levels, creaseFn);
-                        if (!ccMesh.empty()) {
-                            // Baked CC becomes the new editable base; drop subdivision
-                            // modifiers (they would re-subdivide an already-CC cage) and
-                            // the now-stale crease keys.
-                            ctx.scene.base_mesh_cache[selectedNodeName] = ccMesh;
-                            modifierStack.modifiers.erase(
-                                std::remove_if(modifierStack.modifiers.begin(), modifierStack.modifiers.end(),
-                                    [](const MeshModifiers::ModifierData& m) {
-                                        return m.type == MeshModifiers::ModifierType::FlatSubdivision ||
-                                               m.type == MeshModifiers::ModifierType::SmoothSubdivision;
-                                    }),
-                                modifierStack.modifiers.end());
-                            modifierStack.edgeCreases.clear();
-                            const auto displayMesh = modifierStack.modifiers.empty()
-                                ? ccMesh
-                                : modifierStack.evaluate(ccMesh);
-                            replaceEvaluatedMesh(displayMesh, ccMesh, "Catmull-Clark Baked");
-                        }
-                    }
-                }
-                ImGui::TextDisabled("Bakes a true Catmull-Clark surface from the cage (uses edge creases).");
+                // NOTE: the static "Bake to GPU (device-resident)" button was removed — a
+                // one-shot bake doesn't track cage edits/sculpt (the dense GPU mesh froze),
+                // so it was the wrong model. The device-resident backend (uploadDeviceResident-
+                // Mesh / m_deviceResidentMeshes / evaluateCCToDeviceGeometry) stays and will be
+                // driven LIVE from the Subdivision modifier's Render level (Slice 4): cage
+                // edit/sculpt -> GPU stencil re-apply + BLAS refit, no Apply, no host download.
 
                 if (applyModifierIndex >= 0) {
                     SCENE_LOG_INFO("Applying Modifier Stack up to index " + std::to_string(applyModifierIndex) + " for '" + selectedNodeName + "'...");
@@ -2576,8 +2816,12 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     bakedStack.modifiers.assign(
                         modifierStack.modifiers.begin(),
                         modifierStack.modifiers.begin() + applyModifierIndex + 1);
+                    // Carry creases so a Catmull-Clark Apply keeps its sharp edges.
+                    bakedStack.edgeCreases = modifierStack.edgeCreases;
 
-                    auto bakedMesh = bakedStack.evaluate(baseMesh);
+                    std::vector<std::shared_ptr<Triangle>> bakedMesh;
+                    { MESH_PROFILE_SCOPE("apply.evaluate(subdivision)");
+                      bakedMesh = bakedStack.evaluate(baseMesh); }
                     ctx.scene.base_mesh_cache[selectedNodeName] = bakedMesh;
                     modifierStack.modifiers.erase(
                         modifierStack.modifiers.begin(),
@@ -2595,7 +2839,10 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     SCENE_LOG_INFO("Evaluating Modifier Stack for '" + selectedNodeName + "'...");
 
                     const auto& baseMesh = ctx.scene.base_mesh_cache[selectedNodeName];
-                    auto newMesh = modifierStack.evaluate(baseMesh);
+                    std::vector<std::shared_ptr<Triangle>> newMesh;
+                    { MESH_PROFILE_SCOPE("stackChanged.evaluate(subdivision)");
+                      // Viewport/Render level: match the active viewport mode.
+                      newMesh = modifierStack.evaluate(baseMesh, !g_solid_viewport_active); }
 
                     SCENE_LOG_INFO("Evaluated mesh '" + selectedNodeName + "': " + std::to_string(baseMesh.size()) + " -> " + std::to_string(newMesh.size()) + " triangles.");
                     replaceEvaluatedMesh(newMesh, baseMesh, "Modifiers Updated");
@@ -2791,7 +3038,14 @@ void SceneUI::drawTerrainPaintPanel(UIContext& ctx, TerrainObject* terrain) {
     ImGui::SliderFloat("Strength", &paint_mode_state.brush.strength, 0.01f, 10.0f, "%.2f");
     ImGui::SliderFloat("Falloff", &paint_mode_state.brush.falloff, 0.0f, 1.0f, "%.2f");
     if (!paint_mode_state.compact_ui) {
-        ImGui::SliderFloat("Spacing", &paint_mode_state.brush.spacing, 0.01f, 1.0f, "%.2f");
+        int stroke_method = static_cast<int>(paint_mode_state.brush.stroke_method);
+        const char* method_labels[] = { "Space", "Airbrush", "Anchored", "Dots", "Line", "Curve" };
+        if (ImGui::Combo("Stroke Method##paint1", &stroke_method, method_labels, IM_ARRAYSIZE(method_labels))) {
+            paint_mode_state.brush.stroke_method = static_cast<Paint::StrokeMethod>(stroke_method);
+        }
+        if (paint_mode_state.brush.stroke_method == Paint::StrokeMethod::Space) {
+            ImGui::SliderFloat("Spacing", &paint_mode_state.brush.spacing, 0.01f, 1.0f, "%.2f");
+        }
         ImGui::SliderFloat("Flow", &paint_mode_state.brush.flow, 0.1f, 2.0f, "%.2f");
     }
     ImGui::Checkbox("Show Brush Preview", &paint_mode_state.brush.show_preview);
@@ -3967,7 +4221,14 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
         ImGui::SliderFloat("Strength", &paint_mode_state.brush.strength, 0.01f, 10.0f, "%.2f");
         ImGui::SliderFloat("Falloff", &paint_mode_state.brush.falloff, 0.0f, 1.0f, "%.2f");
         if (!paint_mode_state.compact_ui) {
-            ImGui::SliderFloat("Spacing", &paint_mode_state.brush.spacing, 0.01f, 1.0f, "%.2f");
+            int stroke_method = static_cast<int>(paint_mode_state.brush.stroke_method);
+            const char* method_labels[] = { "Space", "Airbrush", "Anchored", "Dots", "Line", "Curve" };
+            if (ImGui::Combo("Stroke Method##paint2", &stroke_method, method_labels, IM_ARRAYSIZE(method_labels))) {
+                paint_mode_state.brush.stroke_method = static_cast<Paint::StrokeMethod>(stroke_method);
+            }
+            if (paint_mode_state.brush.stroke_method == Paint::StrokeMethod::Space) {
+                ImGui::SliderFloat("Spacing", &paint_mode_state.brush.spacing, 0.01f, 1.0f, "%.2f");
+            }
             ImGui::SliderFloat("Flow", &paint_mode_state.brush.flow, 0.1f, 2.0f, "%.2f");
         }
         ImGui::Checkbox("Show Brush Preview", &paint_mode_state.brush.show_preview);
@@ -4528,6 +4789,15 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
             }
 
             if (terrain_brush.mode == 4 && beginBrushDockSection("Stamp##terrain_sculpt_section")) {
+                int stroke_method = static_cast<int>(terrain_brush.stroke_method);
+                const char* method_labels[] = { "Space", "Airbrush", "Anchored", "Dots", "Line", "Curve" };
+                if (ImGui::Combo("Stroke Method##terrain", &stroke_method, method_labels, IM_ARRAYSIZE(method_labels))) {
+                    terrain_brush.stroke_method = static_cast<Paint::StrokeMethod>(stroke_method);
+                }
+                if (terrain_brush.stroke_method == Paint::StrokeMethod::Anchored) {
+                    ImGui::TextDisabled("Anchored: press to fix the imprint centre, then");
+                    ImGui::TextDisabled("DRAG to set its depth/radius and rotation live.");
+                }
                 ImGui::SliderFloat("Rotation", &terrain_brush.stamp_rotation, 0.0f, 360.0f, "%.0f deg");
                 if (UIWidgets::IconActionButton("LoadTerrainStamp", UIWidgets::IconType::StampTool, "Load Stamp",
                                                 false, ImVec4(0.22f, 0.55f, 0.88f, 1.0f), ImVec2(140.0f, 34.0f),
@@ -4582,6 +4852,7 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
             // re-enabling is a one-line restore once the back-face capture is fixed.
             // { "SculptSnakeHook", "Snake Hook\nDrags the surface into hooks and tentacles.", SceneUI::SculptBrushTool::SnakeHook },
             { "SculptElastic", "Elastic Deform\nSoft, wide grab-style pull.", SceneUI::SculptBrushTool::ElasticDeform },
+            { "SculptStamp", "Stamp\nImprints the loaded alpha/mask texture along the normal.\nAnchored: press to fix centre, drag to set depth/rotation.", SceneUI::SculptBrushTool::Stamp },
             { "SculptMask", "Mask\nPaints a protection weight; masked areas resist every brush.", SceneUI::SculptBrushTool::Mask }
         };
 
@@ -4679,8 +4950,17 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
             }
             ImGui::SliderFloat("Strength", &sculpt_mode_state.brush.strength, 0.01f, 10.0f, "%.2f");
             ImGui::SliderFloat("Falloff", &sculpt_mode_state.brush.falloff, 0.0f, 1.0f, "%.2f");
-            if (!sculpt_mode_state.compact_ui) {
+            
+            int stroke_method = static_cast<int>(sculpt_mode_state.brush.stroke_method);
+            const char* method_labels[] = { "Space", "Airbrush", "Anchored", "Dots", "Line", "Curve" };
+            if (ImGui::Combo("Stroke Method##sculpt", &stroke_method, method_labels, IM_ARRAYSIZE(method_labels))) {
+                sculpt_mode_state.brush.stroke_method = static_cast<Paint::StrokeMethod>(stroke_method);
+            }
+            if (sculpt_mode_state.brush.stroke_method == Paint::StrokeMethod::Space) {
                 ImGui::SliderFloat("Spacing", &sculpt_mode_state.brush.spacing, 0.01f, 1.0f, "%.2f");
+            }
+            
+            if (!sculpt_mode_state.compact_ui) {
                 ImGui::SliderFloat("Flow", &sculpt_mode_state.brush.flow, 0.1f, 2.0f, "%.2f");
             }
             ImGui::Checkbox("Show Brush Preview", &sculpt_mode_state.brush.show_preview);
@@ -4736,6 +5016,23 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
             }
             if (ImGui::Button("Sharpen##mask", ImVec2(fullW, 0.0f))) {
                 applySculptMaskOperation(4);
+            }
+        }
+
+        if (beginBrushDockSection("Surface Smooth")) {
+            ImGui::Checkbox("Anti-Fold Relax", &sculpt_mode_state.surface_relax_enabled);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Light per-dab smoothing that removes the triangulated-quad\n"
+                                  "facets (the diagonal 'fold') that brushing a polygon mesh\n"
+                                  "leaves behind, so quads stay smooth without needing multires.\n"
+                                  "Skipped for Grab/Smooth/Mask/ClayStrips.");
+            }
+            if (sculpt_mode_state.surface_relax_enabled) {
+                ImGui::SliderFloat("Relax Strength", &sculpt_mode_state.surface_relax_strength, 0.0f, 1.0f, "%.2f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Higher = smoother quad surface but softer fine detail.\n"
+                                      "Lower = keeps detail but the diagonal fold shows more.");
+                }
             }
         }
 
@@ -4908,6 +5205,9 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
                 case SculptBrushTool::ElasticDeform:
                     tool_hint = "Elastic Deform is a soft, wide grab-style pull (drag to move the surface).";
                     break;
+                case SculptBrushTool::Stamp:
+                    tool_hint = "Stamp imprints the loaded alpha/mask texture along the normal. Load one under 'Load Custom Alpha Texture' + 'Use Loaded Alpha'. With Anchored Stroke on, press to fix the centre then drag to set depth/rotation; hold Ctrl to indent inward.";
+                    break;
                 default:
                     break;
                 }
@@ -4984,6 +5284,16 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
             ImGui::Checkbox("Follow Stroke Angle##sculpt", &sculpt_mode_state.brush.follow_stroke_angle);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Rotate the shape/alpha to trail the stroke direction (like mesh paint).");
+            }
+
+            if (sculpt_mode_state.tool == SceneUI::SculptBrushTool::Stamp) {
+                ImGui::Separator();
+                if (sculpt_mode_state.brush.stroke_method == Paint::StrokeMethod::Anchored) {
+                    ImGui::TextDisabled(
+                        "Blender-style anchored stamp: press to fix the imprint centre, then\n"
+                        "DRAG to set its depth (drag length) and rotation (drag angle) live.\n"
+                        "Non-accumulating single imprint. Hold Ctrl to indent inward.");
+                }
             }
 
             ImGui::Spacing();
@@ -5836,7 +6146,11 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         const float baseline = 1024.0f;
         const float scaled_radius = paint_mode_state.brush.radius * (static_cast<float>(active_texture->width) / baseline);
         const float spacing_px = std::max(1.0f, scaled_radius * std::max(0.05f, paint_mode_state.brush.spacing));
-        should_apply = distance_px >= spacing_px;
+        if (paint_mode_state.brush.stroke_method == Paint::StrokeMethod::Airbrush) {
+            should_apply = true;
+        } else {
+            should_apply = distance_px >= spacing_px;
+        }
         if (!should_apply &&
             (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Wet ||
              paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Oil) &&
@@ -5994,7 +6308,10 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
     Paint::PaintLayerStack* layer_stack = adapter->getLayerStack();
     const bool use_layers = (layer_stack != nullptr && layer_stack->layerCount() > 0);
     const int active_layer = paint_mode_state.active_layer_index;
-    const float dab_dt = std::max(io.DeltaTime > 0.0f ? io.DeltaTime : (1.0f / 60.0f), paint_mode_state.stroke.elapsed);
+    float dab_dt = 1.0f / 60.0f;
+    if (paint_mode_state.brush.stroke_method == Paint::StrokeMethod::Airbrush) {
+        dab_dt = std::max(io.DeltaTime > 0.0f ? io.DeltaTime : (1.0f / 60.0f), paint_mode_state.stroke.elapsed);
+    }
 
     // Accumulated dirty rect for region-based compositing (layers only).
     Paint::PaintDirtyRect accumulated_dirty;

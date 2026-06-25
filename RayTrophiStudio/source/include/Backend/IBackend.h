@@ -377,6 +377,28 @@ public:
         uint32_t flags = 0;
         uint32_t terrainLayerIdx = 0; // Index into terrain layer buffer (valid when MAT_FLAG_TERRAIN set)
 
+        // Thin-shell BUBBLE (champagne / soda / soap-foam close-up). Carried from
+        // the host gpuMaterial so the backend can set GPU_MAT_FLAG_BUBBLE +
+        // bubble_ior/bubble_film on the final GpuMaterial.
+        bool  is_bubble   = false;
+        float bubble_ior  = 1.33f;
+        float bubble_film = 0.0f;
+
+        // Iridescent clearcoat (thin-film tint on the clearcoat lobe). 0 = plain white.
+        float clearcoat_iridescence = 0.0f;
+        float clearcoat_film_thickness = 0.55f;
+
+        // Transmission interior absorption density (thick resin / glass-marble depth).
+        // 0 = legacy constant-thickness glass tint; >0 = Beer-Lambert over real distance.
+        float transmission_density = 0.0f;
+        Vec3  resin_color = Vec3(1.0f, 1.0f, 1.0f); // resin absorption tint (separate from albedo)
+        float resin_roughness = 0.1f;              // resin coat gloss (reflect lobe), independent of base
+        float resin_inclusion = 0.0f;              // dust cloudiness (heterogeneous absorption)
+        float resin_dirt = 0.0f;                   // opaque dirt-speck amount (early-return)
+        float resin_inclusion_scale = 8.0f;        // procedural feature size
+        Vec3  resin_dirt_color = Vec3(0.18f, 0.14f, 0.10f);
+        bool  glass_marble_volume = false;         // full-volume marble medium march (raygen)
+
         // Procedural surface detail
         float micro_detail_strength = 0.0f;
         float micro_detail_scale    = 0.0f;

@@ -78,6 +78,8 @@ const float SHADOW_TMIN = 1e-3;   // Shadow rays: avoid near-field self/adjacent
 const float OPACITY_THRESHOLD = 0.5;  // Alpha cutout threshold
 const uint MAT_FLAG_WATER = (1u << 17);
 const uint MAT_FLAG_WATER_FFT_READY = (1u << 18);
+const uint MAT_FLAG_BUBBLE = (1u << 19);
+const uint MAT_FLAG_MARBLE_VOLUME = (1u << 20); // glass marble full-volume medium march (raygen integrates interior)
 
 // ============================================================
 // Payload — raygen shader ile eşleşmeli
@@ -111,54 +113,8 @@ layout(location = 1) rayPayloadEXT bool shadowOccluded;
 // ============================================================
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 
-struct Material {
-    // Block 1: Albedo + opacity
-    float albedo_r, albedo_g, albedo_b, opacity;
-    // Block 2: Emission + strength
-    float emission_r, emission_g, emission_b, emission_strength;
-    // Block 3: PBR properties
-    float roughness, metallic, ior, transmission;
-    // Block 4: Subsurface color + amount
-    float subsurface_r, subsurface_g, subsurface_b, subsurface_amount;
-    // Block 5: Subsurface radius + scale
-    float subsurface_radius_r, subsurface_radius_g, subsurface_radius_b, subsurface_scale;
-    // Block 6: Coatings & Translucency
-    float clearcoat, clearcoat_roughness, translucent, subsurface_anisotropy;
-    // Block 7: Additional properties
-    float anisotropic, sheen, sheen_tint;
-    uint flags;
-    // Block 8: Water/Extra params
-    float fft_amplitude, fft_time_scale, micro_detail_strength, micro_detail_scale;
-    // Block 9: Extra water params
-    float foam_threshold, fft_ocean_size, fft_choppiness, fft_wind_speed;
-    // Block 10: Extra water animation params
-    float micro_anim_speed, micro_morph_speed, foam_noise_scale, fft_wind_direction;
-    // Block 11: UV transform core
-    float uv_scale_x, uv_scale_y, uv_offset_x, uv_offset_y;
-    // Block 12: UV transform extra
-    float uv_rotation_degrees, uv_tiling_x, uv_tiling_y;
-    uint uv_wrap_mode;
-    // Block 13: Standard Textures (first 4)
-    uint albedo_tex;
-    uint normal_tex;
-    uint roughness_tex;
-    uint metallic_tex;
-    // Block 14: Standard Textures (second 4)
-    uint emission_tex;
-    uint height_tex;
-    uint opacity_tex;
-    uint transmission_tex;
-    // Block 15: Reserved
-    float subsurface_ior;
-    uint _terrain_layer_idx; // terrain layer buffer index (valid when FLAG_TERRAIN set)
-    float normal_strength;
-    float tile_break_strength;  // UV tile-break (independent from dirt/roughness)
-    // Block 16: Specular controls
-    float specular;
-    uint specular_tex;
-    uint _pad_specular0;
-    uint _pad_specular1;
-};
+// Material struct — single source of truth shared by every material-reading shader.
+#include "material_struct.glsl"
 
 float wrapRepeat(float x) {
     float r = mod(x, 1.0);
@@ -1120,6 +1076,72 @@ vec3 schlickFresnelVec(float cosTheta, vec3 f0) {
 }
 
 // ============================================================
+// Resin inclusion procedural fields (self-contained 3D noise)
+// Used by the resin internal march: dust = fbm cloudiness (heterogeneous
+// absorption), dirt = worley specks (opaque early-return). No scene rays.
+// ============================================================
+float rh_hash13(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+vec3 rh_hash33(vec3 p) {
+    p = vec3(dot(p, vec3(127.1, 311.7, 74.7)),
+             dot(p, vec3(269.5, 183.3, 246.1)),
+             dot(p, vec3(113.5, 271.9, 124.6)));
+    return fract(sin(p) * 43758.5453);
+}
+// Value noise (trilinear, quintic-smoothed) — soft, non-blocky gradients.
+float rh_vnoise(vec3 x) {
+    vec3 i = floor(x);
+    vec3 f = fract(x);
+    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);  // quintic — smoother than cubic (less coarse)
+    float n000 = rh_hash13(i + vec3(0,0,0));
+    float n100 = rh_hash13(i + vec3(1,0,0));
+    float n010 = rh_hash13(i + vec3(0,1,0));
+    float n110 = rh_hash13(i + vec3(1,1,0));
+    float n001 = rh_hash13(i + vec3(0,0,1));
+    float n101 = rh_hash13(i + vec3(1,0,1));
+    float n011 = rh_hash13(i + vec3(0,1,1));
+    float n111 = rh_hash13(i + vec3(1,1,1));
+    float nx00 = mix(n000, n100, f.x);
+    float nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x);
+    float nx11 = mix(n011, n111, f.x);
+    float nxy0 = mix(nx00, nx10, f.y);
+    float nxy1 = mix(nx01, nx11, f.y);
+    return mix(nxy0, nxy1, f.z);
+}
+// Billowy turbulence FBM — sum of |signed noise| gives cloud-puff structure
+// (wispy dense cores, clear gaps) instead of a flat smooth haze. 5 octaves with a
+// per-octave offset to avoid axis-aligned repetition. Normalised to ~0..1.
+float rh_fbm(vec3 p) {
+    float v = 0.0, a = 0.5, tot = 0.0;
+    for (int i = 0; i < 5; ++i) {
+        v   += a * abs(2.0 * rh_vnoise(p) - 1.0);
+        tot += a;
+        p = p * 2.03 + vec3(7.1, 3.7, 11.3);
+        a *= 0.5;
+    }
+    return v / max(tot, 1e-4);
+}
+// Worley/cellular: returns F1 distance (0 at cell centres) — small values =
+// near a seed point → opaque dirt speck.
+float rh_worley(vec3 p) {
+    vec3 ip = floor(p);
+    vec3 fp = fract(p);
+    float d = 1.0;
+    for (int z = -1; z <= 1; ++z)
+    for (int y = -1; y <= 1; ++y)
+    for (int x = -1; x <= 1; ++x) {
+        vec3 g = vec3(x, y, z);
+        vec3 o = rh_hash33(ip + g);
+        d = min(d, length(g + o - fp));
+    }
+    return d;
+}
+
+// ============================================================
 // Material Scatter Fonksiyonları
 // ============================================================
 
@@ -1127,6 +1149,13 @@ const uint BOUNCE_SPECULAR = 0u;
 const uint BOUNCE_DIFFUSE = 1u;
 const uint BOUNCE_TRANSMISSION = 2u;
 const uint BOUNCE_TRANSPARENT = 3u;
+// Resin interactions (glossy coat reflect + absorbing diffuse base) are tagged
+// separately so raygen can cap them at a small dedicated budget — an
+// energy-preserving resin would otherwise run full-depth GI paths (TDR risk).
+const uint BOUNCE_RESIN = 4u;
+// Glass marble full-volume entry: tagged on the FRONT-face transmit so raygen
+// integrates the real interior segment (dust/dirt) before the next surface.
+const uint BOUNCE_MARBLE = 5u;
 
 // --- Lambertian Diffuse ---
 void scatterDiffuse(vec3 hitPos, vec3 normal, vec3 albedo, inout uint seed) {
@@ -1196,13 +1225,16 @@ void scatterMetal(vec3 hitPos, vec3 normal, vec3 rayDir, vec3 albedo, float roug
 }
 
 // --- Dielectric Glass (Fresnel + TIR + Roughness) ---
-void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool frontFace, vec3 rayDir, vec3 albedo, float ior, float roughness, inout uint seed) {
+void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool frontFace, vec3 rayDir, vec3 albedo, float ior, float roughness, float transmissionDensity, vec3 resinColor, inout uint seed) {
     // Işığın hangi taraftan geldiğini belirle
     vec3  macroNormal  = safeNormalize(macroNormalIn, vec3(0.0, 1.0, 0.0));
     vec3  shadingNormal = safeNormalize(shadingNormalIn, macroNormal);
     if (dot(shadingNormal, macroNormal) < 0.0) {
         shadingNormal = -shadingNormal;
     }
+    // Resin needs real refraction to read as a solid volume (OptiX parity): with
+    // IOR≈1 the ray passes straight through and only darkens (no lensing / depth cue).
+    if (transmissionDensity > 1e-4) ior = max(ior, 1.45);
     float etaRatio     = frontFace ? (1.0 / ior) : ior;
     
     vec3 outNormal = shadingNormal;
@@ -1225,6 +1257,31 @@ void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool fr
 
     float fresnelProb  = schlickFresnel(cosTheta, ior);
     bool  doReflect    = totalIntRefl || (rnd(seed) < fresnelProb);
+
+    bool realDepth = (transmissionDensity > 1e-4);
+
+    // ── RESIN terminate-on-base: the refraction lobe travels the resin THICKNESS,
+    // hits the actual base material albedo at that depth, and scatters back out
+    // through the resin (absorb in + out). The object is OPAQUE under a refractive
+    // absorbing resin layer (no see-through). The reflection lobe stays the glossy
+    // resin top. resinColor = the colour that builds over the thickness. ──
+    if (realDepth && !doReflect) {
+        vec3  ct      = clamp(resinColor, vec3(0.0), vec3(1.0));
+        float cosV    = max(abs(dot(-rayDir, macroNormal)), 0.25);
+        float pathLen = 2.0 * transmissionDensity / cosV;   // in + out through the thickness
+        // Beer-Lambert extinction. A small BASE extinction (0.25) makes Resin Depth
+        // darken even for a white/clear resin (artist expectation); resinColor then
+        // tints which channels survive (lower channel = absorbed faster = that hue stays).
+        vec3  ext     = (vec3(1.0) - ct) + vec3(0.25);
+        vec3  absorb  = exp(-pathLen * ext);
+        vec3  baseDir = cosineSampleHemisphere(macroNormal, seed); // diffuse off the base albedo
+        payload.scatterOrigin = offset_ray(hitPos, macroNormal);
+        payload.scatterDir    = normalize(baseDir);
+        payload.attenuation  *= clamp(albedo, vec3(0.0), vec3(1.0)) * absorb;
+        payload.scattered     = true;
+        payload.bounceType     = BOUNCE_DIFFUSE;
+        return;
+    }
 
     vec3 dir;
     vec3 offsetDir;
@@ -1355,7 +1412,8 @@ void scatterSSS(vec3 hitPos, vec3 normal, vec3 albedo,
 // Clearcoat — Second GGX Specular Lobe (IOR=1.5, lacquer layer)
 // ============================================================
 void scatterClearcoat(vec3 hitPos, vec3 normal, vec3 rayDir,
-                      float ccRoughness, inout uint seed) {
+                      float ccRoughness, float iridescence, float filmThickness,
+                      inout uint seed) {
     // IOR=1.5 → F0 = ((1.5-1)/(1.5+1))^2 ≈ 0.04
     const float CC_F0 = 0.04;
 
@@ -1384,7 +1442,19 @@ void scatterClearcoat(vec3 hitPos, vec3 normal, vec3 rayDir,
     float k   = alpha * 0.5;
     float G1L = NdotL / (NdotL * (1.0 - k) + k);
 
-    payload.attenuation  *= vec3(fresnel * G1L);
+    // Iridescent thin-film tint (same OPD/cos model as the bubble path). The clearcoat
+    // is a thin dielectric layer; at grazing the optical path difference grows, cycling
+    // the interference hue. iridescence=0 → white (plain clearcoat, no change).
+    vec3 ccTint = vec3(1.0);
+    if (iridescence > 1e-3) {
+        float opd = filmThickness * (1.0 / max(VdotH, 0.15));
+        vec3 filmCol = vec3(0.55 + 0.45 * cos(opd * 6.2831853),
+                            0.55 + 0.45 * cos(opd * 6.2831853 + 2.0944),
+                            0.55 + 0.45 * cos(opd * 6.2831853 + 4.18879));
+        ccTint = mix(vec3(1.0), filmCol, clamp(iridescence, 0.0, 1.0));
+    }
+
+    payload.attenuation  *= vec3(fresnel * G1L) * ccTint;
     payload.scatterOrigin = hitPos + normal * RAY_OFFSET;
     payload.scatterDir    = L;
     payload.scattered     = true;
@@ -1881,7 +1951,7 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
     // (deep_color) into Dielectric, so refraction tint must not vary with foam.
     vec3 transmissionTint = deep_color;
     bool waterFrontFace = dot(rayDir, shadingNormal) < 0.0;
-    scatterGlass(hitPos, shadingNormal, shadingNormal, waterFrontFace, rayDir, transmissionTint, ior, mix(roughness, 0.8, totalFoam), seed);
+    scatterGlass(hitPos, shadingNormal, shadingNormal, waterFrontFace, rayDir, transmissionTint, ior, mix(roughness, 0.8, totalFoam), 0.0, vec3(1.0), seed);
 }
 
 // ============================================================
@@ -2184,8 +2254,50 @@ void main() {
         }
     }
     
+    // ── Thin-shell BUBBLE (champagne / soda / soap-foam close-up) ──────────────
+    // A bubble is a THIN dielectric film: light either Fresnel-reflects off the
+    // shell (bright silver rim, strong at grazing) or passes STRAIGHT through (a
+    // thin shell enters/exits parallel, no net refraction). Reads as a bright-rimmed
+    // transparent sphere independent of the surrounding medium. bubble_ior drives the
+    // rim Fresnel; bubble_film adds thin-film iridescence. Mirrors material_scatter.cuh.
+    // Returns before emission so an emissive bubble material won't wash out the look.
+    if ((mat.flags & MAT_FLAG_BUBBLE) != 0u) {
+        // Use the SMOOTH (interpolated) shading normal, not the faceted geometric
+        // normal, so the rim curves smoothly across a sphere (parity with OptiX N).
+        vec3  Nb   = normalize(worldNormal);
+        float cosT = min(abs(dot(rayDir, Nb)), 1.0);
+        float bio  = (mat.bubble_ior > 1.0001) ? mat.bubble_ior : 1.33;
+        float r0   = (1.0 - bio) / (1.0 + bio); r0 = r0 * r0;
+        float fres = r0 + (1.0 - r0) * pow(1.0 - cosT, 5.0);
+        vec3 dir, att;
+        if (rnd(payload.seed) < fres) {
+            dir = reflect(rayDir, Nb);                  // bright Fresnel rim
+            if (mat.bubble_film > 1e-3) {
+                float opd = mat.bubble_film * (1.0 / max(cosT, 0.15));
+                att = vec3(0.55 + 0.45 * cos(opd * 6.2831853),
+                           0.55 + 0.45 * cos(opd * 6.2831853 + 2.0944),
+                           0.55 + 0.45 * cos(opd * 6.2831853 + 4.1888));
+            } else {
+                att = vec3(1.0);
+            }
+            payload.scatterOrigin = hitPos + Nb * RAY_OFFSET;
+        } else {
+            dir = rayDir;                               // straight pass-through (thin shell)
+            att = vec3(0.85) + 0.15 * vec3(mat.albedo_r, mat.albedo_g, mat.albedo_b);
+            payload.scatterOrigin = offset_ray(hitPos, -geomNormal);
+        }
+        payload.radiance            = vec3(0.0);
+        payload.hitEmissive         = false;
+        payload.scatterDir          = dir;
+        payload.attenuation        *= att;
+        payload.scattered           = true;
+        payload.bounceType          = BOUNCE_SPECULAR;
+        payload.primaryTransmission = 1.0;              // aerial parity (don't wash bubble)
+        return;
+    }
+
     // Opaque pixel — continue to shading normally
-    
+
     // --- MODE 2: glass/transmission adjustment ---
     if (mat.opacity < 0.99 && metallic < 0.1 && transmission < 0.01) {
         transmission = 1.0 - mat.opacity;
@@ -2370,15 +2482,166 @@ if (emissionTexID > 0) {
     // OptiX-like probablilistic branching based on transmission weight.
     // ----------------------------------------------------------
     vec3 directAttenuation = payload.attenuation;
-    if (transmission > 0.01) {
-        if (rnd(payload.seed) < transmission) {
-            // 1) Chosen transmission path - act as Glass
-            scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, albedo, ior, roughness, payload.seed);
-            return; // Immediately return, skipping direct lighting (Next Event Estimation)
+    vec3  resinColor = vec3(mat.resin_color_r, mat.resin_color_g, mat.resin_color_b);
+
+    // Carried into the NEE block below so direct light reaching the base also gets
+    // absorbed on its ENTRY path through the resin (at the light's angle).
+    bool  resinActive  = false;
+    vec3  resinExt     = vec3(0.0);
+    float resinDensity = 0.0;
+
+    if (mat.transmission_density > 1e-4) {
+        // RESIN: a refractive ABSORBING layer over an OPAQUE base. Fresnel-split the
+        // surface — the reflection lobe is the glossy resin top (specular, skips NEE);
+        // light that enters reaches the base, which we tint by the coat absorption over
+        // the thickness and shade as a normal diffuse surface, so the base gets full
+        // direct lighting (NEE) + indirect (deeper, cleaner). A small base extinction
+        // (0.25) makes Resin Depth darken even for a white resin; resinColor tints.
+        float effIor = max(ior, 1.45);
+        float cosT   = clamp(dot(-rayDir, worldNormal), 0.0, 1.0);
+        float fres   = schlickFresnel(cosT, effIor);
+        // Coat gloss is the resin LAYER's own roughness, independent of the base.
+        float resinRough = clamp(mat.resin_roughness, 0.0, 1.0);
+        if (rnd(payload.seed) < fres) {
+            vec3 V = -rayDir;
+            vec3 refl;
+            if (resinRough < 0.02) {
+                refl = reflect(rayDir, worldNormal);
+            } else {
+                // ggxSampleVNDF returns the REFLECTED direction directly (matches
+                // OptiX + scatterMetal). The old ggxSampleHemisphere path double-
+                // reflected (it already returns L, not a half-vector) → tiny/garbage
+                // highlight that ignored roughness on the resin surface.
+                float alpha = max(resinRough * resinRough, 1e-4);
+                refl = ggxSampleVNDF(worldNormal, V, alpha, rnd(payload.seed), rnd(payload.seed));
+                if (dot(refl, worldNormal) <= 0.0) refl = reflect(rayDir, worldNormal);
+            }
+            payload.scatterOrigin = offset_ray(hitPos, worldNormal);
+            payload.scatterDir    = normalize(refl);
+            payload.attenuation  *= vec3(1.0);
+            payload.scattered     = true;
+            payload.bounceType     = BOUNCE_RESIN; // capped by raygen resin budget
+            return;
+        }
+        // Base under the resin: absorb over the thickness (in + out), then shade as an
+        // opaque diffuse surface → falls through to direct lighting (NEE) + BRDF below.
+        vec3  ct      = clamp(resinColor, vec3(0.0), vec3(1.0));
+        float cosV    = max(abs(cosT), 0.25);
+        vec3  ext     = (vec3(1.0) - ct) + vec3(0.25);
+
+        // --- Resin INTERNAL inclusions (Phase 1) -----------------------------------
+        // March the refracted ray through the resin thickness (no scene rays — pure
+        // procedural sampling): dust = heterogeneous absorption at depth, dirt = opaque
+        // worley specks that terminate early (their colour shows through the resin
+        // already crossed), and the refracted lateral travel offsets the base lookup
+        // (parallax). Falls back to the cheap analytic path when inclusions are off.
+        bool resinHasInclusions = (mat.resin_inclusion > 0.001 || mat.resin_dirt > 0.001);
+        if (resinHasInclusions) {
+            vec3 Tdir = refract(rayDir, worldNormal, 1.0 / effIor);
+            if (dot(Tdir, Tdir) < 1e-6) Tdir = rayDir;        // total internal reflection fallback
+            Tdir = normalize(Tdir);
+            const int RESIN_STEPS = 6;
+            float dt  = max(mat.transmission_density, 1e-3) / float(RESIN_STEPS);
+            float scl = max(mat.resin_inclusion_scale, 0.01);
+            vec3  P      = hitPos;
+            vec3  absorb = vec3(1.0);
+            bool  dirtHit = false;
+            for (int i = 0; i < RESIN_STEPS; ++i) {
+                P += Tdir * dt;
+                // Dust cloudiness → extra extinction at this depth. Power curve makes
+                // it sparse/wispy (mostly clear, occasional dense cores) not flat haze.
+                float dust     = rh_fbm(P * scl);
+                dust           = pow(dust, 2.0);
+                float localExt = 1.0 + mat.resin_inclusion * dust * 6.0;
+                absorb *= exp(-dt * ext * localExt);
+                // Dirt specks → opaque early return (ray stops inside the resin).
+                if (mat.resin_dirt > 0.001) {
+                    float cell  = rh_worley(P * scl * 3.0);            // 0 at speck centres
+                    float speck = 1.0 - smoothstep(0.0, 0.18, cell);  // 1 inside a speck
+                    if (speck * mat.resin_dirt > 0.5) { dirtHit = true; break; }
+                }
+            }
+            if (dirtHit) {
+                // Terminate on the dirt speck: its colour, dimmed by the resin crossed.
+                albedo = vec3(mat.resin_dirt_color_r, mat.resin_dirt_color_g, mat.resin_dirt_color_b) * absorb;
+            } else {
+                // Reached the base: parallax-offset the base lookup along the refracted
+                // lateral travel, then apply the accumulated (heterogeneous) absorption.
+                vec3 inPlane = Tdir - worldNormal * dot(Tdir, worldNormal);
+                vec2 parUV = materialUV
+                           + vec2(dot(inPlane, surfaceTangent), dot(inPlane, surfaceBitangent))
+                             * (mat.transmission_density * 0.05);
+                if (albedoTexID > 0) albedo = texture(materialTextures[nonuniformEXT(albedoTexID)], parUV).rgb;
+                albedo *= absorb;
+            }
         } else {
-            // 2) Chosen base path (diffuse/metal), compensate probability weight
+            float pathLen = 2.0 * mat.transmission_density / cosV;
+            albedo       *= exp(-pathLen * ext);
+        }
+        roughness     = 1.0;
+        metallic      = 0.0;
+        transmission  = 0.0;
+        // Hand the absorption to the NEE block so direct light entering the resin is
+        // also attenuated by its own (light-angle) path length, not just the albedo tint.
+        resinActive   = true;
+        resinExt      = ext;
+        resinDensity  = mat.transmission_density;
+        // (no return — direct lighting + diffuse BRDF below shade the tinted base)
+    }
+    else if (transmission > 0.01) {
+        if (rnd(payload.seed) < transmission) {
+            // NOTE: glass-marble FULL VOLUME (real-interior medium march, MAT_FLAG_MARBLE_VOLUME)
+            // was disabled — it was too camera-angle dependent and the interior dust/dirt never
+            // read as intended. The flag + serialize fields are kept dormant (saved scenes load
+            // fine); inclusion-bearing glass now always uses the shell march below.
+            bool inclusionsOn = (mat.resin_inclusion > 0.001 || mat.resin_dirt > 0.001);
+            // GLASS MARBLE (shell): when inclusions are enabled on a GLASS base, march the
+            // refracted ray through the interior — dust (haze) + dirt specks (opaque
+            // early-return) — BEFORE refracting through, so light still passes through
+            // (real see-through glass) but picks up volumetric internal structure.
+            // Independent of the resin coat (that path forces an opaque base). No extra
+            // scene rays: the march is procedural; scatterGlass does the real refraction.
+            if (inclusionsOn) {
+                vec3 Tg = refract(rayDir, worldNormal, surfaceFrontFace ? (1.0 / ior) : ior);
+                if (dot(Tg, Tg) < 1e-6) Tg = rayDir;            // total internal reflection fallback
+                Tg = normalize(Tg);
+                float cosIn = max(abs(dot(Tg, -worldNormal)), 0.05);
+                const int GMS = 6;
+                float gdt  = (0.65 / cosIn) / float(GMS);       // matches scatterGlass thickness model
+                float gscl = max(mat.resin_inclusion_scale, 0.01);
+                vec3  Pg = hitPos;
+                vec3  gabsorb = vec3(1.0);
+                bool  gdirt = false;
+                for (int i = 0; i < GMS; ++i) {
+                    Pg += Tg * gdt;
+                    float dust = rh_fbm(Pg * gscl);
+                    dust = pow(dust, 2.0);                                      // sparse wispy cores
+                    gabsorb *= exp(-gdt * (mat.resin_inclusion * dust * 6.0));  // grey dust haze
+                    if (mat.resin_dirt > 0.001) {
+                        float cell  = rh_worley(Pg * gscl * 3.0);
+                        float speck = 1.0 - smoothstep(0.0, 0.18, cell);
+                        if (speck * mat.resin_dirt > 0.5) { gdirt = true; break; }
+                    }
+                }
+                if (gdirt) {
+                    // Opaque dirt speck suspended in the glass: shade as a lit diffuse
+                    // point (colour dimmed by the glass crossed) → fall through to NEE.
+                    albedo = vec3(mat.resin_dirt_color_r, mat.resin_dirt_color_g, mat.resin_dirt_color_b) * gabsorb;
+                    roughness = 1.0; metallic = 0.0; transmission = 0.0;
+                    // (no return — direct lighting + diffuse BRDF below shade the speck)
+                } else {
+                    // Hazy clear glass: refract through carrying the dust absorption.
+                    scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, albedo * gabsorb, ior, roughness, 0.0, vec3(1.0), payload.seed);
+                    return;
+                }
+            } else {
+                // Chosen transmission path - act as Glass
+                scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, albedo, ior, roughness, 0.0, vec3(1.0), payload.seed);
+                return; // Immediately return, skipping direct lighting (Next Event Estimation)
+            }
+        } else {
+            // Chosen base path (diffuse/metal), compensate probability weight
             payload.attenuation *= (1.0 / max(1.0 - transmission, 0.01));
-            // Ensure transmission doesn't accidentally affect BRDF down the line anymore
             transmission = 0.0;
         }
     }
@@ -2460,6 +2723,13 @@ if (emissionTexID > 0) {
                             contrib.y = isnan(contrib.y) ? 0.0 : (isinf(contrib.y) ? (contrib.y > 0.0 ? 1e4 : 0.0) : contrib.y);
                             contrib.z = isnan(contrib.z) ? 0.0 : (isinf(contrib.z) ? (contrib.z > 0.0 ? 1e4 : 0.0) : contrib.z);
                             contrib = min(contrib, vec3(1e4));
+                            // Resin: the direct light also travels through the coat to reach
+                            // the base. Absorb it over its ENTRY path (light-angle slant),
+                            // so thick/tinted resin visibly dims direct lighting too.
+                            if (resinActive) {
+                                float cosL = max(NdotL, 0.05);
+                                contrib *= exp(-(resinDensity / cosL) * resinExt);
+                            }
                             // Apply volumetric transmittance (soft shadow from volumes)
                             contrib *= volShadowTr * shadowVisibility;
 
@@ -2556,7 +2826,8 @@ if (emissionTexID > 0) {
         // Probability of choosing clearcoat lobe = clearcoat weight * fresnel
         float ccProb = clearcoat * ccFresnel;
         if (rnd(payload.seed) < ccProb) {
-            scatterClearcoat(hitPos, worldNormal, rayDir, clearcoatRoughness, payload.seed);
+            scatterClearcoat(hitPos, worldNormal, rayDir, clearcoatRoughness,
+                             mat.clearcoat_iridescence, mat.clearcoat_film_thickness, payload.seed);
             // Compensate selection probability
             payload.attenuation *= (1.0 / max(ccProb, 0.01));
             return;
@@ -2627,6 +2898,13 @@ if (emissionTexID > 0) {
         } else {
             scatterDiffuse(hitPos, worldNormal, albedo, payload.seed);
         }
+    }
+
+    // Resin base scattered as a normal diffuse lobe above (which set BOUNCE_DIFFUSE).
+    // Re-tag it BOUNCE_RESIN so raygen counts it against the small dedicated resin
+    // budget instead of the global diffuse budget — bounds resin GI cost (TDR fix).
+    if (resinActive && payload.scattered) {
+        payload.bounceType = BOUNCE_RESIN;
     }
 }
 

@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -136,8 +136,21 @@ struct OptixHitResult {
     // direct reflections. Not filled by closesthit — it's a raygen-side hint
     // written into the struct between trace and scatter/eval calls.
     int bounce_index;
-};
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PATH TRACING REFACTOR: Communication payload fields (Vulkan parity)
+    // Closest-hit writes radiance/attenuation/scatter; raygen reads them.
+    // ═══════════════════════════════════════════════════════════════════════════
+    float3 radiance;            // emission + NEE direct lighting contribution
+    float3 scatter_attenuation; // BSDF attenuation for the scattered ray
+    float3 scatterOrigin;       // next ray origin (from offset_ray)
+    float3 scatterDir;          // next ray direction (from scatter)
+    int scattered;              // 1 = valid scatter, 0 = absorbed/emissive-only
+    int bounceType;             // PATH_BOUNCE_SPECULAR/DIFFUSE/TRANSMISSION/RESIN etc.
+    void* rng;                  // pointer to raygen's curandState (set by raygen before trace)
+    float primary_transmission; // transmission value for aerial perspective
+    float primary_metallic;     // metallic value for denoiser hints
+};
 
 // Pointer packing helpers
 template <typename T>

@@ -958,7 +958,7 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         SetupTex(mat->emissionProperty.texture, bundle.emission_tex, bundle.has_emission_tex);
         SetupTex(mat->opacityProperty.texture, bundle.opacity_tex, bundle.has_opacity_tex);
 
-        target_tri->textureBundle = bundle;
+        target_tri->textureBundle.reset(new OptixGeometryData::TextureBundle(bundle));
     };
 
     auto TriggerMaterialUpdate = [&](bool needs_texture_update) {
@@ -1519,6 +1519,113 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
             changed = true;
         }
 
+        // Thick-resin / glass-marble depth. Self-contained: when > 0 the material
+        // becomes a transmissive resin body (no need to raise Transmission too) and
+        // absorbs colour over the REAL distance light travels inside it — deep centre,
+        // clear thin edges. Albedo = the absorption tint. 0 = off (plain material).
+        if (ImGui::SliderFloat("Resin Depth##transdens", &pbsdf->transmissionDensity, 0.0f, 8.0f, "%.2f")) {
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Thick glass / resin interior absorption (independent of the Transmission slider).\n"
+                              "> 0 turns the material into a transmissive resin body; colour deepens with the\n"
+                              "REAL distance light travels inside — deep centre, clear thin edges (glass-marble).\n"
+                              "IOR is auto-raised for lensing. Set Resin Color for the depth tint.");
+        if (pbsdf->transmissionDensity > 0.001f) {
+            ImGui::Indent();
+            float resinCol[3] = { (float)pbsdf->resinColor.x, (float)pbsdf->resinColor.y, (float)pbsdf->resinColor.z };
+            if (ImGui::ColorEdit3("Resin Color##resincol", resinCol)) {
+                pbsdf->resinColor = Vec3(resinCol[0], resinCol[1], resinCol[2]);
+                changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The colour the resin builds with depth (separate from albedo).\n"
+                                  "White = clear (lensing only). Saturated = stronger, richer depth.");
+            if (ImGui::SliderFloat("Resin Gloss##resinrough", &pbsdf->resinRoughness, 0.0f, 1.0f, "%.3f")) {
+                changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Roughness of the resin COAT's reflection (the glossy top layer),\n"
+                                  "independent of the base material roughness underneath.\n"
+                                  "0 = mirror-sharp clear coat, 1 = matte/satin coat.");
+            ImGui::Unindent();
+        }
+
+        // Internal inclusions — a shared procedural march used by TWO modes:
+        //   - Resin (Resin Depth > 0): opaque base under the coat.
+        //   - Glass Marble (base Transmission high, no Resin Depth): real see-through
+        //     glass with volumetric dust/dirt inside (independent of the resin coat).
+        bool resinMode = pbsdf->transmissionDensity > 0.001f;
+        bool glassMarbleMode = (transmission > 0.5f) && !resinMode;
+        if (resinMode || glassMarbleMode) {
+            ImGui::Indent();
+            ImGui::Separator();
+            ImGui::TextDisabled(glassMarbleMode ? "Inclusions (Glass Marble \xE2\x80\x94 volumetric interior)"
+                                                 : "Inclusions (inside the resin)");
+            if (ImGui::SliderFloat("Dust##resindust", &pbsdf->resinInclusion, 0.0f, 1.0f, "%.3f")) {
+                changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Cloudy dust suspended inside — heterogeneous absorption that\n"
+                                  "thickens at depth (amorphous, varies in 3D). 0 = perfectly clear.");
+            if (ImGui::SliderFloat("Dirt Specks##resindirt", &pbsdf->resinDirt, 0.0f, 1.0f, "%.3f")) {
+                changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Opaque specks (dirt/debris) embedded at random depths. A ray that\n"
+                                  "hits one terminates early — its colour shows through the medium crossed.");
+            if (pbsdf->resinDirt > 0.001f) {
+                ImGui::Indent();
+                float dirtCol[3] = { (float)pbsdf->resinDirtColor.x, (float)pbsdf->resinDirtColor.y, (float)pbsdf->resinDirtColor.z };
+                if (ImGui::ColorEdit3("Dirt Color##resindirtcol", dirtCol)) {
+                    pbsdf->resinDirtColor = Vec3(dirtCol[0], dirtCol[1], dirtCol[2]);
+                    changed = true;
+                }
+                ImGui::Unindent();
+            }
+            if (pbsdf->resinInclusion > 0.001f || pbsdf->resinDirt > 0.001f) {
+                if (ImGui::SliderFloat("Inclusion Scale##resininclscale", &pbsdf->resinInclusionScale, 1.0f, 64.0f, "%.1f")) {
+                    changed = true;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Feature size of the procedural dust/dirt field.\n"
+                                      "Low = large blobs/clouds, high = fine grain.");
+            }
+            if (glassMarbleMode) {
+                // Full Volume (real-interior medium march) was retired — too camera-angle
+                // dependent and the interior dust/dirt never read as intended. Inclusion glass
+                // uses the front-shell approximation only. Keep the flag dormant/off.
+                pbsdf->glassMarbleVolume = false;
+                ImGui::TextDisabled("Glass Marble: light passes through (see-through) + shell inclusions.");
+            }
+            ImGui::Unindent();
+        }
+
+        // Thin-shell BUBBLE (champagne / soda / soap-foam close-up). Renders the
+        // surface as a thin dielectric film (Fresnel rim + straight pass-through) —
+        // assign this material to foam BUBBLES (foam panel) for the production look.
+        if (ImGui::Checkbox("Bubble (thin shell)", &pbsdf->isBubble)) {
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Thin dielectric bubble film: bright Fresnel rim + transparent centre.\n"
+                              "For champagne/soda/soap close-ups. Assign to foam Bubbles in the foam panel.");
+        if (pbsdf->isBubble) {
+            ImGui::Indent();
+            if (ImGui::SliderFloat("Rim IOR##bubble", &pbsdf->bubbleIor, 1.0f, 2.0f, "%.3f")) {
+                changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Fresnel strength of the bubble rim. ~1.33 = air/water interface.");
+            if (ImGui::SliderFloat("Thin-Film##bubble", &pbsdf->bubbleFilm, 0.0f, 30.0f, "%.1f")) {
+                changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Soap-bubble iridescence: thin-film interference tints the rim by view angle.\n"
+                                  "0 = clean silver rim. Higher = rainbow shimmer (thicker film / more cycles).");
+            ImGui::Unindent();
+        }
+
         float specular = pbsdf->specularProperty.intensity;
         bool specKeyed = isMatKeyed(mat_id, false, false, false, false, false, false, false, true);
         if (SceneUI::DrawSmartFloat("spec", "Spec", &specular, 0.0f, 1.0f, "%.3f", specKeyed,
@@ -1658,11 +1765,34 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
             pbsdf->clearcoatRoughness = cc_roughness;
             changed = true;
         }
-        
+
+        // Iridescent clearcoat (thin-film tint on the clearcoat lobe): oil-slick, beetle
+        // shell, candy paint. 0 = plain white clearcoat. Thickness drives the hue cycle.
+        float cc_irid = pbsdf->clearcoatIridescence;
+        if (SceneUI::DrawSmartFloat("cci", "Irides", &cc_irid, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
+            pbsdf->clearcoatIridescence = cc_irid;
+            changed = true;
+        }
+        if (pbsdf->clearcoatIridescence > 0.001f) {
+            float cc_thick = pbsdf->clearcoatFilmThickness;
+            if (SceneUI::DrawSmartFloat("ccft", "FilmThk", &cc_thick, 0.1f, 2.0f, "%.3f", false, nullptr, 12)) {
+                pbsdf->clearcoatFilmThickness = cc_thick;
+                changed = true;
+            }
+        }
+
         ImGui::Separator();
         if (ImGui::SmallButton("Car Paint")) {
             pbsdf->clearcoat = 1.0f;
             pbsdf->clearcoatRoughness = 0.03f;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Oil Slick")) {
+            pbsdf->clearcoat = 1.0f;
+            pbsdf->clearcoatRoughness = 0.04f;
+            pbsdf->clearcoatIridescence = 0.85f;
+            pbsdf->clearcoatFilmThickness = 0.55f;
             changed = true;
         }
         UIWidgets::EndSection();

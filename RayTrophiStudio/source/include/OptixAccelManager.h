@@ -58,6 +58,15 @@ struct MeshBLAS {
     size_t gas_output_size = 0;             // GAS output buffer size (for refit)
     size_t vertex_count = 0;
     size_t index_count = 0;
+
+    // P-render G1 (wedge weld): when non-empty, this BLAS was built from a
+    // welded indexed geometry. Maps each original expanded corner (size =
+    // 3*index_count) to its welded vertex id, so per-frame refit can scatter
+    // updated positions/normals into the smaller welded buffers WITHOUT
+    // re-welding (which could reorder vertices mid-sculpt). Empty = legacy
+    // non-indexed BLAS (skinned meshes, or welding disabled).
+    std::vector<uint32_t> weld_corner_map;
+
     float3 bounds_min = make_float3(0.0f, 0.0f, 0.0f);
     float3 bounds_max = make_float3(0.0f, 0.0f, 0.0f);
     int sbt_offset = 0;                     // Base SBT offset (for RAY_TYPE_COUNT records)
@@ -147,7 +156,44 @@ struct CurveBLAS {
 
 enum class InstanceType {
     Mesh,
-    Curve
+    Curve,
+    Sphere
+};
+
+// Per-system Bottom-Level Acceleration Structure of analytic spheres.
+// One GAS holds MANY spheres (centre + radius buffers), intersected by OptiX's
+// built-in sphere primitive. The whole set is ONE TLAS instance instead of one
+// instance per particle — this is the scalable representation for foam / fluid
+// splat / spray, where a sphere-per-particle TLAS instance does not scale (the
+// per-frame TLAS refit + structural rebuilds choke the GPU). Per-frame motion
+// is an in-place GAS refit (OPTIX_BUILD_OPERATION_UPDATE) over the centre/radius
+// buffers; the pool only grows (surplus slots collapse to radius 0 = no hit), so
+// a settled or shrinking system stays on the cheap refit path.
+struct SphereBLAS {
+    OptixTraversableHandle handle = 0;
+    CUdeviceptr d_centers = 0;        // float3 sphere centres (object space)
+    CUdeviceptr d_radii   = 0;        // float   sphere radii
+    CUdeviceptr d_gas_output = 0;
+    size_t gas_output_size = 0;       // cached for refit
+    size_t sphere_capacity = 0;       // allocated slot count (pool, grows only)
+    size_t sphere_count = 0;          // primitives in the current GAS build
+    int sbt_offset = 0;
+    int material_id = 0;
+    std::string name;                 // stable cache key
+
+    // Persisted so OptiX can read them asynchronously after refit returns
+    // (mirrors CurveBLAS::d_refit_*).
+    CUdeviceptr d_refit_centers = 0;
+    CUdeviceptr d_refit_radii   = 0;
+
+    void cleanup() {
+        if (d_centers)    { cudaFree(reinterpret_cast<void*>(d_centers));    d_centers = 0; }
+        if (d_radii)      { cudaFree(reinterpret_cast<void*>(d_radii));      d_radii = 0; }
+        if (d_gas_output) { cudaFree(reinterpret_cast<void*>(d_gas_output)); d_gas_output = 0; }
+        sphere_capacity = 0;
+        sphere_count = 0;
+        handle = 0;
+    }
 };
 
 // Per-instance data for TLAS
@@ -213,9 +259,11 @@ public:
     ~OptixAccelManager() { cleanup(); }
     
     // Initialize with OptiX context and stream
-    void initialize(OptixDeviceContext ctx, CUstream str, 
+    void initialize(OptixDeviceContext ctx, CUstream str,
                     OptixProgramGroup hit_pg, OptixProgramGroup hit_shadow_pg,
-                    OptixProgramGroup hair_hit_pg, OptixProgramGroup hair_shadow_pg);
+                    OptixProgramGroup hair_hit_pg, OptixProgramGroup hair_shadow_pg,
+                    OptixProgramGroup sphere_hit_pg = nullptr,
+                    OptixProgramGroup sphere_shadow_pg = nullptr);
     
     // Mark that the scene structure (object list) has changed
     void markTopologyDirty() { m_topology_dirty = true; }
@@ -232,6 +280,40 @@ public:
     
     // Update curve material parameters without rebuild
     void updateCurveMaterial(int curve_id, const GpuHairMaterial& material);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SPHERE BLAS MANAGEMENT (analytic point-sphere primitives)
+    // ═══════════════════════════════════════════════════════════════════════
+    // Build a sphere GAS from host centre/radius arrays. `capacity` pre-sizes the
+    // device buffers (>= centers.size()) so later refits can grow the live count
+    // without reallocating until the pool doubles. Returns sphere_blas index, -1
+    // on failure. Built with ALLOW_UPDATE so motion takes the cheap refit path.
+    int buildSphereBLAS(const std::string& name, int material_id,
+                        const std::vector<float3>& centers,
+                        const std::vector<float>& radii,
+                        size_t capacity);
+
+    // In-place GAS refit over new centre/radius arrays (same capacity/primitive
+    // count as the last build). Returns false if a full rebuild is required
+    // (count changed / buffers too small) — caller should buildSphereBLAS then.
+    // `rebuild`=false → cheap in-place UPDATE (refit). `rebuild`=true → fresh
+    // BUILD into the same slot (new handle, optimal BVH) — use this for foam,
+    // which moves too far each frame for a refit to stay tight. A rebuild
+    // changes the GAS handle, so the caller must force a full TLAS rebuild
+    // afterwards (markTLASNeedsRebuild + forceTLASRebuild).
+    bool refitSphereBLAS(int sphere_id,
+                        const std::vector<float3>& centers,
+                        const std::vector<float>& radii,
+                        bool sync = true, bool rebuild = false);
+
+    // Find an existing sphere BLAS by name (stable cache key). -1 if absent.
+    int findSphereBLAS(const std::string& name) const;
+
+    const SphereBLAS* getSphereBLAS(int sphere_id) const {
+        return (sphere_id >= 0 && sphere_id < static_cast<int>(sphere_blas_list.size()))
+            ? &sphere_blas_list[sphere_id] : nullptr;
+    }
+    void clearSpheres();   // Free all sphere BLAS + their instances
 
     // Fast update for hair curves (Refit)
     /**
@@ -334,6 +416,16 @@ public:
     
     // Update TLAS (refit only - faster if topology unchanged)
     void updateTLAS();
+
+    // Force the next updateTLAS() to actually run. Used after an in-place sphere
+    // GAS refit (foam): the GAS handle is unchanged but its AABBs moved, so the
+    // TLAS over it is stale even when no instance transform changed this frame.
+    void markTLASNeedsRebuild() { tlas_needs_rebuild = true; }
+
+    // Force the next buildTLAS() to do a full BUILD instead of a refit (UPDATE).
+    // Required after a sphere GAS REBUILD: the child traversable handle changed,
+    // which a TLAS UPDATE cannot absorb.
+    void forceTLASRebuild() { m_force_tlas_build = true; }
     
     // Get final traversable handle for rendering
     OptixTraversableHandle getTraversableHandle() const { return tlas_handle; }
@@ -412,10 +504,13 @@ private:
     OptixProgramGroup hit_shadow_program_group = nullptr;
     OptixProgramGroup hair_hit_program_group = nullptr;
     OptixProgramGroup hair_shadow_program_group = nullptr;
+    OptixProgramGroup sphere_hit_program_group = nullptr;
+    OptixProgramGroup sphere_shadow_program_group = nullptr;
     
     // BLAS storage
     std::vector<MeshBLAS> mesh_blas_list;
     std::vector<CurveBLAS> curve_blas_list;
+    std::vector<SphereBLAS> sphere_blas_list;
     
     // Instance storage
     std::vector<SceneInstance> instances;
@@ -428,6 +523,7 @@ private:
     CUdeviceptr d_tlas_temp = 0;            // TLAS temp buffer
     size_t tlas_output_size = 0;
     bool tlas_needs_rebuild = true;
+    bool m_force_tlas_build = false;   // next buildTLAS() must BUILD (child handle changed)
     
     // Topology cache for animation performance
     bool m_topology_dirty = true;

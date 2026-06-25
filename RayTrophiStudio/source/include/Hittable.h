@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -98,6 +98,10 @@ public:
 
     // Visibility flag for rendering (CPU/GPU)
     bool visible = true;
+    
+    // Fast RTTI bypass
+    virtual bool isTriangle() const { return false; }
+    virtual bool isTriangleMesh() const { return false; }
 };
 
 #endif // HITTABLE_H

@@ -3027,15 +3027,15 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         m_interactiveViewport.gridSegments[8] = segNegStart;
         m_interactiveViewport.gridSegments[9] = segNegCount;
 
-        if (segAxisVCount > 0) {
-            std::string sample = "[Grid] +Z sample:";
-            uint32_t vstart = segAxisVStart * 3;
-            uint32_t vend = (std::min)((uint32_t)positions.size(), vstart + (std::min)(segAxisVCount, (uint32_t)6) * 3u);
-            for (uint32_t vi = vstart; vi + 2 < vend; vi += 3) {
-                sample += " (" + std::to_string(positions[vi]) + "," + std::to_string(positions[vi+1]) + "," + std::to_string(positions[vi+2]) + ")";
-            }
-            SCENE_LOG_INFO(sample);
-        }
+        //if (segAxisVCount > 0) {
+        //    std::string sample = "[Grid] +Z sample:";
+        //    uint32_t vstart = segAxisVStart * 3;
+        //    uint32_t vend = (std::min)((uint32_t)positions.size(), vstart + (std::min)(segAxisVCount, (uint32_t)6) * 3u);
+        //    for (uint32_t vi = vstart; vi + 2 < vend; vi += 3) {
+        //        sample += " (" + std::to_string(positions[vi]) + "," + std::to_string(positions[vi+1]) + "," + std::to_string(positions[vi+2]) + ")";
+        //    }
+        //    SCENE_LOG_INFO(sample);
+        //}
 
         VulkanRT::BufferCreateInfo vci{};
         vci.size = positions.size() * sizeof(float);

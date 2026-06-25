@@ -61,7 +61,7 @@ public:
     int active_layer_index = 0;
     uint32_t active_layer_id = 0;
     int active_material_slot = 0;
-    MaterialBindingMode material_binding_mode = MaterialBindingMode::UseCurrentMaterial;
+    MaterialBindingMode material_binding_mode = MaterialBindingMode::MakeUniqueForPaint;
     PaintChannel active_channel = PaintChannel::BaseColor;
     int requested_texture_resolution = 1024;
     float height_to_normal_strength = 4.0f;

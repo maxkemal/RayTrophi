@@ -22,9 +22,8 @@ Triangle::Triangle()
         vertices[i].original = Vec3(0.0f); 
         vertices[i].normal = Vec3(0.0f, 1.0f, 0.0f); // Default normal Y-up
         vertices[i].originalNormal = Vec3(0.0f, 1.0f, 0.0f);
-        vertices[i].color = Vec3(0.0f);
     }
-    uv_sets.push_back({t0, t1, t2});
+    // UV set 0 is t0/t1/t2; uv_sets stays empty until a SECOND set is added (no per-tri heap alloc).
 }
 
 Triangle::Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
@@ -52,11 +51,7 @@ Triangle::Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
     vertices[2].normal = nc.normalize();
     vertices[2].originalNormal = nc.normalize();
     
-    // Default color black (Flexible)
-    vertices[0].color = Vec3(0.0f);
-    vertices[1].color = Vec3(0.0f);
-    vertices[2].color = Vec3(0.0f);
-    uv_sets.push_back({ta, tb, tc});
+    // UV set 0 is t0/t1/t2; uv_sets stays empty until a SECOND set is added (no per-tri heap alloc).
 
     update_bounding_box();
 }
@@ -96,11 +91,7 @@ Triangle::Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
     vertices[2].normal = nc.normalize();
     vertices[2].originalNormal = nc.normalize();
 
-    // Default color black (Flexible)
-    vertices[0].color = Vec3(0.0f);
-    vertices[1].color = Vec3(0.0f);
-    vertices[2].color = Vec3(0.0f);
-    uv_sets.push_back({ta, tb, tc});
+    // UV set 0 is t0/t1/t2; uv_sets stays empty until a SECOND set is added (no per-tri heap alloc).
 
     update_bounding_box();
 }
@@ -128,14 +119,19 @@ void Triangle::setMaterial(const std::shared_ptr<Material>& mat) {
 // UV Coordinates
 // ============================================================================
 
+// UV-set storage model (memory slim):
+//   * Set 0 always lives in t0/t1/t2.
+//   * uv_sets is EMPTY for single-set triangles (the overwhelming majority, incl. every
+//     procedurally subdivided mesh) — no per-triangle heap allocation.
+//   * The first time an EXTRA set (index >= 1) is authored, uv_sets is materialized as the
+//     FULL list (uv_sets[0] = current t0/t1/t2 backup), after which it mirrors the legacy
+//     layout so active-set switching (applyUVSet) round-trips losslessly.
 void Triangle::setUVCoordinates(const Vec2& uv0, const Vec2& uv1, const Vec2& uv2) {
     t0 = uv0;
     t1 = uv1;
     t2 = uv2;
-    if (uv_sets.empty()) {
-        uv_sets.push_back({uv0, uv1, uv2});
-    } else {
-        uv_sets[0] = {uv0, uv1, uv2};
+    if (!uv_sets.empty()) {
+        uv_sets[0] = {uv0, uv1, uv2};   // keep the set-0 backup in sync (multi-set meshes only)
     }
 }
 
@@ -144,13 +140,28 @@ std::tuple<Vec2, Vec2, Vec2> Triangle::getUVCoordinates() const {
 }
 
 void Triangle::setUVSetCoordinates(size_t set_index, const Vec2& uv0, const Vec2& uv1, const Vec2& uv2) {
+    if (set_index == 0 && uv_sets.empty()) {
+        // Single-set fast path: set 0 is t0/t1/t2, no allocation.
+        t0 = uv0; t1 = uv1; t2 = uv2;
+        return;
+    }
+    if (uv_sets.empty()) {
+        // Promote to multi-set: materialize the existing set 0 from t0/t1/t2 first.
+        uv_sets.push_back({t0, t1, t2});
+    }
     if (uv_sets.size() <= set_index) {
         uv_sets.resize(set_index + 1, {Vec2(0.0f, 0.0f), Vec2(0.0f, 0.0f), Vec2(0.0f, 0.0f)});
     }
     uv_sets[set_index] = {uv0, uv1, uv2};
+    if (set_index == 0) {
+        t0 = uv0; t1 = uv1; t2 = uv2;   // keep t0/t1/t2 mirroring set 0
+    }
 }
 
 std::tuple<Vec2, Vec2, Vec2> Triangle::getUVSetCoordinates(size_t set_index) const {
+    if (uv_sets.empty()) {
+        return std::make_tuple(t0, t1, t2);   // only set 0 exists
+    }
     if (set_index < uv_sets.size()) {
         const auto& uv_set = uv_sets[set_index];
         return std::make_tuple(uv_set[0], uv_set[1], uv_set[2]);
@@ -160,9 +171,8 @@ std::tuple<Vec2, Vec2, Vec2> Triangle::getUVSetCoordinates(size_t set_index) con
 
 void Triangle::applyUVSet(size_t set_index) {
     if (uv_sets.empty()) {
-        uv_sets.push_back({t0, t1, t2});
+        return;   // only set 0 (already active in t0/t1/t2)
     }
-
     const size_t resolved_index = (set_index < uv_sets.size()) ? set_index : 0;
     const auto& uv_set = uv_sets[resolved_index];
     t0 = uv_set[0];
@@ -233,8 +243,8 @@ void Triangle::update_bounding_box() const {
 // ============================================================================
 
 void Triangle::initializeSkinData() {
-    if (!skinData.has_value()) {
-        skinData = SkinnedTriangleData();
+    if (!skinData) {
+        skinData.reset(new SkinnedTriangleData());
         skinData->vertexBoneWeights.resize(3);
         skinData->originalVertexPositions.resize(3);
         
@@ -246,7 +256,7 @@ void Triangle::initializeSkinData() {
 }
 
 bool Triangle::hasAnySkinWeights() const {
-    if (!skinData.has_value()) return false;
+    if (!skinData) return false;
     for (const auto& weights : skinData->vertexBoneWeights) {
         if (!weights.empty()) return true;
     }
@@ -268,7 +278,7 @@ void Triangle::setSkinBoneWeights(int vertexIndex, const std::vector<std::pair<i
 
 const std::vector<std::pair<int, float>>& Triangle::getSkinBoneWeights(int vertexIndex) const {
     static const std::vector<std::pair<int, float>> empty;
-    if (skinData.has_value() && vertexIndex >= 0 && vertexIndex < 3) {
+    if (skinData && vertexIndex >= 0 && vertexIndex < 3) {
         return skinData->vertexBoneWeights[vertexIndex];
     }
     return empty;
@@ -510,8 +520,27 @@ void Triangle::updateTransformedVerticesWith(const Matrix4x4& finalTransform,
     update_bounding_box();
 }
 
+#include <unordered_set>
+#include <mutex>
+
+class StringInterner {
+    std::unordered_set<std::string> strings;
+    std::mutex mtx;
+public:
+    static StringInterner& getInstance() {
+        static StringInterner instance;
+        return instance;
+    }
+    const std::string* intern(const std::string& str) {
+        if (str.empty()) return nullptr;
+        std::lock_guard<std::mutex> lock(mtx);
+        auto it = strings.insert(str);
+        return &(*it.first);
+    }
+};
+
 void Triangle::setNodeName(const std::string& name) {
-    nodeName = name;
+    nodeNamePtr = StringInterner::getInstance().intern(name);
 }
 
 void Triangle::setBaseTransform(const Matrix4x4& t) {

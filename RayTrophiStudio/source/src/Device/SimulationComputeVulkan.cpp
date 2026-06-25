@@ -131,12 +131,21 @@ public:
     ComputeBufferHandle createBuffer(const ComputeBufferDesc& desc) override {
         if (!m_device || desc.size_bytes == 0) return {};
 
+        // Phase 3d: an AccelInput buffer doubles as RT BLAS build input, so it needs the
+        // accel-input + vertex + device-address usages and an address-capable allocation.
+        const bool accelInput = hasComputeBufferUsage(desc.usage, ComputeBufferUsage::AccelInput);
+
         VkBufferCreateInfo bci{};
         bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bci.size  = desc.size_bytes;
         bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT   |
                     VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        if (accelInput) {
+            bci.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        }
         bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
         VkBuffer buf = VK_NULL_HANDLE;
@@ -162,6 +171,14 @@ public:
         ai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         ai.allocationSize  = req.size;
         ai.memoryTypeIndex = memType;
+
+        // Address-capable allocation so vkGetBufferDeviceAddress works for BLAS interop.
+        VkMemoryAllocateFlagsInfo allocFlags{};
+        if (accelInput) {
+            allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+            allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+            ai.pNext = &allocFlags;
+        }
 
         VkDeviceMemory mem = VK_NULL_HANDLE;
         if (vkAllocateMemory(m_device, &ai, nullptr, &mem) != VK_SUCCESS) {
@@ -211,6 +228,15 @@ public:
         auto it = m_buffers.find(h.id);
         if (it == m_buffers.end()) return nullptr;
         return reinterpret_cast<void*>(it->second.buffer);
+    }
+
+    uint64_t bufferDeviceAddress(ComputeBufferHandle h) const override {
+        auto it = m_buffers.find(h.id);
+        if (it == m_buffers.end() || !it->second.buffer) return 0;
+        VkBufferDeviceAddressInfo info{};
+        info.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+        info.buffer = it->second.buffer;
+        return static_cast<uint64_t>(vkGetBufferDeviceAddress(m_device, &info));
     }
 
     // ── Upload / Download ─────────────────────────────────────────────────────
@@ -556,6 +582,17 @@ private:
             { "sim_grid_advect_scalar",             "sim_grid_advect_scalar.spv",          5, 20 },
             { "sim_grid_advect_velocity",           "sim_grid_advect_velocity.spv",        6, 20 },
             { "sim_grid_velocity_dissipate_clamp",  "sim_grid_velocity_dissipate.spv",     3, 20 },
+            // Mesh subdivision (linear 1->4). 2 SSBO (in/out tris) + 16B push-const.
+            { "subdivide_linear",                   "subdivide_linear.spv",                2, 16 },
+            // Catmull-Clark GPU refine (Phase 3b): per-level sparse stencil apply (5 SSBO:
+            // inPos/outPos/off/idx/w) then Newell face normals (4 SSBO) gathered per
+            // vertex atomic-free (4 SSBO). All take a 16B push-const (one uint count).
+            { "cc_stencil_apply",                   "cc_stencil_apply.spv",                5, 16 },
+            { "cc_face_normals",                    "cc_face_normals.spv",                 4, 16 },
+            { "cc_vertex_normals",                  "cc_vertex_normals.spv",               4, 16 },
+            // CC device-resident expand (Phase 3d): indexed refine -> non-indexed combined
+            // BLAS-layout buffer (6 SSBO: pos/nrm/triIdx/triUV/triMat/out, 16B push-const).
+            { "cc_expand_blas",                     "cc_expand_blas.spv",                  6, 16 },
         };
         for (const auto& d : defs)
             createPipeline(d.name, sd + "/" + d.spv, d.bufs, d.pc);
@@ -657,6 +694,50 @@ createVulkanSimulationComputeBackend(const SimulationComputeVulkanContext& ctx) 
         ctx.shader_atomic_float_enabled);
     if (!backend->supportsDispatch()) return nullptr;
     return backend;
+}
+
+} // namespace RayTrophiSim
+
+// The Vulkan compute context filled in by VulkanBackend init (globals.h). Declared
+// here directly to avoid pulling the heavy globals.h into this device TU.
+extern RayTrophiSim::SimulationComputeVulkanContext g_vulkan_sim_compute_ctx;
+
+namespace RayTrophiSim {
+
+// Lazily-created, process-wide compute backend shared by non-simulation GPU work
+// (mesh subdivision, etc.), independent of whether a GPU sim domain is active.
+// Returns nullptr when no Vulkan compute device is available (caller falls back to
+// CPU). The backend is created once on first use and reused; it is NOT torn down
+// (matches the lifetime of the Vulkan device, which outlives all mesh ops).
+static std::unique_ptr<ISimulationComputeBackend> s_sharedMeshBackend;
+static void* s_sharedMeshBackendDevice = nullptr;
+
+ISimulationComputeBackend* acquireSharedMeshComputeBackend() {
+    void* curDev = g_vulkan_sim_compute_ctx.device;
+    // Backend switch (e.g. Vulkan RT -> OptiX -> Vulkan RT): the VkDevice our cached
+    // backend was built on was destroyed and a new one created. releaseSharedMeshCompute-
+    // Backend() should have run during the old device's teardown (s_backend then null); if
+    // some path skipped it, LEAK the stale backend — its VkDevice is gone, so running its
+    // destructor would dereference freed handles (the createBuffer crash) — and rebuild.
+    if (s_sharedMeshBackend && curDev && curDev != s_sharedMeshBackendDevice) {
+        s_sharedMeshBackend.release();   // intentional: stale device, cannot safely destruct
+        s_sharedMeshBackendDevice = nullptr;
+    }
+    // Retry creation until the Vulkan device exists (subdivision may run before the
+    // render backend finishes filling g_vulkan_sim_compute_ctx); once created, reuse.
+    if (!s_sharedMeshBackend && curDev) {
+        s_sharedMeshBackend = createVulkanSimulationComputeBackend(g_vulkan_sim_compute_ctx);
+        s_sharedMeshBackendDevice = curDev;
+    }
+    return (s_sharedMeshBackend && s_sharedMeshBackend->supportsDispatch()) ? s_sharedMeshBackend.get() : nullptr;
+}
+
+// Tear down the shared mesh compute backend. MUST be called while its VkDevice is still
+// valid (i.e. before vkDestroyDevice) so its buffers/pipelines are freed cleanly; a later
+// acquire then rebuilds against whatever device is current.
+void releaseSharedMeshComputeBackend() {
+    s_sharedMeshBackend.reset();
+    s_sharedMeshBackendDevice = nullptr;
 }
 
 } // namespace RayTrophiSim

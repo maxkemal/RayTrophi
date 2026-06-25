@@ -10,48 +10,11 @@ layout(location = 3) in vec3 vWorldPos;
 
 layout(location = 0) out vec4 outColor;
 
-// Material buffer (matches VkGpuMaterial layout)
-struct GpuMaterial {
-    // Block 1
-    float albedo_r, albedo_g, albedo_b, opacity;
-    // Block 2
-    float emission_r, emission_g, emission_b, emission_strength;
-    // Block 3
-    float roughness, metallic, ior, transmission;
-    // Block 4
-    float subsurface_r, subsurface_g, subsurface_b, subsurface_amount;
-    // Block 5
-    float subsurface_radius_r, subsurface_radius_g, subsurface_radius_b, subsurface_scale;
-    // Block 6
-    float clearcoat, clearcoat_roughness, translucent, subsurface_anisotropy;
-    // Block 7
-    float anisotropic, sheen, sheen_tint;
-    uint flags;
-    // Block 8
-    float fft_amplitude, fft_time_scale, micro_detail_strength, micro_detail_scale;
-    // Block 9
-    float foam_threshold, fft_ocean_size, fft_choppiness, fft_wind_speed;
-    // Block 10
-    float micro_anim_speed, micro_morph_speed, foam_noise_scale, fft_wind_direction;
-    // Block 11
-    float uv_scale_x, uv_scale_y, uv_offset_x, uv_offset_y;
-    // Block 12
-    float uv_rotation_degrees, uv_tiling_x, uv_tiling_y;
-    uint uv_wrap_mode;
-    // Block 13
-    uint albedo_tex, normal_tex, roughness_tex, metallic_tex;
-    // Block 14
-    uint emission_tex, height_tex, opacity_tex, transmission_tex;
-    // Block 15
-    float subsurface_ior;
-    uint _terrain_layer_idx;
-    float normal_strength;
-    float tile_break_strength;  // UV tile-break (independent from dirt/roughness)
-    float specular;
-    uint specular_tex;
-    uint _pad_specular0;
-    uint _pad_specular1;
-};
+// Material buffer struct — single source of truth shared by every material-reading
+// shader. This shader historically called the type `GpuMaterial`; alias it so the
+// existing code (materials[i], GpuMaterial mat, function params) is unchanged.
+#define GpuMaterial Material
+#include "material_struct.glsl"
 
 layout(set = 0, binding = 0, std430) readonly buffer MaterialBuffer {
     GpuMaterial materials[];
@@ -221,8 +184,10 @@ vec3 sampleEnvSpecular(vec3 reflectDir, uint lightingPreset) {
     return texture(envMaps[envIdx], dirToEquirect(reflectDir)).rgb;
 }
 
-// Apply material UV transform: scale → rotate → offset
-vec2 applyUVTransform(vec2 uv, const GpuMaterial mat) {
+// Apply material UV transform: scale → rotate → offset → tiling
+vec2 applyUVTransform(vec2 originalUV, const GpuMaterial mat) {
+    vec2 uv = originalUV - vec2(0.5);
+
     // Scale
     float sx = (mat.uv_scale_x != 0.0) ? mat.uv_scale_x : 1.0;
     float sy = (mat.uv_scale_y != 0.0) ? mat.uv_scale_y : 1.0;
@@ -235,8 +200,15 @@ vec2 applyUVTransform(vec2 uv, const GpuMaterial mat) {
         uv = vec2(c * uv.x - s * uv.y, s * uv.x + c * uv.y);
     }
 
-    // Offset
+    // Offset and Pivot
+    uv += vec2(0.5);
     uv += vec2(mat.uv_offset_x, mat.uv_offset_y);
+
+    // Tiling
+    float tx = (mat.uv_tiling_x != 0.0) ? mat.uv_tiling_x : 1.0;
+    float ty = (mat.uv_tiling_y != 0.0) ? mat.uv_tiling_y : 1.0;
+    uv *= vec2(tx, ty);
+
     return uv;
 }
 

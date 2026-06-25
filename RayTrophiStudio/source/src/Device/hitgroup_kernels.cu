@@ -608,6 +608,66 @@ extern "C" __global__ void __closesthit__shadow() {
     optixSetPayload_0(1u);
 }
 
+// Sphere Closest Hit — foam / fluid-splat point spheres (one sphere GAS holds
+// the whole set, so this single program shades every particle). The built-in
+// sphere primitive carries no vertex/UV/normal attributes: the normal is the
+// surface gradient (hitPoint - centre) and shading reads the flat per-GAS
+// material from the SBT. Mirrors the tail of __closesthit__ch (no terrain,
+// no textures, no blended data).
+extern "C" __global__ void __closesthit__sphere() {
+    unsigned int p0 = optixGetPayload_0();
+    unsigned int p1 = optixGetPayload_1();
+    OptixHitResult* payload = unpackPayload<OptixHitResult>(p0, p1);
+    const HitGroupData* hgd = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
+
+    float t = optixGetRayTmax();
+    float3 rayOrigin = optixGetWorldRayOrigin();
+    float3 rayDir = optixGetWorldRayDirection();
+    float3 hitPoint = rayOrigin + t * rayDir;
+
+    // Built-in sphere data in OBJECT space: [centre.xyz, radius].
+    float4 q[1];
+    optixGetSphereData(optixGetGASTraversableHandle(), optixGetPrimitiveIndex(),
+                       optixGetSbtGASIndex(), 0.0f, q);
+    float3 objHit = optixTransformPointFromWorldToObjectSpace(hitPoint);
+    float3 objNormal = normalize(objHit - make_float3(q[0].x, q[0].y, q[0].z));
+    float3 world_normal = normalize(optixTransformNormalFromObjectToWorldSpace(objNormal));
+    float3 world_geo_normal = world_normal;
+
+    const bool front_face = dot(world_geo_normal, rayDir) < 0.0f;
+    if (!front_face) {
+        world_normal = -world_normal;
+        world_geo_normal = -world_geo_normal;
+    }
+    float3 final_normal = world_normal;
+    float2 uv = make_float2(0.0f, 0.0f);
+
+    payload->use_blended_data = 0;
+    payload->water_surface_active = 0;
+
+    if (payload->bounce_index == 0) {
+        float3 primary_albedo = make_float3(0.8f, 0.8f, 0.8f);
+        if (hgd->material_id >= 0 && optixLaunchParams.materials) {
+            primary_albedo = optixLaunchParams.materials[hgd->material_id].albedo;
+        }
+        payload->primary_albedo = primary_albedo;
+        payload->primary_normal = final_normal;
+        payload->primary_hit = 1;
+    }
+
+    payload->hit = 1;
+    payload->position = hitPoint;
+    payload->normal = final_normal;
+    payload->geom_normal = world_geo_normal;
+    payload->front_face = front_face ? 1 : 0;
+    payload->material_id = hgd->material_id;
+    payload->uv = uv;
+    payload->is_volumetric = 0;
+    payload->object_id = hgd->object_id;
+    payload->is_terrain = 0;
+    payload->t = t;
+}
+
 // Stochastic Hair Shadow (AnyHit)
 // Allows light to bleed through hair strands for a "deep shadow" effect
 extern "C" __global__ void __anyhit__hair_shadow() {

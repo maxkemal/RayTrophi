@@ -177,7 +177,7 @@ struct SceneData {
 
         auto matchesPendingDelete = [&](const std::shared_ptr<Hittable>& obj) -> bool {
             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            return tri && isEditorPendingDeleteObjectName(tri->nodeName);
+            return tri && isEditorPendingDeleteObjectName(tri->getNodeName());
         };
 
         const size_t beforeCount = world.objects.size();
@@ -675,16 +675,18 @@ struct SceneData {
     // tris + rest_local_pos/nrm are populated (rigid needs no welding/Jolt seed).
     std::unordered_map<std::string, SoftWeldCache> rigid_bake_cache_;
 
-    // ── Per-mesh deform refit (Vulkan RT perf) ───────────────────────────────
-    // A simulated body bakes new verts into its source mesh EVERY step. Routing
-    // that through markDirty(Geometry) made the Vulkan render loop destroy + rebuild
-    // EVERY BLAS in the scene per frame (rebuildAccelerationStructure) — so one body
-    // in a crowded scene froze playback. When the active render backend is Vulkan RT
-    // we instead record the changed node here and refit ONLY its BLAS in place
-    // (updateInteractiveMesh) from the render loop; other backends keep the proven
-    // full-rebuild path. Set per-frame by Main via setDeformRefitViaVulkan().
+    // ── Per-mesh deform refit (all backends) ─────────────────────────────────
+    // A simulated body (rigid / soft / fracture shard) bakes new verts into its
+    // source mesh EVERY step. Routing that through markDirty(Geometry) destroyed +
+    // rebuilt EVERY BLAS / raster mesh / CPU BVH in the scene per frame — so a few
+    // moving bodies (e.g. a shattered wall) froze playback in Solid AND render modes.
+    // Instead we record the changed node here and refit ONLY that node in place on
+    // whichever path is active (raster Solid: updateRasterMeshFromTriangles, OptiX /
+    // Vulkan RT: updateInteractiveMesh) + a cheap CPU Embree refit — promoting to a
+    // full rebuild only if a refit fails (topology change). Set per-frame by Main via
+    // setDeformRefitActive() (true whenever the active path supports a per-mesh refit).
     std::unordered_set<std::string> pending_deform_nodes_;
-    bool deform_refit_via_vulkan_ = false;
+    bool deform_refit_active_ = false;
     // Bumped whenever ANY body's mesh verts change (sim write-back / reset). The
     // selection gizmo/outline memoizes a body's world-AABB against this so a STATIC
     // (stopped) body costs O(1) per frame instead of re-walking its triangles every
@@ -1205,6 +1207,42 @@ struct SceneData {
             rigid_body_system->setSoftMeshResetToRest(
                 [this](const std::string& node) { restoreSoftRestMesh(node); });
 
+            // resumeState(): when playback runs PAST the RAM cache, the soft body was
+            // left uncreated during the cached replay and is rebuilt from REST. Hand
+            // back the cached deformed verts of the frame we're resuming FROM
+            // (soft_resume_frame_) plus a finite-difference velocity, so the body
+            // continues from there instead of re-animating from rest (the reported
+            // "sim recomputes from the start past frame N" bug). Returns false on a
+            // first bake / when that frame isn't cached.
+            rigid_body_system->setSoftResumeProvider(
+                [this](const std::string& node,
+                       std::vector<Vec3>& out_positions,
+                       std::vector<Vec3>& out_velocities) -> bool {
+                    out_positions.clear();
+                    out_velocities.clear();
+                    if (soft_resume_frame_ < 1) return false;
+                    auto it = soft_frame_cache_.find(soft_resume_frame_);
+                    if (it == soft_frame_cache_.end()) return false;
+                    auto nit = it->second.find(node);
+                    if (nit == it->second.end() || nit->second.empty()) return false;
+                    out_positions = nit->second;
+                    // Velocity from the previous cached frame (so the resume keeps the
+                    // body's momentum). Skip if absent or topology changed.
+                    auto pit = soft_frame_cache_.find(soft_resume_frame_ - 1);
+                    if (pit != soft_frame_cache_.end()) {
+                        auto pnit = pit->second.find(node);
+                        if (pnit != pit->second.end() &&
+                            pnit->second.size() == out_positions.size()) {
+                            const float inv_dt =
+                                (soft_resume_dt_ > 1.0e-6f) ? (1.0f / soft_resume_dt_) : 0.0f;
+                            out_velocities.resize(out_positions.size());
+                            for (std::size_t i = 0; i < out_positions.size(); ++i)
+                                out_velocities[i] = (out_positions[i] - pnit->second[i]) * inv_dt;
+                        }
+                    }
+                    return true;
+                });
+
             // ── Rigid-fluid coupling (buoyancy + drag) ────────────────────────
             // prepare(): once per step (only when a coupled body exists), rebuild
             // a sim-resolution coupling level set for EVERY fluid source — both
@@ -1380,6 +1418,138 @@ struct SceneData {
         rigid_body_system->setBodies(&rigid_bodies);
         invalidateRigidBodySimulationCache();
         return &rigid_bodies.back();
+    }
+
+    // ── Destruction: fracture-group break (Faz 2) ───────────────────────────
+    // True when any breakable body exists. Breakable scenes bypass the rigid
+    // frame cache (deterministic re-sim) so the shatter replays correctly on a
+    // loop / rewind instead of fighting cached pre-break (static) poses.
+    bool hasBreakableBodies() const {
+        for (const auto& rb : rigid_bodies) if (rb.breakable) return true;
+        return false;
+    }
+
+    // World-space centre of a scene node's geometry (mesh AABB centre).
+    Vec3 nodeWorldCenter(const std::string& node) const {
+        Vec3 mn(1e30f, 1e30f, 1e30f), mx(-1e30f, -1e30f, -1e30f);
+        bool any = false;
+        for (const auto& o : world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(o);
+            if (!tri || tri->getNodeName() != node) continue;
+            for (int i = 0; i < 3; ++i) {
+                const Vec3 p = tri->getVertexPosition(i);
+                mn = Vec3(std::min(mn.x, p.x), std::min(mn.y, p.y), std::min(mn.z, p.z));
+                mx = Vec3(std::max(mx.x, p.x), std::max(mx.y, p.y), std::max(mx.z, p.z));
+                any = true;
+            }
+        }
+        return any ? (mn + mx) * 0.5f : Vec3(0.0f, 0.0f, 0.0f);
+    }
+
+    // Register each shard node of a fractured mesh as a STATIC, breakable rigid
+    // body (intact until an impact exceeds `threshold`). Shards share `group` so a
+    // hit on any one shatters them all. Shape = Mesh → ConvexHull once dynamic.
+    void makeFractureGroupBreakable(const std::string& group,
+                                    const std::vector<std::string>& shard_nodes,
+                                    float threshold) {
+        if (shard_nodes.empty()) return;
+        ensureRigidBodySystem();
+        for (const auto& node : shard_nodes) {
+            RayTrophiSim::RigidBodyObject* rb = addRigidBodyForObject(node, /*dynamic=*/false);
+            if (!rb) continue;
+            rb->breakable = true;
+            rb->broken = false;
+            rb->fracture_group = group;
+            rb->break_impulse = threshold;
+            rb->shape = RayTrophiSim::RigidBodyShape::Mesh;   // convex hull when broken
+            rb->motion_type = RayTrophiSim::RigidBodyMotionType::Static;
+            rb->dynamic = false;
+        }
+        if (rigid_body_system) {
+            rigid_body_system->setContactEventsEnabled(true);  // impacts drive the break
+            rigid_body_system->resetRuntime(true);
+            rigid_body_system->setBodies(&rigid_bodies);
+        }
+        invalidateRigidBodySimulationCache();
+    }
+
+    // Shatter a fracture group NOW: flip every still-intact shard to Dynamic and
+    // give it a one-shot blast velocity (radial from `impact_point`, blended with
+    // `impact_dir`). Re-creation happens on the next step (created=false).
+    void breakFractureGroup(const std::string& group, const Vec3& impact_point,
+                            const Vec3& impact_dir, float strength) {
+        bool any = false;
+        for (auto& rb : rigid_bodies) {
+            if (!rb.breakable || rb.broken || rb.fracture_group != group) continue;
+            rb.broken = true;
+            rb.motion_type = RayTrophiSim::RigidBodyMotionType::Dynamic;
+            rb.dynamic = true;
+            rb.created = false;  // recreate as a dynamic convex hull next step
+            const Vec3 c = nodeWorldCenter(rb.source_name);
+            Vec3 radial = c - impact_point;
+            const float r = radial.length();
+            const Vec3 dir = (r > 1e-4f) ? radial * (1.0f / r) : Vec3(0.0f, 1.0f, 0.0f);
+            const float falloff = 1.0f / (1.0f + r);  // nearer shards fly faster
+            rb.pending_launch_velocity =
+                dir * (strength * falloff) + impact_dir * (strength * 0.3f);
+            rb.has_pending_launch = true;
+            any = true;
+        }
+        if (any && rigid_body_system) rigid_body_system->setBodies(&rigid_bodies);
+    }
+
+    // Manual shatter (UI "Break Now"): explode the group radially from its own
+    // centre. Takes effect on the next sim step (recreates shards dynamic).
+    void breakFractureGroupNow(const std::string& group, float strength) {
+        Vec3 sum(0.0f, 0.0f, 0.0f);
+        int n = 0;
+        for (auto& rb : rigid_bodies)
+            if (rb.breakable && !rb.broken && rb.fracture_group == group) {
+                sum += nodeWorldCenter(rb.source_name);
+                ++n;
+            }
+        if (n == 0) return;
+        breakFractureGroup(group, sum * (1.0f / static_cast<float>(n)),
+                           Vec3(0.0f, 0.0f, 0.0f), strength);
+    }
+
+    // After a sim step: read the contact events and shatter any breakable group
+    // whose shard took an impact above its threshold. No-op without breakables.
+    void processFractureImpacts() {
+        if (!rigid_body_system || !rigid_body_system->contactEventsEnabled()) return;
+        const auto& events = rigid_body_system->contactEvents();
+        if (events.empty()) return;
+        auto findBreakable = [&](const std::string& src) -> RayTrophiSim::RigidBodyObject* {
+            if (src.empty()) return nullptr;
+            for (auto& rb : rigid_bodies)
+                if (rb.breakable && !rb.broken && rb.source_name == src) return &rb;
+            return nullptr;
+        };
+        for (const auto& ev : events) {
+            RayTrophiSim::RigidBodyObject* hit = findBreakable(ev.source_a);
+            Vec3 dir = ev.normal;
+            if (!hit) { hit = findBreakable(ev.source_b); dir = ev.normal * -1.0f; }
+            if (!hit || ev.impulse < hit->break_impulse) continue;
+            const float strength = std::max(2.0f, ev.impulse * 0.5f);
+            breakFractureGroup(hit->fracture_group, ev.point, dir, strength);
+        }
+    }
+
+    // Reset every breakable group back to intact (Static, unbroken) — called on a
+    // rewind to frame 0 so a replay re-derives the shatter deterministically.
+    void resetFractureToIntact() {
+        bool any = false;
+        for (auto& rb : rigid_bodies) {
+            if (!rb.breakable) continue;
+            rb.broken = false;
+            rb.motion_type = RayTrophiSim::RigidBodyMotionType::Static;
+            rb.dynamic = false;
+            rb.created = false;
+            rb.has_pending_launch = false;
+            rb.pending_launch_velocity = Vec3(0.0f, 0.0f, 0.0f);
+            any = true;
+        }
+        if (any && rigid_body_system) rigid_body_system->setBodies(&rigid_bodies);
     }
 
     // Mark a scene object as a deformable body (soft body or cloth). Mirrors
@@ -1661,6 +1831,14 @@ struct SceneData {
     // deformation lives in the mesh, not in a pose, so it must be recorded per frame
     // or a cached-frame replay would freeze the cloth. Cleared with the fluid cache.
     std::map<int, std::map<std::string, std::vector<Vec3>>> soft_frame_cache_;
+
+    // When playback steps PAST the cached range, soft bodies are rebuilt from rest
+    // (see RigidBodySystem::restoreFrameState). These tell the soft-resume provider
+    // which cached frame to teleport a freshly created soft body onto so it CONTINUES
+    // instead of restarting from rest. soft_resume_frame_ < 1 disables the resume
+    // (first bake / nothing to resume). Set just before a forward resim, reset after.
+    int   soft_resume_frame_ = -1;
+    float soft_resume_dt_    = 1.0f / 24.0f;
     // Discrete particles are frame-cached alongside the fluid+rigid+soft caches:
     // the full per-system SoA + alive count, captured post-step in captureSimFrame
     // and restored in restoreSimFrame. WHY: sim_frame_cache_ holds only grid-domain
@@ -1777,6 +1955,15 @@ struct SceneData {
                 const bool fluid_surface_route =
                     is_fluid_domain &&
                     fluid_mode == RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF;
+                // Volume whitewater: foam rides THIS surface volume's temperature
+                // channel (single volume → no coincident-volume drop). Only on the
+                // surface route (that is the volume it rides) and only when the foam
+                // panel's render mode is Volume.
+                const bool volume_foam_active =
+                    fluid_surface_route && d < domains.size() &&
+                    domains[d].fluid_foam_params.enabled &&
+                    domains[d].fluid_foam_params.render_mode ==
+                        RayTrophiSim::Fluid::FoamRenderMode::Volume;
 
                 const bool renderable =
                     domain_render_enabled && system.visible && state.valid && has_density &&
@@ -2039,6 +2226,22 @@ struct SceneData {
                     upload_sig = hash_combine_local(upload_sig, static_cast<uint64_t>(up_stats.eff_ny));
                     upload_sig = hash_combine_local(upload_sig, static_cast<uint64_t>(up_stats.eff_nz));
                     upload_sig = hash_combine_local(upload_sig, quantize_local(up_stats.eff_voxel));
+                    // Volume foam rides the temperature channel and moves every frame,
+                    // so make any foam-bearing frame re-upload — fold the live foam
+                    // count + the frame so the temp grid tracks the whitewater motion.
+                    if (volume_foam_active) {
+                        upload_sig = hash_combine_local(upload_sig, static_cast<uint64_t>(state.foam.size()));
+                        upload_sig = hash_combine_local(upload_sig, static_cast<uint64_t>(frame));
+                        // Fold the deposit-per-particle + per-class weights so a Foam
+                        // Density / Bubble Froth / Spray slider edit re-uploads the temp
+                        // grid even on a non-forced (stride) frame.
+                        upload_sig = hash_combine_local(upload_sig,
+                            quantize_local(domains[d].fluid_foam_params.volume_density));
+                        upload_sig = hash_combine_local(upload_sig,
+                            quantize_local(domains[d].fluid_foam_params.volume_bubble_strength));
+                        upload_sig = hash_combine_local(upload_sig,
+                            quantize_local(domains[d].fluid_foam_params.volume_spray_strength));
+                    }
                 }
                 const bool upload_changed =
                     density_ptr_override &&
@@ -2089,6 +2292,32 @@ struct SceneData {
                     const int   up_nz    = refined_upload ? up_stats.eff_nz : state.grid.nz;
                     const float up_voxel = refined_upload ? up_stats.eff_voxel : state.grid.voxel_size;
                     const float* up_temp = density_ptr_override ? nullptr : temp_ptr;
+
+                    // ── Volume whitewater: foam → THIS volume's temperature channel ──
+                    // Trilinear-splat the foam particles into a density field at the
+                    // SAME resolution/extent as the SDF density grid, pre-scaled by
+                    // FOAM_TEMP_SCALE. volume_closesthit.rchit (source_type==4) marches
+                    // it as a bright white single-scatter medium (÷FOAM_TEMP_SCALE).
+                    // One volume carries BOTH water (density/SDF) and foam (temp), so
+                    // there is no coincident-volume drop on any backend. copyFromDense
+                    // culls temp voxels < 300 → a ~0.03 foam-density floor (faint
+                    // foam dropped — acceptable).
+                    auto& foam_density = system.domain_foam_density[d];
+                    if (volume_foam_active && !state.foam.empty()) {
+                        constexpr float kFoamTempScale = 10000.0f; // MUST match FOAM_TEMP_SCALE in volume_closesthit.rchit
+                        const float dpp = std::max(0.01f,
+                            domains[d].fluid_foam_params.volume_density);
+                        RayTrophiSim::Fluid::splatFoamDensity(
+                            state.foam, up_nx, up_ny, up_nz, up_voxel, state.grid.origin,
+                            foam_density, dpp,
+                            domains[d].fluid_foam_params.volume_bubble_strength,
+                            domains[d].fluid_foam_params.volume_spray_strength);
+                        for (float& v : foam_density) v *= kFoamTempScale;
+                        up_temp = foam_density.data();
+                    } else if (!foam_density.empty()) {
+                        foam_density.clear();
+                        foam_density.shrink_to_fit();
+                    }
                     system.domain_vdb_ids[d] = mgr.registerOrUpdateLiveVolume(
                         prev_id,
                         volume_name,
@@ -2149,6 +2378,15 @@ struct SceneData {
                     vol->render_isosurface_ior = domains[d].fluid_surface_ior;
                     vol->render_isosurface_roughness = domains[d].fluid_surface_roughness;
                     vol->render_isosurface_foam = domains[d].fluid_surface_foam;
+                    // Volume whitewater look (temperature-channel particle foam):
+                    // tint + extinction drive the white single-scatter medium the
+                    // shader marches (_ext_reserved[3..6]). Only meaningful when the
+                    // foam render mode is Volume.
+                    if (volume_foam_active) {
+                        const auto& fp = domains[d].fluid_foam_params;
+                        vol->render_isosurface_foam_color   = fp.volume_color;
+                        vol->render_isosurface_foam_opacity = fp.volume_opacity;
+                    }
                 }
                 if (domain_shader) {
                     vol->setShader(domain_shader);  // pick up live shader edits
@@ -2190,11 +2428,15 @@ struct SceneData {
         force_simulation_render_sync_ = false;
     }
 
-    // Whitewater "Volume" render mode was REMOVED (it splatted foam into a white
-    // scattering NanoVDB that fought the fluid surface volume on the Vulkan
-    // integrator → black cube). Foam now renders as Surface (metaball mesh, see
-    // syncFluidFoamRenderInstances) or Spheres. This routine only TEARS DOWN any
-    // foam volumes left over from an older session/save so they stop rendering.
+    // The old whitewater "Volume" mode used a SEPARATE foam NanoVDB volume that sat
+    // coincident with the fluid surface volume and got dropped by the Vulkan
+    // integrator (black cube). The Volume mode is back, but it now rides the fluid
+    // SURFACE volume's TEMPERATURE channel instead (single volume → no coincidence;
+    // see volume_foam_active in syncSimulationRenderVolumes). This routine therefore
+    // only TEARS DOWN any leftover SEPARATE foam volumes (domain_foam_volumes) from
+    // an older session/save; it does NOT touch the surface-volume temp-channel foam.
+    // (domain_foam_density is a transient splat scratch refilled per frame, safe to
+    // clear here.)
     void syncFluidFoamVolumes(VDBVolumeManager& mgr, int frame, bool force_sync) {
         (void)frame; (void)force_sync;
         for (auto& system : particle_systems) {
@@ -2485,10 +2727,17 @@ struct SceneData {
             if (!rigidCouplesToFluid(rb)) continue;
             for (char c : rb.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
             for (char c : rb.collider_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
-            h = mix(h, static_cast<uint64_t>(rb.motion_type));
+            // Breakable bodies flip motion_type/dynamic when they shatter at runtime;
+            // hash the authored-static intent so a break doesn't invalidate the fluid
+            // coupling cache (and re-bake/reset). See computeSimConfigSignature.
+            if (rb.breakable) {
+                h = mix(h, 0xB4EAC0DEull);
+            } else {
+                h = mix(h, static_cast<uint64_t>(rb.motion_type));
+                h = mix(h, rb.dynamic ? 1ull : 0ull);
+            }
             h = mix(h, static_cast<uint64_t>(rb.shape));
             h = mix(h, rb.enabled ? 1ull : 0ull);
-            h = mix(h, rb.dynamic ? 1ull : 0ull);
             h = mix(h, qf(rb.mass));
             h = mix(h, rb.auto_mass_from_density ? 1ull : 0ull);
             h = mix(h, qf(rb.density));
@@ -2635,8 +2884,18 @@ struct SceneData {
         for (const auto& rb : rigid_bodies) {
             for (char c : rb.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
             for (char c : rb.collider_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
-            h = mix(h, static_cast<uint64_t>(rb.motion_type));
-            h = mix(h, rb.dynamic ? 1ull : 0ull);
+            // A breakable shard flips motion_type/dynamic at runtime when it shatters.
+            // Hash its AUTHORED (always-static) intent + the fracture authoring fields
+            // instead, so the live break doesn't look like a user edit and trigger a
+            // cache reset — which would un-break it → infinite reset/flicker loop.
+            if (rb.breakable) {
+                h = mix(h, 0xB4EAC0DEull);  // stable "breakable, authored static" marker
+                h = mix(h, qf(rb.break_impulse));
+                for (char c : rb.fracture_group) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
+            } else {
+                h = mix(h, static_cast<uint64_t>(rb.motion_type));
+                h = mix(h, rb.dynamic ? 1ull : 0ull);
+            }
             h = mix(h, static_cast<uint64_t>(rb.shape));
             h = mix(h, qf(rb.mass));
             h = mix(h, rb.auto_mass_from_density ? 1ull : 0ull);
@@ -3184,9 +3443,13 @@ struct SceneData {
     // the proven full-rebuild path. See pending_deform_nodes_.
     void markBodyGeometryDirty(const std::string& node) {
         ++body_geom_version_;  // invalidate the gizmo's memoized world-AABB
-        if (deform_refit_via_vulkan_ && !node.empty()) {
+        if (deform_refit_active_ && !node.empty()) {
+            // Cheap per-node refit on the active path (consumed in Main's render loop)
+            // + a true CPU Embree refit for the picking / CPU-render BVH. Avoids the
+            // full-scene teardown markDirty(Geometry) triggers every frame.
             pending_deform_nodes_.insert(node);
-            g_vulkan_geometry_deform_pending = true;
+            g_geometry_deform_pending = true;
+            g_cpu_bvh_refit_pending = true;
         } else {
             Core::RenderStateManager::instance().markDirty(Core::DirtyScope::Geometry);
         }
@@ -3208,7 +3471,7 @@ struct SceneData {
 
     // Set each frame by the render loop: true only when the active RENDER backend
     // is Vulkan RT and a per-mesh BLAS refit is valid for this frame.
-    void setDeformRefitViaVulkan(bool v) { deform_refit_via_vulkan_ = v; }
+    void setDeformRefitActive(bool v) { deform_refit_active_ = v; }
     bool hasPendingDeformNodes() const { return !pending_deform_nodes_.empty(); }
     void clearPendingDeformNodes() { pending_deform_nodes_.clear(); }
     std::vector<std::string> takePendingDeformNodes() {
@@ -3360,7 +3623,11 @@ struct SceneData {
     void syncRigidToFrame(int frame, float fixed_dt, int max_steps) {
         if (frame < 0) frame = 0;
         if (rigid_timeline_frame_ == frame) return;
-        if (restoreRigidFrame(frame)) return;
+        // Breakable scenes bypass the cache and re-sim: the Static->Dynamic shatter
+        // transition isn't captured by the (dynamic-only) rigid frame cache, so a
+        // cached replay would freeze shards pre-break. Deterministic re-sim re-breaks
+        // at the same frame instead. Rigid is cheap; the fluid/grid cache is untouched.
+        if (!hasBreakableBodies() && restoreRigidFrame(frame)) return;
         advanceRigidTimelineToFrame(frame, fixed_dt, max_steps);
     }
 
@@ -3368,7 +3635,7 @@ struct SceneData {
         // Rigid bodies aren't frame-cached yet (Faz 5); the start is the only frame
         // we can faithfully reconstruct, so reset them to their initial pose there.
         // (A loop-back / scrub to frame 0 thus puts a fallen body back at the top.)
-        if (frame <= 0 && rigid_body_system) rigid_body_system->resetRuntime();
+        if (frame <= 0 && rigid_body_system) { rigid_body_system->resetRuntime(); resetFractureToIntact(); }
         // Soft/cloth deformation is mesh-resident and cached per frame; replay it so
         // a cached-frame scrub/loop shows the cloth's shape instead of a frozen mesh.
         restoreSoftFrame(frame);
@@ -3465,6 +3732,7 @@ struct SceneData {
         }
         if (rigid_timeline_frame_ < 0 || target_frame < rigid_timeline_frame_) {
             rigid_body_system->resetRuntime();
+            resetFractureToIntact();  // rewind un-shatters; re-sim re-breaks deterministically
             rigid_timeline_frame_ = 0;
         }
         int steps = 0;
@@ -3473,6 +3741,7 @@ struct SceneData {
             applySimSourceObjectPosesForFrame(next_frame);
             syncSimulationWorld();
             stepRigidBodiesOnly(fixed_dt, next_frame);
+            processFractureImpacts();  // shatter on contact above threshold
             rigid_timeline_frame_ = next_frame;
             ++steps;
         }
@@ -3507,6 +3776,7 @@ struct SceneData {
         }
         // Rigid bodies respawn at their source objects' poses on the next step.
         if (rigid_body_system) rigid_body_system->resetRuntime();
+        resetFractureToIntact();  // un-shatter breakable groups back to intact
         rigid_timeline_frame_ = 0;
         simulation_world.resetTime(0.0f, 0);
         applySimSourceObjectPosesForFrame(0);
@@ -3557,6 +3827,20 @@ struct SceneData {
                 system.domain_volumes[d]->render_isosurface_ior = domains[d].fluid_surface_ior;
                 system.domain_volumes[d]->render_isosurface_roughness = domains[d].fluid_surface_roughness;
                 system.domain_volumes[d]->render_isosurface_foam = domains[d].fluid_surface_foam;
+                // Volume whitewater look (tint + extinction) is pure shader state —
+                // push it live like the IOR so a Foam Color / Foam Opacity slider
+                // updates the current frame without a re-splat (those ride
+                // g_gas_volumes_dirty into the volume table). Foam Density is NOT
+                // here: it changes the deposited temp grid and needs a re-upload
+                // (the UI routes it through requestSimulationTimelineRenderResync).
+                if (domains[d].fluid_foam_params.enabled &&
+                    domains[d].fluid_foam_params.render_mode ==
+                        RayTrophiSim::Fluid::FoamRenderMode::Volume) {
+                    system.domain_volumes[d]->render_isosurface_foam_color =
+                        domains[d].fluid_foam_params.volume_color;
+                    system.domain_volumes[d]->render_isosurface_foam_opacity =
+                        domains[d].fluid_foam_params.volume_opacity;
+                }
             }
         }
         for (auto& obj : fluid_objects) {
@@ -3648,6 +3932,7 @@ struct SceneData {
             rigid_timeline_frame_ = -1;
             syncSimulationWorld();
             simulation_world.stepOnce(realtime_dt);
+            processFractureImpacts();  // live preview: shatter on impact
             syncSimulationRenderVolumes();
             return;
         }
@@ -3732,6 +4017,11 @@ struct SceneData {
                     }
                     changed = true;
                 }
+                // Resume soft bodies from the (cached) frame we're stepping FROM, so
+                // crossing the cache boundary continues the cloth/soft motion instead
+                // of rebuilding it at rest and re-animating from the start.
+                soft_resume_frame_ = sim_timeline_frame_;
+                soft_resume_dt_ = fixed_dt;
                 int steps = 0;
                 while (sim_timeline_frame_ < tl_frame && steps < kMaxStepsPerTick) {
                     // Re-pose keyframed sim-source objects (e.g. moving colliders)
@@ -3740,12 +4030,14 @@ struct SceneData {
                     applySimSourceObjectPosesForFrame(sim_timeline_frame_ + 1);
                     syncSimulationWorld();
                     simulation_world.stepOnce(fixed_dt);
+                    processFractureImpacts();  // shatter on impact above threshold
                     ++sim_timeline_frame_;
                     rigid_timeline_frame_ = sim_timeline_frame_;
                     captureSimFrame(sim_timeline_frame_);
                     ++steps;
                     changed = true;
                 }
+                soft_resume_frame_ = -1;  // one-shot: only the boundary step resumes
                 // If the bake hasn't caught up to the displayed frame this tick,
                 // restore the playhead pose so the viewport collider doesn't lag
                 // behind the timeline while the remaining frames bake.
@@ -3827,6 +4119,11 @@ struct SceneData {
                 sim_timeline_frame_ = 0;
             }
         }
+        // Resume soft bodies from the cached frame we're stepping FROM (same fix as
+        // the interactive path): rebuilt-from-rest soft bodies would otherwise restart
+        // their motion when the bake resumes past the cache.
+        soft_resume_frame_ = sim_timeline_frame_;
+        soft_resume_dt_ = fixed_dt;
         while (sim_timeline_frame_ < tl_frame) {
             // Re-pose keyframed sim-source objects for the frame being stepped
             // into. Matters for the first rendered frame (bakes 0..start_frame in
@@ -3835,10 +4132,12 @@ struct SceneData {
             applySimSourceObjectPosesForFrame(sim_timeline_frame_ + 1);
             syncSimulationWorld();
             simulation_world.stepOnce(fixed_dt);
+            processFractureImpacts();  // shatter on impact above threshold
             ++sim_timeline_frame_;
             rigid_timeline_frame_ = sim_timeline_frame_;
             if (cache_frames) captureSimFrame(sim_timeline_frame_);
         }
+        soft_resume_frame_ = -1;  // one-shot: only the boundary step resumes
 
         // SurfaceSDF volumes (level-set → NanoVDB) + discrete particle / foam
         // render instances. Order matches the viewport's per-tick drive.

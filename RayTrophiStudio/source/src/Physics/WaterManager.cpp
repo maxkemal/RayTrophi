@@ -2022,7 +2022,7 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
         // Find existing triangles in scene by nodeName (don't create new ones!)
         for (auto& obj : scene.world.objects) {
             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (tri && tri->nodeName == surf.name) {
+            if (tri && tri->getNodeName() == surf.name) {
                 surf.mesh_triangles.push_back(tri);
                 if (!surf.reference_triangle) {
                     surf.reference_triangle = tri;

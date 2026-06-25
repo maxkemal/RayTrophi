@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -1341,7 +1341,6 @@ public:
                             Vec3 verts[3] = { tri->getVertexPosition(0), tri->getVertexPosition(1), tri->getVertexPosition(2) };
                             Vec3 norms[3] = { tri->getVertexNormal(0), tri->getVertexNormal(1), tri->getVertexNormal(2) };
                             Vec2 uvs[3] = { tri->t0, tri->t1, tri->t2 };
-                            Vec3 cols[3] = { tri->getVertexColor(0), tri->getVertexColor(1), tri->getVertexColor(2) };
 
                             size_t base_v_idx = i * 3;
                             uint3 tri_idx_struct;
@@ -1353,7 +1352,7 @@ public:
                                 data.vertices[base_v_idx + k] = make_float3(verts[k].x, verts[k].y, verts[k].z);
                                 data.normals[base_v_idx + k] = make_float3(norms[k].x, norms[k].y, norms[k].z);
                                 data.uvs[base_v_idx + k] = make_float2(uvs[k].u, uvs[k].v);
-                                data.colors[base_v_idx + k] = make_float3(cols[k].x, cols[k].y, cols[k].z);
+                                data.colors[base_v_idx + k] = make_float3(0.0f, 0.0f, 0.0f); // default color
 
                                     // Extract skinning data
                                     if (tri->hasSkinData()) {
@@ -1956,26 +1955,34 @@ private:
             // Mesh'teki üçgenleri çıkar
             processTriangles(mesh, globalTransform, uniqueNodeName, convertedMaterial, triangles, boneData);
 
-            // Copy texture bundle to all newly added triangles
+            // Copy texture bundle to all newly added triangles (only when the material
+            // actually has textures — otherwise leave the deep_ptr null = 8 bytes).
             // Yeni eklenen tüm üçgenlere texture paketini kopyala
-            for (size_t t = triangleStart; t < triangles.size(); ++t) {
-                auto& tri = triangles[t];
-                tri->textureBundle.albedo_tex = hit_data.albedo_tex;
-                tri->textureBundle.has_albedo_tex = hit_data.has_albedo_tex;
-                tri->textureBundle.roughness_tex = hit_data.roughness_tex;
-                tri->textureBundle.has_roughness_tex = hit_data.has_roughness_tex;
-                tri->textureBundle.normal_tex = hit_data.normal_tex;
-                tri->textureBundle.has_normal_tex = hit_data.has_normal_tex;
-                tri->textureBundle.metallic_tex = hit_data.metallic_tex;
-                tri->textureBundle.has_metallic_tex = hit_data.has_metallic_tex;
-                tri->textureBundle.specular_tex = hit_data.specular_tex;
-                tri->textureBundle.has_specular_tex = hit_data.has_specular_tex;
-                tri->textureBundle.transmission_tex = hit_data.transmission_tex;
-                tri->textureBundle.has_transmission_tex = hit_data.has_transmission_tex;
-                tri->textureBundle.opacity_tex = hit_data.opacity_tex;
-                tri->textureBundle.has_opacity_tex = hit_data.has_opacity_tex;
-                tri->textureBundle.emission_tex = hit_data.emission_tex;
-                tri->textureBundle.has_emission_tex = hit_data.has_emission_tex;
+            const bool anyImportedTex =
+                hit_data.has_albedo_tex || hit_data.has_roughness_tex || hit_data.has_normal_tex ||
+                hit_data.has_metallic_tex || hit_data.has_specular_tex || hit_data.has_transmission_tex ||
+                hit_data.has_opacity_tex || hit_data.has_emission_tex;
+            if (anyImportedTex) {
+                OptixGeometryData::TextureBundle importedBundle;
+                importedBundle.albedo_tex = hit_data.albedo_tex;
+                importedBundle.has_albedo_tex = hit_data.has_albedo_tex;
+                importedBundle.roughness_tex = hit_data.roughness_tex;
+                importedBundle.has_roughness_tex = hit_data.has_roughness_tex;
+                importedBundle.normal_tex = hit_data.normal_tex;
+                importedBundle.has_normal_tex = hit_data.has_normal_tex;
+                importedBundle.metallic_tex = hit_data.metallic_tex;
+                importedBundle.has_metallic_tex = hit_data.has_metallic_tex;
+                importedBundle.specular_tex = hit_data.specular_tex;
+                importedBundle.has_specular_tex = hit_data.has_specular_tex;
+                importedBundle.transmission_tex = hit_data.transmission_tex;
+                importedBundle.has_transmission_tex = hit_data.has_transmission_tex;
+                importedBundle.opacity_tex = hit_data.opacity_tex;
+                importedBundle.has_opacity_tex = hit_data.has_opacity_tex;
+                importedBundle.emission_tex = hit_data.emission_tex;
+                importedBundle.has_emission_tex = hit_data.has_emission_tex;
+                for (size_t t = triangleStart; t < triangles.size(); ++t) {
+                    triangles[t]->textureBundle.reset(new OptixGeometryData::TextureBundle(importedBundle));
+                }
             }
 
             // Backup TextureBundle for OptiX usage
@@ -2243,9 +2250,7 @@ private:
                     triangle->applyUVSet(static_cast<size_t>(selectedUvSet));
                 }
 
-                triangle->setVertexColor(0, colors[0]);
-                triangle->setVertexColor(1, colors[1]);
-                triangle->setVertexColor(2, colors[2]);
+                // Colors removed from Triangle
 
                 if (hasActualWeights) {
                     triangle->initializeSkinData();

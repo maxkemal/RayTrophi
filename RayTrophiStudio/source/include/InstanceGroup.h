@@ -153,6 +153,16 @@ struct InstanceGroup {
     // Instances
     std::vector<InstanceTransform> instances;   // All instance transforms
 
+    // Point-sphere render mode (foam / fluid splat). When true, the OptiX
+    // backend does NOT emit one TLAS instance per InstanceTransform; instead it
+    // partitions the instances by source_index (foam type) and builds ONE
+    // analytic sphere GAS per source — the whole set is 3 TLAS instances, not N.
+    // instances[i].position = sphere centre (world), scale.x*0.5 = radius,
+    // source_index = which source/material (sphere GAS) it belongs to. Other
+    // backends (Vulkan / CPU) ignore this flag and keep the InstanceTransform
+    // path, so foam still renders there via the icosphere primitive.
+    bool point_sphere_mode = false;
+
     // Targeting: allow scattering on TERRAIN (default) or on a specific MESH node
     enum class TargetType {
         TERRAIN = 0,

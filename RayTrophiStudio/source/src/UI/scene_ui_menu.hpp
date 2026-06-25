@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -39,6 +39,7 @@
 #endif
 #include <scene_ui_gas.hpp>
 #include "perlin.h"
+#include "FractureGenerator.h"  // Convex Voronoi pre-fracture (destruction Faz 1)
 // extern bool show_controls_window; // Assume defined elsewhere
 
 extern bool g_vulkan_rebuild_pending;
@@ -1220,6 +1221,159 @@ void SceneUI::addProceduralPlane(UIContext& ctx) {
     addViewportMessage("Added Plane: " + name);
 }
 
+// ── Destruction: convex Voronoi pre-fracture (Faz 1) ─────────────────────────
+
+// Refresh every geometry consumer after shards are added/removed (mirrors the
+// procedural-add tail so the change shows on all backends + the picking BVH).
+// Member function because rebuildMeshCache is a SceneUI method.
+void SceneUI::fractureRefreshScene_(UIContext& ctx) {
+    rebuildMeshCache(ctx.scene.world.objects);
+    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    ctx.renderer.resetCPUAccumulation();
+    if (g_backend) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    g_viewport_raster_rebuild_pending = true;
+    if (sceneUiMenuRenderBackendIsVulkan()) g_vulkan_rebuild_pending = true;
+    extern bool g_geometry_dirty;
+    extern std::atomic<uint64_t> g_scene_geometry_generation;
+    extern std::atomic<bool> g_needs_optix_sync;
+    g_geometry_dirty = true;
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+    g_needs_optix_sync.store(true, std::memory_order_release);
+}
+
+// Erase every Triangle in the scene whose node name is in `nodes`.
+static void fractureEraseNodes_(UIContext& ctx, const std::unordered_set<std::string>& nodes) {
+    auto& objs = ctx.scene.world.objects;
+    objs.erase(std::remove_if(objs.begin(), objs.end(),
+        [&](const std::shared_ptr<Hittable>& o) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(o);
+            return tri && nodes.count(tri->getNodeName()) > 0;
+        }), objs.end());
+}
+
+void SceneUI::fractureSelectedMesh(UIContext& ctx, const std::string& node,
+                                   int site_count, uint32_t seed, int pattern) {
+    if (node.empty()) return;
+
+    // Remove any shards from a previous fracture of this node (re-fracture).
+    if (auto sit = fracture_shard_nodes_.find(node); sit != fracture_shard_nodes_.end()) {
+        std::unordered_set<std::string> old(sit->second.begin(), sit->second.end());
+        fractureEraseNodes_(ctx, old);
+        sit->second.clear();
+    }
+
+    // Gather world-space source triangles. First time: collect from the live scene
+    // and PARK the originals (kept alive, pulled out of world.objects). Re-fracture:
+    // read from the parked copies (the originals are no longer in the scene).
+    std::vector<RayTrophiSim::FractureInputTri> src;
+    uint16_t src_mat = 0xFFFF;
+    auto& parked = fracture_parked_originals_[node];
+    if (parked.empty()) {
+        std::vector<std::shared_ptr<Hittable>> keep;
+        keep.reserve(ctx.scene.world.objects.size());
+        for (auto& o : ctx.scene.world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(o);
+            if (tri && tri->getNodeName() == node) {
+                src.push_back({tri->getVertexPosition(0), tri->getVertexPosition(1),
+                               tri->getVertexPosition(2)});
+                if (src_mat == 0xFFFF) src_mat = tri->getMaterialID();
+                parked.push_back(o);
+            } else {
+                keep.push_back(o);
+            }
+        }
+        ctx.scene.world.objects.swap(keep);
+    } else {
+        for (auto& o : parked) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(o);
+            if (!tri) continue;
+            src.push_back({tri->getVertexPosition(0), tri->getVertexPosition(1),
+                           tri->getVertexPosition(2)});
+            if (src_mat == 0xFFFF) src_mat = tri->getMaterialID();
+        }
+    }
+    if (src.empty()) {
+        fracture_parked_originals_.erase(node);
+        addViewportMessage("Fracture: '" + node + "' has no geometry.");
+        return;
+    }
+
+    // Impact point / spread for the clustered pattern = source bbox centre + ~40%
+    // of the diagonal (Faz 2 will feed the real contact point instead).
+    Vec3 mn = src[0].a, mx = src[0].a;
+    for (const auto& t : src) {
+        for (const Vec3& p : {t.a, t.b, t.c}) {
+            mn = Vec3((std::min)(mn.x, p.x), (std::min)(mn.y, p.y), (std::min)(mn.z, p.z));
+            mx = Vec3((std::max)(mx.x, p.x), (std::max)(mx.y, p.y), (std::max)(mx.z, p.z));
+        }
+    }
+    RayTrophiSim::FractureParams fp;
+    fp.site_count = (std::max)(1, site_count);
+    fp.seed = seed ? seed : 1u;
+    fp.pattern = (pattern == 1) ? RayTrophiSim::FracturePattern::ImpactClustered
+                                : RayTrophiSim::FracturePattern::Uniform;
+    fp.impact_point = (mn + mx) * 0.5f;
+    fp.impact_radius = (std::max)(1.0e-3f, (mx - mn).length() * 0.4f);
+
+    std::vector<RayTrophiSim::FractureShard> shards;
+    if (!RayTrophiSim::generateConvexFracture(src, fp, shards) || shards.empty()) {
+        // Degenerate input (flat/thin mesh): restore the original so nothing is lost.
+        unfractureMesh(ctx, node);
+        addViewportMessage("Fracture failed: '" + node + "' is not a solid mesh.");
+        return;
+    }
+
+    // Build a scene node per shard (identity transform → local == world rest).
+    auto& shard_nodes = fracture_shard_nodes_[node];
+    shard_nodes.clear();
+    shard_nodes.reserve(shards.size());
+    // Optional preview gap: pull each shard toward its own centroid so the cut
+    // seams are visible before any physics moves the pieces (Faz 1 feedback). 0 =
+    // perfect tiling (looks intact until Faz 2 separates them on impact).
+    const float shrink = 1.0f - std::clamp(fracture_preview_gap, 0.0f, 0.9f);
+    int idx = 0;
+    for (const auto& shard : shards) {
+        const std::string sname = node + "__shard_" + std::to_string(idx++);
+        auto xf = std::make_shared<Transform>();
+        xf->setBase(Matrix4x4::identity());
+        const Vec3 cz = shard.centroid;
+        for (const auto& st : shard.tris) {
+            const Vec3 a = cz + (st.a - cz) * shrink;
+            const Vec3 b = cz + (st.b - cz) * shrink;
+            const Vec3 c = cz + (st.c - cz) * shrink;
+            auto tri = std::make_shared<Triangle>(
+                a, b, c, st.n, st.n, st.n,
+                Vec2(0, 0), Vec2(1, 0), Vec2(0, 1), src_mat);
+            tri->setTransformHandle(xf);
+            tri->setNodeName(sname);
+            tri->update_bounding_box();
+            ctx.scene.world.objects.push_back(tri);
+        }
+        shard_nodes.push_back(sname);
+    }
+
+    fractureRefreshScene_(ctx);
+    addViewportMessage("Fractured '" + node + "' into " + std::to_string(shards.size()) + " shards.");
+    SCENE_LOG_INFO("Fracture: '" + node + "' -> " + std::to_string(shards.size()) + " shards");
+}
+
+void SceneUI::unfractureMesh(UIContext& ctx, const std::string& node) {
+    if (node.empty()) return;
+    // Drop the shards.
+    if (auto sit = fracture_shard_nodes_.find(node); sit != fracture_shard_nodes_.end()) {
+        std::unordered_set<std::string> shard_set(sit->second.begin(), sit->second.end());
+        fractureEraseNodes_(ctx, shard_set);
+        fracture_shard_nodes_.erase(sit);
+    }
+    // Put the parked originals back into the scene.
+    if (auto pit = fracture_parked_originals_.find(node); pit != fracture_parked_originals_.end()) {
+        for (auto& o : pit->second) ctx.scene.world.objects.push_back(o);
+        fracture_parked_originals_.erase(pit);
+    }
+    fractureRefreshScene_(ctx);
+    addViewportMessage("Restored '" + node + "' (un-fractured).");
+}
+
 // Add a procedural cube to the scene
 void SceneUI::addProceduralCube(UIContext& ctx) {
     std::shared_ptr<Transform> t = std::make_shared<Transform>();
@@ -1253,6 +1407,29 @@ void SceneUI::addProceduralCube(UIContext& ctx) {
         3,2,6, 6,7,3
     };
 
+    const float w = 1.0f / 4.0f;
+    const float h = 1.0f / 3.0f;
+    Vec2 uv_data[36] = {
+        // Face 0 (Front) 1,1: BL, BR, TR,  TR, TL, BL
+        Vec2(1*w, 1*h), Vec2(2*w, 1*h), Vec2(2*w, 2*h),
+        Vec2(2*w, 2*h), Vec2(1*w, 2*h), Vec2(1*w, 1*h),
+        // Face 1 (Right) 2,1: BL, BR, TR,  TR, TL, BL
+        Vec2(2*w, 1*h), Vec2(3*w, 1*h), Vec2(3*w, 2*h),
+        Vec2(3*w, 2*h), Vec2(2*w, 2*h), Vec2(2*w, 1*h),
+        // Face 2 (Back) 3,1: TR, TL, BL,  BL, BR, TR
+        Vec2(4*w, 2*h), Vec2(3*w, 2*h), Vec2(3*w, 1*h),
+        Vec2(3*w, 1*h), Vec2(4*w, 1*h), Vec2(4*w, 2*h),
+        // Face 3 (Left) 0,1: BL, BR, TR,  TR, TL, BL
+        Vec2(0*w, 1*h), Vec2(1*w, 1*h), Vec2(1*w, 2*h),
+        Vec2(1*w, 2*h), Vec2(0*w, 2*h), Vec2(0*w, 1*h),
+        // Face 4 (Bottom) 1,0: BL, BR, TR,  TR, TL, BL
+        Vec2(1*w, 0*h), Vec2(2*w, 0*h), Vec2(2*w, 1*h),
+        Vec2(2*w, 1*h), Vec2(1*w, 1*h), Vec2(1*w, 0*h),
+        // Face 5 (Top) 1,2: BL, BR, TR,  TR, TL, BL
+        Vec2(1*w, 2*h), Vec2(2*w, 2*h), Vec2(2*w, 3*h),
+        Vec2(2*w, 3*h), Vec2(1*w, 3*h), Vec2(1*w, 2*h),
+    };
+
     std::string name = "Cube_" + std::to_string(g_ProjectManager.getProjectData().next_object_id);
 
     for(int i=0; i<36; i+=3) {
@@ -1261,7 +1438,11 @@ void SceneUI::addProceduralCube(UIContext& ctx) {
         Vec3 v2 = p[indices[i+2]];
         Vec3 n = (v1-v0).cross(v2-v0).normalize();
         
-        auto tri = std::make_shared<Triangle>(v0, v1, v2, n, n, n, Vec2(0,0), Vec2(1,0), Vec2(0,1), mat_id);
+        Vec2 uv0 = uv_data[i];
+        Vec2 uv1 = uv_data[i+1];
+        Vec2 uv2 = uv_data[i+2];
+
+        auto tri = std::make_shared<Triangle>(v0, v1, v2, n, n, n, uv0, uv1, uv2, mat_id);
         tri->setTransformHandle(t);
         tri->setNodeName(name);
         tri->update_bounding_box();
@@ -1426,34 +1607,35 @@ void SceneUI::addProceduralCylinder(UIContext& ctx) {
         
         positions.push_back(Vec3(x, halfHeight, z));
         normals.push_back(Vec3(cos(theta), 0.0f, sin(theta)));
-        uvs.push_back(Vec2(u, 1.0f));
+        uvs.push_back(Vec2(u, 0.5f)); // Top of body at V=0.5
 
         positions.push_back(Vec3(x, -halfHeight, z));
         normals.push_back(Vec3(cos(theta), 0.0f, sin(theta)));
-        uvs.push_back(Vec2(u, 0.0f));
+        uvs.push_back(Vec2(u, 0.0f)); // Bottom of body at V=0.0
     }
 
     // Caps
-    int capStartIndex = positions.size();
     Vec3 topCenter(0, halfHeight, 0);
     Vec3 bottomCenter(0, -halfHeight, 0);
     
     // Create triangles for body
     for (int i = 0; i < segments; ++i) {
         int idx = i * 2;
+        // Fix winding: 0, 2, 1
         auto tri1 = std::make_shared<Triangle>(
-            positions[idx], positions[idx + 1], positions[idx + 2],
-            normals[idx], normals[idx + 1], normals[idx + 2],
-            uvs[idx], uvs[idx + 1], uvs[idx + 2], mat_id);
+            positions[idx], positions[idx + 2], positions[idx + 1],
+            normals[idx], normals[idx + 2], normals[idx + 1],
+            uvs[idx], uvs[idx + 2], uvs[idx + 1], mat_id);
         tri1->setTransformHandle(t);
         tri1->setNodeName(name);
         tri1->update_bounding_box();
         ctx.scene.world.objects.push_back(tri1);
 
+        // Fix winding: 1, 2, 3
         auto tri2 = std::make_shared<Triangle>(
-            positions[idx + 1], positions[idx + 3], positions[idx + 2],
-            normals[idx + 1], normals[idx + 3], normals[idx + 2],
-            uvs[idx + 1], uvs[idx + 3], uvs[idx + 2], mat_id);
+            positions[idx + 1], positions[idx + 2], positions[idx + 3],
+            normals[idx + 1], normals[idx + 2], normals[idx + 3],
+            uvs[idx + 1], uvs[idx + 2], uvs[idx + 3], mat_id);
         tri2->setTransformHandle(t);
         tri2->setNodeName(name);
         tri2->update_bounding_box();
@@ -1466,9 +1648,9 @@ void SceneUI::addProceduralCylinder(UIContext& ctx) {
         Vec3 v1 = positions[i * 2];
         Vec3 v2 = positions[(i * 2 + 2) % (segments * 2 + 2)];
         Vec3 n(0, 1, 0);
-        Vec2 uv0(0.5f, 0.5f);
-        Vec2 uv1(0.5f + 0.5f * cos(i * 2.0f * 3.1415926535f / segments), 0.5f + 0.5f * sin(i * 2.0f * 3.1415926535f / segments));
-        Vec2 uv2(0.5f + 0.5f * cos((i + 1) * 2.0f * 3.1415926535f / segments), 0.5f + 0.5f * sin((i + 1) * 2.0f * 3.1415926535f / segments));
+        Vec2 uv0(0.25f, 0.75f);
+        Vec2 uv1(0.25f + 0.25f * cos(i * 2.0f * 3.1415926535f / segments), 0.75f + 0.25f * sin(i * 2.0f * 3.1415926535f / segments));
+        Vec2 uv2(0.25f + 0.25f * cos((i + 1) * 2.0f * 3.1415926535f / segments), 0.75f + 0.25f * sin((i + 1) * 2.0f * 3.1415926535f / segments));
         
         auto tri = std::make_shared<Triangle>(v0, v1, v2, n, n, n, uv0, uv1, uv2, mat_id);
         tri->setTransformHandle(t);
@@ -1483,12 +1665,11 @@ void SceneUI::addProceduralCylinder(UIContext& ctx) {
         Vec3 v1 = positions[(i * 2 + 3) % (segments * 2 + 2)];
         Vec3 v2 = positions[i * 2 + 1];
         Vec3 n(0, -1, 0);
-        Vec2 uv0(0.5f, 0.5f);
-        // Correcting the UV assignments to prevent warning
+        Vec2 uv0(0.75f, 0.75f);
         float angle1 = (i + 1) * 2.0f * 3.1415926535f / segments;
         float angle2 = i * 2.0f * 3.1415926535f / segments;
-        Vec2 uv1(0.5f + 0.5f * cos(angle1), 0.5f + 0.5f * sin(angle1));
-        Vec2 uv2(0.5f + 0.5f * cos(angle2), 0.5f + 0.5f * sin(angle2));
+        Vec2 uv1(0.75f + 0.25f * cos(angle1), 0.75f + 0.25f * sin(angle1));
+        Vec2 uv2(0.75f + 0.25f * cos(angle2), 0.75f + 0.25f * sin(angle2));
         
         auto tri = std::make_shared<Triangle>(v0, v1, v2, n, n, n, uv0, uv1, uv2, mat_id);
         tri->setTransformHandle(t);

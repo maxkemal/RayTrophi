@@ -1,0 +1,67 @@
+// sim_grid_subtract_gradient.comp
+// Subtracts pressure gradient from MAC velocity: vel -= dt/h * grad(p).
+// Handles all three face-arrays in a single kernel (id ranges over max faces).
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    int boundary;
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int iterations;
+    int parity;
+} pc;
+
+layout(set = 0, binding = 0) buffer VelX      { float vel_x[];    };
+layout(set = 0, binding = 1) buffer VelY      { float vel_y[];    };
+layout(set = 0, binding = 2) buffer VelZ      { float vel_z[];    };
+layout(set = 0, binding = 3) readonly buffer Pressure  { float pressure[]; };
+layout(set = 0, binding = 4) readonly buffer Divergence{ float dummy[];    };
+
+float sample_p(int i, int j, int k) {
+    if (i < 0 || i >= pc.nx || j < 0 || j >= pc.ny || k < 0 || k >= pc.nz) {
+        if (pc.boundary == 0) return 0.0; // open
+        i = clamp(i, 0, pc.nx-1);
+        j = clamp(j, 0, pc.ny-1);
+        k = clamp(k, 0, pc.nz-1);
+    }
+    return pressure[i + j*pc.nx + k*pc.nx*pc.ny];
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+
+    float h     = max(pc.voxel_size, 1e-6);
+    float scale = pc.dt / h;
+
+    int vx_count = (pc.nx+1) * pc.ny * pc.nz;
+    int vy_count = pc.nx * (pc.ny+1) * pc.nz;
+    int vz_count = pc.nx * pc.ny * (pc.nz+1);
+
+    if (id < vx_count) {
+        int plane = (pc.nx+1)*pc.ny;
+        int k = id / plane;
+        int rem = id - k*plane;
+        int j = rem / (pc.nx+1);
+        int i = rem - j*(pc.nx+1);
+        vel_x[id] -= scale * (sample_p(i,j,k) - sample_p(i-1,j,k));
+    }
+    if (id < vy_count) {
+        int plane = pc.nx*(pc.ny+1);
+        int k = id / plane;
+        int rem = id - k*plane;
+        int j = rem / pc.nx;
+        int i = rem - j*pc.nx;
+        vel_y[id] -= scale * (sample_p(i,j,k) - sample_p(i,j-1,k));
+    }
+    if (id < vz_count) {
+        int plane = pc.nx*pc.ny;
+        int k = id / plane;
+        int rem = id - k*plane;
+        int j = rem / pc.nx;
+        int i = rem - j*pc.nx;
+        vel_z[id] -= scale * (sample_p(i,j,k) - sample_p(i,j,k-1));
+    }
+}

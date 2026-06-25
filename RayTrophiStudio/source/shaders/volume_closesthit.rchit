@@ -1018,19 +1018,33 @@ void main() {
                 vec3  skyAmb  = sampleSkyAmbient(rayDir);
                 vec3  sunDirF = normalize(worldData.w.sunDir);
                 float jitf    = rnd(payload.seed);
+                // ── Ray-constant shading terms (HOISTED out of the per-step loop) ──
+                // view·sun, the HG phase and the thin-film cos() are identical for
+                // every foam sample on this ray → evaluate them ONCE, not per step.
+                float cosVS      = dot(rayDir, sunDirF);                      // view·sun
+                float foamPhase  = henyeyGreenstein(cosVS, 0.35);            // mild forward lobe
+                vec3  silver     = mix(vec3(1.0), 0.5 + 0.5 * cos(cosVS * 9.0 + vec3(0.0, 2.0, 4.0)), 0.15);
+                // Foam shares the volume's Edge Cutoff (_reserved[0]) so the faint
+                // low-density foam fringe is clipped like the water density — otherwise
+                // it leaves a grey haze the density cutoff can't reach.
+                float foamCutoff = max(vol._reserved[0], 1e-4);
                 for (int fs = 0; fs < fsteps && foam_T > 0.01; ++fs) {
                     float ft   = tNear + (float(fs) + jitf) * fstep;
                     vec3  fpos = rayOrigin + rayDir * ft;
                     float fd   = sampleTemperature(vol, fpos) * (1.0 / FOAM_TEMP_SCALE);
-                    if (fd <= 1e-4) continue;
+                    if (fd <= foamCutoff) continue;
                     float a    = 1.0 - exp(-fd * foamOptical * fstep);
+                    // Soft edge falloff over [cutoff, 2·cutoff] → clean fade, not a ring.
+                    a *= smoothstep(foamCutoff, foamCutoff * 2.0, fd);
 
-                    // Light the foam the SAME way the fog raymarch does — scene
-                    // lights[] + nishita sun + sky ambient. Lighting it with ONLY
-                    // the sun made foam BLACK in scene-light-lit setups (the sun
-                    // term is ~0 there), and a dark in-scatter under a dimming
-                    // foam_T is exactly the black-on-water the user reported.
-                    // Foam is diffuse white → isotropic, NO self-shadow (bright).
+                    // ── Production whitewater shading ──────────────────────────
+                    // Foam is a bright, high-albedo single-scatter medium. Two cues
+                    // sell the look: a FORWARD-SCATTER silver lining (HG phase toward
+                    // the light, so backlit crests glow) and a POWDER term (gentle
+                    // edge-dark / core-bright self-occlusion). Still scene-lit (lights
+                    // + nishita sun + sky ambient) and NO self-shadow, so it never
+                    // goes black in scene-light-lit setups.
+                    float powder    = mix(0.75, 1.0, gpu_powder_effect(fd, cosVS)); // gentle edge-dark (cosVS/foamPhase hoisted)
                     vec3 Lf = vec3(0.0);
                     if (cam.lightCount > 0u) {
                         int li = clamp(int(floor(rnd(payload.seed) * float(cam.lightCount))),
@@ -1046,13 +1060,26 @@ void main() {
                             ldir = (dL > EPSILON) ? (toL / dL) : vec3(0.0, 1.0, 0.0);
                             if (dL > EPSILON) latten = 1.0 / (dL * dL);
                         }
-                        Lf += float(cam.lightCount) * lt.color.rgb * lt.color.a * latten;
+                        float lph = henyeyGreenstein(dot(rayDir, ldir), 0.35);  // per-light silver lining
+                        Lf += float(cam.lightCount) * lt.color.rgb * lt.color.a * latten
+                            * (1.0 + lph * 3.0) * powder;
                     }
+                    // Bubble-aggregate upgrade: thin-film silver tint (hoisted above).
                     if (worldData.w.mode == 2) {
                         Lf += sampleTransmittanceLUT(fpos, sunDirF)
-                            * worldData.w.sunColor * worldData.w.sunIntensity;
+                            * worldData.w.sunColor * worldData.w.sunIntensity
+                            * (1.0 + foamPhase * 4.0) * powder * silver;        // backlit crest glow
+                    } else {
+                        Lf += worldData.w.sunColor * worldData.w.sunIntensity
+                            * (foamPhase * 2.0) * powder * silver;              // sun glow w/o atmosphere LUT
                     }
                     Lf += skyAmb;                       // ambient fill (never fully dark)
+                    // MULTIPLE SCATTERING: foam is a packed mass of air bubbles; its
+                    // white comes from light diffusing across many interfaces, so thick
+                    // foam reads as a bright FILLED white, not a thin wisp. Near-
+                    // isotropic boost that saturates with local density.
+                    float ms = 1.0 - exp(-fd * 6.0);
+                    Lf += 1.2 * ms * (skyAmb + 0.4 * worldData.w.sunColor * worldData.w.sunIntensity);
 
                     foam_inscatter += foam_T * a * (foamAlbedo * Lf);
                     foam_T *= (1.0 - a);

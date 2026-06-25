@@ -1,4 +1,4 @@
-﻿#include "Paint/MeshPaintAdapter.h"
+#include "Paint/MeshPaintAdapter.h"
 
 #include "scene_data.h"
 #include "Triangle.h"
@@ -2682,6 +2682,10 @@ bool MeshPaintAdapter::assignTextureToChannel(PaintChannel channel) {
     }
 
     set.initialized = true;
+    
+    // Ensure the layer stack exists and bakes this channel's UVs BEFORE we zero the material UVs
+    ensureLayerStack();
+    
     bindTextureSetToMaterial();
     return true;
 }
@@ -2738,6 +2742,15 @@ void MeshPaintAdapter::bindTextureSetToMaterial() {
     }
     if (set->opacity) {
         material->opacityProperty.texture = set->opacity;
+    }
+
+    // Since the PaintLayerStack baked the original texture's UV transformations into the pixel data,
+    // we must reset the material's UV transforms to 1.0/0.0 to prevent the GPU from scaling the baked strokes.
+    if (auto pbsdf = std::dynamic_pointer_cast<PrincipledBSDF>(material)) {
+        pbsdf->textureTransform.scale = Vec2(1.0f, 1.0f);
+        pbsdf->textureTransform.translation = Vec2(0.0f, 0.0f);
+        pbsdf->textureTransform.tilingFactor = Vec2(1.0f, 1.0f);
+        pbsdf->textureTransform.rotation_degrees = 0.0f;
     }
 }
 
@@ -3453,9 +3466,29 @@ const PaintLayerStack* MeshPaintAdapter::getLayerStack() const {
 PaintLayerStack& MeshPaintAdapter::ensureLayerStack() {
     const std::string key = getNodeName() + "#" + std::to_string(getMaterialID());
     auto it = scene_->mesh_paint_layer_stacks.find(key);
+    
+    PaintLayerStack::PaintUVParams uv_params;
+    if (triangle_ && triangle_->getMaterial()) {
+        std::shared_ptr<Material> mat = triangle_->getMaterial();
+        if (auto pbsdf = std::dynamic_pointer_cast<PrincipledBSDF>(mat)) {
+            uv_params.scale_x = pbsdf->textureTransform.scale.u;
+            uv_params.scale_y = pbsdf->textureTransform.scale.v;
+            uv_params.offset_x = pbsdf->textureTransform.translation.u;
+            uv_params.offset_y = pbsdf->textureTransform.translation.v;
+            uv_params.tiling_x = pbsdf->textureTransform.tilingFactor.u;
+            uv_params.tiling_y = pbsdf->textureTransform.tilingFactor.v;
+            uv_params.rotation_degrees = pbsdf->textureTransform.rotation_degrees;
+            uv_params.wrap_mode = static_cast<int>(pbsdf->textureTransform.wrapMode);
+        }
+    }
+
     if (it != scene_->mesh_paint_layer_stacks.end()) {
         PaintLayerStack& existing = it->second;
         PaintTextureSet* tex_set = getTextureSet();
+
+        // Ensure subsequent channels use the UV params from the original bake session
+        // to prevent later channels from ignoring the UV transform after bindTextureSetToMaterial zeroes it out.
+        PaintLayerStack::PaintUVParams use_uv = existing.has_baked_uv_params ? existing.baked_uv_params : uv_params;
 
         if (tex_set && tex_set->initialized && existing.layerCount() > 0) {
             PaintLayerData* base = existing.layerAt(0);
@@ -3470,19 +3503,13 @@ PaintLayerStack& MeshPaintAdapter::ensureLayerStack() {
                     if (!texture || !texture->is_loaded() || texture->pixels.empty()) {
                         continue;
                     }
-
-                    auto& buf = base->ensurePixels(channel);
-                    if (texture->width == base->width && texture->height == base->height) {
-                        buf = texture->pixels;
-                    } else {
-                        buf.assign(static_cast<size_t>(base->width) * static_cast<size_t>(base->height),
-                                   defaultChannelPixel(channel));
+                    
+                    // We just call seedFromTextureSet to properly handle UV baking for any newly added channels
+                    existing.seedFromTextureSet(*tex_set, use_uv);
+                    for (int c = 0; c < static_cast<int>(kPaintChannelCount); ++c) {
+                        existing.flattenChannelInto(static_cast<PaintChannel>(c), *tex_set);
                     }
-                    if (channel != PaintChannel::Opacity) {
-                        for (auto& p : buf) {
-                            p.a = 255;
-                        }
-                    }
+                    break;
                 }
             }
         }
@@ -3498,7 +3525,10 @@ PaintLayerStack& MeshPaintAdapter::ensureLayerStack() {
                 if (!has_any) {
                     PaintTextureSet* tex_set = getTextureSet();
                     if (tex_set && tex_set->initialized) {
-                        existing.seedFromTextureSet(*tex_set);
+                        existing.seedFromTextureSet(*tex_set, use_uv);
+                        for (int c = 0; c < static_cast<int>(kPaintChannelCount); ++c) {
+                            existing.flattenChannelInto(static_cast<PaintChannel>(c), *tex_set);
+                        }
                     }
                 }
             }
@@ -3508,9 +3538,15 @@ PaintLayerStack& MeshPaintAdapter::ensureLayerStack() {
 
     // Create a new layer stack and seed it from the existing texture set if available.
     PaintLayerStack stack;
+    stack.baked_uv_params = uv_params;
+    stack.has_baked_uv_params = true;
+    
     PaintTextureSet* tex_set = getTextureSet();
     if (tex_set && tex_set->initialized) {
-        stack.seedFromTextureSet(*tex_set);
+        stack.seedFromTextureSet(*tex_set, uv_params);
+        for (int c = 0; c < static_cast<int>(kPaintChannelCount); ++c) {
+            stack.flattenChannelInto(static_cast<PaintChannel>(c), *tex_set);
+        }
     } else {
         // Use the texture set resolution or the default.
         const int res = tex_set ? tex_set->resolution : 1024;

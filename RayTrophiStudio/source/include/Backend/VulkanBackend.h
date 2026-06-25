@@ -248,6 +248,16 @@ struct BLASCreateInfo {
     
     bool allowUpdate = false;               // For dynamic geometry
     bool opaqueGeometry = false;            // True when every primitive can skip opacity any-hit
+
+    // Phase 3d zero-copy device-resident geometry: when set, the geometry already lives
+    // in a GPU buffer (e.g. written by the CC compute refine) laid out exactly as
+    // createBLAS would combine host data — vert | norm | uv | idx | mat, contiguous,
+    // with the same offsets derived from the *Count fields. The BLAS builds straight
+    // from geometryDeviceAddress with no host upload; the buffer is NOT owned by the
+    // BLAS (see AccelStructHandle::externalGeometry). vertexData/normalData/etc. are
+    // ignored in this mode; the *Count fields must still be set for offset math.
+    bool useDeviceGeometry = false;
+    uint64_t geometryDeviceAddress = 0;
 };
 
 struct VkGeometryData {
@@ -322,7 +332,11 @@ struct AccelStructHandle {
     BufferHandle indexBuffer;
     BufferHandle materialIndexBuffer;
     VkDeviceAddress deviceAddress = 0;
-    
+
+    // Phase 3d: geometry buffer is owned elsewhere (device-resident CC output); the
+    // attribute BufferHandles only carry addresses, so cleanup must NOT destroy them.
+    bool externalGeometry = false;
+
     // Skinning
     bool hasSkinning = false;
     bool allowUpdate = false;
@@ -469,6 +483,17 @@ public:
      */
     uint32_t createHairAABB_BLAS(const std::vector<VkAabbPositionsKHR>& aabbs);
 
+    // Foam point-sphere AABB BLAS (combined, one per foam cloud). The AS + AABB
+    // buffer are sized for `poolCapacity` (the group's full instance pool) but only
+    // the supplied `aabbs` (LIVE spheres, compact) are built — so each frame rebuilds
+    // just the live foam, matching the OptiX compact sphere GAS, while leaving room
+    // for the live count to grow up to poolCapacity without a structural rebuild.
+    uint32_t createFoamSphereBLAS(const std::vector<VkAabbPositionsKHR>& aabbs, uint32_t poolCapacity);
+    bool     updateFoamSphereBLAS(uint32_t blasIndex, const std::vector<VkAabbPositionsKHR>& aabbs);
+    // Upload the combined foam sphere SSBO (FoamSphereGPU[count], 32 bytes each)
+    // to binding 18.
+    void     updateFoamSphereBuffer(const void* data, uint32_t count);
+
     /**
      * @brief Upload hair segment and material GPU buffers.
      * Called by uploadHairStrands / uploadHairMaterials, also updates descriptors.
@@ -479,6 +504,13 @@ public:
     /// Returns the SBT hit-region offset for hair instances.
     /// 1 if no volume shaders loaded, 2 if volume shaders present.
     uint32_t getHairSbtOffset() const { return m_hasVolumeShaders ? 2u : 1u; }
+
+    /// Returns the SBT hit-region offset for foam point-sphere instances.
+    /// Hit region order: triangle(0), [volume], [hair], [sphere] — sphere is
+    /// always last, so its offset is 1 + the optional groups before it.
+    uint32_t getSphereSbtOffset() const {
+        return 1u + (m_hasVolumeShaders ? 1u : 0u) + (m_hasHairShaders ? 1u : 0u);
+    }
     
     /**
      * @brief Build top-level acceleration structure (instances)
@@ -517,7 +549,9 @@ public:
                           const std::vector<std::uint32_t>& hairClosestHitSPV       = std::vector<std::uint32_t>(),
                           const std::vector<std::uint32_t>& hairIntersectionSPV     = std::vector<std::uint32_t>(),
                           const std::vector<std::uint32_t>& shadowMissSPV           = std::vector<std::uint32_t>(),
-                          const std::vector<std::uint32_t>& hairAnyHitSPV           = std::vector<std::uint32_t>());
+                          const std::vector<std::uint32_t>& hairAnyHitSPV           = std::vector<std::uint32_t>(),
+                          const std::vector<std::uint32_t>& sphereClosestHitSPV     = std::vector<std::uint32_t>(),
+                          const std::vector<std::uint32_t>& sphereIntersectionSPV   = std::vector<std::uint32_t>());
     
     /**
      * @brief Bind RT descriptors (output image + TLAS)
@@ -705,6 +739,7 @@ public:
     bool m_rtPipelineReady = false;
     bool m_hasVolumeShaders = false; // Whether pipeline includes volume procedural hit group
     bool m_hasHairShaders = false; // Whether pipeline includes hair procedural hit group
+    bool m_hasSphereShaders = false; // Whether pipeline includes foam point-sphere procedural hit group
     bool m_hasShadowMiss = false; // Whether a shadow miss shader is at miss index 1
     VkPipeline m_rtPipeline = VK_NULL_HANDLE;
     
@@ -855,6 +890,14 @@ private:
     // Hair GPU buffers (bindings 10 and 11)
     BufferHandle m_hairSegmentBuffer;    // HairSegmentGPU[] — binding 10
     BufferHandle m_hairMaterialBuffer;   // HairGpuMaterial[] — binding 11
+
+    // Foam point-sphere buffer (binding 18). One combined buffer for the whole
+    // foam cloud: { vec4 centreRadius, uint matId, uint pad[3] } per sphere,
+    // indexed by gl_PrimitiveID in sphere_intersection.rint / sphere_closesthit.
+    // Kept persistently bound (dummy 1-element until foam exists) so binding 18
+    // is always valid; the foam consumer re-uploads it each frame.
+    BufferHandle m_foamSphereBuffer;     // FoamSphereGPU[] — binding 18
+    uint32_t m_foamSphereCount = 0;
     
     // Shader Binding Table
     BufferHandle m_sbtBuffer;
@@ -1021,6 +1064,59 @@ public:
     // IBackend - Geometry Upload
     // ========================================================================
     uint32_t uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName) override;
+
+    // Phase 3d: register a BLAS for a DEVICE-RESIDENT CC mesh whose geometry already
+    // lives in a GPU buffer (combined non-indexed layout written by the CC compute
+    // expand; same VkDevice). No host triangles, no upload — createBLAS builds straight
+    // from geometryDeviceAddress. materialIds is the per-triangle host copy (from the CC
+    // plan's triMat) used for shader material lookup; the buffer's mat block carries the
+    // device copy. Returns the BLAS index (cached by meshName) or UINT32_MAX on failure.
+    uint32_t uploadDeviceResidentMesh(const std::string& meshName,
+                                      uint64_t geometryDeviceAddress,
+                                      uint32_t vertexCount,
+                                      uint32_t triCount,
+                                      const std::vector<uint32_t>& materialIds,
+                                      bool opaqueGeometry);
+
+    // Phase 3d: a static / render-only device-resident CC mesh. Its geometry already lives
+    // in a GPU buffer (combined non-indexed layout written by the CC compute expand); there
+    // are NO host triangles. Backend-owned; the heavy rebuild registers a BLAS straight from
+    // deviceAddress and appends a TLAS instance. Picking / Solid raster fall back to the cage.
+    struct DeviceResidentCCMesh {
+        std::string meshKey;
+        uint64_t bufferId = 0;             // shared mesh-compute buffer handle id (for release)
+        uint64_t deviceAddress = 0;
+        uint32_t vertexCount = 0;          // triCount * 3
+        uint32_t triCount = 0;
+        Matrix4x4 transform;               // world transform of the instance
+        uint32_t materialID = 0;           // representative material id for the instance
+        std::vector<uint32_t> materialIds; // per-triangle material ids (shader lookup)
+        bool opaque = false;
+        std::string cageNodeName;          // editable cage (picking / raster fallback)
+    };
+
+    // Register or replace a device-resident CC mesh (matched by meshKey). The caller must
+    // trigger a geometry rebuild afterwards. Replacing queues the old GPU buffer for release.
+    void registerDeviceResidentCCMesh(const DeviceResidentCCMesh& mesh);
+    // Remove a device-resident CC mesh by key; queues its GPU buffer for deferred release.
+    void removeDeviceResidentCCMesh(const std::string& meshKey);
+    // True if a live device-resident CC mesh is currently registered for this cage node.
+    // The host-display machine uses this to skip the per-frame full CPU BVH rebuild on cage
+    // edits (the dense lives on the GPU + is RT-excluded; CPU BVH is deferred to stroke end).
+    bool hasDeviceResidentCCNode(const std::string& cageNodeName) const;
+
+    // Slice 4 fast path: queue a position-only refit (UI thread). The entry must already be
+    // registered with the same vertexCount; the caller also registerDeviceResidentCCMesh()'s
+    // the new buffer so a fallback full rebuild stays correct. Coalesces per meshKey (the
+    // superseded buffer is queued for release).
+    void queueDeviceResidentCCRefit(const std::string& meshKey, uint64_t newGeomBase,
+                                    uint64_t newBufferId, uint32_t vertexCount);
+    // Drain queued refits (render thread): MODE_UPDATE-refit each BLAS to its new device
+    // buffer + refresh the shader geometry-address binding + refit the TLAS. Returns false if
+    // any request could not be refit (missing / non-updatable / topology changed) so the
+    // caller can fall back to a full rebuild. No-op (returns true) when the queue is empty.
+    bool drainDeviceResidentCCRefits();
+
     uint32_t uploadHairStrands(const std::vector<HairStrandData>& strands, const std::string& groomName) override;
     void clearHairGeometry(bool rebuild_tlas = true);
     // Upload flat LINE_LIST vertex data {x,y,z,v_coord} x vertexCount for the raster viewport hair overlay
@@ -1519,8 +1615,35 @@ protected:
     // that region in place, which requires knowing the current per-triangle ids.
     std::unordered_map<uint32_t, std::vector<uint32_t>> m_blasMaterialIds;
 
+    // Phase 3d: backend-owned static device-resident CC meshes (geometry on the GPU; no
+    // host triangles). The heavy rebuild appends a BLAS + TLAS instance for each. Buffers
+    // queued in m_deviceResidentReleaseQueue are freed only after the BLAS teardown +
+    // GPU idle inside rebuildAccelerationStructure (the hit shader reads them while live).
+    std::vector<DeviceResidentCCMesh> m_deviceResidentMeshes;
+    std::vector<uint64_t> m_deviceResidentReleaseQueue;
+
+    // Phase 3d Slice 4: a position-only cage edit (same triangle count) re-evaluates the CC
+    // stencils into a NEW device buffer, then REFITS the existing BLAS to it instead of a full
+    // scene rebuild. queueDeviceResidentCCRefit (UI thread) coalesces per meshKey;
+    // drainDeviceResidentCCRefits (render thread) MODE_UPDATE-refits each BLAS + TLAS.
+    struct DeviceCCRefitRequest {
+        std::string meshKey;
+        uint64_t newGeomBase = 0;   // device address of the freshly-evaluated combined buffer
+        uint64_t newBufferId = 0;   // compute-backend handle id (replaces the entry's buffer)
+        uint32_t vertexCount = 0;   // triCount * 3 (must match the registered BLAS to refit)
+    };
+    std::vector<DeviceCCRefitRequest> m_deviceResidentRefitQueue;
+
     // Volume instance tracking for Vulkan volume rendering
     uint32_t m_volumeBlasIndex = UINT32_MAX; // Shared AABB BLAS for all volumes
+
+    // Foam / fluid-splat point-sphere tracking. A point_sphere_mode InstanceGroup
+    // becomes ONE AABB BLAS (binding-18 sphere SSBO) + ONE TLAS instance instead of
+    // N per-particle instances. The BLAS is refit in place each frame via
+    // updateFoamSphereBLAS(); a pool-capacity change forces a full rebuild.
+    uint32_t m_foamSphereBlasIndex   = UINT32_MAX; // index into m_device->m_blasList
+    int      m_foamSphereGroupId     = -1;         // owning InstanceGroup::id
+    uint32_t m_foamSpherePoolCapacity = 0;         // stable primitive count for refit
 
     // TLAS storage for updates
     std::vector<VulkanRT::TLASInstance> m_vkInstances;

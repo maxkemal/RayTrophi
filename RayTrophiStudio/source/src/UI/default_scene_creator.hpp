@@ -61,13 +61,26 @@ createCubeTriangles(uint16_t matId) {
         {1, 2, 6, 5, { 1,  0,  0}},
     };
 
-    const Vec2 uv0(0,0), uv1(1,0), uv2(1,1), uv3(0,1);
+    const float w = 1.0f / 4.0f;
+    const float h = 1.0f / 3.0f;
+    
+    struct FaceUV { Vec2 a, b, c, d; };
+    const FaceUV uvs[6] = {
+        { Vec2(4*w, 1*h), Vec2(4*w, 2*h), Vec2(3*w, 2*h), Vec2(3*w, 1*h) }, // Face 0 (Back)
+        { Vec2(1*w, 1*h), Vec2(2*w, 1*h), Vec2(2*w, 2*h), Vec2(1*w, 2*h) }, // Face 1 (Front)
+        { Vec2(1*w, 0*h), Vec2(2*w, 0*h), Vec2(2*w, 1*h), Vec2(1*w, 1*h) }, // Face 2 (Bottom)
+        { Vec2(1*w, 3*h), Vec2(1*w, 2*h), Vec2(2*w, 2*h), Vec2(2*w, 3*h) }, // Face 3 (Top)
+        { Vec2(0*w, 1*h), Vec2(1*w, 1*h), Vec2(1*w, 2*h), Vec2(0*w, 2*h) }, // Face 4 (Left)
+        { Vec2(3*w, 1*h), Vec2(3*w, 2*h), Vec2(2*w, 2*h), Vec2(2*w, 1*h) }, // Face 5 (Right)
+    };
 
-    for (const auto& f : faces) {
+    for (int i = 0; i < 6; ++i) {
+        const auto& f = faces[i];
+        const auto& uv = uvs[i];
         auto t1 = std::make_shared<Triangle>(
-            v[f.a], v[f.b], v[f.c], f.n, f.n, f.n, uv0, uv1, uv2, matId);
+            v[f.a], v[f.b], v[f.c], f.n, f.n, f.n, uv.a, uv.b, uv.c, matId);
         auto t2 = std::make_shared<Triangle>(
-            v[f.a], v[f.c], v[f.d], f.n, f.n, f.n, uv0, uv2, uv3, matId);
+            v[f.a], v[f.c], v[f.d], f.n, f.n, f.n, uv.a, uv.c, uv.d, matId);
         tris->push_back(t1);
         tris->push_back(t2);
     }
@@ -217,7 +230,7 @@ inline void createDefaultScene(SceneData& scene, Renderer& renderer, Backend::IB
         cubeTransform->updateMatrix();
 
         for (auto& tri : *cubeTris) {
-            tri->nodeName = "Cube";
+            tri->setNodeName("Cube");
             tri->setTransformHandle(cubeTransform);
         }
 

@@ -1223,17 +1223,9 @@ void TerrainManager::sculpt(TerrainObject* terrain, const Vec3& hitPoint, int mo
                      float v = v_rot * 0.5f + 0.5f;
                      
                      if (u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f) {
-                         // Sample texture (Red channel usually)
-                         // Simple nearest neighbor or bilinear if possible. 
-                         // Accessing raw pixels from texture class might be slow or not exposed.
-                         // Assuming texture has getPixel or raw buffer access.
-                         // If not, we might need to rely on CPU buffer if available.
-                         // For now, assuming Texture has 'getPixelIntensity(u,v)' or similar.
-                         // Actually Texture class structure is unknown here, let's assume it has `data` vector if CPU accessible.
-                         // If generic Texture class doesn't keep CPU data, we can't stamp easily.
-                         // FALLBACK: Use a simple noise function if texture access is hard, OR check Texture.h
-                         
-                         float texVal = stampTexture->sampleIntensity(u, v);
+                         // Bilinear texture sampling for high-fidelity stamp edges
+                         Vec3 color = stampTexture->get_color_bilinear(u, v);
+                         float texVal = 0.299f * color.x + 0.587f * color.y + 0.114f * color.z;
                          texVal = std::clamp(texVal, 0.0f, 1.0f);
 
                          float stampMask = texVal * falloff;

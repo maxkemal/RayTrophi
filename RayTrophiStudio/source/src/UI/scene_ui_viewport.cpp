@@ -461,7 +461,7 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
                 const ImVec4 pivotCenterCol(0.95f, 0.72f, 0.28f, 1.0f);
                 if (iconTypeButton("##center_pivot", ImVec2(btn_h, btn_h), pivotCenterCol, UIWidgets::IconType::PivotCenter, 19.0f)) {
                     if (can_edit_object_pivot) {
-                        std::string nm = sel.selected.object->nodeName;
+                        std::string nm = sel.selected.object->getNodeName();
                         if (nm.empty()) nm = "Unnamed";
                         recenterObjectPivotToBoundsCenter(ctx, nm);
                     }

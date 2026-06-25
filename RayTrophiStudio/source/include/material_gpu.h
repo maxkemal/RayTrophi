@@ -16,8 +16,16 @@
 #include <string>
 
 // Float comparison epsilon
-constexpr float FLOAT_COMPARE_EPSILON = 1e-4f;  
+constexpr float FLOAT_COMPARE_EPSILON = 1e-4f;
 static constexpr int GPU_MAT_FLAG_WATER = (1 << 17);
+// Thin-shell BUBBLE material (champagne / soda / soap-foam close-up). The BSDF
+// treats the surface as a thin dielectric shell: Fresnel rim reflection vs a
+// STRAIGHT pass-through (no net refraction bending), so it reads as a bright-
+// rimmed transparent bubble regardless of the surrounding medium (no nested-
+// dielectric needed). bubble_ior drives the rim Fresnel; bubble_film is reserved
+// for the thin-film interference (soap iridescence) phase.
+static constexpr int GPU_MAT_FLAG_BUBBLE = (1 << 18);
+static constexpr int GPU_MAT_FLAG_MARBLE_VOLUME = (1 << 19); // glass marble full-volume medium march
 
 /**
  * @brief Optimized GPU Material structure
@@ -116,10 +124,31 @@ struct alignas(16) GpuMaterial {
 
     // Scalar specular amount. Blender-style dielectric F0 = 0.08 * specular.
     float specular = 0.5f;
-    float _specular_pad0 = 0.0f;
-    float _specular_pad1 = 0.0f;
-    float _specular_pad2 = 0.0f;
-};  
+    // Thin-shell BUBBLE params (active when flags & GPU_MAT_FLAG_BUBBLE). Repurposed
+    // from the trailing specular padding so the struct size/layout is UNCHANGED
+    // (both backends share this struct byte-for-byte).
+    float bubble_ior  = 1.33f;  // rim Fresnel IOR (air/liquid interface)
+    float bubble_film = 0.0f;   // thin-film interference strength (Faz 2; 0 = off)
+    // Transmission interior absorption density (thick resin / glass-marble depth).
+    // 0 = legacy constant-thickness glass tint; >0 = real Beer-Lambert over the
+    // actual in-medium ray distance (deep centre, clear edges). Repurposed pad.
+    float transmission_density = 0.0f;
+    // Resin absorption colour (the depth tint), separate from albedo. White = clear.
+    float3 resin_color = {1.0f, 1.0f, 1.0f};
+    // Resin coat gloss — reflection-lobe roughness of the resin layer, independent of base.
+    float resin_roughness = 0.1f;
+    // Resin internal inclusions (procedural dust/dirt march through the resin thickness).
+    float resin_inclusion = 0.0f;        // dust cloudiness amount (0 = off)
+    float resin_dirt = 0.0f;             // opaque dirt-speck amount (early-return)
+    float resin_inclusion_scale = 8.0f;  // procedural feature size
+    float3 resin_dirt_color = {0.18f, 0.14f, 0.10f};
+    // Iridescent clearcoat: thin-film tint on the clearcoat lobe (oil-slick / beetle-shell /
+    // candy paint). Repurposed from the trailing implicit padding so the struct size/layout
+    // is UNCHANGED (matches GLSL _resin2_pad0/_resin2_pad1, shared byte-for-byte).
+    // 0 = plain white clearcoat (no behaviour change). Reuses the bubble thin-film formula.
+    float clearcoat_iridescence    = 0.0f;  // tint strength (0 = off)
+    float clearcoat_film_thickness = 0.55f; // hue cycle / film thickness (OPD scale)
+};
 
 /**
  * @brief GPU-friendly hair material
@@ -232,8 +261,25 @@ inline bool operator==(const GpuMaterial& a, const GpuMaterial& b) {
         fabsf(a.uv_rotation_degrees - b.uv_rotation_degrees) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.uv_tiling_x - b.uv_tiling_x) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.uv_tiling_y - b.uv_tiling_y) < FLOAT_COMPARE_EPSILON &&
-        a.uv_wrap_mode == b.uv_wrap_mode;
-}    
+        a.uv_wrap_mode == b.uv_wrap_mode &&
+        // Bubble (thin-shell) params + material flags
+        a.flags == b.flags &&
+        fabsf(a.bubble_ior - b.bubble_ior) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.bubble_film - b.bubble_film) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.transmission_density - b.transmission_density) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.resin_color.x - b.resin_color.x) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.resin_color.y - b.resin_color.y) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.resin_color.z - b.resin_color.z) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.resin_roughness - b.resin_roughness) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.resin_inclusion - b.resin_inclusion) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.resin_dirt - b.resin_dirt) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.resin_inclusion_scale - b.resin_inclusion_scale) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.resin_dirt_color.x - b.resin_dirt_color.x) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.resin_dirt_color.y - b.resin_dirt_color.y) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.resin_dirt_color.z - b.resin_dirt_color.z) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.clearcoat_iridescence - b.clearcoat_iridescence) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.clearcoat_film_thickness - b.clearcoat_film_thickness) < FLOAT_COMPARE_EPSILON;
+}
 
 namespace std {  
     template <>  
@@ -311,7 +357,25 @@ namespace std {
                 hash_combine_f(h, (float)m.sss_use_random_walk);
                 hash_combine_f(h, (float)m.sss_max_steps);
 
-            return h;  
+            // Bubble (thin-shell) params + flags
+            hash_combine_f(h, (float)m.flags);
+            hash_combine_f(h, m.bubble_ior);
+            hash_combine_f(h, m.bubble_film);
+            hash_combine_f(h, m.transmission_density);
+            hash_combine_f(h, m.resin_color.x);
+            hash_combine_f(h, m.resin_color.y);
+            hash_combine_f(h, m.resin_color.z);
+            hash_combine_f(h, m.resin_roughness);
+            hash_combine_f(h, m.resin_inclusion);
+            hash_combine_f(h, m.resin_dirt);
+            hash_combine_f(h, m.resin_inclusion_scale);
+            hash_combine_f(h, m.resin_dirt_color.x);
+            hash_combine_f(h, m.resin_dirt_color.y);
+            hash_combine_f(h, m.resin_dirt_color.z);
+            hash_combine_f(h, m.clearcoat_iridescence);
+            hash_combine_f(h, m.clearcoat_film_thickness);
+
+            return h;
         }  
     };  
 }

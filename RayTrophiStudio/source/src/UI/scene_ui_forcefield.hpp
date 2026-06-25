@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -2748,13 +2748,81 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                             foam_changed |= ImGui::SliderInt("Bubble when >= N", &fo.bubble_min_neighbors, 4, 60);
 
                             ImGui::Spacing(); ImGui::TextDisabled("Render");
-                            // Foam always renders as instanced spheres. The old
-                            // marching-cubes "Surface" mode was removed (it rebuilt a
-                            // deforming mesh every frame -> full-scene rebuild each
-                            // frame -> OptiX unresponsive). Whitewater is particulate,
-                            // so spheres are both cheaper and the more faithful look.
+                            // Foam render mode: Spheres (one instanced sphere per
+                            // particle — granular, but O(N) TLAS instances so it
+                            // crawls at high counts) vs Volume (foam splatted into the
+                            // fluid SURFACE volume's temperature channel and marched as
+                            // a white single-scatter medium — cost ~independent of
+                            // particle count; the production whitewater approach).
+                            {
+                                int foam_mode_idx =
+                                    (fo.render_mode == RayTrophiSim::Fluid::FoamRenderMode::Volume) ? 1 : 0;
+                                const char* foam_render_modes[] = { "Spheres (granular, per-particle)",
+                                                                    "Volume (whitewater medium, fast)" };
+                                if (ImGui::Combo("Foam Render##FoamMode", &foam_mode_idx, foam_render_modes, 2)) {
+                                    fo.render_mode = (foam_mode_idx == 1)
+                                        ? RayTrophiSim::Fluid::FoamRenderMode::Volume
+                                        : RayTrophiSim::Fluid::FoamRenderMode::Spheres;
+                                    // Structural: flips the sphere instance group on/off
+                                    // AND the volume foam splat on/off — force a re-sync
+                                    // so the current (paused) frame rebuilds both paths.
+                                    scene.requestSimulationTimelineRenderResync();
+                                    foam_changed = true;
+                                }
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip("Spheres: one instanced sphere per foam particle (granular close-up, "
+                                                      "but O(N) instances).\nVolume: foam rides the fluid surface volume's "
+                                                      "temperature channel as a white single-scatter medium — cheap at "
+                                                      "millions of particles, the production approach.");
+                                if (fo.render_mode == RayTrophiSim::Fluid::FoamRenderMode::Volume &&
+                                    domain.fluid_render_mode != RayTrophiSim::Fluid::FluidRenderMode::SurfaceSDF) {
+                                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
+                                        "  Volume foam needs Fluid Render = Surface SDF (it rides that volume).");
+                                }
+                            }
 
-                            // ── Foam material pickers (with custom overrides) ──
+                            const bool foam_is_volume =
+                                (fo.render_mode == RayTrophiSim::Fluid::FoamRenderMode::Volume);
+
+                            if (foam_is_volume) {
+                                // ── Volume whitewater medium look ──
+                                // Colour + Opacity are pure shader state → push them
+                                // live (refreshFluidSurfaceMaterial) so the CURRENT
+                                // frame updates without a re-splat. Density changes the
+                                // temp grid each foam particle deposits → it needs a
+                                // re-upload (requestSimulationTimelineRenderResync).
+                                ImGui::Spacing(); ImGui::TextDisabled("Whitewater medium");
+                                bool foam_look_changed  = false;
+                                bool foam_resplat_changed = false;
+                                foam_look_changed |= ImGui::ColorEdit3("Foam Color", &fo.volume_color.x);
+                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scattering tint of the foam medium (cool white = sea foam).");
+                                // Density drives the re-splat (SDF/temp re-upload) — gate
+                                // it to the drag RELEASE so dragging doesn't rebuild the
+                                // level set every frame (settle pattern, like auto-reseed).
+                                ImGui::DragFloat("Foam Density", &fo.volume_density, 0.02f, 0.05f, 20.0f, "%.2f");
+                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Density each foam particle deposits into the volume. Higher = thicker / whiter foam.");
+                                if (ImGui::IsItemDeactivatedAfterEdit()) foam_resplat_changed = true;
+                                foam_look_changed |= ImGui::DragFloat("Foam Opacity", &fo.volume_opacity, 0.1f, 0.1f, 64.0f, "%.1f");
+                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Extinction multiplier — how strongly the foam medium occludes what is behind it.");
+                                // Per-class whitewater contribution (Ihmsen spray/foam/bubble).
+                                // These change the deposited temp grid → settle-gated re-splat
+                                // like Foam Density. Surface foam is always full strength.
+                                ImGui::DragFloat("Bubble Froth", &fo.volume_bubble_strength, 0.02f, 0.0f, 4.0f, "%.2f");
+                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much submerged BUBBLE particles deposit into the foam medium.\nThey sit deep in the water so the depth tint colours them cooler — subsurface froth.\n0 = no bubbles, 1 = same as surface foam, >1 = brighter silvery pop.");
+                                if (ImGui::IsItemDeactivatedAfterEdit()) foam_resplat_changed = true;
+                                ImGui::DragFloat("Spray in Volume", &fo.volume_spray_strength, 0.02f, 0.0f, 4.0f, "%.2f");
+                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much airborne SPRAY particles deposit into the foam medium.\nThe liquid SDF already surfaces splashes, so spray can be dialled down to avoid double froth.");
+                                if (ImGui::IsItemDeactivatedAfterEdit()) foam_resplat_changed = true;
+                                if (foam_look_changed) {
+                                    scene.refreshFluidSurfaceMaterial();
+                                    foam_changed = true;
+                                }
+                                if (foam_resplat_changed) {
+                                    scene.requestSimulationTimelineRenderResync();
+                                    foam_changed = true;
+                                }
+                            } else {
+                            // ── Foam material pickers (with custom overrides) — Spheres mode ──
                             {
                                 static bool show_material_overrides = false;
                                 static int last_domain_id = -1;
@@ -2792,22 +2860,42 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                                     return changed;
                                 };
 
+                                // Inline full editor for an assigned foam material so it can be
+                                // tuned (Bubble thin-shell toggle, emission, color, …) WITHOUT
+                                // first assigning it to a scene object.
+                                auto drawInlineMatEditor = [&](const char* title, int mat_id) {
+                                    if (mat_id < 0) return;
+                                    Material* m = MaterialManager::getInstance().getMaterial(static_cast<uint16_t>(mat_id));
+                                    PrincipledBSDF* p = dynamic_cast<PrincipledBSDF*>(m);
+                                    if (!p) return;
+                                    ImGui::PushID(mat_id ^ 0x6F0A);
+                                    if (ImGui::CollapsingHeader(title)) {
+                                        ImGui::Indent();
+                                        ui.drawPrincipledBSDFEditor(p, static_cast<uint16_t>(mat_id), ui_ctx);
+                                        ImGui::Unindent();
+                                    }
+                                    ImGui::PopID();
+                                };
+
                                 if (show_material_overrides) {
                                     ImGui::Indent();
                                     if (drawMaterialCombo("Spray Material", fo.spray_material_id, "Default (water droplet)")) {
                                         foam_changed = true;
                                     }
                                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("PBR material for airborne water droplets (Spray).");
+                                    drawInlineMatEditor("Edit Spray Material", fo.spray_material_id);
 
                                     if (drawMaterialCombo("Foam Material", fo.foam_material_id, "Default (white foam)")) {
                                         foam_changed = true;
                                     }
                                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("PBR material for surface foam clusters (Foam).");
+                                    drawInlineMatEditor("Edit Foam Material", fo.foam_material_id);
 
                                     if (drawMaterialCombo("Bubble Material", fo.bubble_material_id, "Default (air bubble)")) {
                                         foam_changed = true;
                                     }
-                                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("PBR material for submerged air bubbles (Bubble).");
+                                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("PBR material for submerged air bubbles (Bubble). Enable 'Bubble (thin shell)' in its editor below for the soap/champagne look.");
+                                    drawInlineMatEditor("Edit Bubble Material", fo.bubble_material_id);
                                     ImGui::Unindent();
                                 } else {
                                     if (drawMaterialCombo("Foam Material", fo.foam_material_id, "Default (white foam)")) {
@@ -2824,6 +2912,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
 
                             foam_changed |= ImGui::SliderInt("Foam Subdivisions", &fo.foam_sphere_subdivisions, 0, 3);
                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mesh subdivision level for rendering foam spheres. Higher = smoother close-up but slightly slower BVH rebuild.");
+                            } // end Spheres-mode controls
 
                             int maxf = static_cast<int>(std::min<std::size_t>(fo.max_foam, 20000000u));
                             if (ImGui::DragInt("Max Foam Particles", &maxf, 1000.0f, 1000, 20000000)) {
@@ -3314,6 +3403,60 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         if (!has_obj) ImGui::EndDisabled();
         if (!has_obj) ImGui::TextDisabled("Select a mesh object above to add it as a physics body.");
 
+        // ── Destruction: convex Voronoi pre-fracture (Faz 1, geometry only) ──
+        ImGui::Spacing();
+        if (ImGui::CollapsingHeader("Fracture (Destruction)")) {
+            ImGui::TextDisabled("Splits the selected mesh into convex shards (Voronoi).");
+            ImGui::TextDisabled("Faz 1: geometry only. Faz 2 makes shards rigid bodies.");
+            const bool fractured = has_obj && ui.isMeshFractured(sel_name);
+            if (!has_obj) ImGui::BeginDisabled();
+            ImGui::SliderInt("Shards##frac", &ui.fracture_site_count, 2, 200);
+            ImGui::InputInt("Seed##frac", &ui.fracture_seed);
+            ImGui::Combo("Pattern##frac", &ui.fracture_pattern, "Uniform\0Impact-clustered\0");
+            ImGui::SliderFloat("Preview Gap##frac", &ui.fracture_preview_gap, 0.0f, 0.3f, "%.3f");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Shrinks shards toward their centre so the cuts are visible\n"
+                                  "before physics. 0 = perfect tiling (looks intact).");
+            const float fw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
+            if (ImGui::Button(fractured ? "Re-Fracture##frac" : "Generate Shards##frac", ImVec2(fw, 28))) {
+                ui.fractureSelectedMesh(ui_ctx, sel_name, ui.fracture_site_count,
+                                        static_cast<uint32_t>(ui.fracture_seed), ui.fracture_pattern);
+            }
+            if (ImGui::IsItemHovered() && has_obj)
+                ImGui::SetTooltip("Clip the mesh's convex hull into %d Voronoi shards.", ui.fracture_site_count);
+            ImGui::SameLine();
+            if (!fractured) ImGui::BeginDisabled();
+            if (ImGui::Button("Restore##frac", ImVec2(fw, 28)))
+                ui.unfractureMesh(ui_ctx, sel_name);
+            if (!fractured) ImGui::EndDisabled();
+            if (!has_obj) ImGui::EndDisabled();
+            if (fractured) {
+                ImGui::TextColored(ImVec4(0.55f, 0.90f, 0.55f, 1.0f), "Fractured into shards.");
+                // ── Faz 2: shards → breakable rigid bodies ──
+                ImGui::Separator();
+                ImGui::TextDisabled("Destruction: shards become rigid bodies, intact until hit.");
+                ImGui::SliderFloat("Break Threshold##frac", &ui.fracture_break_threshold,
+                                   0.5f, 100.0f, "%.1f");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Impact impulse (kg·m/s) needed to shatter the object.\n"
+                                      "Lower = fragile, higher = tough.");
+                if (ImGui::Button("Make Breakable##frac", ImVec2(fw, 28))) {
+                    auto sit = ui.fracture_shard_nodes_.find(sel_name);
+                    if (sit != ui.fracture_shard_nodes_.end())
+                        scene.makeFractureGroupBreakable(sel_name, sit->second,
+                                                         ui.fracture_break_threshold);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Register the shards as static rigid bodies that shatter\n"
+                                      "into dynamic pieces when something hits them hard enough.");
+                ImGui::SameLine();
+                if (ImGui::Button("Break Now##frac", ImVec2(fw, 28)))
+                    scene.breakFractureGroupNow(sel_name, 6.0f);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Shatter immediately (takes effect during playback).");
+            }
+        }
+
         ImGui::Spacing();
         ImGui::Text("Registered Bodies: %zu", scene.rigid_bodies.size());
         ImGui::Separator();
@@ -3431,7 +3574,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
                 if (!tri) continue;
                 std::string nn = tri->getNodeName();
-                if (nn.empty()) nn = tri->nodeName;
+                if (nn.empty()) nn = tri->getNodeName();
                 if (nn == selection_request_name) {
                     ui_ctx.selection.selectObject(tri, (int)i, nn);
                     break;
@@ -3578,7 +3721,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                                 auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
                                 if (!tri) continue;
                                 std::string nn = tri->getNodeName();
-                                if (nn.empty()) nn = tri->nodeName;
+                                if (nn.empty()) nn = tri->getNodeName();
                                 if (nn == rb.source_name) {
                                     ui_ctx.selection.selectObject(tri, (int)i, nn);
                                     found = true;

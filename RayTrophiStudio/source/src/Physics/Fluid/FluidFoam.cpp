@@ -415,7 +415,9 @@ void splatFoamDensity(const FoamParticles& foam,
 void splatFoamDensity(const FoamParticles& foam,
                       int nx, int ny, int nz, float voxel, const Vec3& origin,
                       std::vector<float>& density_out,
-                      float density_per_particle)
+                      float density_per_particle,
+                      float bubble_weight,
+                      float spray_weight)
 {
     const std::size_t cells = (nx > 0 && ny > 0 && nz > 0)
         ? static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) * static_cast<std::size_t>(nz)
@@ -431,9 +433,20 @@ void splatFoamDensity(const FoamParticles& foam,
     };
 
     const std::size_t n = foam.size();
+    const bool has_type = (foam.type.size() == n);
     for (std::size_t p = 0; p < n; ++p) {
         const Vec3& x = foam.position[p];
         if (!std::isfinite(x.x) || !std::isfinite(x.y) || !std::isfinite(x.z)) continue;
+        // Per-class deposit weight: surface FOAM full, BUBBLE/SPRAY scaled. Bubbles
+        // ride the same channel but are depth-tinted by the water for free → distinct
+        // subsurface froth without a second volume.
+        float dpp = density_per_particle;
+        if (has_type) {
+            const uint8_t t = foam.type[p];
+            if (t == static_cast<uint8_t>(FoamType::Bubble))      dpp *= bubble_weight;
+            else if (t == static_cast<uint8_t>(FoamType::Spray))  dpp *= spray_weight;
+        }
+        if (dpp <= 0.0f) continue;  // class fully suppressed
         // Cell-centred coords (shift by -0.5 so trilinear weights span cell centres).
         const float gx = (x.x - origin.x) * inv_h - 0.5f;
         const float gy = (x.y - origin.y) * inv_h - 0.5f;
@@ -448,7 +461,7 @@ void splatFoamDensity(const FoamParticles& foam,
             const int i = i0 + di, j = j0 + dj, k = k0 + dk;
             if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
             const float w = (di ? fx : 1.0f - fx) * (dj ? fy : 1.0f - fy) * (dk ? fz : 1.0f - fz);
-            density_out[idx(i, j, k)] += density_per_particle * w;
+            density_out[idx(i, j, k)] += dpp * w;
         }
     }
 }

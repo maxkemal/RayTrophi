@@ -19,39 +19,10 @@ layout(push_constant) uniform CameraPC {
     float exposure_factor;
 } cam;
 
-// Material struct (must match GPU layout exactly)
-struct Material {
-    float albedo_r, albedo_g, albedo_b, opacity;
-    float emission_r, emission_g, emission_b, emission_strength;
-    float roughness, metallic, ior, transmission;
-    float subsurface_r, subsurface_g, subsurface_b, subsurface_amount;
-    float subsurface_radius_r, subsurface_radius_g, subsurface_radius_b, subsurface_scale;
-    float clearcoat, clearcoat_roughness, translucent, subsurface_anisotropy;
-    float anisotropic, sheen, sheen_tint;
-    uint flags;
-    float fft_amplitude, fft_time_scale, micro_detail_strength, micro_detail_scale;
-    float foam_threshold, fft_ocean_size, fft_choppiness, fft_wind_speed;
-    float micro_anim_speed, micro_morph_speed, foam_noise_scale, fft_wind_direction;
-    float uv_scale_x, uv_scale_y, uv_offset_x, uv_offset_y;
-    float uv_rotation_degrees, uv_tiling_x, uv_tiling_y;
-    uint uv_wrap_mode;
-    uint albedo_tex;
-    uint normal_tex;
-    uint roughness_tex;
-    uint metallic_tex;
-    uint emission_tex;
-    uint height_tex;
-    uint opacity_tex;
-    uint transmission_tex;
-    float subsurface_ior;
-    uint _terrain_layer_idx;
-    float normal_strength;
-    float tile_break_strength;
-    float specular;
-    uint specular_tex;
-    uint _pad_specular0;
-    uint _pad_specular1;
-};
+// Material struct — single source of truth shared by every material-reading shader.
+// The stride matters even though this shader only reads opacity/opacity_tex/flags/UV:
+// materials.m[matIndex] for any matIndex >= 1 reads garbage if it is shorter.
+#include "material_struct.glsl"
 
 struct VkInstanceData {
     uint materialIndex;

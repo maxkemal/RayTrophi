@@ -1,4 +1,4 @@
-#include "SceneSerializer.h"
+﻿#include "SceneSerializer.h"
 #include "globals.h"
 #include "Renderer.h"
 #include "OptixWrapper.h"
@@ -404,6 +404,10 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
         fj["foam_sphere_subdivisions"] = fo.foam_sphere_subdivisions;
         fj["render_mode"] = static_cast<int>(fo.render_mode);
         fj["volume_density"] = fo.volume_density;
+        fj["volume_color"] = { fo.volume_color.x, fo.volume_color.y, fo.volume_color.z };
+        fj["volume_opacity"] = fo.volume_opacity;
+        fj["volume_bubble_strength"] = fo.volume_bubble_strength;
+        fj["volume_spray_strength"]  = fo.volume_spray_strength;
         fj["foam_material_id"] = fo.foam_material_id;
         fj["spray_material_id"] = fo.spray_material_id;
         fj["bubble_material_id"] = fo.bubble_material_id;
@@ -558,13 +562,21 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fj.contains("render_radius_voxels")) fo.render_radius_voxels = fj["render_radius_voxels"];
         if (fj.contains("foam_sphere_subdivisions")) fo.foam_sphere_subdivisions = fj["foam_sphere_subdivisions"].get<int>();
         if (fj.contains("render_mode")) {
-            // Enum changed: old {Volume=0, Spheres=1} → new {Surface=0, Spheres=1}.
-            // An old Volume(0) save loads as Surface — the new metaball default.
+            // FoamRenderMode { Surface=0 (legacy, treated as Spheres), Spheres=1,
+            // Volume=2 (foam rides the surface volume's temperature channel) }.
             int rm = fj["render_mode"].get<int>();
-            if (rm < 0 || rm > 1) rm = 0;
+            if (rm < 0 || rm > 2) rm = 0;
             fo.render_mode = static_cast<RayTrophiSim::Fluid::FoamRenderMode>(rm);
         }
         if (fj.contains("volume_density")) fo.volume_density = fj["volume_density"];
+        if (fj.contains("volume_color") && fj["volume_color"].is_array() && fj["volume_color"].size() == 3) {
+            fo.volume_color = Vec3(fj["volume_color"][0].get<float>(),
+                                   fj["volume_color"][1].get<float>(),
+                                   fj["volume_color"][2].get<float>());
+        }
+        if (fj.contains("volume_opacity")) fo.volume_opacity = fj["volume_opacity"].get<float>();
+        if (fj.contains("volume_bubble_strength")) fo.volume_bubble_strength = fj["volume_bubble_strength"].get<float>();
+        if (fj.contains("volume_spray_strength"))  fo.volume_spray_strength  = fj["volume_spray_strength"].get<float>();
         if (fj.contains("foam_material_id")) fo.foam_material_id = fj["foam_material_id"].get<int>();
         if (fj.contains("spray_material_id")) fo.spray_material_id = fj["spray_material_id"].get<int>();
         if (fj.contains("bubble_material_id")) fo.bubble_material_id = fj["bubble_material_id"].get<int>();
@@ -698,7 +710,7 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
         auto tri = std::dynamic_pointer_cast<Triangle>(obj);
         if (tri) {
             json oj;
-            oj["name"] = tri->nodeName;
+            oj["name"] = tri->getNodeName();
             oj["material_id"] = tri->getMaterialID();
             Transform* th = tri->getTransformPtr();
             if (th) {
@@ -989,7 +1001,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                 }
                 
                 std::string_view obj_name;
-                if (!o["name"].get(obj_name)) tri->nodeName = std::string(obj_name);
+                if (!o["name"].get(obj_name)) tri->setNodeName(std::string(obj_name));
                 
                 int64_t mat_id = 0;
                 if (!o["material_id"].get(mat_id)) tri->setMaterialID((int)mat_id);
@@ -1109,7 +1121,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         size_t purged_count = 0;
         for (auto it = objs_list.begin(); it != objs_list.end(); ) {
             auto tri = std::dynamic_pointer_cast<Triangle>(*it);
-            if (tri && tri->nodeName.find("Terrain_") == 0 && tri->nodeName.find("_Chunk") != std::string::npos) {
+            if (tri && tri->getNodeName().find("Terrain_") == 0 && tri->getNodeName().find("_Chunk") != std::string::npos) {
                 it = objs_list.erase(it);
                 purged_count++;
             } else {

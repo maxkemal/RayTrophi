@@ -1,4 +1,4 @@
-﻿#include "OptixWrapper.h"
+#include "OptixWrapper.h"
 #include "fft_ocean.cuh"
 #include "Stylize/StylizeKernel.h"
 #include "OptixAccelManager.h"
@@ -959,11 +959,12 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     pipeline_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
     pipeline_options.pipelineLaunchParamsVariableName = "optixLaunchParams";
     
-    pipeline_options.usesPrimitiveTypeFlags = 
-        OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE | 
+    pipeline_options.usesPrimitiveTypeFlags =
+        OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE |
         OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_LINEAR |
         OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BEZIER |
-        OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BSPLINE;
+        OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BSPLINE |
+        OPTIX_PRIMITIVE_TYPE_FLAGS_SPHERE;   // foam / fluid splat point-spheres
 
     char log[2048];
     size_t log_size = sizeof(log);
@@ -1083,9 +1084,40 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     log_size = sizeof(log);
     OPTIX_CHECK(optixProgramGroupCreate(context, &hair_shadow_desc, 1, &pg_options, log, &log_size, &hair_shadow_pg));
 
+    // Sphere (foam / fluid splat points) — built-in analytic sphere primitive.
+    // The whole foam set is one sphere GAS, so a single closest-hit that derives
+    // the normal from optixGetSphereData shades every point. Spheres are opaque
+    // (built with DISABLE_ANYHIT), so no anyhit program; the shadow group reuses
+    // the cheap __closesthit__shadow.
+    OptixModule sphereIS_module = nullptr;
+    {
+        OptixBuiltinISOptions builtinISOptions = {};
+        builtinISOptions.builtinISModuleType = OPTIX_PRIMITIVE_TYPE_SPHERE;
+        builtinISOptions.usesMotionBlur = false;
+        builtinISOptions.buildFlags = OPTIX_BUILD_FLAG_ALLOW_UPDATE | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+        OPTIX_CHECK(optixBuiltinISModuleGet(context, &module_options, &pipeline_options, &builtinISOptions, &sphereIS_module));
+    }
+
+    OptixProgramGroupDesc sphere_hit_desc = {};
+    sphere_hit_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+    sphere_hit_desc.hitgroup.moduleCH = hitgroup_module;
+    sphere_hit_desc.hitgroup.entryFunctionNameCH = "__closesthit__sphere";
+    sphere_hit_desc.hitgroup.moduleIS = sphereIS_module;
+    log_size = sizeof(log);
+    OPTIX_CHECK(optixProgramGroupCreate(context, &sphere_hit_desc, 1, &pg_options, log, &log_size, &sphere_hit_pg));
+
+    OptixProgramGroupDesc sphere_shadow_desc = {};
+    sphere_shadow_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+    sphere_shadow_desc.hitgroup.moduleCH = hitgroup_module;
+    sphere_shadow_desc.hitgroup.entryFunctionNameCH = "__closesthit__shadow";
+    sphere_shadow_desc.hitgroup.moduleIS = sphereIS_module;
+    log_size = sizeof(log);
+    OPTIX_CHECK(optixProgramGroupCreate(context, &sphere_shadow_desc, 1, &pg_options, log, &log_size, &sphere_shadow_pg));
+
     // 6. Pipeline Link
-    std::vector<OptixProgramGroup> program_groups = { 
-        raygen_pg, miss_pg, miss_shadow_pg, hit_pg, hit_shadow_pg, hair_hit_pg, hair_shadow_pg 
+    std::vector<OptixProgramGroup> program_groups = {
+        raygen_pg, miss_pg, miss_shadow_pg, hit_pg, hit_shadow_pg, hair_hit_pg, hair_shadow_pg,
+        sphere_hit_pg, sphere_shadow_pg
     };
     OptixPipelineLinkOptions link_options = {};
     link_options.maxTraceDepth = 2;
@@ -1119,7 +1151,8 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
             else SCENE_LOG_INFO(msg);
         });
     }
-    accel_manager->initialize(context, stream, hit_pg, hit_shadow_pg, hair_hit_pg, hair_shadow_pg);
+    accel_manager->initialize(context, stream, hit_pg, hit_shadow_pg, hair_hit_pg, hair_shadow_pg,
+                              sphere_hit_pg, sphere_shadow_pg);
 
     // SBT Raygen
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) EmptySbtRecord { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; };
@@ -1587,7 +1620,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
 
     for (int slot = 0; slot < 2; ++slot) {
         if (!host_output_copy_events[slot]) {
-            CUDA_CHECK(cudaEventCreateWithFlags(&host_output_copy_events[slot], cudaEventDisableTiming));
+            CUDA_CHECK(cudaEventCreateWithFlags(&host_output_copy_events[slot], cudaEventDisableTiming | cudaEventBlockingSync));
         }
     }
 
@@ -1662,13 +1695,13 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     bool is_first_render = (last_camera_hash == 0);
 
     if (camera_changed) {
-        // Camera moved - reset accumulation and variance
-        cudaMemset(d_accumulation_float4, 0, pixel_count * sizeof(float4));
-        if (d_denoiser_albedo) cudaMemset(d_denoiser_albedo, 0, pixel_count * sizeof(float4));
-        if (d_denoiser_normal) cudaMemset(d_denoiser_normal, 0, pixel_count * sizeof(float4));
-        if (d_stylize_position) cudaMemset(d_stylize_position, 0, pixel_count * sizeof(float4));
+        // Camera moved - reset accumulation and variance (async to avoid CPU stall)
+        cudaMemsetAsync(d_accumulation_float4, 0, pixel_count * sizeof(float4), stream);
+        if (d_denoiser_albedo) cudaMemsetAsync(d_denoiser_albedo, 0, pixel_count * sizeof(float4), stream);
+        if (d_denoiser_normal) cudaMemsetAsync(d_denoiser_normal, 0, pixel_count * sizeof(float4), stream);
+        if (d_stylize_position) cudaMemsetAsync(d_stylize_position, 0, pixel_count * sizeof(float4), stream);
         if (d_variance_buffer) {
-            cudaMemset(d_variance_buffer, 0, pixel_count * sizeof(float));
+            cudaMemsetAsync(d_variance_buffer, 0, pixel_count * sizeof(float), stream);
         }
         accumulated_samples = 0;
 
@@ -1899,7 +1932,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
             *host_converged_count_buffers[converged_slot] = 0;
         }
         if (!host_converged_count_events[converged_slot]) {
-            CUDA_CHECK(cudaEventCreateWithFlags(&host_converged_count_events[converged_slot], cudaEventDisableTiming));
+            CUDA_CHECK(cudaEventCreateWithFlags(&host_converged_count_events[converged_slot], cudaEventDisableTiming | cudaEventBlockingSync));
         }
         if (host_converged_count_pending[converged_slot]) {
             CUDA_CHECK(cudaEventSynchronize(host_converged_count_events[converged_slot]));
@@ -1978,24 +2011,32 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
             ? host_output_buffers[host_output_display_slot]
             : partial_framebuffer.data();
 
-    // Update SDL Surface
+    // Update SDL Surface — [PERF] Pre-compute pixel format shifts once instead of
+    // calling SDL_MapRGB per pixel (~2M function calls/frame at 1080p → 0).
     Uint32* pixels = (Uint32*)surface->pixels;
-    int row_stride = surface->pitch / 4;
+    const int row_stride = surface->pitch / 4;
 
     // Safety checks to prevent crash if Surface size != Render size
-    int safe_w = (std::min)(width, surface->w);
-    int safe_h = (std::min)(height, surface->h);
+    const int safe_w = (std::min)(width, surface->w);
+    const int safe_h = (std::min)(height, surface->h);
+
+    // Cache format masks/shifts once — avoids per-pixel SDL_MapRGB dispatch.
+    const SDL_PixelFormat* fmt = surface->format;
+    const Uint32 aMaskOr = fmt->Amask;  // Usually 0xFF000000; OR'd into every pixel
+    const Uint8 rShift = fmt->Rshift;
+    const Uint8 gShift = fmt->Gshift;
+    const Uint8 bShift = fmt->Bshift;
 
     for (int j = 0; j < safe_h; ++j) {
+        const int screen_y = surface->h - 1 - j;
+        Uint32* __restrict dst_row = pixels + screen_y * row_stride;
+        const uchar4* __restrict src_row = display_framebuffer + j * width;
         for (int i = 0; i < safe_w; ++i) {
-            int fb_index = j * width + i;
-            const uchar4& c = display_framebuffer[fb_index];
-            
-            // Flip Y for screen (using surface height)
-            int screen_y = surface->h - 1 - j;
-            int screen_index = screen_y * row_stride + i;
-            
-            pixels[screen_index] = SDL_MapRGB(surface->format, c.x, c.y, c.z);
+            const uchar4& c = src_row[i];
+            dst_row[i] = aMaskOr
+                | ((Uint32)c.x << rShift)
+                | ((Uint32)c.y << gShift)
+                | ((Uint32)c.z << bShift);
         }
     }
 
@@ -2427,27 +2468,28 @@ bool OptixWrapper::isAccumulationComplete() const {
 }
 
 void OptixWrapper::resetAccumulation() {
-    // Reset the Cycles-style accumulation buffer for new frame
+    // Reset the Cycles-style accumulation buffer for new frame (async to avoid CPU stall)
     if (d_accumulation_float4 && prev_width > 0 && prev_height > 0) {
-        cudaMemset(d_accumulation_float4, 0, prev_width * prev_height * sizeof(float4));
+        cudaMemsetAsync(d_accumulation_float4, 0, prev_width * prev_height * sizeof(float4), stream);
     }
     if (d_denoiser_albedo && prev_width > 0 && prev_height > 0) {
-        cudaMemset(d_denoiser_albedo, 0, prev_width * prev_height * sizeof(float4));
+        cudaMemsetAsync(d_denoiser_albedo, 0, prev_width * prev_height * sizeof(float4), stream);
     }
     if (d_denoiser_normal && prev_width > 0 && prev_height > 0) {
-        cudaMemset(d_denoiser_normal, 0, prev_width * prev_height * sizeof(float4));
+        cudaMemsetAsync(d_denoiser_normal, 0, prev_width * prev_height * sizeof(float4), stream);
     }
     if (d_stylize_position && prev_width > 0 && prev_height > 0) {
-        cudaMemset(d_stylize_position, 0, prev_width * prev_height * sizeof(float4));
+        cudaMemsetAsync(d_stylize_position, 0, prev_width * prev_height * sizeof(float4), stream);
     }
     // Reset variance buffer for adaptive sampling
     if (d_variance_buffer && prev_width > 0 && prev_height > 0) {
-        cudaMemset(d_variance_buffer, 0, prev_width * prev_height * sizeof(float));
+        cudaMemsetAsync(d_variance_buffer, 0, prev_width * prev_height * sizeof(float), stream);
     }
     accumulated_samples = 0;
     last_camera_hash = 0;  // Force re-hash on next render
     accumulation_valid = true;
 }
+
 
 // ============================================================================
 // CRITICAL: updateGeometry() Limitations
@@ -3061,8 +3103,68 @@ MeshGeometry OptixWrapper::extractMeshGeometry(
     return geom;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Point-sphere (foam / fluid-splat) group → analytic sphere GAS
+// ─────────────────────────────────────────────────────────────────────────────
+// A point_sphere_mode InstanceGroup is rendered as ONE sphere GAS per source
+// (foam type) instead of one TLAS instance per particle. Each GAS spans the
+// whole group instance pool: a slot whose source_index matches the type gets its
+// real radius (scale.x * 0.5), every other slot gets radius 0 (degenerate, never
+// hit). The primitive count is therefore the stable pool capacity — so per-frame
+// motion (foam reclassifies types constantly) is a cheap GAS refit, and only a
+// pool-capacity GROW (which the bridge already flags structural) forces a full
+// rebuild. Resolves the foam material from the source's first triangle.
+namespace {
+int foamSourceMaterial(const ScatterSource& src) {
+    const auto* tris = src.centered_triangles_ptr ? src.centered_triangles_ptr.get() : &src.triangles;
+    int mat = 0;
+    if (tris && !tris->empty() && (*tris)[0]) mat = (*tris)[0]->getMaterialID();
+    if (mat == MaterialManager::INVALID_MATERIAL_ID) mat = 0;
+    return mat;
+}
 
-void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data, 
+std::string foamSphereName(const InstanceGroup& group, size_t source_index) {
+    const std::string base = group.name.empty() ? ("FoamSphere_" + std::to_string(group.id)) : group.name;
+    return "[" + base + "] S" + std::to_string(source_index);
+}
+
+// Gather the LIVE spheres of one foam type into COMPACT centre/radius arrays
+// (size = live count, no padding). The foam GAS is rebuilt fresh each frame
+// (refitSphereBLAS rebuild=true), so the primitive count need not be stable —
+// which lets us drop the dead/other-type slots entirely. That keeps the GAS at
+// ~the live foam count (not 3× the pool) and, crucially, avoids parking a huge
+// pile of degenerate spheres at one point (the origin cluster that made the
+// first cut slower than the per-instance path).
+void gatherFoamSpheres(const InstanceGroup& group, size_t type,
+                       std::vector<float3>& centers, std::vector<float>& radii) {
+    centers.clear();
+    radii.clear();
+    centers.reserve(group.instances.size());
+    radii.reserve(group.instances.size());
+    for (const auto& inst : group.instances) {
+        if (static_cast<int>(type) == inst.source_index && inst.scale.x > 1e-6f) {
+            centers.push_back(make_float3(static_cast<float>(inst.position.x),
+                                          static_cast<float>(inst.position.y),
+                                          static_cast<float>(inst.position.z)));
+            radii.push_back(static_cast<float>(inst.scale.x) * 0.5f);
+        }
+    }
+    // A type can be momentarily empty (foam reclassifies constantly). Keep the
+    // GAS + its TLAS instance alive with ONE degenerate sphere (radius 0, never
+    // hit) so an empty frame is a cheap rebuild, not a structural teardown — and
+    // so a 0-primitive GAS (which some drivers reject) is never built. Anchor it
+    // on the group's first instance, not the origin.
+    if (centers.empty() && !group.instances.empty()) {
+        const auto& a = group.instances[0];
+        centers.push_back(make_float3(static_cast<float>(a.position.x),
+                                      static_cast<float>(a.position.y),
+                                      static_cast<float>(a.position.z)));
+        radii.push_back(0.0f);
+    }
+}
+} // namespace
+
+void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                                       const std::vector<std::shared_ptr<Hittable>>& objects) {
     // Block render while rebuilding
     extern std::atomic<bool> g_optix_rebuild_in_progress;
@@ -3173,7 +3275,8 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
         if (m_accelStatusCallback) accel_manager->setMessageCallback(m_accelStatusCallback);
     }
     accel_manager->cleanup();
-    accel_manager->initialize(context, stream, hit_pg, hit_shadow_pg, hair_hit_pg, hair_shadow_pg);
+    accel_manager->initialize(context, stream, hit_pg, hit_shadow_pg, hair_hit_pg, hair_shadow_pg,
+                              sphere_hit_pg, sphere_shadow_pg);
     
     // Note: We use OptixInstance vector for TLAS build
     std::vector<OptixInstance> optix_instances;
@@ -3240,9 +3343,9 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                     geom.uvs[base + 1] = make_float2(tri->t1.x, tri->t1.y);
                     geom.uvs[base + 2] = make_float2(tri->t2.x, tri->t2.y);
 
-                    geom.colors[base + 0] = toFloat3(tri->getVertexColor(0));
-                    geom.colors[base + 1] = toFloat3(tri->getVertexColor(1));
-                    geom.colors[base + 2] = toFloat3(tri->getVertexColor(2));
+                    geom.colors[base + 0] = make_float3(0.0f, 0.0f, 0.0f);
+                    geom.colors[base + 1] = make_float3(0.0f, 0.0f, 0.0f);
+                    geom.colors[base + 2] = make_float3(0.0f, 0.0f, 0.0f);
 
                     geom.indices[i] = make_uint3(static_cast<uint32_t>(base),
                                                  static_cast<uint32_t>(base + 1),
@@ -3398,9 +3501,9 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                         geom.uvs.push_back(make_float2(tri->t2.x, tri->t2.y));
                         
                         // COLORS
-                        geom.colors.push_back(toFloat3(tri->getVertexColor(0)));
-                        geom.colors.push_back(toFloat3(tri->getVertexColor(1)));
-                        geom.colors.push_back(toFloat3(tri->getVertexColor(2)));
+                        geom.colors.push_back(make_float3(0.0f, 0.0f, 0.0f));
+                        geom.colors.push_back(make_float3(0.0f, 0.0f, 0.0f));
+                        geom.colors.push_back(make_float3(0.0f, 0.0f, 0.0f));
 
                         // SKINNING DATA: Ensure we always push data if the group is skinned to maintain buffer alignment
                         if (isSkinned) {
@@ -3467,6 +3570,27 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
     const auto& instanceGroups = InstanceManager::getInstance().getGroups();
     for (const auto& group : instanceGroups) {
         if (group.instances.empty() || group.sources.empty()) continue;
+
+        // Point-sphere (foam): one analytic sphere GAS per source + ONE identity
+        // TLAS instance each — NOT one instance per particle. Skips the triangle
+        // BLAS path entirely.
+        if (group.point_sphere_mode) {
+            std::vector<float3> centers;
+            std::vector<float> radii;
+            for (size_t t = 0; t < group.sources.size(); ++t) {
+                const int mat = foamSourceMaterial(group.sources[t]);
+                gatherFoamSpheres(group, t, centers, radii);
+                const std::string name = foamSphereName(group, t);
+                int sid = accel_manager->buildSphereBLAS(name, mat, centers, radii,
+                                                         group.instances.size());
+                if (sid < 0) continue;
+                float identity[12] = { 1,0,0,0, 0,1,0,0, 0,0,1,0 };
+                int inst_id = accel_manager->addInstance(sid, identity, mat,
+                                                         InstanceType::Sphere, name, nullptr);
+                if (inst_id >= 0) node_to_instance[name].push_back(inst_id);
+            }
+            continue;
+        }
 
         std::vector<std::vector<int>> meshIdsBySource(group.sources.size());
         for (size_t si = 0; si < group.sources.size(); ++si) {
@@ -3544,9 +3668,9 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                     geom.uvs.push_back(make_float2(tri->t0.x, tri->t0.y));
                     geom.uvs.push_back(make_float2(tri->t1.x, tri->t1.y));
                     geom.uvs.push_back(make_float2(tri->t2.x, tri->t2.y));
-                    geom.colors.push_back(toFloat3(tri->getVertexColor(0)));
-                    geom.colors.push_back(toFloat3(tri->getVertexColor(1)));
-                    geom.colors.push_back(toFloat3(tri->getVertexColor(2)));
+                    geom.colors.push_back(make_float3(0.0f, 0.0f, 0.0f));
+                    geom.colors.push_back(make_float3(0.0f, 0.0f, 0.0f));
+                    geom.colors.push_back(make_float3(0.0f, 0.0f, 0.0f));
 
                     if (isSkinned) {
                         if (triangleHasEffectiveSkinData(tri)) {
@@ -3660,6 +3784,46 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
     
     g_optix_rebuild_in_progress.store(false, std::memory_order_release);
    // SCENE_LOG_INFO("[OptiX TLAS] Build complete. Instances: " + std::to_string(accel_manager->getInstanceCount()));
+}
+
+// Cheap per-frame motion update for point-sphere (foam) groups: refit each
+// sphere GAS in place over fresh centre/radius buffers. The primitive count is
+// the stable pool capacity, so a refit always matches unless the pool grew —
+// in which case we ask for a full rebuild next frame (the bridge normally flags
+// that itself; this is the safety net). Call BEFORE accel_manager->updateTLAS()
+// so the TLAS refit picks up the new sphere AABBs.
+void OptixWrapper::refitSphereGroups() {
+    if (!accel_manager) return;
+    bool needs_rebuild = false;
+    bool refitted_any = false;
+    const auto& groups = InstanceManager::getInstance().getGroups();
+    std::vector<float3> centers;
+    std::vector<float> radii;
+    for (const auto& group : groups) {
+        if (!group.point_sphere_mode || group.instances.empty() || group.sources.empty()) continue;
+        for (size_t t = 0; t < group.sources.size(); ++t) {
+            const int sid = accel_manager->findSphereBLAS(foamSphereName(group, t));
+            if (sid < 0) { needs_rebuild = true; continue; }
+            gatherFoamSpheres(group, t, centers, radii);
+            // rebuild=true: fresh per-frame GAS BUILD (optimal BVH) — foam moves
+            // too far for a refit to stay tight (see refitSphereBLAS).
+            if (accel_manager->refitSphereBLAS(sid, centers, radii, true, /*rebuild=*/true)) {
+                refitted_any = true;
+            } else {
+                needs_rebuild = true;   // capacity changed → full rebuild next frame
+            }
+        }
+    }
+    // The GAS rebuild changed child handles → the TLAS must do a full BUILD
+    // (not a refit) to pick them up.
+    if (refitted_any) {
+        accel_manager->markTLASNeedsRebuild();
+        accel_manager->forceTLASRebuild();
+    }
+    if (needs_rebuild) {
+        extern bool g_optix_rebuild_pending;
+        g_optix_rebuild_pending = true;
+    }
 }
 
 
@@ -3824,6 +3988,9 @@ void OptixWrapper::updateTLASGeometry(const std::vector<std::shared_ptr<Hittable
     // Sync instance transforms (Ensures Gizmo moves are reflected during animation)
     accel_manager->syncInstanceTransforms(objects);
 
+    // Refit foam sphere GAS in place (centre/radius) before the TLAS refit.
+    refitSphereGroups();
+
     // Rebuild TLAS (instances point to updated BLAS handles)
     accel_manager->updateTLAS();
     traversable_handle = accel_manager->getTraversableHandle();
@@ -3839,7 +4006,10 @@ void OptixWrapper::updateTLASMatricesOnly(const std::vector<std::shared_ptr<Hitt
     
     // Lightweight sync: Transform only
     accel_manager->syncInstanceTransforms(objects);
-    
+
+    // Refit foam sphere GAS in place (centre/radius) before the TLAS refit.
+    refitSphereGroups();
+
     // Fast TLAS Refit
     accel_manager->updateTLAS();
     traversable_handle = accel_manager->getTraversableHandle();

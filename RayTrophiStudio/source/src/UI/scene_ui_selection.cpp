@@ -1,4 +1,4 @@
-// ===============================================================================
+﻿// ===============================================================================
 // SCENE UI - SELECTION & INTERACTION
 // ===============================================================================
 // This file handles Mouse picking, Marquee selection, and Delete operations.
@@ -1104,7 +1104,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                         item.type = SelectableType::Object;
                         item.object = first_tri;
                         item.object_index = index;
-                        item.name = first_tri->nodeName;
+                        item.name = first_tri->getNodeName();
                         
                         if (ctx.selection.isSelected(item)) {
                             ctx.selection.removeFromSelection(item);
@@ -1112,10 +1112,10 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                             ctx.selection.addToSelection(item);
                         }
                     } else {
-                        ctx.selection.selectObject(first_tri, index, first_tri->nodeName);
+                        ctx.selection.selectObject(first_tri, index, first_tri->getNodeName());
                         
                         // TERRAIN CONNECTION: Check if this is a terrain chunk
-                        std::string tName = first_tri->nodeName;
+                        std::string tName = first_tri->getNodeName();
                         if (tName.find("Terrain_") == 0) {
                             size_t chunkPos = tName.find("_Chunk");
                             if (chunkPos != std::string::npos) {
@@ -1248,7 +1248,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                             item.type = SelectableType::Object;
                             item.object = found_tri;
                             item.object_index = index;
-                            item.name = found_tri->nodeName;
+                            item.name = found_tri->getNodeName();
 
                             if (ctx.selection.isSelected(item)) {
                                 ctx.selection.removeFromSelection(item);
@@ -1256,11 +1256,11 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                                 ctx.selection.addToSelection(item);
                             }
                         } else {
-                            ctx.selection.selectObject(found_tri, index, found_tri->nodeName);
+                            ctx.selection.selectObject(found_tri, index, found_tri->getNodeName());
                            // SCENE_LOG_INFO("Selected via CPU Viewport: " + found_tri->nodeName);
 
                             // TERRAIN CONNECTION: Check if this is a terrain chunk
-                            std::string tName = found_tri->nodeName;
+                            std::string tName = found_tri->getNodeName();
                             if (tName.find("Terrain_") == 0) {
                                 size_t chunkPos = tName.find("_Chunk");
                                 if (chunkPos != std::string::npos) {
@@ -1313,7 +1313,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                                         }
                                     }
                                     if (retry_tri) {
-                                        ctx.selection.selectObject(retry_tri, idx2, retry_tri->nodeName);
+                                        ctx.selection.selectObject(retry_tri, idx2, retry_tri->getNodeName());
                                        // SCENE_LOG_INFO("Selected via linear fallback: " + retry_tri->nodeName);
                                     }
                                 }
@@ -1825,7 +1825,7 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
             // Use item.name as primary, fallback to nodeName
             std::string targetName = item.name;
             if (targetName.empty()) {
-                targetName = item.object->nodeName;
+                targetName = item.object->getNodeName();
             }
             if (targetName.empty()) targetName = "Unnamed";
             

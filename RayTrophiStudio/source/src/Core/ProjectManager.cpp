@@ -1,4 +1,4 @@
-#include "ProjectManager.h"
+﻿#include "ProjectManager.h"
 #include "globals.h"
 #include "Renderer.h"
 #include "OptixWrapper.h"
@@ -908,8 +908,8 @@ void ProjectManager::syncProjectToScene(SceneData& scene) {
     // Utilize cache if available, otherwise build it
     for (const auto& obj : scene.world.objects) {
         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-            if (!tri->nodeName.empty()) {
-                scene_obj_map[tri->nodeName] = tri;
+            if (!tri->getNodeName().empty()) {
+                scene_obj_map[tri->getNodeName()] = tri;
             }
         }
     }
@@ -2269,7 +2269,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
         std::string prefix = ctx.importName + "_";
         for (size_t i = 0; i < selectable_count; ++i) {
             auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
-            if (tri && tri->nodeName.find(prefix) == 0) {
+            if (tri && tri->getNodeName().find(prefix) == 0) {
                 ctx.members.push_back(tri);
             }
         }
@@ -2361,7 +2361,7 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
     for (size_t i = objects_before; i < scene.world.objects.size(); ++i) {
         auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
         if (tri) {
-            std::string unique_name = tri->nodeName; // Already prefixed by AssimpLoader now!
+            std::string unique_name = tri->getNodeName(); // Already prefixed by AssimpLoader now!
             
             ImportedModelData::ObjectInstance inst;
             inst.node_name = unique_name;
@@ -2562,9 +2562,9 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
             if (terrain_triangles.count(tri)) continue;
             
             // Skip foliage instances (they are serialized via InstanceManager)
-            if (tri->nodeName.find("_inst_") != std::string::npos) continue;
+            if (tri->getNodeName().find("_inst_") != std::string::npos) continue;
 
-            const std::string& nodeName = tri->nodeName;
+            const std::string& nodeName = tri->getNodeName();
 
             // Check if we have a base mesh cache for this node
             if (scene.base_mesh_cache.find(nodeName) != scene.base_mesh_cache.end()) {
@@ -2572,9 +2572,9 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
                     nodes_processed.insert(nodeName);
                     for (const auto& baseTri : scene.base_mesh_cache.at(nodeName)) {
                         triangles.push_back(baseTri);
-                        if (node_name_map.find(baseTri->nodeName) == node_name_map.end()) {
-                            node_name_map[baseTri->nodeName] = static_cast<uint32_t>(node_names.size());
-                            node_names.push_back(baseTri->nodeName);
+                        if (node_name_map.find(baseTri->getNodeName()) == node_name_map.end()) {
+                            node_name_map[baseTri->getNodeName()] = static_cast<uint32_t>(node_names.size());
+                            node_names.push_back(baseTri->getNodeName());
                         }
                         auto th = baseTri->getTransformHandle();
                         if (th && transform_map.find(th) == transform_map.end()) {
@@ -2585,9 +2585,9 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
                 }
             } else {
                 triangles.push_back(tri);
-                if (node_name_map.find(tri->nodeName) == node_name_map.end()) {
-                    node_name_map[tri->nodeName] = static_cast<uint32_t>(node_names.size());
-                    node_names.push_back(tri->nodeName);
+                if (node_name_map.find(tri->getNodeName()) == node_name_map.end()) {
+                    node_name_map[tri->getNodeName()] = static_cast<uint32_t>(node_names.size());
+                    node_names.push_back(tri->getNodeName());
                 }
                 
                 // Track unique transforms
@@ -2676,7 +2676,7 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
 
         // Node name index (v7+)
         uint32_t node_name_idx = 0xFFFFFFFF;
-        auto node_it = node_name_map.find(tri->nodeName);
+        auto node_it = node_name_map.find(tri->getNodeName());
         if (node_it != node_name_map.end()) {
             node_name_idx = node_it->second;
         }

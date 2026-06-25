@@ -1524,7 +1524,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                                 if (transform) {
                                     transform->setPivotMatrix(Matrix4x4::fromTRS(item.position, item.rotation, item.scale));
                                     if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
-                                        ctx.backend_ptr->updateObjectTransform(item.object->nodeName, transform->base);
+                                        ctx.backend_ptr->updateObjectTransform(item.object->getNodeName(), transform->base);
                                     } else {
                                         item.object->updateTransformedVertices();
                                     }
@@ -1610,7 +1610,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                         ImGui::SameLine();
                         if (ImGui::Button("Center Pivot")) {
-                            std::string object_name = !sel.selected.name.empty() ? sel.selected.name : sel.selected.object->nodeName;
+                            std::string object_name = !sel.selected.name.empty() ? sel.selected.name : sel.selected.object->getNodeName();
                             if (object_name.empty()) object_name = "Unnamed";
                             recenterObjectPivotToBoundsCenter(ctx, object_name);
                             pivot_edit_mode = false;
@@ -1620,7 +1620,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                         Vec3 pivot_world = sel.selected.position;
                         if (ImGui::DragFloat3("Pivot Pos", &pivot_world.x, 0.1f)) {
-                            std::string object_name = !sel.selected.name.empty() ? sel.selected.name : sel.selected.object->nodeName;
+                            std::string object_name = !sel.selected.name.empty() ? sel.selected.name : sel.selected.object->getNodeName();
                             if (object_name.empty()) object_name = "Unnamed";
                             moveObjectPivot(ctx, object_name, pivot_world - sel.selected.position);
                             ProjectManager::getInstance().markModified();

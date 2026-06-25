@@ -955,8 +955,23 @@ bool PrincipledBSDF::clearcoat_scatter(const Ray& r_in, const HitRecord& rec, Ve
     float k = alpha * 0.5f;
     float G1L = NdotL / (NdotL * (1.0f - k) + k);
 
+    // Iridescent thin-film tint (same OPD/cos model as the GPU bubble/clearcoat path).
+    // iridescence=0 → white (plain clearcoat). At grazing the optical path difference
+    // grows, cycling the interference hue (oil-slick / beetle-shell / candy paint).
+    Vec3 ccTint = Vec3(1.0f, 1.0f, 1.0f);
+    float iridescence = std::min(std::max(this->clearcoatIridescence, 0.0f), 1.0f);
+    if (iridescence > 1e-3f) {
+        float opd = this->clearcoatFilmThickness * (1.0f / std::max(VdotH, 0.15f));
+        Vec3 film = Vec3(0.55f + 0.45f * std::cos(opd * 6.2831853f),
+                         0.55f + 0.45f * std::cos(opd * 6.2831853f + 2.0944f),
+                         0.55f + 0.45f * std::cos(opd * 6.2831853f + 4.18879f));
+        ccTint = Vec3(1.0f - iridescence + iridescence * film.x,
+                      1.0f - iridescence + iridescence * film.y,
+                      1.0f - iridescence + iridescence * film.z);
+    }
+
     // Attenuation is white specular scaled by Fresnel*G1L. Caller compensates for cc_prob.
-    attenuation = Vec3(fresnel * G1L, fresnel * G1L, fresnel * G1L);
+    attenuation = Vec3(fresnel * G1L, fresnel * G1L, fresnel * G1L) * ccTint;
     scattered = Ray(rec.point + N * 0.001f, L);
     return true;
 }

@@ -50,9 +50,14 @@ enum class FoamType : uint8_t { Spray = 0, Foam = 1, Bubble = 2 };
 //   Spheres: each foam particle is an instanced sphere (debug / close-up / low
 //     counts). O(N) TLAS instances, so it crawls at the millions whitewater
 //     reaches — not the default.
-// (The old Volume mode — splatting foam into a white scattering NanoVDB — was
-//  removed: it was unstable when coincident with the fluid surface volume.)
-enum class FoamRenderMode : uint8_t { Surface = 0, Spheres = 1 };
+//   Volume: foam is trilinear-splatted into the fluid SURFACE volume's TEMPERATURE
+//     channel and marched as a bright single-scatter white medium (production
+//     whitewater). Cost is ~independent of particle count, and because it rides the
+//     SAME volume as the water SDF (NOT a second coincident volume) it is stable on
+//     every backend. Requires the fluid to be in Surface SDF render mode (that is
+//     the volume it rides). This is the recommended high-count default.
+// (Surface was the old marching-cubes metaball mode — removed; kept for save-compat.)
+enum class FoamRenderMode : uint8_t { Surface = 0, Spheres = 1, Volume = 2 };
 
 // SoA foam storage (mirrors FluidParticles' layout philosophy).
 struct FoamParticles {
@@ -120,9 +125,12 @@ struct FoamParams {
     std::size_t max_foam = 100000;     // hard cap on live foam particles
 
     // ── Render ───────────────────────────────────────────────────────────────
-    FoamRenderMode render_mode = FoamRenderMode::Surface; // metaball surface
+    // Volume is the production default: foam splats into the fluid surface volume's
+    // temperature channel and marches as a white single-scatter medium (cheap at
+    // high counts, both backends). Spheres = one instanced sphere per particle.
+    FoamRenderMode render_mode = FoamRenderMode::Volume;
 
-    // Scene material assigned to the foam geometry (both Surface and Spheres).
+    // Scene material assigned to the foam geometry (Spheres mode only).
     // -1 → a built-in default white foam material is created/used. Otherwise a
     // MaterialManager id the user picked in the foam panel.
     int   foam_material_id = -1;
@@ -135,6 +143,24 @@ struct FoamParams {
     // Spheres mode: icosphere subdivision level (0..3).
     int   foam_sphere_subdivisions = 1;
 
+    // ── Volume mode look ──────────────────────────────────────────────────────
+    // density_per_particle for the temperature-channel splat (volume_density,
+    // below — kept from the old Volume mode). foam tint + extinction drive the
+    // single-scatter medium the volume shader marches (_ext_reserved[3..6]).
+    Vec3  volume_color   = Vec3(0.95f, 0.97f, 1.0f); // foam scattering tint (cool white)
+    float volume_opacity = 8.0f;                     // extinction multiplier (density × this)
+
+    // Per-class deposit weight into the temperature-channel splat (Volume mode).
+    // Surface FOAM always deposits at full strength (it IS the bright white froth).
+    // BUBBLE (submerged) and SPRAY (airborne) ride the SAME single-scatter channel
+    // but scale their contribution here. Bubbles sit deep inside the water SDF, so
+    // the existing depth absorption auto-tints them cooler/dimmer = they already
+    // read as subsurface froth distinct from surface foam (Phase-1 bubble look; the
+    // physical Fresnel rim + inverted-IOR refraction is a later phase). 1.0 = same
+    // as foam (no change), lower = fainter, higher = brighter silvery pop.
+    float volume_bubble_strength = 1.0f;
+    float volume_spray_strength  = 1.0f;
+
     // ── Surface (metaball) mode ───────────────────────────────────────────────
     // Foam SDF reconstruction (Zhu-Bridson). Radii are in SIM voxels so the
     // surface shape is grid-resolution invariant.
@@ -144,7 +170,8 @@ struct FoamParams {
     int   surface_smoothing_iterations   = 2;     // Laplacian smoothing sweeps
     int   surface_resolution_multiplier  = 1;     // SDF fineness vs sim grid (1..4)
 
-    // Deprecated (old Volume mode); kept so existing saves deserialize cleanly.
+    // Volume mode: density each foam particle deposits into the temperature-channel
+    // splat (density_per_particle). Higher = denser/whiter foam.
     float volume_density = 1.0f;
 };
 
@@ -186,7 +213,9 @@ void splatFoamDensity(const FoamParticles& foam,
 void splatFoamDensity(const FoamParticles& foam,
                       int nx, int ny, int nz, float voxel, const Vec3& origin,
                       std::vector<float>& density_out,
-                      float density_per_particle);
+                      float density_per_particle,
+                      float bubble_weight = 1.0f,
+                      float spray_weight  = 1.0f);
 
 } // namespace Fluid
 } // namespace RayTrophiSim

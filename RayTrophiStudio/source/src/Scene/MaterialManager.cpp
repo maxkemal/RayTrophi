@@ -521,6 +521,21 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
                 matJson["microDetailScale"]    = pbsdf->micro_detail_scale;
                 matJson["tileBreakStrength"]   = pbsdf->tile_break_strength;
 
+                // Thin-shell bubble (champagne / soda / soap close-up)
+                matJson["isBubble"]   = pbsdf->isBubble;
+                matJson["bubbleIor"]  = pbsdf->bubbleIor;
+                matJson["bubbleFilm"] = pbsdf->bubbleFilm;
+                matJson["clearcoatIridescence"]   = pbsdf->clearcoatIridescence;
+                matJson["clearcoatFilmThickness"] = pbsdf->clearcoatFilmThickness;
+                matJson["transmissionDensity"] = pbsdf->transmissionDensity;
+                matJson["resinColor"] = vec3ToJson(pbsdf->resinColor);
+                matJson["resinRoughness"] = pbsdf->resinRoughness;
+                matJson["resinInclusion"] = pbsdf->resinInclusion;
+                matJson["resinDirt"] = pbsdf->resinDirt;
+                matJson["resinInclusionScale"] = pbsdf->resinInclusionScale;
+                matJson["resinDirtColor"] = vec3ToJson(pbsdf->resinDirtColor);
+                matJson["glassMarbleVolume"] = pbsdf->glassMarbleVolume;
+
                 // Legacy tiling fallback for older scene compatibility
                 matJson["tilingFactor"] = { pbsdf->tilingFactor.x, pbsdf->tilingFactor.y };
                 matJson["selectedUvSet"] = pbsdf->selected_uv_set;
@@ -676,6 +691,23 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
             pbsdf->micro_detail_strength = matJson.value("microDetailStrength", 0.0f);
             pbsdf->micro_detail_scale    = matJson.value("microDetailScale",    2.0f);
             pbsdf->tile_break_strength   = matJson.value("tileBreakStrength",   0.0f);
+
+            // Thin-shell bubble (champagne / soda / soap close-up)
+            pbsdf->isBubble   = matJson.value("isBubble",   false);
+            pbsdf->bubbleIor  = matJson.value("bubbleIor",  1.33f);
+            pbsdf->bubbleFilm = matJson.value("bubbleFilm", 0.0f);
+            pbsdf->clearcoatIridescence   = matJson.value("clearcoatIridescence",   0.0f);
+            pbsdf->clearcoatFilmThickness = matJson.value("clearcoatFilmThickness", 0.55f);
+            pbsdf->transmissionDensity = matJson.value("transmissionDensity", 0.0f);
+            if (matJson.contains("resinColor"))
+                pbsdf->resinColor = jsonToVec3(matJson["resinColor"], Vec3(1.0f, 1.0f, 1.0f));
+            pbsdf->resinRoughness = matJson.value("resinRoughness", 0.1f);
+            pbsdf->resinInclusion = matJson.value("resinInclusion", 0.0f);
+            pbsdf->resinDirt = matJson.value("resinDirt", 0.0f);
+            pbsdf->resinInclusionScale = matJson.value("resinInclusionScale", 8.0f);
+            if (matJson.contains("resinDirtColor"))
+                pbsdf->resinDirtColor = jsonToVec3(matJson["resinDirtColor"], Vec3(0.18f, 0.14f, 0.10f));
+            pbsdf->glassMarbleVolume = matJson.value("glassMarbleVolume", false);
 
             // Legacy tiling fallback
             if (matJson.contains("tilingFactor") && matJson["tilingFactor"].is_array()) {

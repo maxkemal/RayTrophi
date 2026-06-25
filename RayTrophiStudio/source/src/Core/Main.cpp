@@ -532,8 +532,9 @@ std::atomic<uint64_t> g_scene_geometry_generation{1};
 bool g_bvh_rebuild_pending = false;      // CPU BVH needs rebuild
 bool g_gpu_refit_pending = false;        // GPU Geometry needs update (Deferred)
 bool g_vulkan_rebuild_pending = false;    // GPU Vulkan geometry needs rebuild
+bool g_vulkan_device_cc_refit_pending = false; // Slice 4: device-resident CC position-only edit — MODE_UPDATE-refit the BLAS instead of a full rebuild
 bool g_vulkan_geometry_append_pending = false; // Additive-only mutation (scatter etc.) — try incremental TLAS refit first
-bool g_vulkan_geometry_deform_pending = false; // Physics body deformed its mesh — refit only those BLAS in place (vs full rebuild)
+bool g_geometry_deform_pending = false; // Physics body baked new verts — refit only those nodes in place on the active path (raster/OptiX/Vulkan) + CPU Embree refit (vs full rebuild)
 bool g_viewport_raster_rebuild_pending = false; // Interactive raster viewport needs rebuild
 bool g_optix_rebuild_pending = false;
 bool g_particle_cpu_geometry_dirty = false; // Particle bridge changed; CPU-active path re-expands particles into the BVH
@@ -557,6 +558,7 @@ bool        g_seq_save_denoise = false;
 bool g_solid_viewport_active = false;
 bool g_sim_timeline_mode = true;  // true = timeline-driven (bake/scrub, idle when stopped); false = live free-run preview
 bool g_sim_use_gpu_solver = false; // experimental GPU simulation compute (CUDA today): grid solver + APIC fluid + NanoVDB bridge
+bool g_gpu_subdivide_enabled = true; // GPU linear mesh subdivision (CPU fallback when unavailable / small mesh)
 RayTrophiSim::SimulationComputeVulkanContext g_vulkan_sim_compute_ctx{};
 std::atomic<bool> g_optix_rebuild_in_progress{false}; // True while TLAS rebuild is happening // GPU OptiX geometry needs rebuild
 std::atomic<bool> g_viewport_rebuild_in_progress{false}; // True while viewport backend resources are being torn down/rebuilt
@@ -5743,13 +5745,38 @@ int main(int argc, char* argv[]) try {
         const bool active_vulkan_raster_backend =
             (rasterViewportBackend != nullptr);
 
-        // Tell the physics write-back which refresh path to use for deforming bodies.
-        // Vulkan RT (rendered mode) → cheap per-mesh BLAS refit; anything else → the
-        // full-rebuild path. Backend type is stable across a play session, so the
-        // one-frame lag relative to the sim step (which runs earlier, in the UI pass)
-        // is harmless.
-        scene.setDeformRefitViaVulkan(active_vulkan_render_backend && g_hasVulkan &&
-                                      !interactive_viewport_active && !skip_backend_for_anim);
+        // Tell the physics write-back to use the cheap per-mesh refit path whenever
+        // the ACTIVE path supports an in-place per-node refit: raster Solid/Matcap
+        // (updateRasterMeshFromTriangles), OptiX or Vulkan RT rendered
+        // (updateInteractiveMesh) — each paired with a CPU Embree refit. Only the
+        // CPU reference render (no GPU/raster path live) keeps the full-rebuild path.
+        // Backend/mode is stable across a play session, so the one-frame lag relative
+        // to the sim step (which runs earlier, in the UI pass) is harmless.
+        const bool deform_refit_path_live =
+            !skip_backend_for_anim &&
+            ((interactive_viewport_active && rasterViewportBackend != nullptr) ||
+             (!interactive_viewport_active && active_optix_backend && g_backend) ||
+             (!interactive_viewport_active && active_vulkan_render_backend && g_hasVulkan && g_backend));
+        scene.setDeformRefitActive(deform_refit_path_live);
+
+        // Play → pause: force ONE full backend rebuild on the active GPU renderer.
+        // During playback the per-frame motion path only REFITS the acceleration
+        // structure (TLAS UPDATE + mesh BLAS refit) — fast, but a refit keeps the
+        // tree topology from the geometry's earlier positions, so after a stretch
+        // of heavy motion (sim, soft/rigid, sculpt) the BVH degrades and every
+        // paused-frame sample traces slowly. The user worked around this by
+        // toggling Solid→Rendered (which rebuilds). Automate that toggle: on the
+        // play→pause edge, rebuild once so the held frame converges at full speed.
+        {
+            const bool anim_active =
+                ui.timeline.isPlaying() || ui_ctx.render_settings.animation_is_playing;
+            static bool s_prev_anim_active = false;
+            if (s_prev_anim_active && !anim_active && !interactive_viewport_active) {
+                if (active_optix_backend)         g_optix_rebuild_pending = true;
+                else if (active_vulkan_render_backend) g_vulkan_rebuild_pending = true;
+            }
+            s_prev_anim_active = anim_active;
+        }
 
         // Drop stale pending flags that belong to an inactive backend to avoid
         // repeated heavy rebuild attempts after backend/mode transitions.
@@ -6069,36 +6096,68 @@ int main(int argc, char* argv[]) try {
         }
 
         // ── Deforming-body refit fast path (rigid / soft / cloth sim) ───────────────
-        // A simulated body bakes new verts into its source mesh every frame. The full
-        // rebuild below would destroy + recreate EVERY BLAS in the scene per frame —
-        // unusable in a crowded scene. Refit ONLY the changed bodies' BLAS in place
-        // ([World-Solo] meshes are created with allowUpdate) and refresh the TLAS;
-        // promote to a full rebuild if any mesh can't be refit (topology mismatch) or
-        // a full rebuild is already queued this frame.
-        if (g_vulkan_geometry_deform_pending && active_vulkan_render_backend && g_hasVulkan &&
-            !interactive_viewport_active && !skip_backend_for_anim) {
-            g_vulkan_geometry_deform_pending = false;
-            if (g_backend) {
-                auto* vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
-                bool all_ok = (vkBackend != nullptr) && !g_vulkan_rebuild_pending;
-                if (all_ok) {
-                    for (const auto& node : scene.takePendingDeformNodes()) {
+        // A simulated body (rigid / soft / fracture shard) baked new verts into its
+        // source mesh this frame. Refit ONLY the changed nodes in place on the active
+        // path — raster Solid (updateRasterMeshFromTriangles), OptiX or Vulkan RT
+        // (updateInteractiveMesh) — instead of the full-scene teardown below. The CPU
+        // picking/render BVH is refit separately (g_cpu_bvh_refit_pending, set when the
+        // node was marked dirty). Promote to a full rebuild only if a refit fails
+        // (topology change) or one is already queued.
+        if (g_geometry_deform_pending && !skip_backend_for_anim) {
+            g_geometry_deform_pending = false;
+            auto deform_nodes = scene.takePendingDeformNodes();
+            bool refit_ok = true;
+            if (interactive_viewport_active) {
+                // Solid / Matcap: refit the raster viewport mesh(es) in place.
+                if (!rasterViewportBackend || g_viewport_raster_rebuild_pending) {
+                    refit_ok = false;
+                } else {
+                    for (const auto& node : deform_nodes) {
                         auto tris = scene.collectNodeTriangles(node);
-                        if (tris.empty() || !vkBackend->updateInteractiveMesh(node, tris)) {
-                            all_ok = false;
+                        if (tris.empty() || !rasterViewportBackend->updateRasterMeshFromTriangles(node, tris)) {
+                            refit_ok = false;
                             break;
                         }
                     }
                 }
-                if (all_ok) {
-                    g_backend->resetAccumulation();
+                if (!refit_ok) g_viewport_raster_rebuild_pending = true;  // full raster rebuild fallback
+                else start_render = true;  // wake the Solid viewport this frame so the refit is presented
+                                           // (a full rebuild used to keep it awake via pending_scene_refresh;
+                                           //  the in-place refit doesn't, so playback left a stale image)
+            } else if (active_optix_backend && g_backend) {
+                refit_ok = !g_optix_rebuild_pending;
+                for (const auto& node : deform_nodes) {
+                    if (!refit_ok) break;
+                    auto tris = scene.collectNodeTriangles(node);
+                    if (tris.empty() || !g_backend->updateInteractiveMesh(node, tris)) refit_ok = false;
+                }
+                if (refit_ok) { g_backend->resetAccumulation(); start_render = true; g_camera_dirty = true; }
+                else g_optix_rebuild_pending = true;  // full OptiX rebuild fallback
+            } else if (active_vulkan_render_backend && g_hasVulkan && g_backend) {
+                auto* vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
+                refit_ok = (vkBackend != nullptr) && !g_vulkan_rebuild_pending;
+                for (const auto& node : deform_nodes) {
+                    if (!refit_ok) break;
+                    auto tris = scene.collectNodeTriangles(node);
+                    if (tris.empty() || !vkBackend->updateInteractiveMesh(node, tris)) refit_ok = false;
+                }
+                if (refit_ok) { g_backend->resetAccumulation(); start_render = true; g_camera_dirty = true; }
+                else g_vulkan_rebuild_pending = true;  // full Vulkan rebuild fallback
+            }
+        }
+
+        // Slice 4: device-resident CC position-only edit — try the cheap BLAS MODE_UPDATE
+        // refit BEFORE the heavy full rebuild. Same triangle count -> repoint the BLAS at the
+        // freshly-evaluated device buffer + refit TLAS; on any miss fall back to a full rebuild.
+        if (g_vulkan_device_cc_refit_pending && active_vulkan_render_backend && g_hasVulkan &&
+            !interactive_viewport_active && !skip_backend_for_anim) {
+            g_vulkan_device_cc_refit_pending = false;
+            if (auto* vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
+                if (!vkBackend->drainDeviceResidentCCRefits()) {
+                    g_vulkan_rebuild_pending = true;  // a request couldn't refit -> full rebuild
+                } else {
                     start_render = true;
                     g_camera_dirty = true;
-                } else {
-                    // Could not refit in place (or a full rebuild is already queued) —
-                    // fall back to the proven full-scene rebuild below.
-                    scene.clearPendingDeformNodes();
-                    g_vulkan_rebuild_pending = true;
                 }
             }
         }

@@ -1,0 +1,54 @@
+// cc_expand_blas.comp
+// Phase 3d: expand the indexed CC refine result (final positions/normals + static
+// per-corner topology) into the NON-INDEXED, expanded-soup combined buffer the RT BLAS
+// build consumes (see VulkanDevice::createBLAS + the host gather at VulkanBackend.cpp
+// ~7332). One thread = one final triangle; writes its 3 corners' position/normal/uv and
+// the per-triangle material id, with NO host round-trip.
+//
+// Combined layout (tightly packed, 4-byte words; vertexCount = triCount*3):
+//   pos block  [0,            triCount*9 )   3 floats * 3 corners per tri
+//   norm block [triCount*9,   triCount*18)   3 floats * 3 corners per tri
+//   uv block   [triCount*18,  triCount*24)   2 floats * 3 corners per tri
+//   mat block  [triCount*24,  triCount*25)   1 uint per tri
+// This matches createBLAS's offsets: norm@vertSize, uv@vertSize+normSize, mat@...+uvSize.
+#version 450
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly  buffer PosBuf { float pos[];   }; // 3/vertex (final)
+layout(std430, set = 0, binding = 1) readonly  buffer NrmBuf { float nrm[];   }; // 3/vertex (final)
+layout(std430, set = 0, binding = 2) readonly  buffer IdxBuf { uint  triIdx[]; }; // 3/tri (vertex ids)
+layout(std430, set = 0, binding = 3) readonly  buffer UvBuf  { float triUV[];  }; // 6/tri (per-corner uv)
+layout(std430, set = 0, binding = 4) readonly  buffer MatBuf { uint  triMat[]; }; // 1/tri
+layout(std430, set = 0, binding = 5) writeonly buffer OutBuf { uint  outGeom[]; }; // combined (float bits + uint)
+
+layout(push_constant) uniform PC { uint triCount; } pc;
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= pc.triCount) return;
+
+    uint posBase  = 0u;
+    uint normBase = pc.triCount * 9u;
+    uint uvBase   = pc.triCount * 18u;
+    uint matBase  = pc.triCount * 24u;
+
+    for (uint c = 0u; c < 3u; ++c) {
+        uint vid = triIdx[t * 3u + c];
+
+        uint pw = posBase + t * 9u + c * 3u;
+        outGeom[pw + 0u] = floatBitsToUint(pos[vid * 3u + 0u]);
+        outGeom[pw + 1u] = floatBitsToUint(pos[vid * 3u + 1u]);
+        outGeom[pw + 2u] = floatBitsToUint(pos[vid * 3u + 2u]);
+
+        uint nw = normBase + t * 9u + c * 3u;
+        outGeom[nw + 0u] = floatBitsToUint(nrm[vid * 3u + 0u]);
+        outGeom[nw + 1u] = floatBitsToUint(nrm[vid * 3u + 1u]);
+        outGeom[nw + 2u] = floatBitsToUint(nrm[vid * 3u + 2u]);
+
+        uint uw = uvBase + t * 6u + c * 2u;
+        outGeom[uw + 0u] = floatBitsToUint(triUV[t * 6u + c * 2u + 0u]);
+        outGeom[uw + 1u] = floatBitsToUint(triUV[t * 6u + c * 2u + 1u]);
+    }
+
+    outGeom[matBase + t] = triMat[t];
+}

@@ -1,4 +1,4 @@
-#include "renderer.h"
+﻿#include "renderer.h"
 #include <SDL_image.h>
 #include <filesystem>
 #include <chrono>      // For wall-clock deltaTime in animation fallback
@@ -9,6 +9,7 @@
 #include <imgui_impl_sdlrenderer2.h>
 #include <scene_ui.h>
 #include "OptixWrapper.h"
+#include "MeshProfileTimer.h" // TEMP: RSS-delta profiling of BVH/backend rebuild
 #include "Backend/IBackend.h"
 #include "Backend/OptixBackend.h"
 #include <future>
@@ -1912,7 +1913,7 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                     std::string prefix = ctx.importName + "_";
                     for (auto& obj : scene.world.objects) {
                         auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                        if (tri && tri->nodeName.find(prefix) == 0) {
+                        if (tri && tri->getNodeName().find(prefix) == 0) {
                             ctx.members.push_back(tri);
                         }
                     }
@@ -3493,6 +3494,7 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync) {
         SCENE_LOG_WARN("Scene not initialized, BVH rebuild skipped.");
         return;
     }
+    MESH_PROFILE_SCOPE(std::string("Renderer::rebuildBVH(") + (use_embree ? "Embree" : "internal") + ")");
 
     // Keep CPU geometry in sync with transform handles before building BVH.
     // Open-project deserialization already does this for static meshes, but
@@ -7847,6 +7849,7 @@ std::vector<std::shared_ptr<Hittable>> filterVisibleGeometryObjects(
 
 // Rebuild OptiX geometry after scene modifications (deletion/addition)
 void Renderer::rebuildBackendGeometry(SceneData& scene) {
+    MESH_PROFILE_SCOPE("Renderer::rebuildBackendGeometry(GPU)");
     // Rebuild geometry TLAS
     rebuildBackendGeometryWithList(filterVisibleGeometryObjects(scene.world.objects));
     // Sync all volumes (VDB/Gas)
@@ -8301,6 +8304,9 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
             }
 
             // Copy water-specific GPU params (live in GpuMaterial, not duplicated in PrincipledBSDF)
+            // NOTE: bubble (is_bubble / bubble_ior / bubble_film) is already carried by
+            // makeBackendMaterialDataFromSnapshot above (authoritative, from the PBSDF
+            // snapshot) — do NOT re-stamp it from the possibly-stale gpuMaterial here.
             if (mat->gpuMaterial) {
                 const auto& gm = *mat->gpuMaterial;
                 if ((gm.flags & GPU_MAT_FLAG_WATER) != 0 || gm.sheen > 0.0001f) {

@@ -524,6 +524,39 @@ void JoltWorld::addSoftBodyVertexVelocities(JoltBodyHandle handle, const std::ve
     if (any) impl_->physics_system->GetBodyInterface().ActivateBody(id);
 }
 
+void JoltWorld::setSoftBodyVertices(JoltBodyHandle handle, const std::vector<Vec3>& positions,
+                                    const std::vector<Vec3>* velocities) {
+    if (!impl_->initialized || handle == kInvalidBody || positions.empty()) return;
+    JPH::BodyID id = toBodyID(handle);
+    {
+        JPH::BodyLockWrite lock(impl_->physics_system->GetBodyLockInterface(), id);
+        if (!lock.Succeeded()) return;
+        JPH::Body& body = lock.GetBody();
+        if (!body.IsSoftBody()) return;
+        JPH::SoftBodyMotionProperties* mp =
+            static_cast<JPH::SoftBodyMotionProperties*>(body.GetMotionProperties());
+        // Particles are stored relative to the body's center of mass; map the target
+        // WORLD positions back into that frame (inverse of getSoftBodyVertices' com*).
+        const JPH::RMat44 com = body.GetCenterOfMassTransform();
+        const JPH::RMat44 inv_com = com.InversedRotationTranslation();
+        auto& verts = mp->GetVertices();
+        const std::size_t n = std::min(verts.size(), positions.size());
+        const bool have_vel = velocities && velocities->size() >= n;
+        for (std::size_t i = 0; i < n; ++i) {
+            if (verts[i].mInvMass <= 0.0f) continue;  // pinned: leave on its pin
+            const JPH::Vec3 local_pos = JPH::Vec3(inv_com * toJoltR(positions[i]));
+            verts[i].mPosition = local_pos;
+            // Match previous position so the solver doesn't infer a spurious one-step
+            // velocity from the teleport; the explicit velocity below is authoritative.
+            verts[i].mPreviousPosition = local_pos;
+            verts[i].mVelocity = have_vel
+                ? com.Multiply3x3Transposed(toJolt((*velocities)[i]))
+                : JPH::Vec3::sZero();
+        }
+    }
+    impl_->physics_system->GetBodyInterface().ActivateBody(id);
+}
+
 void JoltWorld::removeBody(JoltBodyHandle handle) {
     if (!impl_->initialized || handle == kInvalidBody) return;
     JPH::BodyID id = toBodyID(handle);

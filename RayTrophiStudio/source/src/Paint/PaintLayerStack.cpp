@@ -76,6 +76,92 @@ void resamplePixels(const std::vector<CompactVec4>& src, int src_w, int src_h,
     }
 }
 
+std::pair<float, float> applyMaterialUVTransform(float u, float v, const PaintLayerStack::PaintUVParams& p) {
+    float nx = u - 0.5f;
+    float ny = v - 0.5f;
+    nx *= p.scale_x;
+    ny *= p.scale_y;
+
+    float angleRad = p.rotation_degrees * 3.14159265359f / 180.0f;
+    float c = std::cos(angleRad);
+    float s = std::sin(angleRad);
+    float rx = nx * c - ny * s;
+    float ry = nx * s + ny * c;
+
+    rx += 0.5f;
+    ry += 0.5f;
+    rx += p.offset_x;
+    ry += p.offset_y;
+    rx *= p.tiling_x;
+    ry *= p.tiling_y;
+
+    auto wrapRepeat = [](float x) {
+        float r = std::fmod(x, 1.0f);
+        return r < 0.0f ? r + 1.0f : r;
+    };
+    auto wrapMirror = [](float x) {
+        float r = std::fmod(x, 2.0f);
+        if (r < 0.0f) r += 2.0f;
+        return r > 1.0f ? 2.0f - r : r;
+    };
+
+    switch (p.wrap_mode) {
+        case 0: rx = wrapRepeat(rx); ry = wrapRepeat(ry); break;
+        case 1: rx = wrapMirror(rx); ry = wrapMirror(ry); break;
+        case 2: rx = std::clamp(rx, 0.0f, 1.0f); ry = std::clamp(ry, 0.0f, 1.0f); break;
+        case 3: rx = u; ry = v; break;
+    }
+    return {rx, ry};
+}
+
+void resamplePixelsWithUV(const std::vector<CompactVec4>& src, int src_w, int src_h,
+                          std::vector<CompactVec4>& dst, int dst_w, int dst_h,
+                          const PaintLayerStack::PaintUVParams& p)
+{
+    dst.resize(static_cast<size_t>(dst_w) * static_cast<size_t>(dst_h));
+    if (src.empty() || src_w <= 0 || src_h <= 0) {
+        std::fill(dst.begin(), dst.end(), CompactVec4(0, 0, 0, 0));
+        return;
+    }
+
+    for (int y = 0; y < dst_h; ++y) {
+        float v = dst_h > 1 ? static_cast<float>(y) / static_cast<float>(dst_h - 1) : 0.0f;
+        for (int x = 0; x < dst_w; ++x) {
+            float u = dst_w > 1 ? static_cast<float>(x) / static_cast<float>(dst_w - 1) : 0.0f;
+            
+            auto [tu, tv] = applyMaterialUVTransform(u, v, p);
+            
+            float sx = tu * static_cast<float>(src_w - 1);
+            float sy = tv * static_cast<float>(src_h - 1);
+            
+            int x0 = std::clamp(static_cast<int>(std::floor(sx)), 0, src_w - 1);
+            int x1 = std::clamp(x0 + 1, 0, src_w - 1);
+            int y0 = std::clamp(static_cast<int>(std::floor(sy)), 0, src_h - 1);
+            int y1 = std::clamp(y0 + 1, 0, src_h - 1);
+            float tx = sx - static_cast<float>(x0);
+            float ty = sy - static_cast<float>(y0);
+
+            const auto& c00 = src[y0 * src_w + x0];
+            const auto& c10 = src[y0 * src_w + x1];
+            const auto& c01 = src[y1 * src_w + x0];
+            const auto& c11 = src[y1 * src_w + x1];
+
+            auto lerp = [](float a, float b, float t) { return a + (b - a) * t; };
+            auto bilerp = [&](uint8_t a00, uint8_t a10, uint8_t a01, uint8_t a11) -> uint8_t {
+                const float top = lerp(static_cast<float>(a00), static_cast<float>(a10), tx);
+                const float bot = lerp(static_cast<float>(a01), static_cast<float>(a11), tx);
+                return static_cast<uint8_t>(std::clamp(lerp(top, bot, ty), 0.0f, 255.0f));
+            };
+
+            dst[y * dst_w + x] = CompactVec4(
+                bilerp(c00.r, c10.r, c01.r, c11.r),
+                bilerp(c00.g, c10.g, c01.g, c11.g),
+                bilerp(c00.b, c10.b, c01.b, c11.b),
+                bilerp(c00.a, c10.a, c01.a, c11.a));
+        }
+    }
+}
+
 // Blend a single source pixel onto a destination pixel.
 // `opacity` is the layer-level opacity [0..1].
 void blendPixel(CompactVec4& dst, const CompactVec4& src,
@@ -504,7 +590,7 @@ void PaintLayerStack::setResolution(int w, int h) {
 
 // -------- initialisation --------
 
-void PaintLayerStack::seedFromTextureSet(const PaintTextureSet& src) {
+void PaintLayerStack::seedFromTextureSet(const PaintTextureSet& src, const PaintUVParams& uv_params) {
     ensureBaseLayer();
 
     PaintLayerData& base = layers_[0];
@@ -514,6 +600,8 @@ void PaintLayerStack::seedFromTextureSet(const PaintTextureSet& src) {
         auto texture = src.getTexture(channel);
         if (!texture || !texture->is_loaded() || texture->pixels.empty()) continue;
 
+        if (base.hasPixels(channel)) continue; // Prevent double-baking or overwriting existing seeded layers
+
         if (width_ <= 0 || height_ <= 0) {
             width_  = texture->width;
             height_ = texture->height;
@@ -522,11 +610,11 @@ void PaintLayerStack::seedFromTextureSet(const PaintTextureSet& src) {
         }
 
         auto& buf = base.ensurePixels(channel);
-        if (texture->width == width_ && texture->height == height_) {
+        if (texture->width == width_ && texture->height == height_ && uv_params.isDefault()) {
             buf = texture->pixels;
         } else {
-            resamplePixels(texture->pixels, texture->width, texture->height,
-                           buf, width_, height_);
+            resamplePixelsWithUV(texture->pixels, texture->width, texture->height,
+                           buf, width_, height_, uv_params);
         }
 
         // Base layer must always be fully opaque for every channel except
