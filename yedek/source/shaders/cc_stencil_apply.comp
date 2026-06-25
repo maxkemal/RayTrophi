@@ -1,0 +1,36 @@
+// cc_stencil_apply.comp
+// GPU port of one level of MeshModifiers::evaluateCCPositions' position refine.
+// Catmull-Clark position rules are LINEAR in the current-level positions, so each
+// level is a sparse matrix apply  outPos[o] = sum_k w[k] * inPos[idx[k]]  in CSR
+// form. The host drives this once per subdivision level (ping-pong pos buffers) with
+// the plan's cached per-level stencil. One thread = one output vertex.
+// Numerically equivalent to the CPU path (GPU float rounding may differ in the last
+// bits, so not bit-identical).
+#version 450
+layout(local_size_x = 64) in;
+
+// Positions are flat scalar floats (3 per vertex) to dodge std430 vec3->16B padding.
+layout(std430, set = 0, binding = 0) readonly  buffer InPos  { float inPos[];  };
+layout(std430, set = 0, binding = 1) writeonly buffer OutPos { float outPos[]; };
+layout(std430, set = 0, binding = 2) readonly  buffer OffBuf { int   csrOff[]; }; // size outCount+1
+layout(std430, set = 0, binding = 3) readonly  buffer IdxBuf { int   csrIdx[]; }; // size off[outCount]
+layout(std430, set = 0, binding = 4) readonly  buffer WBuf   { float csrW[];   }; // size off[outCount]
+
+layout(push_constant) uniform PC { uint outCount; } pc;
+
+void main() {
+    uint o = gl_GlobalInvocationID.x;
+    if (o >= pc.outCount) return;
+
+    int beg = csrOff[o];
+    int end = csrOff[o + 1u];
+    vec3 acc = vec3(0.0);
+    for (int k = beg; k < end; ++k) {
+        int vi = csrIdx[k];
+        float w = csrW[k];
+        acc += vec3(inPos[vi * 3], inPos[vi * 3 + 1], inPos[vi * 3 + 2]) * w;
+    }
+    outPos[o * 3]     = acc.x;
+    outPos[o * 3 + 1] = acc.y;
+    outPos[o * 3 + 2] = acc.z;
+}

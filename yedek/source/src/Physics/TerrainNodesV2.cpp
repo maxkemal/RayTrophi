@@ -1,0 +1,3731 @@
+/**
+ * @file TerrainNodesV2.cpp
+ * @brief Implementation of terrain nodes using V2 NodeSystem
+ */
+
+#include "TerrainNodesV2.h"
+#include "scene_data.h"
+#include "TerrainManager.h"
+#include "TerrainFFT.h"  // FFT-accelerated noise with CUDA fallback
+#include "globals.h"
+#include "stb_image.h"
+#include "stb_image_write.h"
+#include <cmath>
+#include <algorithm>
+#include <cfloat>  // FLT_MAX
+#include <fstream>
+#include <string>
+#include <cstring>
+#include "perlin.h" // For gradient noise
+#include <image_resample.h>
+#include <image_filters.h>
+
+namespace TerrainNodesV2 {
+
+    static NodeSystem::Image2DData buildPackedErosionMap(
+        const std::vector<float>& before,
+        const std::vector<float>& after,
+        int w,
+        int h,
+        const std::vector<float>* flowMap,
+        const std::vector<float>* hardnessMap,
+        const std::vector<float>* mask)
+    {
+        NodeSystem::Image2DData result;
+        result.data = std::make_shared<std::vector<float>>(static_cast<size_t>(w) * h * 4, 0.0f);
+        result.width = w;
+        result.height = h;
+        result.channels = 4;
+        result.semantic = NodeSystem::ImageSemantic::Mask;
+
+        float maxErosion = 0.0f;
+        float maxDeposition = 0.0f;
+        float maxFlow = 0.0f;
+
+        const bool hasFlow = flowMap && flowMap->size() == static_cast<size_t>(w) * h;
+        const bool hasHardness = hardnessMap && hardnessMap->size() == static_cast<size_t>(w) * h;
+        const bool hasMask = mask && mask->size() == static_cast<size_t>(w) * h;
+
+        std::vector<float> localFlow(static_cast<size_t>(w) * h, 0.0f);
+        if (!hasFlow) {
+            for (int y = 1; y < h - 1; ++y) {
+                for (int x = 1; x < w - 1; ++x) {
+                    const int idx = y * w + x;
+                    const float slopeX = std::fabs(after[idx + 1] - after[idx - 1]) * 0.5f;
+                    const float slopeY = std::fabs(after[idx + w] - after[idx - w]) * 0.5f;
+                    const float delta = std::fabs(before[idx] - after[idx]);
+                    localFlow[idx] = slopeX + slopeY + delta * 2.0f;
+                    maxFlow = (std::max)(maxFlow, localFlow[idx]);
+                }
+            }
+        }
+
+        for (int i = 0; i < w * h; ++i) {
+            const float erosion = (std::max)(before[i] - after[i], 0.0f);
+            const float deposition = (std::max)(after[i] - before[i], 0.0f);
+            maxErosion = (std::max)(maxErosion, erosion);
+            maxDeposition = (std::max)(maxDeposition, deposition);
+            if (hasFlow) {
+                maxFlow = (std::max)(maxFlow, (*flowMap)[i]);
+            }
+        }
+
+        const float logFlowDenom = static_cast<float>(std::log1p((std::max)(maxFlow, 1e-6f)));
+        for (int i = 0; i < w * h; ++i) {
+            const float erosion = (std::max)(before[i] - after[i], 0.0f);
+            const float deposition = (std::max)(after[i] - before[i], 0.0f);
+            const float rawFlow = hasFlow ? (*flowMap)[i] : localFlow[i];
+            const float normalizedFlow = (logFlowDenom > 0.0f)
+                ? (static_cast<float>(std::log1p((std::max)(rawFlow, 0.0f))) / logFlowDenom) : 0.0f;
+            const float alpha = hasHardness ? std::clamp((*hardnessMap)[i], 0.0f, 1.0f)
+                : (hasMask ? std::clamp((*mask)[i], 0.0f, 1.0f) : 1.0f);
+
+            (*result.data)[i * 4 + 0] = (maxErosion > 1e-6f) ? (erosion / maxErosion) : 0.0f;
+            (*result.data)[i * 4 + 1] = (maxDeposition > 1e-6f) ? (deposition / maxDeposition) : 0.0f;
+            (*result.data)[i * 4 + 2] = std::clamp(normalizedFlow, 0.0f, 1.0f);
+            (*result.data)[i * 4 + 3] = alpha;
+        }
+
+        return result;
+    }
+
+
+    // ============================================================================
+    // HEIGHTMAP FILE LOADING
+    // ============================================================================
+    
+    void HeightmapInputNode::loadHeightmapFromFile() {
+        if (strlen(filePath) == 0) return;
+        
+        std::string path(filePath);
+        
+        // SAFETY: Check if path has extension
+        size_t dotPos = path.find_last_of('.');
+        if (dotPos == std::string::npos || dotPos == path.length() - 1) {
+            // No extension found - cannot determine format
+            fileLoaded = false;
+            return;
+        }
+        
+        std::string ext = path.substr(dotPos + 1);
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        
+        loadedHeightData.clear();
+        fileLoaded = false;
+        
+        // Try RAW16 format first (common for heightmaps)
+        if (ext == "raw" || ext == "r16") {
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file) return;
+            
+            size_t fileSize = file.tellg();
+            file.seekg(0);
+            
+            // Assume square heightmap, 16-bit
+            size_t pixelCount = fileSize / 2;
+            int side = (int)std::sqrt((double)pixelCount);
+            
+            if (side * side * 2 != fileSize) {
+                // Try common sizes
+                if (fileSize == 1025 * 1025 * 2) side = 1025;
+                else if (fileSize == 2049 * 2049 * 2) side = 2049;
+                else if (fileSize == 4097 * 4097 * 2) side = 4097;
+                else if (fileSize == 513 * 513 * 2) side = 513;
+                else if (fileSize == 257 * 257 * 2) side = 257;
+            }
+            
+            loadedWidth = side;
+            loadedHeight = side;
+            loadedHeightData.resize(side * side);
+            
+            std::vector<uint16_t> rawData(side * side);
+            file.read(reinterpret_cast<char*>(rawData.data()), side * side * 2);
+            
+            // Convert to normalized float (0-1 range scaled to typical height)
+            for (size_t i = 0; i < rawData.size(); i++) {
+                loadedHeightData[i] = (float)rawData[i] / 65535.0f; // Normalize 0-1
+            }
+            
+            fileLoaded = true;
+            sourceMode = SourceMode::File; // AUTO-SWITCH to File mode
+            dirty = true;
+            return;
+        }
+        
+        // PNG/JPG/BMP via stb_image
+        if (ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "bmp" || ext == "tga") {
+            int w, h, channels;
+            unsigned char* img = stbi_load(path.c_str(), &w, &h, &channels, 1); // Force grayscale
+            
+            if (img) {
+                // Calculate separate strides for X and Y to preserve aspect ratio
+                int strideX = 1, strideY = 1;
+                if (w > maxResolution) {
+                    strideX = (w + maxResolution - 1) / maxResolution;  // Ceiling division
+                }
+                if (h > maxResolution) {
+                    strideY = (h + maxResolution - 1) / maxResolution;  // Ceiling division
+                }
+                
+                loadedWidth = w / strideX;
+                loadedHeight = h / strideY;
+                rawHeightData.resize(loadedWidth * loadedHeight);
+
+                if (strideX == 1 && strideY == 1) {
+                    // Direct copy with sRGB->linear conversion. Apply light dithering
+                    // only on small/medium images to break banding; skip for very large inputs.
+                    std::mt19937 rng(1337);
+                    std::uniform_real_distribution<float> dither_dist(-0.5f / 255.0f, 0.5f / 255.0f);
+                    const float gamma = 2.2f;
+                    bool high_input = (w >= 3000 || h >= 3000);
+                    bool apply_dither = !high_input;
+                    for (int y = 0; y < loadedHeight; y++) {
+                        for (int x = 0; x < loadedWidth; x++) {
+                            int srcIdx = (y * strideY) * w + (x * strideX);
+                            float v = (float)img[srcIdx] / 255.0f;
+                            v = powf(v, gamma);
+                            if (apply_dither) v = v + dither_dist(rng);
+                            v = std::clamp(v, 0.0f, 1.0f);
+                            rawHeightData[y * loadedWidth + x] = v;
+                        }
+                    }
+                } else {
+                    std::vector<uint8_t> dstBuf((size_t)loadedWidth * loadedHeight);
+                    int lanczos_a = 2;
+                    ImageResample::lanczos_resample_u8(img, w, h, dstBuf.data(), loadedWidth, loadedHeight, lanczos_a);
+                    for (int i = 0; i < loadedWidth * loadedHeight; ++i) rawHeightData[i] = dstBuf[i] / 255.0f;
+                }
+
+                // Apply frequency separation (high-quality) to loadedHeightData with adaptive params
+                try {
+                    std::vector<float> fs_out;
+                    const bool downsampled_local = !(strideX == 1 && strideY == 1);
+                    float fs_sigma = downsampled_local ? 1.4f : 0.6f;
+                    float fs_detail_strength = downsampled_local ? 0.8f : 0.97f;
+                    ImageFilters::frequency_separation(rawHeightData, loadedWidth, loadedHeight, fs_out, fs_sigma, fs_detail_strength);
+                    rawHeightData.swap(fs_out);
+                } catch (...) {
+                    // ignore failures
+                }
+                
+                stbi_image_free(img);
+                applySmoothing();
+                fileLoaded = true;
+                sourceMode = SourceMode::File; // AUTO-SWITCH to File mode
+                dirty = true;
+            }
+            return;
+        }
+        
+        // Try 16-bit PNG loading
+        if (ext == "png") {
+            int w, h, channels;
+            unsigned short* img16 = stbi_load_16(path.c_str(), &w, &h, &channels, 1);
+            
+            if (img16) {
+                // Calculate separate strides for X and Y to preserve aspect ratio
+                int strideX = 1, strideY = 1;
+                if (w > maxResolution) {
+                    strideX = (w + maxResolution - 1) / maxResolution;
+                }
+                if (h > maxResolution) {
+                    strideY = (h + maxResolution - 1) / maxResolution;
+                }
+                
+                loadedWidth = w / strideX;
+                loadedHeight = h / strideY;
+                rawHeightData.resize(loadedWidth * loadedHeight);
+
+                if (strideX == 1 && strideY == 1) {
+                    for (int y = 0; y < loadedHeight; y++) {
+                        for (int x = 0; x < loadedWidth; x++) {
+                            int srcIdx = (y * strideY) * w + (x * strideX);
+                            rawHeightData[y * loadedWidth + x] = (float)img16[srcIdx] / 65535.0f;
+                        }
+                    }
+                } else {
+                    std::vector<uint16_t> dstBuf((size_t)loadedWidth * loadedHeight);
+                    ImageResample::lanczos_resample_u16(img16, w, h, dstBuf.data(), loadedWidth, loadedHeight, 3);
+                    for (int i = 0; i < loadedWidth * loadedHeight; ++i) rawHeightData[i] = dstBuf[i] / 65535.0f;
+                }
+            
+            stbi_image_free(img16);
+            applySmoothing();
+            fileLoaded = true;
+            sourceMode = SourceMode::File; // AUTO-SWITCH to File mode
+            dirty = true;
+        }    }
+     }
+    
+    void HeightmapInputNode::applySmoothing() {
+        if (rawHeightData.empty() || loadedWidth == 0 || loadedHeight == 0) return;
+        
+        // Start with raw data
+        loadedHeightData = rawHeightData;
+        
+        if (smoothIterations <= 0) return;
+        
+        std::vector<float> temp = loadedHeightData;
+        int w = loadedWidth;
+        int h = loadedHeight;
+        
+        for (int iter = 0; iter < smoothIterations; iter++) {
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    float sum = 0.0f;
+                    int count = 0;
+                    
+                    // 3x3 Box Blur
+                    for (int dy = -1; dy <= 1; dy++) {
+                        for (int dx = -1; dx <= 1; dx++) {
+                            int nx = x + dx;
+                            int ny = y + dy;
+                            
+                            if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                                sum += temp[ny * w + nx];
+                                count++;
+                            }
+                        }
+                    }
+                    loadedHeightData[y * w + x] = sum / count;
+                }
+            }
+            if (iter < smoothIterations - 1) temp = loadedHeightData;
+        }
+    }
+    
+    // ============================================================================
+    // NOISE GENERATOR IMPLEMENTATION
+    // ============================================================================
+    
+    NodeSystem::PinValue NoiseGeneratorNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        if (!tctx || !tctx->terrain) {
+            ctx.addError(id, "No terrain context");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = tctx->width;
+        int h = tctx->height;
+        auto result = createHeightOutput(w, h);
+        
+        // Create Perlin generator seeded by node parameter so output is deterministic
+        Perlin perlin((unsigned int)seed);
+        
+        // ═══════════════════════════════════════════════════════════
+        // NOISE HELPER FUNCTIONS
+        // ═══════════════════════════════════════════════════════════
+        
+        // Seed-based hash function
+        auto hash = [this](float n) -> float {
+            float seeded = n + (float)seed * 17.31f;
+            float result = std::sin(seeded) * 43758.5453f;
+            return result - std::floor(result);
+        };
+        
+        // 2D hash for Voronoi
+        auto hash2 = [this](float x, float y) -> std::pair<float, float> {
+            float sx = x + (float)seed * 0.31f;
+            float sy = y + (float)seed * 0.47f;
+            float px = sx * 127.1f + sy * 311.7f;
+            float py = sx * 269.5f + sy * 183.3f;
+            float hx = std::sin(px) * 43758.5453f;
+            float hy = std::sin(py) * 43758.5453f;
+            return { hx - std::floor(hx), hy - std::floor(hy) };
+        };
+        
+        // Simple 2D value noise
+        auto noise2D = [&hash](float x, float y) -> float {
+            float px = std::floor(x);
+            float py = std::floor(y);
+            float fx = x - px;
+            float fy = y - py;
+            
+            // Smoothstep
+            fx = fx * fx * (3.0f - 2.0f * fx);
+            fy = fy * fy * (3.0f - 2.0f * fy);
+            
+            float n = px + py * 57.0f;
+            float a = hash(n);
+            float b = hash(n + 1.0f);
+            float c = hash(n + 57.0f);
+            float d = hash(n + 58.0f);
+            
+            return a + fx * (b - a) + fy * (c - a) + fx * fy * (a - b - c + d);
+        };
+        
+        // FBM (Fractional Brownian Motion)
+        auto fbm = [&noise2D, this](float x, float y) -> float {
+            float value = 0.0f;
+            float amp = 1.0f;
+            float freq = 1.0f;
+            float maxAmp = 0.0f;
+            
+            for (int i = 0; i < octaves; i++) {
+                value += noise2D(x * freq, y * freq) * amp;
+                maxAmp += amp;
+                amp *= persistance;
+                freq *= lacunarity;
+            }
+            return value / maxAmp;
+        };
+        
+        // Voronoi/Worley noise
+        auto voronoi = [&hash2, this](float x, float y) -> float {
+            float ix = std::floor(x);
+            float iy = std::floor(y);
+            float fx = x - ix;
+            float fy = y - iy;
+            
+            float minDist = 10.0f;
+            
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    auto hashResult = hash2(ix + dx, iy + dy);
+                    float hx = hashResult.first;
+                    float hy = hashResult.second;
+                    float px = dx + hx * jitter - fx;
+                    float py = dy + hy * jitter - fy;
+                    float dist = std::sqrt(px * px + py * py);
+                    minDist = (std::min)(minDist, dist);
+                }
+            }
+            return minDist;
+        };
+        
+        // Voronoi FBM
+        auto voronoiFbm = [&voronoi, this](float x, float y) -> float {
+            float value = 0.0f;
+            float amp = 1.0f;
+            float freq = 1.0f;
+            float maxAmp = 0.0f;
+            
+            for (int i = 0; i < octaves; i++) {
+                value += voronoi(x * freq, y * freq) * amp;
+                maxAmp += amp;
+                amp *= persistance;
+                freq *= lacunarity;
+            }
+            return value / maxAmp;
+        };
+        
+        // ═══════════════════════════════════════════════════════════
+        // GENERATE NOISE FOR EACH PIXEL
+        // ═══════════════════════════════════════════════════════════
+        
+        // Seed offset for variation
+        float seedOffsetX = (float)(seed % 1000) * 0.1f;
+        float seedOffsetY = (float)((seed / 1000) % 1000) * 0.1f + 100.0f;
+        
+        // Get terrain aspect ratio for proper noise scaling
+        float terrainAspect = 1.0f;
+        if (tctx->terrain && w > 0 && h > 0) {
+            // Use consistent scaling based on terrain's actual world size
+            terrainAspect = (float)w / (float)h;
+        }
+        
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                // Normalize to 0-1 range preserving aspect ratio
+                // Both coordinates use the same base scale for isotropic noise
+                float baseX = (float)x / (float)(std::max)(w, h);
+                float baseY = (float)y / (float)(std::max)(w, h);
+                
+                // Apply scale and frequency
+                float nx = baseX * scale * 10.0f + seedOffsetX;
+                float ny = baseY * scale * 10.0f + seedOffsetY;
+                
+                // Additional frequency multiplier
+                nx *= frequency * 100.0f;
+                ny *= frequency * 100.0f;
+                
+                float noiseValue = 0.0f;
+                
+                switch (noiseType) {
+                    case NoiseType::Perlin: {
+                        // Use Perlin class with turb() for FBM
+                        Vec3 p(nx, ny, 0.0f);
+                        noiseValue = perlin.turb(p, octaves);
+                        break;
+                    }
+                    
+                    case NoiseType::Simplex: {
+                        // Hash-based FBM (similar to CPUCloudNoise)
+                        noiseValue = fbm(nx, ny);
+                        break;
+                    }
+                    
+                    case NoiseType::Voronoi: {
+                        // Worley/cell noise
+                        noiseValue = 1.0f - voronoiFbm(nx, ny);
+                        break;
+                    }
+                    
+                    case NoiseType::Ridge: {
+                        // Ridge noise: sharp mountain ridges
+                        float value = 0.0f;
+                        float amp = 1.0f;
+                        float freq = 1.0f;
+                        float maxAmp = 0.0f;
+                        float weight = 1.0f;
+                        
+                        for (int i = 0; i < octaves; i++) {
+                            Vec3 p(nx * freq, ny * freq, 0.0f);
+                            float n = perlin.noise(p);
+                            n = ridge_offset - std::abs(n);
+                            n = n * n; // Square for sharper ridges
+                            n *= weight;
+                            weight = clampValue(n * 2.0f, 0.0f, 1.0f);
+                            
+                            value += n * amp;
+                            maxAmp += amp;
+                            amp *= persistance;
+                            freq *= lacunarity;
+                        }
+                        noiseValue = value / maxAmp;
+                        break;
+                    }
+                    
+                    case NoiseType::Billow: {
+                        // Billow: soft, puffy hills
+                        float value = 0.0f;
+                        float amp = 1.0f;
+                        float freq = 1.0f;
+                        float maxAmp = 0.0f;
+                        
+                        for (int i = 0; i < octaves; i++) {
+                            Vec3 p(nx * freq, ny * freq, 0.0f);
+                            float n = perlin.noise(p);
+                            n = std::abs(n) * 2.0f - 1.0f;
+                            
+                            value += n * amp;
+                            maxAmp += amp;
+                            amp *= persistance;
+                            freq *= lacunarity;
+                        }
+                        noiseValue = (value / maxAmp + 1.0f) * 0.5f;
+                        break;
+                    }
+                    
+                    case NoiseType::Warped: {
+                        // Domain warping: distort coordinates with noise
+                        float warpX = fbm(nx, ny) * warp_strength * 5.0f;
+                        float warpY = fbm(nx + 5.2f, ny + 1.3f) * warp_strength * 5.0f;
+                        
+                        Vec3 p(nx + warpX, ny + warpY, 0.0f);
+                        noiseValue = perlin.turb(p, octaves);
+                        break;
+                    }
+                    
+                    // ═══════════════════════════════════════════════════════════
+                    // FFT-ACCELERATED NOISE TYPES
+                    // Uses TerrainFFT system: CUDA if available, CPU fallback otherwise
+                    // ═══════════════════════════════════════════════════════════
+                    
+                    case NoiseType::FFT_Ocean:
+                    case NoiseType::FFT_Ridge:
+                    case NoiseType::FFT_Billow:
+                    case NoiseType::FFT_Turb: {
+                        // For FFT types, we'll generate the full heightmap once
+                        // and then read from it. Since we're in a per-pixel loop,
+                        // we'll use CPU fallback noise here (similar algorithm)
+                        // The actual FFT generation happens in a separate code path
+                        
+                        // Use TerrainFFT CPU noise as these are compatible
+                        TerrainFFT::FFTNoiseParams fftParams;
+                        fftParams.seed = seed;
+                        fftParams.scale = scale;
+                        fftParams.frequency = frequency;
+                        fftParams.octaves = octaves;
+                        fftParams.persistence = persistance;
+                        fftParams.lacunarity = lacunarity;
+                        fftParams.ridgeOffset = ridge_offset;
+                        
+                        // Map noise type
+                        switch (noiseType) {
+                            case NoiseType::FFT_Ocean:
+                                noiseValue = TerrainFFT::CPUNoise::fbmNoise(nx, ny, octaves, persistance, lacunarity, seed);
+                                break;
+                            case NoiseType::FFT_Ridge:
+                                noiseValue = TerrainFFT::CPUNoise::ridgedNoise(nx, ny, octaves, persistance, lacunarity, ridge_offset, 2.0f, seed);
+                                break;
+                            case NoiseType::FFT_Billow:
+                                noiseValue = TerrainFFT::CPUNoise::billowNoise(nx, ny, octaves, persistance, lacunarity, seed);
+                                break;
+                            case NoiseType::FFT_Turb:
+                            default:
+                                noiseValue = TerrainFFT::CPUNoise::fbmNoise(nx, ny, octaves, persistance, lacunarity, seed);
+                                break;
+                        }
+                        break;
+                    }
+                }
+                
+                // Scale to amplitude
+                (*result.data)[y * w + x] = noiseValue * amplitude;
+            }
+        }
+        
+        return result;
+    }
+
+    // ============================================================================
+    // EROSION NODE IMPLEMENTATIONS
+    // ============================================================================
+    
+    NodeSystem::PinValue HydraulicErosionNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        if (!tctx || !tctx->terrain) {
+            ctx.addError(id, "No terrain context");
+            return NodeSystem::PinValue{};
+        }
+        
+        // Get input heightmap
+        auto inputHeight = getHeightInput(0, ctx);
+        if (!inputHeight.isValid()) {
+            ctx.addError(id, "No valid height input");
+            return NodeSystem::PinValue{};
+        }
+        
+        TerrainObject* terrain = tctx->terrain;
+        TerrainManager& mgr = TerrainManager::getInstance();
+        
+        // CRITICAL: Use scale values from TerrainContext (set at evaluation start)
+        // This ensures consistent scale throughout the entire node chain
+        float preserved_scale_xz = tctx->scale_xz;
+        float preserved_scale_y = tctx->scale_y;
+        
+        // ALWAYS apply input to terrain - handle size mismatch
+        if (inputHeight.width != terrain->heightmap.width || 
+            inputHeight.height != terrain->heightmap.height) {
+            terrain->heightmap.width = inputHeight.width;
+            terrain->heightmap.height = inputHeight.height;
+            terrain->heightmap.data.resize(inputHeight.width * inputHeight.height);
+        }
+        const std::vector<float> originalHeight = *inputHeight.data;
+        terrain->heightmap.data = *inputHeight.data;
+        
+        // Apply scale from context (guaranteed valid)
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
+        terrain->dirty_mesh = true;
+        
+        // Get optional mask
+        std::vector<float> mask;
+        auto maskInput = getHeightInput(1, ctx);
+        if (maskInput.isValid() && maskInput.data->size() == terrain->heightmap.data.size()) {
+            mask = *maskInput.data;
+        }
+        
+        // NEW: Get optional Hardness input
+        auto hardnessInput = getHeightInput(2, ctx);
+        if (hardnessInput.isValid() && hardnessInput.data->size() == terrain->heightmap.data.size()) {
+            terrain->hardnessMap = *hardnessInput.data;
+        }
+        
+        // Run erosion via TerrainManager
+        if (useGPU) {
+            mgr.hydraulicErosionGPU(terrain, params, mask);
+        } else {
+            mgr.hydraulicErosion(terrain, params, mask);
+        }
+        
+        // Create output using INPUT dimensions to propagate correctly
+        auto result = createHeightOutput(inputHeight.width, inputHeight.height);
+        *result.data = terrain->heightmap.data;
+        
+        // Apply Edge Falloff if enabled
+        if (this->edgeFalloffWidth > 0.01f) {
+            applyEdgeFalloff(*result.data, inputHeight.width, inputHeight.height, this->edgeFalloffWidth, this->edgeFalloffValue);
+        }
+
+        auto erosionMap = buildPackedErosionMap(
+            originalHeight,
+            *result.data,
+            inputHeight.width,
+            inputHeight.height,
+            nullptr,
+            terrain->hardnessMap.empty() ? nullptr : &terrain->hardnessMap,
+            mask.empty() ? nullptr : &mask);
+        terrain->erosionMapRGBA = *erosionMap.data;
+
+        ctx.setCachedValue(id, 0, result);
+        ctx.setCachedValue(id, 1, erosionMap);
+        return (outputIndex == 1) ? NodeSystem::PinValue{erosionMap} : NodeSystem::PinValue{result};
+    }
+    
+    void HydraulicErosionNode::drawContent() {
+        if (!g_hasCUDA) useGPU = false;
+        ImGui::BeginDisabled(!g_hasCUDA);
+        if (ImGui::Checkbox("Use GPU", &useGPU)) dirty = true;
+        ImGui::EndDisabled();
+        if (g_hasCUDA) {
+            ImGui::TextDisabled("CUDA available. You can switch between GPU and CPU.");
+        } else {
+            ImGui::TextDisabled("CUDA unavailable. Hydraulic erosion falls back to CPU.");
+        }
+        
+        ImGui::TextColored(
+            useGPU ? ImVec4(0.4f, 0.7f, 1.0f, 1.0f) : ImVec4(0.4f, 1.0f, 0.7f, 1.0f),
+            useGPU ? "Mode: GPU Hydraulic Droplet Solver" : "Mode: CPU Hydraulic Droplet Solver");
+        if (ImGui::DragInt("Droplets", &params.iterations, 25000, 25000, 1000000, "%d hits")) dirty = true;
+        if (ImGui::DragInt("Lifetime", &params.dropletLifetime, 1, 16, 512)) dirty = true;
+        if (ImGui::DragFloat("Inertia", &params.inertia, 0.01f, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::DragFloat("Capacity", &params.sedimentCapacity, 0.05f, 0.1f, 20.0f)) dirty = true;
+        if (ImGui::DragFloat("Erode Rate", &params.erodeSpeed, 0.01f, 0.01f, 2.0f)) dirty = true;
+        if (ImGui::DragFloat("Deposit Rate", &params.depositSpeed, 0.01f, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::DragFloat("Evaporate", &params.evaporateSpeed, 0.001f, 0.0f, 0.2f)) dirty = true;
+        if (ImGui::DragFloat("Gravity", &params.gravity, 0.1f, 1.0f, 50.0f)) dirty = true;
+        if (ImGui::DragFloat("Min Slope", &params.minSlope, 0.001f, 0.0f, 0.1f, "%.4f")) dirty = true;
+        if (ImGui::DragInt("Channel Width", &params.erosionRadius, 1, 1, 15)) dirty = true;
+
+        if (ImGui::Button(useGPU ? "Reset GPU Params" : "Reset CPU Params")) {
+            params = HydraulicErosionParams();
+            dirty = true;
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Edge Falloff");
+        if (ImGui::DragFloat("Fade Width", &this->edgeFalloffWidth, 1.0f, 0.0f, 256.0f, "%.0f px")) dirty = true;
+        if (ImGui::SliderFloat("Fade Value", &this->edgeFalloffValue, 0.0f, 1.0f)) dirty = true;
+    }
+    
+    NodeSystem::PinValue ThermalErosionNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        if (!tctx || !tctx->terrain) {
+            ctx.addError(id, "No terrain context");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto inputHeight = getHeightInput(0, ctx);
+        if (!inputHeight.isValid()) {
+            ctx.addError(id, "No valid height input");
+            return NodeSystem::PinValue{};
+        }
+        
+        TerrainObject* terrain = tctx->terrain;
+        TerrainManager& mgr = TerrainManager::getInstance();
+        
+        // CRITICAL: Use scale values from TerrainContext (set at evaluation start)
+        float preserved_scale_xz = tctx->scale_xz;
+        float preserved_scale_y = tctx->scale_y;
+        
+        // ALWAYS apply input to terrain - handle size mismatch
+        if (inputHeight.width != terrain->heightmap.width || 
+            inputHeight.height != terrain->heightmap.height) {
+            terrain->heightmap.width = inputHeight.width;
+            terrain->heightmap.height = inputHeight.height;
+            terrain->heightmap.data.resize(inputHeight.width * inputHeight.height);
+        }
+        terrain->heightmap.data = *inputHeight.data;
+        
+        // Apply scale from context
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
+        terrain->dirty_mesh = true;
+        
+        // Get optional mask
+        std::vector<float> mask;
+        auto maskInput = getHeightInput(1, ctx);
+        if (maskInput.isValid() && maskInput.data->size() == terrain->heightmap.data.size()) {
+            mask = *maskInput.data;
+        }
+        
+        // NEW: Get optional Hardness input
+        auto hardnessInput = getHeightInput(2, ctx);
+        if (hardnessInput.isValid() && hardnessInput.data->size() == terrain->heightmap.data.size()) {
+            terrain->hardnessMap = *hardnessInput.data;
+        }
+        
+        if (useGPU) {
+            mgr.thermalErosionGPU(terrain, params, mask);
+        } else {
+            mgr.thermalErosion(terrain, params, mask);
+        }
+        
+        auto result = createHeightOutput(inputHeight.width, inputHeight.height);
+        *result.data = terrain->heightmap.data;
+        
+        // Apply Edge Falloff if enabled
+        if (this->edgeFalloffWidth > 0.01f) {
+            applyEdgeFalloff(*result.data, inputHeight.width, inputHeight.height, this->edgeFalloffWidth, this->edgeFalloffValue);
+        }
+        
+        return result;
+    }
+    
+    void ThermalErosionNode::drawContent() {
+        if (!g_hasCUDA) useGPU = false;
+        ImGui::BeginDisabled(!g_hasCUDA);
+        if (ImGui::Checkbox("Use GPU", &useGPU)) dirty = true;
+        ImGui::EndDisabled();
+        if (!g_hasCUDA) ImGui::TextDisabled("CUDA required for GPU mode.");
+        ImGui::DragInt("Iterations", &params.iterations, 1, 1, 500);
+        
+        float uiDegrees = std::atan(params.talusAngle) * 180.0f / 3.14159f;
+        if (ImGui::DragFloat("Talus Angle", &uiDegrees, 0.1f, 0.0f, 80.0f, "%.1f deg")) {
+            params.talusAngle = std::tan(uiDegrees * 3.14159f / 180.0f);
+            dirty = true;
+        }
+        if (ImGui::DragFloat("Erosion Amount", &params.erosionAmount, 0.01f, 0.0f, 1.0f)) dirty = true;
+
+        ImGui::Separator();
+        ImGui::Text("Edge Falloff");
+        if (ImGui::DragFloat("Fade Width", &this->edgeFalloffWidth, 1.0f, 0.0f, 256.0f, "%.0f px")) dirty = true;
+        if (ImGui::SliderFloat("Fade Value", &this->edgeFalloffValue, 0.0f, 1.0f)) dirty = true;
+    }
+    
+    NodeSystem::PinValue FluvialErosionNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        if (!tctx || !tctx->terrain) {
+            ctx.addError(id, "No terrain context");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto inputHeight = getHeightInput(0, ctx);
+        if (!inputHeight.isValid()) {
+            ctx.addError(id, "No valid height input");
+            return NodeSystem::PinValue{};
+        }
+        
+        TerrainObject* terrain = tctx->terrain;
+        TerrainManager& mgr = TerrainManager::getInstance();
+        
+        // CRITICAL: Preserve scales
+        float preserved_scale_xz = tctx->scale_xz;
+        float preserved_scale_y = tctx->scale_y;
+        
+        // Setup terrain data
+        if (inputHeight.width != terrain->heightmap.width || 
+            inputHeight.height != terrain->heightmap.height) {
+            terrain->heightmap.width = inputHeight.width;
+            terrain->heightmap.height = inputHeight.height;
+            terrain->heightmap.data.resize(inputHeight.width * inputHeight.height);
+        }
+        const std::vector<float> originalHeight = *inputHeight.data;
+        terrain->heightmap.data = *inputHeight.data;
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
+        
+        // Get optional mask
+        std::vector<float> mask;
+        auto maskInput = getHeightInput(1, ctx);
+        if (maskInput.isValid() && maskInput.data->size() == terrain->heightmap.data.size()) {
+            mask = *maskInput.data;
+        }
+        
+        if (useGPU) {
+            // ========================================================
+            // GPU WAY: CPU-Parity Stream Power Erosion (Hybrid)
+            // ========================================================
+            mgr.fluvialErosionGPU(terrain, params, mask);
+        } else {
+            // ========================================================
+            // CPU WAY: Global Hydrological Analysis
+            // ========================================================
+            mgr.fluvialErosion(terrain, params, mask);
+        }
+        
+        auto result = createHeightOutput(inputHeight.width, inputHeight.height);
+        *result.data = terrain->heightmap.data;
+        
+        if (this->edgeFalloffWidth > 0.01f) {
+            applyEdgeFalloff(*result.data, inputHeight.width, inputHeight.height, this->edgeFalloffWidth, this->edgeFalloffValue);
+        }
+
+        auto erosionMap = buildPackedErosionMap(
+            originalHeight,
+            *result.data,
+            inputHeight.width,
+            inputHeight.height,
+            terrain->flowMap.empty() ? nullptr : &terrain->flowMap,
+            terrain->hardnessMap.empty() ? nullptr : &terrain->hardnessMap,
+            mask.empty() ? nullptr : &mask);
+        terrain->erosionMapRGBA = *erosionMap.data;
+
+        ctx.setCachedValue(id, 0, result);
+        ctx.setCachedValue(id, 1, erosionMap);
+        return (outputIndex == 1) ? NodeSystem::PinValue{erosionMap} : NodeSystem::PinValue{result};
+    }
+    
+    void FluvialErosionNode::drawContent() {
+        if (!g_hasCUDA) useGPU = false;
+        ImGui::BeginDisabled(!g_hasCUDA);
+        if (ImGui::Checkbox("Use GPU", &useGPU)) dirty = true;
+        ImGui::EndDisabled();
+        if (!g_hasCUDA) ImGui::TextDisabled("CUDA required for GPU mode.");
+
+        if (ImGui::Button(useGPU ? "Reset GPU Params" : "Reset CPU Params")) {
+            params = HydraulicErosionParams();
+            params.iterations = 250000;
+            params.sedimentCapacity = 2.0f;
+            params.erosionRadius = 4;
+            params.erodeSpeed = 0.5f;
+            params.minSlope = 0.005f;
+            dirty = true;
+        }
+        ImGui::TextColored(
+            useGPU ? ImVec4(0.4f, 0.7f, 1.0f, 1.0f) : ImVec4(0.4f, 1.0f, 0.7f, 1.0f),
+            useGPU ? "Mode: GPU Stream Power River Carver" : "Mode: CPU Stream Power River Carver");
+        if (ImGui::DragInt("Intensity", &params.iterations, 25000, 25000, 1500000, "%d hits")) dirty = true;
+        if (ImGui::DragFloat("Stream Power", &params.sedimentCapacity, 0.05f, 0.25f, 8.0f)) dirty = true;
+        if (ImGui::DragFloat("Erosion Rate", &params.erodeSpeed, 0.01f, 0.01f, 1.5f)) dirty = true;
+        if (ImGui::DragInt("Channel Width", &params.erosionRadius, 1, 1, 12)) dirty = true;
+        if (ImGui::DragFloat("Cutoff Slope", &params.minSlope, 0.001f, 0.001f, 0.05f, "%.4f")) dirty = true;
+        
+        ImGui::Separator();
+        ImGui::Text("Edge Falloff");
+        if (ImGui::DragFloat("Fade Width", &this->edgeFalloffWidth, 1.0f, 0.0f, 256.0f, "%.0f px")) dirty = true;
+        if (ImGui::SliderFloat("Fade Value", &this->edgeFalloffValue, 0.0f, 1.0f)) dirty = true;
+    }
+    
+    NodeSystem::PinValue WindErosionNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        if (!tctx || !tctx->terrain) {
+            ctx.addError(id, "No terrain context");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto inputHeight = getHeightInput(0, ctx);
+        if (!inputHeight.isValid()) {
+            ctx.addError(id, "No valid height input");
+            return NodeSystem::PinValue{};
+        }
+        
+        TerrainObject* terrain = tctx->terrain;
+        TerrainManager& mgr = TerrainManager::getInstance();
+        
+        // CRITICAL: Use scale values from TerrainContext (set at evaluation start)
+        float preserved_scale_xz = tctx->scale_xz;
+        float preserved_scale_y = tctx->scale_y;
+        
+        // ALWAYS apply input to terrain - handle size mismatch
+        if (inputHeight.width != terrain->heightmap.width || 
+            inputHeight.height != terrain->heightmap.height) {
+            terrain->heightmap.width = inputHeight.width;
+            terrain->heightmap.height = inputHeight.height;
+            terrain->heightmap.data.resize(inputHeight.width * inputHeight.height);
+        }
+        terrain->heightmap.data = *inputHeight.data;
+        
+        // Apply scale from context
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
+        terrain->dirty_mesh = true;
+        
+        // Get optional mask
+        std::vector<float> mask;
+        auto maskInput = getHeightInput(1, ctx);
+        if (maskInput.isValid() && maskInput.data->size() == terrain->heightmap.data.size()) {
+            mask = *maskInput.data;
+        }
+        
+        if (useGPU) {
+            mgr.windErosionGPU(terrain, strength, direction, iterations, mask);
+        } else {
+            mgr.windErosion(terrain, strength, direction, iterations, mask);
+        }
+        
+        auto result = createHeightOutput(inputHeight.width, inputHeight.height);
+        *result.data = terrain->heightmap.data;
+        
+        // Apply Edge Falloff if enabled
+        if (this->edgeFalloffWidth > 0.01f) {
+            applyEdgeFalloff(*result.data, inputHeight.width, inputHeight.height, this->edgeFalloffWidth, this->edgeFalloffValue);
+        }
+        
+        return result;
+    }
+    
+    void WindErosionNode::drawContent() {
+        if (!g_hasCUDA) useGPU = false;
+        ImGui::BeginDisabled(!g_hasCUDA);
+        if (ImGui::Checkbox("Use GPU", &useGPU)) dirty = true;
+        ImGui::EndDisabled();
+        if (!g_hasCUDA) ImGui::TextDisabled("CUDA required for GPU mode.");
+        ImGui::SliderFloat("Strength", &strength, 0.0f, 2.0f);
+        ImGui::SliderFloat("Direction", &direction, 0.0f, 360.0f);
+        ImGui::DragInt("Iterations", &iterations, 10, 1, 1000);
+
+        ImGui::Separator();
+        ImGui::Text("Edge Falloff");
+        if (ImGui::DragFloat("Fade Width", &this->edgeFalloffWidth, 1.0f, 0.0f, 256.0f, "%.0f px")) dirty = true;
+        if (ImGui::SliderFloat("Fade Value", &this->edgeFalloffValue, 0.0f, 1.0f)) dirty = true;
+    }
+
+    // ============================================================================
+    // SEDIMENT DEPOSITION NODE IMPLEMENTATIONS
+    // ============================================================================
+    
+    NodeSystem::PinValue SedimentDepositionNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        auto inputHeight = getHeightInput(0, ctx);
+        
+        if (!tctx || !inputHeight.isValid()) {
+            ctx.addError(id, "Invalid context or input");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = inputHeight.width;
+        int h = inputHeight.height;
+        
+        // Get terrain's height scale
+        float heightScale = (tctx->terrain) ? tctx->terrain->heightmap.scale_y : 1.0f;
+        float cellSize = (tctx->terrain) ? (tctx->terrain->heightmap.scale_xz / (std::max)(w, h)) : 1.0f;
+        
+        // Working buffers
+        std::vector<float> heightData = *inputHeight.data;
+        std::vector<float> sediment(w * h, 0.0f);  // Sediment in transport
+        std::vector<float> deposited(w * h, 0.0f); // Total deposited sediment
+        
+        // Optional flow mask input
+        auto flowInput = getHeightInput(1, ctx);
+        std::vector<float> flowMask(w * h, 1.0f);
+        if (flowInput.isValid() && flowInput.data->size() == heightData.size()) {
+            flowMask = *flowInput.data;
+        }
+        
+        // D8 flow directions
+        const int dx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+        const int dy[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+        const float dist[] = {1.414f, 1.0f, 1.414f, 1.0f, 1.0f, 1.414f, 1.0f, 1.414f};
+        
+        // Flow-based sediment transport simulation
+        for (int iter = 0; iter < iterations; iter++) {
+            std::vector<float> newSediment(w * h, 0.0f);
+            
+            for (int y = 1; y < h - 1; y++) {
+                for (int x = 1; x < w - 1; x++) {
+                    int idx = y * w + x;
+                    float centerH = heightData[idx] * heightScale;
+                    float currentSed = sediment[idx];
+                    float flow = flowMask[idx];
+                    
+                    // Calculate slope to steepest neighbor
+                    float maxSlope = 0.0f;
+                    int bestDir = -1;
+                    float neighborH = centerH;
+                    
+                    for (int d = 0; d < 8; d++) {
+                        int nx = x + dx[d];
+                        int ny = y + dy[d];
+                        int nidx = ny * w + nx;
+                        
+                        float nH = heightData[nidx] * heightScale;
+                        float slope = (centerH - nH) / (dist[d] * cellSize);
+                        
+                        if (slope > maxSlope) {
+                            maxSlope = slope;
+                            bestDir = d;
+                            neighborH = nH;
+                        }
+                    }
+                    
+                    // Transport capacity based on slope and flow
+                    float capacity = maxSlope * transportCapacity * flow;
+                    
+                    if (maxSlope > 0.01f && bestDir >= 0) {
+                        // Erosion (pick up sediment) on steep slopes
+                        float erosion = (std::min)(maxSlope * 0.01f, 0.001f);
+                        heightData[idx] -= erosion / heightScale;
+                        currentSed += erosion;
+                        
+                        // Transport sediment downhill
+                        int nx = x + dx[bestDir];
+                        int ny = y + dy[bestDir];
+                        int nidx = ny * w + nx;
+                        
+                        float transported = (std::min)(currentSed, capacity);
+                        newSediment[nidx] += transported * (1.0f - settlingSpeed);
+                        
+                        // Deposit excess sediment
+                        float excess = currentSed - transported;
+                        if (excess > 0) {
+                            deposited[idx] += excess * depositionRate;
+                            heightData[idx] += excess * depositionRate / heightScale;
+                        }
+                    } else {
+                        // Flat area: deposit all sediment
+                        deposited[idx] += currentSed * depositionRate;
+                        heightData[idx] += currentSed * depositionRate / heightScale;
+                    }
+                }
+            }
+            
+            sediment = newSediment;
+        }
+        
+        // Return appropriate output
+        if (outputIndex == 0) {
+            // Height output
+            auto result = createHeightOutput(w, h);
+            *result.data = heightData;
+            return result;
+        } else {
+            // Sediment mask output
+            auto result = createMaskOutput(w, h);
+            // Normalize deposited map
+            float maxDep = 0.001f;
+            for (float d : deposited) maxDep = (std::max)(maxDep, d);
+            for (int i = 0; i < w * h; i++) {
+                (*result.data)[i] = clampValue(deposited[i] / maxDep, 0.0f, 1.0f);
+            }
+            return result;
+        }
+    }
+    
+    void SedimentDepositionNode::drawContent() {
+        ImGui::SliderInt("Iterations", &iterations, 1, 150);
+        ImGui::DragFloat("Deposit Rate", &depositionRate, 0.01f, 0.01f, 2.0f);
+        ImGui::DragFloat("Transport Cap", &transportCapacity, 0.05f, 0.05f, 20.0f);
+        ImGui::SliderFloat("Settling", &settlingSpeed, 0.0f, 0.99f);
+    }
+    
+    NodeSystem::PinValue AlluvialFanNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        auto inputHeight = getHeightInput(0, ctx);
+        
+        if (!tctx || !inputHeight.isValid()) {
+            ctx.addError(id, "Invalid context or input");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = inputHeight.width;
+        int h = inputHeight.height;
+        
+        float heightScale = (tctx->terrain) ? tctx->terrain->heightmap.scale_y : 1.0f;
+        float cellSize = (tctx->terrain) ? (tctx->terrain->heightmap.scale_xz / (std::max)(w, h)) : 1.0f;
+        
+        std::vector<float> heightData = *inputHeight.data;
+        std::vector<float> fanMask(w * h, 0.0f);
+        
+        // Calculate slope map
+        std::vector<float> slopeMap(w * h, 0.0f);
+        for (int y = 1; y < h - 1; y++) {
+            for (int x = 1; x < w - 1; x++) {
+                int idx = y * w + x;
+                float dzdx = (heightData[idx + 1] - heightData[idx - 1]) * heightScale / (2.0f * cellSize);
+                float dzdy = (heightData[idx + w] - heightData[idx - w]) * heightScale / (2.0f * cellSize);
+                slopeMap[idx] = std::atan(std::sqrt(dzdx * dzdx + dzdy * dzdy)) * 57.2957795f;
+            }
+        }
+        
+        // Find steep-to-flat transition zones (fan apex points)
+        float slopeThreshRad = slopeThreshold;
+        
+        for (int y = 2; y < h - 2; y++) {
+            for (int x = 2; x < w - 2; x++) {
+                int idx = y * w + x;
+                float currentSlope = slopeMap[idx];
+                
+                // Check if this is a steep-to-flat transition
+                bool isSteepAbove = false;
+                bool isFlatBelow = false;
+                
+                // Check uphill neighbors (simplified: check north side)
+                for (int dy = -2; dy <= 0; dy++) {
+                    int nidx = (y + dy) * w + x;
+                    if (slopeMap[nidx] > slopeThreshRad) isSteepAbove = true;
+                }
+                
+                // Check downhill neighbors
+                for (int dy = 1; dy <= 2; dy++) {
+                    int nidx = (y + dy) * w + x;
+                    if (slopeMap[nidx] < slopeThreshRad * 0.5f) isFlatBelow = true;
+                }
+                
+                // If transition zone, create fan
+                if (isSteepAbove && isFlatBelow && currentSlope < slopeThreshRad) {
+                    float spreadRad = fanSpreadAngle * 3.14159f / 180.0f;
+                    
+                    // Spread sediment in fan pattern
+                    for (int d = 0; d < fanLength; d++) {
+                        float spread = (float)d / fanLength * spreadRad;
+                        
+                        for (float angle = -spread; angle <= spread; angle += 0.1f) {
+                            int fx = x + (int)(std::sin(angle) * d);
+                            int fy = y + d; // Fans spread downhill (south)
+                            
+                            if (fx >= 0 && fx < w && fy >= 0 && fy < h) {
+                                int fidx = fy * w + fx;
+                                float falloff = 1.0f - (float)d / fanLength;
+                                falloff = falloff * falloff;
+                                
+                                float deposit = depositionStrength * falloff * 0.01f;
+                                heightData[fidx] += deposit / heightScale;
+                                fanMask[fidx] = (std::max)(fanMask[fidx], falloff);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (outputIndex == 0) {
+            auto result = createHeightOutput(w, h);
+            *result.data = heightData;
+            return result;
+        } else {
+            auto result = createMaskOutput(w, h);
+            *result.data = fanMask;
+            return result;
+        }
+    }
+    
+    void AlluvialFanNode::drawContent() {
+        ImGui::SliderFloat("Slope Threshold", &slopeThreshold, 5.0f, 70.0f);
+        ImGui::SliderFloat("Spread Angle", &fanSpreadAngle, 10.0f, 140.0f);
+        ImGui::DragFloat("Deposit Strength", &depositionStrength, 0.05f, 0.1f, 10.0f);
+        ImGui::SliderInt("Fan Length", &fanLength, 4, 300);
+    }
+    
+    NodeSystem::PinValue DeltaFormationNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        auto inputHeight = getHeightInput(0, ctx);
+        
+        if (!tctx || !inputHeight.isValid()) {
+            ctx.addError(id, "Invalid context or input");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = inputHeight.width;
+        int h = inputHeight.height;
+        
+        float heightScale = (tctx->terrain) ? tctx->terrain->heightmap.scale_y : 1.0f;
+        
+        std::vector<float> heightData = *inputHeight.data;
+        std::vector<float> deltaMask(w * h, 0.0f);
+        
+        // Get flow mask for river detection
+        auto flowInput = getHeightInput(1, ctx);
+        std::vector<float> flowMask(w * h, 0.0f);
+        if (flowInput.isValid() && flowInput.data->size() == heightData.size()) {
+            flowMask = *flowInput.data;
+        } else {
+            // No flow input, skip delta formation
+            if (outputIndex == 0) {
+                auto result = createHeightOutput(w, h);
+                *result.data = heightData;
+                return result;
+            } else {
+                return createMaskOutput(w, h);
+            }
+        }
+        
+        // Find high-flow points at sea level (river mouths)
+        float seaLevelThresh = seaLevel;
+        float flowThreshold = 0.5f; // High flow accumulation
+        
+        for (int y = 1; y < h - 1; y++) {
+            for (int x = 1; x < w - 1; x++) {
+                int idx = y * w + x;
+                float height = heightData[idx];
+                float flow = flowMask[idx];
+                
+                // Is this a river mouth? (high flow, low elevation)
+                if (flow > flowThreshold && height < seaLevelThresh) {
+                    float spreadRad = deltaSpread * 3.14159f / 180.0f;
+                    
+                    // Create branching delta pattern
+                    for (int branch = 0; branch < branchingFactor; branch++) {
+                        float branchAngle = -spreadRad + 2.0f * spreadRad * branch / (branchingFactor - 1);
+                        if (branchingFactor == 1) branchAngle = 0;
+                        
+                        // Extend branch
+                        float bx = (float)x;
+                        float by = (float)y;
+                        
+                        for (int d = 0; d < 30; d++) {
+                            bx += std::sin(branchAngle);
+                            by += 1.0f; // Delta extends downward
+                            
+                            int fx = (int)bx;
+                            int fy = (int)by;
+                            
+                            if (fx >= 0 && fx < w && fy >= 0 && fy < h) {
+                                int fidx = fy * w + fx;
+                                float falloff = 1.0f - (float)d / 30.0f;
+                                
+                                // Build up delta sediment
+                                float deposit = sedimentRatio * falloff * flow * 0.01f;
+                                heightData[fidx] += deposit / heightScale;
+                                deltaMask[fidx] = (std::max)(deltaMask[fidx], falloff * flow);
+                                
+                                // Add some width to branches
+                                for (int bw = -1; bw <= 1; bw++) {
+                                    int wfx = fx + bw;
+                                    if (wfx >= 0 && wfx < w) {
+                                        int wfidx = fy * w + wfx;
+                                        heightData[wfidx] += deposit * 0.5f / heightScale;
+                                        deltaMask[wfidx] = (std::max)(deltaMask[wfidx], falloff * flow * 0.5f);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (outputIndex == 0) {
+            auto result = createHeightOutput(w, h);
+            *result.data = heightData;
+            return result;
+        } else {
+            auto result = createMaskOutput(w, h);
+            // Normalize delta mask
+            float maxVal = 0.001f;
+            for (float v : deltaMask) maxVal = (std::max)(maxVal, v);
+            for (int i = 0; i < w * h; i++) {
+                (*result.data)[i] = clampValue(deltaMask[i] / maxVal, 0.0f, 1.0f);
+            }
+            return result;
+        }
+    }
+    
+    void DeltaFormationNode::drawContent() {
+        ImGui::SliderFloat("Sea Level", &seaLevel, 0.0f, 1.0f);
+        ImGui::SliderFloat("Delta Spread", &deltaSpread, 5.0f, 140.0f);
+        ImGui::SliderInt("Branches", &branchingFactor, 1, 9);
+        ImGui::DragFloat("Sediment Ratio", &sedimentRatio, 0.05f, 0.1f, 10.0f);
+    }
+
+    // ============================================================================
+    // EROSION WIZARD NODE IMPLEMENTATION
+    // ============================================================================
+    
+    const char* ErosionWizardNode::getPresetName(ErosionPreset p) {
+        switch (p) {
+            case ErosionPreset::Custom: return "Custom";
+            case ErosionPreset::YoungMountains: return "Young Mountains (1-10 My)";
+            case ErosionPreset::MatureMountains: return "Mature Mountains (10-50 My)";
+            case ErosionPreset::AncientPlateau: return "Ancient Plateau (100+ My)";
+            case ErosionPreset::TropicalRainforest: return "Tropical Rainforest";
+            case ErosionPreset::AridDesert: return "Arid Desert";
+            case ErosionPreset::GlacialCarving: return "Glacial Carving";
+            case ErosionPreset::CoastalErosion: return "Coastal Erosion";
+            case ErosionPreset::VolcanicTerrain: return "Volcanic Terrain";
+            case ErosionPreset::RiverDelta: return "River Delta";
+            default: return "Unknown";
+        }
+    }
+    
+    void ErosionWizardNode::applyPreset(ErosionPreset p) {
+        switch (p) {
+            case ErosionPreset::YoungMountains:
+                timeScaleMy = 5.0f;
+                rainfallFactor = 0.15f;    // Tamed: Was 1.0
+                temperatureFactor = 0.1f;
+                windFactor = 0.05f;
+                break;
+            case ErosionPreset::MatureMountains:
+                timeScaleMy = 40.0f;
+                rainfallFactor = 0.3f;     // Tamed: Was 1.2
+                temperatureFactor = 0.2f;
+                windFactor = 0.15f;
+                break;
+            case ErosionPreset::AncientPlateau:
+                timeScaleMy = 250.0f;
+                rainfallFactor = 0.6f;     // Ancient needs high cumulative work
+                temperatureFactor = 0.4f;
+                windFactor = 0.3f;
+                break;
+            case ErosionPreset::TropicalRainforest:
+                timeScaleMy = 20.0f;
+                rainfallFactor = 0.5f;     // Was 2.0
+                temperatureFactor = 0.15f;
+                windFactor = 0.1f;
+                break;
+            case ErosionPreset::AridDesert:
+                timeScaleMy = 80.0f;
+                rainfallFactor = 0.05f;
+                temperatureFactor = 0.5f;
+                windFactor = 0.6f;
+                break;
+            case ErosionPreset::GlacialCarving:
+                timeScaleMy = 2.0f;
+                rainfallFactor = 0.2f;
+                temperatureFactor = 0.6f;  // High freeze-thaw
+                windFactor = 0.2f;
+                break;
+            case ErosionPreset::CoastalErosion:
+                timeScaleMy = 15.0f;
+                rainfallFactor = 0.25f;
+                temperatureFactor = 0.15f;
+                windFactor = 0.4f;
+                break;
+            case ErosionPreset::VolcanicTerrain:
+                timeScaleMy = 0.8f;
+                rainfallFactor = 0.3f;
+                temperatureFactor = 0.4f;
+                windFactor = 0.1f;
+                break;
+            case ErosionPreset::RiverDelta:
+                timeScaleMy = 10.0f;
+                rainfallFactor = 0.4f;
+                temperatureFactor = 0.1f;
+                windFactor = 0.05f;
+                break;
+            default:
+                break;
+        }
+    }
+    
+    NodeSystem::PinValue ErosionWizardNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        auto inputHeight = getHeightInput(0, ctx);
+        
+        if (!tctx || !tctx->terrain || !inputHeight.isValid()) {
+            ctx.addError(id, "Invalid context or input");
+            return NodeSystem::PinValue{};
+        }
+        
+        // Cache terrain for UI simulation updates
+        cachedTerrain = tctx->terrain;
+        
+        int w = inputHeight.width;
+        int h = inputHeight.height;
+        TerrainObject* terrain = tctx->terrain;
+        
+        // Cache mask
+        cachedMask.clear();
+        auto maskInput = getHeightInput(1, ctx);
+        if (maskInput.isValid() && maskInput.data->size() == (size_t)(w * h)) {
+            cachedMask = *maskInput.data;
+        }
+        
+        // CRITICAL: Use scale values from TerrainContext (set at evaluation start)
+        float preserved_scale_xz = tctx->scale_xz;
+        float preserved_scale_y = tctx->scale_y;
+        
+        // 1. ALWAYS SYNC & RESET TERRAIN (Initialization)
+        // Ensure dimensions match
+        if (inputHeight.width != terrain->heightmap.width || 
+            inputHeight.height != terrain->heightmap.height) {
+            terrain->heightmap.width = inputHeight.width;
+            terrain->heightmap.height = inputHeight.height;
+            terrain->heightmap.data.resize(inputHeight.width * inputHeight.height);
+        }
+        
+        // Reset terrain data from input (Start Fresh)
+        terrain->heightmap.data = *inputHeight.data;
+        
+        // Apply scale from context
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
+        
+        // 2. AUTO-START SIMULATION
+        isSimulating = true;
+        currentPass = 0;
+        
+        // Setup Parameters
+        float timeMultiplier = 1.0f + std::log10(1.0f + timeScaleMy) * timeScaleMy * 0.1f;
+        int baseIterations = 15000 * qualityLevel; // Tripled from 5000
+        
+        totalPasses = 1 + static_cast<int>(timeScaleMy / 50.0f);
+        totalPasses = (std::min)(totalPasses, 30); // Higher pass cap
+        
+        // Calculate iterations
+        hydraulicItersPerPass = static_cast<int>(baseIterations * rainfallFactor * timeMultiplier / totalPasses);
+        thermalItersPerPass = static_cast<int>(150 * qualityLevel * temperatureFactor * timeMultiplier / totalPasses);
+        windItersPerPass = static_cast<int>(60 * qualityLevel * windFactor * timeMultiplier / totalPasses);
+        
+        // Clamp limits (Safety)
+        hydraulicItersPerPass = (std::min)(hydraulicItersPerPass, 500000);
+        thermalItersPerPass = (std::min)(thermalItersPerPass, 1000);
+        windItersPerPass = (std::min)(windItersPerPass, 200);
+        
+        // Backup for mask calculation
+        originalHeight = terrain->heightmap.data;
+        
+        SCENE_LOG_INFO("[ErosionWizard] Auto-started simulation: %d passes, %.1f My", totalPasses, timeScaleMy);
+        
+        // 3. RETURN INITIAL STATE (Passthrough)
+        if (outputIndex == 0) {
+            // Height output
+            auto result = createHeightOutput(w, h);
+            *result.data = terrain->heightmap.data;
+            return result;
+        } else {
+            // Erosion mask (Empty initially)
+            auto result = createMaskOutput(w, h);
+            std::fill(result.data->begin(), result.data->end(), 0.0f);
+            return result;
+        }
+    }
+    
+    void ErosionWizardNode::drawContent() {
+        // Preset selector (Disable during sim)
+        ImGui::BeginDisabled(isSimulating);
+        if (ImGui::BeginCombo("Preset", getPresetName(preset))) {
+            for (int i = 0; i <= (int)ErosionPreset::RiverDelta; i++) {
+                ErosionPreset p = static_cast<ErosionPreset>(i);
+                bool selected = (preset == p);
+                if (ImGui::Selectable(getPresetName(p), selected)) {
+                    preset = p;
+                    if (p != ErosionPreset::Custom) applyPreset(p);
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        
+        ImGui::Separator();
+        ImGui::SliderFloat("Time (My)", &timeScaleMy, 0.1f, 500.0f, "%.1f My");
+        ImGui::Text("Climate:");
+        ImGui::SliderFloat("Rainfall", &rainfallFactor, 0.0f, 2.0f);
+        ImGui::SliderFloat("Temperature", &temperatureFactor, 0.0f, 2.0f);
+        ImGui::SliderFloat("Wind", &windFactor, 0.0f, 2.0f);
+        ImGui::SliderInt("Quality", &qualityLevel, 1, 3);
+        if (!g_hasCUDA) useGPU = false;
+        ImGui::BeginDisabled(!g_hasCUDA);
+        ImGui::Checkbox("Use GPU", &useGPU);
+        ImGui::EndDisabled();
+        if (!g_hasCUDA) ImGui::TextDisabled("CUDA required for GPU mode.");
+        ImGui::EndDisabled();
+
+        ImGui::Separator();
+        
+        // STATUS & CONTROLS
+        if (isSimulating) {
+            // Header
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "Simulating...");
+            ImGui::SameLine();
+            if (ImGui::Button("Stop")) {
+                isSimulating = false;
+                SCENE_LOG_INFO("[ErosionWizard] Simulation stopped by user.");
+            }
+            
+            // Progress bar
+            float progress = (totalPasses > 0) ? (float)currentPass / (float)totalPasses : 0.0f;
+            char overlay[32];
+            sprintf(overlay, "Pass %d/%d", currentPass, totalPasses);
+            ImGui::ProgressBar(progress, ImVec2(-1, 0), overlay);
+            
+            // EXECUTE ONE PASS PER FRAME
+            if (cachedTerrain && currentPass < totalPasses) {
+                TerrainManager& mgr = TerrainManager::getInstance();
+                
+                // 1. Thermal
+                if (temperatureFactor > 0.01f && thermalItersPerPass > 0) {
+                    ThermalErosionParams tp;
+                    tp.iterations = thermalItersPerPass;
+                    // Normalize Talus Angle: UI uses degrees, Kernel uses tangent (h/w)
+                    float degrees = 30.0f - temperatureFactor * 10.0f; // Soften as it gets hotter
+                    tp.talusAngle = std::tan(degrees * 3.14159f / 180.0f);
+                    tp.erosionAmount = 0.4f * temperatureFactor;
+                    
+                    if (useGPU) mgr.thermalErosionGPU(cachedTerrain, tp, cachedMask);
+                    else mgr.thermalErosion(cachedTerrain, tp, cachedMask);
+                }
+                
+                // 2. Hydraulic
+                if (rainfallFactor > 0.01f && hydraulicItersPerPass > 0) {
+                    HydraulicErosionParams hp;
+                    // SCALE ITERATIONS by resolution for consistent density in Wizard
+                    int w = cachedTerrain->heightmap.width;
+                    int h = cachedTerrain->heightmap.height;
+                    float resScale = (float)(w * h) / (512.0f * 512.0f);
+                    hp.iterations = static_cast<int>(hydraulicItersPerPass * resScale);
+                    
+                    hp.erosionRadius = 2; // Fixed radius for stability
+                    hp.depositSpeed = 0.2f; // Balanced for consistency
+                    hp.sedimentCapacity = 2.0f * rainfallFactor; // Tamed from 12.0
+                    hp.evaporateSpeed = 0.012f;
+                    hp.erodeSpeed = 0.15f * rainfallFactor; // Tamed from 0.6
+                    hp.gravity = 10.0f;
+                    hp.dropletLifetime = 128;
+                    
+                    if (useGPU) mgr.fluvialErosionGPU(cachedTerrain, hp, cachedMask);
+                    else mgr.hydraulicErosion(cachedTerrain, hp, cachedMask);
+                }
+                
+                // 3. Wind
+                if (windFactor > 0.01f && windItersPerPass > 0) {
+                     if (useGPU) mgr.windErosionGPU(cachedTerrain, windFactor * 0.8f, 45.0f, windItersPerPass, cachedMask);
+                     else mgr.windErosion(cachedTerrain, windFactor * 0.8f, 45.0f, windItersPerPass, cachedMask);
+                }
+                
+                // Update Mesh & Viewport
+                mgr.updateTerrainMesh(cachedTerrain);
+                extern bool g_bvh_rebuild_pending;
+                extern bool g_optix_rebuild_pending;
+                g_bvh_rebuild_pending = true;
+                g_optix_rebuild_pending = true;
+                
+                currentPass++;
+            } else {
+                isSimulating = false;
+                SCENE_LOG_INFO("[ErosionWizard] Simulation complete!");
+            }
+        } else {
+            ImGui::TextDisabled("Status: Ready (Press Evaluate)");
+        }
+    }
+
+    // ============================================================================
+    // OUTPUT NODE IMPLEMENTATIONS
+    // ============================================================================
+    
+    NodeSystem::PinValue HeightOutputNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        if (!tctx || !tctx->terrain) {
+            ctx.addError(id, "No terrain context");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto inputHeight = getHeightInput(0, ctx);
+        if (!inputHeight.isValid()) {
+            ctx.addError(id, "No valid height input");
+            return NodeSystem::PinValue{};
+        }
+        
+        TerrainObject* terrain = tctx->terrain;
+        TerrainManager& mgr = TerrainManager::getInstance();
+        
+        // CRITICAL: Use scale values from TerrainContext (set at evaluation start)
+        // This ensures consistent scale throughout the entire node chain
+        float preserved_scale_xz = tctx->scale_xz;
+        float preserved_scale_y = tctx->scale_y;
+        
+        // Resize terrain if dimensions changed
+        if (inputHeight.width != terrain->heightmap.width || 
+            inputHeight.height != terrain->heightmap.height) {
+            terrain->heightmap.width = inputHeight.width;
+            terrain->heightmap.height = inputHeight.height;
+            terrain->heightmap.data.resize(inputHeight.width * inputHeight.height);
+        }
+        
+        // Apply heightmap data
+        terrain->heightmap.data = *inputHeight.data;
+        
+        // Apply scale from context (guaranteed valid)
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
+        
+        terrain->dirty_mesh = true;
+        terrain->dirty_region.markAllDirty();
+        mgr.updateTerrainMesh(terrain);
+        
+        return NodeSystem::PinValue{}; // Output nodes don't produce data
+    }
+    
+    NodeSystem::PinValue SplatOutputNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        if (!tctx || !tctx->terrain) {
+            ctx.addError(id, "No terrain context");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto splatInput = getHeightInput(0, ctx);
+        if (!splatInput.isValid()) {
+            return NodeSystem::PinValue{};
+        }
+        
+        TerrainObject* terrain = tctx->terrain;
+        
+        // Apply splat data to terrain if autoApply enabled
+        if (autoApplyToTerrain && terrain->splatMap) {
+            int sw = terrain->splatMap->width;
+            int sh = terrain->splatMap->height;
+            
+            // Check if input is 4-channel
+            if (splatInput.channels == 4 && splatInput.data->size() == sw * sh * 4) {
+                // Direct copy from 4-channel data
+                for (int i = 0; i < sw * sh; i++) {
+                    terrain->splatMap->pixels[i].r = (uint8_t)((*splatInput.data)[i * 4 + 0] * 255.0f);
+                    terrain->splatMap->pixels[i].g = (uint8_t)((*splatInput.data)[i * 4 + 1] * 255.0f);
+                    terrain->splatMap->pixels[i].b = (uint8_t)((*splatInput.data)[i * 4 + 2] * 255.0f);
+                    terrain->splatMap->pixels[i].a = (uint8_t)((*splatInput.data)[i * 4 + 3] * 255.0f);
+                }
+                terrain->splatMap->updateGPU();
+            }
+        }
+        
+        return NodeSystem::PinValue{};
+    }
+    
+    void SplatOutputNode::drawContent() {
+        ImGui::Checkbox("Apply to Terrain", &autoApplyToTerrain);
+        
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        
+        if (strlen(exportPath) > 0) {
+            std::string shortPath = exportPath;
+            if (shortPath.length() > 20) {
+                shortPath = "..." + shortPath.substr(shortPath.length() - 17);
+            }
+            ImGui::TextDisabled("%s", shortPath.c_str());
+        }
+        
+        if (ImGui::Button("Export PNG...")) {
+            browseForExport = true;
+        }
+    }
+    
+    void SplatOutputNode::exportSplatMap(TerrainObject* terrain) {
+        if (!terrain || !terrain->splatMap || strlen(exportPath) == 0) return;
+        
+        int sw = terrain->splatMap->width;
+        int sh = terrain->splatMap->height;
+        std::vector<uint8_t> rgba(sw * sh * 4);
+        
+        for (int i = 0; i < sw * sh; i++) {
+            rgba[i * 4 + 0] = terrain->splatMap->pixels[i].r;
+            rgba[i * 4 + 1] = terrain->splatMap->pixels[i].g;
+            rgba[i * 4 + 2] = terrain->splatMap->pixels[i].b;
+            rgba[i * 4 + 3] = 255;  // Full alpha for visibility
+        }
+        
+        stbi_write_png(exportPath, sw, sh, 4, rgba.data(), sw * 4);
+    }
+
+    // HARDNESS OUTPUT
+    NodeSystem::PinValue HardnessOutputNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        if (!tctx || !tctx->terrain) {
+            ctx.addError(id, "No terrain context");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto hardnessInput = getHeightInput(0, ctx);
+        if (!hardnessInput.isValid()) {
+            return NodeSystem::PinValue{};
+        }
+        
+        TerrainObject* terrain = tctx->terrain;
+        int w = hardnessInput.width;
+        int h = hardnessInput.height;
+        
+        // Ensure hardness map matches size
+        if (terrain->hardnessMap.size() != (size_t)(w * h)) {
+            terrain->hardnessMap.resize(w * h, 0.5f);
+        }
+        
+        // Copy data directly to terrain hardness map
+        terrain->hardnessMap = *hardnessInput.data;
+        
+        // Pass-through for chaining
+        return hardnessInput;
+    }
+
+    // HARDNESS INPUT
+    NodeSystem::PinValue HardnessInputNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        if (!tctx || !tctx->terrain) {
+            ctx.addError(id, "No terrain context");
+            return NodeSystem::PinValue{};
+        }
+        
+        TerrainObject* terrain = tctx->terrain;
+        int w = terrain->heightmap.width;
+        int h = terrain->heightmap.height;
+        
+        auto result = createMaskOutput(w, h);
+        
+        // If terrain doesn't have a hardness map, create a default one (0.5)
+        if (terrain->hardnessMap.size() != (size_t)(w * h)) {
+            terrain->hardnessMap.assign(w * h, 0.5f);
+        }
+        
+        *result.data = terrain->hardnessMap;
+        return result;
+    }
+
+    // ============================================================================
+    // MATH NODE IMPLEMENTATIONS
+    // ============================================================================
+    
+    NodeSystem::PinValue MathNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto inputA = getHeightInput(0, ctx);
+        if (!inputA.isValid()) {
+            ctx.addError(id, "Input A not valid");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto result = createHeightOutput(inputA.width, inputA.height);
+        
+        // Get optional B input
+        auto inputB = getHeightInput(1, ctx);
+        bool hasB = inputB.isValid();
+        
+        // Calculate scale ratios if dimensions differ
+        float scaleX = 1.0f;
+        float scaleY = 1.0f;
+        if (hasB && (inputB.width != inputA.width || inputB.height != inputA.height)) {
+            scaleX = (float)inputB.width / (float)inputA.width;
+            scaleY = (float)inputB.height / (float)inputA.height;
+        }
+        
+        int w = inputA.width;
+        int h = inputA.height;
+        
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int idx = y * w + x;
+                float a = (*inputA.data)[idx];
+                float b = factor;
+                
+                if (hasB) {
+                    if (scaleX == 1.0f && scaleY == 1.0f) {
+                        b = (*inputB.data)[idx];
+                    } else {
+                        // Nearest Neighbor Resampling for Input B
+                        int bx = (std::min)((int)(x * scaleX), inputB.width - 1);
+                        int by = (std::min)((int)(y * scaleY), inputB.height - 1);
+                        b = (*inputB.data)[by * inputB.width + bx];
+                    }
+                }
+                
+                switch (operation) {
+                    case MathOp::Add: (*result.data)[idx] = a + b; break;
+                    case MathOp::Subtract: (*result.data)[idx] = a - b; break;
+                    case MathOp::Multiply: (*result.data)[idx] = a * b; break;
+                    case MathOp::Divide: (*result.data)[idx] = (b != 0) ? a / b : 0; break;
+                    case MathOp::Min: (*result.data)[idx] = (std::min)(a, b); break;
+                    case MathOp::Max: (*result.data)[idx] = (std::max)(a, b); break;
+                }
+            }
+        }
+        
+        return result;
+    }
+    
+    void MathNode::drawContent() {
+        const char* opNames[] = { "Add", "Subtract", "Multiply", "Divide", "Min", "Max" };
+        int opIdx = (int)operation;
+        if (ImGui::Combo("Op", &opIdx, opNames, 6)) {
+            operation = (MathOp)opIdx;
+            dirty = true;
+        }
+        ImGui::DragFloat("Factor", &factor, 0.1f);
+    }
+    
+    NodeSystem::PinValue BlendNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto inputA = getHeightInput(0, ctx);
+        auto inputB = getHeightInput(1, ctx);
+        
+        if (!inputA.isValid() || !inputB.isValid()) {
+            ctx.addError(id, "Both inputs A and B required");
+            return NodeSystem::PinValue{};
+        }
+        
+        if (inputA.data->size() != inputB.data->size()) {
+            ctx.addError(id, "Input size mismatch");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto result = createHeightOutput(inputA.width, inputA.height);
+        auto maskInput = getHeightInput(2, ctx);
+        bool hasMask = maskInput.isValid() && maskInput.data->size() == inputA.data->size();
+        
+        size_t size = inputA.data->size();
+        for (size_t i = 0; i < size; i++) {
+            float blend = hasMask ? (*maskInput.data)[i] : alpha;
+            (*result.data)[i] = (*inputA.data)[i] * (1.0f - blend) + (*inputB.data)[i] * blend;
+        }
+        
+        return result;
+    }
+    
+    void BlendNode::drawContent() {
+        ImGui::DragFloat("Alpha", &alpha, 0.01f, 0.0f, 1.0f);
+    }
+    
+    NodeSystem::PinValue ClampNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto input = getHeightInput(0, ctx);
+        if (!input.isValid()) {
+            ctx.addError(id, "No valid input");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto result = createHeightOutput(input.width, input.height);
+        
+        for (size_t i = 0; i < input.data->size(); i++) {
+            (*result.data)[i] = clampValue((*input.data)[i], minVal, maxVal);
+        }
+        
+        return result;
+    }
+    
+    void ClampNode::drawContent() {
+        ImGui::DragFloat("Min", &minVal, 0.1f);
+        ImGui::DragFloat("Max", &maxVal, 0.1f);
+    }
+    
+    NodeSystem::PinValue InvertNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto input = getHeightInput(0, ctx);
+        if (!input.isValid()) {
+            ctx.addError(id, "No valid input");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto result = createMaskOutput(input.width, input.height);
+        
+        for (size_t i = 0; i < input.data->size(); i++) {
+            (*result.data)[i] = 1.0f - (*input.data)[i];
+        }
+        
+        return result;
+    }
+
+    // ============================================================================
+    // MASK NODE IMPLEMENTATIONS
+    // ============================================================================
+    
+    NodeSystem::PinValue SlopeMaskNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        auto input = getHeightInput(0, ctx);
+        
+        if (!tctx || !input.isValid()) {
+            ctx.addError(id, "Invalid context or input");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = input.width;
+        int h = input.height;
+        auto result = createMaskOutput(w, h);
+        
+        // Get terrain scales for proper gradient calculation
+        float cellSize = tctx->terrain ? (tctx->terrain->heightmap.scale_xz / (std::max)(w, h)) : 1.0f;
+        float heightScale = tctx->terrain ? tctx->terrain->heightmap.scale_y : 1.0f;
+        
+        for (int y = 1; y < h - 1; y++) {
+            for (int x = 1; x < w - 1; x++) {
+                int idx = y * w + x;
+                
+                // Scale heights from normalized (0-1) to physical units for proper gradient
+                float h_right = (*input.data)[idx + 1] * heightScale;
+                float h_left = (*input.data)[idx - 1] * heightScale;
+                float h_down = (*input.data)[idx + w] * heightScale;
+                float h_up = (*input.data)[idx - w] * heightScale;
+                
+                float dzdx = (h_right - h_left) / (2.0f * cellSize);
+                float dzdy = (h_down - h_up) / (2.0f * cellSize);
+                float slope = std::atan(std::sqrt(dzdx * dzdx + dzdy * dzdy)) * 57.2957795f; // rad to deg
+                
+                float t = 0.0f;
+                if (slope >= minSlope && slope <= maxSlope) {
+                    t = 1.0f;
+                } else if (slope < minSlope) {
+                    t = (std::max)(0.0f, 1.0f - (minSlope - slope) / (falloff * (maxSlope - minSlope) + 0.001f));
+                } else {
+                    t = (std::max)(0.0f, 1.0f - (slope - maxSlope) / (falloff * (maxSlope - minSlope) + 0.001f));
+                }
+                (*result.data)[idx] = t;
+            }
+        }
+        
+        return result;
+    }
+    
+    void SlopeMaskNode::drawContent() {
+        ImGui::DragFloat("Min Slope", &minSlope, 0.1f, 0.0f, 90.0f);
+        ImGui::DragFloat("Max Slope", &maxSlope, 0.1f, 0.0f, 90.0f);
+        ImGui::DragFloat("Falloff", &falloff, 0.01f, 0.0f, 1.0f);
+    }
+    
+    NodeSystem::PinValue HeightMaskNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        auto input = getHeightInput(0, ctx);
+        
+        if (!input.isValid()) {
+            ctx.addError(id, "Invalid input");
+            return NodeSystem::PinValue{};
+        }
+        
+        // Get height scale to convert normalized heights to physical units
+        float heightScale = (tctx && tctx->terrain) ? tctx->terrain->heightmap.scale_y : 1.0f;
+        
+        auto result = createMaskOutput(input.width, input.height);
+        
+        for (size_t i = 0; i < input.data->size(); i++) {
+            // Convert normalized height (0-1) to physical height 
+            float h = (*input.data)[i] * heightScale;
+            float t = 0.0f;
+            
+            if (h >= minHeight && h <= maxHeight) {
+                t = 1.0f;
+            } else if (h < minHeight) {
+                t = (std::max)(0.0f, 1.0f - (minHeight - h) / (falloff + 0.001f));
+            } else {
+                t = (std::max)(0.0f, 1.0f - (h - maxHeight) / (falloff + 0.001f));
+            }
+            (*result.data)[i] = t;
+        }
+        
+        return result;
+    }
+    
+    void HeightMaskNode::drawContent() {
+        ImGui::DragFloat("Min Height", &minHeight, 1.0f);
+        ImGui::DragFloat("Max Height", &maxHeight, 1.0f);
+        ImGui::DragFloat("Falloff", &falloff, 0.1f, 0.0f, 100.0f);
+    }
+    
+    NodeSystem::PinValue CurvatureMaskNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto input = getHeightInput(0, ctx);
+        
+        if (!input.isValid()) {
+            ctx.addError(id, "Invalid input");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = input.width;
+        int h = input.height;
+        auto result = createMaskOutput(w, h);
+        
+        for (int y = 1; y < h - 1; y++) {
+            for (int x = 1; x < w - 1; x++) {
+                int idx = y * w + x;
+                
+                float center = (*input.data)[idx];
+                float laplacian = 
+                    (*input.data)[idx - 1] + (*input.data)[idx + 1] +
+                    (*input.data)[idx - w] + (*input.data)[idx + w] - 4.0f * center;
+                
+                // Positive = concave (valleys), Negative = convex (ridges)
+                float curv = selectConvex ? -laplacian : laplacian;
+                curv = clampValue((curv - minCurve) / (maxCurve - minCurve + 0.001f), 0.0f, 1.0f);
+                (*result.data)[idx] = curv;
+            }
+        }
+        
+        return result;
+    }
+    
+    void CurvatureMaskNode::drawContent() {
+        ImGui::DragFloat("Min Curve", &minCurve, 0.01f);
+        ImGui::DragFloat("Max Curve", &maxCurve, 0.01f);
+        ImGui::Checkbox("Select Convex (Ridges)", &selectConvex);
+    }
+    
+    // ============================================================================
+    // FLOW AND EXPOSURE MASK IMPLEMENTATIONS
+    // ============================================================================
+    
+    // FLOW MASK - Soil/sediment accumulation
+    NodeSystem::PinValue FlowMaskNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        auto input = getHeightInput(0, ctx);
+        
+        if (!tctx || !input.isValid()) {
+            ctx.addError(id, "Invalid context or input");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = input.width;
+        int h = input.height;
+        auto result = createMaskOutput(w, h);
+        
+        // Height scale for proper slope detection
+        float heightScale = (tctx && tctx->terrain) ? tctx->terrain->heightmap.scale_y : 1.0f;
+        float cellSize = (tctx && tctx->terrain) ? (tctx->terrain->heightmap.scale_xz / (float)w) : 1.0f;
+
+        // 1. Organic Sink-Filling Accumulation
+        std::vector<float> height = *input.data;
+        std::vector<float> filledHeight = height;
+        std::vector<int> drainageParent(w * h, -1);
+        std::vector<bool> processed(w * h, false);
+        std::priority_queue<std::pair<float, int>, std::vector<std::pair<float, int>>, std::greater<std::pair<float, int>>> pq;
+        
+        const float eps = 0.0001f;
+        int dx8[] = { -1, 0, 1, -1, 1, -1, 0, 1 };
+        int dy8[] = { -1, -1, -1, 0, 0, 1, 1, 1 };
+
+        for (int x = 0; x < w; x++) {
+            pq.push({ filledHeight[x], x });
+            pq.push({ filledHeight[(h - 1) * w + x], (h - 1) * w + x });
+            processed[x] = processed[(h - 1) * w + x] = true;
+        }
+        for (int y = 1; y < h - 1; y++) {
+            pq.push({ filledHeight[y * w], y * w });
+            pq.push({ filledHeight[y * w + w - 1], y * w + w - 1 });
+            processed[y * w] = processed[y * w + w - 1] = true;
+        }
+
+        while (!pq.empty()) {
+            auto [priority, idx] = pq.top(); pq.pop();
+            float cH = filledHeight[idx];
+            int x = idx % w, y = idx / w;
+
+            for (int d = 0; d < 8; d++) {
+                int nx = x + dx8[d], ny = y + dy8[d];
+                if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                int nIdx = ny * w + nx;
+                if (processed[nIdx]) continue;
+                
+                float tieBreaker = height[nIdx] * 1e-6f;
+                float tH = fmaxf(filledHeight[nIdx], cH + eps);
+                
+                filledHeight[nIdx] = tH;
+                drainageParent[nIdx] = idx;
+                processed[nIdx] = true;
+                pq.push({ tH + tieBreaker, nIdx });
+            }
+        }
+
+        
+        // 1. Sort indices by height (Descending) to ensure flow travels from top to bottom
+        std::vector<int> indices(w * h);
+        for(int i = 0; i < w * h; i++) indices[i] = i;
+        std::sort(indices.begin(), indices.end(), [&](int a, int b) {
+            return (*input.data)[a] > (*input.data)[b];
+        });
+
+        // 2. Initial rain (Flow accumulation buffer)
+        std::vector<float> flow(w * h, 1.0f);
+        
+        const int dx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+        const int dy[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+        const float dist[] = {1.414f, 1.0f, 1.414f, 1.0f, 1.0f, 1.414f, 1.0f, 1.414f};
+
+        // 3. One-pass Flow Accumulation (MFD Theory)
+        // This is MUCH more accurate than iterative scattering for static masks
+        for (int idx : indices) {
+            int x = idx % w;
+            int y = idx / w;
+            if (x == 0 || x == w - 1 || y == 0 || y == h - 1) continue;
+
+            float centerH = (*input.data)[idx] * heightScale;
+            float currentFlow = flow[idx];
+
+            // Multiple Flow Direction (MFD): Distribute to ALL downhill neighbors
+            float totalSlope = 0.0f;
+            float slopes[8];
+            int downhillCount = 0;
+
+            for (int d = 0; d < 8; d++) {
+                int nidx = (y + dy[d]) * w + (x + dx[d]);
+                float slope = (centerH - (*input.data)[nidx] * heightScale) / dist[d];
+                
+                if (slope > 0.0001f) {
+                    slopes[d] = std::pow(slope, 1.1f); // Exponent for channelization
+                    totalSlope += slopes[d];
+                    downhillCount++;
+                } else {
+                    slopes[d] = 0.0f;
+                }
+            }
+
+            if (totalSlope > 0.0f) {
+                // Distribute flow to all downhill neighbors proportionally
+                for (int d = 0; d < 8; d++) {
+                    if (slopes[d] > 0.0f) {
+                        int nidx = (y + dy[d]) * w + (x + dx[d]);
+                        float weight = (slopes[d] / totalSlope) * decay;
+                        flow[nidx] += currentFlow * weight;
+                    }
+                }
+            } else {
+                // FLAT AREA HANDLING: Spread flow to all neighbors slightly to avoid "pixels"
+                // This simulates water pooling and slowly finding an exit
+                for (int d = 0; d < 8; d++) {
+                    int nidx = (y + dy[d]) * w + (x + dx[d]);
+                    flow[nidx] += currentFlow * (0.1f * decay / 8.0f);
+                }
+            }
+        }
+
+        // 4. Post-processing: Apply iterations as a "Flow Diffusion" pass if requested
+        // This softens the organic paths and helps in extremely flat areas
+        for (int iter = 0; iter < iterations; iter++) {
+            std::vector<float> blurred = flow;
+            for (int y = 1; y < h - 1; y++) {
+                for (int x = 1; x < w - 1; x++) {
+                    int idx = y * w + x;
+                    float sum = flow[idx] * 2.0f;
+                    for(int d=0; d<8; d++) sum += flow[(y+dy[d])*w + (x+dx[d])];
+                    blurred[idx] = sum / 10.0f;
+                }
+            }
+            flow = blurred;
+        }
+
+        // 5. Persist raw accumulation for terrain-level Generate Mask / Bake Flow to Alpha.
+        if (tctx->terrain) {
+            tctx->terrain->flowMap.resize(w * h);
+            for (int i = 0; i < w * h; i++) {
+                tctx->terrain->flowMap[i] = flow[i] * strength;
+            }
+        }
+
+        // 6. Final scaling for node output
+        float maxFlow = 0.001f;
+        for (float f : flow) if (f > maxFlow) maxFlow = f;
+        
+        float finalStrength = strength;
+        for (int i = 0; i < w * h; i++) {
+            float rawVal = flow[i] * finalStrength;
+            float val = normalize ? (rawVal / maxFlow) : rawVal;
+            // Gamma-like curve for better visual contrast in small streams
+            val = std::pow(std::max(val, 0.0f), 0.6f);
+            (*result.data)[i] = clampValue(val, 0.0f, 1.0f);
+        }
+
+        return result;
+    }
+    
+    void FlowMaskNode::drawContent() {
+        ImGui::SetNextItemWidth(80);
+        ImGui::SliderInt("Iterations", &iterations, 1, 32);
+        ImGui::SetNextItemWidth(80);
+        ImGui::SliderFloat("Strength", &strength, 0.1f, 2.0f);
+        ImGui::SetNextItemWidth(80);
+        ImGui::SliderFloat("Decay", &decay, 0.5f, 0.99f);
+        ImGui::Checkbox("Normalize", &normalize);
+    }
+    
+    // EXPOSURE MASK - Sun-facing direction
+    NodeSystem::PinValue ExposureMaskNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        auto input = getHeightInput(0, ctx);
+        
+        if (!tctx || !input.isValid()) {
+            ctx.addError(id, "Invalid context or input");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = input.width;
+        int h = input.height;
+        auto result = createMaskOutput(w, h);
+        
+        float cellSize = tctx->terrain ? (tctx->terrain->heightmap.scale_xz / w) : 1.0f;
+        
+        // Calculate sun direction vector
+        float azimuthRad = sunAzimuth * 3.14159f / 180.0f;
+        float elevationRad = sunElevation * 3.14159f / 180.0f;
+        
+        // Sun direction (pointing TO the sun)
+        float sunX = std::sin(azimuthRad) * std::cos(elevationRad);
+        float sunY = std::sin(elevationRad);
+        float sunZ = std::cos(azimuthRad) * std::cos(elevationRad);
+        
+        for (int y = 1; y < h - 1; y++) {
+            for (int x = 1; x < w - 1; x++) {
+                int idx = y * w + x;
+                
+                // Calculate surface normal from height gradient
+                float dzdx = ((*input.data)[idx + 1] - (*input.data)[idx - 1]) / (2.0f * cellSize);
+                float dzdy = ((*input.data)[idx + w] - (*input.data)[idx - w]) / (2.0f * cellSize);
+                
+                // Normal vector (unnormalized Y is up)
+                float nx = -dzdx;
+                float ny = 1.0f;
+                float nz = -dzdy;
+                float nlen = std::sqrt(nx * nx + ny * ny + nz * nz);
+                if (nlen > 0.001f) { nx /= nlen; ny /= nlen; nz /= nlen; }
+                
+                // Dot product with sun direction
+                float exposure = nx * sunX + ny * sunY + nz * sunZ;
+                
+                // Apply contrast
+                exposure = (exposure - 0.5f) * contrast + 0.5f;
+                exposure = clampValue(exposure, 0.0f, 1.0f);
+                
+                if (invert) exposure = 1.0f - exposure;
+                
+                (*result.data)[idx] = exposure;
+            }
+        }
+        
+        // Fill borders
+        for (int x = 0; x < w; x++) {
+            (*result.data)[x] = (*result.data)[w + x];
+            (*result.data)[(h-1) * w + x] = (*result.data)[(h-2) * w + x];
+        }
+        for (int y = 0; y < h; y++) {
+            (*result.data)[y * w] = (*result.data)[y * w + 1];
+            (*result.data)[y * w + w - 1] = (*result.data)[y * w + w - 2];
+        }
+        
+        return result;
+    }
+    
+    void ExposureMaskNode::drawContent() {
+        ImGui::SetNextItemWidth(100);
+        if (ImGui::SliderFloat("Azimuth", &sunAzimuth, 0.0f, 360.0f, "%.0f\302\260")) {
+            while(sunAzimuth < 0) sunAzimuth += 360;
+            while(sunAzimuth >= 360) sunAzimuth -= 360;
+        }
+        
+        // Visual Compass for Azimuth
+        ImGui::SameLine();
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        ImVec2 cp = ImGui::GetCursorScreenPos();
+        float c_size = 12.0f;
+        cp.x += c_size + 5;
+        cp.y += 12.0f;
+        drawList->AddCircleFilled(cp, c_size + 2, IM_COL32(40, 40, 40, 255));
+        drawList->AddCircle(cp, c_size, IM_COL32(200, 200, 200, 255), 16);
+        
+        float s_rad = sunAzimuth * 0.0174533f;
+        ImVec2 s_needle(cp.x + sinf(s_rad) * c_size, cp.y - cosf(s_rad) * c_size);
+        drawList->AddLine(cp, s_needle, IM_COL32(255, 200, 50, 255), 2.0f); // Golden sun color
+        drawList->AddText(ImVec2(cp.x - 3, cp.y - c_size - 14), IM_COL32(200, 200, 200, 150), "N");
+        ImGui::Dummy(ImVec2(c_size * 2 + 10, 1)); 
+
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderFloat("Elevation", &sunElevation, 0.0f, 90.0f, "%.0f\302\260");
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderFloat("Contrast", &contrast, 0.1f, 3.0f);
+        ImGui::Checkbox("Invert (Shadow)", &invert);
+    }
+
+    // ============================================================================
+    // NEW OPERATOR NODE IMPLEMENTATIONS
+    // ============================================================================
+    
+    // SMOOTH NODE
+    NodeSystem::PinValue SmoothNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto input = getHeightInput(0, ctx);
+        if (!input.isValid()) {
+            ctx.addError(id, "No valid input");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = input.width;
+        int h = input.height;
+        auto result = createHeightOutput(w, h);
+        *result.data = *input.data;
+        
+        // Get optional mask
+        auto maskInput = getHeightInput(1, ctx);
+        bool hasMask = maskInput.isValid() && maskInput.data->size() == input.data->size();
+        
+        std::vector<float> temp = *result.data;
+        int halfKernel = kernelSize / 2;
+        
+        for (int iter = 0; iter < iterations; iter++) {
+            for (int y = halfKernel; y < h - halfKernel; y++) {
+                for (int x = halfKernel; x < w - halfKernel; x++) {
+                    int idx = y * w + x;
+                    
+                    float sum = 0.0f;
+                    int count = 0;
+                    
+                    for (int ky = -halfKernel; ky <= halfKernel; ky++) {
+                        for (int kx = -halfKernel; kx <= halfKernel; kx++) {
+                            int nIdx = (y + ky) * w + (x + kx);
+                            sum += temp[nIdx];
+                            count++;
+                        }
+                    }
+                    
+                    float avg = sum / count;
+                    float maskVal = hasMask ? (*maskInput.data)[idx] : 1.0f;
+                    float blendedStrength = strength * maskVal;
+                    
+                    (*result.data)[idx] = temp[idx] * (1.0f - blendedStrength) + avg * blendedStrength;
+                }
+            }
+            if (iter < iterations - 1) temp = *result.data;
+        }
+        
+        return result;
+    }
+    
+    void SmoothNode::drawContent() {
+        ImGui::DragInt("Iterations", &iterations, 1, 1, 50);
+        ImGui::DragFloat("Strength", &strength, 0.01f, 0.0f, 1.0f);
+        
+        const char* sizes[] = { "3x3", "5x5", "7x7" };
+        int sizeIdx = (kernelSize == 3) ? 0 : ((kernelSize == 5) ? 1 : 2);
+        if (ImGui::Combo("Kernel", &sizeIdx, sizes, 3)) {
+            kernelSize = (sizeIdx == 0) ? 3 : ((sizeIdx == 1) ? 5 : 7);
+            dirty = true;
+        }
+    }
+    
+    // NORMALIZE NODE
+    NodeSystem::PinValue NormalizeNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto input = getHeightInput(0, ctx);
+        if (!input.isValid()) {
+            ctx.addError(id, "No valid input");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto result = createHeightOutput(input.width, input.height);
+        
+        // Find min/max in input
+        float minH = FLT_MAX, maxH = -FLT_MAX;
+        for (float h : *input.data) {
+            minH = (std::min)(minH, h);
+            maxH = (std::max)(maxH, h);
+        }
+        
+        float range = maxH - minH;
+        if (range < 0.0001f) range = 1.0f;
+        
+        float outRange = maxOutput - minOutput;
+        
+        for (size_t i = 0; i < input.data->size(); i++) {
+            float normalized = ((*input.data)[i] - minH) / range;
+            (*result.data)[i] = minOutput + normalized * outRange;
+        }
+        
+        return result;
+    }
+    
+    void NormalizeNode::drawContent() {
+        ImGui::Checkbox("Auto Range", &autoRange);
+        if (!autoRange) {
+            ImGui::DragFloat("Min Out", &minOutput, 1.0f);
+            ImGui::DragFloat("Max Out", &maxOutput, 1.0f);
+        } else {
+            ImGui::TextDisabled("Input: Auto");
+            ImGui::DragFloat("Max Out", &maxOutput, 1.0f, 0.0f, 10000.0f);
+            minOutput = 0.0f;
+        }
+    }
+    
+    // TERRACE NODE
+    NodeSystem::PinValue TerraceNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto input = getHeightInput(0, ctx);
+        if (!input.isValid()) {
+            ctx.addError(id, "No valid input");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = input.width;
+        int h = input.height;
+        auto result = createHeightOutput(w, h);
+        
+        // Get optional mask
+        auto maskInput = getHeightInput(1, ctx);
+        bool hasMask = maskInput.isValid() && maskInput.data->size() == input.data->size();
+        
+        // Find min/max
+        float minH = FLT_MAX, maxH = -FLT_MAX;
+        for (float hVal : *input.data) {
+            minH = (std::min)(minH, hVal);
+            maxH = (std::max)(maxH, hVal);
+        }
+        float range = maxH - minH;
+        if (range < 0.0001f) range = 1.0f;
+        
+        float stepSize = range / levels;
+        
+        for (size_t i = 0; i < input.data->size(); i++) {
+            float h = (*input.data)[i];
+            float normalized = (h - minH) / range + offset / range;
+            
+            // Calculate terrace level
+            float level = std::floor(normalized * levels) / levels;
+            float fraction = (normalized * levels) - std::floor(normalized * levels);
+            
+            // Blend between hard step and smooth ramp based on sharpness
+            float terraced;
+            if (sharpness >= 1.0f) {
+                terraced = level;
+            } else {
+                float smooth = level + fraction / levels;
+                float step = level + (fraction > 0.5f ? 1.0f / levels : 0.0f);
+                terraced = smooth * (1.0f - sharpness) + step * sharpness;
+            }
+            
+            float newH = minH + terraced * range;
+            
+            // Apply mask
+            float maskVal = hasMask ? (*maskInput.data)[i] : 1.0f;
+            (*result.data)[i] = h * (1.0f - maskVal) + newH * maskVal;
+        }
+        
+        return result;
+    }
+    
+    void TerraceNode::drawContent() {
+        if (ImGui::DragInt("Levels", &levels, 1, 2, 64)) dirty = true;
+        if (ImGui::DragFloat("Sharpness", &sharpness, 0.01f, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::DragFloat("Offset", &offset, 0.1f, -100.0f, 100.0f)) dirty = true;
+    }
+    
+    // EDGE FALLOFF NODE
+    NodeSystem::PinValue EdgeFalloffNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto input = getHeightInput(0, ctx);
+        if (!input.isValid()) {
+            ctx.addError(id, "No valid input");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = input.width;
+        int h = input.height;
+        auto result = createHeightOutput(w, h);
+        
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int idx = y * w + x;
+                float height = (*input.data)[idx];
+                
+                // Calculate normalized distance from nearest edge (0 to 0.5)
+                float dx = (float)x / (std::max(1, w - 1));
+                float dy = (float)y / (std::max(1, h - 1));
+                
+                float distX = std::min(dx, 1.0f - dx);
+                float distY = std::min(dy, 1.0f - dy);
+                
+                // IMPROVED MATH:
+                // Instead of min(distX, distY) which creates a diagonal ridge (box distance),
+                // we use a smooth combination that rounds the corners.
+                float tx = std::clamp(distX / (std::max(0.001f, fadeWidth)), 0.0f, 1.0f);
+                float ty = std::clamp(distY / (std::max(0.001f, fadeWidth)), 0.0f, 1.0f);
+                
+                // Multiplicative falloff eliminates the diagonal "crease"
+                float t = tx * ty; 
+                
+                // Apply optional extra smoothing to the mask itself
+                switch (mode) {
+                    case FalloffMode::Linear:
+                        break;
+                    case FalloffMode::Smoothstep:
+                        t = t * t * (3.0f - 2.0f * t);
+                        break;
+                    case FalloffMode::Cosine:
+                        t = 0.5f * (1.0f - std::cos(t * 3.14159f));
+                        break;
+                }
+                
+                (*result.data)[idx] = fadeValue * (1.0f - t) + height * t;
+            }
+        }
+        
+        return result;
+    }
+    
+    void EdgeFalloffNode::drawContent() {
+        if (ImGui::SliderFloat("Fade Width", &fadeWidth, 0.001f, 0.5f, "%.3f")) dirty = true;
+        if (ImGui::DragFloat("Fade Value", &fadeValue, 0.1f)) dirty = true;
+        
+        const char* modeNames[] = { "Linear", "Smoothstep", "Cosine" };
+        int modeIdx = (int)mode;
+        if (ImGui::Combo("Fade Mode", &modeIdx, modeNames, 3)) {
+            mode = (FalloffMode)modeIdx;
+            dirty = true;
+        }
+    }
+    
+    // MASK COMBINE NODE
+    NodeSystem::PinValue MaskCombineNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto inputA = getHeightInput(0, ctx);
+        auto inputB = getHeightInput(1, ctx);
+        
+        if (!inputA.isValid() || !inputB.isValid()) {
+            ctx.addError(id, "Both mask inputs required");
+            return NodeSystem::PinValue{};
+        }
+        
+        if (inputA.data->size() != inputB.data->size()) {
+            ctx.addError(id, "Mask size mismatch");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto result = createMaskOutput(inputA.width, inputA.height);
+        
+        for (size_t i = 0; i < inputA.data->size(); i++) {
+            float a = (*inputA.data)[i];
+            float b = (*inputB.data)[i];
+            float out = 0.0f;
+            
+            switch (operation) {
+                case MaskCombineOp::AND:
+                    out = (std::min)(a, b);
+                    break;
+                case MaskCombineOp::OR:
+                    out = (std::max)(a, b);
+                    break;
+                case MaskCombineOp::XOR:
+                case MaskCombineOp::Difference:
+                    out = std::abs(a - b);
+                    break;
+                case MaskCombineOp::Multiply:
+                    out = a * b;
+                    break;
+                case MaskCombineOp::Add:
+                    out = clampValue(a + b, 0.0f, 1.0f);
+                    break;
+                case MaskCombineOp::Subtract:
+                    out = clampValue(a - b, 0.0f, 1.0f);
+                    break;
+            }
+            
+            (*result.data)[i] = out;
+        }
+        
+        return result;
+    }
+    
+    void MaskCombineNode::drawContent() {
+        const char* opNames[] = { "AND (Min)", "OR (Max)", "XOR", "Multiply", "Add", "Subtract", "Difference" };
+        int opIdx = (int)operation;
+        if (ImGui::Combo("Operation", &opIdx, opNames, 7)) {
+            operation = (MaskCombineOp)opIdx;
+            dirty = true;
+        }
+    }
+    
+    // OVERLAY NODE
+    NodeSystem::PinValue OverlayNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto inputBase = getHeightInput(0, ctx);
+        auto inputBlend = getHeightInput(1, ctx);
+        
+        if (!inputBase.isValid() || !inputBlend.isValid()) {
+            ctx.addError(id, "Both inputs required");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = inputBase.width;
+        int h = inputBase.height;
+        auto result = createHeightOutput(w, h);
+        
+        // Get optional mask
+        auto maskInput = getHeightInput(2, ctx);
+        bool hasMask = maskInput.isValid() && maskInput.data->size() == inputBase.data->size();
+        
+        // Need to normalize to 0-1 for overlay blend
+        float minB = FLT_MAX, maxB = -FLT_MAX;
+        float minL = FLT_MAX, maxL = -FLT_MAX;
+        for (size_t i = 0; i < inputBase.data->size(); i++) {
+            minB = (std::min)(minB, (*inputBase.data)[i]);
+            maxB = (std::max)(maxB, (*inputBase.data)[i]);
+            minL = (std::min)(minL, (*inputBlend.data)[i]);
+            maxL = (std::max)(maxL, (*inputBlend.data)[i]);
+        }
+        float rangeB = (maxB - minB > 0.0001f) ? maxB - minB : 1.0f;
+        float rangeL = (maxL - minL > 0.0001f) ? maxL - minL : 1.0f;
+        
+        for (size_t i = 0; i < inputBase.data->size(); i++) {
+            float base = ((*inputBase.data)[i] - minB) / rangeB;
+            float blend = ((*inputBlend.data)[i] - minL) / rangeL;
+            
+            // Overlay formula: a < 0.5 ? 2*a*b : 1 - 2*(1-a)*(1-b)
+            float overlay;
+            if (base < 0.5f) {
+                overlay = 2.0f * base * blend;
+            } else {
+                overlay = 1.0f - 2.0f * (1.0f - base) * (1.0f - blend);
+            }
+            
+            // Convert back to original scale
+            float outValue = minB + overlay * rangeB;
+            
+            // Apply strength and mask
+            float maskVal = hasMask ? (*maskInput.data)[i] : 1.0f;
+            float blendAmount = strength * maskVal;
+            
+            (*result.data)[i] = (*inputBase.data)[i] * (1.0f - blendAmount) + outValue * blendAmount;
+        }
+        
+        return result;
+    }
+    
+    void OverlayNode::drawContent() {
+        if (ImGui::DragFloat("Strength", &strength, 0.01f, 0.0f, 1.0f)) dirty = true;
+    }
+    
+    // SCREEN NODE
+    NodeSystem::PinValue ScreenNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto inputBase = getHeightInput(0, ctx);
+        auto inputBlend = getHeightInput(1, ctx);
+        
+        if (!inputBase.isValid() || !inputBlend.isValid()) {
+            ctx.addError(id, "Both inputs required");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = inputBase.width;
+        int h = inputBase.height;
+        auto result = createHeightOutput(w, h);
+        
+        // Get optional mask
+        auto maskInput = getHeightInput(2, ctx);
+        bool hasMask = maskInput.isValid() && maskInput.data->size() == inputBase.data->size();
+        
+        // Normalize to 0-1
+        float minB = FLT_MAX, maxB = -FLT_MAX;
+        float minL = FLT_MAX, maxL = -FLT_MAX;
+        for (size_t i = 0; i < inputBase.data->size(); i++) {
+            minB = (std::min)(minB, (*inputBase.data)[i]);
+            maxB = (std::max)(maxB, (*inputBase.data)[i]);
+            minL = (std::min)(minL, (*inputBlend.data)[i]);
+            maxL = (std::max)(maxL, (*inputBlend.data)[i]);
+        }
+        float rangeB = (maxB - minB > 0.0001f) ? maxB - minB : 1.0f;
+        float rangeL = (maxL - minL > 0.0001f) ? maxL - minL : 1.0f;
+        
+        for (size_t i = 0; i < inputBase.data->size(); i++) {
+            float base = ((*inputBase.data)[i] - minB) / rangeB;
+            float blend = ((*inputBlend.data)[i] - minL) / rangeL;
+            
+            // Screen formula: 1 - (1-a)*(1-b)
+            float screen = 1.0f - (1.0f - base) * (1.0f - blend);
+            
+            // Convert back to original scale
+            float outValue = minB + screen * rangeB;
+            
+            // Apply strength and mask
+            float maskVal = hasMask ? (*maskInput.data)[i] : 1.0f;
+            float blendAmount = strength * maskVal;
+            
+            (*result.data)[i] = (*inputBase.data)[i] * (1.0f - blendAmount) + outValue * blendAmount;
+        }
+        
+        return result;
+    }
+    
+    void ScreenNode::drawContent() {
+        if (ImGui::DragFloat("Strength", &strength, 0.01f, 0.0f, 1.0f)) dirty = true;
+    }
+
+    // ============================================================================
+    // PROCEDURAL TEXTURE NODE IMPLEMENTATIONS
+    // ============================================================================
+    
+    // Helper: Simple hash-based noise
+    static float simpleNoise(int x, int y, int seed) {
+        int n = x + y * 57 + seed * 131;
+        n = (n << 13) ^ n;
+        return (1.0f - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0f) * 0.5f + 0.5f;
+    }
+    
+    // Helper: Smoothstep
+    static float smoothstepLocal(float edge0, float edge1, float x) {
+        float t = clampValue((x - edge0) / (edge1 - edge0 + 0.0001f), 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    }
+    
+    NodeSystem::PinValue AutoSplatNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        auto input = getHeightInput(0, ctx);
+        
+        if (!input.isValid()) {
+            ctx.addError(id, "Height input required");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = input.width;
+        int h = input.height;
+        
+        // Create 4-channel output (stored as 4 separate values per pixel)
+        NodeSystem::Image2DData result;
+        result.data = std::make_shared<std::vector<float>>(w * h * 4, 0.0f);
+        result.width = w;
+        result.height = h;
+        result.channels = 4;
+        result.semantic = NodeSystem::ImageSemantic::Mask;
+        
+        float cellSize = 1.0f;
+        float heightScale = 100.0f; // Default scale if no terrain context
+        
+        if (tctx && tctx->terrain) {
+            cellSize = tctx->terrain->heightmap.scale_xz / w; // Assuming uniform grid
+            heightScale = tctx->terrain->heightmap.scale_y;
+        }
+
+        // Calculate weights for each pixel
+        for (int y = 1; y < h - 1; y++) {
+            for (int x = 1; x < w - 1; x++) {
+                int idx = y * w + x;
+                // De-normalize height for rule evaluation (0-1 -> 0-heightScale)
+                float height = (*input.data)[idx] * heightScale;
+                
+                // Calculate slope (degrees) using scaled heights
+                float h_l = (*input.data)[idx - 1] * heightScale;
+                float h_r = (*input.data)[idx + 1] * heightScale;
+                float h_u = (*input.data)[idx - w] * heightScale;
+                float h_d = (*input.data)[idx + w] * heightScale; // Down in image space is +Y
+                
+                float dzdx = (h_r - h_l) / (2.0f * cellSize);
+                float dzdy = (h_d - h_u) / (2.0f * cellSize);
+                float slope = std::atan(std::sqrt(dzdx * dzdx + dzdy * dzdy)) * 57.2957795f;
+                
+                float weights[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                
+                // Calculate weight for each layer
+                for (int layer = 0; layer < 4; layer++) {
+                    if (!rules[layer].enabled) continue;
+                    
+                    const auto& rule = rules[layer];
+                    
+                    // Height contribution
+                    float heightWeight = 0.0f;
+                    if (height >= rule.heightMin && height <= rule.heightMax) {
+                        heightWeight = 1.0f;
+                    } else if (height < rule.heightMin) {
+                        heightWeight = smoothstepLocal(rule.heightMin - rule.falloff, rule.heightMin, height);
+                    } else {
+                        heightWeight = 1.0f - smoothstepLocal(rule.heightMax, rule.heightMax + rule.falloff, height);
+                    }
+                    
+                    // Slope contribution
+                    float slopeWeight = 0.0f;
+                    if (slope >= rule.slopeMin && slope <= rule.slopeMax) {
+                        slopeWeight = 1.0f;
+                    } else if (slope < rule.slopeMin) {
+                        slopeWeight = smoothstepLocal(rule.slopeMin - rule.falloff, rule.slopeMin, slope);
+                    } else {
+                        slopeWeight = 1.0f - smoothstepLocal(rule.slopeMax, rule.slopeMax + rule.falloff, slope);
+                    }
+                    
+                    // Combine height and slope
+                    float finalWeight = heightWeight * rule.heightWeight + slopeWeight * rule.slopeWeight;
+                    
+                    // Add noise variation
+                    if (rule.noiseAmount > 0.0f) {
+                        float noise = simpleNoise(x, y, noiseSeed + layer) * 2.0f - 1.0f;
+                        finalWeight += noise * rule.noiseAmount;
+                    }
+                    
+                    weights[layer] = clampValue(finalWeight, 0.0f, 1.0f);
+                }
+                
+                // Normalize weights if requested
+                if (normalizeOutput) {
+                    float sum = weights[0] + weights[1] + weights[2] + weights[3];
+                    if (sum > 0.001f) {
+                        for (int i = 0; i < 4; i++) weights[i] /= sum;
+                    } else {
+                        weights[0] = 1.0f; // Default to first layer
+                    }
+                }
+                
+                // Store as RGBA
+                (*result.data)[idx * 4 + 0] = weights[0];
+                (*result.data)[idx * 4 + 1] = weights[1];
+                (*result.data)[idx * 4 + 2] = weights[2];
+                (*result.data)[idx * 4 + 3] = weights[3];
+            }
+        }
+        
+        // Fill edges
+        for (int x = 0; x < w; x++) {
+            for (int c = 0; c < 4; c++) {
+                (*result.data)[x * 4 + c] = (*result.data)[(w + x) * 4 + c];
+                (*result.data)[((h-1) * w + x) * 4 + c] = (*result.data)[((h-2) * w + x) * 4 + c];
+            }
+        }
+        for (int y = 0; y < h; y++) {
+            for (int c = 0; c < 4; c++) {
+                (*result.data)[(y * w) * 4 + c] = (*result.data)[(y * w + 1) * 4 + c];
+                (*result.data)[(y * w + w - 1) * 4 + c] = (*result.data)[(y * w + w - 2) * 4 + c];
+            }
+        }
+        
+        return result;
+    }
+    
+    void AutoSplatNode::drawContent() {
+        const char* layerNames[] = { "Layer 0 (R)", "Layer 1 (G)", "Layer 2 (B)", "Layer 3 (A)" };
+        
+        for (int i = 0; i < 4; i++) {
+            if (ImGui::TreeNode(layerNames[i])) {
+                auto& rule = rules[i];
+                
+                if (ImGui::Checkbox("Enabled", &rule.enabled)) dirty = true;
+                
+                if (rule.enabled) {
+                    ImGui::Text("Height Range:");
+                    if (ImGui::DragFloat("H Min##h", &rule.heightMin, 1.0f, 0.0f, 1000.0f)) dirty = true;
+                    if (ImGui::DragFloat("H Max##h", &rule.heightMax, 1.0f, 0.0f, 1000.0f)) dirty = true;
+                    
+                    ImGui::Text("Slope Range (deg):");
+                    if (ImGui::DragFloat("S Min##s", &rule.slopeMin, 1.0f, 0.0f, 90.0f)) dirty = true;
+                    if (ImGui::DragFloat("S Max##s", &rule.slopeMax, 1.0f, 0.0f, 90.0f)) dirty = true;
+                    
+                    ImGui::Text("Weights:");
+                    if (ImGui::SliderFloat("Height W", &rule.heightWeight, 0.0f, 1.0f)) dirty = true;
+                    if (ImGui::SliderFloat("Slope W", &rule.slopeWeight, 0.0f, 1.0f)) dirty = true;
+                    
+                    if (ImGui::DragFloat("Falloff", &rule.falloff, 0.5f, 0.0f, 50.0f)) dirty = true;
+                    if (ImGui::DragFloat("Noise", &rule.noiseAmount, 0.01f, 0.0f, 0.5f)) dirty = true;
+                }
+                
+                ImGui::TreePop();
+            }
+        }
+        
+        ImGui::Separator();
+        if (ImGui::Checkbox("Normalize", &normalizeOutput)) dirty = true;
+        if (ImGui::DragInt("Noise Seed", &noiseSeed)) dirty = true;
+    }
+    
+    // MASK PAINT NODE
+    void MaskPaintNode::initBuffer(int width, int height) {
+        if (bufferWidth != width || bufferHeight != height) {
+            bufferWidth = width;
+            bufferHeight = height;
+            paintBuffer.resize(width * height, 0.0f);
+            needsInit = false;
+        }
+    }
+    
+    void MaskPaintNode::paint(float u, float v, float strength) {
+        if (paintBuffer.empty() || bufferWidth == 0 || bufferHeight == 0) return;
+        
+        int cx = (int)(u * (bufferWidth - 1));
+        int cy = (int)(v * (bufferHeight - 1));
+        int radiusPixels = (int)(brushRadius * bufferWidth / 100.0f);
+        if (radiusPixels < 1) radiusPixels = 1;
+        
+        for (int dy = -radiusPixels; dy <= radiusPixels; dy++) {
+            for (int dx = -radiusPixels; dx <= radiusPixels; dx++) {
+                int px = cx + dx;
+                int py = cy + dy;
+                
+                if (px < 0 || px >= bufferWidth || py < 0 || py >= bufferHeight) continue;
+                
+                float dist = std::sqrt((float)(dx * dx + dy * dy));
+                if (dist > radiusPixels) continue;
+                
+                float falloff = 1.0f - (dist / radiusPixels);
+                falloff = std::pow(falloff, 2.0f - brushFalloff * 2.0f);
+                
+                int idx = py * bufferWidth + px;
+                paintBuffer[idx] += strength * brushStrength * falloff;
+                paintBuffer[idx] = clampValue(paintBuffer[idx], 0.0f, 1.0f);
+            }
+        }
+        
+        dirty = true;
+    }
+    
+    NodeSystem::PinValue MaskPaintNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        
+        // Get resolution from reference input or terrain
+        int w = 512, h = 512;
+        auto refInput = getHeightInput(0, ctx);
+        if (refInput.isValid()) {
+            w = refInput.width;
+            h = refInput.height;
+        } else if (tctx && tctx->terrain) {
+            w = tctx->terrain->heightmap.width;
+            h = tctx->terrain->heightmap.height;
+        }
+        
+        // Initialize buffer if needed
+        if (needsInit || paintBuffer.empty() || bufferWidth != w || bufferHeight != h) {
+            initBuffer(w, h);
+        }
+        
+        auto result = createMaskOutput(bufferWidth, bufferHeight);
+        *result.data = paintBuffer;
+        
+        return result;
+    }
+    
+    void MaskPaintNode::drawContent() {
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.3f, 1.0f), "Brush Settings");
+        
+        if (ImGui::DragFloat("Radius", &brushRadius, 0.5f, 1.0f, 100.0f)) dirty = true;
+        if (ImGui::DragFloat("Strength", &brushStrength, 0.01f, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::DragFloat("Falloff", &brushFalloff, 0.01f, 0.0f, 1.0f)) dirty = true;
+        
+        ImGui::Spacing();
+        
+        if (ImGui::Button("Clear")) { clear(); dirty = true; }
+        ImGui::SameLine();
+        if (ImGui::Button("Fill")) { fill(1.0f); dirty = true; }
+        
+        ImGui::TextDisabled("Size: %dx%d", bufferWidth, bufferHeight);
+        
+        if (isPainting) {
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "PAINTING...");
+        }
+    }
+    
+    // MASK IMAGE NODE
+    void MaskImageNode::loadMaskFromFile() {
+        if (strlen(filePath) == 0) return;
+        
+        int w, h, channels;
+        unsigned char* data = stbi_load(filePath, &w, &h, &channels, 1);  // Force grayscale
+        
+        if (!data) {
+            fileLoaded = false;
+            return;
+        }
+        
+        loadedWidth = w;
+        loadedHeight = h;
+        loadedMask.resize(w * h);
+        
+        for (int i = 0; i < w * h; i++) {
+            float val = data[i] / 255.0f;
+            
+            // Apply adjustments
+            val = (val - 0.5f) * contrast + 0.5f + brightness;
+            if (invert) val = 1.0f - val;
+            
+            loadedMask[i] = clampValue(val, 0.0f, 1.0f);
+        }
+        
+        stbi_image_free(data);
+        fileLoaded = true;
+        dirty = true;
+    }
+    
+    NodeSystem::PinValue MaskImageNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        if (!fileLoaded || loadedMask.empty()) {
+            ctx.addError(id, "No mask loaded");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto result = createMaskOutput(loadedWidth, loadedHeight);
+        *result.data = loadedMask;
+        
+        return result;
+    }
+    
+    void MaskImageNode::drawContent() {
+        if (fileLoaded) {
+            std::string shortPath = filePath;
+            if (shortPath.length() > 25) {
+                shortPath = "..." + shortPath.substr(shortPath.length() - 22);
+            }
+            ImGui::TextDisabled("%s", shortPath.c_str());
+            ImGui::TextColored(ImVec4(0.3f, 0.8f, 0.3f, 1.0f), "Size: %dx%d", loadedWidth, loadedHeight);
+        } else {
+            ImGui::TextDisabled("No file loaded");
+        }
+        
+        if (ImGui::Button("Browse...")) {
+            browseForMask = true;
+        }
+        
+        ImGui::Spacing();
+        ImGui::Text("Adjustments:");
+        if (ImGui::DragFloat("Contrast", &contrast, 0.01f, 0.0f, 3.0f)) {
+            if (fileLoaded) loadMaskFromFile();
+        }
+        if (ImGui::DragFloat("Brightness", &brightness, 0.01f, -1.0f, 1.0f)) {
+            if (fileLoaded) loadMaskFromFile();
+        }
+        if (ImGui::Checkbox("Invert", &invert)) {
+            if (fileLoaded) loadMaskFromFile();
+        }
+    }
+
+    // ============================================================================
+    // GEOLOGICAL TRANSFORM NODES IMPLEMENTATION
+    // ============================================================================
+    
+    // ------------------------------------------------------------------------
+    // FAULT NODE - Strike-slip fault line
+    // ------------------------------------------------------------------------
+    NodeSystem::PinValue FaultNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        auto input = getHeightInput(0, ctx);
+        
+        if (!tctx || !input.isValid()) {
+            ctx.addError(id, "Invalid input or context");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = input.width;
+        int h = input.height;
+        auto result = createHeightOutput(w, h);
+        
+        // Get optional mask (use getHeightInput for mask too)
+        auto maskData = getHeightInput(1, ctx);
+        bool hasMask = maskData.isValid();
+        
+        float dirRad = direction * 3.14159f / 180.0f;
+        float cosD = std::cos(dirRad);
+        float sinD = std::sin(dirRad);
+        
+        // Fault line position in grid coordinates
+        float faultPos = position * (std::max)(w, h);
+        
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int idx = y * w + x;
+                
+                // Project point onto fault line direction
+                float px = x - w * 0.5f;
+                float py = y - h * 0.5f;
+                float perpDist = px * sinD - py * cosD + faultPos;
+                
+                // Calculate offset based on which side of fault
+                float t = 0.0f;
+                if (width > 0.01f) {
+                    t = perpDist / width;
+                    t = clampValue(t, -1.0f, 1.0f);
+                    // Smooth transition using smoothstep
+                    t = t * 0.5f + 0.5f; // Map to 0-1
+                    t = t * t * (3.0f - 2.0f * t); // Smoothstep
+                } else {
+                    t = perpDist > 0 ? 1.0f : 0.0f;
+                }
+                
+                // Calculate source coordinates with offset
+                float offsetAmount = offset * (t - 0.5f) * 2.0f;
+                int srcX = x + (int)(offsetAmount * cosD);
+                int srcY = y + (int)(offsetAmount * sinD);
+                
+                // Clamp source coordinates
+                srcX = clampValue(srcX, 0, w - 1);
+                srcY = clampValue(srcY, 0, h - 1);
+                
+                float srcHeight = (*input.data)[srcY * w + srcX];
+                float vOffset = verticalOffset * (t - 0.5f) * 2.0f;
+                
+                float finalHeight = srcHeight + vOffset;
+                
+                // Apply mask
+                if (hasMask) {
+                    float mask = (*maskData.data)[idx];
+                    finalHeight = (*input.data)[idx] * (1.0f - mask) + finalHeight * mask;
+                }
+                
+                (*result.data)[idx] = finalHeight;
+            }
+        }
+        
+        return result;
+    }
+    
+    void FaultNode::drawContent() {
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderFloat("Direction", &direction, 0.0f, 360.0f, "%.0f°");
+        ImGui::SetNextItemWidth(100);
+        ImGui::DragFloat("Offset", &offset, 0.5f, -50.0f, 50.0f);
+        ImGui::SetNextItemWidth(100);
+        ImGui::DragFloat("V.Offset", &verticalOffset, 0.1f, -10.0f, 10.0f);
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderFloat("Position", &position, 0.0f, 1.0f);
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderFloat("Width", &width, 0.1f, 20.0f);
+    }
+    
+    // ------------------------------------------------------------------------
+    // MESA NODE - Flat-topped plateau
+    // ------------------------------------------------------------------------
+    NodeSystem::PinValue MesaNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        auto input = getHeightInput(0, ctx);
+        
+        if (!tctx || !input.isValid()) {
+            ctx.addError(id, "Invalid input or context");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = input.width;
+        int h = input.height;
+        auto result = createHeightOutput(w, h);
+        
+        // Get optional mask (use getHeightInput for mask too)
+        auto maskData = getHeightInput(1, ctx);
+        bool hasMask = maskData.isValid();
+        
+        // Find height range for threshold calculation
+        float minH = 1e9f, maxH = -1e9f;
+        for (int i = 0; i < w * h; i++) {
+            float v = (*input.data)[i];
+            if (v < minH) minH = v;
+            if (v > maxH) maxH = v;
+        }
+        float heightRange = maxH - minH;
+        if (heightRange < 0.001f) heightRange = 1.0f;
+        
+        float absThreshold = minH + threshold * heightRange;
+        
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int idx = y * w + x;
+                float srcHeight = (*input.data)[idx];
+                
+                float finalHeight = srcHeight;
+                
+                if (srcHeight > absThreshold) {
+                    // Calculate distance from threshold
+                    float above = (srcHeight - absThreshold) / heightRange;
+                    
+                    // Apply terrace levels
+                    if (terraceCount > 1) {
+                        float step = 1.0f / terraceCount;
+                        above = std::floor(above / step) * step;
+                    }
+                    
+                    // Smoothstep for cliff transition
+                    float cliff = above / (1.0f - threshold + 0.001f);
+                    cliff = clampValue(cliff, 0.0f, 1.0f);
+                    
+                    // Cliff steepness control
+                    float steepCliff = std::pow(cliff, 1.0f / (1.0f - cliffSteepness * 0.9f + 0.1f));
+                    
+                    // Mesa top is flat at plateau height
+                    float mesaTop = absThreshold + plateauHeight * heightRange * 0.3f;
+                    
+                    // Blend between original slope and flat top
+                    finalHeight = absThreshold + (mesaTop - absThreshold) * steepCliff;
+                }
+                
+                // Apply mask
+                if (hasMask) {
+                    float mask = (*maskData.data)[idx];
+                    finalHeight = srcHeight * (1.0f - mask) + finalHeight * mask;
+                }
+                
+                (*result.data)[idx] = finalHeight;
+            }
+        }
+        
+        return result;
+    }
+    
+    void MesaNode::drawContent() {
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderFloat("Threshold", &threshold, 0.0f, 1.0f);
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderFloat("Cliff", &cliffSteepness, 0.0f, 1.0f);
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderFloat("Height", &plateauHeight, 0.1f, 2.0f);
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderInt("Terraces", &terraceCount, 1, 10);
+    }
+    
+    // ------------------------------------------------------------------------
+    // SHEAR NODE - Diagonal deformation
+    // ------------------------------------------------------------------------
+    NodeSystem::PinValue ShearNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        auto input = getHeightInput(0, ctx);
+        
+        if (!tctx || !input.isValid()) {
+            ctx.addError(id, "Invalid input or context");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = input.width;
+        int h = input.height;
+        auto result = createHeightOutput(w, h);
+        
+        // Get optional mask (use getHeightInput for mask too)
+        auto maskData = getHeightInput(1, ctx);
+        bool hasMask = maskData.isValid();
+        
+        float angleRad = angle * 3.14159f / 180.0f;
+        float tanA = std::tan(angleRad);
+        
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int idx = y * w + x;
+                
+                // Normalize coordinates to 0-1
+                float nx = (float)x / w;
+                float ny = (float)y / h;
+                
+                // Determine which band this pixel is in
+                float bandProgress = ny * bands;
+                int bandIndex = (int)bandProgress;
+                float bandLocal = bandProgress - bandIndex;
+                
+                // Shear direction alternates if bidirectional
+                float shearDir = 1.0f;
+                if (bidirectional && (bandIndex % 2 == 1)) {
+                    shearDir = -1.0f;
+                }
+                
+                // Calculate shear amount within band
+                float shearAmount = 0.0f;
+                if (bandLocal < bandWidth) {
+                    // Inside shear zone
+                    float t = bandLocal / bandWidth;
+                    shearAmount = std::sin(t * 3.14159f) * strength * shearDir;
+                }
+                
+                // Calculate source coordinates
+                float srcX = x + shearAmount * w * tanA;
+                
+                // Bilinear interpolation for smooth sampling
+                int x0 = (int)std::floor(srcX);
+                int x1 = x0 + 1;
+                float tx = srcX - x0;
+                
+                x0 = clampValue(x0, 0, w - 1);
+                x1 = clampValue(x1, 0, w - 1);
+                
+                float h0 = (*input.data)[y * w + x0];
+                float h1 = (*input.data)[y * w + x1];
+                float finalHeight = h0 * (1.0f - tx) + h1 * tx;
+                
+                // Apply mask
+                if (hasMask) {
+                    float mask = (*maskData.data)[idx];
+                    finalHeight = (*input.data)[idx] * (1.0f - mask) + finalHeight * mask;
+                }
+                
+                (*result.data)[idx] = finalHeight;
+            }
+        }
+        
+        return result;
+    }
+    
+    void ShearNode::drawContent() {
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderFloat("Angle", &angle, -60.0f, 60.0f, "%.0f°");
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderFloat("Strength", &strength, 0.0f, 1.0f);
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderInt("Bands", &bands, 1, 16);
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderFloat("Width", &bandWidth, 0.05f, 0.5f);
+        ImGui::Checkbox("Bidirectional", &bidirectional);
+    }
+
+    // ============================================================================
+    // TERRAIN GRAPH V2 IMPLEMENTATION
+    // ============================================================================
+    
+    NodeSystem::NodeBase* TerrainNodeGraphV2::addTerrainNode(NodeType type, float x, float y) {
+        NodeSystem::NodeBase* node = nullptr;
+        
+        switch (type) {
+            case NodeType::HeightmapInput: node = addNode<HeightmapInputNode>(); break;
+            case NodeType::NoiseGenerator: node = addNode<NoiseGeneratorNode>(); break;
+            case NodeType::HydraulicErosion: node = addNode<HydraulicErosionNode>(); break;
+            case NodeType::ThermalErosion: node = addNode<ThermalErosionNode>(); break;
+            case NodeType::FluvialErosion: node = addNode<FluvialErosionNode>(); break;
+            case NodeType::WindErosion: node = addNode<WindErosionNode>(); break;
+            case NodeType::HeightOutput: node = addNode<HeightOutputNode>(); break;
+            case NodeType::SplatOutput: node = addNode<SplatOutputNode>(); break;
+            case NodeType::HardnessOutput: node = addNode<HardnessOutputNode>(); break;
+            case NodeType::HardnessInput: node = addNode<HardnessInputNode>(); break;
+            case NodeType::Add:
+            case NodeType::Subtract:
+            case NodeType::Multiply:
+                node = addNode<MathNode>();
+                break;
+            case NodeType::Blend: node = addNode<BlendNode>(); break;
+            case NodeType::Clamp: node = addNode<ClampNode>(); break;
+            case NodeType::Invert: node = addNode<InvertNode>(); break;
+            case NodeType::SlopeMask: node = addNode<SlopeMaskNode>(); break;
+            case NodeType::HeightMask: node = addNode<HeightMaskNode>(); break;
+            case NodeType::CurvatureMask: node = addNode<CurvatureMaskNode>(); break;
+            case NodeType::FlowMask: node = addNode<FlowMaskNode>(); break;
+            case NodeType::ExposureMask: node = addNode<ExposureMaskNode>(); break;
+            // NEW OPERATORS
+            case NodeType::Smooth: node = addNode<SmoothNode>(); break;
+            case NodeType::Normalize: node = addNode<NormalizeNode>(); break;
+            case NodeType::Terrace: node = addNode<TerraceNode>(); break;
+            case NodeType::EdgeFalloff: node = addNode<EdgeFalloffNode>(); break;
+            case NodeType::MaskCombine: node = addNode<MaskCombineNode>(); break;
+            case NodeType::Overlay: node = addNode<OverlayNode>(); break;
+            case NodeType::Screen: node = addNode<ScreenNode>(); break;
+            // NEW: Procedural Texture Nodes
+            case NodeType::AutoSplat: node = addNode<AutoSplatNode>(); break;
+            case NodeType::MaskPaint: node = addNode<MaskPaintNode>(); break;
+            case NodeType::MaskImage: node = addNode<MaskImageNode>(); break;
+            // NEW: Geological Transform Nodes
+            case NodeType::Fault: node = addNode<FaultNode>(); break;
+            case NodeType::Mesa: node = addNode<MesaNode>(); break;
+            case NodeType::Shear: node = addNode<ShearNode>(); break;
+            // Stacks and Anastomosing - TODO: implement later
+            case NodeType::Stacks: break;
+            case NodeType::Anastomosing: break;
+            // NEW: Sediment Deposition Nodes
+            case NodeType::SedimentDeposition: node = addNode<SedimentDepositionNode>(); break;
+            case NodeType::AlluvialFan: node = addNode<AlluvialFanNode>(); break;
+            case NodeType::DeltaFormation: node = addNode<DeltaFormationNode>(); break;
+            // NEW: Erosion Wizard
+            case NodeType::ErosionWizard: node = addNode<ErosionWizardNode>(); break;
+        }
+        
+        if (node) {
+            node->x = x;
+            node->y = y;
+        }
+        
+        return node;
+    }
+    
+    void TerrainNodeGraphV2::evaluateTerrain(TerrainObject* terrain, SceneData& scene) {
+        if (!terrain) return;
+        
+        // CRITICAL FIX: Preserve AND RESTORE scale values at the START
+        // If terrain is in a "broken" state from a previous failed evaluation,
+        // we need to fix it immediately. Don't just preserve - actively repair.
+        float preserved_scale_xz = terrain->heightmap.scale_xz;
+        float preserved_scale_y = terrain->heightmap.scale_y;
+        
+        // Force valid scale values immediately - repair broken terrain state
+        if (preserved_scale_xz < 1.0f) preserved_scale_xz = 100.0f;
+        if (preserved_scale_y < 0.1f) preserved_scale_y = 10.0f;
+        
+        // IMMEDIATELY apply valid scales to terrain (repair before evaluation)
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
+        
+        // Use the proper constructor that sets width/height from terrain
+        TerrainContext tctx(terrain);
+        
+        NodeSystem::EvaluationContext ctx(this);
+        ctx.setDomainContext(&tctx);
+        
+        // CRITICAL FIX: Clear cache and mark all nodes dirty before evaluation
+        // Without this, intermediate nodes (deformation nodes) may be skipped
+        // because their cached values would be reused instead of recomputing
+        ctx.clearCache();
+        ctx.clearErrors();
+        markAllDirty();
+
+        // Find output nodes
+        HeightOutputNode* heightOutputNode = nullptr;
+        std::vector<SplatOutputNode*> splatOutputNodes;
+        std::vector<HardnessOutputNode*> hardnessOutputNodes;
+
+        for (auto& node : nodes) {
+            std::string typeId = node->getTypeId();
+            if (typeId == "TerrainV2.HeightOutput") {
+                if (!heightOutputNode) heightOutputNode = dynamic_cast<HeightOutputNode*>(node.get());
+            } else if (typeId == "TerrainV2.SplatOutput") {
+                if (auto* splat = dynamic_cast<SplatOutputNode*>(node.get())) {
+                    splatOutputNodes.push_back(splat);
+                }
+            } else if (typeId == "TerrainV2.HardnessOutput") {
+                if (auto* hardness = dynamic_cast<HardnessOutputNode*>(node.get())) {
+                    hardnessOutputNodes.push_back(hardness);
+                }
+            }
+        }
+        
+        // Evaluate secondary outputs first (Splat, Hardness)
+        // These use pull-based evaluation through the connected graph
+        for (auto* splatNode : splatOutputNodes) {
+            splatNode->compute(0, ctx);
+        }
+        for (auto* hardNode : hardnessOutputNodes) {
+            hardNode->compute(0, ctx);
+        }
+
+        if (!heightOutputNode) {
+            // No height output node found - nothing to update geometry-wise
+            // But we still checked splats above.
+            return;
+        }
+        
+        // Pull data from the input of the output node (Input index 0 for Height)
+        // This triggers the pull-based evaluation chain through ALL connected nodes
+        auto heightData = heightOutputNode->getHeightInput(0, ctx);
+        
+        // Check for errors in the evaluation chain
+        if (ctx.hasErrors()) {
+            for (const auto& err : ctx.getErrors()) {
+                // Log detailed errors
+                SCENE_LOG_ERROR("Terrain Graph Error (Node " + std::to_string(err.nodeId) + "): " + err.message);
+            }
+        }
+        
+        // CRITICAL CHECK: Verify input data integrity
+        if (!heightData.isValid() || !heightData.data || heightData.width < 2 || heightData.height < 2) {
+            // If data is invalid or too small (e.g. uninitialized), do not update terrain
+            // This prevents "scrambled" artifacts during initialization
+            return;
+        }
+        
+        if (heightData.isValid() && heightData.data) {
+            // Check if resize needed
+            bool resized = (terrain->heightmap.width != heightData.width || terrain->heightmap.height != heightData.height);
+            size_t expectedTriCount = 0;
+            if (heightData.width > 1 && heightData.height > 1) {
+                expectedTriCount = static_cast<size_t>(heightData.width - 1) * static_cast<size_t>(heightData.height - 1) * 2ull;
+            }
+            // Important: some intermediate terrain nodes mutate terrain->heightmap dimensions before the
+            // final Height Output is pulled. In that case `resized` can be false even though the mesh still
+            // has the old triangle topology. Rebuild when triangle count does not match the current height
+            // grid, otherwise the terrain collapses into a thin / corrupted strip on first evaluate.
+            bool topologyMismatch = terrain->mesh_triangles.size() != expectedTriCount;
+            
+            // Resize terrain heightmap manually (vector resize)
+            if (resized) {
+                terrain->heightmap.width = heightData.width;
+                terrain->heightmap.height = heightData.height;
+                terrain->heightmap.data.resize(heightData.width * heightData.height);
+            }
+            
+            // Copy data directly to terrain
+            terrain->heightmap.data = *heightData.data;
+            
+            // CRITICAL FIX: Restore scale values after node graph evaluation
+            // This ensures terrain physical dimensions remain constant regardless of node chain
+            terrain->heightmap.scale_xz = preserved_scale_xz;
+            terrain->heightmap.scale_y = preserved_scale_y;
+            
+            // Update mesh visualization (Rebuild if resized, Update if content changed)
+            if (resized || topologyMismatch) {
+                TerrainManager::getInstance().resizeSplatMap(terrain);
+                TerrainManager::getInstance().rebuildTerrainMesh(scene, terrain);
+            } else {
+                TerrainManager::getInstance().updateTerrainMesh(terrain);
+            }
+        }
+    }
+    
+    
+    void TerrainNodeGraphV2::createDefaultGraph(TerrainObject* terrain) {
+        clear();
+        
+        // Create default nodes
+        auto* inputNode = addTerrainNode(NodeType::HeightmapInput, 50, 100);
+        auto* outputNode = addTerrainNode(NodeType::HeightOutput, 400, 100);
+        
+        // Connect them
+        if (inputNode && outputNode && 
+            !inputNode->outputs.empty() && !outputNode->inputs.empty()) {
+            addLink(inputNode->outputs[0].id, outputNode->inputs[0].id);
+        }
+    }
+
+    
+    // ============================================================================
+    // TERRAIN NODE GRAPH SERIALIZATION
+    // ============================================================================
+    
+    nlohmann::json TerrainNodeGraphV2::toJson() const {
+        nlohmann::json j;
+        
+        // Save ID generators for proper restoration
+        j["nextNodeId"] = nextNodeId;
+        j["nextPinId"] = nextPinId;
+        j["nextLinkId"] = nextLinkId;
+        j["nextGroupId"] = nextGroupId;
+        
+        // Save nodes
+        nlohmann::json nodesArray = nlohmann::json::array();
+        for (const auto& nodePtr : nodes) {
+            nlohmann::json nodeJson;
+            
+            // Save base node data
+            nodeJson["id"] = nodePtr->id;
+            
+            // Save pin IDs for link restoration
+            nlohmann::json inputPins = nlohmann::json::array();
+            for (const auto& pin : nodePtr->inputs) {
+                nlohmann::json pinJson;
+                pinJson["id"] = pin.id;
+                pinJson["name"] = pin.name;
+                inputPins.push_back(pinJson);
+            }
+            nodeJson["inputPins"] = inputPins;
+            
+            nlohmann::json outputPins = nlohmann::json::array();
+            for (const auto& pin : nodePtr->outputs) {
+                nlohmann::json pinJson;
+                pinJson["id"] = pin.id;
+                pinJson["name"] = pin.name;
+                outputPins.push_back(pinJson);
+            }
+            nodeJson["outputPins"] = outputPins;
+            
+            // Save node-specific data via virtual method
+            if (auto* terrainNode = dynamic_cast<TerrainNodeBase*>(nodePtr.get())) {
+                terrainNode->serializeToJson(nodeJson);
+            }
+            
+            nodesArray.push_back(nodeJson);
+        }
+        j["nodes"] = nodesArray;
+        
+        // Save links
+        nlohmann::json linksArray = nlohmann::json::array();
+        for (const auto& link : links) {
+            nlohmann::json linkJson;
+            linkJson["id"] = link.id;
+            linkJson["startPinId"] = link.startPinId;
+            linkJson["endPinId"] = link.endPinId;
+            linksArray.push_back(linkJson);
+        }
+        j["links"] = linksArray;
+        
+        // Save groups (optional)
+        nlohmann::json groupsArray = nlohmann::json::array();
+        for (const auto& group : groups) {
+            nlohmann::json groupJson;
+            groupJson["id"] = group.id;
+            groupJson["name"] = group.name;
+            groupJson["position"] = { group.position.x, group.position.y };
+            groupJson["size"] = { group.size.x, group.size.y };
+            groupJson["nodeIds"] = group.nodeIds;
+            groupsArray.push_back(groupJson);
+        }
+        j["groups"] = groupsArray;
+        
+        return j;
+    }
+    
+    void TerrainNodeGraphV2::fromJson(const nlohmann::json& j, TerrainObject* terrain) {
+        // Clear existing graph
+        clear();
+        
+        // Restore ID generators
+        if (j.contains("nextNodeId")) nextNodeId = j["nextNodeId"].get<uint32_t>();
+        if (j.contains("nextPinId")) nextPinId = j["nextPinId"].get<uint32_t>();
+        if (j.contains("nextLinkId")) nextLinkId = j["nextLinkId"].get<uint32_t>();
+        if (j.contains("nextGroupId")) nextGroupId = j["nextGroupId"].get<uint32_t>();
+        
+        // ID mapping for proper link restoration
+        std::unordered_map<uint32_t, uint32_t> oldToNewPinId;
+        std::unordered_map<uint32_t, uint32_t> oldToNewNodeId;
+        
+        // Load nodes
+        if (j.contains("nodes") && j["nodes"].is_array()) {
+            for (const auto& nodeJson : j["nodes"]) {
+                std::string typeId = nodeJson.value("typeId", "");
+                uint32_t oldNodeId = nodeJson.value("id", 0u);
+                float x = nodeJson.value("x", 0.0f);
+                float y = nodeJson.value("y", 0.0f);
+                
+                // Create node by type ID
+                NodeSystem::NodeBase* newNode = nullptr;
+                
+                if (typeId == "TerrainV2.HeightmapInput") {
+                    newNode = addTerrainNode(NodeType::HeightmapInput, x, y);
+                } else if (typeId == "TerrainV2.NoiseGenerator") {
+                    newNode = addTerrainNode(NodeType::NoiseGenerator, x, y);
+                } else if (typeId == "TerrainV2.HydraulicErosion") {
+                    newNode = addTerrainNode(NodeType::HydraulicErosion, x, y);
+                } else if (typeId == "TerrainV2.ThermalErosion") {
+                    newNode = addTerrainNode(NodeType::ThermalErosion, x, y);
+                } else if (typeId == "TerrainV2.FluvialErosion") {
+                    newNode = addTerrainNode(NodeType::FluvialErosion, x, y);
+                } else if (typeId == "TerrainV2.WindErosion") {
+                    newNode = addTerrainNode(NodeType::WindErosion, x, y);
+                } else if (typeId == "TerrainV2.HeightOutput") {
+                    newNode = addTerrainNode(NodeType::HeightOutput, x, y);
+                } else if (typeId == "TerrainV2.SplatOutput") {
+                    newNode = addTerrainNode(NodeType::SplatOutput, x, y);
+                } else if (typeId == "TerrainV2.Math") {
+                    newNode = addTerrainNode(NodeType::Add, x, y);
+                } else if (typeId == "TerrainV2.Blend") {
+                    newNode = addTerrainNode(NodeType::Blend, x, y);
+                } else if (typeId == "TerrainV2.Clamp") {
+                    newNode = addTerrainNode(NodeType::Clamp, x, y);
+                } else if (typeId == "TerrainV2.Invert") {
+                    newNode = addTerrainNode(NodeType::Invert, x, y);
+                } else if (typeId == "TerrainV2.SlopeMask") {
+                    newNode = addTerrainNode(NodeType::SlopeMask, x, y);
+                } else if (typeId == "TerrainV2.HeightMask") {
+                    newNode = addTerrainNode(NodeType::HeightMask, x, y);
+                } else if (typeId == "TerrainV2.CurvatureMask") {
+                    newNode = addTerrainNode(NodeType::CurvatureMask, x, y);
+                } else if (typeId == "TerrainV2.FlowMask") {
+                    newNode = addTerrainNode(NodeType::FlowMask, x, y);
+                } else if (typeId == "TerrainV2.ExposureMask") {
+                    newNode = addTerrainNode(NodeType::ExposureMask, x, y);
+                } else if (typeId == "TerrainV2.Smooth") {
+                    newNode = addTerrainNode(NodeType::Smooth, x, y);
+                } else if (typeId == "TerrainV2.Normalize") {
+                    newNode = addTerrainNode(NodeType::Normalize, x, y);
+                } else if (typeId == "TerrainV2.Terrace") {
+                    newNode = addTerrainNode(NodeType::Terrace, x, y);
+                } else if (typeId == "TerrainV2.EdgeFalloff") {
+                    newNode = addTerrainNode(NodeType::EdgeFalloff, x, y);
+                } else if (typeId == "TerrainV2.MaskCombine") {
+                    newNode = addTerrainNode(NodeType::MaskCombine, x, y);
+                } else if (typeId == "TerrainV2.Overlay") {
+                    newNode = addTerrainNode(NodeType::Overlay, x, y);
+                } else if (typeId == "TerrainV2.Screen") {
+                    newNode = addTerrainNode(NodeType::Screen, x, y);
+                } else if (typeId == "TerrainV2.AutoSplat") {
+                    newNode = addTerrainNode(NodeType::AutoSplat, x, y);
+                } else if (typeId == "TerrainV2.MaskPaint") {
+                    newNode = addTerrainNode(NodeType::MaskPaint, x, y);
+                } else if (typeId == "TerrainV2.MaskImage") {
+                    newNode = addTerrainNode(NodeType::MaskImage, x, y);
+                } else if (typeId == "TerrainV2.Fault") {
+                    newNode = addTerrainNode(NodeType::Fault, x, y);
+                } else if (typeId == "TerrainV2.Mesa") {
+                    newNode = addTerrainNode(NodeType::Mesa, x, y);
+                } else if (typeId == "TerrainV2.Shear") {
+                    newNode = addTerrainNode(NodeType::Shear, x, y);
+                } else if (typeId == "TerrainV2.SedimentDeposition") {
+                    newNode = addTerrainNode(NodeType::SedimentDeposition, x, y);
+                } else if (typeId == "TerrainV2.AlluvialFan") {
+                    newNode = addTerrainNode(NodeType::AlluvialFan, x, y);
+                } else if (typeId == "TerrainV2.DeltaFormation") {
+                    newNode = addTerrainNode(NodeType::DeltaFormation, x, y);
+                } else if (typeId == "TerrainV2.ErosionWizard") {
+                    newNode = addTerrainNode(NodeType::ErosionWizard, x, y);
+                }
+                
+                if (newNode) {
+                    // Store ID mapping
+                    oldToNewNodeId[oldNodeId] = newNode->id;
+                    
+                    // Map old pin IDs to new pin IDs
+                    if (nodeJson.contains("inputPins")) {
+                        size_t idx = 0;
+                        for (const auto& pinJson : nodeJson["inputPins"]) {
+                            if (idx < newNode->inputs.size()) {
+                                uint32_t oldPinId = pinJson.value("id", 0u);
+                                oldToNewPinId[oldPinId] = newNode->inputs[idx].id;
+                            }
+                            idx++;
+                        }
+                    }
+                    if (nodeJson.contains("outputPins")) {
+                        size_t idx = 0;
+                        for (const auto& pinJson : nodeJson["outputPins"]) {
+                            if (idx < newNode->outputs.size()) {
+                                uint32_t oldPinId = pinJson.value("id", 0u);
+                                oldToNewPinId[oldPinId] = newNode->outputs[idx].id;
+                            }
+                            idx++;
+                        }
+                    }
+                    
+                    // Deserialize node-specific data
+                    if (auto* terrainNode = dynamic_cast<TerrainNodeBase*>(newNode)) {
+                        terrainNode->deserializeFromJson(nodeJson);
+                    }
+                }
+            }
+        }
+        
+        // Restore links using ID mappings
+        if (j.contains("links") && j["links"].is_array()) {
+            for (const auto& linkJson : j["links"]) {
+                uint32_t oldStartPin = linkJson.value("startPinId", 0u);
+                uint32_t oldEndPin = linkJson.value("endPinId", 0u);
+                
+                auto startIt = oldToNewPinId.find(oldStartPin);
+                auto endIt = oldToNewPinId.find(oldEndPin);
+                
+                if (startIt != oldToNewPinId.end() && endIt != oldToNewPinId.end()) {
+                    addLink(startIt->second, endIt->second);
+                }
+            }
+        }
+        
+        // Restore groups
+        if (j.contains("groups") && j["groups"].is_array()) {
+            for (const auto& groupJson : j["groups"]) {
+                std::string name = groupJson.value("name", "Group");
+                ImVec2 pos(0, 0), size(200, 150);
+                if (groupJson.contains("position") && groupJson["position"].is_array()) {
+                    pos.x = groupJson["position"][0].get<float>();
+                    pos.y = groupJson["position"][1].get<float>();
+                }
+                if (groupJson.contains("size") && groupJson["size"].is_array()) {
+                    size.x = groupJson["size"][0].get<float>();
+                    size.y = groupJson["size"][1].get<float>();
+                }
+                
+                uint32_t groupId = createGroup(name, pos, size);
+                
+                if (groupJson.contains("nodeIds")) {
+                    for (uint32_t oldNodeId : groupJson["nodeIds"]) {
+                        auto it = oldToNewNodeId.find(oldNodeId);
+                        if (it != oldToNewNodeId.end()) {
+                            addNodeToGroup(it->second, groupId);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+} // namespace TerrainNodesV2

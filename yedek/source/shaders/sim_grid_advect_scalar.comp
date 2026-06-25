@@ -1,0 +1,70 @@
+// sim_grid_advect_scalar.comp — semi-Lagrangian scalar advection.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    float voxel_size;
+    float dt;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer VelX      { float vel_x[];     };
+layout(set = 0, binding = 1) readonly buffer VelY      { float vel_y[];     };
+layout(set = 0, binding = 2) readonly buffer VelZ      { float vel_z[];     };
+layout(set = 0, binding = 3) readonly buffer ScalarIn  { float scalar_in[]; };
+layout(set = 0, binding = 4) buffer          ScalarOut { float scalar_out[];};
+
+float trilinear(int i0,int j0,int k0,float fx,float fy,float fz) {
+    i0=clamp(i0,0,pc.nx-1); j0=clamp(j0,0,pc.ny-1); k0=clamp(k0,0,pc.nz-1);
+    int i1=min(i0+1,pc.nx-1), j1=min(j0+1,pc.ny-1), k1=min(k0+1,pc.nz-1);
+    #define C(a,b,c) scalar_in[a+b*pc.nx+c*pc.nx*pc.ny]
+    float c00=mix(C(i0,j0,k0),C(i1,j0,k0),fx), c10=mix(C(i0,j1,k0),C(i1,j1,k0),fx);
+    float c01=mix(C(i0,j0,k1),C(i1,j0,k1),fx), c11=mix(C(i0,j1,k1),C(i1,j1,k1),fx);
+    #undef C
+    return mix(mix(c00,c10,fy),mix(c01,c11,fy),fz);
+}
+float sample_vx(float fi,float fj,float fk){
+    int i0=int(floor(fi)),j0=int(floor(fj)),k0=int(floor(fk));
+    i0=clamp(i0,0,pc.nx); j0=clamp(j0,0,pc.ny-1); k0=clamp(k0,0,pc.nz-1);
+    int i1=min(i0+1,pc.nx),j1=min(j0+1,pc.ny-1),k1=min(k0+1,pc.nz-1);
+    #define V(a,b,c) vel_x[a+b*(pc.nx+1)+c*(pc.nx+1)*pc.ny]
+    float c00=mix(V(i0,j0,k0),V(i1,j0,k0),fi-i0),c10=mix(V(i0,j1,k0),V(i1,j1,k0),fi-i0);
+    float c01=mix(V(i0,j0,k1),V(i1,j0,k1),fi-i0),c11=mix(V(i0,j1,k1),V(i1,j1,k1),fi-i0);
+    #undef V
+    return mix(mix(c00,c10,fj-j0),mix(c01,c11,fj-j0),fk-k0);
+}
+float sample_vy(float fi,float fj,float fk){
+    int i0=int(floor(fi)),j0=int(floor(fj)),k0=int(floor(fk));
+    i0=clamp(i0,0,pc.nx-1); j0=clamp(j0,0,pc.ny); k0=clamp(k0,0,pc.nz-1);
+    int i1=min(i0+1,pc.nx-1),j1=min(j0+1,pc.ny),k1=min(k0+1,pc.nz-1);
+    #define V(a,b,c) vel_y[a+b*pc.nx+c*pc.nx*(pc.ny+1)]
+    float c00=mix(V(i0,j0,k0),V(i1,j0,k0),fi-i0),c10=mix(V(i0,j1,k0),V(i1,j1,k0),fi-i0);
+    float c01=mix(V(i0,j0,k1),V(i1,j0,k1),fi-i0),c11=mix(V(i0,j1,k1),V(i1,j1,k1),fi-i0);
+    #undef V
+    return mix(mix(c00,c10,fj-j0),mix(c01,c11,fj-j0),fk-k0);
+}
+float sample_vz(float fi,float fj,float fk){
+    int i0=int(floor(fi)),j0=int(floor(fj)),k0=int(floor(fk));
+    i0=clamp(i0,0,pc.nx-1); j0=clamp(j0,0,pc.ny-1); k0=clamp(k0,0,pc.nz);
+    int i1=min(i0+1,pc.nx-1),j1=min(j0+1,pc.ny-1),k1=min(k0+1,pc.nz);
+    #define V(a,b,c) vel_z[a+b*pc.nx+c*pc.nx*pc.ny]
+    float c00=mix(V(i0,j0,k0),V(i1,j0,k0),fi-i0),c10=mix(V(i0,j1,k0),V(i1,j1,k0),fi-i0);
+    float c01=mix(V(i0,j0,k1),V(i1,j0,k1),fi-i0),c11=mix(V(i0,j1,k1),V(i1,j1,k1),fi-i0);
+    #undef V
+    return mix(mix(c00,c10,fj-j0),mix(c01,c11,fj-j0),fk-k0);
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= pc.nx*pc.ny*pc.nz) return;
+    int i=id%pc.nx, j=(id/pc.nx)%pc.ny, k=id/(pc.nx*pc.ny);
+    float lx=float(i)+0.5, ly=float(j)+0.5, lz=float(k)+0.5;
+    float inv_h = pc.voxel_size>1e-6 ? 1.0/pc.voxel_size : 1.0;
+    float vx=sample_vx(lx,ly-0.5,lz-0.5), vy=sample_vy(lx-0.5,ly,lz-0.5), vz=sample_vz(lx-0.5,ly-0.5,lz);
+    float bx=lx-vx*pc.dt*inv_h, by=ly-vy*pc.dt*inv_h, bz=lz-vz*pc.dt*inv_h;
+    bx-=0.5; by-=0.5; bz-=0.5;
+    int i0=int(floor(bx)), j0=int(floor(by)), k0=int(floor(bz));
+    if(i0<0||i0>=pc.nx-1||j0<0||j0>=pc.ny-1||k0<0||k0>=pc.nz-1)
+        { scalar_out[id]=0.0; return; }
+    scalar_out[id]=trilinear(i0,j0,k0,bx-float(i0),by-float(j0),bz-float(k0));
+}

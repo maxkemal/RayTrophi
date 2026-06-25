@@ -1,0 +1,61 @@
+// subdivide_linear.comp
+// GPU port of MeshModifiers::subdividePodOnce — one level of linear (1->4 midpoint)
+// subdivision. One thread = one input triangle; emits 4 output triangles. The host
+// drives this once per subdivision level (ping-pong buffers), then downloads the
+// final soup. Numerically equivalent to the CPU path (GPU float rounding may differ
+// in the last bits, so not bit-identical).
+#version 450
+layout(local_size_x = 64) in;
+
+// std430 scalar-float layout — matches the host GpuTri (112 bytes). Using plain
+// scalars (not vec3) avoids std430 vec3->16B alignment surprises.
+struct GpuVert { float px, py, pz, nx, ny, nz, u, v; };          // 32B
+struct GpuTri  { GpuVert a, b, c; uint mat; uint _p0, _p1, _p2; }; // 112B
+
+layout(std430, set = 0, binding = 0) readonly  buffer InBuf  { GpuTri inTri[];  };
+layout(std430, set = 0, binding = 1) writeonly buffer OutBuf { GpuTri outTri[]; };
+
+layout(push_constant) uniform PC { uint inCount; } pc;
+
+GpuVert makeVert(vec3 p, vec3 n, vec2 uv) {
+    GpuVert r;
+    r.px = p.x; r.py = p.y; r.pz = p.z;
+    r.nx = n.x; r.ny = n.y; r.nz = n.z;
+    r.u = uv.x; r.v = uv.y;
+    return r;
+}
+vec3 vpos(GpuVert g) { return vec3(g.px, g.py, g.pz); }
+vec3 vnrm(GpuVert g) { return vec3(g.nx, g.ny, g.nz); }
+vec2 vuv (GpuVert g) { return vec2(g.u,  g.v);        }
+
+void main() {
+    uint ti = gl_GlobalInvocationID.x;
+    if (ti >= pc.inCount) return;
+
+    GpuTri tri = inTri[ti];
+    vec3 v0 = vpos(tri.a), v1 = vpos(tri.b), v2 = vpos(tri.c);
+    vec3 n0 = vnrm(tri.a), n1 = vnrm(tri.b), n2 = vnrm(tri.c);
+    vec2 uv0 = vuv(tri.a), uv1 = vuv(tri.b), uv2 = vuv(tri.c);
+
+    vec3 m01 = (v0 + v1) * 0.5, m12 = (v1 + v2) * 0.5, m20 = (v2 + v0) * 0.5;
+    vec3 nm01 = normalize(n0 + n1), nm12 = normalize(n1 + n2), nm20 = normalize(n2 + n0);
+    vec2 uvm01 = (uv0 + uv1) * 0.5, uvm12 = (uv1 + uv2) * 0.5, uvm20 = (uv2 + uv0) * 0.5;
+
+    GpuVert V0  = makeVert(v0, n0, uv0),   V1  = makeVert(v1, n1, uv1),   V2  = makeVert(v2, n2, uv2);
+    GpuVert M01 = makeVert(m01, nm01, uvm01);
+    GpuVert M12 = makeVert(m12, nm12, uvm12);
+    GpuVert M20 = makeVert(m20, nm20, uvm20);
+
+    uint base = ti * 4u;
+    uint mat = tri.mat;
+
+    GpuTri o0; o0.a = V0;  o0.b = M01; o0.c = M20; o0.mat = mat; o0._p0=0u; o0._p1=0u; o0._p2=0u;
+    GpuTri o1; o1.a = M01; o1.b = V1;  o1.c = M12; o1.mat = mat; o1._p0=0u; o1._p1=0u; o1._p2=0u;
+    GpuTri o2; o2.a = M12; o2.b = V2;  o2.c = M20; o2.mat = mat; o2._p0=0u; o2._p1=0u; o2._p2=0u;
+    GpuTri o3; o3.a = M01; o3.b = M12; o3.c = M20; o3.mat = mat; o3._p0=0u; o3._p1=0u; o3._p2=0u;
+
+    outTri[base + 0u] = o0;
+    outTri[base + 1u] = o1;
+    outTri[base + 2u] = o2;
+    outTri[base + 3u] = o3;
+}

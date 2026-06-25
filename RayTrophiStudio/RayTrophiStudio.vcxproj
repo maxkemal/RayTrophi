@@ -1,5 +1,5 @@
-<?xml version="1.0" encoding="utf-8"?>
-<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<?xml version='1.0' encoding='utf-8'?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
       <Configuration>Debug</Configuration>
@@ -136,7 +136,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
-  </ItemDefinitionGroup>
+  <CudaCompile><Include>$(ProjectDir)source\include;%(Include)</Include><AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions></CudaCompile></ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -152,7 +152,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
-  </ItemDefinitionGroup>
+  <CudaCompile><Include>$(ProjectDir)source\include;%(Include)</Include><AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions></CudaCompile></ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -168,7 +168,7 @@
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <AdditionalOptions>/bigobj /FS /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <AdditionalIncludeDirectories>$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)external\JoltPhysics;external\JoltPhysics;$(ProjectDir)source\include;source\include;$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -177,7 +177,7 @@
       <AdditionalLibraryDirectories>$(ProjectDir)..\vcpkg\installed\x64-windows\debug\lib;$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(OIDN_ROOT)\lib;$(ASSIMP_ROOT)\lib\x64;$(EMBREE_ROOT)\lib;$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cudart64_11.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
-  </ItemDefinitionGroup>
+  <CudaCompile><Include>$(ProjectDir)source\include;%(Include)</Include><AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions></CudaCompile></ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -192,7 +192,7 @@
       <AdditionalDependencies>$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;ObjLoader.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(SDL2_ROOT)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
-  </ItemDefinitionGroup>
+  <CudaCompile><Include>$(ProjectDir)source\include;%(Include)</Include><AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions></CudaCompile></ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -214,7 +214,7 @@
       <WholeProgramOptimization>true</WholeProgramOptimization>
       <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
       <OpenMPSupport>true</OpenMPSupport>
-      <AdditionalIncludeDirectories>$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)external\JoltPhysics;external\JoltPhysics;$(ProjectDir)source\include;source\include;$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
       <AdditionalOptions>/bigobj /FS /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
     </ClCompile>
@@ -228,7 +228,7 @@
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cudart64_11.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
-  </ItemDefinitionGroup>
+  <CudaCompile><Include>$(ProjectDir)source\include;%(Include)</Include><AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions></CudaCompile></ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -247,13 +247,14 @@
       <AdditionalDependencies>$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;ObjLoader.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(SDL2_ROOT)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
-  </ItemDefinitionGroup>
+  <CudaCompile><Include>$(ProjectDir)source\include;%(Include)</Include><AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions></CudaCompile></ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="resource.h" />
     <ClInclude Include="source\src\Physics\Jolt\JoltSmokeTest.h" />
     <ClInclude Include="source\src\Physics\Jolt\JoltWorld.h" />
     <ClInclude Include="source\src\Physics\Jolt\JoltTypes.h" />
     <ClInclude Include="source\include\RigidBodySystem.h" />
+    <ClInclude Include="source\include\FractureGenerator.h" />
     <ClInclude Include="external\miniz.h" />
     <None Include="cpp.hint" />
     <None Include="source\include\gas_kernels.cuh" />
@@ -385,13 +386,13 @@
     <ClInclude Include="source\include\Transform.h" />
     <ClInclude Include="source\include\World.h" />
     <ClInclude Include="source\include\TerrainFFT.h" />
-    <!-- Unified Rendering System for CPU/GPU Parity -->
+    
     <ClInclude Include="source\include\unified_types.h" />
     <ClInclude Include="source\include\unified_brdf.h" />
     <ClInclude Include="source\include\unified_light_sampling.h" />
     <ClInclude Include="source\include\unified_converters.h" />
     <ClInclude Include="source\include\unified_cpu_adapter.h" />
-    <!-- Vulkan / Backend System -->
+    
     <ClInclude Include="source\include\Backend\IBackend.h" />
     <ClInclude Include="source\include\Backend\RenderCapabilities.h" />
     <ClInclude Include="source\include\Backend\OptixBackend.h" />
@@ -402,7 +403,7 @@
     <ResourceCompile Include="raytracing_render_code.rc" />
   </ItemGroup>
   <ItemGroup>
-    <!-- Jolt Physics v5.5.0 (MIT) - compiled in-project for matching flags/runtime/SIMD -->
+    
     <ClCompile Include="external\JoltPhysics\Jolt\AABBTree\AABBTreeBuilder.cpp">
       <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
       <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
@@ -1247,6 +1248,7 @@
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp" />
     <ClCompile Include="source\src\Paint\PaintLayerStack.cpp" />
     <ClCompile Include="source\src\Render\HitMaterialResolver.cpp" />
+    <ClCompile Include="source\src\Scene\TriangleMesh.cpp" />
     <ClCompile Include="source\src\simdjson.cpp" />
     <ClCompile Include="source\src\Hair\HairBSDF.cpp" />
     <ClCompile Include="source\src\Hair\HairStrand.cpp" />
@@ -1326,6 +1328,7 @@
     <ClCompile Include="source\src\Physics\ParticleRenderBridge.cpp" />
     <ClCompile Include="source\src\Physics\SimCache.cpp" />
     <ClCompile Include="source\src\MeshEdit\HalfEdgeMesh.cpp" />
+    <ClCompile Include="source\src\Physics\FractureGenerator.cpp" />
     <ClCompile Include="source\src\Physics\GridFluidSolver.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidSimulationSystem.cpp" />
@@ -1367,7 +1370,7 @@
     <ClCompile Include="external\imgui\imgui_widgets.cpp" />
     <ClCompile Include="external\xatlas\xatlas.cpp" Condition="Exists('$(ProjectDir)external\xatlas\xatlas.cpp')" />
     <ClCompile Include="external\xatlas\source\xatlas\xatlas.cpp" Condition="'$(RayTrophiHasXatlas)'=='true' and !Exists('$(ProjectDir)external\xatlas\xatlas.cpp')" />
-    <!-- Unified Rendering System -->
+    
     <ClCompile Include="source\src\Render\unified_converters.cpp" />
   </ItemGroup>
   <ItemGroup>

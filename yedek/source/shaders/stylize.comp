@@ -1,0 +1,970 @@
+#version 460
+//
+// stylize.comp — Vulkan-native GPU stylize (no CUDA). GLSL port of StylizeCore.h,
+// kept bire-bir with the CPU/CUDA path: same algorithm, same constants, same
+// integer-hash noise (32-bit uint -> bit-identical). lerp3/lerpf/normalize3/
+// smoothstep are hand-rolled to match Vec3 exactly; transcendentals are visually
+// identical (same standard as the CUDA path).
+//
+// Runs in SURFACE space, mirroring applyStylizeToSurfaceWithCamera:
+//   * color is the already-graded SDL surface uploaded as a packed uint32 SSBO;
+//     decoded/encoded with the surface format masks/shifts from the UBO.
+//   * pixel (x,y): AOV sampled at buffer coords (x, height-1-y); edge neighbours
+//     at (x+1, height-1-y) and (x, height-1-y+1); noise coords = surface (x,y).
+//   * AOV decode mirrors raygen: albedo = albedoImg.rgb, normal = normalImg.rgb*2-1,
+//     position.rgb = world pos, position.a = matEncoded; depth=|world-ray_origin|.
+//
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Packed graded color (surface uint32, SURFACE space, row stride = width).
+layout(set = 0, binding = 0, std430) buffer ColorBuf { uint color[]; };
+
+// AOV images written by raygen (rgba32f). Read-only here.
+layout(set = 0, binding = 1, rgba32f) uniform readonly image2D positionImg;
+layout(set = 0, binding = 2, rgba32f) uniform readonly image2D albedoImg;
+layout(set = 0, binding = 3, rgba32f) uniform readonly image2D normalImg;
+
+// All vec4/ivec4/uvec4 so std430 layout matches the C++ side with no padding
+// (with only 16-byte members, std430 == std140 here). SSBO not UBO so both
+// non-image bindings are plain storage buffers.
+layout(set = 0, binding = 4, std430) readonly buffer StylizeParams {
+    vec4 cam_lower_left;     // .xyz
+    vec4 cam_horizontal;     // .xyz
+    vec4 cam_vertical;       // .xyz
+    vec4 cam_origin;         // .xyz
+    vec4 ray_origin;         // .xyz
+    vec4 sun_direction;      // .xyz (raw)
+
+    vec4 misc0;  // x=sun_size y=sun_elevation z=cloud_coverage w=cloud_density
+    vec4 misc1;  // x=cloud_scale y=cloud_offset_x z=cloud_offset_z w=global_strength
+    vec4 misc2;  // x=temporal_coherence
+    ivec4 idims; // x=width y=height z=frame_index
+    ivec4 iflags;// x=clouds_enabled y=cloud_seed
+
+    uvec4 color_mask;  // x=R y=G z=B w=A
+    ivec4 color_shift; // x=R y=G z=B
+
+    vec4 palette_shadow;     // .xyz
+    vec4 palette_mid;        // .xyz
+    vec4 palette_highlight;  // .xyz
+
+    vec4 sky_horizon;        // .xyz
+    vec4 sky_zenith;         // .xyz
+    vec4 sky_sunglow;        // .xyz
+    vec4 sky0;     // gradient_strength, cloud_brush_scale, cloud_brush_strength, wind_smear
+    vec4 sky1;     // horizon_haze, sun_disc_scale, cloud_roundness
+    ivec4 sky_flags; // x=enabled y=style
+
+    vec4 mtl0;     // brush_strength, brush_scale, pigment_thickness, dry_brush
+    vec4 mtl1;     // oil_body, paint_load, pickup_rate, deposit_rate
+    vec4 mtl2;     // bristle_buildup, surface_adherence, depth_scale_response, edge_respect
+    vec4 mtl3;     // palette_influence, material_color_preservation, color_simplification
+    ivec4 mat_flags; // x=enabled y=stroke_direction z=wet_oil_model
+
+    vec4 out_custom; // .xyz custom_color
+    vec4 out0;     // strength, width, taper, break_up
+    vec4 out1;     // color_bleed, distance_thinning, detail_protection
+    ivec4 out_flags; // x=enabled y=line_type z=color_mode
+};
+
+// Enum mirrors (match StylizeCore / StylizeModeState ordering).
+const int SD_SurfaceNormal = 0, SD_Vertical = 1, SD_Horizontal = 2, SD_Diagonal = 3, SD_CrossHatch = 4;
+const int LT_Ink = 0, LT_OilPaint = 1, LT_Pencil = 2, LT_DryBrush = 3, LT_Pressure = 4;
+const int CM_PaletteShadow = 0, CM_CustomColor = 1, CM_MaterialTint = 2, CM_WarmPaint = 3, CM_CoolPencil = 4;
+const int SK_PainterlyClouds = 0, SK_CartoonCel = 1, SK_SunsetBands = 2, SK_InkWash = 3, SK_ClearGradient = 4;
+
+struct AOV {
+    vec3  albedo;
+    vec3  normal;
+    vec3  world_position;
+    vec3  view_dir;
+    vec3  sun_dir;
+    float screen_u;
+    float screen_v;
+    float sun_size_degrees;
+    float sun_elevation_degrees;
+    int   nishita_clouds_enabled;
+    float nishita_cloud_coverage;
+    float nishita_cloud_density;
+    float nishita_cloud_scale;
+    float nishita_cloud_offset_x;
+    float nishita_cloud_offset_z;
+    int   nishita_cloud_seed;
+    float depth;
+    float edge;
+    float pixel_scale;   // world units per pixel at the hit point (0 = unknown)
+    uint  material_id;
+    int   valid;
+    int   hit;
+};
+
+// ---- math helpers (bire-bir with StylizeCore) ----
+float saturatef(float v) { return clamp(v, 0.0, 1.0); }
+vec3  clamp01(vec3 v) { return vec3(saturatef(v.x), saturatef(v.y), saturatef(v.z)); }
+float luminance(vec3 c) { return c.x * 0.2126 + c.y * 0.7152 + c.z * 0.0722; }
+vec3  lerp3(vec3 a, vec3 b, float t) { return vec3(a.x + t*(b.x-a.x), a.y + t*(b.y-a.y), a.z + t*(b.z-a.z)); }
+float lerpf(float a, float b, float t) { return a * (1.0 - t) + b * t; }
+float lensq3(vec3 v) { return v.x*v.x + v.y*v.y + v.z*v.z; }
+vec3  normalize3(vec3 v) {            // reproduces Vec3::normalize (1e-6 gate)
+    float len_sq = lensq3(v);
+    if (len_sq > 1e-6) { float inv = 1.0 / sqrt(len_sq); return v * inv; }
+    return vec3(0.0);
+}
+float smoothstepf(float e0, float e1, float x) {
+    float t = saturatef((x - e0) / max(1e-5, e1 - e0));
+    return t * t * (3.0 - 2.0 * t);
+}
+float fract01(float v) { return v - floor(v); }
+
+float hashNoise(int x, int y, int seed) {
+    uint n = uint(x) * 1973u ^ uint(y) * 9277u ^ uint(seed) * 26699u ^ 0x68bc21ebu;
+    n = (n ^ (n >> 15u)) * 2246822519u;
+    n = (n ^ (n >> 13u)) * 3266489917u;
+    n = n ^ (n >> 16u);
+    return float(n & 0x00ffffffu) / float(0x00ffffffu);
+}
+float valueNoise(float x, float y, int seed) {
+    int x0 = int(floor(x));
+    int y0 = int(floor(y));
+    float tx = x - float(x0);
+    float ty = y - float(y0);
+    float sx = tx * tx * (3.0 - 2.0 * tx);
+    float sy = ty * ty * (3.0 - 2.0 * ty);
+    float n00 = hashNoise(x0, y0, seed);
+    float n10 = hashNoise(x0 + 1, y0, seed);
+    float n01 = hashNoise(x0, y0 + 1, seed);
+    float n11 = hashNoise(x0 + 1, y0 + 1, seed);
+    float nx0 = n00 + (n10 - n00) * sx;
+    float nx1 = n01 + (n11 - n01) * sx;
+    return nx0 + (nx1 - nx0) * sy;
+}
+float fbmNoise(float x, float y, int seed) {
+    float amp = 0.55, freq = 1.0, sum = 0.0, norm = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        sum += valueNoise(x * freq, y * freq, seed + i * 17) * amp;
+        norm += amp; amp *= 0.5; freq *= 2.0;
+    }
+    return norm > 0.0 ? sum / norm : 0.0;
+}
+
+// ---- stylize building blocks ----
+vec3 paletteRamp(float luma) {
+    luma = saturatef(luma);
+    if (luma < 0.5) return lerp3(palette_shadow.xyz, palette_mid.xyz, luma * 2.0);
+    return lerp3(palette_mid.xyz, palette_highlight.xyz, (luma - 0.5) * 2.0);
+}
+vec3 preserveMaterialHue(vec3 style_color, vec3 material_color, float amount) {
+    amount = saturatef(amount);
+    float mat_luma = max(0.035, luminance(material_color));
+    float style_luma = max(0.035, luminance(style_color));
+    vec3 hue = vec3(
+        clamp(material_color.x / mat_luma, 0.20, 2.80),
+        clamp(material_color.y / mat_luma, 0.20, 2.80),
+        clamp(material_color.z / mat_luma, 0.20, 2.80));
+    vec3 hue_preserved = clamp01(hue * style_luma);
+    return lerp3(style_color, hue_preserved, amount);
+}
+vec3 dominantPigmentTint(vec3 color, float amount) {
+    amount = saturatef(amount);
+    float mx = max(color.x, max(color.y, color.z));
+    float mn = min(color.x, min(color.y, color.z));
+    float chroma = saturatef((mx - mn) / max(0.08, mx));
+    if (amount <= 0.001 || chroma <= 0.001) return color;
+
+    vec3 target = color;
+    float lift = 0.025 * amount;
+    float dom_boost = 1.0 + 0.16 * amount;
+    float sub_pull = 1.0 - 0.18 * amount;
+    if (color.x >= color.y && color.x >= color.z) {
+        target.x = min(1.0, color.x * dom_boost + lift);
+        target.y = color.y * sub_pull;
+        target.z = color.z * sub_pull;
+    } else if (color.y >= color.x && color.y >= color.z) {
+        target.x = color.x * sub_pull;
+        target.y = min(1.0, color.y * dom_boost + lift);
+        target.z = color.z * sub_pull;
+    } else {
+        target.x = color.x * sub_pull;
+        target.y = color.y * sub_pull;
+        target.z = min(1.0, color.z * dom_boost + lift);
+    }
+
+    float src_luma = max(0.025, luminance(color));
+    float dst_luma = max(0.025, luminance(target));
+    target = clamp01(target * clamp(src_luma / dst_luma, 0.72, 1.28));
+    return lerp3(color, target, amount * (0.35 + chroma * 0.65));
+}
+vec3 simplifyColor(vec3 col, float amount) {
+    amount = saturatef(amount);
+    float levels = max(2.0, 16.0 - amount * 12.0);
+    vec3 stepped = vec3(
+        floor(saturatef(col.x) * levels + 0.5) / levels,
+        floor(saturatef(col.y) * levels + 0.5) / levels,
+        floor(saturatef(col.z) * levels + 0.5) / levels);
+    return lerp3(col, stepped, amount);
+}
+float surfacePixelScale(AOV a, float base_scale) {
+    if (a.hit == 0) return base_scale;
+    float depth = max(0.0, a.depth);
+    float depth_response = saturatef(mtl2.z);      // depth_scale_response
+    float surface_lock = saturatef(mtl2.y);        // surface_adherence
+    float depth_factor = clamp(1.0 + log(1.0 + depth) * 0.22 * depth_response, 0.75, 2.35);
+    return base_scale * (1.0 + (depth_factor - 1.0) * surface_lock);
+}
+void surfaceLockedPixel(inout float fx, inout float fy, AOV a, float pixel_scale) {
+    if (a.hit == 0) return;
+    float surface_lock = saturatef(mtl2.y);
+    if (surface_lock <= 0.001) return;
+    int mat_seed = int(a.material_id & 0xFFFFu);
+    float mat_offset_x = (hashNoise(mat_seed, 19, 0) - 0.5) * pixel_scale * 2.2;
+    float mat_offset_y = (hashNoise(mat_seed, 37, 1) - 0.5) * pixel_scale * 2.2;
+    float depth_offset = log(1.0 + max(0.0, a.depth)) * pixel_scale * 0.18;
+    fx += (mat_offset_x + a.normal.x * depth_offset) * surface_lock;
+    fy += (mat_offset_y - a.normal.y * depth_offset + a.normal.z * depth_offset * 0.35) * surface_lock;
+}
+void surfaceBasis(vec3 normal, out vec3 tangent, out vec3 bitangent) {
+    vec3 n = length(normal) > 1e-5 ? normalize3(normal) : vec3(0.0, 1.0, 0.0);
+    // Duff et al. 2017 branchless ONB (parity with StylizeCore.h surfaceBasis):
+    // continuous except n.z=-1, so the stroke frame no longer snaps on curves.
+    float s = n.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (s + n.z);
+    float b = n.x * n.y * a;
+    tangent   = vec3(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
+    bitangent = vec3(b, s + n.y * n.y * a, -n.y);
+}
+bool surfaceStrokeCoordinates(float screen_u, float screen_v, AOV a, float v_scale, out float u, out float v) {
+    u = screen_u; v = screen_v;
+    if (a.hit == 0) return false;
+    float surface_lock = saturatef(mtl2.y);
+    if (surface_lock <= 0.001) return false;
+    vec3 tangent, bitangent;
+    surfaceBasis(a.normal, tangent, bitangent);
+    float brush_scale = max(0.05, mtl0.y);
+    float world_scale = max(0.015, 0.10 + brush_scale * 0.28);
+    int mat_seed = int(a.material_id & 0xFFFFu);
+    float mat_u = (hashNoise(mat_seed, 71, 2) - 0.5) * 4.0;
+    float mat_v = (hashNoise(mat_seed, 97, 3) - 0.5) * 4.0;
+    float world_u = dot(a.world_position, tangent) / world_scale + mat_u;
+    float world_v = dot(a.world_position, bitangent) / (world_scale * v_scale) + mat_v;
+    u = world_u;
+    v = world_v;
+    return true;
+}
+float strokeField(int x, int y, AOV a, int frame_index) {
+    float brush_scale = max(0.05, mtl0.y);
+    float pixel_scale = surfacePixelScale(a, 14.0 + brush_scale * 28.0);
+    float coherent_frame = float(frame_index) * (1.0 - misc2.x);
+    float nx = a.hit != 0 ? a.normal.x : 0.0;
+    float ny = a.hit != 0 ? a.normal.y : 1.0;
+    float nz = a.hit != 0 ? a.normal.z : 0.0;
+    float angle = atan(nz + ny * 0.35, nx + 0.001);
+    int sdir = mat_flags.y;
+    if (sdir == SD_Vertical) angle = 1.5707963;
+    else if (sdir == SD_Horizontal) angle = 0.0;
+    else if (sdir == SD_Diagonal) angle = 0.7853982;
+    else if (sdir == SD_CrossHatch) angle = ((x / 48 + y / 48) % 2 != 0) ? 0.7853982 : -0.7853982;
+    float ca = cos(angle), sa = sin(angle);
+    float fx = float(x), fy = float(y);
+    surfaceLockedPixel(fx, fy, a, pixel_scale);
+    float screen_u = (fx * ca + fy * sa) / pixel_scale;
+    float screen_v = (-fx * sa + fy * ca) / (pixel_scale * 0.32);
+    if (a.hit != 0) { screen_u += a.depth * 0.018 + nx * 1.7; screen_v += ny * 1.1 + nz * 0.7; }
+    float u, v;
+    surfaceStrokeCoordinates(screen_u, screen_v, a, 0.32, u, v);
+    int seed = int(coherent_frame) + int(a.material_id & 0xFFu) * 23;
+    float long_stroke = fbmNoise(u, v, seed);
+    float fiber = fbmNoise(u * 2.8 + 19.0, v * 0.55 - 7.0, seed + 91);
+    return (long_stroke - 0.5) * 0.75 + (fiber - 0.5) * 0.25;
+}
+
+// ---- brush daub field (bire-bir with StylizeCore::brushStrokeField) ----
+// Discrete overlapping oriented paint stamps; per-daub random priority gives
+// painter ordering so overlapping daubs keep crisp boundaries.
+struct BrushStrokeSample {
+    float coverage;   // 0..1 paint deposited by the winning daub
+    float tone;       // -1..1 per-daub tonal offset
+    float bristle;    // -1..1 bristle streaks along the daub axis
+    float rim;        // -1..1 signed impasto rim (+ lit top edge, - shadow edge)
+    float gap;        // 0..1 bare canvas between daubs
+};
+
+void evalBrushDaubLayer(float u, float v, int seed, float aspect, float breakup, float edge_rag, out BrushStrokeSample s) {
+    s.coverage = 0.0; s.tone = 0.0; s.bristle = 0.0; s.rim = 0.0; s.gap = 1.0;
+    float spacing = aspect * 0.74;
+    int row0 = int(floor(v));
+    float best_priority = -1.0;
+    float best_cov = 0.0;
+    float best_tone = 0.0;
+    float best_rim = 0.0;
+    float best_bris = 0.0;
+    float total_cov = 0.0;
+    for (int rj = -1; rj <= 1; ++rj) {
+        int row = row0 + rj;
+        float row_shift = hashNoise(row, seed, 11) * spacing;
+        int slot0 = int(floor((u + row_shift) / spacing));
+        for (int sj = -1; sj <= 1; ++sj) {
+            int slot = slot0 + sj;
+            int cell = seed + row * 131 + slot * 977;
+            if (hashNoise(slot, row, cell + 1) < breakup * 0.55) continue;   // dry brush: missing daub
+            float h_cu = hashNoise(slot, row, cell + 2);
+            float h_cv = hashNoise(slot, row, cell + 3);
+            float cu = (float(slot) + 0.5 + (h_cu - 0.5) * 0.55) * spacing - row_shift;
+            float cv = float(row) + 0.5 + (h_cv - 0.5) * 0.40;
+            float du = u - cu;
+            float dv = v - cv;
+            if (abs(du) > aspect * 0.80 || abs(dv) > 1.45) continue;   // cheap reject before trig/noise
+            float ja = (hashNoise(slot, row, cell + 4) - 0.5) * 0.50;
+            float cj = cos(ja);
+            float sn = sin(ja);
+            float ru = du * cj + dv * sn;
+            float rv = -du * sn + dv * cj;
+            float half_len = aspect * (0.40 + hashNoise(slot, row, cell + 5) * 0.24);
+            float half_wid = 0.46 + hashNoise(slot, row, cell + 6) * 0.26;
+            float t = ru / max(1e-4, half_len);              // -1..1 along the stroke
+            float at = abs(t);
+            if (at > 1.15) continue;
+            // wavy spine — real strokes curve a little
+            float wob = (valueNoise(ru * 1.6 + h_cu * 9.0, h_cv * 7.0, cell + 12) - 0.5) * half_wid * 0.55;
+            float rvw = rv - wob;
+            // rounded head, thinning tail
+            // directional brush: loaded rounded head (t<0), dragged thinning tail (t>0)
+            float w_local = half_wid * (0.40 + 0.60 * sqrt(max(0.0, 1.0 - t * t)));
+            w_local *= 1.0 - 0.42 * smoothstepf(-0.15, 1.0, t);
+            float dn = abs(rvw) / max(1e-4, w_local);
+            float lon = 1.0 - smoothstepf(0.82, 1.06, at);
+            float lat = 1.0 - smoothstepf(0.58, 1.0, dn);
+            float cov = lat * lon;
+            if (cov <= 0.02) continue;
+            // bristle pattern across the width — streaks AND torn ragged ends;
+            // edge_rag tears the stroke wherever the AOV edge runs through it
+            float bris = valueNoise(rvw * 4.6 / max(0.05, half_wid), t * 1.5, cell + 13);
+            // body stays solid; tips and the dragged tail split into frayed strands
+            float tip_fray = saturatef(smoothstepf(0.45, 1.0, at) + smoothstepf(0.25, 1.0, t) * 0.5 + edge_rag);
+            cov *= 1.0 - tip_fray * smoothstepf(0.32, 0.82, bris) * (0.62 + breakup * 0.38);
+            if (cov <= 0.02) continue;
+            total_cov = max(total_cov, cov);
+            float priority = hashNoise(slot, row, cell + 7) + cov * 0.35;
+            if (priority > best_priority) {
+                best_priority = priority;
+                best_cov = cov;
+                best_tone = (hashNoise(slot, row, cell + 8) - 0.5) * 2.0;
+                best_bris = (bris - 0.5) * 2.0;
+                float band = smoothstepf(0.55, 0.95, dn) * lat * lon;
+                best_rim = band * clamp(-rvw / max(1e-4, w_local) * 1.7, -1.0, 1.0);
+            }
+        }
+    }
+    if (best_priority < 0.0) return;
+    s.coverage = best_cov;
+    s.tone = best_tone;
+    s.rim = best_rim;
+    s.bristle = best_bris;
+    s.gap = saturatef(1.0 - total_cov);
+}
+
+BrushStrokeSample brushStrokeField(int x, int y, AOV a, int frame_index) {
+    float brush_scale = max(0.05, mtl0.y);
+    // daub width in pixels — SCREEN-space size, so strokes never blow up or
+    // shrink with surface orientation/distance (depth growth stays knob-gated
+    // through surfacePixelScale only).
+    float daub_px = surfacePixelScale(a, 6.0 + brush_scale * 10.0);
+    float coherent_frame = float(frame_index) * (1.0 - misc2.x);
+
+    float nx = a.hit != 0 ? a.normal.x : 0.0;
+    float ny = a.hit != 0 ? a.normal.y : 1.0;
+    float nz = a.hit != 0 ? a.normal.z : 0.0;
+    float angle = atan(nz + ny * 0.35, nx + 0.001);
+    int sdir = mat_flags.y;
+    if (sdir == SD_Vertical) angle = 1.5707963;
+    else if (sdir == SD_Horizontal) angle = 0.0;
+    else if (sdir == SD_Diagonal) angle = 0.7853982;
+    else if (sdir == SD_CrossHatch) angle = ((x / 48 + y / 48) % 2 != 0) ? 0.7853982 : -0.7853982;
+    float ca = cos(angle), sa = sin(angle);
+    float fx = float(x), fy = float(y);
+    // Stroke-space coordinates. With Surface Lock the daubs are parameterized
+    // on the SURFACE (world tangent plane, rotated by the stroke direction) so
+    // they stay glued to geometry under camera motion — no screen-door sliding.
+    // The scale is depth-normalized and split across two log2-quantized levels
+    // that crossfade, so the on-screen daub size stays ~constant (within ~2x)
+    // without the pattern swimming or popping.
+    float pu, pv, world_per_daub;
+    float surface_lock = a.hit != 0 ? saturatef(mtl2.y) : 0.0;
+    if (surface_lock > 0.001) {
+        vec3 tangent, bitangent;
+        surfaceBasis(a.normal, tangent, bitangent);
+        float tu = dot(a.world_position, tangent);
+        float tv = dot(a.world_position, bitangent);
+        pu = tu * ca + tv * sa;
+        pv = -tu * sa + tv * ca;
+        // exact world-per-pixel from the AOV when the builder filled it; the
+        // 0.0007*depth term is only a legacy fov-guess fallback
+        float wpp = a.pixel_scale > 1e-7
+            ? a.pixel_scale
+            : max(1e-5, a.depth) * 0.0007;
+        world_per_daub = wpp * daub_px;
+    } else {
+        pu = fx * ca + fy * sa;
+        pv = -fx * sa + fy * ca;
+        world_per_daub = daub_px;
+    }
+    int mat_seed = int(a.material_id & 0xFFFFu);
+    float mat_u = (hashNoise(mat_seed, 71, 2) - 0.5) * 4.0 + nx * 1.7;
+    float mat_v = (hashNoise(mat_seed, 97, 3) - 0.5) * 4.0 + ny * 1.1 + nz * 0.7;
+
+    float l = log2(max(1e-6, world_per_daub));
+    int lvl = int(floor(l));
+    float lf = l - float(lvl);
+    float s0 = exp2(float(lvl));
+    float s1 = s0 * 2.0;
+
+    int seed = int(coherent_frame) * 13 + int(a.material_id & 0xFFu) * 53 + 977;
+    float aspect = 2.6;                                     // daub length / width (chunkier = bolder hand-daub, less hair)
+    float breakup = saturatef(mtl0.w);                      // dry_brush
+    // AOV edges tear the stroke tips instead of clipping the paint — silhouettes
+    // end in ragged brush starts/stops, not a hard geometric line.
+    float edge_rag = a.hit != 0
+        ? saturatef(a.edge) * (0.35 + saturatef(mtl2.w) * 0.65)
+        : 0.0;
+    // Seeds depend on the LOD level, so when the camera dollies and the level
+    // increments, the incoming fine layer is EXACTLY the previous coarse layer
+    // (no reshuffle at the boundary).
+    BrushStrokeSample lodA;
+    evalBrushDaubLayer(pu / s0 + mat_u, pv / s0 + mat_v, seed + lvl * 101,
+                       aspect, breakup, edge_rag, lodA);
+    BrushStrokeSample lodB;
+    evalBrushDaubLayer(pu / s1 + mat_u, pv / s1 + mat_v, seed + (lvl + 1) * 101,
+                       aspect, breakup, edge_rag, lodB);
+
+    BrushStrokeSample s;
+    float wA = lodA.coverage * (1.0 - lf);
+    float wB = lodB.coverage * lf;
+    float wsum = wA + wB;
+    s.coverage = lerpf(lodA.coverage, lodB.coverage, lf);
+    s.gap = lerpf(lodA.gap, lodB.gap, lf);
+    if (wsum > 1e-4) {
+        s.tone = (lodA.tone * wA + lodB.tone * wB) / wsum;
+        s.bristle = (lodA.bristle * wA + lodB.bristle * wB) / wsum;
+        s.rim = (lodA.rim * wA + lodB.rim * wB) / wsum;
+    } else {
+        s.tone = 0.0;
+        s.bristle = 0.0;
+        s.rim = 0.0;
+    }
+    return s;
+}
+
+struct WetOil { float bristle; float ridge; float drag; float body; };
+WetOil wetOilStrokeModel(int x, int y, AOV a, int frame_index, float stroke) {
+    float brush_scale = max(0.05, mtl0.y);
+    float oil_body = saturatef(mtl1.x);
+    float buildup = saturatef(mtl2.x);             // bristle_buildup
+    float pixel_scale = surfacePixelScale(a, 7.0 + brush_scale * 18.0);
+    float coherent_frame = float(frame_index) * (1.0 - misc2.x);
+    int seed = int(coherent_frame) + 311 + int(a.material_id & 0xFFu) * 29;
+    float nx = a.hit != 0 ? a.normal.x : 0.0;
+    float ny = a.hit != 0 ? a.normal.y : 1.0;
+    float angle = atan(ny, nx + 0.001);
+    int sdir = mat_flags.y;
+    if (sdir == SD_Vertical) angle = 1.5707963;
+    else if (sdir == SD_Horizontal) angle = 0.0;
+    else if (sdir == SD_Diagonal) angle = 0.7853982;
+    float ca = cos(angle), sa = sin(angle);
+    float fx = float(x), fy = float(y);
+    surfaceLockedPixel(fx, fy, a, pixel_scale);
+    float screen_u = (fx * ca + fy * sa) / pixel_scale;
+    float screen_v = (-fx * sa + fy * ca) / (pixel_scale * 0.22);
+    float u, v;
+    surfaceStrokeCoordinates(screen_u, screen_v, a, 0.22, u, v);
+    float bristle_noise = fbmNoise(u * 3.6 + oil_body * 2.0, v * 0.42 - 11.0, seed);
+    float body_noise = fbmNoise(u * 0.85 - 5.0, v * 0.55 + 13.0, seed + 73);
+    float bristle = (bristle_noise - 0.5) * (0.45 + buildup * 0.55);
+    WetOil o;
+    o.bristle = bristle;
+    o.ridge = smoothstepf(0.42, 0.96, abs(stroke) + body_noise * 0.28 + buildup * 0.24);
+    o.drag = smoothstepf(0.18, 0.88, body_noise * (0.55 + oil_body * 0.45) + abs(bristle));
+    o.body = body_noise;
+    return o;
+}
+
+vec3 applySkyLayer(vec3 input_color, AOV a, int x, int y, int frame_index) {
+    if (sky_flags.x == 0) return input_color;
+    vec3 dir = lensq3(a.view_dir) > 1e-8 ? normalize3(a.view_dir) : vec3(0.0, 0.0, -1.0);
+    vec3 sun_dir = lensq3(a.sun_dir) > 1e-8 ? normalize3(a.sun_dir) : normalize3(vec3(0.32, 0.82, 0.46));
+    float azimuth = atan(dir.z, dir.x);
+    float sphere_u = azimuth / (2.0 * 3.14159265) + 0.5;
+    float sphere_v = saturatef(dir.y * 0.5 + 0.5);
+    float horizon = 1.0 - smoothstepf(-0.08, 0.34, dir.y);
+    float sky_t = smoothstepf(-0.16, 0.88, dir.y);
+    float coherent_frame = float(frame_index) * (1.0 - misc2.x);
+    int style = sky_flags.y;
+    bool cartoon_sky = style == SK_CartoonCel;
+    bool ink_sky = style == SK_InkWash;
+    bool sunset_sky = style == SK_SunsetBands;
+    bool clear_sky = style == SK_ClearGradient;
+
+    vec3 gradient = lerp3(sky_horizon.xyz, sky_zenith.xyz, sky_t);
+    if (cartoon_sky) {
+        float band_noise = (fbmNoise(sphere_u * 3.0, sky_t * 1.7, 911) - 0.5) * 0.045;
+        float band = floor(saturatef(sky_t + band_noise) * 5.0 + 0.5) / 5.0;
+        gradient = lerp3(sky_horizon.xyz, sky_zenith.xyz, band);
+    } else if (sunset_sky) {
+        float wave = (fbmNoise(sphere_u * 2.4, sky_t * 1.2, 937) - 0.5) * 0.075;
+        float lower_band = smoothstepf(0.03, 0.30, sky_t + wave) * (1.0 - smoothstepf(0.36, 0.58, sky_t + wave));
+        float upper_band = smoothstepf(0.30, 0.58, sky_t - wave * 0.45) * (1.0 - smoothstepf(0.68, 0.88, sky_t));
+        vec3 peach = lerp3(sky_horizon.xyz, sky_sunglow.xyz, 0.72);
+        vec3 violet = lerp3(sky_zenith.xyz, palette_shadow.xyz, 0.20);
+        gradient = lerp3(gradient, peach, lower_band * 0.48);
+        gradient = lerp3(gradient, violet, upper_band * 0.22);
+    } else if (!ink_sky) {
+        float input_luma = max(0.025, luminance(input_color));
+        float gradient_luma = max(0.025, luminance(gradient));
+        gradient = clamp01(gradient * clamp(input_luma / gradient_luma, 0.65, 1.45));
+    }
+
+    float gradient_strength = sky0.x;
+    float gradient_mix = (cartoon_sky || sunset_sky || ink_sky)
+        ? saturatef(0.72 + gradient_strength * 0.28) : saturatef(gradient_strength);
+    vec3 color = lerp3(input_color, gradient, gradient_mix);
+
+    float horizon_haze = sky1.x;
+    float haze_amount = saturatef(horizon_haze) * horizon;
+    vec3 haze_color = clamp01(lerp3(sky_horizon.xyz, sky_sunglow.xyz, 0.18));
+    color = lerp3(color, haze_color, haze_amount * (sunset_sky ? 0.78 : 0.55));
+
+    float cloud_brush_scale = sky0.y;
+    float cloud_brush_strength = sky0.z;
+    float wind_smear = sky0.w;
+    float cloud_roundness = sky1.z;
+    float brush_scale = max(0.10, cloud_brush_scale);
+    float nishita_scale = a.nishita_clouds_enabled != 0 ? a.nishita_cloud_scale : 1.0;
+    float cloud_scale = max(0.08, brush_scale * nishita_scale);
+    float cloud_coverage = a.nishita_clouds_enabled != 0 ? a.nishita_cloud_coverage : 0.42;
+    float cloud_density = a.nishita_clouds_enabled != 0 ? a.nishita_cloud_density : 0.72;
+    float wind = coherent_frame * 0.018 * saturatef(wind_smear);
+    float world_u = fract01(sphere_u + a.nishita_cloud_offset_x * 0.0025 + wind);
+    float world_v = saturatef(sphere_v + a.nishita_cloud_offset_z * 0.0025 + wind * 0.10);
+    int cloud_seed = 1207 + a.nishita_cloud_seed * 37;
+    float cloud_band = smoothstepf(0.18, 0.74, world_v) * (1.0 - smoothstepf(0.88, 1.0, world_v));
+    float cloud_shape = 0.0, cloud_detail = 0.0, cloud_shadow = 0.0, cloud_highlight = 0.0, cloud_rim = 0.0;
+    if (!clear_sky) {
+        float banks = sunset_sky ? 3.0 : (cartoon_sky ? 3.5 : 4.0);
+        float bank_pos = world_v * banks;
+        int base_bank = int(floor(bank_pos));
+        float roundness = clamp(cloud_roundness, 0.05, 1.0);
+        float groups_per_bank = clamp(1.8 + cloud_scale * 0.42 + cloud_coverage * 2.4, 2.0, 6.5);
+        for (int bank_offset = -1; bank_offset <= 1; ++bank_offset) {
+            int bank = base_bank + bank_offset;
+            float bank_center = (float(bank) + 0.5) / banks;
+            float bank_wave = (fbmNoise(world_u * 2.2 + float(bank) * 1.7, 0.37, cloud_seed + 41) - 0.5) * 0.055;
+            float bank_v = bank_center + bank_wave + horizon * 0.06;
+            float bank_keep = 1.0 - smoothstepf(0.105, 0.205, abs(world_v - bank_v));
+            if (bank_keep <= 0.001) continue;
+            float group_pos = world_u * groups_per_bank + hashNoise(bank, cloud_seed, 9) * 0.65;
+            int base_group = int(floor(group_pos));
+            for (int group_offset = -1; group_offset <= 1; ++group_offset) {
+                int group = base_group + group_offset;
+                float h0 = hashNoise(group, bank + cloud_seed, 0);
+                float h1 = hashNoise(group, bank + cloud_seed, 1);
+                float group_center_u = fract01((float(group) + 0.20 + h0 * 0.60) / groups_per_bank);
+                float group_center_v = bank_v + (h1 - 0.5) * 0.045;
+                float group_width = 0.070 + cloud_coverage * 0.095 + (cartoon_sky ? 0.030 : 0.0);
+                for (int lobe = 0; lobe < 6; ++lobe) {
+                    float lh0 = hashNoise(group, cloud_seed + bank * 17 + lobe * 31, 5);
+                    float lh1 = hashNoise(group, cloud_seed + bank * 17 + lobe * 31, 6);
+                    float lh2 = hashNoise(group, cloud_seed + bank * 17 + lobe * 31, 7);
+                    float lobe_offset = (float(lobe) - 2.5) * group_width * (0.34 + lh0 * 0.20);
+                    float lobe_u = fract01(group_center_u + lobe_offset);
+                    float arch = 1.0 - abs(float(lobe) - 2.5) / 2.5;
+                    float lobe_v = group_center_v + arch * (0.035 + roundness * 0.035) + (lh1 - 0.5) * 0.026;
+                    float du = abs(world_u - lobe_u);
+                    du = min(du, 1.0 - du);
+                    float dv = (world_v - lobe_v) * (2.55 - roundness * 0.80);
+                    float rx = group_width * (0.58 + lh2 * 0.38);
+                    float ry = rx * (0.40 + roundness * 0.24);
+                    float d = sqrt((du * du) / max(1e-5, rx * rx) + (dv * dv) / max(1e-5, ry * ry));
+                    float puff = (1.0 - smoothstepf(0.78, 1.0, d)) * bank_keep;
+                    float interior = (1.0 - smoothstepf(0.38, 0.90, d)) * bank_keep;
+                    float lower = smoothstepf(-ry * 0.20, ry * 1.20, -dv);
+                    float upper = smoothstepf(-ry * 1.15, ry * 0.05, dv);
+                    float rim = smoothstepf(0.72, 0.98, d) * puff;
+                    cloud_shape = max(cloud_shape, puff);
+                    cloud_detail += interior * (0.25 + lh2 * 0.18);
+                    cloud_shadow = max(cloud_shadow, puff * lower * (0.35 + lh0 * 0.22));
+                    cloud_highlight = max(cloud_highlight, interior * upper * (0.42 + lh1 * 0.32));
+                    cloud_rim = max(cloud_rim, rim);
+                }
+            }
+        }
+        float coverage_gate = lerpf(0.72, 0.12, saturatef(cloud_coverage));
+        float keep = smoothstepf(coverage_gate, 1.0, cloud_shape + cloud_detail * 0.18);
+        cloud_shape *= keep; cloud_shadow *= keep; cloud_highlight *= keep; cloud_rim *= keep;
+    }
+
+    float cloud_alpha = saturatef(cloud_brush_strength) * saturatef(cloud_density) * cloud_band * saturatef(cloud_shape);
+    vec3 cloud_tint = cartoon_sky
+        ? vec3(1.0, 0.96, 0.78)
+        : clamp01(lerp3(vec3(0.96, 0.92, 0.82), palette_highlight.xyz, ink_sky ? 0.08 : 0.28));
+    if (ink_sky) cloud_tint = lerp3(vec3(0.88, 0.88, 0.80), palette_shadow.xyz, 0.16);
+    vec3 shadow_tint = cartoon_sky
+        ? vec3(0.58, 0.72, 0.92)
+        : clamp01(lerp3(palette_shadow.xyz, sky_zenith.xyz, ink_sky ? 0.42 : 0.28));
+    vec3 highlight_tint = cartoon_sky
+        ? vec3(1.0, 0.98, 0.86)
+        : clamp01(lerp3(vec3(1.0, 0.96, 0.84), sky_sunglow.xyz, sunset_sky ? 0.45 : 0.18));
+    color = lerp3(color, shadow_tint, cloud_alpha * cloud_shadow * (cartoon_sky ? 0.48 : 0.34));
+    color = lerp3(color, cloud_tint, cloud_alpha * (cartoon_sky ? 0.92 : 0.66));
+    color = lerp3(color, highlight_tint, cloud_alpha * cloud_highlight * (cartoon_sky ? 0.64 : 0.46));
+    if (cartoon_sky) color = lerp3(color, vec3(0.24, 0.42, 0.76), cloud_alpha * cloud_rim * 0.16);
+    if (!cartoon_sky) {
+        float fiber = fbmNoise(world_u * 18.0, world_v * 5.0, cloud_seed + 82) - 0.5;
+        color = color * (1.0 + fiber * cloud_alpha * (ink_sky ? 0.08 : 0.12));
+    }
+
+    float sun_disc_scale = sky1.y;
+    float sun_dot = saturatef(dot(dir, sun_dir));
+    float sun_size = max(0.01, a.sun_size_degrees);
+    float low_sun_factor = a.sun_elevation_degrees < 15.0
+        ? 1.0 + (15.0 - max(a.sun_elevation_degrees, -10.0)) * 0.04 : 1.0;
+    float style_sun_scale = max(0.5, sun_disc_scale) * (cartoon_sky ? 1.35 : 1.0);
+    float sun_radius = sun_size * low_sun_factor * style_sun_scale * (3.14159265 / 180.0) * 0.5;
+    float sun_threshold = cos(sun_radius);
+    float sun_disk = cartoon_sky ? (sun_dot > sun_threshold ? 1.0 : 0.0) : smoothstepf(sun_threshold, 1.0, sun_dot);
+    float sun_glow = pow(sun_dot, sunset_sky ? 8.0 : 14.0) * (0.24 + saturatef(gradient_strength) * 0.64);
+    color = lerp3(color, clamp01(color + sky_sunglow.xyz * (sunset_sky ? 0.72 : 0.45)), saturatef(sun_glow) * (cartoon_sky ? 0.16 : 0.38));
+    vec3 sun_color = cartoon_sky
+        ? clamp01(sky_sunglow.xyz * 1.55 + vec3(0.08, 0.04, 0.0))
+        : clamp01(sky_sunglow.xyz * 1.35);
+    color = lerp3(color, sun_color, sun_disk * (cartoon_sky ? 1.0 : 0.86));
+
+    if (!cartoon_sky && !clear_sky) {
+        float stroke = fbmNoise(sphere_u * 10.0 + wind * 4.0, sphere_v * 3.0, 1423) - 0.5;
+        color = color * (1.0 + stroke * saturatef(cloud_brush_strength) * (ink_sky ? 0.06 : 0.08));
+    }
+    return clamp01(color);
+}
+
+vec3 outlineColor(AOV a, vec3 base_albedo) {
+    float color_bleed = out1.x;
+    int cmode = out_flags.z;
+    if (cmode == CM_CustomColor) return clamp01(out_custom.xyz);
+    if (cmode == CM_MaterialTint) {
+        vec3 material_ink = base_albedo * (0.34 + color_bleed * 0.22);
+        return clamp01(lerp3(palette_shadow.xyz * 0.55, material_ink, color_bleed));
+    }
+    if (cmode == CM_WarmPaint)
+        return clamp01(lerp3(palette_shadow.xyz * 0.55, vec3(0.34, 0.18, 0.08), 0.35 + color_bleed * 0.35));
+    if (cmode == CM_CoolPencil)
+        return clamp01(lerp3(palette_shadow.xyz * 0.45, vec3(0.12, 0.14, 0.17), 0.55));
+    return clamp01(palette_shadow.xyz * 0.55);
+}
+float outlineTexture(int x, int y, AOV a, int frame_index) {
+    float o_width = out0.y, o_taper = out0.z, o_break_up = out0.w;
+    float o_color_bleed = out1.x, o_distance_thinning = out1.y, o_detail_protection = out1.z;
+    int line_type = out_flags.y;
+    float edge = saturatef(a.edge);
+    float distance = a.hit != 0 ? log(1.0 + max(0.0, a.depth)) : 0.0;
+    float distance_factor = a.hit != 0 ? 1.0 / (1.0 + distance * (0.20 + o_distance_thinning * 0.85)) : 1.0;
+    float adaptive_width = lerpf(o_width, o_width * distance_factor, o_distance_thinning);
+    float width = max(0.1, adaptive_width);
+    int mat_seed = int(a.material_id & 0xFFu) * 41 + int(float(frame_index) * (1.0 - misc2.x));
+    float fx = float(x), fy = float(y);
+    if (a.hit != 0) {
+        float push = distance * 3.0;
+        fx += a.normal.x * push;
+        fy += (a.normal.y + a.normal.z * 0.35) * push;
+    }
+    // Surface-locked bristle warp (parity with StylizeCore.h outlineTexture):
+    // anchor the silhouette texture to world geometry so it doesn't crawl in
+    // screen space when the camera moves. mtl2.y == surface_adherence.
+    float gx = fx / (12.0 + width * 8.0);
+    float gy = fy / (7.0 + width * 5.0);
+    float hx = fx / (4.0 + width * 3.0) + 17.0;
+    float hy = fy / (18.0 + width * 9.0) - 5.0;
+    float outline_lock = a.hit != 0 ? saturatef(mtl2.y) : 0.0;
+    if (outline_lock > 0.001) {
+        vec3 tangent, bitangent;
+        surfaceBasis(a.normal, tangent, bitangent);
+        float world_scale = max(0.01, 0.06 + width * 0.05);
+        float su = dot(a.world_position, tangent) / world_scale;
+        float sv = dot(a.world_position, bitangent) / world_scale;
+        gx = lerpf(gx, su * 0.85, outline_lock);
+        gy = lerpf(gy, sv * 1.45, outline_lock);
+        hx = lerpf(hx, sv * 0.65 + 17.0, outline_lock);
+        hy = lerpf(hy, su * 1.90 - 5.0, outline_lock);
+    }
+    float grain = fbmNoise(gx, gy, mat_seed + 503);
+    float fiber = fbmNoise(hx, hy, mat_seed + 719);
+    float taper = smoothstepf(0.02, 0.90, edge) * (1.0 - o_taper * smoothstepf(0.55, 1.0, edge));
+    float coverage = saturatef(edge * (0.75 + width * 0.45));
+    float fine_detail = saturatef((1.0 - distance_factor) * (1.0 - smoothstepf(0.45, 1.0, edge)));
+    coverage *= 1.0 - fine_detail * o_detail_protection * 0.82;
+    if (line_type == LT_OilPaint) {
+        coverage *= 0.80 + grain * 0.42;
+        coverage += smoothstepf(0.62, 0.95, fiber) * o_color_bleed * 0.18;
+    } else if (line_type == LT_Pencil) {
+        coverage *= 0.52 + fiber * 0.58;
+        coverage *= 0.85 + grain * 0.18;
+    } else if (line_type == LT_DryBrush) {
+        float dry_cut = smoothstepf(0.18, 0.86, grain + fiber * 0.35);
+        coverage *= 0.42 + dry_cut * 0.78;
+    } else if (line_type == LT_Pressure) {
+        coverage *= 0.68 + smoothstepf(0.18, 0.95, edge + grain * 0.18) * 0.55;
+        coverage *= 1.0 - o_taper * 0.35 * (1.0 - edge);
+    } else { // LT_Ink
+        coverage *= 0.92 + grain * 0.16;
+    }
+    float breakup = saturatef(o_break_up);
+    if (breakup > 0.001) {
+        float keep = smoothstepf(breakup * 0.45, 0.96, grain + edge * 0.28);
+        coverage *= lerpf(1.0, keep, breakup);
+    }
+    return saturatef(coverage * (0.55 + taper * 0.45));
+}
+
+// Cel band the LIGHTING (parity with StylizeCore.h celShadeLighting): split lit
+// colour from albedo, quantise the shading term, re-light albedo with it.
+vec3 celShadeLighting(vec3 color, vec3 albedo, float amount) {
+    amount = saturatef(amount);
+    if (amount <= 0.001) return color;
+    float lit = luminance(color);
+    float alb = max(0.06, luminance(albedo));
+    float shade = saturatef(lit / alb * 0.9);
+    float bands = max(2.0, round(lerpf(5.0, 2.0, amount)));
+    float soft = lerpf(0.16, 0.03, amount);
+    float scaled = shade * bands;
+    float idx = floor(scaled);
+    float frac = scaled - idx;
+    float stepped = saturatef((idx + smoothstepf(0.5 - soft, 0.5 + soft, frac)) / bands);
+    vec3 lit_albedo = clamp01(albedo * (0.22 + stepped * 1.20));
+    vec3 palette_band = paletteRamp(stepped);
+    palette_band = preserveMaterialHue(palette_band, albedo, 0.65);
+    float palette_influence = saturatef(mtl3.x);
+    vec3 toon = lerp3(lit_albedo, palette_band, palette_influence);
+    return lerp3(color, clamp01(toon), amount);
+}
+
+vec3 applyPostProcess(vec3 input_color, AOV a, int x, int y, int frame_index) {
+    float strength = saturatef(misc1.w);            // global_strength
+    if (strength <= 0.0001) return input_color;
+    vec3 color = clamp01(input_color);
+    vec3 base_albedo = a.hit != 0 ? clamp01(a.albedo) : color;
+    float albedo_luma = luminance(base_albedo);
+    bool material_domain = a.hit != 0;
+
+    if (a.valid != 0 && a.hit == 0) color = applySkyLayer(color, a, x, y, frame_index);
+
+    float palette_influence = saturatef(mtl3.x);
+    float edge_respect = mtl2.w;
+    float edge_guard = a.hit != 0 ? (1.0 - saturatef(a.edge * (0.35 + edge_respect * 0.65))) : 1.0;
+
+    if (material_domain) {
+        float color_simplification = mtl3.z;
+        float material_color_preservation = mtl3.y;
+        vec3 palette_color = paletteRamp(albedo_luma);
+        palette_color = preserveMaterialHue(palette_color, base_albedo, material_color_preservation);
+        float palette_mix = palette_influence * strength * (0.16 + color_simplification * 0.46);
+        color = lerp3(color, palette_color, palette_mix);
+
+        float material_guard = 0.35 + 0.65 * (1.0 - saturatef(material_color_preservation));
+        color = simplifyColor(color, strength * color_simplification * 0.48 * edge_guard * material_guard);
+
+        // Real toon: band the lighting itself (only for simplification-leaning profiles).
+        float cel_amount = smoothstepf(0.35, 1.0, color_simplification) * strength;
+        color = celShadeLighting(color, base_albedo, cel_amount);
+
+        float brush_strength = mtl0.x, dry_brush = mtl0.w;
+        bool brush_on = mat_flags.x != 0 && brush_strength > 0.001;
+        bool outline_on = out_flags.x != 0 && a.edge > 0.001;
+        BrushStrokeSample daub;
+        daub.coverage = 0.0; daub.tone = 0.0; daub.bristle = 0.0; daub.rim = 0.0; daub.gap = 1.0;
+        if (brush_on || outline_on) daub = brushStrokeField(x, y, a, frame_index);
+
+        if (brush_on) {
+            float stroke = strokeField(x, y, a, frame_index);
+            float lit_luma = luminance(color);
+            float shadow_boost = 1.0 + (1.0 - smoothstepf(0.08, 0.48, lit_luma)) * 0.22;
+            float highlight_thin = 1.0 - smoothstepf(0.62, 0.96, lit_luma) * 0.42;
+            // No edge_guard on the daub layer: edges tear the strokes inside the
+            // field (edge_rag) instead of fading the paint into a clean cutout.
+            float brush_amount = brush_strength * strength * shadow_boost * highlight_thin;
+            float guarded_amount = brush_amount * edge_guard;
+            float daub_opacity = saturatef(brush_amount * 2.2);
+            vec3 paint_color = dominantPigmentTint(color, 0.42 + palette_influence * 0.18);
+            vec3 palette_tint = lerp3(palette_shadow.xyz, palette_highlight.xyz, saturatef(albedo_luma + stroke * 0.28));
+            palette_tint = preserveMaterialHue(palette_tint, paint_color, material_color_preservation);
+            vec3 stroke_tint = lerp3(paint_color, palette_tint, palette_influence * 0.18);
+            if (mat_flags.z != 0) { // wet_oil_model
+                WetOil oil = wetOilStrokeModel(x, y, a, frame_index, stroke);
+                float oil_body = saturatef(mtl1.x);
+                float paint_load = saturatef(mtl1.y);
+                float pickup = saturatef(mtl1.z);
+                float deposit = saturatef(mtl1.w);
+                float wet_visibility = 0.55 + oil_body * 0.62 + paint_load * 0.20;
+                float wet_mask = saturatef(guarded_amount * wet_visibility * (0.08 + oil_body * 0.12 + oil.drag * 0.18));
+                float deposit_mask = saturatef(guarded_amount * paint_load * deposit * wet_visibility * (0.05 + oil.ridge * 0.10));
+                float bristle_mask = saturatef(guarded_amount * (0.10 + oil_body * 0.12 + saturatef(mtl2.x) * 0.10));
+                vec3 picked_color = lerp3(color, paint_color, 0.28 + pickup * 0.22);
+                vec3 carried_color = lerp3(picked_color, stroke_tint, saturatef(deposit * paint_load * palette_influence * 0.22));
+                float body_luma = (oil.body - 0.5) * (0.045 + oil_body * 0.055);
+                float bristle_luma = (stroke + oil.bristle) * (0.055 + oil_body * 0.065);
+                vec3 material_stroke = clamp01(paint_color * (1.0 + body_luma + bristle_luma));
+                material_stroke = lerp3(material_stroke, carried_color, saturatef(palette_influence * 0.18 + deposit * 0.08));
+                color = lerp3(color, material_stroke, wet_mask);
+                color = lerp3(color, carried_color, deposit_mask);
+                color = color * (1.0 + (stroke + oil.bristle) * bristle_mask * 0.42);
+                color = lerp3(color, color * (1.0 + 0.045 * oil.ridge), oil.ridge * guarded_amount * oil_body * 0.35);
+                color = lerp3(color, color * (0.985 - oil.ridge * 0.015), dry_brush * guarded_amount * (1.0 - oil.drag) * 0.32);
+                vec3 wet_daub = clamp01(paint_color * (1.0 + daub.tone * (0.16 + oil_body * 0.10)
+                                                           + (daub.bristle * 0.6 + oil.bristle) * 0.12));
+                wet_daub = lerp3(wet_daub, carried_color, saturatef(palette_influence * 0.20 + deposit * 0.10));
+                color = lerp3(color, wet_daub, daub_opacity * daub.coverage * (0.30 + paint_load * 0.35));
+                color = clamp01(color * (1.0 + daub.rim * daub_opacity * (0.10 + oil_body * 0.14)));
+            } else {
+                vec3 daub_color = clamp01(paint_color * (1.0 + daub.tone * 0.30 + daub.bristle * 0.10 + stroke * 0.06));
+                daub_color = lerp3(daub_color, stroke_tint, palette_influence * 0.22);
+                color = lerp3(color, daub_color, daub_opacity * daub.coverage * 0.92);
+                color = clamp01(color * (1.0 + daub.rim * daub_opacity
+                                                   * (0.16 + saturatef(mtl0.z) * 0.22)));
+                float gap_amount = daub.gap * daub_opacity * dry_brush * 0.35;
+                color = lerp3(color, lerp3(color, palette_shadow.xyz, 0.45), gap_amount);
+                color = color * (1.0 + stroke * guarded_amount * 0.10);
+            }
+        }
+
+        float pigment_thickness = mtl0.z;
+        if (pigment_thickness > 0.001) {
+            float pigment = pigment_thickness * strength;
+            color = vec3(
+                pow(saturatef(color.x), 1.0 + pigment * 0.18),
+                pow(saturatef(color.y), 1.0 + pigment * 0.14),
+                pow(saturatef(color.z), 1.0 + pigment * 0.10));
+            float edge_pigment = a.hit != 0 ? saturatef(a.edge * 0.8) : 0.0;
+            color = lerp3(color, color + palette_highlight.xyz * 0.035 * palette_influence, pigment * (1.0 - edge_pigment));
+            color = lerp3(color, lerp3(base_albedo, palette_shadow.xyz * 0.7, palette_influence), pigment * edge_pigment * 0.24);
+        }
+
+        if (outline_on) {
+            float line = outlineTexture(x, y, a, frame_index);
+            // contour drawn with the same brush: it breaks at daub gaps and
+            // tapers at stroke tips instead of tracing a solid geometric line
+            line *= 0.40 + 0.60 * smoothstepf(0.10, 0.70, daub.coverage + abs(daub.bristle) * 0.25);
+            float o_strength = out0.x;
+            float edge = saturatef(line * o_strength * strength);
+            vec3 ink = outlineColor(a, base_albedo);
+            color = lerp3(color, ink, edge);
+        }
+    }
+
+    return clamp01(lerp3(input_color, color, strength));
+}
+
+// ---- AOV build (mirrors makeStylizeAOV; buffer coords bx,by) ----
+AOV buildAOV(int bx, int by) {
+    AOV a;
+    a.albedo = vec3(0.0); a.normal = vec3(0.0); a.world_position = vec3(0.0);
+    a.view_dir = vec3(0.0, 0.0, -1.0); a.sun_dir = vec3(0.32, 0.82, 0.46);
+    a.screen_u = 0.0; a.screen_v = 0.0; a.sun_size_degrees = 0.545; a.sun_elevation_degrees = 35.0;
+    a.nishita_clouds_enabled = 0; a.nishita_cloud_coverage = 0.45; a.nishita_cloud_density = 0.65;
+    a.nishita_cloud_scale = 1.0; a.nishita_cloud_offset_x = 0.0; a.nishita_cloud_offset_z = 0.0;
+    a.nishita_cloud_seed = 0; a.depth = 0.0; a.edge = 0.0; a.pixel_scale = 0.0; a.material_id = 0xFFFFFFFFu; a.valid = 0; a.hit = 0;
+
+    int w = idims.x, h = idims.y;
+    if (bx < 0 || by < 0 || bx >= w || by >= h) return a;
+    a.valid = 1;
+    a.screen_u = (float(bx) + 0.5) / max(1.0, float(w));
+    a.screen_v = (float(by) + 0.5) / max(1.0, float(h));
+
+    vec3 sd = sun_direction.xyz;
+    a.sun_dir = lensq3(sd) <= 1e-8 ? vec3(0.32, 0.82, 0.46) : normalize3(sd);
+    a.sun_size_degrees = max(0.01, misc0.x);
+    a.sun_elevation_degrees = misc0.y;
+    a.nishita_clouds_enabled = iflags.x;
+    a.nishita_cloud_coverage = clamp(misc0.z, 0.0, 1.0);
+    a.nishita_cloud_density = max(0.0, misc0.w);
+    a.nishita_cloud_scale = max(0.05, misc1.x);
+    a.nishita_cloud_offset_x = misc1.y;
+    a.nishita_cloud_offset_z = misc1.z;
+    a.nishita_cloud_seed = iflags.y;
+
+    vec3 view = cam_lower_left.xyz + cam_horizontal.xyz * a.screen_u + cam_vertical.xyz * a.screen_v - cam_origin.xyz;
+    a.view_dir = lensq3(view) > 1e-8 ? normalize3(view) : vec3(0.0, 0.0, -1.0);
+
+    // The raw Vulkan AOV images are top-down; getDenoiserFrame flips them to the
+    // bottom-up CPU AOV layout that makeStylizeAOV samples at buffer row `by`.
+    // Reading the raw image at row (height-1-by) reproduces that flipped sample,
+    // so screen_u/v (from buffer coords) and the image value stay co-located with
+    // the surface color exactly as the CPU path. (OptiX needs no flip — its buffer
+    // is already bottom-up — but this shader is Vulkan-only.)
+    int iy = idims.y - 1 - by;
+    vec4 P = imageLoad(positionImg, ivec2(bx, iy));
+    float matEncoded = P.w;
+    bool hitRaw = matEncoded >= 0.5;
+    float depth = 0.0;
+    if (hitRaw) {
+        vec3 d = P.xyz - ray_origin.xyz;
+        depth = sqrt(dot(d, d));
+    }
+    uint material_id = 0xFFFFFFFFu;
+    if (matEncoded >= 1.5) material_id = uint(matEncoded + 0.5) - 2u;
+
+    vec3 alb = imageLoad(albedoImg, ivec2(bx, iy)).rgb;
+    vec3 nrm = imageLoad(normalImg, ivec2(bx, iy)).rgb;
+    a.albedo = alb;
+    a.normal = nrm * 2.0 - vec3(1.0);
+    a.world_position = P.xyz;
+    a.depth = depth;
+    a.material_id = material_id;
+    a.hit = (hitRaw && depth > 0.0) ? 1 : 0;
+    float view_len = length(view);
+    if (a.hit != 0 && view_len > 1e-6) {
+        // world units per pixel at the hit — drives screen-constant brush daub sizing
+        a.pixel_scale = depth * length(cam_vertical.xyz)
+                      / (max(1.0, float(idims.y)) * view_len);
+    }
+    return a;
+}
+
+float edgeContribution(AOV c, AOV n) {
+    if (n.hit == 0) return 1.0;
+    float e = 0.0;
+    float depth_scale = max(0.025, c.depth * 0.015);
+    e += min(1.0, abs(c.depth - n.depth) / depth_scale);
+    e += min(1.0, length(c.normal - n.normal) * 0.75);
+    if (c.material_id != n.material_id) e += 0.45;
+    return e;
+}
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    int w = idims.x, h = idims.y;
+    if (x >= w || y >= h) return;
+    int cidx = y * w + x;
+    int buffer_y = h - 1 - y;
+
+    AOV a = buildAOV(x, buffer_y);
+    if (a.hit != 0) {
+        AOV right = buildAOV(x + 1, buffer_y);
+        AOV down = buildAOV(x, buffer_y + 1);
+        float edge = edgeContribution(a, right) + edgeContribution(a, down);
+        a.edge = clamp(edge * 0.55, 0.0, 1.0);
+    }
+
+    uint px = color[cidx];
+    float inv255 = 1.0 / 255.0;
+    vec3 in_color = vec3(
+        float((px & color_mask.x) >> uint(color_shift.x)) * inv255,
+        float((px & color_mask.y) >> uint(color_shift.y)) * inv255,
+        float((px & color_mask.z) >> uint(color_shift.z)) * inv255);
+
+    vec3 outc = applyPostProcess(in_color, a, x, y, idims.z);
+
+    uint ri = uint(saturatef(outc.x) * 255.0);
+    uint gi = uint(saturatef(outc.y) * 255.0);
+    uint bi = uint(saturatef(outc.z) * 255.0);
+    color[cidx] = (px & color_mask.w)
+                | (ri << uint(color_shift.x))
+                | (gi << uint(color_shift.y))
+                | (bi << uint(color_shift.z));
+}

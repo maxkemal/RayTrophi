@@ -26,6 +26,7 @@ struct InstanceGroup;
 struct WaterSurface;
 class VDBVolume;
 class GasVolume;
+class Hittable;
 
 #include "ui_modern.h"  // Modern UI sistemi
 #include "SceneHistory.h"  // Undo/Redo system
@@ -114,6 +115,10 @@ struct UIContext {
 
 	
 };
+
+namespace MeshModifiers { struct ModifierStack; }
+bool hasEnabledSubdivisionPreview(const MeshModifiers::ModifierStack& stack);
+std::size_t computeSubdivisionPreviewSignature(UIContext& ctx, const std::string& objectName);
 
 class SceneUI {
 public:   
@@ -256,7 +261,7 @@ public:
      // Sculpt entry: repair only ZERO/non-finite shading normals (the dense-mesh black-shading
      // bug) WITHOUT rewriting valid ones — preserves the object's current flat/smooth look.
      bool repairSculptEntryShadingNormals(UIContext& ctx, const std::string& objectName, bool queueGpuSync = true);
-     bool refreshEditableDisplayMeshFromBase(UIContext& ctx, const std::string& objectName, bool queueGpuSync = true);
+     bool refreshEditableDisplayMeshFromBase(UIContext& ctx, const std::string& objectName, bool queueGpuSync = true, bool rebuildEditableCache = true);
      void beginInteractiveSubdivisionPreview(const std::string& objectName);
      void endInteractiveSubdivisionPreview(UIContext& ctx, const std::string& objectName, bool rebuildFull = true);
      bool isInteractiveSubdivisionPreviewActiveForObject(const std::string& objectName) const;
@@ -363,6 +368,30 @@ public:
     void addProceduralTorus(UIContext& ctx);      // Add a procedural torus mesh (quad-based)
     void addProceduralStaircase(UIContext& ctx);  // Add a procedural staircase mesh (quad-based)
     void drawProceduralGeneratorWindow(UIContext& ctx);
+
+    // ── Destruction: convex Voronoi pre-fracture (Faz 1, geometry only) ───────
+    // Split the given mesh node into convex shard meshes. The original mesh is
+    // parked (kept alive, removed from the scene) so re-fracture reuses it and
+    // unfractureMesh restores it exactly. No physics yet (Faz 2 makes shards
+    // rigid bodies). `pattern`: 0 = uniform, 1 = impact-clustered.
+    void fractureSelectedMesh(UIContext& ctx, const std::string& node,
+                              int site_count, uint32_t seed, int pattern);
+    void unfractureMesh(UIContext& ctx, const std::string& node);
+    void fractureRefreshScene_(UIContext& ctx);  // rebuild caches/BVH/backends after shard edits
+    bool isMeshFractured(const std::string& node) const {
+        return fracture_shard_nodes_.find(node) != fracture_shard_nodes_.end();
+    }
+    // Fracture authoring state (panel controls).
+    int   fracture_site_count = 15;
+    int   fracture_seed = 1337;
+    int   fracture_pattern = 0;     // 0 = Uniform, 1 = Impact-clustered
+    float fracture_preview_gap = 0.02f;  // shrink shards toward their centroid so the
+                                         // cuts are visible without physics (Faz 1)
+    float fracture_break_threshold = 5.0f;  // impact impulse (kg·m/s) to shatter (Faz 2)
+    // Parked source meshes (alive, out of the scene) + emitted shard node names,
+    // keyed by the fractured source node. UI-side for Faz 1 (serialize = Faz 5).
+    std::map<std::string, std::vector<std::shared_ptr<Hittable>>> fracture_parked_originals_;
+    std::map<std::string, std::vector<std::string>> fracture_shard_nodes_;
     
     // Procedural generator window state
     bool show_procedural_generator = false;
@@ -521,21 +550,44 @@ public:
          std::vector<CachedMeshOverlayVertexSource> vertices;
      };
      MeshOverlayCache mesh_overlay_cache;
+     // SoA migration (Phase 1): refs/faces store an INDEX into the cache's owning
+     // source_triangles vector instead of a per-element shared_ptr<Triangle>. On a dense
+     // mesh this turns 6M (refs) + 2M (faces) scattered shared_ptr copies — each an atomic
+     // refcount bump during the build — into a single owning vector, and roughly halves the
+     // cache memory. Use EditableMeshCache::refTri()/faceTri() (raw Triangle*) or
+     // refTriShared()/faceTriShared() (shared_ptr, when ownership must be handed on).
      struct EditableVertexRef {
-         std::shared_ptr<class Triangle> triangle;
+         int triangle_index = -1;
          int corner = 0;
+     };
+     // Lightweight non-owning view over a slice of a CSR data array (P-CSR migration).
+     // Replaces the per-vertex std::vector that EditableVertex.refs / vertex_neighbors used
+     // to hold — millions of tiny heap allocations on a dense mesh — with two flat arrays
+     // (offsets + data). Supports range-for, [] and empty()/size() so call sites read the
+     // same as the old vector.
+     template <typename T>
+     struct CacheSpan {
+         const T* b = nullptr;
+         const T* e = nullptr;
+         const T* begin() const { return b; }
+         const T* end() const { return e; }
+         bool empty() const { return b == e; }
+         std::size_t size() const { return static_cast<std::size_t>(e - b); }
+         const T& operator[](std::size_t i) const { return b[i]; }
      };
      struct EditableVertex {
          Vec3 local_position;
          bool is_boundary = false;
-         std::vector<EditableVertexRef> refs;
+         // View into EditableMeshCache::vertex_ref_data (P-CSR). Behaves like the old
+         // std::vector<EditableVertexRef> for call sites (range-for / [] / empty()/size()).
+         CacheSpan<EditableVertexRef> refs;
      };
      struct EditableEdge {
          int v0 = -1;
          int v1 = -1;
      };
      struct EditableFace {
-         std::shared_ptr<class Triangle> triangle;
+         int triangle_index = -1;
          int v0 = -1;
          int v1 = -1;
          int v2 = -1;
@@ -580,6 +632,10 @@ public:
          bool shade_flat = false;
          bool auto_smooth = true;
          float auto_smooth_angle_degrees = 60.0f;
+         // Owning list of the source triangles this cache was welded from. EditableVertexRef
+         // and EditableFace index into it (Phase 1 SoA migration). Kept alive here so raw
+         // Triangle* views stay valid for the cache's lifetime.
+         std::vector<std::shared_ptr<class Triangle>> source_triangles;
          std::vector<EditableVertex> vertices;
          std::vector<Vec3> vertex_positions;      // Aligned flat position buffer (1:1 with vertices)
          std::vector<uint8_t> vertex_is_boundary; // Fast per-vertex boundary flags (1:1 with vertices)
@@ -587,9 +643,19 @@ public:
          std::vector<EditableEdge> polygon_edges;
          std::vector<EditableFace> faces;
          std::vector<EditablePolygonFace> polygon_faces;
-         std::vector<std::vector<int>> vertex_neighbors;
-         std::unordered_map<const class Triangle*, std::array<int, 3>> triangle_vertex_ids;
-         std::unordered_map<const class Triangle*, size_t> triangle_to_mesh_index;
+         // P-CSR backing storage. The per-vertex incident-triangle refs and neighbour lists
+         // live in these two flat arrays (built once, never resized after); EditableVertex.refs
+         // and vertex_neighbors[v] are lightweight CacheSpans into them, replacing the old
+         // millions of tiny per-vertex std::vectors. Spans stay valid for the cache's lifetime.
+         std::vector<EditableVertexRef> vertex_ref_data;
+         std::vector<int> vertex_neighbor_data;
+         std::vector<CacheSpan<int>> vertex_neighbors; // 1:1 with vertices; views into vertex_neighbor_data
+         // Per-face source-mesh index (parallel to source_triangles / faces). Replaces the old
+         // triangle_to_mesh_index hash map: a Triangle* resolves to its face index via
+         // Triangle::editable_index, then face_to_mesh_index[faceIdx] gives the GPU/source
+         // buffer slot. {v0,v1,v2} likewise comes from faces[faceIdx] (replaces the old
+         // triangle_vertex_ids map). Both eliminate millions of serial hash inserts on entry.
+         std::vector<int> face_to_mesh_index;
          float spatial_cell_size = 0.0f;
          std::unordered_map<EditableSpatialCellKey, std::vector<int>, EditableSpatialCellKeyHasher> vertex_spatial_buckets;
          std::vector<uint32_t> vertex_mark_stamps;
@@ -607,6 +673,34 @@ public:
          // True when the cache was built in the cheaper sculpt-only layout (skips some
          // edit-mode topology). Lets ensureEditableMeshCache avoid a needless rebuild.
          bool built_minimal_for_sculpt = false;
+
+         // --- Polygon (quad/ngon) grouping for LOOP NORMALS ---
+         // Source triangles grouped by Triangle::faceIndex so sculpt/shading can compute ONE
+         // normal per polygon (the quad) instead of per split triangle — the latter exposes the
+         // triangulation diagonal as a facet/fold. Built lazily on the first normal recompute
+         // (O(triangles), once per cache lifetime); empty/identity when the mesh carries no
+         // faceIndex (faceIndex < 0), in which case shading falls back to per-triangle normals.
+         std::vector<int> polygon_tri_off;   // CSR offsets, size = numPolygons + 1
+         std::vector<int> polygon_tri_data;  // source-triangle indices, grouped by polygon
+         std::vector<int> tri_to_polygon;    // per source-triangle -> dense polygon slot (or -1)
+         bool polygon_grouping_built = false;
+         bool has_polygon_grouping = false;  // true once a real quad/ngon grouping exists
+         void buildPolygonGrouping();        // groups source_triangles by Triangle::faceIndex
+
+         // --- index -> triangle accessors (Phase 1 SoA migration) ---
+         class Triangle* triangleAt(int idx) const {
+             return (idx >= 0 && idx < static_cast<int>(source_triangles.size()))
+                 ? source_triangles[static_cast<size_t>(idx)].get() : nullptr;
+         }
+         const std::shared_ptr<class Triangle>& triangleSharedAt(int idx) const {
+             static const std::shared_ptr<class Triangle> kNull;
+             return (idx >= 0 && idx < static_cast<int>(source_triangles.size()))
+                 ? source_triangles[static_cast<size_t>(idx)] : kNull;
+         }
+         class Triangle* refTri(const EditableVertexRef& r) const { return triangleAt(r.triangle_index); }
+         const std::shared_ptr<class Triangle>& refTriShared(const EditableVertexRef& r) const { return triangleSharedAt(r.triangle_index); }
+         class Triangle* faceTri(const EditableFace& f) const { return triangleAt(f.triangle_index); }
+         const std::shared_ptr<class Triangle>& faceTriShared(const EditableFace& f) const { return triangleSharedAt(f.triangle_index); }
      };
      struct SculptControlNode {
          Vec3 local_position;
@@ -761,6 +855,7 @@ public:
         // Stamp Params
         std::shared_ptr<class Texture> stamp_texture;
         float stamp_rotation = 0.0f; // Degrees
+        Paint::StrokeMethod stroke_method = Paint::StrokeMethod::Space; // Stroke behavior
         
         // Paint Params
         int paint_channel = 0; // 0=R(Layer0), 1=G(Layer1), 2=B(Layer2), 3=A(Layer3)
@@ -789,7 +884,12 @@ public:
         Blob,        // spherical swell (inflate + lateral gather)
         Fill,        // directional flatten: fill valleys (Ctrl = deepen)
         SnakeHook,   // drag the surface along the stroke into a hook/tentacle
-        ElasticDeform // Grab-family: soft, wide, volume-preserving pull
+        ElasticDeform, // Grab-family: soft, wide, volume-preserving pull
+        Stamp        // imprint an alpha/mask texture along the surface normal
+                     // (shares the Draw deform; the imprint shape comes from the
+                     // brush footprint, i.e. the loaded alpha texture). With the
+                     // Anchored stroke mode it presses at a fixed centre while the
+                     // drag drives depth + rotation (non-accumulating single imprint).
     };
     // Grab-family tools share the drag-based solve path (primed candidate set +
     // start positions) rather than the per-dab worldDelta switch. Snake Hook is
@@ -813,7 +913,7 @@ public:
         bool mirror_x = false;
         bool mirror_y = false;
         bool mirror_z = false;
-        // Radial symmetry: repeat each stroke as N evenly-spaced rotations about
+        // radial_symmetry: repeat each stroke as N evenly-spaced rotations about
         // an object-local axis (through the object origin). count >= 2 to apply.
         bool radial_symmetry = false;
         int radial_count = 6;     // number of copies including the primary
@@ -835,6 +935,16 @@ public:
         // viscous tongue (putty); low = the flow keeps its roughness and breaks into chunks
         // (mud), especially with heterogeneous density on.
         float wet_clay_cohesion = 0.6f;
+        // Per-dab surface relaxation: a light ISOTROPIC Laplacian on the touched verts
+        // after each additive deposit. Sculpting the LINEAR (triangulated) evaluated mesh
+        // makes brushed quads non-planar, and a quad rendered as two fixed-diagonal
+        // triangles folds visibly along that diagonal ("triangulated-quad facets"). This
+        // pass pulls each touched vertex a fraction toward its neighbour centroid, which
+        // removes that sub-quad fold while the brush re-deposits the broad shape each dab —
+        // so it gives a smooth quad surface WITHOUT paying for a multires limit surface on
+        // dense meshes. Skipped for Grab/Smooth/Mask (those drive their own coherent solve).
+        bool surface_relax_enabled = true;
+        float surface_relax_strength = 0.4f; // 0 = off, 1 = aggressive smoothing
         // Reserved for the disabled experimental GPU sculpt path.
         bool use_gpu = false;
         SculptModeState() { brush.radius = 0.3f; brush.strength = 1.0f; brush.falloff = 0.75f; }
@@ -845,14 +955,28 @@ public:
         bool changed = false;
         std::string object_name;
         Vec3 start_world_hit;
+        bool has_last_world_hit = false;
         Vec3 last_world_hit;
+        Vec3 last_world_hit_normal;
         Vec3 stroke_normal;
+        
+        // Gelişmiş Stroke Metodları (Line, Curve)
+        bool is_line_drawing = false;
+        Vec3 line_end_world;
+        bool execute_line_stroke = false;
+        
+        bool is_curve_drawing = false;
+        bool is_curve_bending = false;
+        Vec3 curve_end_world;
+        Vec3 curve_control_world;
+        bool execute_curve_stroke = false;
         // Distance-gated dab scheduling (additive brushes only). last_dab_world is
         // the world position of the last emitted dab; new dabs are placed only every
         // `spacing` units travelled, with the remainder carried here. This stops the
         // same spot getting hammered every frame on slow / high-tess meshes (the
         // "circles piling up" artifact) while keeping even spacing at any speed.
         Vec3 last_dab_world;
+        Vec3 last_dab_normal;
         bool has_last_dab = false;
         std::unordered_map<int, Vec3> grab_start_local_positions;
         std::unordered_map<int, float> grab_weights_by_vertex;
@@ -866,6 +990,18 @@ public:
         // captured on the stroke's first frame — same drift-free approach as the
         // mirror grab, but the start hit/drag are rotated about the radial axis.
         std::unordered_map<int, std::vector<int>> grab_radial_candidate_sets;
+        // Anchored stamp (Blender-style): the brush centre, normal and tangent frame
+        // are FROZEN at the stroke's first frame; the cursor drag then drives the
+        // imprint DEPTH (drag length) and ROTATION (drag angle in that frame) instead
+        // of moving the centre. grab_start_local_positions holds the frozen footprint
+        // verts' rest positions; every frame re-writes pos = rest + anchorNormal *
+        // (depth * footprintWeight) absolutely, so the imprint never accumulates and
+        // live-resizes/rotates as you drag. anchored_primed gates the one-time capture.
+        bool anchored_primed = false;
+        Vec3 anchor_world;
+        Vec3 anchor_normal;
+        Vec3 anchor_tangent;
+        Vec3 anchor_bitangent;
         std::vector<float> layer_accum;
         std::vector<float> clay_layer_accum;
         std::vector<float> clay_strips_layer_accum;

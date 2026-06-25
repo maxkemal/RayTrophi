@@ -251,7 +251,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 // If terrain has generated mesh triangles, select one to sync viewport selection
                 if (!t->mesh_triangles.empty() && ctx.selection.hasSelection() == false) {
                     auto tri = t->mesh_triangles.front();
-                    if (tri) ctx.selection.selectObject(tri, -1, tri->nodeName);
+                    if (tri) ctx.selection.selectObject(tri, -1, tri->getNodeName());
                 }
                 SCENE_LOG_INFO("Terrain created: " + t->name);
                 ctx.renderer.resetCPUAccumulation();
@@ -306,7 +306,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                          // Select a representative triangle so the viewport selection matches the list
                          if (!t.mesh_triangles.empty()) {
                              auto tri = t.mesh_triangles.front();
-                             if (tri) ctx.selection.selectObject(tri, -1, tri->nodeName);
+                             if (tri) ctx.selection.selectObject(tri, -1, tri->getNodeName());
                          }
                          SCENE_LOG_INFO("Active terrain switched to: " + t.name);
                          // Trigger rebuild for highlighting or gizmos if necessary
@@ -1820,6 +1820,13 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
     static float last_vulkan_paint_sync_time = -1000.0f;
     static float last_live_geometry_sync_time = -1000.0f;
 
+    // Anchored stroke state variables
+    static bool terrain_stroke_active = false;
+    static Vec3 terrain_stroke_anchor_world(0.0f, 0.0f, 0.0f);
+    static std::vector<float> terrain_stroke_backup_heightmap;
+    static float terrain_stroke_current_radius = 0.0f;
+    static float terrain_stroke_current_rotation = 0.0f;
+
     const bool mouse_moved_since_last_brush_frame =
         (x != last_brush_mouse_x) || (y != last_brush_mouse_y);
     last_brush_mouse_x = x;
@@ -1932,6 +1939,8 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
 
     if (!is_left_down && was_left_down) {
         commitTerrainStroke();
+        terrain_stroke_active = false;
+        terrain_stroke_backup_heightmap.clear();
     }
     was_left_down = is_left_down;
     
@@ -1990,12 +1999,22 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                     return ImVec2((ndc_x * 0.5f + 0.5f) * win_w, (0.5f - ndc_y * 0.5f) * win_h);
                 };
                 
+                Vec3 previewCenter = hitPoint;
+                float previewRadius = terrain_brush.radius;
+                float previewRotation = terrain_brush.stamp_rotation;
+                
+                if (terrain_brush.mode == 4 && terrain_brush.stroke_method == Paint::StrokeMethod::Anchored && terrain_stroke_active) {
+                    previewCenter = terrain_stroke_anchor_world;
+                    previewRadius = terrain_stroke_current_radius;
+                    previewRotation = terrain_stroke_current_rotation;
+                }
+
                 for (int i = 0; i < segments; i++) {
                     float theta = (float)i / segments * 6.28318f;
                     float theta2 = (float)(i + 1) / segments * 6.28318f;
                     
-                    Vec3 p1 = hitPoint + Vec3(cos(theta) * terrain_brush.radius, 0.1f, sin(theta) * terrain_brush.radius);
-                    Vec3 p2 = hitPoint + Vec3(cos(theta2) * terrain_brush.radius, 0.1f, sin(theta2) * terrain_brush.radius);
+                    Vec3 p1 = previewCenter + Vec3(cos(theta) * previewRadius, 0.1f, sin(theta) * previewRadius);
+                    Vec3 p2 = previewCenter + Vec3(cos(theta2) * previewRadius, 0.1f, sin(theta2) * previewRadius);
                     
                     ImVec2 s1 = Project(p1);
                     ImVec2 s2 = Project(p2);
@@ -2007,12 +2026,12 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
 
                 for (int ring = 0; ring < 2; ++ring) {
                     float ringScale = (ring == 0) ? 0.5f : std::pow(0.5f, 1.0f / std::max(terrain_brush.curve, 0.25f));
-                    float ringRadius = terrain_brush.radius * ringScale;
+                    float ringRadius = previewRadius * ringScale;
                     for (int i = 0; i < segments; i++) {
                         float theta = (float)i / segments * 6.28318f;
                         float theta2 = (float)(i + 1) / segments * 6.28318f;
-                        Vec3 p1 = hitPoint + Vec3(cos(theta) * ringRadius, 0.12f, sin(theta) * ringRadius);
-                        Vec3 p2 = hitPoint + Vec3(cos(theta2) * ringRadius, 0.12f, sin(theta2) * ringRadius);
+                        Vec3 p1 = previewCenter + Vec3(cos(theta) * ringRadius, 0.12f, sin(theta) * ringRadius);
+                        Vec3 p2 = previewCenter + Vec3(cos(theta2) * ringRadius, 0.12f, sin(theta2) * ringRadius);
                         ImVec2 s1 = Project(p1);
                         ImVec2 s2 = Project(p2);
                         if (s1.x > -50 && s1.x < win_w + 50) {
@@ -2022,20 +2041,20 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                 }
 
                 if (terrain_brush.mode == 4) {
-                    float rad = terrain_brush.stamp_rotation * 3.14159f / 180.0f;
+                    float rad = previewRotation * 3.14159f / 180.0f;
                     float c = cosf(rad);
                     float s = sinf(rad);
                     Vec3 corners[4] = {
-                        Vec3(-terrain_brush.radius, 0.15f, -terrain_brush.radius),
-                        Vec3( terrain_brush.radius, 0.15f, -terrain_brush.radius),
-                        Vec3( terrain_brush.radius, 0.15f,  terrain_brush.radius),
-                        Vec3(-terrain_brush.radius, 0.15f,  terrain_brush.radius)
+                        Vec3(-previewRadius, 0.15f, -previewRadius),
+                        Vec3( previewRadius, 0.15f, -previewRadius),
+                        Vec3( previewRadius, 0.15f,  previewRadius),
+                        Vec3(-previewRadius, 0.15f,  previewRadius)
                     };
                     ImVec2 screenCorners[4];
                     for (int i = 0; i < 4; ++i) {
                         Vec3 local = corners[i];
                         Vec3 rotated(local.x * c - local.z * s, local.y, local.x * s + local.z * c);
-                        screenCorners[i] = Project(hitPoint + rotated);
+                        screenCorners[i] = Project(previewCenter + rotated);
                     }
                     for (int i = 0; i < 4; ++i) {
                         ImVec2 a = screenCorners[i];
@@ -2094,19 +2113,54 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                  }
                  else {
                      // SCULPT
-                     TerrainManager::getInstance().sculpt(
-                         terrain, 
-                         hitPoint, 
-                         terrain_brush.mode, 
-                         terrain_brush.radius, 
-                         terrain_brush.strength, 
-                         dt,
-                         terrain_brush.curve,
-                         targetH,
-                         terrain_brush.stamp_texture,
-                         terrain_brush.stamp_rotation,
-                         false
-                     );
+                     if (terrain_brush.mode == 4 && terrain_brush.stroke_method == Paint::StrokeMethod::Anchored) {
+                         if (!terrain_stroke_active) {
+                             terrain_stroke_anchor_world = hitPoint;
+                             terrain_stroke_backup_heightmap = terrain->heightmap.data;
+                             terrain_stroke_active = true;
+                             terrain_stroke_current_radius = 0.0f;
+                             terrain_stroke_current_rotation = terrain_brush.stamp_rotation;
+                         } else {
+                             Vec3 drag_vector = hitPoint - terrain_stroke_anchor_world;
+                             float drag_dist = sqrtf(drag_vector.x * drag_vector.x + drag_vector.z * drag_vector.z);
+                             float drag_angle_rad = atan2f(drag_vector.z, drag_vector.x);
+                             float drag_angle_deg = drag_angle_rad * 180.0f / 3.14159265f;
+                             terrain_stroke_current_radius = drag_dist;
+                             terrain_stroke_current_rotation = terrain_brush.stamp_rotation - drag_angle_deg;
+                         }
+                         
+                         // Restore heightmap from backup before applying the new absolute state
+                         terrain->heightmap.data = terrain_stroke_backup_heightmap;
+                         
+                         TerrainManager::getInstance().sculpt(
+                             terrain, 
+                             terrain_stroke_anchor_world, 
+                             terrain_brush.mode, 
+                             terrain_stroke_current_radius, 
+                             terrain_brush.strength, 
+                             1.0f, // dt = 1.0f for absolute strength
+                             terrain_brush.curve,
+                             targetH,
+                             terrain_brush.stamp_texture,
+                             terrain_stroke_current_rotation,
+                             false
+                         );
+                     }
+                     else {
+                         TerrainManager::getInstance().sculpt(
+                             terrain, 
+                             hitPoint, 
+                             terrain_brush.mode, 
+                             terrain_brush.radius, 
+                             terrain_brush.strength, 
+                             dt,
+                             terrain_brush.curve,
+                             targetH,
+                             terrain_brush.stamp_texture,
+                             terrain_brush.stamp_rotation,
+                             false
+                         );
+                     }
                      
                      ResetTerrainBackendAccumulation(ctx);
                      ctx.renderer.resetCPUAccumulation();

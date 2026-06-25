@@ -1,0 +1,67 @@
+/*
+ * RayTrophi Studio — Vulkan Foam Sphere Intersection Shader
+ * Analytic ray-sphere intersection for foam / fluid-splat point spheres.
+ *
+ * Each AABB primitive is one foam sphere. The whole foam set of one type is a
+ * single AABB BLAS (= one TLAS instance) instead of one instance per particle —
+ * the scalable representation that the OptiX side uses via built-in sphere GAS.
+ * Per-sphere centre+radius live in a storage buffer indexed by gl_PrimitiveID
+ * (mirrors hair_intersection.rint's HairSegmentSSBO). The geometric normal is
+ * handed to the closest-hit through a hit attribute so it needs no buffer.
+ *
+ * Procedural hit group: VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR.
+ */
+#version 460
+#extension GL_EXT_ray_tracing         : require
+#extension GL_EXT_scalar_block_layout : require
+
+hitAttributeEXT vec3 sphereNormal;   // world-space outward normal at the hit
+
+// One combined foam buffer for the whole set (all types). gl_PrimitiveID indexes
+// it directly — the whole foam cloud is ONE AABB BLAS / ONE TLAS instance, so the
+// per-sphere material lives here too (read by sphere_closesthit.rchit).
+struct FoamSphereGPU {
+    vec4 centerRadius;   // xyz = centre (world space), w = radius
+    uint matId;          // foam material index (Spray / Foam / Bubble)
+    uint _p0;
+    uint _p1;
+    uint _p2;
+};
+
+layout(set = 0, binding = 18, scalar) readonly buffer FoamSphereSSBO {
+    FoamSphereGPU foamSpheres[];
+};
+
+void main()
+{
+    uint idx = uint(gl_PrimitiveID);
+    if (idx >= foamSpheres.length()) return;
+
+    vec3  C = foamSpheres[idx].centerRadius.xyz;
+    float R = foamSpheres[idx].centerRadius.w;
+    if (R <= 0.0) return;   // degenerate padding sphere (never hit)
+
+    // Foam instances are placed in world space with an identity transform, so
+    // the world ray is also the object ray — no transform needed.
+    vec3 rO = gl_WorldRayOriginEXT;
+    vec3 rD = gl_WorldRayDirectionEXT;
+    vec3 oc = rO - C;
+    float a = dot(rD, rD);
+    float b = 2.0 * dot(oc, rD);
+    float c = dot(oc, oc) - R * R;
+    float disc = b * b - 4.0 * a * c;
+    if (disc < 0.0) return;
+
+    float sd = sqrt(disc);
+    float t0 = (-b - sd) / (2.0 * a);
+    float t1 = (-b + sd) / (2.0 * a);
+
+    float t = -1.0;
+    if (t0 >= gl_RayTminEXT && t0 <= gl_RayTmaxEXT)      t = t0;
+    else if (t1 >= gl_RayTminEXT && t1 <= gl_RayTmaxEXT) t = t1;
+    if (t < 0.0) return;
+
+    vec3 hit = rO + t * rD;
+    sphereNormal = normalize(hit - C);
+    reportIntersectionEXT(t, 0u);
+}

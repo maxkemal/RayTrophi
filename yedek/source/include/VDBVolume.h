@@ -1,0 +1,436 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          VDBVolume.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+/**
+ * @file VDBVolume.h
+ * @brief VDB Volume Scene Object - Standalone volumetric container
+ * 
+ * This class represents a VDB volume as a scene object, independent of geometry meshes.
+ * It follows Blender/Houdini conventions for VDB import and rendering.
+ * 
+ * Key features:
+ * - Uses VDB's native bounding box (not mesh-dependent)
+ * - Full transform support (position, rotation, scale)
+ * - Shader assignment (VolumeShader)
+ * - Animation sequence support
+ * 
+ * @note This is a Hittable subclass, so it participates in ray tracing like other geometry.
+ */
+
+#ifndef VDB_VOLUME_H
+#define VDB_VOLUME_H
+
+#include "Hittable.h"
+#include "Matrix4x4.h"
+#include "VolumeShader.h"
+#include "VDBVolumeManager.h"
+#include "Transform.h"
+#include <string>
+#include <memory>
+#include <vector>
+
+// Forward declarations
+class Triangle;
+
+/**
+ * @brief VDB Volume Object - Standalone volumetric object in scene
+ * 
+ * Key differences from mesh-attached volumetrics:
+ * - Has its own transform (not dependent on mesh)
+ * - Uses VDB's native bounding box
+ * - Supports animation sequences
+ * - Shader is a separate, assignable component
+ * 
+ * @example
+ * ```cpp
+ * auto vdb = std::make_shared<VDBVolume>();
+ * vdb->loadVDB("explosion.vdb");
+ * vdb->setPosition(Vec3(0, 2, 0));
+ * vdb->setShader(VolumeShader::createFirePreset());
+ * scene.world.add(vdb);
+ * ```
+ */
+class VDBVolume : public Hittable {
+public:
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CONSTRUCTION
+    // ═══════════════════════════════════════════════════════════════════════════
+    VDBVolume();
+    explicit VDBVolume(const std::string& vdb_path);
+    ~VDBVolume() override = default;
+    
+    /**
+     * @brief Load a single VDB file
+     * @param path Path to .vdb file
+     * @return true on success
+     */
+    bool loadVDB(const std::string& path);
+    
+    /**
+     * @brief Load VDB sequence from pattern
+     * @param pattern Pattern like "fire_####.vdb" or "smoke.%04d.vdb"
+     * @return true on success
+     */
+    bool loadVDBSequence(const std::string& pattern);
+    
+    /**
+     * @brief Unload and release VDB data
+     */
+    void unload();
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // HITTABLE INTERFACE
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    /**
+     * @brief Ray intersection test
+     * 
+     * For VDB volumes, we test against the transformed AABB.
+     * Actual ray marching happens during shading, not here.
+     */
+    bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool ignore_volumes = false) const override;
+    
+    /**
+     * @brief Fast occlusion test with Ray Marching support for stochastic transparency.
+     */
+    bool occluded(const Ray& r, float t_min, float t_max) const override;
+    
+    /**
+     * @brief Get world-space bounding box
+     */
+    bool bounding_box(float time0, float time1, AABB& output_box) const override;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // TRANSFORM (Object → World)
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    void setTransform(const Matrix4x4& transform);
+    Matrix4x4 getTransform() const { return world_transform; }
+    Matrix4x4 getPivotMatrix() const { return transform_handle ? transform_handle->getPivotMatrix() : world_transform; }
+    Matrix4x4 getInverseTransform() const { return world_transform_inv; }
+    void setPivotMatrix(const Matrix4x4& transform);
+    
+    void setPosition(const Vec3& pos);
+    void setRotation(const Vec3& euler_deg);
+    void setScale(const Vec3& scale);
+    
+    Vec3 getPosition() const { return position; }
+    Vec3 getRotation() const { return rotation_euler; }
+    Vec3 getScale() const { return scale_vec; }
+    Vec3 getPivotOffset() const { return pivot_offset; }
+    void setPivotOffset(const Vec3& po, bool preserve_world = true);
+    
+    /**
+     * @brief Move pivot point to bottom center of bounding box
+     * Offsets local bbox so origin is at (centerX, bottomY, centerZ)
+     */
+    void centerPivotToBottomCenter();
+    
+    /**
+     * @brief Get transform handle for gizmo integration
+     */
+    std::shared_ptr<Transform> getTransformHandle() { return transform_handle; }
+
+    /**
+     * @brief Fast non-owning accessor to transform (avoid shared_ptr refcount ops)
+     */
+    Transform* getTransformPtr() const noexcept { return transform_handle.get(); }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // VDB DATA ACCESS
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    /**
+     * @brief Get VDBVolumeManager volume ID
+     */
+    int getVDBVolumeID() const { return vdb_volume_id; }
+
+    /**
+     * @brief Override the bound manager volume ID for transient live-volume invalidation.
+     */
+    void setVDBVolumeID(int id) { vdb_volume_id = id; }
+    
+    /**
+     * @brief Get sequence ID (if animated)
+     */
+    int getVDBSequenceID() const { return vdb_sequence_id; }
+    
+    /**
+     * @brief Check if VDB is loaded
+     */
+    bool isLoaded() const { return procedural_volume || vdb_volume_id >= 0 || vdb_sequence_id >= 0; }
+    bool isProceduralVolume() const { return procedural_volume; }
+    void setProceduralVolumeBounds(const Vec3& min, const Vec3& max) {
+        procedural_volume = true;
+        vdb_volume_id = -1;
+        vdb_sequence_id = -1;
+        filepath.clear();
+        setLocalBounds(min, max);
+    }
+
+    /**
+     * @brief Bind to a live (manager-owned) VDB id produced by grid simulation.
+     *
+     * The live volume's index space maps to world via voxel_size, so its local
+     * box is [0, world_max - world_min]; placement is a pure translation to
+     * world_min. Used by the simulation render bridge (transient volumes).
+     */
+    void bindLiveVolume(int manager_id, float voxel, const Vec3& world_min, const Vec3& world_max) {
+        procedural_volume = false;
+        vdb_volume_id = manager_id;
+        vdb_sequence_id = -1;
+        voxel_size = voxel;
+        setLocalBounds(Vec3(0.0f), world_max - world_min);
+        setScale(Vec3(1.0f, 1.0f, 1.0f));
+        setRotation(Vec3(0.0f, 0.0f, 0.0f));
+        setPosition(world_min);
+    }
+    
+    /**
+     * @brief Get native VDB bounds (before transform)
+     */
+    Vec3 getLocalBoundsMin() const { return local_bbox_min; }
+    Vec3 getLocalBoundsMax() const { return local_bbox_max; }
+    
+    /**
+     * @brief Manually set local bounds (useful for correcting invalid/overflow bounds)
+     */
+    void setLocalBounds(const Vec3& min, const Vec3& max) { 
+        local_bbox_min = min; 
+        local_bbox_max = max; 
+        
+        // Also fix first frame bounds if they were corrupted or uninitialized
+        if (is_sequence) {
+            first_frame_bbox_min = min;
+            first_frame_bbox_max = max;
+            has_first_frame_bounds = true;
+        }
+        
+        invalidateWorldBounds();
+    }
+    
+    /**
+     * @brief Ray-AABB intersection with transform
+     */
+    bool intersectTransformedAABB(const Ray& r, float t_min, float t_max, 
+                                   float& out_t_enter, float& out_t_exit) const;
+    
+    /**
+     * @brief Get world-space bounds (after transform)
+     */
+    AABB getWorldBounds() const;
+    
+    /**
+     * @brief Get list of available grid names in the VDB
+     */
+    std::vector<std::string> getAvailableGrids() const;
+    
+    /**
+     * @brief Check if a specific grid exists
+     */
+    bool hasGrid(const std::string& grid_name) const;
+    
+    /**
+     * @brief Get VDB file path
+     */
+    const std::string& getFilePath() const { return filepath; }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SHADER ASSIGNMENT
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    void setShader(std::shared_ptr<VolumeShader> shader) { volume_shader = shader; }
+    std::shared_ptr<VolumeShader> getShader() const { return volume_shader; }
+    
+    /**
+     * @brief Get or create default shader
+     */
+    std::shared_ptr<VolumeShader> getOrCreateShader() {
+        if (!volume_shader) {
+            volume_shader = std::make_shared<VolumeShader>();
+        }
+        return volume_shader;
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ANIMATION (VDB Sequences)
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    /**
+     * @brief Check if this is an animated sequence
+     */
+    bool isAnimated() const { return is_sequence; }
+    
+    /**
+     * @brief Get total frame count (1 for single files)
+     */
+    int getFrameCount() const;
+    
+    /**
+     * @brief Get current frame index
+     */
+    int getCurrentFrame() const { return current_frame; }
+    
+    /**
+     * @brief Set current frame (updates VDB data reference)
+     */
+    void setCurrentFrame(int frame);
+    
+    /**
+     * @brief Link/unlink from main timeline
+     */
+    void setLinkedToTimeline(bool linked) { timeline_linked = linked; }
+    bool isLinkedToTimeline() const { return timeline_linked; }
+    
+    /**
+     * @brief Update frame from timeline (called by animation system)
+     * @param timeline_frame Current frame from main timeline
+     */
+    void updateFromTimeline(int timeline_frame, void* stream = nullptr);
+    
+    void setFrameOffset(int offset) { frame_offset = offset; }
+    int getFrameOffset() const { return frame_offset; }
+    
+  
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SCENE HIERARCHY
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    std::string name = "VDB Volume";
+    std::string filepath;  ///< Original file path for reload/export
+    bool transient = false; ///< Simulation-owned live volume: excluded from save/hierarchy
+    int sequence_digits = 4; // Number of digits in sequence (e.g. 4 for 0001, 1 for 0)
+    // When true, the volume backend renders this as a refractive isosurface
+    // (SDF density-proxy band -> implicit surface + Snell refraction) instead
+    // of as fog. Set by the SurfaceSDF render route. Maps to source_type=4 in
+    // GpuVDBVolume / VkVolumeInstance; shaders branch on it.
+    bool render_as_isosurface = false;
+    // When true, this volume is kept registered + visible ONLY for the GPU SSBO
+    // slot mapping (fluid Particles / splat-sphere render mode keeps the domain
+    // volume alive to avoid TLAS rebuild churn) but contributes NOTHING on the CPU.
+    // VDBVolume::hit returns false so the CPU BVH doesn't treat the domain AABB as
+    // an occluder — otherwise the box masked the discrete splat spheres INSIDE it
+    // (only wall-adjacent spheres, hit before the AABB entry, survived). The GPU is
+    // unaffected (it never calls VDBVolume::hit; it raymarches via the SSBO/SBT).
+    bool cpu_render_skip = false;
+    // IOR for the isosurface dielectric boundary (water 1.33, glass 1.5).
+    // Carried into GpuVDBVolume.ior / VkVolumeInstance ior reserved slot.
+    float render_isosurface_ior = 1.33f;
+    // Surface roughness 0..1 (GGX) for the isosurface dielectric.
+    float render_isosurface_roughness = 0.0f;
+    // Whitewater/foam strength 0..1 (curvature-driven) for the isosurface.
+    float render_isosurface_foam = 0.0f;
+    // Particle-foam (whitewater) look for the SurfaceSDF single-volume path:
+    // foam rides this volume's temperature channel and the iso shader marches
+    // it. Set from the domain foam_shader at sync. Tint + extinction multiplier.
+    Vec3  render_isosurface_foam_color = Vec3(0.95f, 0.97f, 1.0f);
+    float render_isosurface_foam_opacity = 0.0f;  // 0 → shader default
+
+    /**
+     * @brief Get object type identifier
+     */
+    std::string getObjectType() const { return "VDBVolume"; }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // GPU DATA PREPARATION
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    /**
+     * @brief Check if GPU data is ready
+     */
+    bool isGPUReady() const;
+    
+    /**
+     * @brief Ensure GPU data is uploaded
+     */
+    bool uploadToGPU();
+    
+    /**
+     * @brief Get GPU grid pointer for density
+     */
+    void* getDensityGridGPU() const;
+    
+    /**
+     * @brief Get GPU grid pointer for temperature (if available)
+     */
+    void* getTemperatureGridGPU() const;
+    
+    /**
+     * @brief Get GPU grid pointer for velocity (if available)
+     */
+    void* getVelocityGridGPU() const;
+    // Shader
+    std::shared_ptr<VolumeShader> volume_shader;
+    
+    // Density control
+    float density_scale = 1.0f;
+    float voxel_size = 0.1f;
+    float getVoxelSize() const { return voxel_size; }
+    Vec3 pivot_offset = Vec3(0); // Persistent offset for pivot adjustments
+private:
+    // VDB data reference
+    int vdb_volume_id = -1;
+    int vdb_sequence_id = -1;
+    bool procedural_volume = false;
+    
+    // Transform components
+    std::shared_ptr<Transform> transform_handle;
+    Matrix4x4 world_transform;
+    Matrix4x4 world_transform_inv;   
+    Vec3 position = Vec3(0);
+  
+    Vec3 rotation_euler = Vec3(0);  // Degrees
+    Vec3 scale_vec = Vec3(1);
+    
+    // Native VDB bounds (local space, from VDB file)
+    Vec3 local_bbox_min;
+    Vec3 local_bbox_max;
+    
+    // Cached world bounds
+    mutable AABB world_bounds_cache;
+    mutable bool world_bounds_dirty = true;
+    
+  
+    
+    // Animation
+    bool is_sequence = false;
+    std::string sequence_pattern; // e.g. "path/to/explosion_####.vdb"
+    int sequence_start_frame = 0;
+    int sequence_end_frame = 0;
+    
+    int current_frame = 0;
+    bool timeline_linked = true;
+    int frame_offset = 0;  // Offset from timeline frame
+    
+    // Sequence bounds consistency - store first frame's bbox for consistent sizing
+    Vec3 first_frame_bbox_min;
+    Vec3 first_frame_bbox_max;
+    bool has_first_frame_bounds = false;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // INTERNAL HELPERS
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    void updateTransformMatrix();
+    void updateBoundsFromVDB();
+    void invalidateWorldBounds() { world_bounds_dirty = true; }
+    void syncTransformStateFromHandle();
+    
+    /**
+     * @brief Transform AABB to world space
+     */
+    AABB transformAABB(const AABB& local_box) const;
+    
+
+};
+
+#endif // VDB_VOLUME_H
+

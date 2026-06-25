@@ -1,0 +1,57 @@
+// sim_fluid_free_surface_sor.comp
+// Free-surface SOR pressure solve. fluid_mask > 0.5 = fluid cell (p solved),
+// else air cell (p = 0 Dirichlet). Out-of-bounds = solid wall (no contribution).
+// Red-black coloring via parity push constant.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   boundary;   // unused (always closed-wall for APIC)
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int   iterations; // unused (host loops externally)
+    int   parity;     // 0 or 1 for red-black sweep
+} pc;
+
+layout(set = 0, binding = 0) buffer   Pressure   { float pressure[];   };
+layout(set = 0, binding = 1) readonly buffer Divergence { float divergence[]; };
+layout(set = 0, binding = 2) readonly buffer FluidMask  { float fluid_mask[];  };
+
+int cell_id(int i, int j, int k) { return i + j*pc.nx + k*pc.nx*pc.ny; }
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= pc.nx * pc.ny * pc.nz) return;
+
+    if (fluid_mask[id] < 0.5) { pressure[id] = 0.0; return; }
+
+    int i = id % pc.nx;
+    int j = (id / pc.nx) % pc.ny;
+    int k = id / (pc.nx * pc.ny);
+    if (((i + j + k) & 1) != pc.parity) return;
+
+    int  diagonal = 0;
+    float sum     = 0.0;
+
+    // i-1
+    if (i > 0) { ++diagonal; int n = cell_id(i-1,j,k); if (fluid_mask[n]>0.5) sum+=pressure[n]; }
+    // i+1
+    if (i < pc.nx-1) { ++diagonal; int n = cell_id(i+1,j,k); if (fluid_mask[n]>0.5) sum+=pressure[n]; }
+    // j-1
+    if (j > 0) { ++diagonal; int n = cell_id(i,j-1,k); if (fluid_mask[n]>0.5) sum+=pressure[n]; }
+    // j+1
+    if (j < pc.ny-1) { ++diagonal; int n = cell_id(i,j+1,k); if (fluid_mask[n]>0.5) sum+=pressure[n]; }
+    // k-1
+    if (k > 0) { ++diagonal; int n = cell_id(i,j,k-1); if (fluid_mask[n]>0.5) sum+=pressure[n]; }
+    // k+1
+    if (k < pc.nz-1) { ++diagonal; int n = cell_id(i,j,k+1); if (fluid_mask[n]>0.5) sum+=pressure[n]; }
+
+    if (diagonal == 0) return;
+
+    float h      = max(pc.voxel_size, 1e-6);
+    float inv_dt = pc.dt > 1e-8 ? 1.0/pc.dt : 0.0;
+    float rhs    = divergence[id] * h * h * inv_dt;
+    pressure[id] += pc.sor_omega * ((sum - rhs) / float(diagonal) - pressure[id]);
+}

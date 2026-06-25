@@ -1,0 +1,58 @@
+#version 460
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer BasePositions { float inPositions[]; };
+layout(std430, set = 0, binding = 1) readonly buffer BaseNormals   { float inNormals[]; };
+layout(std430, set = 0, binding = 2) readonly buffer BoneIDs       { ivec4 inBoneIDs[]; };
+layout(std430, set = 0, binding = 3) readonly buffer BoneWeights   { vec4 inBoneWeights[]; };
+layout(std430, set = 0, binding = 4) readonly buffer BoneMatrices  { mat4 bones[]; };
+layout(std430, set = 0, binding = 5) writeonly buffer AnimPositions { float outPositions[]; };
+layout(std430, set = 0, binding = 6) writeonly buffer AnimNormals   { float outNormals[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint vertexCount;
+    uint boneCount;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.vertexCount) return;
+
+    // Her kose icin bagli 4 kemik indeks ve agirligi
+    ivec4 bIDs = inBoneIDs[idx];
+    vec4  w    = inBoneWeights[idx];
+
+    // Ciltleme matrisi (Identity ile baslayip weighted toplam alabilir veya direk agirlikla toplayabilirsiniz)
+    mat4 skinMat = mat4(0.0);
+    // X, Y, Z, W bilesenleri icin
+    if (bIDs.x >= 0 && bIDs.x < pc.boneCount) skinMat += bones[bIDs.x] * w.x;
+    if (bIDs.y >= 0 && bIDs.y < pc.boneCount) skinMat += bones[bIDs.y] * w.y;
+    if (bIDs.z >= 0 && bIDs.z < pc.boneCount) skinMat += bones[bIDs.z] * w.z;
+    if (bIDs.w >= 0 && bIDs.w < pc.boneCount) skinMat += bones[bIDs.w] * w.w;
+
+    // Normalizasyon vs (Eger skinMat sifir cikarsa birim matris kullan)
+    if (w.x + w.y + w.z + w.w < 0.001) {
+        skinMat = mat4(1.0);
+    }
+
+    // C++ engine sends row-major matrices, but GLSL reads them as column-major.
+    // Therefore, skinMat is effectively the transpose of the actual bone matrix.
+    // We must transpose it back to apply the correct transformation.
+    mat4 M = transpose(skinMat);
+
+    // Orijinal pozisyon ve normal (xyz dizilimi)
+    vec4 localPos = vec4(inPositions[idx * 3 + 0], inPositions[idx * 3 + 1], inPositions[idx * 3 + 2], 1.0);
+    vec4 localNorm = vec4(inNormals[idx * 3 + 0], inNormals[idx * 3 + 1], inNormals[idx * 3 + 2], 0.0);
+
+    vec4 finalPos = M * localPos;
+    vec4 finalNorm = M * localNorm;
+
+    // Yeni pozisyon ve normali array'e geri yazalim
+    outPositions[idx * 3 + 0] = finalPos.x;
+    outPositions[idx * 3 + 1] = finalPos.y;
+    outPositions[idx * 3 + 2] = finalPos.z;
+
+    outNormals[idx * 3 + 0] = finalNorm.x;
+    outNormals[idx * 3 + 1] = finalNorm.y;
+    outNormals[idx * 3 + 2] = finalNorm.z;
+}

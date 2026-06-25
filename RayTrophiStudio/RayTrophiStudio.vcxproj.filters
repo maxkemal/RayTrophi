@@ -150,6 +150,9 @@
     <ClInclude Include="source\include\SimulationWorld.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\FractureGenerator.h">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\SimulationSystems.h">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClInclude>
@@ -426,6 +429,21 @@
     <ClInclude Include="source\include\OzzRuntime.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\src\Physics\Jolt\JoltSmokeTest.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Physics\Jolt\JoltWorld.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Physics\Jolt\JoltTypes.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\RigidBodySystem.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\SimulationComputeVulkanContext.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc">
@@ -593,6 +611,9 @@
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\SimulationWorld.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\FractureGenerator.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\SimulationSystems.cpp">
@@ -999,6 +1020,420 @@
     </ClCompile>
     <ClCompile Include="source\src\Viewport\ViewportSceneSync.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\AABBTree\AABBTreeBuilder.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\Color.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\Factory.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\IssueReporting.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\JobSystemSingleThreaded.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\JobSystemThreadPool.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\JobSystemWithBarrier.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\LinearCurve.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\Memory.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\Profiler.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\RTTI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\Semaphore.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\StringTools.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\TickCounter.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Geometry\ConvexHullBuilder.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Geometry\ConvexHullBuilder2D.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Geometry\Indexify.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Geometry\OrientedBox.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Math\Vec3.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStream.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamBinaryIn.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamBinaryOut.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamIn.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamOut.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamTextIn.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamTextOut.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\SerializableObject.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\TypeDeclarations.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\Body.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\BodyCreationSettings.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\BodyInterface.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\BodyManager.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\MassProperties.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\MotionProperties.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Character\Character.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Character\CharacterBase.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Character\CharacterVirtual.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\BroadPhase\BroadPhase.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\BroadPhase\BroadPhaseBruteForce.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\BroadPhase\BroadPhaseQuadTree.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\BroadPhase\QuadTree.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CastConvexVsTriangles.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CastSphereVsTriangles.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CollideConvexVsTriangles.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CollideSphereVsTriangles.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CollisionDispatch.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CollisionGroup.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\EstimateCollisionResponse.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\GroupFilter.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\GroupFilterTable.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\ManifoldBetweenTwoFaces.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\NarrowPhaseQuery.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\NarrowPhaseStats.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\PhysicsMaterial.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\PhysicsMaterialSimple.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\BoxShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\CapsuleShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\CompoundShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\ConvexHullShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\ConvexShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\CylinderShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\DecoratedShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\EmptyShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\HeightFieldShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\MeshShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\MutableCompoundShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\OffsetCenterOfMassShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\PlaneShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\RotatedTranslatedShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\ScaledShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\Shape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\SphereShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\StaticCompoundShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\TaperedCapsuleShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\TaperedCylinderShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\TriangleShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\TransformedShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\ConeConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\Constraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\ConstraintManager.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\ContactConstraintManager.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\DistanceConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\FixedConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\GearConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\HingeConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\MotorSettings.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PathConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PathConstraintPath.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PathConstraintPathHermite.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PointConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PulleyConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\RackAndPinionConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\SixDOFConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\SliderConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\SpringSettings.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\SwingTwistConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\TwoBodyConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\DeterminismLog.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\IslandBuilder.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\LargeIslandSplitter.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\PhysicsScene.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\PhysicsSystem.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\PhysicsUpdateContext.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Ragdoll\Ragdoll.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\SoftBody\SoftBodyCreationSettings.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\SoftBody\SoftBodyMotionProperties.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\SoftBody\SoftBodyShape.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\SoftBody\SoftBodySharedSettings.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\StateRecorderImpl.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\MotorcycleController.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\TrackedVehicleController.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleAntiRollBar.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleCollisionTester.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleConstraint.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleController.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleDifferential.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleEngine.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleTrack.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleTransmission.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\Wheel.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\WheeledVehicleController.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\RegisterTypes.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Renderer\DebugRenderer.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Renderer\DebugRendererPlayback.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Renderer\DebugRendererRecorder.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Renderer\DebugRendererSimple.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Skeleton\SkeletalAnimation.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Skeleton\Skeleton.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Skeleton\SkeletonMapper.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Skeleton\SkeletonPose.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\TriangleSplitter\TriangleSplitter.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\TriangleSplitter\TriangleSplitterBinning.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\TriangleSplitter\TriangleSplitterMean.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Device\SimulationComputeVulkan.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Jolt\JoltSmokeTest.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Jolt\JoltWorld.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Jolt\RigidBodySystem.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\TriangleMesh.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
