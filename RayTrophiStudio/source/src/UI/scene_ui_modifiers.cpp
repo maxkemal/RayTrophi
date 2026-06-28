@@ -30,6 +30,7 @@
 #include <cmath>
 #include <filesystem>
 #include <SDL.h>
+#include <omp.h>
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern std::unique_ptr<Backend::IBackend> g_backend;   // Phase 3d: active render backend
@@ -1008,8 +1009,8 @@ bool computeTriangleUvFrame(const Triangle& tri, const Vec3& normal_hint, Vec3& 
     const Vec3 p2 = tri.getVertexPosition(2);
     const Vec3 edge1 = p1 - p0;
     const Vec3 edge2 = p2 - p0;
-    const Vec2 deltaUV1 = tri.t1 - tri.t0;
-    const Vec2 deltaUV2 = tri.t2 - tri.t0;
+    const Vec2 deltaUV1 = tri.t_ref(1) - tri.t_ref(0);
+    const Vec2 deltaUV2 = tri.t_ref(2) - tri.t_ref(0);
     const float det = deltaUV1.u * deltaUV2.v - deltaUV2.u * deltaUV1.v;
     if (std::abs(det) <= 1e-6f) {
         return false;
@@ -1171,6 +1172,8 @@ bool resolveMirroredMeshPaintHit(UIContext& ctx,
 
     out_hit = source_hit;
     out_hit.triangle = best_tri.get();
+    out_hit.tri_mesh = best_tri->parentMesh.get();   // Faz 1: (mesh, faceIndex) handle
+    out_hit.tri_face = best_tri->faceIndex;
     out_hit.point = best_point;
     out_hit.normal = best_normal;
     out_hit.uv = best_uv;
@@ -1763,8 +1766,8 @@ void drawMeshPaintPreview(UIContext& ctx, const HitRecord& rec, const Paint::Mes
         const Vec3 p2 = rec.triangle->getVertexPosition(2);
         const Vec3 edge1 = p1 - p0;
         const Vec3 edge2 = p2 - p0;
-        const Vec2 deltaUV1 = rec.triangle->t1 - rec.triangle->t0;
-        const Vec2 deltaUV2 = rec.triangle->t2 - rec.triangle->t0;
+        const Vec2 deltaUV1 = rec.triangle->t_ref(1) - rec.triangle->t_ref(0);
+        const Vec2 deltaUV2 = rec.triangle->t_ref(2) - rec.triangle->t_ref(0);
         
         const float f = 1.0f / (deltaUV1.u * deltaUV2.v - deltaUV2.u * deltaUV1.v);
         if (std::isfinite(f) && std::abs(deltaUV1.u * deltaUV2.v - deltaUV2.u * deltaUV1.v) > 1e-6f) {
@@ -2184,6 +2187,7 @@ void SceneUI::activateEditWorkspace(UIContext& ctx) {
         return;
     }
     const std::string selectedNodeName = ctx.selection.selected.object->getNodeName();
+    SCENE_LOG_INFO(("[activateEditWorkspace] Activating Edit workspace for: " + selectedNodeName).c_str());
 
     ensureCPUSyncForPicking(ctx);
 
@@ -2205,6 +2209,7 @@ void SceneUI::activateEditWorkspace(UIContext& ctx) {
         editable_mesh_cache = EditableMeshCache{};
     }
     mesh_overlay_cache = MeshOverlayCache{};
+    SCENE_LOG_INFO("[activateEditWorkspace] Workspace activated successfully.");
 }
 
 void SceneUI::activateSculptWorkspace(UIContext& ctx) {
@@ -2214,6 +2219,7 @@ void SceneUI::activateSculptWorkspace(UIContext& ctx) {
         return;
     }
     const std::string selectedNodeName = ctx.selection.selected.object->getNodeName();
+    SCENE_LOG_INFO(("[activateSculptWorkspace] Activating Sculpt workspace for: " + selectedNodeName).c_str());
     auto selectedTriangle = std::dynamic_pointer_cast<Triangle>(ctx.selection.selected.object);
     const bool selectedIsTerrain = selectedTriangle && selectedTriangle->terrain_id != -1;
 
@@ -2238,13 +2244,42 @@ void SceneUI::activateSculptWorkspace(UIContext& ctx) {
     }
     auto meshIt = mesh_cache.find(selectedNodeName);
     if (meshIt != mesh_cache.end()) {
-        for (auto& entry : meshIt->second) {
+        const auto& entries = meshIt->second;
+        const int numEntries = (int)entries.size();
+
+        // Pre-calculate matrices to avoid thread-unsafe lazy writes in Transform::getFinal()
+        std::unordered_map<Transform*, std::pair<Matrix4x4, Matrix4x4>> xformMap;
+        for (const auto& entry : entries) {
             if (entry.second) {
-                entry.second->updateTransformedVertices();
+                Transform* tf = entry.second->getTransformPtr();
+                if (tf && xformMap.find(tf) == xformMap.end()) {
+                    xformMap[tf] = { tf->getFinal(), tf->getNormalTransform() };
+                }
+            }
+        }
+
+        int numThreads = omp_get_max_threads();
+        if (numThreads < 1) numThreads = 1;
+
+        #pragma omp parallel for schedule(static) num_threads(numThreads) if(numEntries >= 4096)
+        for (int i = 0; i < numEntries; ++i) {
+            if (entries[i].second) {
+                Transform* tf = entries[i].second->getTransformPtr();
+                if (tf) {
+                    const auto& xf = xformMap.at(tf);
+                    entries[i].second->updateTransformedVerticesWith(xf.first, xf.second);
+                } else {
+                    entries[i].second->updateTransformedVerticesWith(Matrix4x4::identity(), Matrix4x4::identity());
+                }
             }
         }
         objects_needing_cpu_sync.erase(selectedNodeName);
     }
+
+    // Eagerly pre-build the editable mesh cache, control graph, and PBVH to avoid first-stroke lockup
+    ensureEditableMeshCache(ctx, selectedNodeName);
+    ensureSculptControlGraph(ctx, selectedNodeName);
+    ensureSculptPBVH(ctx, selectedNodeName);
     extern bool g_bvh_rebuild_pending;
     g_bvh_rebuild_pending = true;
 
@@ -2268,6 +2303,7 @@ void SceneUI::activateSculptWorkspace(UIContext& ctx) {
         // ones alone, so the object stays in whatever shading mode it already had.
         repairSculptEntryShadingNormals(ctx, selectedNodeName, true);
     }
+    SCENE_LOG_INFO("[activateSculptWorkspace] Workspace activated successfully.");
 }
 
 void SceneUI::drawModifiersPanel(UIContext& ctx) {

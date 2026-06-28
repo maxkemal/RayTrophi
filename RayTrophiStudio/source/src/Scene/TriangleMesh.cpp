@@ -1,40 +1,36 @@
-﻿/*
-* =========================================================================
-* Project:       RayTrophi Studio
-* Repository:    https://github.com/maxkemal/RayTrophi
-* File:          TriangleMesh.cpp
-* Author:        Kemal Demirtas
-* Date:          June 2026
-* License:       [License Information - e.g. Proprietary / MIT / etc.]
-* =========================================================================
-*/
 #include "TriangleMesh.h"
-#include "ParallelBVHNode.h" // Optional, can be stubbed out if disabled
+#include "ParallelBVHNode.h"
 #include "Transform.h"
+#include <algorithm>
+
+TriangleMesh::TriangleMesh() {
+    geometry = std::make_shared<DNA::GeometryDetail>();
+}
 
 void TriangleMesh::clear() {
-    positions.clear();
-    normals.clear();
-    uvs.clear();
-    indices.clear();
-    materialIDs.clear();
+    if (geometry) {
+        geometry->indices.clear();
+        geometry->clear_deltas();
+        geometry->resize_vertices(0);
+    }
     local_bvh = nullptr;
 }
 
 void TriangleMesh::build_local_bvh() {
-    // For now, as per user request, we can skip BVH if not needed, 
-    // or build a basic one. We'll leave it empty to fallback to naive loop
-    // or implement a custom BVH tree later.
     local_bvh = nullptr; 
 }
 
 bool TriangleMesh::bounding_box(float time0, float time1, AABB& output_box) const {
-    if (positions.empty()) return false;
+    if (!geometry || geometry->get_vertex_count() == 0) return false;
+    
+    const Vec3* positions = geometry->get_attribute_data<Vec3>("P");
+    if (!positions) return false;
     
     Vec3 min_pt = positions[0];
     Vec3 max_pt = positions[0];
     
-    for (size_t i = 1; i < positions.size(); ++i) {
+    size_t count = geometry->get_vertex_count();
+    for (size_t i = 1; i < count; ++i) {
         min_pt = Vec3(
             (std::min)(min_pt.x, positions[i].x),
             (std::min)(min_pt.y, positions[i].y),
@@ -75,7 +71,7 @@ bool TriangleMesh::bounding_box(float time0, float time1, AABB& output_box) cons
 }
 
 bool TriangleMesh::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool ignore_volumes) const {
-    if (!visible) return false;
+    if (!visible || !geometry || geometry->indices.empty()) return false;
     
     Ray local_r = r;
     if (transform) {
@@ -87,17 +83,23 @@ bool TriangleMesh::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, b
     bool hit_anything = false;
     float closest_so_far = t_max;
     HitRecord temp_rec;
+    size_t hit_face = 0;
 
     if (local_bvh) {
-        // If local BVH exists, intersect with it
-        // hit_anything = local_bvh->hit(local_r, t_min, closest_so_far, temp_rec, ignore_volumes);
+        // Reserved for future local BVH integration
     } else {
-        // Naive iteration (Warning: very slow for high poly without BVH!)
-        size_t tri_count = indices.size() / 3;
+        const Vec3* positions = geometry->get_attribute_data<Vec3>("P");
+        const Vec3* normals = geometry->get_attribute_data<Vec3>("N");
+        const Vec2* uvs = geometry->get_attribute_data<Vec2>("uv");
+        const uint16_t* materialIDs = geometry->get_attribute_data<uint16_t>("materialID");
+        
+        if (!positions) return false;
+
+        size_t tri_count = geometry->indices.size() / 3;
         for (size_t i = 0; i < tri_count; ++i) {
-            uint32_t i0 = indices[i * 3 + 0];
-            uint32_t i1 = indices[i * 3 + 1];
-            uint32_t i2 = indices[i * 3 + 2];
+            uint32_t i0 = geometry->indices[i * 3 + 0];
+            uint32_t i1 = geometry->indices[i * 3 + 1];
+            uint32_t i2 = geometry->indices[i * 3 + 2];
             
             const Vec3& v0 = positions[i0];
             const Vec3& v1 = positions[i1];
@@ -126,14 +128,15 @@ bool TriangleMesh::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, b
             if (t > t_min && t < closest_so_far) {
                 closest_so_far = t;
                 hit_anything = true;
-                
+                hit_face = i;
+
                 temp_rec.t = t;
                 temp_rec.u = u;
                 temp_rec.v = v;
                 temp_rec.point = local_r.at(t);
                 
                 // Normal interpolation
-                if (!normals.empty()) {
+                if (normals) {
                     const Vec3& n0 = normals[i0];
                     const Vec3& n1 = normals[i1];
                     const Vec3& n2 = normals[i2];
@@ -147,14 +150,14 @@ bool TriangleMesh::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, b
                 }
                 
                 // UV interpolation
-                if (!uvs.empty()) {
+                if (uvs) {
                     const Vec2& uv0 = uvs[i0];
                     const Vec2& uv1 = uvs[i1];
                     const Vec2& uv2 = uvs[i2];
                     temp_rec.uv = (1.0f - u - v) * uv0 + u * uv1 + v * uv2;
                 }
                 
-                if (!materialIDs.empty()) {
+                if (materialIDs) {
                     temp_rec.materialID = materialIDs[i];
                 }
             }
@@ -163,6 +166,8 @@ bool TriangleMesh::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, b
     
     if (hit_anything) {
         rec = temp_rec;
+        rec.tri_mesh = const_cast<TriangleMesh*>(this);   // Faz 1: (mesh, faceIndex) handle
+        rec.tri_face = static_cast<uint32_t>(hit_face);
         if (transform) {
             Matrix4x4 mat = transform->getMatrix();
             Matrix4x4 normMat = transform->getNormalTransform();

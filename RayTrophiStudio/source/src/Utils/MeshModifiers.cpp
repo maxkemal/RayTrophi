@@ -1,4 +1,5 @@
 #include "MeshModifiers.h"
+#include "TriangleProxyConverter.h"
 #include "SimulationCompute.h"   // shared Vulkan compute backend (GPU subdivision)
 #include "globals.h"             // g_gpu_subdivide_enabled, kGpuSubdivideMinTris, SCENE_LOG_INFO
 #include <algorithm>
@@ -104,7 +105,7 @@ namespace MeshModifiers {
         void subdividePodOnce(std::vector<PodTri>& mesh) {
             const int n = static_cast<int>(mesh.size());
             std::vector<PodTri> next(static_cast<size_t>(n) * 4);
-            #pragma omp parallel for schedule(static) if(n >= 2048)
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static) if(n >= 2048)
             for (int ti = 0; ti < n; ++ti) {
                 const PodTri& tri = mesh[static_cast<size_t>(ti)];
                 const Vec3& v0 = tri.v[0].pos; const Vec3& v1 = tri.v[1].pos; const Vec3& v2 = tri.v[2].pos;
@@ -136,15 +137,38 @@ namespace MeshModifiers {
                 const std::vector<PodTri>& pod, const PodMeshMeta& meta, bool transformVertices) {
             const int n = static_cast<int>(pod.size());
             std::vector<std::shared_ptr<Triangle>> out(static_cast<size_t>(n));
-            #pragma omp parallel for schedule(static) if(n >= 2048)
+
+            auto sharedGeom = std::make_shared<OriginalMeshGeometry>();
+            sharedGeom->positions.resize(static_cast<size_t>(n) * 3);
+            sharedGeom->normals.resize(static_cast<size_t>(n) * 3);
+
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static) if(n >= 2048)
             for (int i = 0; i < n; ++i) {
                 const PodTri& t = pod[static_cast<size_t>(i)];
+
+                const size_t baseIdx = static_cast<size_t>(i) * 3;
+                sharedGeom->positions[baseIdx + 0] = t.v[0].pos;
+                sharedGeom->positions[baseIdx + 1] = t.v[1].pos;
+                sharedGeom->positions[baseIdx + 2] = t.v[2].pos;
+                sharedGeom->normals[baseIdx + 0] = t.v[0].nrm;
+                sharedGeom->normals[baseIdx + 1] = t.v[1].nrm;
+                sharedGeom->normals[baseIdx + 2] = t.v[2].nrm;
+
                 auto tri = std::make_shared<Triangle>(
                     t.v[0].pos, t.v[1].pos, t.v[2].pos,
                     t.v[0].nrm, t.v[1].nrm, t.v[2].nrm,
                     t.v[0].uv,  t.v[1].uv,  t.v[2].uv, t.mat);
+                
                 tri->setTransformHandle(meta.transform);
                 tri->setNodeName(meta.nodeName);
+                
+                tri->setAssimpVertexIndices(
+                    static_cast<unsigned int>(baseIdx + 0),
+                    static_cast<unsigned int>(baseIdx + 1),
+                    static_cast<unsigned int>(baseIdx + 2)
+                );
+                tri->setOriginalGeometry(sharedGeom);
+
                 // Flat path matches the old SubdivideSubD (bbox only); the Smooth path
                 // mutated positions post-construction so it also refreshed transformed verts.
                 if (transformVertices) tri->updateTransformedVertices();
@@ -746,6 +770,10 @@ namespace MeshModifiers {
         }
 
         // ---- Triangulate (post-CC faces are quads) -> Triangle objects ----
+        auto sharedGeom = std::make_shared<OriginalMeshGeometry>();
+        sharedGeom->positions = P;
+        sharedGeom->normals = VN;
+
         std::vector<std::shared_ptr<Triangle>> out;
         out.reserve(F.size() * 2);
         auto emitTri = [&](int a, int b, int c,
@@ -755,6 +783,12 @@ namespace MeshModifiers {
                 P[a], P[b], P[c], VN[a], VN[b], VN[c], ua, ub, uc, mat);
             t->setTransformHandle(sharedTransform);
             t->setNodeName(nodeName);
+            t->setOriginalGeometry(sharedGeom);
+            t->setAssimpVertexIndices(
+                static_cast<unsigned int>(a),
+                static_cast<unsigned int>(b),
+                static_cast<unsigned int>(c)
+            );
             t->updateTransformedVertices();
             t->update_bounding_box();
             out.push_back(std::move(t));
@@ -1069,7 +1103,7 @@ namespace MeshModifiers {
             std::vector<std::vector<std::pair<int, float>>> rows(outCount);
 
             // Vertex points [0, V): same classification as newVertPt in CatmullClarkSubD.
-            #pragma omp parallel for schedule(dynamic, 512) if(V >= 4096)
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(dynamic, 512) if(V >= 4096)
             for (int v = 0; v < V; ++v) {
                 std::vector<std::pair<int, float>>& r = rows[v];
                 if (vFaceCnt[v] == 0 || vSharpCnt[v] >= 3) {
@@ -1097,7 +1131,7 @@ namespace MeshModifiers {
             }
 
             // Edge points [V, V+E): (1-σ)*smoothEP + σ*mid, boundary = mid.
-            #pragma omp parallel for schedule(dynamic, 512) if(E >= 4096)
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(dynamic, 512) if(E >= 4096)
             for (int i = 0; i < E; ++i) {
                 std::vector<std::pair<int, float>>& r = rows[V + i];
                 const EdgeKey& e = edgeList[i];
@@ -1115,7 +1149,7 @@ namespace MeshModifiers {
             }
 
             // Face points [V+E, V+E+Fn): centroid.
-            #pragma omp parallel for schedule(static) if(Fn >= 4096)
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static) if(Fn >= 4096)
             for (int f = 0; f < Fn; ++f) {
                 std::vector<std::pair<int, float>>& r = rows[faceBase + f];
                 const int k = static_cast<int>(F[f].size());
@@ -1126,7 +1160,7 @@ namespace MeshModifiers {
             // Sort + merge duplicate input ids per row (rows are independent → parallel), then
             // prefix-sum the row lengths and flatten to CSR (idx ascending within each row).
             std::vector<int> rowLen(outCount, 0);
-            #pragma omp parallel for schedule(dynamic, 512) if(outCount >= 4096)
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(dynamic, 512) if(outCount >= 4096)
             for (int o = 0; o < outCount; ++o) {
                 std::vector<std::pair<int, float>>& r = rows[o];
                 if (r.empty()) continue;
@@ -1149,7 +1183,7 @@ namespace MeshModifiers {
             for (int o = 0; o < outCount; ++o) sl.off[o + 1] = sl.off[o] + rowLen[o];
             sl.idx.resize(sl.off[sl.outCount]);
             sl.w.resize(sl.off[sl.outCount]);
-            #pragma omp parallel for schedule(dynamic, 512) if(outCount >= 4096)
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(dynamic, 512) if(outCount >= 4096)
             for (int o = 0; o < outCount; ++o) {
                 int p = sl.off[o];
                 for (const auto& kv : rows[o]) { sl.idx[p] = kv.first; sl.w[p] = kv.second; ++p; }
@@ -1419,7 +1453,7 @@ namespace MeshModifiers {
         for (const auto& sl : plan.levels) {
             std::vector<Vec3> next(sl.outCount);
             const int n = sl.outCount;
-            #pragma omp parallel for schedule(static) if(n >= 4096)
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static) if(n >= 4096)
             for (int o = 0; o < n; ++o) {
                 Vec3 acc(0.0f, 0.0f, 0.0f);
                 for (int k = sl.off[o]; k < sl.off[o + 1]; ++k)
@@ -1433,7 +1467,7 @@ namespace MeshModifiers {
         // ---- Normals: Newell per FINAL FACE (quad), gathered per vertex (matches ref) ----
         const int numFaces = static_cast<int>(plan.faceVertOff.size()) - 1;
         std::vector<Vec3> faceN(numFaces);
-        #pragma omp parallel for schedule(static) if(numFaces >= 4096)
+        #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static) if(numFaces >= 4096)
         for (int f = 0; f < numFaces; ++f) {
             Vec3 nrm(0.0f, 0.0f, 0.0f);
             const int beg = plan.faceVertOff[f], end = plan.faceVertOff[f + 1];
@@ -1448,7 +1482,7 @@ namespace MeshModifiers {
             faceN[f] = nrm;
         }
         outNormals.assign(plan.finalVertCount, Vec3(0.0f, 0.0f, 0.0f));
-        #pragma omp parallel for schedule(static) if(plan.finalVertCount >= 4096)
+        #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static) if(plan.finalVertCount >= 4096)
         for (int v = 0; v < plan.finalVertCount; ++v) {
             Vec3 acc(0.0f, 0.0f, 0.0f);
             for (int k = plan.vfaceOff[v]; k < plan.vfaceOff[v + 1]; ++k)
@@ -1640,26 +1674,20 @@ namespace MeshModifiers {
         const auto _ccT2 = std::chrono::high_resolution_clock::now();
 
         const int nTris = static_cast<int>(plan.triMat.size());
-        std::vector<std::shared_ptr<Triangle>> out(static_cast<size_t>(nTris));
-        #pragma omp parallel for schedule(static) if(nTris >= 2048)
-        for (int t = 0; t < nTris; ++t) {
-            const uint32_t i0 = plan.triIndices[t * 3 + 0];
-            const uint32_t i1 = plan.triIndices[t * 3 + 1];
-            const uint32_t i2 = plan.triIndices[t * 3 + 2];
-            auto tri = std::make_shared<Triangle>(
-                pos[i0], pos[i1], pos[i2],
-                nrm[i0], nrm[i1], nrm[i2],
-                plan.triUV[t * 3 + 0], plan.triUV[t * 3 + 1], plan.triUV[t * 3 + 2],
-                plan.triMat[t]);
-            // Carry the source polygon id so sculpt/shading can compute one normal per quad/ngon
-            // (loop normals) instead of per split triangle (the visible triangulation diagonal).
-            tri->setFaceIndex((t < static_cast<int>(plan.triFace.size())) ? plan.triFace[t] : -1);
-            tri->setTransformHandle(sharedTransform);
-            tri->setNodeName(nodeName);
-            tri->updateTransformedVertices();
-            tri->update_bounding_box();
-            out[static_cast<size_t>(t)] = std::move(tri);
-        }
+        std::vector<std::shared_ptr<Triangle>> out;
+        
+        // Faz 1 (B): emit lightweight facade triangles over a shared SoA mesh instead of fat
+        // standalone Triangles. One-line revert to convertFromRawArrays if a regression shows.
+        TriangleProxyConverter::convertFromRawArraysToMesh(
+            pos,
+            nrm,
+            plan.triIndices,
+            plan.triUV,
+            plan.triMat,
+            plan.triFace,
+            sharedTransform,
+            nodeName,
+            out);
 
         {
             const auto _ccT3 = std::chrono::high_resolution_clock::now();
@@ -1673,6 +1701,7 @@ namespace MeshModifiers {
                 levels, nTris, ms(_ccT0, _ccT1), ms(_ccT1, _ccT2), ms(_ccT2, _ccT3), ms(_ccT0, _ccT3));
             SCENE_LOG_INFO(buf);
         }
+        
         return out;
     }
 
@@ -1754,6 +1783,15 @@ namespace MeshModifiers {
                 currentMesh = catmullClarkSubDStencil(currentMesh, lvl, creaseFn);
             }
         }
+
+        // [PERF FIX] The convertToProxyMesh call is a no-op because its return value (TriangleMesh)
+        // is discarded, yet it performs an extremely expensive single-threaded vertex weld over
+        // millions of triangles. Removing it saves 6.4 seconds and gigabytes of RAM in ModifierStack::evaluate.
+        /*
+        if (!modifiers.empty()) {
+            TriangleProxyConverter::convertToProxyMesh(currentMesh);
+        }
+        */
 
         return currentMesh;
     }

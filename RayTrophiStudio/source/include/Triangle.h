@@ -27,6 +27,7 @@
 #include <SDL.h>
 #include <SDL_image.h>
 #include <OptixWrapper.h>
+#include "TriangleMesh.h"
 
 // Forward declarations
 class Material;
@@ -51,16 +52,19 @@ struct deep_ptr {
     void reset(T* x = nullptr) { p.reset(x); }
 };
 
+struct OriginalMeshGeometry {
+    std::vector<Vec3> positions;
+    std::vector<Vec3> normals;
+};
+
 /**
  * @brief Consolidated vertex data structure for memory optimization
- * Replaces 9 separate Vec3 members (original, transformed, current) with this
- * 48 bytes vs 108 bytes - 55% savings on vertex data alone
+ * Stores only world-space position and normal. Original bind-pose data is
+ * stored in the shared OriginalMeshGeometry structure to save massive memory.
  */
 struct TriangleVertexData {
-    Vec3 position;       // Current/transformed position
-    Vec3 original;       // Bind-pose original position
-    Vec3 normal;         // Current/transformed normal
-    Vec3 originalNormal; // Bind-pose normal
+    Vec3 position;       // Current/transformed position (world space)
+    Vec3 normal;         // Current/transformed normal (world space)
 };
 
 /**
@@ -70,6 +74,14 @@ struct TriangleVertexData {
 struct SkinnedTriangleData {
     std::vector<std::vector<std::pair<int, float>>> vertexBoneWeights; // [vertex][(boneIndex, weight)]
     std::vector<Vec3> originalVertexPositions; // For skinning calculations
+};
+
+struct TriangleOptionalData {
+    std::shared_ptr<OriginalMeshGeometry> originalGeometry;
+    std::array<unsigned int, 3> assimpVertexIndices = { 0, 0, 0 };
+    int faceIndex = -1;
+    std::shared_ptr<Texture> texture;
+    deep_ptr<OptixGeometryData::TextureBundle> textureBundle;
 };
 
 /**
@@ -85,14 +97,23 @@ struct SkinnedTriangleData {
  * 
  * Total estimated savings: 612 -> ~146 bytes per triangle (75% reduction)
  */
+// LegacyTriangleData removed for inline flat layout
+
 class Triangle : public Hittable {
 public:
+    // Facade/View fields referencing a TriangleMesh
+    std::shared_ptr<TriangleMesh> parentMesh = nullptr;
+    uint32_t faceIndex = 0;
+
     // ========================================================================
     // Constructors
     // ========================================================================
     
     Triangle();
     
+    // Facade constructor referencing a TriangleMesh
+    Triangle(std::shared_ptr<TriangleMesh> parent, uint32_t faceIdx);
+
     // New optimized constructor with material ID
     Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
              const Vec3& na, const Vec3& nb, const Vec3& nc,
@@ -105,64 +126,203 @@ public:
              const Vec2& ta, const Vec2& tb, const Vec2& tc,
              std::shared_ptr<Material> m);
 
-    inline uint16_t getMaterialID() const { return materialID; }
+    inline uint16_t getMaterialID() const {
+        if (parentMesh && parentMesh->geometry) {
+            const uint16_t* matIDs = parentMesh->geometry->get_attribute_data<uint16_t>("materialID");
+            if (matIDs && !parentMesh->geometry->indices.empty()) {
+                uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + 0];
+                return matIDs[globalIndex];
+            }
+        }
+        return materialID;
+    }
+
+    inline void setMaterialID(uint16_t id) {
+        if (parentMesh && parentMesh->geometry) {
+            uint16_t* matIDs = parentMesh->geometry->get_attribute_data_mut<uint16_t>("materialID");
+            if (matIDs && !parentMesh->geometry->indices.empty()) {
+                uint32_t i0 = parentMesh->geometry->indices[faceIndex * 3 + 0];
+                uint32_t i1 = parentMesh->geometry->indices[faceIndex * 3 + 1];
+                uint32_t i2 = parentMesh->geometry->indices[faceIndex * 3 + 2];
+                matIDs[i0] = id;
+                matIDs[i1] = id;
+                matIDs[i2] = id;
+                return;
+            }
+        }
+        materialID = id;
+    }
 
     // ========================================================================
     // Vertex Access Methods (replace direct member access)
     // ========================================================================
     
-    inline const Vec3& getVertexPosition(int i) const { return vertices[i].position; }
+    inline const Vec3& getVertexPosition(int i) const {
+        if (parentMesh && parentMesh->geometry) {
+            const Vec3* positions = parentMesh->geometry->get_positions();
+            if (positions) {
+                uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
+                return positions[globalIndex];
+            }
+        }
+        return svr()[i].position;
+    }
+    
     inline void setVertexPosition(int i, const Vec3& pos) { 
-        vertices[i].position = pos; 
-        aabbDirty = true;
+        if (parentMesh && parentMesh->geometry) {
+            Vec3* positions = parentMesh->geometry->get_positions_mut();
+            if (positions) {
+                uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
+                positions[globalIndex] = pos;
+                vertexPositionsDirty = true;
+                return;
+            }
+        }
+        svw()[i].position = pos;
         vertexPositionsDirty = true;
     }
     
-    inline const Vec3& getVertexNormal(int i) const { return vertices[i].normal; }
+    inline const Vec3& getVertexNormal(int i) const {
+        if (parentMesh && parentMesh->geometry) {
+            const Vec3* normals = parentMesh->geometry->get_normals();
+            if (normals) {
+                uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
+                return normals[globalIndex];
+            }
+        }
+        return svr()[i].normal;
+    }
+    
     inline void setVertexNormal(int i, const Vec3& normal) { 
-        vertices[i].normal = normal; 
+        if (parentMesh && parentMesh->geometry) {
+            Vec3* normals = parentMesh->geometry->get_normals_mut();
+            if (normals) {
+                uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
+                normals[globalIndex] = normal;
+                vertexPositionsDirty = true;
+                return;
+            }
+        }
+        svw()[i].normal = normal;
         vertexPositionsDirty = true;
     }
     
-    inline const Vec3& getOriginalVertexPosition(int i) const { return vertices[i].original; }
-    inline void setOriginalVertexPosition(int i, const Vec3& pos) { vertices[i].original = pos; }
+    const Vec3& getOriginalVertexPosition(int i) const;
+    void setOriginalVertexPosition(int i, const Vec3& pos);
     
-    inline const Vec3& getOriginalVertexNormal(int i) const { return vertices[i].originalNormal; }
-    inline void setOriginalVertexNormal(int i, const Vec3& normal) { vertices[i].originalNormal = normal; }
-
-    // Source polygon (quad/ngon) id this triangle was split from, or -1 if none. Lets sculpt /
-    // shading compute one normal per polygon (loop normals) instead of per split triangle.
-    inline int getFaceIndex() const { return faceIndex; }
-    inline void setFaceIndex(int idx) { faceIndex = idx; }
+    const Vec3& getOriginalVertexNormal(int i) const;
+    void setOriginalVertexNormal(int i, const Vec3& normal);
 
     // Convenience accessors for backward compatibility
-    inline Vec3 getV0() const { return vertices[0].position; }
-    inline Vec3 getV1() const { return vertices[1].position; }
-    inline Vec3 getV2() const { return vertices[2].position; }
-    inline Vec3 getN0() const { return vertices[0].normal; }
-    inline Vec3 getN1() const { return vertices[1].normal; }
-    inline Vec3 getN2() const { return vertices[2].normal; }
+    inline Vec3 getV0() const { return getVertexPosition(0); }
+    inline Vec3 getV1() const { return getVertexPosition(1); }
+    inline Vec3 getV2() const { return getVertexPosition(2); }
+    inline Vec3 getN0() const { return getVertexNormal(0); }
+    inline Vec3 getN1() const { return getVertexNormal(1); }
+    inline Vec3 getN2() const { return getVertexNormal(2); }
 
     // ========================================================================
     // Material Access (ID-based)
     // ========================================================================
     
-  
-    inline void setMaterialID(uint16_t id) { materialID = id; }
-    
     // Legacy compatibility - fetches from MaterialManager
     std::shared_ptr<Material> getMaterial() const;
     void setMaterial(const std::shared_ptr<Material>& mat);
 
-    // ========================================================================
-    // Transform Management
-    // ========================================================================
+    // ============================================================================
+    // Direct Reference Accessors (Backward Compatibility)
+    // ============================================================================
+    inline Vec3& v_pos(int i) {
+        if (parentMesh && parentMesh->geometry) {
+            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
+            Vec3* posData = parentMesh->geometry->get_positions_mut();
+            if (posData) return posData[globalIndex];
+        }
+        return svw()[i].position;
+    }
+
+    inline const Vec3& v_pos(int i) const {
+        if (parentMesh && parentMesh->geometry) {
+            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
+            const Vec3* posData = parentMesh->geometry->get_positions();
+            if (posData) return posData[globalIndex];
+        }
+        return svr()[i].position;
+    }
+
+    Vec3& v_orig(int i);
+    const Vec3& v_orig(int i) const;
+
+    inline Vec3& v_norm(int i) {
+        if (parentMesh && parentMesh->geometry) {
+            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
+            Vec3* normData = parentMesh->geometry->get_normals_mut();
+            if (normData) return normData[globalIndex];
+        }
+        return svw()[i].normal;
+    }
+
+    inline const Vec3& v_norm(int i) const {
+        if (parentMesh && parentMesh->geometry) {
+            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
+            const Vec3* normData = parentMesh->geometry->get_normals();
+            if (normData) return normData[globalIndex];
+        }
+        return svr()[i].normal;
+    }
+
+    Vec3& v_orig_norm(int i);
+    const Vec3& v_orig_norm(int i) const;
+
+    inline Vec2& t_ref(int i) {
+        if (parentMesh && parentMesh->geometry) {
+            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
+            Vec2* uvData = parentMesh->geometry->get_uvs_mut();
+            if (uvData) return uvData[globalIndex];
+        }
+        if (i == 0) return t0;
+        if (i == 1) return t1;
+        return t2;
+    }
+
+    inline const Vec2& t_ref(int i) const {
+        if (parentMesh && parentMesh->geometry) {
+            uint32_t globalIndex = parentMesh->geometry->indices[faceIndex * 3 + i];
+            const Vec2* uvData = parentMesh->geometry->get_uvs();
+            if (uvData) return uvData[globalIndex];
+        }
+        if (i == 0) return t0;
+        if (i == 1) return t1;
+        return t2;
+    }
+
+    // ============================================================================
+    // Material Management
+    // ============================================================================
     
-    void setTransformHandle(std::shared_ptr<Transform> handle) { transformHandle = handle; }
-    std::shared_ptr<Transform> getTransformHandle() const { return transformHandle; }
+    inline void setTransformHandle(std::shared_ptr<Transform> handle) {
+        if (parentMesh) {
+            parentMesh->transform = handle;
+            return;
+        }
+        transformHandle = handle;
+    }
+    
+    inline std::shared_ptr<Transform> getTransformHandle() const {
+        if (parentMesh) {
+            return parentMesh->transform;
+        }
+        return transformHandle;
+    }
+    
     // Fast non-owning accessor to avoid atomic refcount operations in hot paths.
     // Returns a raw pointer to the internal Transform (may be nullptr).
-    inline Transform* getTransformPtr() const noexcept { return transformHandle.get(); }
+    inline Transform* getTransformPtr() const noexcept {
+        if (parentMesh) {
+            return parentMesh->transform.get();
+        }
+        return transformHandle.get();
+    }
     
     void setBaseTransform(const Matrix4x4& transform);
     void updateAnimationTransform(const Matrix4x4& animTransform);
@@ -184,7 +344,7 @@ public:
     // UV Coordinates
     // ========================================================================
     
-    Vec2 t0, t1, t2; // Texture coordinates (kept as-is, essential for rendering)
+    // UV coords now handled via legacyData or parentMesh
 
     // Transient index into the active editable-mesh cache's source_triangles (SoA migration;
     // -1 = not in the current edit/sculpt cache). Lets the cache map a Triangle* back to its
@@ -202,7 +362,7 @@ public:
     // per-triangle heap allocation (the 12.5M-allocation spike that dominated dense-subdivide
     // materialize). When uv_sets is non-empty it is the full set list (uv_sets[0] == set 0
     // backup), so the rare multi-UV workflow (active-set switching via applyUVSet) round-trips.
-    size_t getUVSetCount() const { return uv_sets.empty() ? size_t{ 1 } : uv_sets.size(); }
+    size_t getUVSetCount() const;
     void applyUVSet(size_t set_index);
 
     // ========================================================================
@@ -210,7 +370,11 @@ public:
     // ========================================================================
     
     void initializeSkinData();
-    bool hasSkinData() const { return static_cast<bool>(skinData); }
+    bool hasSkinData() const { 
+        if (skinData) return true;
+        if (parentMesh && parentMesh->geometry && !parentMesh->geometry->skin_weights.empty()) return true;
+        return false;
+    }
     bool hasAnySkinWeights() const;
     
     void setSkinBoneWeights(int vertexIndex, const std::vector<std::pair<int, float>>& weights);
@@ -248,30 +412,14 @@ public:
     // ========================================================================
    
     inline const std::string& getNodeName() const { 
+        if (parentMesh && !parentMesh->nodeName.empty()) {
+            return parentMesh->nodeName;
+        }
         static const std::string emptyString = "";
         return nodeNamePtr ? *nodeNamePtr : emptyString; 
     }
     void setNodeName(const std::string& name);
     bool isTriangle() const override { return true; }
-    
-    void setAssimpVertexIndices(unsigned int i0, unsigned int i1, unsigned int i2) {
-        assimpVertexIndices = { i0, i1, i2 };
-    }
-    inline const std::array<unsigned int, 3>& getAssimpVertexIndices() const {
-        return assimpVertexIndices;
-    }
-
-    // ========================================================================
-    // GPU/Texture Bundle (for OptiX integration)
-    // ========================================================================
-    
-    // Heap-allocated ONLY when the mesh actually carries textures (set at import / material
-    // assignment). 8 bytes when absent vs the 104-byte inline struct — procedural / dense
-    // subdivided meshes (the 32M case) have no textures, so this is the single biggest soup
-    // saving. The modern GPU path binds textures per-material (unified_converters), so nothing
-    // reads this per-triangle; it only keeps imported CUDA texture handles alive.
-    deep_ptr<OptixGeometryData::TextureBundle> textureBundle;
-    std::shared_ptr<Texture> texture;
 
     // ========================================================================
     // AABB Caching (Lazy Evaluation)
@@ -279,7 +427,6 @@ public:
     
     void update_bounding_box() const;
     inline void markAABBDirty() { 
-        aabbDirty = true; 
         vertexPositionsDirty = true;
     }
 
@@ -289,26 +436,81 @@ public:
     // ========================================================================
     
     // These provide direct access but should be migrated to accessor methods
-    Vec3& v0_ref() { return vertices[0].position; }
-    Vec3& v1_ref() { return vertices[1].position; }
-    Vec3& v2_ref() { return vertices[2].position; }
-    Vec3& n0_ref() { return vertices[0].normal; }
-    Vec3& n1_ref() { return vertices[1].normal; }
-    Vec3& n2_ref() { return vertices[2].normal; }
+    Vec3& v0_ref() { return svw()[0].position; }
+    Vec3& v1_ref() { return svw()[1].position; }
+    Vec3& v2_ref() { return svw()[2].position; }
+    Vec3& n0_ref() { return svw()[0].normal; }
+    Vec3& n1_ref() { return svw()[1].normal; }
+    Vec3& n2_ref() { return svw()[2].normal; }
 
     // Read-only direct access for performance-critical code
-    const Vec3& v0_cref() const { return vertices[0].position; }
-    const Vec3& v1_cref() const { return vertices[1].position; }
-    const Vec3& v2_cref() const { return vertices[2].position; }
-    const Vec3& n0_cref() const { return vertices[0].normal; }
-    const Vec3& n1_cref() const { return vertices[1].normal; }
-    const Vec3& n2_cref() const { return vertices[2].normal; }
+    const Vec3& v0_cref() const { return getVertexPosition(0); }
+    const Vec3& v1_cref() const { return getVertexPosition(1); }
+    const Vec3& v2_cref() const { return getVertexPosition(2); }
+    const Vec3& n0_cref() const { return getVertexNormal(0); }
+    const Vec3& n1_cref() const { return getVertexNormal(1); }
+    const Vec3& n2_cref() const { return getVertexNormal(2); }
     const std::string* nodeNamePtr = nullptr;
-    TriangleVertexData vertices[3];           // Consolidated vertex data (144 bytes)
     int terrain_id = -1;
     mutable bool vertexPositionsDirty = false;
-    std::vector<std::array<Vec2, 3>> uv_sets;
+
+    // ========================================================================
+    // Inline Triangle Data (Replaced LegacyTriangleData)
+    // ========================================================================
+    // NOTE: per-corner positions/normals moved to a lazily-allocated standalone payload
+    // (see svw()/svr() below) — facade triangles (parentMesh set) read geometry from
+    // parentMesh->geometry (SoA) and never allocate it. t0/t1/t2 (UV set 0) stay inline.
+    Vec2 t0, t1, t2;
+    deep_ptr<std::vector<std::array<Vec2, 3>>> uv_sets;
     // Terrain ID if this is a terrain triangle
+
+    // ========================================================================
+    // Memory-Optimized Optional Data Accessors
+    // ========================================================================
+    inline TriangleOptionalData& ensureOptionalData() const {
+        if (!opt) opt.reset(new TriangleOptionalData());
+        return *opt;
+    }
+
+    inline std::shared_ptr<OriginalMeshGeometry> getOriginalGeometry() const {
+        return opt ? opt->originalGeometry : nullptr;
+    }
+    inline void setOriginalGeometry(std::shared_ptr<OriginalMeshGeometry> geom) {
+        if (!geom && !opt) return;
+        ensureOptionalData().originalGeometry = geom;
+    }
+
+    inline int getFaceIndex() const {
+        return opt ? opt->faceIndex : -1;
+    }
+    inline void setFaceIndex(int idx) {
+        if (idx == -1 && !opt) return;
+        ensureOptionalData().faceIndex = idx;
+    }
+
+    inline const std::array<unsigned int, 3>& getAssimpVertexIndices() const {
+        static const std::array<unsigned int, 3> defaultIndices = { 0, 0, 0 };
+        return opt ? opt->assimpVertexIndices : defaultIndices;
+    }
+    inline void setAssimpVertexIndices(unsigned int i0, unsigned int i1, unsigned int i2) {
+        ensureOptionalData().assimpVertexIndices = { i0, i1, i2 };
+    }
+
+    inline std::shared_ptr<Texture> getTexture() const {
+        return opt ? opt->texture : nullptr;
+    }
+    inline void setTexture(std::shared_ptr<Texture> tex) {
+        if (!tex && !opt) return;
+        ensureOptionalData().texture = tex;
+    }
+
+    inline OptixGeometryData::TextureBundle* getTextureBundle() const {
+        return opt && opt->textureBundle ? opt->textureBundle.get() : nullptr;
+    }
+    inline void setTextureBundle(const OptixGeometryData::TextureBundle& bundle) {
+        ensureOptionalData().textureBundle.reset(new OptixGeometryData::TextureBundle(bundle));
+    }
+
 private:
     // ========================================================================
     // Optimized Data Members
@@ -323,14 +525,26 @@ private:
                                                  // std::optional, which reserved ~56 B inline)
     
                      // 32 bytes avg
-    int faceIndex = -1;                        // 4 bytes
-    std::array<unsigned int, 3> assimpVertexIndices = { 0, 0, 0 }; // 12 bytes
+    mutable deep_ptr<TriangleOptionalData> opt;  // Optional fields grouped on the heap (8 bytes when absent)
 
-    // AABB Caching
-    mutable AABB cachedAABB;                  // 24 bytes
-    mutable bool aabbDirty = true;            // 1 byte
-  
-    mutable Material* cachedMaterial = nullptr; // Performance cache
+    // Standalone-only per-corner position/normal. NEVER allocated for facade triangles
+    // (parentMesh set) — their geometry lives in parentMesh->geometry (SoA). Lazily
+    // allocated for standalone triangles, so a facade object is ~96 B lighter.
+    struct StandaloneVerts {
+        TriangleVertexData v[3];
+        StandaloneVerts() {
+            for (auto& x : v) { x.position = Vec3(0.0f); x.normal = Vec3(0.0f, 1.0f, 0.0f); }
+        }
+    };
+    mutable deep_ptr<StandaloneVerts> standalone_verts_;
+    inline TriangleVertexData* svw() {
+        if (!standalone_verts_) standalone_verts_.reset(new StandaloneVerts());
+        return standalone_verts_->v;
+    }
+    inline const TriangleVertexData* svr() const {
+        if (!standalone_verts_) standalone_verts_.reset(new StandaloneVerts());
+        return standalone_verts_->v;
+    }
 
     // ========================================================================
     // Internal Methods

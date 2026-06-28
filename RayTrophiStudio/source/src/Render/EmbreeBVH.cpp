@@ -77,7 +77,12 @@ bool resolve_embree_surface_hit(const EmbreeBVH& bvh,
     const float u = rayhit.hit.u;
     const float v = rayhit.hit.v;
     const float w = 1.0f - u - v;
-    out_uv = out_tri->t0 * w + out_tri->t1 * u + out_tri->t2 * v;
+    if (out_tri->original_ptr) {
+        const auto [t0, t1, t2] = out_tri->original_ptr->getUVCoordinates();
+        out_uv = t0 * w + t1 * u + t2 * v;
+    } else {
+        out_uv = Vec2(0.0f);
+    }
     out_mat = out_tri->getMaterial();
     return true;
 }
@@ -125,17 +130,18 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
     vdb_geom_id = RTC_INVALID_GEOMETRY_ID;
     instance_objects.clear();
     vdb_objects.clear();
+    active_mesh_groups.clear();
 
     if (!device) {
         SCENE_LOG_ERROR("[EmbreeBVH::build] Device is null!");
         return;
     }
     
-    // Create new scene if needed (clearGeometry usually does this but let's be safe)
+    // Create new scene if needed
     if (!scene) {
         scene = rtcNewScene(device);
         rtcSetSceneBuildQuality(scene, RTC_BUILD_QUALITY_MEDIUM);
-        rtcSetSceneFlags(scene, RTC_SCENE_FLAG_DYNAMIC | RTC_SCENE_FLAG_ROBUST); // ROBUST important for instancing
+        rtcSetSceneFlags(scene, RTC_SCENE_FLAG_DYNAMIC | RTC_SCENE_FLAG_ROBUST);
     }
 
     // 1. Separate objects
@@ -147,7 +153,7 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
     vdb_objects.reserve(objects.size());
 
     for (const auto& obj : objects) {
-        if (!obj->visible) continue; // [FIX] Skip invisible objects (e.g. Gizmos)
+        if (!obj->visible) continue;
 
         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             cached_triangles.push_back(tri);
@@ -162,47 +168,129 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
 
     // 2. Build Triangle Geometry (if any)
     if (!cached_triangles.empty()) {
-        size_t tri_count = cached_triangles.size();
-        triangle_data.clear();
-        triangle_data.reserve(tri_count);
+        // Group triangles by parentMesh to exploit contiguous flat buffers
+        struct TempMeshGroup {
+            TriangleMesh* mesh = nullptr;
+            std::vector<std::shared_ptr<Triangle>> tris;
+        };
+        std::vector<TempMeshGroup> temp_groups;
+        std::unordered_map<TriangleMesh*, size_t> mesh_to_group;
+        std::vector<std::shared_ptr<Triangle>> standalone_tris;
+
+        for (const auto& tri : cached_triangles) {
+            if (!tri) continue;
+            if (tri->parentMesh) {
+                auto it = mesh_to_group.find(tri->parentMesh.get());
+                if (it != mesh_to_group.end()) {
+                    temp_groups[it->second].tris.push_back(tri);
+                } else {
+                    mesh_to_group[tri->parentMesh.get()] = temp_groups.size();
+                    temp_groups.push_back({tri->parentMesh.get(), {tri}});
+                }
+            } else {
+                standalone_tris.push_back(tri);
+            }
+        }
+
+        // Calculate total vertices and triangles to allocate
+        size_t total_vertices = 0;
+        size_t total_triangles = cached_triangles.size();
+
+        for (const auto& group : temp_groups) {
+            total_vertices += group.mesh->num_vertices();
+        }
+        total_vertices += standalone_tris.size() * 3;
 
         RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
 
         Vec3* vertex_buffer = (Vec3*)rtcSetNewGeometryBuffer(
             geom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3,
-            sizeof(Vec3), tri_count * 3
+            sizeof(Vec3), total_vertices
         );
         unsigned* index_buffer = (unsigned*)rtcSetNewGeometryBuffer(
             geom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3,
-            sizeof(unsigned) * 3, tri_count
+            sizeof(unsigned) * 3, total_triangles
         );
 
-        // Fill buffers
-        #pragma omp parallel for
-        for (int i = 0; i < (int)tri_count; ++i) {
-            const auto& tri = cached_triangles[i];
-            
-            // Vertices
-            vertex_buffer[i * 3 + 0] = tri->getVertexPosition(0);
-            vertex_buffer[i * 3 + 1] = tri->getVertexPosition(1);
-            vertex_buffer[i * 3 + 2] = tri->getVertexPosition(2);
+        triangle_data.resize(total_triangles);
 
-            // Indices
-            index_buffer[i * 3 + 0] = i * 3 + 0;
-            index_buffer[i * 3 + 1] = i * 3 + 1;
-            index_buffer[i * 3 + 2] = i * 3 + 2;
+        size_t vertex_offset = 0;
+        size_t tri_offset = 0;
+
+        // 2a. Populate grouped meshes using zero-copy memcpy
+        for (const auto& group : temp_groups) {
+            size_t vCount = group.mesh->num_vertices();
+            if (vCount > 0 && group.mesh->geometry) {
+                const Vec3* src_positions = group.mesh->geometry->get_attribute_data<Vec3>("P");
+                if (src_positions) {
+                    memcpy(vertex_buffer + vertex_offset, src_positions, vCount * sizeof(Vec3));
+                }
+
+                // Add to active_mesh_groups for fast refitting
+                Matrix4x4 initial_xform = group.mesh->transform ? group.mesh->transform->getFinal() : Matrix4x4::identity();
+                active_mesh_groups.push_back({group.mesh, vertex_offset, vCount, initial_xform});
+            }
+
+            // Populate indices and triangle_data in parallel
+            size_t group_tris_count = group.tris.size();
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
+            for (int i = 0; i < (int)group_tris_count; ++i) {
+                const auto& tri = group.tris[i];
+                uint32_t faceIdx = tri->faceIndex;
+                size_t local_tri_offset = tri_offset + i;
+                if (group.mesh->geometry && faceIdx * 3 + 2 < group.mesh->geometry->indices.size()) {
+                    index_buffer[local_tri_offset * 3 + 0] = group.mesh->geometry->indices[faceIdx * 3 + 0] + static_cast<unsigned>(vertex_offset);
+                    index_buffer[local_tri_offset * 3 + 1] = group.mesh->geometry->indices[faceIdx * 3 + 1] + static_cast<unsigned>(vertex_offset);
+                    index_buffer[local_tri_offset * 3 + 2] = group.mesh->geometry->indices[faceIdx * 3 + 2] + static_cast<unsigned>(vertex_offset);
+                } else {
+                    index_buffer[local_tri_offset * 3 + 0] = 0;
+                    index_buffer[local_tri_offset * 3 + 1] = 0;
+                    index_buffer[local_tri_offset * 3 + 2] = 0;
+                }
+
+                triangle_data[local_tri_offset] = {
+                    tri->getMaterialID(),
+                    tri->terrain_id,
+                    tri.get()
+                };
+            }
+            tri_offset += group_tris_count;
+            vertex_offset += vCount;
         }
 
-        // Fill triangle_data serial (or parallel if safe)
-        for (const auto& tri : cached_triangles) {
-            triangle_data.push_back({
-                tri->getVertexPosition(0), tri->getVertexPosition(1), tri->getVertexPosition(2),
-                tri->getVertexNormal(0), tri->getVertexNormal(1), tri->getVertexNormal(2),
-                tri->t0, tri->t1, tri->t2,
-                tri->getMaterialID(),
-                tri->terrain_id,
-                tri.get() // Store original pointer
-            });
+        // Save standalone offsets for fast refits
+        standalone_vertex_offset = vertex_offset;
+        standalone_tri_offset = tri_offset;
+
+        // 2b. Populate standalone triangles (fallback path)
+        if (!standalone_tris.empty()) {
+            size_t standalone_count = standalone_tris.size();
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
+            for (int i = 0; i < (int)standalone_count; ++i) {
+                const auto& tri = standalone_tris[i];
+                size_t local_v_offset = vertex_offset + i * 3;
+                size_t local_t_offset = tri_offset + i;
+
+                // Vertices
+                vertex_buffer[local_v_offset + 0] = tri->getVertexPosition(0);
+                vertex_buffer[local_v_offset + 1] = tri->getVertexPosition(1);
+                vertex_buffer[local_v_offset + 2] = tri->getVertexPosition(2);
+
+                // Indices
+                index_buffer[local_t_offset * 3 + 0] = static_cast<unsigned>(local_v_offset + 0);
+                index_buffer[local_t_offset * 3 + 1] = static_cast<unsigned>(local_v_offset + 1);
+                index_buffer[local_t_offset * 3 + 2] = static_cast<unsigned>(local_v_offset + 2);
+
+                // TriangleData
+                triangle_data[local_t_offset] = {
+                    tri->getMaterialID(),
+                    tri->terrain_id,
+                    tri.get()
+                };
+            }
+            
+            tri_offset += standalone_count;
+            vertex_offset += standalone_count * 3;
         }
 
         rtcSetGeometryMask(geom, 0x01); // Mask 1 for Surfaces
@@ -221,17 +309,6 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
 
             RTCGeometry inst_geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_INSTANCE);
             rtcSetGeometryInstancedScene(inst_geom, child_bvh->getRTCScene());
-            
-            // Set Transform (Embree uses column-major float[12] for 3x4 affine)
-            // Matrix4x4 is likely row-major or we need to check.
-            // Matrix4x4 typically: m[row][col]
-            // Embree expects: 
-            // xx yx zx tx
-            // xy yy zy ty
-            // xz yz zz tz
-            
-            // Standard format for rtcSetGeometryTransform:
-            // "The transformation matrix is passed as a pointer to an array of 12 floats in column-major order."
             
             float transform[12];
             // Column 0 (X axis)
@@ -470,6 +547,7 @@ void EmbreeBVH::clearGeometry() {
     }
     triangle_data.clear();
     cached_triangles.clear(); // [NEW] Önbelleği de temizle
+    active_mesh_groups.clear();
     
     // CRITICAL FIX: Clear instance mappings to prevent stale pointers after rebuild
     instance_objects.clear();
@@ -483,9 +561,11 @@ void EmbreeBVH::updateGeometryFromTriangles() {
     Vec3* vertex_buffer = (Vec3*)rtcGetGeometryBufferData(geom, RTC_BUFFER_TYPE_VERTEX, 0);
     for (size_t i = 0; i < triangle_data.size(); ++i) {
         const auto& tri = triangle_data[i];
-        vertex_buffer[i * 3 + 0] = tri.v0;
-        vertex_buffer[i * 3 + 1] = tri.v1;
-        vertex_buffer[i * 3 + 2] = tri.v2;
+        if (tri.original_ptr) {
+            vertex_buffer[i * 3 + 0] = tri.original_ptr->getVertexPosition(0);
+            vertex_buffer[i * 3 + 1] = tri.original_ptr->getVertexPosition(1);
+            vertex_buffer[i * 3 + 2] = tri.original_ptr->getVertexPosition(2);
+        }
     }
 
     rtcUpdateGeometryBuffer(geom, RTC_BUFFER_TYPE_VERTEX, 0);
@@ -511,45 +591,65 @@ void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::sha
         if (geom) {
             Vec3* vertex_buffer = (Vec3*)rtcGetGeometryBufferData(geom, RTC_BUFFER_TYPE_VERTEX, 0);
             if (vertex_buffer) {
-                // RTC_BUILD_QUALITY_REFIT tells Embree to update existing BVH structure
                 rtcSetGeometryBuildQuality(geom, RTC_BUILD_QUALITY_REFIT);
 
-                size_t valid_tri_count = cached_triangles.size();
-                if (valid_tri_count > 0) {
-                    int any_dirty = 0;
-                    // Parallelize vertex update on the DENSE list (safe indexing)
-                    #pragma omp parallel for reduction(+:any_dirty)
-                    for (int i = 0; i < (int)valid_tri_count; ++i) {
-                        const auto& tri = cached_triangles[i];
+                int any_dirty = 0;
+
+                // 1. Grouped fast-path: zero-copy memcpy deformed vertices in parallel (only if transform changed)
+                if (!active_mesh_groups.empty()) {
+                    size_t group_count = active_mesh_groups.size();
+                    #pragma omp parallel for num_threads(get_omp_threads_limit()) reduction(+:any_dirty)
+                    for (int i = 0; i < (int)group_count; ++i) {
+                        auto& group = active_mesh_groups[i];
+                        Matrix4x4 current_xform = group.mesh->transform ? group.mesh->transform->getFinal() : Matrix4x4::identity();
+                        if (!(group.last_xform == current_xform)) {
+                            const Vec3* src_positions = group.mesh->geometry->get_attribute_data<Vec3>("P");
+                            if (src_positions) {
+                                memcpy(vertex_buffer + group.vertex_offset, src_positions, group.vertex_count * sizeof(Vec3));
+                                any_dirty += 1;
+                            }
+                            group.last_xform = current_xform;
+                        }
+                    }
+                }
+
+                // 2. Standalone fallback path: update vertices for standalone triangles
+                if (standalone_tri_offset < cached_triangles.size()) {
+                    size_t standalone_count = cached_triangles.size() - standalone_tri_offset;
+                    #pragma omp parallel for num_threads(get_omp_threads_limit()) reduction(+:any_dirty)
+                    for (int i = 0; i < (int)standalone_count; ++i) {
+                        const auto& tri = cached_triangles[standalone_tri_offset + i];
                         if (tri->vertexPositionsDirty) {
                             any_dirty += 1;
-
-                            // Direct write to mapped Embree buffer
-                            vertex_buffer[i * 3 + 0] = tri->getVertexPosition(0);
-                            vertex_buffer[i * 3 + 1] = tri->getVertexPosition(1);
-                            vertex_buffer[i * 3 + 2] = tri->getVertexPosition(2);
-
-                            // Update shadow cache in TriangleData if necessary
-                            if (i < triangle_data.size()) {
-                                triangle_data[i].v0 = tri->getVertexPosition(0);
-                                triangle_data[i].v1 = tri->getVertexPosition(1);
-                                triangle_data[i].v2 = tri->getVertexPosition(2);
-
-                                if (triangle_data[i].n0 != Vec3()) {
-                                    triangle_data[i].n0 = tri->getVertexNormal(0);
-                                    triangle_data[i].n1 = tri->getVertexNormal(1);
-                                    triangle_data[i].n2 = tri->getVertexNormal(2);
-                                }
-                            }
+                            size_t local_v_offset = standalone_vertex_offset + i * 3;
+                            vertex_buffer[local_v_offset + 0] = tri->getVertexPosition(0);
+                            vertex_buffer[local_v_offset + 1] = tri->getVertexPosition(1);
+                            vertex_buffer[local_v_offset + 2] = tri->getVertexPosition(2);
                             tri->vertexPositionsDirty = false;
                         }
                     }
-
-                    if (any_dirty > 0) {
-                        rtcUpdateGeometryBuffer(geom, RTC_BUFFER_TYPE_VERTEX, 0);
-                        rtcCommitGeometry(geom);
-                        geometry_committed = true;
+                } else if (active_mesh_groups.empty()) {
+                    // Fallback when active_mesh_groups is empty and standalone_tri_offset is not set/invalid
+                    size_t valid_tri_count = cached_triangles.size();
+                    if (valid_tri_count > 0) {
+                        #pragma omp parallel for num_threads(get_omp_threads_limit()) reduction(+:any_dirty)
+                        for (int i = 0; i < (int)valid_tri_count; ++i) {
+                            const auto& tri = cached_triangles[i];
+                            if (tri->vertexPositionsDirty) {
+                                any_dirty += 1;
+                                vertex_buffer[i * 3 + 0] = tri->getVertexPosition(0);
+                                vertex_buffer[i * 3 + 1] = tri->getVertexPosition(1);
+                                vertex_buffer[i * 3 + 2] = tri->getVertexPosition(2);
+                                tri->vertexPositionsDirty = false;
+                            }
+                        }
                     }
+                }
+
+                if (any_dirty > 0) {
+                    rtcUpdateGeometryBuffer(geom, RTC_BUFFER_TYPE_VERTEX, 0);
+                    rtcCommitGeometry(geom);
+                    geometry_committed = true;
                 }
             }
         }
@@ -557,27 +657,15 @@ void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::sha
 
     // 2. Update Instance Transforms (Rigid Body)
     if (!instance_objects.empty()) {
-        // Iterate over stored instances and update their transforms
         for (size_t geomID = 0; geomID < instance_objects.size(); ++geomID) {
             const auto& inst = instance_objects[geomID];
             if (!inst) continue;
-            
-            // Skip if this slot matches triangle_geom_id (though instance_objects should be null there usually? 
-            // no, instance_objects is sparse or we loop carefully?
-            // current implementation: instance_objects resizes to Max ID.
-            // If triangle_geom_id is 0, instance_objects[0] is likely null/garbage if not initialized carefully?
-            // In build(), we resize instance_objects but only write to instance slots.
-            // Initialize with nullptr.
             if (geomID == triangle_geom_id) continue;
 
             RTCGeometry inst_geom = rtcGetGeometry(scene, (unsigned)geomID);
             if (!inst_geom) continue;
 
-            // Check if it's actually an instance geometry? 
-            // Assume yes based on our tracking.
-
-            // Update Transform
-             float transform[12];
+            float transform[12];
             // Column 0 (X axis)
             transform[0] = inst->transform.m[0][0];
             transform[1] = inst->transform.m[1][0];
@@ -710,46 +798,7 @@ bool EmbreeBVH::occluded(const Ray& ray, float t_min, float t_max) const {
         return true; // Fallback
     }
 }
-void EmbreeBVH::buildFromTriangleData(const std::vector<TriangleData>& triangles) {
-    triangle_data = triangles; // Store triangle data
 
-    if (triangles.empty()) return;
-
-    RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
-
-    // Allocate buffers directly
-    Vec3* vertex_buffer = (Vec3*)rtcSetNewGeometryBuffer(
-        geom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3,
-        sizeof(Vec3), triangles.size() * 3
-    );
-
-    unsigned* index_buffer = (unsigned*)rtcSetNewGeometryBuffer(
-        geom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3,
-        sizeof(unsigned) * 3, triangles.size()
-    );
-
-    // Write directly to buffers (no intermediate vectors!)
-    for (size_t i = 0; i < triangles.size(); ++i) {
-        const auto& tri = triangles[i];
-        unsigned base_idx = static_cast<unsigned>(i * 3);
-
-        // Vertices
-        vertex_buffer[base_idx + 0] = tri.v0;
-        vertex_buffer[base_idx + 1] = tri.v1;
-        vertex_buffer[base_idx + 2] = tri.v2;
-
-        // Indices
-        index_buffer[i * 3 + 0] = base_idx + 0;
-        index_buffer[i * 3 + 1] = base_idx + 1;
-        index_buffer[i * 3 + 2] = base_idx + 2;
-    }
-
-    rtcCommitGeometry(geom);
-    rtcAttachGeometry(scene, geom);
-    rtcReleaseGeometry(geom);
-
-    rtcCommitScene(scene);
-}
 
 bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bool ignore_volumes) const {
     RTCRayHit rayhit = {};
@@ -831,10 +880,19 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
             float v = rayhit.hit.v;
             float w = 1.0f - u - v;
 
-            rec.normal = (tri.n0 * w + tri.n1 * u + tri.n2 * v).normalize();
+            if (tri.original_ptr) {
+                rec.normal = (tri.original_ptr->getVertexNormal(0) * w + 
+                              tri.original_ptr->getVertexNormal(1) * u + 
+                              tri.original_ptr->getVertexNormal(2) * v).normalize();
+                const auto [t0, t1, t2] = tri.original_ptr->getUVCoordinates();
+                rec.u = t0.u * w + t1.u * u + t2.u * v;
+                rec.v = t0.v * w + t1.v * u + t2.v * v;
+            } else {
+                rec.normal = Vec3(0.0f, 1.0f, 0.0f);
+                rec.u = 0.0f;
+                rec.v = 0.0f;
+            }
             rec.interpolated_normal = rec.normal;
-            rec.u = tri.t0.u * w + tri.t1.u * u + tri.t2.u * v;
-            rec.v = tri.t0.v * w + tri.t1.v * u + tri.t2.v * v;
             rec.uv = Vec2(rec.u, rec.v); 
             rec.t = rayhit.ray.tfar;
             rec.point = ray.at(rec.t); 
@@ -844,8 +902,12 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
             rec.terrain_id = tri.terrain_id;
             rec.is_instance_hit = false; // Local geometry (e.g. Terrain)
             rec.triangle = tri.original_ptr; // Restore identity
+            if (tri.original_ptr) {          // Faz 1: (mesh, faceIndex) handle
+                rec.tri_mesh = tri.original_ptr->parentMesh.get();
+                rec.tri_face = tri.original_ptr->faceIndex;
+            }
             return true;
-        } 
+        }
         else if (hit_instance) {
             // Hit Instance
             rec.is_instance_hit = true; // Mark as instance for filtering
@@ -856,32 +918,42 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
                 if (child_bvh) {
                      int prim_id = rayhit.hit.primID;
                      if (prim_id < child_bvh->triangle_data.size()) {
-                         const TriangleData& tri = resolved_tri ? *resolved_tri : child_bvh->triangle_data[prim_id];
+                          const TriangleData& tri = resolved_tri ? *resolved_tri : child_bvh->triangle_data[prim_id];
 
-                         float u = rayhit.hit.u;
-                         float v = rayhit.hit.v;
-                         float w = 1.0f - u - v;
-                         
+                          float u = rayhit.hit.u;
+                          float v = rayhit.hit.v;
+                          float w = 1.0f - u - v;
+                          
                           // Interpolate Local Normal
-                         Vec3 local_normal = (tri.n0 * w + tri.n1 * u + tri.n2 * v).normalize();
-                         
-                         // Transform Normal to World using Instance Transform
-                         // Assuming uniform scale, transform_vector (rotation) is sufficient.
-                         // For non-uniform, use inverse transpose (not easily available without computing it)
-                         // But we can key off inv_transform if available or just use transform_vector
-                         rec.normal = inst->transform.transform_vector(local_normal).normalize();
-                         rec.interpolated_normal = rec.normal;
-                         rec.u = tri.t0.u * w + tri.t1.u * u + tri.t2.u * v;
-                         rec.v = tri.t0.v * w + tri.t1.v * u + tri.t2.v * v;
-                         rec.uv = Vec2(rec.u, rec.v); 
-                         rec.t = rayhit.ray.tfar;
-                         rec.point = ray.at(rec.t); 
-                         rec.set_face_normal(ray, rec.normal);
-                         rec.materialPtr = mat; // Reuse the alpha-test lookup; shared_ptr is resolved later
-                         rec.materialID = tri.materialID;
-                         rec.terrain_id = tri.terrain_id;
-                         rec.triangle = tri.original_ptr; // Restore identity (Source Mesh)
-                         return true;
+                          Vec3 local_normal(0.0f, 1.0f, 0.0f);
+                          if (tri.original_ptr) {
+                              local_normal = (tri.original_ptr->getVertexNormal(0) * w + 
+                                              tri.original_ptr->getVertexNormal(1) * u + 
+                                              tri.original_ptr->getVertexNormal(2) * v).normalize();
+                              const auto [t0, t1, t2] = tri.original_ptr->getUVCoordinates();
+                              rec.u = t0.u * w + t1.u * u + t2.u * v;
+                              rec.v = t0.v * w + t1.v * u + t2.v * v;
+                          } else {
+                              rec.u = 0.0f;
+                              rec.v = 0.0f;
+                          }
+                          
+                          // Transform Normal to World using Instance Transform
+                          rec.normal = inst->transform.transform_vector(local_normal).normalize();
+                          rec.interpolated_normal = rec.normal;
+                          rec.uv = Vec2(rec.u, rec.v); 
+                          rec.t = rayhit.ray.tfar;
+                          rec.point = ray.at(rec.t); 
+                          rec.set_face_normal(ray, rec.normal);
+                          rec.materialPtr = mat; // Reuse the alpha-test lookup; shared_ptr is resolved later
+                          rec.materialID = tri.materialID;
+                          rec.terrain_id = tri.terrain_id;
+                          rec.triangle = tri.original_ptr; // Restore identity (Source Mesh)
+                          if (tri.original_ptr) {          // Faz 1: (mesh, faceIndex) handle
+                              rec.tri_mesh = tri.original_ptr->parentMesh.get();
+                              rec.tri_face = tri.original_ptr->faceIndex;
+                          }
+                          return true;
                      }
                 }
             }
@@ -900,25 +972,36 @@ OptixGeometryData EmbreeBVH::exportToOptixData() const {
     OptixGeometryData data;
 
     for (const auto& tri : triangle_data) {
+        if (!tri.original_ptr) continue;
         uint32_t base_index = static_cast<uint32_t>(data.vertices.size());
 
+        const Vec3& v0 = tri.original_ptr->getVertexPosition(0);
+        const Vec3& v1 = tri.original_ptr->getVertexPosition(1);
+        const Vec3& v2 = tri.original_ptr->getVertexPosition(2);
+        
+        const Vec3& n0 = tri.original_ptr->getVertexNormal(0);
+        const Vec3& n1 = tri.original_ptr->getVertexNormal(1);
+        const Vec3& n2 = tri.original_ptr->getVertexNormal(2);
+        
+        const auto [t0, t1, t2] = tri.original_ptr->getUVCoordinates();
+
         // Vertexler
-        data.vertices.push_back(make_float3(tri.v0.x, tri.v0.y, tri.v0.z));
-        data.vertices.push_back(make_float3(tri.v1.x, tri.v1.y, tri.v1.z));
-        data.vertices.push_back(make_float3(tri.v2.x, tri.v2.y, tri.v2.z));
+        data.vertices.push_back(make_float3(v0.x, v0.y, v0.z));
+        data.vertices.push_back(make_float3(v1.x, v1.y, v1.z));
+        data.vertices.push_back(make_float3(v2.x, v2.y, v2.z));
 
         // Index
         data.indices.push_back(make_uint3(base_index, base_index + 1, base_index + 2));
 
         // Normaller
-        data.normals.push_back(make_float3(tri.n0.x, tri.n0.y, tri.n0.z));
-        data.normals.push_back(make_float3(tri.n1.x, tri.n1.y, tri.n1.z));
-        data.normals.push_back(make_float3(tri.n2.x, tri.n2.y, tri.n2.z));
+        data.normals.push_back(make_float3(n0.x, n0.y, n0.z));
+        data.normals.push_back(make_float3(n1.x, n1.y, n1.z));
+        data.normals.push_back(make_float3(n2.x, n2.y, n2.z));
 
         // UV
-        data.uvs.push_back(make_float2(tri.t0.x, tri.t0.y));
-        data.uvs.push_back(make_float2(tri.t1.x, tri.t1.y));
-        data.uvs.push_back(make_float2(tri.t2.x, tri.t2.y));
+        data.uvs.push_back(make_float2(t0.x, t0.y));
+        data.uvs.push_back(make_float2(t1.x, t1.y));
+        data.uvs.push_back(make_float2(t2.x, t2.y));
 
         // Material
         GpuMaterial gpuMat = {};  // Zero-initialize all fields

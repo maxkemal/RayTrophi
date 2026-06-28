@@ -3074,6 +3074,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 // Main Menu Bar implementation moved to separate file: scene_ui_menu.hpp check end of file
 
 #include "scene_ui_menu.hpp"
+#include <omp.h>
 
 
 void SceneUI::validateSelectionAgainstScene(UIContext& ctx) {
@@ -5104,6 +5105,7 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
         Vec3 bounds_min(1e30f, 1e30f, 1e30f);
         Vec3 bounds_max(-1e30f, -1e30f, -1e30f);
         std::vector<std::shared_ptr<Transform>> new_transforms;
+        std::unordered_set<Transform*> unique_transforms_set;
         std::shared_ptr<Triangle> first_new_triangle;
 
         for (size_t i = objects_before; i < ctx.scene.world.objects.size(); ++i) {
@@ -5127,7 +5129,7 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
             }
 
             if (auto th = tri->getTransformHandle()) {
-                if (std::find(new_transforms.begin(), new_transforms.end(), th) == new_transforms.end()) {
+                if (unique_transforms_set.insert(th.get()).second) {
                     new_transforms.push_back(th);
                 }
             }
@@ -5146,9 +5148,34 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
                     transform->setBase(translation * transform->base);
                 }
             }
+            // Re-bake transformed vertices after the drop reposition. Facade triangles share
+            // one TriangleMesh SoA, so bake each unique mesh ONCE (the old per-face
+            // updateTransformedVertices() re-transformed every shared vertex ~6× and ran a
+            // dynamic_pointer_cast per face — the asset-drop cost import never paid).
+            std::unordered_set<TriangleMesh*> rebaked_meshes;
             for (size_t i = objects_before; i < ctx.scene.world.objects.size(); ++i) {
-                if (auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i])) {
-                    tri->updateTransformedVertices();
+                auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i]);
+                if (!tri) continue;
+                TriangleMesh* mesh = tri->parentMesh.get();
+                if (mesh && mesh->geometry) {
+                    if (!rebaked_meshes.insert(mesh).second) continue; // already baked this mesh
+                    auto& geom = *mesh->geometry;
+                    Vec3* P = geom.get_positions_mut();
+                    Vec3* N = geom.get_normals_mut();
+                    const Vec3* Po = geom.get_positions_orig();
+                    const Vec3* No = geom.get_normals_orig();
+                    const int vc = static_cast<int>(geom.get_vertex_count());
+                    Matrix4x4 fT = Matrix4x4::identity(), nT = Matrix4x4::identity();
+                    if (mesh->transform) { fT = mesh->transform->getFinal(); nT = mesh->transform->getNormalTransform(); }
+                    if (P && Po) {
+                        #pragma omp parallel for schedule(static) if(vc >= 4096)
+                        for (int v = 0; v < vc; ++v) {
+                            P[v] = fT.transform_point(Po[v]);
+                            if (N && No) N[v] = nT.transform_vector(No[v]).normalize();
+                        }
+                    }
+                } else {
+                    tri->updateTransformedVertices(); // standalone triangle
                 }
             }
         }
@@ -6420,6 +6447,7 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
                    std::to_string(foliage_count) + " foliage skipped)");*/
     mesh_cache.clear();
     mesh_ui_cache.clear();
+    last_synced_transforms.clear();
     mesh_overlay_cache = MeshOverlayCache{};
     // Preserve the editable cache (and its sub-element selection) for the object that is
     // actively being edited. rebuildMeshCache historically wiped editable_mesh_cache
@@ -6451,11 +6479,20 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
     
     tri_to_index.reserve(selectable_count);
 
+    std::string lastName = "";
+    std::vector<std::pair<int, std::shared_ptr<Triangle>>>* lastVector = nullptr;
+
     for (size_t i = 0; i < selectable_count; ++i) {
         if (objects[i]->isTriangle()) {
             auto tri = std::static_pointer_cast<Triangle>(objects[i]);
-            std::string name = tri->getNodeName().empty() ? "Unnamed" : tri->getNodeName();
-            mesh_cache[name].push_back({(int)i, tri});
+            const std::string& name = tri->getNodeName().empty() ? "Unnamed" : tri->getNodeName();
+            
+            if (name != lastName || !lastVector) {
+                lastName = name;
+                lastVector = &mesh_cache[name];
+            }
+            
+            lastVector->push_back({(int)i, tri});
             this->tri_to_index[tri.get()] = (int)i; // Store const pointer to index mapping
             continue;
         }
@@ -6463,11 +6500,29 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
         auto inst = std::dynamic_pointer_cast<HittableInstance>(objects[i]);
         if (inst && inst->source_triangles) {
             std::string inst_name = inst->node_name.empty() ? "Unnamed" : inst->node_name;
+            
+            // Only add the source triangles of this unique instanced mesh to mesh_cache ONCE.
+            // But still update tri_to_index so picking works (it will map to the last instance).
+            bool already_in_cache = false;
+            if (!inst->source_triangles->empty() && inst->source_triangles->front()) {
+                const std::string& first_tri_name = inst->source_triangles->front()->getNodeName().empty() ? inst_name : inst->source_triangles->front()->getNodeName();
+                if (mesh_cache.find(first_tri_name) != mesh_cache.end()) {
+                    already_in_cache = true;
+                }
+            }
+
             for (const auto& srcTri : *inst->source_triangles) {
                 if (!srcTri) continue;
-                std::string tri_name = srcTri->getNodeName().empty() ? inst_name : srcTri->getNodeName();
-                mesh_cache[tri_name].push_back({(int)i, srcTri});
                 this->tri_to_index[srcTri.get()] = (int)i;
+                
+                if (!already_in_cache) {
+                    const std::string& tri_name = srcTri->getNodeName().empty() ? inst_name : srcTri->getNodeName();
+                    if (tri_name != lastName || !lastVector) {
+                        lastName = tri_name;
+                        lastVector = &mesh_cache[tri_name];
+                    }
+                    lastVector->push_back({(int)i, srcTri});
+                }
             }
         }
     }
@@ -6484,30 +6539,71 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
         Vec3 bb_min(1e10f, 1e10f, 1e10f);
         Vec3 bb_max(-1e10f, -1e10f, -1e10f);
         
-        // Collect unique material IDs for this object
+        const auto& trisVector = kv.second;
         std::vector<uint16_t> mat_ids;
-        
-        for (auto& pair : kv.second) {
-            auto& tri = pair.second;
-            // Use ORIGINAL vertices (local space) - not getV0() which returns transformed!
-            Vec3 v0 = tri->getOriginalVertexPosition(0);
-            Vec3 v1 = tri->getOriginalVertexPosition(1);
-            Vec3 v2 = tri->getOriginalVertexPosition(2);
-            
-            bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
-            bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
-            bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
-            bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
-            bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
-            bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
-            
-            // Collect material ID (check for duplicates - usually few materials)
-            uint16_t mid = tri->getMaterialID();
-            bool found = false;
-            for (uint16_t existing : mat_ids) {
-                if (existing == mid) { found = true; break; }
+
+        if (!trisVector.empty() && trisVector[0].second->parentMesh && trisVector[0].second->parentMesh->geometry) {
+            // Optimized flat geometry fast-path
+            TriangleMesh* pm = trisVector[0].second->parentMesh.get();
+            size_t vCount = pm->geometry->get_vertex_count();
+            const Vec3* origP = pm->geometry->get_positions_orig();
+            if (!origP) origP = pm->geometry->get_positions();
+            if (origP) {
+                for (size_t v = 0; v < vCount; ++v) {
+                    Vec3 p = origP[v];
+                    bb_min.x = fminf(bb_min.x, p.x);
+                    bb_min.y = fminf(bb_min.y, p.y);
+                    bb_min.z = fminf(bb_min.z, p.z);
+                    bb_max.x = fmaxf(bb_max.x, p.x);
+                    bb_max.y = fmaxf(bb_max.y, p.y);
+                    bb_max.z = fmaxf(bb_max.z, p.z);
+                }
             }
-            if (!found) mat_ids.push_back(mid);
+
+            const uint16_t* matIDs = pm->geometry->get_material_ids();
+            if (matIDs) {
+                uint16_t lastMid = 0xFFFF;
+                for (size_t v = 0; v < vCount; ++v) {
+                    uint16_t mid = matIDs[v];
+                    if (mid == lastMid) continue;
+                    lastMid = mid;
+                    
+                    bool found = false;
+                    for (uint16_t existing : mat_ids) {
+                        if (existing == mid) { found = true; break; }
+                    }
+                    if (!found) mat_ids.push_back(mid);
+                }
+            }
+        } else {
+            // Fallback for standalone/legacy triangles
+            for (const auto& pair : trisVector) {
+                const auto& tri = pair.second;
+                Vec3 v0 = tri->getOriginalVertexPosition(0);
+                Vec3 v1 = tri->getOriginalVertexPosition(1);
+                Vec3 v2 = tri->getOriginalVertexPosition(2);
+                
+                bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
+                bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
+                bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
+                bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
+                bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
+                bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
+            }
+
+            uint16_t lastMid = 0xFFFF;
+            for (const auto& pair : trisVector) {
+                const auto& tri = pair.second;
+                uint16_t mid = tri->getMaterialID();
+                if (mid == lastMid) continue;
+                lastMid = mid;
+                
+                bool found = false;
+                for (uint16_t existing : mat_ids) {
+                    if (existing == mid) { found = true; break; }
+                }
+                if (!found) mat_ids.push_back(mid);
+            }
         }
         
         bbox_cache[kv.first] = {bb_min, bb_max};
@@ -6527,6 +6623,74 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
    /* SCENE_LOG_INFO("Selection cache built: " + std::to_string(mesh_cache.size()) +
                    " mesh groups, " + std::to_string(cached_scene_triangle_count) +
                    " triangles cached");*/
+}
+
+void SceneUI::syncAllTransformedVertices(struct SceneData& scene) {
+    if (!mesh_cache_valid) {
+        rebuildMeshCache(scene.world.objects);
+    }
+
+    // Iterate through all mesh groups in mesh_cache
+    for (auto& [name, tris] : mesh_cache) {
+        if (tris.empty()) continue;
+
+        // Sync instance's transform first if it is a HittableInstance
+        const int object_index = tris[0].first;
+        if (object_index >= 0 && static_cast<size_t>(object_index) < scene.world.objects.size()) {
+            if (auto inst = std::dynamic_pointer_cast<HittableInstance>(scene.world.objects[object_index])) {
+                inst->syncTransformFromSourceTriangles();
+            }
+        }
+
+        // Only sync vertices if transform has changed
+        if (auto t_ptr = tris[0].second->getTransformPtr()) {
+            Matrix4x4 current_xform = t_ptr->getFinal();
+            auto cache_it = last_synced_transforms.find(name);
+            if (cache_it == last_synced_transforms.end() || !(cache_it->second == current_xform)) {
+                
+                if (tris[0].second->parentMesh && tris[0].second->parentMesh->geometry) {
+                    TriangleMesh* pm = tris[0].second->parentMesh.get();
+                    size_t vCount = pm->geometry->get_vertex_count();
+                    
+                    const Vec3* origP = pm->geometry->get_positions_orig();
+                    if (!origP) {
+                        tris[0].second->getOriginalVertexPosition(0);
+                        origP = pm->geometry->get_positions_orig();
+                    }
+                    const Vec3* origN = pm->geometry->get_normals_orig();
+                    if (!origN) {
+                        tris[0].second->getOriginalVertexNormal(0);
+                        origN = pm->geometry->get_normals_orig();
+                    }
+                    
+                    Vec3* positions = pm->geometry->get_attribute_data_mut<Vec3>("P");
+                    Vec3* normals = pm->geometry->get_attribute_data_mut<Vec3>("N");
+                    
+                    if (origP && origN && positions && normals) {
+                        Matrix4x4 normal_xform = t_ptr->getNormalTransform();
+                        #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
+                        for (int v = 0; v < (int)vCount; ++v) {
+                            positions[v] = current_xform.transform_point(origP[v]);
+                            normals[v] = normal_xform.transform_vector(origN[v]).normalize();
+                        }
+                        
+                        for (auto& pair : tris) {
+                            pair.second->vertexPositionsDirty = true;
+                        }
+                    }
+                } else {
+                    // Fallback for standalone/legacy triangles
+                    for (auto& pair : tris) {
+                        if (!pair.second->hasAnySkinWeights()) {
+                            pair.second->updateTransformedVertices();
+                        }
+                    }
+                }
+                
+                last_synced_transforms[name] = current_xform;
+            }
+        }
+    }
 }
 
 void SceneUI::rebuildTriToIndex(const std::vector<std::shared_ptr<Hittable>>& objects) {
@@ -6563,11 +6727,15 @@ void SceneUI::invalidateCache() {
     mesh_cache_valid = false; 
     mesh_cache.clear();
     mesh_ui_cache.clear();
+    last_synced_transforms.clear();
     mesh_overlay_cache = MeshOverlayCache{};
     editable_mesh_cache = EditableMeshCache{};
     cached_triangle_count_by_object.clear();
     cached_scene_triangle_count = 0;
     bbox_cache.clear();
+    hull_candidate_cache.clear();
+    selection_skin_pose_hash.clear();
+    selection_outline_frame_cache.clear();
     material_slots_cache.clear();
     picking_vertices_synced = false;
     SCENE_LOG_INFO("Selection cache fully cleared and invalidated");
@@ -6583,19 +6751,37 @@ void SceneUI::updateBBoxCache(const std::string& objectName) {
     Vec3 bb_min(1e10f, 1e10f, 1e10f);
     Vec3 bb_max(-1e10f, -1e10f, -1e10f);
     
-    for (auto& pair : it->second) {
-        auto& tri = pair.second;
-        // Use ORIGINAL vertices (local space) for consistency with rebuildMeshCache
-        Vec3 v0 = tri->getOriginalVertexPosition(0);
-        Vec3 v1 = tri->getOriginalVertexPosition(1);
-        Vec3 v2 = tri->getOriginalVertexPosition(2);
-        
-        bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
-        bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
-        bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
-        bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
-        bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
-        bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
+    const auto& trisVector = it->second;
+    if (!trisVector.empty() && trisVector[0].second->parentMesh && trisVector[0].second->parentMesh->geometry) {
+        TriangleMesh* pm = trisVector[0].second->parentMesh.get();
+        size_t vCount = pm->geometry->get_vertex_count();
+        const Vec3* origP = pm->geometry->get_positions_orig();
+        if (!origP) origP = pm->geometry->get_positions();
+        if (origP) {
+            for (size_t v = 0; v < vCount; ++v) {
+                Vec3 p = origP[v];
+                bb_min.x = fminf(bb_min.x, p.x);
+                bb_min.y = fminf(bb_min.y, p.y);
+                bb_min.z = fminf(bb_min.z, p.z);
+                bb_max.x = fmaxf(bb_max.x, p.x);
+                bb_max.y = fmaxf(bb_max.y, p.y);
+                bb_max.z = fmaxf(bb_max.z, p.z);
+            }
+        }
+    } else {
+        for (auto& pair : trisVector) {
+            auto& tri = pair.second;
+            Vec3 v0 = tri->getOriginalVertexPosition(0);
+            Vec3 v1 = tri->getOriginalVertexPosition(1);
+            Vec3 v2 = tri->getOriginalVertexPosition(2);
+            
+            bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
+            bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
+            bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
+            bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
+            bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
+            bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
+        }
     }
     
     bbox_cache[objectName] = {bb_min, bb_max};
@@ -6620,19 +6806,62 @@ void SceneUI::ensureCPUSyncForPicking(UIContext& ctx) {
     for (const auto& name : objects_needing_cpu_sync) {
         auto it = mesh_cache.find(name);
         if (it != mesh_cache.end() && !it->second.empty()) {
-            for (auto& pair : it->second) {
-                const int object_index = pair.first;
-                if (object_index >= 0 && static_cast<size_t>(object_index) < ctx.scene.world.objects.size()) {
-                    if (auto inst = std::dynamic_pointer_cast<HittableInstance>(ctx.scene.world.objects[object_index])) {
-                        if (inst->syncTransformFromSourceTriangles()) {
-                            ++synced_count;
-                            continue;
+            auto& tris = it->second;
+            const int object_index = tris[0].first;
+            if (object_index >= 0 && static_cast<size_t>(object_index) < ctx.scene.world.objects.size()) {
+                if (auto inst = std::dynamic_pointer_cast<HittableInstance>(ctx.scene.world.objects[object_index])) {
+                    if (inst->syncTransformFromSourceTriangles()) {
+                        synced_count += tris.size();
+                        if (auto t_ptr = tris[0].second->getTransformPtr()) {
+                            last_synced_transforms[name] = t_ptr->getFinal();
                         }
+                        continue;
                     }
                 }
+            }
 
-                pair.second->updateTransformedVertices();
-                ++synced_count;
+            if (tris[0].second->parentMesh && tris[0].second->parentMesh->geometry) {
+                TriangleMesh* pm = tris[0].second->parentMesh.get();
+                size_t vCount = pm->geometry->get_vertex_count();
+                const Vec3* origP = pm->geometry->get_positions_orig();
+                if (!origP) {
+                    tris[0].second->getOriginalVertexPosition(0);
+                    origP = pm->geometry->get_positions_orig();
+                }
+                const Vec3* origN = pm->geometry->get_normals_orig();
+                if (!origN) {
+                    tris[0].second->getOriginalVertexNormal(0);
+                    origN = pm->geometry->get_normals_orig();
+                }
+                
+                Vec3* positions = pm->geometry->get_attribute_data_mut<Vec3>("P");
+                Vec3* normals = pm->geometry->get_attribute_data_mut<Vec3>("N");
+                
+                if (origP && origN && positions && normals) {
+                    if (auto t_ptr = tris[0].second->getTransformPtr()) {
+                        Matrix4x4 current_xform = t_ptr->getFinal();
+                        Matrix4x4 normal_xform = t_ptr->getNormalTransform();
+                        #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
+                        for (int v = 0; v < (int)vCount; ++v) {
+                            positions[v] = current_xform.transform_point(origP[v]);
+                            normals[v] = normal_xform.transform_vector(origN[v]).normalize();
+                        }
+                        last_synced_transforms[name] = current_xform;
+                    }
+                    
+                    for (auto& pair : tris) {
+                        pair.second->vertexPositionsDirty = true;
+                    }
+                    synced_count += tris.size();
+                }
+            } else {
+                for (auto& pair : tris) {
+                    pair.second->updateTransformedVertices();
+                    ++synced_count;
+                }
+                if (auto t_ptr = tris[0].second->getTransformPtr()) {
+                    last_synced_transforms[name] = t_ptr->getFinal();
+                }
             }
         }
     }
@@ -6646,7 +6875,7 @@ void SceneUI::ensureCPUSyncForPicking(UIContext& ctx) {
         extern bool g_bvh_rebuild_pending;
         g_bvh_rebuild_pending = true;
         ctx.renderer.resetCPUAccumulation();
-       // SCENE_LOG_INFO("Lazy CPU sync: updated " + std::to_string(synced_count) + " triangles for " + std::to_string(count) + " objects");
+        // SCENE_LOG_INFO("Lazy CPU sync: updated " + std::to_string(synced_count) + " triangles for " + std::to_string(count) + " objects");
     }
 }
 
@@ -7331,17 +7560,21 @@ void SceneUI::performOpenProject(UIContext& ctx) {
                 }
 
                 invalidateCache();
+                SCENE_LOG_INFO("[LoadDebug] invalidateCache finished");
                 active_model_path = g_ProjectManager.getProjectName();
 
                 scene_loading_progress = 92;
                 setSceneLoadingStage("Waiting for backend...");
                 if (ctx.backend_ptr) {
+                    SCENE_LOG_INFO("[LoadDebug] Waiting for backend completion...");
                     ctx.backend_ptr->waitForCompletion();
+                    SCENE_LOG_INFO("[LoadDebug] Backend completion wait finished");
                 }
 
                 scene_loading_progress = 93;
                 setSceneLoadingStage("Registering animations...");
                 if (!ctx.scene.animationDataList.empty()) {
+                    SCENE_LOG_INFO("[LoadDebug] Registering animations start...");
                     auto& animCtrl = AnimationController::getInstance();
                     animCtrl.registerClips(ctx.scene.animationDataList);
                     const auto& clips = animCtrl.getAllClips();
@@ -7351,6 +7584,7 @@ void SceneUI::performOpenProject(UIContext& ctx) {
                     }
                     SCENE_LOG_INFO("[SceneUI] Registered " + std::to_string(ctx.scene.animationDataList.size()) + " animation clips after project load.");
                 }
+                SCENE_LOG_INFO("[LoadDebug] Animations registration finished");
 
                 g_ProjectManager.getProjectData().is_modified = false;
 
@@ -7360,17 +7594,21 @@ void SceneUI::performOpenProject(UIContext& ctx) {
                 if (terrain) {
                     scene_loading_progress = 95;
                     setSceneLoadingStage("Evaluating terrain graph...");
+                    SCENE_LOG_INFO("[LoadDebug] Evaluating terrain graph...");
                     auto t_start = std::chrono::steady_clock::now();
                     terrainNodeGraph.evaluateTerrain(terrain, ctx.scene);
                     auto t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t_start).count();
                     SCENE_LOG_INFO("[Load] Terrain graph evaluated in " + std::to_string(t_ms) + " ms");
                 }
+                SCENE_LOG_INFO("[LoadDebug] Terrain evaluation finished");
 
                 scene_loading_progress = 98;
                 setSceneLoadingStage("Syncing volumes...");
                 hairUI.clear();
+                SCENE_LOG_INFO("[LoadDebug] Syncing VDB volumes to GPU...");
                 SceneUI::syncVDBVolumesToGPU(ctx);
+                SCENE_LOG_INFO("[LoadDebug] VDB volumes synced to GPU");
 
                 scene_loading_progress = 100;
                 setSceneLoadingStage("Finalizing...");
