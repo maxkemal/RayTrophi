@@ -21,7 +21,7 @@
 class Material;
 class Texture;
 class Triangle;
-class Triangle;
+class TriangleMesh;
 class VDBVolume;
 class GasVolume;
 
@@ -50,6 +50,13 @@ struct HitRecord {
     SurfaceOverrideData surface_override;
   
     const Triangle* triangle = nullptr;
+    // Faz 1 (DNA migration): lightweight (mesh, faceIndex) handle to the hit face, populated
+    // alongside `triangle` by every hit producer. Lets consumers query geometry via a
+    // DNA::TriangleProxy{tri_mesh, tri_face} without a per-face Triangle object. `triangle`
+    // stays the source of truth until the selection/edit identity migration (Faz 1 S3) lands;
+    // tri_mesh is null for standalone (parentMesh-less) triangles.
+    TriangleMesh* tri_mesh = nullptr;
+    uint32_t      tri_face = 0;
     Material* materialPtr = nullptr; // FAST ACCESS
     const VDBVolume* vdb_volume = nullptr; // Pointer to VDB Volume if hit
     const GasVolume* gas_volume = nullptr; // Pointer to Gas Volume if hit
