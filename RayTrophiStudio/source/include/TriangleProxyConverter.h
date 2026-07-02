@@ -57,7 +57,12 @@ public:
         const std::vector<int>& faceIdxs,
         std::shared_ptr<Transform> transform,
         const std::string& nodeName,
-        std::vector<std::shared_ptr<Triangle>>& outTriangles);
+        std::vector<std::shared_ptr<Triangle>>& outTriangles,
+        // Flat/proxy migration flip: when non-null, the freshly built shared TriangleMesh is
+        // returned here and the per-face facade materialization is SKIPPED entirely (outTriangles
+        // stays empty). This is what eliminates the 12.6M make_shared<Triangle> (materialize ~5s)
+        // and the facade soup (~1.6 GB) — the mesh goes straight into world.objects as one Hittable.
+        std::shared_ptr<TriangleMesh>* outMesh = nullptr);
 };
 
 #endif // TRIANGLE_PROXY_CONVERTER_H

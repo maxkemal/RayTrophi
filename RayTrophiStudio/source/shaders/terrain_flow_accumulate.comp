@@ -1,0 +1,48 @@
+// terrain_flow_accumulate.comp
+// Iterative (ping-pong) GPU approximation of the CPU flow-accumulation step, which
+// normally processes cells in strict descending-height topological order (a true
+// parallel equivalent — e.g. Zhou et al.'s pointer-jumping accumulation — is a much
+// bigger undertaking). Instead: each pass, every cell gathers accumulated flow from
+// its 8 neighbors weighted by each neighbor's precomputed outflow weight toward it
+// (terrain_flow_weights.comp), on top of a constant base rain of 1.0/cell.
+//
+// This converges to the correct accumulation only after as many passes as the
+// longest flow path in cells (up to the map diagonal in the worst case for one very
+// long river) — for interactive use the host runs a fixed, tunable pass count instead
+// of running to full convergence, which is "good enough" for most terrain but may
+// undercount very long primary channels if the pass count is set too low.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Weights { float weights[]; };
+layout(set = 0, binding = 1) readonly buffer FlowIn  { float flowIn[]; };
+layout(set = 0, binding = 2) buffer FlowOut          { float flowOut[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    int x = id % pc.mapWidth;
+    int y = id / pc.mapWidth;
+
+    const int dx[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+    const int dy[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+    // Offsets are symmetric: the neighbor at index d sees *this* cell in the
+    // opposite direction, index (7-d) in the same list.
+
+    float acc = 1.0; // base rain per cell
+    for (int d = 0; d < 8; d++) {
+        int nx = x + dx[d];
+        int ny = y + dy[d];
+        if (nx < 0 || nx >= pc.mapWidth || ny < 0 || ny >= pc.mapHeight) continue;
+        int nIdx = ny * pc.mapWidth + nx;
+        int opp = 7 - d;
+        acc += flowIn[nIdx] * weights[nIdx * 8 + opp];
+    }
+    flowOut[id] = acc;
+}

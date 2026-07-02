@@ -1,4 +1,4 @@
-﻿#include "PrincipledBSDF.h"
+#include "PrincipledBSDF.h"
 #include "PBRTextureChannelPolicy.h"
 #include <cmath>
 #include "Matrix4x4.h"
@@ -130,9 +130,17 @@ void PrincipledBSDF::setEmissionTexture(const std::shared_ptr<Texture>& tex, flo
     emissionProperty = MaterialProperty(Vec3(0, 0, 0), intensity, tex);
 }
 
-void PrincipledBSDF::setClearcoat(float clearcoat, float clearcoatRoughness) {
-    this->clearcoat = clearcoat;
-    this->clearcoatRoughness = clearcoatRoughness;
+void PrincipledBSDF::setClearcoat(float cc, float roughness) {
+    if (cc > 0.001f || roughness != 0.03f) {
+        if (!clearcoat_ext) clearcoat_ext = std::make_unique<ClearcoatExtension>();
+        clearcoat_ext->clearcoat = cc;
+        clearcoat_ext->clearcoatRoughness = roughness;
+    } else {
+        if (clearcoat_ext) {
+            clearcoat_ext->clearcoat = cc;
+            clearcoat_ext->clearcoatRoughness = roughness;
+        }
+    }
 }
 
 
@@ -150,8 +158,9 @@ float PrincipledBSDF::getTransmission(const Vec2& uv) const {
 }
 
 void PrincipledBSDF::setSubsurfaceScattering(const Vec3& sssColor, Vec3 sssRadius) {
-    this->subsurfaceColor = sssColor;
-    this->subsurfaceRadius = sssRadius;
+    if (!sss_ext) sss_ext = std::make_unique<SubsurfaceExtension>();
+    sss_ext->subsurfaceColor = sssColor;
+    sss_ext->subsurfaceRadius = sssRadius;
 }
 std::shared_ptr<Texture> PrincipledBSDF::getTexture() const {
     if (albedoProperty.texture) return albedoProperty.texture;
@@ -339,8 +348,8 @@ bool PrincipledBSDF::scatter(
     // independently from scatter decision. Emissive surfaces still scatter normally.
 
     float translucentValue = translucent; 
-    float sssValue = subsurface; 
-    float clearcoatValue = clearcoat;
+    float sssValue = getSubsurface(); 
+    float clearcoatValue = getClearcoat();
 
     if (rec.surface_override.valid) {
         translucentValue = rec.surface_override.translucent;
@@ -666,7 +675,7 @@ Vec3 PrincipledBSDF::computeFresnel(const Vec3& F0, float cosTheta) const {
 }
 Vec3 PrincipledBSDF::computeClearcoat(const Vec3& V, const Vec3& L, const Vec3& N) const {
     Vec3 clearcoatColor = Vec3(1.0f);
-    float clearcoatRough = clearcoatRoughness;
+    float clearcoatRough = getClearcoatRoughness();
 
     Vec3 H = (V + L).normalize();  // H vektörü yansıyan ışık değil, göz ve ışık yönü olmalı
     float clearcoatNDF = DistributionGGX(N, H, clearcoatRough);
@@ -701,7 +710,7 @@ Vec3 PrincipledBSDF::computeSubsurfaceScattering(const Vec3& N, const Vec3& V, c
     }
 
     scatteredLight /= static_cast<float>(numSamples);
-    return subsurfaceColor * scatteredLight;
+    return getSubsurfaceColor() * scatteredLight;
 }
 
 
@@ -918,7 +927,7 @@ bool PrincipledBSDF::clearcoat_scatter(const Ray& r_in, const HitRecord& rec, Ve
     // Use VNDF sampling to match Vulkan closesthit.rchit behavior
     float cc_rough = rec.surface_override.valid
         ? std::max(rec.surface_override.clearcoat_roughness, 0.001f)
-        : std::max(this->clearcoatRoughness, 0.001f);
+        : std::max(getClearcoatRoughness(), 0.001f);
     float alpha = std::max(cc_rough * cc_rough, 1e-4f);
 
     // Sample VNDF using Heitz method
@@ -959,9 +968,9 @@ bool PrincipledBSDF::clearcoat_scatter(const Ray& r_in, const HitRecord& rec, Ve
     // iridescence=0 → white (plain clearcoat). At grazing the optical path difference
     // grows, cycling the interference hue (oil-slick / beetle-shell / candy paint).
     Vec3 ccTint = Vec3(1.0f, 1.0f, 1.0f);
-    float iridescence = std::min(std::max(this->clearcoatIridescence, 0.0f), 1.0f);
+    float iridescence = std::min(std::max(getClearcoatIridescence(), 0.0f), 1.0f);
     if (iridescence > 1e-3f) {
-        float opd = this->clearcoatFilmThickness * (1.0f / std::max(VdotH, 0.15f));
+        float opd = getClearcoatFilmThickness() * (1.0f / std::max(VdotH, 0.15f));
         Vec3 film = Vec3(0.55f + 0.45f * std::cos(opd * 6.2831853f),
                          0.55f + 0.45f * std::cos(opd * 6.2831853f + 2.0944f),
                          0.55f + 0.45f * std::cos(opd * 6.2831853f + 4.18879f));
@@ -978,10 +987,10 @@ bool PrincipledBSDF::clearcoat_scatter(const Ray& r_in, const HitRecord& rec, Ve
 
 bool PrincipledBSDF::sss_random_walk_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const {
     Vec3 N = rec.normal;
-    Vec3 sss_color = rec.surface_override.valid ? rec.surface_override.subsurface_color : this->subsurfaceColor;
-    Vec3 sss_radius = this->subsurfaceRadius;
-    float sss_scale = std::max(this->subsurfaceScale, 0.001f);
-    float sss_anisotropy = this->subsurfaceAnisotropy;
+    Vec3 sss_color = rec.surface_override.valid ? rec.surface_override.subsurface_color : getSubsurfaceColor();
+    Vec3 sss_radius = getSubsurfaceRadius();
+    float sss_scale = std::max(getSubsurfaceScale(), 0.001f);
+    float sss_anisotropy = getSubsurfaceAnisotropy();
 
     auto compute_sigma_t = [](const Vec3& radius, float scale) {
         Vec3 scaled_radius = radius * scale;
@@ -995,7 +1004,7 @@ bool PrincipledBSDF::sss_random_walk_scatter(const Ray& r_in, const HitRecord& r
     Vec3 sigma_t = compute_sigma_t(sss_radius, sss_scale);
 
     // If random-walk is disabled, perform a single-step SSS exit (GPU parity)
-    if (!this->useRandomWalkSSS) {
+    if (!getUseRandomWalkSSS()) {
         float rand_channel = Vec3::random_float();
         float sigma_sample;
         if (rand_channel < 0.333f) sigma_sample = sigma_t.x;
@@ -1020,7 +1029,7 @@ bool PrincipledBSDF::sss_random_walk_scatter(const Ray& r_in, const HitRecord& r
     }
 
     // Multi-scatter random walk (bounded)
-    int maxSteps = this->sssMaxSteps;
+    int maxSteps = getSssMaxSteps();
     if (maxSteps <= 0) maxSteps = 1;
     Vec3 throughput = Vec3(1.0f, 1.0f, 1.0f);
     Vec3 pos = rec.point - N * 0.001f;
@@ -1079,5 +1088,278 @@ bool PrincipledBSDF::translucent_scatter(const Ray& r_in, const HitRecord& rec, 
     scattered = Ray(rec.point - N * 0.001f, trans_dir);
     
     return true;
+}
+
+// --- Lazy-allocated Material Extension Getters & Setters ---
+
+// Clearcoat
+float PrincipledBSDF::getClearcoat() const {
+    return clearcoat_ext ? clearcoat_ext->clearcoat : 0.0f;
+}
+float PrincipledBSDF::getClearcoatRoughness() const {
+    return clearcoat_ext ? clearcoat_ext->clearcoatRoughness : 0.03f;
+}
+float PrincipledBSDF::getClearcoatIridescence() const {
+    return clearcoat_ext ? clearcoat_ext->clearcoatIridescence : 0.0f;
+}
+void PrincipledBSDF::setClearcoatIridescence(float val) {
+    if (val > 0.001f) {
+        if (!clearcoat_ext) clearcoat_ext = std::make_unique<ClearcoatExtension>();
+        clearcoat_ext->clearcoatIridescence = val;
+    } else if (clearcoat_ext) {
+        clearcoat_ext->clearcoatIridescence = val;
+    }
+}
+float PrincipledBSDF::getClearcoatFilmThickness() const {
+    return clearcoat_ext ? clearcoat_ext->clearcoatFilmThickness : 0.55f;
+}
+void PrincipledBSDF::setClearcoatFilmThickness(float val) {
+    if (std::abs(val - 0.55f) > 0.001f) {
+        if (!clearcoat_ext) clearcoat_ext = std::make_unique<ClearcoatExtension>();
+        clearcoat_ext->clearcoatFilmThickness = val;
+    } else if (clearcoat_ext) {
+        clearcoat_ext->clearcoatFilmThickness = val;
+    }
+}
+
+// Subsurface
+float PrincipledBSDF::getSubsurface() const {
+    return sss_ext ? sss_ext->subsurface : 0.0f;
+}
+void PrincipledBSDF::setSubsurface(float val) {
+    if (val > 0.001f) {
+        if (!sss_ext) sss_ext = std::make_unique<SubsurfaceExtension>();
+        sss_ext->subsurface = val;
+    } else if (sss_ext) {
+        sss_ext->subsurface = val;
+    }
+}
+Vec3 PrincipledBSDF::getSubsurfaceColor() const {
+    return sss_ext ? sss_ext->subsurfaceColor : Vec3(1.0f, 0.8f, 0.6f);
+}
+void PrincipledBSDF::setSubsurfaceColor(const Vec3& val) {
+    if (!sss_ext) sss_ext = std::make_unique<SubsurfaceExtension>();
+    sss_ext->subsurfaceColor = val;
+}
+Vec3 PrincipledBSDF::getSubsurfaceRadius() const {
+    return sss_ext ? sss_ext->subsurfaceRadius : Vec3(1.0f, 0.2f, 0.1f);
+}
+void PrincipledBSDF::setSubsurfaceRadius(const Vec3& val) {
+    if (!sss_ext) sss_ext = std::make_unique<SubsurfaceExtension>();
+    sss_ext->subsurfaceRadius = val;
+}
+float PrincipledBSDF::getSubsurfaceScale() const {
+    return sss_ext ? sss_ext->subsurfaceScale : 0.05f;
+}
+void PrincipledBSDF::setSubsurfaceScale(float val) {
+    if (!sss_ext) sss_ext = std::make_unique<SubsurfaceExtension>();
+    sss_ext->subsurfaceScale = val;
+}
+float PrincipledBSDF::getSubsurfaceAnisotropy() const {
+    return sss_ext ? sss_ext->subsurfaceAnisotropy : 0.0f;
+}
+void PrincipledBSDF::setSubsurfaceAnisotropy(float val) {
+    if (!sss_ext) sss_ext = std::make_unique<SubsurfaceExtension>();
+    sss_ext->subsurfaceAnisotropy = val;
+}
+float PrincipledBSDF::getSubsurfaceIOR() const {
+    return sss_ext ? sss_ext->subsurfaceIOR : 1.4f;
+}
+void PrincipledBSDF::setSubsurfaceIOR(float val) {
+    if (!sss_ext) sss_ext = std::make_unique<SubsurfaceExtension>();
+    sss_ext->subsurfaceIOR = val;
+}
+bool PrincipledBSDF::getUseRandomWalkSSS() const {
+    return sss_ext ? sss_ext->useRandomWalkSSS : true;
+}
+void PrincipledBSDF::setUseRandomWalkSSS(bool val) {
+    if (!sss_ext) sss_ext = std::make_unique<SubsurfaceExtension>();
+    sss_ext->useRandomWalkSSS = val;
+}
+int PrincipledBSDF::getSssMaxSteps() const {
+    return sss_ext ? sss_ext->sssMaxSteps : 6;
+}
+void PrincipledBSDF::setSssMaxSteps(int val) {
+    if (!sss_ext) sss_ext = std::make_unique<SubsurfaceExtension>();
+    sss_ext->sssMaxSteps = val;
+}
+
+// Resin
+float PrincipledBSDF::getTransmissionDensity() const {
+    return resin_ext ? resin_ext->transmissionDensity : 0.0f;
+}
+void PrincipledBSDF::setTransmissionDensity(float val) {
+    if (val > 0.001f) {
+        if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+        resin_ext->transmissionDensity = val;
+    } else if (resin_ext) {
+        resin_ext->transmissionDensity = val;
+    }
+}
+Vec3 PrincipledBSDF::getResinColor() const {
+    return resin_ext ? resin_ext->resinColor : Vec3(1.0f, 1.0f, 1.0f);
+}
+void PrincipledBSDF::setResinColor(const Vec3& val) {
+    if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+    resin_ext->resinColor = val;
+}
+float PrincipledBSDF::getResinRoughness() const {
+    return resin_ext ? resin_ext->resinRoughness : 0.1f;
+}
+void PrincipledBSDF::setResinRoughness(float val) {
+    if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+    resin_ext->resinRoughness = val;
+}
+float PrincipledBSDF::getResinInclusion() const {
+    return resin_ext ? resin_ext->resinInclusion : 0.0f;
+}
+void PrincipledBSDF::setResinInclusion(float val) {
+    if (val > 0.001f) {
+        if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+        resin_ext->resinInclusion = val;
+    } else if (resin_ext) {
+        resin_ext->resinInclusion = val;
+    }
+}
+float PrincipledBSDF::getResinDirt() const {
+    return resin_ext ? resin_ext->resinDirt : 0.0f;
+}
+void PrincipledBSDF::setResinDirt(float val) {
+    if (val > 0.001f) {
+        if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+        resin_ext->resinDirt = val;
+    } else if (resin_ext) {
+        resin_ext->resinDirt = val;
+    }
+}
+float PrincipledBSDF::getResinInclusionScale() const {
+    return resin_ext ? resin_ext->resinInclusionScale : 8.0f;
+}
+void PrincipledBSDF::setResinInclusionScale(float val) {
+    if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+    resin_ext->resinInclusionScale = val;
+}
+Vec3 PrincipledBSDF::getResinDirtColor() const {
+    return resin_ext ? resin_ext->resinDirtColor : Vec3(0.18f, 0.14f, 0.10f);
+}
+void PrincipledBSDF::setResinDirtColor(const Vec3& val) {
+    if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+    resin_ext->resinDirtColor = val;
+}
+bool PrincipledBSDF::getGlassMarbleVolume() const {
+    return resin_ext ? resin_ext->glassMarbleVolume : false;
+}
+void PrincipledBSDF::setGlassMarbleVolume(bool val) {
+    if (val) {
+        if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+        resin_ext->glassMarbleVolume = val;
+    } else if (resin_ext) {
+        resin_ext->glassMarbleVolume = val;
+    }
+}
+
+// Bubble
+bool PrincipledBSDF::getIsBubble() const {
+    return bubble_ext ? bubble_ext->isBubble : false;
+}
+void PrincipledBSDF::setIsBubble(bool val) {
+    if (val) {
+        if (!bubble_ext) bubble_ext = std::make_unique<BubbleExtension>();
+        bubble_ext->isBubble = val;
+    } else if (bubble_ext) {
+        bubble_ext->isBubble = val;
+    }
+}
+float PrincipledBSDF::getBubbleIor() const {
+    return bubble_ext ? bubble_ext->bubbleIor : 1.33f;
+}
+void PrincipledBSDF::setBubbleIor(float val) {
+    if (!bubble_ext) bubble_ext = std::make_unique<BubbleExtension>();
+    bubble_ext->bubbleIor = val;
+}
+float PrincipledBSDF::getBubbleFilm() const {
+    return bubble_ext ? bubble_ext->bubbleFilm : 0.0f;
+}
+void PrincipledBSDF::setBubbleFilm(float val) {
+    if (val > 0.001f) {
+        if (!bubble_ext) bubble_ext = std::make_unique<BubbleExtension>();
+        bubble_ext->bubbleFilm = val;
+    } else if (bubble_ext) {
+        bubble_ext->bubbleFilm = val;
+    }
+}
+
+PrincipledBSDF::PrincipledBSDF(const PrincipledBSDF& other)
+    : Material(other)
+{
+    // Copy base properties
+    translucent = other.translucent;
+    anisotropic = other.anisotropic;
+    transmission = other.transmission;
+    sheen = other.sheen;
+    sheen_tint = other.sheen_tint;
+    surface_deposition = other.surface_deposition;
+    anisotropicDirection = other.anisotropicDirection;
+    opacityAlpha = other.opacityAlpha;
+    micro_detail_strength = other.micro_detail_strength;
+    micro_detail_scale = other.micro_detail_scale;
+    tile_break_strength = other.tile_break_strength;
+
+    // Deep copy extensions
+    if (other.sss_ext) {
+        sss_ext = std::make_unique<SubsurfaceExtension>(*other.sss_ext);
+    }
+    if (other.clearcoat_ext) {
+        clearcoat_ext = std::make_unique<ClearcoatExtension>(*other.clearcoat_ext);
+    }
+    if (other.resin_ext) {
+        resin_ext = std::make_unique<ResinExtension>(*other.resin_ext);
+    }
+    if (other.bubble_ext) {
+        bubble_ext = std::make_unique<BubbleExtension>(*other.bubble_ext);
+    }
+}
+
+PrincipledBSDF& PrincipledBSDF::operator=(const PrincipledBSDF& other) {
+    if (this == &other) return *this;
+
+    Material::operator=(other);
+
+    // Copy base properties
+    translucent = other.translucent;
+    anisotropic = other.anisotropic;
+    transmission = other.transmission;
+    sheen = other.sheen;
+    sheen_tint = other.sheen_tint;
+    surface_deposition = other.surface_deposition;
+    anisotropicDirection = other.anisotropicDirection;
+    opacityAlpha = other.opacityAlpha;
+    micro_detail_strength = other.micro_detail_strength;
+    micro_detail_scale = other.micro_detail_scale;
+    tile_break_strength = other.tile_break_strength;
+
+    // Deep copy extensions
+    if (other.sss_ext) {
+        sss_ext = std::make_unique<SubsurfaceExtension>(*other.sss_ext);
+    } else {
+        sss_ext.reset();
+    }
+    if (other.clearcoat_ext) {
+        clearcoat_ext = std::make_unique<ClearcoatExtension>(*other.clearcoat_ext);
+    } else {
+        clearcoat_ext.reset();
+    }
+    if (other.resin_ext) {
+        resin_ext = std::make_unique<ResinExtension>(*other.resin_ext);
+    } else {
+        resin_ext.reset();
+    }
+    if (other.bubble_ext) {
+        bubble_ext = std::make_unique<BubbleExtension>(*other.bubble_ext);
+    } else {
+        bubble_ext.reset();
+    }
+
+    return *this;
 }
 

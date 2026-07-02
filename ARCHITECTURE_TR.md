@@ -63,6 +63,15 @@ Endüstri standardı çerçeveler ve donanım hızlandırmalı API'ler üzerine 
 
 ---
 
+## 🎮 Render Cihazları ve İş Yükü Dağılımı
+Geliştiriciler ve yapay zeka ajanlarının doğru yönlendirilmesi için render mekanizmaları şu şekilde kurgulanmıştır:
+*   **Vulkan RT (Varsayılan Render Aygıtı):** GPU tarafındaki birincil ve varsayılan path tracing / render motorumuzdur.
+*   **Vulkan Raster (Önizleme ve Edit Modu):** Temel düzenleme (edit), sculpt, boyama (paint) gibi etkileşimli işlemler varsayılan olarak raster modunda çalıştırılır.
+*   **OptiX (İkincil Render Aygıtı):** Şu an için GPU tarafında ikinci/alternatif render motoru olarak konumlandırılmıştır.
+*   **Intel Embree (CPU Çekirdeği):** CPU tabanlı ray tracing ve temel sahne BVH yapısı için motorun çekirdek yapısını oluşturur.
+
+---
+
 ## 🚀 Bu Rapor Neden Önemli?
 Geliştiriciler ve işverenler için bu rapor şunları göstermektedir:
 1.  **Ölçeklenebilirlik:** 200k+ satırlık motora ait kod/shader yüzeyine sahip büyük, çoklu backend grafik kod tabanını yönetme deneyimi.

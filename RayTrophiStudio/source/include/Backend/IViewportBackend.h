@@ -18,6 +18,11 @@ public:
         const std::string& nodeName,
         const std::vector<size_t>& dirtyIndices,
         const std::vector<std::pair<int, std::shared_ptr<class Triangle>>>& meshEntries) = 0;
+
+    // Refit a flat (direct SoA) mesh's raster vertices straight from its DNA SoA (no per-face
+    // Triangle facades). Returns false if unsupported / mesh not found so the caller can fall back.
+    virtual bool updateRasterMeshFromMeshSoA(const std::string& /*nodeName*/,
+                                             const class TriangleMesh* /*mesh*/) { return false; }
     virtual bool cloneRasterObjectByNodeName(
         const std::string& sourceNodeName,
         const std::string& newNodeName,

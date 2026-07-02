@@ -1,4 +1,4 @@
-﻿#include "AtmosphereLUT.h"
+#include "AtmosphereLUT.h"
 #include <cuda_runtime.h>
 #include <cmath>
 #include <vector>
@@ -154,7 +154,7 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
 
     // Phase 1: Transmittance LUT (256x64)
     host_transmittance.resize(TRANSMITTANCE_LUT_W * TRANSMITTANCE_LUT_H);
-    #pragma omp parallel for
+    #pragma omp parallel for num_threads(get_omp_threads_limit())
     for (int y = 0; y < TRANSMITTANCE_LUT_H; ++y) {
         for (int x = 0; x < TRANSMITTANCE_LUT_W; ++x) {
             float u = (float)x / (TRANSMITTANCE_LUT_W - 1.0f);
@@ -174,7 +174,7 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
 
     // Phase 2: Multi-Scattering LUT (32x32)
     host_multi_scatter.resize(MULTI_SCATTER_LUT_RES * MULTI_SCATTER_LUT_RES);
-    #pragma omp parallel for
+    #pragma omp parallel for num_threads(get_omp_threads_limit())
     for (int y = 0; y < MULTI_SCATTER_LUT_RES; ++y) {
         for (int x = 0; x < MULTI_SCATTER_LUT_RES; ++x) {
             float u = (float)x / (MULTI_SCATTER_LUT_RES - 1.0f);
@@ -202,7 +202,7 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
 
     // Phase 3: SkyView LUT (256x128)
     host_skyview.resize(SKYVIEW_LUT_W * SKYVIEW_LUT_H);
-    #pragma omp parallel for
+    #pragma omp parallel for num_threads(get_omp_threads_limit())
     for (int y = 0; y < SKYVIEW_LUT_H; ++y) {
         for (int x = 0; x < SKYVIEW_LUT_W; ++x) {
             float u = (float)x / (SKYVIEW_LUT_W - 1.0f);

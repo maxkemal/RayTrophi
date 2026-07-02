@@ -14,6 +14,12 @@ namespace MeshModifiers {
     // Performs a linear subdivision without smoothing (flat subdivide).
     std::vector<std::shared_ptr<Triangle>> SubdivideSubD(const std::vector<std::shared_ptr<Triangle>>& inputMesh, int levels = 1);
 
+    // Flat/proxy: build ONE shared TriangleMesh (SoA) from a facade list, with no per-face
+    // Triangle facades. Used by Apply to bake any modifier result (incl. Simple/Flat subdivide,
+    // whose facades are standalone with no shared parentMesh) into a flat mesh. Un-welded (3N) so
+    // per-corner shading is preserved exactly; local rest + world-baked attrs match the live path.
+    std::shared_ptr<TriangleMesh> facadesToFlatMesh(const std::vector<std::shared_ptr<Triangle>>& facades);
+
     // Subdivides a mesh and applies Laplacian smoothing to the new vertices.
     // Approximates evaluating a smooth subdivision surface (like Loop subdivision for triangles).
     // NOTE: superseded by CatmullClarkSubD for the Smooth Subdivision modifier; kept for reference.
@@ -109,7 +115,10 @@ namespace MeshModifiers {
     std::vector<std::shared_ptr<Triangle>> catmullClarkSubDStencil(
         const std::vector<std::shared_ptr<Triangle>>& inputMesh,
         int levels = 1,
-        const EdgeCreaseFn& creaseLookup = {});
+        const EdgeCreaseFn& creaseLookup = {},
+        // Flat/proxy migration flip: when non-null, returns the single shared TriangleMesh here
+        // and emits NO facade triangles (returns empty). See convertFromRawArraysToMesh.
+        std::shared_ptr<TriangleMesh>* outMesh = nullptr);
 
     // ---- Phase 3d: device-resident CC geometry (zero-copy BLAS) ----
     // Result of evaluating a CC plan straight into a GPU buffer laid out as the RT BLAS
@@ -167,7 +176,10 @@ namespace MeshModifiers {
         // automatically inside Catmull-Clark — no extra plumbing at the call sites.
         // forRender selects each subdivision modifier's renderLevels (Rendered / final
         // quality) instead of its viewport levels (Solid / edit display).
-        std::vector<std::shared_ptr<Triangle>> evaluate(const std::vector<std::shared_ptr<Triangle>>& baseMesh, bool forRender = false) const;
+        // outMesh (flat/proxy migration flip): when non-null AND the stack is a single enabled
+        // Catmull-Clark modifier, the result is emitted as ONE shared TriangleMesh here (no
+        // facades; returns empty vector). Any other stack falls back to the facade path.
+        std::vector<std::shared_ptr<Triangle>> evaluate(const std::vector<std::shared_ptr<Triangle>>& baseMesh, bool forRender = false, std::shared_ptr<TriangleMesh>* outMesh = nullptr) const;
 
         // Crease authoring (positions in mesh LOCAL space). weight<=0 clears the edge.
         static std::array<int, 6> makeCreaseKey(const Vec3& a, const Vec3& b);

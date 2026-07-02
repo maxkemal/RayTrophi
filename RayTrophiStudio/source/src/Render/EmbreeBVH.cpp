@@ -1,4 +1,4 @@
-#include "EmbreeBVH.h"
+﻿#include "EmbreeBVH.h"
 #include "HittableInstance.h"
 #include "VDBVolume.h" // Add VDB support
 #include "VDBVolumeManager.h"
@@ -146,8 +146,12 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
 
     // 1. Separate objects
     cached_triangles.clear();
+    facadeless_tri_count = 0; // recomputed below; reset so a triangle-free rebuild can't keep a stale count
     std::vector<std::shared_ptr<HittableInstance>> local_instances;
-    
+    // Flat/proxy migration: dense meshes may live in world.objects as a single TriangleMesh
+    // (no per-face Triangle facades). Collected here and built as facade-less groups below.
+    std::vector<std::shared_ptr<TriangleMesh>> direct_meshes;
+
     cached_triangles.reserve(objects.size());
     local_instances.reserve(objects.size());
     vdb_objects.reserve(objects.size());
@@ -158,6 +162,9 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             cached_triangles.push_back(tri);
         }
+        else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (mesh->geometry && !mesh->geometry->indices.empty()) direct_meshes.push_back(mesh);
+        }
         else if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
             local_instances.push_back(inst);
         }
@@ -167,11 +174,14 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
     }
 
     // 2. Build Triangle Geometry (if any)
-    if (!cached_triangles.empty()) {
-        // Group triangles by parentMesh to exploit contiguous flat buffers
+    if (!cached_triangles.empty() || !direct_meshes.empty()) {
+        // Group triangles by parentMesh to exploit contiguous flat buffers. facadeless groups
+        // (tris empty) cover ALL faces of a TriangleMesh placed directly in world.objects.
         struct TempMeshGroup {
             TriangleMesh* mesh = nullptr;
             std::vector<std::shared_ptr<Triangle>> tris;
+            bool facadeless = false;       // true => emit all mesh faces from SoA, no Triangle objects
+            size_t face_count = 0;         // facadeless: mesh->num_triangles()
         };
         std::vector<TempMeshGroup> temp_groups;
         std::unordered_map<TriangleMesh*, size_t> mesh_to_group;
@@ -185,20 +195,38 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
                     temp_groups[it->second].tris.push_back(tri);
                 } else {
                     mesh_to_group[tri->parentMesh.get()] = temp_groups.size();
-                    temp_groups.push_back({tri->parentMesh.get(), {tri}});
+                    temp_groups.push_back({tri->parentMesh.get(), {tri}, false, 0});
                 }
             } else {
                 standalone_tris.push_back(tri);
             }
         }
 
+        // facade-less direct meshes: one group each, covering every face from the SoA index buffer.
+        for (const auto& mesh : direct_meshes) {
+            TempMeshGroup g;
+            g.mesh = mesh.get();
+            g.facadeless = true;
+            g.face_count = mesh->num_triangles();
+            temp_groups.push_back(std::move(g));
+        }
+
         // Calculate total vertices and triangles to allocate
         size_t total_vertices = 0;
-        size_t total_triangles = cached_triangles.size();
+        size_t total_triangles = 0;
 
+        facadeless_tri_count = 0;
         for (const auto& group : temp_groups) {
             total_vertices += group.mesh->num_vertices();
+            total_triangles += group.facadeless ? group.face_count : group.tris.size();
+            if (group.facadeless) facadeless_tri_count += group.face_count;
         }
+        // Standalone (parentMesh-less) triangles are emitted into the same buffers after the groups
+        // (loop at "2b"), so they MUST be counted here. The pre-facade-less code derived
+        // total_triangles from cached_triangles.size() (which included standalone); switching to a
+        // per-group sum to account for facade-less faces dropped them, under-allocating the index/
+        // triangle buffers and causing an OOB write in the standalone loop on project load.
+        total_triangles += standalone_tris.size();
         total_vertices += standalone_tris.size() * 3;
 
         RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
@@ -221,14 +249,64 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
         for (const auto& group : temp_groups) {
             size_t vCount = group.mesh->num_vertices();
             if (vCount > 0 && group.mesh->geometry) {
-                const Vec3* src_positions = group.mesh->geometry->get_attribute_data<Vec3>("P");
-                if (src_positions) {
-                    memcpy(vertex_buffer + vertex_offset, src_positions, vCount * sizeof(Vec3));
+                Matrix4x4 initial_xform = group.mesh->transform ? group.mesh->transform->getFinal() : Matrix4x4::identity();
+
+                if (group.facadeless) {
+                    // CPU facade-less geometry lives in the BVH as WORLD positions + identity. Derive
+                    // world = getFinal() * P_orig HERE (same math Vulkan RT uses: P_orig + TLAS xform)
+                    // instead of memcpy-ing the SoA "P" attribute. "P" is a separately-baked cache that
+                    // is NOT reliably re-baked when only this mesh's transform changes (it has no facade
+                    // in the dynamic-triangle refit list), which left the CPU picking BVH at a stale
+                    // position while Vulkan rendered the current one. Baking from P_orig keeps both
+                    // backends in lockstep on every rebuild.
+                    const Vec3* origP = group.mesh->geometry->get_positions_orig();
+                    if (!origP) origP = group.mesh->geometry->get_attribute_data<Vec3>("P");
+                    if (origP) {
+                        #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
+                        for (int v = 0; v < (int)vCount; ++v) {
+                            vertex_buffer[vertex_offset + v] = initial_xform.transform_point(origP[v]);
+                        }
+                    }
+                } else {
+                    const Vec3* src_positions = group.mesh->geometry->get_attribute_data<Vec3>("P");
+                    if (src_positions) {
+                        memcpy(vertex_buffer + vertex_offset, src_positions, vCount * sizeof(Vec3));
+                    }
                 }
 
                 // Add to active_mesh_groups for fast refitting
-                Matrix4x4 initial_xform = group.mesh->transform ? group.mesh->transform->getFinal() : Matrix4x4::identity();
-                active_mesh_groups.push_back({group.mesh, vertex_offset, vCount, initial_xform});
+                active_mesh_groups.push_back({group.mesh, vertex_offset, vCount, initial_xform, group.facadeless});
+            }
+
+            if (group.facadeless) {
+                // Facade-less: emit every mesh face straight from the SoA index buffer. No
+                // Triangle objects — identity/normals/uv come from (mesh_ptr, face_index) at hit.
+                const auto* geom = group.mesh->geometry.get();
+                const auto& gIdx = geom->indices;
+                const uint16_t* gMat = geom->get_attribute_data<uint16_t>("materialID");
+                const int faceCount = static_cast<int>(group.face_count);
+                const int terrainId = group.mesh->terrain_id; // -1 for ordinary flat meshes; terrain's own id otherwise
+                #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
+                for (int i = 0; i < faceCount; ++i) {
+                    size_t local_tri_offset = tri_offset + i;
+                    uint32_t i0 = gIdx[i * 3 + 0], i1 = gIdx[i * 3 + 1], i2 = gIdx[i * 3 + 2];
+                    index_buffer[local_tri_offset * 3 + 0] = i0 + static_cast<unsigned>(vertex_offset);
+                    index_buffer[local_tri_offset * 3 + 1] = i1 + static_cast<unsigned>(vertex_offset);
+                    index_buffer[local_tri_offset * 3 + 2] = i2 + static_cast<unsigned>(vertex_offset);
+
+                    uint16_t mId = gMat ? gMat[i0] : 0;
+                    if (mId == MaterialManager::INVALID_MATERIAL_ID) mId = 0;
+                    TriangleData td;
+                    td.materialID = mId;
+                    td.terrain_id = terrainId;
+                    td.original_ptr = nullptr;
+                    td.mesh_ptr = group.mesh;
+                    td.face_index = static_cast<uint32_t>(i);
+                    triangle_data[local_tri_offset] = td;
+                }
+                tri_offset += group.face_count;
+                vertex_offset += vCount;
+                continue;
             }
 
             // Populate indices and triangle_data in parallel
@@ -579,7 +657,14 @@ void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::sha
 
     // Topology changes require a full rebuild. Refit is only safe when the dense
     // triangle set still matches Embree's existing vertex/index buffers.
-    if (cached_triangles.size() != triangle_data.size()) {
+    //
+    // NOTE (flat/proxy): facade-less direct-mesh faces have no cached_triangles entry, so the dense
+    // count is cached_triangles + facadeless_tri_count. The grouped fast-path below now SELF-BAKES
+    // world = getFinal()*P_orig for facade-less groups (instead of memcpy-ing the un-rebaked "P"
+    // cache), so a transform-only change (keyframe / rigid pose) REFITS correctly here instead of
+    // forcing a full per-frame rebuild — the heavy cost on a keyframed flat mesh. A real topology
+    // change still mismatches this sum and bails to a rebuild.
+    if (cached_triangles.size() + facadeless_tri_count != triangle_data.size()) {
         extern bool g_bvh_rebuild_pending;
         g_bvh_rebuild_pending = true;
         return;
@@ -595,18 +680,45 @@ void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::sha
 
                 int any_dirty = 0;
 
-                // 1. Grouped fast-path: zero-copy memcpy deformed vertices in parallel (only if transform changed)
+                // 1. Grouped fast-path: update deformed vertices (only if transform changed).
+                // The outer loop is SEQUENTIAL over groups and the parallelism lives on the
+                // dominant inner axis (vertices). A facade scene has the work spread over many
+                // memcpy groups (memory-bound, so per-group threading buys little), but a flat
+                // (facade-less) scene is typically ONE huge TriangleMesh = one group: parallelizing
+                // over groups left that group's whole getFinal()*P_orig bake on a SINGLE thread —
+                // the "flat keyframe is much heavier than facade" cost. Threading the vertex loop
+                // instead matches facade speed (a 12M-vertex mesh now bakes across all cores).
                 if (!active_mesh_groups.empty()) {
+                    const int bakeThreads = get_omp_threads_limit();
                     size_t group_count = active_mesh_groups.size();
-                    #pragma omp parallel for num_threads(get_omp_threads_limit()) reduction(+:any_dirty)
                     for (int i = 0; i < (int)group_count; ++i) {
                         auto& group = active_mesh_groups[i];
                         Matrix4x4 current_xform = group.mesh->transform ? group.mesh->transform->getFinal() : Matrix4x4::identity();
                         if (!(group.last_xform == current_xform)) {
-                            const Vec3* src_positions = group.mesh->geometry->get_attribute_data<Vec3>("P");
-                            if (src_positions) {
-                                memcpy(vertex_buffer + group.vertex_offset, src_positions, group.vertex_count * sizeof(Vec3));
-                                any_dirty += 1;
+                            if (group.facadeless) {
+                                // Self-bake world = getFinal()*P_orig (same math as build + Vulkan RT).
+                                // The "P" cache isn't re-baked on a transform-only change for a flat
+                                // mesh, so memcpy-ing it would refit to a stale pose (the old "only the
+                                // rep facade moved" bug). P_orig is authoritative local rest (also what
+                                // sculpt/rigid deform write), so this stays correct under deformation too.
+                                const Vec3* origP = group.mesh->geometry->get_positions_orig();
+                                if (!origP) origP = group.mesh->geometry->get_attribute_data<Vec3>("P");
+                                if (origP) {
+                                    Vec3* dst = vertex_buffer + group.vertex_offset;
+                                    const Matrix4x4 xf = current_xform;
+                                    const int vCount = (int)group.vertex_count;
+                                    #pragma omp parallel for num_threads(bakeThreads) schedule(static) if(vCount >= 8192)
+                                    for (int v = 0; v < vCount; ++v) {
+                                        dst[v] = xf.transform_point(origP[v]);
+                                    }
+                                    any_dirty += 1;
+                                }
+                            } else {
+                                const Vec3* src_positions = group.mesh->geometry->get_attribute_data<Vec3>("P");
+                                if (src_positions) {
+                                    memcpy(vertex_buffer + group.vertex_offset, src_positions, group.vertex_count * sizeof(Vec3));
+                                    any_dirty += 1;
+                                }
                             }
                             group.last_xform = current_xform;
                         }
@@ -881,30 +993,51 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
             float w = 1.0f - u - v;
 
             if (tri.original_ptr) {
-                rec.normal = (tri.original_ptr->getVertexNormal(0) * w + 
-                              tri.original_ptr->getVertexNormal(1) * u + 
+                rec.normal = (tri.original_ptr->getVertexNormal(0) * w +
+                              tri.original_ptr->getVertexNormal(1) * u +
                               tri.original_ptr->getVertexNormal(2) * v).normalize();
                 const auto [t0, t1, t2] = tri.original_ptr->getUVCoordinates();
                 rec.u = t0.u * w + t1.u * u + t2.u * v;
                 rec.v = t0.v * w + t1.v * u + t2.v * v;
+            } else if (tri.mesh_ptr && tri.mesh_ptr->geometry) {
+                // Facade-less: interpolate normal/uv from the mesh SoA via face_index (mirrors the
+                // facade path exactly — same SoA the facades read, so identical space/values).
+                const auto* g = tri.mesh_ptr->geometry.get();
+                const auto& gIdx = g->indices;
+                const uint32_t base = tri.face_index * 3u;
+                if (base + 2u < gIdx.size()) {
+                    const uint32_t i0 = gIdx[base + 0], i1 = gIdx[base + 1], i2 = gIdx[base + 2];
+                    const Vec3* N = g->get_normals();
+                    const Vec2* UV = g->get_uvs();
+                    if (N) rec.normal = (N[i0] * w + N[i1] * u + N[i2] * v).normalize();
+                    else   rec.normal = Vec3(0.0f, 1.0f, 0.0f);
+                    if (UV) { rec.u = UV[i0].u * w + UV[i1].u * u + UV[i2].u * v;
+                              rec.v = UV[i0].v * w + UV[i1].v * u + UV[i2].v * v; }
+                    else    { rec.u = 0.0f; rec.v = 0.0f; }
+                } else {
+                    rec.normal = Vec3(0.0f, 1.0f, 0.0f); rec.u = 0.0f; rec.v = 0.0f;
+                }
             } else {
                 rec.normal = Vec3(0.0f, 1.0f, 0.0f);
                 rec.u = 0.0f;
                 rec.v = 0.0f;
             }
             rec.interpolated_normal = rec.normal;
-            rec.uv = Vec2(rec.u, rec.v); 
+            rec.uv = Vec2(rec.u, rec.v);
             rec.t = rayhit.ray.tfar;
-            rec.point = ray.at(rec.t); 
+            rec.point = ray.at(rec.t);
             rec.set_face_normal(ray, rec.normal);
             rec.materialPtr = mat; // Reuse the alpha-test lookup; shared_ptr is resolved later
             rec.materialID = tri.materialID;
             rec.terrain_id = tri.terrain_id;
             rec.is_instance_hit = false; // Local geometry (e.g. Terrain)
-            rec.triangle = tri.original_ptr; // Restore identity
+            rec.triangle = tri.original_ptr; // Restore identity (null for facade-less)
             if (tri.original_ptr) {          // Faz 1: (mesh, faceIndex) handle
                 rec.tri_mesh = tri.original_ptr->parentMesh.get();
                 rec.tri_face = tri.original_ptr->faceIndex;
+            } else if (tri.mesh_ptr) {
+                rec.tri_mesh = tri.mesh_ptr;
+                rec.tri_face = tri.face_index;
             }
             return true;
         }
@@ -965,6 +1098,19 @@ void EmbreeBVH::clearAndRebuild(const std::vector<std::shared_ptr<Hittable>>& ob
     rtcReleaseScene(scene);
     scene = rtcNewScene(device);
     build(objects);
+}
+
+int EmbreeBVH::remapMeshMaterialID(const TriangleMesh* mesh, uint16_t oldID, uint16_t newID) {
+    if (!mesh) return 0;
+    const bool repaintAll = (oldID == MaterialManager::INVALID_MATERIAL_ID);
+    int n = 0;
+    for (auto& td : triangle_data) {
+        if (td.mesh_ptr != mesh) continue;          // only this dense mesh's facade-less faces
+        if (!repaintAll && td.materialID != oldID) continue;
+        td.materialID = newID;
+        ++n;
+    }
+    return n;
 }
 
 // OptixGeometryData icin tam donusumlu export metodu

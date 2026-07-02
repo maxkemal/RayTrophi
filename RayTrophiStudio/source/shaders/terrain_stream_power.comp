@@ -1,0 +1,102 @@
+// terrain_stream_power.comp
+// Vulkan port of fluvialStreamPowerKernel (erosion_kernels.cu). Stream Power Law
+// erosion (E = K * sqrt(flow) * slope) with dynamic channel width + circular
+// falloff, accumulated into erosionAccum (applied separately by
+// terrain_apply_stream_power.comp to keep per-pass erosion capped). Requires
+// float atomics — gated by has_float_atomics on the host side.
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    float cellSize; float heightScale;
+    float erodeSpeed; float sedimentCapacity; float minSlope;
+    int erosionRadius;
+    float maxPassErosionFraction;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Height  { float heightMap[]; };
+layout(set = 0, binding = 1) buffer Accum            { float erosionAccum[]; };
+layout(set = 0, binding = 2) readonly buffer Flow     { float flowMap[]; };
+layout(set = 0, binding = 3) readonly buffer Hardness { float hardnessMap[]; };
+layout(set = 0, binding = 4) readonly buffer Mask     { float maskMap[]; };
+
+float hashNoise(int idx) {
+    return float((idx * 1103515245 + 12345) & 0x7FFFFFFF) / 2147483647.0;
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    int x = id % pc.mapWidth;
+    int y = id / pc.mapWidth;
+    if (x <= 2 || x >= pc.mapWidth - 3 || y <= 2 || y >= pc.mapHeight - 3) return;
+
+    int idx = id;
+
+    // MASK CHECK: stop execution if masked out.
+    if (maskMap[idx] < 0.01) return;
+
+    float flow = flowMap[idx];
+    if (flow < 3.0) return; // Ignore tiny streams
+
+    float invCellSize = 1.0 / max(0.001, pc.cellSize);
+    float slopeX = (heightMap[idx + 1] - heightMap[idx - 1]) * 0.5 * invCellSize;
+    float slopeY = (heightMap[idx + pc.mapWidth] - heightMap[idx - pc.mapWidth]) * 0.5 * invCellSize;
+    float slope = sqrt(slopeX * slopeX + slopeY * slopeY);
+    slope = max(slope, pc.minSlope);
+
+    float Ks = pc.erodeSpeed * 0.02;
+    float streamPower = Ks * sqrt(flow) * slope;
+
+    // Chaos/turbulence factor to break "circuit board" artifacts on flats.
+    if (slope < 0.05) {
+        float noise = hashNoise(idx);
+        float flatIntensity = 1.0 - (slope / 0.05);
+        streamPower += Ks * sqrt(flow) * 0.25 * flatIntensity * (0.7 + noise * 0.6);
+    }
+
+    float hardness = hardnessMap[idx];
+    float flowScale = min(1.0, (flow - 3.0) / 100.0);
+    float baseRadius = float(pc.erosionRadius) * 0.5;
+    float dynamicRadius = max(0.5, baseRadius * sqrt(flowScale) * (1.5 - hardness));
+    int channelRadius = int(ceil(dynamicRadius));
+    if (channelRadius > 10) channelRadius = 10;
+
+    float hardnessMultiplier = 1.0 - hardness * 0.7;
+    float flowPower = min(1.5, sqrt(flow) * 0.2);
+    float slopeDampening = min(1.0, slope * 60.0);
+
+    streamPower *= hardnessMultiplier * pc.sedimentCapacity * flowPower * slopeDampening;
+    streamPower *= maskMap[idx];
+
+    for (int dy = -channelRadius; dy <= channelRadius; dy++) {
+        for (int dx = -channelRadius; dx <= channelRadius; dx++) {
+            int nx = x + dx;
+            int ny = y + dy;
+            if (nx < 0 || nx >= pc.mapWidth || ny < 0 || ny >= pc.mapHeight) continue;
+
+            float distSq = float(dx * dx + dy * dy);
+            if (distSq > dynamicRadius * dynamicRadius) continue;
+
+            int nIdx = ny * pc.mapWidth + nx;
+            float dist = sqrt(distSq);
+
+            float t = dist / (dynamicRadius + 0.001);
+            float falloff = 1.0 - t * t * (3.0 - 2.0 * t);
+            falloff = max(falloff, 0.0);
+
+            float targetHeight = heightMap[nIdx];
+            if (isnan(targetHeight) || isinf(targetHeight) || targetHeight <= 0.0) continue;
+
+            float erode = streamPower * falloff;
+            erode = min(erode, targetHeight * 0.1);
+            if (isnan(erode) || isinf(erode) || erode <= 0.0) continue;
+
+            atomicAdd(erosionAccum[nIdx], erode);
+        }
+    }
+}

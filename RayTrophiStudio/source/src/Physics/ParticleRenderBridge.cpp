@@ -836,9 +836,9 @@ uint16_t ensureFoamParticleMaterial(RayTrophiSim::Fluid::FoamType type, const st
         pbsdf->setRoughness(0.0f);
         pbsdf->setTransmission(0.0f, 1.33f);
         pbsdf->emissionProperty = MaterialProperty(Vec3(0.0f), 0.0f);
-        pbsdf->isBubble   = true;     // thin-shell bubble model
-        pbsdf->bubbleIor  = 1.33f;    // air/water rim Fresnel
-        pbsdf->bubbleFilm = 0.0f;     // clean air bubble by default (user dials soap shimmer)
+        pbsdf->setIsBubble(true);     // thin-shell bubble model
+        pbsdf->setBubbleIor(1.33f);    // air/water rim Fresnel
+        pbsdf->setBubbleFilm(0.0f);     // clean air bubble by default (user dials soap shimmer)
     } else {
         // Foam: Scattering surface foam (diffuse, rough white)
         const Vec3 white(0.93f, 0.95f, 0.98f);

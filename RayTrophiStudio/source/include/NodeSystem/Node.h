@@ -175,13 +175,18 @@ namespace NodeSystem {
                 return getBypassValue(outputIndex, ctx);
             }
             
-            // Compute
+            // Compute — bracketed so the node-editor UI can show which node is
+            // currently active and derive a coarse completion fraction (see
+            // EvaluationContext::beginNode/endNode) without every node subtype
+            // needing to report progress itself.
+            ctx.beginNode(id);
             PinValue result = compute(outputIndex, ctx);
-            
+            ctx.endNode();
+
             // Cache result
             ctx.setCachedValue(id, outputIndex, result);
             dirty = false;
-            
+
             return result;
         }
         

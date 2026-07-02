@@ -27,6 +27,8 @@
 #include "RiverSpline.h"
 #include <thread>
 #include <chrono>
+#include <unordered_set>
+#include <atomic>
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern std::unique_ptr<Backend::IBackend> g_backend;
@@ -150,68 +152,6 @@ static void SyncTerrainMaterialState(UIContext& ctx) {
     ResetTerrainBackendAccumulation(ctx);
 }
 
-static bool BuildTerrainDirtyRasterPatchData(
-    TerrainObject* terrain,
-    std::vector<size_t>& dirtyTriangleIndices,
-    std::vector<std::pair<int, std::shared_ptr<Triangle>>>& meshEntries) {
-    dirtyTriangleIndices.clear();
-    meshEntries.clear();
-
-    if (!terrain || terrain->mesh_triangles.empty()) {
-        return false;
-    }
-
-    meshEntries.reserve(terrain->mesh_triangles.size());
-    for (size_t i = 0; i < terrain->mesh_triangles.size(); ++i) {
-        meshEntries.emplace_back(static_cast<int>(i), terrain->mesh_triangles[i]);
-    }
-
-    if (!terrain->dirty_region.has_any_dirty) {
-        return false;
-    }
-
-    const int w = terrain->heightmap.width;
-    const int h = terrain->heightmap.height;
-    if (w <= 1 || h <= 1) {
-        return false;
-    }
-
-    const int sector_w = std::max(1, w / DirtyRegion::SECTOR_GRID_SIZE);
-    const int sector_h = std::max(1, h / DirtyRegion::SECTOR_GRID_SIZE);
-
-    dirtyTriangleIndices.reserve(terrain->dirty_region.countDirtySectors() * 32);
-    for (int sy = 0; sy < DirtyRegion::SECTOR_GRID_SIZE; ++sy) {
-        for (int sx = 0; sx < DirtyRegion::SECTOR_GRID_SIZE; ++sx) {
-            if (!terrain->dirty_region.sectors[sx][sy]) continue;
-
-            const int startX = sx * sector_w;
-            const int startZ = sy * sector_h;
-            const int endX = std::min(startX + sector_w, w - 1);
-            const int endZ = std::min(startZ + sector_h, h - 1);
-
-            for (int z = startZ; z < endZ; ++z) {
-                for (int x = startX; x < endX; ++x) {
-                    const size_t tri_idx = (static_cast<size_t>(z) * static_cast<size_t>(w - 1) +
-                                            static_cast<size_t>(x)) * 2ull;
-                    if (tri_idx < terrain->mesh_triangles.size()) {
-                        dirtyTriangleIndices.push_back(tri_idx);
-                    }
-                    if (tri_idx + 1 < terrain->mesh_triangles.size()) {
-                        dirtyTriangleIndices.push_back(tri_idx + 1);
-                    }
-                }
-            }
-        }
-    }
-
-    std::sort(dirtyTriangleIndices.begin(), dirtyTriangleIndices.end());
-    dirtyTriangleIndices.erase(
-        std::unique(dirtyTriangleIndices.begin(), dirtyTriangleIndices.end()),
-        dirtyTriangleIndices.end());
-
-    return !dirtyTriangleIndices.empty();
-}
-
 void SceneUI::drawTerrainPanel(UIContext& ctx) {
     UIWidgets::PushControlSurfaceStyle(ImVec4(0.48f, 0.86f, 0.58f, 1.0f));
     // SCENE_UI_TERRAIN.HPP is included in Main.cpp, so static vector is shared? 
@@ -248,10 +188,12 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 preferred_bottom_panel_height = 420.0f;
                 bottom_panel_height = preferred_bottom_panel_height;
                 focus_bottom_panel_next_frame = true;
-                // If terrain has generated mesh triangles, select one to sync viewport selection
-                if (!t->mesh_triangles.empty() && ctx.selection.hasSelection() == false) {
-                    auto tri = t->mesh_triangles.front();
-                    if (tri) ctx.selection.selectObject(tri, -1, tri->getNodeName());
+                // If terrain has a generated flat mesh, select a throwaway representative
+                // facade (face 0) to sync viewport selection — same convention other flat
+                // (direct SoA) meshes use for their selection UI handle.
+                if (t->flatMesh && ctx.selection.hasSelection() == false) {
+                    auto rep = std::make_shared<Triangle>(t->flatMesh, 0);
+                    ctx.selection.selectObject(rep, -1, rep->getNodeName());
                 }
                 SCENE_LOG_INFO("Terrain created: " + t->name);
                 ctx.renderer.resetCPUAccumulation();
@@ -271,14 +213,31 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
 
         // Cleanup: If terrain triangles were removed from the scene by other code,
         // remove stale terrain entries so the list stays in sync with the viewport.
+        //
+        // This used to be a per-frame std::find() over world.objects for each
+        // terrain triangle — O(mesh_triangles * world.objects), redone every
+        // single frame the Terrain panel is visible. On a scene with a large
+        // terrain and a nontrivial object count (scatter/foliage instances etc.)
+        // that pegged the UI thread continuously (reported as the UI "freezing"
+        // once a Hydraulic Erosion node existed — same panel, bigger scene).
+        // Build an O(1)-lookup set once per actual scene-geometry change instead
+        // (g_scene_geometry_generation is bumped by exactly the operations that
+        // could make a terrain stale — object add/remove/rebuild), and reuse it
+        // across frames until the next real change.
+        extern std::atomic<uint64_t> g_scene_geometry_generation;
+        static uint64_t s_stale_check_generation = static_cast<uint64_t>(-1);
+        static std::unordered_set<Hittable*> s_world_objects_set;
+        const uint64_t current_generation = g_scene_geometry_generation.load(std::memory_order_acquire);
+        if (current_generation != s_stale_check_generation) {
+            s_world_objects_set.clear();
+            s_world_objects_set.reserve(ctx.scene.world.objects.size());
+            for (auto& obj : ctx.scene.world.objects) s_world_objects_set.insert(obj.get());
+            s_stale_check_generation = current_generation;
+        }
+
         std::vector<int> stale_ids;
         for (auto& tt : terrains) {
-            bool found = false;
-            for (auto& tri_ptr : tt.mesh_triangles) {
-                if (std::find(ctx.scene.world.objects.begin(), ctx.scene.world.objects.end(), tri_ptr) != ctx.scene.world.objects.end()) {
-                    found = true; break;
-                }
-            }
+            bool found = tt.flatMesh && s_world_objects_set.count(tt.flatMesh.get()) > 0;
             if (!found) stale_ids.push_back(tt.id);
         }
         for (int sid : stale_ids) {
@@ -303,10 +262,10 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                      
                      if (ImGui::Selectable(label.c_str(), is_selected)) {
                          terrain_brush.active_terrain_id = t.id;
-                         // Select a representative triangle so the viewport selection matches the list
-                         if (!t.mesh_triangles.empty()) {
-                             auto tri = t.mesh_triangles.front();
-                             if (tri) ctx.selection.selectObject(tri, -1, tri->getNodeName());
+                         // Select a throwaway representative facade so the viewport selection matches the list
+                         if (t.flatMesh) {
+                             auto rep = std::make_shared<Triangle>(t.flatMesh, 0);
+                             ctx.selection.selectObject(rep, -1, rep->getNodeName());
                          }
                          SCENE_LOG_INFO("Active terrain switched to: " + t.name);
                          // Trigger rebuild for highlighting or gizmos if necessary
@@ -656,10 +615,25 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                      if (UIWidgets::SecondaryButton("Add Selected Object", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
                          if (ctx.selection.hasSelection()) {
                              std::string n = ctx.selection.selected.name;
+                             // Flat (SoA) objects live in world.objects as TriangleMesh, not
+                             // per-face Triangle facades — a Triangle-only scan found nothing for
+                             // them, and multi-material imports split into several sibling
+                             // TriangleMesh sharing this nodeName. Materialize every face of every
+                             // matching sibling instead (mirrors the Scatter Brush panel fix).
                              std::vector<std::shared_ptr<Triangle>> tris;
+                             std::unordered_set<TriangleMesh*> seenMeshes;
                              for (auto& obj : ctx.scene.world.objects) {
-                                 auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                 if (tri && tri->getNodeName() == n) tris.push_back(tri);
+                                 if (auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                                     if (tmesh->nodeName != n || !tmesh->geometry) continue;
+                                     if (!seenMeshes.insert(tmesh.get()).second) continue;
+                                     const size_t nTris = tmesh->num_triangles();
+                                     tris.reserve(tris.size() + nTris);
+                                     for (size_t f = 0; f < nTris; ++f) {
+                                         tris.push_back(std::make_shared<Triangle>(tmesh, static_cast<uint32_t>(f)));
+                                     }
+                                 } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                                     if (tri->getNodeName() == n) tris.push_back(tri);
+                                 }
                              }
                              if (!tris.empty()) {
                                  group.sources.emplace_back(n, tris);
@@ -699,14 +673,26 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                              if (filter[0] != '\0' && name.find(filter) == std::string::npos) continue;
                              
                              if (ImGui::Selectable(name.c_str())) {
-                                 // Add all triangles associated with this name
+                                 // tris_list (mesh_cache) holds only ONE representative single-face
+                                 // facade per sibling TriangleMesh (the UI selection handle) —
+                                 // materialize the full geometry of every sibling instead so the
+                                 // foliage source is the whole object, not one triangle per material.
                                  std::vector<std::shared_ptr<Triangle>> source_tris;
-                                 source_tris.reserve(tris_list.size());
-                                 
+                                 std::unordered_set<TriangleMesh*> seenMeshes;
                                  for (const auto& pair : tris_list) {
-                                     source_tris.push_back(pair.second);
+                                     TriangleMesh* pm = pair.second ? pair.second->parentMesh.get() : nullptr;
+                                     if (pm && pm->geometry) {
+                                         if (!seenMeshes.insert(pm).second) continue;
+                                         const size_t nTris = pm->num_triangles();
+                                         source_tris.reserve(source_tris.size() + nTris);
+                                         for (size_t f = 0; f < nTris; ++f) {
+                                             source_tris.push_back(std::make_shared<Triangle>(pair.second->parentMesh, static_cast<uint32_t>(f)));
+                                         }
+                                     } else if (pair.second) {
+                                         source_tris.push_back(pair.second);
+                                     }
                                  }
-                                 
+
                                  if (!source_tris.empty()) {
                                      group.sources.emplace_back(name, source_tris);
                                  }
@@ -1847,22 +1833,20 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
             }
         }
 
-        std::vector<size_t> dirtyTriangleIndices;
-        std::vector<std::pair<int, std::shared_ptr<Triangle>>> meshEntries;
-        const bool hasDirtyPatchData = BuildTerrainDirtyRasterPatchData(
-            terrain,
-            dirtyTriangleIndices,
-            meshEntries);
-
         // Terrain triangles are registered in the raster backend with the node name
-        // "<terrain->name>_Chunk" (set in TerrainManager), so we must use that name
-        // when looking up the raster mesh — not bare terrain->name.
+        // "<terrain->name>_Chunk" (set in TerrainManager/gridToFlatMesh), so we must
+        // use that name when looking up the raster mesh — not bare terrain->name.
         const std::string terrainRasterNodeName = terrain->name + "_Chunk";
 
-        if (hasDirtyPatchData &&
-            vkBackend->patchRasterMeshTriangles(terrainRasterNodeName, dirtyTriangleIndices, meshEntries)) {
-            handled = true;
-        } else if (vkBackend->updateRasterMeshFromTriangles(terrainRasterNodeName, terrain->mesh_triangles)) {
+        // Flat (SoA) mesh: refit the raster vertex buffer straight from the mesh's
+        // DNA SoA — same dirty-range-free, per-dab-realtime path regular mesh sculpt
+        // already uses (see scene_ui_mesh_overlay.cpp's syncMeshRasterViewport /
+        // updateRasterMeshFromMeshSoA). Falls through to a full buildRasterGeometry
+        // only when the raster mesh isn't registered yet or topology changed (vertex
+        // count mismatch) — buildRasterGeometry() itself early-outs on an unchanged
+        // scene-geometry generation, which is fine here since a real topology change
+        // already goes through rebuildTerrainMesh() (bumps that generation).
+        if (terrain->flatMesh && vkBackend->updateRasterMeshFromMeshSoA(terrainRasterNodeName, terrain->flatMesh.get())) {
             handled = true;
         } else if (allowFullRasterFallback) {
             vkBackend->buildRasterGeometry(ctx.scene.world.objects);
@@ -1923,7 +1907,14 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                 if (ctx.render_settings.use_optix) {
                     g_optix_rebuild_pending = true;
                 } else if (ctx.render_settings.use_vulkan) {
-                    g_vulkan_rebuild_pending = true;
+                    // Only fall back to a full rebuild if the incremental BLAS refit above
+                    // (renderedBackendHandled, from vkRtBackend->updateTerrainBLASPartial) didn't
+                    // already handle it — this used to fire unconditionally, forcing a full
+                    // rebuildAccelerationStructure()+updateGeometry() on every stroke commit
+                    // (mouse-up) even when the cheap refit had already synced the terrain.
+                    if (!renderedBackendHandled) {
+                        g_vulkan_rebuild_pending = true;
+                    }
                 } else {
                     g_bvh_rebuild_pending = true;
                 }
@@ -2171,12 +2162,14 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                      }
 
                      bool liveViewportUpdated = false;
+                     bool liveViewportIsInteractiveRaster = false;
                      if (liveRasterViewportBackend) {
                          const Backend::ViewportMode viewportMode = liveRasterViewportBackend->getViewportMode();
                          const bool interactiveRasterMode =
                              viewportMode == Backend::ViewportMode::Solid ||
                              viewportMode == Backend::ViewportMode::Matcap ||
                              viewportMode == Backend::ViewportMode::MaterialPreview;
+                         liveViewportIsInteractiveRaster = interactiveRasterMode;
                          liveViewportUpdated = syncTerrainVulkanViewport(
                              liveRasterViewportBackend,
                              false,
@@ -2189,23 +2182,38 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                      const bool renderedViewportActive = (ctx.backend_ptr == g_backend.get());
                      bool liveRenderBackendUpdated = false;
                      if (renderedViewportActive) {
-                         if (ctx.optix_gpu_ptr && g_hasOptix && ctx.render_settings.use_optix) {
-                             // OptiX rendered viewport: push terrain BLAS updates immediately per dab.
-                             liveRenderBackendUpdated =
-                                 ctx.optix_gpu_ptr->updateTerrainBLASPartial(terrain->name, terrain);
-                             if (!liveRenderBackendUpdated) {
-                                 g_optix_rebuild_pending = true;
-                             }
-                         } else if (auto* vkRenderedBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr)) {
-                             liveRenderBackendUpdated = vkRenderedBackend->updateTerrainBLASPartial(terrain->name, terrain);
-                             if (liveRenderBackendUpdated) {
-                                 vkRenderedBackend->resetAccumulation();
+                         // Throttle the synchronous BLAS+TLAS refit to a capped rate (same 0.08s /
+                         // ~12Hz the non-active-render branch below already uses) instead of doing it
+                         // on every UI frame during a drag (up to 100+ Hz). BLAS+TLAS update is a
+                         // real GPU-synchronous cost proportional to terrain size, and re-doing it
+                         // (plus resetAccumulation) far faster than a human can perceive is what made
+                         // Vulkan RT feel like it was rebuilding on every single brush dab. The final
+                         // state is always pushed on stroke commit (mouse-up) regardless.
+                         float now = (float)ImGui::GetTime();
+                         if (now - last_live_geometry_sync_time > 0.08f) {
+                             if (ctx.optix_gpu_ptr && g_hasOptix && ctx.render_settings.use_optix) {
+                                 // OptiX rendered viewport: push terrain BLAS updates per throttle tick.
+                                 liveRenderBackendUpdated =
+                                     ctx.optix_gpu_ptr->updateTerrainBLASPartial(terrain->name, terrain);
+                                 if (!liveRenderBackendUpdated) {
+                                     g_optix_rebuild_pending = true;
+                                 }
+                             } else if (auto* vkRenderedBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr)) {
+                                 liveRenderBackendUpdated = vkRenderedBackend->updateTerrainBLASPartial(terrain->name, terrain);
+                                 if (liveRenderBackendUpdated) {
+                                     vkRenderedBackend->resetAccumulation();
+                                 } else {
+                                     g_vulkan_rebuild_pending = true;
+                                 }
                              } else {
-                                 g_vulkan_rebuild_pending = true;
+                                 // CPU rendered viewport: keep BVH fresh so terrain sculpt appears live.
+                                 g_cpu_bvh_refit_pending = true;
+                                 liveRenderBackendUpdated = true;
                              }
+                             last_live_geometry_sync_time = now;
                          } else {
-                             // CPU rendered viewport: keep BVH fresh so terrain sculpt appears live.
-                             g_cpu_bvh_refit_pending = true;
+                             // Skipped this frame purely due to the throttle — not stale, just not due
+                             // yet — so don't request a full rebuild for it.
                              liveRenderBackendUpdated = true;
                          }
                      } else {
@@ -2239,7 +2247,15 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                              last_live_geometry_sync_time = now;
                          }
                      }
-                     if (!liveViewportUpdated && liveRasterViewportBackend) {
+                     // Only request a raster rebuild when a raster (Solid/Matcap/MaterialPreview)
+                     // view is actually visible. When the Rendered (RT) viewport is the active one
+                     // and there's no separate dedicated raster panel, liveRasterViewportBackend
+                     // aliases the SAME RT backend and updateRasterMeshFromMeshSoA() legitimately
+                     // has nothing to do there — setting this flag anyway made every sculpt dab
+                     // trip Main.cpp's g_viewport_raster_rebuild_pending handler (material buffer +
+                     // hair re-upload) for a view that isn't even being shown, which is what made
+                     // Vulkan RT feel like it was rebuilding on every stroke.
+                     if (!liveViewportUpdated && liveRasterViewportBackend && liveViewportIsInteractiveRaster) {
                          g_viewport_raster_rebuild_pending = true;
                      }
                      if (renderedViewportActive && !liveRenderBackendUpdated) {

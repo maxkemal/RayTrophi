@@ -1,4 +1,4 @@
-#include "scene_ui.h"
+﻿#include "scene_ui.h"
 #include "ui_modern.h"
 #include "imgui_internal.h"
 #include "HittableInstance.h"
@@ -28,6 +28,13 @@
 #include <cfloat>
 #include <cstdio>
 #include <cmath>
+
+// Flat/proxy migration FLIP toggle (EXPERIMENTAL, default OFF). When true, a single-CC modifier
+// evaluate/apply emits ONE TriangleMesh into world.objects (no 12.6M facades) — eliminating the
+// materialize (~5s) + facade soup (~1.6 GB) for dense subdivide. With it ON, CPU (Embree) and
+// Vulkan RT render the dense mesh; OptiX / picking / sculpt of that mesh are later increments
+// (graceful degradation, no crash). Flip to true + rebuild to measure the win.
+bool g_dense_mesh_as_hittable = true;
 #include <filesystem>
 #include <SDL.h>
 #include <omp.h>
@@ -819,7 +826,8 @@ std::shared_ptr<Material> clonePaintableMaterial(const std::shared_ptr<Material>
     return nullptr;
 }
 
-uint16_t makeObjectSlotPaintMaterialUnique(UIContext& ctx,
+uint16_t makeObjectSlotPaintMaterialUnique(SceneUI& ui,
+                                           UIContext& ctx,
                                            const std::string& obj_name,
                                            int slot_index,
                                            uint16_t source_material_id,
@@ -827,6 +835,18 @@ uint16_t makeObjectSlotPaintMaterialUnique(UIContext& ctx,
                                            std::vector<uint16_t>& slot_ids) {
     auto& mgr = MaterialManager::getInstance();
     const std::string paint_name = obj_name + "_PaintSlot_" + std::to_string(slot_index);
+
+    // Flat/proxy: mesh_entries is mesh_cache[obj_name], which for a dense single-TriangleMesh
+    // object holds only ONE representative facade — the per-facade loops below only ever touch
+    // that single face's 3 SoA vertices (Triangle::setMaterialID writes exactly faceIndex's
+    // corners). Entering paint mode on a flat object cloned the shared source material into a
+    // per-object unique one but only ever repainted the rep face, leaving the entire rest of the
+    // body on the OLD material id — the diagnosed "adapter mat=N, body rec.matID=old" mismatch
+    // that made painting silently do nothing. Bulk-repaint the full SoA afterward, exactly like
+    // the Material Slot combo / Create-&-Assign paths already do.
+    auto bulkRepaintFlatIfNeeded = [&](uint16_t oldID, uint16_t newID) {
+        ui.repaintDirectMeshMaterial(ctx, obj_name, oldID, newID);
+    };
 
     if (mgr.hasMaterial(paint_name)) {
         const uint16_t existing_id = mgr.getMaterialID(paint_name);
@@ -838,6 +858,7 @@ uint16_t makeObjectSlotPaintMaterialUnique(UIContext& ctx,
                     pair.second->setMaterialID(existing_id);
                 }
             }
+            bulkRepaintFlatIfNeeded(source_material_id, existing_id);
             slot_ids[slot_index] = existing_id;
             ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, source_material_id, existing_id);
         }
@@ -856,6 +877,7 @@ uint16_t makeObjectSlotPaintMaterialUnique(UIContext& ctx,
             pair.second->setMaterialID(new_id);
         }
     }
+    bulkRepaintFlatIfNeeded(source_material_id, new_id);
 
     if (slot_index >= 0 && slot_index < static_cast<int>(slot_ids.size())) {
         slot_ids[slot_index] = new_id;
@@ -881,12 +903,32 @@ void syncPaintBrushToTerrain(SceneUI& ui, TerrainObject* terrain) {
 }
 
 bool isMeshPaintTargetHit(const HitRecord& rec, const Paint::MeshPaintAdapter& adapter) {
-    if (!rec.triangle) {
-        return false;
+    if (rec.triangle) {
+        return rec.triangle->getNodeName() == adapter.getNodeName() &&
+               rec.triangle->getMaterialID() == adapter.getMaterialID();
     }
-
-    return rec.triangle->getNodeName() == adapter.getNodeName() &&
-           rec.triangle->getMaterialID() == adapter.getMaterialID();
+    // Flat (direct SoA) mesh: no per-face facade (rec.triangle is null on the facade-less Embree
+    // hit), so match by the mesh node name. The per-face material is only used to refine the
+    // match WHEN it can be resolved — if the adapter's material is unspecified (0xFFFF) or the
+    // SoA has no materialID attribute, the node-name match alone is authoritative (otherwise a
+    // false material mismatch would leave the paint brush inert / invisible on a flat mesh).
+    if (rec.tri_mesh && rec.tri_mesh->geometry) {
+        if (rec.tri_mesh->nodeName != adapter.getNodeName()) {
+            return false;
+        }
+        const uint16_t adapterMat = adapter.getMaterialID();
+        if (adapterMat == 0xFFFF) {
+            return true;
+        }
+        const DNA::GeometryDetail* g = rec.tri_mesh->geometry.get();
+        const uint16_t* matIDs = g->get_attribute_data<uint16_t>("materialID");
+        const size_t corner = static_cast<size_t>(rec.tri_face) * 3;
+        if (!matIDs || corner >= g->indices.size()) {
+            return true;
+        }
+        return matIDs[g->indices[corner]] == adapterMat;
+    }
+    return false;
 }
 
 bool raycastMeshPaintTargetFallback(UIContext& ctx,
@@ -1697,6 +1739,37 @@ float estimateMeshPaintWorldRadius(const Triangle& tri, const Texture& texture, 
     return std::max(0.001f, uv_radius * world_per_uv);
 }
 
+// Flat (direct SoA) mesh variant: no per-face Triangle facade, so derive the same world-per-UV
+// scale straight from the mesh SoA at the hit face (P_orig in local space, baked to world via the
+// mesh transform; UVs per vertex). Lets the brush preview ring size correctly on apply-flat /
+// import-flat meshes.
+float estimateMeshPaintWorldRadiusFlat(const TriangleMesh& mesh, uint32_t faceIndex,
+                                       const Texture& texture, float radius_px) {
+    const DNA::GeometryDetail* g = mesh.geometry.get();
+    if (!g) return 0.0f;
+    const size_t base = static_cast<size_t>(faceIndex) * 3;
+    if (base + 2 >= g->indices.size()) return 0.0f;
+    const Vec3* Pl = g->get_positions_orig();
+    if (!Pl) Pl = g->get_positions();
+    const Vec2* UV = g->get_attribute_data<Vec2>("uv");
+    if (!Pl || !UV) return 0.0f;
+    const Matrix4x4 xf = mesh.transform ? mesh.transform->getFinal() : Matrix4x4::identity();
+    const uint32_t i0 = g->indices[base], i1 = g->indices[base + 1], i2 = g->indices[base + 2];
+    const Vec3 v0 = xf.transform_point(Pl[i0]);
+    const Vec3 v1 = xf.transform_point(Pl[i1]);
+    const Vec3 v2 = xf.transform_point(Pl[i2]);
+    const Vec3 cross = (v1 - v0).cross(v2 - v0);
+    const float world_area = 0.5f * std::sqrt(cross.length_squared());
+    const Vec2 duv1 = UV[i1] - UV[i0];
+    const Vec2 duv2 = UV[i2] - UV[i0];
+    const float uv_area = 0.5f * std::abs(duv1.u * duv2.v - duv1.v * duv2.u);
+    if (world_area <= 1e-6f || uv_area <= 1e-8f || texture.width <= 0 || texture.height <= 0) {
+        return 0.0f;
+    }
+    const float world_per_uv = std::sqrt(world_area / uv_area);
+    return std::max(0.001f, (radius_px / 1024.0f) * world_per_uv);
+}
+
 ImU32 makePreviewColorU32(const Paint::BrushSettings& brush, Paint::PaintChannel channel, float nx, float ny, float alpha, bool ghost) {
     Vec3 color = getPreviewChannelColor(brush, channel);
     std::shared_ptr<Texture> paint_texture = getPreviewChannelTexture(brush, channel);
@@ -1741,7 +1814,7 @@ ImU32 makePreviewColorU32(const Paint::BrushSettings& brush, Paint::PaintChannel
 }
 
 void drawMeshPaintPreview(UIContext& ctx, const HitRecord& rec, const Paint::MeshPaintAdapter& adapter, const Paint::BrushSettings& brush, Paint::PaintChannel channel, bool ghost = false, bool show_alpha_rotate_ring = false) {
-    if (!brush.show_preview || !rec.triangle || !ctx.scene.camera) {
+    if (!brush.show_preview || (!rec.triangle && !rec.tri_mesh) || !ctx.scene.camera) {
         return;
     }
 
@@ -1751,7 +1824,12 @@ void drawMeshPaintPreview(UIContext& ctx, const HitRecord& rec, const Paint::Mes
         return;
     }
 
-    const float world_radius = estimateMeshPaintWorldRadius(*rec.triangle, *texture, brush.radius);
+    // Flat (direct SoA) hits carry no facade (rec.triangle is null) — size the preview ring from
+    // the mesh SoA at the hit face; the UV-tangent block below is skipped and the normal-based
+    // tangent fallback orients the ring on the surface plane.
+    const float world_radius = rec.triangle
+        ? estimateMeshPaintWorldRadius(*rec.triangle, *texture, brush.radius)
+        : estimateMeshPaintWorldRadiusFlat(*rec.tri_mesh, rec.tri_face, *texture, brush.radius);
     if (world_radius <= 0.0f) {
         return;
     }
@@ -2574,7 +2652,32 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                 // 1. Lazy initialize base mesh cache if not present
                 if (ctx.scene.base_mesh_cache.find(selectedNodeName) == ctx.scene.base_mesh_cache.end()) {
                     std::vector<std::shared_ptr<Triangle>> baseTriangles;
-                    if (hasMeshEntries) {
+
+                    // [FLAT SUBDIVIDE COLLAPSE FIX] A flat (direct SoA) node lives in world.objects as
+                    // a single TriangleMesh and mesh_cache holds only ONE representative facade (face 0).
+                    // The old "copy mesh_cache entries" path therefore handed the modifier a 1-triangle
+                    // base mesh, so subdivision collapsed the WHOLE object to a single subdivided
+                    // triangle. Materialize the full facade set over the flat mesh's SoA (each facade
+                    // references SoA face t) so the cage is the real geometry. These are lightweight
+                    // facades (parentMesh + faceIndex); the CC/Simple evaluate re-welds from
+                    // getOriginalVertexPosition, so referencing the shared SoA is sufficient.
+                    std::shared_ptr<TriangleMesh> flatShared;
+                    if (hasMeshEntries && !meshEntriesIt->second.empty() && meshEntriesIt->second.front().second) {
+                        auto repParent = meshEntriesIt->second.front().second->parentMesh;
+                        if (repParent && repParent->geometry &&
+                            ctx.scene.getFlatNodeMesh(selectedNodeName) == repParent.get() &&
+                            meshEntriesIt->second.size() < repParent->num_triangles()) {
+                            flatShared = repParent;
+                        }
+                    }
+
+                    if (flatShared) {
+                        const size_t nTris = flatShared->num_triangles();
+                        baseTriangles.reserve(nTris);
+                        for (size_t t = 0; t < nTris; ++t) {
+                            baseTriangles.push_back(std::make_shared<Triangle>(flatShared, static_cast<uint32_t>(t)));
+                        }
+                    } else if (hasMeshEntries) {
                         baseTriangles.reserve(meshEntriesIt->second.size());
                         for (const auto& entry : meshEntriesIt->second) {
                             if (entry.second) {
@@ -2595,7 +2698,8 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
 
                 auto replaceEvaluatedMesh = [&](const std::vector<std::shared_ptr<Triangle>>& meshToShow,
                                                 const std::vector<std::shared_ptr<Triangle>>& selectionFallback,
-                                                const std::string& message) {
+                                                const std::string& message,
+                                                std::shared_ptr<Hittable> directMesh = nullptr) {
                     std::vector<std::shared_ptr<Hittable>> remainingObjects;
                     remainingObjects.reserve(ctx.scene.world.objects.size() + meshToShow.size());
                     for (const auto& obj : ctx.scene.world.objects) {
@@ -2604,24 +2708,41 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                             if (tri->getNodeName() != selectedNodeName) {
                                 remainingObjects.push_back(obj);
                             }
+                        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                            // Flat/proxy flip: a previously emitted TriangleMesh for this node
+                            // must also be replaced (it isn't a Triangle, so the branch above misses it).
+                            if (tm->nodeName != selectedNodeName) {
+                                remainingObjects.push_back(obj);
+                            }
                         } else {
                             remainingObjects.push_back(obj);
                         }
                     }
 
-                    for (const auto& tri : meshToShow) {
-                        remainingObjects.push_back(tri);
+                    if (directMesh) {
+                        // Flat/proxy flip: one TriangleMesh Hittable replaces the whole facade soup.
+                        remainingObjects.push_back(directMesh);
+                    } else {
+                        for (const auto& tri : meshToShow) {
+                            remainingObjects.push_back(tri);
+                        }
                     }
 
                     ctx.scene.world.objects = remainingObjects;
 
-                    if (!meshToShow.empty()) {
-                        ctx.selection.selectObject(meshToShow[0], -1, selectedNodeName);
-                    } else if (!selectionFallback.empty()) {
-                        ctx.selection.selectObject(selectionFallback[0], -1, selectedNodeName);
+                    // Triangle-facade-only selection/edit-cache wiring. The dense-mesh (directMesh)
+                    // selection + sculpt path is a later migration increment; for now the flipped
+                    // mesh renders (CPU/Vulkan) but is not selected/edited here.
+                    if (!directMesh) {
+                        if (!meshToShow.empty()) {
+                            ctx.selection.selectObject(meshToShow[0], -1, selectedNodeName);
+                        } else if (!selectionFallback.empty()) {
+                            ctx.selection.selectObject(selectionFallback[0], -1, selectedNodeName);
+                        }
                     }
 
-                    if (mesh_overlay_settings.edit_mode &&
+                    if (!directMesh &&
+                        mesh_overlay_settings.edit_mode &&
                         mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit &&
                         !selectedNodeName.empty()) {
                         active_mesh_edit_object_name = selectedNodeName;
@@ -2719,8 +2840,29 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     // level, Solid/edit the viewport level — fold the mode + both levels in
                     // so a mode switch or render-level change re-syncs the display mesh.
                     const bool forRenderEval = !g_solid_viewport_active;
+
+                    // Flat/proxy flip: this node may currently render as a direct TriangleMesh
+                    // (no facades in mesh_cache). Track ITS triangle count for drift, and resync
+                    // as a mesh — otherwise this steady-state check would re-emit facades every
+                    // time the signature changes and silently undo the flip's materialize/soup win.
+                    TriangleMesh* directNodeMesh = nullptr;
+                    bool flipEligible = false;
+                    if (g_dense_mesh_as_hittable) {
+                        for (const auto& obj : ctx.scene.world.objects) {
+                            if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                                if (tm->nodeName == selectedNodeName) { directNodeMesh = tm.get(); break; }
+                            }
+                        }
+                        int en = 0; const MeshModifiers::ModifierData* only = nullptr;
+                        for (const auto& m : modifierStack.modifiers) { if (m.enabled) { ++en; only = &m; } }
+                        flipEligible = (en == 1 && only && only->type == MeshModifiers::ModifierType::CatmullClark);
+                    }
+                    const std::size_t visibleTriCount = directNodeMesh
+                        ? directNodeMesh->num_triangles()
+                        : (hasMeshEntries ? meshEntriesIt->second.size() : 0u);
+
                     mixSig(ctx.scene.base_mesh_cache[selectedNodeName].size());
-                    mixSig(hasMeshEntries ? meshEntriesIt->second.size() : 0u);
+                    mixSig(visibleTriCount);
                     mixSig(forRenderEval ? 7u : 11u);
                     for (const auto& mod : modifierStack.modifiers) {
                         mixSig(static_cast<std::size_t>(static_cast<int>(mod.type)));
@@ -2735,13 +2877,24 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                         s_driftValid = true;
                         s_driftNode = selectedNodeName;
                         s_driftSig = driftSig;
-                        const auto evaluatedPreview = modifierStack.evaluate(ctx.scene.base_mesh_cache[selectedNodeName], forRenderEval);
-                        const bool previewMismatch =
-                            !hasMeshEntries ||
-                            meshEntriesIt->second.size() != evaluatedPreview.size();
-                        if (previewMismatch) {
-                            replaceEvaluatedMesh(evaluatedPreview, ctx.scene.base_mesh_cache[selectedNodeName], "Modifier Preview Synced");
-                            meshEntriesIt = mesh_cache.find(effectiveNodeName);
+                        if (flipEligible) {
+                            std::shared_ptr<TriangleMesh> previewMesh;
+                            modifierStack.evaluate(ctx.scene.base_mesh_cache[selectedNodeName], forRenderEval, &previewMesh);
+                            const std::size_t newCount = previewMesh ? previewMesh->num_triangles() : 0u;
+                            if (!directNodeMesh || directNodeMesh->num_triangles() != newCount) {
+                                std::vector<std::shared_ptr<Triangle>> emptyFacades;
+                                replaceEvaluatedMesh(emptyFacades, ctx.scene.base_mesh_cache[selectedNodeName], "Modifier Preview Synced", previewMesh);
+                                meshEntriesIt = mesh_cache.find(effectiveNodeName);
+                            }
+                        } else {
+                            const auto evaluatedPreview = modifierStack.evaluate(ctx.scene.base_mesh_cache[selectedNodeName], forRenderEval);
+                            const bool previewMismatch =
+                                !hasMeshEntries ||
+                                meshEntriesIt->second.size() != evaluatedPreview.size();
+                            if (previewMismatch) {
+                                replaceEvaluatedMesh(evaluatedPreview, ctx.scene.base_mesh_cache[selectedNodeName], "Modifier Preview Synced");
+                                meshEntriesIt = mesh_cache.find(effectiveNodeName);
+                            }
                         }
                     }
                 }
@@ -2863,11 +3016,34 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                         modifierStack.modifiers.begin(),
                         modifierStack.modifiers.begin() + applyModifierIndex + 1);
 
-                    auto displayMesh = modifierStack.modifiers.empty()
-                        ? bakedMesh
-                        : modifierStack.evaluate(ctx.scene.base_mesh_cache[selectedNodeName]);
+                    std::shared_ptr<TriangleMesh> applyMesh;
+                    std::vector<std::shared_ptr<Triangle>> displayMesh;
+                    if (modifierStack.modifiers.empty()) {
+                        // Apply-flat: with no modifier left to evaluate on top, hand the baked
+                        // dense result to the scene as ONE flat (cage-less) TriangleMesh instead
+                        // of the per-face facade soup. catmullClarkSubDStencil already built the
+                        // baked facades over a shared SoA TriangleMesh (their common parentMesh),
+                        // so reusing it is free — no second subdivision pass — and the cage facades
+                        // in base_mesh_cache stay in sync with the live mesh (same SoA). This is
+                        // the cage-less direct mesh that activates the sculpt-on-flat SoA path.
+                        displayMesh = bakedMesh;
+                        if (g_dense_mesh_as_hittable && !bakedMesh.empty() && bakedMesh[0]) {
+                            if (bakedMesh[0]->parentMesh) {
+                                // Catmull-Clark: facades already share a welded SoA mesh — reuse it.
+                                applyMesh = bakedMesh[0]->parentMesh;
+                            } else {
+                                // Simple/Flat subdivide (and any standalone-facade bake): build the
+                                // flat mesh from the facades so Apply is fully flat too (facade path
+                                // is being removed — no modifier result should stay a facade soup).
+                                applyMesh = MeshModifiers::facadesToFlatMesh(bakedMesh);
+                            }
+                        }
+                    } else {
+                        displayMesh = modifierStack.evaluate(ctx.scene.base_mesh_cache[selectedNodeName], false,
+                                                             g_dense_mesh_as_hittable ? &applyMesh : nullptr);
+                    }
 
-                    replaceEvaluatedMesh(displayMesh, ctx.scene.base_mesh_cache[selectedNodeName], "Modifier Applied");
+                    replaceEvaluatedMesh(displayMesh, ctx.scene.base_mesh_cache[selectedNodeName], "Modifier Applied", applyMesh);
                 }
 
                 // 4. Evaluate stack if changed
@@ -2876,12 +3052,16 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
 
                     const auto& baseMesh = ctx.scene.base_mesh_cache[selectedNodeName];
                     std::vector<std::shared_ptr<Triangle>> newMesh;
+                    std::shared_ptr<TriangleMesh> newMeshObj;
                     { MESH_PROFILE_SCOPE("stackChanged.evaluate(subdivision)");
                       // Viewport/Render level: match the active viewport mode.
-                      newMesh = modifierStack.evaluate(baseMesh, !g_solid_viewport_active); }
+                      newMesh = modifierStack.evaluate(baseMesh, !g_solid_viewport_active,
+                                                       g_dense_mesh_as_hittable ? &newMeshObj : nullptr); }
 
-                    SCENE_LOG_INFO("Evaluated mesh '" + selectedNodeName + "': " + std::to_string(baseMesh.size()) + " -> " + std::to_string(newMesh.size()) + " triangles.");
-                    replaceEvaluatedMesh(newMesh, baseMesh, "Modifiers Updated");
+                    SCENE_LOG_INFO("Evaluated mesh '" + selectedNodeName + "': " + std::to_string(baseMesh.size()) +
+                                   " -> " + (newMeshObj ? std::to_string(newMeshObj->num_triangles()) + " triangles (mesh)"
+                                                        : std::to_string(newMesh.size()) + " triangles"));
+                    replaceEvaluatedMesh(newMesh, baseMesh, "Modifiers Updated", newMeshObj);
                 }
 
                 UIWidgets::Divider();
@@ -3221,6 +3401,21 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
         }
     };
 
+    // "Make unique for paint" only needs to clone a material that is actually SHARED with
+    // another object — if the user already assigned this object its own dedicated material
+    // (e.g. via Create & Assign, or it's already a prior "_PaintSlot_" clone), cloning again
+    // just piles up redundant materials for no benefit. O(#objects) scene-wide scan, called
+    // only on button press / Create-Channels click (not per-frame), so the cost is negligible.
+    auto isMaterialExclusiveToObject = [&](uint16_t material_id) -> bool {
+        for (const auto& kv : material_slots_cache) {
+            if (kv.first == obj_name) continue;
+            for (uint16_t mid : kv.second) {
+                if (mid == material_id) return false;
+            }
+        }
+        return true;
+    };
+
     ImGui::Text("Material: %s", adapter->getMaterialName().empty() ? "(unnamed)" : adapter->getMaterialName().c_str());
     UIWidgets::Divider();
 
@@ -3253,20 +3448,25 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
 
         if (paint_mode_state.material_binding_mode == Paint::MaterialBindingMode::MakeUniqueForPaint) {
             if (UIWidgets::SecondaryButton("Make Unique Now", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
-                const uint16_t unique_material_id = makeObjectSlotPaintMaterialUnique(
-                    ctx,
-                    obj_name,
-                    paint_mode_state.active_material_slot,
-                    slot_material_id,
-                    mesh_entries,
-                    slot_ids);
-                slot_triangle = findMeshTriangleForMaterial(mesh_entries, unique_material_id);
-                if (slot_triangle) {
-                    paint_mode_state.setAdapter(std::make_shared<Paint::MeshPaintAdapter>(&ctx.scene, slot_triangle));
-                    adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
+                if (isMaterialExclusiveToObject(slot_material_id)) {
+                    addViewportMessage("Material is already unique to this object.");
+                } else {
+                    const uint16_t unique_material_id = makeObjectSlotPaintMaterialUnique(
+                        *this,
+                        ctx,
+                        obj_name,
+                        paint_mode_state.active_material_slot,
+                        slot_material_id,
+                        mesh_entries,
+                        slot_ids);
+                    slot_triangle = findMeshTriangleForMaterial(mesh_entries, unique_material_id);
+                    if (slot_triangle) {
+                        paint_mode_state.setAdapter(std::make_shared<Paint::MeshPaintAdapter>(&ctx.scene, slot_triangle));
+                        adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
+                    }
+                    syncPaintMaterials();
+                    g_ProjectManager.markModified();
                 }
-                syncPaintMaterials();
-                g_ProjectManager.markModified();
             }
         }
 
@@ -3380,8 +3580,10 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
             : (active_channel_texture ? "Ensure Selected Channels" : "Create Selected Channels");
         if (UIWidgets::PrimaryButton(create_button_label, ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
             uint16_t paint_material_id = slot_material_id;
-            if (paint_mode_state.material_binding_mode == Paint::MaterialBindingMode::MakeUniqueForPaint) {
+            if (paint_mode_state.material_binding_mode == Paint::MaterialBindingMode::MakeUniqueForPaint &&
+                !isMaterialExclusiveToObject(slot_material_id)) {
                 paint_material_id = makeObjectSlotPaintMaterialUnique(
+                    *this,
                     ctx,
                     obj_name,
                     paint_mode_state.active_material_slot,
@@ -6002,12 +6204,41 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
     HitRecord rec;
     bool has_hit = raycastViewportHit(ctx, paint_mouse_pos, rec);
     bool is_target_hit = has_hit && isMeshPaintTargetHit(rec, *adapter);
+
     if (!is_target_hit &&
         (!has_hit || (rec.triangle && rec.triangle->getNodeName() == adapter->getNodeName()))) {
-        auto mesh_it = mesh_cache.find(adapter->getNodeName());
-        if (mesh_it != mesh_cache.end()) {
+        // Flat (SoA) target: mesh_cache holds only ONE representative facade for it, which for some
+        // procedural meshes (e.g. a UV sphere) happens to be a degenerate pole triangle — so the
+        // fallback raycast against that single facade misses the whole body and the object can never
+        // be painted ("uv sphere hiç paint hit olmuyor"). Materialize the full face set so the
+        // fallback tests the real geometry. This only runs when the main BVH hit didn't already land
+        // on the target (nothing in front), so it never paints through an occluder.
+        std::vector<std::pair<int, std::shared_ptr<Triangle>>> flatFallbackEntries;
+        const std::vector<std::pair<int, std::shared_ptr<Triangle>>>* fallbackEntries = nullptr;
+
+        // Only materialize the full flat face set for modest meshes. A dense imported mesh
+        // (millions of faces) hits reliably through the scene BVH, so it never reaches this miss
+        // branch in practice; capping avoids a per-frame multi-million facade allocation if it did.
+        constexpr size_t kFlatFallbackMaxFaces = 200000;
+        size_t flatFaceCount = 0;
+        {
+            auto dmIt = direct_mesh_nodes.find(adapter->getNodeName());
+            if (dmIt != direct_mesh_nodes.end() && dmIt->second.mesh)
+                flatFaceCount = dmIt->second.mesh->num_triangles();
+        }
+        if (flatFaceCount > 1 && flatFaceCount <= kFlatFallbackMaxFaces) {
+            auto flatFacades = adapter->gatherNodeFacadesForPaint(adapter->getNodeName(), adapter->getMaterialID());
+            flatFallbackEntries.reserve(flatFacades.size());
+            for (auto& f : flatFacades) flatFallbackEntries.emplace_back(0, std::move(f));
+            fallbackEntries = &flatFallbackEntries;
+        } else {
+            auto mesh_it = mesh_cache.find(adapter->getNodeName());
+            if (mesh_it != mesh_cache.end()) fallbackEntries = &mesh_it->second;
+        }
+
+        if (fallbackEntries) {
             HitRecord fallback_rec;
-            if (raycastMeshPaintTargetFallback(ctx, paint_mouse_pos, mesh_it->second, *adapter, fallback_rec)) {
+            if (raycastMeshPaintTargetFallback(ctx, paint_mouse_pos, *fallbackEntries, *adapter, fallback_rec)) {
                 rec = fallback_rec;
                 has_hit = true;
                 is_target_hit = true;

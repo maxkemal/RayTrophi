@@ -5109,6 +5109,31 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
         std::shared_ptr<Triangle> first_new_triangle;
 
         for (size_t i = objects_before; i < ctx.scene.world.objects.size(); ++i) {
+            // Imports collapse into a flat TriangleMesh directly in world.objects (the
+            // "import-flat" pass in create_scene) rather than per-face Triangle facades, so this
+            // must handle both shapes — a dynamic_pointer_cast<Triangle>-only loop found nothing
+            // for flat imports, new_transforms stayed empty, and the drop-to-raycast-point
+            // reposition below silently never ran (dropped assets always landed at the imported
+            // file's own origin instead of the drop point).
+            if (auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(ctx.scene.world.objects[i])) {
+                AABB bounds;
+                if (tmesh->bounding_box(0.0f, 0.0f, bounds)) {
+                    bounds_min.x = (std::min)(bounds_min.x, bounds.min.x);
+                    bounds_min.y = (std::min)(bounds_min.y, bounds.min.y);
+                    bounds_min.z = (std::min)(bounds_min.z, bounds.min.z);
+                    bounds_max.x = (std::max)(bounds_max.x, bounds.max.x);
+                    bounds_max.y = (std::max)(bounds_max.y, bounds.max.y);
+                    bounds_max.z = (std::max)(bounds_max.z, bounds.max.z);
+                }
+                if (tmesh->transform && unique_transforms_set.insert(tmesh->transform.get()).second) {
+                    new_transforms.push_back(tmesh->transform);
+                }
+                if (!first_new_triangle && tmesh->geometry && !tmesh->geometry->indices.empty()) {
+                    first_new_triangle = std::make_shared<Triangle>(tmesh, 0);
+                }
+                continue;
+            }
+
             auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i]);
             if (!tri) {
                 continue;
@@ -5153,27 +5178,34 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
             // updateTransformedVertices() re-transformed every shared vertex ~6× and ran a
             // dynamic_pointer_cast per face — the asset-drop cost import never paid).
             std::unordered_set<TriangleMesh*> rebaked_meshes;
+            auto rebakeMesh = [&](TriangleMesh* mesh) {
+                if (!mesh || !mesh->geometry) return;
+                if (!rebaked_meshes.insert(mesh).second) return; // already baked this mesh
+                auto& geom = *mesh->geometry;
+                Vec3* P = geom.get_positions_mut();
+                Vec3* N = geom.get_normals_mut();
+                const Vec3* Po = geom.get_positions_orig();
+                const Vec3* No = geom.get_normals_orig();
+                const int vc = static_cast<int>(geom.get_vertex_count());
+                Matrix4x4 fT = Matrix4x4::identity(), nT = Matrix4x4::identity();
+                if (mesh->transform) { fT = mesh->transform->getFinal(); nT = mesh->transform->getNormalTransform(); }
+                if (P && Po) {
+                    #pragma omp parallel for schedule(static) if(vc >= 4096)
+                    for (int v = 0; v < vc; ++v) {
+                        P[v] = fT.transform_point(Po[v]);
+                        if (N && No) N[v] = nT.transform_vector(No[v]).normalize();
+                    }
+                }
+            };
             for (size_t i = objects_before; i < ctx.scene.world.objects.size(); ++i) {
+                if (auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(ctx.scene.world.objects[i])) {
+                    rebakeMesh(tmesh.get());
+                    continue;
+                }
                 auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i]);
                 if (!tri) continue;
-                TriangleMesh* mesh = tri->parentMesh.get();
-                if (mesh && mesh->geometry) {
-                    if (!rebaked_meshes.insert(mesh).second) continue; // already baked this mesh
-                    auto& geom = *mesh->geometry;
-                    Vec3* P = geom.get_positions_mut();
-                    Vec3* N = geom.get_normals_mut();
-                    const Vec3* Po = geom.get_positions_orig();
-                    const Vec3* No = geom.get_normals_orig();
-                    const int vc = static_cast<int>(geom.get_vertex_count());
-                    Matrix4x4 fT = Matrix4x4::identity(), nT = Matrix4x4::identity();
-                    if (mesh->transform) { fT = mesh->transform->getFinal(); nT = mesh->transform->getNormalTransform(); }
-                    if (P && Po) {
-                        #pragma omp parallel for schedule(static) if(vc >= 4096)
-                        for (int v = 0; v < vc; ++v) {
-                            P[v] = fT.transform_point(Po[v]);
-                            if (N && No) N[v] = nT.transform_vector(No[v]).normalize();
-                        }
-                    }
+                if (tri->parentMesh) {
+                    rebakeMesh(tri->parentMesh.get());
                 } else {
                     tri->updateTransformedVertices(); // standalone triangle
                 }
@@ -6469,6 +6501,8 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
     }
     editable_mesh_cache = EditableMeshCache{};
     this->tri_to_index.clear(); // Clear the lookup map
+    direct_mesh_nodes.clear();  // Flat/proxy: rebuilt below for facade-less TriangleMesh nodes
+    direct_mesh_rep_by_ptr.clear();
     cached_triangle_count_by_object.clear();
     cached_scene_triangle_count = 0;
     bbox_cache.clear();
@@ -6494,6 +6528,51 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
             
             lastVector->push_back({(int)i, tri});
             this->tri_to_index[tri.get()] = (int)i; // Store const pointer to index mapping
+            continue;
+        }
+
+        // Flat/proxy migration: a dense mesh placed directly in world.objects as a single
+        // TriangleMesh (no per-face facades). We keep a SINGLE representative facade (face 0) as
+        // the UI handle and push it into mesh_cache exactly like a normal mesh entry — the bbox /
+        // material-slot / transform-sync fast-paths all key off parentMesh->geometry (the full SoA)
+        // and only need one facade as the handle, so the entire facade-based UI (hierarchy listing,
+        // click selection, gizmo, transform-bake) works unchanged without materializing 12.6M
+        // facades. object_index points at the TriangleMesh's slot in world.objects.
+        if (auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(objects[i])) {
+            const std::string& name = tmesh->nodeName.empty() ? "Unnamed" : tmesh->nodeName;
+            // Pick a NON-DEGENERATE representative face. Face 0 of some procedural meshes (e.g. a UV
+            // sphere's first row) is a zero-area pole triangle; its per-face material can also diverge
+            // from the body after edits, so using it as the UI/paint handle made the paint adapter
+            // target a phantom material that no body face carries (paint silently did nothing — the
+            // diagnosed Sphere "target=0, rec.matID=body vs adapter=pole" case). The rep facade's
+            // faceIndex only feeds material/UV/identity lookups, so any valid face works; bbox /
+            // transform read the full SoA. Scan a bounded prefix for the first face with area.
+            uint32_t repFace = 0;
+            if (tmesh->geometry) {
+                const auto& idx = tmesh->geometry->indices;
+                const Vec3* P = tmesh->geometry->get_positions_orig();
+                if (!P) P = tmesh->geometry->get_positions();
+                const size_t nF = idx.size() / 3;
+                const size_t scanLimit = (nF < 1024) ? nF : 1024;
+                if (P) {
+                    for (size_t f = 0; f < scanLimit; ++f) {
+                        const Vec3& pa = P[idx[f * 3 + 0]];
+                        const Vec3& pb = P[idx[f * 3 + 1]];
+                        const Vec3& pc = P[idx[f * 3 + 2]];
+                        if ((pb - pa).cross(pc - pa).length_squared() > 1e-12f) {
+                            repFace = static_cast<uint32_t>(f);
+                            break;
+                        }
+                    }
+                }
+            }
+            auto rep = std::make_shared<Triangle>(tmesh, repFace);
+            mesh_cache[name].push_back({ (int)i, rep });
+            tri_to_index[rep.get()] = (int)i;
+            direct_mesh_nodes[name] = DirectMeshNode{ tmesh, (int)i, rep };
+            direct_mesh_rep_by_ptr[tmesh.get()] = rep;
+            lastName = name;
+            lastVector = &mesh_cache[name];
             continue;
         }
 
@@ -6543,36 +6622,70 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
         std::vector<uint16_t> mat_ids;
 
         if (!trisVector.empty() && trisVector[0].second->parentMesh && trisVector[0].second->parentMesh->geometry) {
-            // Optimized flat geometry fast-path
-            TriangleMesh* pm = trisVector[0].second->parentMesh.get();
-            size_t vCount = pm->geometry->get_vertex_count();
-            const Vec3* origP = pm->geometry->get_positions_orig();
-            if (!origP) origP = pm->geometry->get_positions();
-            if (origP) {
-                for (size_t v = 0; v < vCount; ++v) {
-                    Vec3 p = origP[v];
-                    bb_min.x = fminf(bb_min.x, p.x);
-                    bb_min.y = fminf(bb_min.y, p.y);
-                    bb_min.z = fminf(bb_min.z, p.z);
-                    bb_max.x = fmaxf(bb_max.x, p.x);
-                    bb_max.y = fmaxf(bb_max.y, p.y);
-                    bb_max.z = fmaxf(bb_max.z, p.z);
-                }
-            }
+            // Optimized flat geometry fast-path. A multi-material import shares one nodeName
+            // across SEVERAL sibling TriangleMesh objects (one per material) — trisVector holds
+            // one rep per sibling. Iterate every DISTINCT parentMesh here (not just trisVector[0])
+            // so bbox and material_slots_cache cover ALL materials of the object, not just the
+            // first one (previously the Materials panel only ever showed one merged material for
+            // multi-material imports).
+            std::unordered_set<TriangleMesh*> seenMeshes;
+            for (const auto& pair : trisVector) {
+                TriangleMesh* pm = pair.second->parentMesh.get();
+                if (!pm || !pm->geometry || !seenMeshes.insert(pm).second) continue;
 
-            const uint16_t* matIDs = pm->geometry->get_material_ids();
-            if (matIDs) {
-                uint16_t lastMid = 0xFFFF;
-                for (size_t v = 0; v < vCount; ++v) {
-                    uint16_t mid = matIDs[v];
-                    if (mid == lastMid) continue;
-                    lastMid = mid;
-                    
-                    bool found = false;
-                    for (uint16_t existing : mat_ids) {
-                        if (existing == mid) { found = true; break; }
+                size_t vCount = pm->geometry->get_vertex_count();
+                const Vec3* origP = pm->geometry->get_positions_orig();
+                if (!origP) origP = pm->geometry->get_positions();
+                if (origP) {
+                    for (size_t v = 0; v < vCount; ++v) {
+                        Vec3 p = origP[v];
+                        bb_min.x = fminf(bb_min.x, p.x);
+                        bb_min.y = fminf(bb_min.y, p.y);
+                        bb_min.z = fminf(bb_min.z, p.z);
+                        bb_max.x = fmaxf(bb_max.x, p.x);
+                        bb_max.y = fmaxf(bb_max.y, p.y);
+                        bb_max.z = fmaxf(bb_max.z, p.z);
                     }
-                    if (!found) mat_ids.push_back(mid);
+                }
+
+                const uint16_t* matIDs = pm->geometry->get_material_ids();
+                if (matIDs) {
+                    // Build the material-slot list per FACE, skipping zero-area (degenerate) faces.
+                    // A UV sphere's pole triangles are degenerate; their per-face material can diverge
+                    // from the body after edits (the diagnosed "adapter mat=2 (pole) vs rec.matID=1
+                    // (body)" paint failure). Including such a stray material here surfaced a phantom
+                    // material slot that the paint adapter targeted but no visible face carries, so the
+                    // brush matched nothing. Degenerate faces contribute no pixels — drop their material.
+                    const auto& idx = pm->geometry->indices;
+                    const size_t nF = idx.size() / 3;
+                    uint16_t lastMid = 0xFFFF;
+                    bool anyFace = false;
+                    for (size_t f = 0; f < nF; ++f) {
+                        const uint32_t a = idx[f * 3 + 0], b = idx[f * 3 + 1], c = idx[f * 3 + 2];
+                        if (origP &&
+                            (origP[b] - origP[a]).cross(origP[c] - origP[a]).length_squared() <= 1e-12f) {
+                            continue; // degenerate face — no visible surface, ignore its material
+                        }
+                        anyFace = true;
+                        const uint16_t mid = matIDs[a];
+                        if (mid == lastMid) continue;
+                        lastMid = mid;
+
+                        bool found = false;
+                        for (uint16_t existing : mat_ids) {
+                            if (existing == mid) { found = true; break; }
+                        }
+                        if (!found) mat_ids.push_back(mid);
+                    }
+                    // Safety: a fully-degenerate scan (or missing positions) must still yield a slot.
+                    if (!anyFace && vCount > 0) {
+                        uint16_t mid = matIDs[0];
+                        bool found = false;
+                        for (uint16_t existing : mat_ids) {
+                            if (existing == mid) { found = true; break; }
+                        }
+                        if (!found) mat_ids.push_back(mid);
+                    }
                 }
             }
         } else {
@@ -6745,12 +6858,37 @@ void SceneUI::invalidateCache() {
 // NOTE: Since we now store LOCAL bbox (from original vertices), this may not need
 // to be called unless the mesh geometry itself changes. Transform is applied at draw time.
 void SceneUI::updateBBoxCache(const std::string& objectName) {
-    auto it = mesh_cache.find(objectName);
-    if (it == mesh_cache.end()) return;
-    
     Vec3 bb_min(1e10f, 1e10f, 1e10f);
     Vec3 bb_max(-1e10f, -1e10f, -1e10f);
-    
+
+    // Flat node: read the authoritative TriangleMesh SoA from direct_mesh_nodes, NOT the rep
+    // facade's parentMesh. The rep facade's parentMesh link can go stale after some edits
+    // (sculpt / re-emit), and the per-facade fallback below then collapses the gizmo bbox to a
+    // single triangle (the reported "sculpt → gizmo selects one triangle"). direct_mesh_nodes is
+    // rebuilt straight from world.objects so it always points at the live flat mesh.
+    {
+        auto dmIt = direct_mesh_nodes.find(objectName);
+        if (dmIt != direct_mesh_nodes.end() && dmIt->second.mesh && dmIt->second.mesh->geometry) {
+            TriangleMesh* pm = dmIt->second.mesh.get();
+            size_t vCount = pm->geometry->get_vertex_count();
+            const Vec3* origP = pm->geometry->get_positions_orig();
+            if (!origP) origP = pm->geometry->get_positions();
+            if (origP) {
+                for (size_t v = 0; v < vCount; ++v) {
+                    Vec3 p = origP[v];
+                    bb_min.x = fminf(bb_min.x, p.x); bb_min.y = fminf(bb_min.y, p.y); bb_min.z = fminf(bb_min.z, p.z);
+                    bb_max.x = fmaxf(bb_max.x, p.x); bb_max.y = fmaxf(bb_max.y, p.y); bb_max.z = fmaxf(bb_max.z, p.z);
+                }
+                bbox_cache[objectName] = {bb_min, bb_max};
+                hull_candidate_cache.erase(objectName);
+                return;
+            }
+        }
+    }
+
+    auto it = mesh_cache.find(objectName);
+    if (it == mesh_cache.end()) return;
+
     const auto& trisVector = it->second;
     if (!trisVector.empty() && trisVector[0].second->parentMesh && trisVector[0].second->parentMesh->geometry) {
         TriangleMesh* pm = trisVector[0].second->parentMesh.get();

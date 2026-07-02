@@ -19,6 +19,8 @@
 #include "HittableInstance.h"
 #include "Texture.h"
 #include "Triangle.h"
+#include "TriangleMesh.h"   // Flat/proxy: direct-mesh material repaint reads/writes mesh SoA
+#include "EmbreeBVH.h"      // Flat/proxy: in-place CPU BVH materialID remap
 #include "TextureCompressionCache.h"
 #include "TerrainManager.h"
 #include <cmath>
@@ -29,6 +31,32 @@
 
 // Static editor instance
 static bool showMatNodeEditor = false;
+
+bool SceneUI::repaintDirectMeshMaterial(UIContext& ctx, const std::string& name,
+                                        uint16_t oldID, uint16_t newID) {
+    auto it = direct_mesh_nodes.find(name);
+    if (it == direct_mesh_nodes.end() || !it->second.mesh) return false;
+    TriangleMesh* mesh = it->second.mesh.get();
+    if (!mesh->geometry) return true; // it IS a direct mesh, just nothing to paint
+
+    // 1) Bulk-repaint the per-vertex SoA materialID buffer (the single rep facade's setMaterialID
+    //    only touched face 0). This is the source of truth for future BVH builds and GPU uploads.
+    const bool repaintAll = (oldID == MaterialManager::INVALID_MATERIAL_ID);
+    uint16_t* matIDs = mesh->geometry->get_attribute_data_mut<uint16_t>("materialID");
+    if (matIDs) {
+        const size_t vCount = mesh->geometry->get_vertex_count();
+        for (size_t v = 0; v < vCount; ++v) {
+            if (repaintAll || matIDs[v] == oldID) matIDs[v] = newID;
+        }
+    }
+
+    // 2) Remap the live CPU Embree BVH in place so the CPU render reflects the change now,
+    //    without paying for a full ~multi-second rebuild of a dense mesh.
+    if (auto embree = std::dynamic_pointer_cast<EmbreeBVH>(ctx.scene.bvh)) {
+        embree->remapMeshMaterialID(mesh, oldID, newID);
+    }
+    return true;
+}
 
 // Cache tag map: key = "texname|type_int", value = "BC7"/"BC5"/"BC4"/"" (empty = no managed cache).
 // Populated lazily per texture slot; cleared when a bake completes.
@@ -477,6 +505,10 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                     // Trigger Updates (Optimized)
                     ctx.renderer.resetCPUAccumulation();
                     
+                    // Flat/proxy: a dense single-TriangleMesh object isn't repainted by the
+                    // per-facade loop above (only its one rep face). Bulk-repaint SoA + CPU BVH.
+                    repaintDirectMeshMaterial(ctx, obj_name, active_mat_id, (uint16_t)i);
+
                     // Update bindings on GPU (Fast Path) - CRITICAL FIX
                     ctx.renderer.updateMeshMaterialBinding(ctx.scene, obj_name, active_mat_id, (uint16_t)i);
 
@@ -541,7 +573,10 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                     }
                 }
             }
-            
+
+            // Flat/proxy: bulk-repaint a dense single-TriangleMesh object (SoA + CPU BVH).
+            repaintDirectMeshMaterial(ctx, obj_name, active_mat_id, new_id);
+
             // UPDATE CACHE IN-PLACE
             if (active_slot_index < (int)slots_it->second.size()) {
                 slots_it->second[active_slot_index] = new_id;
@@ -597,7 +632,10 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                     }
                 }
             }
-            
+
+            // Flat/proxy: bulk-repaint a dense single-TriangleMesh object (SoA + CPU BVH).
+            repaintDirectMeshMaterial(ctx, obj_name, active_mat_id, new_id);
+
             // UPDATE CACHE IN-PLACE
             if (active_slot_index < (int)slots_it->second.size()) {
                 slots_it->second[active_slot_index] = new_id;
@@ -958,7 +996,7 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         SetupTex(mat->emissionProperty.texture, bundle.emission_tex, bundle.has_emission_tex);
         SetupTex(mat->opacityProperty.texture, bundle.opacity_tex, bundle.has_opacity_tex);
 
-        target_tri->textureBundle.reset(new OptixGeometryData::TextureBundle(bundle));
+        target_tri->setTextureBundle(bundle);
     };
 
     auto TriggerMaterialUpdate = [&](bool needs_texture_update) {
@@ -1001,9 +1039,36 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
     };
 
     auto ensureUvWorkflowCache = [&]() {
-        size_t object_triangle_count = 0;
+        // Flat (SoA) node: mesh_cache holds only ONE representative facade for it, so building the
+        // UV preview/edit cache from mesh_cache would show a single triangle's UV (the reported "uv
+        // workflow tek üçgen"). Detect the flat TriangleMesh and materialize its full face set below.
+        // A multi-material import shares one nodeName across SEVERAL sibling TriangleMesh objects
+        // (one per material) — direct_mesh_nodes[obj_n] only ever tracks the LAST one seen during
+        // cache rebuild, so filtering strictly by that single mesh made every material slot except
+        // the last show an empty UV preview (nothing in that one mesh carries mat_id). Collect every
+        // distinct parentMesh from mesh_cache[obj_n] instead and materialize from all of them.
+        auto dmIt = direct_mesh_nodes.find(obj_n);
+        const bool isFlat = (dmIt != direct_mesh_nodes.end() && dmIt->second.mesh && dmIt->second.mesh->geometry);
+
         auto mesh_it = mesh_cache.find(obj_n);
-        if (mesh_it != mesh_cache.end()) {
+        std::vector<std::shared_ptr<TriangleMesh>> flatMeshes;
+        if (isFlat) {
+            std::unordered_set<TriangleMesh*> seenMeshes;
+            if (mesh_it != mesh_cache.end()) {
+                for (const auto& entry : mesh_it->second) {
+                    if (entry.second && entry.second->parentMesh &&
+                        seenMeshes.insert(entry.second->parentMesh.get()).second) {
+                        flatMeshes.push_back(entry.second->parentMesh);
+                    }
+                }
+            }
+            if (flatMeshes.empty()) flatMeshes.push_back(dmIt->second.mesh);
+        }
+
+        size_t object_triangle_count = 0;
+        if (isFlat) {
+            for (const auto& fm : flatMeshes) object_triangle_count += fm->num_triangles();
+        } else if (mesh_it != mesh_cache.end()) {
             object_triangle_count = mesh_it->second.size();
         }
 
@@ -1025,6 +1090,30 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         uv_workflow_cached_max_uv_sets = 1;
         uv_workflow_cached_triangles.clear();
         uv_workflow_preview_entries.clear();
+
+        if (isFlat) {
+            // Materialize every face as a facade over each sibling flat mesh, filtered by material.
+            // These facades read/write the SoA "uv" attribute directly, so the UV editor
+            // (setUVSetCoordinates / applyUVSet on uv_workflow_cached_triangles) edits the flat
+            // geometry in place.
+            size_t totalTris = 0;
+            for (const auto& fm : flatMeshes) totalTris += fm->num_triangles();
+            uv_workflow_cached_triangles.reserve(totalTris);
+            for (const auto& flatMesh : flatMeshes) {
+                const size_t nTris = flatMesh->num_triangles();
+                for (size_t t = 0; t < nTris; ++t) {
+                    auto facade = std::make_shared<Triangle>(flatMesh, static_cast<uint32_t>(t));
+                    if (facade->getMaterialID() != mat_id) {
+                        continue;
+                    }
+                    uv_workflow_cached_max_uv_sets = std::max(uv_workflow_cached_max_uv_sets, static_cast<int>(facade->getUVSetCount()));
+                    uv_workflow_cached_triangles.push_back(facade);
+                }
+            }
+            rebuildUvWorkflowPreviewEntries();
+            uv_workflow_cache_dirty = false;
+            return;
+        }
 
         if (mesh_it == mesh_cache.end()) {
             uv_workflow_cache_dirty = false;
@@ -1523,7 +1612,9 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         // becomes a transmissive resin body (no need to raise Transmission too) and
         // absorbs colour over the REAL distance light travels inside it — deep centre,
         // clear thin edges. Albedo = the absorption tint. 0 = off (plain material).
-        if (ImGui::SliderFloat("Resin Depth##transdens", &pbsdf->transmissionDensity, 0.0f, 8.0f, "%.2f")) {
+        float trans_density = pbsdf->getTransmissionDensity();
+        if (ImGui::SliderFloat("Resin Depth##transdens", &trans_density, 0.0f, 8.0f, "%.2f")) {
+            pbsdf->setTransmissionDensity(trans_density);
             changed = true;
         }
         if (ImGui::IsItemHovered())
@@ -1531,17 +1622,19 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
                               "> 0 turns the material into a transmissive resin body; colour deepens with the\n"
                               "REAL distance light travels inside — deep centre, clear thin edges (glass-marble).\n"
                               "IOR is auto-raised for lensing. Set Resin Color for the depth tint.");
-        if (pbsdf->transmissionDensity > 0.001f) {
+        if (pbsdf->getTransmissionDensity() > 0.001f) {
             ImGui::Indent();
-            float resinCol[3] = { (float)pbsdf->resinColor.x, (float)pbsdf->resinColor.y, (float)pbsdf->resinColor.z };
+            float resinCol[3] = { (float)pbsdf->getResinColor().x, (float)pbsdf->getResinColor().y, (float)pbsdf->getResinColor().z };
             if (ImGui::ColorEdit3("Resin Color##resincol", resinCol)) {
-                pbsdf->resinColor = Vec3(resinCol[0], resinCol[1], resinCol[2]);
+                pbsdf->setResinColor(Vec3(resinCol[0], resinCol[1], resinCol[2]));
                 changed = true;
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("The colour the resin builds with depth (separate from albedo).\n"
                                   "White = clear (lensing only). Saturated = stronger, richer depth.");
-            if (ImGui::SliderFloat("Resin Gloss##resinrough", &pbsdf->resinRoughness, 0.0f, 1.0f, "%.3f")) {
+            float resin_roughness = pbsdf->getResinRoughness();
+            if (ImGui::SliderFloat("Resin Gloss##resinrough", &resin_roughness, 0.0f, 1.0f, "%.3f")) {
+                pbsdf->setResinRoughness(resin_roughness);
                 changed = true;
             }
             if (ImGui::IsItemHovered())
@@ -1555,36 +1648,42 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         //   - Resin (Resin Depth > 0): opaque base under the coat.
         //   - Glass Marble (base Transmission high, no Resin Depth): real see-through
         //     glass with volumetric dust/dirt inside (independent of the resin coat).
-        bool resinMode = pbsdf->transmissionDensity > 0.001f;
+        bool resinMode = pbsdf->getTransmissionDensity() > 0.001f;
         bool glassMarbleMode = (transmission > 0.5f) && !resinMode;
         if (resinMode || glassMarbleMode) {
             ImGui::Indent();
             ImGui::Separator();
             ImGui::TextDisabled(glassMarbleMode ? "Inclusions (Glass Marble \xE2\x80\x94 volumetric interior)"
                                                  : "Inclusions (inside the resin)");
-            if (ImGui::SliderFloat("Dust##resindust", &pbsdf->resinInclusion, 0.0f, 1.0f, "%.3f")) {
+            float resin_inclusion = pbsdf->getResinInclusion();
+            if (ImGui::SliderFloat("Dust##resindust", &resin_inclusion, 0.0f, 1.0f, "%.3f")) {
+                pbsdf->setResinInclusion(resin_inclusion);
                 changed = true;
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Cloudy dust suspended inside — heterogeneous absorption that\n"
                                   "thickens at depth (amorphous, varies in 3D). 0 = perfectly clear.");
-            if (ImGui::SliderFloat("Dirt Specks##resindirt", &pbsdf->resinDirt, 0.0f, 1.0f, "%.3f")) {
+            float resin_dirt = pbsdf->getResinDirt();
+            if (ImGui::SliderFloat("Dirt Specks##resindirt", &resin_dirt, 0.0f, 1.0f, "%.3f")) {
+                pbsdf->setResinDirt(resin_dirt);
                 changed = true;
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Opaque specks (dirt/debris) embedded at random depths. A ray that\n"
                                   "hits one terminates early — its colour shows through the medium crossed.");
-            if (pbsdf->resinDirt > 0.001f) {
+            if (pbsdf->getResinDirt() > 0.001f) {
                 ImGui::Indent();
-                float dirtCol[3] = { (float)pbsdf->resinDirtColor.x, (float)pbsdf->resinDirtColor.y, (float)pbsdf->resinDirtColor.z };
+                float dirtCol[3] = { (float)pbsdf->getResinDirtColor().x, (float)pbsdf->getResinDirtColor().y, (float)pbsdf->getResinDirtColor().z };
                 if (ImGui::ColorEdit3("Dirt Color##resindirtcol", dirtCol)) {
-                    pbsdf->resinDirtColor = Vec3(dirtCol[0], dirtCol[1], dirtCol[2]);
+                    pbsdf->setResinDirtColor(Vec3(dirtCol[0], dirtCol[1], dirtCol[2]));
                     changed = true;
                 }
                 ImGui::Unindent();
             }
-            if (pbsdf->resinInclusion > 0.001f || pbsdf->resinDirt > 0.001f) {
-                if (ImGui::SliderFloat("Inclusion Scale##resininclscale", &pbsdf->resinInclusionScale, 1.0f, 64.0f, "%.1f")) {
+            if (pbsdf->getResinInclusion() > 0.001f || pbsdf->getResinDirt() > 0.001f) {
+                float resin_inclusion_scale = pbsdf->getResinInclusionScale();
+                if (ImGui::SliderFloat("Inclusion Scale##resininclscale", &resin_inclusion_scale, 1.0f, 64.0f, "%.1f")) {
+                    pbsdf->setResinInclusionScale(resin_inclusion_scale);
                     changed = true;
                 }
                 if (ImGui::IsItemHovered())
@@ -1595,7 +1694,7 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
                 // Full Volume (real-interior medium march) was retired — too camera-angle
                 // dependent and the interior dust/dirt never read as intended. Inclusion glass
                 // uses the front-shell approximation only. Keep the flag dormant/off.
-                pbsdf->glassMarbleVolume = false;
+                pbsdf->setGlassMarbleVolume(false);
                 ImGui::TextDisabled("Glass Marble: light passes through (see-through) + shell inclusions.");
             }
             ImGui::Unindent();
@@ -1604,20 +1703,26 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         // Thin-shell BUBBLE (champagne / soda / soap-foam close-up). Renders the
         // surface as a thin dielectric film (Fresnel rim + straight pass-through) —
         // assign this material to foam BUBBLES (foam panel) for the production look.
-        if (ImGui::Checkbox("Bubble (thin shell)", &pbsdf->isBubble)) {
+        bool is_bubble = pbsdf->getIsBubble();
+        if (ImGui::Checkbox("Bubble (thin shell)", &is_bubble)) {
+            pbsdf->setIsBubble(is_bubble);
             changed = true;
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Thin dielectric bubble film: bright Fresnel rim + transparent centre.\n"
                               "For champagne/soda/soap close-ups. Assign to foam Bubbles in the foam panel.");
-        if (pbsdf->isBubble) {
+        if (pbsdf->getIsBubble()) {
             ImGui::Indent();
-            if (ImGui::SliderFloat("Rim IOR##bubble", &pbsdf->bubbleIor, 1.0f, 2.0f, "%.3f")) {
+            float bubble_ior = pbsdf->getBubbleIor();
+            if (ImGui::SliderFloat("Rim IOR##bubble", &bubble_ior, 1.0f, 2.0f, "%.3f")) {
+                pbsdf->setBubbleIor(bubble_ior);
                 changed = true;
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Fresnel strength of the bubble rim. ~1.33 = air/water interface.");
-            if (ImGui::SliderFloat("Thin-Film##bubble", &pbsdf->bubbleFilm, 0.0f, 30.0f, "%.1f")) {
+            float bubble_film = pbsdf->getBubbleFilm();
+            if (ImGui::SliderFloat("Thin-Film##bubble", &bubble_film, 0.0f, 30.0f, "%.1f")) {
+                pbsdf->setBubbleFilm(bubble_film);
                 changed = true;
             }
             if (ImGui::IsItemHovered())
@@ -1660,93 +1765,93 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         UIWidgets::EndSection();
     }
     if (UIWidgets::BeginSection("Subsurface Scattering", ImVec4(1.0f, 0.7f, 0.4f, 1.0f))) {
-        float sss_amount = pbsdf->subsurface;
+        float sss_amount = pbsdf->getSubsurface();
         if (SceneUI::DrawSmartFloat("sss", "Subsurf", &sss_amount, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-            pbsdf->subsurface = sss_amount;
+            pbsdf->setSubsurface(sss_amount);
             changed = true;
         }
         UIWidgets::HelpMarker("Amount of subsurface scattering (0=off, 1=full)");
         
-        Vec3 sss_color = pbsdf->subsurfaceColor;
+        Vec3 sss_color = pbsdf->getSubsurfaceColor();
         float sss_color_arr[3] = {(float)sss_color.x, (float)sss_color.y, (float)sss_color.z};
         if (ImGui::ColorEdit3("SSS Color", sss_color_arr)) {
-            pbsdf->subsurfaceColor = Vec3(sss_color_arr[0], sss_color_arr[1], sss_color_arr[2]);
+            pbsdf->setSubsurfaceColor(Vec3(sss_color_arr[0], sss_color_arr[1], sss_color_arr[2]));
             changed = true;
         }
         
-        Vec3 sss_radius = pbsdf->subsurfaceRadius;
+        Vec3 sss_radius = pbsdf->getSubsurfaceRadius();
         float sss_radius_arr[3] = {(float)sss_radius.x, (float)sss_radius.y, (float)sss_radius.z};
         if (ImGui::DragFloat3("Radius (RGB)", sss_radius_arr, 0.01f, 0.001f, 10.0f, "%.3f")) {
-            pbsdf->subsurfaceRadius = Vec3(sss_radius_arr[0], sss_radius_arr[1], sss_radius_arr[2]);
+            pbsdf->setSubsurfaceRadius(Vec3(sss_radius_arr[0], sss_radius_arr[1], sss_radius_arr[2]));
             changed = true;
         }
         
-        float sss_scale = pbsdf->subsurfaceScale;
+        float sss_scale = pbsdf->getSubsurfaceScale();
         if (SceneUI::DrawSmartFloat("sscl", "Scale", &sss_scale, 0.001f, 2.0f, "%.4f", false, nullptr, 12)) {
-            pbsdf->subsurfaceScale = sss_scale;
+            pbsdf->setSubsurfaceScale(sss_scale);
             changed = true;
         }
         
-        float sss_aniso = pbsdf->subsurfaceAnisotropy;
+        float sss_aniso = pbsdf->getSubsurfaceAnisotropy();
         if (SceneUI::DrawSmartFloat("ssani", "Aniso", &sss_aniso, -0.9f, 0.9f, "%.2f", false, nullptr, 12)) {
-            pbsdf->subsurfaceAnisotropy = sss_aniso;
+            pbsdf->setSubsurfaceAnisotropy(sss_aniso);
             changed = true;
         }
         
         // SSS Index of Refraction (controls internal refraction/exit behavior)
-        float sss_ior = pbsdf->subsurfaceIOR;
+        float sss_ior = pbsdf->getSubsurfaceIOR();
         if (SceneUI::DrawSmartFloat("ssior", "SSS IOR", &sss_ior, 1.0f, 3.0f, "%.3f", false, nullptr, 12)) {
-            pbsdf->subsurfaceIOR = sss_ior;
+            pbsdf->setSubsurfaceIOR(sss_ior);
             changed = true;
         }
 
         // Random-walk controls: enable and max steps
-        bool sss_rw = pbsdf->useRandomWalkSSS;
+        bool sss_rw = pbsdf->getUseRandomWalkSSS();
         if (ImGui::Checkbox("Enable Random-Walk", &sss_rw)) {
-            pbsdf->useRandomWalkSSS = sss_rw;
+            pbsdf->setUseRandomWalkSSS(sss_rw);
             changed = true;
         }
-        int sss_steps = pbsdf->sssMaxSteps;
+        int sss_steps = pbsdf->getSssMaxSteps();
         if (ImGui::SliderInt("Max Steps", &sss_steps, 1, 32)) {
-            pbsdf->sssMaxSteps = sss_steps;
+            pbsdf->setSssMaxSteps(sss_steps);
             changed = true;
         }
         
         ImGui::Separator();
         ImGui::Text("Presets:");
         if (ImGui::SmallButton("Skin")) {
-            pbsdf->subsurface = 0.3f;
-            pbsdf->subsurfaceColor = Vec3(1.0f, 0.8f, 0.6f);
-            pbsdf->subsurfaceRadius = Vec3(1.0f, 0.2f, 0.1f);
-            pbsdf->subsurfaceScale = 0.05f;
-            pbsdf->subsurfaceAnisotropy = 0.0f;
+            pbsdf->setSubsurface(0.3f);
+            pbsdf->setSubsurfaceColor(Vec3(1.0f, 0.8f, 0.6f));
+            pbsdf->setSubsurfaceRadius(Vec3(1.0f, 0.2f, 0.1f));
+            pbsdf->setSubsurfaceScale(0.05f);
+            pbsdf->setSubsurfaceAnisotropy(0.0f);
             changed = true;
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("Wax")) {
-            pbsdf->subsurface = 0.5f;
-            pbsdf->subsurfaceColor = Vec3(1.0f, 0.9f, 0.6f);
-            pbsdf->subsurfaceRadius = Vec3(0.3f, 0.3f, 0.2f);
-            pbsdf->subsurfaceScale = 0.1f;
-            pbsdf->subsurfaceAnisotropy = 0.0f;
+            pbsdf->setSubsurface(0.5f);
+            pbsdf->setSubsurfaceColor(Vec3(1.0f, 0.9f, 0.6f));
+            pbsdf->setSubsurfaceRadius(Vec3(0.3f, 0.3f, 0.2f));
+            pbsdf->setSubsurfaceScale(0.1f);
+            pbsdf->setSubsurfaceAnisotropy(0.0f);
             changed = true;
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("Milk")) {
-            pbsdf->subsurface = 0.8f;
-            pbsdf->subsurfaceColor = Vec3(1.0f, 1.0f, 1.0f);
-            pbsdf->subsurfaceRadius = Vec3(0.5f, 0.5f, 0.5f);
-            pbsdf->subsurfaceScale = 0.2f;
-            pbsdf->subsurfaceAnisotropy = 0.8f;
+            pbsdf->setSubsurface(0.8f);
+            pbsdf->setSubsurfaceColor(Vec3(1.0f, 1.0f, 1.0f));
+            pbsdf->setSubsurfaceRadius(Vec3(0.5f, 0.5f, 0.5f));
+            pbsdf->setSubsurfaceScale(0.2f);
+            pbsdf->setSubsurfaceAnisotropy(0.8f);
             changed = true;
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("Jade")) {
-            pbsdf->subsurface = 0.4f;
-            pbsdf->subsurfaceColor = Vec3(0.3f, 0.8f, 0.4f);
-            pbsdf->subsurfaceRadius = Vec3(0.2f, 0.5f, 0.2f);
-            pbsdf->subsurfaceScale = 0.05f;
-            pbsdf->subsurfaceAnisotropy = 0.3f;
+            pbsdf->setSubsurface(0.4f);
+            pbsdf->setSubsurfaceColor(Vec3(0.3f, 0.8f, 0.4f));
+            pbsdf->setSubsurfaceRadius(Vec3(0.2f, 0.5f, 0.2f));
+            pbsdf->setSubsurfaceScale(0.05f);
+            pbsdf->setSubsurfaceAnisotropy(0.3f);
             changed = true;
         }
         
@@ -1754,45 +1859,43 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
     }
 
     if (UIWidgets::BeginSection("Clear Coat", ImVec4(0.8f, 0.2f, 0.8f, 1.0f))) {
-        float cc_amount = pbsdf->clearcoat;
+        float cc_amount = pbsdf->getClearcoat();
         if (SceneUI::DrawSmartFloat("cc", "ClearCt", &cc_amount, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-            pbsdf->clearcoat = cc_amount;
+            pbsdf->setClearcoat(cc_amount, pbsdf->getClearcoatRoughness());
             changed = true;
         }
         
-        float cc_roughness = pbsdf->clearcoatRoughness;
+        float cc_roughness = pbsdf->getClearcoatRoughness();
         if (SceneUI::DrawSmartFloat("ccr", "CCRough", &cc_roughness, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-            pbsdf->clearcoatRoughness = cc_roughness;
+            pbsdf->setClearcoat(pbsdf->getClearcoat(), cc_roughness);
             changed = true;
         }
 
         // Iridescent clearcoat (thin-film tint on the clearcoat lobe): oil-slick, beetle
         // shell, candy paint. 0 = plain white clearcoat. Thickness drives the hue cycle.
-        float cc_irid = pbsdf->clearcoatIridescence;
+        float cc_irid = pbsdf->getClearcoatIridescence();
         if (SceneUI::DrawSmartFloat("cci", "Irides", &cc_irid, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-            pbsdf->clearcoatIridescence = cc_irid;
+            pbsdf->setClearcoatIridescence(cc_irid);
             changed = true;
         }
-        if (pbsdf->clearcoatIridescence > 0.001f) {
-            float cc_thick = pbsdf->clearcoatFilmThickness;
+        if (pbsdf->getClearcoatIridescence() > 0.001f) {
+            float cc_thick = pbsdf->getClearcoatFilmThickness();
             if (SceneUI::DrawSmartFloat("ccft", "FilmThk", &cc_thick, 0.1f, 2.0f, "%.3f", false, nullptr, 12)) {
-                pbsdf->clearcoatFilmThickness = cc_thick;
+                pbsdf->setClearcoatFilmThickness(cc_thick);
                 changed = true;
             }
         }
 
         ImGui::Separator();
         if (ImGui::SmallButton("Car Paint")) {
-            pbsdf->clearcoat = 1.0f;
-            pbsdf->clearcoatRoughness = 0.03f;
+            pbsdf->setClearcoat(1.0f, 0.03f);
             changed = true;
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("Oil Slick")) {
-            pbsdf->clearcoat = 1.0f;
-            pbsdf->clearcoatRoughness = 0.04f;
-            pbsdf->clearcoatIridescence = 0.85f;
-            pbsdf->clearcoatFilmThickness = 0.55f;
+            pbsdf->setClearcoat(1.0f, 0.04f);
+            pbsdf->setClearcoatIridescence(0.85f);
+            pbsdf->setClearcoatFilmThickness(0.55f);
             changed = true;
         }
         UIWidgets::EndSection();

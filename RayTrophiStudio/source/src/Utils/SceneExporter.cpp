@@ -857,9 +857,9 @@ bool SceneExporter::exportScene(const std::string& filepath, SceneData& scene, c
             Vec3 n1 = t->getOriginalVertexNormal(1);
             Vec3 n2 = t->getOriginalVertexNormal(2);
 
-             Vec2 uv0 = t->t0;
-             Vec2 uv1 = t->t1;
-             Vec2 uv2 = t->t2;
+             Vec2 uv0 = t->t_ref(0);
+             Vec2 uv1 = t->t_ref(1);
+             Vec2 uv2 = t->t_ref(2);
         
              int baseIdx = (int)i * 3;
             

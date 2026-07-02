@@ -1,0 +1,62 @@
+// terrain_pipe_water.comp
+// Vulkan port of fluvialWaterKernel (erosion_kernels.cu) — step 3 of the shallow-water
+// pipe model. Updates water volume from flux divergence and derives a velocity field
+// (used by terrain_pipe_erosion.comp for sediment transport). Race-free: each cell
+// only writes its own water/velocity cell, reading neighbors' flux (which they alone
+// wrote in terrain_pipe_flux.comp).
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    float fixedDeltaTime; float pipeLength;
+    float cellSize; float heightScale;
+    float erosionRate; float depositionRate;
+    float evaporationRate; float gravity;
+    float sedimentCapacityConstant;
+} pc;
+
+layout(set = 0, binding = 0) buffer Water         { float waterMap[]; };
+layout(set = 0, binding = 1) readonly buffer Flux { float fluxMap[]; };
+layout(set = 0, binding = 2) buffer Velocity      { float velocityMap[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    int x = id % pc.mapWidth;
+    int y = id / pc.mapWidth;
+    if (x <= 1 || x >= pc.mapWidth - 2 || y <= 1 || y >= pc.mapHeight - 2) return;
+
+    int idx = id;
+
+    float inflow = 0.0;
+    inflow += fluxMap[(idx - 1) * 4 + 1];
+    inflow += fluxMap[(idx + 1) * 4 + 0];
+    inflow += fluxMap[(idx - pc.mapWidth) * 4 + 3];
+    inflow += fluxMap[(idx + pc.mapWidth) * 4 + 2];
+
+    float outflow = fluxMap[idx*4+0] + fluxMap[idx*4+1] + fluxMap[idx*4+2] + fluxMap[idx*4+3];
+
+    float dV = pc.fixedDeltaTime * (inflow - outflow);
+    float oldW = waterMap[idx];
+    float newW = max(0.0, oldW + dV / (pc.cellSize * pc.cellSize));
+    waterMap[idx] = newW;
+
+    float fluxL = fluxMap[idx*4+0];
+    float fluxR = fluxMap[idx*4+1];
+    float fluxT = fluxMap[idx*4+2];
+    float fluxB = fluxMap[idx*4+3];
+
+    float avgWater = (oldW + newW) * 0.5;
+    if (avgWater > 0.0001) {
+        float vx = (fluxR - fluxL + fluxMap[(idx-1)*4+1] - fluxMap[(idx+1)*4+0]) * 0.5;
+        float vy = (fluxB - fluxT + fluxMap[(idx-pc.mapWidth)*4+3] - fluxMap[(idx+pc.mapWidth)*4+2]) * 0.5;
+        velocityMap[idx*2+0] = vx;
+        velocityMap[idx*2+1] = vy;
+    } else {
+        velocityMap[idx*2+0] = 0.0;
+        velocityMap[idx*2+1] = 0.0;
+    }
+}

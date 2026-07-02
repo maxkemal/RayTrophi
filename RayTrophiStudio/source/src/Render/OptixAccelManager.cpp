@@ -1,4 +1,4 @@
-﻿#include "OptixAccelManager.h"
+#include "OptixAccelManager.h"
 
 #include "Backend/SceneTextureManager.h"
 #include "globals.h"
@@ -1300,6 +1300,13 @@ void OptixAccelManager::syncInstanceTransforms(const std::vector<std::shared_ptr
             m = tri->getTransformMatrix();
         } else if (auto inst = std::dynamic_pointer_cast<HittableInstance>(item.representative_hittable)) {
             m = inst->transform;
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(item.representative_hittable)) {
+            // Flat (direct SoA) TriangleMesh-as-Hittable per-frame transform (keyframe / physics) —
+            // mirrors the Vulkan path. Dormant until OptiX-flat lands a flat BLAS (flat meshes are
+            // not yet emitted to OptiX instances), but keeps the per-frame sync complete for when
+            // it does, so flat meshes won't silently freeze under OptiX playback.
+            if (!tm->transform) continue;
+            m = tm->transform->getFinal();
         } else {
             continue;
         }
@@ -1442,6 +1449,35 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
         }
 
         // Non-skinned deformers such as animated water still need live vertex uploads.
+        // We can do this directly from GeometryDetail (SoA) if parentMesh is present to avoid slow CPU copies.
+        bool uploaded_flat = false;
+        if (!group.triangle_indices.empty()) {
+            const auto& first_tri = m_cached_triangles[group.triangle_indices[0]];
+            if (first_tri && first_tri->parentMesh && first_tri->parentMesh->geometry) {
+                TriangleMesh* parentMesh = first_tri->parentMesh.get();
+                const Vec3* src_positions = parentMesh->geometry->get_attribute_data<Vec3>("P");
+                const Vec3* src_normals = parentMesh->geometry->get_attribute_data<Vec3>("N");
+                if (src_positions && parentMesh->num_vertices() == blas.vertex_count) {
+                    size_t v_size = blas.vertex_count * sizeof(float3);
+                    cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_vertices), src_positions, v_size, cudaMemcpyHostToDevice, stream);
+                    
+                    if (src_normals && blas.d_normals) {
+                        size_t n_size = blas.vertex_count * sizeof(float3);
+                        cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_normals), src_normals, n_size, cudaMemcpyHostToDevice, stream);
+                    }
+                    
+                    // Refit GAS
+                    refitMeshBLAS(group.blas_idx, false);
+                    uploaded_flat = true;
+                }
+            }
+        }
+
+        if (uploaded_flat) {
+            continue;
+        }
+
+        // Fallback: CPU gather and upload path for legacy/standalone triangles
         MeshGeometry liveGeom;
         liveGeom.vertices.reserve(group.triangle_indices.size() * 3);
         liveGeom.normals.reserve(group.triangle_indices.size() * 3);

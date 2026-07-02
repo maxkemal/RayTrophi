@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -12,6 +12,7 @@
 #define GLOBALS_H
 
 #include <mutex>
+#include <thread>
 #include <atomic>
 #include <limits>
 #include <cmath>
@@ -455,6 +456,22 @@ extern int g_bvh_rebuild_deferred_frames; // Delay CPU BVH rebuild briefly after
 extern std::atomic<bool> g_scene_loading_in_progress;  // Prevents concurrent load operations
 extern std::atomic<bool> g_needs_geometry_rebuild;   // Set by loader thread, main loop does actual rebuild
 extern std::atomic<bool> g_needs_optix_sync;         // Set by loader thread, main loop syncs backend buffers
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+inline std::thread::id g_main_thread_id;
+
+inline int get_omp_threads_limit(int default_limit = -1) {
+#ifdef _OPENMP
+    if (std::this_thread::get_id() != g_main_thread_id) {
+        return 1;
+    }
+    if (default_limit < 1) {
+        return omp_get_max_threads();
+    }
+#endif
+    return default_limit;
+}
 
 // ===========================================================================
 // UI INTERACTION FLAGS

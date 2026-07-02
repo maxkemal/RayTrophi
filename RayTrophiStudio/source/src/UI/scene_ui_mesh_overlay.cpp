@@ -1564,6 +1564,57 @@ Vec3 safeNormalizeVec3(const Vec3& value, const Vec3& fallback) {
     return isFiniteVec3(normalized) ? normalized : fallback;
 }
 
+// Shading normal for an editable vertex, resolving both cache flavours. A facade-backed cache
+// reads the incident Triangle (same value the call sites used inline); a flat (direct) SoA cache
+// has no facades, so the normal comes straight from the mesh SoA at the matching vertex (editable
+// vertex id == SoA vertex id, 1:1). Returns false when no source is available so callers keep
+// their existing geometric (hit) normal fallback. `world` selects N (world-baked) vs N_orig (local).
+static bool editableVertexShadingNormal(
+    const SceneUI::EditableMeshCache& cache, int vertexId, bool world, Vec3& outNormal) {
+    if (vertexId < 0 || vertexId >= static_cast<int>(cache.vertices.size())) {
+        return false;
+    }
+    if (cache.flat_source_mesh && cache.flat_source_mesh->geometry) {
+        const DNA::GeometryDetail* g = cache.flat_source_mesh->geometry.get();
+        // vertexId is an EDITABLE id (positions are welded); map it to a representative SoA
+        // vertex via the CSR (all SoA copies of a welded vertex share the recomputed normal).
+        int soaV = vertexId;
+        const std::vector<int>& off = cache.flat_soa_offsets;
+        if (off.size() == cache.vertices.size() + 1 && !cache.flat_soa_data.empty() &&
+            off[static_cast<size_t>(vertexId)] < off[static_cast<size_t>(vertexId) + 1]) {
+            soaV = static_cast<int>(cache.flat_soa_data[static_cast<size_t>(off[static_cast<size_t>(vertexId)])]);
+        }
+        if (soaV < 0 || soaV >= static_cast<int>(g->get_vertex_count())) {
+            return false;
+        }
+        if (world) {
+            const Vec3* Nw = g->get_normals();
+            if (Nw) { outNormal = Nw[soaV]; return true; }
+            const Vec3* Nl = g->get_normals_orig();
+            if (Nl) {
+                outNormal = cache.source_object_transform.inverse().transpose()
+                                .transform_vector(Nl[soaV]);
+                return true;
+            }
+        } else {
+            const Vec3* Nl = g->get_normals_orig();
+            if (!Nl) Nl = g->get_normals();
+            if (Nl) { outNormal = Nl[soaV]; return true; }
+        }
+        return false;
+    }
+    const auto& vert = cache.vertices[static_cast<size_t>(vertexId)];
+    if (!vert.refs.empty()) {
+        const Triangle* t = cache.refTri(vert.refs[0]);
+        if (t) {
+            outNormal = world ? t->v_norm(vert.refs[0].corner)
+                              : t->getOriginalVertexNormal(vert.refs[0].corner);
+            return true;
+        }
+    }
+    return false;
+}
+
 Vec3 computeStableSculptHitNormal(const HitRecord& hit, const Vec3& fallbackNormal) {
     const Vec3 fallback = safeNormalizeVec3(fallbackNormal, Vec3(0.0f, 1.0f, 0.0f));
     if (hit.interpolated_normal.length_squared() > 1e-8f) {
@@ -1704,6 +1755,45 @@ inline Vec3 rotateLocalAroundAxis(const Vec3& p, int axis, float angleRad) {
     }
 }
 
+// Builds the "pre-pass" snapshot a neighbour-relaxation dab reads from, WITHOUT copying the whole
+// position array. The relax passes only read the dab footprint (touched verts) and their 1-ring
+// neighbours, so we refresh ONLY those entries in a persistent scratch buffer — O(footprint·valence)
+// instead of O(totalVerts) per dab. On a 1M-vert mesh that turns a multi-MB copy on every dab (×3
+// passes × up-to-100 dabs/frame) into a few-thousand-entry write, which is the dominant sculpt cost
+// (the dab budget model assumed cost ≈ footprint but the full copy made it ≈ totalVerts → stutter →
+// fast-cursor gaps). 'scratch' must be a per-pass function-static (the passes run sequentially on the
+// sculpt thread; each rebuilds its own footprint so stale far entries are never read).
+static const std::vector<Vec3>& buildTouchedRelaxSnapshot(
+    std::vector<Vec3>& scratch,
+    const SceneUI::EditableMeshCache& cache,
+    const std::vector<Vec3>& updatedLocalPositions,
+    const std::vector<int>& touchedVertexIds) {
+    const size_t n = updatedLocalPositions.size();
+    if (scratch.size() != n) {
+        scratch.assign(n, Vec3(0.0f, 0.0f, 0.0f));
+    }
+    // ADAPTIVE: the sparse "touched + 1-ring" refresh wins only for SMALL footprints. A wide brush
+    // touches a large fraction of a dense mesh, where the sparse path's scattered (cache-missing)
+    // writes PLUS the extra neighbour-vector walk lose to a single sequential whole-array copy
+    // (memory-bandwidth bound). Each touched vert refreshes ~1+valence(~6) entries, and scattered
+    // writes run several× slower per entry, so once the footprint passes a few percent of the mesh
+    // the full copy is cheaper. Fall back to it then so wide brushes never regress vs the old code.
+    if (touchedVertexIds.size() * 16 >= n) {
+        std::copy(updatedLocalPositions.begin(), updatedLocalPositions.end(), scratch.begin());
+        return scratch;
+    }
+    const int ni = static_cast<int>(n);
+    for (const int vid : touchedVertexIds) {
+        if (vid < 0 || vid >= ni) continue;
+        scratch[static_cast<size_t>(vid)] = updatedLocalPositions[static_cast<size_t>(vid)];
+        if (static_cast<size_t>(vid) >= cache.vertex_neighbors.size()) continue;
+        for (const int nb : cache.vertex_neighbors[static_cast<size_t>(vid)]) {
+            if (nb >= 0 && nb < ni) scratch[static_cast<size_t>(nb)] = updatedLocalPositions[static_cast<size_t>(nb)];
+        }
+    }
+    return scratch;
+}
+
 void applyClayPolishPass(
     const SceneUI::EditableMeshCache& cache,
     std::vector<Vec3>& updatedLocalPositions,
@@ -1725,7 +1815,9 @@ void applyClayPolishPass(
         return;
     }
 
-    const std::vector<Vec3> snapshot = updatedLocalPositions;
+    static std::vector<Vec3> s_polishSnapshot;
+    const std::vector<Vec3>& snapshot =
+        buildTouchedRelaxSnapshot(s_polishSnapshot, cache, updatedLocalPositions, touchedVertexIds);
     const float maxDelta = (std::max)(localRadius * 0.035f, 1e-5f);
 
     auto processVertex = [&](const int vertexIdInt) {
@@ -1822,7 +1914,9 @@ void applyDabRibbleSmoothPass(
         return;
     }
 
-    const std::vector<Vec3> snapshot = updatedLocalPositions;
+    static std::vector<Vec3> s_ribbleSnapshot;
+    const std::vector<Vec3>& snapshot =
+        buildTouchedRelaxSnapshot(s_ribbleSnapshot, cache, updatedLocalPositions, touchedVertexIds);
     const float maxDelta = (std::max)(localRadius * maxDeltaFactor, 1e-6f);
     const float safeBias = saturateFloat(tangentBias);
     const float tangentLenSq = localStrokeTangent.length_squared();
@@ -1923,7 +2017,9 @@ void applyClayAntiPitPass(
         return;
     }
 
-    const std::vector<Vec3> snapshot = updatedLocalPositions;
+    static std::vector<Vec3> s_antiPitSnapshot;
+    const std::vector<Vec3>& snapshot =
+        buildTouchedRelaxSnapshot(s_antiPitSnapshot, cache, updatedLocalPositions, touchedVertexIds);
     const float maxLift = (std::max)(localRadius * 0.045f, 1e-5f);
     const float maxFlatten = (std::max)(localRadius * 0.025f, 1e-5f);
 
@@ -2274,16 +2370,25 @@ bool raycastSculptPBVHLocal(
                 continue;
             }
             for (const auto& ref : cache.vertices[static_cast<size_t>(vid)].refs) {
-                Triangle* tri = cache.refTri(ref);
-                if (!tri) continue;
+                Triangle* tri = cache.refTri(ref); // null on a flat (direct SoA) cache
+                // ref.triangle_index is the face index for both cache flavours. On a flat
+                // cache there are no facades, so read the triangle corners straight from the
+                // cache faces/vertices (same data the facade would expose).
+                const int fi = ref.triangle_index;
+                if (fi < 0 || fi >= static_cast<int>(cache.faces.size())) continue;
+                const SceneUI::EditableFace& face = cache.faces[static_cast<size_t>(fi)];
+                if (face.v0 < 0 || face.v1 < 0 || face.v2 < 0 ||
+                    static_cast<size_t>(face.v0) >= cache.vertices.size() ||
+                    static_cast<size_t>(face.v1) >= cache.vertices.size() ||
+                    static_cast<size_t>(face.v2) >= cache.vertices.size()) {
+                    continue;
+                }
+                const Vec3 p0 = tri ? tri->getOriginalVertexPosition(0) : cache.vertices[static_cast<size_t>(face.v0)].local_position;
+                const Vec3 p1 = tri ? tri->getOriginalVertexPosition(1) : cache.vertices[static_cast<size_t>(face.v1)].local_position;
+                const Vec3 p2 = tri ? tri->getOriginalVertexPosition(2) : cache.vertices[static_cast<size_t>(face.v2)].local_position;
                 float t;
                 Vec3 n;
-                if (rayHitsTriangle(
-                        tri->getOriginalVertexPosition(0),
-                        tri->getOriginalVertexPosition(1),
-                        tri->getOriginalVertexPosition(2),
-                        t, n) &&
-                    t < closest) {
+                if (rayHitsTriangle(p0, p1, p2, t, n) && t < closest) {
                     closest = t;
                     bestNormal = n;
                     bestTriangle = tri;
@@ -2569,6 +2674,7 @@ void beginSculptStroke(
 
     strokeState.before_triangle_states.reserve(512);
     strokeState.touched_triangles.reserve(512);
+    strokeState.flat_before_soa.reserve(512); // flat (SoA) sculpt undo snapshots
 
     if (activeTool == SceneUI::SculptBrushTool::Layer) {
         strokeState.layer_accum.assign(editableVertexCount, 0.0f);
@@ -3627,10 +3733,10 @@ bool applyNonGrabSculptCandidate(
     case SceneUI::SculptBrushTool::Stamp:
     case SceneUI::SculptBrushTool::Draw: {
         Vec3 vertexNormal = hitNormalWorld;
-        if (!vertex.refs.empty() && editableMeshCache.refTri(vertex.refs[0])) {
-            const auto& ref = vertex.refs[0];
-            const Vec3 n = editableMeshCache.refTri(ref)->v_norm(ref.corner);
-            if (n.length_squared() > 1e-8f) {
+        {
+            Vec3 n;
+            if (editableVertexShadingNormal(editableMeshCache, static_cast<int>(vertexId), true, n) &&
+                n.length_squared() > 1e-8f) {
                 vertexNormal = safeNormalizeVec3(n, hitNormalWorld);
             }
         }
@@ -3661,10 +3767,10 @@ bool applyNonGrabSculptCandidate(
     }
     case SceneUI::SculptBrushTool::Clay: {
         Vec3 vertexNormal = hitNormalWorld;
-        if (!vertex.refs.empty() && editableMeshCache.refTri(vertex.refs[0])) {
-            const auto& ref = vertex.refs[0];
-            const Vec3 n = editableMeshCache.refTri(ref)->v_norm(ref.corner);
-            if (n.length_squared() > 1e-8f) {
+        {
+            Vec3 n;
+            if (editableVertexShadingNormal(editableMeshCache, static_cast<int>(vertexId), true, n) &&
+                n.length_squared() > 1e-8f) {
                 vertexNormal = safeNormalizeVec3(n, hitNormalWorld);
             }
         }
@@ -3810,9 +3916,10 @@ bool applyNonGrabSculptCandidate(
         // Crisp ridge/crease: square the weight so the falloff edge is much
         // tighter than Draw, and push along the vertex normal. Ctrl digs inward.
         Vec3 vertexNormal = hitNormalWorld;
-        if (!vertex.refs.empty() && editableMeshCache.refTri(vertex.refs[0])) {
-            const Vec3 n = editableMeshCache.refTri(vertex.refs[0])->v_norm(vertex.refs[0].corner);
-            if (n.length_squared() > 1e-8f) {
+        {
+            Vec3 n;
+            if (editableVertexShadingNormal(editableMeshCache, static_cast<int>(vertexId), true, n) &&
+                n.length_squared() > 1e-8f) {
                 vertexNormal = safeNormalizeVec3(n, hitNormalWorld);
             }
         }
@@ -3967,9 +4074,10 @@ void refreshSculptControlGraphNodeData(
             accumulatedPosition += vertex.local_position * weight;
 
             Vec3 vertexNormal(0.0f, 1.0f, 0.0f);
-            if (!vertex.refs.empty() && editableMeshCache.refTri(vertex.refs[0])) {
-                const Vec3 normal = editableMeshCache.refTri(vertex.refs[0])->getOriginalVertexNormal(vertex.refs[0].corner);
-                if (normal.length_squared() > 1e-8f) {
+            {
+                Vec3 normal;
+                if (editableVertexShadingNormal(editableMeshCache, static_cast<int>(vertexId), false, normal) &&
+                    normal.length_squared() > 1e-8f) {
                     vertexNormal = normal.normalize();
                 }
             }
@@ -5315,7 +5423,10 @@ bool SceneUI::refineSculptHitWithPBVH(const Ray& ray, const std::string& objectN
     }
     hit.point = worldPt;
     hit.triangle = pbvhTri;
-    hit.tri_mesh = pbvhTri ? pbvhTri->parentMesh.get() : nullptr;   // Faz 1: (mesh, faceIndex) handle
+    // Faz 1: (mesh, faceIndex) handle. On a flat (direct SoA) cache raycastSculptPBVHLocal has
+    // no facade to return (pbvhTri is null), so keep the cache's own flat source mesh as the
+    // hit's mesh handle rather than nulling it.
+    hit.tri_mesh = pbvhTri ? pbvhTri->parentMesh.get() : editable_mesh_cache.flat_source_mesh;
     hit.tri_face = pbvhTri ? pbvhTri->faceIndex : 0;
     const Vec3 worldN = invXf.transpose().transform_vector(localN);
     hit.interpolated_normal = Vec3(0.0f, 0.0f, 0.0f);
@@ -5599,12 +5710,26 @@ bool SceneUI::applyMeshShadingSettings(UIContext& ctx, const std::string& object
     MeshShadingSettings& shading = ensureMeshShadingSettings(objectName);
 
     std::vector<std::shared_ptr<Triangle>> displayTriangles;
-    displayTriangles.reserve(meshIt->second.size());
-    std::unordered_set<const Triangle*> seenTriangles;
-    seenTriangles.reserve(meshIt->second.size());
-    for (const auto& entry : meshIt->second) {
-        if (entry.second && seenTriangles.insert(entry.second.get()).second) {
-            displayTriangles.push_back(entry.second);
+    // Flat (SoA) mesh: mesh_cache holds only ONE representative facade, so the per-facade shading
+    // recompute below would only touch face 0 and every other face stays smooth (the reported "flat
+    // objects ignore smooth/flat shade mode"). Materialize all faces from the flat TriangleMesh so
+    // the whole SoA's normals are recomputed; the facade normal writes land in parentMesh->geometry.
+    auto dmIt = direct_mesh_nodes.find(objectName);
+    if (dmIt != direct_mesh_nodes.end() && dmIt->second.mesh && dmIt->second.mesh->geometry) {
+        const auto& flatMesh = dmIt->second.mesh;
+        const size_t nTris = flatMesh->num_triangles();
+        displayTriangles.reserve(nTris);
+        for (size_t t = 0; t < nTris; ++t) {
+            displayTriangles.push_back(std::make_shared<Triangle>(flatMesh, static_cast<uint32_t>(t)));
+        }
+    } else {
+        displayTriangles.reserve(meshIt->second.size());
+        std::unordered_set<const Triangle*> seenTriangles;
+        seenTriangles.reserve(meshIt->second.size());
+        for (const auto& entry : meshIt->second) {
+            if (entry.second && seenTriangles.insert(entry.second.get()).second) {
+                displayTriangles.push_back(entry.second);
+            }
         }
     }
     applyShadingSettingsToTriangles(
@@ -5632,6 +5757,14 @@ bool SceneUI::applyMeshShadingSettings(UIContext& ctx, const std::string& object
 
     if (queueGpuSync && (ctx.backend_ptr != nullptr || g_backend != nullptr || g_viewport_backend != nullptr)) {
         queueMeshEditGpuSync(objectName);
+    }
+
+    // A flat mesh's per-vertex normals were just rewritten across the whole SoA; force the
+    // Solid/raster viewport to re-extract them (the partial mesh-edit GPU sync keys off touched
+    // faces, which a whole-mesh shading flip doesn't populate).
+    if (dmIt != direct_mesh_nodes.end()) {
+        extern bool g_viewport_raster_rebuild_pending;
+        g_viewport_raster_rebuild_pending = true;
     }
 
     extern bool g_bvh_rebuild_pending;
@@ -6015,6 +6148,9 @@ void SceneUI::stepWetClayField(UIContext& ctx) {
     }
 
     recomputeEditableSmoothNormals(cache, movedVertexIds);
+    // Flat (direct) SoA mesh: scatter the edited positions/normals straight into the mesh's SoA
+    // (no-op for a facade-backed cache, where the refTri write-back above already did the work).
+    syncFlatSculptVerticesToSoA(movedVertexIds);
 
     {
         std::vector<int> movedInts;
@@ -6349,6 +6485,191 @@ void SceneUI::tryRestoreSerializedMeshEditLayer(UIContext& ctx) {
     pending_serialized_mesh_edit_layer = PendingSerializedMeshEditLayer{};
 }
 
+bool SceneUI::syncFlatSculptVerticesToSoA(const std::vector<size_t>& movedVertexIds) {
+    // For a flat (direct) SoA mesh the editable cache was built straight from the mesh's DNA
+    // GeometryDetail with vertices 1:1 (editable vertex id == SoA vertex id), and there are no
+    // per-face Triangle facades — so the usual refTri()->setOriginalVertexPosition() write-back
+    // is a no-op (refTri is null). Instead scatter the edited local positions straight into the
+    // SoA, and recompute per-vertex smooth normals for the moved verts + their one-ring (a moved
+    // vertex changes every incident face's normal, shared by all that face's corners) from the
+    // cache faces. P_orig/N_orig are authoritative (local rest space, what the Embree/Vulkan
+    // facade-less paths read); P/N are the world-baked mirrors kept in sync for direct readers.
+    EditableMeshCache& cache = editable_mesh_cache;
+    TriangleMesh* mesh = cache.flat_source_mesh;
+    if (!mesh || !mesh->geometry) {
+        return false; // facade-backed cache — caller keeps the existing per-Triangle write-back
+    }
+    if (movedVertexIds.empty()) {
+        return true;
+    }
+    DNA::GeometryDetail* geom = mesh->geometry.get();
+    const size_t soaVCount = geom->get_vertex_count();
+    Vec3* Porig = geom->get_attribute_data_mut<Vec3>("P_orig");
+    Vec3* P     = geom->get_attribute_data_mut<Vec3>("P");
+    Vec3* Norig = geom->get_attribute_data_mut<Vec3>("N_orig");
+    Vec3* N     = geom->get_attribute_data_mut<Vec3>("N");
+    if (!Porig && !P) {
+        return true;
+    }
+    const Matrix4x4 world = cache.source_object_transform;
+    const Matrix4x4 normalMatrix = world.inverse().transpose();
+
+    // The editable cache welds coincident positions, so one editable vertex maps to one OR MORE
+    // SoA vertices (a UV seam's split copies). Scatter every edit to all of them via the CSR map
+    // (falls back to 1:1 if the map is absent). Without this the seam copies stay split and tear.
+    const std::vector<int>& off = cache.flat_soa_offsets;
+    const std::vector<uint32_t>& soa = cache.flat_soa_data;
+    const bool haveMap = (off.size() == cache.vertices.size() + 1) && !soa.empty();
+    auto forEachSoA = [&](size_t ev, auto&& fn) {
+        if (haveMap) {
+            for (int j = off[ev]; j < off[ev + 1]; ++j) {
+                const uint32_t s = soa[static_cast<size_t>(j)];
+                if (s < soaVCount) fn(s);
+            }
+        } else if (ev < soaVCount) {
+            fn(static_cast<uint32_t>(ev));
+        }
+    };
+
+    // Flat sculpt undo: while a stroke is active, snapshot each SoA vertex's local rest pos+normal
+    // the FIRST time it is written this stroke (positions OR normals loop). finishSculptStroke turns
+    // these BEFORE snapshots + the final SoA into a FlatSculptEditCommand. Skipped for the non-stroke
+    // callers (gizmo move/transform have their own undo); they don't set sculpt_stroke_state.active.
+    const bool captureUndo = sculpt_stroke_state.active;
+    auto captureBefore = [&](uint32_t s) {
+        if (!captureUndo) return;
+        if (sculpt_stroke_state.flat_before_soa.count(s)) return;
+        const Vec3 bp = Porig ? Porig[s] : (P ? P[s] : Vec3());
+        const Vec3 bn = Norig ? Norig[s] : Vec3(0.0f, 1.0f, 0.0f);
+        sculpt_stroke_state.flat_before_soa.emplace(s, std::make_pair(bp, bn));
+    };
+
+    // 1) Positions — P_orig is the authoritative local rest position; P is the world mirror.
+    for (const size_t v : movedVertexIds) {
+        if (v >= cache.vertices.size()) continue;
+        const Vec3 lp = cache.vertices[v].local_position;
+        const Vec3 wp = world.transform_point(lp);
+        forEachSoA(v, [&](uint32_t s) {
+            captureBefore(s);
+            if (Porig) Porig[s] = lp;
+            if (P)     P[s] = wp;
+        });
+    }
+
+    // 2) Normals over the moved verts AND their one-ring neighbours.
+    //
+    // recomputeEditableSmoothNormals (the shade_flat-aware recompute) is a NO-OP for a flat/direct
+    // SoA mesh: it writes via cache.refTri(ref), which is null here (flat meshes have no per-face
+    // Triangle facades — see the header comment above). This function is therefore the ONLY place
+    // that actually updates flat-mesh normals after a sculpt dab, so it must itself honor
+    // shade_flat — previously it always wrote one SMOOTH (fully area-averaged) normal per welded
+    // vertex to every one of that vertex's SoA slots, so a Flat-shaded object's sculpted area
+    // always ended up smooth-shaded regardless of the object's setting.
+    if (Norig) {
+        std::unordered_set<size_t> affected;
+        affected.reserve(movedVertexIds.size() * 7 + 1);
+        for (const size_t v : movedVertexIds) {
+            if (v >= cache.vertices.size()) continue;
+            affected.insert(v);
+            if (v < cache.vertex_neighbors.size()) {
+                for (const int nb : cache.vertex_neighbors[v]) {
+                    if (nb >= 0) affected.insert(static_cast<size_t>(nb));
+                }
+            }
+        }
+
+        // Per-face normal cache (used by both branches — flat writes it directly per corner,
+        // smooth accumulates it into the vertex average).
+        std::unordered_map<int, Vec3> faceNormalCache;
+        auto faceNormal = [&](int fi) -> Vec3 {
+            auto it = faceNormalCache.find(fi);
+            if (it != faceNormalCache.end()) return it->second;
+            Vec3 n(0.0f, 1.0f, 0.0f);
+            if (fi >= 0 && fi < static_cast<int>(cache.faces.size())) {
+                const EditableFace& f = cache.faces[static_cast<size_t>(fi)];
+                if (f.v0 >= 0 && f.v1 >= 0 && f.v2 >= 0) {
+                    const Vec3& p0 = cache.vertices[static_cast<size_t>(f.v0)].local_position;
+                    const Vec3& p1 = cache.vertices[static_cast<size_t>(f.v1)].local_position;
+                    const Vec3& p2 = cache.vertices[static_cast<size_t>(f.v2)].local_position;
+                    const Vec3 cr = Vec3::cross(p1 - p0, p2 - p0);
+                    const float l = cr.length();
+                    if (l > 1e-12f) n = cr / l;
+                }
+            }
+            faceNormalCache[fi] = n;
+            return n;
+        };
+
+        for (const size_t w : affected) {
+            if (w >= cache.vertices.size()) continue;
+
+            if (cache.shade_flat) {
+                // Each incident face-corner keeps ITS OWN face normal — write straight to the
+                // exact SoA vertex that face-corner owns (derived from the face's own index
+                // triple), not the coarse per-editable-vertex CSR scatter used for positions
+                // (that would overwrite every seam-duplicate slot with the same value, erasing
+                // the per-facet distinction that makes flat shading look flat).
+                for (const auto& ref : cache.vertices[w].refs) {
+                    const int fi = ref.triangle_index;
+                    if (fi < 0 || fi >= static_cast<int>(cache.faces.size())) continue;
+                    const auto& idx = mesh->geometry->indices;
+                    const size_t slotPos = static_cast<size_t>(fi) * 3 + static_cast<size_t>(ref.corner);
+                    if (slotPos >= idx.size()) continue;
+                    const uint32_t s = idx[slotPos];
+                    if (s >= soaVCount) continue;
+                    const Vec3 nLocal = faceNormal(fi);
+                    const Vec3 nWorld = safeNormalizeVec3(normalMatrix.transform_vector(nLocal), nLocal);
+                    captureBefore(s);
+                    Norig[s] = nLocal;
+                    if (N) N[s] = nWorld;
+                }
+                continue;
+            }
+
+            // Smooth (optionally angle-gated by auto_smooth): area-weighted blend of incident
+            // face normals, written identically to every SoA slot of this welded vertex.
+            const float clampedAngle = std::clamp(cache.auto_smooth_angle_degrees, 1.0f, 180.0f);
+            const float autoSmoothThreshold = std::cos(clampedAngle * 3.14159265359f / 180.0f);
+            Vec3 acc(0.0f, 0.0f, 0.0f);
+            Vec3 anyFaceNormal(0.0f, 1.0f, 0.0f);
+            bool haveAny = false;
+            for (const auto& ref : cache.vertices[w].refs) {
+                const int fi = ref.triangle_index;
+                if (fi < 0 || fi >= static_cast<int>(cache.faces.size())) continue;
+                const EditableFace& f = cache.faces[static_cast<size_t>(fi)];
+                if (f.v0 < 0 || f.v1 < 0 || f.v2 < 0) continue;
+                const Vec3& p0 = cache.vertices[static_cast<size_t>(f.v0)].local_position;
+                const Vec3& p1 = cache.vertices[static_cast<size_t>(f.v1)].local_position;
+                const Vec3& p2 = cache.vertices[static_cast<size_t>(f.v2)].local_position;
+                const Vec3 areaN = Vec3::cross(p1 - p0, p2 - p0); // area-weighted (un-normalized)
+                if (!haveAny) { anyFaceNormal = faceNormal(fi); haveAny = true; }
+                if (cache.auto_smooth) {
+                    const Vec3 unitN = faceNormal(fi);
+                    if (anyFaceNormal.dot(unitN) < autoSmoothThreshold) continue;
+                }
+                acc = acc + areaN;
+            }
+            const float len = acc.length();
+            if (len > 1e-12f) {
+                const Vec3 nLocal = acc / len;
+                const Vec3 nWorld = safeNormalizeVec3(normalMatrix.transform_vector(nLocal), nLocal);
+                forEachSoA(w, [&](uint32_t s) {
+                    captureBefore(s);
+                    Norig[s] = nLocal;
+                    if (N) N[s] = nWorld;
+                });
+            }
+        }
+    }
+
+    // NOTE: do NOT bump g_scene_geometry_generation here — a sculpt dab is position-only (no
+    // topology/count change), so it is a refit, not a structural rebuild. Bumping the generation
+    // forced the Vulkan RT / raster backends into a full rebuild every dab (and briefly dropped
+    // the Solid mesh mid-rebuild). The caller drives the incremental sync (CPU BVH refit flag +
+    // queueMeshEditGpuSync, which now routes flat meshes through a SoA refit).
+    return true;
+}
+
 bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectName) {
     if (objectName.empty()) {
         editable_mesh_cache = EditableMeshCache{};
@@ -6411,7 +6732,22 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
         !ctx.scene.base_mesh_cache[objectName].empty();
     const std::vector<std::shared_ptr<Triangle>>* editableSourceTriangles =
         useControlCage ? &ctx.scene.base_mesh_cache[objectName] : nullptr;
-    const size_t triangleCount = editableSourceTriangles ? editableSourceTriangles->size() : meshEntries.size();
+    // Flat (direct) SoA mesh path. When the object is a single TriangleMesh-as-Hittable (the
+    // materialize-flip / future flat-import result) with NO live control cage, mesh_cache holds
+    // only one representative facade for it — the real geometry lives in the mesh's DNA SoA
+    // GeometryDetail (already welded + indexed = the DNA equivalent of the canSkipWeld fast
+    // path). Sculpt/edit build the editable cache straight from that SoA: vertices 1:1 with the
+    // SoA vertex array (so editable vertex id == SoA vertex id, making write-back trivial),
+    // corner ids straight from the SoA index buffer, and source_triangles left empty. If a
+    // control cage IS active (subdivision preview), we still edit the cage facades — unchanged.
+    const auto flatNodeIt = direct_mesh_nodes.find(objectName);
+    const bool buildFromFlatSoA =
+        !editableSourceTriangles &&
+        flatNodeIt != direct_mesh_nodes.end() &&
+        flatNodeIt->second.mesh && flatNodeIt->second.mesh->geometry;
+    TriangleMesh* flatMesh = buildFromFlatSoA ? flatNodeIt->second.mesh.get() : nullptr;
+    const size_t triangleCount = editableSourceTriangles ? editableSourceTriangles->size()
+        : (buildFromFlatSoA ? flatMesh->num_triangles() : meshEntries.size());
     Matrix4x4 currentObjectTransform = Matrix4x4::identity();
     if (!meshEntries.empty() && meshEntries[0].second) {
         currentObjectTransform = meshEntries[0].second->getTransformMatrix();
@@ -6472,6 +6808,7 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     editable_mesh_cache.auto_smooth = shading.auto_smooth;
     editable_mesh_cache.auto_smooth_angle_degrees = shading.auto_smooth_angle_degrees;
     editable_mesh_cache.built_minimal_for_sculpt = buildForSculpt;
+    editable_mesh_cache.flat_source_mesh = buildFromFlatSoA ? flatMesh : nullptr;
 
     SCENE_LOG_INFO(("[ensureEditableMeshCache] Rebuild started for object: " + objectName + " (buildForSculpt=" + std::to_string(buildForSculpt ? 1 : 0) + ")").c_str());
 
@@ -6487,7 +6824,15 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     // Source-mesh index per welded triangle (parallel to weldTris). Becomes
     // editable_mesh_cache.face_to_mesh_index — the flat replacement for triangle_to_mesh_index.
     std::vector<int> srcMeshIndex;
-    {
+    if (buildFromFlatSoA) {
+        // Flat SoA: no per-face Triangle facades to weld. weldTris stays empty so
+        // source_triangles ends up empty (refTri()/faceTri() return null — write-back and
+        // normals use the SoA path). face_to_mesh_index is identity: face index == SoA triangle
+        // index == GPU/source buffer slot.
+        const size_t F = flatMesh->num_triangles();
+        srcMeshIndex.resize(F);
+        for (size_t i = 0; i < F; ++i) srcMeshIndex[i] = static_cast<int>(i);
+    } else {
         const size_t srcCount = editableSourceTriangles ? editableSourceTriangles->size() : meshEntries.size();
         weldTris.reserve(srcCount);
         srcMeshIndex.reserve(srcCount);
@@ -6565,7 +6910,7 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
         }
     }
 
-    const size_t weldCornerCount = weldTris.size() * 3;
+    const size_t weldCornerCount = buildFromFlatSoA ? (flatMesh->num_triangles() * 3) : (weldTris.size() * 3);
 
     // Check if we can bypass the expensive vertex weld entirely.
     // If all triangles already share the exact same OriginalMeshGeometry, they are already
@@ -6590,11 +6935,41 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     }
 
     std::vector<int> cornerVertexId;
-    if (!canSkipWeld) {
+    if (buildFromFlatSoA || !canSkipWeld) {
+        // Per-corner local-position source for the weld below. Facade caches read the incident
+        // Triangle; a flat (direct SoA) cache has NO facades (weldTris is empty), so corner k's
+        // position comes from the SoA: P_orig[ indices[k] ]. Reading weldTris on a flat cache
+        // (as the shared Pass-2 fill used to) is an out-of-bounds access → crash on sculpt entry.
+        const Vec3* flatPorig = nullptr;
+        const uint32_t* flatCornerIdx = nullptr;
+        if (buildFromFlatSoA) {
+            const DNA::GeometryDetail* g = flatMesh->geometry.get();
+            flatPorig = g->get_positions_orig();
+            if (!flatPorig) flatPorig = g->get_positions();
+            flatCornerIdx = g->indices.data();
+        }
         SCENE_LOG_INFO("[ensureEditableMeshCache] Pass 1: Quantizing corner positions...");
-        // Pass 1 (parallel): quantize every corner position into a flat key array.
+        // Pass 1 (parallel): quantize every corner position into a flat key array. A flat (direct
+        // SoA) cache MUST weld by position too — its index buffer keeps split copies at UV seams
+        // (same position, different uv), and a 1:1 cache would let a normal-direction brush push
+        // each copy a different way, tearing the seam open. Welding here collapses each seam to one
+        // editable vertex (flat_soa_offsets/data maps it back to every SoA copy for write-back).
         std::vector<QuantizedVertexKey> cornerKeys(weldCornerCount);
-        {
+        if (buildFromFlatSoA) {
+            const DNA::GeometryDetail* geom = flatMesh->geometry.get();
+            const Vec3* Porig = geom->get_positions_orig();
+            if (!Porig) Porig = geom->get_positions();
+            const auto& idx = geom->indices;
+            const int numTris = static_cast<int>(weldCornerCount / 3);
+            #pragma omp parallel for schedule(static) num_threads(numThreads)
+            for (int t = 0; t < numTris; ++t) {
+                for (int c = 0; c < 3; ++c) {
+                    const uint32_t soaV = idx[static_cast<size_t>(3 * t + c)];
+                    cornerKeys[3 * t + c] = Porig ? quantizeTopologyVertex(Porig[soaV])
+                                                  : QuantizedVertexKey{};
+                }
+            }
+        } else {
             const int numTris = static_cast<int>(weldTris.size());
             #pragma omp parallel for schedule(static) num_threads(numThreads)
             for (int t = 0; t < numTris; ++t) {
@@ -6664,8 +7039,13 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
                     const bool isNewUnique = (k == 0 || !(cornerKeys[idx] == cornerKeys[order[k - 1]]));
                     if (isNewUnique) {
                         EditableVertex vertex;
-                        vertex.local_position =
-                            weldTris[idx / 3]->getOriginalVertexPosition(static_cast<int>(idx % 3));
+                        if (buildFromFlatSoA) {
+                            const uint32_t soaV = flatCornerIdx[idx];
+                            vertex.local_position = flatPorig ? flatPorig[soaV] : Vec3(0.0f, 0.0f, 0.0f);
+                        } else {
+                            vertex.local_position =
+                                weldTris[idx / 3]->getOriginalVertexPosition(static_cast<int>(idx % 3));
+                        }
                         editable_mesh_cache.vertices[writeIdx] = vertex;
                         writeIdx++;
                     }
@@ -6689,7 +7069,42 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     editable_mesh_cache.source_triangles = std::move(weldTris);
     editable_mesh_cache.face_to_mesh_index = std::move(srcMeshIndex);
     const size_t sourceTriCount = editable_mesh_cache.source_triangles.size();
+    // Face count drives the topology passes. For a flat SoA mesh source_triangles is empty, so
+    // the face count comes from the SoA index buffer (cornerVertexId) instead.
+    const size_t faceCount = buildFromFlatSoA ? (cornerVertexId.size() / 3) : sourceTriCount;
     const size_t vertexCount = editable_mesh_cache.vertices.size();
+
+    // Flat cache: build the editable-vertex -> SoA-vertex map (CSR). The weld above collapsed
+    // each coincident position into one editable vertex; here we invert cornerVertexId (editable
+    // id per corner) against the SoA index buffer (SoA id per corner) so write-back can scatter an
+    // edit to every SoA copy of a welded vertex (the seam halves).
+    editable_mesh_cache.flat_soa_offsets.clear();
+    editable_mesh_cache.flat_soa_data.clear();
+    if (buildFromFlatSoA) {
+        const DNA::GeometryDetail* geom = flatMesh->geometry.get();
+        const auto& idx = geom->indices;
+        const size_t soaVCount = geom->get_vertex_count();
+        std::vector<int> soaToEditable(soaVCount, -1);
+        const size_t corners = (std::min)(cornerVertexId.size(), idx.size());
+        for (size_t k = 0; k < corners; ++k) {
+            const uint32_t soaV = idx[k];
+            const int ev = cornerVertexId[k];
+            if (soaV < soaVCount && ev >= 0) soaToEditable[soaV] = ev;
+        }
+        std::vector<int>& off = editable_mesh_cache.flat_soa_offsets;
+        off.assign(vertexCount + 1, 0);
+        for (size_t s = 0; s < soaVCount; ++s) {
+            const int ev = soaToEditable[s];
+            if (ev >= 0) off[static_cast<size_t>(ev) + 1]++;
+        }
+        for (size_t v = 0; v < vertexCount; ++v) off[v + 1] += off[v];
+        editable_mesh_cache.flat_soa_data.resize(static_cast<size_t>(off[vertexCount]));
+        std::vector<int> cursor(off.begin(), off.end());
+        for (size_t s = 0; s < soaVCount; ++s) {
+            const int ev = soaToEditable[s];
+            if (ev >= 0) editable_mesh_cache.flat_soa_data[static_cast<size_t>(cursor[ev]++)] = static_cast<uint32_t>(s);
+        }
+    }
 
     SCENE_LOG_INFO("[ensureEditableMeshCache] Skip-weld check completed. Starting Pass 3a (Ref Offsets)...");
     // Pass 3a (P-CSR): offset table for the per-vertex incident-triangle refs.
@@ -6742,12 +7157,14 @@ bool SceneUI::ensureEditableMeshCache(UIContext& ctx, const std::string& objectN
     }
 
     SCENE_LOG_INFO("[ensureEditableMeshCache] Starting Pass 3b (Faces population)...");
-    editable_mesh_cache.faces.resize(sourceTriCount);
+    editable_mesh_cache.faces.resize(faceCount);
     #pragma omp parallel for schedule(static) num_threads(numThreads)
-    for (int t = 0; t < (int)sourceTriCount; ++t) {
-        Triangle* tri = editable_mesh_cache.source_triangles[t].get();
+    for (int t = 0; t < (int)faceCount; ++t) {
+        // Flat SoA has no source_triangles — refs/faces index purely by face id.
+        Triangle* tri = (t < (int)editable_mesh_cache.source_triangles.size())
+            ? editable_mesh_cache.source_triangles[t].get() : nullptr;
         const int triIndex = static_cast<int>(t);
-        tri->editable_index = triIndex;
+        if (tri) tri->editable_index = triIndex;
         int v[3];
         if (!canSkipWeld) {
             v[0] = cornerVertexId[3 * t + 0];
@@ -7717,6 +8134,10 @@ bool SceneUI::applySelectedMeshElementTranslation(UIContext& ctx, const Vec3& wo
     if (ctx.selection.mesh_element_mode == MeshElementSelectMode::Combined) {
         softSettings.proportional_edit = false;
     }
+    // Flat (direct) SoA mesh has no facades, so the per-ref write-back below is a no-op; record
+    // the moved vertex ids to scatter into the SoA after the move (see syncFlatSculptVerticesToSoA).
+    const bool flatMesh = editable_mesh_cache.flat_source_mesh != nullptr;
+    std::vector<size_t> flatMovedVerts;
     // Apply the local delta to one vertex (weight-scaled) and touch its triangles.
     auto applyTranslationToVertex = [&](size_t vertexId, float weight) {
         if (weight <= 1e-5f) {
@@ -7725,6 +8146,7 @@ bool SceneUI::applySelectedMeshElementTranslation(UIContext& ctx, const Vec3& wo
         EditableVertex& vertex = editable_mesh_cache.vertices[vertexId];
         vertex.local_position = vertex.local_position + (localDelta * weight);
         editable_mesh_cache.vertex_positions[vertexId] = vertex.local_position;
+        if (flatMesh) flatMovedVerts.push_back(vertexId);
         for (const auto& ref : vertex.refs) {
             Triangle* refTri = editable_mesh_cache.refTri(ref);
             if (!refTri) {
@@ -7762,6 +8184,7 @@ bool SceneUI::applySelectedMeshElementTranslation(UIContext& ctx, const Vec3& wo
             collectAffectedEditableVertexIds(editable_mesh_cache, touchedTriangles);
         recomputeEditableSmoothNormals(editable_mesh_cache, affectedVertexIds);
     }
+    syncFlatSculptVerticesToSoA(flatMovedVerts);
 
     for (const auto& tri : touchedTriangles) {
         tri->updateTransformedVertices();
@@ -7910,6 +8333,9 @@ bool SceneUI::applySelectedMeshElementTransform(UIContext& ctx, const Matrix4x4&
         softSettings.proportional_edit = false;
     }
     bool changed = false;
+    // Flat (direct) SoA mesh: record moved verts to scatter into the SoA after the transform.
+    const bool flatMesh = editable_mesh_cache.flat_source_mesh != nullptr;
+    std::vector<size_t> flatMovedVerts;
     // Transform one vertex about the object's pivot (weight-scaled blend) and touch its
     // triangles. Returns whether the vertex actually moved.
     auto applyTransformToVertex = [&](size_t vertexId, float weight) {
@@ -7934,6 +8360,7 @@ bool SceneUI::applySelectedMeshElementTransform(UIContext& ctx, const Matrix4x4&
         changed = true;
         vertex.local_position = updatedLocal;
         editable_mesh_cache.vertex_positions[vertexId] = updatedLocal;
+        if (flatMesh) flatMovedVerts.push_back(vertexId);
 
         for (const auto& ref : vertex.refs) {
             Triangle* refTri = editable_mesh_cache.refTri(ref);
@@ -7973,6 +8400,7 @@ bool SceneUI::applySelectedMeshElementTransform(UIContext& ctx, const Matrix4x4&
             collectAffectedEditableVertexIds(editable_mesh_cache, touchedTriangles);
         recomputeEditableSmoothNormals(editable_mesh_cache, affectedVertexIds);
     }
+    syncFlatSculptVerticesToSoA(flatMovedVerts);
 
     for (const auto& tri : touchedTriangles) {
         tri->updateTransformedVertices();
@@ -10427,6 +10855,36 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
                     endStates));
             }
 
+            // Flat (direct SoA) mesh: the facade before_triangle_states above stay empty, so record
+            // a FlatSculptEditCommand from the per-SoA-vertex BEFORE snapshots (captured during the
+            // stroke in syncFlatSculptVerticesToSoA) + the final SoA values (AFTER). This is the
+            // flat-mesh equivalent of the MeshEditCommand above — without it, sculpting an
+            // imported/opened/added flat mesh (now the default) was un-undoable.
+            if (!sculpt_stroke_state.flat_before_soa.empty() &&
+                editable_mesh_cache.flat_source_mesh &&
+                editable_mesh_cache.flat_source_mesh->geometry) {
+                DNA::GeometryDetail* geom = editable_mesh_cache.flat_source_mesh->geometry.get();
+                const size_t vCount = geom->get_vertex_count();
+                const Vec3* Porig = geom->get_attribute_data<Vec3>("P_orig");
+                const Vec3* Norig = geom->get_attribute_data<Vec3>("N_orig");
+                std::vector<FlatSculptVertexState> flatStates;
+                flatStates.reserve(sculpt_stroke_state.flat_before_soa.size());
+                for (const auto& [soaId, before] : sculpt_stroke_state.flat_before_soa) {
+                    if (soaId >= vCount) continue;
+                    FlatSculptVertexState st;
+                    st.soa_id = soaId;
+                    st.before_pos = before.first;
+                    st.before_nrm = before.second;
+                    st.after_pos = Porig ? Porig[soaId] : before.first;
+                    st.after_nrm = Norig ? Norig[soaId] : before.second;
+                    flatStates.push_back(st);
+                }
+                if (!flatStates.empty()) {
+                    history.record(std::make_unique<FlatSculptEditCommand>(
+                        sculpt_stroke_state.object_name, std::move(flatStates)));
+                }
+            }
+
             // Mark scene geometry dirty even when the solid-mode raster sync path
             // handled the live viewport update. The Rendered/Vulkan RT transition
             // checks these flags/generation to decide whether a full RT geometry
@@ -10614,9 +11072,12 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
     // which becomes catastrophic on dense meshes (e.g. 500k+ tris). Keep the
     // direct-object scan only as a narrow fallback when the selected object was
     // just CPU-synced and the scene BVH may still be one frame behind.
+    // Accept BOTH a facade hit (hit.triangle) and a flat/direct SoA mesh hit (hit.tri_mesh,
+    // hit.triangle is null on the facade-less Embree path) — otherwise sculpt on an
+    // apply-flat / import-flat mesh never registers a hit and the brush stays inert.
     rawDidHit = raycastViewportHit(ctx, io.MousePos, hit) &&
-        hit.triangle &&
-        hit.triangle->getNodeName() == objectName;
+        ((hit.triangle && hit.triangle->getNodeName() == objectName) ||
+         (hit.tri_mesh && hit.tri_mesh->nodeName == objectName));
 
     if (!rawDidHit &&
         objectHadPendingCpuSync &&
@@ -12199,9 +12660,10 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
                         case SculptBrushTool::Stamp:
                         case SculptBrushTool::Draw: {
                             Vec3 vn = mirWorldNormal;
-                            if (!vertex.refs.empty() && editable_mesh_cache.refTri(vertex.refs[0])) {
-                                const Vec3 n = editable_mesh_cache.refTri(vertex.refs[0])->v_norm(vertex.refs[0].corner);
-                                if (n.length_squared() > 1e-8f) vn = safeNormalizeVec3(n, mirWorldNormal);
+                            {
+                                Vec3 n;
+                                if (editableVertexShadingNormal(editable_mesh_cache, static_cast<int>(vertexId), true, n) &&
+                                    n.length_squared() > 1e-8f) vn = safeNormalizeVec3(n, mirWorldNormal);
                             }
                             const float centerBias = std::clamp(w, 0.0f, 1.0f);
                             const float drawStrokeNormalMix =
@@ -12230,9 +12692,10 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
                         }
                         case SculptBrushTool::Clay: {
                             Vec3 vn = mirWorldNormal;
-                            if (!vertex.refs.empty() && editable_mesh_cache.refTri(vertex.refs[0])) {
-                                const Vec3 n = editable_mesh_cache.refTri(vertex.refs[0])->v_norm(vertex.refs[0].corner);
-                                if (n.length_squared() > 1e-8f) vn = safeNormalizeVec3(n, mirWorldNormal);
+                            {
+                                Vec3 n;
+                                if (editableVertexShadingNormal(editable_mesh_cache, static_cast<int>(vertexId), true, n) &&
+                                    n.length_squared() > 1e-8f) vn = safeNormalizeVec3(n, mirWorldNormal);
                             }
                             Vec3 mirClaySampleCenter = mirWorldCenter;
                             if (clayLikeTool && sculpt_stroke_state.changed) {
@@ -12357,9 +12820,10 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
                         }
                         case SculptBrushTool::DrawSharp: {
                             Vec3 vnSharp = mirWorldNormal;
-                            if (!vertex.refs.empty() && editable_mesh_cache.refTri(vertex.refs[0])) {
-                                const Vec3 n = editable_mesh_cache.refTri(vertex.refs[0])->v_norm(vertex.refs[0].corner);
-                                if (n.length_squared() > 1e-8f) vnSharp = safeNormalizeVec3(n, mirWorldNormal);
+                            {
+                                Vec3 n;
+                                if (editableVertexShadingNormal(editable_mesh_cache, static_cast<int>(vertexId), true, n) &&
+                                    n.length_squared() > 1e-8f) vnSharp = safeNormalizeVec3(n, mirWorldNormal);
                             }
                             const float sharpW = w * w;
                             wd = vnSharp * (radiusWorld * 0.26f * brushStrength * dt * sharpW * (1.0f + normalStrength) * directionSign);
@@ -13059,11 +13523,22 @@ void SceneUI::handleMeshSculpt(UIContext& ctx, const Vec3* overrideHitPoint) {
     if (affectedVertexIds.empty()) {
         affectedVertexIds = collectAffectedEditableVertexIds(editable_mesh_cache, touchedTriangles);
     }
+    // Flat (direct) SoA mesh has no facades, so collectAffectedEditableVertexIds (driven by the
+    // touched-Triangle set) yields nothing — fall back to the verts this stroke actually wrote.
+    if (editable_mesh_cache.flat_source_mesh && affectedVertexIds.empty()) {
+        affectedVertexIds.reserve(expandedStrokeVertexIds.size());
+        for (const int vid : expandedStrokeVertexIds) {
+            if (vid >= 0) affectedVertexIds.push_back(static_cast<size_t>(vid));
+        }
+    }
     expandTouchedTrianglesFromAffectedVertices(
         editable_mesh_cache,
         affectedVertexIds,
         touchedTriangles);
+
     recomputeEditableSmoothNormals(editable_mesh_cache, affectedVertexIds);
+    // Flat mesh: scatter the stroke's edited positions/normals into the SoA (no-op for facades).
+    syncFlatSculptVerticesToSoA(affectedVertexIds);
     refreshSculptPBVHLeavesAndAncestors(
         sculpt_pbvh,
         editable_mesh_cache,
@@ -13188,6 +13663,35 @@ void SceneUI::processPendingMeshEditGpuSync(UIContext& ctx) {
     auto syncMeshRasterViewport = [&](Backend::IViewportBackend* vkBackend) -> bool {
         if (!vkBackend) {
             return false;
+        }
+
+        // Flat (direct) SoA mesh: mesh_cache holds only ONE representative facade for it, so the
+        // facade-triangle raster updates below would replace the whole raster mesh with a single
+        // triangle (the Solid mesh collapses to one face — the reported "flat smooth → tek üçgen").
+        // Refit the raster straight from the mesh SoA instead — a dirty-range upload that stays
+        // realtime per dab. buildRasterGeometry would early-out here anyway (scene generation is
+        // unchanged for a position/normal-only edit). This must cover EVERY flat node, not just the
+        // one currently in edit mode: a whole-mesh shading flip (applyMeshShadingSettings) queues
+        // this sync for a flat object that is NOT in edit mode, and the facade fallback below would
+        // otherwise upload the single rep facade. Look the flat mesh up via direct_mesh_nodes when
+        // editable_mesh_cache doesn't own this object.
+        TriangleMesh* flatMesh = nullptr;
+        if (editable_mesh_cache.flat_source_mesh && editable_mesh_cache.object_name == objectName) {
+            flatMesh = editable_mesh_cache.flat_source_mesh;
+        } else {
+            auto dmIt = direct_mesh_nodes.find(objectName);
+            if (dmIt != direct_mesh_nodes.end() && dmIt->second.mesh && dmIt->second.mesh->geometry) {
+                flatMesh = dmIt->second.mesh.get();
+            }
+        }
+        if (flatMesh) {
+            if (vkBackend->updateRasterMeshFromMeshSoA(objectName, flatMesh)) {
+                vkBackend->resetAccumulation();
+                return true;
+            }
+            vkBackend->buildRasterGeometry(ctx.scene.world.objects);
+            vkBackend->resetAccumulation();
+            return true;
         }
 
         auto meshCacheIt = mesh_cache.find(objectName);

@@ -64,7 +64,7 @@ ParallelBVHNode* ParallelBVHNode::init(const std::vector<std::shared_ptr<Hittabl
     AABB overall_box;
 
     // Parallel calculation of ObjectInfo
-    #pragma omp parallel
+    #pragma omp parallel num_threads(get_omp_threads_limit())
     {
         AABB local_box; 
         #pragma omp for nowait
@@ -109,7 +109,7 @@ ParallelBVHNode* ParallelBVHNode::init(const std::vector<std::shared_ptr<Hittabl
         }
 
         // Parallel SAH calculation
-        #pragma omp parallel
+        #pragma omp parallel num_threads(get_omp_threads_limit())
         {
             double local_best_cost = std::numeric_limits<double>::max();
             int local_best_axis = -1;

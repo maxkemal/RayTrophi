@@ -15,10 +15,10 @@
 #include <memory>
 #include "Vec2.h"
 #include "Vec3.h"
+#include "Triangle.h" // calculateMeshCenter() below needs Triangle's full definition (getV0/1/2)
 
 // Forward declarations
 struct SceneData;
-class Triangle;
 
 // A single foliage layer definition (e.g. "Pine Trees", "Grass Clumps")
 struct TerrainFoliageLayer {

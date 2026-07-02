@@ -1,4 +1,4 @@
-﻿#include "renderer.h"
+#include "renderer.h"
 #include <SDL_image.h>
 #include <filesystem>
 #include <chrono>      // For wall-clock deltaTime in animation fallback
@@ -13,6 +13,7 @@
 #include "Backend/IBackend.h"
 #include "Backend/OptixBackend.h"
 #include <future>
+#include <omp.h>
 #include <thread>
 #include <functional>
 #include <unordered_set>
@@ -38,6 +39,7 @@
 #include "VDBVolumeManager.h"
 #include "VolumeShader.h"
 #include "Triangle.h"
+#include "TriangleMesh.h"   // import-flat collapse in create_scene (upcast TriangleMesh -> Hittable)
 #include "Mesh.h"
 #include "AABB.h"
 #include "Ray.h"
@@ -3517,26 +3519,51 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync) {
     }
 
     if (!skip_sync) {
-        std::for_each(std::execution::par_unseq,
-            m_dynamic_triangles.begin(), m_dynamic_triangles.end(),
-            [](std::shared_ptr<Triangle>& tri) {
-                tri->updateTransformedVertices();
-            });
+        int numThreads = get_omp_threads_limit();
+        if (numThreads < 1) numThreads = 1;
 
-        std::for_each(std::execution::par_unseq,
-            m_dynamic_instances.begin(), m_dynamic_instances.end(),
-            [](std::shared_ptr<HittableInstance>& inst) {
-                if (inst->syncTransformFromSourceTriangles()) {
-                    return;
+        // Pre-calculate matrices on the main thread to avoid thread-unsafe lazy writes in Transform::getFinal()
+        std::unordered_map<Transform*, std::pair<Matrix4x4, Matrix4x4>> xformMap;
+        for (const auto& tri : m_dynamic_triangles) {
+            if (tri) {
+                Transform* tf = tri->getTransformPtr();
+                if (tf && xformMap.find(tf) == xformMap.end()) {
+                    xformMap[tf] = { tf->getFinal(), tf->getNormalTransform() };
                 }
-                if (inst->source_triangles) {
+            }
+        }
+
+        #pragma omp parallel for num_threads(numThreads) schedule(static) if(m_dynamic_triangles.size() >= 4096)
+        for (int i = 0; i < (int)m_dynamic_triangles.size(); ++i) {
+            auto& tri = m_dynamic_triangles[i];
+            if (tri) {
+                Transform* tf = tri->getTransformPtr();
+                if (tf) {
+                    const auto& xf = xformMap.at(tf);
+                    tri->updateTransformedVerticesWith(xf.first, xf.second);
+                } else {
+                    tri->updateTransformedVerticesWith(Matrix4x4::identity(), Matrix4x4::identity());
+                }
+            }
+        }
+
+        // Keep the instance loop sequential to prevent critical data races and deadlocks on shared source triangles
+        std::unordered_set<const std::vector<std::shared_ptr<Triangle>>*> processed_sources;
+        for (int i = 0; i < (int)m_dynamic_instances.size(); ++i) {
+            auto& inst = m_dynamic_instances[i];
+            if (inst->syncTransformFromSourceTriangles()) {
+                continue;
+            }
+            if (inst->source_triangles) {
+                if (processed_sources.insert(inst->source_triangles.get()).second) {
                     for (auto& srcTri : *inst->source_triangles) {
-                        if (srcTri && srcTri->getTransformPtr() && !srcTri->hasAnySkinWeights()) {
+                        if (srcTri && !srcTri->hasAnySkinWeights()) {
                             srcTri->updateTransformedVertices();
                         }
                     }
                 }
-            });
+            }
+        }
     }
 
     // Create a temporary list of ALL hittable objects for the BVH
@@ -3633,31 +3660,49 @@ void Renderer::refitBVH(SceneData& scene, bool use_embree) {
     }
 
     // 2. Adım: Sadece transformu değişen dinamik üçgenleri dünya uzayına senkronize et
-    std::for_each(std::execution::par_unseq,
-        m_dynamic_triangles.begin(), m_dynamic_triangles.end(),
-        [&dirty_transforms](std::shared_ptr<Triangle>& tri) {
-            auto tf = tri->getTransformPtr();
-            if (tf && dirty_transforms.count(tf) > 0) {
-                tri->updateTransformedVertices();
-            }
-        });
+    int numThreads = get_omp_threads_limit();
+    if (numThreads < 1) numThreads = 1;
 
-    std::for_each(std::execution::par_unseq,
-        m_dynamic_instances.begin(), m_dynamic_instances.end(),
-        [&dirty_transforms](std::shared_ptr<HittableInstance>& inst) {
-            if (inst->syncTransformFromSourceTriangles()) {
-                return;
+    // Pre-calculate matrices for dirty transforms on the main thread
+    std::unordered_map<Transform*, std::pair<Matrix4x4, Matrix4x4>> xformMap;
+    for (Transform* tf : dirty_transforms) {
+        if (tf) {
+            xformMap[tf] = { tf->getFinal(), tf->getNormalTransform() };
+        }
+    }
+
+    #pragma omp parallel for num_threads(numThreads) schedule(static) if(m_dynamic_triangles.size() >= 4096)
+    for (int i = 0; i < (int)m_dynamic_triangles.size(); ++i) {
+        auto& tri = m_dynamic_triangles[i];
+        if (tri) {
+            Transform* tf = tri->getTransformPtr();
+            if (tf && dirty_transforms.count(tf) > 0) {
+                const auto& xf = xformMap.at(tf);
+                tri->updateTransformedVerticesWith(xf.first, xf.second);
             }
-            if (inst->source_triangles) {
+        }
+    }
+
+    // Keep the instance loop sequential to prevent critical data races and deadlocks on shared source triangles
+    std::unordered_set<const std::vector<std::shared_ptr<Triangle>>*> processed_sources;
+    for (int i = 0; i < (int)m_dynamic_instances.size(); ++i) {
+        auto& inst = m_dynamic_instances[i];
+        if (inst->syncTransformFromSourceTriangles()) {
+            continue;
+        }
+        if (inst->source_triangles) {
+            if (processed_sources.insert(inst->source_triangles.get()).second) {
                 for (auto& srcTri : *inst->source_triangles) {
-                    if (srcTri && srcTri->getTransformPtr() && !srcTri->hasAnySkinWeights()) {
-                        if (dirty_transforms.count(srcTri->getTransformPtr()) > 0) {
+                    if (srcTri && !srcTri->hasAnySkinWeights()) {
+                        Transform* tf = srcTri->getTransformPtr();
+                        if (tf && dirty_transforms.count(tf) > 0) {
                             srcTri->updateTransformedVertices();
                         }
                     }
                 }
             }
-        });
+        }
+    }
 
     // 3. Adım: Embree BVH Refit Güncellemesi (Sadece dirty olan üçgenleri işler)
     embree_ptr->updateGeometryFromTrianglesFromSource(scene.world.objects);
@@ -3878,6 +3923,7 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
     // NOTE: AnimatedObject wrappers removed (were unused, wasted memory)
     // Add triangles to scene and model context members
     // Reserve to avoid repeated vector reallocations when importing millions of triangles.
+    const size_t flat_collapse_objects_before = scene.world.objects.size();
     scene.world.reserve(scene.world.size() + loaded_triangles.size());
     modelCtx.members.reserve(modelCtx.members.size() + loaded_triangles.size());
     for (const auto& tri : loaded_triangles) {
@@ -3887,6 +3933,58 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
     modelCtx.rebuildSkeletonRepresentation(scene.boneData);
     scene.importedModelContexts.push_back(modelCtx);
     SCENE_LOG_INFO("Added " + std::to_string(loaded_triangles.size()) + " triangles to scene member list.");
+
+    // ── Import-flat (gated): collapse each freshly-loaded non-skinned facade group into the single
+    // shared SoA TriangleMesh the loader already built (the facades' common parentMesh), so the scene
+    // holds ONE Hittable per mesh instead of a per-face soup. ProjectManager::importModel runs the
+    // same pass AFTER its create_scene call, but create_scene is ALSO the default.glb startup path
+    // (default_scene_creator) and the scene_ui "load model" path — neither collapsed, so their meshes
+    // stayed a facade soup (the HUD showed everything as facade; the default cube never went flat).
+    // Doing it here covers all three. importModel's later pass then finds only TriangleMesh in the
+    // range and is a harmless no-op. Skinned meshes keep the facade path (SoA skinning is a later
+    // increment). modelCtx.members still references the facades — matches importModel; members are a
+    // tracking list, not what gets rendered/picked (world.objects is).
+    {
+        extern bool g_dense_mesh_as_hittable;
+        const size_t objects_before = flat_collapse_objects_before;
+        if (g_dense_mesh_as_hittable && scene.world.objects.size() > objects_before) {
+            constexpr size_t kMinFlatFaces = 1;
+            std::unordered_map<TriangleMesh*, std::shared_ptr<TriangleMesh>> flatGroups;
+            std::unordered_map<TriangleMesh*, size_t> faceCounts;
+            std::unordered_set<TriangleMesh*> disqualified;
+            for (size_t i = objects_before; i < scene.world.objects.size(); ++i) {
+                auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
+                if (!tri || !tri->parentMesh) continue;
+                TriangleMesh* pm = tri->parentMesh.get();
+                if (tri->hasSkinData()) { disqualified.insert(pm); continue; }
+                flatGroups[pm] = tri->parentMesh;
+                faceCounts[pm]++;
+            }
+            bool anyCollapse = false;
+            for (const auto& kv : faceCounts) {
+                if (kv.second >= kMinFlatFaces && !disqualified.count(kv.first)) { anyCollapse = true; break; }
+            }
+            if (anyCollapse) {
+                std::vector<std::shared_ptr<Hittable>> rebuilt;
+                rebuilt.reserve(scene.world.objects.size());
+                std::unordered_set<TriangleMesh*> emitted;
+                for (size_t i = 0; i < scene.world.objects.size(); ++i) {
+                    if (i < objects_before) { rebuilt.push_back(scene.world.objects[i]); continue; }
+                    auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
+                    TriangleMesh* pm = (tri && tri->parentMesh) ? tri->parentMesh.get() : nullptr;
+                    const bool collapse = pm && !disqualified.count(pm) && faceCounts[pm] >= kMinFlatFaces;
+                    if (collapse) {
+                        if (emitted.insert(pm).second) rebuilt.push_back(flatGroups[pm]); // one TriangleMesh per group
+                    } else {
+                        rebuilt.push_back(scene.world.objects[i]);
+                    }
+                }
+                scene.world.objects = std::move(rebuilt);
+                SCENE_LOG_INFO("[import-flat/create_scene] collapsed " + std::to_string(emitted.size()) +
+                               " mesh(es) to flat TriangleMesh");
+            }
+        }
+    }
 
     // Initialize animation system for the new model
     if (modelCtx.hasAnimation) {
@@ -4311,8 +4409,8 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         
         // Try to get clearcoat from material
         if (auto pMat = dynamic_cast<PrincipledBSDF*>(material)) {
-            clearcoat = pMat->clearcoat;
-            clearcoatRoughness = pMat->clearcoatRoughness;
+            clearcoat = pMat->getClearcoat();
+            clearcoatRoughness = pMat->getClearcoatRoughness();
             specularAmount = pMat->getSpecularValue(uv);
         }
     }
@@ -4700,7 +4798,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
 
     // Clearcoat Contribution
     if (clearcoat > 0.001f) {
-        psdf.clearcoatRoughness = clearcoatRoughness;
+        psdf.setClearcoat(clearcoat, clearcoatRoughness);
         // Check signature: computeClearcoat(V, L, N)
         // V is view vector (-ray.dir), L is light vector, N is normal
         Vec3 cc = psdf.computeClearcoat(V, L, N); 
@@ -6301,11 +6399,11 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     metallic = pbsdf->getMetallicValue(uv);
                     specular = pbsdf->getSpecularValue(uv);
                     transmission = pbsdf->getTransmission(uv);
-                    clearcoatValue = pbsdf->clearcoat;
-                    clearcoatRoughnessValue = pbsdf->clearcoatRoughness;
+                    clearcoatValue = pbsdf->getClearcoat();
+                    clearcoatRoughnessValue = pbsdf->getClearcoatRoughness();
                     translucentValue = pbsdf->translucent;
-                    subsurfaceValue = pbsdf->subsurface;
-                    subsurfaceColorValue = pbsdf->subsurfaceColor;
+                    subsurfaceValue = pbsdf->getSubsurface();
+                    subsurfaceColorValue = pbsdf->getSubsurfaceColor();
                     iorValue = pbsdf->getIOR();
                 }
 
@@ -6406,21 +6504,21 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         
                         params.shallow_color = pbsdf->emissionProperty.color;
                         params.deep_color = pbsdf->albedoProperty.color;
-                        params.absorption_color = pbsdf->subsurfaceColor;
+                        params.absorption_color = pbsdf->getSubsurfaceColor();
                         
-                        params.depth_max = pbsdf->subsurface * 100.0f;
-                        params.absorption_density = pbsdf->subsurfaceScale;
+                        params.depth_max = pbsdf->getSubsurface() * 100.0f;
+                        params.absorption_density = pbsdf->getSubsurfaceScale();
                         params.clarity = std::fmax(0.1f, 1.0f - params.absorption_density);
 
                         params.foam_level = 0.01f; // High/Starting quality default
-                        params.shore_foam_distance = pbsdf->subsurfaceRadius.x;
-                        params.shore_foam_intensity = pbsdf->clearcoat;
+                        params.shore_foam_distance = pbsdf->getSubsurfaceRadius().x;
+                        params.shore_foam_intensity = pbsdf->getClearcoat();
                         
-                        params.caustic_intensity_scale = pbsdf->clearcoatRoughness;
-                        params.caustic_scale = pbsdf->subsurfaceRadius.y;
-                        params.caustic_speed = pbsdf->subsurfaceAnisotropy;
+                        params.caustic_intensity_scale = pbsdf->getClearcoatRoughness();
+                        params.caustic_scale = pbsdf->getSubsurfaceRadius().y;
+                        params.caustic_speed = pbsdf->getSubsurfaceAnisotropy();
                         
-                        params.sss_intensity = pbsdf->subsurfaceRadius.z;
+                        params.sss_intensity = pbsdf->getSubsurfaceRadius().z;
                         params.sss_color = params.absorption_color;
 
                         params.use_fft_ocean = false; // FFT always requires GPU
@@ -6597,8 +6695,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 // sigma_a = (1 - color) * density
                 auto pbsdf = dynamic_cast<PrincipledBSDF*>(rec.materialPtr);
                 if (pbsdf) {
-                    Vec3 subColor = pbsdf->subsurfaceColor; 
-                    float subScale = pbsdf->subsurfaceScale;
+                    Vec3 subColor = pbsdf->getSubsurfaceColor(); 
+                    float subScale = pbsdf->getSubsurfaceScale();
                     
                     Vec3 absorb_base = Vec3(1.0f) - subColor;
                     absorb_base = Vec3(fmaxf(absorb_base.x, 0.0f), fmaxf(absorb_base.y, 0.0f), fmaxf(absorb_base.z, 0.0f));
@@ -7969,10 +8067,14 @@ void Renderer::rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<
             for (const auto& obj : objects) collect(obj);
         }
 
-        OptixGeometryData optix_data;
-        if (!triangles.empty()) {
-            optix_data = assimpLoader.convertTrianglesToOptixData(triangles);
-        }
+        // Always build optix_data, even with zero facade triangles: an all-flat scene (no per-face
+        // Triangle facades — geometry comes from flat SoA TriangleMeshes handled inside
+        // buildFromDataTLAS STEP 3.5) still needs the GLOBAL material/texture/volumetric tables,
+        // which convertTrianglesToOptixData pulls from MaterialManager regardless of the triangle
+        // list (its geometry extraction is gated on nTris>0, so empty triangles are safe). Without
+        // this, a flat scene reached buildFromDataTLAS with empty materials → null material buffer →
+        // optixLaunch illegal memory access (CUDA 700).
+        OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(triangles);
 
         // ===================================================================
         // HAIR GEOMETRY DATA (OptiX Curve Primitives)

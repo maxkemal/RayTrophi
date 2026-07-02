@@ -627,7 +627,7 @@ namespace TerrainNodesV2 {
         if (useGPU) {
             mgr.hydraulicErosionGPU(terrain, params, mask);
         } else {
-            mgr.hydraulicErosion(terrain, params, mask);
+            mgr.hydraulicErosion(terrain, params, mask, [&ctx](float f) { ctx.reportNodeProgress(f); });
         }
         
         // Create output using INPUT dimensions to propagate correctly
@@ -740,7 +740,7 @@ namespace TerrainNodesV2 {
         if (useGPU) {
             mgr.thermalErosionGPU(terrain, params, mask);
         } else {
-            mgr.thermalErosion(terrain, params, mask);
+            mgr.thermalErosion(terrain, params, mask, [&ctx](float f) { ctx.reportNodeProgress(f); });
         }
         
         auto result = createHeightOutput(inputHeight.width, inputHeight.height);
@@ -823,7 +823,7 @@ namespace TerrainNodesV2 {
             // ========================================================
             // CPU WAY: Global Hydrological Analysis
             // ========================================================
-            mgr.fluvialErosion(terrain, params, mask);
+            mgr.fluvialErosion(terrain, params, mask, [&ctx](float f) { ctx.reportNodeProgress(f); });
         }
         
         auto result = createHeightOutput(inputHeight.width, inputHeight.height);
@@ -923,7 +923,7 @@ namespace TerrainNodesV2 {
         if (useGPU) {
             mgr.windErosionGPU(terrain, strength, direction, iterations, mask);
         } else {
-            mgr.windErosion(terrain, strength, direction, iterations, mask);
+            mgr.windErosion(terrain, strength, direction, iterations, mask, [&ctx](float f) { ctx.reportNodeProgress(f); });
         }
         
         auto result = createHeightOutput(inputHeight.width, inputHeight.height);
@@ -3342,46 +3342,90 @@ namespace TerrainNodesV2 {
         return node;
     }
     
-    void TerrainNodeGraphV2::evaluateTerrain(TerrainObject* terrain, SceneData& scene) {
-        if (!terrain) return;
-        
+    // Phase A: pure CPU height-data compute. Safe to run on a worker thread —
+    // touches only terrain->heightmap (a std::vector<float>) and the node graph's
+    // own cached PinValues, never scene.world.objects / mesh_triangles / GPU
+    // textures. `ctx` must already have its domain context set by the caller and
+    // must be kept alive (and reused, unmodified) for the subsequent
+    // evaluateTerrainAuxOutputs() call so cached upstream node results aren't
+    // recomputed.
+    bool TerrainNodeGraphV2::evaluateTerrainHeightData(TerrainObject* terrain, NodeSystem::EvaluationContext& ctx) {
+        if (!terrain) return false;
+
         // CRITICAL FIX: Preserve AND RESTORE scale values at the START
         // If terrain is in a "broken" state from a previous failed evaluation,
         // we need to fix it immediately. Don't just preserve - actively repair.
         float preserved_scale_xz = terrain->heightmap.scale_xz;
         float preserved_scale_y = terrain->heightmap.scale_y;
-        
+
         // Force valid scale values immediately - repair broken terrain state
         if (preserved_scale_xz < 1.0f) preserved_scale_xz = 100.0f;
         if (preserved_scale_y < 0.1f) preserved_scale_y = 10.0f;
-        
+
         // IMMEDIATELY apply valid scales to terrain (repair before evaluation)
         terrain->heightmap.scale_xz = preserved_scale_xz;
         terrain->heightmap.scale_y = preserved_scale_y;
-        
-        // Use the proper constructor that sets width/height from terrain
-        TerrainContext tctx(terrain);
-        
-        NodeSystem::EvaluationContext ctx(this);
-        ctx.setDomainContext(&tctx);
-        
-        // CRITICAL FIX: Clear cache and mark all nodes dirty before evaluation
-        // Without this, intermediate nodes (deformation nodes) may be skipped
-        // because their cached values would be reused instead of recomputing
-        ctx.clearCache();
-        ctx.clearErrors();
-        markAllDirty();
 
-        // Find output nodes
         HeightOutputNode* heightOutputNode = nullptr;
+        for (auto& node : nodes) {
+            if (node->getTypeId() == "TerrainV2.HeightOutput") {
+                heightOutputNode = dynamic_cast<HeightOutputNode*>(node.get());
+                if (heightOutputNode) break;
+            }
+        }
+        if (!heightOutputNode) {
+            // No height output node found - nothing to update geometry-wise.
+            return false;
+        }
+
+        // Pull data from the input of the output node (Input index 0 for Height)
+        // This triggers the pull-based evaluation chain through ALL connected nodes
+        auto heightData = heightOutputNode->getHeightInput(0, ctx);
+
+        // Check for errors in the evaluation chain
+        if (ctx.hasErrors()) {
+            for (const auto& err : ctx.getErrors()) {
+                SCENE_LOG_ERROR("Terrain Graph Error (Node " + std::to_string(err.nodeId) + "): " + err.message);
+            }
+        }
+
+        // CRITICAL CHECK: Verify input data integrity
+        if (!heightData.isValid() || !heightData.data || heightData.width < 2 || heightData.height < 2) {
+            // If data is invalid or too small (e.g. uninitialized), do not update terrain
+            // This prevents "scrambled" artifacts during initialization
+            return false;
+        }
+
+        // Resize terrain heightmap manually (vector resize)
+        bool resized = (terrain->heightmap.width != heightData.width || terrain->heightmap.height != heightData.height);
+        lastEvaluateResized_.store(resized);
+        if (resized) {
+            terrain->heightmap.width = heightData.width;
+            terrain->heightmap.height = heightData.height;
+            terrain->heightmap.data.resize(heightData.width * heightData.height);
+        }
+
+        // Copy data directly to terrain
+        terrain->heightmap.data = *heightData.data;
+
+        // CRITICAL FIX: Restore scale values after node graph evaluation
+        // This ensures terrain physical dimensions remain constant regardless of node chain
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
+
+        return true;
+    }
+
+    // Phase B: MAIN THREAD ONLY. SplatOutputNode::compute() calls
+    // terrain->splatMap->updateGPU() — a GPU texture upload.
+    void TerrainNodeGraphV2::evaluateTerrainAuxOutputs(TerrainObject* terrain, NodeSystem::EvaluationContext& ctx) {
+        if (!terrain) return;
+
         std::vector<SplatOutputNode*> splatOutputNodes;
         std::vector<HardnessOutputNode*> hardnessOutputNodes;
-
         for (auto& node : nodes) {
             std::string typeId = node->getTypeId();
-            if (typeId == "TerrainV2.HeightOutput") {
-                if (!heightOutputNode) heightOutputNode = dynamic_cast<HeightOutputNode*>(node.get());
-            } else if (typeId == "TerrainV2.SplatOutput") {
+            if (typeId == "TerrainV2.SplatOutput") {
                 if (auto* splat = dynamic_cast<SplatOutputNode*>(node.get())) {
                     splatOutputNodes.push_back(splat);
                 }
@@ -3391,77 +3435,130 @@ namespace TerrainNodesV2 {
                 }
             }
         }
-        
-        // Evaluate secondary outputs first (Splat, Hardness)
-        // These use pull-based evaluation through the connected graph
+
+        // Pull-based evaluation through the connected graph. Any node shared with
+        // the height chain already evaluated in phase A is served from ctx's cache.
         for (auto* splatNode : splatOutputNodes) {
             splatNode->compute(0, ctx);
         }
         for (auto* hardNode : hardnessOutputNodes) {
             hardNode->compute(0, ctx);
         }
+    }
 
-        if (!heightOutputNode) {
-            // No height output node found - nothing to update geometry-wise
-            // But we still checked splats above.
+    // Phase C: MAIN THREAD ONLY. Touches scene.world.objects / mesh_triangles,
+    // shared with the render/BVH thread.
+    //
+    // deferBackendSignal: when false (default — used by the synchronous
+    // evaluateTerrain() wrapper for project load/deserialize), backend
+    // rebuild flags are set exactly as before. When true (used by the async
+    // "Evaluate" button path, pollEvaluateAsync()), the in-place-update branch
+    // does NOT set the flags itself — the caller decides between a cheap
+    // partial refit and the full-rebuild flags based on
+    // lastFinalizeWasFullRebuild().
+    void TerrainNodeGraphV2::finalizeTerrainMesh(SceneData& scene, TerrainObject* terrain, bool deferBackendSignal) {
+        if (!terrain) return;
+        if (terrain->heightmap.width < 2 || terrain->heightmap.height < 2) return;
+
+        size_t expectedTriCount = static_cast<size_t>(terrain->heightmap.width - 1) *
+                                   static_cast<size_t>(terrain->heightmap.height - 1) * 2ull;
+        // Important: some intermediate terrain nodes mutate terrain->heightmap dimensions before the
+        // final Height Output is pulled. In that case `resized` can be false even though the mesh still
+        // has the old triangle topology. Rebuild when triangle count does not match the current height
+        // grid, otherwise the terrain collapses into a thin / corrupted strip on first evaluate.
+        bool topologyMismatch = !terrain->flatMesh || terrain->flatMesh->num_triangles() != expectedTriCount;
+        bool fullRebuild = lastEvaluateResized_.load() || topologyMismatch;
+        lastFinalizeWasFullRebuild_.store(fullRebuild);
+
+        if (fullRebuild) {
+            TerrainManager::getInstance().resizeSplatMap(terrain);
+            TerrainManager::getInstance().rebuildTerrainMesh(scene, terrain);
+        } else {
+            TerrainManager::getInstance().updateTerrainMesh(terrain, /*signalRebuild=*/!deferBackendSignal);
+        }
+    }
+
+    void TerrainNodeGraphV2::evaluateTerrain(TerrainObject* terrain, SceneData& scene) {
+        if (!terrain) return;
+
+        TerrainContext tctx(terrain);
+        NodeSystem::EvaluationContext ctx(this);
+        ctx.setDomainContext(&tctx);
+
+        // CRITICAL FIX: Clear cache and mark all nodes dirty before evaluation
+        // Without this, intermediate nodes (deformation nodes) may be skipped
+        // because their cached values would be reused instead of recomputing
+        ctx.clearCache();
+        ctx.clearErrors();
+        markAllDirty();
+        ctx.setTotalNodes(static_cast<int>(nodeCount()));
+
+        // Evaluate secondary outputs first (Splat, Hardness) — matches the
+        // original synchronous order. Order doesn't affect correctness since any
+        // node shared between chains is memoized in ctx regardless of which
+        // chain visits it first; kept for behavioral parity with before.
+        evaluateTerrainAuxOutputs(terrain, ctx);
+
+        bool updated = evaluateTerrainHeightData(terrain, ctx);
+        if (updated) {
+            finalizeTerrainMesh(scene, terrain);
+        }
+    }
+
+    void TerrainNodeGraphV2::evaluateTerrainAsync(TerrainObject* terrain, SceneData& scene) {
+        if (!terrain) return;
+        if (isEvaluating.exchange(true)) {
+            // Already running — ignore re-entrant clicks.
             return;
         }
-        
-        // Pull data from the input of the output node (Input index 0 for Height)
-        // This triggers the pull-based evaluation chain through ALL connected nodes
-        auto heightData = heightOutputNode->getHeightInput(0, ctx);
-        
-        // Check for errors in the evaluation chain
-        if (ctx.hasErrors()) {
-            for (const auto& err : ctx.getErrors()) {
-                // Log detailed errors
-                SCENE_LOG_ERROR("Terrain Graph Error (Node " + std::to_string(err.nodeId) + "): " + err.message);
+
+        activeTerrainCtx_ = std::make_unique<TerrainContext>(terrain);
+        activeEvalContext = std::make_shared<NodeSystem::EvaluationContext>(this);
+        activeEvalContext->setDomainContext(activeTerrainCtx_.get());
+        activeEvalContext->clearCache();
+        activeEvalContext->clearErrors();
+        markAllDirty();
+        activeEvalContext->setTotalNodes(static_cast<int>(nodeCount()));
+
+        pendingFinalizeTerrain_ = terrain;
+        pendingFinalizeScene_ = &scene;
+
+        // Worker thread only ever touches terrain->heightmap and the node graph's
+        // cached PinValues (see evaluateTerrainHeightData's doc comment) — no
+        // scene/world/GPU access here.
+        std::shared_ptr<NodeSystem::EvaluationContext> ctxForWorker = activeEvalContext;
+        evalFuture_ = std::async(std::launch::async, [this, terrain, ctxForWorker]() {
+            evaluateTerrainHeightData(terrain, *ctxForWorker);
+            isEvaluating.store(false);
+        });
+    }
+
+    bool TerrainNodeGraphV2::pollEvaluateAsync() {
+        if (!evalFuture_.valid()) return false;
+        if (evalFuture_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+
+        evalFuture_.get(); // join, propagate exceptions
+
+        TerrainObject* terrain = pendingFinalizeTerrain_;
+        SceneData* scene = pendingFinalizeScene_;
+        pendingFinalizeTerrain_ = nullptr;
+        pendingFinalizeScene_ = nullptr;
+
+        if (terrain && scene && activeEvalContext) {
+            // Splat/hardness GPU upload + mesh/BVH rebuild — main thread only.
+            evaluateTerrainAuxOutputs(terrain, *activeEvalContext);
+            if (terrain->heightmap.width >= 2 && terrain->heightmap.height >= 2) {
+                // deferBackendSignal=true: let the toolbar (which has access to the
+                // viewport/render backends) choose a cheap partial refit over a
+                // full-scene rebuild when topology didn't change — see
+                // lastFinalizeWasFullRebuild().
+                finalizeTerrainMesh(*scene, terrain, /*deferBackendSignal=*/true);
             }
         }
-        
-        // CRITICAL CHECK: Verify input data integrity
-        if (!heightData.isValid() || !heightData.data || heightData.width < 2 || heightData.height < 2) {
-            // If data is invalid or too small (e.g. uninitialized), do not update terrain
-            // This prevents "scrambled" artifacts during initialization
-            return;
-        }
-        
-        if (heightData.isValid() && heightData.data) {
-            // Check if resize needed
-            bool resized = (terrain->heightmap.width != heightData.width || terrain->heightmap.height != heightData.height);
-            size_t expectedTriCount = 0;
-            if (heightData.width > 1 && heightData.height > 1) {
-                expectedTriCount = static_cast<size_t>(heightData.width - 1) * static_cast<size_t>(heightData.height - 1) * 2ull;
-            }
-            // Important: some intermediate terrain nodes mutate terrain->heightmap dimensions before the
-            // final Height Output is pulled. In that case `resized` can be false even though the mesh still
-            // has the old triangle topology. Rebuild when triangle count does not match the current height
-            // grid, otherwise the terrain collapses into a thin / corrupted strip on first evaluate.
-            bool topologyMismatch = terrain->mesh_triangles.size() != expectedTriCount;
-            
-            // Resize terrain heightmap manually (vector resize)
-            if (resized) {
-                terrain->heightmap.width = heightData.width;
-                terrain->heightmap.height = heightData.height;
-                terrain->heightmap.data.resize(heightData.width * heightData.height);
-            }
-            
-            // Copy data directly to terrain
-            terrain->heightmap.data = *heightData.data;
-            
-            // CRITICAL FIX: Restore scale values after node graph evaluation
-            // This ensures terrain physical dimensions remain constant regardless of node chain
-            terrain->heightmap.scale_xz = preserved_scale_xz;
-            terrain->heightmap.scale_y = preserved_scale_y;
-            
-            // Update mesh visualization (Rebuild if resized, Update if content changed)
-            if (resized || topologyMismatch) {
-                TerrainManager::getInstance().resizeSplatMap(terrain);
-                TerrainManager::getInstance().rebuildTerrainMesh(scene, terrain);
-            } else {
-                TerrainManager::getInstance().updateTerrainMesh(terrain);
-            }
-        }
+
+        activeEvalContext.reset();
+        activeTerrainCtx_.reset();
+        return true;
     }
     
     

@@ -158,7 +158,8 @@ bool TriangleMesh::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, b
                 }
                 
                 if (materialIDs) {
-                    temp_rec.materialID = materialIDs[i];
+                    // materialID is per-VERTEX (not per-face); index by a corner vertex id.
+                    temp_rec.materialID = materialIDs[i0];
                 }
             }
         }
@@ -168,6 +169,7 @@ bool TriangleMesh::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, b
         rec = temp_rec;
         rec.tri_mesh = const_cast<TriangleMesh*>(this);   // Faz 1: (mesh, faceIndex) handle
         rec.tri_face = static_cast<uint32_t>(hit_face);
+        rec.terrain_id = terrain_id;
         if (transform) {
             Matrix4x4 mat = transform->getMatrix();
             Matrix4x4 normMat = transform->getNormalTransform();

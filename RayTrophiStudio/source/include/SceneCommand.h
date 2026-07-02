@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -50,6 +50,10 @@ public:
     
     // Get human-readable description for UI
     virtual std::string getDescription() const = 0;
+
+    // Check if the command contains heavy mesh geometry vectors
+    virtual bool isHeavyGeometry() const { return false; }
+    virtual size_t getTriangleCount() const { return 0; }
 };
 
 // ============================================================================
@@ -165,28 +169,28 @@ struct LightState {
             case LightType::Directional: {
                 auto& l = (const DirectionalLight&)light;
                 s.direction = l.direction;
-                s.radius = l.radius;
+                s.radius = l.getDiskRadius();
                 break;
             }
             case LightType::Spot: {
                 auto& l = (const SpotLight&)light;
                 s.direction = l.direction;
-                s.radius = l.radius; // Range
+                s.radius = l.getRadius(); // Range
                 s.angle = l.getAngleDegrees();
                 s.falloff = l.getFalloff();
                 break;
             }
             case LightType::Area: {
                 auto& l = (const AreaLight&)light;
-                s.u = l.u;
-                s.v = l.v;
-                s.width = l.width;
-                s.height = l.height;
+                s.u = l.getU();
+                s.v = l.getV();
+                s.width = l.getWidth();
+                s.height = l.getHeight();
                 break;
             }
             case LightType::Point: {
                 auto& l = (const PointLight&)light;
-                s.radius = l.radius;
+                s.radius = l.getRadius();
                 break;
             }
         }
@@ -200,28 +204,27 @@ struct LightState {
             case LightType::Directional: {
                 auto& l = (DirectionalLight&)light;
                 l.setDirection(direction);
-                l.radius = radius;
+                l.setDiskRadius(radius);
                 break;
             }
             case LightType::Spot: {
                 auto& l = (SpotLight&)light;
                 l.direction = direction;
-                l.radius = radius;
+                l.setRadius(radius);
                 l.setAngleDegrees(angle);
                 l.setFalloff(falloff);
                 break;
             }
             case LightType::Area: {
                 auto& l = (AreaLight&)light;
-                l.u = u;
-                l.v = v;
-                l.width = width;
-                l.height = height;
+                l.setUVVectors(u, v);
+                l.setWidth(width);
+                l.setHeight(height);
                 break;
             }
             case LightType::Point: {
                 auto& l = (PointLight&)light;
-                l.radius = radius;
+                l.setRadius(radius);
                 break;
             }
         }
@@ -429,6 +432,34 @@ private:
     void applyStates(UIContext& ctx, const std::vector<MeshEditTriangleState>& states);
 };
 
+// Undo/redo for sculpting a FLAT (direct SoA) mesh. The facade-based MeshEditCommand keys on
+// per-face Triangle pointers, which a flat TriangleMesh-as-Hittable does not have — so flat sculpt
+// strokes recorded nothing and were un-undoable. This command instead stores, per touched SoA
+// vertex, its local rest position + normal before and after the stroke; undo/redo scatter the
+// chosen snapshot straight back into the mesh's GeometryDetail (P_orig/N_orig + the world-baked
+// P/N mirrors) and trigger the same full scene-mutation refresh MeshEditCommand uses.
+struct FlatSculptVertexState {
+    uint32_t soa_id = 0;
+    Vec3 before_pos{}; Vec3 before_nrm{};
+    Vec3 after_pos{};  Vec3 after_nrm{};
+};
+
+class FlatSculptEditCommand : public SceneCommand {
+public:
+    FlatSculptEditCommand(std::string object_name, std::vector<FlatSculptVertexState> states)
+        : object_name_(std::move(object_name)), states_(std::move(states)) {}
+
+    void execute(UIContext& ctx) override;  // redo → after
+    void undo(UIContext& ctx) override;     // → before
+    Type getType() const override { return Type::Transform; }
+    std::string getDescription() const override { return "Sculpt " + object_name_; }
+
+private:
+    std::string object_name_;
+    std::vector<FlatSculptVertexState> states_;
+    void apply(UIContext& ctx, bool use_after);
+};
+
 class ReplaceMeshGeometryCommand : public SceneCommand {
 public:
     ReplaceMeshGeometryCommand(const std::string& object_name,
@@ -450,6 +481,12 @@ public:
     void undo(UIContext& ctx) override;
     Type getType() const override { return Type::Heavy; }
     std::string getDescription() const override { return "Replace Mesh Geometry " + object_name_; }
+    
+    bool isHeavyGeometry() const override { return true; }
+    size_t getTriangleCount() const override {
+        return before_display_mesh_.size() + after_display_mesh_.size() +
+               before_base_mesh_.size() + after_base_mesh_.size();
+    }
 
 private:
     std::string object_name_;

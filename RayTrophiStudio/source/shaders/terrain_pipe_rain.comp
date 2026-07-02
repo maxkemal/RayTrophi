@@ -1,0 +1,74 @@
+// terrain_pipe_rain.comp
+// Vulkan port of fluvialRainKernel (erosion_kernels.cu) — step 1 of the shallow-water
+// "virtual pipes" hydraulic erosion model (Mei et al. 2007). Adds a rain source each
+// substep. Skips the outer 2-cell ring (matches the flux/water kernels' boundary
+// margin) so it never accumulates rain — the original CUDA kernel rained on every
+// cell including that ring, which the flux/water kernels never drain (they skip it),
+// causing an unbounded "wall of water" at the edges over many substeps. This is a
+// deliberate improvement over the (never-wired) CUDA original; see
+// project_terrain_erosion_gpu_migration memory.
+//
+// Physics fix: on a freshly-created (perfectly flat, all-zero) terrain, uniform rain
+// gives every cell an identical water level, so the height+water gradient the flux
+// kernel reads stays EXACTLY zero forever — no flow, no channelization, no erosion at
+// all, no matter how many substeps run (confirmed: user reported zero visible effect).
+// The droplet model never had this problem because each droplet gets a random start
+// position/direction even on flat terrain. Fix: spatially-varying rain (a coarse,
+// bilinearly-interpolated value-noise "weather" field, like real rainfall isn't
+// uniform) breaks the symmetry so gradients — and real channels — can emerge.
+//
+// Revised (2026-07-01): the first version used a per-cell LCG hash keyed only on the
+// flat array index (idx = y*width+x). LCGs have poor spatial decorrelation along a
+// linear sequence, and it showed up visually as a regular repeating ripple pattern
+// across the whole terrain instead of organic drainage — confirmed by the user
+// (screenshot showed a fingerprint-like ribbed pattern). Replaced with: (1) a proper
+// 2D avalanche hash keyed on (x,y) instead of the linear idx, and (2) a coarse
+// (~24-cell) bilinearly-interpolated value-noise field instead of raw per-pixel
+// noise, so rain intensity varies smoothly like real weather — this lets small
+// trickles naturally merge into fewer, larger channels downhill instead of scratching
+// many disconnected per-pixel grooves. See project_terrain_erosion_gpu_migration memory.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int width; int height;
+    float rainAmount; float dt;
+} pc;
+
+layout(set = 0, binding = 0) buffer Water { float waterMap[]; };
+
+// Squirrel-Eiserloh-style 2D integer hash — avalanches well, no linear-sequence
+// artifacts like an LCG keyed on a flattened array index.
+float hash2D(int x, int y) {
+    uint h = uint(x) * 374761393u + uint(y) * 668265263u;
+    h = (h ^ (h >> 13u)) * 1274126177u;
+    h = h ^ (h >> 16u);
+    return float(h & 0x7FFFFFFFu) / float(0x7FFFFFFF);
+}
+
+float valueNoise2D(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    float a = hash2D(int(i.x),     int(i.y));
+    float b = hash2D(int(i.x) + 1, int(i.y));
+    float c = hash2D(int(i.x),     int(i.y) + 1);
+    float d = hash2D(int(i.x) + 1, int(i.y) + 1);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.width * pc.height;
+    if (id >= total) return;
+
+    int x = id % pc.width;
+    int y = id / pc.width;
+    if (x <= 1 || x >= pc.width - 2 || y <= 1 || y >= pc.height - 2) return;
+
+    // Coarse "weather" field (broad wet/dry regions) plus a smaller fine-detail term.
+    float coarse = valueNoise2D(vec2(float(x), float(y)) / 24.0);
+    float fine = hash2D(x, y);
+    float noise = 0.4 + coarse * 0.9 + fine * 0.2; // ~0.4x .. ~1.5x
+    waterMap[id] += pc.rainAmount * pc.dt * noise;
+}

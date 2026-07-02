@@ -60,7 +60,44 @@ struct SoftPinRegion {
     bool enabled = true;
 };
 
+struct SoftBodyComponent {
+    float soft_stiffness = 0.8f;        // edge constraint stiffness (0 = floppy, 1 = stiff)
+    float soft_compliance = 0.0f;       // XPBD inverse stiffness; 0 = fully stiff (overrides nothing when 0)
+    float soft_pressure = 0.0f;         // closed-volume inflation (balloons/soft solids); 0 = off (cloth)
+    float soft_damping = 0.05f;         // velocity damping per step
+    float soft_vertex_radius = 0.01f;   // per-vertex collision thickness (m)
+    int   soft_iterations = 5;          // constraint solver iterations per step
+    float soft_friction = 0.5f;
+    float soft_restitution = 0.0f;
+    float soft_gravity_factor = 1.0f;
+    float soft_mass = 1.0f;             // total mass distributed over the mesh vertices (kg)
+    bool  soft_two_sided = true;        // cloth: collide both faces
+    std::vector<SoftPinRegion> soft_pins;
+};
+
+struct FluidCouplingComponent {
+    float buoyancy_scale = 1.0f;
+    float fluid_density = 1000.0f;    // kg/m^3, water default
+    float fluid_drag = 1.0f;          // linear (viscous) drag ~ -k*v
+    float fluid_quadratic_drag = 0.5f;// form/slam drag ~ -k*v*|v| (the water resistance that stops a body skipping off the surface)
+    float fluid_angular_drag = 1.0f;
+    float fluid_max_coupling_speed = 4.0f;
+};
+
+struct FractureComponent {
+    bool  breakable = false;
+    float break_impulse = 5.0f;   // impact impulse (kg·m/s) that triggers a break
+    std::string fracture_group;         // shards of one source share this id (= source node)
+};
+
 struct RigidBodyObject {
+    RigidBodyObject();
+    ~RigidBodyObject();
+    RigidBodyObject(const RigidBodyObject& other);
+    RigidBodyObject& operator=(const RigidBodyObject& other);
+    RigidBodyObject(RigidBodyObject&& other) noexcept;
+    RigidBodyObject& operator=(RigidBodyObject&& other) noexcept;
+
     std::string name = "Rigid Body";
     std::string source_name;          // scene object nodeName this body drives
     std::string collider_name;        // authored collider descriptor used for Jolt shape/material
@@ -88,37 +125,6 @@ struct RigidBodyObject {
     bool lock_rotation_y = false;
     bool lock_rotation_z = false;
     bool fluid_coupling_enabled = false;
-    float buoyancy_scale = 1.0f;
-    float fluid_density = 1000.0f;    // kg/m^3, water default
-    float fluid_drag = 1.0f;          // linear (viscous) drag ~ -k*v
-    float fluid_quadratic_drag = 0.5f;// form/slam drag ~ -k*v*|v| (the water resistance that stops a body skipping off the surface)
-    float fluid_angular_drag = 1.0f;
-    // Speed cap (m/s) on the fluid velocity that drives drag. The grid velocity
-    // near a plunging body is dominated by the splash the body itself stamps in;
-    // feeding it back undamped flung light bodies sideways. Clamping (plus the
-    // per-body temporal smoothing below) breaks that splash->drag->fling loop.
-    // 0 disables the clamp.
-    float fluid_max_coupling_speed = 4.0f;
-
-    // ---- soft-body / cloth authoring (used when kind != Rigid) ---------------
-    // Maps onto Jolt's SoftBodySharedSettings / SoftBodyCreationSettings when the
-    // soft solver is wired. A soft body builds its particle/edge graph from the
-    // source mesh; cloth is the same path restricted to a surface (no volume
-    // constraints, two-sided collision). Ignored entirely by the rigid path.
-    float soft_stiffness = 0.8f;        // edge constraint stiffness (0 = floppy, 1 = stiff)
-    float soft_compliance = 0.0f;       // XPBD inverse stiffness; 0 = fully stiff (overrides nothing when 0)
-    float soft_pressure = 0.0f;         // closed-volume inflation (balloons/soft solids); 0 = off (cloth)
-    float soft_damping = 0.05f;         // velocity damping per step
-    float soft_vertex_radius = 0.01f;   // per-vertex collision thickness (m)
-    int   soft_iterations = 5;          // constraint solver iterations per step
-    float soft_friction = 0.5f;
-    float soft_restitution = 0.0f;
-    float soft_gravity_factor = 1.0f;
-    float soft_mass = 1.0f;             // total mass distributed over the mesh vertices (kg)
-    bool  soft_two_sided = true;        // cloth: collide both faces
-    // Cloth/soft pins: rest vertices inside any enabled region are held fixed.
-    // Applied at create time (changing them forces a body rebuild). World-space.
-    std::vector<SoftPinRegion> soft_pins;
 
     // ---- force-field coupling (all body kinds) -------------------------------
     // When enabled, the scene's force fields drive this body too (rigid: a force at
@@ -128,14 +134,60 @@ struct RigidBodyObject {
     bool  force_field_enabled = true;
     float force_field_scale = 1.0f;
 
-    // ---- destruction / fracture (Faz 2) --------------------------------------
-    // A breakable body sits STATIC (intact) until an impact impulse exceeds
-    // break_impulse, then the whole fracture_group flips to Dynamic and shatters.
-    // Shards generated from one source mesh share fracture_group so a hit on any
-    // shard breaks them all. Authored via the Fracture panel ("Make Breakable").
-    bool        breakable = false;
-    float       break_impulse = 5.0f;   // impact impulse (kg·m/s) that triggers a break
-    std::string fracture_group;         // shards of one source share this id (= source node)
+    // Sparse Components
+    std::unique_ptr<SoftBodyComponent> soft_body;
+    std::unique_ptr<FluidCouplingComponent> fluid_coupling;
+    std::unique_ptr<FractureComponent> fracture;
+
+    // Soft Body Getters/Setters
+    inline float getSoftStiffness() const { return soft_body ? soft_body->soft_stiffness : 0.8f; }
+    inline void setSoftStiffness(float val) { ensureSoftBody(); soft_body->soft_stiffness = val; }
+    inline float getSoftCompliance() const { return soft_body ? soft_body->soft_compliance : 0.0f; }
+    inline void setSoftCompliance(float val) { ensureSoftBody(); soft_body->soft_compliance = val; }
+    inline float getSoftPressure() const { return soft_body ? soft_body->soft_pressure : 0.0f; }
+    inline void setSoftPressure(float val) { ensureSoftBody(); soft_body->soft_pressure = val; }
+    inline float getSoftDamping() const { return soft_body ? soft_body->soft_damping : 0.05f; }
+    inline void setSoftDamping(float val) { ensureSoftBody(); soft_body->soft_damping = val; }
+    inline float getSoftVertexRadius() const { return soft_body ? soft_body->soft_vertex_radius : 0.01f; }
+    inline void setSoftVertexRadius(float val) { ensureSoftBody(); soft_body->soft_vertex_radius = val; }
+    inline int getSoftIterations() const { return soft_body ? soft_body->soft_iterations : 5; }
+    inline void setSoftIterations(int val) { ensureSoftBody(); soft_body->soft_iterations = val; }
+    inline float getSoftFriction() const { return soft_body ? soft_body->soft_friction : 0.5f; }
+    inline void setSoftFriction(float val) { ensureSoftBody(); soft_body->soft_friction = val; }
+    inline float getSoftRestitution() const { return soft_body ? soft_body->soft_restitution : 0.0f; }
+    inline void setSoftRestitution(float val) { ensureSoftBody(); soft_body->soft_restitution = val; }
+    inline float getSoftGravityFactor() const { return soft_body ? soft_body->soft_gravity_factor : 1.0f; }
+    inline void setSoftGravityFactor(float val) { ensureSoftBody(); soft_body->soft_gravity_factor = val; }
+    inline float getSoftMass() const { return soft_body ? soft_body->soft_mass : 1.0f; }
+    inline void setSoftMass(float val) { ensureSoftBody(); soft_body->soft_mass = val; }
+    inline bool getSoftTwoSided() const { return soft_body ? soft_body->soft_two_sided : true; }
+    inline void setSoftTwoSided(bool val) { ensureSoftBody(); soft_body->soft_two_sided = val; }
+
+    const std::vector<SoftPinRegion>& getSoftPins() const;
+    std::vector<SoftPinRegion>& getSoftPinsMut();
+    void setSoftPins(const std::vector<SoftPinRegion>& pins);
+
+    // Fluid Coupling Getters/Setters
+    inline float getBuoyancyScale() const { return fluid_coupling ? fluid_coupling->buoyancy_scale : 1.0f; }
+    inline void setBuoyancyScale(float val) { ensureFluidCoupling(); fluid_coupling->buoyancy_scale = val; }
+    inline float getFluidDensity() const { return fluid_coupling ? fluid_coupling->fluid_density : 1000.0f; }
+    inline void setFluidDensity(float val) { ensureFluidCoupling(); fluid_coupling->fluid_density = val; }
+    inline float getFluidDrag() const { return fluid_coupling ? fluid_coupling->fluid_drag : 1.0f; }
+    inline void setFluidDrag(float val) { ensureFluidCoupling(); fluid_coupling->fluid_drag = val; }
+    inline float getFluidQuadraticDrag() const { return fluid_coupling ? fluid_coupling->fluid_quadratic_drag : 0.5f; }
+    inline void setFluidQuadraticDrag(float val) { ensureFluidCoupling(); fluid_coupling->fluid_quadratic_drag = val; }
+    inline float getFluidAngularDrag() const { return fluid_coupling ? fluid_coupling->fluid_angular_drag : 1.0f; }
+    inline void setFluidAngularDrag(float val) { ensureFluidCoupling(); fluid_coupling->fluid_angular_drag = val; }
+    inline float getFluidMaxCouplingSpeed() const { return fluid_coupling ? fluid_coupling->fluid_max_coupling_speed : 4.0f; }
+    inline void setFluidMaxCouplingSpeed(float val) { ensureFluidCoupling(); fluid_coupling->fluid_max_coupling_speed = val; }
+
+    // Fracture Getters/Setters
+    inline bool getBreakable() const { return fracture ? fracture->breakable : false; }
+    void setBreakable(bool val);
+    inline float getBreakImpulse() const { return fracture ? fracture->break_impulse : 5.0f; }
+    inline void setBreakImpulse(float val) { ensureFracture(); fracture->break_impulse = val; }
+    inline std::string getFractureGroup() const { return fracture ? fracture->fracture_group : ""; }
+    inline void setFractureGroup(const std::string& val) { ensureFracture(); fracture->fracture_group = val; }
 
     // ---- runtime state (not serialized) ----
     bool broken = false;                                    // group has shattered (now dynamic)
@@ -167,6 +219,11 @@ struct RigidBodyObject {
     float dbg_vel_y = 0.0f;             // body linear velocity y (m/s)
     float dbg_body_density = 0.0f;      // effective mass/volume (kg/m^3) used by the solver
     int   dbg_pinned_count = 0;         // soft/cloth vertices pinned at last create
+
+private:
+    void ensureSoftBody();
+    void ensureFluidCoupling();
+    void ensureFracture();
 };
 
 // One dynamic body's full kinematic state at a baked frame. Captured during the

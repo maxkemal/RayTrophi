@@ -1,9 +1,9 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
 * File:          DirectionalLight.h
-* Author:        Kemal DemirtaÅŸ
+* Author:        Kemal Demirtaş
 * Date:          June 2024
 * License:       [License Information - e.g. Proprietary / MIT / etc.]
 * =========================================================================
@@ -27,13 +27,11 @@ public:
     float pdf(const Vec3& hit_point, const Vec3& incoming_direction) const override;
 
     void setDirection(const Vec3& dir);
-    void setDiskRadius(float r) { radius = r; }
-    float getDiskRadius() const { return radius; }
+    void setDiskRadius(float r) { setRadius(r); }
+    float getDiskRadius() const { return getRadius(); }
 
 private:
-    
     mutable Vec3 last_sampled_point;
 };
 
 #endif // DIRECTIONAL_LIGHT_H
-

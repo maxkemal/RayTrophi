@@ -372,7 +372,19 @@ namespace NodeSystem {
             
             ctx.setProgress(1.0f);
         }
-        
+
+        // ========================================================================
+        // ASYNC EVALUATION STATE (generic accessors for the node-editor UI)
+        // ========================================================================
+        // Default no-ops for graphs that always evaluate synchronously. A graph
+        // subtype that supports background evaluation (e.g. TerrainNodeGraphV2)
+        // overrides these so NodeEditorUIV2::drawNode() can draw a per-node
+        // "currently active" indicator + overall progress without needing to know
+        // about that subtype.
+        virtual bool isEvaluatingAsync() const { return false; }
+        virtual uint32_t currentAsyncNodeId() const { return 0; }
+        virtual float asyncEvalProgress() const { return 0.0f; }
+
         /**
          * @brief Check if a node is terminal (no downstream connections)
          */

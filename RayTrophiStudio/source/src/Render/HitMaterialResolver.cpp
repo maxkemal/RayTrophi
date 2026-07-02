@@ -101,10 +101,10 @@ void applyTerrainBlendIfNeeded(HitRecord& rec) {
         blended_albedo = blended_albedo + mat->getPropertyValue(mat->albedoProperty, layer_uv) * weight;
         blended_roughness += mat->getPropertyValue(mat->roughnessProperty, layer_uv).y * weight;
         blended_metallic += mat->getPropertyValue(mat->metallicProperty, layer_uv).z * weight;
-        blended_clearcoat += mat->clearcoat * weight;
-        blended_clearcoat_roughness += mat->clearcoatRoughness * weight;
-        blended_subsurface += mat->subsurface * weight;
-        blended_subsurface_color = blended_subsurface_color + mat->subsurfaceColor * weight;
+        blended_clearcoat += mat->getClearcoat() * weight;
+        blended_clearcoat_roughness += mat->getClearcoatRoughness() * weight;
+        blended_subsurface += mat->getSubsurface() * weight;
+        blended_subsurface_color = blended_subsurface_color + mat->getSubsurfaceColor() * weight;
         blended_transmission += mat->transmission * weight;
         blended_ior += mat->getIndexOfRefraction() * weight;
         total_weight += weight;

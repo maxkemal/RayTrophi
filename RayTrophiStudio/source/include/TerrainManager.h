@@ -123,15 +123,20 @@ public:
     // Serialization===========================================================================
     // EROSION SYSTEM
     // ===========================================================================
-    void hydraulicErosion(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
+    // progressCallback (optional): invoked periodically with a 0..1 fraction of
+    // iterations completed. These CPU loops are single-threaded and can run for
+    // tens of seconds at default iteration counts on a background evaluate
+    // thread — without this, the node-editor progress bar shows no movement for
+    // the whole duration a single erosion node is running.
+    void hydraulicErosion(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {}, const std::function<void(float)>& progressCallback = nullptr);
     void hydraulicErosionAdvanced(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
-    void fluvialErosion(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
+    void fluvialErosion(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {}, const std::function<void(float)>& progressCallback = nullptr);
     void fluvialErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
     void hydraulicErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
     void thermalErosionGPU(TerrainObject* terrain, const ThermalErosionParams& params, const std::vector<float>& mask = {});
-    void thermalErosion(TerrainObject* terrain, const ThermalErosionParams& params, const std::vector<float>& mask = {});
-   
-    void windErosion(TerrainObject* terrain, float strength, float direction, int iterations, const std::vector<float>& mask = {});
+    void thermalErosion(TerrainObject* terrain, const ThermalErosionParams& params, const std::vector<float>& mask = {}, const std::function<void(float)>& progressCallback = nullptr);
+
+    void windErosion(TerrainObject* terrain, float strength, float direction, int iterations, const std::vector<float>& mask = {}, const std::function<void(float)>& progressCallback = nullptr);
     void windErosionGPU(TerrainObject* terrain, float strength, float direction, int iterations, const std::vector<float>& mask = {});
     
     // Edge preservation helpers (prevents cliffs/walls at terrain boundaries)

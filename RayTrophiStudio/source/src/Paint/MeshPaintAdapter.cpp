@@ -1146,6 +1146,41 @@ void MeshPaintAdapter::clearWetSimulation() {
     invalidateWetFlowField();
 }
 
+std::vector<std::shared_ptr<Triangle>> MeshPaintAdapter::gatherNodeFacadesForPaint(
+    const std::string& nodeName, uint16_t materialId) const {
+    std::vector<std::shared_ptr<Triangle>> out;
+    if (!scene_) return out;
+
+    // Flat (SoA) mesh first: a TriangleMesh in world.objects carries the whole node — materialize a
+    // facade per face so wet-flow / seam passes see EVERY triangle, not just the representative.
+    for (const auto& obj : scene_->world.objects) {
+        auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj);
+        if (tm && tm->nodeName == nodeName && tm->geometry) {
+            const size_t nT = tm->num_triangles();
+            out.reserve(nT);
+            for (size_t t = 0; t < nT; ++t) {
+                auto facade = std::make_shared<Triangle>(tm, static_cast<uint32_t>(t));
+                if (facade->getMaterialID() == materialId) out.push_back(std::move(facade));
+            }
+            return out;
+        }
+    }
+
+    // Facade meshes: the edit cache holds the live face set; else scan world.objects.
+    auto cache_it = scene_->base_mesh_cache.find(nodeName);
+    if (cache_it != scene_->base_mesh_cache.end() && !cache_it->second.empty()) {
+        return cache_it->second;
+    }
+    out.reserve(scene_->world.objects.size());
+    for (const auto& object : scene_->world.objects) {
+        auto tri = std::dynamic_pointer_cast<Triangle>(object);
+        if (tri && tri->getNodeName() == nodeName && tri->getMaterialID() == materialId) {
+            out.push_back(tri);
+        }
+    }
+    return out;
+}
+
 void MeshPaintAdapter::invalidateWetFlowField() {
     wet_flow_field_cache_ = WetFlowFieldCache{};
 }
@@ -1159,18 +1194,7 @@ void MeshPaintAdapter::rebuildWetFlowField(int width, int height) {
 
     std::vector<std::shared_ptr<Triangle>> candidates;
     if (scene_) {
-        auto cache_it = scene_->base_mesh_cache.find(getNodeName());
-        if (cache_it != scene_->base_mesh_cache.end()) {
-            candidates = cache_it->second;
-        } else {
-            candidates.reserve(scene_->world.objects.size());
-            for (const auto& object : scene_->world.objects) {
-                auto tri = std::dynamic_pointer_cast<Triangle>(object);
-                if (tri && tri->getNodeName() == getNodeName() && tri->getMaterialID() == getMaterialID()) {
-                    candidates.push_back(tri);
-                }
-            }
-        }
+        candidates = gatherNodeFacadesForPaint(getNodeName(), getMaterialID());
     }
 
     const RayTrophiSim::SimulationForceFieldSnapshot* force_snapshot = nullptr;
@@ -1328,19 +1352,7 @@ void MeshPaintAdapter::rebuildWetSeamLinks() {
         source_uvs = { u0, u1, u2 };
     }
 
-    std::vector<std::shared_ptr<Triangle>> candidates;
-    auto cache_it = scene_->base_mesh_cache.find(getNodeName());
-    if (cache_it != scene_->base_mesh_cache.end()) {
-        candidates = cache_it->second;
-    } else {
-        candidates.reserve(scene_->world.objects.size());
-        for (const auto& object : scene_->world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(object);
-            if (tri && tri->getNodeName() == getNodeName() && tri->getMaterialID() == getMaterialID()) {
-                candidates.push_back(tri);
-            }
-        }
-    }
+    std::vector<std::shared_ptr<Triangle>> candidates = gatherNodeFacadesForPaint(getNodeName(), getMaterialID());
 
     for (const auto& candidate : candidates) {
         if (!candidate || candidate.get() == triangle_.get() || candidate->getMaterialID() != getMaterialID()) {

@@ -27,6 +27,10 @@
 #include "json.hpp"
 #include <unordered_map>
 #include <cstring>
+#include <future>
+#include <memory>
+#include <atomic>
+#include <chrono>
 
 namespace TerrainNodesV2 {
 
@@ -327,13 +331,28 @@ namespace TerrainNodesV2 {
                 return result;
             }
             
-            // Default: read from terrain
+            // Default: read from terrain. A terrain that has never been evaluated
+            // yet has heightmap.width/height == 0 (TerrainSystem.h default) — reading
+            // that raw zero here (instead of TerrainContext's already-clamped
+            // width/height) produces a 0x0 Image2DData. Every downstream node then
+            // resizes terrain->heightmap back to 0x0, a fixed point that never
+            // escapes: inserting erosion/modifier nodes before the first direct
+            // Height->Output evaluate looked like an infinite loop/hang because of
+            // this — each node kept "succeeding" on empty 0-length data forever.
+            // NoiseGeneratorNode already reads tctx->width/height (clamped to
+            // TerrainContext::DEFAULT_RESOLUTION when uninitialized); mirror that
+            // here so a never-evaluated terrain gets a sane starting resolution
+            // instead of a degenerate empty one.
             TerrainObject* terrain = tctx->terrain;
             int w = terrain->heightmap.width;
             int h = terrain->heightmap.height;
-            
+            if (w < 2 || h < 2) {
+                w = tctx->width;
+                h = tctx->height;
+            }
+
             auto result = createHeightOutput(w, h);
-            
+
             if (terrain->heightmap.data.size() == (size_t)(w * h)) {
                 *result.data = terrain->heightmap.data;
             }
@@ -2391,10 +2410,67 @@ namespace TerrainNodesV2 {
         
         // Factory method for creating nodes by type
         NodeSystem::NodeBase* addTerrainNode(NodeType type, float x = 0, float y = 0);
-        
-        // Evaluate with terrain context
+
+        // Evaluate with terrain context (synchronous — used by load/deserialize,
+        // which run before the UI is interactive and don't need backgrounding)
         void evaluateTerrain(TerrainObject* terrain, struct ::SceneData& scene);
-        
+
+        // ========================================================================
+        // ASYNC EVALUATION (interactive "Evaluate" button path)
+        // ========================================================================
+        // Split of evaluateTerrain() into a phase that's safe to run off the main
+        // thread (pure CPU height-data compute) and phases that must stay on the
+        // main thread (GPU texture upload for splat/hardness outputs, and mesh/
+        // BVH/backend rebuild). See happy-kindling-flame.md plan for rationale.
+
+        // Phase A (safe to call from a worker thread): pulls HeightOutputNode,
+        // writes terrain->heightmap.data. No GPU/backend calls. Returns true if
+        // heightmap data was updated (mirrors evaluateTerrain's early-returns).
+        bool evaluateTerrainHeightData(TerrainObject* terrain, NodeSystem::EvaluationContext& ctx);
+
+        // Phase B (MAIN THREAD ONLY): pulls Splat/Hardness output nodes — touches
+        // TerrainObject::splatMap->updateGPU(), a GPU texture upload.
+        void evaluateTerrainAuxOutputs(TerrainObject* terrain, NodeSystem::EvaluationContext& ctx);
+
+        // Phase C (MAIN THREAD ONLY): resize/topology-mismatch mesh rebuild —
+        // touches scene.world.objects / mesh_triangles, shared with render/BVH.
+        // See lastFinalizeWasFullRebuild() for deferBackendSignal semantics.
+        void finalizeTerrainMesh(struct ::SceneData& scene, TerrainObject* terrain, bool deferBackendSignal = false);
+
+        // Kicks off phase A on a worker thread. No-op (returns immediately) if an
+        // evaluation is already in flight for this graph.
+        void evaluateTerrainAsync(TerrainObject* terrain, struct ::SceneData& scene);
+
+        // Call once per frame from the node-editor draw path (main thread). If the
+        // background phase A has finished, runs phases B+C synchronously and
+        // returns true (caller should then fire the usual GPU/backend rebuild
+        // flags, same as the old synchronous button handler did). Returns false
+        // while still evaluating or when nothing is pending.
+        bool pollEvaluateAsync();
+
+        // True if the most recent finalizeTerrainMesh() call had to take the full
+        // rebuild branch (terrain resolution/topology changed — new Triangle
+        // objects, different triangle count). False means it took the cheap
+        // in-place update branch (same Triangle pointers, positions changed only),
+        // in which case the caller can use a partial BLAS/raster-mesh refit
+        // instead of a full-scene rebuild — see updateTerrainBLASPartial usage in
+        // scene_ui_terrain.hpp's brush-stroke commit path for the existing,
+        // already-proven pattern this mirrors.
+        bool lastFinalizeWasFullRebuild() const { return lastFinalizeWasFullRebuild_.load(); }
+
+        std::atomic<bool> isEvaluating{false};
+        std::shared_ptr<NodeSystem::EvaluationContext> activeEvalContext;
+
+        // GraphBase overrides so NodeEditorUIV2::drawNode() can show a per-node
+        // "currently active" indicator + overall progress generically.
+        bool isEvaluatingAsync() const override { return isEvaluating.load(); }
+        uint32_t currentAsyncNodeId() const override {
+            return activeEvalContext ? activeEvalContext->getCurrentNodeId() : 0;
+        }
+        float asyncEvalProgress() const override {
+            return activeEvalContext ? activeEvalContext->getProgress() : 0.0f;
+        }
+
         // Create a default graph with basic nodes
         void createDefaultGraph(TerrainObject* terrain);
         
@@ -2413,6 +2489,14 @@ namespace TerrainNodesV2 {
          * @param terrain Optional terrain for context during loading
          */
         void fromJson(const nlohmann::json& j, TerrainObject* terrain = nullptr);
+
+    private:
+        std::future<void> evalFuture_;
+        TerrainObject* pendingFinalizeTerrain_ = nullptr;
+        struct ::SceneData* pendingFinalizeScene_ = nullptr;
+        std::unique_ptr<TerrainContext> activeTerrainCtx_;
+        std::atomic<bool> lastEvaluateResized_{false};
+        std::atomic<bool> lastFinalizeWasFullRebuild_{false};
     };
 
 } // namespace TerrainNodesV2

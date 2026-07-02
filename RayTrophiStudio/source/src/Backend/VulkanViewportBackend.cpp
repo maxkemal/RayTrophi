@@ -1,4 +1,4 @@
-﻿#include "Backend/VulkanViewportBackend.h"
+#include "Backend/VulkanViewportBackend.h"
 #include "HittableInstance.h"
 #include "HittableList.h"
 #include "InstanceManager.h"
@@ -3423,25 +3423,97 @@ bool VulkanViewportBackend::updateRasterMeshFromTriangles(
     std::vector<float> newUVs(uvFloatCount);
     std::vector<uint32_t> newMatIds(vertCount);
 
-    size_t idx = 0;
-    size_t uvIdx = 0;
-    size_t matIdx = 0;
-    for (const auto& tri : triangles) {
+    const size_t numTriangles = triangles.size();
+    #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
+    for (int t = 0; t < (int)numTriangles; ++t) {
+        const auto& tri = triangles[t];
         if (!tri) continue;
+
+        const size_t local_idx = t * 9;
+        const size_t local_uvIdx = t * 6;
+        const size_t local_matIdx = t * 3;
+
         const bool hasSharedTransform = (tri->getTransformPtr() != nullptr);
-        auto [uv0, uv1, uv2] = tri->getUVCoordinates();
-        const Vec2 triUvs[3] = { uv0, uv1, uv2 };
-        const uint32_t triMatId = static_cast<uint32_t>(tri->getMaterialID());
+        
+        Vec2 triUvs[3] = { Vec2(0, 0), Vec2(0, 0), Vec2(0, 0) };
+        uint32_t triMatId = 0;
+        Vec3 verts[3];
+        Vec3 norms[3];
+        bool resolved = false;
+
+        if (tri->parentMesh && tri->parentMesh->geometry) {
+            TriangleMesh* parentMesh = tri->parentMesh.get();
+            const Vec3* cachedPositions = parentMesh->geometry->get_attribute_data<Vec3>("P");
+            const Vec3* cachedNormals = parentMesh->geometry->get_attribute_data<Vec3>("N");
+            const Vec3* cachedOrigPositions = parentMesh->geometry->get_attribute_data<Vec3>("P_orig");
+            const Vec3* cachedOrigNormals = parentMesh->geometry->get_attribute_data<Vec3>("N_orig");
+            const Vec2* cachedUvs = parentMesh->geometry->get_attribute_data<Vec2>("uv");
+            const uint16_t* cachedMatIDs = parentMesh->geometry->get_attribute_data<uint16_t>("materialID");
+            const std::vector<uint32_t, DNA::AlignedAllocator<uint32_t, 32>>* cachedIndices = &parentMesh->geometry->indices;
+
+            if (cachedPositions && cachedIndices && !cachedIndices->empty()) {
+                uint32_t faceIdx = tri->faceIndex;
+                uint32_t baseIdx = faceIdx * 3;
+                if (baseIdx + 2 < cachedIndices->size()) {
+                    uint32_t i0 = (*cachedIndices)[baseIdx + 0];
+                    uint32_t i1 = (*cachedIndices)[baseIdx + 1];
+                    uint32_t i2 = (*cachedIndices)[baseIdx + 2];
+
+                    triUvs[0] = cachedUvs ? cachedUvs[i0] : Vec2(0, 0);
+                    triUvs[1] = cachedUvs ? cachedUvs[i1] : Vec2(0, 0);
+                    triUvs[2] = cachedUvs ? cachedUvs[i2] : Vec2(0, 0);
+
+                    triMatId = cachedMatIDs ? cachedMatIDs[i0] : static_cast<uint32_t>(tri->getMaterialID());
+
+                    if (hasSharedTransform) {
+                        if (tri->hasSkinData()) {
+                            verts[0] = tri->getOriginalVertexPosition(0);
+                            verts[1] = tri->getOriginalVertexPosition(1);
+                            verts[2] = tri->getOriginalVertexPosition(2);
+                        } else {
+                            verts[0] = cachedOrigPositions ? cachedOrigPositions[i0] : cachedPositions[i0];
+                            verts[1] = cachedOrigPositions ? cachedOrigPositions[i1] : cachedPositions[i1];
+                            verts[2] = cachedOrigPositions ? cachedOrigPositions[i2] : cachedPositions[i2];
+                        }
+                        norms[0] = cachedOrigNormals ? cachedOrigNormals[i0] : (cachedNormals ? cachedNormals[i0] : Vec3(0, 1, 0));
+                        norms[1] = cachedOrigNormals ? cachedOrigNormals[i1] : (cachedNormals ? cachedNormals[i1] : Vec3(0, 1, 0));
+                        norms[2] = cachedOrigNormals ? cachedOrigNormals[i2] : (cachedNormals ? cachedNormals[i2] : Vec3(0, 1, 0));
+                    } else {
+                        verts[0] = cachedPositions[i0];
+                        verts[1] = cachedPositions[i1];
+                        verts[2] = cachedPositions[i2];
+                        norms[0] = cachedOrigNormals ? cachedOrigNormals[i0] : (cachedNormals ? cachedNormals[i0] : Vec3(0, 1, 0));
+                        norms[1] = cachedOrigNormals ? cachedOrigNormals[i1] : (cachedNormals ? cachedNormals[i1] : Vec3(0, 1, 0));
+                        norms[2] = cachedOrigNormals ? cachedOrigNormals[i2] : (cachedNormals ? cachedNormals[i2] : Vec3(0, 1, 0));
+                    }
+                    resolved = true;
+                }
+            }
+        }
+
+        if (!resolved) {
+            auto [uv0, uv1, uv2] = tri->getUVCoordinates();
+            triUvs[0] = uv0; triUvs[1] = uv1; triUvs[2] = uv2;
+            triMatId = static_cast<uint32_t>(tri->getMaterialID());
+            for (int v = 0; v < 3; ++v) {
+                verts[v] = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
+                norms[v] = tri->getOriginalVertexNormal(v);
+            }
+        }
+
         for (int v = 0; v < 3; ++v) {
-            Vec3 p = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
-            Vec3 n = hasSharedTransform ? tri->getOriginalVertexNormal(v) : tri->getOriginalVertexNormal(v);
-            newPositions[idx]   = p.x; newPositions[idx + 1] = p.y; newPositions[idx + 2] = p.z;
-            newNormals[idx]     = n.x; newNormals[idx + 1]   = n.y; newNormals[idx + 2]   = n.z;
-            newUVs[uvIdx]       = triUvs[v].x; newUVs[uvIdx + 1] = triUvs[v].y;
-            newMatIds[matIdx]   = triMatId;
-            idx += 3;
-            uvIdx += 2;
-            ++matIdx;
+            newPositions[local_idx + v * 3 + 0] = verts[v].x;
+            newPositions[local_idx + v * 3 + 1] = verts[v].y;
+            newPositions[local_idx + v * 3 + 2] = verts[v].z;
+
+            newNormals[local_idx + v * 3 + 0] = norms[v].x;
+            newNormals[local_idx + v * 3 + 1] = norms[v].y;
+            newNormals[local_idx + v * 3 + 2] = norms[v].z;
+
+            newUVs[local_uvIdx + v * 2 + 0] = triUvs[v].x;
+            newUVs[local_uvIdx + v * 2 + 1] = triUvs[v].y;
+
+            newMatIds[local_matIdx + v] = triMatId;
         }
     }
 
@@ -3589,6 +3661,139 @@ bool VulkanViewportBackend::updateRasterMeshFromTriangles(
     return true;
 }
 
+bool VulkanViewportBackend::updateRasterMeshFromMeshSoA(const std::string& nodeName,
+                                                        const TriangleMesh* mesh) {
+    if (!m_device || !m_device->isInitialized() || !mesh || !mesh->geometry) return false;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    auto findTargetKey = [&]() -> std::string {
+        if (nodeName.empty()) return {};
+        for (const auto& ri : m_rasterInstances) {
+            if (ri.nodeName == nodeName) return ri.meshKey;
+        }
+        for (const auto& ri : m_rasterInstances) {
+            if (viewportMatchesNodeNameForInstance(ri.nodeName, nodeName)) return ri.meshKey;
+        }
+        for (const auto& ri : m_rasterInstances) {
+            if (viewportMatchesNodeNameForInstance(nodeName, ri.nodeName)) return ri.meshKey;
+        }
+        return {};
+    };
+    const std::string targetKey = findTargetKey();
+    if (targetKey.empty()) return false;
+
+    auto meshIt = m_rasterMeshes.find(targetKey);
+    if (meshIt == m_rasterMeshes.end()) return false;
+    auto& rmb = meshIt->second;
+
+    const DNA::GeometryDetail* g = mesh->geometry.get();
+    const auto& indices = g->indices;
+    const size_t numFaces = indices.size() / 3;
+    const size_t vertCount = numFaces * 3;
+    const size_t floatCount = vertCount * 3;
+    const size_t uvFloatCount = vertCount * 2;
+    // The raster buffer was built 3N (non-indexed) from this same SoA, so the slot count must
+    // match for an in-place refit; a structural change goes through a full buildRasterGeometry.
+    if (vertCount != rmb.vertexCount) return false;
+
+    const Vec3* Porig = g->get_attribute_data<Vec3>("P_orig");
+    if (!Porig) Porig = g->get_attribute_data<Vec3>("P");
+    const Vec3* Norig = g->get_attribute_data<Vec3>("N_orig");
+    if (!Norig) Norig = g->get_attribute_data<Vec3>("N");
+    const Vec2* UV = g->get_attribute_data<Vec2>("uv");
+    const uint16_t* matIDs = g->get_attribute_data<uint16_t>("materialID");
+    if (!Porig) return false;
+
+    auto ensurePreviewAttributeBuffers = [&]() {
+        if (!rmb.uvBuffer.buffer) {
+            VulkanRT::BufferCreateInfo uci{};
+            uci.size = uvFloatCount * sizeof(float);
+            uci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            uci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            uci.initialData = nullptr;
+            rmb.uvBuffer = m_device->createBuffer(uci);
+        }
+        if (!rmb.matIdBuffer.buffer) {
+            VulkanRT::BufferCreateInfo mci{};
+            mci.size = vertCount * sizeof(uint32_t);
+            mci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            mci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            mci.initialData = nullptr;
+            rmb.matIdBuffer = m_device->createBuffer(mci);
+        }
+    };
+
+    std::vector<float> newPositions(floatCount);
+    std::vector<float> newNormals(floatCount);
+    std::vector<float> newUVs(uvFloatCount);
+    std::vector<uint32_t> newMatIds(vertCount);
+
+    // Flat raster verts are LOCAL (P_orig) — the raster instance carries the mesh transform — so
+    // this mirrors updateRasterMeshFromTriangles' shared-transform branch.
+    #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
+    for (int f = 0; f < (int)numFaces; ++f) {
+        for (int c = 0; c < 3; ++c) {
+            const uint32_t soaV = indices[static_cast<size_t>(f) * 3 + c];
+            const Vec3 p = Porig[soaV];
+            const Vec3 n = Norig ? Norig[soaV] : Vec3(0.0f, 1.0f, 0.0f);
+            const Vec2 uv = UV ? UV[soaV] : Vec2(0.0f, 0.0f);
+            const uint32_t m = matIDs ? static_cast<uint32_t>(matIDs[soaV]) : 0u;
+            const size_t vbase = (static_cast<size_t>(f) * 3 + c) * 3;
+            const size_t uvbase = (static_cast<size_t>(f) * 3 + c) * 2;
+            const size_t mbase = static_cast<size_t>(f) * 3 + c;
+            newPositions[vbase + 0] = p.x; newPositions[vbase + 1] = p.y; newPositions[vbase + 2] = p.z;
+            newNormals[vbase + 0] = n.x;   newNormals[vbase + 1] = n.y;   newNormals[vbase + 2] = n.z;
+            newUVs[uvbase + 0] = uv.x;     newUVs[uvbase + 1] = uv.y;
+            newMatIds[mbase] = m;
+        }
+    }
+
+    // Same upload path as updateRasterMeshFromTriangles: when the slot count matches and a CPU
+    // mirror exists, only the changed vertex range is re-uploaded (realtime per-dab), else a full
+    // re-upload. Sizes always match here (early-out above), so the incremental branch is taken.
+    if (rmb.cpuPositions.size() == floatCount) {
+        ensurePreviewAttributeBuffers();
+        size_t dirtyMin = floatCount;
+        size_t dirtyMax = 0;
+        for (size_t i = 0; i < floatCount; ++i) {
+            if (newPositions[i] != rmb.cpuPositions[i] || newNormals[i] != rmb.cpuNormals[i]) {
+                if (i < dirtyMin) dirtyMin = i;
+                if (i > dirtyMax) dirtyMax = i;
+            }
+        }
+        if (dirtyMin <= dirtyMax) {
+            dirtyMin = (dirtyMin / 3) * 3;
+            dirtyMax = ((dirtyMax / 3) + 1) * 3;
+            if (dirtyMax > floatCount) dirtyMax = floatCount;
+            const uint64_t byteOffset = dirtyMin * sizeof(float);
+            const uint64_t byteSize = (dirtyMax - dirtyMin) * sizeof(float);
+            m_device->uploadBuffer(rmb.vertexBuffer, &newPositions[dirtyMin], byteSize, byteOffset);
+            m_device->uploadBuffer(rmb.normalBuffer, &newNormals[dirtyMin], byteSize, byteOffset);
+            std::memcpy(&rmb.cpuPositions[dirtyMin], &newPositions[dirtyMin], byteSize);
+            std::memcpy(&rmb.cpuNormals[dirtyMin], &newNormals[dirtyMin], byteSize);
+        }
+        if (rmb.uvBuffer.buffer) {
+            m_device->uploadBuffer(rmb.uvBuffer, newUVs.data(), uvFloatCount * sizeof(float), 0);
+        }
+        if (rmb.matIdBuffer.buffer) {
+            m_device->uploadBuffer(rmb.matIdBuffer, newMatIds.data(), newMatIds.size() * sizeof(uint32_t), 0);
+        }
+        rmb.cpuMatIds = std::move(newMatIds);
+    } else {
+        ensurePreviewAttributeBuffers();
+        if (rmb.vertexBuffer.buffer) m_device->uploadBuffer(rmb.vertexBuffer, newPositions.data(), floatCount * sizeof(float));
+        if (rmb.normalBuffer.buffer) m_device->uploadBuffer(rmb.normalBuffer, newNormals.data(), floatCount * sizeof(float));
+        if (rmb.uvBuffer.buffer) m_device->uploadBuffer(rmb.uvBuffer, newUVs.data(), uvFloatCount * sizeof(float), 0);
+        if (rmb.matIdBuffer.buffer) m_device->uploadBuffer(rmb.matIdBuffer, newMatIds.data(), newMatIds.size() * sizeof(uint32_t), 0);
+        rmb.cpuPositions = std::move(newPositions);
+        rmb.cpuNormals = std::move(newNormals);
+        rmb.cpuMatIds = std::move(newMatIds);
+    }
+
+    m_interactiveViewport.dirty = true;
+    return true;
+}
+
 bool VulkanViewportBackend::patchRasterMeshTriangles(
     const std::string& nodeName,
     const std::vector<size_t>& dirtyIndices,
@@ -3633,6 +3838,14 @@ bool VulkanViewportBackend::patchRasterMeshTriangles(
     size_t dirtyMinFloat = expectedFloatCount;
     size_t dirtyMaxFloat = 0;
 
+    TriangleMesh* lastParentMesh = nullptr;
+    const Vec3* cachedPositions = nullptr;
+    const Vec3* cachedNormals = nullptr;
+    const Vec3* cachedOrigPositions = nullptr;
+    const Vec3* cachedOrigNormals = nullptr;
+    const std::vector<uint32_t, DNA::AlignedAllocator<uint32_t, 32>>* cachedIndices = nullptr;
+    bool hasGeometry = false;
+
     for (const size_t triIdx : sortedDirty) {
         if (triIdx >= meshEntries.size()) continue;
         const auto& tri = meshEntries[triIdx].second;
@@ -3642,16 +3855,73 @@ bool VulkanViewportBackend::patchRasterMeshTriangles(
         if (baseFloat + 8 >= expectedFloatCount) continue;
 
         const bool hasSharedTransform = (tri->getTransformPtr() != nullptr);
+        
+        Vec3 verts[3];
+        Vec3 norms[3];
+        bool resolved = false;
+
+        if (tri->parentMesh) {
+            if (tri->parentMesh.get() != lastParentMesh) {
+                lastParentMesh = tri->parentMesh.get();
+                if (lastParentMesh->geometry) {
+                    cachedPositions = lastParentMesh->geometry->get_attribute_data<Vec3>("P");
+                    cachedNormals = lastParentMesh->geometry->get_attribute_data<Vec3>("N");
+                    cachedOrigPositions = lastParentMesh->geometry->get_attribute_data<Vec3>("P_orig");
+                    cachedOrigNormals = lastParentMesh->geometry->get_attribute_data<Vec3>("N_orig");
+                    cachedIndices = &lastParentMesh->geometry->indices;
+                    hasGeometry = (cachedPositions != nullptr) && (cachedIndices != nullptr) && (!cachedIndices->empty());
+                } else {
+                    hasGeometry = false;
+                }
+            }
+
+            if (hasGeometry) {
+                uint32_t faceIdx = tri->faceIndex;
+                uint32_t baseIdx = faceIdx * 3;
+                uint32_t i0 = (*cachedIndices)[baseIdx + 0];
+                uint32_t i1 = (*cachedIndices)[baseIdx + 1];
+                uint32_t i2 = (*cachedIndices)[baseIdx + 2];
+
+                if (hasSharedTransform) {
+                    if (tri->hasSkinData()) {
+                        verts[0] = tri->getOriginalVertexPosition(0);
+                        verts[1] = tri->getOriginalVertexPosition(1);
+                        verts[2] = tri->getOriginalVertexPosition(2);
+                    } else {
+                        verts[0] = cachedOrigPositions ? cachedOrigPositions[i0] : cachedPositions[i0];
+                        verts[1] = cachedOrigPositions ? cachedOrigPositions[i1] : cachedPositions[i1];
+                        verts[2] = cachedOrigPositions ? cachedOrigPositions[i2] : cachedPositions[i2];
+                    }
+                    norms[0] = cachedOrigNormals ? cachedOrigNormals[i0] : (cachedNormals ? cachedNormals[i0] : Vec3(0, 1, 0));
+                    norms[1] = cachedOrigNormals ? cachedOrigNormals[i1] : (cachedNormals ? cachedNormals[i1] : Vec3(0, 1, 0));
+                    norms[2] = cachedOrigNormals ? cachedOrigNormals[i2] : (cachedNormals ? cachedNormals[i2] : Vec3(0, 1, 0));
+                } else {
+                    verts[0] = cachedPositions[i0];
+                    verts[1] = cachedPositions[i1];
+                    verts[2] = cachedPositions[i2];
+                    norms[0] = cachedOrigNormals ? cachedOrigNormals[i0] : (cachedNormals ? cachedNormals[i0] : Vec3(0, 1, 0));
+                    norms[1] = cachedOrigNormals ? cachedOrigNormals[i1] : (cachedNormals ? cachedNormals[i1] : Vec3(0, 1, 0));
+                    norms[2] = cachedOrigNormals ? cachedOrigNormals[i2] : (cachedNormals ? cachedNormals[i2] : Vec3(0, 1, 0));
+                }
+                resolved = true;
+            }
+        }
+
+        if (!resolved) {
+            for (int v = 0; v < 3; ++v) {
+                verts[v] = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
+                norms[v] = tri->getOriginalVertexNormal(v);
+            }
+        }
+
         for (int v = 0; v < 3; ++v) {
-            Vec3 p = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
-            Vec3 n = hasSharedTransform ? tri->getOriginalVertexNormal(v) : tri->getOriginalVertexNormal(v);
             const size_t idx = baseFloat + static_cast<size_t>(v) * 3;
-            rmb.cpuPositions[idx]     = p.x;
-            rmb.cpuPositions[idx + 1] = p.y;
-            rmb.cpuPositions[idx + 2] = p.z;
-            rmb.cpuNormals[idx]       = n.x;
-            rmb.cpuNormals[idx + 1]   = n.y;
-            rmb.cpuNormals[idx + 2]   = n.z;
+            rmb.cpuPositions[idx]     = verts[v].x;
+            rmb.cpuPositions[idx + 1] = verts[v].y;
+            rmb.cpuPositions[idx + 2] = verts[v].z;
+            rmb.cpuNormals[idx]       = norms[v].x;
+            rmb.cpuNormals[idx + 1]   = norms[v].y;
+            rmb.cpuNormals[idx + 2]   = norms[v].z;
         }
 
         if (baseFloat < dirtyMinFloat) dirtyMinFloat = baseFloat;
@@ -4532,7 +4802,12 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
             auto found = groupByKey.find(groupKey);
             if (found == groupByKey.end()) {
                 RasterTriGroup g;
-                g.meshKey = "[Raster-Solo]-" + nodeName;
+                // Keyed by groupKey (nodeName + transform), not just nodeName: multi-material
+                // imports create several sibling objects sharing one nodeName (one per material),
+                // and a plain nodeName key would collide in m_rasterMeshes, silently overwriting
+                // all but the last material's raster buffer (Solid view showed only one material
+                // while Vulkan RT, which keys BLAS per-object-pointer, rendered fine).
+                g.meshKey = "[Raster-Solo]-" + groupKey;
                 g.nodeName = nodeName;
                 g.transform = hasSharedTransform ? tri->getTransformMatrix() : Matrix4x4::identity();
                 groups.push_back(std::move(g));
@@ -4551,6 +4826,54 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                 grp.normals.push_back(n.x); grp.normals.push_back(n.y); grp.normals.push_back(n.z);
                 grp.uvs.push_back(triUvs[v].x); grp.uvs.push_back(triUvs[v].y);
                 grp.matIds.push_back(triMatId);
+            }
+        }
+        // Flat/proxy flip: a dense mesh placed directly in world.objects as a TriangleMesh (no
+        // facades). Expand its SoA faces into a raster group (local P_orig + getFinal() transform,
+        // matching the facade path above) so Solid/Matcap viewport shows it.
+        else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (!mesh->visible || !mesh->geometry || mesh->geometry->indices.empty()) return;
+            const auto* geom = mesh->geometry.get();
+            const Vec3* Po = geom->get_positions_orig();
+            const Vec3* No = geom->get_normals_orig();
+            const Vec2* UV = geom->get_uvs();
+            const uint16_t* M = geom->get_material_ids();
+            if (!Po) Po = geom->get_positions();
+            if (!No) No = geom->get_normals();
+            if (!Po) return;
+
+            std::string nodeName = mesh->nodeName.empty() ? ("[Solo-" + std::to_string(groups.size()) + "]") : mesh->nodeName;
+            const std::string groupKey = nodeName + "#mesh=" + std::to_string(reinterpret_cast<uintptr_t>(mesh.get()));
+            auto found = groupByKey.find(groupKey);
+            if (found == groupByKey.end()) {
+                RasterTriGroup g;
+                // See the facade-Triangle branch above: key by groupKey (includes the mesh
+                // pointer), not bare nodeName, so sibling per-material TriangleMesh objects with
+                // the same nodeName don't collide and overwrite each other in m_rasterMeshes.
+                g.meshKey = "[Raster-Solo]-" + groupKey;
+                g.nodeName = nodeName;
+                g.transform = mesh->transform ? mesh->transform->getFinal() : Matrix4x4::identity();
+                groups.push_back(std::move(g));
+                found = groupByKey.emplace(groupKey, groups.size() - 1).first;
+            }
+            auto& grp = groups[found->second];
+            const auto& idx = geom->indices;
+            const size_t triCount = idx.size() / 3;
+            grp.positions.reserve(grp.positions.size() + triCount * 9);
+            grp.normals.reserve(grp.normals.size() + triCount * 9);
+            grp.uvs.reserve(grp.uvs.size() + triCount * 6);
+            grp.matIds.reserve(grp.matIds.size() + triCount * 3);
+            for (size_t f = 0; f < triCount; ++f) {
+                for (int c = 0; c < 3; ++c) {
+                    const uint32_t vi = idx[f * 3 + c];
+                    const Vec3& p = Po[vi];
+                    const Vec3 n = No ? No[vi] : Vec3(0.0f, 1.0f, 0.0f);
+                    const Vec2 uv = UV ? UV[vi] : Vec2(0.0f, 0.0f);
+                    grp.positions.push_back(p.x); grp.positions.push_back(p.y); grp.positions.push_back(p.z);
+                    grp.normals.push_back(n.x); grp.normals.push_back(n.y); grp.normals.push_back(n.z);
+                    grp.uvs.push_back(uv.x); grp.uvs.push_back(uv.y);
+                    grp.matIds.push_back(M ? static_cast<uint32_t>(M[vi]) : 0u);
+                }
             }
         }
     };
@@ -4884,6 +5207,13 @@ void VulkanViewportBackend::syncRasterInstanceTransforms(
             std::string name = tri->getNodeName();
             if (!name.empty() && th) {
                 transformMap[name] = tri->getTransformMatrix();
+            }
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            // Flat (direct SoA) mesh: drives its world transform through its own handle. Without this
+            // the Solid/Matcap viewport never refreshed a keyframed/physics-driven flat mesh per
+            // frame — it froze during playback (RT updated correctly, raster did not).
+            if (!tm->nodeName.empty() && tm->transform) {
+                transformMap[tm->nodeName] = tm->transform->getFinal();
             }
         }
     };
@@ -5243,7 +5573,10 @@ void uploadEditOverlayBuffer(VulkanRT::VulkanDevice* device,
         VulkanRT::BufferCreateInfo bci{};
         bci.size     = byteSize;
         bci.usage    = usage | VulkanRT::BufferUsage::TRANSFER_DST;
-        bci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        // Use CPU_TO_GPU memory for frequently-updated overlay buffers to map and copy directly.
+        // This avoids staging buffer allocation, command recording, queue submission, and fence waits
+        // on the main thread, completely preventing OpenMP / Vulkan queue deadlocks.
+        bci.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
         buffer = device->createBuffer(bci);
     }
     if (buffer.buffer) {

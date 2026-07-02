@@ -430,6 +430,20 @@ JoltBodyHandle JoltWorld::createSoftBody(const JoltSoftBodyDesc& desc) {
         /*shearCompliance=*/desc.compliance,
         /*bendCompliance=*/desc.compliance);
     settings->CreateConstraints(&va, 1, JPH::SoftBodySharedSettings::EBendType::Distance);
+
+    // [RESOLUTION-INDEPENDENT STIFFNESS] CreateConstraints stamps every edge with the SAME raw
+    // compliance, which makes a denser (more subdivided) mesh behave SOFTER: N edges in series have
+    // total compliance N*C, so the more you subdivide the same cloth the more it sags — it "feels
+    // heavier" even though the MASS is unchanged (per-vertex = total_mass / N, total conserved).
+    // A continuum spring has stiffness k = EA/L  =>  compliance ∝ L, so scale each edge's compliance
+    // by its rest length (reference 1 unit). Macroscopic stiffness then stays constant across
+    // subdivision levels; the compliance/stiffness knob now means "per unit edge length". Bend
+    // springs are emitted as edges too (EBendType::Distance), so this covers stretch + bend.
+    constexpr float kComplianceRefLen = 1.0f;
+    for (auto& e : settings->mEdgeConstraints) {
+        e.mCompliance *= (e.mRestLength / kComplianceRefLen);
+    }
+
     settings->Optimize();
 
     // Vertices are already world-space; create at the origin with identity rotation.

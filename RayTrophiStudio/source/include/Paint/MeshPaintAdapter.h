@@ -31,6 +31,12 @@ public:
     void endStroke() override;
 
     std::shared_ptr<Triangle> getTriangle() const { return triangle_; }
+    // Returns ALL paintable facades for a node. Flat (SoA TriangleMesh) nodes live in world.objects
+    // as ONE TriangleMesh (no per-face facades) — the facade scan / base_mesh_cache would yield just
+    // the single representative, so wet-flow / seam passes saw "one triangle". This materializes the
+    // full face set from the flat mesh on demand (facade meshes fall back to the existing scan).
+    std::vector<std::shared_ptr<Triangle>> gatherNodeFacadesForPaint(const std::string& nodeName,
+                                                                     uint16_t materialId) const;
     uint16_t getMaterialID() const;
     std::string getNodeName() const;
     std::string getMaterialName() const;

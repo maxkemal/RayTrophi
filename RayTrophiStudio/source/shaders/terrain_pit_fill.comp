@@ -1,0 +1,40 @@
+// terrain_pit_fill.comp
+// Vulkan port of pitFillingKernel (erosion_kernels.cu). Eliminates micro-ponds
+// (cells significantly lower than all 4 cardinal neighbors) that cause black
+// triangles in the render mesh.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    float cellSize; float heightScale;
+    float pitThreshold; float spikeThreshold;
+    int edgeFadeWidth;
+} pc;
+
+layout(set = 0, binding = 0) buffer Height { float heightmap[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    int x = id % pc.mapWidth;
+    int y = id / pc.mapWidth;
+    if (x <= 0 || x >= pc.mapWidth - 1 || y <= 0 || y >= pc.mapHeight - 1) return;
+
+    int idx = id;
+    float h = heightmap[idx];
+
+    float hL = heightmap[idx - 1];
+    float hR = heightmap[idx + 1];
+    float hU = heightmap[idx - pc.mapWidth];
+    float hD = heightmap[idx + pc.mapWidth];
+
+    float minNeighbor = min(min(hL, hR), min(hU, hD));
+    float avgNeighbor = (hL + hR + hU + hD) * 0.25;
+
+    if (h < minNeighbor - pc.pitThreshold) {
+        heightmap[idx] = avgNeighbor * 0.5 + h * 0.5;
+    }
+}

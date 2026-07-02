@@ -1,0 +1,65 @@
+// terrain_pipe_flux.comp
+// Vulkan port of fluvialFluxKernel (erosion_kernels.cu) — step 2 of the shallow-water
+// pipe model. Computes outflow flux to the 4 cardinal neighbors from the height+water
+// difference (already properly normalized by cellSize/heightScale/gravity in the
+// original — no scale-dependent clamp bug here, unlike the droplet/stream-power
+// kernels). Purely local (each cell only writes its own 4 flux slots) — no atomics,
+// race-free by construction.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    float fixedDeltaTime; float pipeLength;
+    float cellSize; float heightScale;
+    float erosionRate; float depositionRate;
+    float evaporationRate; float gravity;
+    float sedimentCapacityConstant;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Height { float heightMap[]; };
+layout(set = 0, binding = 1) readonly buffer Water  { float waterMap[]; };
+layout(set = 0, binding = 2) buffer Flux            { float fluxMap[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    int x = id % pc.mapWidth;
+    int y = id / pc.mapWidth;
+    if (x <= 0 || x >= pc.mapWidth - 1 || y <= 0 || y >= pc.mapHeight - 1) return;
+
+    int idx = id;
+    float H = heightMap[idx] + waterMap[idx];
+
+    int idxL = idx - 1;
+    int idxR = idx + 1;
+    int idxT = idx - pc.mapWidth;
+    int idxB = idx + pc.mapWidth;
+
+    float safeHeightScale = max(1.0, pc.heightScale);
+    float dHL = (H - (heightMap[idxL] + waterMap[idxL])) * safeHeightScale;
+    float dHR = (H - (heightMap[idxR] + waterMap[idxR])) * safeHeightScale;
+    float dHT = (H - (heightMap[idxT] + waterMap[idxT])) * safeHeightScale;
+    float dHB = (H - (heightMap[idxB] + waterMap[idxB])) * safeHeightScale;
+
+    float invCellSize = 1.0 / max(0.01, pc.cellSize);
+    float fluxFactor = pc.fixedDeltaTime * pc.gravity * invCellSize;
+
+    float fL = max(0.0, fluxMap[idx*4+0] + fluxFactor * dHL);
+    float fR = max(0.0, fluxMap[idx*4+1] + fluxFactor * dHR);
+    float fT = max(0.0, fluxMap[idx*4+2] + fluxFactor * dHT);
+    float fB = max(0.0, fluxMap[idx*4+3] + fluxFactor * dHB);
+
+    float sumFlux = fL + fR + fT + fB;
+    if (sumFlux > 0.0) {
+        float K = min(1.0, (waterMap[idx] * pc.cellSize * pc.cellSize) / (sumFlux * pc.fixedDeltaTime));
+        fL *= K; fR *= K; fT *= K; fB *= K;
+    }
+
+    fluxMap[idx*4+0] = fL;
+    fluxMap[idx*4+1] = fR;
+    fluxMap[idx*4+2] = fT;
+    fluxMap[idx*4+3] = fB;
+}
