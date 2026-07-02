@@ -1,4 +1,4 @@
-﻿// ===============================================================================
+// ===============================================================================
 // SCENE UI - LIGHTS PANEL
 // ===============================================================================
 // This file handles the Lights properties panel.
@@ -68,11 +68,11 @@ void SceneUI::drawLightsContent(UIContext& ctx)
                     switch (new_type) {
                     case 0: // Point
                         new_light = std::make_shared<PointLight>(pos, col, inten);
-                        new_light->radius = light->radius;
+                        new_light->setRadius(light->getRadius());
                         break;
                     case 1: // Directional
                         new_light = std::make_shared<DirectionalLight>(dir, col, inten);
-                        new_light->radius = light->radius; // Preserves soft shadow size if applicable
+                        new_light->setRadius(light->getRadius()); // Preserves soft shadow size if applicable
                         break;
                     case 2: // Spot
                         // Use reasonable defaults for Angle/Falloff
@@ -97,7 +97,7 @@ void SceneUI::drawLightsContent(UIContext& ctx)
                         new_light->color = col;
                         new_light->intensity = inten;
                         new_light->direction = dir;
-                        new_light->radius = light->radius;
+                        new_light->setRadius(light->getRadius());
 
                         // Route through command pattern for undo/redo
                         auto cmd = std::make_unique<ChangeLightTypeCommand>(i, light, new_light);
@@ -189,8 +189,13 @@ void SceneUI::drawLightsContent(UIContext& ctx)
 
             if (light->type() == LightType::Point ||
                 light->type() == LightType::Area ||
-                light->type() == LightType::Directional)
-                if (ImGui::DragFloat("Radius", &light->radius, 0.01f, 0.01f, 100.0f)) changed = true;
+                light->type() == LightType::Directional) {
+                float rad = light->getRadius();
+                if (ImGui::DragFloat("Radius", &rad, 0.01f, 0.01f, 100.0f)) {
+                    light->setRadius(rad);
+                    changed = true;
+                }
+            }
 
             if (auto sl = std::dynamic_pointer_cast<SpotLight>(light)) {
                 float angle = sl->getAngleDegrees();
@@ -205,12 +210,14 @@ void SceneUI::drawLightsContent(UIContext& ctx)
                 }
             }
             else if (auto al = std::dynamic_pointer_cast<AreaLight>(light)) {
-                if (ImGui::DragFloat("Width", &al->width, 0.05f, 0.01f, 100.0f)) {
-                    al->u = al->u.normalize() * al->width;
+                float w = al->getWidth();
+                if (ImGui::DragFloat("Width", &w, 0.05f, 0.01f, 100.0f)) {
+                    al->setWidth(w);
                     changed = true;
                 }
-                if (ImGui::DragFloat("Height", &al->height, 0.05f, 0.01f, 100.0f)) {
-                    al->v = al->v.normalize() * al->height;
+                float h = al->getHeight();
+                if (ImGui::DragFloat("Height", &h, 0.05f, 0.01f, 100.0f)) {
+                    al->setHeight(h);
                     changed = true;
                 }
             }

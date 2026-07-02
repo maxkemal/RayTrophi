@@ -1,4 +1,4 @@
-<?xml version='1.0' encoding='utf-8'?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -136,7 +136,11 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
-  <CudaCompile><Include>$(ProjectDir)source\include;%(Include)</Include><AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions></CudaCompile></ItemDefinitionGroup>
+    <CudaCompile>
+      <Include>$(ProjectDir)source\include;%(Include)</Include>
+      <AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -152,7 +156,11 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
-  <CudaCompile><Include>$(ProjectDir)source\include;%(Include)</Include><AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions></CudaCompile></ItemDefinitionGroup>
+    <CudaCompile>
+      <Include>$(ProjectDir)source\include;%(Include)</Include>
+      <AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -177,7 +185,11 @@
       <AdditionalLibraryDirectories>$(ProjectDir)..\vcpkg\installed\x64-windows\debug\lib;$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(OIDN_ROOT)\lib;$(ASSIMP_ROOT)\lib\x64;$(EMBREE_ROOT)\lib;$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cudart64_11.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
-  <CudaCompile><Include>$(ProjectDir)source\include;%(Include)</Include><AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions></CudaCompile></ItemDefinitionGroup>
+    <CudaCompile>
+      <Include>$(ProjectDir)source\include;%(Include)</Include>
+      <AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -192,7 +204,11 @@
       <AdditionalDependencies>$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;ObjLoader.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(SDL2_ROOT)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
-  <CudaCompile><Include>$(ProjectDir)source\include;%(Include)</Include><AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions></CudaCompile></ItemDefinitionGroup>
+    <CudaCompile>
+      <Include>$(ProjectDir)source\include;%(Include)</Include>
+      <AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -228,7 +244,11 @@
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cudart64_11.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
-  <CudaCompile><Include>$(ProjectDir)source\include;%(Include)</Include><AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions></CudaCompile></ItemDefinitionGroup>
+    <CudaCompile>
+      <Include>$(ProjectDir)source\include;%(Include)</Include>
+      <AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -247,7 +267,11 @@
       <AdditionalDependencies>$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;ObjLoader.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(SDL2_ROOT)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
-  <CudaCompile><Include>$(ProjectDir)source\include;%(Include)</Include><AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions></CudaCompile></ItemDefinitionGroup>
+    <CudaCompile>
+      <Include>$(ProjectDir)source\include;%(Include)</Include>
+      <AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
+  </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="resource.h" />
     <ClInclude Include="source\src\Physics\Jolt\JoltSmokeTest.h" />
@@ -386,13 +410,11 @@
     <ClInclude Include="source\include\Transform.h" />
     <ClInclude Include="source\include\World.h" />
     <ClInclude Include="source\include\TerrainFFT.h" />
-    
     <ClInclude Include="source\include\unified_types.h" />
     <ClInclude Include="source\include\unified_brdf.h" />
     <ClInclude Include="source\include\unified_light_sampling.h" />
     <ClInclude Include="source\include\unified_converters.h" />
     <ClInclude Include="source\include\unified_cpu_adapter.h" />
-    
     <ClInclude Include="source\include\Backend\IBackend.h" />
     <ClInclude Include="source\include\Backend\RenderCapabilities.h" />
     <ClInclude Include="source\include\Backend\OptixBackend.h" />
@@ -403,7 +425,6 @@
     <ResourceCompile Include="raytracing_render_code.rc" />
   </ItemGroup>
   <ItemGroup>
-    
     <ClCompile Include="external\JoltPhysics\Jolt\AABBTree\AABBTreeBuilder.cpp">
       <ObjectFileName>$(IntDir)Jolt\</ObjectFileName>
       <ProgramDataBaseFileName>$(IntDir)Jolt\</ProgramDataBaseFileName>
@@ -1260,6 +1281,7 @@
     <ClCompile Include="source\src\Scene\AreaLight.cpp" />
     <ClCompile Include="source\src\Scene\AssetRegistry.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_mesh_overlay.cpp" />
+    <ClCompile Include="source\src\Utils\TriangleProxyConverter.cpp" />
     <ClCompile Include="source\src\Viewport\ViewportSceneSync.cpp" />
     <ClCompile Include="source\src\Utils\AssimpLoader.cpp" />
     <ClCompile Include="source\src\Render\AtmosphereLUT.cpp" />
@@ -1370,7 +1392,6 @@
     <ClCompile Include="external\imgui\imgui_widgets.cpp" />
     <ClCompile Include="external\xatlas\xatlas.cpp" Condition="Exists('$(ProjectDir)external\xatlas\xatlas.cpp')" />
     <ClCompile Include="external\xatlas\source\xatlas\xatlas.cpp" Condition="'$(RayTrophiHasXatlas)'=='true' and !Exists('$(ProjectDir)external\xatlas\xatlas.cpp')" />
-    
     <ClCompile Include="source\src\Render\unified_converters.cpp" />
   </ItemGroup>
   <ItemGroup>

@@ -1,4 +1,4 @@
-﻿// ===============================================================================
+// ===============================================================================
 // SCENE UI - SELECTION & INTERACTION
 // ===============================================================================
 // This file handles Mouse picking, Marquee selection, and Delete operations.
@@ -14,6 +14,7 @@
 #include "Backend/OptixBackend.h"
 #include "Backend/IViewportBackend.h"
 #include "HittableInstance.h"
+#include "TriangleMesh.h"  // Flat/proxy: direct-mesh selection dereferences HitRecord.tri_mesh
 #include "InstanceManager.h"
 #include "imgui.h"
 #include "ImGuizmo.h"
@@ -240,6 +241,16 @@ void setSelectionSceneNodeLocalVisibility(UIContext& ctx, const std::string& nod
             if (selectionNodeMatches(inst->node_name, nodeName)) {
                 inst->visible = visible;
             }
+            continue;
+        }
+
+        // Flat (direct SoA) node: no per-face facade, so the node name lives on the
+        // TriangleMesh itself — without this branch a flat object's own `visible` field never
+        // got updated by this scan (only the throwaway rep-facade UI handle did, elsewhere).
+        if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(world_obj)) {
+            if (selectionNodeMatches(tm->nodeName, nodeName)) {
+                tm->visible = visible;
+            }
         }
     }
 }
@@ -465,62 +476,69 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 //    come from apply_skinning below, and rigid-transforming
                 //    them first would just be overwritten (or worse, clobber
                 //    a still-valid skinned pose when the skin pass skips).
-                std::vector<std::pair<Matrix4x4, Matrix4x4>> sync_xforms;
-                std::vector<std::pair<Triangle*, uint32_t>> sync_work;
                 for (auto& [obj_name, tris] : mesh_cache) {
                     if (tris.empty()) continue;
                     if (!tris[0].second->getTransformPtr()) continue;
-                    const bool skinned_bucket = tris[0].second->hasAnySkinWeights();
-                    const Transform* lastHandle = nullptr;
-                    for (auto& pair : tris) {
-                        // Triangles with skin data get their world positions
-                        // from the apply_skinning pass below; rigid-syncing
-                        // them here would clobber a still-valid skinned pose.
-                        // Skinned nodes can still carry skinless triangles —
-                        // those keep the rigid path.
-                        if (skinned_bucket && pair.second->hasSkinData()) continue;
-                        const int object_index = pair.first;
-                        if (object_index >= 0 && static_cast<size_t>(object_index) < ctx.scene.world.objects.size()) {
-                            if (auto inst = std::dynamic_pointer_cast<HittableInstance>(ctx.scene.world.objects[object_index])) {
-                                if (inst->syncTransformFromSourceTriangles()) {
-                                    continue;
-                                }
+                    
+                    // Compare against last synced transform to avoid redundant calculations
+                    Transform* t_ptr = tris[0].second->getTransformPtr();
+                    Matrix4x4 current_xform = t_ptr->getFinal();
+                    auto cache_it = last_synced_transforms.find(obj_name);
+                    if (cache_it != last_synced_transforms.end()) {
+                        if (cache_it->second == current_xform) {
+                            continue; // Skip entire mesh if transform hasn't changed
+                        }
+                    }
+                    
+                    // Sync instance's transform first if it is a HittableInstance
+                    const int object_index = tris[0].first;
+                    if (object_index >= 0 && static_cast<size_t>(object_index) < ctx.scene.world.objects.size()) {
+                        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(ctx.scene.world.objects[object_index])) {
+                            inst->syncTransformFromSourceTriangles();
+                        }
+                    }
+
+                    if (tris[0].second->parentMesh && tris[0].second->parentMesh->geometry) {
+                        TriangleMesh* pm = tris[0].second->parentMesh.get();
+                        size_t vCount = pm->geometry->get_vertex_count();
+                        
+                        const Vec3* origP = pm->geometry->get_positions_orig();
+                        if (!origP) {
+                            tris[0].second->getOriginalVertexPosition(0);
+                            origP = pm->geometry->get_positions_orig();
+                        }
+                        const Vec3* origN = pm->geometry->get_normals_orig();
+                        if (!origN) {
+                            tris[0].second->getOriginalVertexNormal(0);
+                            origN = pm->geometry->get_normals_orig();
+                        }
+                        
+                        Vec3* positions = pm->geometry->get_attribute_data_mut<Vec3>("P");
+                        Vec3* normals = pm->geometry->get_attribute_data_mut<Vec3>("N");
+                        
+                        if (origP && origN && positions && normals) {
+                            Matrix4x4 normal_xform = t_ptr->getNormalTransform();
+                            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
+                            for (int v = 0; v < (int)vCount; ++v) {
+                                positions[v] = current_xform.transform_point(origP[v]);
+                                normals[v] = normal_xform.transform_vector(origN[v]).normalize();
+                            }
+                            
+                            for (auto& pair : tris) {
+                                pair.second->vertexPositionsDirty = true;
                             }
                         }
-                        Transform* h = pair.second->getTransformPtr();
-                        if (h != lastHandle) {
-                            Matrix4x4 finalT = pair.second->getTransformMatrix();
-                            sync_xforms.emplace_back(finalT, finalT.inverse().transpose());
-                            lastHandle = h;
+                    } else {
+                        // Fallback for standalone/legacy triangles
+                        const bool skinned_bucket = tris[0].second->hasAnySkinWeights();
+                        for (auto& pair : tris) {
+                            if (skinned_bucket && pair.second->hasSkinData()) continue;
+                            pair.second->updateTransformedVertices();
                         }
-                        sync_work.emplace_back(pair.second.get(),
-                                               (uint32_t)(sync_xforms.size() - 1));
                     }
+                    
+                    last_synced_transforms[obj_name] = current_xform;
                     ++synced_objects;
-                }
-
-                auto runSyncRange = [&](size_t s, size_t e) {
-                    for (size_t i = s; i < e; ++i) {
-                        const auto& xf = sync_xforms[sync_work[i].second];
-                        sync_work[i].first->updateTransformedVerticesWith(xf.first, xf.second);
-                    }
-                };
-                const size_t kParallelSyncThreshold = 16384;
-                unsigned syncThreads = std::thread::hardware_concurrency();
-                if (syncThreads == 0) syncThreads = 4;
-                if (sync_work.size() < kParallelSyncThreshold || syncThreads < 2) {
-                    runSyncRange(0, sync_work.size());
-                } else {
-                    const size_t chunk = (sync_work.size() + syncThreads - 1) / syncThreads;
-                    std::vector<std::future<void>> futures;
-                    futures.reserve(syncThreads);
-                    for (unsigned t = 0; t < syncThreads; ++t) {
-                        const size_t s = t * chunk;
-                        const size_t e = (std::min)(s + chunk, sync_work.size());
-                        if (s >= e) break;
-                        futures.push_back(std::async(std::launch::async, runSyncRange, s, e));
-                    }
-                    for (auto& f : futures) f.get();
                 }
             } else {
                 // Skip foliage tail: InstanceManager always appends at end
@@ -528,6 +546,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 size_t selectable_count = (foliage_count <= ctx.scene.world.objects.size())
                                               ? (ctx.scene.world.objects.size() - foliage_count)
                                               : ctx.scene.world.objects.size();
+                std::unordered_set<const std::vector<std::shared_ptr<Triangle>>*> processed_sources;
                 for (size_t si = 0; si < selectable_count; ++si) {
                     const auto& obj = ctx.scene.world.objects[si];
                     if (!obj) continue;
@@ -543,9 +562,11 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                         continue;
                     }
                     if (inst && inst->source_triangles) {
-                        for (auto& srcTri : *inst->source_triangles) {
-                            if (srcTri && srcTri->getTransformPtr()) {
-                                srcTri->updateTransformedVertices();
+                        if (processed_sources.insert(inst->source_triangles.get()).second) {
+                            for (auto& srcTri : *inst->source_triangles) {
+                                if (srcTri && srcTri->getTransformPtr()) {
+                                    srcTri->updateTransformedVertices();
+                                }
                             }
                         }
                         ++synced_objects;
@@ -1321,6 +1342,31 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                         }
                     }
                 }
+                // --- FLAT/PROXY DIRECT-MESH SELECTION ---
+                // A dense mesh stored directly in world.objects as a single TriangleMesh reports
+                // HitRecord.tri_mesh (no facade pointer). Resolve its representative facade and
+                // select it like any object so gizmo/properties/transform treat it normally.
+                else if (rec.tri_mesh) {
+                    if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+                    auto repIt = direct_mesh_rep_by_ptr.find(rec.tri_mesh);
+                    if (repIt != direct_mesh_rep_by_ptr.end() && repIt->second) {
+                        auto found_tri = repIt->second;
+                        auto idxIt = tri_to_index.find(found_tri.get());
+                        int index = (idxIt != tri_to_index.end()) ? idxIt->second : -1;
+                        const std::string& name = rec.tri_mesh->nodeName;
+                        if (ctrl_held) {
+                            SelectableItem item;
+                            item.type = SelectableType::Object;
+                            item.object = found_tri;
+                            item.object_index = index;
+                            item.name = name;
+                            if (ctx.selection.isSelected(item)) ctx.selection.removeFromSelection(item);
+                            else ctx.selection.addToSelection(item);
+                        } else {
+                            ctx.selection.selectObject(found_tri, index, name);
+                        }
+                    }
+                }
                 else if (closest_camera && closest_camera_t < closest_t) {
                     // Camera is closer than light
                     if (ctrl_held) {
@@ -1533,6 +1579,19 @@ void SceneUI::triggerDelete(UIContext& ctx) {
                 for (auto& pair : cache_it->second) {
                     pair.second->visible = false;
                     tris_for_undo.push_back(pair.second);
+                    // Flat (direct SoA) node: the flip above only hides the throwaway REP FACADE
+                    // (mesh_cache's UI handle) — the real TriangleMesh sitting in world.objects
+                    // never got touched, so the HUD flat-triangle count, a fresh backend rebuild,
+                    // and any other consumer scanning world.objects for visible geometry all kept
+                    // seeing the "deleted" object as fully alive. Hide the actual mesh directly.
+                    // A multi-material import shares one nodeName across SEVERAL TriangleMesh
+                    // objects (one per material), each with its own rep in cache_it->second —
+                    // hide every one of them via parentMesh, not just a single direct_mesh_nodes
+                    // entry (which only ever tracks the LAST material seen during cache rebuild
+                    // and would leave the other materials' geometry visible).
+                    if (pair.second->parentMesh) {
+                        pair.second->parentMesh->visible = false;
+                    }
                 }
 
                 if (!tris_for_undo.empty()) {
@@ -1723,6 +1782,21 @@ void SceneUI::triggerDelete(UIContext& ctx) {
                 g_cpu_sync_pending = true;
             }
             ctx.start_render = true;
+
+            // A regular object delete is a SOFT delete (visible=false + pending-delete tombstone;
+            // world.objects isn't physically shrunk until the next save) — so world.objects.size()
+            // doesn't change here. Several systems gate an "did the scene actually change" decision
+            // on g_scene_geometry_generation instead of (or in addition to) object count:
+            // refreshSceneGeometryStats's HUD cache, and the Solid→Rendered switch's
+            // geometryChangedSinceSolid check that decides whether to force a full Vulkan RT
+            // updateGeometry/TLAS rebuild (Main.cpp). Without this bump both silently concluded
+            // "nothing changed" after a delete and kept serving pre-delete state — the deleted
+            // object stayed in the HUD triangle count, and switching Solid→Vulkan RT after a
+            // Solid-mode delete skipped the full rebuild that would have caught up.
+            extern std::atomic<uint64_t> g_scene_geometry_generation;
+            extern bool g_geometry_dirty;
+            g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+            g_geometry_dirty = true;
         }
 
         // Update lights if any were deleted
@@ -1810,6 +1884,15 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
     std::vector<std::shared_ptr<Hittable>> allNewTriangles;
     std::vector<SelectableItem> newSelectionList;
     std::vector<PendingDuplicateCacheEntry> pendingCacheEntries;
+
+    // Flat (SoA TriangleMesh) duplicates: a flat node's mesh_cache entry holds only ONE
+    // representative facade, so the facade-clone path below would clone a single triangle that
+    // still shares the original's geometry. Flat objects are deep-copied as whole TriangleMeshes
+    // instead and committed separately (registered like rebuildMeshCache's direct-mesh path).
+    std::vector<std::shared_ptr<TriangleMesh>> newFlatMeshes;
+    std::vector<std::string> newFlatNames;
+    std::vector<std::string> newFlatSourceNames; // original node names (for incremental backend clone)
+    bool anyFlatDuplicated = false;
     
     // Temporary map for name uniqueness check
     if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
@@ -1849,6 +1932,33 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
             } while (mesh_cache.count(newName) > 0 || assignedNames.count(newName) > 0);
             
             assignedNames.insert(newName);
+
+            // ── FLAT path: object is a flat SoA TriangleMesh (no per-face facades). Deep-copy the
+            // whole mesh (independent geometry SoA via GeometryDetail's deep copy ctor) + a fresh
+            // transform, then register/commit it below. The standard geometry rebuild propagates to
+            // every backend (CPU BVH, Vulkan RT, OptiX) — no facade-specific incremental clone.
+            {
+                std::shared_ptr<TriangleMesh> srcFlat = std::dynamic_pointer_cast<TriangleMesh>(item.object);
+                if (!srcFlat) {
+                    auto dit = direct_mesh_nodes.find(targetName);
+                    if (dit != direct_mesh_nodes.end()) srcFlat = dit->second.mesh;
+                }
+                if (srcFlat && srcFlat->geometry) {
+                    auto newMesh = std::make_shared<TriangleMesh>();
+                    newMesh->geometry = std::make_shared<DNA::GeometryDetail>(*srcFlat->geometry);
+                    newMesh->nodeName = newName;
+                    auto newFlatTransform = std::make_shared<Transform>();
+                    if (srcFlat->transform) *newFlatTransform = *srcFlat->transform;
+                    newMesh->transform = newFlatTransform;
+
+                    newFlatMeshes.push_back(newMesh);
+                    newFlatNames.push_back(newName);
+                    newFlatSourceNames.push_back(targetName);
+                    anyDuplicated = true;
+                    anyFlatDuplicated = true;
+                    continue; // handled as a flat mesh; skip the facade-clone path
+                }
+            }
 
             // Create Unique Transform
             std::shared_ptr<Transform> newTransform = std::make_shared<Transform>();
@@ -1997,7 +2107,46 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
                 }
             }
         }
-        
+
+        // Commit flat (whole-TriangleMesh) duplicates: append to world.objects and register the
+        // selection caches exactly like rebuildMeshCache's direct-mesh branch (one representative
+        // facade as the UI handle), so the clones are immediately selectable / movable / pickable.
+        for (size_t fi = 0; fi < newFlatMeshes.size(); ++fi) {
+            auto& newMesh = newFlatMeshes[fi];
+            const std::string& newName = newFlatNames[fi];
+            const int idx = static_cast<int>(ctx.scene.world.objects.size());
+            ctx.scene.world.objects.push_back(newMesh);
+
+            auto rep = std::make_shared<Triangle>(newMesh, 0);
+            mesh_cache[newName] = { { idx, rep } };
+            mesh_ui_cache.push_back({ newName, mesh_cache[newName] });
+            tri_to_index[rep.get()] = idx;
+            direct_mesh_nodes[newName] = DirectMeshNode{ newMesh, idx, rep };
+            direct_mesh_rep_by_ptr[newMesh.get()] = rep;
+
+            // Feed the SAME incremental backend-clone path the facade duplicates use, so the clone
+            // appears on every backend WITHOUT a full geometry rebuild — critical for the shift+drag
+            // flow (a full rebuild mid-drag disrupts the active gizmo manipulation, leaving the clone
+            // frozen on top of the source). cache_entries.front() is the Vulkan representative.
+            PendingDuplicateCacheEntry pendingCacheEntry;
+            pendingCacheEntry.source_name = newFlatSourceNames[fi];
+            pendingCacheEntry.new_name = newName;
+            pendingCacheEntry.transform = newMesh->transform ? newMesh->transform->getFinal() : Matrix4x4();
+            pendingCacheEntry.cache_entries = { { idx, rep } };
+            pendingCacheEntries.push_back(std::move(pendingCacheEntry));
+
+            SelectableItem newItem;
+            newItem.type = SelectableType::Object;
+            newItem.object = rep; // flat selection handle is the representative facade (direct-mesh convention)
+            newItem.object_index = idx;
+            newItem.name = newName;
+            Matrix4x4 pivotMat = newMesh->transform->getPivotMatrix();
+            newItem.position = Vec3(pivotMat.m[0][3], pivotMat.m[1][3], pivotMat.m[2][3]);
+            newItem.rotation = Vec3(0, 0, 0);
+            newItem.scale = Vec3(1, 1, 1);
+            newSelectionList.push_back(newItem);
+        }
+
         sel.clearSelection();
         for (const auto& newItem : newSelectionList) {
             sel.addToSelection(newItem);

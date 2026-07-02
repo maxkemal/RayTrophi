@@ -31,6 +31,11 @@ Triangle::Triangle()
 Triangle::Triangle(std::shared_ptr<TriangleMesh> parent, uint32_t faceIdx)
     : parentMesh(parent), faceIndex(faceIdx)
 {
+    // Inherit terrain identity from the parent flat mesh (if it IS a terrain's
+    // mesh) so representative/pick-resolution facades built over a terrain
+    // still gate correctly on terrain_id (paint/select/mesh-edit checks, and
+    // terrain_brush.active_terrain_id sync from a clicked facade).
+    if (parent) terrain_id = parent->terrain_id;
     update_bounding_box();
 }
 

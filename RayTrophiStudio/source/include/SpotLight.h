@@ -1,9 +1,9 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
 * File:          SpotLight.h
-* Author:        Kemal DemirtaÅŸ
+* Author:        Kemal Demirtaş
 * Date:          June 2024
 * License:       [License Information - e.g. Proprietary / MIT / etc.]
 * =========================================================================
@@ -24,17 +24,14 @@ public:
     float pdf(const Vec3& hit_point, const Vec3& incoming_direction) const override;
     LightType type() const override;
 
-    void setAngleDegrees(float deg) { angle_degrees = deg; }
-    float getAngleDegrees() const { return angle_degrees; }
+    void setAngleDegrees(float deg);
+    float getAngleDegrees() const;
 
-    void setFalloff(float f) { falloff = f; }
-    float getFalloff() const { return falloff; }
+    void setFalloff(float f);
+    float getFalloff() const;
 
 private:
-    float angle_degrees = 45.0f;
-    float falloff = 0.1f;
+    mutable Vec3 last_sampled_point;
 };
 
 #endif // SPOTLIGHT_H
-
-

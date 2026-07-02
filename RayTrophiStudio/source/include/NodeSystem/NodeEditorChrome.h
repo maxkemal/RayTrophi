@@ -31,15 +31,15 @@ namespace NodeSystem {
     inline NodeChromeLayout buildNodeChromeLayout(const NodeBase& node, float zoom,
         float defaultWidthScreen, size_t inputCount, size_t outputCount, float titleWidthScreen) {
         NodeChromeLayout layout;
-        layout.headerHeight = scaleNodeChromeMetric(zoom, 26.0f, 22.0f, 38.0f);
-        layout.pinSpacing = scaleNodeChromeMetric(zoom, 22.0f, 16.0f, 30.0f);
-        layout.pinRadius = scaleNodeChromeMetric(zoom, 6.0f, 4.5f, 9.0f);
-        layout.cornerRadius = scaleNodeChromeMetric(zoom, 10.0f, 8.0f, 16.0f);
-        layout.bodyPadding = scaleNodeChromeMetric(zoom, 10.0f, 7.0f, 14.0f);
-        layout.shadowOffset = scaleNodeChromeMetric(zoom, 5.0f, 3.0f, 8.0f);
-        layout.collapsedPinSpacing = scaleNodeChromeMetric(zoom, 8.0f, 5.0f, 10.0f);
-        layout.toggleSize = scaleNodeChromeMetric(zoom, 18.0f, 16.0f, 22.0f);
-        layout.resizeHandleWidth = scaleNodeChromeMetric(zoom, 8.0f, 6.0f, 12.0f);
+        layout.headerHeight = scaleNodeChromeMetric(zoom, 20.0f, 16.0f, 26.0f);
+        layout.pinSpacing = scaleNodeChromeMetric(zoom, 18.0f, 14.0f, 24.0f);
+        layout.pinRadius = scaleNodeChromeMetric(zoom, 5.0f, 4.0f, 7.5f);
+        layout.cornerRadius = scaleNodeChromeMetric(zoom, 6.0f, 4.0f, 9.0f);
+        layout.bodyPadding = scaleNodeChromeMetric(zoom, 8.0f, 6.0f, 11.0f);
+        layout.shadowOffset = scaleNodeChromeMetric(zoom, 4.0f, 2.5f, 6.5f);
+        layout.collapsedPinSpacing = scaleNodeChromeMetric(zoom, 6.0f, 4.0f, 8.0f);
+        layout.toggleSize = scaleNodeChromeMetric(zoom, 15.0f, 13.0f, 18.0f);
+        layout.resizeHandleWidth = scaleNodeChromeMetric(zoom, 6.0f, 4.5f, 9.5f);
         layout.showTitle = zoom >= 0.32f;
         layout.showPinLabels = zoom >= 0.72f;
         layout.collapsed = node.collapsed;

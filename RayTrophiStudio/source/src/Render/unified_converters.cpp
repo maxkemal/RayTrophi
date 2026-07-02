@@ -52,13 +52,12 @@ UnifiedMaterial toUnifiedMaterial(const PrincipledBSDF& bsdf, int material_id) {
     unified.transmission_tex_id = bsdf.transmissionProperty.texture ? material_id * 10 + 6 : -1;
     
     // Additional properties (from private members - these may need getter functions)
-    // For now, use defaults
-    unified.subsurface = 0.0f;
-    unified.subsurface_color = Vec3f(0.0f);
-    unified.clearcoat = 0.0f;
-    unified.anisotropic = 0.0f;
-    unified.sheen = 0.0f;
-    unified.sheen_tint = 0.0f;
+    unified.subsurface = bsdf.getSubsurface();
+    unified.subsurface_color = toVec3f(bsdf.getSubsurfaceColor());
+    unified.clearcoat = bsdf.getClearcoat();
+    unified.anisotropic = bsdf.anisotropic;
+    unified.sheen = bsdf.sheen;
+    unified.sheen_tint = bsdf.sheen_tint;
     unified.artistic_albedo_response = 0.0f;
     
     return unified;

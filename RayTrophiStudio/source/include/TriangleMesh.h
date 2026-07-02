@@ -1,53 +1,42 @@
-/*
-* =========================================================================
-* Project:       RayTrophi Studio
-* Repository:    https://github.com/maxkemal/RayTrophi
-* File:          TriangleMesh.h
-* Author:        Kemal Demirtas
-* Date:          June 2026
-* License:       [License Information - e.g. Proprietary / MIT / etc.]
-* =========================================================================
-*/
-#ifndef TRIANGLE_MESH_H
-#define TRIANGLE_MESH_H
+#pragma once
 
 #include "Hittable.h"
 #include "Vec3.h"
 #include "Vec2.h"
-#include <vector>
-#include <string>
+#include "DNA/GeometryDetail.h"
 #include <memory>
+#include <string>
+#include <vector>
 
 class Transform;
 class ParallelBVHNode;
 
 /**
- * @brief Contiguous memory container for a triangle mesh.
- * 
- * Replaces the old system of having a separate `shared_ptr<Triangle>` for every single triangle.
- * Stores vertex data in SoA (Struct of Arrays) format for maximum cache coherency.
- */
+     * @brief Contiguous memory container for a triangle mesh.
+     * 
+     * Replaces the old system of having a separate `shared_ptr<Triangle>` for every single triangle.
+     * Delegates all flat geometry storage (SoA, AVX aligned, delta-tracked) to DNA::GeometryDetail.
+     */
 class TriangleMesh : public Hittable {
 public:
-    // Core geometry arrays (Struct of Arrays)
-    std::vector<Vec3> positions;
-    std::vector<Vec3> normals;
-    std::vector<Vec2> uvs;
-    
-    // Topology (Indices are flat: 0,1,2 for first triangle, 3,4,5 for second...)
-    std::vector<uint32_t> indices;
-    
-    // Material IDs (one per triangle)
-    std::vector<uint16_t> materialIDs;
+    // Core geometry database (contains flat, aligned attributes & deltas)
+    std::shared_ptr<DNA::GeometryDetail> geometry;
     
     // Metadata
     std::string nodeName;
     std::shared_ptr<Transform> transform;
 
+    // Terrain ID if this mesh IS a terrain's flat mesh (-1 otherwise). Mirrors the
+    // old per-facade Triangle::terrain_id — propagated into HitRecord::terrain_id
+    // by the CPU/Embree path (see EmbreeBVH.cpp's "facadeless" mesh group handling)
+    // so terrain hits route through TerrainObject's layer/splat shading instead of
+    // a plain PBR material lookup.
+    int terrain_id = -1;
+
     // Optional Local BVH for CPU raytracing
     std::shared_ptr<ParallelBVHNode> local_bvh;
 
-    TriangleMesh() = default;
+    TriangleMesh();
     virtual ~TriangleMesh() = default;
 
     // Hittable interface implementation
@@ -62,8 +51,11 @@ public:
     void build_local_bvh();
     
     // Vertex and Triangle counts
-    inline size_t num_vertices() const { return positions.size(); }
-    inline size_t num_triangles() const { return indices.size() / 3; }
+    inline size_t num_vertices() const { 
+        return geometry ? geometry->get_vertex_count() : 0; 
+    }
+    
+    inline size_t num_triangles() const { 
+        return geometry ? geometry->indices.size() / 3 : 0; 
+    }
 };
-
-#endif // TRIANGLE_MESH_H

@@ -145,11 +145,58 @@ namespace NodeSystem {
         void setProgress(float progress) {
             progress_.store(std::clamp(progress, 0.0f, 1.0f));
         }
-        
+
         float getProgress() const {
             return progress_.load();
         }
-        
+
+        /**
+         * @brief Total node count expected to be visited this evaluation pass
+         * (set once up front so per-node completion can derive a fraction).
+         */
+        void setTotalNodes(int total) {
+            totalNodes_.store(total);
+            completedNodes_.store(0);
+        }
+
+        /**
+         * @brief Mark a node as the one currently being computed (read by the
+         * node-editor UI to draw a per-node "active" indicator).
+         */
+        void beginNode(uint32_t nodeId) {
+            currentNodeId_.store(nodeId);
+        }
+
+        /**
+         * @brief Mark the current node as finished; advances the coarse
+         * completed/total progress fraction.
+         */
+        void endNode() {
+            int total = totalNodes_.load();
+            if (total > 0) {
+                int done = completedNodes_.fetch_add(1) + 1;
+                setProgress(static_cast<float>(done) / static_cast<float>(total));
+            }
+        }
+
+        uint32_t getCurrentNodeId() const { return currentNodeId_.load(); }
+
+        /**
+         * @brief Report FRACTIONAL progress (0..1) of the node currently being
+         * computed (between its beginNode()/endNode() calls). Blends with the
+         * coarse node-count progress so a single long-running node (e.g. an
+         * erosion droplet loop) shows visible movement instead of the progress
+         * bar sitting still for the node's entire duration. No-op if
+         * setTotalNodes() was never called (e.g. synchronous non-terrain graphs).
+         */
+        void reportNodeProgress(float fraction) {
+            int total = totalNodes_.load();
+            if (total <= 0) return;
+            int completed = completedNodes_.load();
+            float frac = std::clamp(fraction, 0.0f, 1.0f);
+            setProgress((static_cast<float>(completed) + frac) / static_cast<float>(total));
+        }
+
         /**
          * @brief Request cancellation of evaluation
          */
@@ -220,6 +267,9 @@ namespace NodeSystem {
         
         std::atomic<float> progress_{0.0f};
         std::atomic<bool> cancelled_{false};
+        std::atomic<uint32_t> currentNodeId_{0};
+        std::atomic<int> totalNodes_{0};
+        std::atomic<int> completedNodes_{0};
         
         std::chrono::high_resolution_clock::time_point startTime_;
     };

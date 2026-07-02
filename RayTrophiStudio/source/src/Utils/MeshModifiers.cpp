@@ -267,7 +267,89 @@ namespace MeshModifiers {
             return true;
         }
 
+        // Flat/proxy: materialize the POD soup straight into ONE shared TriangleMesh (SoA) instead
+        // of per-face Triangle facades — the same materialize+soup elimination CC gets, for Simple
+        // (linear) subdivision. Emitted UN-WELDED (3N, indices 0..3N-1) so the linear subdivider's
+        // exact per-corner normals are preserved (no weld = no risk of merging a flat-shaded mesh's
+        // hard edges). P_orig/N_orig are local rest; P/N are world-baked via the shared transform —
+        // matching convertFromRawArraysToMesh so every consumer (Embree/Vulkan/sculpt) reads it the
+        // same way. The editable sculpt cache welds by position itself, so 3N is fine for editing.
+        std::shared_ptr<TriangleMesh> podToFlatMesh(const std::vector<PodTri>& pod, const PodMeshMeta& meta) {
+            const size_t n = pod.size();
+            if (n == 0) return nullptr;
+            auto tm = std::make_shared<TriangleMesh>();
+            tm->transform = meta.transform;
+            tm->nodeName = meta.nodeName;
+            const size_t vCount = n * 3;
+            tm->geometry->resize_vertices(vCount);
+            tm->geometry->add_attribute<Vec3>("P");
+            tm->geometry->add_attribute<Vec3>("N");
+            tm->geometry->add_attribute<Vec3>("P_orig");
+            tm->geometry->add_attribute<Vec3>("N_orig");
+            tm->geometry->add_attribute<Vec2>("uv");
+            tm->geometry->add_attribute<uint16_t>("materialID");
+            Vec3*     P  = tm->geometry->get_attribute_data_mut<Vec3>("P");
+            Vec3*     N  = tm->geometry->get_attribute_data_mut<Vec3>("N");
+            Vec3*     Po = tm->geometry->get_attribute_data_mut<Vec3>("P_orig");
+            Vec3*     No = tm->geometry->get_attribute_data_mut<Vec3>("N_orig");
+            Vec2*     UV = tm->geometry->get_attribute_data_mut<Vec2>("uv");
+            uint16_t* M  = tm->geometry->get_attribute_data_mut<uint16_t>("materialID");
+            tm->geometry->indices.resize(vCount);
+            Matrix4x4 finalT = Matrix4x4::identity(), normalT = Matrix4x4::identity();
+            if (meta.transform) { finalT = meta.transform->getFinal(); normalT = meta.transform->getNormalTransform(); }
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static) if(n >= 2048)
+            for (int i = 0; i < (int)n; ++i) {
+                const PodTri& t = pod[(size_t)i];
+                for (int c = 0; c < 3; ++c) {
+                    const size_t v = (size_t)i * 3 + (size_t)c;
+                    const Vec3 lp = t.v[c].pos;
+                    Vec3 ln = t.v[c].nrm;
+                    const float nl = ln.length();
+                    ln = (nl > 1e-6f) ? (ln / nl) : Vec3(0.0f, 1.0f, 0.0f);
+                    if (Po) Po[v] = lp;
+                    if (No) No[v] = ln;
+                    if (UV) UV[v] = t.v[c].uv;
+                    if (M)  M[v]  = t.mat;
+                    const Vec3 wp = finalT.transform_point(lp);
+                    Vec3 wn = normalT.transform_vector(ln);
+                    const float wl = wn.length();
+                    if (P) P[v] = wp;
+                    if (N) N[v] = (wl > 1e-6f) ? (wn / wl) : Vec3(0.0f, 1.0f, 0.0f);
+                    tm->geometry->indices[v] = (uint32_t)v;
+                }
+            }
+            return tm;
+        }
+
+        // Simple (linear / FlatSubdivision) subdivide that returns ONE flat TriangleMesh. Mirrors
+        // SubdivideSubD's POD pipeline (GPU when available, else CPU) then materializes flat.
+        std::shared_ptr<TriangleMesh> subdivideSimpleToFlatMesh(
+                const std::vector<std::shared_ptr<Triangle>>& inputMesh, int levels) {
+            PodMeshMeta meta;
+            std::vector<PodTri> mesh = trianglesToPod(inputMesh, meta);
+            if (mesh.empty()) return nullptr;
+            if (levels > 0) {
+                size_t finalCount = mesh.size();
+                for (int i = 0; i < levels; ++i) finalCount *= 4;
+                const bool gpuOk = g_gpu_subdivide_enabled
+                                && finalCount >= kGpuSubdivideMinTris
+                                && subdivideLinearGpu(mesh, levels);
+                if (!gpuOk) {
+                    for (int level = 0; level < levels; ++level) subdividePodOnce(mesh);
+                }
+            }
+            return podToFlatMesh(mesh, meta);
+        }
+
     } // namespace
+
+    std::shared_ptr<TriangleMesh> facadesToFlatMesh(const std::vector<std::shared_ptr<Triangle>>& facades) {
+        if (facades.empty()) return nullptr;
+        PodMeshMeta meta;
+        std::vector<PodTri> pod = trianglesToPod(facades, meta);
+        if (pod.empty()) return nullptr;
+        return podToFlatMesh(pod, meta);
+    }
 
     std::vector<std::shared_ptr<Triangle>> SubdivideSubD(const std::vector<std::shared_ptr<Triangle>>& inputMesh, int levels) {
         if (levels <= 0) return inputMesh;
@@ -1088,105 +1170,121 @@ namespace MeshModifiers {
                 }
             }
 
-            // Accumulate weights per output vertex. Each output row is built independently
-            // (the three passes below write disjoint row ranges, so they parallelize cleanly);
-            // duplicate input ids inside a row are merged at flatten time. This replaces a
-            // per-row std::map<int,float> — a red-black-tree node allocation per weight, which
-            // was the dominant single-threaded cost AND a multi-GB transient-heap spike once the
-            // final level reaches millions of rows — with a flat append + sort/merge. Output is
-            // numerically equivalent (ascending idx, summed weights; FP summation order may
-            // differ negligibly, same as the existing GPU refine path).
+            // Accumulate weights per output vertex into ONE flat scratch (CSR), not a per-row
+            // std::vector. Each output row is built independently; duplicate input ids inside a
+            // row are merged after the fill. This evolved from a per-row std::map<int,float>
+            // (red-black-tree node per weight — the original single-threaded cost + multi-GB heap
+            // spike) → a per-row std::vector<pair> (still ONE heap allocation PER output vertex:
+            // ~12.6M tiny allocs at the final level, ~700MB of vector overhead, and the dominant
+            // remaining allocation churn) → this flat scratch: an exact pre-count sizes a single
+            // contiguous buffer, three passes fill disjoint slices in parallel, then each slice is
+            // sorted/merged in place. Output is numerically equivalent (ascending idx, summed
+            // weights; FP summation order may differ negligibly, same as the existing GPU path).
             CCSubdivPlan::StencilLevel sl;
             sl.inCount = V;
             sl.outCount = V + E + Fn;
             const int outCount = sl.outCount;
-            std::vector<std::vector<std::pair<int, float>>> rows(outCount);
 
-            // Vertex points [0, V): same classification as newVertPt in CatmullClarkSubD.
-            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(dynamic, 512) if(V >= 4096)
-            for (int v = 0; v < V; ++v) {
-                std::vector<std::pair<int, float>>& r = rows[v];
-                if (vFaceCnt[v] == 0 || vSharpCnt[v] >= 3) {
-                    r.emplace_back(v, 1.0f);                          // corner / isolated → fixed
-                } else if (vSharpCnt[v] == 2) {
-                    r.emplace_back(v, 6.0f / 8.0f);
-                    r.emplace_back(vSharpNbr[v][0], 1.0f / 8.0f);
-                    r.emplace_back(vSharpNbr[v][1], 1.0f / 8.0f);
-                } else {
-                    const float n = static_cast<float>(vFaceCnt[v]);
-                    r.emplace_back(v, (n - 3.0f) / n);               // P[v] term
-                    // Q/n = (1/n^2) * sum_f (1/k_f) * sum_{vi in f} P[vi]
-                    for (int f : incidentFaces[v]) {
-                        const int k = static_cast<int>(F[f].size());
-                        const float wf = 1.0f / (n * n * static_cast<float>(k));
-                        for (int vi : F[f]) r.emplace_back(vi, wf);
+            // Single source of truth for a row's (idx, weight) entries. The count pass runs it with
+            // a counting sink, the fill pass with a writing sink — they can never drift out of sync.
+            auto genRow = [&](int o, auto&& emit) {
+                if (o < V) {
+                    const int v = o;                                 // vertex point: newVertPt classes
+                    if (vFaceCnt[v] == 0 || vSharpCnt[v] >= 3) {
+                        emit(v, 1.0f);                               // corner / isolated → fixed
+                    } else if (vSharpCnt[v] == 2) {
+                        emit(v, 6.0f / 8.0f);
+                        emit(vSharpNbr[v][0], 1.0f / 8.0f);
+                        emit(vSharpNbr[v][1], 1.0f / 8.0f);
+                    } else {
+                        const float n = static_cast<float>(vFaceCnt[v]);
+                        emit(v, (n - 3.0f) / n);                     // P[v] term
+                        for (int f : incidentFaces[v]) {             // Q/n
+                            const int k = static_cast<int>(F[f].size());
+                            const float wf = 1.0f / (n * n * static_cast<float>(k));
+                            for (int vi : F[f]) emit(vi, wf);
+                        }
+                        const int ec = vEdgeCnt[v];                  // 2R/n
+                        if (ec > 0) {
+                            const float we = 1.0f / (n * static_cast<float>(ec));
+                            for (int w : incidentNbr[v]) { emit(v, we); emit(w, we); }
+                        }
                     }
-                    // 2R/n = (1/(n*ec)) * sum_w (P[v] + P[w])
-                    const int ec = vEdgeCnt[v];
-                    if (ec > 0) {
-                        const float we = 1.0f / (n * static_cast<float>(ec));
-                        for (int w : incidentNbr[v]) { r.emplace_back(v, we); r.emplace_back(w, we); }
+                } else if (o < V + E) {
+                    const int i = o - V;                             // edge point: (1-σ)smooth + σ mid
+                    const EdgeKey& e = edgeList[i];
+                    const float sigma = edgeSig[i];
+                    const int f0 = edgeFaces[i][0], f1 = edgeFaces[i][1];
+                    if (f1 < 0) {                                    // boundary (nf < 2)
+                        emit(e.a, 0.5f); emit(e.b, 0.5f);
+                    } else {
+                        const float sm = 1.0f - sigma;
+                        emit(e.a, sm * 0.25f + sigma * 0.5f);
+                        emit(e.b, sm * 0.25f + sigma * 0.5f);
+                        { const int k0 = static_cast<int>(F[f0].size()); const float w = sm * 0.25f / static_cast<float>(k0); for (int vi : F[f0]) emit(vi, w); }
+                        { const int k1 = static_cast<int>(F[f1].size()); const float w = sm * 0.25f / static_cast<float>(k1); for (int vi : F[f1]) emit(vi, w); }
                     }
-                }
-            }
-
-            // Edge points [V, V+E): (1-σ)*smoothEP + σ*mid, boundary = mid.
-            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(dynamic, 512) if(E >= 4096)
-            for (int i = 0; i < E; ++i) {
-                std::vector<std::pair<int, float>>& r = rows[V + i];
-                const EdgeKey& e = edgeList[i];
-                const float sigma = edgeSig[i];
-                const int f0 = edgeFaces[i][0], f1 = edgeFaces[i][1];
-                if (f1 < 0) {                                        // boundary (nf < 2)
-                    r.emplace_back(e.a, 0.5f); r.emplace_back(e.b, 0.5f);
                 } else {
-                    const float sm = 1.0f - sigma;
-                    r.emplace_back(e.a, sm * 0.25f + sigma * 0.5f);
-                    r.emplace_back(e.b, sm * 0.25f + sigma * 0.5f);
-                    { const int k0 = static_cast<int>(F[f0].size()); const float w = sm * 0.25f / static_cast<float>(k0); for (int vi : F[f0]) r.emplace_back(vi, w); }
-                    { const int k1 = static_cast<int>(F[f1].size()); const float w = sm * 0.25f / static_cast<float>(k1); for (int vi : F[f1]) r.emplace_back(vi, w); }
+                    const int f = o - (V + E);                       // face point: centroid
+                    const int k = static_cast<int>(F[f].size());
+                    const float w = 1.0f / static_cast<float>(k);
+                    for (int vi : F[f]) emit(vi, w);
                 }
+            };
+
+            // Pass 1: exact pre-dedup entry count per row → flat-scratch offsets (one allocation).
+            std::vector<int> rawLen(outCount, 0);
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(dynamic, 512) if(outCount >= 4096)
+            for (int o = 0; o < outCount; ++o) {
+                int c = 0;
+                genRow(o, [&](int, float) { ++c; });
+                rawLen[o] = c;
+            }
+            std::vector<int64_t> rawOff(static_cast<size_t>(outCount) + 1, 0);
+            for (int o = 0; o < outCount; ++o) rawOff[o + 1] = rawOff[o] + rawLen[o];
+            std::vector<std::pair<int, float>> scratch(static_cast<size_t>(rawOff[outCount]));
+
+            // Pass 2: fill each row's disjoint slice (parallel, no contention).
+            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(dynamic, 512) if(outCount >= 4096)
+            for (int o = 0; o < outCount; ++o) {
+                int64_t p = rawOff[o];
+                genRow(o, [&](int idx, float w) { scratch[static_cast<size_t>(p++)] = { idx, w }; });
             }
 
-            // Face points [V+E, V+E+Fn): centroid.
-            #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static) if(Fn >= 4096)
-            for (int f = 0; f < Fn; ++f) {
-                std::vector<std::pair<int, float>>& r = rows[faceBase + f];
-                const int k = static_cast<int>(F[f].size());
-                const float w = 1.0f / static_cast<float>(k);
-                for (int vi : F[f]) r.emplace_back(vi, w);
-            }
-
-            // Sort + merge duplicate input ids per row (rows are independent → parallel), then
-            // prefix-sum the row lengths and flatten to CSR (idx ascending within each row).
+            // Pass 3: sort + merge duplicate input ids within each slice, in place. rowLen = merged.
             std::vector<int> rowLen(outCount, 0);
             #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(dynamic, 512) if(outCount >= 4096)
             for (int o = 0; o < outCount; ++o) {
-                std::vector<std::pair<int, float>>& r = rows[o];
-                if (r.empty()) continue;
-                std::sort(r.begin(), r.end(),
+                const int64_t s = rawOff[o], e = rawOff[o + 1];
+                if (e <= s) continue;
+                std::sort(scratch.begin() + s, scratch.begin() + e,
                           [](const std::pair<int, float>& a, const std::pair<int, float>& b) { return a.first < b.first; });
-                int wpos = 0;
-                for (size_t rd = 0; rd < r.size(); ) {
-                    const int key = r[rd].first;
+                int64_t wpos = s;
+                for (int64_t rd = s; rd < e; ) {
+                    const int key = scratch[static_cast<size_t>(rd)].first;
                     float acc = 0.0f;
-                    size_t rr = rd;
-                    while (rr < r.size() && r[rr].first == key) { acc += r[rr].second; ++rr; }
-                    r[wpos++] = { key, acc };
+                    int64_t rr = rd;
+                    while (rr < e && scratch[static_cast<size_t>(rr)].first == key) { acc += scratch[static_cast<size_t>(rr)].second; ++rr; }
+                    scratch[static_cast<size_t>(wpos++)] = { key, acc };
                     rd = rr;
                 }
-                r.resize(wpos);
-                rowLen[o] = wpos;
+                rowLen[o] = static_cast<int>(wpos - s);
             }
 
+            // Prefix-sum merged lengths → CSR offsets, then compact each slice into the output.
             sl.off.assign(sl.outCount + 1, 0);
             for (int o = 0; o < outCount; ++o) sl.off[o + 1] = sl.off[o] + rowLen[o];
             sl.idx.resize(sl.off[sl.outCount]);
             sl.w.resize(sl.off[sl.outCount]);
             #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(dynamic, 512) if(outCount >= 4096)
             for (int o = 0; o < outCount; ++o) {
+                const int64_t src = rawOff[o];
                 int p = sl.off[o];
-                for (const auto& kv : rows[o]) { sl.idx[p] = kv.first; sl.w[p] = kv.second; ++p; }
+                const int len = rowLen[o];
+                for (int j = 0; j < len; ++j) {
+                    const auto& kv = scratch[static_cast<size_t>(src + j)];
+                    sl.idx[p] = kv.first; sl.w[p] = kv.second; ++p;
+                }
             }
             plan.levels.push_back(std::move(sl));
 
@@ -1652,7 +1750,8 @@ namespace MeshModifiers {
     std::vector<std::shared_ptr<Triangle>> catmullClarkSubDStencil(
             const std::vector<std::shared_ptr<Triangle>>& inputMesh,
             int levels,
-            const EdgeCreaseFn& creaseLookup) {
+            const EdgeCreaseFn& creaseLookup,
+            std::shared_ptr<TriangleMesh>* outMesh) {
         if (inputMesh.empty() || levels <= 0) return inputMesh;
 
         std::shared_ptr<Transform> sharedTransform;
@@ -1687,7 +1786,8 @@ namespace MeshModifiers {
             plan.triFace,
             sharedTransform,
             nodeName,
-            out);
+            out,
+            outMesh);   // flip: when set, emits one TriangleMesh and skips facade materialization
 
         {
             const auto _ccT3 = std::chrono::high_resolution_clock::now();
@@ -1755,7 +1855,37 @@ namespace MeshModifiers {
         return (it != edgeCreases.end()) ? it->second : 0.0f;
     }
 
-    std::vector<std::shared_ptr<Triangle>> ModifierStack::evaluate(const std::vector<std::shared_ptr<Triangle>>& baseMesh, bool forRender) const {
+    std::vector<std::shared_ptr<Triangle>> ModifierStack::evaluate(const std::vector<std::shared_ptr<Triangle>>& baseMesh, bool forRender, std::shared_ptr<TriangleMesh>* outMesh) const {
+        // Flat/proxy migration flip: a single enabled Catmull-Clark modifier can emit ONE shared
+        // TriangleMesh (no per-face facades) — the materialize+soup win. Restricted to the
+        // single-CC case (the common "tek subdivide" stack) so multi-modifier chaining, which
+        // consumes facades between stages, keeps the proven facade path.
+        if (outMesh) {
+            *outMesh = nullptr;
+            int enabledCount = 0;
+            const ModifierData* only = nullptr;
+            for (const auto& m : modifiers) { if (m.enabled) { ++enabledCount; only = &m; } }
+            if (enabledCount == 1 && only && only->type == ModifierType::CatmullClark) {
+                const int lvl = forRender ? only->renderLevels : only->levels;
+                EdgeCreaseFn creaseFn;
+                if (!edgeCreases.empty()) {
+                    creaseFn = [this](const Vec3& a, const Vec3& b) { return getEdgeCrease(a, b); };
+                }
+                catmullClarkSubDStencil(baseMesh, lvl, creaseFn, outMesh);
+                return {}; // facades intentionally not produced; caller uses *outMesh
+            }
+            // Simple (linear / FlatSubdivision) — the "Simple" subdivision mode — also emits ONE
+            // flat TriangleMesh (no facades), matching the Catmull-Clark fast path above.
+            if (enabledCount == 1 && only && only->type == ModifierType::FlatSubdivision) {
+                const int lvl = forRender ? only->renderLevels : only->levels;
+                *outMesh = subdivideSimpleToFlatMesh(baseMesh, lvl);
+                if (*outMesh) {
+                    return {}; // emitted one flat TriangleMesh; caller uses *outMesh
+                }
+                // else: conversion unavailable — fall through to the facade path below
+            }
+        }
+
         std::vector<std::shared_ptr<Triangle>> currentMesh = baseMesh;
 
         // Apply modifiers sequentially

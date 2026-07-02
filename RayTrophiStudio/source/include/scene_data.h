@@ -22,6 +22,11 @@
 #include "SimulationWorld.h"
 #include "SimulationComputeVulkanContext.h"
 #include <thread>
+#include <atomic>
+
+// Global atomics to track and cancel active background SDF bakes during scene destruction/clearance.
+inline std::atomic<bool> g_cancel_sdf_bakes{false};
+inline std::atomic<int> g_active_sdf_bakes{0};
 #include "Fluid/FluidObject.h"
 #include "Fluid/FluidSimulationSystem.h"
 #include "RigidBodySystem.h"
@@ -176,8 +181,17 @@ struct SceneData {
         }
 
         auto matchesPendingDelete = [&](const std::shared_ptr<Hittable>& obj) -> bool {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            return tri && isEditorPendingDeleteObjectName(tri->getNodeName());
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                return isEditorPendingDeleteObjectName(tri->getNodeName());
+            }
+            // Flat (direct SoA) node: no per-face facade, so without this branch a deleted flat
+            // object never matched here and stayed physically in world.objects forever (even
+            // across saves) — only hidden via visible=false, still counted by anything that
+            // scans world.objects without checking visibility (e.g. the HUD triangle stats).
+            if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                return isEditorPendingDeleteObjectName(tm->nodeName);
+            }
+            return false;
         };
 
         const size_t beforeCount = world.objects.size();
@@ -667,6 +681,19 @@ struct SceneData {
         std::vector<std::array<Vec3, 3>> rest_local_pos;
         std::vector<std::array<Vec3, 3>> rest_local_nrm;
         uint64_t geometry_generation = 0;             // g_scene_geometry_generation when captured
+        // Flat (direct SoA) rigid body: a flat TriangleMesh-as-Hittable has no per-face facades, so
+        // `tris` is empty and the bake writes straight into the mesh's GeometryDetail. flat_mesh is
+        // the non-owning mesh; flat_rest_pos/nrm are the per-SoA-vertex rest LOCAL pos/normal.
+        class TriangleMesh* flat_mesh = nullptr;
+        std::vector<Vec3> flat_rest_pos;
+        std::vector<Vec3> flat_rest_nrm;
+        // Flat SOFT/cloth body: a flat mesh straight from facadesToFlatMesh is an UNWELDED triangle
+        // soup (indices[v]=v, vc = 3*tris). The cloth solver needs a CONNECTED mesh (shared verts)
+        // or every triangle is 3 free particles with no constraints. So the flat soft path welds by
+        // rest position into `rest_world_unique` (+ remaps corner_unique to those unique ids) and
+        // keeps this per-SoA-vertex -> unique map to scatter the welded solver result back onto every
+        // duplicate SoA vertex. Empty for the rigid flat bake (which moves the whole mesh, no weld).
+        std::vector<uint32_t> flat_soa_to_unique;
     };
     std::unordered_map<std::string, SoftWeldCache> soft_weld_cache_;
     // Rest-pose cache for RIGID bodies that render via vertex baking (see
@@ -1120,10 +1147,17 @@ struct SceneData {
             rigid_body_system->setPivotGetter(
                 [this](const std::string& node, Matrix4x4& out_pivot) -> bool {
                     for (auto& obj : world.objects) {
-                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                        if (tri && tri->getNodeName() == node) {
-                            if (Transform* th = tri->getTransformPtr()) {
-                                out_pivot = th->getPivotMatrix();
+                        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                            if (tri->getNodeName() == node) {
+                                if (Transform* th = tri->getTransformPtr()) {
+                                    out_pivot = th->getPivotMatrix();
+                                    return true;
+                                }
+                            }
+                        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                            // Flat (direct SoA) mesh: pivot lives on its own Transform handle.
+                            if (tm->nodeName == node && tm->transform) {
+                                out_pivot = tm->transform->getPivotMatrix();
                                 return true;
                             }
                         }
@@ -1143,11 +1177,20 @@ struct SceneData {
                     };
                     bool changed = false;
                     for (auto& obj : world.objects) {
-                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                        if (tri && tri->getNodeName() == node) {
-                            if (Transform* th = tri->getTransformPtr()) {
-                                if (!matrixEqual(th->getPivotMatrix(), pivot)) {
-                                    th->setPivotMatrix(pivot);
+                        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                            if (tri->getNodeName() == node) {
+                                if (Transform* th = tri->getTransformPtr()) {
+                                    if (!matrixEqual(th->getPivotMatrix(), pivot)) {
+                                        th->setPivotMatrix(pivot);
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                            // Flat (direct SoA) mesh: pivot lives on its own Transform handle.
+                            if (tm->nodeName == node && tm->transform) {
+                                if (!matrixEqual(tm->transform->getPivotMatrix(), pivot)) {
+                                    tm->transform->setPivotMatrix(pivot);
                                     changed = true;
                                 }
                             }
@@ -1425,7 +1468,7 @@ struct SceneData {
     // frame cache (deterministic re-sim) so the shatter replays correctly on a
     // loop / rewind instead of fighting cached pre-break (static) poses.
     bool hasBreakableBodies() const {
-        for (const auto& rb : rigid_bodies) if (rb.breakable) return true;
+        for (const auto& rb : rigid_bodies) if (rb.getBreakable()) return true;
         return false;
     }
 
@@ -1457,10 +1500,10 @@ struct SceneData {
         for (const auto& node : shard_nodes) {
             RayTrophiSim::RigidBodyObject* rb = addRigidBodyForObject(node, /*dynamic=*/false);
             if (!rb) continue;
-            rb->breakable = true;
+            rb->setBreakable(true);
             rb->broken = false;
-            rb->fracture_group = group;
-            rb->break_impulse = threshold;
+            rb->setFractureGroup(group);
+            rb->setBreakImpulse(threshold);
             rb->shape = RayTrophiSim::RigidBodyShape::Mesh;   // convex hull when broken
             rb->motion_type = RayTrophiSim::RigidBodyMotionType::Static;
             rb->dynamic = false;
@@ -1480,7 +1523,7 @@ struct SceneData {
                             const Vec3& impact_dir, float strength) {
         bool any = false;
         for (auto& rb : rigid_bodies) {
-            if (!rb.breakable || rb.broken || rb.fracture_group != group) continue;
+            if (!rb.getBreakable() || rb.broken || rb.getFractureGroup() != group) continue;
             rb.broken = true;
             rb.motion_type = RayTrophiSim::RigidBodyMotionType::Dynamic;
             rb.dynamic = true;
@@ -1504,7 +1547,7 @@ struct SceneData {
         Vec3 sum(0.0f, 0.0f, 0.0f);
         int n = 0;
         for (auto& rb : rigid_bodies)
-            if (rb.breakable && !rb.broken && rb.fracture_group == group) {
+            if (rb.getBreakable() && !rb.broken && rb.getFractureGroup() == group) {
                 sum += nodeWorldCenter(rb.source_name);
                 ++n;
             }
@@ -1522,16 +1565,16 @@ struct SceneData {
         auto findBreakable = [&](const std::string& src) -> RayTrophiSim::RigidBodyObject* {
             if (src.empty()) return nullptr;
             for (auto& rb : rigid_bodies)
-                if (rb.breakable && !rb.broken && rb.source_name == src) return &rb;
+                if (rb.getBreakable() && !rb.broken && rb.source_name == src) return &rb;
             return nullptr;
         };
         for (const auto& ev : events) {
             RayTrophiSim::RigidBodyObject* hit = findBreakable(ev.source_a);
             Vec3 dir = ev.normal;
             if (!hit) { hit = findBreakable(ev.source_b); dir = ev.normal * -1.0f; }
-            if (!hit || ev.impulse < hit->break_impulse) continue;
+            if (!hit || ev.impulse < hit->getBreakImpulse()) continue;
             const float strength = std::max(2.0f, ev.impulse * 0.5f);
-            breakFractureGroup(hit->fracture_group, ev.point, dir, strength);
+            breakFractureGroup(hit->getFractureGroup(), ev.point, dir, strength);
         }
     }
 
@@ -1540,7 +1583,7 @@ struct SceneData {
     void resetFractureToIntact() {
         bool any = false;
         for (auto& rb : rigid_bodies) {
-            if (!rb.breakable) continue;
+            if (!rb.getBreakable()) continue;
             rb.broken = false;
             rb.motion_type = RayTrophiSim::RigidBodyMotionType::Static;
             rb.dynamic = false;
@@ -2730,7 +2773,7 @@ struct SceneData {
             // Breakable bodies flip motion_type/dynamic when they shatter at runtime;
             // hash the authored-static intent so a break doesn't invalidate the fluid
             // coupling cache (and re-bake/reset). See computeSimConfigSignature.
-            if (rb.breakable) {
+            if (rb.getBreakable()) {
                 h = mix(h, 0xB4EAC0DEull);
             } else {
                 h = mix(h, static_cast<uint64_t>(rb.motion_type));
@@ -2758,16 +2801,12 @@ struct SceneData {
             h = mix(h, rb.lock_rotation_x ? 1ull : 0ull);
             h = mix(h, rb.lock_rotation_y ? 1ull : 0ull);
             h = mix(h, rb.lock_rotation_z ? 1ull : 0ull);
-            // Fluid-coupling params: a coupled body that drags/floats differently
-            // pushes the fluid differently, so editing these must re-bake the FLUID
-            // too (not just the rigid) — otherwise the rigid replays against a stale
-            // fluid and diverges.
             h = mix(h, rb.fluid_coupling_enabled ? 1ull : 0ull);
-            h = mix(h, qf(rb.buoyancy_scale));
-            h = mix(h, qf(rb.fluid_density));
-            h = mix(h, qf(rb.fluid_drag));
-            h = mix(h, qf(rb.fluid_quadratic_drag));
-            h = mix(h, qf(rb.fluid_angular_drag));
+            h = mix(h, qf(rb.getBuoyancyScale()));
+            h = mix(h, qf(rb.getFluidDensity()));
+            h = mix(h, qf(rb.getFluidDrag()));
+            h = mix(h, qf(rb.getFluidQuadraticDrag()));
+            h = mix(h, qf(rb.getFluidAngularDrag()));
             // Cached spawn pose (see computeSimConfigSignature) — O(1), no scan.
             {
                 const Vec3 t = rb.initial_pivot.getTranslation();
@@ -2884,14 +2923,10 @@ struct SceneData {
         for (const auto& rb : rigid_bodies) {
             for (char c : rb.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
             for (char c : rb.collider_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
-            // A breakable shard flips motion_type/dynamic at runtime when it shatters.
-            // Hash its AUTHORED (always-static) intent + the fracture authoring fields
-            // instead, so the live break doesn't look like a user edit and trigger a
-            // cache reset — which would un-break it → infinite reset/flicker loop.
-            if (rb.breakable) {
+            if (rb.getBreakable()) {
                 h = mix(h, 0xB4EAC0DEull);  // stable "breakable, authored static" marker
-                h = mix(h, qf(rb.break_impulse));
-                for (char c : rb.fracture_group) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
+                h = mix(h, qf(rb.getBreakImpulse()));
+                for (char c : rb.getFractureGroup()) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
             } else {
                 h = mix(h, static_cast<uint64_t>(rb.motion_type));
                 h = mix(h, rb.dynamic ? 1ull : 0ull);
@@ -2919,18 +2954,18 @@ struct SceneData {
             h = mix(h, rb.lock_rotation_y ? 1ull : 0ull);
             h = mix(h, rb.lock_rotation_z ? 1ull : 0ull);
             h = mix(h, rb.fluid_coupling_enabled ? 1ull : 0ull);
-            h = mix(h, qf(rb.buoyancy_scale));
-            h = mix(h, qf(rb.fluid_density));
-            h = mix(h, qf(rb.fluid_drag));
-            h = mix(h, qf(rb.fluid_quadratic_drag));
-            h = mix(h, qf(rb.fluid_angular_drag));
+            h = mix(h, qf(rb.getBuoyancyScale()));
+            h = mix(h, qf(rb.getFluidDensity()));
+            h = mix(h, qf(rb.getFluidDrag()));
+            h = mix(h, qf(rb.getFluidQuadraticDrag()));
+            h = mix(h, qf(rb.getFluidAngularDrag()));
             h = mix(h, rb.enabled ? 1ull : 0ull);
             // Force-field coupling knobs (drive every body kind).
             h = mix(h, rb.force_field_enabled ? 1ull : 0ull);
             h = mix(h, qf(rb.force_field_scale));
             // Cloth/soft pins: editing/adding/removing a pin must rebuild the body.
-            h = mix(h, rb.soft_pins.size());
-            for (const auto& pin : rb.soft_pins) {
+            h = mix(h, rb.getSoftPins().size());
+            for (const auto& pin : rb.getSoftPins()) {
                 h = mix(h, pin.enabled ? 1ull : 0ull);
                 h = mix(h, qf(pin.radius));
                 h = mix(h, qf(pin.center.x)); h = mix(h, qf(pin.center.y)); h = mix(h, qf(pin.center.z));
@@ -2940,17 +2975,17 @@ struct SceneData {
             // is keyed off these). Cheap to fold in here.
             h = mix(h, static_cast<uint64_t>(rb.kind));
             if (rb.kind != RayTrophiSim::BodyKind::Rigid) {
-                h = mix(h, qf(rb.soft_stiffness));
-                h = mix(h, qf(rb.soft_compliance));
-                h = mix(h, qf(rb.soft_pressure));
-                h = mix(h, qf(rb.soft_damping));
-                h = mix(h, qf(rb.soft_vertex_radius));
-                h = mix(h, static_cast<uint64_t>(rb.soft_iterations));
-                h = mix(h, qf(rb.soft_friction));
-                h = mix(h, qf(rb.soft_restitution));
-                h = mix(h, qf(rb.soft_gravity_factor));
-                h = mix(h, qf(rb.soft_mass));
-                h = mix(h, rb.soft_two_sided ? 1ull : 0ull);
+                h = mix(h, qf(rb.getSoftStiffness()));
+                h = mix(h, qf(rb.getSoftCompliance()));
+                h = mix(h, qf(rb.getSoftPressure()));
+                h = mix(h, qf(rb.getSoftDamping()));
+                h = mix(h, qf(rb.getSoftVertexRadius()));
+                h = mix(h, static_cast<uint64_t>(rb.getSoftIterations()));
+                h = mix(h, qf(rb.getSoftFriction()));
+                h = mix(h, qf(rb.getSoftRestitution()));
+                h = mix(h, qf(rb.getSoftGravityFactor()));
+                h = mix(h, qf(rb.getSoftMass()));
+                h = mix(h, rb.getSoftTwoSided() ? 1ull : 0ull);
             }
             // CACHED spawn pose (rb.initial_pivot) so MOVING a rigid changes the
             // signature without a per-tick world scan — O(1) here. The cache is
@@ -3121,6 +3156,90 @@ struct SceneData {
         extern std::atomic<uint64_t> g_scene_geometry_generation;
         const uint64_t current_gen = g_scene_geometry_generation.load(std::memory_order_acquire);
 
+        // Flat (direct SoA) node: no per-face facades, so the facade weld below would find no
+        // triangles and bail (soft/cloth body never created, no pins). We must still WELD by rest
+        // position: a flat mesh from facadesToFlatMesh is an UNWELDED soup (indices[v]=v, vc=3*tris),
+        // and handing that to the cloth solver makes every triangle 3 free particles (no shared edge
+        // = no constraint = unpinned verts free-fall, no collision — the reported bug). The welded
+        // unique set drives the solver; flat_soa_to_unique scatters its result back to every duplicate
+        // SoA vertex. flat_rest_pos/nrm keep the per-SoA-vertex authored rest for the reset path.
+        if (TriangleMesh* fm = getFlatNodeMesh(node)) {
+            if (!fm->geometry) return false;
+            DNA::GeometryDetail* g = fm->geometry.get();
+            const size_t vc = g->get_vertex_count();
+            const auto& idx = g->indices;
+            if (vc == 0 || idx.size() < 3) return false;
+
+            const Matrix4x4 xf = fm->transform ? fm->transform->getFinal() : Matrix4x4::identity();
+            const Vec3* Po = g->get_attribute_data<Vec3>("P_orig");
+            if (!Po) return false;
+
+            auto it = soft_weld_cache_.find(node);
+            const bool have_rest = (it != soft_weld_cache_.end() &&
+                                    it->second.flat_mesh == fm &&
+                                    it->second.flat_rest_pos.size() == vc &&
+                                    it->second.flat_soa_to_unique.size() == vc &&
+                                    !it->second.rest_world_unique.empty());
+            if (have_rest) {
+                SoftWeldCache& cache = it->second;
+                if (cache.geometry_generation == current_gen) return true; // unchanged — reuse
+                // Topology unchanged, generation bumped (almost always a sim write-back): keep the
+                // AUTHORED rest local + weld, only refresh the rest WORLD seed from the current
+                // transform — re-deriving rest from the now-deformed live SoA would freeze the
+                // deformed frame in as the new rest (the soft-edit-at-frame-N corruption).
+                cache.geometry_generation = current_gen;
+                for (size_t v = 0; v < vc; ++v) {
+                    const uint32_t u = cache.flat_soa_to_unique[v];
+                    if (u < cache.rest_world_unique.size())
+                        cache.rest_world_unique[u] = xf.transform_point(cache.flat_rest_pos[v]);
+                }
+                return cache.unique_count >= 3;
+            }
+
+            const Vec3* No = g->get_attribute_data<Vec3>("N_orig");
+            SoftWeldCache cache;
+            cache.geometry_generation = current_gen;
+            cache.flat_mesh = fm;
+            cache.flat_rest_pos.assign(Po, Po + vc);
+            if (No) cache.flat_rest_nrm.assign(No, No + vc);
+
+            // Weld every SoA corner to a shared unique vertex by quantized rest WORLD position.
+            std::map<std::array<int64_t, 3>, uint32_t> weld;
+            const double kQuant = 10000.0;  // ~0.1 mm tolerance (matches the facade weld)
+            cache.flat_soa_to_unique.assign(vc, 0);
+            std::vector<uint8_t> seen(vc, 0);
+            cache.corner_unique.reserve(idx.size());
+            for (std::size_t k = 0; k < idx.size(); ++k) {
+                const uint32_t soa_vid = idx[k];
+                if (soa_vid >= vc) { cache.corner_unique.push_back(0); continue; }
+                uint32_t u;
+                if (seen[soa_vid]) {
+                    u = cache.flat_soa_to_unique[soa_vid];
+                } else {
+                    const Vec3 rest = xf.transform_point(Po[soa_vid]);
+                    const std::array<int64_t, 3> key{
+                        (int64_t)std::llround((double)rest.x * kQuant),
+                        (int64_t)std::llround((double)rest.y * kQuant),
+                        (int64_t)std::llround((double)rest.z * kQuant)};
+                    auto wit = weld.find(key);
+                    if (wit == weld.end()) {
+                        u = (uint32_t)cache.rest_world_unique.size();
+                        cache.rest_world_unique.push_back(rest);
+                        weld.emplace(key, u);
+                    } else {
+                        u = wit->second;
+                    }
+                    cache.flat_soa_to_unique[soa_vid] = u;
+                    seen[soa_vid] = 1;
+                }
+                cache.corner_unique.push_back(u);
+            }
+            cache.unique_count = cache.rest_world_unique.size();
+            const bool ok = cache.unique_count >= 3;
+            soft_weld_cache_[node] = std::move(cache);
+            return ok;
+        }
+
         std::size_t current_tri_count = 0;
         for (const auto& obj : world.objects) {
             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
@@ -3216,6 +3335,21 @@ struct SceneData {
         for (const auto& kv : soft_weld_cache_) {
             const SoftWeldCache& cache = kv.second;
             if (cache.unique_count == 0) continue;
+            // Flat (direct SoA) soft body: the writer set P (world) per SoA vertex; gather the WELDED
+            // unique world verts back via flat_soa_to_unique (duplicates share one unique slot).
+            if (cache.flat_mesh && cache.flat_mesh->geometry) {
+                const Vec3* P = cache.flat_mesh->geometry->get_attribute_data<Vec3>("P");
+                const size_t vc = cache.flat_mesh->geometry->get_vertex_count();
+                if (P && cache.flat_soa_to_unique.size() == vc) {
+                    std::vector<Vec3> uniq(cache.unique_count, Vec3(0.0f, 0.0f, 0.0f));
+                    for (size_t v = 0; v < vc; ++v) {
+                        const uint32_t u = cache.flat_soa_to_unique[v];
+                        if (u < uniq.size()) uniq[u] = P[v];
+                    }
+                    out[kv.first] = std::move(uniq);
+                }
+                continue;
+            }
             std::vector<Vec3> uniq(cache.unique_count, Vec3(0.0f, 0.0f, 0.0f));
             std::size_t corner = 0;
             for (const auto& tri : cache.tris) {
@@ -3234,6 +3368,61 @@ struct SceneData {
         if (it == soft_weld_cache_.end()) return;
         SoftWeldCache& cache = it->second;
         if (world_verts.size() != cache.unique_count) return;  // stale topology
+
+        // Flat (direct SoA) soft body: the solver deforms the WELDED unique verts; scatter each one
+        // back onto every duplicate SoA vertex via flat_soa_to_unique. Write P (world) + P_orig
+        // (local), with area-weighted smooth normals accumulated on the WELDED topology
+        // (corner_unique) so shared verts shade smooth. No facades, so we never touch cache.tris.
+        if (cache.flat_mesh && cache.flat_mesh->geometry) {
+            DNA::GeometryDetail* g = cache.flat_mesh->geometry.get();
+            const size_t vc = g->get_vertex_count();
+            if (cache.flat_soa_to_unique.size() != vc) return;
+            Vec3* Po = g->get_attribute_data_mut<Vec3>("P_orig");
+            Vec3* P  = g->get_attribute_data_mut<Vec3>("P");
+            Vec3* No = g->get_attribute_data_mut<Vec3>("N_orig");
+            Vec3* N  = g->get_attribute_data_mut<Vec3>("N");
+            const Matrix4x4 xf = cache.flat_mesh->transform ? cache.flat_mesh->transform->getFinal()
+                                                            : Matrix4x4::identity();
+            const Matrix4x4 inv_xf = xf.inverse();
+
+            // Per-unique local positions + area-weighted smooth normals (world + local).
+            const size_t uc = cache.unique_count;
+            std::vector<Vec3> uniq_local(uc);
+            for (size_t u = 0; u < uc; ++u) uniq_local[u] = inv_xf.transform_point(world_verts[u]);
+            std::vector<Vec3> nw(uc, Vec3(0.0f, 0.0f, 0.0f)), nl(uc, Vec3(0.0f, 0.0f, 0.0f));
+            auto cross = [](const Vec3& a, const Vec3& b) {
+                return Vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+            };
+            const auto& cu = cache.corner_unique;
+            for (size_t t = 0; t + 2 < cu.size(); t += 3) {
+                const uint32_t a = cu[t], b = cu[t + 1], c = cu[t + 2];
+                if (a >= uc || b >= uc || c >= uc) continue;
+                const Vec3 fnw = cross(world_verts[b] - world_verts[a], world_verts[c] - world_verts[a]);
+                const Vec3 fnl = cross(uniq_local[b] - uniq_local[a], uniq_local[c] - uniq_local[a]);
+                nw[a] += fnw; nw[b] += fnw; nw[c] += fnw;
+                nl[a] += fnl; nl[b] += fnl; nl[c] += fnl;
+            }
+            auto norm = [](const Vec3& v, const Vec3& fb) {
+                const float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+                return (len > 1e-12f) ? Vec3(v.x / len, v.y / len, v.z / len) : fb;
+            };
+            for (size_t u = 0; u < uc; ++u) {
+                nw[u] = norm(nw[u], Vec3(0.0f, 1.0f, 0.0f));
+                nl[u] = norm(nl[u], Vec3(0.0f, 1.0f, 0.0f));
+            }
+
+            // Scatter the welded result onto every SoA vertex.
+            for (size_t v = 0; v < vc; ++v) {
+                const uint32_t u = cache.flat_soa_to_unique[v];
+                if (u >= uc) continue;
+                if (P)  P[v]  = world_verts[u];
+                if (Po) Po[v] = uniq_local[u];
+                if (N)  N[v]  = nw[u];
+                if (No) No[v] = nl[u];
+            }
+            markBodyGeometryDirty(node);
+            return;
+        }
 
         const Transform* last_xf = nullptr;
         bool inv_valid = false;
@@ -3307,7 +3496,26 @@ struct SceneData {
             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
             if (tri && tri->getNodeName() == node) cache.tris.push_back(tri);
         }
-        if (cache.tris.empty()) return false;
+        if (cache.tris.empty()) {
+            // Flat (direct SoA) mesh: no per-face facades. Capture the SoA rest local pos/normal so
+            // applyRigidBakedTransform can bake the body delta straight into the GeometryDetail.
+            for (auto& obj : world.objects) {
+                auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj);
+                if (!tm || tm->nodeName != node || !tm->geometry) continue;
+                DNA::GeometryDetail* g = tm->geometry.get();
+                const size_t vc = g->get_vertex_count();
+                const Vec3* Po = g->get_attribute_data<Vec3>("P_orig");
+                const Vec3* No = g->get_attribute_data<Vec3>("N_orig");
+                if (!Po || vc == 0) return false;
+                cache.flat_mesh = tm.get();
+                cache.flat_rest_pos.assign(Po, Po + vc);
+                if (No) cache.flat_rest_nrm.assign(No, No + vc);
+                break;
+            }
+            if (!cache.flat_mesh) return false;
+            rigid_bake_cache_[node] = std::move(cache);
+            return true;
+        }
         cache.rest_local_pos.reserve(cache.tris.size());
         cache.rest_local_nrm.reserve(cache.tris.size());
         for (auto& tri : cache.tris) {
@@ -3338,6 +3546,44 @@ struct SceneData {
             it = rigid_bake_cache_.find(node);
         }
         SoftWeldCache& cache = it->second;
+
+        // Flat (direct SoA) rigid bake: no facades, so apply the body's world delta D straight to
+        // the mesh's GeometryDetail. Convert D to a LOCAL transform (Mlocal = inv(Th)*D*Th, Th = the
+        // untouched spawn world matrix) and push every SoA vertex's rest local pos/normal through it,
+        // writing P_orig/N_orig (authoritative local) + the world-baked P/N mirrors — the same SoA
+        // write the flat sculpt path uses. Mirrors the facade math below, vertex-indexed instead of
+        // per-corner. The transform handle stays untouched (matches the facade rigid path).
+        if (cache.flat_mesh && cache.flat_mesh->geometry) {
+            DNA::GeometryDetail* g = cache.flat_mesh->geometry.get();
+            const size_t vc = g->get_vertex_count();
+            Vec3* Po = g->get_attribute_data_mut<Vec3>("P_orig");
+            Vec3* P  = g->get_attribute_data_mut<Vec3>("P");
+            Vec3* No = g->get_attribute_data_mut<Vec3>("N_orig");
+            Vec3* N  = g->get_attribute_data_mut<Vec3>("N");
+            const Matrix4x4 ThF = cache.flat_mesh->transform ? cache.flat_mesh->transform->getFinal()
+                                                             : Matrix4x4::identity();
+            const Matrix4x4 NTF = cache.flat_mesh->transform ? cache.flat_mesh->transform->getNormalTransform()
+                                                             : Matrix4x4::identity();
+            const Matrix4x4 Mlocal = ThF.inverse() * D * ThF;       // rest LOCAL -> deformed LOCAL
+            const Matrix4x4 Mlocal_n = Mlocal.inverse().transpose();
+            auto unit = [](const Vec3& v) {
+                const float l = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+                return (l > 1e-12f) ? Vec3(v.x / l, v.y / l, v.z / l) : Vec3(0.0f, 1.0f, 0.0f);
+            };
+            const size_t n = std::min(vc, cache.flat_rest_pos.size());
+            for (size_t v = 0; v < n; ++v) {
+                const Vec3 lp = Mlocal.transform_point(cache.flat_rest_pos[v]);
+                if (Po) Po[v] = lp;
+                if (P)  P[v]  = ThF.transform_point(lp);
+                if (v < cache.flat_rest_nrm.size()) {
+                    const Vec3 ln = unit(Mlocal_n.transform_vector(cache.flat_rest_nrm[v]));
+                    if (No) No[v] = ln;
+                    if (N)  N[v]  = unit(NTF.transform_vector(ln));
+                }
+            }
+            markBodyGeometryDirty(node);
+            return;
+        }
 
         const Transform* last_xf = nullptr;
         Matrix4x4 Th = Matrix4x4::identity();
@@ -3388,6 +3634,34 @@ struct SceneData {
         auto it = soft_weld_cache_.find(node);
         if (it != soft_weld_cache_.end()) {
             SoftWeldCache& cache = it->second;
+            // Flat (direct SoA) soft body: restore the SoA from the captured rest local pos/normal
+            // (the writer overwrote P_orig/N_orig with the deformed shape), then re-bake world P/N.
+            if (cache.flat_mesh && cache.flat_mesh->geometry) {
+                DNA::GeometryDetail* g = cache.flat_mesh->geometry.get();
+                const size_t vc = std::min(g->get_vertex_count(), cache.flat_rest_pos.size());
+                Vec3* Po = g->get_attribute_data_mut<Vec3>("P_orig");
+                Vec3* P  = g->get_attribute_data_mut<Vec3>("P");
+                Vec3* No = g->get_attribute_data_mut<Vec3>("N_orig");
+                Vec3* N  = g->get_attribute_data_mut<Vec3>("N");
+                const Matrix4x4 xf = cache.flat_mesh->transform ? cache.flat_mesh->transform->getFinal()
+                                                                : Matrix4x4::identity();
+                const Matrix4x4 NT = cache.flat_mesh->transform ? cache.flat_mesh->transform->getNormalTransform()
+                                                                : Matrix4x4::identity();
+                auto unit = [](const Vec3& v) {
+                    const float l = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+                    return (l > 1e-12f) ? Vec3(v.x / l, v.y / l, v.z / l) : Vec3(0.0f, 1.0f, 0.0f);
+                };
+                for (size_t v = 0; v < vc; ++v) {
+                    if (Po) Po[v] = cache.flat_rest_pos[v];
+                    if (P)  P[v]  = xf.transform_point(cache.flat_rest_pos[v]);
+                    if (v < cache.flat_rest_nrm.size()) {
+                        if (No) No[v] = cache.flat_rest_nrm[v];
+                        if (N)  N[v]  = unit(NT.transform_vector(cache.flat_rest_nrm[v]));
+                    }
+                }
+                markBodyGeometryDirty(node);
+                return;
+            }
             for (std::size_t t = 0; t < cache.tris.size(); ++t) {
                 auto& tri = cache.tris[t];
                 if (!tri) continue;
@@ -3493,6 +3767,17 @@ struct SceneData {
             if (tri && tri->getNodeName() == node) tris.push_back(tri);
         }
         return tris;
+    }
+
+    // The flat (direct SoA) TriangleMesh-as-Hittable for a node, or null when the node is facade-
+    // backed / absent. Lets the per-mesh deform refit route a flat mesh (collectNodeTriangles is
+    // empty for it) straight to a cheap SoA refit instead of a full per-frame rebuild.
+    TriangleMesh* getFlatNodeMesh(const std::string& node) {
+        for (auto& obj : world.objects) {
+            auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj);
+            if (tm && tm->nodeName == node) return tm.get();
+        }
+        return nullptr;
     }
 
     // ── Save-time rest restore ───────────────────────────────────────────────
@@ -5247,14 +5532,49 @@ public:
                !rigid_bodies.empty();
     }
 
+    // True only if node_name is actually referenced as a sim source (particle
+    // emitter/collider/grid-domain/flow-source or rigid body). Used to gate
+    // per-frame gizmo bounds refresh so it doesn't force a full surface-mesh
+    // rebuild for large meshes that have nothing to do with simulation.
+    bool isObjectUsedAsSimSource(const std::string& node_name) const {
+        if (node_name.empty()) return false;
+        for (const auto& rb : rigid_bodies) {
+            if (rb.source_name == node_name) return true;
+        }
+        for (const auto& system : particle_systems) {
+            if (!system.runtime) continue;
+            for (const auto& emitter : system.runtime->emitters()) {
+                if (emitter.source_mode == RayTrophiSim::ParticleEmitterSourceMode::ObjectOrigin &&
+                    emitter.source_name == node_name) return true;
+            }
+            for (const auto& collider : system.runtime->colliders()) {
+                if (collider.source_name == node_name) return true;
+            }
+            for (const auto& domain : system.runtime->gridDomains()) {
+                if (domain.source_mode == RayTrophiSim::SimulationGridDomainSourceMode::ObjectBounds &&
+                    domain.source_name == node_name) return true;
+            }
+            for (const auto& source : system.runtime->flowSources()) {
+                if (source.source_mode == RayTrophiSim::SimulationFlowSourceMode::ObjectBounds &&
+                    source.source_name == node_name) return true;
+            }
+        }
+        return false;
+    }
+
     bool hasLiveSimulationObject(const std::string& node_name) const {
         if (node_name.empty() || isEditorPendingDeleteObjectName(node_name)) {
             return false;
         }
         for (const auto& obj : world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (tri && tri->getNodeName() == node_name) {
-                return true;
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                if (tri->getNodeName() == node_name) return true;
+            } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                // Flat (direct SoA) mesh: no per-face facades but it IS a live sim-eligible object.
+                // Without this gate the whole collider/OBB/surface-cache resolution returned null for
+                // a flat mesh, so a flat STATIC body's collision shape was never built and cloth /
+                // particles / rigid bodies fell straight through it (collision "didn't see" flat).
+                if (tm->nodeName == node_name) return true;
             }
         }
         return false;
@@ -5442,6 +5762,26 @@ public:
             auto cache_it = base_mesh_cache.find(node_name);
             if (cache_it != base_mesh_cache.end()) {
                 triangles = cache_it->second;
+            }
+        }
+
+        if (triangles.empty()) {
+            // Flat (direct SoA) mesh: no per-face facades. Build the surface cache straight from the
+            // mesh SoA so collider/OBB resolution (rigid body creation, particle colliders) works on
+            // a flat mesh exactly like a facade-backed one.
+            for (const auto& obj : world.objects) {
+                auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj);
+                if (!tm || tm->nodeName != node_name || !tm->geometry) continue;
+                DNA::GeometryDetail* g = tm->geometry.get();
+                const Vec3* P  = g->get_attribute_data<Vec3>("P");       // world-baked
+                const Vec2* uv = g->get_attribute_data<Vec2>("uv");
+                const uint16_t* mat = g->get_attribute_data<uint16_t>("materialID");
+                auto& fcache = surface_mesh_cache[node_name];
+                fcache = RayTrophiSim::SurfaceMeshCache::buildFromSoA(
+                    node_name, P, uv, mat, g->indices.data(), g->indices.size(),
+                    surface_mesh_cache_version);
+                if (refresh && !fcache.empty()) surface_cache_epoch_done_.insert(node_name);
+                return fcache.empty() ? nullptr : &fcache;
             }
         }
 
@@ -5880,6 +6220,8 @@ public:
 
         auto result_vec = std::make_shared<std::vector<float>>();
 
+        g_active_sdf_bakes.fetch_add(1, std::memory_order_acquire);
+
         std::thread([this, node_name, triangles, bmin, bmax, N, result_vec, target_runtime]() {
             Vec3 size = bmax - bmin;
             Vec3 pad = size * 0.15f;
@@ -5917,20 +6259,29 @@ public:
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 1)
 #endif
-            for (int k = 0; k < nz; ++k)
-            for (int j = 0; j < ny; ++j)
-            for (int i = 0; i < nx; ++i) {
-                const Vec3 cell_p = origin + Vec3((i + 0.5f) * step_x,
-                                                  (j + 0.5f) * step_y,
-                                                  (k + 0.5f) * step_z);
-                Vec3 closest;
-                float dist = std::sqrt(bvh.closestDistanceSquared(cell_p, closest));
-                int inside_votes = 0;
-                for (int d = 0; d < 3; ++d) {
-                    if (bvh.countRayHits(cell_p, probe_dirs[d]) & 1) ++inside_votes;
+            for (int k = 0; k < nz; ++k) {
+                if (g_cancel_sdf_bakes.load(std::memory_order_relaxed)) {
+                    continue;
                 }
-                if (inside_votes >= 2) dist = -dist;
-                out[static_cast<std::size_t>(k * (nx * ny) + j * nx + i)] = dist;
+                for (int j = 0; j < ny; ++j)
+                for (int i = 0; i < nx; ++i) {
+                    const Vec3 cell_p = origin + Vec3((i + 0.5f) * step_x,
+                                                      (j + 0.5f) * step_y,
+                                                      (k + 0.5f) * step_z);
+                    Vec3 closest;
+                    float dist = std::sqrt(bvh.closestDistanceSquared(cell_p, closest));
+                    int inside_votes = 0;
+                    for (int d = 0; d < 3; ++d) {
+                        if (bvh.countRayHits(cell_p, probe_dirs[d]) & 1) ++inside_votes;
+                    }
+                    if (inside_votes >= 2) dist = -dist;
+                    out[static_cast<std::size_t>(k * (nx * ny) + j * nx + i)] = dist;
+                }
+            }
+
+            if (g_cancel_sdf_bakes.load(std::memory_order_relaxed)) {
+                g_active_sdf_bakes.fetch_sub(1, std::memory_order_release);
+                return;
             }
 
             auto p_sys = target_runtime ? target_runtime : this->getParticleSimulationSystem();
@@ -5949,6 +6300,7 @@ public:
                     }
                 }
             }
+            g_active_sdf_bakes.fetch_sub(1, std::memory_order_release);
         }).detach();
     }
 
@@ -6279,6 +6631,13 @@ public:
     // Clear all scene data
     // =========================================================================
     void clear() {
+        // Cancel and wait for all active background SDF bakes before destroying the scene objects
+        g_cancel_sdf_bakes.store(true, std::memory_order_release);
+        while (g_active_sdf_bakes.load(std::memory_order_acquire) > 0) {
+            std::this_thread::yield();
+        }
+        g_cancel_sdf_bakes.store(false, std::memory_order_release); // reset for subsequent projects
+
         syncSimulationWorld();
         world.clear();
         lights.clear();
@@ -6288,6 +6647,17 @@ public:
         timeline.clear();              // Clear keyframes
         ui_settings_json_str = "";     // Clear UI settings string
         load_counter = 0;              // Reset load counter
+        
+        base_mesh_cache.clear();
+        mesh_modifiers.clear();
+        mesh_paint_texture_sets.clear();
+        mesh_paint_layer_stacks.clear();
+        object_groups.clear();
+        surface_cache_epoch_done_.clear();
+        last_sim_pose_applied_.clear();
+        soft_weld_cache_.clear();
+        rigid_bake_cache_.clear();
+        editor_pending_delete_object_names.clear();
         
         // Clear per-model animator caches BEFORE clearing the vector
         for (auto& ctx : importedModelContexts) {

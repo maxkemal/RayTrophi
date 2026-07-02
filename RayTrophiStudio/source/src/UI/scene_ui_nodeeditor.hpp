@@ -23,6 +23,7 @@
 #include "TerrainManager.h"
 #include "NodeSystem/NodeEditorUIV2.h"
 #include "ProjectManager.h" // Added for markModified
+#include "Backend/VulkanBackend.h" // For the partial BLAS/raster-mesh refit path (same-topology re-evaluate)
 #include <functional> // Added for callback
 #include <string>
 #include <unordered_map>
@@ -32,6 +33,8 @@
 
 extern bool g_bvh_rebuild_pending;
 extern bool g_optix_rebuild_pending;
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+extern std::unique_ptr<Backend::IBackend> g_backend;
 
 namespace TerrainNodesV2 {
 
@@ -130,9 +133,9 @@ public:
         editor.config.gridSizeMinor = 32.0f;
         editor.config.showMinimap = true;
         
-        // Context Menu Callback
+        // Context Menu Callback (Fallback)
         editor.onBackgroundContextMenu = []() {
-            ImGui::OpenPopup("NodeGraphContext");
+            // Unused as we unified popups, but kept for compatibility
         };
         
         // Node selected callback
@@ -169,6 +172,28 @@ public:
             ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "Select a terrain in Terrain tab first");
             return;
         }
+
+        // Dynamically bind background custom menu choices (requires active graph parameter)
+        editor.onDrawBackgroundMenu = [this, &graph]() {
+            for (const auto& cat : categories) {
+                ImGui::PushStyleColor(ImGuiCol_Text, cat.color);
+                bool menuOpen = ImGui::BeginMenu(cat.name);
+                ImGui::PopStyleColor();
+
+                if (menuOpen) {
+                    for (const auto& nodePair : cat.nodes) {
+                        if (ImGui::MenuItem(nodePair.second)) {
+                            ImVec2 mousePos = ImGui::GetMousePos();
+                            float spawnX = (mousePos.x - editor.canvasPos_.x - editor.scrollX) / editor.zoom;
+                            float spawnY = (mousePos.y - editor.canvasPos_.y - editor.scrollY) / editor.zoom;
+                            graph.addTerrainNode(nodePair.first, spawnX, spawnY);
+                            ProjectManager::getInstance().markModified();
+                        }
+                    }
+                    ImGui::EndMenu();
+                }
+            }
+        };
         
         // Update current terrain reference for export operations
         currentTerrain = terrain;
@@ -193,28 +218,44 @@ public:
         // Get canvas position before drawing (for drop coordinate calculation)
         ImVec2 canvasPos = ImGui::GetCursorScreenPos();
         ImVec2 canvasSize = ImGui::GetContentRegionAvail();
-        
+
+        // The background worker thread (see TerrainNodeGraphV2::evaluateTerrainAsync)
+        // reads `nodes`/pin connections while computing — structural edits (add/
+        // remove/connect node) or parameter edits from the UI thread during that
+        // window would race it. Block the mutating entry points below (and grey
+        // out canvas interaction) while an evaluation is in flight; viewing/panning
+        // still works via editor.draw() itself.
+        const bool graphEvaluating = graph.isEvaluatingAsync();
+
         // Render V2 Node Graph
+        ImGui::BeginDisabled(graphEvaluating);
         editor.draw(graph, canvasSize);
-        
+        ImGui::EndDisabled();
+
+        if (graphEvaluating) {
+            ImVec2 overlayPos = canvasPos;
+            ImGui::SetCursorScreenPos(ImVec2(overlayPos.x + 8.0f, overlayPos.y + 8.0f));
+            ImGui::TextColored(ImVec4(0.5f, 0.85f, 1.0f, 1.0f), "Evaluating... graph is read-only until it finishes");
+        }
+
         // Drop target for node library drag-drop
         // Make the whole canvas area accept drops
-        if (ImGui::BeginDragDropTarget()) {
+        if (!graphEvaluating && ImGui::BeginDragDropTarget()) {
             if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("TERRAIN_NODE_TYPE")) {
                 NodeType droppedType = *(const NodeType*)payload->Data;
-                
+
                 // Calculate spawn position from mouse position
                 ImVec2 mousePos = ImGui::GetMousePos();
                 float spawnX = (mousePos.x - canvasPos.x - editor.scrollX) / editor.zoom;
                 float spawnY = (mousePos.y - canvasPos.y - editor.scrollY) / editor.zoom;
-                
+
                 // Check if dropped on a link - insert node in between
                 NodeSystem::Link* targetLink = findLinkNearMouse(graph, mousePos, canvasPos);
-                
+
                 if (targetLink) {
                     // Create the new node
                     auto* newNode = graph.addTerrainNode(droppedType, spawnX, spawnY);
-                    
+
                     if (newNode && tryInsertNodeIntoLink(graph, newNode, targetLink)) {
                         // Successfully inserted!
                         ProjectManager::getInstance().markModified();
@@ -228,10 +269,12 @@ public:
             }
             ImGui::EndDragDropTarget();
         }
-        
-        // Render Context Menu
-        drawContextMenu(graph);
-        
+
+        // Render Context Menu (structural edits — disabled during evaluation)
+        if (!graphEvaluating) {
+            drawContextMenu(graph);
+        }
+
         ImGui::EndChild();
         
         ImGui::SameLine();
@@ -269,7 +312,9 @@ public:
         ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.4f, 0.4f, 0.5f, 1.0f));
         ImGui::BeginChild("NodeProperties", ImVec2(propertiesWidth, 0), true);
+        ImGui::BeginDisabled(graphEvaluating);
         drawPropertiesPanel(graph);
+        ImGui::EndDisabled();
         ImGui::EndChild();
         ImGui::PopStyleColor();
         ImGui::PopStyleVar();
@@ -836,49 +881,98 @@ private:
         }
         ImGui::SameLine();
         
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.3f, 1.0f));
-        if (ImGui::Button("Evaluate")) {
-            // Mark all nodes dirty
-            graph.markAllDirty();
-            
-            // Evaluate using V2 system
-            graph.evaluateTerrain(terrain, ctx.scene);
-            
-            // Trigger GPU rebuild
-            if (terrain) {
-                ctx.renderer.resetCPUAccumulation();
-                g_bvh_rebuild_pending = true;
-                g_optix_rebuild_pending = true;
-                
-                extern bool g_geometry_dirty;
-                extern std::atomic<uint64_t> g_scene_geometry_generation;
-                extern std::atomic<bool> g_needs_optix_sync;
-                extern bool g_mesh_cache_dirty;
-                extern bool g_viewport_raster_rebuild_pending;
-                
-                g_geometry_dirty = true;
-                g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
-                g_needs_optix_sync.store(true, std::memory_order_release);
-                g_mesh_cache_dirty = true;
+        // Once the background height-data phase finishes, run the (main-thread-only)
+        // GPU-texture + mesh/BVH finalize phases and fire the same rebuild flags the
+        // old synchronous handler set inline. Polled every frame this toolbar draws
+        // (i.e. while the terrain node-editor tab is open). If the user switches to
+        // a different tab mid-evaluation, the worker thread still runs to completion
+        // in the background — finalize (GPU upload + mesh rebuild) simply happens on
+        // the next frame this tab is visible again, since it needs ImGui/GPU context
+        // that's only meaningful while this panel is drawing.
+        if (graph.pollEvaluateAsync()) {
+            ctx.renderer.resetCPUAccumulation();
+            // CPU Embree BVH rebuild and OptiX rebuild are already dispatched via
+            // std::async by their Main.cpp consumers (non-blocking), so requesting
+            // them unconditionally costs nothing extra on the main thread.
+            g_bvh_rebuild_pending = true;
+            g_optix_rebuild_pending = true;
+
+            extern bool g_geometry_dirty;
+            extern std::atomic<uint64_t> g_scene_geometry_generation;
+            extern std::atomic<bool> g_needs_optix_sync;
+            extern bool g_mesh_cache_dirty;
+            extern bool g_viewport_raster_rebuild_pending;
+            extern bool g_vulkan_rebuild_pending;
+
+            g_geometry_dirty = true;
+            g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+            g_needs_optix_sync.store(true, std::memory_order_release);
+            g_mesh_cache_dirty = true;
+
+            // g_viewport_raster_rebuild_pending / g_vulkan_rebuild_pending each
+            // trigger a FULL re-upload of every object's geometry to the GPU
+            // (buildRasterGeometry / rebuildAccelerationStructure+updateGeometry) —
+            // the one synchronous, main-thread-blocking cost left after
+            // backgrounding the height-data compute. When this evaluate only
+            // updated terrain positions in place (same topology — the common
+            // "tweak a parameter and re-evaluate" case), try the cheap partial
+            // refit the terrain sculpt-brush path already uses in production
+            // (scene_ui_terrain.hpp's commitTerrainStroke/updateTerrainBLASPartial)
+            // instead of re-uploading the whole scene. Topology changes (first
+            // evaluate, resolution edits) still take the proven full-rebuild path.
+            if (graph.lastFinalizeWasFullRebuild() || !terrain) {
                 g_viewport_raster_rebuild_pending = true;
-                
-                extern bool g_vulkan_rebuild_pending;
                 g_vulkan_rebuild_pending = true;
-                if (ctx.optix_gpu_ptr) {
-                    if (g_hasCUDA) cudaDeviceSynchronize();
-                    ctx.optix_gpu_ptr->resetAccumulation();
+            } else {
+                bool vulkanHandled = false;
+                if (auto* vkRtBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
+                    vulkanHandled = vkRtBackend->updateTerrainBLASPartial(terrain->name, terrain);
+                    if (vulkanHandled) vkRtBackend->resetAccumulation();
                 }
+                if (!vulkanHandled) {
+                    g_vulkan_rebuild_pending = true;
+                }
+
+                // Terrain is now a single flat (SoA) mesh — there is no facade triangle
+                // list left to feed the incremental raster patch, so fall back to a full
+                // raster rebuild here (RT/BLAS refit above stays incremental either way).
+                g_viewport_raster_rebuild_pending = true;
+            }
+
+            if (ctx.optix_gpu_ptr) {
+                if (g_hasCUDA) cudaDeviceSynchronize();
+                ctx.optix_gpu_ptr->resetAccumulation();
             }
         }
+
+        bool evaluating = graph.isEvaluating.load();
+        ImGui::PushStyleColor(ImGuiCol_Button, evaluating ? ImVec4(0.35f, 0.45f, 0.3f, 1.0f)
+                                                           : ImVec4(0.2f, 0.6f, 0.3f, 1.0f));
+        ImGui::BeginDisabled(evaluating);
+        char evalLabel[32];
+        if (evaluating && graph.activeEvalContext) {
+            snprintf(evalLabel, sizeof(evalLabel), "Evaluating %.0f%%...", graph.activeEvalContext->getProgress() * 100.0f);
+        } else {
+            snprintf(evalLabel, sizeof(evalLabel), "Evaluate");
+        }
+        if (ImGui::Button(evalLabel)) {
+            // Mark all nodes dirty and kick off the height-data compute (the
+            // expensive part — noise/erosion) on a worker thread. Splat/hardness
+            // GPU upload + mesh rebuild run later on the main thread once
+            // pollEvaluateAsync() (above) detects completion.
+            graph.markAllDirty();
+            graph.evaluateTerrainAsync(terrain, ctx.scene);
+        }
+        ImGui::EndDisabled();
         ImGui::PopStyleColor();
-        
+
         ImGui::SameLine();
         ImGui::TextDisabled("|");
         ImGui::SameLine();
         ImGui::Text("Nodes: %d  Links: %d", (int)graph.nodeCount(), (int)graph.linkCount());
         ImGui::SameLine();
         ImGui::Text("Zoom: %.1f", editor.zoom);
-        
+
         ImGui::Separator();
     }
 };

@@ -1,0 +1,43 @@
+// terrain_apply_stream_power.comp
+// Vulkan port of applyFluvialStreamPowerKernel (erosion_kernels.cu). Clamps the
+// accumulated per-cell erosion (written by terrain_stream_power.comp) to a
+// fraction of current height before applying it, then resets the accumulator.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    float cellSize; float heightScale;
+    float erodeSpeed; float sedimentCapacity; float minSlope;
+    int erosionRadius;
+    float maxPassErosionFraction;
+} pc;
+
+layout(set = 0, binding = 0) buffer Height { float heightMap[]; };
+layout(set = 0, binding = 1) buffer Accum  { float erosionAccum[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    float currentHeight = heightMap[id];
+    float accumulated = erosionAccum[id];
+
+    if (isnan(currentHeight) || isinf(currentHeight) || currentHeight <= 0.0) {
+        heightMap[id] = 0.0;
+        erosionAccum[id] = 0.0;
+        return;
+    }
+
+    if (isnan(accumulated) || isinf(accumulated) || accumulated <= 0.0) {
+        erosionAccum[id] = 0.0;
+        return;
+    }
+
+    float maxPassErode = currentHeight * max(0.0, pc.maxPassErosionFraction);
+    accumulated = min(accumulated, maxPassErode);
+
+    heightMap[id] = max(currentHeight - accumulated, 0.0);
+    erosionAccum[id] = 0.0;
+}

@@ -1,6 +1,6 @@
-﻿#include "SceneHistory.h"
+#include "SceneHistory.h"
 #include "globals.h"  // For SCENE_LOG_INFO
-
+#include <algorithm>
 
 void SceneHistory::record(std::unique_ptr<SceneCommand> command) {
     if (!command) {
@@ -15,7 +15,18 @@ void SceneHistory::record(std::unique_ptr<SceneCommand> command) {
     undo_stack_.push_back(std::move(command));
     
     // Limit Configuration
-    const size_t LIMIT_HEAVY = 5;      // Delete, Duplicate
+    size_t limit_heavy = 5;      // Delete, Duplicate
+    for (const auto& cmd : undo_stack_) {
+        if (cmd->isHeavyGeometry()) {
+            size_t tris = cmd->getTriangleCount();
+            if (tris > 4000000) {
+                limit_heavy = (std::min)(limit_heavy, (size_t)1);
+            } else if (tris > 1000000) {
+                limit_heavy = (std::min)(limit_heavy, (size_t)2);
+            }
+        }
+    }
+    const size_t LIMIT_HEAVY = limit_heavy;
     const size_t LIMIT_TRANSFORM = 20; // Move, Rotate, Scale
     const size_t LIMIT_GLOBAL = (max_history_ > 0) ? max_history_ : 50; // Safety cap
     
@@ -60,9 +71,6 @@ void SceneHistory::record(std::unique_ptr<SceneCommand> command) {
     while (undo_stack_.size() > LIMIT_GLOBAL) {
         undo_stack_.pop_front();
     }
-    
-    // SCENE_LOG_INFO("History: Recorded command (undo: " + 
-    //                std::to_string(undo_stack_.size()) + ")");  // Too verbose
 }
 
 bool SceneHistory::undo(UIContext& ctx) {

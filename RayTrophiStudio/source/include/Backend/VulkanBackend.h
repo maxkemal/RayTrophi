@@ -1,4 +1,4 @@
-/*
+﻿/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          VulkanBackend.h
@@ -39,6 +39,10 @@
 #include "Backend/IViewportBackend.h"
 #include "Backend/SceneTextureManager.h"
 #include "AtmosphereLUT.h"
+
+// Facade-mesh SoA database (DNA::GeometryDetail) — used by the indexed-BLAS upload path.
+class TriangleMesh;
+
 namespace VulkanRT {
 
 // ============================================================================
@@ -1065,6 +1069,18 @@ public:
     // ========================================================================
     uint32_t uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName) override;
 
+    // INDEXED upload for a single facade mesh: reads the shared SoA (DNA::GeometryDetail)
+    // directly and builds an INDEXED BLAS (unique verts + index buffer) instead of the 3N
+    // expanded soup uploadTriangles() produces — a large VRAM win for dense meshes (e.g.
+    // Catmull-Clark subdivide). `useOriginalSpace` picks bind/local P_orig (static imported
+    // meshes whose world transform lives in the TLAS instance) vs live P (transformless /
+    // procedural). Skinned / water / live-deformed meshes stay on uploadTriangles(). The
+    // shader already supports indexAddr, so no shader change is needed. Returns the BLAS
+    // index (cached by meshName) or UINT32_MAX on failure.
+    uint32_t uploadTriangleMeshIndexed(const TriangleMesh* mesh,
+                                       const std::string& meshName,
+                                       bool useOriginalSpace);
+
     // Phase 3d: register a BLAS for a DEVICE-RESIDENT CC mesh whose geometry already
     // lives in a GPU buffer (combined non-indexed layout written by the CC compute
     // expand; same VkDevice). No host triangles, no upload — createBLAS builds straight
@@ -1274,8 +1290,18 @@ public:
     bool supportsViewportMode(ViewportMode mode) const override;
     bool updateInteractiveMesh(const std::string& nodeName,
                                const std::vector<std::shared_ptr<Triangle>>& triangles) override;
+    // Refit a flat (direct SoA) mesh's RT BLAS straight from its DNA SoA, found by node name — no
+    // per-face Triangle facades (a flat mesh has none, so updateInteractiveMesh's facade-list path
+    // can't reach it). Used by the physics per-mesh deform refit for rigid-on-flat. Returns false
+    // (mesh/BLAS not found, or not an indexed solo BLAS) so the caller can fall back to a rebuild.
+    bool refitFlatMeshBLAS(const std::string& nodeName);
     bool updateRasterMeshFromTriangles(const std::string& nodeName,
                                        const std::vector<std::shared_ptr<Triangle>>& triangles);
+    // Refit a flat (direct SoA) mesh's raster vertices straight from its DNA SoA — no per-face
+    // Triangle facades (a flat mesh has none). Uses the same efficient dirty-range upload as
+    // updateRasterMeshFromTriangles so a sculpt dab stays realtime in Solid without a full
+    // buildRasterGeometry (which early-outs on an unchanged scene generation anyway).
+   // bool updateRasterMeshFromMeshSoA(const std::string& nodeName, const TriangleMesh* mesh) override;
     bool patchRasterMeshTriangles(const std::string& nodeName,
                                   const std::vector<size_t>& dirtyIndices,
                                   const std::vector<std::pair<int, std::shared_ptr<Triangle>>>& meshEntries);
@@ -1658,6 +1684,17 @@ protected:
     // a mismatch would scatter positions into the wrong BLAS slots (corruption).
     std::unordered_map<uint32_t, std::vector<std::shared_ptr<Triangle>>> m_soloBlasBuildTriangles;
     std::unordered_map<uint32_t, std::unordered_map<const Triangle*, uint32_t>> m_soloBlasBuildTriangleSlots;
+
+    // Solo BLASes built via uploadTriangleMeshIndexed() (indexed geometry). These do NOT use
+    // m_soloBlasBuildTriangles for refit — their interactive refit re-reads the mesh SoA
+    // directly (vCount unique verts), so we record the source mesh + space here instead.
+    struct SoloIndexedMeshInfo {
+        TriangleMesh* mesh = nullptr;
+        bool localSpace = false; // true => refit reads bind/local P_orig, false => live P
+    };
+    std::unordered_map<uint32_t, SoloIndexedMeshInfo> m_soloBlasIndexedMesh;
+    // Re-reads a solo indexed BLAS's mesh SoA and MODE_UPDATE-refits it (no 3N gather).
+    bool refitIndexedSoloBLAS(uint32_t blasIndex);
     struct InstanceTransformCache { int instance_id; std::shared_ptr<Hittable> representative_hittable; };
     std::vector<InstanceTransformCache> m_instance_sync_cache;
     bool m_topology_dirty = false; // set when instances/BLAS list changes

@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -858,6 +858,8 @@ namespace AnimationGraph {
         uint32_t nextNodeId = 1;
         uint32_t nextPinId = 1;
         uint32_t nextLinkId = 1;
+        uint32_t nextGroupId = 1;
+        std::vector<NodeSystem::NodeGroup> groups;
         
         // Evaluation
         AnimationEvalContext evalContext;
@@ -904,6 +906,61 @@ namespace AnimationGraph {
         AnimNodeBase* findNodeById(uint32_t id);
         NodeSystem::Pin* findPinById(uint32_t id);
         AnimNodeBase* findNodeByPinId(uint32_t pinId);
+        
+        // ========================================================================
+        // Group Management
+        // ========================================================================
+        uint32_t createGroup(const std::string& name, const ImVec2& pos, const ImVec2& size) {
+            NodeSystem::NodeGroup group;
+            group.id = nextGroupId++;
+            group.name = name;
+            group.position = pos;
+            group.size = size;
+            groups.push_back(std::move(group));
+            return groups.back().id;
+        }
+        
+        void addNodeToGroup(uint32_t nodeId, uint32_t groupId) {
+            for (auto& group : groups) {
+                if (group.id == groupId) {
+                    if (std::find(group.nodeIds.begin(), group.nodeIds.end(), nodeId) == group.nodeIds.end()) {
+                        group.nodeIds.push_back(nodeId);
+                    }
+                    if (AnimNodeBase* node = findNodeById(nodeId)) {
+                        node->groupId = groupId;
+                    }
+                    return;
+                }
+            }
+        }
+        
+        void removeNodeFromGroups(uint32_t nodeId) {
+            for (auto& group : groups) {
+                group.nodeIds.erase(std::remove(group.nodeIds.begin(), group.nodeIds.end(), nodeId),
+                                    group.nodeIds.end());
+            }
+            if (AnimNodeBase* node = findNodeById(nodeId)) {
+                node->groupId = 0;
+            }
+        }
+        
+        void deleteGroup(uint32_t groupId) {
+            for (auto& node : nodes) {
+                if (node->groupId == groupId) {
+                    node->groupId = 0;
+                }
+            }
+            groups.erase(std::remove_if(groups.begin(), groups.end(),
+                [groupId](const NodeSystem::NodeGroup& g) { return g.id == groupId; }),
+                groups.end());
+        }
+        
+        NodeSystem::NodeGroup* getGroup(uint32_t id) {
+            for (auto& g : groups) {
+                if (g.id == id) return &g;
+            }
+            return nullptr;
+        }
         
         // ========================================================================
         // Evaluation

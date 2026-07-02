@@ -3064,9 +3064,9 @@ MeshGeometry OptixWrapper::extractMeshGeometry(
             geom.normals[base + 1] = toFloat3(tri->getOriginalVertexNormal(1));
             geom.normals[base + 2] = toFloat3(tri->getOriginalVertexNormal(2));
 
-            geom.uvs[base + 0] = make_float2(tri->t0.x, tri->t0.y);
-            geom.uvs[base + 1] = make_float2(tri->t1.x, tri->t1.y);
-            geom.uvs[base + 2] = make_float2(tri->t2.x, tri->t2.y);
+            geom.uvs[base + 0] = make_float2(tri->t_ref(0).x, tri->t_ref(0).y);
+            geom.uvs[base + 1] = make_float2(tri->t_ref(1).x, tri->t_ref(1).y);
+            geom.uvs[base + 2] = make_float2(tri->t_ref(2).x, tri->t_ref(2).y);
 
             if (hasSkinning) {
                 auto w0 = packWeights(tri->getSkinBoneWeights(0));
@@ -3182,6 +3182,19 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
     m_cached_textures = data.textures;
     m_cached_volumetrics = data.volumetric_info;
 
+    // DEFENSIVE GUARD: never build a launchable TLAS without materials. buildSBT/the global material
+    // buffer would be empty, so the next optixLaunch dereferences a null/stale d_materials → CUDA 700
+    // (illegal memory access). This fires on transient rebuilds (project reset, viewport switches)
+    // and previously only mattered once flat meshes started emitting OptiX instances (an all-flat
+    // scene with empty materials used to produce 0 instances and never launch). traversable_handle
+    // stays 0 → the render loop draws the partial framebuffer until a rebuild with materials arrives.
+    if (data.materials.empty()) {
+        SCENE_LOG_WARN("[OptiX] Rebuild deferred: material table is empty (will rebuild when materials are ready).");
+        traversable_handle = 0;
+        g_optix_rebuild_in_progress.store(false, std::memory_order_release);
+        return;
+    }
+
    // SCENE_LOG_INFO("[OptiX TLAS] Building scene (Native Instancing Enabled)...");
     
     // ===========================================================================
@@ -3189,7 +3202,8 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
     // ===========================================================================
     std::vector<std::shared_ptr<Triangle>> static_triangles;
     std::vector<std::shared_ptr<HittableInstance>> instances;
-    
+    std::vector<std::shared_ptr<TriangleMesh>> flat_meshes; // flat (SoA) meshes-as-Hittable
+
     // Recursive helper to flatten scene hierarchy
     std::function<void(const std::shared_ptr<Hittable>&)> collectRenderables;
     collectRenderables = [&](const std::shared_ptr<Hittable>& obj) {
@@ -3198,11 +3212,17 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
         if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
             // Found Instance
             instances.push_back(inst);
-        } 
+        }
         else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             // Found Static Triangle
             static_triangles.push_back(tri);
-        } 
+        }
+        else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            // Flat SoA mesh-as-Hittable (open-flat / import-flat / sculpt-on-flat). No per-face
+            // facades exist, so the Triangle branch never sees it — collect it for the SoA-direct
+            // BLAS build below (STEP 3.5). This is what makes OptiX render flat like Vulkan RT/Solid.
+            flat_meshes.push_back(tm);
+        }
         else if (auto list = std::dynamic_pointer_cast<HittableList>(obj)) {
             // Found List - Recurse
             for (const auto& child : list->objects) {
@@ -3242,7 +3262,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
      //              ", Instances: " + std::to_string(instances.size()));
 
     // Check if we found anything regarding issue
-    if (static_triangles.empty() && instances.empty()) {
+    if (static_triangles.empty() && instances.empty() && flat_meshes.empty()) {
          SCENE_LOG_WARN("[OptiX] No renderable geometry found after recursive search!");
     }
 
@@ -3339,9 +3359,9 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                     geom.normals[base + 1] = toFloat3(tri->getOriginalVertexNormal(1));
                     geom.normals[base + 2] = toFloat3(tri->getOriginalVertexNormal(2));
 
-                    geom.uvs[base + 0] = make_float2(tri->t0.x, tri->t0.y);
-                    geom.uvs[base + 1] = make_float2(tri->t1.x, tri->t1.y);
-                    geom.uvs[base + 2] = make_float2(tri->t2.x, tri->t2.y);
+                    geom.uvs[base + 0] = make_float2(tri->t_ref(0).x, tri->t_ref(0).y);
+                    geom.uvs[base + 1] = make_float2(tri->t_ref(1).x, tri->t_ref(1).y);
+                    geom.uvs[base + 2] = make_float2(tri->t_ref(2).x, tri->t_ref(2).y);
 
                     geom.colors[base + 0] = make_float3(0.0f, 0.0f, 0.0f);
                     geom.colors[base + 1] = make_float3(0.0f, 0.0f, 0.0f);
@@ -3416,7 +3436,100 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
             }
         }
     }
-    
+
+    // ===========================================================================
+    // STEP 3.5: BUILD BLAS FOR FLAT (SoA TriangleMesh) GEOMETRY
+    // ===========================================================================
+    // Flat meshes carry no per-face Triangle facades. Gather the BLAS soup DIRECTLY from the SoA
+    // (GeometryDetail) — this never materializes 3N Triangle facades, so the flat RAM win is kept
+    // under OptiX too. Verts are LOCAL (P_orig); the TLAS instance carries getFinal() (mirrors the
+    // facade path). One BLAS per material bucket. The instance's source_hittable is the TriangleMesh
+    // pointer (which IS in world.objects), so syncInstanceTransforms re-maps it via ptr_to_obj and
+    // its TriangleMesh branch keeps keyframe/physics motion live. Skinned flat is skipped (skinned
+    // meshes stay facade until SoA skinning write-back lands).
+    for (const auto& tm : flat_meshes) {
+        if (!tm || !tm->geometry) continue;
+        DNA::GeometryDetail* geo = tm->geometry.get();
+
+        // Defensive: a genuinely skinned flat mesh would need bone-driven vertex deform we do not
+        // wire here. Flat emission already excludes real skin, but guard anyway.
+        bool real_skin = false;
+        for (const auto& w : geo->skin_weights) { if (!w.empty()) { real_skin = true; break; } }
+        if (real_skin) {
+            SCENE_LOG_WARN("[OptiX flat] skipping skinned flat mesh '" + tm->nodeName + "' (not yet supported)");
+            continue;
+        }
+
+        const Vec3* P = geo->get_positions_orig();
+        if (!P) P = geo->get_positions();
+        const Vec3* N = geo->get_normals_orig();
+        if (!N) N = geo->get_normals();
+        const Vec2* UV = geo->get_uvs();
+        const uint16_t* MID = geo->get_material_ids();
+        const auto& indices = geo->indices; // DNA::AlignedAllocator vector
+        const size_t nVerts = geo->get_vertex_count();
+        const size_t nTris = indices.size() / 3;
+        if (!P || nTris == 0) continue;
+
+        const std::string base_name = tm->nodeName.empty() ? "flat_mesh" : tm->nodeName;
+
+        // Bucket faces by material (per-face material = MID at the face's first corner). A flat mesh
+        // with one material yields one BLAS; multi-material flat splits into one BLAS per material.
+        std::unordered_map<int, std::vector<uint32_t>> faceByMat;
+        for (size_t f = 0; f < nTris; ++f) {
+            uint32_t i0 = indices[f * 3];
+            int mat = (MID && i0 < nVerts) ? static_cast<int>(MID[i0]) : 0;
+            faceByMat[mat].push_back(static_cast<uint32_t>(f));
+        }
+
+        // World transform for the single instance (shared by all material buckets).
+        Matrix4x4 world = tm->transform ? tm->transform->getFinal() : Matrix4x4::identity();
+        float transform[12];
+        transform[0] = world.m[0][0]; transform[1] = world.m[0][1]; transform[2] = world.m[0][2]; transform[3] = world.m[0][3];
+        transform[4] = world.m[1][0]; transform[5] = world.m[1][1]; transform[6] = world.m[1][2]; transform[7] = world.m[1][3];
+        transform[8] = world.m[2][0]; transform[9] = world.m[2][1]; transform[10] = world.m[2][2]; transform[11] = world.m[2][3];
+
+        for (const auto& [mat, faces] : faceByMat) {
+            MeshGeometry geom;
+            geom.original_name = base_name;
+            geom.material_id = mat;
+            geom.mesh_name = base_name + "_mat_" + std::to_string(mat) + "_static";
+
+            const size_t fcount = faces.size();
+            geom.vertices.resize(fcount * 3);
+            geom.normals.resize(fcount * 3);
+            geom.uvs.resize(fcount * 3);
+            geom.colors.assign(fcount * 3, make_float3(0.0f, 0.0f, 0.0f));
+            geom.indices.resize(fcount);
+
+            for (size_t fi = 0; fi < fcount; ++fi) {
+                const uint32_t f = faces[fi];
+                const size_t base = fi * 3;
+                for (int k = 0; k < 3; ++k) {
+                    const uint32_t vi = indices[f * 3 + k];
+                    geom.vertices[base + k] = (vi < nVerts) ? toFloat3(P[vi]) : make_float3(0, 0, 0);
+                    geom.normals[base + k]  = (N && vi < nVerts) ? toFloat3(N[vi]) : make_float3(0, 1, 0);
+                    geom.uvs[base + k]      = (UV && vi < nVerts) ? make_float2(UV[vi].x, UV[vi].y) : make_float2(0, 0);
+                }
+                geom.indices[fi] = make_uint3(static_cast<uint32_t>(base),
+                                              static_cast<uint32_t>(base + 1),
+                                              static_cast<uint32_t>(base + 2));
+            }
+
+            int mesh_id = accel_manager->buildMeshBLAS(geom);
+            if (mesh_id < 0) continue;
+            built_mesh_ids[geom.mesh_name] = mesh_id;
+
+            int inst_id = accel_manager->addInstance(mesh_id, transform, geom.material_id,
+                                                     InstanceType::Mesh, geom.original_name,
+                                                     (void*)tm.get());
+            if (inst_id >= 0) {
+                node_to_instance[geom.original_name].push_back(inst_id);
+                instance_to_node[inst_id] = geom.original_name;
+            }
+        }
+    }
+
     // ===========================================================================
     // STEP 4: BUILD BLAS FOR INSTANCES (Multi-Material Support)
     // ===========================================================================
@@ -3496,9 +3609,9 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                         geom.normals.push_back(toFloat3(n1));
                         geom.normals.push_back(toFloat3(n2));
                         
-                        geom.uvs.push_back(make_float2(tri->t0.x, tri->t0.y));
-                        geom.uvs.push_back(make_float2(tri->t1.x, tri->t1.y));
-                        geom.uvs.push_back(make_float2(tri->t2.x, tri->t2.y));
+                        geom.uvs.push_back(make_float2(tri->t_ref(0).x, tri->t_ref(0).y));
+                        geom.uvs.push_back(make_float2(tri->t_ref(1).x, tri->t_ref(1).y));
+                        geom.uvs.push_back(make_float2(tri->t_ref(2).x, tri->t_ref(2).y));
                         
                         // COLORS
                         geom.colors.push_back(make_float3(0.0f, 0.0f, 0.0f));
@@ -3665,9 +3778,9 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                     geom.normals.push_back(toFloat3(n1));
                     geom.normals.push_back(toFloat3(n2));
 
-                    geom.uvs.push_back(make_float2(tri->t0.x, tri->t0.y));
-                    geom.uvs.push_back(make_float2(tri->t1.x, tri->t1.y));
-                    geom.uvs.push_back(make_float2(tri->t2.x, tri->t2.y));
+                    geom.uvs.push_back(make_float2(tri->t_ref(0).x, tri->t_ref(0).y));
+                    geom.uvs.push_back(make_float2(tri->t_ref(1).x, tri->t_ref(1).y));
+                    geom.uvs.push_back(make_float2(tri->t_ref(2).x, tri->t_ref(2).y));
                     geom.colors.push_back(make_float3(0.0f, 0.0f, 0.0f));
                     geom.colors.push_back(make_float3(0.0f, 0.0f, 0.0f));
                     geom.colors.push_back(make_float3(0.0f, 0.0f, 0.0f));
@@ -4091,28 +4204,41 @@ bool OptixWrapper::updateTerrainBLASPartial(const std::string& node_name, Terrai
     
     // SCENE_LOG_INFO("updateTerrainBLASPartial: Found BLAS ID " + std::to_string(blas_id) + " for " + node_name);
 
-    // 2. Build Geometry for the ENTIRE terrain (Robust Fallback)
+    // 2. Build Geometry for the ENTIRE terrain (Robust Fallback) — read straight
+    // from the terrain's flat SoA mesh (P_orig/N_orig, local/untransformed, same
+    // space the old facade's getOriginalVertexPosition/Normal returned) instead
+    // of walking per-triangle facades. The OptiX BLAS was built unwelded (3 verts
+    // per triangle, in index-buffer order), so unweld here via the index buffer.
     MeshGeometry geom;
     geom.mesh_name = node_name; // Ensure name matches for verification if needed
-    size_t tri_count = terrain->mesh_triangles.size();
-    
+
+    if (!terrain->flatMesh || !terrain->flatMesh->geometry) {
+        SCENE_LOG_WARN("updateTerrainBLASPartial: Terrain has no flat mesh! cannot update.");
+        return false;
+    }
+
+    const DNA::GeometryDetail& geo = *terrain->flatMesh->geometry;
+    const size_t tri_count = geo.indices.size() / 3;
+
     if (tri_count == 0) {
         SCENE_LOG_WARN("updateTerrainBLASPartial: Terrain has 0 triangles! cannot update.");
         return false;
     }
-    
+
+    const Vec3* Po = geo.get_positions_orig();
+    const Vec3* No = geo.get_normals_orig();
+    if (!Po) {
+        SCENE_LOG_WARN("updateTerrainBLASPartial: Terrain flat mesh has no position data! cannot update.");
+        return false;
+    }
+
     geom.vertices.reserve(tri_count * 3);
     geom.normals.reserve(tri_count * 3);
-    
-    for (const auto& tri : terrain->mesh_triangles) {
-        if (!tri) continue;
-        geom.vertices.push_back(toFloat3(tri->getOriginalVertexPosition(0)));
-        geom.vertices.push_back(toFloat3(tri->getOriginalVertexPosition(1)));
-        geom.vertices.push_back(toFloat3(tri->getOriginalVertexPosition(2)));
-        
-        geom.normals.push_back(toFloat3(tri->getOriginalVertexNormal(0)));
-        geom.normals.push_back(toFloat3(tri->getOriginalVertexNormal(1)));
-        geom.normals.push_back(toFloat3(tri->getOriginalVertexNormal(2)));
+
+    for (size_t i = 0; i < geo.indices.size(); ++i) {
+        uint32_t vi = geo.indices[i];
+        geom.vertices.push_back(toFloat3(Po[vi]));
+        geom.normals.push_back(toFloat3(No ? No[vi] : Vec3(0.0f, 1.0f, 0.0f)));
     }
     
     // 3. Perform Update

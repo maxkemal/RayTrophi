@@ -1,4 +1,4 @@
-﻿#include "ProjectManager.h"
+#include "ProjectManager.h"
 #include "globals.h"
 #include "Renderer.h"
 #include "OptixWrapper.h"
@@ -916,14 +916,16 @@ void ProjectManager::syncProjectToScene(SceneData& scene) {
 
     // 2. Iterate Imported Models and Sync
     for (auto& model : g_project.imported_models) {
-        // Clear old deleted list - we will rebuild it
-        // model.deleted_objects.clear(); // Keep manual ones? No, state should track scene.
-        // Actually, if we just check existing model.objects, we might miss objects that were ALREADY deleted and removed from model.objects?
-        // Wait, imported_models.objects is the LIST of ALL imported nodes.
-        // We assume model.objects contains everything from the source file.
-        // If it was partial, we are in trouble.
-        // Assimp load populates it fully in importModel phase.
-        
+        // Deduplicate to clean up any existing bloat in memory
+        std::vector<ImportedModelData::ObjectInstance> unique_objs;
+        std::unordered_set<std::string> seen;
+        for (auto& obj : model.objects) {
+            if (seen.insert(obj.node_name).second) {
+                unique_objs.push_back(std::move(obj));
+            }
+        }
+        model.objects = std::move(unique_objs);
+
         // Re-evaluate deleted objects
         std::vector<std::string> current_deleted;
         
@@ -1055,9 +1057,16 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer
     // drives a full rebuild (Main.cpp syncActiveRenderBackendScene or the
     // g_vulkan_rebuild_pending block), so running it here on the empty pre-load
     // scene is wasted work for foliage-heavy projects.
-    if (!defer_backend_reset &&
-        (render_settings.use_optix || render_settings.use_vulkan) && renderer.m_backend) {
-        renderer.rebuildBackendGeometry(scene);
+    if (!defer_backend_reset && renderer.m_backend) {
+        try {
+            renderer.m_backend->waitForCompletion();
+            if (render_settings.use_vulkan) {
+                renderer.m_backend->rebuildAccelerationStructure();
+            } else {
+                renderer.rebuildBackendGeometry(scene);
+            }
+            renderer.m_backend->resetAccumulation();
+        } catch (...) {}
     }
 
     // [VIEWPORT TEXTURE LEAK FIX] The dedicated raster viewport backend keeps its
@@ -1789,15 +1798,19 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                     model.deleted_objects = j_model.value("deleted_objects", std::vector<std::string>{});
 
                     if (j_model.contains("objects") && j_model["objects"].is_array()) {
+                        std::unordered_set<std::string> seen_nodes;
                         for (const auto& j_obj : j_model["objects"]) {
-                            ImportedModelData::ObjectInstance inst;
-                            inst.node_name = j_obj.value("node_name", "");
-                            if (j_obj.contains("transform")) {
-                                inst.transform = jsonToMat4(j_obj["transform"]);
+                            std::string node_name = j_obj.value("node_name", "");
+                            if (seen_nodes.insert(node_name).second) {
+                                ImportedModelData::ObjectInstance inst;
+                                inst.node_name = std::move(node_name);
+                                if (j_obj.contains("transform")) {
+                                    inst.transform = jsonToMat4(j_obj["transform"]);
+                                }
+                                inst.material_id = j_obj.value("material_id", static_cast<uint16_t>(0));
+                                inst.visible = j_obj.value("visible", true);
+                                model.objects.push_back(inst);
                             }
-                            inst.material_id = j_obj.value("material_id", static_cast<uint16_t>(0));
-                            inst.visible = j_obj.value("visible", true);
-                            model.objects.push_back(inst);
                         }
                     }
 
@@ -1990,13 +2003,11 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                     if (!baseTriangles.empty() && !stack.modifiers.empty()) {
                         scene.base_mesh_cache[nodeName] = baseTriangles;
                         auto newMesh = stack.evaluate(baseTriangles);
-                        // Insert new mesh BEFORE foliage tail
+                        // Insert new mesh BEFORE foliage tail in a single range insertion
+                        // (prevents quadratic complexity O(N*M) which freezes on high-poly meshes)
                         size_t insert_pos = remainingObjects.size() - mod_foliage_count;
-                        for (const auto& tri : newMesh) {
-                            remainingObjects.insert(remainingObjects.begin() + insert_pos, tri);
-                            ++insert_pos;
-                            ++mod_selectable; // Track new non-foliage count
-                        }
+                        remainingObjects.insert(remainingObjects.begin() + insert_pos, newMesh.begin(), newMesh.end());
+                        mod_selectable += newMesh.size(); // Track new non-foliage count
                         scene.world.objects = remainingObjects;
                     }
                 }
@@ -2358,26 +2369,99 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
     if (progress_callback) progress_callback(80, "Processing objects...");
 
     // Track new objects
+    std::unordered_set<std::string> processed_nodes;
     for (size_t i = objects_before; i < scene.world.objects.size(); ++i) {
         auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
         if (tri) {
             std::string unique_name = tri->getNodeName(); // Already prefixed by AssimpLoader now!
             
-            ImportedModelData::ObjectInstance inst;
-            inst.node_name = unique_name;
-            auto th = tri->getTransformPtr();
-            if (th) {
-                inst.transform = th->base;
+            if (processed_nodes.insert(unique_name).second) {
+                ImportedModelData::ObjectInstance inst;
+                inst.node_name = unique_name;
+                auto th = tri->getTransformPtr();
+                if (th) {
+                    inst.transform = th->base;
+                }
+                inst.material_id = tri->getMaterialID();
+                inst.visible = true;
+                model.objects.push_back(inst);
             }
-            inst.material_id = tri->getMaterialID();
-            inst.visible = true;
-            model.objects.push_back(inst);
         }
     }
     
     g_project.imported_models.push_back(model);
     g_project.is_modified = true;
-    
+
+    // Deduplicate all imported models to clean up any existing bloat in memory
+    for (auto& m : g_project.imported_models) {
+        std::vector<ImportedModelData::ObjectInstance> unique_objs;
+        std::unordered_set<std::string> seen;
+        for (auto& obj : m.objects) {
+            if (seen.insert(obj.node_name).second) {
+                unique_objs.push_back(std::move(obj));
+            }
+        }
+        m.objects = std::move(unique_objs);
+    }
+
+    // ── Import-flat (gated): collapse each freshly-imported dense, non-skinned facade group into
+    // the single shared SoA TriangleMesh the loader already built (the facades' common
+    // parentMesh), so the scene holds ONE Hittable per mesh instead of a per-face soup. Mirrors
+    // the materialize-flip / apply-flat path and activates the sculpt-on-flat SoA path on imported
+    // meshes (a cage-less direct mesh). Skinned meshes keep the facade path (SoA skinning
+    // write-back is a later increment); small meshes stay loose (facade overhead is negligible).
+    // Runs AFTER the ImportedModelData tracking above, so serialization still records the per-node
+    // instances. Selection/material on the collapsed mesh go through the representative-facade
+    // path, registered by SceneUI::rebuildMeshCache on the next UI pass (e.g. selection/sculpt).
+    {
+        extern bool g_dense_mesh_as_hittable;
+        if (g_dense_mesh_as_hittable && scene.world.objects.size() > objects_before) {
+            // Collapse EVERY non-skinned imported mesh to flat (threshold 1) — the per-face
+            // Triangle facade is being phased out entirely, so leaving small meshes as facades is
+            // against the direction (and they leak into the viewport's loose-triangle HUD count).
+            // Skinned meshes still stay facade (SoA skinning write-back is a later increment).
+            constexpr size_t kMinFlatFaces = 1;
+            std::unordered_map<TriangleMesh*, std::shared_ptr<TriangleMesh>> flatGroups;
+            std::unordered_map<TriangleMesh*, size_t> faceCounts;
+            std::unordered_set<TriangleMesh*> disqualified;
+            for (size_t i = objects_before; i < scene.world.objects.size(); ++i) {
+                auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
+                if (!tri || !tri->parentMesh) continue; // standalone / non-facade → leave as-is
+                TriangleMesh* pm = tri->parentMesh.get();
+                if (tri->hasSkinData()) { disqualified.insert(pm); continue; }
+                flatGroups[pm] = tri->parentMesh;
+                faceCounts[pm]++;
+            }
+            bool anyCollapse = false;
+            for (const auto& [pm, count] : faceCounts) {
+                if (count >= kMinFlatFaces && !disqualified.count(pm)) { anyCollapse = true; break; }
+            }
+            if (anyCollapse) {
+                std::vector<std::shared_ptr<Hittable>> rebuilt;
+                rebuilt.reserve(scene.world.objects.size());
+                std::unordered_set<TriangleMesh*> emitted;
+                for (size_t i = 0; i < scene.world.objects.size(); ++i) {
+                    if (i < objects_before) { rebuilt.push_back(scene.world.objects[i]); continue; }
+                    auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
+                    TriangleMesh* pm = (tri && tri->parentMesh) ? tri->parentMesh.get() : nullptr;
+                    const bool collapse = pm && !disqualified.count(pm) &&
+                                          faceCounts[pm] >= kMinFlatFaces;
+                    if (collapse) {
+                        if (emitted.insert(pm).second) {
+                            rebuilt.push_back(flatGroups[pm]); // one TriangleMesh Hittable per group
+                        }
+                        // drop the per-face facade
+                    } else {
+                        rebuilt.push_back(scene.world.objects[i]);
+                    }
+                }
+                scene.world.objects = std::move(rebuilt);
+                SCENE_LOG_INFO("[import-flat] collapsed " + std::to_string(emitted.size()) +
+                               " mesh(es) to flat TriangleMesh");
+            }
+        }
+    }
+
     // AUTO-ACTIVATE CAMERA: If imported model has cameras, set first new one as active
     if (!scene.cameras.empty()) {
         // Find if we have new cameras (cameras added during this import)
@@ -2527,9 +2611,9 @@ bool ProjectManager::readZipPackage(const std::string& filepath) {
 // ============================================================================
 
 // Binary format magic number and version
-// v7 adds a shared node-name table so triangle records no longer duplicate strings.
-static constexpr char RTP_MAGIC[4] = {'R', 'T', 'P', '7'};
-static constexpr uint32_t RTP_VERSION = 7;
+// v8 migrates to flat DNA (GeometryDetail) block serialization for meshes
+static constexpr char RTP_MAGIC[4] = {'R', 'T', 'P', '8'};
+static constexpr uint32_t RTP_VERSION = 8;
 
 bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& scene) {
     // Write header
@@ -2537,61 +2621,61 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
     uint32_t version = RTP_VERSION;
     out.write(reinterpret_cast<const char*>(&version), sizeof(version));
     
-    // Collect all triangles
-    std::vector<std::shared_ptr<Triangle>> triangles;
-    std::unordered_map<std::shared_ptr<Transform>, uint32_t> transform_map;
-    std::vector<std::shared_ptr<Transform>> transforms;
-    std::unordered_map<std::string, uint32_t> node_name_map;
-    std::vector<std::string> node_names;
-    
-    // FILTERING: Identify terrain triangles to exclude from binary geometry
-    std::unordered_set<std::shared_ptr<Triangle>> terrain_triangles;
+    // FILTERING: Identify terrain flat meshes to exclude from binary geometry —
+    // terrain geometry is regenerated from its heightmap on load (see
+    // TerrainManager::deserialize), never round-tripped through this block.
+    std::unordered_set<TriangleMesh*> terrain_meshes;
     auto& terrains = TerrainManager::getInstance().getTerrains();
     for (auto& t : terrains) {
-        for (auto& tri : t.mesh_triangles) {
-            terrain_triangles.insert(tri);
-        }
+        if (t.flatMesh) terrain_meshes.insert(t.flatMesh.get());
     }
 
-    // Track processed nodeNames so we don't save the base mesh multiple times if skipping modified instances
-    std::unordered_set<std::string> nodes_processed;
+    // Identify unique flat meshes (TriangleMesh) and standalone triangles
+    std::unordered_set<TriangleMesh*> processed_meshes;
+    std::vector<std::shared_ptr<TriangleMesh>> flat_meshes;
+    std::vector<std::shared_ptr<Triangle>> standalone_triangles;
+    std::unordered_map<std::shared_ptr<Transform>, uint32_t> transform_map;
+    std::vector<std::shared_ptr<Transform>> transforms;
 
     for (const auto& obj : scene.world.objects) {
         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-            // Skip terrain chunks
-            if (terrain_triangles.count(tri)) continue;
-            
             // Skip foliage instances (they are serialized via InstanceManager)
             if (tri->getNodeName().find("_inst_") != std::string::npos) continue;
 
-            const std::string& nodeName = tri->getNodeName();
-
-            // Check if we have a base mesh cache for this node
-            if (scene.base_mesh_cache.find(nodeName) != scene.base_mesh_cache.end()) {
-                if (nodes_processed.find(nodeName) == nodes_processed.end()) {
-                    nodes_processed.insert(nodeName);
-                    for (const auto& baseTri : scene.base_mesh_cache.at(nodeName)) {
-                        triangles.push_back(baseTri);
-                        if (node_name_map.find(baseTri->getNodeName()) == node_name_map.end()) {
-                            node_name_map[baseTri->getNodeName()] = static_cast<uint32_t>(node_names.size());
-                            node_names.push_back(baseTri->getNodeName());
-                        }
-                        auto th = baseTri->getTransformHandle();
-                        if (th && transform_map.find(th) == transform_map.end()) {
-                            transform_map[th] = static_cast<uint32_t>(transforms.size());
-                            transforms.push_back(th);
-                        }
+            if (tri->parentMesh && tri->parentMesh->geometry) {
+                TriangleMesh* pm = tri->parentMesh.get();
+                if (processed_meshes.find(pm) == processed_meshes.end()) {
+                    processed_meshes.insert(pm);
+                    flat_meshes.push_back(tri->parentMesh);
+                    
+                    auto th = tri->parentMesh->transform;
+                    if (th && transform_map.find(th) == transform_map.end()) {
+                        transform_map[th] = static_cast<uint32_t>(transforms.size());
+                        transforms.push_back(th);
                     }
                 }
             } else {
-                triangles.push_back(tri);
-                if (node_name_map.find(tri->getNodeName()) == node_name_map.end()) {
-                    node_name_map[tri->getNodeName()] = static_cast<uint32_t>(node_names.size());
-                    node_names.push_back(tri->getNodeName());
-                }
-                
-                // Track unique transforms
+                standalone_triangles.push_back(tri);
+
                 auto th = tri->getTransformHandle();
+                if (th && transform_map.find(th) == transform_map.end()) {
+                    transform_map[th] = static_cast<uint32_t>(transforms.size());
+                    transforms.push_back(th);
+                }
+            }
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            // Flat mesh-as-Hittable (open-flat / import-flat / apply-flat / Simple-subdivide-flat /
+            // add-object-flat): there is no per-face facade, so the Triangle branch above never sees
+            // it. Serialize the SoA TriangleMesh DIRECTLY as a mesh group — mirrors the
+            // facade→parentMesh branch. Without this, every flat mesh is silently dropped on save
+            // (geometry loss on the next round-trip), since the whole flat migration removes facades.
+            if (!tm->geometry) continue;
+            if (tm->nodeName.find("_inst_") != std::string::npos) continue; // foliage via InstanceManager
+            if (terrain_meshes.count(tm.get())) continue; // terrain: regenerated from heightmap on load
+            TriangleMesh* pm = tm.get();
+            if (processed_meshes.insert(pm).second) {
+                flat_meshes.push_back(tm);
+                auto th = tm->transform;
                 if (th && transform_map.find(th) == transform_map.end()) {
                     transform_map[th] = static_cast<uint32_t>(transforms.size());
                     transforms.push_back(th);
@@ -2606,26 +2690,97 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
     
     for (const auto& tr : transforms) {
         out.write(reinterpret_cast<const char*>(&tr->base), sizeof(Matrix4x4));
-        // v5: Write components
         out.write(reinterpret_cast<const char*>(&tr->position), sizeof(Vec3));
         out.write(reinterpret_cast<const char*>(&tr->rotation), sizeof(Vec3));
         out.write(reinterpret_cast<const char*>(&tr->scale), sizeof(Vec3));
     }
 
-    // Write shared node-name table (v7+)
-    const uint32_t node_name_count = static_cast<uint32_t>(node_names.size());
-    out.write(reinterpret_cast<const char*>(&node_name_count), sizeof(node_name_count));
-    for (const auto& node_name : node_names) {
-        writeStringBinary(out, node_name);
+    // Write flat meshes count
+    uint32_t mesh_group_count = static_cast<uint32_t>(flat_meshes.size());
+    out.write(reinterpret_cast<const char*>(&mesh_group_count), sizeof(mesh_group_count));
+
+    for (const auto& pm : flat_meshes) {
+        // Node name
+        writeStringBinary(out, pm->nodeName);
+        
+        // Transform index
+        uint32_t tr_idx = 0xFFFFFFFF;
+        if (pm->transform) {
+            auto it = transform_map.find(pm->transform);
+            if (it != transform_map.end()) {
+                tr_idx = it->second;
+            }
+        }
+        out.write(reinterpret_cast<const char*>(&tr_idx), sizeof(tr_idx));
+        
+        uint32_t vCount = static_cast<uint32_t>(pm->geometry->get_vertex_count());
+        uint32_t iCount = static_cast<uint32_t>(pm->geometry->indices.size());
+        
+        out.write(reinterpret_cast<const char*>(&vCount), sizeof(vCount));
+        out.write(reinterpret_cast<const char*>(&iCount), sizeof(iCount));
+        
+        // Retrieve original geometry arrays (local space)
+        const Vec3* origP = pm->geometry->get_positions_orig();
+        if (!origP) origP = pm->geometry->get_positions();
+        const Vec3* origN = pm->geometry->get_normals_orig();
+        if (!origN) origN = pm->geometry->get_normals();
+        const Vec2* uvs = pm->geometry->get_uvs();
+        const uint16_t* matIDs = pm->geometry->get_material_ids();
+        
+        // Block writes (Zero-overhead block copy to disk)
+        if (origP) out.write(reinterpret_cast<const char*>(origP), vCount * sizeof(Vec3));
+        if (origN) out.write(reinterpret_cast<const char*>(origN), vCount * sizeof(Vec3));
+        if (uvs) out.write(reinterpret_cast<const char*>(uvs), vCount * sizeof(Vec2));
+        if (matIDs) out.write(reinterpret_cast<const char*>(matIDs), vCount * sizeof(uint16_t));
+        out.write(reinterpret_cast<const char*>(pm->geometry->indices.data()), iCount * sizeof(uint32_t));
+        
+        // Find extra UV sets
+        std::vector<uint32_t> extra_uv_set_indices;
+        for (int set = 1; set < 8; ++set) {
+            std::string attrName = "uv" + std::to_string(set);
+            if (pm->geometry->has_attribute(attrName)) {
+                extra_uv_set_indices.push_back(set);
+            }
+        }
+        
+        uint32_t extra_uv_sets_count = static_cast<uint32_t>(extra_uv_set_indices.size());
+        out.write(reinterpret_cast<const char*>(&extra_uv_sets_count), sizeof(extra_uv_sets_count));
+        for (uint32_t set_idx : extra_uv_set_indices) {
+            out.write(reinterpret_cast<const char*>(&set_idx), sizeof(set_idx));
+            std::string attrName = "uv" + std::to_string(set_idx);
+            const Vec2* extraUvs = pm->geometry->get_attribute_data<Vec2>(attrName);
+            if (extraUvs) {
+                out.write(reinterpret_cast<const char*>(extraUvs), vCount * sizeof(Vec2));
+            }
+        }
+        
+        // Has skinning — require at least one REAL (non-empty) per-vertex weight list, not just an
+        // allocated skin_weights vector. A phantom skin (vector sized to vCount but every entry
+        // empty) must not be written as has_skin=1, or the mesh stays facade on every reopen.
+        bool real_skin = false;
+        for (const auto& w : pm->geometry->skin_weights) { if (!w.empty()) { real_skin = true; break; } }
+        uint8_t has_skin = real_skin ? 1 : 0;
+        out.write(reinterpret_cast<const char*>(&has_skin), sizeof(has_skin));
+        if (has_skin) {
+            for (uint32_t v = 0; v < vCount; ++v) {
+                const auto& weights = pm->geometry->skin_weights[v];
+                uint8_t weight_count = static_cast<uint8_t>(std::min(weights.size(), (size_t)255));
+                out.write(reinterpret_cast<const char*>(&weight_count), sizeof(weight_count));
+                for (uint8_t w = 0; w < weight_count; ++w) {
+                    int32_t bone_idx = weights[w].first;
+                    float weight = weights[w].second;
+                    out.write(reinterpret_cast<const char*>(&bone_idx), sizeof(bone_idx));
+                    out.write(reinterpret_cast<const char*>(&weight), sizeof(weight));
+                }
+            }
+        }
     }
+
+    // Write standalone triangles count and data
+    uint32_t standalone_count = static_cast<uint32_t>(standalone_triangles.size());
+    out.write(reinterpret_cast<const char*>(&standalone_count), sizeof(standalone_count));
     
-    // Write triangle count
-    uint32_t tri_count = static_cast<uint32_t>(triangles.size());
-    out.write(reinterpret_cast<const char*>(&tri_count), sizeof(tri_count));
-    
-    // Write each triangle
-    for (const auto& tri : triangles) {
-        // Vertices (original, not transformed)
+    for (const auto& tri : standalone_triangles) {
         Vec3 v0 = tri->getOriginalVertexPosition(0);
         Vec3 v1 = tri->getOriginalVertexPosition(1);
         Vec3 v2 = tri->getOriginalVertexPosition(2);
@@ -2633,7 +2788,6 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
         out.write(reinterpret_cast<const char*>(&v1), sizeof(Vec3));
         out.write(reinterpret_cast<const char*>(&v2), sizeof(Vec3));
         
-        // Normals
         Vec3 n0 = tri->getOriginalVertexNormal(0);
         Vec3 n1 = tri->getOriginalVertexNormal(1);
         Vec3 n2 = tri->getOriginalVertexNormal(2);
@@ -2641,15 +2795,13 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
         out.write(reinterpret_cast<const char*>(&n1), sizeof(Vec3));
         out.write(reinterpret_cast<const char*>(&n2), sizeof(Vec3));
         
-        // Active UVs
-        Vec2 uv0 = tri->t0;
-        Vec2 uv1 = tri->t1;
-        Vec2 uv2 = tri->t2;
+        Vec2 uv0 = tri->t_ref(0);
+        Vec2 uv1 = tri->t_ref(1);
+        Vec2 uv2 = tri->t_ref(2);
         out.write(reinterpret_cast<const char*>(&uv0), sizeof(Vec2));
         out.write(reinterpret_cast<const char*>(&uv1), sizeof(Vec2));
         out.write(reinterpret_cast<const char*>(&uv2), sizeof(Vec2));
-
-        // All UV sets (v6+)
+        
         uint32_t uv_set_count = static_cast<uint32_t>(tri->getUVSetCount());
         out.write(reinterpret_cast<const char*>(&uv_set_count), sizeof(uv_set_count));
         for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
@@ -2659,12 +2811,10 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
             out.write(reinterpret_cast<const char*>(&set_uv2), sizeof(Vec2));
         }
         
-        // Material ID
         uint16_t mat_id = tri->getMaterialID();
         out.write(reinterpret_cast<const char*>(&mat_id), sizeof(mat_id));
         
-        // Transform index
-        uint32_t tr_idx = 0xFFFFFFFF; // No transform
+        uint32_t tr_idx = 0xFFFFFFFF;
         auto th = tri->getTransformHandle();
         if (th) {
             auto it = transform_map.find(th);
@@ -2673,26 +2823,19 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
             }
         }
         out.write(reinterpret_cast<const char*>(&tr_idx), sizeof(tr_idx));
-
-        // Node name index (v7+)
-        uint32_t node_name_idx = 0xFFFFFFFF;
-        auto node_it = node_name_map.find(tri->getNodeName());
-        if (node_it != node_name_map.end()) {
-            node_name_idx = node_it->second;
-        }
-        out.write(reinterpret_cast<const char*>(&node_name_idx), sizeof(node_name_idx));
         
-        // Skinning data (v4+)
-        uint8_t has_skin = tri->hasSkinData() ? 1 : 0;
+        writeStringBinary(out, tri->getNodeName());
+        
+        // hasAnySkinWeights() (real non-empty bone weights), NOT hasSkinData() (struct merely
+        // allocated). Writing the allocated-but-empty phantom skin as has_skin=1 is what pinned
+        // imported (Tripo etc.) meshes to facade across every save/open round-trip.
+        uint8_t has_skin = tri->hasAnySkinWeights() ? 1 : 0;
         out.write(reinterpret_cast<const char*>(&has_skin), sizeof(has_skin));
-        
         if (has_skin) {
-            // Write bone weights for each vertex (3 vertices)
             for (int vi = 0; vi < 3; ++vi) {
                 const auto& weights = tri->getSkinBoneWeights(vi);
                 uint8_t weight_count = static_cast<uint8_t>(std::min(weights.size(), (size_t)255));
                 out.write(reinterpret_cast<const char*>(&weight_count), sizeof(weight_count));
-                
                 for (size_t w = 0; w < weight_count; ++w) {
                     int32_t bone_idx = weights[w].first;
                     float weight = weights[w].second;
@@ -2703,14 +2846,14 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
         }
     }
     
-    SCENE_LOG_INFO("[ProjectManager] Wrote " + std::to_string(tri_count) + " triangles, " + 
-                   std::to_string(transform_count) + " transforms, " +
-                   std::to_string(node_name_count) + " node names to binary (v7).");
+    SCENE_LOG_INFO("[ProjectManager] Wrote " + std::to_string(mesh_group_count) + " flat meshes, " + 
+                   std::to_string(standalone_count) + " standalone triangles, " +
+                   std::to_string(transform_count) + " transforms to binary (v8).");
     return true;
 }
 
 bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
-    // Read and validate header (accept RTP3, RTP4, RTP5, RTP6, RTP7 formats)
+    // Read and validate header (accept RTP3, RTP4, RTP5, RTP6, RTP7, RTP8 formats)
     char magic[4];
     in.read(magic, 4);
     
@@ -2720,8 +2863,9 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
     bool is_v5 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '5');
     bool is_v6 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '6');
     bool is_v7 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '7');
+    bool is_v8 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '8');
     
-    if (!is_v3 && !is_v4 && !is_v5 && !is_v6 && !is_v7) {
+    if (!is_v3 && !is_v4 && !is_v5 && !is_v6 && !is_v7 && !is_v8) {
         SCENE_LOG_ERROR("[ProjectManager] Invalid geometry file format.");
         return false;
     }
@@ -2768,6 +2912,297 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
         transforms.push_back(tr);
     }
 
+    // ── Open-project legacy-facade → flat collapse (shared by BOTH the v8 standalone path and the
+    // pre-v8 legacy path). Old projects — and re-saved sculpt files whose mesh round-tripped as a
+    // parentMesh-less Triangle SOUP — keep those facades forever; the writer re-emits a
+    // parentMesh-less facade as a standalone triangle. Collapse the just-loaded standalone facades
+    // into ONE flat SoA TriangleMesh per node so the open scene is flat like the mesh-group
+    // emit_flat / import-flat paths. Uses hasAnySkinWeights() (REAL bone weights), not hasSkinData()
+    // (struct merely allocated): a phantom skin (skinData!=0, all-empty weights — Tripo/imports)
+    // collapses to flat; a genuine rig stays facade (SoA skinning write-back is a later increment).
+    // The standalone verts were saved LOCAL (getOriginalVertexPosition) + a transform handle —
+    // exactly what facadesToFlatMesh consumes — so the world pose is preserved. Must run BEFORE the
+    // v8 early return, or v8 standalone facades never collapse (the reported re-saved-sculpt bug).
+    auto collapseStandaloneFacadesToFlat = [&scene]() {
+        extern bool g_dense_mesh_as_hittable;
+        if (!g_dense_mesh_as_hittable) return;
+        std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>> legacyGroups;
+        int genuine_rig_facades = 0;
+        for (const auto& obj : scene.world.objects) {
+            auto t = std::dynamic_pointer_cast<Triangle>(obj);
+            if (!t || t->parentMesh) continue;        // mesh-group facade handled elsewhere
+            // hasAnySkinWeights() = REAL non-empty bone weights, NOT hasSkinData() (struct merely
+            // allocated). A phantom skin (skinData!=0, all-empty weights — Tripo/imports) collapses
+            // to flat; a genuine rig stays facade (SoA skinning write-back is a later increment).
+            if (t->hasAnySkinWeights()) { ++genuine_rig_facades; continue; }
+            const std::string& nn = t->getNodeName();
+            if (nn.empty()) continue;                 // unnamed loose tris stay as-is
+            legacyGroups[nn].push_back(t);
+        }
+        std::unordered_map<std::string, std::shared_ptr<TriangleMesh>> flatByNode;
+        for (auto& kv : legacyGroups) {
+            if (kv.second.empty()) continue;
+            if (auto fm = MeshModifiers::facadesToFlatMesh(kv.second)) {
+                fm->nodeName = kv.first;
+                flatByNode[kv.first] = fm;
+            }
+        }
+        if (flatByNode.empty()) return;
+        std::vector<std::shared_ptr<Hittable>> rebuilt;
+        rebuilt.reserve(scene.world.objects.size());
+        std::unordered_set<std::string> emitted;
+        for (const auto& obj : scene.world.objects) {
+            auto t = std::dynamic_pointer_cast<Triangle>(obj);
+            // Predicate MUST mirror the collection loop (hasAnySkinWeights, not hasSkinData), or a
+            // phantom-skin facade is collected but never dropped → flat built then discarded.
+            if (t && !t->parentMesh && !t->hasAnySkinWeights()) {
+                auto it = flatByNode.find(t->getNodeName());
+                if (it != flatByNode.end()) {
+                    if (emitted.insert(t->getNodeName()).second) rebuilt.push_back(it->second);
+                    continue; // drop the legacy facade
+                }
+            }
+            rebuilt.push_back(obj);
+        }
+        scene.world.objects = std::move(rebuilt);
+        SCENE_LOG_INFO("[open-flat] collapsed " + std::to_string(flatByNode.size()) +
+                       " standalone facade mesh(es) to flat TriangleMesh" +
+                       (genuine_rig_facades ? " (" + std::to_string(genuine_rig_facades) +
+                                              " genuine-rig facades kept)" : ""));
+    };
+
+    if (version >= 8) {
+        // Read Mesh Groups
+        uint32_t mesh_group_count = 0;
+        in.read(reinterpret_cast<char*>(&mesh_group_count), sizeof(mesh_group_count));
+        if (!in) {
+            SCENE_LOG_ERROR("[ProjectManager] Invalid mesh group count in geometry file.");
+            return false;
+        }
+        
+        for (uint32_t mg = 0; mg < mesh_group_count; ++mg) {
+            std::string nodeName = readStringBinary(in);
+            uint32_t tr_idx;
+            in.read(reinterpret_cast<char*>(&tr_idx), sizeof(tr_idx));
+            
+            uint32_t vCount = 0, iCount = 0;
+            in.read(reinterpret_cast<char*>(&vCount), sizeof(vCount));
+            in.read(reinterpret_cast<char*>(&iCount), sizeof(iCount));
+            
+            if (!in) {
+                SCENE_LOG_ERROR("[ProjectManager] Truncated geometry binary while reading mesh metadata.");
+                return false;
+            }
+            
+            auto triMesh = std::make_shared<TriangleMesh>();
+            triMesh->nodeName = nodeName;
+            if (tr_idx < transforms.size()) {
+                triMesh->transform = transforms[tr_idx];
+            }
+            
+            triMesh->geometry->resize_vertices(vCount);
+            triMesh->geometry->indices.resize(iCount);
+            
+            triMesh->geometry->add_attribute<Vec3>("P");
+            triMesh->geometry->add_attribute<Vec3>("N");
+            triMesh->geometry->add_attribute<Vec3>("P_orig");
+            triMesh->geometry->add_attribute<Vec3>("N_orig");
+            triMesh->geometry->add_attribute<Vec2>("uv");
+            triMesh->geometry->add_attribute<uint16_t>("materialID");
+            
+            Vec3* positions = triMesh->geometry->get_attribute_data_mut<Vec3>("P");
+            Vec3* normals = triMesh->geometry->get_attribute_data_mut<Vec3>("N");
+            Vec3* origPositions = triMesh->geometry->get_attribute_data_mut<Vec3>("P_orig");
+            Vec3* origNormals = triMesh->geometry->get_attribute_data_mut<Vec3>("N_orig");
+            Vec2* uvs = triMesh->geometry->get_attribute_data_mut<Vec2>("uv");
+            uint16_t* matIDs = triMesh->geometry->get_attribute_data_mut<uint16_t>("materialID");
+            
+            if (origPositions) in.read(reinterpret_cast<char*>(origPositions), vCount * sizeof(Vec3));
+            if (origNormals) in.read(reinterpret_cast<char*>(origNormals), vCount * sizeof(Vec3));
+            if (uvs) in.read(reinterpret_cast<char*>(uvs), vCount * sizeof(Vec2));
+            if (matIDs) in.read(reinterpret_cast<char*>(matIDs), vCount * sizeof(uint16_t));
+            in.read(reinterpret_cast<char*>(triMesh->geometry->indices.data()), iCount * sizeof(uint32_t));
+            
+            if (positions && origPositions) std::memcpy(positions, origPositions, vCount * sizeof(Vec3));
+            if (normals && origNormals) std::memcpy(normals, origNormals, vCount * sizeof(Vec3));
+            
+            uint32_t extra_uv_sets_count = 0;
+            in.read(reinterpret_cast<char*>(&extra_uv_sets_count), sizeof(extra_uv_sets_count));
+            for (uint32_t uv_set = 0; uv_set < extra_uv_sets_count; ++uv_set) {
+                uint32_t uv_set_idx;
+                in.read(reinterpret_cast<char*>(&uv_set_idx), sizeof(uv_set_idx));
+                std::string attrName = "uv" + std::to_string(uv_set_idx);
+                triMesh->geometry->add_attribute<Vec2>(attrName);
+                Vec2* extraUvs = triMesh->geometry->get_attribute_data_mut<Vec2>(attrName);
+                if (extraUvs) {
+                    in.read(reinterpret_cast<char*>(extraUvs), vCount * sizeof(Vec2));
+                }
+            }
+            
+            uint8_t has_skin = 0;
+            in.read(reinterpret_cast<char*>(&has_skin), sizeof(has_skin));
+            if (has_skin) {
+                triMesh->geometry->skin_weights.resize(vCount);
+                for (uint32_t v = 0; v < vCount; ++v) {
+                    uint8_t weight_count = 0;
+                    in.read(reinterpret_cast<char*>(&weight_count), sizeof(weight_count));
+                    triMesh->geometry->skin_weights[v].resize(weight_count);
+                    for (uint8_t w = 0; w < weight_count; ++w) {
+                        int32_t bone_idx;
+                        float weight;
+                        in.read(reinterpret_cast<char*>(&bone_idx), sizeof(bone_idx));
+                        in.read(reinterpret_cast<char*>(&weight), sizeof(weight));
+                        triMesh->geometry->skin_weights[v][w] = {bone_idx, weight};
+                    }
+                }
+            }
+            
+            if (!in) {
+                SCENE_LOG_ERROR("[ProjectManager] Geometry binary: stream failed while reading flat mesh data.");
+                return false;
+            }
+            
+            uint32_t numTriangles = iCount / 3;
+            // ── Open-project-flat (gated): emit the loaded mesh as ONE SoA TriangleMesh Hittable
+            // instead of a per-face Triangle facade soup — the loader-level equivalent of
+            // import-flat / apply-flat / Simple-subdivide-flat. This never materializes the facade
+            // soup at all (no transient RAM spike on load), and activates the sculpt-on-flat SoA
+            // path on the loaded mesh (a cage-less direct mesh). Skinned meshes keep the facade path
+            // (SoA skinning write-back is a later increment). Flag OFF or skinned → original facade
+            // emission, byte-for-byte behaviour. Selection/material/sculpt on the collapsed mesh go
+            // through the representative-facade path registered by SceneUI::rebuildMeshCache.
+            extern bool g_dense_mesh_as_hittable;
+            // Recompute from the ACTUAL loaded weights: an old file may carry a phantom has_skin=1
+            // with all-empty weight lists. Treat skin as real only if some vertex has a non-empty
+            // list, so a rigless imported mesh collapses to flat even from a pre-fix save.
+            bool real_has_skin = false;
+            if (has_skin) {
+                for (const auto& w : triMesh->geometry->skin_weights) { if (!w.empty()) { real_has_skin = true; break; } }
+            }
+            const bool emit_flat = g_dense_mesh_as_hittable && !real_has_skin && numTriangles >= 1;
+            if (has_skin && !real_has_skin)
+                SCENE_LOG_INFO(std::string("[open-flat] mesh-group node='") + nodeName +
+                               "' phantom skin stripped -> FLAT");
+            if (emit_flat) {
+                scene.world.objects.push_back(triMesh); // one TriangleMesh Hittable per mesh group
+            } else {
+                for (uint32_t t = 0; t < numTriangles; ++t) {
+                    auto triangle = std::make_shared<Triangle>(triMesh, t);
+                    scene.world.objects.push_back(triangle);
+                }
+            }
+            
+            // For static flat meshes, apply root transform if not identity (use real_has_skin so a
+            // phantom-skin mesh that just collapsed to flat still gets its world P/N baked).
+            if (triMesh->transform && !real_has_skin) {
+                if (!triMesh->transform->base.isIdentity()) {
+                    Vec3* pos = triMesh->geometry->get_positions_mut();
+                    Vec3* norm = triMesh->geometry->get_normals_mut();
+                    const Vec3* op = triMesh->geometry->get_positions_orig();
+                    const Vec3* on = triMesh->geometry->get_normals_orig();
+                    Matrix4x4 rootTransform = triMesh->transform->getFinal();
+                    Matrix4x4 rootNormalTransform = triMesh->transform->getNormalTransform();
+                    if (pos && op && norm && on) {
+                        #pragma omp parallel for schedule(static)
+                        for (int v = 0; v < (int)vCount; ++v) {
+                            pos[v] = rootTransform.transform_point(op[v]);
+                            norm[v] = rootNormalTransform.transform_vector(on[v]).normalize();
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Read standalone triangles
+        uint32_t standalone_tri_count = 0;
+        in.read(reinterpret_cast<char*>(&standalone_tri_count), sizeof(standalone_tri_count));
+        scene.world.objects.reserve(scene.world.objects.size() + standalone_tri_count);
+        
+        for (uint32_t i = 0; i < standalone_tri_count; ++i) {
+            Vec3 v0, v1, v2;
+            in.read(reinterpret_cast<char*>(&v0), sizeof(Vec3));
+            in.read(reinterpret_cast<char*>(&v1), sizeof(Vec3));
+            in.read(reinterpret_cast<char*>(&v2), sizeof(Vec3));
+            Vec3 n0, n1, n2;
+            in.read(reinterpret_cast<char*>(&n0), sizeof(Vec3));
+            in.read(reinterpret_cast<char*>(&n1), sizeof(Vec3));
+            in.read(reinterpret_cast<char*>(&n2), sizeof(Vec3));
+            Vec2 uv0, uv1, uv2;
+            in.read(reinterpret_cast<char*>(&uv0), sizeof(Vec2));
+            in.read(reinterpret_cast<char*>(&uv1), sizeof(Vec2));
+            in.read(reinterpret_cast<char*>(&uv2), sizeof(Vec2));
+            
+            uint32_t uv_set_count = 0;
+            in.read(reinterpret_cast<char*>(&uv_set_count), sizeof(uv_set_count));
+            std::vector<std::array<Vec2, 3>> uv_sets(uv_set_count);
+            for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
+                in.read(reinterpret_cast<char*>(&uv_sets[uv_set][0]), sizeof(Vec2));
+                in.read(reinterpret_cast<char*>(&uv_sets[uv_set][1]), sizeof(Vec2));
+                in.read(reinterpret_cast<char*>(&uv_sets[uv_set][2]), sizeof(Vec2));
+            }
+            
+            uint16_t mat_id;
+            in.read(reinterpret_cast<char*>(&mat_id), sizeof(mat_id));
+            uint32_t tr_idx;
+            in.read(reinterpret_cast<char*>(&tr_idx), sizeof(tr_idx));
+            
+            std::string node_name = readStringBinary(in);
+            
+            if (!in) {
+                SCENE_LOG_ERROR("[ProjectManager] Geometry binary: stream failed while reading standalone triangles.");
+                return false;
+            }
+            
+            auto tri = std::make_shared<Triangle>(v0, v1, v2, n0, n1, n2, uv0, uv1, uv2, mat_id);
+            tri->setNodeName(node_name);
+            if (tr_idx < transforms.size()) {
+                tri->setTransformHandle(transforms[tr_idx]);
+            }
+            
+            for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
+                tri->setUVSetCoordinates(uv_set, uv_sets[uv_set][0], uv_sets[uv_set][1], uv_sets[uv_set][2]);
+            }
+            
+            uint8_t has_skin;
+            in.read(reinterpret_cast<char*>(&has_skin), sizeof(has_skin));
+            if (has_skin) {
+                tri->initializeSkinData();
+                for (int vi = 0; vi < 3; ++vi) {
+                    uint8_t weight_count = 0;
+                    in.read(reinterpret_cast<char*>(&weight_count), sizeof(weight_count));
+                    std::vector<std::pair<int, float>> weights(weight_count);
+                    for (uint8_t w = 0; w < weight_count; ++w) {
+                        in.read(reinterpret_cast<char*>(&weights[w].first), sizeof(int32_t));
+                        in.read(reinterpret_cast<char*>(&weights[w].second), sizeof(float));
+                    }
+                    tri->setSkinBoneWeights(vi, weights);
+                }
+            }
+            
+            if (tr_idx < transforms.size()) {
+                if (!has_skin) {
+                    if (!transforms[tr_idx]->base.isIdentity()) {
+                        tri->updateTransformedVertices();
+                    } else {
+                        tri->update_bounding_box();
+                    }
+                }
+            } else {
+                tri->update_bounding_box();
+            }
+            
+            scene.world.objects.push_back(tri);
+        }
+        
+        // v8 standalone facades (e.g. a re-saved sculpt file whose mesh round-tripped as a
+        // parentMesh-less soup) must collapse here too — this path returns before the pre-v8
+        // collapse below would ever run.
+        collapseStandaloneFacadesToFlat();
+
+        SCENE_LOG_INFO("[ProjectManager] Loaded flat geometry (v8): " + std::to_string(mesh_group_count) + " meshes, " + std::to_string(standalone_tri_count) + " standalone triangles, " + std::to_string(transform_count) + " transforms.");
+        return true;
+    }
+
     std::vector<std::string> node_names;
     if (version >= 7) {
         uint32_t node_name_count = 0;
@@ -2796,6 +3231,8 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
     }
     
     scene.world.objects.reserve(scene.world.objects.size() + tri_count);
+    
+    std::unordered_map<std::string, std::shared_ptr<OriginalMeshGeometry>> sharedGeoms;
     
     for (uint32_t i = 0; i < tri_count; ++i) {
         // Vertices
@@ -2902,23 +3339,62 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
                 }
             }
         }
+
+        // Determine if we need to allocate and link the shared OriginalMeshGeometry on load.
+        // We only need it if:
+        // 1. The mesh has skin data (rigged), OR
+        // 2. The mesh has a non-Identity transform (so we must run updateTransformedVertices,
+        //    which requires the original geometry to transform correctly).
+        // For static meshes with Identity (or no) transform, we keep originalGeometry null to save ~1.3 GB of RAM!
+        const bool has_transform = (tr_idx < transforms.size());
+        const bool needsOriginalGeometryOnLoad = has_skin_data || (has_transform && !transforms[tr_idx]->base.isIdentity());
+
+        if (needsOriginalGeometryOnLoad) {
+            auto& sharedGeom = sharedGeoms[node_name];
+            if (!sharedGeom) {
+                sharedGeom = std::make_shared<OriginalMeshGeometry>();
+            }
+            unsigned int baseIdx = static_cast<unsigned int>(sharedGeom->positions.size());
+            sharedGeom->positions.push_back(v0);
+            sharedGeom->positions.push_back(v1);
+            sharedGeom->positions.push_back(v2);
+            
+            auto normalize_safe = [](const Vec3& n) {
+                float len = n.length();
+                return len > 1e-6f ? n / len : Vec3(0.0f, 1.0f, 0.0f);
+            };
+            sharedGeom->normals.push_back(normalize_safe(n0));
+            sharedGeom->normals.push_back(normalize_safe(n1));
+            sharedGeom->normals.push_back(normalize_safe(n2));
+
+            tri->setAssimpVertexIndices(baseIdx + 0, baseIdx + 1, baseIdx + 2);
+            tri->setOriginalGeometry(sharedGeom);
+        }
         
         // Assign transform
-        if (tr_idx < transforms.size()) {
+        if (has_transform) {
             tri->setTransformHandle(transforms[tr_idx]);
             
             // Static meshes need an initial CPU-space update for BVH/picking.
             // Skinned meshes must stay in bind/local space until animation updates them.
             if (!has_skin_data) {
-                tri->updateTransformedVertices();
+                if (!transforms[tr_idx]->base.isIdentity()) {
+                    tri->updateTransformedVertices();
+                } else {
+                    tri->update_bounding_box();
+                }
             }
+        } else {
+            tri->update_bounding_box();
         }
-        
-        tri->update_bounding_box();
         scene.world.objects.push_back(tri);
     }
-    
-    SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(tri_count) + " triangles, " + 
+
+    // Pre-v8 legacy path: collapse the just-loaded standalone facades to flat (same helper the v8
+    // standalone path calls before its early return).
+    collapseStandaloneFacadesToFlat();
+
+    SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(tri_count) + " triangles, " +
                    std::to_string(transform_count) + " transforms from binary.");
     return true;
 }
@@ -2940,7 +3416,7 @@ json ProjectManager::serializeLights(const std::vector<std::shared_ptr<Light>>& 
         l["direction"] = vec3ToJson(light->direction);
         l["color"] = vec3ToJson(light->color);
         l["intensity"] = light->intensity;
-        l["radius"] = light->radius;
+        l["radius"] = light->getRadius();
         
         // Spot light specific
         if (light->type() == LightType::Spot) {
@@ -2953,8 +3429,10 @@ json ProjectManager::serializeLights(const std::vector<std::shared_ptr<Light>>& 
         
         // Area light specific
         if (light->type() == LightType::Area) {
-            l["width"] = light->width;
-            l["height"] = light->height;
+            if (auto al = std::dynamic_pointer_cast<AreaLight>(light)) {
+                l["width"] = al->getWidth();
+                l["height"] = al->getHeight();
+            }
         }
         
         arr.push_back(l);
@@ -3983,30 +4461,30 @@ json ProjectManager::serializeRigidBodies(const SceneData& scene) {
         b["lock_rotation_y"] = rb.lock_rotation_y;
         b["lock_rotation_z"] = rb.lock_rotation_z;
         b["fluid_coupling_enabled"] = rb.fluid_coupling_enabled;
-        b["buoyancy_scale"] = rb.buoyancy_scale;
-        b["fluid_density"] = rb.fluid_density;
-        b["fluid_drag"] = rb.fluid_drag;
-        b["fluid_quadratic_drag"] = rb.fluid_quadratic_drag;
-        b["fluid_angular_drag"] = rb.fluid_angular_drag;
-        b["fluid_max_coupling_speed"] = rb.fluid_max_coupling_speed;
+        b["buoyancy_scale"] = rb.getBuoyancyScale();
+        b["fluid_density"] = rb.getFluidDensity();
+        b["fluid_drag"] = rb.getFluidDrag();
+        b["fluid_quadratic_drag"] = rb.getFluidQuadraticDrag();
+        b["fluid_angular_drag"] = rb.getFluidAngularDrag();
+        b["fluid_max_coupling_speed"] = rb.getFluidMaxCouplingSpeed();
         // Soft-body / cloth authoring (meaningful when kind != Rigid).
-        b["soft_stiffness"] = rb.soft_stiffness;
-        b["soft_compliance"] = rb.soft_compliance;
-        b["soft_pressure"] = rb.soft_pressure;
-        b["soft_damping"] = rb.soft_damping;
-        b["soft_vertex_radius"] = rb.soft_vertex_radius;
-        b["soft_iterations"] = rb.soft_iterations;
-        b["soft_friction"] = rb.soft_friction;
-        b["soft_restitution"] = rb.soft_restitution;
-        b["soft_gravity_factor"] = rb.soft_gravity_factor;
-        b["soft_mass"] = rb.soft_mass;
-        b["soft_two_sided"] = rb.soft_two_sided;
+        b["soft_stiffness"] = rb.getSoftStiffness();
+        b["soft_compliance"] = rb.getSoftCompliance();
+        b["soft_pressure"] = rb.getSoftPressure();
+        b["soft_damping"] = rb.getSoftDamping();
+        b["soft_vertex_radius"] = rb.getSoftVertexRadius();
+        b["soft_iterations"] = rb.getSoftIterations();
+        b["soft_friction"] = rb.getSoftFriction();
+        b["soft_restitution"] = rb.getSoftRestitution();
+        b["soft_gravity_factor"] = rb.getSoftGravityFactor();
+        b["soft_mass"] = rb.getSoftMass();
+        b["soft_two_sided"] = rb.getSoftTwoSided();
         b["force_field_enabled"] = rb.force_field_enabled;
         b["force_field_scale"] = rb.force_field_scale;
         // Cloth/soft pin regions (world-space spheres).
-        if (!rb.soft_pins.empty()) {
+        if (!rb.getSoftPins().empty()) {
             json pins = json::array();
-            for (const auto& pin : rb.soft_pins) {
+            for (const auto& pin : rb.getSoftPins()) {
                 json p;
                 p["center"] = vec3ToJson(pin.center);
                 p["radius"] = pin.radius;
@@ -4075,34 +4553,35 @@ void ProjectManager::deserializeRigidBodies(const json& j, SceneData& scene) {
         rb.lock_rotation_y = item.value("lock_rotation_y", rb.lock_rotation_y);
         rb.lock_rotation_z = item.value("lock_rotation_z", rb.lock_rotation_z);
         rb.fluid_coupling_enabled = item.value("fluid_coupling_enabled", rb.fluid_coupling_enabled);
-        rb.buoyancy_scale = item.value("buoyancy_scale", rb.buoyancy_scale);
-        rb.fluid_density = item.value("fluid_density", rb.fluid_density);
-        rb.fluid_drag = item.value("fluid_drag", rb.fluid_drag);
-        rb.fluid_quadratic_drag = item.value("fluid_quadratic_drag", rb.fluid_quadratic_drag);
-        rb.fluid_angular_drag = item.value("fluid_angular_drag", rb.fluid_angular_drag);
-        rb.fluid_max_coupling_speed = item.value("fluid_max_coupling_speed", rb.fluid_max_coupling_speed);
-        rb.soft_stiffness = item.value("soft_stiffness", rb.soft_stiffness);
-        rb.soft_compliance = item.value("soft_compliance", rb.soft_compliance);
-        rb.soft_pressure = item.value("soft_pressure", rb.soft_pressure);
-        rb.soft_damping = item.value("soft_damping", rb.soft_damping);
-        rb.soft_vertex_radius = item.value("soft_vertex_radius", rb.soft_vertex_radius);
-        rb.soft_iterations = item.value("soft_iterations", rb.soft_iterations);
-        rb.soft_friction = item.value("soft_friction", rb.soft_friction);
-        rb.soft_restitution = item.value("soft_restitution", rb.soft_restitution);
-        rb.soft_gravity_factor = item.value("soft_gravity_factor", rb.soft_gravity_factor);
-        rb.soft_mass = item.value("soft_mass", rb.soft_mass);
-        rb.soft_two_sided = item.value("soft_two_sided", rb.soft_two_sided);
+        rb.setBuoyancyScale(item.value("buoyancy_scale", rb.getBuoyancyScale()));
+        rb.setFluidDensity(item.value("fluid_density", rb.getFluidDensity()));
+        rb.setFluidDrag(item.value("fluid_drag", rb.getFluidDrag()));
+        rb.setFluidQuadraticDrag(item.value("fluid_quadratic_drag", rb.getFluidQuadraticDrag()));
+        rb.setFluidAngularDrag(item.value("fluid_angular_drag", rb.getFluidAngularDrag()));
+        rb.setFluidMaxCouplingSpeed(item.value("fluid_max_coupling_speed", rb.getFluidMaxCouplingSpeed()));
+        rb.setSoftStiffness(item.value("soft_stiffness", rb.getSoftStiffness()));
+        rb.setSoftCompliance(item.value("soft_compliance", rb.getSoftCompliance()));
+        rb.setSoftPressure(item.value("soft_pressure", rb.getSoftPressure()));
+        rb.setSoftDamping(item.value("soft_damping", rb.getSoftDamping()));
+        rb.setSoftVertexRadius(item.value("soft_vertex_radius", rb.getSoftVertexRadius()));
+        rb.setSoftIterations(item.value("soft_iterations", rb.getSoftIterations()));
+        rb.setSoftFriction(item.value("soft_friction", rb.getSoftFriction()));
+        rb.setSoftRestitution(item.value("soft_restitution", rb.getSoftRestitution()));
+        rb.setSoftGravityFactor(item.value("soft_gravity_factor", rb.getSoftGravityFactor()));
+        rb.setSoftMass(item.value("soft_mass", rb.getSoftMass()));
+        rb.setSoftTwoSided(item.value("soft_two_sided", rb.getSoftTwoSided()));
         rb.force_field_enabled = item.value("force_field_enabled", rb.force_field_enabled);
         rb.force_field_scale = item.value("force_field_scale", rb.force_field_scale);
         if (item.contains("soft_pins") && item["soft_pins"].is_array()) {
-            rb.soft_pins.clear();
+            auto& pins = rb.getSoftPinsMut();
+            pins.clear();
             for (const auto& p : item["soft_pins"]) {
                 if (!p.is_object()) continue;
                 RayTrophiSim::SoftPinRegion pin;
                 if (p.contains("center")) pin.center = jsonToVec3(p["center"]);
                 pin.radius = p.value("radius", pin.radius);
                 pin.enabled = p.value("enabled", pin.enabled);
-                rb.soft_pins.push_back(pin);
+                pins.push_back(pin);
             }
         }
         const bool hasSerializedRest = item.value("rest_captured", false) && item.contains("initial_pivot");

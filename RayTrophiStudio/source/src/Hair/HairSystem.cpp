@@ -1229,9 +1229,9 @@ Vec3 HairSystem::sampleTriangleSurface(
     outNormal = (n0 * w + n1 * u + n2 * v).normalize();
     
     // UV interpolation (using public members t0, t1, t2)
-    Vec2 uv0 = tri.t0;
-    Vec2 uv1 = tri.t1;
-    Vec2 uv2 = tri.t2;
+    Vec2 uv0 = tri.t_ref(0);
+    Vec2 uv1 = tri.t_ref(1);
+    Vec2 uv2 = tri.t_ref(2);
     outUV.x = uv0.x * w + uv1.x * u + uv2.x * v;
     outUV.y = uv0.y * w + uv1.y * u + uv2.y * v;
     

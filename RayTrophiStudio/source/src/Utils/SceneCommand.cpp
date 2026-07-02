@@ -7,6 +7,7 @@
 #include "Paint/PaintTextureSet.h"
 #include "Paint/MeshPaintAdapter.h"
 #include "HittableInstance.h"
+#include "TriangleMesh.h"  // FlatSculptEditCommand: SoA GeometryDetail write-back
 #include "Backend/OptixBackend.h"
 #include "Backend/VulkanBackend.h"
 #include "Backend/IViewportBackend.h"
@@ -930,6 +931,58 @@ void MeshEditCommand::execute(UIContext& ctx) {
 void MeshEditCommand::undo(UIContext& ctx) {
     applyStates(ctx, before_states_);
     SCENE_LOG_INFO("Undo: Edit Mesh " + object_name_);
+}
+
+void FlatSculptEditCommand::apply(UIContext& ctx, bool use_after) {
+    // Locate the flat TriangleMesh-as-Hittable by node name (resolved at apply time so it survives
+    // mesh-cache rebuilds between the stroke and the undo).
+    TriangleMesh* mesh = nullptr;
+    for (const auto& obj : ctx.scene.world.objects) {
+        if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (tm->nodeName == object_name_) { mesh = tm.get(); break; }
+        }
+    }
+    if (!mesh || !mesh->geometry) return;
+    DNA::GeometryDetail* geom = mesh->geometry.get();
+    const size_t vCount = geom->get_vertex_count();
+    Vec3* Porig = geom->get_attribute_data_mut<Vec3>("P_orig");
+    Vec3* P     = geom->get_attribute_data_mut<Vec3>("P");
+    Vec3* Norig = geom->get_attribute_data_mut<Vec3>("N_orig");
+    Vec3* N     = geom->get_attribute_data_mut<Vec3>("N");
+    if (!Porig && !P) return;
+
+    // P_orig/N_orig are authoritative local rest; P/N are the world-baked mirrors (same convention
+    // as SceneUI::syncFlatSculptVerticesToSoA, so every consumer reads a consistent result).
+    const Matrix4x4 world = mesh->transform ? mesh->transform->getFinal() : Matrix4x4::identity();
+    const Matrix4x4 normalMatrix = world.inverse().transpose();
+    for (const auto& s : states_) {
+        if (s.soa_id >= vCount) continue;
+        const Vec3 lp = use_after ? s.after_pos : s.before_pos;
+        const Vec3 ln = use_after ? s.after_nrm : s.before_nrm;
+        if (Porig) Porig[s.soa_id] = lp;
+        if (P)     P[s.soa_id]     = world.transform_point(lp);
+        if (Norig) Norig[s.soa_id] = ln;
+        if (N) {
+            const Vec3 wn = normalMatrix.transform_vector(ln);
+            const float wl = wn.length();
+            N[s.soa_id] = (wl > 1e-12f) ? (wn / wl) : ln;
+        }
+    }
+
+    scheduleSceneMutationRebuilds(ctx, true);
+    ctx.renderer.resetCPUAccumulation();
+    ProjectManager::getInstance().markModified();
+    ctx.start_render = true;
+}
+
+void FlatSculptEditCommand::execute(UIContext& ctx) {
+    apply(ctx, true);
+    SCENE_LOG_INFO("Redo: Sculpt " + object_name_);
+}
+
+void FlatSculptEditCommand::undo(UIContext& ctx) {
+    apply(ctx, false);
+    SCENE_LOG_INFO("Undo: Sculpt " + object_name_);
 }
 
 void ReplaceMeshGeometryCommand::applyMesh(

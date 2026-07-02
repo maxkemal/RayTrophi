@@ -1,0 +1,82 @@
+// terrain_flow_fill.comp
+// GPU port of the CPU priority-flood depression-filling step in fluvialErosionGPU's
+// updateFlowCPU (TerrainManager.cpp) — used to compute a depression-free "filled"
+// surface that flow direction is derived from. A true parallel priority-flood
+// (Barnes et al.) is a much bigger undertaking; this instead uses the classic
+// Planchon-Darboux (2001) relaxation formulation, which converges to the same
+// depression-free surface via repeated Jacobi-style passes (ping-pong buffers):
+// each interior cell's filled value can only decrease each pass, starting from
+// +infinity, until it settles at max(ownHeight, min-over-neighbors(neighborFilled)+eps).
+// Border cells are pinned to their own (noised) height — same role as the CPU
+// version's boundary-seeded priority queue. Includes the same coherent low-frequency
+// noise the CPU path now applies (see project_terrain_erosion_gpu_migration memory) so
+// flat-ground flow doesn't follow a deterministic rectilinear artifact.
+//
+// Convergence needs roughly as many passes as the largest connected flat/depression
+// region (in cells) — the noise keeps this bounded in practice but very large flat
+// areas may need more passes than the host currently budgets; tune fillPasses if flat
+// areas still look artifact-y.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    float eps; float noiseAmplitude;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer OrigHeight { float origHeight[]; };
+layout(set = 0, binding = 1) readonly buffer FilledIn   { float filledIn[]; };
+layout(set = 0, binding = 2) buffer FilledOut           { float filledOut[]; };
+
+float hash2(int xi, int yi) {
+    uint hh = uint(xi) * 374761393u + uint(yi) * 668265263u;
+    hh = (hh ^ (hh >> 13u)) * 1274126177u;
+    hh ^= hh >> 16u;
+    return float(hh & 0xFFFFFFu) / float(0xFFFFFF);
+}
+
+float coherentNoise(int x, int y) {
+    const float blobSize = 20.0;
+    float fx = float(x) / blobSize;
+    float fy = float(y) / blobSize;
+    int ix = int(floor(fx));
+    int iy = int(floor(fy));
+    float tx = fx - float(ix);
+    float ty = fy - float(iy);
+    float a = hash2(ix, iy);
+    float b = hash2(ix + 1, iy);
+    float c = hash2(ix, iy + 1);
+    float d = hash2(ix + 1, iy + 1);
+    float sx = tx * tx * (3.0 - 2.0 * tx);
+    float sy = ty * ty * (3.0 - 2.0 * ty);
+    float top = a + (b - a) * sx;
+    float bot = c + (d - c) * sx;
+    return top + (bot - top) * sy;
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    int x = id % pc.mapWidth;
+    int y = id / pc.mapWidth;
+
+    float noisedH = origHeight[id] + coherentNoise(x, y) * pc.noiseAmplitude;
+
+    if (x == 0 || x == pc.mapWidth - 1 || y == 0 || y == pc.mapHeight - 1) {
+        filledOut[id] = noisedH;
+        return;
+    }
+
+    const int dx[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+    const int dy[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+
+    float best = 1e18;
+    for (int d = 0; d < 8; d++) {
+        int nIdx = (y + dy[d]) * pc.mapWidth + (x + dx[d]);
+        float candidate = max(noisedH, filledIn[nIdx] + pc.eps);
+        best = min(best, candidate);
+    }
+    filledOut[id] = min(filledIn[id], best);
+}

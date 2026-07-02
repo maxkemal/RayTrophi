@@ -1,4 +1,4 @@
-﻿#include "SceneSerializer.h"
+#include "SceneSerializer.h"
 #include "globals.h"
 #include "Renderer.h"
 #include "OptixWrapper.h"
@@ -684,22 +684,22 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
         lj["name"] = l->nodeName;
 
         if (l->type() == LightType::Point) {
-            lj["radius"] = std::static_pointer_cast<PointLight>(l)->radius;
+            lj["radius"] = l->getRadius();
         } else if (l->type() == LightType::Directional) {
             lj["direction"] = vec3ToJson(std::static_pointer_cast<DirectionalLight>(l)->direction);
-            lj["radius"] = std::static_pointer_cast<DirectionalLight>(l)->radius;
+            lj["radius"] = l->getRadius();
         } else if (l->type() == LightType::Spot) {
             auto sl = std::static_pointer_cast<SpotLight>(l);
             lj["direction"] = vec3ToJson(sl->direction);
-            lj["radius"] = sl->radius;
+            lj["radius"] = sl->getRadius();
             lj["angle"] = sl->getAngleDegrees();
             lj["falloff"] = sl->getFalloff();
         } else if (l->type() == LightType::Area) {
             auto al = std::static_pointer_cast<AreaLight>(l);
-            lj["u"] = vec3ToJson(al->u);
-            lj["v"] = vec3ToJson(al->v);
-            lj["width"] = al->width;
-            lj["height"] = al->height;
+            lj["u"] = vec3ToJson(al->getU());
+            lj["v"] = vec3ToJson(al->getV());
+            lj["width"] = al->getWidth();
+            lj["height"] = al->getHeight();
         }
         root["lights"].push_back(lj);
     }

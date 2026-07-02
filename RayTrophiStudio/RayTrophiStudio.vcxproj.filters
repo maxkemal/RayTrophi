@@ -1435,6 +1435,9 @@
     <ClCompile Include="source\src\Scene\TriangleMesh.cpp">
       <Filter>Kaynak Dosyalar\Scene</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Utils\TriangleProxyConverter.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Viewport\ViewportSceneSync.h">

@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -3570,6 +3570,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         // List click -> viewport selection (bidirectional sync; viewport -> list
         // already happens because sel_rb is derived from the active selection).
         if (!selection_request_name.empty()) {
+            bool sel_found = false;
             for (size_t i = 0; i < scene.world.objects.size(); ++i) {
                 auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
                 if (!tri) continue;
@@ -3577,7 +3578,16 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 if (nn.empty()) nn = tri->getNodeName();
                 if (nn == selection_request_name) {
                     ui_ctx.selection.selectObject(tri, (int)i, nn);
+                    sel_found = true;
                     break;
+                }
+            }
+            // Flat (direct SoA) body: no per-face facades in world.objects, so select via the
+            // representative facade held in direct_mesh_nodes (the same handle normal selection uses).
+            if (!sel_found) {
+                auto dit = ui.direct_mesh_nodes.find(selection_request_name);
+                if (dit != ui.direct_mesh_nodes.end() && dit->second.rep) {
+                    ui_ctx.selection.selectObject(dit->second.rep, dit->second.object_index, selection_request_name);
                 }
             }
             for (int i = 0; i < (int)scene.rigid_bodies.size(); ++i) {
@@ -3663,37 +3673,89 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     ImGui::Spacing();
 
                     const bool is_cloth = (rb.kind == RayTrophiSim::BodyKind::Cloth);
+                    float soft_stiffness = rb.getSoftStiffness();
                     ImGui::SetNextItemWidth(150);
-                    rb_changed |= ImGui::DragFloat("Stiffness##sbstiff", &rb.soft_stiffness, 0.005f, 0.0f, 1.0f, "%.3f");
+                    if (ImGui::DragFloat("Stiffness##sbstiff", &soft_stiffness, 0.005f, 0.0f, 1.0f, "%.3f")) {
+                        rb.setSoftStiffness(soft_stiffness);
+                        rb_changed = true;
+                    }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Edge constraint stiffness: 0 = floppy, 1 = rigid-ish.");
+
+                    float soft_compliance = rb.getSoftCompliance();
                     ImGui::SetNextItemWidth(150);
-                    rb_changed |= ImGui::DragFloat("Compliance##sbcompl", &rb.soft_compliance, 0.0001f, 0.0f, 1.0f, "%.4f");
+                    if (ImGui::DragFloat("Compliance##sbcompl", &soft_compliance, 0.0001f, 0.0f, 1.0f, "%.4f")) {
+                        rb.setSoftCompliance(soft_compliance);
+                        rb_changed = true;
+                    }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("XPBD inverse stiffness; 0 = fully stiff.");
+
+                    float soft_damping = rb.getSoftDamping();
                     ImGui::SetNextItemWidth(150);
-                    rb_changed |= ImGui::DragFloat("Damping##sbdamp", &rb.soft_damping, 0.005f, 0.0f, 1.0f, "%.3f");
+                    if (ImGui::DragFloat("Damping##sbdamp", &soft_damping, 0.005f, 0.0f, 1.0f, "%.3f")) {
+                        rb.setSoftDamping(soft_damping);
+                        rb_changed = true;
+                    }
+
+                    int soft_iterations = rb.getSoftIterations();
                     ImGui::SetNextItemWidth(150);
-                    rb_changed |= ImGui::DragInt("Iterations##sbiter", &rb.soft_iterations, 0.1f, 1, 64);
+                    if (ImGui::DragInt("Iterations##sbiter", &soft_iterations, 0.1f, 1, 64)) {
+                        rb.setSoftIterations(soft_iterations);
+                        rb_changed = true;
+                    }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Constraint solver iterations per step (higher = stiffer/stabler, slower).");
+
+                    float soft_mass = rb.getSoftMass();
                     ImGui::SetNextItemWidth(150);
-                    rb_changed |= ImGui::DragFloat("Total Mass (kg)##sbmass", &rb.soft_mass, 0.05f, 0.001f, 100000.0f, "%.3f");
+                    if (ImGui::DragFloat("Total Mass (kg)##sbmass", &soft_mass, 0.05f, 0.001f, 100000.0f, "%.3f")) {
+                        rb.setSoftMass(soft_mass);
+                        rb_changed = true;
+                    }
+
+                    float soft_vertex_radius = rb.getSoftVertexRadius();
                     ImGui::SetNextItemWidth(150);
-                    rb_changed |= ImGui::DragFloat("Vertex Radius##sbvr", &rb.soft_vertex_radius, 0.001f, 0.0f, 1.0f, "%.4f");
+                    if (ImGui::DragFloat("Vertex Radius##sbvr", &soft_vertex_radius, 0.001f, 0.0f, 1.0f, "%.4f")) {
+                        rb.setSoftVertexRadius(soft_vertex_radius);
+                        rb_changed = true;
+                    }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-vertex collision thickness (m).");
 
                     ImGui::BeginDisabled(is_cloth);  // closed-volume pressure is meaningless for open cloth
+                    float soft_pressure = rb.getSoftPressure();
                     ImGui::SetNextItemWidth(150);
-                    rb_changed |= ImGui::DragFloat("Pressure##sbpress", &rb.soft_pressure, 0.05f, 0.0f, 1000.0f, "%.2f");
+                    if (ImGui::DragFloat("Pressure##sbpress", &soft_pressure, 0.05f, 0.0f, 1000.0f, "%.2f")) {
+                        rb.setSoftPressure(soft_pressure);
+                        rb_changed = true;
+                    }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Closed-volume inflation (balloons / soft solids). N/A for cloth.");
                     ImGui::EndDisabled();
 
+                    float soft_friction = rb.getSoftFriction();
                     ImGui::SetNextItemWidth(150);
-                    rb_changed |= ImGui::DragFloat("Friction##sbfric", &rb.soft_friction, 0.01f, 0.0f, 1.0f, "%.3f");
+                    if (ImGui::DragFloat("Friction##sbfric", &soft_friction, 0.01f, 0.0f, 1.0f, "%.3f")) {
+                        rb.setSoftFriction(soft_friction);
+                        rb_changed = true;
+                    }
+
+                    float soft_restitution = rb.getSoftRestitution();
                     ImGui::SetNextItemWidth(150);
-                    rb_changed |= ImGui::DragFloat("Restitution##sbrest", &rb.soft_restitution, 0.01f, 0.0f, 1.0f, "%.3f");
+                    if (ImGui::DragFloat("Restitution##sbrest", &soft_restitution, 0.01f, 0.0f, 1.0f, "%.3f")) {
+                        rb.setSoftRestitution(soft_restitution);
+                        rb_changed = true;
+                    }
+
+                    float soft_gravity_factor = rb.getSoftGravityFactor();
                     ImGui::SetNextItemWidth(150);
-                    rb_changed |= ImGui::DragFloat("Gravity Factor##sbgrav", &rb.soft_gravity_factor, 0.01f, -10.0f, 10.0f, "%.2f");
+                    if (ImGui::DragFloat("Gravity Factor##sbgrav", &soft_gravity_factor, 0.01f, -10.0f, 10.0f, "%.2f")) {
+                        rb.setSoftGravityFactor(soft_gravity_factor);
+                        rb_changed = true;
+                    }
+
                     if (is_cloth) {
-                        rb_changed |= ImGui::Checkbox("Two-Sided Collision##sb2s", &rb.soft_two_sided);
+                        bool soft_two_sided = rb.getSoftTwoSided();
+                        if (ImGui::Checkbox("Two-Sided Collision##sb2s", &soft_two_sided)) {
+                            rb.setSoftTwoSided(soft_two_sided);
+                            rb_changed = true;
+                        }
                     }
                     if (rb_changed) rb_rebuild = true;
 
@@ -3702,11 +3764,6 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     ImGui::SeparatorText("Pins");
                     ImGui::TextDisabled("Pinned vertices stay fixed in place during play.");
 
-                    // Primary workflow: mark the vertices selected in Edit Mesh mode.
-                    // Each selected vertex becomes a small world-space pin sphere, so it
-                    // survives re-import and needs no gizmo alignment. The selection is
-                    // published by SceneUI into g_edit_pin_selection (the panel is a free
-                    // function, so it can't read SceneUI's edit cache directly).
                     // Check if edit mode is active on this object
                     bool is_editing = ui.mesh_overlay_settings.enabled && ui.mesh_overlay_settings.edit_mode &&
                                       ui.mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit &&
@@ -3726,6 +3783,17 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                                     ui_ctx.selection.selectObject(tri, (int)i, nn);
                                     found = true;
                                     break;
+                                }
+                            }
+                            // Flat (direct SoA) body: no facades — select via the representative facade
+                            // (direct_mesh_nodes). Without this the Triangle-only scan never matched, so
+                            // the edit workspace never activated and you couldn't enter vertex-pin mode
+                            // (and a viewport click selected the OBJECT, appearing to "cancel" the mode).
+                            if (!found) {
+                                auto dit = ui.direct_mesh_nodes.find(rb.source_name);
+                                if (dit != ui.direct_mesh_nodes.end() && dit->second.rep) {
+                                    ui_ctx.selection.selectObject(dit->second.rep, dit->second.object_index, rb.source_name);
+                                    found = true;
                                 }
                             }
                             if (found) {
@@ -3761,7 +3829,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                             RayTrophiSim::SoftPinRegion pin;
                             pin.center = wp;
                             pin.radius = pin_snap_radius;
-                            rb.soft_pins.push_back(pin);
+                            rb.getSoftPinsMut().push_back(pin);
                         }
                         rb_rebuild = true;
                         rb_changed = true;
@@ -3776,9 +3844,10 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
 
                     // Pin region list: per-pin radius/enable/remove + add empty/clear.
                     int pin_to_remove = -1;
-                    for (int pi = 0; pi < (int)rb.soft_pins.size(); ++pi) {
+                    auto& pins = rb.getSoftPinsMut();
+                    for (int pi = 0; pi < (int)pins.size(); ++pi) {
                         ImGui::PushID(pi);
-                        auto& pin = rb.soft_pins[pi];
+                        auto& pin = pins[pi];
                         if (ImGui::Checkbox("##pinen", &pin.enabled)) { rb_rebuild = true; rb_changed = true; }
                         ImGui::SameLine();
                         ImGui::SetNextItemWidth(150);
@@ -3791,12 +3860,12 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                         ImGui::PopID();
                     }
                     if (pin_to_remove >= 0) {
-                        rb.soft_pins.erase(rb.soft_pins.begin() + pin_to_remove);
+                        pins.erase(pins.begin() + pin_to_remove);
                         rb_rebuild = true; rb_changed = true;
                     }
-                    if (!rb.soft_pins.empty()) {
+                    if (!pins.empty()) {
                         if (ImGui::SmallButton("Clear All Pins##sbpinclr")) {
-                            rb.soft_pins.clear();
+                            pins.clear();
                             rb_rebuild = true; rb_changed = true;
                         }
                         ImGui::SameLine();
@@ -3858,26 +3927,57 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 if (ImGui::BeginTabItem("Fluid")) {
                     rb_changed |= ImGui::Checkbox("Use Fluid Coupling##rbfluid", &rb.fluid_coupling_enabled);
                     ImGui::BeginDisabled(!rb.fluid_coupling_enabled);
-                    rb_changed |= ImGui::DragFloat("Fluid Density##rbfldens", &rb.fluid_density, 5.0f, 0.1f, 20000.0f, "%.1f");
-                    rb_changed |= ImGui::DragFloat("Buoyancy Scale##rbbscale", &rb.buoyancy_scale, 0.01f, 0.0f, 10.0f, "%.2f");
-                    rb_changed |= ImGui::DragFloat("Fluid Drag##rbfdrag", &rb.fluid_drag, 0.01f, 0.0f, 100.0f, "%.2f");
+                    
+                    float fluid_density = rb.getFluidDensity();
+                    if (ImGui::DragFloat("Fluid Density##rbfldens", &fluid_density, 5.0f, 0.1f, 20000.0f, "%.1f")) {
+                        rb.setFluidDensity(fluid_density);
+                        rb_changed = true;
+                    }
+                    
+                    float buoyancy_scale = rb.getBuoyancyScale();
+                    if (ImGui::DragFloat("Buoyancy Scale##rbbscale", &buoyancy_scale, 0.01f, 0.0f, 10.0f, "%.2f")) {
+                        rb.setBuoyancyScale(buoyancy_scale);
+                        rb_changed = true;
+                    }
+                    
+                    float fluid_drag = rb.getFluidDrag();
+                    if (ImGui::DragFloat("Fluid Drag##rbfdrag", &fluid_drag, 0.01f, 0.0f, 100.0f, "%.2f")) {
+                        rb.setFluidDrag(fluid_drag);
+                        rb_changed = true;
+                    }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Linear (viscous) drag: -k*v. Damps slow drift.");
-                    rb_changed |= ImGui::DragFloat("Form Drag (slam)##rbfqdrag", &rb.fluid_quadratic_drag, 0.01f, 0.0f, 100.0f, "%.2f");
+                    
+                    float fluid_quadratic_drag = rb.getFluidQuadraticDrag();
+                    if (ImGui::DragFloat("Form Drag (slam)##rbfqdrag", &fluid_quadratic_drag, 0.01f, 0.0f, 100.0f, "%.2f")) {
+                        rb.setFluidQuadraticDrag(fluid_quadratic_drag);
+                        rb_changed = true;
+                    }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Quadratic form/slam drag: grows with speed (~v^2).\nThis is what stops a body skipping off the water surface; raise it if impacts bounce too much.");
-                    rb_changed |= ImGui::DragFloat("Angular Fluid Drag##rbfadrag", &rb.fluid_angular_drag, 0.01f, 0.0f, 100.0f, "%.2f");
-                    rb_changed |= ImGui::DragFloat("Max Coupling Speed##rbfmaxspd", &rb.fluid_max_coupling_speed, 0.1f, 0.0f, 50.0f, "%.1f m/s");
+                    
+                    float fluid_angular_drag = rb.getFluidAngularDrag();
+                    if (ImGui::DragFloat("Angular Fluid Drag##rbfadrag", &fluid_angular_drag, 0.01f, 0.0f, 100.0f, "%.2f")) {
+                        rb.setFluidAngularDrag(fluid_angular_drag);
+                        rb_changed = true;
+                    }
+                    
+                    float fluid_max_coupling_speed = rb.getFluidMaxCouplingSpeed();
+                    if (ImGui::DragFloat("Max Coupling Speed##rbfmaxspd", &fluid_max_coupling_speed, 0.1f, 0.0f, 50.0f, "%.1f m/s")) {
+                        rb.setFluidMaxCouplingSpeed(fluid_max_coupling_speed);
+                        rb_changed = true;
+                    }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Speed cap on the fluid velocity that drives drag.\nDamps the splash a plunging body stamps into the grid so it isn't flung sideways. 0 disables the clamp.");
+                    
                     ImGui::EndDisabled();
                     // Always-visible float/sink verdict (the one number that
                     // explains most "won't float/sink" confusion). The rest of
                     // the per-step coupling telemetry is tucked under a collapsed
                     // Debug header so the panel stays clean.
                     if (rb.fluid_coupling_enabled && rb.dbg_coupled) {
-                        const bool floats = rb.dbg_body_density < rb.fluid_density;
+                        const bool floats = rb.dbg_body_density < rb.getFluidDensity();
                         ImGui::TextColored(floats ? ImVec4(0.45f, 0.85f, 1.0f, 1.0f)
                                                   : ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
                                            "Body %.0f kg/m3 vs fluid %.0f  (%s)",
-                                           rb.dbg_body_density, rb.fluid_density,
+                                           rb.dbg_body_density, rb.getFluidDensity(),
                                            floats ? "floats" : "sinks");
                         if (ImGui::TreeNodeEx("Coupling Debug##rbcpldbg", ImGuiTreeNodeFlags_None)) {
                             ImGui::Text("Submerged: %d / %d pts   sd_min %.3f m",
@@ -3911,23 +4011,53 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     if (ImGui::BeginTabItem("Fluid")) {
                         rb_changed |= ImGui::Checkbox("Use Fluid Coupling##rbfluid_soft", &rb.fluid_coupling_enabled);
                         ImGui::BeginDisabled(!rb.fluid_coupling_enabled);
-                        rb_changed |= ImGui::DragFloat("Fluid Density##rbfldens_soft", &rb.fluid_density, 5.0f, 0.1f, 20000.0f, "%.1f");
-                        rb_changed |= ImGui::DragFloat("Buoyancy Scale##rbbscale_soft", &rb.buoyancy_scale, 0.01f, 0.0f, 10.0f, "%.2f");
-                        rb_changed |= ImGui::DragFloat("Fluid Drag##rbfdrag_soft", &rb.fluid_drag, 0.01f, 0.0f, 100.0f, "%.2f");
+                        
+                        float fluid_density = rb.getFluidDensity();
+                        if (ImGui::DragFloat("Fluid Density##rbfldens_soft", &fluid_density, 5.0f, 0.1f, 20000.0f, "%.1f")) {
+                            rb.setFluidDensity(fluid_density);
+                            rb_changed = true;
+                        }
+                        
+                        float buoyancy_scale = rb.getBuoyancyScale();
+                        if (ImGui::DragFloat("Buoyancy Scale##rbbscale_soft", &buoyancy_scale, 0.01f, 0.0f, 10.0f, "%.2f")) {
+                            rb.setBuoyancyScale(buoyancy_scale);
+                            rb_changed = true;
+                        }
+                        
+                        float fluid_drag = rb.getFluidDrag();
+                        if (ImGui::DragFloat("Fluid Drag##rbfdrag_soft", &fluid_drag, 0.01f, 0.0f, 100.0f, "%.2f")) {
+                            rb.setFluidDrag(fluid_drag);
+                            rb_changed = true;
+                        }
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Linear (viscous) drag: -k*v. Damps slow drift.");
-                        rb_changed |= ImGui::DragFloat("Form Drag (slam)##rbfqdrag_soft", &rb.fluid_quadratic_drag, 0.01f, 0.0f, 100.0f, "%.2f");
+                        
+                        float fluid_quadratic_drag = rb.getFluidQuadraticDrag();
+                        if (ImGui::DragFloat("Form Drag (slam)##rbfqdrag_soft", &fluid_quadratic_drag, 0.01f, 0.0f, 100.0f, "%.2f")) {
+                            rb.setFluidQuadraticDrag(fluid_quadratic_drag);
+                            rb_changed = true;
+                        }
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Quadratic form/slam drag: grows with speed (~v^2).");
-                        rb_changed |= ImGui::DragFloat("Angular Fluid Drag##rbfadrag_soft", &rb.fluid_angular_drag, 0.01f, 0.0f, 100.0f, "%.2f");
-                        rb_changed |= ImGui::DragFloat("Max Coupling Speed##rbfmaxspd_soft", &rb.fluid_max_coupling_speed, 0.1f, 0.0f, 50.0f, "%.1f m/s");
+                        
+                        float fluid_angular_drag = rb.getFluidAngularDrag();
+                        if (ImGui::DragFloat("Angular Fluid Drag##rbfadrag_soft", &fluid_angular_drag, 0.01f, 0.0f, 100.0f, "%.2f")) {
+                            rb.setFluidAngularDrag(fluid_angular_drag);
+                            rb_changed = true;
+                        }
+                        
+                        float fluid_max_coupling_speed = rb.getFluidMaxCouplingSpeed();
+                        if (ImGui::DragFloat("Max Coupling Speed##rbfmaxspd_soft", &fluid_max_coupling_speed, 0.1f, 0.0f, 50.0f, "%.1f m/s")) {
+                            rb.setFluidMaxCouplingSpeed(fluid_max_coupling_speed);
+                            rb_changed = true;
+                        }
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Speed cap on the fluid velocity that drives drag. 0 disables the clamp.");
                         ImGui::EndDisabled();
 
                         if (rb.fluid_coupling_enabled && rb.dbg_coupled) {
-                            const bool floats = rb.dbg_body_density < rb.fluid_density;
+                            const bool floats = rb.dbg_body_density < rb.getFluidDensity();
                             ImGui::TextColored(floats ? ImVec4(0.45f, 0.85f, 1.0f, 1.0f)
                                                       : ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
                                                "Body %.0f kg/m3 vs fluid %.0f  (%s)",
-                                               rb.dbg_body_density, rb.fluid_density,
+                                               rb.dbg_body_density, rb.getFluidDensity(),
                                                floats ? "floats" : "sinks");
                             if (ImGui::TreeNodeEx("Coupling Debug##rbcpldbg_soft", ImGuiTreeNodeFlags_None)) {
                                 ImGui::Text("Submerged: %d / %d pts   sd_min %.3f m",

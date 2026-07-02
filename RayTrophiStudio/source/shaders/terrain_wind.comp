@@ -1,0 +1,97 @@
+// terrain_wind.comp
+// Vulkan port of windErosionKernel (erosion_kernels.cu). Shadow-zone + saltation
+// aeolian transport model (Bagnold 1941 / Werner 1995). Clamps were already
+// physically normalized (heightScale/cellSize) in the CUDA original — no scale bug
+// here. Physics fix: the CUDA kernel called curand_init(1337, idx, 0, &state) with a
+// FIXED seed every iteration, so the wind-direction jitter never varied between
+// iterations (only the changing heights made iterations differ at all) — no real
+// stochastic gust variation. Fixed here by hashing in an iterationSeed push-constant
+// that the host increments per dispatch. See project_terrain_erosion_gpu_migration memory.
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    float windDirX; float windDirY;
+    float strength; float suspensionRate; float depositionRate;
+    float cellSize; float heightScale;
+    uint iterationSeed;
+} pc;
+
+layout(set = 0, binding = 0) buffer Height { float heightmap[]; };
+
+float hash1(uint x) {
+    x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;
+    return float(x) * (1.0 / 4294967295.0);
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    int x = id % pc.mapWidth;
+    int y = id / pc.mapWidth;
+    if (x <= 5 || x >= pc.mapWidth - 6 || y <= 5 || y >= pc.mapHeight - 6) return;
+
+    int idx = id;
+    float h = heightmap[idx];
+
+    float safeHeightScale = max(0.1, pc.heightScale);
+    float invCellSize = 1.0 / max(0.01, pc.cellSize);
+    float slopeScale = safeHeightScale * invCellSize;
+
+    uint rngState = uint(idx) * 374761393u + pc.iterationSeed * 2246822519u;
+    float angleJitter = (hash1(rngState) - 0.5) * 0.2;
+    float windLen = sqrt(pc.windDirX * pc.windDirX + pc.windDirY * pc.windDirY);
+    float cosJ = cos(angleJitter);
+    float sinJ = sin(angleJitter);
+    float normWindX = (windLen > 0.001) ? (pc.windDirX * cosJ - pc.windDirY * sinJ) / windLen : 1.0;
+    float normWindY = (windLen > 0.001) ? (pc.windDirX * sinJ + pc.windDirY * cosJ) / windLen : 0.0;
+
+    float shadowFactor = 1.0;
+    const float SHADOW_TAN = 0.26;
+
+    float maxSearchDist = 20.0;
+    int maxSteps = int(maxSearchDist * invCellSize);
+    maxSteps = min(maxSteps, 15);
+
+    for (int step = 1; step <= maxSteps; step++) {
+        float dist = float(step) * pc.cellSize;
+        int checkX = x - int(normWindX * float(step));
+        int checkY = y - int(normWindY * float(step));
+
+        if (checkX < 0 || checkX >= pc.mapWidth || checkY < 0 || checkY >= pc.mapHeight) break;
+
+        float upwindH = heightmap[checkY * pc.mapWidth + checkX];
+        if (upwindH * pc.heightScale > h * pc.heightScale + dist * SHADOW_TAN) {
+            shadowFactor *= 0.4;
+            if (shadowFactor < 0.1) break;
+        }
+    }
+
+    int ux = x - int(normWindX);
+    int uy = y - int(normWindY);
+    float upwindH = heightmap[uy * pc.mapWidth + ux];
+    float slope = (h - upwindH) * slopeScale;
+
+    if (slope > 0.0 && shadowFactor > 0.5) {
+        float erosion = slope * pc.strength * pc.suspensionRate * shadowFactor;
+        atomicAdd(heightmap[idx], -erosion);
+
+        float jumpDistWorld = 4.0 * pc.strength;
+        int jumpSteps = int(jumpDistWorld * invCellSize);
+        jumpSteps = max(1, min(jumpSteps, 10));
+
+        int dxJump = x + int(normWindX * float(jumpSteps));
+        int dyJump = y + int(normWindY * float(jumpSteps));
+
+        if (dxJump > 0 && dxJump < pc.mapWidth && dyJump > 0 && dyJump < pc.mapHeight) {
+            atomicAdd(heightmap[dyJump * pc.mapWidth + dxJump], erosion * pc.depositionRate);
+        }
+    } else if (shadowFactor < 0.7) {
+        float settling = (1.0 - shadowFactor) * pc.strength * 0.05 * pc.depositionRate;
+        atomicAdd(heightmap[idx], settling);
+    }
+}

@@ -1171,7 +1171,13 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                 if (ImGui::Button(all_visible ? "(o)" : "( )")) {
                     bool new_visible = !all_visible && !ctx.scene.isEditorPendingDeleteObjectName(name);
-                    for (auto& pair : kv.second) pair.second->visible = new_visible;
+                    // A multi-material import shares one nodeName across several TriangleMesh
+                    // objects (one per material); flip the rep facade AND its parentMesh so every
+                    // material's real geometry (not just the throwaway UI-handle facade) toggles.
+                    for (auto& pair : kv.second) {
+                        pair.second->visible = new_visible;
+                        if (pair.second->parentMesh) pair.second->parentMesh->visible = new_visible;
+                    }
                     setHierarchyObjectVisibility(ctx, name, new_visible);
                     
                     ProjectManager::getInstance().markModified();
@@ -2795,17 +2801,17 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         Vec3 dir = light.direction;
                         if (dir.length_squared() < 0.001f) dir = Vec3(0, -1, 0);
                         std::string name = light.nodeName;
-                        float radius = light.radius;
+                        float radius = light.getRadius();
 
                         std::shared_ptr<Light> new_light;
                         switch (newTypeIdx) {
                         case 0: // Point
                             new_light = std::make_shared<PointLight>(pos, col, inten);
-                            new_light->radius = radius;
+                            new_light->setRadius(radius);
                             break;
                         case 1: // Directional
                             new_light = std::make_shared<DirectionalLight>(dir, col, inten);
-                            new_light->radius = radius;
+                            new_light->setRadius(radius);
                             break;
                         case 2: // Spot
                             new_light = std::make_shared<SpotLight>(pos, dir, col, 45.0f, 10.0f);
@@ -2826,7 +2832,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             new_light->color = col;
                             new_light->intensity = inten;
                             new_light->direction = dir;
-                            new_light->radius = radius;
+                            new_light->setRadius(radius);
 
                             // Resolve scene index (selection.light_index may be stale)
                             size_t idx = 0;
@@ -2880,8 +2886,12 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     light_changed = true;
                 }
 
-                if (light.type() == LightType::Point || light.type() == LightType::Directional) {
-                    if (SceneUI::DrawSmartFloat("lrad", "Radius", &light.radius, 0.01f, 100.0f, "%.2f", false, nullptr, 16)) light_changed = true;
+                if (light.type() == LightType::Point || light.type() == LightType::Directional || light.type() == LightType::Spot) {
+                    float rad = light.getRadius();
+                    if (SceneUI::DrawSmartFloat("lrad", "Radius", &rad, 0.01f, 100.0f, "%.2f", false, nullptr, 16)) {
+                        light.setRadius(rad);
+                        light_changed = true;
+                    }
                 }
 
                 if (auto sl = dynamic_cast<SpotLight*>(&light)) {
@@ -2892,12 +2902,14 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     }
                 }
                 else if (auto al = dynamic_cast<AreaLight*>(&light)) {
-                    if (SceneUI::DrawSmartFloat("awid", "Width", &al->width, 0.01f, 100.0f, "%.2f", false, nullptr, 16)) {
-                        al->u = al->u.normalize() * al->width;
+                    float w = al->getWidth();
+                    if (SceneUI::DrawSmartFloat("awid", "Width", &w, 0.01f, 100.0f, "%.2f", false, nullptr, 16)) {
+                        al->setWidth(w);
                         light_changed = true;
                     }
-                    if (SceneUI::DrawSmartFloat("ahei", "Height", &al->height, 0.01f, 100.0f, "%.2f", false, nullptr, 16)) {
-                        al->v = al->v.normalize() * al->height;
+                    float h = al->getHeight();
+                    if (SceneUI::DrawSmartFloat("ahei", "Height", &h, 0.01f, 100.0f, "%.2f", false, nullptr, 16)) {
+                        al->setHeight(h);
                         light_changed = true;
                     }
                 }

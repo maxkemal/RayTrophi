@@ -236,6 +236,12 @@ public:
      void drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapter);
      void drawPaintChannelTextureSlots(UIContext& ctx, Paint::MeshPaintAdapter* adapter);
      void drawMaterialPanel(UIContext& ctx);   // Material/Texture editor for selected object
+     // Flat/proxy: a dense mesh stored as a single TriangleMesh (no facades) cannot be repainted
+     // by the per-facade setMaterialID loop (only its one representative face would change). If
+     // `name` is such a direct mesh, bulk-rewrite its SoA materialID buffer (oldID->newID; pass
+     // oldID==INVALID to repaint all) AND remap the CPU Embree BVH in place (no full rebuild), so
+     // CPU render reflects the change immediately. Returns true if handled as a direct mesh.
+     bool repaintDirectMeshMaterial(UIContext& ctx, const std::string& name, uint16_t oldID, uint16_t newID);
      void drawPrincipledBSDFEditor(class PrincipledBSDF* pbsdf, uint16_t mat_id, UIContext& ctx); // Reusable editor widget
      void drawEditableMeshOverlay(UIContext& ctx); // Viewport edit overlay for selected mesh
      // GPU edit overlay: pushes editable-mesh wireframe/vertex/face data to the
@@ -245,6 +251,10 @@ public:
                                  bool drawVertices, bool drawEdges, bool drawFaces);
      void releaseGpuEditMeshOverlay(); // clear backend buffers + disable the GPU overlay
      bool ensureEditableMeshCache(UIContext& ctx, const std::string& objectName);
+     // Scatter sculpt/edit vertex edits from the editable cache back into a flat (direct) SoA
+     // mesh (editable vertex id == SoA vertex id). Updates P_orig/P and recomputes N_orig/N for
+     // the moved verts + their one-ring. No-op (returns false) when the cache is facade-backed.
+     bool syncFlatSculptVerticesToSoA(const std::vector<size_t>& movedVertexIds);
      bool ensureSculptControlGraph(UIContext& ctx, const std::string& objectName);
      void invalidateSculptControlGraph(const std::string& objectName = std::string());
      bool ensureSculptPBVH(UIContext& ctx, const std::string& objectName);
@@ -324,6 +334,7 @@ public:
      void invalidateCache();
      void rebuildTriToIndex(const std::vector<std::shared_ptr<class Hittable>>& objects);
      void rebuildMeshCache(const std::vector<std::shared_ptr<class Hittable>>& objects);
+     void syncAllTransformedVertices(struct SceneData& scene);
      void updateBBoxCache(const std::string& objectName);  // Update bounding box for specific object after transform
      void moveObjectPivot(UIContext& ctx, const std::string& objectName, const Vec3& worldDelta);
      void recenterObjectPivotToBoundsCenter(UIContext& ctx, const std::string& objectName);
@@ -657,7 +668,13 @@ public:
          // triangle_vertex_ids map). Both eliminate millions of serial hash inserts on entry.
          std::vector<int> face_to_mesh_index;
          float spatial_cell_size = 0.0f;
-         std::unordered_map<EditableSpatialCellKey, std::vector<int>, EditableSpatialCellKeyHasher> vertex_spatial_buckets;
+          struct SpatialBucket {
+              EditableSpatialCellKey key;
+              int start_index = 0;
+              int count = 0;
+          };
+          std::vector<SpatialBucket> spatial_buckets;
+          std::vector<int> vertex_spatial_indices;
          std::vector<uint32_t> vertex_mark_stamps;
          uint32_t vertex_mark_generation = 1;
          std::vector<uint32_t> triangle_mark_stamps;
@@ -673,6 +690,18 @@ public:
          // True when the cache was built in the cheaper sculpt-only layout (skips some
          // edit-mode topology). Lets ensureEditableMeshCache avoid a needless rebuild.
          bool built_minimal_for_sculpt = false;
+         // Non-owning back-pointer to the flat (direct) SoA mesh this cache was built from, or
+         // null for a per-face-Triangle (facade) cache. When set, sculpt/edit write-back targets
+         // the mesh's DNA SoA directly instead of the empty source_triangles facade list. The
+         // mesh is owned by direct_mesh_nodes/world.
+         class TriangleMesh* flat_source_mesh = nullptr;
+         // Flat cache only: editable vertex -> SoA vertex ids (CSR). The editable cache welds
+         // coincident positions into ONE editable vertex (so a UV seam's split SoA copies move
+         // together — without this they tear apart under a normal-direction brush), so one
+         // editable vertex maps to one OR MORE SoA vertices. Write-back (syncFlatSculptVerticesToSoA)
+         // scatters the edited position/normal to every SoA copy. Empty for a facade cache.
+         std::vector<int> flat_soa_offsets;      // size = vertices.size() + 1
+         std::vector<uint32_t> flat_soa_data;    // SoA vertex ids, grouped per editable vertex
 
          // --- Polygon (quad/ngon) grouping for LOOP NORMALS ---
          // Source triangles grouped by Triangle::faceIndex so sculpt/shading can compute ONE
@@ -1007,6 +1036,11 @@ public:
         std::vector<float> clay_strips_layer_accum;
         std::unordered_map<const class Triangle*, MeshEditTriangleState> before_triangle_states;
         std::unordered_map<const class Triangle*, std::shared_ptr<class Triangle>> touched_triangles;
+        // FLAT (direct SoA) sculpt undo: facade pointers above stay empty on a flat mesh, so capture
+        // each touched SoA vertex's local rest pos+normal the FIRST time it is written this stroke
+        // (in syncFlatSculptVerticesToSoA). At stroke end this seeds a FlatSculptEditCommand.
+        // Key = SoA vertex id; value = {P_orig, N_orig} BEFORE the stroke's first touch of it.
+        std::unordered_map<uint32_t, std::pair<Vec3, Vec3>> flat_before_soa;
     };
     SculptStrokeState sculpt_stroke_state;
 
@@ -1149,6 +1183,17 @@ public:
     SceneHistory history;  // Command history for undo/redo
     // Fast lookup from Triangle pointer to its index in world.objects (for BVH Picking)
     std::unordered_map<const class Triangle*, int> tri_to_index;
+    // Flat/proxy migration: dense meshes that live in world.objects as a single TriangleMesh
+    // (no per-face facades) are registered here by node name + world.objects index, so the
+    // facade-based UI (hierarchy listing, click selection) can treat them as first-class objects.
+    // `rep` is a SINGLE representative facade (face 0) that serves as the UI handle: the
+    // hierarchy/selection/gizmo/bbox/transform-sync machinery all read parentMesh->geometry for a
+    // flat mesh and only need one facade as the handle, so one 136B facade replaces 12.6M of them.
+    struct DirectMeshNode { std::shared_ptr<class TriangleMesh> mesh; int object_index = -1; std::shared_ptr<class Triangle> rep; };
+    std::unordered_map<std::string, DirectMeshNode> direct_mesh_nodes;
+    // Reverse lookup for viewport picking: a flat-mesh hit reports HitRecord.tri_mesh (no facade
+    // pointer), so map the mesh pointer back to its representative facade to drive selection.
+    std::unordered_map<const class TriangleMesh*, std::shared_ptr<class Triangle>> direct_mesh_rep_by_ptr;
     // Interaction State
     bool is_dragging = false; // Tracks if a gizmo manipulation is in progress
     bool is_bvh_dirty = false; // Flag for lazy BVH updates
@@ -1333,6 +1378,23 @@ private:
   
     size_t cached_scene_triangle_count = 0;
     std::unordered_map<std::string, size_t> cached_triangle_count_by_object;
+
+    // Accurate geometry breakdown for the debug HUD. cached_scene_triangle_count above counts
+    // mesh_cache ENTRIES (a flat mesh = 1 representative facade), so it badly undercounts flat
+    // scenes; this is the real per-triangle accounting (facade vs flat vs skinned vs animated),
+    // recomputed only when the geometry generation or object count changes (not per frame).
+    struct SceneGeometryStats {
+        uint64_t generation = ~0ull;
+        size_t object_count = ~0ull;
+        size_t facade_tris = 0;    // per-face Triangle facades (parentMesh-backed or standalone)
+        size_t flat_tris = 0;      // SoA TriangleMesh-as-Hittable faces
+        size_t skinned_tris = 0;   // facade + flat tris carrying skin weights
+        size_t animated_tris = 0;  // tris whose node has a timeline transform track
+        size_t flat_meshes = 0;    // number of flat TriangleMesh objects
+        size_t facade_nodes = 0;   // distinct node names still emitting facades
+    };
+    SceneGeometryStats scene_geometry_stats;
+    void refreshSceneGeometryStats(class SceneData& scene);
     // Sequential cache for ImGui Clipper (Visualization)
     std::vector<std::pair<std::string, std::vector<std::pair<int, std::shared_ptr<class Triangle>>>>> mesh_ui_cache;
     
@@ -1397,6 +1459,7 @@ private:
     // In TLAS mode, we skip CPU vertex update on gizmo release for instant response.
     // Instead, we mark objects as "needing sync" and only update when picking is attempted.
     std::set<std::string> objects_needing_cpu_sync;
+    std::unordered_map<std::string, Matrix4x4> last_synced_transforms;
     void ensureCPUSyncForPicking(UIContext& ctx); // Called before mouse picking to sync pending objects
 
     // Tracks whether a full CPU vertex sync has been performed since the last

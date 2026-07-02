@@ -500,18 +500,18 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
                 
                 // Scalar values
                 matJson["transmission"] = pbsdf->transmission;
-                matJson["clearcoat"] = pbsdf->clearcoat;
-                matJson["clearcoatRoughness"] = pbsdf->clearcoatRoughness;
+                matJson["clearcoat"] = pbsdf->getClearcoat();
+                matJson["clearcoatRoughness"] = pbsdf->getClearcoatRoughness();
                 matJson["anisotropic"] = pbsdf->anisotropic;
                 matJson["normalStrength"] = pbsdf->get_normal_strength();
                 
                 // SSS
-                matJson["subsurface"] = pbsdf->subsurface;
-                matJson["subsurfaceColor"] = vec3ToJson(pbsdf->subsurfaceColor);
-                matJson["subsurfaceRadius"] = vec3ToJson(pbsdf->subsurfaceRadius);
-                matJson["subsurfaceScale"] = pbsdf->subsurfaceScale;
-                matJson["subsurfaceAnisotropy"] = pbsdf->subsurfaceAnisotropy;
-                matJson["subsurfaceIOR"] = pbsdf->subsurfaceIOR;
+                matJson["subsurface"] = pbsdf->getSubsurface();
+                matJson["subsurfaceColor"] = vec3ToJson(pbsdf->getSubsurfaceColor());
+                matJson["subsurfaceRadius"] = vec3ToJson(pbsdf->getSubsurfaceRadius());
+                matJson["subsurfaceScale"] = pbsdf->getSubsurfaceScale();
+                matJson["subsurfaceAnisotropy"] = pbsdf->getSubsurfaceAnisotropy();
+                matJson["subsurfaceIOR"] = pbsdf->getSubsurfaceIOR();
                 
                 // Translucent
                 matJson["translucent"] = pbsdf->translucent;
@@ -522,19 +522,19 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
                 matJson["tileBreakStrength"]   = pbsdf->tile_break_strength;
 
                 // Thin-shell bubble (champagne / soda / soap close-up)
-                matJson["isBubble"]   = pbsdf->isBubble;
-                matJson["bubbleIor"]  = pbsdf->bubbleIor;
-                matJson["bubbleFilm"] = pbsdf->bubbleFilm;
-                matJson["clearcoatIridescence"]   = pbsdf->clearcoatIridescence;
-                matJson["clearcoatFilmThickness"] = pbsdf->clearcoatFilmThickness;
-                matJson["transmissionDensity"] = pbsdf->transmissionDensity;
-                matJson["resinColor"] = vec3ToJson(pbsdf->resinColor);
-                matJson["resinRoughness"] = pbsdf->resinRoughness;
-                matJson["resinInclusion"] = pbsdf->resinInclusion;
-                matJson["resinDirt"] = pbsdf->resinDirt;
-                matJson["resinInclusionScale"] = pbsdf->resinInclusionScale;
-                matJson["resinDirtColor"] = vec3ToJson(pbsdf->resinDirtColor);
-                matJson["glassMarbleVolume"] = pbsdf->glassMarbleVolume;
+                matJson["isBubble"]   = pbsdf->getIsBubble();
+                matJson["bubbleIor"]  = pbsdf->getBubbleIor();
+                matJson["bubbleFilm"] = pbsdf->getBubbleFilm();
+                matJson["clearcoatIridescence"]   = pbsdf->getClearcoatIridescence();
+                matJson["clearcoatFilmThickness"] = pbsdf->getClearcoatFilmThickness();
+                matJson["transmissionDensity"] = pbsdf->getTransmissionDensity();
+                matJson["resinColor"] = vec3ToJson(pbsdf->getResinColor());
+                matJson["resinRoughness"] = pbsdf->getResinRoughness();
+                matJson["resinInclusion"] = pbsdf->getResinInclusion();
+                matJson["resinDirt"] = pbsdf->getResinDirt();
+                matJson["resinInclusionScale"] = pbsdf->getResinInclusionScale();
+                matJson["resinDirtColor"] = vec3ToJson(pbsdf->getResinDirtColor());
+                matJson["glassMarbleVolume"] = pbsdf->getGlassMarbleVolume();
 
                 // Legacy tiling fallback for older scene compatibility
                 matJson["tilingFactor"] = { pbsdf->tilingFactor.x, pbsdf->tilingFactor.y };
@@ -668,20 +668,19 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
             
             // Scalar values (with defaults for backward compatibility)
             pbsdf->transmission = matJson.value("transmission", 0.0f);
-            pbsdf->clearcoat = matJson.value("clearcoat", 0.0f);
-            pbsdf->clearcoatRoughness = matJson.value("clearcoatRoughness", 0.03f);
+            pbsdf->setClearcoat(matJson.value("clearcoat", 0.0f), matJson.value("clearcoatRoughness", 0.03f));
             pbsdf->anisotropic = matJson.value("anisotropic", 0.0f);
             pbsdf->normalStrength = matJson.value("normalStrength", 1.0f);
             
             // SSS
-            pbsdf->subsurface = matJson.value("subsurface", 0.0f);
+            pbsdf->setSubsurface(matJson.value("subsurface", 0.0f));
             if (matJson.contains("subsurfaceColor"))
-                pbsdf->subsurfaceColor = jsonToVec3(matJson["subsurfaceColor"], Vec3(1.0f, 0.8f, 0.6f));
+                pbsdf->setSubsurfaceColor(jsonToVec3(matJson["subsurfaceColor"], Vec3(1.0f, 0.8f, 0.6f)));
             if (matJson.contains("subsurfaceRadius"))
-                pbsdf->subsurfaceRadius = jsonToVec3(matJson["subsurfaceRadius"], Vec3(1.0f, 0.2f, 0.1f));
-            pbsdf->subsurfaceScale = matJson.value("subsurfaceScale", 0.05f);
-            pbsdf->subsurfaceAnisotropy = matJson.value("subsurfaceAnisotropy", 0.0f);
-            pbsdf->subsurfaceIOR = matJson.value("subsurfaceIOR", 1.4f);
+                pbsdf->setSubsurfaceRadius(jsonToVec3(matJson["subsurfaceRadius"], Vec3(1.0f, 0.2f, 0.1f)));
+            pbsdf->setSubsurfaceScale(matJson.value("subsurfaceScale", 0.05f));
+            pbsdf->setSubsurfaceAnisotropy(matJson.value("subsurfaceAnisotropy", 0.0f));
+            pbsdf->setSubsurfaceIOR(matJson.value("subsurfaceIOR", 1.4f));
             pbsdf->selected_uv_set = std::max(0, matJson.value("selectedUvSet", 0));
             
             // Translucent
@@ -693,21 +692,21 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
             pbsdf->tile_break_strength   = matJson.value("tileBreakStrength",   0.0f);
 
             // Thin-shell bubble (champagne / soda / soap close-up)
-            pbsdf->isBubble   = matJson.value("isBubble",   false);
-            pbsdf->bubbleIor  = matJson.value("bubbleIor",  1.33f);
-            pbsdf->bubbleFilm = matJson.value("bubbleFilm", 0.0f);
-            pbsdf->clearcoatIridescence   = matJson.value("clearcoatIridescence",   0.0f);
-            pbsdf->clearcoatFilmThickness = matJson.value("clearcoatFilmThickness", 0.55f);
-            pbsdf->transmissionDensity = matJson.value("transmissionDensity", 0.0f);
+            pbsdf->setIsBubble(matJson.value("isBubble",   false));
+            pbsdf->setBubbleIor(matJson.value("bubbleIor",  1.33f));
+            pbsdf->setBubbleFilm(matJson.value("bubbleFilm", 0.0f));
+            pbsdf->setClearcoatIridescence(matJson.value("clearcoatIridescence",   0.0f));
+            pbsdf->setClearcoatFilmThickness(matJson.value("clearcoatFilmThickness", 0.55f));
+            pbsdf->setTransmissionDensity(matJson.value("transmissionDensity", 0.0f));
             if (matJson.contains("resinColor"))
-                pbsdf->resinColor = jsonToVec3(matJson["resinColor"], Vec3(1.0f, 1.0f, 1.0f));
-            pbsdf->resinRoughness = matJson.value("resinRoughness", 0.1f);
-            pbsdf->resinInclusion = matJson.value("resinInclusion", 0.0f);
-            pbsdf->resinDirt = matJson.value("resinDirt", 0.0f);
-            pbsdf->resinInclusionScale = matJson.value("resinInclusionScale", 8.0f);
+                pbsdf->setResinColor(jsonToVec3(matJson["resinColor"], Vec3(1.0f, 1.0f, 1.0f)));
+            pbsdf->setResinRoughness(matJson.value("resinRoughness", 0.1f));
+            pbsdf->setResinInclusion(matJson.value("resinInclusion", 0.0f));
+            pbsdf->setResinDirt(matJson.value("resinDirt", 0.0f));
+            pbsdf->setResinInclusionScale(matJson.value("resinInclusionScale", 8.0f));
             if (matJson.contains("resinDirtColor"))
-                pbsdf->resinDirtColor = jsonToVec3(matJson["resinDirtColor"], Vec3(0.18f, 0.14f, 0.10f));
-            pbsdf->glassMarbleVolume = matJson.value("glassMarbleVolume", false);
+                pbsdf->setResinDirtColor(jsonToVec3(matJson["resinDirtColor"], Vec3(0.18f, 0.14f, 0.10f)));
+            pbsdf->setGlassMarbleVolume(matJson.value("glassMarbleVolume", false));
 
             // Legacy tiling fallback
             if (matJson.contains("tilingFactor") && matJson["tilingFactor"].is_array()) {

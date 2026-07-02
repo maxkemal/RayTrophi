@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -66,15 +66,21 @@ public:
         float transmission_in = 0.0f,
         float translucent_in = 0.0f,
         float clearcoatRoughness_in = 0.03f
-    ) : subsurface(subsurface_in),
-        subsurfaceColor(subsurfaceColor_in),
-        subsurfaceRadius(Vec3(subsurfaceRadius_in)), 
-        clearcoat(clearcoat_in),
-        transmission(transmission_in),
+    ) : transmission(transmission_in),
         translucent(translucent_in),
-        clearcoatRoughness(clearcoatRoughness_in),
         textureTransform(transform)
     {
+        if (subsurface_in > 0.0f || subsurfaceRadius_in > 0.0f) {
+            sss_ext = std::make_unique<SubsurfaceExtension>();
+            sss_ext->subsurface = subsurface_in;
+            sss_ext->subsurfaceColor = subsurfaceColor_in;
+            sss_ext->subsurfaceRadius = Vec3(subsurfaceRadius_in);
+        }
+        if (clearcoat_in > 0.0f || clearcoatRoughness_in != 0.03f) {
+            clearcoat_ext = std::make_unique<ClearcoatExtension>();
+            clearcoat_ext->clearcoat = clearcoat_in;
+            clearcoat_ext->clearcoatRoughness = clearcoatRoughness_in;
+        }
         // Initialize base class properties
         albedoProperty = MaterialProperty(albedo, 1.0f, albedoTexture);
         roughnessProperty = MaterialProperty(Vec3(roughness), 1.0f, roughnessTexture);
@@ -89,6 +95,8 @@ public:
         std::call_once(flag, precomputeLUT);
     }
 
+    PrincipledBSDF(const PrincipledBSDF& other);
+    PrincipledBSDF& operator=(const PrincipledBSDF& other);
 
     virtual bool hasTexture() const override;
     virtual float getIndexOfRefraction() const override;
@@ -113,7 +121,6 @@ public:
     void setSpecularTexture(const std::shared_ptr<Texture>& tex, float intensity = 1.0f);
     void setEmission(const Vec3& emission, const float intensity);
     void setEmissionTexture(const std::shared_ptr<Texture>& tex, float intensity);
-    void setClearcoat(float clearcoat, float clearcoatRoughness = 0.1f);
     void setAnisotropic(float anisotropic, const Vec3& anisotropicDirection);
     float getTransmission(const Vec2& uv) const;
     void setSubsurfaceScattering(const Vec3& sssColor, Vec3 sssRadius);
@@ -174,72 +181,111 @@ public:
     bool translucent_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const;
 
     // float normalStrength = 1.0f; // Shadowing removed
+        // Override virtual getters and setters for memory-saving extensions
+    float getClearcoat() const override;
+    void setClearcoat(float cc, float roughness = 0.03f) override;
+    float getClearcoatRoughness() const override;
+    float getClearcoatIridescence() const override;
+    void setClearcoatIridescence(float val) override;
+    float getClearcoatFilmThickness() const override;
+    void setClearcoatFilmThickness(float val) override;
+
+    float getSubsurface() const override;
+    void setSubsurface(float val) override;
+    Vec3 getSubsurfaceColor() const override;
+    void setSubsurfaceColor(const Vec3& val) override;
+    Vec3 getSubsurfaceRadius() const override;
+    void setSubsurfaceRadius(const Vec3& val) override;
+    float getSubsurfaceScale() const override;
+    void setSubsurfaceScale(float val) override;
+    float getSubsurfaceAnisotropy() const override;
+    void setSubsurfaceAnisotropy(float val) override;
+    float getSubsurfaceIOR() const override;
+    void setSubsurfaceIOR(float val) override;
+    bool getUseRandomWalkSSS() const override;
+    void setUseRandomWalkSSS(bool val) override;
+    int getSssMaxSteps() const override;
+    void setSssMaxSteps(int val) override;
+
+    float getTransmissionDensity() const override;
+    void setTransmissionDensity(float val) override;
+    Vec3 getResinColor() const override;
+    void setResinColor(const Vec3& val) override;
+    float getResinRoughness() const override;
+    void setResinRoughness(float val) override;
+    float getResinInclusion() const override;
+    void setResinInclusion(float val) override;
+    float getResinDirt() const override;
+    void setResinDirt(float val) override;
+    float getResinInclusionScale() const override;
+    void setResinInclusionScale(float val) override;
+    Vec3 getResinDirtColor() const override;
+    void setResinDirtColor(const Vec3& val) override;
+    bool getGlassMarbleVolume() const override;
+    void setGlassMarbleVolume(bool val) override;
+
+    bool getIsBubble() const override;
+    void setIsBubble(bool val) override;
+    float getBubbleIor() const override;
+    void setBubbleIor(float val) override;
+    float getBubbleFilm() const override;
+    void setBubbleFilm(float val) override;
+
+    // Advanced Material extensions (lazy allocated)
+    struct SubsurfaceExtension {
+        Vec3 subsurfaceColor = Vec3(1.0f, 0.8f, 0.6f);     // SSS tint color
+        Vec3 subsurfaceRadius = Vec3(1.0f, 0.2f, 0.1f);    // Per-channel scatter distance
+        float subsurfaceScale = 0.05f;                      // Global radius multiplier
+        float subsurfaceAnisotropy = 0.0f;                  // Scatter direction bias
+        float subsurfaceIOR = 1.4f;                         // Internal SSS IOR
+        float subsurface = 0.0f;                            // SSS amount (0-1)
+        bool useRandomWalkSSS = true;                       // Enable bounded SSS
+        int sssMaxSteps = 6;                                // Max internal scattering steps
+    };
     
-    // Subsurface Scattering (Random Walk)
-    Vec3 subsurfaceColor = Vec3(1.0f, 0.8f, 0.6f);     // SSS tint color
-    Vec3 subsurfaceRadius = Vec3(1.0f, 0.2f, 0.1f);    // Per-channel scatter distance (skin default: R>G>B)
-    float subsurfaceScale = 0.05f;                      // Global radius multiplier
-    float subsurfaceAnisotropy = 0.0f;                  // Scatter direction bias (-1 to 1)
-    float subsurfaceIOR = 1.4f;                         // Internal SSS IOR
-    float subsurface = 0.0f;                            // SSS amount (0-1)
-    bool useRandomWalkSSS = true;                       // Enable bounded random-walk SSS
-    int sssMaxSteps = 6;                                // Max internal scattering steps (bounded)
-    
-    // Clear Coat
-    float clearcoat = 0.0f;                             // Clear coat amount (0-1)
-    float clearcoatRoughness = 0.03f;                   // Clear coat roughness
-    // Iridescent clearcoat: thin-film tint on the clearcoat lobe (oil-slick / beetle-shell /
-    // candy paint). 0 = plain white clearcoat. clearcoatFilmThickness drives the hue cycle.
-    float clearcoatIridescence = 0.0f;                  // thin-film tint strength (0-1)
-    float clearcoatFilmThickness = 0.55f;               // hue cycle / film thickness (OPD scale)
-    
-    // Translucent (thin surface light pass-through)
+    struct ClearcoatExtension {
+        float clearcoat = 0.0f;                             // Clear coat amount (0-1)
+        float clearcoatRoughness = 0.03f;                   // Clear coat roughness
+        float clearcoatIridescence = 0.0f;                  // thin-film tint strength (0-1)
+        float clearcoatFilmThickness = 0.55f;               // hue cycle / film thickness
+    };
+
+    struct ResinExtension {
+        float transmissionDensity = 0.0f;                  // interior absorption density
+        Vec3 resinColor = Vec3(1.0f, 1.0f, 1.0f);           // absorption color
+        float resinRoughness = 0.1f;                        // resin coat gloss
+        float resinInclusion = 0.0f;                        // dust cloudiness amount
+        float resinDirt = 0.0f;                             // opaque dirt-speck amount
+        float resinInclusionScale = 8.0f;                  // procedural feature size
+        Vec3 resinDirtColor = Vec3(0.18f, 0.14f, 0.10f);    // speck tint
+        bool glassMarbleVolume = false;                     // Glass Marble FULL VOLUME
+    };
+
+    struct BubbleExtension {
+        bool isBubble = false;                              // Thin-shell BUBBLE mode
+        float bubbleIor = 1.33f;                            // rim Fresnel IOR
+        float bubbleFilm = 0.0f;                            // thin-film interference strength
+    };
+
+    std::unique_ptr<SubsurfaceExtension> sss_ext;
+    std::unique_ptr<ClearcoatExtension> clearcoat_ext;
+    std::unique_ptr<ResinExtension> resin_ext;
+    std::unique_ptr<BubbleExtension> bubble_ext;
+
+    // Base PBR properties kept directly in the class for fast access
     float translucent = 0.0f;                           // Translucency amount (0-1)
-    
-    // Other properties
     float anisotropic = 0.0f;                           // Surface anisotropy
     float transmission = 0.0f;                          // Glass/water transmission
     float sheen = 0.0f;                                 // Sheen amount (used as IS_WATER flag)
-    float sheen_tint = 0.5f;                            // Sheen color tint (used as wave frequency for water)
+    float sheen_tint = 0.5f;                            // Sheen color tint
     SurfaceDepositionSettings surface_deposition;
     Vec3 anisotropicDirection;
     float opacityAlpha = 1.0f;
 
     // Procedural surface detail
-    float micro_detail_strength = 0.0f;  // 0 = disabled; world-space color+dirt+roughness
-    float micro_detail_scale    = 2.0f;  // World-space frequency (1–5 typical)
-    float tile_break_strength   = 0.0f;  // UV tile-break (0 = off; 0.1–0.3 typical)
-
-    // Thin-shell BUBBLE (champagne / soda / soap-foam close-up). When on, the BSDF
-    // renders the surface as a thin dielectric film: Fresnel rim reflection vs a
-    // straight pass-through (no net refraction), so it reads as a bright-rimmed
-    // transparent bubble independent of the surrounding medium. bubbleFilm is the
-    // thin-film interference strength (soap iridescence) — reserved for Faz 2.
-    bool  isBubble   = false;
-    float bubbleIor  = 1.33f;
-    float bubbleFilm = 0.0f;
-
-    // Transmission interior absorption density (thick resin / glass-marble depth).
-    // 0 = legacy constant-thickness glass tint; >0 = Beer-Lambert over the REAL
-    // in-medium ray distance, so colour deepens with geometric thickness.
-    float transmissionDensity = 0.0f;
-    // Resin absorption colour (the tint that builds with depth). Separate from albedo
-    // so the resin can be coloured independently. White = clear (no colour, lensing only).
-    Vec3  resinColor = Vec3(1.0f, 1.0f, 1.0f);
-    // Resin coat gloss — the reflection-lobe roughness of the resin LAYER itself,
-    // independent of the base material roughness (a glossy coat over a matte base).
-    float resinRoughness = 0.1f;
-    // Resin INTERNAL inclusions (procedural march through the resin thickness):
-    //  - resinInclusion: dust cloudiness amount (heterogeneous absorption at depth)
-    //  - resinDirt: opaque dirt-speck amount (ray terminates early inside the resin)
-    //  - resinInclusionScale: procedural feature size; resinDirtColor: speck tint
-    float resinInclusion = 0.0f;
-    float resinDirt = 0.0f;
-    float resinInclusionScale = 8.0f;
-    Vec3  resinDirtColor = Vec3(0.18f, 0.14f, 0.10f);
-    // Glass Marble FULL VOLUME: integrate the inclusions along the REAL interior path
-    // (front→back) in the path tracer instead of the cheap front-shell approximation.
-    bool  glassMarbleVolume = false;
+    float micro_detail_strength = 0.0f;  // 0 = disabled
+    float micro_detail_scale    = 2.0f;  // World-space frequency
+    float tile_break_strength   = 0.0f;  // UV tile-break
 
 private:
   

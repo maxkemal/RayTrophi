@@ -119,8 +119,16 @@ int InstanceManager::paintInstances(int group_id, const Vec3& center, const Vec3
     if (group->target_type == InstanceGroup::TargetType::MESH && !group->target_node_name.empty() && scene) {
         use_mesh_projection = true;
         for (auto& obj : scene->world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (tri && tri->getNodeName() == group->target_node_name) target_tris.push_back(tri);
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                if (tri->getNodeName() == group->target_node_name) target_tris.push_back(tri);
+            } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                // Flat-aware: the scatter target surface may be ONE flat SoA TriangleMesh now.
+                if (tm->nodeName == group->target_node_name && tm->geometry) {
+                    const size_t nTris = tm->num_triangles();
+                    for (size_t t = 0; t < nTris; ++t)
+                        target_tris.push_back(std::make_shared<Triangle>(tm, static_cast<uint32_t>(t)));
+                }
+            }
         }
     }
 
@@ -940,11 +948,17 @@ void InstanceManager::deserialize(const json& j, SceneData& scene) {
                     src.settings.wind_phase_offset = s.value("wind_phase_offset", 0.0f);
                 }
                 
-                // Re-link triangles from Scene
-                 for (const auto& obj : scene.world.objects) {
-                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                    if (tri && tri->getNodeName() == src.name) {
-                        src.triangles.push_back(tri);
+                // Re-link triangles from Scene (flat-aware: a scatter source may now be ONE flat
+                // SoA TriangleMesh, not a per-face facade soup — materialize its facades).
+                for (const auto& obj : scene.world.objects) {
+                    if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                        if (tri->getNodeName() == src.name) src.triangles.push_back(tri);
+                    } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                        if (tm->nodeName == src.name && tm->geometry) {
+                            const size_t nTris = tm->num_triangles();
+                            for (size_t t = 0; t < nTris; ++t)
+                                src.triangles.push_back(std::make_shared<Triangle>(tm, static_cast<uint32_t>(t)));
+                        }
                     }
                 }
                 src.computeCenter();
@@ -997,14 +1011,38 @@ void InstanceManager::deserializeFast(simdjson::dom::element el, SceneData& scen
     simdjson::dom::array arr;
     if (el.get_array().get(arr)) return;
 
-    // Build a name→triangles lookup once instead of scanning scene.world.objects per source
+    // Build a name→triangles lookup once instead of scanning scene.world.objects per source.
+    // Flat migration: a scatter source mesh may now live in world.objects as ONE flat SoA
+    // TriangleMesh (open-flat collapse / emit_flat) rather than a per-face Triangle facade soup.
+    // Record those by name too and materialize their facades ON DEMAND only for names that are
+    // actually referenced as a scatter source below — so a 2M-tri flat mesh that is NOT a source
+    // never pays the materialize. Without this, the source re-link (tri_by_name lookup) misses the
+    // flat mesh and the whole foliage layer loads with zero source triangles → nothing renders.
     std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>> tri_by_name;
+    std::unordered_map<std::string, std::shared_ptr<TriangleMesh>> flat_by_name;
     for (const auto& obj : scene.world.objects) {
-        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-        if (tri) {
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             tri_by_name[tri->getNodeName()].push_back(tri);
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (!tm->nodeName.empty()) flat_by_name[tm->nodeName] = tm;
         }
     }
+    auto resolveSourceTriangles =
+        [&tri_by_name, &flat_by_name](const std::string& name) -> std::vector<std::shared_ptr<Triangle>> {
+        auto it = tri_by_name.find(name);
+        if (it != tri_by_name.end()) return it->second;
+        auto fit = flat_by_name.find(name);
+        if (fit != flat_by_name.end() && fit->second && fit->second->geometry) {
+            const size_t nTris = fit->second->num_triangles();
+            std::vector<std::shared_ptr<Triangle>> facades;
+            facades.reserve(nTris);
+            for (size_t t = 0; t < nTris; ++t)
+                facades.push_back(std::make_shared<Triangle>(fit->second, static_cast<uint32_t>(t)));
+            tri_by_name[name] = facades; // cache so repeated source refs reuse the same facades
+            return facades;
+        }
+        return {};
+    };
 
     for (simdjson::dom::element j_group : arr) {
         InstanceGroup group;
@@ -1097,11 +1135,9 @@ void InstanceManager::deserializeFast(simdjson::dom::element el, SceneData& scen
                     if (!ss_el["wind_phase_offset"].get(v)) ss.wind_phase_offset = (float)sj_double(v, 0.0);
                 }
 
-                // Re-link triangles from scene using pre-built lookup
-                auto lookup = tri_by_name.find(src.name);
-                if (lookup != tri_by_name.end()) {
-                    src.triangles = lookup->second;
-                }
+                // Re-link triangles from scene using pre-built lookup (flat-aware: materializes
+                // a flat TriangleMesh source's facades on demand).
+                src.triangles = resolveSourceTriangles(src.name);
                 src.computeCenter();
                 group.sources.push_back(std::move(src));
             }
@@ -1216,7 +1252,7 @@ void InstanceManager::rebuildSceneObjects(SceneData& scene) {
                 auto new_tri = std::make_shared<Triangle>(
                     v0, v1, v2,
                     n0, n1, n2,
-                    src_tri->t0, src_tri->t1, src_tri->t2,
+                    src_tri->t_ref(0), src_tri->t_ref(1), src_tri->t_ref(2),
                     src_tri->getMaterial()
                 );
                 new_tri->setNodeName(source.name + "_BAKED");

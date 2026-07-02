@@ -16,7 +16,7 @@
 #include <cstring>
 #include <algorithm>
 #include "Vec3.h"
-#include "Triangle.h"
+#include "TriangleMesh.h"
 #include "FoliageFwd.h"
 #include "WaterSystem.h" // For WaterWaveParams
 
@@ -98,10 +98,12 @@ struct TerrainObject {
     std::string name;
     
     Heightmap heightmap;
-    
-    // Mesh representation for Raytracing
-    // We maintain a list of triangles to update them when heightmap changes
-    std::vector<std::shared_ptr<Triangle>> mesh_triangles;
+
+    // Flat (SoA) mesh representation for raytracing/raster. One Hittable for the
+    // whole terrain grid instead of a facade Triangle per triangle. Rebuilt (new
+    // TriangleMesh) when resolution/topology changes, updated in place (direct
+    // SoA writes) when only heights change.
+    std::shared_ptr<TriangleMesh> flatMesh;
     
     // Reference to a transform (usually identity for terrain, but can be moved)
     std::shared_ptr<Transform> transform;

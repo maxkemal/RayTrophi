@@ -2401,7 +2401,16 @@ void VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, cons
     triangles.vertexData.deviceAddress = blasHandle.vertexBuffer.deviceAddress;
     triangles.vertexStride = 12;
     triangles.maxVertex = blasHandle.vertexCount - 1;
-    triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
+
+    // Indexed BLAS (uploadTriangleMeshIndexed): topology is the resident index buffer, which a
+    // MODE_UPDATE refit reuses unchanged — only the vertex/normal positions were re-uploaded.
+    const bool hasIndices = blasHandle.indexCount > 0 && blasHandle.indexBuffer.buffer;
+    if (hasIndices) {
+        triangles.indexType = VK_INDEX_TYPE_UINT32;
+        triangles.indexData.deviceAddress = blasHandle.indexBuffer.deviceAddress;
+    } else {
+        triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
+    }
 
     VkAccelerationStructureGeometryKHR geometry{};
     geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
@@ -2409,7 +2418,7 @@ void VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, cons
     geometry.flags = 0;
     geometry.geometry.triangles = triangles;
 
-    uint32_t primitiveCount = blasHandle.vertexCount / 3;
+    uint32_t primitiveCount = hasIndices ? (blasHandle.indexCount / 3) : (blasHandle.vertexCount / 3);
 
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
@@ -7472,6 +7481,162 @@ uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& 
     return blasIndex;
 }
 
+uint32_t VulkanBackendAdapter::uploadTriangleMeshIndexed(const TriangleMesh* mesh,
+                                                         const std::string& meshName,
+                                                         bool useOriginalSpace) {
+    if (!m_device || !m_device->isInitialized() || !m_device->hasHardwareRT()) return UINT32_MAX;
+    if (!mesh || !mesh->geometry) return UINT32_MAX;
+
+    // Fast path: mesh already uploaded.
+    auto it = m_meshRegistry.find(meshName);
+    if (it != m_meshRegistry.end()) return it->second;
+
+    const DNA::GeometryDetail& geom = *mesh->geometry;
+    const size_t vCount   = geom.get_vertex_count();
+    const size_t idxCount = geom.indices.size();
+    const size_t triCount = idxCount / 3;
+    if (vCount == 0 || triCount == 0) return UINT32_MAX;
+
+    // Vertex space must match what the non-indexed solo path uploaded (Triangle facade reads
+    // geom P_orig for local/static and geom P for live), so the result is bit-identical, just
+    // deduplicated. Fall back to live if the bind-pose channel is absent.
+    const Vec3* srcP = useOriginalSpace ? geom.get_positions_orig() : geom.get_positions();
+    const Vec3* srcN = useOriginalSpace ? geom.get_normals_orig()   : geom.get_normals();
+    if (!srcP) srcP = geom.get_positions();
+    if (!srcN) srcN = geom.get_normals();
+    if (!srcP) return UINT32_MAX;
+    const Vec2* srcUV = geom.get_uvs();
+    const uint16_t* srcMat = geom.get_material_ids();
+
+    std::vector<float> positions(vCount * 3);
+    std::vector<float> normals(vCount * 3);
+    std::vector<float> uvs(vCount * 2, 0.0f);
+    for (size_t v = 0; v < vCount; ++v) {
+        positions[v * 3 + 0] = srcP[v].x;
+        positions[v * 3 + 1] = srcP[v].y;
+        positions[v * 3 + 2] = srcP[v].z;
+        if (srcN) {
+            normals[v * 3 + 0] = srcN[v].x;
+            normals[v * 3 + 1] = srcN[v].y;
+            normals[v * 3 + 2] = srcN[v].z;
+        } else {
+            normals[v * 3 + 0] = 0.0f; normals[v * 3 + 1] = 1.0f; normals[v * 3 + 2] = 0.0f;
+        }
+        if (srcUV) {
+            uvs[v * 2 + 0] = srcUV[v].x;
+            uvs[v * 2 + 1] = srcUV[v].y;
+        }
+    }
+
+    // Index buffer is the mesh's own flat index buffer (corner -> unique vertex).
+    std::vector<uint32_t> indices(geom.indices.begin(), geom.indices.end());
+
+    // Per-primitive material id (the shader looks this up by primID). All 3 corners of a face
+    // share a material id (the weld key includes materialID), so corner 0 is representative.
+    std::vector<uint32_t> materialIndices(triCount);
+    for (size_t t = 0; t < triCount; ++t) {
+        uint16_t mId = srcMat ? srcMat[geom.indices[t * 3 + 0]] : 0;
+        if (mId == MaterialManager::INVALID_MATERIAL_ID) mId = 0;
+        materialIndices[t] = static_cast<uint32_t>(mId);
+    }
+
+    bool opaqueGeometry = true;
+    for (uint32_t materialIndex : materialIndices) {
+        if (!materialCanUseOpaqueFastPath(materialIndex)) { opaqueGeometry = false; break; }
+    }
+
+    VulkanRT::BLASCreateInfo blasInfo;
+    blasInfo.vertexData = positions.data();
+    blasInfo.normalData = normals.data();
+    blasInfo.uvData = uvs.data();
+    blasInfo.vertexCount = (uint32_t)vCount;
+    blasInfo.vertexStride = 12; // 3 * float
+    blasInfo.indexData = indices.data();
+    blasInfo.indexCount = (uint32_t)idxCount;
+    blasInfo.materialIndexData = materialIndices.data();
+    blasInfo.materialIndexCount = (uint32_t)triCount;
+    blasInfo.opaqueGeometry = opaqueGeometry;
+    blasInfo.hasSkinning = false; // skinned meshes are routed to uploadTriangles()
+    blasInfo.allowUpdate = true;  // solo meshes are editable (sculpt/deform refit)
+
+    uint32_t blasIndex = m_device->createBLAS(blasInfo);
+    if (blasIndex == UINT32_MAX) {
+        SCENE_LOG_ERROR("[Vulkan] Failed to create indexed BLAS for mesh: " + meshName);
+        return UINT32_MAX;
+    }
+
+    m_meshRegistry[meshName] = blasIndex;
+    m_blasMaterialIds[blasIndex] = std::move(materialIndices);
+    m_soloBlasIndexedMesh[blasIndex] = SoloIndexedMeshInfo{ const_cast<TriangleMesh*>(mesh), useOriginalSpace };
+
+    // Reset geometry data buffer because a new BLAS was added.
+    if (m_device->m_geometryDataBuffer.buffer) {
+        m_device->destroyBuffer(m_device->m_geometryDataBuffer);
+    }
+    return blasIndex;
+}
+
+// Interactive refit for a solo INDEXED BLAS: re-read the mesh SoA (vCount unique verts) and
+// MODE_UPDATE the acceleration structure. Cheaper than the 3N gather (no per-corner expand)
+// and topology-stable. Phase 2 will add a dirty-region partial path; for now any edit re-pushes
+// the whole vertex array (still a refit, not a full rebuild).
+bool VulkanBackendAdapter::refitIndexedSoloBLAS(uint32_t blasIndex) {
+    auto idxIt = m_soloBlasIndexedMesh.find(blasIndex);
+    if (idxIt == m_soloBlasIndexedMesh.end()) return false;
+    const SoloIndexedMeshInfo info = idxIt->second;
+    if (!info.mesh || !info.mesh->geometry) return false;
+    if (blasIndex >= m_device->m_blasList.size()) return false;
+    const auto& blasHandle = m_device->m_blasList[blasIndex];
+    if (!blasHandle.allowUpdate || blasHandle.vertexCount == 0) return false;
+
+    const DNA::GeometryDetail& geom = *info.mesh->geometry;
+    const size_t vCount = geom.get_vertex_count();
+    if (vCount != blasHandle.vertexCount) return false; // topology changed -> let full rebuild run
+
+    const Vec3* srcP = info.localSpace ? geom.get_positions_orig() : geom.get_positions();
+    const Vec3* srcN = info.localSpace ? geom.get_normals_orig()   : geom.get_normals();
+    if (!srcP) srcP = geom.get_positions();
+    if (!srcN) srcN = geom.get_normals();
+    if (!srcP) return false;
+
+    std::vector<float> positions(vCount * 3);
+    std::vector<float> normals(vCount * 3);
+    for (size_t v = 0; v < vCount; ++v) {
+        positions[v * 3 + 0] = srcP[v].x;
+        positions[v * 3 + 1] = srcP[v].y;
+        positions[v * 3 + 2] = srcP[v].z;
+        if (srcN) {
+            normals[v * 3 + 0] = srcN[v].x;
+            normals[v * 3 + 1] = srcN[v].y;
+            normals[v * 3 + 2] = srcN[v].z;
+        } else {
+            normals[v * 3 + 0] = 0.0f; normals[v * 3 + 1] = 1.0f; normals[v * 3 + 2] = 0.0f;
+        }
+    }
+
+    m_device->updateBLAS(blasIndex, positions.data(), normals.data());
+
+    // Refresh the TLAS instance transform from the live handle (mirrors the non-indexed refit),
+    // so a scale/rotate since the last full rebuild renders at the correct world-space pose.
+    for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
+        if (m_vkInstances[i].blasIndex != blasIndex) continue;
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+            m_vkInstances[i].transform = inst->transform;
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+            if (tri->getTransformPtr()) m_vkInstances[i].transform = tri->getTransformPtr()->getFinal();
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+            if (tm->transform) m_vkInstances[i].transform = tm->transform->getFinal(); // flat mesh
+        }
+    }
+
+    auto merged = m_vkInstances;
+    for (const auto& h : m_hairVkInstances) merged.push_back(h);
+    if (!merged.empty()) m_device->updateTLAS(merged);
+
+    resetAccumulation();
+    return true;
+}
+
 uint32_t VulkanBackendAdapter::uploadDeviceResidentMesh(const std::string& meshName,
                                                         uint64_t geometryDeviceAddress,
                                                         uint32_t vertexCount,
@@ -7654,62 +7819,14 @@ bool VulkanBackendAdapter::drainDeviceResidentCCRefits() {
 }
 
 bool VulkanBackendAdapter::updateTerrainBLASPartial(const std::string& nodeName, const TerrainObject* terrain) {
-    if (!terrain || !m_device || !m_device->isInitialized() || !m_device->hasHardwareRT()) return false;
-    if (terrain->mesh_triangles.empty() || m_vkInstances.empty() || m_instanceSources.empty()) return false;
-
-    std::lock_guard<std::recursive_mutex> lock(m_mutex);
-
-    uint32_t terrainBlasIndex = UINT32_MAX;
-    for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
-        auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i]);
-        if (!tri) continue;
-        if (tri->getNodeName() == nodeName) {
-            terrainBlasIndex = m_vkInstances[i].blasIndex;
-            break;
-        }
-    }
-
-    if (terrainBlasIndex == UINT32_MAX || terrainBlasIndex >= m_device->m_blasList.size()) {
-        return false;
-    }
-
-    const auto& blasHandle = m_device->m_blasList[terrainBlasIndex];
-    const size_t expectedVertexCount = terrain->mesh_triangles.size() * 3ull;
-    if (expectedVertexCount == 0 || expectedVertexCount != blasHandle.vertexCount) {
-        return false;
-    }
-
-    std::vector<float> positions;
-    std::vector<float> normals;
-    positions.reserve(expectedVertexCount * 3ull);
-    normals.reserve(expectedVertexCount * 3ull);
-
-    for (const auto& tri : terrain->mesh_triangles) {
-        if (!tri) continue;
-        for (int v = 0; v < 3; ++v) {
-            const Vec3& p = tri->getOriginalVertexPosition(v);
-            const Vec3& n = tri->getOriginalVertexNormal(v);
-            positions.push_back(p.x);
-            positions.push_back(p.y);
-            positions.push_back(p.z);
-            normals.push_back(n.x);
-            normals.push_back(n.y);
-            normals.push_back(n.z);
-        }
-    }
-
-    if (positions.size() != expectedVertexCount * 3ull || normals.size() != expectedVertexCount * 3ull) {
-        return false;
-    }
-
-    m_device->updateBLAS(terrainBlasIndex, positions.data(), normals.data());
-
-    auto merged = m_vkInstances;
-    for (const auto& h : m_hairVkInstances) merged.push_back(h);
-    if (!merged.empty()) {
-        m_device->updateTLAS(merged);
-    }
-    return true;
+    // Terrain is now a single flat (SoA) TriangleMesh, not a list of facade
+    // Triangle objects — refit straight from its DNA SoA via the generic
+    // flat-mesh refit path (registered as an indexed solo BLAS like any other
+    // flat mesh). nodeName here is historically the bare terrain name; the
+    // flat mesh itself is registered under "<name>_Chunk", so prefer that.
+    if (!terrain) return false;
+    const std::string& meshNodeName = terrain->flatMesh ? terrain->flatMesh->nodeName : nodeName;
+    return refitFlatMeshBLAS(meshNodeName);
 }
 
 bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, const std::vector<std::shared_ptr<Triangle>>& triangles) {
@@ -7748,6 +7865,13 @@ bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, co
                 strongMatch = true;
                 targetUsesLocalSpace = (tri->getTransformPtr() != nullptr) && !isWaterTriangleMaterial(tri);
             }
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+            // Flat (direct) SoA mesh: matched by node name below. Its solo BLAS is indexed, so
+            // the refit re-reads the mesh SoA directly (refitIndexedSoloBLAS) — no per-triangle
+            // strong match / build-order gather is needed (and the rep-facade caller order won't
+            // match). This routes sculpt on an apply-flat / import-flat mesh to an incremental
+            // refit instead of a full Vulkan RT rebuild every dab.
+            instName = tm->nodeName;
         }
 
         if (strongMatch) {
@@ -7768,6 +7892,12 @@ bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, co
 
     if (targetBlasIndex == UINT32_MAX || targetBlasIndex >= m_device->m_blasList.size()) {
         return false;
+    }
+
+    // Indexed solo BLAS: refit straight from the mesh SoA (vCount unique verts), not the 3N
+    // build-order gather below (whose vertexCount==triangles*3 assumption would fail anyway).
+    if (m_soloBlasIndexedMesh.find(targetBlasIndex) != m_soloBlasIndexedMesh.end()) {
+        return refitIndexedSoloBLAS(targetBlasIndex);
     }
 
     const auto& blasHandle = m_device->m_blasList[targetBlasIndex];
@@ -7797,17 +7927,82 @@ bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, co
     positions.reserve(expectedVertexCount * 3ull);
     normals.reserve(expectedVertexCount * 3ull);
 
+    TriangleMesh* lastParentMesh = nullptr;
+    const Vec3* cachedPositions = nullptr;
+    const Vec3* cachedNormals = nullptr;
+    const Vec3* cachedOrigPositions = nullptr;
+    const Vec3* cachedOrigNormals = nullptr;
+    const std::vector<uint32_t, DNA::AlignedAllocator<uint32_t, 32>>* cachedIndices = nullptr;
+    bool hasGeometry = false;
+
     for (const auto& tri : *orderedTris) {
         if (!tri) continue;
+        
+        Vec3 verts[3];
+        Vec3 norms[3];
+        bool resolved = false;
+
+        if (tri->parentMesh) {
+            if (tri->parentMesh.get() != lastParentMesh) {
+                lastParentMesh = tri->parentMesh.get();
+                if (lastParentMesh->geometry) {
+                    cachedPositions = lastParentMesh->geometry->get_attribute_data<Vec3>("P");
+                    cachedNormals = lastParentMesh->geometry->get_attribute_data<Vec3>("N");
+                    cachedOrigPositions = lastParentMesh->geometry->get_attribute_data<Vec3>("P_orig");
+                    cachedOrigNormals = lastParentMesh->geometry->get_attribute_data<Vec3>("N_orig");
+                    cachedIndices = &lastParentMesh->geometry->indices;
+                    hasGeometry = (cachedPositions != nullptr) && (cachedIndices != nullptr) && (!cachedIndices->empty());
+                } else {
+                    hasGeometry = false;
+                }
+            }
+
+            if (hasGeometry) {
+                uint32_t faceIdx = tri->faceIndex;
+                uint32_t baseIdx = faceIdx * 3;
+                uint32_t i0 = (*cachedIndices)[baseIdx + 0];
+                uint32_t i1 = (*cachedIndices)[baseIdx + 1];
+                uint32_t i2 = (*cachedIndices)[baseIdx + 2];
+
+                if (targetUsesLocalSpace) {
+                    if (tri->hasSkinData()) {
+                        verts[0] = tri->getOriginalVertexPosition(0);
+                        verts[1] = tri->getOriginalVertexPosition(1);
+                        verts[2] = tri->getOriginalVertexPosition(2);
+                    } else {
+                        verts[0] = cachedOrigPositions ? cachedOrigPositions[i0] : cachedPositions[i0];
+                        verts[1] = cachedOrigPositions ? cachedOrigPositions[i1] : cachedPositions[i1];
+                        verts[2] = cachedOrigPositions ? cachedOrigPositions[i2] : cachedPositions[i2];
+                    }
+                    norms[0] = cachedOrigNormals ? cachedOrigNormals[i0] : (cachedNormals ? cachedNormals[i0] : Vec3(0, 1, 0));
+                    norms[1] = cachedOrigNormals ? cachedOrigNormals[i1] : (cachedNormals ? cachedNormals[i1] : Vec3(0, 1, 0));
+                    norms[2] = cachedOrigNormals ? cachedOrigNormals[i2] : (cachedNormals ? cachedNormals[i2] : Vec3(0, 1, 0));
+                } else {
+                    verts[0] = cachedPositions[i0];
+                    verts[1] = cachedPositions[i1];
+                    verts[2] = cachedPositions[i2];
+                    norms[0] = cachedNormals ? cachedNormals[i0] : Vec3(0, 1, 0);
+                    norms[1] = cachedNormals ? cachedNormals[i1] : Vec3(0, 1, 0);
+                    norms[2] = cachedNormals ? cachedNormals[i2] : Vec3(0, 1, 0);
+                }
+                resolved = true;
+            }
+        }
+
+        if (!resolved) {
+            for (int v = 0; v < 3; ++v) {
+                verts[v] = targetUsesLocalSpace ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
+                norms[v] = targetUsesLocalSpace ? tri->getOriginalVertexNormal(v) : tri->getVertexNormal(v);
+            }
+        }
+
         for (int v = 0; v < 3; ++v) {
-            const Vec3 p = targetUsesLocalSpace ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
-            const Vec3 n = targetUsesLocalSpace ? tri->getOriginalVertexNormal(v) : tri->getVertexNormal(v);
-            positions.push_back(p.x);
-            positions.push_back(p.y);
-            positions.push_back(p.z);
-            normals.push_back(n.x);
-            normals.push_back(n.y);
-            normals.push_back(n.z);
+            positions.push_back(verts[v].x);
+            positions.push_back(verts[v].y);
+            positions.push_back(verts[v].z);
+            normals.push_back(norms[v].x);
+            normals.push_back(norms[v].y);
+            normals.push_back(norms[v].z);
         }
     }
 
@@ -7831,6 +8026,8 @@ bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, co
             if (tri->getTransformPtr()) {
                 m_vkInstances[i].transform = tri->getTransformPtr()->getFinal();
             }
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+            if (tm->transform) m_vkInstances[i].transform = tm->transform->getFinal(); // flat mesh
         }
     }
 
@@ -7884,6 +8081,13 @@ int64_t VulkanBackendAdapter::updateMeshBLASPartial(
                 strongMatch = true;
                 targetUsesLocalSpace = (tri->getTransformPtr() != nullptr) && !isWaterTriangleMaterial(tri);
             }
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+            // Flat (direct) SoA mesh: matched by node name below. Its solo BLAS is indexed, so
+            // the refit re-reads the mesh SoA directly (refitIndexedSoloBLAS) — no per-triangle
+            // strong match / build-order gather is needed (and the rep-facade caller order won't
+            // match). This routes sculpt on an apply-flat / import-flat mesh to an incremental
+            // refit instead of a full Vulkan RT rebuild every dab.
+            instName = tm->nodeName;
         }
 
         if (strongMatch) {
@@ -7903,6 +8107,13 @@ int64_t VulkanBackendAdapter::updateMeshBLASPartial(
     }
 
     if (targetBlasIndex == UINT32_MAX || targetBlasIndex >= m_device->m_blasList.size()) {
+        return -1;
+    }
+
+    // Indexed solo BLAS has no 3N build-order slot map. Phase 1: decline the dirty-region
+    // partial so the caller falls back to the (indexed-aware) full SoA refit. A dirty-region
+    // indexed partial is Phase 2.
+    if (m_soloBlasIndexedMesh.find(targetBlasIndex) != m_soloBlasIndexedMesh.end()) {
         return -1;
     }
 
@@ -7955,6 +8166,14 @@ int64_t VulkanBackendAdapter::updateMeshBLASPartial(
     rangePositions.reserve(numVertices * 3);
     rangeNormals.reserve(numVertices * 3);
 
+    TriangleMesh* lastParentMesh = nullptr;
+    const Vec3* cachedPositions = nullptr;
+    const Vec3* cachedNormals = nullptr;
+    const Vec3* cachedOrigPositions = nullptr;
+    const Vec3* cachedOrigNormals = nullptr;
+    const std::vector<uint32_t, DNA::AlignedAllocator<uint32_t, 32>>* cachedIndices = nullptr;
+    bool hasGeometry = false;
+
     for (uint32_t slot = minSlot; slot <= maxSlot; ++slot) {
         if (slot >= orderedTris.size()) break;
         const auto& tri = orderedTris[slot];
@@ -7965,15 +8184,72 @@ int64_t VulkanBackendAdapter::updateMeshBLASPartial(
             }
             continue;
         }
+
+        Vec3 verts[3];
+        Vec3 norms[3];
+        bool resolved = false;
+
+        if (tri->parentMesh) {
+            if (tri->parentMesh.get() != lastParentMesh) {
+                lastParentMesh = tri->parentMesh.get();
+                if (lastParentMesh->geometry) {
+                    cachedPositions = lastParentMesh->geometry->get_attribute_data<Vec3>("P");
+                    cachedNormals = lastParentMesh->geometry->get_attribute_data<Vec3>("N");
+                    cachedOrigPositions = lastParentMesh->geometry->get_attribute_data<Vec3>("P_orig");
+                    cachedOrigNormals = lastParentMesh->geometry->get_attribute_data<Vec3>("N_orig");
+                    cachedIndices = &lastParentMesh->geometry->indices;
+                    hasGeometry = (cachedPositions != nullptr) && (cachedIndices != nullptr) && (!cachedIndices->empty());
+                } else {
+                    hasGeometry = false;
+                }
+            }
+
+            if (hasGeometry) {
+                uint32_t faceIdx = tri->faceIndex;
+                uint32_t baseIdx = faceIdx * 3;
+                uint32_t i0 = (*cachedIndices)[baseIdx + 0];
+                uint32_t i1 = (*cachedIndices)[baseIdx + 1];
+                uint32_t i2 = (*cachedIndices)[baseIdx + 2];
+
+                if (targetUsesLocalSpace) {
+                    if (tri->hasSkinData()) {
+                        verts[0] = tri->getOriginalVertexPosition(0);
+                        verts[1] = tri->getOriginalVertexPosition(1);
+                        verts[2] = tri->getOriginalVertexPosition(2);
+                    } else {
+                        verts[0] = cachedOrigPositions ? cachedOrigPositions[i0] : cachedPositions[i0];
+                        verts[1] = cachedOrigPositions ? cachedOrigPositions[i1] : cachedPositions[i1];
+                        verts[2] = cachedOrigPositions ? cachedOrigPositions[i2] : cachedPositions[i2];
+                    }
+                    norms[0] = cachedOrigNormals ? cachedOrigNormals[i0] : (cachedNormals ? cachedNormals[i0] : Vec3(0, 1, 0));
+                    norms[1] = cachedOrigNormals ? cachedOrigNormals[i1] : (cachedNormals ? cachedNormals[i1] : Vec3(0, 1, 0));
+                    norms[2] = cachedOrigNormals ? cachedOrigNormals[i2] : (cachedNormals ? cachedNormals[i2] : Vec3(0, 1, 0));
+                } else {
+                    verts[0] = cachedPositions[i0];
+                    verts[1] = cachedPositions[i1];
+                    verts[2] = cachedPositions[i2];
+                    norms[0] = cachedNormals ? cachedNormals[i0] : Vec3(0, 1, 0);
+                    norms[1] = cachedNormals ? cachedNormals[i1] : Vec3(0, 1, 0);
+                    norms[2] = cachedNormals ? cachedNormals[i2] : Vec3(0, 1, 0);
+                }
+                resolved = true;
+            }
+        }
+
+        if (!resolved) {
+            for (int v = 0; v < 3; ++v) {
+                verts[v] = targetUsesLocalSpace ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
+                norms[v] = targetUsesLocalSpace ? tri->getOriginalVertexNormal(v) : tri->getVertexNormal(v);
+            }
+        }
+
         for (int v = 0; v < 3; ++v) {
-            const Vec3 p = targetUsesLocalSpace ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
-            const Vec3 n = targetUsesLocalSpace ? tri->getOriginalVertexNormal(v) : tri->getVertexNormal(v);
-            rangePositions.push_back(p.x);
-            rangePositions.push_back(p.y);
-            rangePositions.push_back(p.z);
-            rangeNormals.push_back(n.x);
-            rangeNormals.push_back(n.y);
-            rangeNormals.push_back(n.z);
+            rangePositions.push_back(verts[v].x);
+            rangePositions.push_back(verts[v].y);
+            rangePositions.push_back(verts[v].z);
+            rangeNormals.push_back(norms[v].x);
+            rangeNormals.push_back(norms[v].y);
+            rangeNormals.push_back(norms[v].z);
         }
     }
 
@@ -8019,6 +8295,8 @@ int64_t VulkanBackendAdapter::updateMeshBLASPartial(
             if (tri->getTransformPtr()) {
                 m_vkInstances[i].transform = tri->getTransformPtr()->getFinal();
             }
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+            if (tm->transform) m_vkInstances[i].transform = tm->transform->getFinal(); // flat mesh
         }
     }
 
@@ -8035,6 +8313,24 @@ int64_t VulkanBackendAdapter::updateMeshBLASPartial(
 bool VulkanBackendAdapter::updateInteractiveMesh(const std::string& nodeName,
                                                  const std::vector<std::shared_ptr<Triangle>>& triangles) {
     return updateMeshBLASPartial(nodeName, triangles);
+}
+
+bool VulkanBackendAdapter::refitFlatMeshBLAS(const std::string& nodeName) {
+    if (!m_device || !m_device->isInitialized() || !m_device->hasHardwareRT()) return false;
+    if (m_vkInstances.empty() || m_instanceSources.empty()) return false;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
+        auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i]);
+        if (!tm || !matchesNodeNameForInstance(tm->nodeName, nodeName)) continue;
+        const uint32_t blasIndex = m_vkInstances[i].blasIndex;
+        if (blasIndex >= m_device->m_blasList.size()) return false;
+        // Flat meshes upload as indexed solo BLASes; refitIndexedSoloBLAS re-reads the mesh SoA
+        // directly (and refreshes this instance's TLAS transform), so the freshly baked rigid pose
+        // lands on the GPU as a cheap refit instead of a full per-frame rebuild.
+        if (m_soloBlasIndexedMesh.find(blasIndex) == m_soloBlasIndexedMesh.end()) return false;
+        return refitIndexedSoloBLAS(blasIndex);
+    }
+    return false;
 }
 
 void VulkanBackendAdapter::clearHairGeometry(bool rebuild_tlas) {
@@ -8551,6 +8847,13 @@ void VulkanBackendAdapter::setVisibilityByNodeName(const std::string& nodeName, 
             instName = inst->node_name;
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
             instName = tri->getNodeName();
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+            // Flat (direct SoA) mesh: no facade, so the node name lives on the TriangleMesh
+            // itself. Without this branch instName stayed empty for a flat object's RT
+            // instance, the node-name match below never fired, and its TLAS mask never got
+            // cleared on delete — the deleted object kept rendering in Vulkan RT even after
+            // it vanished from CPU/OptiX/Solid (whose visibility paths don't need this cast).
+            instName = tm->nodeName;
         }
 
         if (matchesNodeNameForInstance(instName, nodeName)) {
@@ -8625,6 +8928,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     // BLAS-slot order. Stale across a full rebuild, so clear it up front.
     m_soloBlasBuildTriangles.clear();
     m_soloBlasBuildTriangleSlots.clear();
+    m_soloBlasIndexedMesh.clear();
 
     struct SoloTriangleGroup {
         std::string nodeName;
@@ -8635,6 +8939,11 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         Matrix4x4 transform;
         uint16_t materialID = 0;
         std::shared_ptr<Hittable> representative;
+        // Indexed-BLAS eligibility: the whole group is one facade mesh (shared SoA), non-skinned,
+        // single space. Set on first triangle, cleared if any later triangle breaks the invariant.
+        TriangleMesh* idxMesh = nullptr;
+        bool idxLocalSpace = false;
+        bool idxEligible = false;
     };
     std::vector<SoloTriangleGroup> soloGroups;
     std::unordered_map<void*, size_t> soloGroupByTransform;
@@ -8811,6 +9120,58 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
             auto& targetGroup = soloGroups[found->second];
             targetGroup.triangles.push_back(d);
             targetGroup.trianglePtrs.push_back(tri);
+
+            // Indexed-BLAS eligibility (whole group == one non-skinned facade mesh, single space).
+            // The same (hasSharedTransform && !useLiveVertexState) decision the d.v* fill above used
+            // determines the upload space (local P_orig vs live P). Mixed mesh / skin / space → off.
+            {
+                const bool triLocalSpace = (hasSharedTransform && !useLiveVertexState);
+                TriangleMesh* triMesh = tri->parentMesh.get();
+                if (targetGroup.triangles.size() == 1) {
+                    targetGroup.idxMesh = triMesh;
+                    targetGroup.idxLocalSpace = triLocalSpace;
+                    targetGroup.idxEligible = (triMesh && triMesh->geometry &&
+                                               !triMesh->geometry->indices.empty() && !d.hasSkinData);
+                } else if (targetGroup.idxEligible) {
+                    if (!triMesh || triMesh != targetGroup.idxMesh || d.hasSkinData ||
+                        triLocalSpace != targetGroup.idxLocalSpace) {
+                        targetGroup.idxEligible = false;
+                    }
+                }
+            }
+        }
+        // 4b. Dense mesh placed directly in world.objects as a single TriangleMesh (flat/proxy
+        // migration) — no per-face Triangle facades. Build an indexed BLAS straight from the mesh
+        // SoA (uploadTriangleMeshIndexed) + one TLAS instance; geometry is object-local, the world
+        // transform rides the TLAS. DORMANT until the CC materialize flip emits TriangleMesh;
+        // harmless when none are present.
+        else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (mesh->visible && mesh->geometry && !mesh->geometry->indices.empty() &&
+                (deviceResidentCageNodes.empty() || !deviceResidentCageNodes.count(mesh->nodeName))) {
+                const auto meshPtrValue = reinterpret_cast<uintptr_t>(mesh.get());
+                std::string meshKey = "[DirectMesh]-" + mesh->nodeName + "-" + std::to_string(meshPtrValue);
+                // Geometry P is WORLD-baked (convertFromRawArraysToMesh bakes P = getFinal*P_orig),
+                // so upload the LOCAL bind pose (P_orig) and let the TLAS instance carry getFinal()
+                // — mirrors the facade solo path (local BLAS + world TLAS). Uploading P here would
+                // double-apply the transform.
+                uint32_t blasIndex = uploadTriangleMeshIndexed(mesh.get(), meshKey, /*useOriginalSpace=*/true);
+                if (blasIndex != UINT32_MAX) {
+                    uint16_t mId = 0;
+                    if (const uint16_t* gMat = mesh->geometry->get_material_ids()) {
+                        mId = gMat[mesh->geometry->indices[0]];
+                        if (mId == MaterialManager::INVALID_MATERIAL_ID) mId = 0;
+                    }
+                    VulkanRT::TLASInstance vi;
+                    vi.blasIndex = blasIndex;
+                    vi.transform = mesh->transform ? mesh->transform->getFinal() : Matrix4x4::identity();
+                    vi.materialIndex = mId;
+                    vi.customIndex = 0;
+                    vi.mask = 0xFF;
+                    vi.frontFaceCCW = true;
+                    vkInstances.push_back(vi);
+                    instanceSources.push_back(mesh);
+                }
+            }
         }
         // 5. Handle VDB Volumes — create AABB BLAS + TLAS instance for procedural hit group
         else if (auto vdb = std::dynamic_pointer_cast<VDBVolume>(obj)) {
@@ -8920,19 +9281,32 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
             if (group.triangles.empty()) continue;
 
             std::string meshKey = "[World-Solo]-" + group.nodeName + "-" + std::to_string(groupIndex);
-            uint32_t soloBlasIndex = uploadTriangles(group.triangles, meshKey);
 
-            // Record build-order triangle pointers so the interactive refit can
-            // re-upload positions into the exact BLAS slots (mesh_cache order may
-            // differ from this scene-graph traversal order).
-            if (soloBlasIndex != UINT32_MAX) {
-                m_soloBlasBuildTriangles[soloBlasIndex] = group.trianglePtrs;
-                auto& slots = m_soloBlasBuildTriangleSlots[soloBlasIndex];
-                slots.clear();
-                slots.reserve(group.trianglePtrs.size());
-                for (uint32_t slotIdx = 0; slotIdx < group.trianglePtrs.size(); ++slotIdx) {
-                    if (group.trianglePtrs[slotIdx]) {
-                        slots[group.trianglePtrs[slotIdx].get()] = slotIdx;
+            // Indexed path only when the group is the ENTIRE mesh (count match guards against
+            // partial visibility / culled faces, which the indexed BLAS — built from the whole
+            // SoA — cannot represent). Otherwise the proven non-indexed 3N upload runs.
+            const bool indexedOk = group.idxEligible && group.idxMesh && group.idxMesh->geometry &&
+                                   group.trianglePtrs.size() == group.idxMesh->num_triangles();
+
+            uint32_t soloBlasIndex;
+            if (indexedOk) {
+                soloBlasIndex = uploadTriangleMeshIndexed(group.idxMesh, meshKey, group.idxLocalSpace);
+            } else {
+                soloBlasIndex = uploadTriangles(group.triangles, meshKey);
+
+                // Record build-order triangle pointers so the interactive refit can
+                // re-upload positions into the exact BLAS slots (mesh_cache order may
+                // differ from this scene-graph traversal order). Indexed BLASes refit
+                // straight from the mesh SoA instead, so they skip this.
+                if (soloBlasIndex != UINT32_MAX) {
+                    m_soloBlasBuildTriangles[soloBlasIndex] = group.trianglePtrs;
+                    auto& slots = m_soloBlasBuildTriangleSlots[soloBlasIndex];
+                    slots.clear();
+                    slots.reserve(group.trianglePtrs.size());
+                    for (uint32_t slotIdx = 0; slotIdx < group.trianglePtrs.size(); ++slotIdx) {
+                        if (group.trianglePtrs[slotIdx]) {
+                            slots[group.trianglePtrs[slotIdx].get()] = slotIdx;
+                        }
                     }
                 }
             }
@@ -11809,10 +12183,10 @@ void VulkanBackendAdapter::setLights(const std::vector<std::shared_ptr<Light>>& 
         // Common params: radius, width, height. Some light types reinterpret these fields
         const float MIN_LIGHT_RADIUS = 1e-3f; // Avoid too-small radii that lead to sampling/precision issues in shaders
         const float MIN_AREA_DIM = 1e-4f;
-        gl.params[0] = (std::max)(l->radius, MIN_LIGHT_RADIUS);
+        gl.params[0] = (std::max)(l->getRadius(), MIN_LIGHT_RADIUS);
         // AreaLight has its own width/height that shadow Light:: base members — must access via derived
-        float w = l->width;
-        float h = l->height;
+        float w = 1.0f;
+        float h = 1.0f;
         // Default u/v axes (overwritten for Area lights)
         gl.area_u[0] = 1.0f; gl.area_u[1] = 0.0f; gl.area_u[2] = 0.0f; gl.area_u[3] = 0.0f;
         gl.area_v[0] = 0.0f; gl.area_v[1] = 1.0f; gl.area_v[2] = 0.0f; gl.area_v[3] = 0.0f;
@@ -12137,6 +12511,14 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
         Matrix4x4 m;
         if (auto tri = std::dynamic_pointer_cast<Triangle>(item.representative_hittable)) m = tri->getTransformMatrix();
         else if (auto inst = std::dynamic_pointer_cast<HittableInstance>(item.representative_hittable)) m = inst->transform;
+        // Flat (direct SoA) TriangleMesh-as-Hittable: drives its world transform through its own
+        // Transform handle. Without this branch a keyframed / physics-driven flat mesh fell through
+        // to `continue` and its TLAS instance transform was never refreshed per frame — it froze in
+        // place during playback and only snapped to the right pose on the next full rebuild (stop).
+        else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(item.representative_hittable)) {
+            if (!tm->transform) continue;
+            m = tm->transform->getFinal();
+        }
         else continue;
         if (item.instance_id >= 0 && item.instance_id < (int)updated.size()) {
             updated[item.instance_id].transform = m;
@@ -12260,6 +12642,12 @@ std::vector<int> VulkanBackendAdapter::getInstancesByNodeName(const std::string&
                 instName = inst->node_name;
             } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
                 instName = tri->getNodeName();
+            } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+                // Flat (direct SoA) mesh: without this branch a keyframed flat mesh wasn't found
+                // here, so the cheap per-instance TLAS transform update (updateInstanceTransform)
+                // was skipped and playback fell back to a full updateSceneGeometry rebuild every
+                // frame — the "flat keyframe is much heavier than facade" cost.
+                instName = tm->nodeName;
             }
 
             if (matchesNodeNameForInstance(instName, nodeName)) {
@@ -12327,6 +12715,10 @@ void VulkanBackendAdapter::rebuildTargetedTransformIndex() {
             instName = inst->node_name;
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
             instName = tri->getNodeName();
+        } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+            // Flat/proxy: a dense direct TriangleMesh instance — index it by node name so
+            // updateObjectTransform() can find and refresh its TLAS transform on a gizmo move.
+            instName = mesh->nodeName;
         }
         addNodeIndex(m_rtNodeIndex, instName, i);
     }
@@ -12377,6 +12769,8 @@ void VulkanBackendAdapter::updateObjectTransform(const std::string& nodeName, co
                     instName = inst->node_name;
                 } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
                     instName = tri->getNodeName();
+                } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+                    instName = mesh->nodeName; // Flat/proxy: direct TriangleMesh instance
                 }
 
                 if (matchesNodeNameForInstance(instName, nodeName)) {
@@ -13599,6 +13993,13 @@ void VulkanBackendAdapter::syncRasterInstanceTransformsImpl(const std::vector<st
             if (!name.empty() && th) {
                 transformMap[name] = tri->getTransformMatrix();
             }
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            // Flat (direct SoA) mesh: drives its world transform through its own handle. Without this
+            // the raster (Solid/Matcap) viewport never refreshed a keyframed/physics-driven flat
+            // mesh per frame — it froze during playback, mirroring the RT-path gap.
+            if (!tm->nodeName.empty() && tm->transform) {
+                transformMap[tm->nodeName] = tm->transform->getFinal();
+            }
         }
     };
 
@@ -13839,16 +14240,75 @@ bool VulkanBackendAdapter::updateRasterMeshFromTrianglesImpl(const std::string& 
     newPositions.resize(floatCount);
     newNormals.resize(floatCount);
 
-    size_t idx = 0;
-    for (const auto& tri : triangles) {
-    if (!tri) continue;
-    const bool hasSharedTransform = (tri->getTransformPtr() != nullptr);
+    const size_t numTriangles = triangles.size();
+    #pragma omp parallel for num_threads(std::thread::hardware_concurrency()) schedule(static)
+    for (int t = 0; t < (int)numTriangles; ++t) {
+        const auto& tri = triangles[t];
+        if (!tri) continue;
+
+        const size_t local_idx = t * 9;
+        const bool hasSharedTransform = (tri->getTransformPtr() != nullptr);
+        
+        Vec3 verts[3];
+        Vec3 norms[3];
+        bool resolved = false;
+
+        if (tri->parentMesh && tri->parentMesh->geometry) {
+            TriangleMesh* parentMesh = tri->parentMesh.get();
+            const Vec3* cachedPositions = parentMesh->geometry->get_attribute_data<Vec3>("P");
+            const Vec3* cachedNormals = parentMesh->geometry->get_attribute_data<Vec3>("N");
+            const Vec3* cachedOrigPositions = parentMesh->geometry->get_attribute_data<Vec3>("P_orig");
+            const Vec3* cachedOrigNormals = parentMesh->geometry->get_attribute_data<Vec3>("N_orig");
+            const std::vector<uint32_t, DNA::AlignedAllocator<uint32_t, 32>>* cachedIndices = &parentMesh->geometry->indices;
+
+            if (cachedPositions && cachedIndices && !cachedIndices->empty()) {
+                uint32_t faceIdx = tri->faceIndex;
+                uint32_t baseIdx = faceIdx * 3;
+                if (baseIdx + 2 < cachedIndices->size()) {
+                    uint32_t i0 = (*cachedIndices)[baseIdx + 0];
+                    uint32_t i1 = (*cachedIndices)[baseIdx + 1];
+                    uint32_t i2 = (*cachedIndices)[baseIdx + 2];
+
+                    if (hasSharedTransform) {
+                        if (tri->hasSkinData()) {
+                            verts[0] = tri->getOriginalVertexPosition(0);
+                            verts[1] = tri->getOriginalVertexPosition(1);
+                            verts[2] = tri->getOriginalVertexPosition(2);
+                        } else {
+                            verts[0] = cachedOrigPositions ? cachedOrigPositions[i0] : cachedPositions[i0];
+                            verts[1] = cachedOrigPositions ? cachedOrigPositions[i1] : cachedPositions[i1];
+                            verts[2] = cachedOrigPositions ? cachedOrigPositions[i2] : cachedPositions[i2];
+                        }
+                        norms[0] = cachedOrigNormals ? cachedOrigNormals[i0] : (cachedNormals ? cachedNormals[i0] : Vec3(0, 1, 0));
+                        norms[1] = cachedOrigNormals ? cachedOrigNormals[i1] : (cachedNormals ? cachedNormals[i1] : Vec3(0, 1, 0));
+                        norms[2] = cachedOrigNormals ? cachedOrigNormals[i2] : (cachedNormals ? cachedNormals[i2] : Vec3(0, 1, 0));
+                    } else {
+                        verts[0] = cachedPositions[i0];
+                        verts[1] = cachedPositions[i1];
+                        verts[2] = cachedPositions[i2];
+                        norms[0] = cachedOrigNormals ? cachedOrigNormals[i0] : (cachedNormals ? cachedNormals[i0] : Vec3(0, 1, 0));
+                        norms[1] = cachedOrigNormals ? cachedOrigNormals[i1] : (cachedNormals ? cachedNormals[i1] : Vec3(0, 1, 0));
+                        norms[2] = cachedOrigNormals ? cachedOrigNormals[i2] : (cachedNormals ? cachedNormals[i2] : Vec3(0, 1, 0));
+                    }
+                    resolved = true;
+                }
+            }
+        }
+
+        if (!resolved) {
+            for (int v = 0; v < 3; ++v) {
+                verts[v] = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
+                norms[v] = tri->getOriginalVertexNormal(v);
+            }
+        }
+
         for (int v = 0; v < 3; ++v) {
-            Vec3 p = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
-            Vec3 n = hasSharedTransform ? tri->getOriginalVertexNormal(v) : tri->getOriginalVertexNormal(v);
-            newPositions[idx]   = p.x; newPositions[idx+1] = p.y; newPositions[idx+2] = p.z;
-            newNormals[idx]     = n.x; newNormals[idx+1]   = n.y; newNormals[idx+2]   = n.z;
-            idx += 3;
+            newPositions[local_idx + v * 3 + 0] = verts[v].x;
+            newPositions[local_idx + v * 3 + 1] = verts[v].y;
+            newPositions[local_idx + v * 3 + 2] = verts[v].z;
+            newNormals[local_idx + v * 3 + 0]   = norms[v].x;
+            newNormals[local_idx + v * 3 + 1]   = norms[v].y;
+            newNormals[local_idx + v * 3 + 2]   = norms[v].z;
         }
     }
 
@@ -14080,6 +14540,10 @@ bool VulkanBackendAdapter::cloneRtObjectByNodeName(
             instName = inst->node_name;
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
             instName = tri->getNodeName();
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+            // Flat (SoA) mesh instance source — without this branch flat duplicates miss every
+            // source instance and the clone falls back to a full geometry rebuild.
+            instName = tm->nodeName;
         }
         if (matchesNodeNameForInstance(instName, sourceNodeName) ||
             matchesNodeNameForInstance(sourceNodeName, instName)) {

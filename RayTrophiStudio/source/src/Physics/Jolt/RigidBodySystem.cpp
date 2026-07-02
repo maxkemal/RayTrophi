@@ -206,7 +206,7 @@ void RigidBodySystem::ensureSoftBodyCreated(RigidBodyObject& rb) {
     // common (unpinned) case stays free of an extra allocation.
     std::vector<uint8_t> pinned;
     int pinned_count = 0;
-    for (const SoftPinRegion& reg : rb.soft_pins) {
+    for (const SoftPinRegion& reg : rb.getSoftPins()) {
         if (!reg.enabled || reg.radius <= 0.0f) continue;
         if (pinned.empty()) pinned.assign(verts.size(), 0);
         const float r2 = reg.radius * reg.radius;
@@ -224,20 +224,20 @@ void RigidBodySystem::ensureSoftBodyCreated(RigidBodyObject& rb) {
     desc.vertices = std::move(verts);
     desc.indices = std::move(indices);
     desc.vertex_pinned = std::move(pinned);
-    desc.total_mass = std::max(1.0e-3f, rb.soft_mass);
+    desc.total_mass = std::max(1.0e-3f, rb.getSoftMass());
     // One authored knob folds two Jolt inputs: explicit compliance wins; otherwise
     // derive it from stiffness (1 = stiff => ~0 compliance, 0 = floppy => large).
-    desc.compliance = (rb.soft_compliance > 0.0f)
-                          ? rb.soft_compliance
-                          : (1.0f - std::min(1.0f, std::max(0.0f, rb.soft_stiffness))) * 1.0e-3f;
-    desc.pressure = (rb.kind == BodyKind::Cloth) ? 0.0f : rb.soft_pressure;
-    desc.damping = rb.soft_damping;
-    desc.num_iterations = rb.soft_iterations;
-    desc.friction = rb.soft_friction;
-    desc.restitution = rb.soft_restitution;
-    desc.gravity_factor = rb.soft_gravity_factor;
-    desc.vertex_radius = rb.soft_vertex_radius;
-    desc.two_sided = (rb.kind == BodyKind::Cloth) ? rb.soft_two_sided : false;
+    desc.compliance = (rb.getSoftCompliance() > 0.0f)
+                          ? rb.getSoftCompliance()
+                          : (1.0f - std::min(1.0f, std::max(0.0f, rb.getSoftStiffness()))) * 1.0e-3f;
+    desc.pressure = (rb.kind == BodyKind::Cloth) ? 0.0f : rb.getSoftPressure();
+    desc.damping = rb.getSoftDamping();
+    desc.num_iterations = rb.getSoftIterations();
+    desc.friction = rb.getSoftFriction();
+    desc.restitution = rb.getSoftRestitution();
+    desc.gravity_factor = rb.getSoftGravityFactor();
+    desc.vertex_radius = rb.getSoftVertexRadius();
+    desc.two_sided = (rb.kind == BodyKind::Cloth) ? rb.getSoftTwoSided() : false;
 
     rb.handle = world_->createSoftBody(desc);
     rb.created = (rb.handle != JoltIntegration::kInvalidBody);
@@ -327,9 +327,9 @@ void RigidBodySystem::applyFluidCoupling(RigidBodyObject& rb, float dt) {
     // scales against the FULL shape volume (worst case = fully submerged), so a
     // normal floater (body density >= rho_fluid/(kMaxBuoyG+1)) is never clamped.
     constexpr float kMaxBuoyG = 15.0f;
-    float buoy_scale = rb.buoyancy_scale;
-    if (rb.fluid_density * shape_volume > 1.0e-8f) {
-        const float cap = (kMaxBuoyG + 1.0f) * mass_eff / (rb.fluid_density * shape_volume);
+    float buoy_scale = rb.getBuoyancyScale();
+    if (rb.getFluidDensity() * shape_volume > 1.0e-8f) {
+        const float cap = (kMaxBuoyG + 1.0f) * mass_eff / (rb.getFluidDensity() * shape_volume);
         if (cap < 1.0f) buoy_scale *= cap;
     }
 
@@ -371,7 +371,7 @@ void RigidBodySystem::applyFluidCoupling(RigidBodyObject& rb, float dt) {
     const float vel_alpha = rb.fluid_vel_primed ? 0.35f : 1.0f;
     rb.smoothed_fluid_vel = rb.smoothed_fluid_vel * (1.0f - vel_alpha) + avg_fvel * vel_alpha;
     rb.fluid_vel_primed = true;
-    const float vmax = std::max(0.0f, rb.fluid_max_coupling_speed);
+    const float vmax = std::max(0.0f, rb.getFluidMaxCouplingSpeed());
     if (vmax > 0.0f) {
         const float sp = rb.smoothed_fluid_vel.length();
         if (sp > vmax) rb.smoothed_fluid_vel = rb.smoothed_fluid_vel * (vmax / sp);
@@ -402,22 +402,22 @@ void RigidBodySystem::applyFluidCoupling(RigidBodyObject& rb, float dt) {
 
         // Buoyancy = -rho * Vsub * g (upward), at the point => restoring torque
         // that levels the body and lets it rock with the surface.
-        const Vec3 fb = gravity_ * (-(rb.fluid_density * vsub * buoy_scale));
+        const Vec3 fb = gravity_ * (-(rb.getFluidDensity() * vsub * buoy_scale));
         dbg_buoy_force_y += fb.y;
 
         // Drag = -k * v_rel, with v_rel the body's velocity AT the point minus
         // the smoothed/clamped fluid velocity (so rotation is damped through the
         // lever arm too, while spatial splash noise is filtered out).
         const Vec3 v_rel = world_->getBodyPointVelocity(rb.handle, wp) - fluid_vel;
-        float k = rb.fluid_drag * rb.fluid_density * vsub;
+        float k = rb.getFluidDrag() * rb.getFluidDensity() * vsub;
         // Form / slam drag ~ 0.5*Cd*rho*A*v^2. Folding the |v_rel| factor into k
         // keeps the same -k*v_rel application but makes the resistance grow with
         // speed (this is what actually stops a body bouncing off the water).
         // Per-point cross-section ~ vsub^(2/3).
-        if (rb.fluid_quadratic_drag > 0.0f) {
+        if (rb.getFluidQuadraticDrag() > 0.0f) {
             const float len = std::cbrt(std::max(vsub, 1e-12f));   // characteristic length
             const float area = len * len;                          // ~ vsub^(2/3)
-            k += rb.fluid_quadratic_drag * rb.fluid_density * area * v_rel.length();
+            k += rb.getFluidQuadraticDrag() * rb.getFluidDensity() * area * v_rel.length();
         }
         k = std::min(k, k_drag_max);
         Vec3 fd(0.0f, 0.0f, 0.0f);
@@ -507,7 +507,7 @@ void RigidBodySystem::applyFluidCoupling(RigidBodyObject& rb, float dt) {
     // damping torque over-corrected and REVERSED the spin each step — pumping
     // energy and accelerating the roll instead of bleeding it. k <= I_min/dt
     // guarantees |domega| <= |omega| on every axis (real inertia >= I_min).
-    if (submerged_pts > 0 && rb.fluid_angular_drag > 0.0f && rb.mass > 0.0f) {
+    if (submerged_pts > 0 && rb.getFluidAngularDrag() > 0.0f && rb.mass > 0.0f) {
         const float frac = static_cast<float>(submerged_pts) / static_cast<float>(count);
         const float Rchar = std::max({ he.x, he.y, he.z, 1e-4f });
         const float third = 1.0f / 3.0f;
@@ -515,7 +515,7 @@ void RigidBodySystem::applyFluidCoupling(RigidBodyObject& rb, float dt) {
         const float iy = third * rb.mass * (he.x * he.x + he.z * he.z);
         const float iz = third * rb.mass * (he.x * he.x + he.y * he.y);
         const float inertia_min = std::max(1e-6f, std::min({ ix, iy, iz, 0.4f * rb.mass * Rchar * Rchar }));
-        float k = rb.fluid_angular_drag * rb.fluid_density * (shape_volume * frac) * (Rchar * Rchar);
+        float k = rb.getFluidAngularDrag() * rb.getFluidDensity() * (shape_volume * frac) * (Rchar * Rchar);
         const float k_max = inertia_min / dt;
         k = std::min(k, k_max);
         if (k > 0.0f) {
@@ -841,6 +841,187 @@ bool RigidBodySystem::restoreFrameState(const std::vector<RigidBodyFrameState>& 
         }
     }
     return true;
+}
+
+RigidBodyObject::RigidBodyObject() = default;
+RigidBodyObject::~RigidBodyObject() = default;
+
+RigidBodyObject::RigidBodyObject(const RigidBodyObject& other) {
+    name = other.name;
+    source_name = other.source_name;
+    collider_name = other.collider_name;
+    enabled = other.enabled;
+    kind = other.kind;
+    dynamic = other.dynamic;
+    motion_type = other.motion_type;
+    shape = other.shape;
+    mass = other.mass;
+    auto_mass_from_density = other.auto_mass_from_density;
+    density = other.density;
+    linear_damping = other.linear_damping;
+    angular_damping = other.angular_damping;
+    gravity_scale = other.gravity_scale;
+    friction = other.friction;
+    restitution = other.restitution;
+    initial_linear_velocity = other.initial_linear_velocity;
+    initial_angular_velocity = other.initial_angular_velocity;
+    sleep_enabled = other.sleep_enabled;
+    lock_translation_x = other.lock_translation_x;
+    lock_translation_y = other.lock_translation_y;
+    lock_translation_z = other.lock_translation_z;
+    lock_rotation_x = other.lock_rotation_x;
+    lock_rotation_y = other.lock_rotation_y;
+    lock_rotation_z = other.lock_rotation_z;
+    fluid_coupling_enabled = other.fluid_coupling_enabled;
+    force_field_enabled = other.force_field_enabled;
+    force_field_scale = other.force_field_scale;
+
+    broken = other.broken;
+    pending_launch_velocity = other.pending_launch_velocity;
+    has_pending_launch = other.has_pending_launch;
+    handle = other.handle;
+    created = other.created;
+    rest_captured = other.rest_captured;
+    initial_body_xf = other.initial_body_xf;
+    initial_pivot = other.initial_pivot;
+    rest_half_extents = other.rest_half_extents;
+    last_written_pivot = other.last_written_pivot;
+    has_written = other.has_written;
+    smoothed_fluid_vel = other.smoothed_fluid_vel;
+    fluid_vel_primed = other.fluid_vel_primed;
+    dbg_coupled = other.dbg_coupled;
+    dbg_sample_count = other.dbg_sample_count;
+    dbg_submerged_pts = other.dbg_submerged_pts;
+    dbg_min_sd = other.dbg_min_sd;
+    dbg_buoy_accel_y = other.dbg_buoy_accel_y;
+    dbg_drag_accel_y = other.dbg_drag_accel_y;
+    dbg_vel_y = other.dbg_vel_y;
+    dbg_body_density = other.dbg_body_density;
+    dbg_pinned_count = other.dbg_pinned_count;
+
+    if (other.soft_body) {
+        soft_body = std::make_unique<SoftBodyComponent>(*other.soft_body);
+    }
+    if (other.fluid_coupling) {
+        fluid_coupling = std::make_unique<FluidCouplingComponent>(*other.fluid_coupling);
+    }
+    if (other.fracture) {
+        fracture = std::make_unique<FractureComponent>(*other.fracture);
+    }
+}
+
+RigidBodyObject& RigidBodyObject::operator=(const RigidBodyObject& other) {
+    if (this != &other) {
+        name = other.name;
+        source_name = other.source_name;
+        collider_name = other.collider_name;
+        enabled = other.enabled;
+        kind = other.kind;
+        dynamic = other.dynamic;
+        motion_type = other.motion_type;
+        shape = other.shape;
+        mass = other.mass;
+        auto_mass_from_density = other.auto_mass_from_density;
+        density = other.density;
+        linear_damping = other.linear_damping;
+        angular_damping = other.angular_damping;
+        gravity_scale = other.gravity_scale;
+        friction = other.friction;
+        restitution = other.restitution;
+        initial_linear_velocity = other.initial_linear_velocity;
+        initial_angular_velocity = other.initial_angular_velocity;
+        sleep_enabled = other.sleep_enabled;
+        lock_translation_x = other.lock_translation_x;
+        lock_translation_y = other.lock_translation_y;
+        lock_translation_z = other.lock_translation_z;
+        lock_rotation_x = other.lock_rotation_x;
+        lock_rotation_y = other.lock_rotation_y;
+        lock_rotation_z = other.lock_rotation_z;
+        fluid_coupling_enabled = other.fluid_coupling_enabled;
+        force_field_enabled = other.force_field_enabled;
+        force_field_scale = other.force_field_scale;
+
+        broken = other.broken;
+        pending_launch_velocity = other.pending_launch_velocity;
+        has_pending_launch = other.has_pending_launch;
+        handle = other.handle;
+        created = other.created;
+        rest_captured = other.rest_captured;
+        initial_body_xf = other.initial_body_xf;
+        initial_pivot = other.initial_pivot;
+        rest_half_extents = other.rest_half_extents;
+        last_written_pivot = other.last_written_pivot;
+        has_written = other.has_written;
+        smoothed_fluid_vel = other.smoothed_fluid_vel;
+        fluid_vel_primed = other.fluid_vel_primed;
+        dbg_coupled = other.dbg_coupled;
+        dbg_sample_count = other.dbg_sample_count;
+        dbg_submerged_pts = other.dbg_submerged_pts;
+        dbg_min_sd = other.dbg_min_sd;
+        dbg_buoy_accel_y = other.dbg_buoy_accel_y;
+        dbg_drag_accel_y = other.dbg_drag_accel_y;
+        dbg_vel_y = other.dbg_vel_y;
+        dbg_body_density = other.dbg_body_density;
+        dbg_pinned_count = other.dbg_pinned_count;
+
+        if (other.soft_body) {
+            soft_body = std::make_unique<SoftBodyComponent>(*other.soft_body);
+        } else {
+            soft_body.reset();
+        }
+        if (other.fluid_coupling) {
+            fluid_coupling = std::make_unique<FluidCouplingComponent>(*other.fluid_coupling);
+        } else {
+            fluid_coupling.reset();
+        }
+        if (other.fracture) {
+            fracture = std::make_unique<FractureComponent>(*other.fracture);
+        } else {
+            fracture.reset();
+        }
+    }
+    return *this;
+}
+
+RigidBodyObject::RigidBodyObject(RigidBodyObject&&) noexcept = default;
+RigidBodyObject& RigidBodyObject::operator=(RigidBodyObject&&) noexcept = default;
+
+void RigidBodyObject::ensureSoftBody() {
+    if (!soft_body) {
+        soft_body = std::make_unique<SoftBodyComponent>();
+    }
+}
+
+void RigidBodyObject::ensureFluidCoupling() {
+    if (!fluid_coupling) {
+        fluid_coupling = std::make_unique<FluidCouplingComponent>();
+    }
+}
+
+void RigidBodyObject::ensureFracture() {
+    if (!fracture) {
+        fracture = std::make_unique<FractureComponent>();
+    }
+}
+
+const std::vector<SoftPinRegion>& RigidBodyObject::getSoftPins() const {
+    static const std::vector<SoftPinRegion> s_empty_pins;
+    return soft_body ? soft_body->soft_pins : s_empty_pins;
+}
+
+std::vector<SoftPinRegion>& RigidBodyObject::getSoftPinsMut() {
+    ensureSoftBody();
+    return soft_body->soft_pins;
+}
+
+void RigidBodyObject::setSoftPins(const std::vector<SoftPinRegion>& pins) {
+    ensureSoftBody();
+    soft_body->soft_pins = pins;
+}
+
+void RigidBodyObject::setBreakable(bool val) {
+    ensureFracture();
+    fracture->breakable = val;
 }
 
 } // namespace RayTrophiSim

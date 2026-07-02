@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -28,6 +28,8 @@
 #include "NodeEditorChrome.h"
 #include "Graph.h"
 #include "imgui.h"
+#include <vector>
+#include <algorithm>
 #include <unordered_map>
 #include <cmath>
 #include <algorithm>
@@ -82,20 +84,28 @@ namespace NodeSystem {
         float scrollY = 0.0f;
         
         uint32_t selectedNodeId = 0;
+        std::vector<uint32_t> selectedNodeIds;
         uint32_t selectedLinkId = 0;
         uint32_t selectedGroupId = 0;
         uint32_t draggingNodeId = 0;
+        uint32_t draggingGroupId = 0;
         uint32_t resizingNodeId = 0;
+        uint32_t resizingGroupId = 0;
         
         bool isCreatingLink = false;
         uint32_t linkStartPinId = 0;
         DataType linkStartType = DataType::None;
+        
+        // Box selection state
+        bool isBoxSelecting = false;
+        ImVec2 boxSelectStartPos;
         
         // Callbacks
         std::function<void(uint32_t nodeId)> onNodeSelected;
         std::function<void(uint32_t linkId)> onLinkSelected;
         std::function<void()> onBackgroundContextMenu;
         std::function<void(uint32_t nodeId)> onNodeContextMenu;
+        std::function<void()> onDrawBackgroundMenu;
         std::function<void()> onGraphModified;
 
         /**
@@ -106,16 +116,22 @@ namespace NodeSystem {
             scrollX = 0.0f;
             scrollY = 0.0f;
             selectedNodeId = 0;
+            selectedNodeIds.clear();
             selectedLinkId = 0;
             selectedGroupId = 0;
             draggingNodeId = 0;
+            draggingGroupId = 0;
             resizingNodeId = 0;
+            resizingGroupId = 0;
             isCreatingLink = false;
             linkStartPinId = 0;
+            isBoxSelecting = false;
         }
 
     private:
         std::unordered_map<uint32_t, ImVec2> pinPositions_;
+
+    public:
         ImVec2 canvasPos_;
         ImVec2 canvasSize_;
 
@@ -189,10 +205,134 @@ namespace NodeSystem {
                 drawMinimap(dl, graph);
             }
             
+            // Context menu popups for group rename/color/delete
+            drawPopups(graph);
+            
             ImGui::EndChild();
         }
 
     private:
+        void drawPopups(GraphBase& graph) {
+            // Background Context Menu
+            if (ImGui::BeginPopup("LocalGraphContextPopup")) {
+                if (ImGui::MenuItem("Create Group Frame", "Ctrl+G", nullptr, !selectedNodeIds.empty())) {
+                    // Create group wrapping selection
+                    float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
+                    for (uint32_t nid : selectedNodeIds) {
+                        NodeBase* n = graph.getNode(nid);
+                        if (n) {
+                            minX = std::min(minX, n->x);
+                            minY = std::min(minY, n->y);
+                            maxX = std::max(maxX, n->x + 160.0f);
+                            maxY = std::max(maxY, n->y + 100.0f);
+                        }
+                    }
+                    if (minX != FLT_MAX) {
+                        uint32_t gid = graph.createGroup("New Group", 
+                            ImVec2(minX - 16.0f, minY - 32.0f), 
+                            ImVec2(maxX - minX + 32.0f, maxY - minY + 48.0f));
+                        for (uint32_t nid : selectedNodeIds) {
+                            graph.addNodeToGroup(nid, gid);
+                        }
+                        if (onGraphModified) onGraphModified();
+                    }
+                }
+                
+                if (ImGui::MenuItem("Create Empty Group Frame")) {
+                    ImVec2 mouseRel = ImGui::GetMousePos();
+                    float graphX = (mouseRel.x - canvasPos_.x - scrollX) / zoom;
+                    float graphY = (mouseRel.y - canvasPos_.y - scrollY) / zoom;
+                    graph.createGroup("New Group", ImVec2(graphX, graphY), ImVec2(240, 160));
+                    if (onGraphModified) onGraphModified();
+                }
+                
+                ImGui::EndPopup();
+            }
+            
+            // Node Context Menu
+            if (ImGui::BeginPopup("LocalNodeContextPopup")) {
+                NodeBase* activeNode = graph.getNode(selectedNodeId);
+                if (activeNode) {
+                    ImGui::Text("Node: %s", activeNode->metadata.displayName.c_str());
+                    ImGui::Separator();
+                    
+                    if (activeNode->groupId != 0) {
+                        if (ImGui::MenuItem("Remove from Group")) {
+                            graph.removeNodeFromGroups(activeNode->id);
+                            if (onGraphModified) onGraphModified();
+                        }
+                    } else {
+                        if (ImGui::BeginMenu("Add to Group")) {
+                            for (auto& g : graph.groups) {
+                                if (ImGui::MenuItem(g.name.c_str())) {
+                                    graph.addNodeToGroup(activeNode->id, g.id);
+                                    if (onGraphModified) onGraphModified();
+                                }
+                            }
+                            ImGui::EndMenu();
+                        }
+                    }
+                    
+                    if (ImGui::MenuItem("Delete Node")) {
+                        graph.removeNode(activeNode->id);
+                        selectedNodeId = 0;
+                        selectedNodeIds.erase(std::remove(selectedNodeIds.begin(), selectedNodeIds.end(), selectedNodeId), selectedNodeIds.end());
+                        if (onGraphModified) onGraphModified();
+                    }
+                }
+                ImGui::EndPopup();
+            }
+            
+            // Group Context Menu
+            if (ImGui::BeginPopup("LocalGroupContextPopup")) {
+                NodeGroup* group = graph.getGroup(selectedGroupId);
+                if (group) {
+                    ImGui::Text("Group: %s", group->name.c_str());
+                    ImGui::Separator();
+                    
+                    static char renameBuf[128] = "";
+                    if (ImGui::IsWindowAppearing()) {
+                        strncpy_s(renameBuf, group->name.c_str(), sizeof(renameBuf) - 1);
+                    }
+                    if (ImGui::InputText("Rename", renameBuf, sizeof(renameBuf))) {
+                        group->name = renameBuf;
+                        if (onGraphModified) onGraphModified();
+                    }
+                    
+                    static ImVec4 colorPicker;
+                    if (ImGui::IsWindowAppearing()) {
+                        colorPicker = ImGui::ColorConvertU32ToFloat4(group->color);
+                    }
+                    if (ImGui::ColorEdit4("Color", &colorPicker.x, ImGuiColorEditFlags_NoInputs)) {
+                        group->color = ImGui::ColorConvertFloat4ToU32(colorPicker);
+                        if (onGraphModified) onGraphModified();
+                    }
+                    
+                    if (ImGui::MenuItem("Select All Nodes in Group")) {
+                        selectedNodeIds = group->nodeIds;
+                        if (!selectedNodeIds.empty()) {
+                            selectedNodeId = selectedNodeIds.back();
+                        }
+                    }
+                    
+                    if (ImGui::MenuItem("Remove All Nodes")) {
+                        for (uint32_t nid : group->nodeIds) {
+                            NodeBase* n = graph.getNode(nid);
+                            if (n) n->groupId = 0;
+                        }
+                        group->nodeIds.clear();
+                        if (onGraphModified) onGraphModified();
+                    }
+                    
+                    if (ImGui::MenuItem("Delete Group Frame (Keep Nodes)")) {
+                        graph.deleteGroup(group->id);
+                        selectedGroupId = 0;
+                        if (onGraphModified) onGraphModified();
+                    }
+                }
+                ImGui::EndPopup();
+            }
+        }
         // ========================================================================
         // GRID
         // ========================================================================
@@ -201,37 +341,39 @@ namespace NodeSystem {
             float minorStep = config.gridSizeMinor * zoom;
             float majorStep = config.gridSizeMajor * zoom;
             
-            // Minor grid
-            if (minorStep > 8.0f) {
-                for (float x = fmodf(scrollX, minorStep); x < canvasSize_.x; x += minorStep) {
-                    dl->AddLine(
-                        ImVec2(canvasPos_.x + x, canvasPos_.y),
-                        ImVec2(canvasPos_.x + x, canvasPos_.y + canvasSize_.y),
-                        config.gridColorMinor
-                    );
-                }
-                for (float y = fmodf(scrollY, minorStep); y < canvasSize_.y; y += minorStep) {
-                    dl->AddLine(
-                        ImVec2(canvasPos_.x, canvasPos_.y + y),
-                        ImVec2(canvasPos_.x + canvasSize_.x, canvasPos_.y + y),
-                        config.gridColorMinor
-                    );
+            // Minor grid (drawn as dots for a premium modern aesthetic, saving draw calls + look & feel)
+            if (minorStep > 12.0f) {
+                ImU32 dotColor = config.gridColorMinor;
+                float startX = fmodf(scrollX, minorStep);
+                float startY = fmodf(scrollY, minorStep);
+                
+                for (float x = startX; x < canvasSize_.x; x += minorStep) {
+                    for (float y = startY; y < canvasSize_.y; y += minorStep) {
+                        // Skip if it aligns closely with the major grid to keep it clean
+                        if (fmodf(x - scrollX + 1.0f, majorStep) < minorStep * 0.5f ||
+                            fmodf(y - scrollY + 1.0f, majorStep) < minorStep * 0.5f) {
+                            continue;
+                        }
+                        dl->AddCircleFilled(ImVec2(canvasPos_.x + x, canvasPos_.y + y), 1.0f * std::clamp(zoom, 0.5f, 1.2f), dotColor);
+                    }
                 }
             }
             
-            // Major grid
+            // Major grid (drawn as subtle lines)
             for (float x = fmodf(scrollX, majorStep); x < canvasSize_.x; x += majorStep) {
                 dl->AddLine(
                     ImVec2(canvasPos_.x + x, canvasPos_.y),
                     ImVec2(canvasPos_.x + x, canvasPos_.y + canvasSize_.y),
-                    config.gridColorMajor
+                    config.gridColorMajor,
+                    1.0f
                 );
             }
             for (float y = fmodf(scrollY, majorStep); y < canvasSize_.y; y += majorStep) {
                 dl->AddLine(
                     ImVec2(canvasPos_.x, canvasPos_.y + y),
                     ImVec2(canvasPos_.x + canvasSize_.x, canvasPos_.y + y),
-                    config.gridColorMajor
+                    config.gridColorMajor,
+                    1.0f
                 );
             }
         }
@@ -244,12 +386,61 @@ namespace NodeSystem {
             ImGui::SetCursorScreenPos(canvasPos_);
             ImGui::SetNextItemAllowOverlap(); // must precede the item in ImGui 1.92+
             ImGui::InvisibleButton("##CanvasInput", canvasSize_,
-                ImGuiButtonFlags_MouseButtonMiddle | ImGuiButtonFlags_MouseButtonRight);
+                ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle | ImGuiButtonFlags_MouseButtonRight);
             
-            // Pan (middle mouse)
-            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
-                scrollX += ImGui::GetIO().MouseDelta.x;
-                scrollY += ImGui::GetIO().MouseDelta.y;
+            // Pan (middle mouse) & Box Selection start
+            if (ImGui::IsItemActive()) {
+                if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+                    scrollX += ImGui::GetIO().MouseDelta.x;
+                    scrollY += ImGui::GetIO().MouseDelta.y;
+                } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    // Clicking on background clears selection unless Shift is held
+                    if (!ImGui::GetIO().KeyShift) {
+                        selectedNodeIds.clear();
+                        selectedNodeId = 0;
+                    }
+                    isBoxSelecting = true;
+                    boxSelectStartPos = ImGui::GetMousePos();
+                }
+            }
+            
+            // Box selection processing
+            if (isBoxSelecting) {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImVec2 mousePos = ImGui::GetMousePos();
+                
+                // Draw selection rectangle (dotted/dashed style)
+                dl->AddRect(boxSelectStartPos, mousePos, IM_COL32(255, 180, 50, 180), 0.0f, 0, 1.0f);
+                dl->AddRectFilled(boxSelectStartPos, mousePos, IM_COL32(255, 180, 50, 20));
+                
+                if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                    isBoxSelecting = false;
+                    
+                    float minX = std::min(boxSelectStartPos.x, mousePos.x);
+                    float maxX = std::max(boxSelectStartPos.x, mousePos.x);
+                    float minY = std::min(boxSelectStartPos.y, mousePos.y);
+                    float maxY = std::max(boxSelectStartPos.y, mousePos.y);
+                    
+                    // Only select if the drag distance is significant (not a click)
+                    if (std::abs(maxX - minX) > 4.0f || std::abs(maxY - minY) > 4.0f) {
+                        for (auto& node : graph.nodes) {
+                            ImVec2 nPos = nodeToScreen(node->x, node->y);
+                            // Estimate node center
+                            ImVec2 nCenter(nPos.x + 80.0f * zoom, nPos.y + 40.0f * zoom);
+                            
+                            if (nCenter.x >= minX && nCenter.x <= maxX &&
+                                nCenter.y >= minY && nCenter.y <= maxY) {
+                                if (std::find(selectedNodeIds.begin(), selectedNodeIds.end(), node->id) == selectedNodeIds.end()) {
+                                    selectedNodeIds.push_back(node->id);
+                                }
+                            }
+                        }
+                        if (!selectedNodeIds.empty()) {
+                            selectedNodeId = selectedNodeIds.back();
+                            if (onNodeSelected) onNodeSelected(selectedNodeId);
+                        }
+                    }
+                }
             }
             
             // Zoom (scroll wheel)
@@ -271,15 +462,49 @@ namespace NodeSystem {
             
             // Context menu (right click on background)
             if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                if (onBackgroundContextMenu) onBackgroundContextMenu();
+                selectedGroupId = 0;
+                ImGui::OpenPopup("LocalGraphContextPopup");
             }
             
-            // Delete key
+            // Key presses & shortcuts
             if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows)) {
+                // Ctrl+G Grouping Shortcut
+                if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_G)) {
+                    if (!selectedNodeIds.empty()) {
+                        float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
+                        for (uint32_t nid : selectedNodeIds) {
+                            NodeBase* n = graph.getNode(nid);
+                            if (n) {
+                                minX = std::min(minX, n->x);
+                                minY = std::min(minY, n->y);
+                                maxX = std::max(maxX, n->x + 160.0f);
+                                maxY = std::max(maxY, n->y + 100.0f);
+                            }
+                        }
+                        if (minX != FLT_MAX) {
+                            uint32_t gid = graph.createGroup("New Group", 
+                                ImVec2(minX - 16.0f, minY - 32.0f), 
+                                ImVec2(maxX - minX + 32.0f, maxY - minY + 48.0f));
+                            for (uint32_t nid : selectedNodeIds) {
+                                graph.addNodeToGroup(nid, gid);
+                            }
+                            if (onGraphModified) onGraphModified();
+                        }
+                    }
+                }
+                
+                // Delete keys
                 if (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
                     if (selectedLinkId != 0) {
                         graph.removeLink(selectedLinkId);
                         selectedLinkId = 0;
+                        if (onGraphModified) onGraphModified();
+                    } else if (!selectedNodeIds.empty()) {
+                        for (uint32_t nid : selectedNodeIds) {
+                            graph.removeNode(nid);
+                        }
+                        selectedNodeIds.clear();
+                        selectedNodeId = 0;
                         if (onGraphModified) onGraphModified();
                     } else if (selectedNodeId != 0) {
                         graph.removeNode(selectedNodeId);
@@ -312,7 +537,8 @@ namespace NodeSystem {
                 }
             }
             
-            // Node dragging
+            // Dragging interactions
+            // Dragging interactions
             if (resizingNodeId != 0) {
                 if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                     NodeBase* node = graph.getNode(resizingNodeId);
@@ -323,17 +549,95 @@ namespace NodeSystem {
                 } else {
                     resizingNodeId = 0;
                 }
+            } else if (resizingGroupId != 0) {
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    NodeGroup* group = graph.getGroup(resizingGroupId);
+                    if (group) {
+                        group->size.x += ImGui::GetIO().MouseDelta.x / zoom;
+                        group->size.y += ImGui::GetIO().MouseDelta.y / zoom;
+                        group->size.x = std::max(100.0f, group->size.x);
+                        group->size.y = std::max(80.0f, group->size.y);
+                    }
+                } else {
+                    resizingGroupId = 0;
+                }
             } else if (draggingNodeId != 0) {
                 if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                     if (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
-                        NodeBase* node = graph.getNode(draggingNodeId);
-                        if (node) {
-                            node->x += ImGui::GetIO().MouseDelta.x / zoom;
-                            node->y += ImGui::GetIO().MouseDelta.y / zoom;
+                        ImVec2 delta = ImVec2(ImGui::GetIO().MouseDelta.x / zoom, ImGui::GetIO().MouseDelta.y / zoom);
+                        
+                        bool isDraggedNodeSelected = std::find(selectedNodeIds.begin(), selectedNodeIds.end(), draggingNodeId) != selectedNodeIds.end();
+                        if (isDraggedNodeSelected) {
+                            // Move all selected nodes together
+                            for (uint32_t nid : selectedNodeIds) {
+                                NodeBase* n = graph.getNode(nid);
+                                if (n) {
+                                    n->x += delta.x;
+                                    n->y += delta.y;
+                                }
+                            }
+                        } else {
+                            // Only move the single dragged node
+                            NodeBase* n = graph.getNode(draggingNodeId);
+                            if (n) {
+                                n->x += delta.x;
+                                n->y += delta.y;
+                            }
                         }
                     }
                 } else {
+                    // Release! Check if we should add/remove the dragged nodes from groups
+                    bool isDraggedNodeSelected = std::find(selectedNodeIds.begin(), selectedNodeIds.end(), draggingNodeId) != selectedNodeIds.end();
+                    std::vector<uint32_t> nodesToProcess = isDraggedNodeSelected ? selectedNodeIds : std::vector<uint32_t>{draggingNodeId};
+                    
+                    for (uint32_t nid : nodesToProcess) {
+                        NodeBase* node = graph.getNode(nid);
+                        if (node) {
+                            float nodeCenterX = node->x + 80.0f;
+                            float nodeCenterY = node->y + 40.0f;
+                            uint32_t newGroupId = 0;
+                            
+                            for (auto& g : graph.groups) {
+                                if (nodeCenterX >= g.position.x && nodeCenterX <= g.position.x + g.size.x &&
+                                    nodeCenterY >= g.position.y && nodeCenterY <= g.position.y + g.size.y) {
+                                    newGroupId = g.id;
+                                    break;
+                                }
+                            }
+                            
+                            if (node->groupId != newGroupId) {
+                                graph.removeNodeFromGroups(node->id);
+                                if (newGroupId != 0) {
+                                    graph.addNodeToGroup(node->id, newGroupId);
+                                }
+                                if (onGraphModified) onGraphModified();
+                            }
+                        }
+                    }
                     draggingNodeId = 0;
+                }
+            } else if (draggingGroupId != 0) {
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    if (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
+                        NodeGroup* group = graph.getGroup(draggingGroupId);
+                        if (group) {
+                            float dx = ImGui::GetIO().MouseDelta.x / zoom;
+                            float dy = ImGui::GetIO().MouseDelta.y / zoom;
+                            group->position.x += dx;
+                            group->position.y += dy;
+                            
+                            // Move all nodes associated with this group
+                            for (uint32_t nodeId : group->nodeIds) {
+                                NodeBase* n = graph.getNode(nodeId);
+                                if (n) {
+                                    n->x += dx;
+                                    n->y += dy;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    draggingGroupId = 0;
                 }
             }
         }
@@ -425,7 +729,7 @@ namespace NodeSystem {
             // Background (Channel 0)
             dl->ChannelsSetCurrent(0);
             
-            bool isSelected = (selectedNodeId == node.id);
+            bool isSelected = std::find(selectedNodeIds.begin(), selectedNodeIds.end(), node.id) != selectedNodeIds.end();
             
             ImU32 headerCol = node.metadata.headerColor;
             if (headerCol == 0) {
@@ -433,31 +737,69 @@ namespace NodeSystem {
             }
             
             ImU32 borderCol = isSelected ? config.nodeSelectedColor : config.nodeBorderColor;
-            float borderW = isSelected ? config.nodeBorderWidth * 2 : config.nodeBorderWidth;
+            float borderW = isSelected ? config.nodeBorderWidth * 1.25f : config.nodeBorderWidth;
             
+            // Multi-layered soft drop shadows
+            dl->AddRectFilled(
+                ImVec2(pos.x + shadowOffset * 1.5f, pos.y + shadowOffset * 1.5f),
+                ImVec2(pos.x + finalWidth + shadowOffset * 1.5f, pos.y + finalHeight + shadowOffset * 1.5f),
+                IM_COL32(0, 0, 0, 25), cornerRadius);
             dl->AddRectFilled(
                 ImVec2(pos.x + shadowOffset, pos.y + shadowOffset),
                 ImVec2(pos.x + finalWidth + shadowOffset, pos.y + finalHeight + shadowOffset),
-                IM_COL32(0, 0, 0, 55), cornerRadius);
+                IM_COL32(0, 0, 0, 45), cornerRadius);
 
             // Body
             dl->AddRectFilled(pos, ImVec2(pos.x + finalWidth, pos.y + finalHeight),
                 config.nodeBodyColor, cornerRadius);
             
-            // Header
+            // Header Base (Integrated Dark Charcoal)
             dl->AddRectFilled(pos, ImVec2(pos.x + finalWidth, pos.y + headerH),
+                IM_COL32(26, 28, 33, 250), cornerRadius, ImDrawFlags_RoundCornersTop);
+            
+            // Modern category color strip at the very top of the node (thin, Gaea/Houdini-style)
+            float stripeHeight = 3.5f * zoom;
+            dl->AddRectFilled(pos, ImVec2(pos.x + finalWidth, pos.y + stripeHeight),
                 headerCol, cornerRadius, ImDrawFlags_RoundCornersTop);
+            
+            // Subtle premium accent line just below the color stripe
+            dl->AddLine(
+                ImVec2(pos.x + 1.0f, pos.y + stripeHeight),
+                ImVec2(pos.x + finalWidth - 1.0f, pos.y + stripeHeight),
+                IM_COL32(255, 255, 255, 30),
+                1.0f
+            );
 
             dl->AddLine(
                 ImVec2(pos.x + 1.0f, pos.y + headerH),
                 ImVec2(pos.x + finalWidth - 1.0f, pos.y + headerH),
-                IM_COL32(255, 255, 255, 22),
+                IM_COL32(255, 255, 255, 12),
                 1.0f);
             
             // Border
             dl->AddRect(pos, ImVec2(pos.x + finalWidth, pos.y + finalHeight),
                 borderCol, cornerRadius, 0, std::max(1.0f, borderW * zoom));
-            
+
+            // Background-evaluation indicator: pulsing border + overall-progress
+            // fill bar along the bottom edge, shown only on the node the graph
+            // reports as currently active (see GraphBase::isEvaluatingAsync /
+            // currentAsyncNodeId / asyncEvalProgress — default no-ops for graphs
+            // that don't support background evaluation, so this is a no-op there).
+            if (graph.isEvaluatingAsync() && graph.currentAsyncNodeId() == node.id) {
+                float pulse = 0.5f + 0.5f * sinf((float)ImGui::GetTime() * 6.0f);
+                ImU32 glowCol = IM_COL32(120, 220, 255, (int)(120 + 100 * pulse));
+                dl->AddRect(ImVec2(pos.x - 2.0f, pos.y - 2.0f), ImVec2(pos.x + finalWidth + 2.0f, pos.y + finalHeight + 2.0f),
+                    glowCol, cornerRadius, 0, std::max(2.0f, borderW * zoom * 1.5f));
+
+                float barH = std::max(3.0f, 4.0f * zoom);
+                float progress = std::clamp(graph.asyncEvalProgress(), 0.0f, 1.0f);
+                ImVec2 barMin(pos.x + 1.0f, pos.y + finalHeight - barH - 1.0f);
+                dl->AddRectFilled(barMin, ImVec2(pos.x + finalWidth - 1.0f, pos.y + finalHeight - 1.0f),
+                    IM_COL32(20, 24, 30, 200));
+                dl->AddRectFilled(barMin, ImVec2(pos.x + 1.0f + (finalWidth - 2.0f) * progress, pos.y + finalHeight - 1.0f),
+                    IM_COL32(120, 220, 255, 235));
+            }
+
             dl->ChannelsMerge();
             
             // Interaction - only if node overlaps canvas
@@ -535,17 +877,34 @@ namespace NodeSystem {
                 ImGui::PushID(node.id + 1000000u);
                 ImGui::InvisibleButton("NodeHeader", ImVec2(std::min(interactSize.x, 200.0f * zoom), interactSize.y));
             
-            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-                selectedNodeId = node.id;
-                draggingNodeId = node.id;
-                node.x += ImGui::GetIO().MouseDelta.x / zoom;
-                node.y += ImGui::GetIO().MouseDelta.y / zoom;
+            if (ImGui::IsItemActive()) {
+                if (draggingNodeId == 0) {
+                    draggingNodeId = node.id;
+                }
             }
             
             if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-                selectedNodeId = node.id;
+                bool isShift = ImGui::GetIO().KeyShift;
+                auto it = std::find(selectedNodeIds.begin(), selectedNodeIds.end(), node.id);
+                if (isShift) {
+                    if (it != selectedNodeIds.end()) {
+                        selectedNodeIds.erase(it);
+                        if (selectedNodeId == node.id) {
+                            selectedNodeId = selectedNodeIds.empty() ? 0 : selectedNodeIds.back();
+                        }
+                    } else {
+                        selectedNodeIds.push_back(node.id);
+                        selectedNodeId = node.id;
+                    }
+                } else {
+                    if (it == selectedNodeIds.end()) {
+                        selectedNodeIds.clear();
+                        selectedNodeIds.push_back(node.id);
+                    }
+                    selectedNodeId = node.id;
+                }
                 selectedLinkId = 0;
-                if (onNodeSelected) onNodeSelected(node.id);
+                if (onNodeSelected) onNodeSelected(selectedNodeId);
             }
             
             // Double-click to collapse/expand
@@ -660,6 +1019,19 @@ namespace NodeSystem {
         // LINK
         // ========================================================================
         
+        ImVec2 getBezierPoint(const ImVec2& p1, const ImVec2& cp1, const ImVec2& cp2, const ImVec2& p2, float t) {
+            float u = 1.0f - t;
+            float tt = t * t;
+            float uu = u * u;
+            float uuu = uu * u;
+            float ttt = tt * t;
+            
+            ImVec2 p;
+            p.x = uuu * p1.x + 3.0f * uu * t * cp1.x + 3.0f * u * tt * cp2.x + ttt * p2.x;
+            p.y = uuu * p1.y + 3.0f * uu * t * cp1.y + 3.0f * u * tt * cp2.y + ttt * p2.y;
+            return p;
+        }
+
         void drawLink(ImDrawList* dl, Link& link, GraphBase& graph) {
             auto itStart = pinPositions_.find(link.startPinId);
             auto itEnd = pinPositions_.find(link.endPinId);
@@ -678,28 +1050,52 @@ namespace NodeSystem {
                 col = link.colorOverride;
             }
             
-            bool isSelected = (selectedLinkId == link.id);
-            float thickness = isSelected ? config.linkSelectedThickness : config.linkThickness;
-            thickness = std::max(1.5f, thickness * zoom);
-            
             // Bezier control points
             float dist = std::abs(p1.x - p2.x);
             float cpDist = std::max(dist * 0.5f, 50.0f * zoom);
             ImVec2 cp1(p1.x + cpDist, p1.y);
             ImVec2 cp2(p2.x - cpDist, p2.y);
             
-            // Draw glow if selected
+            bool isSelected = (selectedLinkId == link.id);
+            bool isHovered = isLinkHovered(p1, cp1, cp2, p2);
+            
+            float thickness = isSelected ? config.linkSelectedThickness : config.linkThickness;
+            thickness = std::max(1.5f, thickness * zoom);
+            
+            // 1. Draw glowing background shadow if selected or hovered
             if (isSelected) {
-                dl->AddBezierCubic(p1, cp1, cp2, p2, IM_COL32(100, 150, 255, 60), 
-                    thickness + 4.0f * zoom);
+                dl->AddBezierCubic(p1, cp1, cp2, p2, (col & 0x00FFFFFF) | 0x30000000, thickness + 6.0f * zoom);
+                dl->AddBezierCubic(p1, cp1, cp2, p2, (col & 0x00FFFFFF) | 0x60000000, thickness + 2.0f * zoom);
+            } else if (isHovered) {
+                dl->AddBezierCubic(p1, cp1, cp2, p2, (col & 0x00FFFFFF) | 0x24000000, thickness + 4.0f * zoom);
             }
             
+            // 2. Draw core link line
             dl->AddBezierCubic(p1, cp1, cp2, p2, col, thickness);
             
-            // Hit test
-            if (isLinkHovered(p1, cp1, cp2, p2)) {
-                dl->AddBezierCubic(p1, cp1, cp2, p2, IM_COL32(255, 255, 255, 80), 
-                    thickness + 2.0f * zoom);
+            // 3. Draw moving data flow particles (only if there is active data flowing through the link)
+            bool isFlowActive = sourcePin && sourcePin->hasValue();
+            if (isFlowActive) {
+                double time = ImGui::GetTime();
+                float speed = 0.4f; // softer speed
+                float progress = fmodf(static_cast<float>(time * speed), 1.0f);
+                
+                // Draw 2 dots moving along the line
+                for (int k = 0; k < 2; k++) {
+                    float t = progress + k * 0.5f;
+                    if (t > 1.0f) t -= 1.0f;
+                    
+                    ImVec2 dotPos = getBezierPoint(p1, cp1, cp2, p2, t);
+                    ImU32 haloCol = (col & 0x00FFFFFF) | 0x24000000; // soft glow halo
+                    dl->AddCircleFilled(dotPos, 4.0f * zoom, haloCol);
+                    dl->AddCircleFilled(dotPos, 1.5f * zoom, IM_COL32(255, 255, 255, 150)); // smaller and softer dot
+                }
+            }
+            
+            // Hit test and click selection
+            if (isHovered) {
+                dl->AddBezierCubic(p1, cp1, cp2, p2, IM_COL32(255, 255, 255, 50), 
+                    thickness + 1.0f * zoom);
                 
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                     selectedLinkId = link.id;
@@ -733,18 +1129,78 @@ namespace NodeSystem {
             ImVec2 pos = nodeToScreen(group.position.x, group.position.y);
             ImVec2 size(group.size.x * zoom, group.size.y * zoom);
             
+            float radius = 8.0f * zoom;
+            
+            ImVec4 colF = ImGui::ColorConvertU32ToFloat4(group.color);
+            // Soft translucent group backdrop
+            ImU32 bgCol = ImGui::ColorConvertFloat4ToU32(ImVec4(colF.x, colF.y, colF.z, 0.05f));
+            
             // Background
-            dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), group.color, 4.0f);
+            dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bgCol, radius);
             
             // Border
             bool isSelected = (selectedGroupId == group.id);
-            ImU32 borderCol = isSelected ? config.nodeSelectedColor : config.groupBorderColor;
-            dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), borderCol, 4.0f, 0, 
-                isSelected ? 2.0f : 1.0f);
+            ImU32 borderCol = isSelected 
+                ? config.nodeSelectedColor 
+                : ImGui::ColorConvertFloat4ToU32(ImVec4(colF.x, colF.y, colF.z, 0.30f));
+                
+            dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), borderCol, radius, 0, 
+                isSelected ? 1.8f * zoom : 1.0f * zoom);
             
-            // Title
+            // Resize Handle (Gaea-style)
+            ImVec2 resizeMin(pos.x + size.x - 12.0f * zoom, pos.y + size.y - 12.0f * zoom);
+            ImVec2 resizeMax(pos.x + size.x, pos.y + size.y);
+            ImU32 handleCol = (resizingGroupId == group.id) ? config.nodeSelectedColor : IM_COL32(160, 160, 170, 120);
+            dl->AddTriangleFilled(
+                ImVec2(resizeMax.x, resizeMin.y),
+                ImVec2(resizeMin.x, resizeMax.y),
+                resizeMax,
+                handleCol
+            );
+
+            ImGui::SetCursorScreenPos(resizeMin);
+            ImGui::PushID((int)group.id + 7000000);
+            ImGui::InvisibleButton("GroupResize", ImVec2(resizeMax.x - resizeMin.x, resizeMax.y - resizeMin.y));
+            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                resizingGroupId = group.id;
+            }
+            ImGui::PopID();
+            
+            // Title Badge (translucent tab at the top-left)
             if (zoom > 0.3f && !group.name.empty()) {
-                dl->AddText(ImVec2(pos.x + 8, pos.y + 4), config.groupTitleColor, group.name.c_str());
+                ImVec2 txtSz = ImGui::CalcTextSize(group.name.c_str());
+                float badgePaddingX = 8.0f * zoom;
+                float badgePaddingY = 4.0f * zoom;
+                
+                ImVec2 badgeMin = pos;
+                ImVec2 badgeMax = ImVec2(pos.x + txtSz.x + badgePaddingX * 2, pos.y + txtSz.y + badgePaddingY * 2);
+                
+                // Draw a colored top-left tab/badge
+                ImU32 badgeCol = ImGui::ColorConvertFloat4ToU32(ImVec4(colF.x, colF.y, colF.z, 0.18f));
+                dl->AddRectFilled(badgeMin, badgeMax, badgeCol, radius, ImDrawFlags_RoundCornersTopLeft | ImDrawFlags_RoundCornersBottomRight);
+                dl->AddRect(badgeMin, badgeMax, borderCol, radius, ImDrawFlags_RoundCornersTopLeft | ImDrawFlags_RoundCornersBottomRight, 1.0f);
+                
+                dl->AddText(ImVec2(pos.x + badgePaddingX, pos.y + badgePaddingY), 
+                    IM_COL32(230, 235, 245, 230), group.name.c_str());
+
+                // Group drag interaction area
+                ImGui::SetCursorScreenPos(badgeMin);
+                ImGui::PushID((int)group.id + 5000000);
+                ImGui::InvisibleButton("GroupDrag", ImVec2(badgeMax.x - badgeMin.x, badgeMax.y - badgeMin.y));
+                if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                    selectedGroupId = group.id;
+                    draggingGroupId = group.id;
+                }
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                    selectedGroupId = group.id;
+                    selectedNodeIds.clear();
+                    selectedNodeId = 0;
+                }
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                    selectedGroupId = group.id;
+                    ImGui::OpenPopup("LocalGroupContextPopup");
+                }
+                ImGui::PopID();
             }
         }
 

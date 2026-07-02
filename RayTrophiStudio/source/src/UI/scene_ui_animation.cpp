@@ -126,22 +126,26 @@ void SceneUI::processAnimations(UIContext& ctx) {
                              
                              anything_changed = true;
                              
-                             // TLAS Update Logic (using OptixWrapper)
+                             // TLAS Update Logic.
+                             //
+                             // Just flag it dirty — the authoritative per-frame sync is
+                             // updateInstanceTransforms(world.objects) below, which rebuilds every
+                             // instance transform from its source handle (Triangle / HittableInstance
+                             // / flat TriangleMesh) and commits the TLAS.
+                             //
+                             // [FLAT KEYFRAME TLAS-STALE FIX] We used to ALSO pre-poke each instance
+                             // here via updateInstanceTransform(transform_handle->base). On Vulkan that
+                             // wrote the new matrix straight into m_vkInstances *before*
+                             // updateInstanceTransforms ran — and that function's commit gate is
+                             // `updated != m_vkInstances`. Pre-poking made `updated` (recomputed from
+                             // getFinal()) equal the already-mutated m_vkInstances, so the gate saw NO
+                             // change and skipped commitTLAS: the BLAS was at the right pose but the TLAS
+                             // instance was never refit. For a non-parented object base == getFinal(),
+                             // so a plain keyframed flat mesh froze at frame 0 in Vulkan RT (parented
+                             // rigs slipped through because base != getFinal()). Leaving m_vkInstances
+                             // untouched lets the gate detect the real change and commit.
                              if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
                                  tlas_dirty = true;
-                                 std::vector<int> inst_ids = ctx.backend_ptr->getInstancesByNodeName(name);
-                                 
-                                 if (!inst_ids.empty()) {
-                                     float t[12];
-                                     const auto& newMat = transform_handle->base;
-                                     t[0] = newMat.m[0][0]; t[1] = newMat.m[0][1]; t[2] = newMat.m[0][2]; t[3] = newMat.m[0][3];
-                                     t[4] = newMat.m[1][0]; t[5] = newMat.m[1][1]; t[6] = newMat.m[1][2]; t[7] = newMat.m[1][3];
-                                     t[8] = newMat.m[2][0]; t[9] = newMat.m[2][1]; t[10] = newMat.m[2][2]; t[11] = newMat.m[2][3];
-                                    
-                                    for (int inst_id : inst_ids) {
-                                         ctx.backend_ptr->updateInstanceTransform(inst_id, t);
-                                    }
-                                 }
                              }
                          }
                          // Optimization: Break after first logic update if we assume shared handle for same object
@@ -246,12 +250,27 @@ void SceneUI::processAnimations(UIContext& ctx) {
         ctx.renderer.resetCPUAccumulation();
         if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
         
-        // Rebuild BVH (CPU)
-        // If objects moved, we must rebuild CPU BVH for picking/CPU render
-        // This can be slow for many objects.
-        // Optimization: Only Refit?
-        // Current engine just calls `rebuildBVH`.
-        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+        // CPU picking/CPU-render BVH refit. A keyframe is a transform-only change (no topology),
+        // so a full rebuild is never needed — refitBVH does an in-place Embree refit (facade verts
+        // via the dirty pre-pass, flat/direct-SoA meshes self-baked from getFinal()*P_orig).
+        //
+        // [TIMELINE-PLAY COST] But the CPU Embree BVH is consumed per-frame ONLY when the CPU
+        // reference renderer is what's drawing the viewport. During a GPU RT (OptiX / Vulkan) or
+        // Solid raster session it's needed solely for picking — which tries GPU pick first and, on
+        // the CPU fallback, independently syncs verts + brings a stale BVH current before querying.
+        // So refitting EVERY keyframe there is pure overhead, heaviest on a dense FLAT mesh that
+        // self-bakes all its verts each frame. Defer it (mark stale); the pick fallback / a backend
+        // switch to CPU promotes it on demand. When CPU IS the viewport we must refit now — it's
+        // what's on screen. The deferred refit stays correct: the flat self-bake is xform-gated (not
+        // dirty-gated) and the facade BVH-buffer update is last_xform/vertexPositionsDirty-gated, and
+        // the click-time pick sync writes the facade world verts regardless.
+        extern bool g_solid_viewport_active;
+        extern bool g_cpu_bvh_stale;
+        if (ctx.backend_ptr != nullptr || g_solid_viewport_active) {
+            g_cpu_bvh_stale = true;
+        } else {
+            ctx.renderer.refitBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+        }
         
         // GPU Updates
         if (ctx.backend_ptr) {

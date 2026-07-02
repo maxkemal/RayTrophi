@@ -1673,6 +1673,55 @@ void SceneUI::clearViewportMessages() {
     active_messages.clear();
 }
 
+// Accurate per-triangle geometry breakdown for the debug HUD (facade vs flat vs skinned vs
+// animated). Scans world.objects ONCE per geometry change (gen / object-count gated) — the trailing
+// foliage instances are skipped (counted separately as "Instances") so a 2M-instance scene doesn't
+// pay an RTTI walk here every refresh.
+void SceneUI::refreshSceneGeometryStats(SceneData& scene) {
+    extern std::atomic<uint64_t> g_scene_geometry_generation;
+    const uint64_t gen = g_scene_geometry_generation.load(std::memory_order_acquire);
+    const size_t obj_count = scene.world.objects.size();
+    if (gen == scene_geometry_stats.generation && obj_count == scene_geometry_stats.object_count) {
+        return; // up to date
+    }
+
+    SceneGeometryStats s;
+    s.generation = gen;
+    s.object_count = obj_count;
+
+    const size_t foliage = InstanceManager::getInstance().getTotalInstanceCount();
+    const size_t scan = (foliage <= obj_count) ? (obj_count - foliage) : obj_count;
+
+    std::unordered_set<std::string> facade_nodes;
+    auto animated = [&scene](const std::string& n) {
+        return !n.empty() && scene.timeline.tracks.find(n) != scene.timeline.tracks.end();
+    };
+
+    for (size_t i = 0; i < scan; ++i) {
+        const auto& obj = scene.world.objects[i];
+        // A deleted object is a soft-delete (visible=false + pending-delete tombstone) until the
+        // project is saved and compactPendingDeletedObjects() physically purges it — so it can sit
+        // in world.objects, invisible but still present, for a long time. Skip it here or the HUD
+        // triangle/flat-mesh count keeps "deleted" geometry in its totals.
+        if (!obj || !obj->visible) continue;
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            const std::string& nn = tri->getNodeName();
+            ++s.facade_tris;
+            if (!nn.empty()) facade_nodes.insert(nn);
+            if (tri->hasSkinData()) ++s.skinned_tris;
+            if (animated(nn)) ++s.animated_tris;
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            const size_t n = tm->num_triangles();
+            s.flat_tris += n;
+            ++s.flat_meshes;
+            if (tm->geometry && !tm->geometry->skin_weights.empty()) s.skinned_tris += n;
+            if (animated(tm->nodeName)) s.animated_tris += n;
+        }
+    }
+    s.facade_nodes = facade_nodes.size();
+    scene_geometry_stats = s;
+}
+
 void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
     // ALWAYS draw if selection exists OR messages exist OR scene is initialized (for render stats)
     if (active_messages.empty() && !ctx.selection.hasSelection() && !ctx.scene.initialized) return;
@@ -1792,7 +1841,24 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
             drawHudLine(status_text, text_col);
 
             if (ctx.render_settings.show_scene_stats_hud) {
-                drawHudLine("Scene tris: " + formatCompactCount(cached_scene_triangle_count), IM_COL32(190, 192, 195, 200));
+                refreshSceneGeometryStats(ctx.scene);
+                const auto& gs = scene_geometry_stats;
+                const size_t total_tris = gs.facade_tris + gs.flat_tris;
+                drawHudLine("Scene tris: " + formatCompactCount(total_tris), IM_COL32(190, 192, 195, 200));
+
+                // Facade vs flat split — the migration debug signal. Orange when ANY facade geometry
+                // remains (something didn't go flat), green when the scene is fully flat.
+                drawHudLine("  flat: " + formatCompactCount(gs.flat_tris) + " (" +
+                                std::to_string(gs.flat_meshes) + " mesh)  facade: " +
+                                formatCompactCount(gs.facade_tris) +
+                                (gs.facade_nodes ? " (" + std::to_string(gs.facade_nodes) + " node)" : ""),
+                            gs.facade_tris > 0 ? IM_COL32(245, 170, 70, 210)
+                                               : IM_COL32(140, 200, 140, 210));
+                if (gs.skinned_tris > 0 || gs.animated_tris > 0) {
+                    drawHudLine("  skinned: " + formatCompactCount(gs.skinned_tris) +
+                                    "  anim: " + formatCompactCount(gs.animated_tris),
+                                IM_COL32(180, 190, 235, 205));
+                }
 
                 const size_t instance_count = InstanceManager::getInstance().getTotalInstanceCount();
                 const size_t instance_triangle_count = InstanceManager::getInstance().getTotalTriangleCount();

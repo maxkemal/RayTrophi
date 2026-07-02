@@ -75,17 +75,17 @@ inline PBRMaterialSnapshot capturePBRMaterialSnapshot(const PrincipledBSDF& pbsd
     s.transmission = pbsdf.transmission;
     s.opacity = pbsdf.opacityProperty.alpha;
 
-    s.subsurface = pbsdf.subsurface;
-    s.subsurfaceColor = pbsdf.subsurfaceColor;
-    s.subsurfaceRadius = pbsdf.subsurfaceRadius;
-    s.subsurfaceScale = pbsdf.subsurfaceScale;
-    s.subsurfaceAnisotropy = pbsdf.subsurfaceAnisotropy;
-    s.subsurfaceIOR = pbsdf.subsurfaceIOR;
-    s.useRandomWalkSSS = pbsdf.useRandomWalkSSS;
-    s.sssMaxSteps = pbsdf.sssMaxSteps;
+    s.subsurface = pbsdf.getSubsurface();
+    s.subsurfaceColor = pbsdf.getSubsurfaceColor();
+    s.subsurfaceRadius = pbsdf.getSubsurfaceRadius();
+    s.subsurfaceScale = pbsdf.getSubsurfaceScale();
+    s.subsurfaceAnisotropy = pbsdf.getSubsurfaceAnisotropy();
+    s.subsurfaceIOR = pbsdf.getSubsurfaceIOR();
+    s.useRandomWalkSSS = pbsdf.getUseRandomWalkSSS();
+    s.sssMaxSteps = pbsdf.getSssMaxSteps();
 
-    s.clearcoat = pbsdf.clearcoat;
-    s.clearcoatRoughness = pbsdf.clearcoatRoughness;
+    s.clearcoat = pbsdf.getClearcoat();
+    s.clearcoatRoughness = pbsdf.getClearcoatRoughness();
     s.translucent = pbsdf.translucent;
     s.anisotropic = pbsdf.anisotropic;
     s.normalStrength = pbsdf.get_normal_strength();
@@ -102,19 +102,19 @@ inline PBRMaterialSnapshot capturePBRMaterialSnapshot(const PrincipledBSDF& pbsd
     s.uvRotationDegrees = pbsdf.textureTransform.rotation_degrees;
     s.uvWrapMode = static_cast<uint32_t>(pbsdf.textureTransform.wrapMode);
 
-    s.isBubble   = pbsdf.isBubble;
-    s.bubbleIor  = pbsdf.bubbleIor;
-    s.bubbleFilm = pbsdf.bubbleFilm;
-    s.clearcoatIridescence = pbsdf.clearcoatIridescence;
-    s.clearcoatFilmThickness = pbsdf.clearcoatFilmThickness;
-    s.transmissionDensity = pbsdf.transmissionDensity;
-    s.resinColor = pbsdf.resinColor;
-    s.resinRoughness = pbsdf.resinRoughness;
-    s.resinInclusion = pbsdf.resinInclusion;
-    s.resinDirt = pbsdf.resinDirt;
-    s.resinInclusionScale = pbsdf.resinInclusionScale;
-    s.resinDirtColor = pbsdf.resinDirtColor;
-    s.glassMarbleVolume = pbsdf.glassMarbleVolume;
+    s.isBubble   = pbsdf.getIsBubble();
+    s.bubbleIor  = pbsdf.getBubbleIor();
+    s.bubbleFilm = pbsdf.getBubbleFilm();
+    s.clearcoatIridescence = pbsdf.getClearcoatIridescence();
+    s.clearcoatFilmThickness = pbsdf.getClearcoatFilmThickness();
+    s.transmissionDensity = pbsdf.getTransmissionDensity();
+    s.resinColor = pbsdf.getResinColor();
+    s.resinRoughness = pbsdf.getResinRoughness();
+    s.resinInclusion = pbsdf.getResinInclusion();
+    s.resinDirt = pbsdf.getResinDirt();
+    s.resinInclusionScale = pbsdf.getResinInclusionScale();
+    s.resinDirtColor = pbsdf.getResinDirtColor();
+    s.glassMarbleVolume = pbsdf.getGlassMarbleVolume();
     return s;
 }
 

@@ -113,6 +113,74 @@ struct SurfaceMeshCache {
         return cache;
     }
 
+    // Flat (direct SoA) build: a flat TriangleMesh-as-Hittable has no per-face Triangle facades, so
+    // build the surface cache straight from its DNA SoA. `positions` are WORLD-space (a flat mesh
+    // keeps "P" world-baked), `indices` are 3-per-triangle. uvs / material_ids may be null. Mirrors
+    // build()'s bounds/centroid/area accumulation, vertex-indexed instead of per-facade.
+    static SurfaceMeshCache buildFromSoA(const std::string& node_name,
+                                         const Vec3* positions,
+                                         const Vec2* uvs,
+                                         const uint16_t* material_ids,
+                                         const uint32_t* indices,
+                                         std::size_t index_count,
+                                         uint64_t version = 0) {
+        SurfaceMeshCache cache;
+        cache.node_name = node_name;
+        cache.version = version;
+        cache.bounds_min = Vec3(std::numeric_limits<float>::max());
+        cache.bounds_max = Vec3(-std::numeric_limits<float>::max());
+        if (!positions || !indices || index_count < 3) {
+            cache.bounds_min = Vec3(0.0f);
+            cache.bounds_max = Vec3(0.0f);
+            return cache;
+        }
+        Vec3 centroid_accum(0.0f);
+        std::size_t vertex_count = 0;
+        const std::size_t tri_count = index_count / 3;
+        cache.triangles.reserve(tri_count);
+        for (std::size_t t = 0; t < tri_count; ++t) {
+            const uint32_t i0 = indices[t * 3 + 0];
+            const uint32_t i1 = indices[t * 3 + 1];
+            const uint32_t i2 = indices[t * 3 + 2];
+            SurfaceMeshTriangle entry;
+            entry.p0 = positions[i0];
+            entry.p1 = positions[i1];
+            entry.p2 = positions[i2];
+            const Vec3 e0 = entry.p1 - entry.p0;
+            const Vec3 e1 = entry.p2 - entry.p0;
+            Vec3 normal = Vec3::cross(e0, e1);
+            const float normal_len = normal.length();
+            if (normal_len <= 1e-8f) {
+                continue;
+            }
+            entry.normal = normal * (1.0f / normal_len);
+            entry.area = normal_len * 0.5f;
+            entry.face_index = static_cast<int>(t);
+            entry.material_id = material_ids ? material_ids[i0] : 0;
+            if (uvs) { entry.uv0 = uvs[i0]; entry.uv1 = uvs[i1]; entry.uv2 = uvs[i2]; }
+
+            cache.bounds_min = Vec3::min(cache.bounds_min, entry.p0);
+            cache.bounds_min = Vec3::min(cache.bounds_min, entry.p1);
+            cache.bounds_min = Vec3::min(cache.bounds_min, entry.p2);
+            cache.bounds_max = Vec3::max(cache.bounds_max, entry.p0);
+            cache.bounds_max = Vec3::max(cache.bounds_max, entry.p1);
+            cache.bounds_max = Vec3::max(cache.bounds_max, entry.p2);
+            centroid_accum = centroid_accum + entry.p0 + entry.p1 + entry.p2;
+            vertex_count += 3;
+            cache.total_area += entry.area;
+            cache.triangles.push_back(entry);
+        }
+        if (cache.triangles.empty()) {
+            cache.bounds_min = Vec3(0.0f);
+            cache.bounds_max = Vec3(0.0f);
+            cache.centroid = Vec3(0.0f);
+            cache.total_area = 0.0f;
+        } else {
+            cache.centroid = centroid_accum * (1.0f / static_cast<float>(vertex_count));
+        }
+        return cache;
+    }
+
     bool sample(uint32_t seed, SurfaceMeshSample& out_sample) const {
         if (triangles.empty() || total_area <= 1e-8f) {
             return false;

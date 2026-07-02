@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -51,53 +51,40 @@ struct Mesh {
     bool hasSkinning = false;
     int materialIndex = -1;
 
-    std::vector<std::shared_ptr<Triangle>> toTriangles() const {
-        std::vector<std::shared_ptr<Triangle>> tris;
-        tris.reserve(indices.size());
+    std::shared_ptr<TriangleMesh> toTriangleMesh() const {
+        auto mesh = std::make_shared<TriangleMesh>();
+        mesh->nodeName = nodeName;
+        
+        size_t v_count = vertices.size();
+        mesh->geometry->resize_vertices(v_count);
 
-        for (const auto& triIndices : indices) {
-            uint32_t i0 = triIndices[0];
-            uint32_t i1 = triIndices[1];
-            uint32_t i2 = triIndices[2];
-            if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) {
-                std::cerr << "[Mesh] Error: Index out of bounds in mesh " << meshName << std::endl;
-                continue; // Skip invalid triangles instead of crashing
-            }
+        mesh->geometry->add_attribute<Vec3>("P");
+        mesh->geometry->add_attribute<Vec3>("N");
+        mesh->geometry->add_attribute<Vec2>("uv");
+        mesh->geometry->add_attribute<uint16_t>("materialID");
 
-            const Vertex& v0 = vertices[i0];
-            const Vertex& v1 = vertices[i1];
-            const Vertex& v2 = vertices[i2];
+        Vec3* positions = mesh->geometry->get_attribute_data_mut<Vec3>("P");
+        Vec3* normals = mesh->geometry->get_attribute_data_mut<Vec3>("N");
+        Vec2* uvs = mesh->geometry->get_attribute_data_mut<Vec2>("uv");
+        uint16_t* matIDs = mesh->geometry->get_attribute_data_mut<uint16_t>("materialID");
 
-            auto tri = std::make_shared<Triangle>(
-                v0.position, v1.position, v2.position,
-                v0.normal, v1.normal, v2.normal,
-                v0.texcoord, v1.texcoord, v2.texcoord,
-                material
-            );
-
-            tri->setOriginalVertexPosition(0, v0.bindPosePosition);
-            tri->setOriginalVertexPosition(1, v1.bindPosePosition);
-            tri->setOriginalVertexPosition(2, v2.bindPosePosition);
-
-            tri->setOriginalVertexNormal(0, v0.bindPoseNormal);
-            tri->setOriginalVertexNormal(1, v1.bindPoseNormal);
-            tri->setOriginalVertexNormal(2, v2.bindPoseNormal);
-
-            if (!v0.boneWeights.empty() || !v1.boneWeights.empty() || !v2.boneWeights.empty()) {
-                tri->initializeSkinData();
-                tri->setSkinBoneWeights(0, v0.boneWeights);
-                tri->setSkinBoneWeights(1, v1.boneWeights);
-                tri->setSkinBoneWeights(2, v2.boneWeights);
-            }
-
-            tri->setAssimpVertexIndices(i0, i1, i2);
-            tri->setNodeName(nodeName);
-            tri->setMaterial(material);
-
-            tris.push_back(tri);
+        for (size_t i = 0; i < v_count; ++i) {
+            if (positions) positions[i] = vertices[i].position;
+            if (normals) normals[i] = vertices[i].normal;
+            if (uvs) uvs[i] = vertices[i].texcoord;
+            if (matIDs) matIDs[i] = static_cast<uint16_t>(materialIndex != -1 ? materialIndex : 0xFFFF);
         }
 
-        return tris;
+        // Copy indices
+        size_t tri_count = indices.size();
+        mesh->geometry->indices.resize(tri_count * 3);
+        for (size_t i = 0; i < tri_count; ++i) {
+            mesh->geometry->indices[i * 3 + 0] = indices[i][0];
+            mesh->geometry->indices[i * 3 + 1] = indices[i][1];
+            mesh->geometry->indices[i * 3 + 2] = indices[i][2];
+        }
+
+        return mesh;
     }
 };
 

@@ -63,6 +63,15 @@ Built upon industry-standard frameworks and hardware-accelerated APIs:
 
 ---
 
+## 🎮 Render Devices & Workload Distribution
+To prevent developer and AI agent confusion, the rendering backend strategy is defined as follows:
+*   **Vulkan RT (Default Render Device):** Our primary and default path tracing / render device on the GPU.
+*   **Vulkan Raster (Preview & Edit Mode):** Core editing, sculpting, and painting operations run in raster mode by default.
+*   **OptiX (Secondary Render Device):** Positioned as the secondary/alternative path tracing engine on the GPU for now.
+*   **Intel Embree (CPU Core):** Forms the core engine structure for CPU-based ray tracing and scene BVH management.
+
+---
+
 ## 🚀 Why This Matters
 For developers and employers, this report demonstrates:
 1.  **Scalability:** Experience managing a large multi-backend graphics codebase with a 200k+ line engine-owned source/shader surface.

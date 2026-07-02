@@ -630,21 +630,40 @@ public:
             -std::numeric_limits<float>::max());
         bool hasVertices = false;
 
-        for (size_t i = startIndex; i < endIndex; ++i) {
-            const auto& tri = triangles[i];
-            if (!tri || tri->getNodeName() != nodeName) {
-                continue;
+        if (startIndex < endIndex && triangles[startIndex] && triangles[startIndex]->parentMesh && triangles[startIndex]->parentMesh->geometry) {
+            TriangleMesh* pm = triangles[startIndex]->parentMesh.get();
+            size_t vCount = pm->geometry->get_vertex_count();
+            const Vec3* origP = pm->geometry->get_positions_orig();
+            if (!origP) origP = pm->geometry->get_positions();
+            if (origP) {
+                hasVertices = true;
+                for (size_t v = 0; v < vCount; ++v) {
+                    Vec3 p = origP[v];
+                    bbMin.x = std::min(bbMin.x, p.x);
+                    bbMin.y = std::min(bbMin.y, p.y);
+                    bbMin.z = std::min(bbMin.z, p.z);
+                    bbMax.x = std::max(bbMax.x, p.x);
+                    bbMax.y = std::max(bbMax.y, p.y);
+                    bbMax.z = std::max(bbMax.z, p.z);
+                }
             }
+        } else {
+            for (size_t i = startIndex; i < endIndex; ++i) {
+                const auto& tri = triangles[i];
+                if (!tri || tri->getNodeName() != nodeName) {
+                    continue;
+                }
 
-            hasVertices = true;
-            for (int vi = 0; vi < 3; ++vi) {
-                const Vec3& v = tri->getOriginalVertexPosition(vi);
-                bbMin.x = std::min(bbMin.x, v.x);
-                bbMin.y = std::min(bbMin.y, v.y);
-                bbMin.z = std::min(bbMin.z, v.z);
-                bbMax.x = std::max(bbMax.x, v.x);
-                bbMax.y = std::max(bbMax.y, v.y);
-                bbMax.z = std::max(bbMax.z, v.z);
+                hasVertices = true;
+                for (int vi = 0; vi < 3; ++vi) {
+                    const Vec3& v = tri->getOriginalVertexPosition(vi);
+                    bbMin.x = std::min(bbMin.x, v.x);
+                    bbMin.y = std::min(bbMin.y, v.y);
+                    bbMin.z = std::min(bbMin.z, v.z);
+                    bbMax.x = std::max(bbMax.x, v.x);
+                    bbMax.y = std::max(bbMax.y, v.y);
+                    bbMax.z = std::max(bbMax.z, v.z);
+                }
             }
         }
 
@@ -1334,13 +1353,82 @@ public:
                         // Local copy of volumetric info for thread-safe accumulation
                         std::vector<OptixGeometryData::VolumetricInfo> local_vol_info = data.volumetric_info;
                         
+                        TriangleMesh* lastParentMesh = nullptr;
+                        const Vec3* cachedPositions = nullptr;
+                        const Vec3* cachedNormals = nullptr;
+                        const Vec2* cachedUvs = nullptr;
+                        const uint16_t* cachedMatIDs = nullptr;
+                        const std::vector<uint32_t, DNA::AlignedAllocator<uint32_t, 32>>* cachedIndices = nullptr;
+                        bool hasGeometry = false;
+
                         for (size_t i = start; i < end; ++i) {
                             const auto& tri = triangles[i];
                             
-                            // Accessors (assuming thread-safe or read-only)
-                            Vec3 verts[3] = { tri->getVertexPosition(0), tri->getVertexPosition(1), tri->getVertexPosition(2) };
-                            Vec3 norms[3] = { tri->getVertexNormal(0), tri->getVertexNormal(1), tri->getVertexNormal(2) };
-                            Vec2 uvs[3] = { tri->t0, tri->t1, tri->t2 };
+                            Vec3 verts[3];
+                            Vec3 norms[3];
+                            Vec2 uvs[3];
+                            uint16_t matID = 0xFFFF;
+
+                            if (tri->parentMesh) {
+                                if (tri->parentMesh.get() != lastParentMesh) {
+                                    lastParentMesh = tri->parentMesh.get();
+                                    if (lastParentMesh->geometry) {
+                                        cachedPositions = lastParentMesh->geometry->get_attribute_data<Vec3>("P");
+                                        cachedNormals = lastParentMesh->geometry->get_attribute_data<Vec3>("N");
+                                        cachedUvs = lastParentMesh->geometry->get_attribute_data<Vec2>("uv");
+                                        cachedMatIDs = lastParentMesh->geometry->get_attribute_data<uint16_t>("materialID");
+                                        cachedIndices = &lastParentMesh->geometry->indices;
+                                        hasGeometry = (cachedPositions != nullptr) && (cachedIndices != nullptr) && (!cachedIndices->empty());
+                                    } else {
+                                        hasGeometry = false;
+                                    }
+                                }
+
+                                if (hasGeometry) {
+                                    uint32_t faceIdx = tri->faceIndex;
+                                    uint32_t baseIdx = faceIdx * 3;
+                                    
+                                    uint32_t i0 = (*cachedIndices)[baseIdx + 0];
+                                    uint32_t i1 = (*cachedIndices)[baseIdx + 1];
+                                    uint32_t i2 = (*cachedIndices)[baseIdx + 2];
+                                    
+                                    verts[0] = cachedPositions[i0];
+                                    verts[1] = cachedPositions[i1];
+                                    verts[2] = cachedPositions[i2];
+                                    
+                                    norms[0] = cachedNormals ? cachedNormals[i0] : Vec3(0, 1, 0);
+                                    norms[1] = cachedNormals ? cachedNormals[i1] : Vec3(0, 1, 0);
+                                    norms[2] = cachedNormals ? cachedNormals[i2] : Vec3(0, 1, 0);
+                                    
+                                    uvs[0] = cachedUvs ? cachedUvs[i0] : Vec2(0, 0);
+                                    uvs[1] = cachedUvs ? cachedUvs[i1] : Vec2(0, 0);
+                                    uvs[2] = cachedUvs ? cachedUvs[i2] : Vec2(0, 0);
+                                    
+                                    matID = cachedMatIDs ? cachedMatIDs[i0] : tri->getMaterialID();
+                                } else {
+                                    verts[0] = tri->getVertexPosition(0);
+                                    verts[1] = tri->getVertexPosition(1);
+                                    verts[2] = tri->getVertexPosition(2);
+                                    norms[0] = tri->getVertexNormal(0);
+                                    norms[1] = tri->getVertexNormal(1);
+                                    norms[2] = tri->getVertexNormal(2);
+                                    uvs[0] = tri->t_ref(0);
+                                    uvs[1] = tri->t_ref(1);
+                                    uvs[2] = tri->t_ref(2);
+                                    matID = tri->getMaterialID();
+                                }
+                            } else {
+                                verts[0] = tri->getVertexPosition(0);
+                                verts[1] = tri->getVertexPosition(1);
+                                verts[2] = tri->getVertexPosition(2);
+                                norms[0] = tri->getVertexNormal(0);
+                                norms[1] = tri->getVertexNormal(1);
+                                norms[2] = tri->getVertexNormal(2);
+                                uvs[0] = tri->t_ref(0);
+                                uvs[1] = tri->t_ref(1);
+                                uvs[2] = tri->t_ref(2);
+                                matID = tri->getMaterialID();
+                            }
 
                             size_t base_v_idx = i * 3;
                             uint3 tri_idx_struct;
@@ -1354,38 +1442,38 @@ public:
                                 data.uvs[base_v_idx + k] = make_float2(uvs[k].u, uvs[k].v);
                                 data.colors[base_v_idx + k] = make_float3(0.0f, 0.0f, 0.0f); // default color
 
-                                    // Extract skinning data
-                                    if (tri->hasSkinData()) {
-                                        const auto& weights = tri->getSkinBoneWeights(k);
-                                        int4 bi = make_int4(-1, -1, -1, -1);
-                                        float4 bw = make_float4(0, 0, 0, 0);
+                                // Extract skinning data
+                                if (tri->hasSkinData()) {
+                                    const auto& weights = tri->getSkinBoneWeights(k);
+                                    int4 bi = make_int4(-1, -1, -1, -1);
+                                    float4 bw = make_float4(0, 0, 0, 0);
 
-                                        // 1. Calculate sum of first 4 weights
-                                        float sum = 0.0f;
-                                        size_t numInfluences = std::min(weights.size(), (size_t)4);
-                                        for (size_t w = 0; w < numInfluences; ++w) {
-                                            sum += weights[w].second;
-                                        }
-
-                                        // 2. Assign and normalize
-                                        if (sum > 1e-6f) {
-                                            float invSum = 1.0f / sum;
-                                            for (size_t w = 0; w < numInfluences; ++w) {
-                                                float normalizedWeight = weights[w].second * invSum;
-                                                if (w == 0) { bi.x = weights[w].first; bw.x = normalizedWeight; }
-                                                else if (w == 1) { bi.y = weights[w].first; bw.y = normalizedWeight; }
-                                                else if (w == 2) { bi.z = weights[w].first; bw.z = normalizedWeight; }
-                                                else if (w == 3) { bi.w = weights[w].first; bw.w = normalizedWeight; }
-                                            }
-                                        }
-
-                                        data.boneIndices[base_v_idx + k] = bi;
-                                        data.boneWeights[base_v_idx + k] = bw;
+                                    // 1. Calculate sum of first 4 weights
+                                    float sum = 0.0f;
+                                    size_t numInfluences = std::min(weights.size(), (size_t)4);
+                                    for (size_t w = 0; w < numInfluences; ++w) {
+                                        sum += weights[w].second;
                                     }
+
+                                    // 2. Assign and normalize
+                                    if (sum > 1e-6f) {
+                                        float invSum = 1.0f / sum;
+                                        for (size_t w = 0; w < numInfluences; ++w) {
+                                            float normalizedWeight = weights[w].second * invSum;
+                                            if (w == 0) { bi.x = weights[w].first; bw.x = normalizedWeight; }
+                                            else if (w == 1) { bi.y = weights[w].first; bw.y = normalizedWeight; }
+                                            else if (w == 2) { bi.z = weights[w].first; bw.z = normalizedWeight; }
+                                            else if (w == 3) { bi.w = weights[w].first; bw.w = normalizedWeight; }
+                                        }
+                                    }
+
+                                    data.boneIndices[base_v_idx + k] = bi;
+                                    data.boneWeights[base_v_idx + k] = bw;
+                                }
                             }
                             data.indices[i] = tri_idx_struct;
 
-                            int gpuIndex = tri->getMaterialID();
+                            int gpuIndex = matID;
                             if (gpuIndex < 0 || gpuIndex >= static_cast<int>(data.materials.size())) {
                                 gpuIndex = 0;
                             }
@@ -1951,8 +2039,13 @@ private:
             // Mevcut üçgen başlangıç sayısını not al
             size_t triangleStart = triangles.size();
 
-            // Extract triangles from mesh
-            // Mesh'teki üçgenleri çıkar
+            // A node with multiple meshes (multi-material import) produces one TriangleMesh per
+            // mesh here. They intentionally share the SAME nodeName (uniqueNodeName) — a
+            // multi-material import is ONE logical object/hierarchy entry, not one per material
+            // (see mesh_cache/direct_mesh_nodes handling in scene_ui.cpp, which groups by
+            // nodeName). The raster-cache collision this used to cause is fixed separately in
+            // VulkanViewportBackend::buildRasterGeometry (meshKey keyed by groupKey/pointer, not
+            // bare nodeName), so all materials still render in Solid mode.
             processTriangles(mesh, globalTransform, uniqueNodeName, convertedMaterial, triangles, boneData);
 
             // Copy texture bundle to all newly added triangles (only when the material
@@ -1981,7 +2074,7 @@ private:
                 importedBundle.emission_tex = hit_data.emission_tex;
                 importedBundle.has_emission_tex = hit_data.has_emission_tex;
                 for (size_t t = triangleStart; t < triangles.size(); ++t) {
-                    triangles[t]->textureBundle.reset(new OptixGeometryData::TextureBundle(importedBundle));
+                    triangles[t]->setTextureBundle(importedBundle);
                 }
             }
 
@@ -2090,11 +2183,7 @@ private:
         std::vector<std::shared_ptr<Triangle>>& triangles,
         const BoneData& boneData)
     {
-        aiMatrix4x4 normalTransform = transform;
-        normalTransform.Inverse();
-        normalTransform.Transpose();
-
-        // Get or create material ID - saves 70+ bytes per triangle!
+        // Get or create material ID
         uint16_t materialID = MaterialManager::INVALID_MATERIAL_ID;
         if (material) {
             std::string baseMatName = material->materialName.empty() 
@@ -2102,19 +2191,15 @@ private:
                 : material->materialName;
             
             // Prepend import name to ensure uniqueness across different imports
-            // This prevents "Mesh B" from using "Mesh A" textures just because they both have "Material.001"
             std::string uniqueMatName = currentImportName.empty() ? baseMatName : (currentImportName + "_" + baseMatName);
 
             materialID = MaterialManager::getInstance().getOrCreateMaterialID(uniqueMatName, material);
         }
 
         // Use shared Transform for all meshes with the same nodeName
-        // This ensures gizmo moves all parts of an object together
         auto sharedTransform = getOrCreateNodeTransform(nodeName, convertMatrix(transform));
 
         // --- NEW: Pre-process bone weights for this mesh ---
-        // This ensures every vertex gets its correct weight list before triangle splits.
-        // Static meshes skip the per-vertex vector table entirely.
         std::vector<std::vector<std::pair<int, float>>> meshVertexWeights;
         bool hasActualWeights = false;
 
@@ -2140,21 +2225,16 @@ private:
                 }
             }
         }
-        // Pre-check Vertex Colors
-        const bool hasColors0 = mesh->HasVertexColors(0);
-        const bool hasColors1 = mesh->HasVertexColors(1);
+
         const bool hasNormals = mesh->HasNormals();
         const bool hasUV0 = mesh->HasTextureCoords(0);
         const unsigned int uv_channel_count = std::min<unsigned int>(AI_MAX_NUMBER_OF_TEXTURECOORDS, mesh->GetNumUVChannels());
 
-        // Hoist the PrincipledBSDF lookup & UV-set selection out of the inner loop.
-        // Done once per mesh so parallel chunks just read the captured value.
+        // Hoist the PrincipledBSDF lookup & UV-set selection
         PrincipledBSDF* const pbsdf = dynamic_cast<PrincipledBSDF*>(material.get());
         const int selectedUvSet = pbsdf ? std::max(0, pbsdf->selected_uv_set) : 0;
-        // ---------------------------------------------------
 
-        // Pre-collect valid (triangle-count == 3) face indices so we can pre-size
-        // the output slot vector and run chunk-parallel construction.
+        // Pre-collect valid face indices
         std::vector<unsigned int> validFaces;
         validFaces.reserve(mesh->mNumFaces);
         for (unsigned int i = 0; i < mesh->mNumFaces; ++i) {
@@ -2168,99 +2248,160 @@ private:
         const size_t baseFaceIndex = triangles.size();
         std::vector<std::shared_ptr<Triangle>> localTriangles(validCount);
 
+        // --- NEW: Allocate and populate TriangleMesh and GeometryDetail ---
+        auto triMesh = std::make_shared<TriangleMesh>();
+        triMesh->nodeName = nodeName;
+        triMesh->transform = sharedTransform;
+
+        size_t vCount = mesh->mNumVertices;
+        triMesh->geometry->resize_vertices(vCount);
+        triMesh->geometry->add_attribute<Vec3>("P");
+        triMesh->geometry->add_attribute<Vec3>("N");
+        triMesh->geometry->add_attribute<Vec3>("P_orig");
+        triMesh->geometry->add_attribute<Vec3>("N_orig");
+        triMesh->geometry->add_attribute<Vec2>("uv");
+        triMesh->geometry->add_attribute<uint16_t>("materialID");
+
+        Vec3* positions = triMesh->geometry->get_attribute_data_mut<Vec3>("P");
+        Vec3* normals = triMesh->geometry->get_attribute_data_mut<Vec3>("N");
+        Vec3* origPositions = triMesh->geometry->get_attribute_data_mut<Vec3>("P_orig");
+        Vec3* origNormals = triMesh->geometry->get_attribute_data_mut<Vec3>("N_orig");
+        Vec2* uvs = triMesh->geometry->get_attribute_data_mut<Vec2>("uv");
+        uint16_t* matIDs = triMesh->geometry->get_attribute_data_mut<uint16_t>("materialID");
+
+        // Copy vertices, normals, and UV0
+        for (unsigned int vIdx = 0; vIdx < vCount; ++vIdx) {
+            const aiVector3D& vertex = mesh->mVertices[vIdx];
+            positions[vIdx] = Vec3(vertex.x, vertex.y, vertex.z);
+            if (origPositions) {
+                origPositions[vIdx] = positions[vIdx];
+            }
+            if (hasNormals) {
+                const aiVector3D& normal = mesh->mNormals[vIdx];
+                Vec3 n(normal.x, normal.y, normal.z);
+                float len = n.length();
+                normals[vIdx] = len > 1e-6f ? n / len : Vec3(0.0f);
+            } else {
+                normals[vIdx] = Vec3(0.0f);
+            }
+            if (origNormals) {
+                origNormals[vIdx] = normals[vIdx];
+            }
+
+            if (hasUV0) {
+                const aiVector3D& texCoord = mesh->mTextureCoords[0][vIdx];
+                uvs[vIdx] = Vec2(texCoord.x, texCoord.y);
+            } else {
+                uvs[vIdx] = Vec2(0.0f, 0.0f);
+            }
+            
+            matIDs[vIdx] = materialID;
+        }
+
+        // Generate normals if missing or invalid
+        bool needNormalGeneration = !hasNormals;
+        if (hasNormals) {
+            for (unsigned int vIdx = 0; vIdx < vCount; ++vIdx) {
+                if (normals[vIdx].length_squared() < 1e-6f) {
+                    needNormalGeneration = true;
+                    break;
+                }
+            }
+        }
+
+        if (needNormalGeneration) {
+            std::vector<Vec3> tempNormals(vCount, Vec3(0.0f));
+            std::vector<bool> isVertexInvalid(vCount, false);
+            for (unsigned int vIdx = 0; vIdx < vCount; ++vIdx) {
+                if (normals[vIdx].length_squared() < 1e-6f) {
+                    isVertexInvalid[vIdx] = true;
+                }
+            }
+
+            for (unsigned int faceIdx : validFaces) {
+                const aiFace& face = mesh->mFaces[faceIdx];
+                Vec3 v0 = positions[face.mIndices[0]];
+                Vec3 v1 = positions[face.mIndices[1]];
+                Vec3 v2 = positions[face.mIndices[2]];
+                Vec3 faceNormalRaw = Vec3::cross(v1 - v0, v2 - v0);
+                float len = faceNormalRaw.length();
+                Vec3 faceNormal = len > 1e-8f ? faceNormalRaw / len : Vec3(0.0f, 1.0f, 0.0f);
+                for (unsigned int j = 0; j < 3; ++j) {
+                    unsigned int vIdx = face.mIndices[j];
+                    if (isVertexInvalid[vIdx]) {
+                        tempNormals[vIdx] += faceNormal;
+                    }
+                }
+            }
+
+            for (unsigned int vIdx = 0; vIdx < vCount; ++vIdx) {
+                if (isVertexInvalid[vIdx]) {
+                    float len_sq = tempNormals[vIdx].length_squared();
+                    if (len_sq > 1e-8f) {
+                        normals[vIdx] = tempNormals[vIdx] / sqrt(len_sq);
+                    } else {
+                        normals[vIdx] = Vec3(0.0f, 1.0f, 0.0f);
+                    }
+                    if (origNormals) {
+                        origNormals[vIdx] = normals[vIdx];
+                    }
+                }
+            }
+        }
+
+        // Copy indices
+        triMesh->geometry->indices.resize(validCount * 3);
+        for (size_t i = 0; i < validCount; ++i) {
+            const aiFace& face = mesh->mFaces[validFaces[i]];
+            triMesh->geometry->indices[i * 3 + 0] = face.mIndices[0];
+            triMesh->geometry->indices[i * 3 + 1] = face.mIndices[1];
+            triMesh->geometry->indices[i * 3 + 2] = face.mIndices[2];
+        }
+
+        // Copy extra UV sets if present
+        for (unsigned int uv_set = 1; uv_set < uv_channel_count; ++uv_set) {
+            std::string attrName = "uv" + std::to_string(uv_set);
+            triMesh->geometry->add_attribute<Vec2>(attrName);
+            Vec2* extraUvs = triMesh->geometry->get_attribute_data_mut<Vec2>(attrName);
+            const bool hasUVSet = mesh->HasTextureCoords(uv_set);
+            if (extraUvs) {
+                for (unsigned int vIdx = 0; vIdx < vCount; ++vIdx) {
+                    if (hasUVSet) {
+                        const aiVector3D& texCoord = mesh->mTextureCoords[uv_set][vIdx];
+                        extraUvs[vIdx] = Vec2(texCoord.x, texCoord.y);
+                    } else {
+                        extraUvs[vIdx] = Vec2(0.0f, 0.0f);
+                    }
+                }
+            }
+        }
+
+        if (pbsdf && selectedUvSet > 0) {
+            std::string attrName = "uv" + std::to_string(selectedUvSet);
+            const Vec2* srcUvs = triMesh->geometry->get_attribute_data<Vec2>(attrName);
+            Vec2* dstUvs = triMesh->geometry->get_attribute_data_mut<Vec2>("uv");
+            if (srcUvs && dstUvs) {
+                std::memcpy(dstUvs, srcUvs, vCount * sizeof(Vec2));
+            }
+        }
+
+        if (hasActualWeights) {
+            for (auto& weights : meshVertexWeights) {
+                std::sort(weights.begin(), weights.end(),
+                    [](const std::pair<int, float>& a, const std::pair<int, float>& b) {
+                        return a.second > b.second;
+                    });
+            }
+            triMesh->geometry->skin_weights = std::move(meshVertexWeights);
+        }
+
+        // Spawn lightweight Triangle facades
         auto buildRange = [&](size_t start, size_t end) {
             for (size_t i = start; i < end; ++i) {
                 const unsigned int faceIdx = validFaces[i];
                 const aiFace& face = mesh->mFaces[faceIdx];
 
-                Vec3 vertices[3];
-                Vec3 normals[3];
-                Vec2 texCoords[3];
-                Vec3 colors[3];
-
-                for (unsigned int j = 0; j < 3; ++j) {
-                    const unsigned int index = face.mIndices[j];
-                    const aiVector3D& vertex = mesh->mVertices[index];
-                    vertices[j] = Vec3(vertex.x, vertex.y, vertex.z);
-
-                    if (hasNormals) {
-                        const aiVector3D& normal = mesh->mNormals[index];
-                        normals[j] = Vec3(normal.x, normal.y, normal.z);
-                    } else {
-                        normals[j] = Vec3(0);
-                    }
-
-                    if (hasUV0) {
-                        const aiVector3D& texCoord = mesh->mTextureCoords[0][index];
-                        texCoords[j] = Vec2(texCoord.x, texCoord.y);
-                    } else {
-                        texCoords[j] = Vec2(0.0f, 0.0f);
-                    }
-
-                    if (hasColors0) {
-                        const aiColor4D& col = mesh->mColors[0][index];
-                        colors[j] = Vec3(col.r, col.g, col.b);
-                    } else if (hasColors1) {
-                        const aiColor4D& col = mesh->mColors[1][index];
-                        colors[j] = Vec3(col.r, col.g, col.b);
-                    } else {
-                        colors[j] = Vec3(0.0f, 0.0f, 0.0f);
-                    }
-                }
-
-                const Vec3 faceNormalRaw = Vec3::cross(vertices[1] - vertices[0], vertices[2] - vertices[0]);
-                const float faceNormalLen = faceNormalRaw.length();
-                const Vec3 faceNormal = faceNormalLen > 1e-8f
-                    ? faceNormalRaw / faceNormalLen
-                    : Vec3(0.0f, 1.0f, 0.0f);
-                const Vec3 averagedNormal = normals[0] + normals[1] + normals[2];
-                if (!hasNormals || averagedNormal.length_squared() <= 1e-8f) {
-                    normals[0] = faceNormal;
-                    normals[1] = faceNormal;
-                    normals[2] = faceNormal;
-                }
-
-                auto triangle = std::make_shared<Triangle>(
-                    vertices[0], vertices[1], vertices[2],
-                    normals[0], normals[1], normals[2],
-                    texCoords[0], texCoords[1], texCoords[2],
-                    materialID
-                );
-
-                triangle->setTransformHandle(sharedTransform);
-                triangle->setNodeName(nodeName);
-                triangle->setAssimpVertexIndices(face.mIndices[0], face.mIndices[1], face.mIndices[2]);
-                triangle->setFaceIndex(static_cast<int>(baseFaceIndex + i));
-
-                for (unsigned int uv_set = 0; uv_set < uv_channel_count; ++uv_set) {
-                    Vec2 uv_set_coords[3];
-                    const bool hasUVSet = mesh->HasTextureCoords(uv_set);
-                    for (unsigned int uv_vertex = 0; uv_vertex < 3; ++uv_vertex) {
-                        const unsigned int uv_index = face.mIndices[uv_vertex];
-                        if (hasUVSet) {
-                            const aiVector3D& texCoord = mesh->mTextureCoords[uv_set][uv_index];
-                            uv_set_coords[uv_vertex] = Vec2(texCoord.x, texCoord.y);
-                        } else {
-                            uv_set_coords[uv_vertex] = Vec2(0.0f, 0.0f);
-                        }
-                    }
-                    triangle->setUVSetCoordinates(uv_set, uv_set_coords[0], uv_set_coords[1], uv_set_coords[2]);
-                }
-                if (pbsdf) {
-                    triangle->applyUVSet(static_cast<size_t>(selectedUvSet));
-                }
-
-                // Colors removed from Triangle
-
-                if (hasActualWeights) {
-                    triangle->initializeSkinData();
-                    triangle->setSkinBoneWeights(0, meshVertexWeights[face.mIndices[0]]);
-                    triangle->setSkinBoneWeights(1, meshVertexWeights[face.mIndices[1]]);
-                    triangle->setSkinBoneWeights(2, meshVertexWeights[face.mIndices[2]]);
-                } else {
-                    triangle->updateTransformedVertices();
-                }
-
+                auto triangle = std::make_shared<Triangle>(triMesh, static_cast<uint32_t>(i));
                 localTriangles[i] = std::move(triangle);
             }
         };

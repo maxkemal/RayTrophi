@@ -1,0 +1,56 @@
+// terrain_edge_preservation.comp
+// Vulkan port of edgePreservationKernel (erosion_kernels.cu). Prevents a hard
+// "wall" at the terrain boundary by blending each edge cell toward an inward
+// reference point (smoothstep-weighted by distance from the edge).
+// Note: the CUDA kernel takes an `originalHeights` buffer but never reads it —
+// the blend uses the (already-eroded) heightmap itself. Preserved verbatim here
+// for 1:1 parity; see project_terrain_erosion_gpu_migration memory for cleanup.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    float cellSize; float heightScale;
+    float pitThreshold; float spikeThreshold;
+    int edgeFadeWidth;
+} pc;
+
+layout(set = 0, binding = 0) buffer Height { float heightmap[]; };
+layout(set = 0, binding = 1) readonly buffer OriginalHeights { float originalHeights[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    int x = id % pc.mapWidth;
+    int y = id / pc.mapWidth;
+    int idx = id;
+
+    int distFromEdge = x;
+    if (y < distFromEdge) distFromEdge = y;
+    if (pc.mapWidth - 1 - x < distFromEdge) distFromEdge = pc.mapWidth - 1 - x;
+    if (pc.mapHeight - 1 - y < distFromEdge) distFromEdge = pc.mapHeight - 1 - y;
+
+    if (distFromEdge < pc.edgeFadeWidth) {
+        float t = float(distFromEdge) / float(pc.edgeFadeWidth);
+        float smoothT = t * t * (3.0 - 2.0 * t);
+
+        int inwardX = x;
+        int inwardY = y;
+
+        if (x < pc.mapWidth / 2) inwardX = x + pc.edgeFadeWidth;
+        else inwardX = x - pc.edgeFadeWidth;
+
+        if (y < pc.mapHeight / 2) inwardY = y + pc.edgeFadeWidth;
+        else inwardY = y - pc.edgeFadeWidth;
+
+        inwardX = clamp(inwardX, 0, pc.mapWidth - 1);
+        inwardY = clamp(inwardY, 0, pc.mapHeight - 1);
+
+        int inwardIdx = inwardY * pc.mapWidth + inwardX;
+        float inwardHeight = heightmap[inwardIdx];
+
+        heightmap[idx] = heightmap[idx] * smoothT + inwardHeight * 0.4 * (1.0 - smoothT);
+    }
+}

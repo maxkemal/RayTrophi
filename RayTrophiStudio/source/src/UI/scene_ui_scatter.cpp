@@ -20,6 +20,7 @@
 #include <future>
 #include <thread>
 #include <atomic>
+#include <unordered_set>
 #include "HittableInstance.h"
 #include "EmbreeBVH.h"
 #include "Backend/IViewportBackend.h"
@@ -83,6 +84,34 @@ void rebuildScatterSceneMutation(UIContext& ctx, bool additive_only = false) {
     } else if (renderBackend) {
         g_optix_rebuild_pending = true;
     }
+}
+
+// Materialize the FULL source geometry for a scatter source object by name. A flat (SoA)
+// object is one or more sibling TriangleMesh objects sharing one nodeName (one per material for
+// multi-material imports) — mesh_cache/"tris_list" only holds ONE representative single-face
+// facade per sibling (the UI selection handle), so building scatter sources straight from
+// mesh_cache silently scattered "the object" as just N single triangles (N = material count)
+// instead of its full geometry ("object bütünlüğü yok" — reported after the multi-material
+// hierarchy fix). Walk world.objects for every TriangleMesh/Triangle matching node_name and
+// materialize every face of every sibling mesh, falling back to legacy per-face facades already
+// present in world.objects (pre-flat / non-imported objects).
+std::vector<std::shared_ptr<Triangle>> gatherFullScatterSourceTriangles(UIContext& ctx, const std::string& node_name) {
+    std::vector<std::shared_ptr<Triangle>> out;
+    std::unordered_set<TriangleMesh*> seenMeshes;
+    for (auto& obj : ctx.scene.world.objects) {
+        if (auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (tmesh->nodeName != node_name || !tmesh->geometry) continue;
+            if (!seenMeshes.insert(tmesh.get()).second) continue;
+            const size_t nTris = tmesh->num_triangles();
+            out.reserve(out.size() + nTris);
+            for (size_t f = 0; f < nTris; ++f) {
+                out.push_back(std::make_shared<Triangle>(tmesh, static_cast<uint32_t>(f)));
+            }
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            if (tri->getNodeName() == node_name) out.push_back(tri);
+        }
+    }
+    return out;
 }
 }
 
@@ -184,9 +213,11 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
                 if (filter[0] != '\0' && name.find(filter) == std::string::npos) continue;
 
                 if (ImGui::Selectable(name.c_str())) {
-                    std::vector<std::shared_ptr<Triangle>> source_tris;
-                    source_tris.reserve(tris_list.size());
-                    for (const auto& pair : tris_list) source_tris.push_back(pair.second);
+                    // tris_list (mesh_cache) holds only ONE representative single-face facade per
+                    // sibling TriangleMesh (the UI selection handle) — materialize the full
+                    // geometry instead so the scatter source is the whole object, not one
+                    // triangle per material.
+                    std::vector<std::shared_ptr<Triangle>> source_tris = gatherFullScatterSourceTriangles(ctx, name);
                     if (!source_tris.empty()) {
                         active_group->sources.emplace_back(name, source_tris);
                     }
@@ -245,13 +276,11 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
         if (UIWidgets::SecondaryButton("Add Selected Object", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
             if (has_selection) {
                 std::string node_name = ctx.selection.selected.name;
-                // Find triangles
-                std::vector<std::shared_ptr<Triangle>> selected_tris;
-                for (auto& obj : ctx.scene.world.objects) {
-                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                    if (tri && tri->getNodeName() == node_name) selected_tris.push_back(tri);
-                }
-                
+                // Flat (SoA) objects live in world.objects as TriangleMesh, not per-face Triangle
+                // facades — a Triangle-only scan found nothing for them (and multi-material
+                // imports split into several sibling TriangleMesh sharing this nodeName).
+                std::vector<std::shared_ptr<Triangle>> selected_tris = gatherFullScatterSourceTriangles(ctx, node_name);
+
                 if (!selected_tris.empty()) {
                     active_group->sources.emplace_back(node_name, selected_tris);
                     SCENE_LOG_INFO("[Scatter] Added " + node_name + " to layer " + active_group->name);
@@ -611,7 +640,7 @@ void SceneUI::syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool cl
                  auto new_tri = std::make_shared<Triangle>(
                      v0, v1, v2, 
                      n0, n1, n2,
-                     src_tri->t0, src_tri->t1, src_tri->t2,
+                     src_tri->t_ref(0), src_tri->t_ref(1), src_tri->t_ref(2),
                      src_tri->getMaterial()
                  );
                   // Only used for Optix BLAS identification.

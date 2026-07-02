@@ -1,0 +1,304 @@
+// terrain_hydraulic_droplet.comp
+// Vulkan port of hydraulicErosionKernel (erosion_kernels.cu) — the Monte-Carlo
+// "virtual droplet" hydraulic erosion model (Beyer thesis derivative, as used by e.g.
+// Sebastian Lague's implementation). Each thread simulates one droplet's random-walk
+// lifetime across the heightmap, eroding/depositing material via bilinear-weighted
+// atomic scatter. This replaces an earlier shallow-water "pipe model" port attempt —
+// the user visually compared both and found the droplet model's organic, non-
+// homogeneous channel character clearly better (the pipe model, being purely
+// gradient-driven, produced very uniform/patterned channels even after noise-seeding
+// fixes). See project_terrain_erosion_gpu_migration memory.
+//
+// curand_init/curand_uniform (CUDA) have no GLSL equivalent, so this uses a
+// hash-seeded xorshift32 PRNG per droplet instead. Everything else is a direct 1:1
+// numerical port of the CUDA kernel's math, including the helper device functions
+// (bilinearInterpolate, updateHeight, sampleOptionalMap, erodeWithBrush) inlined here.
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    int brushRadius; int dropletLifetime;
+    float inertia; float sedimentCapacity; float minSlope;
+    float erodeSpeed; float depositSpeed; float evaporateSpeed;
+    float gravity; float cellSize; float heightScale;
+    uint seed; uint seedOffset;
+    uint hasHardness; uint hasMask;
+    uint dropletCount;
+} pc;
+
+layout(set = 0, binding = 0) buffer Height { float heightmap[]; };
+layout(set = 0, binding = 1) readonly buffer Hardness { float hardnessMap[]; };
+layout(set = 0, binding = 2) readonly buffer Mask { float maskMap[]; };
+
+// ---- PRNG (per-invocation xorshift32, hash-seeded to avoid low-bit correlation
+// between sequential droplet indices) ----
+uint rngState;
+
+uint seedMix(uint x) {
+    x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;
+    return x;
+}
+void rngInit(uint s) { rngState = (s == 0u) ? 1u : s; }
+float rngNext() {
+    rngState ^= rngState << 13u;
+    rngState ^= rngState >> 17u;
+    rngState ^= rngState << 5u;
+    return float(rngState) * (1.0 / 4294967296.0);
+}
+
+// ---- Helper functions (ported from erosion_kernels.cu device functions) ----
+
+float bilinearInterpolate(int width, int height, float x, float y) {
+    int x0 = int(x); int y0 = int(y);
+    int x1 = x0 + 1; int y1 = y0 + 1;
+    x0 = clamp(x0, 0, width - 1); y0 = clamp(y0, 0, height - 1);
+    x1 = clamp(x1, 0, width - 1); y1 = clamp(y1, 0, height - 1);
+
+    float h00 = heightmap[y0 * width + x0];
+    float h10 = heightmap[y0 * width + x1];
+    float h01 = heightmap[y1 * width + x0];
+    float h11 = heightmap[y1 * width + x1];
+
+    float tx = x - float(x0);
+    float ty = y - float(y0);
+
+    return h00 * (1.0 - tx) * (1.0 - ty) + h10 * tx * (1.0 - ty) +
+           h01 * (1.0 - tx) * ty + h11 * tx * ty;
+}
+
+void updateHeight(int width, int height, float x, float y, float change) {
+    int x0 = int(x); int y0 = int(y);
+    int x1 = x0 + 1; int y1 = y0 + 1;
+    if (x0 < 0 || x0 >= width || y0 < 0 || y0 >= height) return;
+    if (x1 < 0 || x1 >= width || y1 < 0 || y1 >= height) return;
+
+    float tx = x - float(x0);
+    float ty = y - float(y0);
+
+    atomicAdd(heightmap[y0 * width + x0], change * (1.0 - tx) * (1.0 - ty));
+    atomicAdd(heightmap[y0 * width + x1], change * tx * (1.0 - ty));
+    atomicAdd(heightmap[y1 * width + x0], change * (1.0 - tx) * ty);
+    atomicAdd(heightmap[y1 * width + x1], change * tx * ty);
+}
+
+float sampleHardness(int width, int height, float x, float y, float defaultValue) {
+    if (pc.hasHardness == 0u) return defaultValue;
+    x = clamp(x, 0.0, float(width - 1));
+    y = clamp(y, 0.0, float(height - 1));
+    int x0 = int(x); int y0 = int(y);
+    int x1 = min(x0 + 1, width - 1);
+    int y1 = min(y0 + 1, height - 1);
+    float tx = x - float(x0);
+    float ty = y - float(y0);
+    float v00 = hardnessMap[y0 * width + x0];
+    float v10 = hardnessMap[y0 * width + x1];
+    float v01 = hardnessMap[y1 * width + x0];
+    float v11 = hardnessMap[y1 * width + x1];
+    float a = v00 + (v10 - v00) * tx;
+    float b = v01 + (v11 - v01) * tx;
+    return a + (b - a) * ty;
+}
+
+float sampleMask(int width, int height, float x, float y, float defaultValue) {
+    if (pc.hasMask == 0u) return defaultValue;
+    x = clamp(x, 0.0, float(width - 1));
+    y = clamp(y, 0.0, float(height - 1));
+    int x0 = int(x); int y0 = int(y);
+    int x1 = min(x0 + 1, width - 1);
+    int y1 = min(y0 + 1, height - 1);
+    float tx = x - float(x0);
+    float ty = y - float(y0);
+    float v00 = maskMap[y0 * width + x0];
+    float v10 = maskMap[y0 * width + x1];
+    float v01 = maskMap[y1 * width + x0];
+    float v11 = maskMap[y1 * width + x1];
+    float a = v00 + (v10 - v00) * tx;
+    float b = v01 + (v11 - v01) * tx;
+    return a + (b - a) * ty;
+}
+
+void erodeWithBrush(int width, int height, float x, float y, float amount, int radius) {
+    if (amount <= 0.0) return;
+    if (radius <= 1) {
+        updateHeight(width, height, x, y, -amount);
+        return;
+    }
+
+    int minX = max(0, int(floor(x)) - radius);
+    int maxX = min(width - 1, int(floor(x)) + radius);
+    int minY = max(0, int(floor(y)) - radius);
+    int maxY = min(height - 1, int(floor(y)) + radius);
+
+    float weightSum = 0.0;
+    for (int iy = minY; iy <= maxY; ++iy) {
+        for (int ix = minX; ix <= maxX; ++ix) {
+            float dx = (float(ix) + 0.5) - x;
+            float dy = (float(iy) + 0.5) - y;
+            float dist = sqrt(dx * dx + dy * dy);
+            if (dist > float(radius)) continue;
+            float t = 1.0 - dist / max(1.0, float(radius));
+            float weight = t * t * (3.0 - 2.0 * t);
+            weightSum += weight;
+        }
+    }
+
+    if (weightSum <= 1e-6) {
+        updateHeight(width, height, x, y, -amount);
+        return;
+    }
+
+    for (int iy = minY; iy <= maxY; ++iy) {
+        for (int ix = minX; ix <= maxX; ++ix) {
+            float dx = (float(ix) + 0.5) - x;
+            float dy = (float(iy) + 0.5) - y;
+            float dist = sqrt(dx * dx + dy * dy);
+            if (dist > float(radius)) continue;
+            float t = 1.0 - dist / max(1.0, float(radius));
+            float weight = t * t * (3.0 - 2.0 * t);
+            atomicAdd(heightmap[iy * width + ix], -(amount * weight / weightSum));
+        }
+    }
+}
+
+void main() {
+    uint dropletIdx = gl_GlobalInvocationID.x;
+    if (dropletIdx >= pc.dropletCount) return;
+
+    rngInit(seedMix(dropletIdx + pc.seedOffset * 747796405u + pc.seed * 2891336453u));
+
+    float posX = rngNext() * float(pc.mapWidth - 1);
+    float posY = rngNext() * float(pc.mapHeight - 1);
+
+    float dirX = 0.0, dirY = 0.0;
+    float speed = 1.0;
+    float water = 1.0;
+    float sediment = 0.0;
+
+    float invCellSize = 1.0 / max(0.001, pc.cellSize);
+
+    for (int step = 0; step < pc.dropletLifetime; ++step) {
+        int nodeX = int(posX);
+        int nodeY = int(posY);
+
+        if (nodeX <= 1 || nodeX >= pc.mapWidth - 2 || nodeY <= 1 || nodeY >= pc.mapHeight - 2) break;
+
+        int gridIdx = nodeY * pc.mapWidth + nodeX;
+
+        float h00 = heightmap[gridIdx];
+        float h10 = heightmap[gridIdx + 1];
+        float h01 = heightmap[gridIdx + pc.mapWidth];
+        float h11 = heightmap[gridIdx + pc.mapWidth + 1];
+
+        float u = posX - float(nodeX);
+        float v = posY - float(nodeY);
+
+        float gradX = (h10 - h00) * (1.0 - v) + (h11 - h01) * v;
+        float gradY = (h01 - h00) * (1.0 - u) + (h11 - h10) * u;
+
+        gradX *= invCellSize;
+        gradY *= invCellSize;
+
+        dirX = dirX * pc.inertia - gradX * (1.0 - pc.inertia);
+        dirY = dirY * pc.inertia - gradY * (1.0 - pc.inertia);
+
+        float len = sqrt(dirX * dirX + dirY * dirY);
+        if (len < 1e-6) {
+            dirX = rngNext() * 0.2 - 0.1;
+            dirY = rngNext() * 0.2 - 0.1;
+        } else {
+            dirX /= len; dirY /= len;
+        }
+
+        float newPosX = posX + dirX;
+        float newPosY = posY + dirY;
+
+        if (newPosX <= 1.0 || newPosX >= float(pc.mapWidth - 2) || newPosY <= 1.0 || newPosY >= float(pc.mapHeight - 2)) break;
+
+        float oldH = bilinearInterpolate(pc.mapWidth, pc.mapHeight, posX, posY);
+        float newH = bilinearInterpolate(pc.mapWidth, pc.mapHeight, newPosX, newPosY);
+        float deltaHeight = newH - oldH;
+
+        float localSlope = -deltaHeight * invCellSize;
+        float capacity = max(localSlope * speed * water * pc.sedimentCapacity * sqrt(max(0.0, localSlope) + 0.001), pc.minSlope);
+
+        float hardness = sampleHardness(pc.mapWidth, pc.mapHeight, posX, posY, 0.0);
+        float hardnessFactor = 1.0 - hardness * 0.9;
+        float maskValue = sampleMask(pc.mapWidth, pc.mapHeight, posX, posY, 1.0);
+        if (maskValue < 0.001) {
+            if (sediment > 0.0) {
+                updateHeight(pc.mapWidth, pc.mapHeight, posX, posY, sediment * 0.5);
+            }
+            break;
+        }
+
+        float downhillSlope = max(localSlope, 0.0);
+        float flatness = 1.0 - min(1.0, downhillSlope / max(pc.minSlope * 8.0, 0.001));
+
+        float speedBeforePhysics = speed;
+
+        if (deltaHeight > 0.0) {
+            // UPHILL
+            if (speed > 0.5 && sediment < capacity) {
+                float erodeAmount = min(deltaHeight * 0.3, oldH * 0.05);
+                erodeAmount *= hardnessFactor * maskValue;
+                erodeWithBrush(pc.mapWidth, pc.mapHeight, newPosX, newPosY, erodeAmount, pc.brushRadius);
+                sediment += erodeAmount;
+                speed *= 0.6;
+            } else {
+                float depoAmount = min(sediment * 0.3, deltaHeight * 0.5);
+                updateHeight(pc.mapWidth, pc.mapHeight, posX, posY, depoAmount);
+                sediment -= depoAmount;
+                speed = 0.0;
+            }
+        } else if (sediment > capacity) {
+            // DOWNHILL - DEPOSITION
+            float depoAmount = (sediment - capacity) * pc.depositSpeed;
+            float flatDepositCap = sediment * flatness * 0.35;
+            depoAmount = min(depoAmount, max(-deltaHeight * 0.5, flatDepositCap));
+            updateHeight(pc.mapWidth, pc.mapHeight, posX, posY, depoAmount);
+            sediment -= depoAmount;
+        } else {
+            // DOWNHILL - EROSION
+            float erodeAmount = min((capacity - sediment) * pc.erodeSpeed, -deltaHeight);
+            erodeAmount = min(erodeAmount, oldH * 0.05);
+            erodeAmount *= hardnessFactor * maskValue;
+            erodeWithBrush(pc.mapWidth, pc.mapHeight, posX, posY, erodeAmount, pc.brushRadius);
+            sediment += erodeAmount;
+        }
+
+        if (deltaHeight <= 0.0 && sediment > 0.0 && flatness > 0.0) {
+            float slowFactor = 1.0 - min(speed, 1.0);
+            float settlingRate = (0.04 + pc.depositSpeed * 0.25) * flatness * (0.35 + 0.65 * slowFactor);
+            float settlingAmount = min(sediment, sediment * settlingRate);
+            if (settlingAmount > 1e-6) {
+                updateHeight(pc.mapWidth, pc.mapHeight, posX, posY, settlingAmount);
+                sediment -= settlingAmount;
+            }
+        }
+
+        speed = sqrt(max(0.001, speed * speed - deltaHeight * pc.gravity));
+        water *= (1.0 - pc.evaporateSpeed);
+
+        if (deltaHeight <= 0.0 && sediment > 0.0) {
+            float speedDrop = max(0.0, speedBeforePhysics - speed);
+            float speedDropNorm = min(1.0, speedDrop / max(speedBeforePhysics + 1e-4, 0.25));
+            float transitionSettling = sediment * speedDropNorm * (0.12 + 0.38 * flatness) * (0.4 + 0.6 * (1.0 - water));
+            if (transitionSettling > 1e-6) {
+                updateHeight(pc.mapWidth, pc.mapHeight, posX, posY, transitionSettling);
+                sediment -= transitionSettling;
+            }
+        }
+
+        posX = newPosX;
+        posY = newPosY;
+
+        if (water < 0.01 || speed < 0.01) {
+            if (sediment > 0.0) {
+                updateHeight(pc.mapWidth, pc.mapHeight, posX, posY, sediment);
+            }
+            break;
+        }
+    }
+}

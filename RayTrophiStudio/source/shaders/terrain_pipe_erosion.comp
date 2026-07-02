@@ -1,0 +1,79 @@
+// terrain_pipe_erosion.comp
+// Vulkan port of fluvialErosionKernel (erosion_kernels.cu) — step 4 of the shallow-water
+// pipe model. Stream-power-style capacity (C = Kc * velocity * slope^0.7) drives
+// erosion/deposition + sediment transport + evaporation. Race-free (each cell only
+// writes its own height/water/sediment).
+//
+// REVERTED (2026-07-01): an earlier pass divided the deposition cap by heightScale,
+// reasoning it should be a scale-invariant *physical* clamp like the capacity term
+// above it. That was wrong — everything else in this kernel (heightMap, sedimentMap,
+// the erosion cap `ht * 0.002`) operates in the SAME raw normalized-height units, not
+// world units, so dividing only the deposit cap by heightScale made it vanish for any
+// realistic heightScale (50-500), while erosion's cap stayed normal-sized — visually
+// confirmed as "no deposition at all, only carving" on a real terrain. Restored to the
+// flat CUDA-original cap so erode/deposit stay in the same units. See
+// project_terrain_erosion_gpu_migration memory.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    float fixedDeltaTime; float pipeLength;
+    float cellSize; float heightScale;
+    float erosionRate; float depositionRate;
+    float evaporationRate; float gravity;
+    float sedimentCapacityConstant;
+} pc;
+
+layout(set = 0, binding = 0) buffer Height             { float heightMap[]; };
+layout(set = 0, binding = 1) buffer Water              { float waterMap[]; };
+layout(set = 0, binding = 2) readonly buffer Velocity  { float velocityMap[]; };
+layout(set = 0, binding = 3) buffer Sediment           { float sedimentMap[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    int x = id % pc.mapWidth;
+    int y = id / pc.mapWidth;
+    if (x <= 1 || x >= pc.mapWidth - 2 || y <= 1 || y >= pc.mapHeight - 2) return;
+
+    int idx = id;
+    float vx = velocityMap[idx*2+0];
+    float vy = velocityMap[idx*2+1];
+    float velocity = sqrt(vx*vx + vy*vy);
+
+    float invCellSize = 1.0 / max(0.001, pc.cellSize);
+    float dzdx = (heightMap[idx + 1] - heightMap[idx - 1]) * 0.5 * invCellSize;
+    float dzdy = (heightMap[idx + pc.mapWidth] - heightMap[idx - pc.mapWidth]) * 0.5 * invCellSize;
+    float slope = sqrt(dzdx * dzdx + dzdy * dzdy) * pc.heightScale;
+
+    float dotVGrad = (vx * dzdx + vy * dzdy) * pc.heightScale;
+    float capacityMultiplier = max(0.1, -dotVGrad * invCellSize);
+
+    float slopeFactor = pow(slope + 0.001, 0.7);
+    float C = pc.sedimentCapacityConstant * velocity * slopeFactor * capacityMultiplier / max(1.0, pc.heightScale);
+    C = min(C, 0.2);
+
+    float waterDepth = waterMap[idx];
+    C *= min(1.0 + waterDepth * 0.5, 2.0);
+
+    float st = sedimentMap[idx];
+    float ht = heightMap[idx];
+
+    if (C > st) {
+        float erode = pc.erosionRate * (C - st) * pc.fixedDeltaTime;
+        erode = min(erode, ht * 0.002);
+        heightMap[idx] -= erode;
+        sedimentMap[idx] += erode;
+    } else {
+        float depositionFactor = 1.0 / (1.0 + velocity * 5.0);
+        float depo = pc.depositionRate * (st - C) * depositionFactor * pc.fixedDeltaTime;
+        depo = min(depo, 0.01);
+        heightMap[idx] += depo;
+        sedimentMap[idx] -= depo;
+    }
+
+    waterMap[idx] *= (1.0 - pc.evaporationRate * pc.fixedDeltaTime);
+}

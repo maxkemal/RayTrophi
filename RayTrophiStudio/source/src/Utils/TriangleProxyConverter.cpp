@@ -261,7 +261,8 @@ void TriangleProxyConverter::convertFromRawArraysToMesh(
     const std::vector<int>& faceIdxs,
     std::shared_ptr<Transform> transform,
     const std::string& nodeName,
-    std::vector<std::shared_ptr<Triangle>>& outTriangles)
+    std::vector<std::shared_ptr<Triangle>>& outTriangles,
+    std::shared_ptr<TriangleMesh>* outMesh)
 {
     outTriangles.clear();
     const size_t nTris = matIDs.size();
@@ -360,6 +361,13 @@ void TriangleProxyConverter::convertFromRawArraysToMesh(
     }
 
     mesh->geometry->indices = std::move(meshIndices);
+
+    // Flat/proxy migration flip: hand the mesh back as a single Hittable and SKIP facade
+    // materialization entirely (the 12.6M make_shared + soup we are trying to eliminate).
+    if (outMesh) {
+        *outMesh = mesh;
+        return;
+    }
 
     // Materialize lightweight facade triangles referencing the shared SoA mesh. With the
     // facade-slim Triangle (lazy standalone payload), each of these is ~16 B of live state

@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -58,6 +58,12 @@ namespace NodeSystem {
         Color,          ///< RGBA color (0-1 range)
         Image2D,        ///< 2D data array (heightmap, mask, texture channel)
         String,         ///< Text data
+        Geometry,       ///< GeometryDetail SoA mesh/spline
+        Instances,      ///< Scatter/Instance transform arrays
+        Volume,         ///< Volume grid (NanoVDB/OpenVDB)
+        Simulation,     ///< Simulation state (cache-backed)
+        Material,       ///< Material shader DAG handle
+        Light,          ///< Light parameters variant
         Custom = 255    ///< Domain-specific extension point
     };
 
@@ -166,6 +172,18 @@ namespace NodeSystem {
                 }
             case DataType::String:
                 return { IM_COL32(200, 200, 100, 255), PinShape::Circle, "String" };
+            case DataType::Geometry:
+                return { IM_COL32(76, 175, 80, 255), PinShape::Circle, "Geometry" };
+            case DataType::Instances:
+                return { IM_COL32(255, 235, 59, 255), PinShape::Circle, "Instances" };
+            case DataType::Volume:
+                return { IM_COL32(156, 39, 176, 255), PinShape::Circle, "Volume" };
+            case DataType::Simulation:
+                return { IM_COL32(255, 87, 34, 255), PinShape::Square, "Simulation" };
+            case DataType::Material:
+                return { IM_COL32(233, 30, 99, 255), PinShape::Circle, "Material" };
+            case DataType::Light:
+                return { IM_COL32(255, 193, 7, 255), PinShape::Circle, "Light" };
             default:
                 return { IM_COL32(128, 128, 128, 255), PinShape::Circle, "Unknown" };
         }

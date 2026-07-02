@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -189,6 +189,56 @@ public:
     virtual float get_shininess() const {
         return (1.0f - roughnessProperty.intensity) * 128.0f; // Derived from roughness
     }
+
+    // Advanced Material extensions (lazy allocated in PrincipledBSDF)
+    virtual float getClearcoat() const { return 0.0f; }
+    virtual void setClearcoat(float cc, float roughness = 0.03f) {}
+    virtual float getClearcoatRoughness() const { return 0.03f; }
+    virtual float getClearcoatIridescence() const { return 0.0f; }
+    virtual void setClearcoatIridescence(float val) {}
+    virtual float getClearcoatFilmThickness() const { return 0.55f; }
+    virtual void setClearcoatFilmThickness(float val) {}
+
+    virtual float getSubsurface() const { return 0.0f; }
+    virtual void setSubsurface(float val) {}
+    virtual Vec3 getSubsurfaceColor() const { return Vec3(1.0f, 0.8f, 0.6f); }
+    virtual void setSubsurfaceColor(const Vec3& val) {}
+    virtual Vec3 getSubsurfaceRadius() const { return Vec3(1.0f, 0.2f, 0.1f); }
+    virtual void setSubsurfaceRadius(const Vec3& val) {}
+    virtual float getSubsurfaceScale() const { return 0.05f; }
+    virtual void setSubsurfaceScale(float val) {}
+    virtual float getSubsurfaceAnisotropy() const { return 0.0f; }
+    virtual void setSubsurfaceAnisotropy(float val) {}
+    virtual float getSubsurfaceIOR() const { return 1.4f; }
+    virtual void setSubsurfaceIOR(float val) {}
+    virtual bool getUseRandomWalkSSS() const { return true; }
+    virtual void setUseRandomWalkSSS(bool val) {}
+    virtual int getSssMaxSteps() const { return 6; }
+    virtual void setSssMaxSteps(int val) {}
+
+    virtual float getTransmissionDensity() const { return 0.0f; }
+    virtual void setTransmissionDensity(float val) {}
+    virtual Vec3 getResinColor() const { return Vec3(1.0f, 1.0f, 1.0f); }
+    virtual void setResinColor(const Vec3& val) {}
+    virtual float getResinRoughness() const { return 0.1f; }
+    virtual void setResinRoughness(float val) {}
+    virtual float getResinInclusion() const { return 0.0f; }
+    virtual void setResinInclusion(float val) {}
+    virtual float getResinDirt() const { return 0.0f; }
+    virtual void setResinDirt(float val) {}
+    virtual float getResinInclusionScale() const { return 8.0f; }
+    virtual void setResinInclusionScale(float val) {}
+    virtual Vec3 getResinDirtColor() const { return Vec3(0.18f, 0.14f, 0.10f); }
+    virtual void setResinDirtColor(const Vec3& val) {}
+    virtual bool getGlassMarbleVolume() const { return false; }
+    virtual void setGlassMarbleVolume(bool val) {}
+
+    virtual bool getIsBubble() const { return false; }
+    virtual void setIsBubble(bool val) {}
+    virtual float getBubbleIor() const { return 1.33f; }
+    virtual void setBubbleIor(float val) {}
+    virtual float getBubbleFilm() const { return 0.0f; }
+    virtual void setBubbleFilm(float val) {}
    
     // Tiling
     Vec2 tilingFactor = Vec2(1, 1);

@@ -1,4 +1,4 @@
-﻿// ===============================================================================
+// ===============================================================================
 // SCENE UI - GIZMOS & TRANSFORM
 // ===============================================================================
 // This file handles 3D Gizmos (Move/Rotate/Scale), Bounding Boxes, and overlays.
@@ -28,6 +28,7 @@
 #include <cstring>
 #include <limits>
 #include <unordered_map>
+#include <omp.h>
 #include <cstdint>
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
@@ -172,7 +173,8 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
     // object. Drop the selected object's memo each idle frame so its gizmo always
     // rebuilds from the live verts and tracks the drag. (Sim writeback already
     // drops the memo via the pivot setter; this covers manual editing.) Cosmetic.
-    if (!timeline.isPlaying() && !selected_source_name.empty()) {
+    if (!timeline.isPlaying() && !selected_source_name.empty() &&
+        ctx.scene.isObjectUsedAsSimSource(selected_source_name)) {
         ctx.scene.refreshSimSourceGizmoBounds(selected_source_name);
     }
     const int selected_domain_index =
@@ -1427,7 +1429,18 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         int min_x = sw, min_y = sh, max_x = -1, max_y = -1;
         bool has_any = false;
 
-        for (size_t i = 0; i < tris.size(); i += tri_stride) {
+        // Parallel projection: each iteration only touches its own projected[i]
+        // slot (read-only mesh/camera captures otherwise), so this is safe to
+        // fan out across cores. Terrain and other raw-Triangle (non-flat/SoA)
+        // meshes push every real triangle into `tris`, unlike flat/proxy
+        // TriangleMesh objects which only ever expose a single facade here —
+        // for those dense raw meshes this per-triangle projection was the
+        // single-threaded cost that pegged one core while orbiting the camera
+        // with the object selected. The bbox/has_any reduction happens in a
+        // cheap serial pass below instead of inside the parallel region.
+        const int64_t tri_count = static_cast<int64_t>(tris.size());
+        #pragma omp parallel for schedule(dynamic, 4096) if(tri_count > 8192)
+        for (int64_t i = 0; i < tri_count; i += static_cast<int64_t>(tri_stride)) {
             ProjTri& pt = projected[i];
             pt.valid = false;
             const Triangle& T = *tris[i].second;
@@ -1481,6 +1494,13 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
             pt.x[2] = p2.x; pt.y[2] = p2.y;
             pt.mean_depth = depth_sum * (1.0f / 3.0f);
             pt.valid = true;
+        }
+
+        // Serial bbox/has_any reduction — cheap (just int compares) next to the
+        // projection math above, so it doesn't need its own parallel reduction.
+        for (int64_t i = 0; i < tri_count; i += static_cast<int64_t>(tri_stride)) {
+            const ProjTri& pt = projected[i];
+            if (!pt.valid) continue;
             has_any = true;
             for (int v = 0; v < 3; ++v) {
                 int xi = static_cast<int>(floorf(pt.x[v]));
@@ -2521,9 +2541,9 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
             draw_list->AddCircle(center, 8.0f, IM_COL32(255, 220, 100, 120), 0, 1.0f);
 
             // World-space radius ring (soft-shadow sphere visualization)
-            if (light->radius > 0.001f) {
+            if (light->getRadius() > 0.001f) {
                 // Project a screen-aligned circle centered on the light position
-                Vec3 rOffset = cam_right * light->radius;
+                Vec3 rOffset = cam_right * light->getRadius();
                 ImVec2 rEdge = Project(pos + rOffset);
                 if (IsOnScreen(rEdge)) {
                     float px = sqrtf((rEdge.x - center.x) * (rEdge.x - center.x) +
@@ -3058,10 +3078,10 @@ mesh_edit_changed_confirmed:
         else if (auto al = std::dynamic_pointer_cast<AreaLight>(sel.selected.light)) {
             hasDir = false;
             // Normalize vekt\u00f6rleri width/height ile \u00f6l\u00e7eklendirerek ger\u00e7ek boyutu yans\u0131t
-            Vec3 X = al->u * al->getWidth();   // u normalize, width ile \u00f6l\u00e7ekle
-            Vec3 Z = al->v * al->getHeight();  // v normalize, height ile \u00f6l\u00e7ekle
+            Vec3 X = al->getU() * al->getWidth();   // u normalize, width ile \u00f6l\u00e7ekle
+            Vec3 Z = al->getV() * al->getHeight();  // v normalize, height ile \u00f6l\u00e7ekle
             // Normalized Y (Normal)
-            Vec3 Y = Vec3::cross(al->u, al->v).normalize();
+            Vec3 Y = Vec3::cross(al->getU(), al->getV()).normalize();
 
             startMat.m[0][0] = X.x; startMat.m[0][1] = Y.x; startMat.m[0][2] = Z.x;
             startMat.m[1][0] = X.y; startMat.m[1][1] = Y.y; startMat.m[1][2] = Z.y;
@@ -3896,12 +3916,15 @@ mesh_edit_changed_confirmed:
                 float sz = forward.length();
 
                 // Width ve Height g�ncelle
-                if (sx > 0.001f) al->width = sx;
-                if (sz > 0.001f) al->height = sz;
+                if (sx > 0.001f) al->setWidth(sx);
+                if (sz > 0.001f) al->setHeight(sz);
 
                 // u ve v HER ZAMAN normalize tutulmal�!
-                if (sx > 0.001f) al->u = right / sx;
-                if (sz > 0.001f) al->v = forward / sz;
+                Vec3 new_u = al->getU();
+                Vec3 new_v = al->getV();
+                if (sx > 0.001f) new_u = (right / sx).normalize();
+                if (sz > 0.001f) new_v = (forward / sz).normalize();
+                al->setUVVectors(new_u, new_v);
 
                 // Position do�rudan gizmo merkezinden al�nmal� (art�k position = merkez)
                 al->position = newPos;
@@ -4593,8 +4616,8 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
         const std::string& sel_node = sel.selected.object->getNodeName();
         for (const auto& rb : ctx.scene.rigid_bodies) {
             if (rb.kind == RayTrophiSim::BodyKind::Rigid) continue;
-            if (rb.source_name != sel_node || rb.soft_pins.empty()) continue;
-            for (const auto& pin : rb.soft_pins) {
+            if (rb.source_name != sel_node || rb.getSoftPins().empty()) continue;
+            for (const auto& pin : rb.getSoftPins()) {
                 if (!pin.enabled) continue;
                 const float r = pin.radius;
                 const ImU32 pin_col = IM_COL32(80, 230, 255, 220);

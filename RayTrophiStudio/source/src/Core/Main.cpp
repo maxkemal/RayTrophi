@@ -170,34 +170,8 @@ bool isActiveRenderBackendGpu() {
 }
 
 void prepareCpuPickingState(SceneData& scene, SceneUI& ui) {
-    const size_t foliage_count = InstanceManager::getInstance().getTotalInstanceCount();
-    const size_t selectable_count = (foliage_count <= scene.world.objects.size())
-        ? (scene.world.objects.size() - foliage_count)
-        : scene.world.objects.size();
-
-    for (size_t obj_index = 0; obj_index < selectable_count; ++obj_index) {
-        auto& obj = scene.world.objects[obj_index];
-        if (!obj) continue;
-
-        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-            tri->updateTransformedVertices();
-            continue;
-        }
-
-        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
-            inst->syncTransformFromSourceTriangles();
-
-            if (inst->source_triangles) {
-                for (auto& srcTri : *inst->source_triangles) {
-                    if (srcTri) {
-                        srcTri->updateTransformedVertices();
-                    }
-                }
-            }
-        }
-    }
-
     ui.rebuildMeshCache(scene.world.objects);
+    ui.syncAllTransformedVertices(scene);
     ui.picking_vertices_synced = true;
 }
 
@@ -1756,6 +1730,7 @@ void init_RayTrophi_Pro_Dark_Thema()
 }
 
 int main(int argc, char* argv[]) try {
+    g_main_thread_id = std::this_thread::get_id();
     installEarlyCrashHandlers();
 
     // Optional diagnostics:
@@ -4948,28 +4923,30 @@ int main(int argc, char* argv[]) try {
                             // Per-object work is independent (each writes only its own
                             // transform/AABB) so par_unseq is safe; foliage scenes with
                             // millions of HittableInstances were single-thread bound here.
-                            std::for_each(std::execution::par_unseq,
-                                scene.world.objects.begin(), scene.world.objects.end(),
-                                [](std::shared_ptr<Hittable>& obj) {
-                                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                    if (tri) {
-                                        tri->updateTransformedVertices();
-                                        return;
-                                    }
+                            std::unordered_set<const std::vector<std::shared_ptr<Triangle>>*> processed_sources;
+                            for (auto& obj : scene.world.objects) {
+                                if (!obj) continue;
+                                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                if (tri) {
+                                    tri->updateTransformedVertices();
+                                    continue;
+                                }
 
-                                    auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
-                                    if (inst && inst->syncTransformFromSourceTriangles()) {
-                                        return;
-                                    }
+                                auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+                                if (inst && inst->syncTransformFromSourceTriangles()) {
+                                    continue;
+                                }
 
-                                    if (inst && inst->source_triangles) {
+                                if (inst && inst->source_triangles) {
+                                    if (processed_sources.insert(inst->source_triangles.get()).second) {
                                         for (auto& srcTri : *inst->source_triangles) {
                                             if (srcTri) {
                                                 srcTri->updateTransformedVertices();
                                             }
                                         }
                                     }
-                                });
+                                }
+                            }
 
                             // Trigger CPU BVH rebuild (SYNCHRONOUS for safety)
                             // Async rebuild causes crashes if objects were deleted in GPU mode.
@@ -5868,34 +5845,8 @@ int main(int argc, char* argv[]) try {
                 // Async allows it to happen without freezing.
 
                 // Sync transform-handle based geometry to CPU-space before snapshot.
-                // Runs on the main thread before the async BVH build is dispatched, so
-                // a serial loop here stalls the UI for foliage-heavy scenes.
-                std::for_each(std::execution::par_unseq,
-                    scene.world.objects.begin(), scene.world.objects.end(),
-                    [](std::shared_ptr<Hittable>& obj) {
-                        if (!obj) return;
-
-                        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-                            if (tri->getTransformPtr() && !tri->hasAnySkinWeights()) {
-                                tri->updateTransformedVertices();
-                            }
-                            return;
-                        }
-
-                        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
-                            if (inst->syncTransformFromSourceTriangles()) {
-                                return;
-                            }
-
-                            if (inst->source_triangles) {
-                                for (auto& srcTri : *inst->source_triangles) {
-                                    if (srcTri && srcTri->getTransformPtr() && !srcTri->hasAnySkinWeights()) {
-                                        srcTri->updateTransformedVertices();
-                                    }
-                                }
-                            }
-                        }
-                    });
+                // Runs on the main thread before the async BVH build is dispatched.
+                ui.syncAllTransformedVertices(scene);
                 // Vertices are now in world-space; mark UI flag so the first
                 // mouse-click selection won't redundantly re-sync them.
                 ui.picking_vertices_synced = true;
@@ -6114,10 +6065,17 @@ int main(int argc, char* argv[]) try {
                 } else {
                     for (const auto& node : deform_nodes) {
                         auto tris = scene.collectNodeTriangles(node);
-                        if (tris.empty() || !rasterViewportBackend->updateRasterMeshFromTriangles(node, tris)) {
-                            refit_ok = false;
-                            break;
+                        bool ok;
+                        if (!tris.empty()) {
+                            ok = rasterViewportBackend->updateRasterMeshFromTriangles(node, tris);
+                        } else if (TriangleMesh* fm = scene.getFlatNodeMesh(node)) {
+                            // Flat (direct SoA) mesh has no facades — refit the raster verts from its
+                            // SoA so a rigid-on-flat body stays realtime in Solid (no full rebuild).
+                            ok = rasterViewportBackend->updateRasterMeshFromMeshSoA(node, fm);
+                        } else {
+                            ok = false;
                         }
+                        if (!ok) { refit_ok = false; break; }
                     }
                 }
                 if (!refit_ok) g_viewport_raster_rebuild_pending = true;  // full raster rebuild fallback
@@ -6139,7 +6097,13 @@ int main(int argc, char* argv[]) try {
                 for (const auto& node : deform_nodes) {
                     if (!refit_ok) break;
                     auto tris = scene.collectNodeTriangles(node);
-                    if (tris.empty() || !vkBackend->updateInteractiveMesh(node, tris)) refit_ok = false;
+                    if (tris.empty()) {
+                        // Flat (direct SoA) mesh: no facades — refit its RT BLAS straight from the SoA
+                        // by node name (rigid-on-flat) instead of falling through to a full rebuild.
+                        if (!vkBackend->refitFlatMeshBLAS(node)) refit_ok = false;
+                    } else if (!vkBackend->updateInteractiveMesh(node, tris)) {
+                        refit_ok = false;
+                    }
                 }
                 if (refit_ok) { g_backend->resetAccumulation(); start_render = true; g_camera_dirty = true; }
                 else g_vulkan_rebuild_pending = true;  // full Vulkan rebuild fallback

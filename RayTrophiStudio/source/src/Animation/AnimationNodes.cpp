@@ -1,4 +1,4 @@
-﻿#include "AnimationNodes.h"
+#include "AnimationNodes.h"
 #include "globals.h"
 #include <algorithm>
 #include <cmath>
@@ -1568,6 +1568,8 @@ namespace AnimationGraph {
     }
     
     void AnimationNodeGraph::removeNode(uint32_t nodeId) {
+        removeNodeFromGroups(nodeId);
+
         // Remove connected links
         links.erase(std::remove_if(links.begin(), links.end(),
             [this, nodeId](const NodeSystem::Link& l) {

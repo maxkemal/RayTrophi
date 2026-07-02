@@ -1,0 +1,76 @@
+// terrain_thermal.comp
+// Vulkan port of thermalErosionKernel (erosion_kernels.cu). Weighted multi-neighbor
+// thermal weathering (Musgrave-style talus stability). 1:1 numerical port — same
+// safeHeightScale/invCellSize clamps as the CUDA kernel (kept intentionally for
+// parity even though they differ from the hardness variant; see
+// project_terrain_erosion_gpu_migration memory for the follow-up normalization pass).
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    float talusAngle; float erosionAmount;
+    float cellSize; float heightScale;
+} pc;
+
+layout(set = 0, binding = 0) buffer Height { float heightmap[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    int x = id % pc.mapWidth;
+    int y = id / pc.mapWidth;
+    if (x <= 0 || x >= pc.mapWidth - 1 || y <= 0 || y >= pc.mapHeight - 1) return;
+
+    int idx = id;
+    float h = heightmap[idx];
+
+    float safeHeightScale = max(1.0, pc.heightScale);
+    float invCellSize = 1.0 / max(0.001, pc.cellSize);
+    float slopeScale = safeHeightScale * invCellSize;
+
+    const int dxs[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+    const int dys[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+    const float dists[8] = float[8](1.414, 1.0, 1.414, 1.0, 1.0, 1.414, 1.0, 1.414);
+
+    float diffs[8];
+    int nIdxs[8];
+    float totalExcess = 0.0;
+    int neighborCount = 0;
+
+    for (int d = 0; d < 8; d++) {
+        int nx = x + dxs[d];
+        int ny = y + dys[d];
+        nIdxs[d] = ny * pc.mapWidth + nx;
+
+        float diff = h - heightmap[nIdxs[d]];
+        float slope = diff * slopeScale / dists[d];
+
+        if (slope > pc.talusAngle) {
+            float excess = (slope - pc.talusAngle) * dists[d] * pc.cellSize / safeHeightScale;
+            diffs[d] = excess;
+            totalExcess += excess;
+            neighborCount++;
+        } else {
+            diffs[d] = 0.0;
+        }
+    }
+
+    if (totalExcess > 0.0 && neighborCount > 0) {
+        float totalMove = totalExcess * 0.5 * pc.erosionAmount;
+        totalMove = min(totalMove, 0.05);
+        if (totalMove > h) totalMove = h * 0.9;
+
+        atomicAdd(heightmap[idx], -totalMove);
+
+        for (int d = 0; d < 8; d++) {
+            if (diffs[d] > 0.0) {
+                float weight = diffs[d] / totalExcess;
+                atomicAdd(heightmap[nIdxs[d]], totalMove * weight);
+            }
+        }
+    }
+}

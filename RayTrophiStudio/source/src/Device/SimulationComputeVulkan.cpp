@@ -324,7 +324,12 @@ public:
         // Kernels using float atomics (P2G scatter, density splat) need hardware support.
         const std::string kernel(cmd.kernel ? cmd.kernel : "");
         const bool needs_atomics = (kernel == "sim_fluid_p2g_scatter" ||
-                                    kernel == "sim_fluid_density_splat");
+                                    kernel == "sim_fluid_density_splat" ||
+                                    kernel == "terrain_thermal" ||
+                                    kernel == "terrain_thermal_hardness" ||
+                                    kernel == "terrain_stream_power" ||
+                                    kernel == "terrain_wind" ||
+                                    kernel == "terrain_hydraulic_droplet");
         if (needs_atomics && !m_has_float_atomics) return false;
 
         auto pit = m_pipelines.find(kernel);
@@ -593,6 +598,40 @@ private:
             // CC device-resident expand (Phase 3d): indexed refine -> non-indexed combined
             // BLAS-layout buffer (6 SSBO: pos/nrm/triIdx/triUV/triMat/out, 16B push-const).
             { "cc_expand_blas",                     "cc_expand_blas.spv",                  6, 16 },
+            // Terrain erosion (Vulkan port of erosion_kernels.cu). Push-constant sizes
+            // must match TerrainPhysics::*ParamsGPU (minus pointer fields, which become
+            // SSBO bindings instead). 1:1 numerical port; see
+            // project_terrain_erosion_gpu_migration memory for follow-up physics fixes.
+            // ThermalErosionParamsGPU  (no ptrs) = 6 fields x 4 bytes = 24
+            // PostProcessParamsGPU     (no ptrs) = 7 fields x 4 bytes = 28
+            // StreamPowerParamsGPU     (no ptrs) = 9 fields x 4 bytes = 36
+            { "terrain_thermal",                    "terrain_thermal.spv",                 1, 24 },
+            { "terrain_thermal_hardness",           "terrain_thermal_hardness.spv",        2, 24 },
+            { "terrain_stream_power",               "terrain_stream_power.spv",            5, 36 },
+            { "terrain_apply_stream_power",         "terrain_apply_stream_power.spv",      2, 36 },
+            { "terrain_pit_fill",                   "terrain_pit_fill.spv",                1, 28 },
+            { "terrain_spike_removal",              "terrain_spike_removal.spv",           1, 28 },
+            { "terrain_edge_preservation",          "terrain_edge_preservation.spv",       2, 28 },
+            { "terrain_smooth",                     "terrain_smooth.spv",                  1, 8  },
+            // Shallow-water "virtual pipes" hydraulic model (revived dead CUDA code —
+            // never had a working host caller — replaces the droplet Monte-Carlo model).
+            // FluvialErosionParamsGPU (no ptrs) = 11 fields x 4 bytes = 44.
+            { "terrain_pipe_rain",                  "terrain_pipe_rain.spv",               1, 16 },
+            { "terrain_pipe_flux",                  "terrain_pipe_flux.spv",               3, 44 },
+            { "terrain_pipe_water",                 "terrain_pipe_water.spv",              3, 44 },
+            { "terrain_pipe_erosion",               "terrain_pipe_erosion.spv",             4, 44 },
+            // WindErosionParamsGPU (no ptrs, +iterationSeed) = 10 fields x 4 bytes = 40.
+            { "terrain_wind",                       "terrain_wind.spv",                    1, 40 },
+            // Monte-Carlo droplet hydraulic erosion (replaces the pipe-model attempt for
+            // the "Hydraulic" node — user found droplet's organic channel character
+            // clearly better). 18 fields x 4 bytes = 72.
+            { "terrain_hydraulic_droplet",          "terrain_hydraulic_droplet.spv",        3, 72 },
+            // GPU flow-accumulation for Fluvial (iterative relaxation approximation of
+            // the CPU priority-flood + MFD accumulation — see terrain_flow_*.comp
+            // headers for the algorithm notes).
+            { "terrain_flow_fill",                  "terrain_flow_fill.spv",               3, 16 },
+            { "terrain_flow_weights",                "terrain_flow_weights.spv",             2, 12 },
+            { "terrain_flow_accumulate",             "terrain_flow_accumulate.spv",          3, 8  },
         };
         for (const auto& d : defs)
             createPipeline(d.name, sd + "/" + d.spv, d.bufs, d.pc);

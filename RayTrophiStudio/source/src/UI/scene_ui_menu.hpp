@@ -40,17 +40,59 @@
 #include <scene_ui_gas.hpp>
 #include "perlin.h"
 #include "FractureGenerator.h"  // Convex Voronoi pre-fracture (destruction Faz 1)
+#include "MeshModifiers.h"      // facadesToFlatMesh (add-object-flat collapse)
+#include "TriangleMesh.h"       // complete type for shared_ptr<TriangleMesh>→shared_ptr<Hittable> upcast
 // extern bool show_controls_window; // Assume defined elsewhere
 
 extern bool g_vulkan_rebuild_pending;
 extern bool g_viewport_raster_rebuild_pending;
 extern std::unique_ptr<Backend::IBackend> g_backend;
+// Defined in scene_ui_modifiers.cpp. Declared at FILE scope (NOT inside the anonymous namespace
+// below) so it refers to the global symbol — an extern inside `namespace {}` gets internal linkage
+// and would be "declared but not defined" (C7631).
+extern bool g_dense_mesh_as_hittable;
 
 namespace {
     std::atomic<bool>  s_bakeRunning{false};
     std::atomic<int>   s_bakeDone{0};
     std::atomic<int>   s_bakeTotal{0};
     std::atomic<bool>  s_bakeNeedsHotReload{false};
+
+    // Add-object-flat: collapse a freshly-added procedural primitive's standalone Triangle facades
+    // (all sharing one node name) into ONE shared SoA TriangleMesh-as-Hittable — the add-object
+    // equivalent of import-flat / apply-flat / Simple-subdivide-flat. Gated by
+    // g_dense_mesh_as_hittable; flag OFF → no-op (facades stay, byte-for-byte old behaviour). All
+    // procedural primitives are static (no skin), so no skin guard is needed. Runs right after the
+    // facades are pushed, BEFORE rebuildMeshCache, so the editable cache / BVH / backends see the
+    // flat mesh. facadesToFlatMesh copies the facades' shared Transform handle onto the TriangleMesh,
+    // so the gizmo, procedural re-edit (name-keyed), and serialization (writeGeometryBinary's
+    // TriangleMesh branch) keep working. Only standalone facades (parentMesh == null) with the given
+    // name are collapsed, so it never disturbs already-flat meshes.
+    void collapseProceduralAddToFlat(std::vector<std::shared_ptr<Hittable>>& objects,
+                                     const std::string& name) {
+        if (!g_dense_mesh_as_hittable) return;
+        std::vector<std::shared_ptr<Triangle>> facades;
+        for (const auto& o : objects) {
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(o)) {
+                if (!tri->parentMesh && tri->getNodeName() == name) facades.push_back(tri);
+            }
+        }
+        if (facades.empty()) return;
+        auto flat = MeshModifiers::facadesToFlatMesh(facades);
+        if (!flat) return;
+        std::vector<std::shared_ptr<Hittable>> rebuilt;
+        rebuilt.reserve(objects.size());
+        bool emitted = false;
+        for (const auto& o : objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(o);
+            if (tri && !tri->parentMesh && tri->getNodeName() == name) {
+                if (!emitted) { rebuilt.push_back(flat); emitted = true; } // one TriangleMesh per group
+            } else {
+                rebuilt.push_back(o);
+            }
+        }
+        objects = std::move(rebuilt);
+    }
 
     // Launched in a detached thread. Iterates all materials and builds
     // compressed DDS cache for every eligible texture slot.
@@ -1172,7 +1214,12 @@ void SceneUI::addProceduralPlane(UIContext& ctx) {
     gpu->clearcoat = 0.0f;
     def_mat->gpuMaterial = gpu;
     
-    uint16_t mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+    // Keep the material's own display name (read by the Properties panel) in sync with the
+    // registry key (read by the Paint panel's reverse-lookup getMaterialName) — leaving
+    // materialName empty made the same material show as "Mat #N" in Properties but the
+    // registry key in Paint, looking like two different materials.
+    def_mat->materialName = "Obj_" + std::to_string(g_ProjectManager.getProjectData().next_object_id) + "_Material";
+    uint16_t mat_id = MaterialManager::getInstance().getOrCreateMaterialID(def_mat->materialName, def_mat);
 
     Vec3 v0(-1, 0, 1), v1(1, 0, 1), v2(1, 0, -1), v3(-1, 0, -1);
     Vec3 n(0, 1, 0);
@@ -1202,7 +1249,8 @@ void SceneUI::addProceduralPlane(UIContext& ctx) {
     proc.transform = t->base;
     proc.material_id = mat_id;
     g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
-    
+
+    collapseProceduralAddToFlat(ctx.scene.world.objects, name);
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
@@ -1392,7 +1440,12 @@ void SceneUI::addProceduralCube(UIContext& ctx) {
     gpu->clearcoat = 0.0f;
     def_mat->gpuMaterial = gpu;
 
-    uint16_t mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+    // Keep the material's own display name (read by the Properties panel) in sync with the
+    // registry key (read by the Paint panel's reverse-lookup getMaterialName) — leaving
+    // materialName empty made the same material show as "Mat #N" in Properties but the
+    // registry key in Paint, looking like two different materials.
+    def_mat->materialName = "Obj_" + std::to_string(g_ProjectManager.getProjectData().next_object_id) + "_Material";
+    uint16_t mat_id = MaterialManager::getInstance().getOrCreateMaterialID(def_mat->materialName, def_mat);
 
     Vec3 p[8] = {
         Vec3(-1,-1, 1), Vec3( 1,-1, 1), Vec3( 1, 1, 1), Vec3(-1, 1, 1),
@@ -1458,6 +1511,7 @@ void SceneUI::addProceduralCube(UIContext& ctx) {
     proc.material_id = mat_id;
     g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
 
+    collapseProceduralAddToFlat(ctx.scene.world.objects, name);
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
@@ -1489,7 +1543,12 @@ void SceneUI::addProceduralSphere(UIContext& ctx) {
     gpu->metallic = 0.0f;
     def_mat->gpuMaterial = gpu;
 
-    uint16_t mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+    // Keep the material's own display name (read by the Properties panel) in sync with the
+    // registry key (read by the Paint panel's reverse-lookup getMaterialName) — leaving
+    // materialName empty made the same material show as "Mat #N" in Properties but the
+    // registry key in Paint, looking like two different materials.
+    def_mat->materialName = "Obj_" + std::to_string(g_ProjectManager.getProjectData().next_object_id) + "_Material";
+    uint16_t mat_id = MaterialManager::getInstance().getOrCreateMaterialID(def_mat->materialName, def_mat);
 
     std::string name = "Sphere_" + std::to_string(g_ProjectManager.getProjectData().next_object_id);
 
@@ -1556,6 +1615,7 @@ void SceneUI::addProceduralSphere(UIContext& ctx) {
     proc.material_id = mat_id;
     g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
 
+    collapseProceduralAddToFlat(ctx.scene.world.objects, name);
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
@@ -1586,7 +1646,12 @@ void SceneUI::addProceduralCylinder(UIContext& ctx) {
     gpu->metallic = 0.0f;
     def_mat->gpuMaterial = gpu;
 
-    uint16_t mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+    // Keep the material's own display name (read by the Properties panel) in sync with the
+    // registry key (read by the Paint panel's reverse-lookup getMaterialName) — leaving
+    // materialName empty made the same material show as "Mat #N" in Properties but the
+    // registry key in Paint, looking like two different materials.
+    def_mat->materialName = "Obj_" + std::to_string(g_ProjectManager.getProjectData().next_object_id) + "_Material";
+    uint16_t mat_id = MaterialManager::getInstance().getOrCreateMaterialID(def_mat->materialName, def_mat);
 
     std::string name = "Cylinder_" + std::to_string(g_ProjectManager.getProjectData().next_object_id);
 
@@ -1686,6 +1751,7 @@ void SceneUI::addProceduralCylinder(UIContext& ctx) {
     proc.material_id = mat_id;
     g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
 
+    collapseProceduralAddToFlat(ctx.scene.world.objects, name);
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
@@ -1883,7 +1949,8 @@ void SceneUI::addProceduralRock(UIContext& ctx) {
         gpu->roughness = 0.5f;
         gpu->metallic = 0.0f;
         def_mat->gpuMaterial = gpu;
-        mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+        def_mat->materialName = "Obj_" + std::to_string(g_ProjectManager.getProjectData().next_object_id) + "_Material";
+        mat_id = MaterialManager::getInstance().getOrCreateMaterialID(def_mat->materialName, def_mat);
     }
     
     std::string name = std::string(rock_name) + "_" + std::to_string(g_ProjectManager.getProjectData().next_object_id);
@@ -1997,7 +2064,8 @@ void SceneUI::addProceduralRock(UIContext& ctx) {
     proc.transform = t->base;
     proc.material_id = mat_id;
     g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
-    
+
+    collapseProceduralAddToFlat(ctx.scene.world.objects, name);
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
@@ -2031,7 +2099,8 @@ void SceneUI::addProceduralBrickWall(UIContext& ctx) {
         gpu->roughness = 0.5f;
         gpu->metallic = 0.0f;
         def_mat->gpuMaterial = gpu;
-        mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+        def_mat->materialName = "Obj_" + std::to_string(g_ProjectManager.getProjectData().next_object_id) + "_Material";
+        mat_id = MaterialManager::getInstance().getOrCreateMaterialID(def_mat->materialName, def_mat);
     }
     
     std::string name = std::string(brick_name) + "_" + std::to_string(g_ProjectManager.getProjectData().next_object_id);
@@ -2123,7 +2192,8 @@ void SceneUI::addProceduralBrickWall(UIContext& ctx) {
     proc.transform = t->base;
     proc.material_id = mat_id;
     g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
-    
+
+    collapseProceduralAddToFlat(ctx.scene.world.objects, name);
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
@@ -2157,7 +2227,8 @@ void SceneUI::addProceduralTorus(UIContext& ctx) {
         gpu->roughness = 0.5f;
         gpu->metallic = 0.0f;
         def_mat->gpuMaterial = gpu;
-        mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+        def_mat->materialName = "Obj_" + std::to_string(g_ProjectManager.getProjectData().next_object_id) + "_Material";
+        mat_id = MaterialManager::getInstance().getOrCreateMaterialID(def_mat->materialName, def_mat);
     }
     
     std::string name = std::string(torus_name) + "_" + std::to_string(g_ProjectManager.getProjectData().next_object_id);
@@ -2221,7 +2292,8 @@ void SceneUI::addProceduralTorus(UIContext& ctx) {
     proc.transform = t->base;
     proc.material_id = mat_id;
     g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
-    
+
+    collapseProceduralAddToFlat(ctx.scene.world.objects, name);
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
@@ -2255,7 +2327,8 @@ void SceneUI::addProceduralStaircase(UIContext& ctx) {
         gpu->roughness = 0.5f;
         gpu->metallic = 0.0f;
         def_mat->gpuMaterial = gpu;
-        mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+        def_mat->materialName = "Obj_" + std::to_string(g_ProjectManager.getProjectData().next_object_id) + "_Material";
+        mat_id = MaterialManager::getInstance().getOrCreateMaterialID(def_mat->materialName, def_mat);
     }
     
     std::string name = std::string(stairs_name) + "_" + std::to_string(g_ProjectManager.getProjectData().next_object_id);
@@ -2332,7 +2405,8 @@ void SceneUI::addProceduralStaircase(UIContext& ctx) {
     proc.transform = t->base;
     proc.material_id = mat_id;
     g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
-    
+
+    collapseProceduralAddToFlat(ctx.scene.world.objects, name);
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();

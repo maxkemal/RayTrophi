@@ -1,0 +1,52 @@
+// terrain_flow_weights.comp
+// One-time (non-iterative) pass: from the converged depression-filled surface
+// (terrain_flow_fill.comp output), compute each cell's normalized MFD (multiple-flow-
+// direction) outflow weight to each of its 8 neighbors — same slope^1.5 power
+// weighting as the CPU flow-accumulation. Precomputing this once lets
+// terrain_flow_accumulate.comp do a cheap O(8) lookup per cell per iteration instead
+// of recomputing neighbor slopes every pass.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    float cellSize;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Filled  { float filled[]; };
+layout(set = 0, binding = 1) buffer Weights          { float weights[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    int x = id % pc.mapWidth;
+    int y = id / pc.mapWidth;
+
+    const int dx[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+    const int dy[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+    const float dist[8] = float[8](1.41421356, 1.0, 1.41421356, 1.0, 1.0, 1.41421356, 1.0, 1.41421356);
+
+    float currentH = filled[id];
+    float power[8];
+    float totalPower = 0.0;
+
+    for (int d = 0; d < 8; d++) {
+        int nx = x + dx[d];
+        int ny = y + dy[d];
+        if (nx < 0 || nx >= pc.mapWidth || ny < 0 || ny >= pc.mapHeight) { power[d] = 0.0; continue; }
+        int nIdx = ny * pc.mapWidth + nx;
+        float slope = (currentH - filled[nIdx]) / (dist[d] * pc.cellSize);
+        if (slope > 0.0) {
+            power[d] = pow(slope, 1.5);
+            totalPower += power[d];
+        } else {
+            power[d] = 0.0;
+        }
+    }
+
+    for (int d = 0; d < 8; d++) {
+        weights[id * 8 + d] = (totalPower > 0.0) ? (power[d] / totalPower) : 0.0;
+    }
+}
