@@ -770,6 +770,23 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
         }
     }
 
+    // 8.6 Geometry Node Graphs (Faz 8a Geo-DAG) — structure only. This serializer has
+    // no binary sidecar, so the originalBaseMesh snapshot is skipped (bin = nullptr);
+    // the full project save path (ProjectManager) persists it.
+    root["geometry_node_graphs"] = json::object();
+    for (const auto& [nodeName, graphPtr] : scene.geometry_node_graphs) {
+        if (!graphPtr) continue;
+        bool hasOperator = false;
+        for (const auto& n : graphPtr->nodes) {
+            const std::string t = n->getTypeId();
+            if (t != "GeoV2.BaseMesh" && t != "GeoV2.Output") { hasOperator = true; break; }
+        }
+        if (!hasOperator) continue;
+        json jg;
+        GeometryNodesV2::serializeGeometryGraph(*graphPtr, jg, nullptr);
+        root["geometry_node_graphs"][nodeName] = jg;
+    }
+
     // 9.6 Particle Systems
     root["active_particle_system_index"] = scene.active_particle_system_index;
     root["particle_systems"] = json::array();
@@ -1138,6 +1155,21 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         TerrainManager::getInstance().deserialize(sjsonToNlohmann(ts), terrainDir, scene);
     }
     
+    // 9.45 Geometry Node Graphs (Faz 8a Geo-DAG) — structure only (no binary sidecar
+    // in this path, so no originalBaseMesh snapshot; see ProjectManager for the full
+    // persistence). Not auto-evaluated: the scene's meshes are whatever was saved.
+    scene.geometry_node_graphs.clear();
+    {
+        simdjson::dom::element geoGraphsRoot;
+        if (!root["geometry_node_graphs"].get(geoGraphsRoot)) {
+            nlohmann::json jGraphs = sjsonToNlohmann(geoGraphsRoot);
+            for (auto it = jGraphs.begin(); it != jGraphs.end(); ++it) {
+                auto graph = GeometryNodesV2::deserializeGeometryGraph(it.value(), nullptr);
+                if (graph) scene.geometry_node_graphs[it.key()] = graph;
+            }
+        }
+    }
+
     // 9.5 Modifiers
     scene.mesh_modifiers.clear();
     scene.base_mesh_cache.clear();

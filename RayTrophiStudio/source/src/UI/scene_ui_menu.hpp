@@ -26,6 +26,7 @@
 #include "scene_ui_forcefield.hpp"
 #include "SceneExporter.h" // For GLTF Export
 #include "GasVolume.h"     // For Gas Volume creation
+#include "HittableInstance.h"  // reorderInstanceTail below
 #include <filesystem>
 #include <thread>
 #include <atomic>
@@ -58,6 +59,24 @@ namespace {
     std::atomic<int>   s_bakeTotal{0};
     std::atomic<bool>  s_bakeNeedsHotReload{false};
 
+    // Every CPU-side selection/hierarchy/picking scan assumes foliage/scatter instances
+    // are a contiguous suffix of world.objects (selectable = size - InstanceManager::
+    // getTotalInstanceCount(), see rebuildMeshCache/tri_to_index/viewport stats/selection
+    // sync). Any code that push_back's a new object while that instance tail already
+    // exists (mid-session "Add X" after a Geo-DAG Scatter/scatter-brush pass) breaks
+    // that invariant — the new object gets miscounted as foliage and vanishes from the
+    // hierarchy/picking even though it still renders (GPU paths iterate everything).
+    // Restoring the invariant is a single stable_partition (non-instances first,
+    // HittableInstance last) — cheap here since it only runs after a discrete "Add"
+    // user action, never per-frame. See [[project_geo_dag_faz8b_fields]] for the
+    // sibling fixes (asset import, Geo-DAG Evaluate) that hit the same bug class.
+    void reorderInstanceTail(std::vector<std::shared_ptr<Hittable>>& objects) {
+        std::stable_partition(objects.begin(), objects.end(),
+            [](const std::shared_ptr<Hittable>& o) {
+                return dynamic_cast<HittableInstance*>(o.get()) == nullptr;
+            });
+    }
+
     // Add-object-flat: collapse a freshly-added procedural primitive's standalone Triangle facades
     // (all sharing one node name) into ONE shared SoA TriangleMesh-as-Hittable — the add-object
     // equivalent of import-flat / apply-flat / Simple-subdivide-flat. Gated by
@@ -70,6 +89,10 @@ namespace {
     // name are collapsed, so it never disturbs already-flat meshes.
     void collapseProceduralAddToFlat(std::vector<std::shared_ptr<Hittable>>& objects,
                                      const std::string& name) {
+        // Restore the instance-tail invariant FIRST — regardless of g_dense_mesh_as_hittable,
+        // since the facades/objects were already push_back'd (at the true end, past any
+        // existing instance tail) by the caller before this function runs.
+        reorderInstanceTail(objects);
         if (!g_dense_mesh_as_hittable) return;
         std::vector<std::shared_ptr<Triangle>> facades;
         for (const auto& o : objects) {

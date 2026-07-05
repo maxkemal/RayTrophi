@@ -960,7 +960,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
 // ===============================================================================
 // REUSABLE MATERIAL EDITOR WIDGET
 // ===============================================================================
-void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, UIContext& ctx) {
+void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, UIContext& ctx, bool showUvWorkflow) {
     if (!pbsdf) return;
     
     bool changed = false;
@@ -1327,242 +1327,246 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
     };
 
     // Style
-    ImVec4 uvFrameBg = ImVec4(0.12f, 0.12f, 0.15f, 1.0f);
-    ImVec4 uvFrameBgHovered = ImVec4(0.18f, 0.20f, 0.25f, 1.0f);
-    ImVec4 uvFrameBgActive = ImVec4(0.22f, 0.25f, 0.30f, 1.0f);
-    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
-        const auto& curTheme = ThemeManager::instance().current();
-        uvFrameBg = curTheme.colors.surface;
-        uvFrameBgHovered = UIWidgets::ScaleColor(curTheme.colors.surface, 1.3f);
-        uvFrameBgActive = UIWidgets::ScaleColor(curTheme.colors.surface, 1.5f);
-    }
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, uvFrameBg);
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, uvFrameBgHovered);
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, uvFrameBgActive);
-    
-    ImVec4 uvSliderGrab = ImVec4(0.35f, 0.65f, 0.45f, 1.0f);
-    ImVec4 uvSliderGrabActive = ImVec4(0.45f, 0.75f, 0.55f, 1.0f);
-    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
-        const auto& curTheme = ThemeManager::instance().current();
-        uvSliderGrab = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.92f);
-        uvSliderGrabActive = ImVec4((std::min)(1.0f, curTheme.colors.accent.x + 0.10f), (std::min)(1.0f, curTheme.colors.accent.y + 0.10f), (std::min)(1.0f, curTheme.colors.accent.z + 0.10f), 1.0f);
-    }
-    ImGui::PushStyleColor(ImGuiCol_SliderGrab, uvSliderGrab);
-    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, uvSliderGrabActive);
-    
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.40f, 0.38f, 0.8f));
-    float uv_round = 3.0f;
-    if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
-        uv_round = ThemeManager::instance().current().style.frameRounding;
-    }
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, uv_round);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 3));
-
-    if (UIWidgets::BeginSection("UV Workflow", ImVec4(0.54f, 0.86f, 1.0f, 1.0f))) {
-        ImGui::TextWrapped("Choose the UV set here and run repair/projection tools before painting.");
-
-        ImGui::BeginDisabled(obj_n.empty());
-        if (UIWidgets::SecondaryButton("Project UVs from View", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
-            ImGui::OpenPopup("MaterialUVProjectConfirm");
+    if (showUvWorkflow) {
+        ImVec4 uvFrameBg = ImVec4(0.12f, 0.12f, 0.15f, 1.0f);
+        ImVec4 uvFrameBgHovered = ImVec4(0.18f, 0.20f, 0.25f, 1.0f);
+        ImVec4 uvFrameBgActive = ImVec4(0.22f, 0.25f, 0.30f, 1.0f);
+        if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+            const auto& curTheme = ThemeManager::instance().current();
+            uvFrameBg = curTheme.colors.surface;
+            uvFrameBgHovered = UIWidgets::ScaleColor(curTheme.colors.surface, 1.3f);
+            uvFrameBgActive = UIWidgets::ScaleColor(curTheme.colors.surface, 1.5f);
         }
-        if (history.getUndoDescription().find("Project UVs") != std::string::npos) {
-            ImVec2 btn_size = ImVec2(UIWidgets::GetInspectorActionWidth(), 0);
-            if (UIWidgets::SecondaryButton("Reset / Undo Projection", btn_size)) {
-                if (history.undo(ctx)) {
-                    rebuildMeshCache(ctx.scene.world.objects);
-                    ctx.selection.updatePositionFromSelection();
-                    ctx.selection.selected.has_cached_aabb = false;
-                    uv_workflow_cache_dirty = true;
-                }
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, uvFrameBg);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, uvFrameBgHovered);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, uvFrameBgActive);
+        
+        ImVec4 uvSliderGrab = ImVec4(0.35f, 0.65f, 0.45f, 1.0f);
+        ImVec4 uvSliderGrabActive = ImVec4(0.45f, 0.75f, 0.55f, 1.0f);
+        if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+            const auto& curTheme = ThemeManager::instance().current();
+            uvSliderGrab = ImVec4(curTheme.colors.accent.x, curTheme.colors.accent.y, curTheme.colors.accent.z, 0.92f);
+            uvSliderGrabActive = ImVec4((std::min)(1.0f, curTheme.colors.accent.x + 0.10f), (std::min)(1.0f, curTheme.colors.accent.y + 0.10f), (std::min)(1.0f, curTheme.colors.accent.z + 0.10f), 1.0f);
+        }
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, uvSliderGrab);
+        ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, uvSliderGrabActive);
+        
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.40f, 0.38f, 0.8f));
+        float uv_round = 3.0f;
+        if (ThemeManager::instance().getIconSettings().overridePanelAccentsWithTheme) {
+            uv_round = ThemeManager::instance().current().style.frameRounding;
+        }
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, uv_round);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 3));
+
+        if (UIWidgets::BeginSection("UV Workflow", ImVec4(0.54f, 0.86f, 1.0f, 1.0f))) {
+            ImGui::TextWrapped("Choose the UV set here and run repair/projection tools before painting.");
+
+            ImGui::BeginDisabled(obj_n.empty());
+            if (UIWidgets::SecondaryButton("Project UVs from View", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+                ImGui::OpenPopup("MaterialUVProjectConfirm");
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Revert UV coordinates to previous state.");
-        }
-        if (ImGui::BeginPopupModal("MaterialUVProjectConfirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::Text("Warning: This will overwrite the active UV set for this object.\nExisting tiling textures might change.\nAre you sure?");
-            ImGui::Separator();
-            if (ImGui::Button("Yes, Project UVs", ImVec2(120, 0))) {
-                projectObjectUVsFromView(ctx, *this, obj_n);
-                uv_workflow_cache_dirty = true;
-                ImGui::CloseCurrentPopup();
+            if (history.getUndoDescription().find("Project UVs") != std::string::npos) {
+                ImVec2 btn_size = ImVec2(UIWidgets::GetInspectorActionWidth(), 0);
+                if (UIWidgets::SecondaryButton("Reset / Undo Projection", btn_size)) {
+                    if (history.undo(ctx)) {
+                        rebuildMeshCache(ctx.scene.world.objects);
+                        ctx.selection.updatePositionFromSelection();
+                        ctx.selection.selected.has_cached_aabb = false;
+                        uv_workflow_cache_dirty = true;
+                    }
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Revert UV coordinates to previous state.");
+            }
+            if (ImGui::BeginPopupModal("MaterialUVProjectConfirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::Text("Warning: This will overwrite the active UV set for this object.\nExisting tiling textures might change.\nAre you sure?");
+                ImGui::Separator();
+                if (ImGui::Button("Yes, Project UVs", ImVec2(120, 0))) {
+                    projectObjectUVsFromView(ctx, *this, obj_n);
+                    uv_workflow_cache_dirty = true;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::EndDisabled();
+
+            ensureUvWorkflowCache();
+            int max_uv_sets = uv_workflow_cached_max_uv_sets;
+            if (max_uv_sets > 1) {
+                std::vector<std::string> uv_labels;
+                std::vector<const char*> uv_label_ptrs;
+                uv_labels.reserve(max_uv_sets);
+                uv_label_ptrs.reserve(max_uv_sets);
+                for (int uv_index = 0; uv_index < max_uv_sets; ++uv_index) {
+                    uv_labels.push_back("UV Set " + std::to_string(uv_index));
+                    uv_label_ptrs.push_back(uv_labels.back().c_str());
+                }
+
+                int selected_uv_set = std::clamp(pbsdf->selected_uv_set, 0, max_uv_sets - 1);
+                if (ImGui::Combo("UV Set", &selected_uv_set, uv_label_ptrs.data(), max_uv_sets)) {
+                    pbsdf->selected_uv_set = selected_uv_set;
+                    uv_workflow_cached_uv_set = selected_uv_set;
+                    for (const auto& tri : uv_workflow_cached_triangles) {
+                        tri->applyUVSet(static_cast<size_t>(selected_uv_set));
+                    }
+                    refreshGeometryAfterUvChange();
+                }
+                ImGui::TextDisabled("Textures and mesh paint use the selected UV set.");
+            } else {
+                pbsdf->selected_uv_set = 0;
+                ImGui::TextDisabled("UV Set: UV 0");
+            }
+
+            ImGui::Spacing();
+            ImGui::SeparatorText("Material UV Transform");
+            {
+                auto& uvTransform = pbsdf->textureTransform;
+                static bool lockUvScaleAxes = true;
+                static bool lockUvOffsetAxes = false;
+                float uvScale[2] = {
+                    static_cast<float>(uvTransform.scale.u),
+                    static_cast<float>(uvTransform.scale.v)
+                };
+                float uvOffset[2] = {
+                    static_cast<float>(uvTransform.translation.u),
+                    static_cast<float>(uvTransform.translation.v)
+                };
+                float uvRotation = uvTransform.rotation_degrees;
+                int wrapMode = static_cast<int>(uvTransform.wrapMode);
+                const char* wrapLabels[] = { "Repeat", "Mirror", "Clamp", "Planar", "Cubic" };
+
+                ImGui::Checkbox("Lock Scale XY", &lockUvScaleAxes);
+                if (ImGui::DragFloat2("Scale XY", uvScale, 0.01f, 0.001f, 64.0f, "%.3f")) {
+                    if (lockUvScaleAxes) {
+                        const float lockedScale = std::max(0.001f, uvScale[0]);
+                        uvScale[0] = lockedScale;
+                        uvScale[1] = lockedScale;
+                    }
+                    uvTransform.scale = Vec2(
+                        std::max(0.001f, uvScale[0]),
+                        std::max(0.001f, uvScale[1]));
+                    changed = true;
+                }
+                ImGui::Checkbox("Lock Offset XY", &lockUvOffsetAxes);
+                if (ImGui::DragFloat2("Offset XY", uvOffset, 0.01f, -100.0f, 100.0f, "%.3f")) {
+                    if (lockUvOffsetAxes) {
+                        uvOffset[1] = uvOffset[0];
+                    }
+                    uvTransform.translation = Vec2(uvOffset[0], uvOffset[1]);
+                    changed = true;
+                }
+                if (ImGui::DragFloat("Rotation", &uvRotation, 0.25f, -360.0f, 360.0f, "%.1f deg")) {
+                    uvTransform.rotation_degrees = uvRotation;
+                    changed = true;
+                }
+                if (ImGui::Combo("Wrap", &wrapMode, wrapLabels, IM_ARRAYSIZE(wrapLabels))) {
+                    uvTransform.wrapMode = static_cast<WrapMode>(wrapMode);
+                    changed = true;
+                }
+
+                if (UIWidgets::SecondaryButton("Reset UV Transform", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+                    uvTransform.scale = Vec2(1.0, 1.0);
+                    uvTransform.translation = Vec2(0.0, 0.0);
+                    uvTransform.rotation_degrees = 0.0f;
+                    uvTransform.wrapMode = WrapMode::Repeat;
+                    changed = true;
+                }
+                ImGui::TextDisabled("Scale/Offset/Rotation affect texture sampling, not stored mesh UVs.");
+            }
+
+            const float uv_tool_w = (UIWidgets::GetInspectorActionWidth() - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+            if (UIWidgets::SecondaryButton("Normalize UVs", ImVec2(uv_tool_w, 0))) {
+                const int selected_uv_set = std::max(0, pbsdf->selected_uv_set);
+                double min_u = std::numeric_limits<double>::max();
+                double min_v = std::numeric_limits<double>::max();
+                double max_u = std::numeric_limits<double>::lowest();
+                double max_v = std::numeric_limits<double>::lowest();
+                for (const auto& tri : uv_workflow_cached_triangles) {
+                    auto [uv0, uv1, uv2] = tri->getUVSetCoordinates(static_cast<size_t>(selected_uv_set));
+                    const Vec2 uvs[3] = { uv0, uv1, uv2 };
+                    for (const Vec2& uv : uvs) {
+                        min_u = std::min(min_u, static_cast<double>(uv.u));
+                        min_v = std::min(min_v, static_cast<double>(uv.v));
+                        max_u = std::max(max_u, static_cast<double>(uv.u));
+                        max_v = std::max(max_v, static_cast<double>(uv.v));
+                    }
+                }
+                const double span_u = std::max(1e-8, max_u - min_u);
+                const double span_v = std::max(1e-8, max_v - min_v);
+                applyUvEditToSelectedSet([&](std::array<Vec2, 3>& uv_data) {
+                    for (Vec2& uv : uv_data) {
+                        uv.u = (uv.u - min_u) / span_u;
+                        uv.v = (uv.v - min_v) / span_v;
+                    }
+                });
             }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
-        ImGui::EndDisabled();
-
-        ensureUvWorkflowCache();
-        int max_uv_sets = uv_workflow_cached_max_uv_sets;
-        if (max_uv_sets > 1) {
-            std::vector<std::string> uv_labels;
-            std::vector<const char*> uv_label_ptrs;
-            uv_labels.reserve(max_uv_sets);
-            uv_label_ptrs.reserve(max_uv_sets);
-            for (int uv_index = 0; uv_index < max_uv_sets; ++uv_index) {
-                uv_labels.push_back("UV Set " + std::to_string(uv_index));
-                uv_label_ptrs.push_back(uv_labels.back().c_str());
+            if (UIWidgets::SecondaryButton("Flip U", ImVec2(uv_tool_w, 0))) {
+                applyUvEditToSelectedSet([&](std::array<Vec2, 3>& uv_data) {
+                    for (Vec2& uv : uv_data) uv.u = 1.0 - uv.u;
+                });
             }
 
-            int selected_uv_set = std::clamp(pbsdf->selected_uv_set, 0, max_uv_sets - 1);
-            if (ImGui::Combo("UV Set", &selected_uv_set, uv_label_ptrs.data(), max_uv_sets)) {
-                pbsdf->selected_uv_set = selected_uv_set;
-                uv_workflow_cached_uv_set = selected_uv_set;
-                for (const auto& tri : uv_workflow_cached_triangles) {
-                    tri->applyUVSet(static_cast<size_t>(selected_uv_set));
+            if (UIWidgets::SecondaryButton("Flip V", ImVec2(uv_tool_w, 0))) {
+                applyUvEditToSelectedSet([&](std::array<Vec2, 3>& uv_data) {
+                    for (Vec2& uv : uv_data) uv.v = 1.0 - uv.v;
+                });
+            }
+            ImGui::SameLine();
+            if (UIWidgets::SecondaryButton("Swap U/V", ImVec2(uv_tool_w, 0))) {
+                applyUvEditToSelectedSet([&](std::array<Vec2, 3>& uv_data) {
+                    for (Vec2& uv : uv_data) std::swap(uv.u, uv.v);
+                });
+            }
+
+            ImGui::BeginChild("##uv_workflow_panel", ImVec2(0, 250.0f), true, ImGuiWindowFlags_NoScrollbar);
+            {
+                ImGui::Spacing();
+                const float preview_size = std::min(220.0f, ImGui::GetContentRegionAvail().x);
+                const ImVec2 preview_min = ImGui::GetCursorScreenPos();
+                const ImVec2 preview_max(preview_min.x + preview_size, preview_min.y + preview_size);
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->AddRectFilled(preview_min, preview_max, IM_COL32(18, 22, 28, 255), 4.0f);
+                dl->AddRect(preview_min, preview_max, IM_COL32(90, 110, 130, 220), 4.0f);
+
+                for (int grid = 1; grid < 4; ++grid) {
+                    const float t = static_cast<float>(grid) / 4.0f;
+                    const float x = preview_min.x + preview_size * t;
+                    const float y = preview_min.y + preview_size * t;
+                    dl->AddLine(ImVec2(x, preview_min.y), ImVec2(x, preview_max.y), IM_COL32(55, 65, 78, 160), 1.0f);
+                    dl->AddLine(ImVec2(preview_min.x, y), ImVec2(preview_max.x, y), IM_COL32(55, 65, 78, 160), 1.0f);
                 }
-                refreshGeometryAfterUvChange();
-            }
-            ImGui::TextDisabled("Textures and mesh paint use the selected UV set.");
-        } else {
-            pbsdf->selected_uv_set = 0;
-            ImGui::TextDisabled("UV Set: UV 0");
-        }
 
-        ImGui::Spacing();
-        ImGui::SeparatorText("Material UV Transform");
-        {
-            auto& uvTransform = pbsdf->textureTransform;
-            static bool lockUvScaleAxes = true;
-            static bool lockUvOffsetAxes = false;
-            float uvScale[2] = {
-                static_cast<float>(uvTransform.scale.u),
-                static_cast<float>(uvTransform.scale.v)
-            };
-            float uvOffset[2] = {
-                static_cast<float>(uvTransform.translation.u),
-                static_cast<float>(uvTransform.translation.v)
-            };
-            float uvRotation = uvTransform.rotation_degrees;
-            int wrapMode = static_cast<int>(uvTransform.wrapMode);
-            const char* wrapLabels[] = { "Repeat", "Mirror", "Clamp", "Planar", "Cubic" };
+                const int selected_uv_set = std::max(0, pbsdf->selected_uv_set);
 
-            ImGui::Checkbox("Lock Scale XY", &lockUvScaleAxes);
-            if (ImGui::DragFloat2("Scale XY", uvScale, 0.01f, 0.001f, 64.0f, "%.3f")) {
-                if (lockUvScaleAxes) {
-                    const float lockedScale = std::max(0.001f, uvScale[0]);
-                    uvScale[0] = lockedScale;
-                    uvScale[1] = lockedScale;
+                auto toPreviewPoint = [&](const Vec2& uv) {
+                    return ImVec2(
+                        preview_min.x + static_cast<float>(uv.u) * preview_size,
+                        preview_max.y - static_cast<float>(uv.v) * preview_size);
+                };
+
+                for (const auto& entry : uv_workflow_preview_entries) {
+                    const ImVec2 p0 = toPreviewPoint(entry.uvs[0]);
+                    const ImVec2 p1 = toPreviewPoint(entry.uvs[1]);
+                    const ImVec2 p2 = toPreviewPoint(entry.uvs[2]);
+                    dl->AddTriangle(p0, p1, p2, IM_COL32(110, 200, 255, 180), 1.0f);
                 }
-                uvTransform.scale = Vec2(
-                    std::max(0.001f, uvScale[0]),
-                    std::max(0.001f, uvScale[1]));
-                changed = true;
-            }
-            ImGui::Checkbox("Lock Offset XY", &lockUvOffsetAxes);
-            if (ImGui::DragFloat2("Offset XY", uvOffset, 0.01f, -100.0f, 100.0f, "%.3f")) {
-                if (lockUvOffsetAxes) {
-                    uvOffset[1] = uvOffset[0];
-                }
-                uvTransform.translation = Vec2(uvOffset[0], uvOffset[1]);
-                changed = true;
-            }
-            if (ImGui::DragFloat("Rotation", &uvRotation, 0.25f, -360.0f, 360.0f, "%.1f deg")) {
-                uvTransform.rotation_degrees = uvRotation;
-                changed = true;
-            }
-            if (ImGui::Combo("Wrap", &wrapMode, wrapLabels, IM_ARRAYSIZE(wrapLabels))) {
-                uvTransform.wrapMode = static_cast<WrapMode>(wrapMode);
-                changed = true;
-            }
 
-            if (UIWidgets::SecondaryButton("Reset UV Transform", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
-                uvTransform.scale = Vec2(1.0, 1.0);
-                uvTransform.translation = Vec2(0.0, 0.0);
-                uvTransform.rotation_degrees = 0.0f;
-                uvTransform.wrapMode = WrapMode::Repeat;
-                changed = true;
-            }
-            ImGui::TextDisabled("Scale/Offset/Rotation affect texture sampling, not stored mesh UVs.");
-        }
-
-        const float uv_tool_w = (UIWidgets::GetInspectorActionWidth() - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-        if (UIWidgets::SecondaryButton("Normalize UVs", ImVec2(uv_tool_w, 0))) {
-            const int selected_uv_set = std::max(0, pbsdf->selected_uv_set);
-            double min_u = std::numeric_limits<double>::max();
-            double min_v = std::numeric_limits<double>::max();
-            double max_u = std::numeric_limits<double>::lowest();
-            double max_v = std::numeric_limits<double>::lowest();
-            for (const auto& tri : uv_workflow_cached_triangles) {
-                auto [uv0, uv1, uv2] = tri->getUVSetCoordinates(static_cast<size_t>(selected_uv_set));
-                const Vec2 uvs[3] = { uv0, uv1, uv2 };
-                for (const Vec2& uv : uvs) {
-                    min_u = std::min(min_u, static_cast<double>(uv.u));
-                    min_v = std::min(min_v, static_cast<double>(uv.v));
-                    max_u = std::max(max_u, static_cast<double>(uv.u));
-                    max_v = std::max(max_v, static_cast<double>(uv.v));
+                ImGui::InvisibleButton("##uv_preview", ImVec2(preview_size, preview_size));
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("UV Preview\nActive Set: %d\nTriangles: %d", selected_uv_set, static_cast<int>(uv_workflow_cached_triangles.size()));
                 }
             }
-            const double span_u = std::max(1e-8, max_u - min_u);
-            const double span_v = std::max(1e-8, max_v - min_v);
-            applyUvEditToSelectedSet([&](std::array<Vec2, 3>& uv_data) {
-                for (Vec2& uv : uv_data) {
-                    uv.u = (uv.u - min_u) / span_u;
-                    uv.v = (uv.v - min_v) / span_v;
-                }
-            });
+            ImGui::EndChild();
+            UIWidgets::EndSection();
         }
-        ImGui::SameLine();
-        if (UIWidgets::SecondaryButton("Flip U", ImVec2(uv_tool_w, 0))) {
-            applyUvEditToSelectedSet([&](std::array<Vec2, 3>& uv_data) {
-                for (Vec2& uv : uv_data) uv.u = 1.0 - uv.u;
-            });
-        }
-
-        if (UIWidgets::SecondaryButton("Flip V", ImVec2(uv_tool_w, 0))) {
-            applyUvEditToSelectedSet([&](std::array<Vec2, 3>& uv_data) {
-                for (Vec2& uv : uv_data) uv.v = 1.0 - uv.v;
-            });
-        }
-        ImGui::SameLine();
-        if (UIWidgets::SecondaryButton("Swap U/V", ImVec2(uv_tool_w, 0))) {
-            applyUvEditToSelectedSet([&](std::array<Vec2, 3>& uv_data) {
-                for (Vec2& uv : uv_data) std::swap(uv.u, uv.v);
-            });
-        }
-
-        ImGui::BeginChild("##uv_workflow_panel", ImVec2(0, 250.0f), true, ImGuiWindowFlags_NoScrollbar);
-        {
-            ImGui::Spacing();
-            const float preview_size = std::min(220.0f, ImGui::GetContentRegionAvail().x);
-            const ImVec2 preview_min = ImGui::GetCursorScreenPos();
-            const ImVec2 preview_max(preview_min.x + preview_size, preview_min.y + preview_size);
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            dl->AddRectFilled(preview_min, preview_max, IM_COL32(18, 22, 28, 255), 4.0f);
-            dl->AddRect(preview_min, preview_max, IM_COL32(90, 110, 130, 220), 4.0f);
-
-            for (int grid = 1; grid < 4; ++grid) {
-                const float t = static_cast<float>(grid) / 4.0f;
-                const float x = preview_min.x + preview_size * t;
-                const float y = preview_min.y + preview_size * t;
-                dl->AddLine(ImVec2(x, preview_min.y), ImVec2(x, preview_max.y), IM_COL32(55, 65, 78, 160), 1.0f);
-                dl->AddLine(ImVec2(preview_min.x, y), ImVec2(preview_max.x, y), IM_COL32(55, 65, 78, 160), 1.0f);
-            }
-
-            const int selected_uv_set = std::max(0, pbsdf->selected_uv_set);
-
-            auto toPreviewPoint = [&](const Vec2& uv) {
-                return ImVec2(
-                    preview_min.x + static_cast<float>(uv.u) * preview_size,
-                    preview_max.y - static_cast<float>(uv.v) * preview_size);
-            };
-
-            for (const auto& entry : uv_workflow_preview_entries) {
-                const ImVec2 p0 = toPreviewPoint(entry.uvs[0]);
-                const ImVec2 p1 = toPreviewPoint(entry.uvs[1]);
-                const ImVec2 p2 = toPreviewPoint(entry.uvs[2]);
-                dl->AddTriangle(p0, p1, p2, IM_COL32(110, 200, 255, 180), 1.0f);
-            }
-
-            ImGui::InvisibleButton("##uv_preview", ImVec2(preview_size, preview_size));
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("UV Preview\nActive Set: %d\nTriangles: %d", selected_uv_set, static_cast<int>(uv_workflow_cached_triangles.size()));
-            }
-        }
-        ImGui::EndChild();
-        UIWidgets::EndSection();
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(6);
     }
 
     if (UIWidgets::BeginSection("Surface Core", ImVec4(1.0f, 0.72f, 0.42f, 1.0f))) {
@@ -1607,6 +1611,18 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
             pbsdf->setTransmission(transmission, pbsdf->ior);
             changed = true;
         }
+
+        // Spectral dispersion: per-path stochastic wavelength-channel refraction.
+        // Only meaningful with Transmission > 0 (prism / diamond colour fringing).
+        float dispersion = pbsdf->dispersion;
+        if (ImGui::SliderFloat("Dispersion##disp", &dispersion, 0.0f, 1.0f, "%.3f")) {
+            pbsdf->dispersion = dispersion;
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Spectral dispersion (chromatic refraction): red/green/blue bend differently,\n"
+                              "producing rainbow fringing in glass (prism, diamond). Needs Transmission > 0.\n"
+                              "Adds colour noise that converges with more samples. 0 = off.");
 
         // Thick-resin / glass-marble depth. Self-contained: when > 0 the material
         // becomes a transmissive resin body (no need to raise Transmission too) and
@@ -2131,8 +2147,31 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
             pbsdf->normalProperty.intensity = normal_strength;
             changed = true;
         }
+        // Channel selector for packed roughness/metallic maps. Auto = ORM
+        // convention (roughness .g / metallic .b, BC4/R8 caches .r). Non-ORM
+        // packings (RMA/MRA, metal-in-R exports) need the explicit choice —
+        // under Auto they read the wrong channel and the surface shades as
+        // full metal (killing diffuse response and caustics on it).
+        auto DrawChannelCombo = [&](const char* id, int& channel) {
+            const char* items[] = { "Auto (ORM)", "R", "G", "B" };
+            int cur = (channel >= 0 && channel <= 3) ? channel : 0;
+            // Own line under the slot — appended to the slot row it lands at the
+            // far right edge, out of comfortable reach.
+            ImGui::Indent(24.0f);
+            ImGui::SetNextItemWidth(130.0f);
+            if (ImGui::Combo(id, &cur, items, 4)) {
+                channel = cur;
+                changed = true;
+                texture_changed = true; // flags live in the GPU material — full resync
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("Channel");
+            ImGui::Unindent(24.0f);
+        };
         DrawTextureSlot("Roughness", pbsdf->roughnessProperty.texture, TextureType::Roughness, Paint::PaintChannel::Roughness);
+        if (pbsdf->roughnessProperty.texture) DrawChannelCombo("##roughch", pbsdf->roughness_tex_channel);
         DrawTextureSlot("Metallic", pbsdf->metallicProperty.texture, TextureType::Metallic, Paint::PaintChannel::Metallic);
+        if (pbsdf->metallicProperty.texture) DrawChannelCombo("##metalch", pbsdf->metallic_tex_channel);
         DrawTextureSlot("Specular", pbsdf->specularProperty.texture, TextureType::Specular, Paint::PaintChannel::Mask);
         DrawTextureSlot("Emission", pbsdf->emissionProperty.texture, TextureType::Emission, Paint::PaintChannel::Emission);
         DrawTextureSlot("Transmission", pbsdf->transmissionProperty.texture, TextureType::Transmission, Paint::PaintChannel::Transmission);
@@ -2146,7 +2185,4 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         TriggerMaterialUpdate(texture_changed);
         g_ProjectManager.markModified();
     }
-
-    ImGui::PopStyleVar(3);
-    ImGui::PopStyleColor(6);
 }

@@ -1,0 +1,302 @@
+#version 460
+// =============================================================================
+// photon.rgen — Light-side photon tracing for caustics (Faz 2 / Dilim 1).
+// =============================================================================
+// Second raygen group in the SAME RT pipeline as the camera raygen: photons
+// reuse the existing closesthit/miss shaders and therefore the full BSDF
+// machinery (scatterGlass refraction incl. dispersion hero-channel, Beer-
+// Lambert tint, water, terrain). The camera push constants are re-pushed with
+// lightCount = 0 for this dispatch so closesthit skips NEE work per photon
+// bounce; the real light data is read here from the LightBuffer directly,
+// selected via photonGrid.h.lightIndex.
+//
+// A photon walks specular/transmission chains; on the first DIFFUSE bounce it
+// splats its power into the hash grid IF the path crossed at least one
+// transmissive interface (LS+D caustic paths only — the camera path tracer
+// already renders everything else, so this cannot double count).
+// =============================================================================
+#extension GL_EXT_ray_tracing        : require
+#extension GL_EXT_scalar_block_layout : require
+
+// ── Payload — must match raygen.rgen / closesthit.rchit EXACTLY (shared ABI) ──
+struct RayPayload {
+    vec3     radiance;
+    vec3     attenuation;
+    vec3     scatterOrigin;
+    vec3     scatterDir;
+    uint     seed;
+    bool     scattered;
+    bool     hitEmissive;
+    uint     occluded;
+    bool     skipAABBs;
+    vec3     primaryAlbedo;
+    vec3     primaryNormal;
+    uint     primaryHit;
+    float    primaryTransmission;
+    float    primaryMetallic;
+    uint     bounceType;
+    uint     primaryMaterialId;
+    float    dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
+};
+layout(location = 0) rayPayloadEXT RayPayload payload;
+
+const uint BOUNCE_SPECULAR     = 0u;
+const uint BOUNCE_DIFFUSE      = 1u;
+const uint BOUNCE_TRANSMISSION = 2u;   // real refraction — the ONLY event that sets crossedGlass
+const uint BOUNCE_TRANSPARENT  = 3u;
+const uint BOUNCE_RESIN        = 4u;
+const uint BOUNCE_GLASS_REFLECT = 6u;  // glass mirror lobe: keep walking, does NOT count as crossing
+
+layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
+
+// LightData — must match closesthit.rchit / VkGpuLight
+struct LightData {
+    vec4 position;    // xyz + type (0=point, 1=dir, 2=area, 3=spot)
+    vec4 color;       // rgb + intensity
+    vec4 params;      // radius, width, height, inner_angle
+    vec4 direction;   // xyz + outer_angle
+    vec4 area_u;      // xyz: AreaLight u-axis (unit)
+    vec4 area_v;      // xyz: AreaLight v-axis (unit)
+};
+layout(set = 0, binding = 3, scalar) readonly buffer LightBuffer { LightData l[]; } lights;
+
+#include "photon_grid.glsl"
+
+// ── RNG (PCG, same family as the other shaders) ─────────────────────────────
+uint pcgHash(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+float rnd(inout uint seed) {
+    seed = pcgHash(seed);
+    return float(seed) * (1.0 / 4294967296.0);
+}
+vec3 rndInUnitSphere(inout uint seed) {
+    // Rejection-free spherical sampling
+    float z   = 1.0 - 2.0 * rnd(seed);
+    float phi = 6.2831853 * rnd(seed);
+    float r   = sqrt(max(0.0, 1.0 - z * z));
+    float rad = pow(rnd(seed), 1.0 / 3.0);
+    return vec3(r * cos(phi), r * sin(phi), z) * rad;
+}
+
+void buildONB(vec3 n, out vec3 t, out vec3 b) {
+    vec3 up = (abs(n.y) < 0.99) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    t = normalize(cross(up, n));
+    b = cross(n, t);
+}
+
+void main() {
+    uint photonIdx = gl_LaunchIDEXT.x + gl_LaunchIDEXT.y * gl_LaunchSizeEXT.x;
+    if (photonIdx >= photonGrid.h.photonCount) return;
+    uint seed = pcgHash(photonIdx ^ pcgHash(photonGrid.h.frameSeed * 9781u + 1u));
+
+    // Per-photon light cycling: photon i draws light (base + i) mod L, so each
+    // light receives ~N/L photons; the power below multiplies by L to keep each
+    // light's total emitted flux exact (round-robin estimator).
+    uint lightCount = photonGrid.h.lightCountReal;
+    if (lightCount == 0u) return;
+    uint lightIdx = (photonGrid.h.lightIndex + photonIdx) % lightCount;
+    LightData light = lights.l[lightIdx];
+    int  ltype     = int(light.position.w + 0.5);
+    vec3 emitCtr   = photonGrid.h.emitCenter.xyz;
+    float emitRad  = max(photonGrid.h.emitCenter.w, 0.1);
+
+    // Emission target: a random point inside the importance sphere. Photons are
+    // only shot toward this region (glass/interest area) — the wasted-photon
+    // fraction is handled by energyScale; exact per-type solid-angle/area
+    // normalization is Dilim 2 (calibration) work.
+    vec3 target = emitCtr + rndInUnitSphere(seed) * emitRad;
+
+    vec3 org, dir;
+    float fluxOverride = -1.0;   // set by the direct-shaft mixture emission below
+    if (ltype == 1) {
+        // Directional: parallel rays from a virtual disk upstream of the target.
+        dir = normalize(light.direction.xyz);
+        vec3 t, b;
+        buildONB(dir, t, b);
+        float ang = 6.2831853 * rnd(seed);
+        float rr  = emitRad * sqrt(rnd(seed));
+        vec3 diskCentre = emitCtr - dir * (2.0 * emitRad + 50.0);
+        org = diskCentre + (t * cos(ang) + b * sin(ang)) * rr;
+    } else if (ltype == 2) {
+        // Area light: uniform point on the rectangle, aimed at the target.
+        float w = max(light.params.y, 1e-3);
+        float h = max(light.params.z, 1e-3);
+        org = light.position.xyz
+            + light.area_u.xyz * (rnd(seed) - 0.5) * w
+            + light.area_v.xyz * (rnd(seed) - 0.5) * h;
+        dir = normalize(target - org);
+    } else {
+        // Point (0) / Spot (3): emit from the light position toward the target.
+        org = light.position.xyz;
+        dir = normalize(target - org);
+
+        // Direct-shaft mode (volume header lightIndex bit 0): pure caster
+        // targeting makes a POINT light look like a spot aimed at the glass —
+        // with direct deposits the emission distribution itself becomes
+        // visible. MIS-style mixture instead: probability q keeps the caster
+        // cone (sharp caustics), 1-q samples the light's TRUE distribution
+        // (isotropic for point, the outer cone for spot). Each photon's power
+        // divides by the MIXTURE pdf, so both estimators stay unbiased and
+        // the surface caustic keeps its brightness.
+        bool directShafts = (photonVolGrid.h.lightIndex & 1u) != 0u;
+        vec3 toCtr = emitCtr - org;
+        float dCtr = length(toCtr);
+        if (directShafts && dCtr > emitRad) {
+            const float q = 0.5;
+            float sinT = clamp(emitRad / dCtr, 0.0, 1.0);
+            float cosT = sqrt(max(0.0, 1.0 - sinT * sinT));
+            float coneOmega = 6.2831853 * (1.0 - cosT);
+            if (ltype == 0) {
+                if (rnd(seed) >= q) dir = normalize(rndInUnitSphere(seed));
+                float inCone = (dot(dir, toCtr / dCtr) >= cosT) ? 1.0 : 0.0;
+                fluxOverride = 1.0 / (q * inCone / coneOmega + (1.0 - q) / 12.566371);
+            } else {
+                vec3 axis = normalize(light.direction.xyz);
+                float outerCos = light.direction.w;
+                float spotOmega = max(6.2831853 * (1.0 - outerCos), 1e-4);
+                if (rnd(seed) >= q) {
+                    // Uniform direction inside the spot's outer cone.
+                    float cz  = mix(outerCos, 1.0, rnd(seed));
+                    float sz  = sqrt(max(0.0, 1.0 - cz * cz));
+                    float ang = 6.2831853 * rnd(seed);
+                    vec3 t, b;
+                    buildONB(axis, t, b);
+                    dir = normalize(axis * cz + (t * cos(ang) + b * sin(ang)) * sz);
+                }
+                if (dot(dir, axis) < outerCos) return;   // outside the spot cone
+                float inCone = (dot(dir, toCtr / dCtr) >= cosT) ? 1.0 : 0.0;
+                fluxOverride = 1.0 / (q * inCone / coneOmega + (1.0 - q) / spotOmega);
+            }
+        } else if (ltype == 3) {
+            // Respect the spot cone: photons outside the outer cone carry no light.
+            float outerCos = light.direction.w;
+            if (dot(dir, normalize(light.direction.xyz)) < outerCos) return;
+        }
+    }
+
+    // ── Photon power — physically normalized (Dilim 2 calibration) ──────────
+    // Units match NEE: point/spot lights carry radiant intensity I = color*a
+    // (NEE irradiance = I/d²), directional carries irradiance E = color*a.
+    // Photons only cover the target cone/disk, so each path carries the flux
+    // THROUGH that region: point/spot Φ = I*Ω (target cone solid angle),
+    // directional Φ = E*π*rad². Sanity check: an unobstructed cone then gives
+    // back E ≈ I/d² at the target — the same as direct NEE. Area lights are
+    // approximated as a point at their sampled origin (Dilim 3 refines).
+    // energyScale stays as a user knob; 1.0 = physical.
+    float fluxFactor;
+    if (fluxOverride > 0.0) {
+        fluxFactor = fluxOverride;             // direct-shaft mixture pdf (above)
+    } else if (ltype == 1) {
+        fluxFactor = 3.14159265 * emitRad * emitRad;      // disk area
+    } else {
+        float dist = length(emitCtr - org);
+        if (dist <= emitRad) {
+            fluxFactor = 12.566371;                       // light inside target: 4π
+        } else {
+            float sinT = clamp(emitRad / dist, 0.0, 1.0);
+            float cosT = sqrt(max(0.0, 1.0 - sinT * sinT));
+            fluxFactor = 6.2831853 * (1.0 - cosT);        // cone solid angle
+        }
+    }
+    vec3 power = light.color.rgb * light.color.a * fluxFactor
+               * (float(lightCount) * photonGrid.h.energyScale
+                  / float(max(photonGrid.h.photonCount, 1u)));
+
+    vec3 throughput   = vec3(1.0);
+    bool crossedGlass = false;
+    bool insideGlass  = false;   // interface-crossing parity — see deposit gate
+
+    payload.dispersionChannel = 0.0;   // per-path hero channel (reset like raygen)
+    payload.skipAABBs = false;
+
+    for (int bounce = 0; bounce < 8; ++bounce) {
+        payload.radiance      = vec3(0.0);
+        payload.attenuation   = vec3(1.0);
+        payload.scatterOrigin = vec3(0.0);
+        payload.scatterDir    = vec3(0.0);
+        payload.seed          = seed;
+        payload.scattered     = false;
+        payload.hitEmissive   = false;
+        payload.skipAABBs     = false;
+        payload.primaryAlbedo = vec3(0.0);
+        payload.primaryNormal = vec3(0.0);
+        payload.primaryHit    = 1u;   // pretend past-primary so closesthit skips AOV work
+        payload.primaryTransmission = 0.0;
+        payload.primaryMetallic     = 0.0;
+        payload.bounceType    = BOUNCE_SPECULAR;
+        payload.primaryMaterialId = 0xFFFFFFFFu;
+
+        // mask 0x01 = triangles only (volumes invisible to photons in Dilim 1);
+        // OpaqueEXT = photons skip alpha-cutout any-hit (stochastic cutout is
+        // handled by closesthit's opacity path instead).
+        traceRayEXT(topLevelAS, gl_RayFlagsOpaqueEXT, 0x01,
+                    0, 0, 0, org, 1e-3, dir, 1e8, 0);
+
+        seed = payload.seed;
+        if (!payload.scattered) break;   // escaped to sky or absorbed
+
+        // ── FAZ 2V: volumetric deposit ──────────────────────────────────────
+        // The segment that just ended at this hit travelled through the
+        // participating medium. Gates:
+        //   !insideGlass  — the entry→exit segment runs INSIDE the glass, and
+        //                   there is no dust inside glass: depositing there
+        //                   painted a rainbow speckle crust filling the slab.
+        //                   Parity of TRANSMISSION events tracks the medium
+        //                   (correct for closed meshes; an open single-sheet
+        //                   "glass" plane would strand the parity inside).
+        //   crossedGlass OR direct-shaft flag (h.lightIndex bit 0) — caustic
+        //                   shafts only by default; the direct flag also lights
+        //                   the light→glass leg of the beam. Direct light in
+        //                   fog stays the god-ray/fog systems' job otherwise.
+        // Deposits are STRATIFIED along the segment (~1 per volume cell, ≤8):
+        // the single-point version left most cells along a segment empty each
+        // pass — the grid itself was the speckle no amount of camera sampling
+        // could smooth. Weight per point = σs·segLen/k (estimator unchanged).
+        // The first cell after the segment start is skipped: deposits hugging
+        // the glass exit face put a speckle film ON the surface itself.
+        // Uses PRE-hit throughput: the medium sits before this surface.
+        if (photonVolGrid.h.debugMode != 0u && !insideGlass &&
+            (crossedGlass || (photonVolGrid.h.lightIndex & 1u) != 0u)) {
+            float segLen = length(payload.scatterOrigin - org);
+            float vcs = max(photonVolGrid.h.originCell.w, 1e-4);
+            if (segLen > vcs * 0.25) {
+                float t0 = min(vcs / segLen, 0.4);
+                int k = clamp(int(segLen / vcs), 1, 8);
+                vec3 w = power * throughput *
+                         (photonVolGrid.h.energyScale * segLen * (1.0 - t0) / float(k));
+                for (int i = 0; i < k; ++i) {
+                    float t = t0 + (1.0 - t0) * ((float(i) + rnd(seed)) / float(k));
+                    photonVolSplat(org + dir * (t * segLen), w, seed);
+                }
+            }
+        }
+
+        throughput *= payload.attenuation;
+        if (max(throughput.r, max(throughput.g, throughput.b)) < 1e-4) break;
+
+        if (payload.bounceType == BOUNCE_TRANSMISSION) {
+            crossedGlass = true;                    // caustic-capable path
+            insideGlass  = !insideGlass;            // refraction crosses the interface
+        } else if (payload.bounceType == BOUNCE_DIFFUSE) {
+            // Surface-grid splat is skipped in volumetric-only mode (surface
+            // header mode 0 = nothing reads it; save the atomics).
+            if (crossedGlass && photonGrid.h.debugMode != 0u) {
+                photonGridSplat(payload.scatterOrigin, power * throughput, seed);
+            }
+            break;                                  // photons stop at the first diffuse hit
+        } else if (payload.bounceType == BOUNCE_RESIN) {
+            break;                                  // resin base is a terminal diffuse
+        }
+        // BOUNCE_SPECULAR / BOUNCE_TRANSPARENT / BOUNCE_GLASS_REFLECT: keep
+        // walking the chain. GLASS_REFLECT deliberately does NOT set
+        // crossedGlass — photons mirrored off the glass OUTER surface used to
+        // splat a ghost caustic (X-mirrored pattern offset along the light
+        // axis); only true refractions count as crossing.
+
+        org = payload.scatterOrigin;
+        dir = payload.scatterDir;
+    }
+}

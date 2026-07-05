@@ -1,4 +1,4 @@
-﻿/*
+/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          OptixBackend.cpp
@@ -138,6 +138,7 @@ namespace {
         gpuMat.transmission_density = mat.transmission_density;
         gpuMat.resin_color = make_float3(mat.resin_color.x, mat.resin_color.y, mat.resin_color.z);
         gpuMat.resin_roughness = mat.resin_roughness;
+        gpuMat.dispersion = mat.dispersion;
         gpuMat.resin_inclusion = mat.resin_inclusion;
         gpuMat.resin_dirt = mat.resin_dirt;
         gpuMat.resin_inclusion_scale = mat.resin_inclusion_scale;

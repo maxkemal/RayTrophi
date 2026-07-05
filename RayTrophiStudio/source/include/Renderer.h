@@ -46,6 +46,7 @@
 #include "matrix4x4.h"
 #include "Vec2.h"
 #include "Vec3SIMD.h"
+#include "CpuPhotonMap.h"
 #include "World.h"
 #include <OpenImageDenoise/oidn.hpp>
 #include <ColorProcessingParams.h>
@@ -416,6 +417,13 @@ public:
     std::vector<std::pair<int, int>> cpu_cached_pixel_list;
     bool cpu_pixel_list_valid = false;  // Reset when resolution or camera changes
     
+    // Photon caustic grid (CPU parity with the Vulkan RT photon pass): photons
+    // are traced once per progressive pass into a world-space hash grid, the
+    // camera path gathers at its first diffuse vertex. Cleared on accumulation
+    // reset; allocated lazily when caustics are enabled.
+    std::unique_ptr<CpuPhotonGrid> cpu_photon_grid;
+    void traceCpuPhotons(SceneData& scene);
+
     // Progressive render functions
     void render_progressive_pass(SDL_Surface* surface, SDL_Window* window, SceneData& scene, int samples_this_pass = 1, int override_target_samples = 0);
     void resetCPUAccumulation();

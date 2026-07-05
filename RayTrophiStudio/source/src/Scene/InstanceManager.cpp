@@ -148,6 +148,8 @@ int InstanceManager::paintInstances(int group_id, const Vec3& center, const Vec3
             Vec3 surface_normal = normal;
             Vec3 surface_pos = pos;
 
+            std::shared_ptr<Triangle> best_tri;
+            Vec3 best_v0(0,0,0), best_v1(0,0,0), best_v2(0,0,0);
             if (use_mesh_projection && !target_tris.empty()) {
                 // Cast a short ray downwards from above the point to find mesh surface
                 Vec3 ray_orig = Vec3(pos.x, pos.y + 1000.0f, pos.z);
@@ -167,6 +169,8 @@ int InstanceManager::paintInstances(int group_id, const Vec3& center, const Vec3
                         best_n = (fn_len > 1e-6f) ? fn / fn_len : Vec3(0,1,0);
                         if (best_n.y < 0.f) best_n = -best_n;
                         hit_found = true;
+                        best_tri = tri;
+                        best_v0 = v0; best_v1 = v1; best_v2 = v2;
                     }
                 }
                 if (hit_found) {
@@ -181,6 +185,41 @@ int InstanceManager::paintInstances(int group_id, const Vec3& center, const Vec3
                     surface_pos.y = TerrainManager::getInstance().sampleHeight(pos.x, pos.z);
                     surface_normal = TerrainManager::getInstance().sampleNormal(pos.x, pos.z);
                 }
+            }
+
+            // Faz 8b Field bridge: gate/scale MESH-target placement by per-vertex float
+            // attributes on the hit triangle's parent mesh (barycentric sample at the
+            // actual hit point), mirroring what ScatterInstancesNode does in the Geo-DAG.
+            // Density and scale read INDEPENDENT named attributes (Blender vertex-group-
+            // per-slot style) so e.g. a paint mask can gate density while a separate
+            // "edge falloff" attribute drives scale. Legacy standalone facades (no
+            // parentMesh, e.g. non-flat objects) have no attribute storage to sample —
+            // sampled value stays 1.0 (unmasked) for them, same as "attribute not found".
+            const std::string& density_attr_name = group->brush_settings.density_mask_attribute;
+            const std::string& scale_attr_name = group->brush_settings.scale_mask_attribute;
+            auto sampleFieldAttribute = [&](const std::string& attrName) -> float {
+                if (attrName.empty() || !best_tri || !best_tri->parentMesh || !best_tri->parentMesh->geometry) return 1.0f;
+                const auto& mgeom = *best_tri->parentMesh->geometry;
+                const float* attr = mgeom.get_attribute_data<float>(attrName);
+                const int faceIdx = best_tri->getFaceIndex();
+                if (!attr || faceIdx < 0 || static_cast<size_t>(faceIdx) * 3 + 2 >= mgeom.indices.size()) return 1.0f;
+                const Vec3 e0 = best_v1 - best_v0;
+                const Vec3 e1 = best_v2 - best_v0;
+                const Vec3 e2 = surface_pos - best_v0;
+                const float d00 = e0.dot(e0), d01 = e0.dot(e1), d11 = e1.dot(e1);
+                const float d20 = e2.dot(e0), d21 = e2.dot(e1);
+                const float denom = d00 * d11 - d01 * d01;
+                if (std::fabs(denom) <= 1e-12f) return 1.0f;
+                const float bw = (d11 * d20 - d01 * d21) / denom;
+                const float bv = (d00 * d21 - d01 * d20) / denom;
+                const float bu = 1.0f - bv - bw;
+                const uint32_t i0 = mgeom.indices[static_cast<size_t>(faceIdx) * 3 + 0];
+                const uint32_t i1 = mgeom.indices[static_cast<size_t>(faceIdx) * 3 + 1];
+                const uint32_t i2 = mgeom.indices[static_cast<size_t>(faceIdx) * 3 + 2];
+                return bu * attr[i0] + bv * attr[i1] + bw * attr[i2];
+            };
+            if (!density_attr_name.empty() && sampleFieldAttribute(density_attr_name) <= 0.001f) {
+                continue;  // mask gates placement, same rejection idea as splat/exclusion below
             }
 
             // If group requests splat-map masking (terrain channels), respect it: only add when mask allows
@@ -202,6 +241,11 @@ int InstanceManager::paintInstances(int group_id, const Vec3& center, const Vec3
             }
 
             InstanceTransform t = group->generateRandomTransform(surface_pos, surface_normal);
+            if (!scale_attr_name.empty() && group->brush_settings.scale_mask_influence > 0.0f) {
+                const float scale_sample = sampleFieldAttribute(scale_attr_name);
+                const float f = 1.0f - group->brush_settings.scale_mask_influence * (1.0f - scale_sample);
+                t.scale = t.scale * f;
+            }
             group->addInstance(t);
             added++;
         }
@@ -686,7 +730,10 @@ json InstanceManager::serialize(std::ostream* binaryOut) {
             {"allow_gullies", group.brush_settings.allow_gullies},
             {"slope_direction_angle", group.brush_settings.slope_direction_angle},
             {"slope_direction_influence", group.brush_settings.slope_direction_influence},
-            {"use_global_settings", group.brush_settings.use_global_settings}
+            {"use_global_settings", group.brush_settings.use_global_settings},
+            {"density_mask_attribute", group.brush_settings.density_mask_attribute},
+            {"scale_mask_attribute", group.brush_settings.scale_mask_attribute},
+            {"scale_mask_influence", group.brush_settings.scale_mask_influence}
         };
 
         // Wind Settings
@@ -905,6 +952,9 @@ void InstanceManager::deserialize(const json& j, SceneData& scene) {
             group.brush_settings.slope_direction_angle = s.value("slope_direction_angle", 0.0f);
             group.brush_settings.slope_direction_influence = s.value("slope_direction_influence", 0.0f);
             group.brush_settings.use_global_settings = s.value("use_global_settings", false);
+            group.brush_settings.density_mask_attribute = s.value("density_mask_attribute", s.value("mask_attribute", std::string()));
+            group.brush_settings.scale_mask_attribute = s.value("scale_mask_attribute", s.value("mask_attribute", std::string()));
+            group.brush_settings.scale_mask_influence = s.value("scale_mask_influence", s.value("mask_scale_influence", 1.0f));
         }
 
         // Wind Settings
@@ -1018,13 +1068,22 @@ void InstanceManager::deserializeFast(simdjson::dom::element el, SceneData& scen
     // actually referenced as a scatter source below — so a 2M-tri flat mesh that is NOT a source
     // never pays the materialize. Without this, the source re-link (tri_by_name lookup) misses the
     // flat mesh and the whole foliage layer loads with zero source triangles → nothing renders.
+    // flat_by_name maps to a VECTOR of TriangleMesh, not one — a multi-material import
+    // gives every material's TriangleMesh the SAME nodeName by design (one logical
+    // object; see [[bugfix_multimaterial_import_nodename_collision]]). A single-value
+    // map here overwrote all but the last material, so a reloaded multi-material
+    // scatter source only ever got one material's worth of geometry back — "her
+    // materyal tek üçgenle dönüyor" (user report, 2026-07-03): each OTHER material
+    // that used to resolve here fell through to returning nothing at all, and any
+    // caller treating a near-empty facade list as "no source" (or one stray leftover
+    // representative facade elsewhere) is what read as "single triangle".
     std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>> tri_by_name;
-    std::unordered_map<std::string, std::shared_ptr<TriangleMesh>> flat_by_name;
+    std::unordered_map<std::string, std::vector<std::shared_ptr<TriangleMesh>>> flat_by_name;
     for (const auto& obj : scene.world.objects) {
         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             tri_by_name[tri->getNodeName()].push_back(tri);
         } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
-            if (!tm->nodeName.empty()) flat_by_name[tm->nodeName] = tm;
+            if (!tm->nodeName.empty()) flat_by_name[tm->nodeName].push_back(tm);
         }
     }
     auto resolveSourceTriangles =
@@ -1032,14 +1091,19 @@ void InstanceManager::deserializeFast(simdjson::dom::element el, SceneData& scen
         auto it = tri_by_name.find(name);
         if (it != tri_by_name.end()) return it->second;
         auto fit = flat_by_name.find(name);
-        if (fit != flat_by_name.end() && fit->second && fit->second->geometry) {
-            const size_t nTris = fit->second->num_triangles();
+        if (fit != flat_by_name.end() && !fit->second.empty()) {
             std::vector<std::shared_ptr<Triangle>> facades;
-            facades.reserve(nTris);
-            for (size_t t = 0; t < nTris; ++t)
-                facades.push_back(std::make_shared<Triangle>(fit->second, static_cast<uint32_t>(t)));
-            tri_by_name[name] = facades; // cache so repeated source refs reuse the same facades
-            return facades;
+            for (const auto& tm : fit->second) {
+                if (!tm || !tm->geometry) continue;
+                const size_t nTris = tm->num_triangles();
+                facades.reserve(facades.size() + nTris);
+                for (size_t t = 0; t < nTris; ++t)
+                    facades.push_back(std::make_shared<Triangle>(tm, static_cast<uint32_t>(t)));
+            }
+            if (!facades.empty()) {
+                tri_by_name[name] = facades; // cache so repeated source refs reuse the same facades
+                return facades;
+            }
         }
         return {};
     };
@@ -1082,6 +1146,14 @@ void InstanceManager::deserializeFast(simdjson::dom::element el, SceneData& scen
             if (!s_el["slope_direction_angle"].get(v)) bs.slope_direction_angle = (float)sj_double(v, 0.0);
             if (!s_el["slope_direction_influence"].get(v)) bs.slope_direction_influence = (float)sj_double(v, 0.0);
             if (!s_el["use_global_settings"].get(v)) bs.use_global_settings = sj_bool(v, false);
+            { simdjson::dom::element mv;
+              if (!s_el["density_mask_attribute"].get(mv)) bs.density_mask_attribute = sj_str(mv);
+              else if (!s_el["mask_attribute"].get(mv)) bs.density_mask_attribute = sj_str(mv); }
+            { simdjson::dom::element mv;
+              if (!s_el["scale_mask_attribute"].get(mv)) bs.scale_mask_attribute = sj_str(mv);
+              else if (!s_el["mask_attribute"].get(mv)) bs.scale_mask_attribute = sj_str(mv); }
+            if (!s_el["scale_mask_influence"].get(v)) bs.scale_mask_influence = (float)sj_double(v, 1.0);
+            else if (!s_el["mask_scale_influence"].get(v)) bs.scale_mask_influence = (float)sj_double(v, 0.0);
         }
 
         // Wind Settings

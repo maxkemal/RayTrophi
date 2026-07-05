@@ -35,10 +35,12 @@ struct RayPayload {
     float    primaryMetallic;
     uint     bounceType;
     uint     primaryMaterialId;   // Stylize AOV: real material index of the primary hit
+    float    dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
-layout(location = 1) rayPayloadInEXT bool shadowOccluded;
+// Shadow payload: rgb = transmissive tint accumulated by any-hits, w = reached-light flag.
+layout(location = 1) rayPayloadInEXT vec4 shadowPayload;
 
 // Descriptor bindings (minimal, mirror main shader)
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
@@ -56,6 +58,6 @@ struct WorldDataSimple {
 layout(set = 0, binding = 7) readonly buffer WorldBuffer { WorldDataSimple w[]; } world;
 
 void main() {
-    // No hit -> not occluded
-    shadowOccluded = false;
+    // Ray escaped to the light: keep the accumulated rgb tint, flag as visible.
+    shadowPayload.w = 1.0;
 }

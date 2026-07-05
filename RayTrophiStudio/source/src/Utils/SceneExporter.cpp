@@ -1,4 +1,4 @@
-﻿#include "SceneExporter.h"
+#include "SceneExporter.h"
 #include "scene_data.h"
 #include "Triangle.h"
 #include "MaterialManager.h"
@@ -28,11 +28,101 @@
 #include <cstdint>
 #include <cmath>
 
+// Helper structure to handle either legacy Triangle or flat TriangleMesh during export
+struct ExportTriangle {
+    std::shared_ptr<Triangle> tri = nullptr;
+    const TriangleMesh* mesh = nullptr;
+    uint32_t faceIndex = 0;
+
+    Vec3 getOriginalVertexPosition(int i) const {
+        if (tri) return tri->getOriginalVertexPosition(i);
+        if (mesh && mesh->geometry) {
+            const Vec3* origPositions = mesh->geometry->get_positions_orig();
+            if (!origPositions) origPositions = mesh->geometry->get_positions();
+            if (origPositions) {
+                uint32_t globalIndex = mesh->geometry->indices[faceIndex * 3 + i];
+                return origPositions[globalIndex];
+            }
+        }
+        return Vec3(0);
+    }
+
+    Vec3 getOriginalVertexNormal(int i) const {
+        if (tri) return tri->getOriginalVertexNormal(i);
+        if (mesh && mesh->geometry) {
+            const Vec3* origNormals = mesh->geometry->get_normals_orig();
+            if (!origNormals) origNormals = mesh->geometry->get_normals();
+            if (origNormals) {
+                uint32_t globalIndex = mesh->geometry->indices[faceIndex * 3 + i];
+                return origNormals[globalIndex];
+            }
+        }
+        return Vec3(0, 1, 0);
+    }
+
+    Vec2 getUV(int i) const {
+        if (tri) return tri->t_ref(i);
+        if (mesh && mesh->geometry) {
+            const Vec2* uvs = mesh->geometry->get_uvs();
+            if (uvs) {
+                uint32_t globalIndex = mesh->geometry->indices[faceIndex * 3 + i];
+                return uvs[globalIndex];
+            }
+        }
+        return Vec2(0);
+    }
+
+    bool hasAnySkinWeights() const {
+        if (tri) return tri->hasAnySkinWeights();
+        if (mesh && mesh->geometry && !mesh->geometry->skin_weights.empty()) {
+            size_t vCount = mesh->geometry->get_vertex_count();
+            uint32_t i0 = mesh->geometry->indices[faceIndex * 3 + 0];
+            uint32_t i1 = mesh->geometry->indices[faceIndex * 3 + 1];
+            uint32_t i2 = mesh->geometry->indices[faceIndex * 3 + 2];
+            if (i0 < vCount && i1 < vCount && i2 < vCount) {
+                if (!mesh->geometry->skin_weights[i0].empty() ||
+                    !mesh->geometry->skin_weights[i1].empty() ||
+                    !mesh->geometry->skin_weights[i2].empty()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    std::vector<std::pair<int, float>> getSkinBoneWeights(int i) const {
+        if (tri) return tri->getSkinBoneWeights(i);
+        if (mesh && mesh->geometry && !mesh->geometry->skin_weights.empty()) {
+            uint32_t globalIndex = mesh->geometry->indices[faceIndex * 3 + i];
+            if (globalIndex < mesh->geometry->skin_weights.size()) {
+                return mesh->geometry->skin_weights[globalIndex];
+            }
+        }
+        return {};
+    }
+
+    std::vector<std::vector<std::pair<int, float>>> getVertexBoneWeights() const {
+        std::vector<std::vector<std::pair<int, float>>> weights(3);
+        for (int v = 0; v < 3; ++v) {
+            weights[v] = getSkinBoneWeights(v);
+        }
+        return weights;
+    }
+
+    Matrix4x4 getTransformMatrix() const {
+        if (tri) return tri->getTransformMatrix();
+        if (mesh && mesh->transform) {
+            return mesh->transform->getFinal();
+        }
+        return Matrix4x4::identity();
+    }
+};
+
 // Define MeshBatch structure at file scope
 struct MeshBatch {
     std::string name;
     uint16_t material_id;
-    std::vector<std::shared_ptr<Triangle>> triangles;
+    std::vector<ExportTriangle> triangles;
 };
 
 struct TerrainBakeResult {
@@ -714,8 +804,11 @@ bool SceneExporter::exportScene(const std::string& filepath, SceneData& scene, c
     std::unordered_set<std::string> selected_node_names;
     if (settings.export_selected_only) {
         for (const auto& obj : selected_objects) {
-             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-             if (tri) selected_node_names.insert(tri->getNodeName());
+             if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                 selected_node_names.insert(tri->getNodeName());
+             } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                 selected_node_names.insert(mesh->nodeName);
+             }
         }
         SCENE_LOG_INFO("[Export] Selected Object Names: " + std::to_string(selected_node_names.size()));
     }
@@ -727,29 +820,59 @@ bool SceneExporter::exportScene(const std::string& filepath, SceneData& scene, c
     if (settings.export_geometry) {
         // Iterate ALL objects once
         for (const auto& obj : scene.world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (!tri) continue;
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                // Filter if needed
+                if (settings.export_selected_only) {
+                    if (selected_node_names.find(tri->getNodeName()) == selected_node_names.end()) {
+                        continue; // Skip unselected
+                    }
+                }
+                
+                accepted_primitives++;
 
-            // Filter if needed
-            // Optimization: check map/set only if filtering is active
-            if (settings.export_selected_only) {
-                if (selected_node_names.find(tri->getNodeName()) == selected_node_names.end()) {
-                    continue; // Skip unselected
+                uint16_t mat_id = tri->getMaterialID(); 
+                std::string key = tri->getNodeName() + "_" + std::to_string(mat_id);
+                
+                if (batches.find(key) == batches.end()) {
+                    batches[key].name = tri->getNodeName();
+                    batches[key].material_id = mat_id;
+                }
+                ExportTriangle et;
+                et.tri = tri;
+                batches[key].triangles.push_back(et);
+            }
+            else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                if (!mesh->geometry) continue;
+
+                // Filter if needed
+                if (settings.export_selected_only) {
+                    if (selected_node_names.find(mesh->nodeName) == selected_node_names.end()) {
+                        continue; // Skip unselected
+                    }
+                }
+
+                const DNA::GeometryDetail& geom = *mesh->geometry;
+                const size_t triCount = geom.indices.size() / 3;
+                const uint16_t* srcMat = geom.get_material_ids();
+
+                for (size_t t = 0; t < triCount; ++t) {
+                    accepted_primitives++;
+
+                    uint16_t mat_id = srcMat ? srcMat[geom.indices[t * 3 + 0]] : 0;
+                    if (mat_id == MaterialManager::INVALID_MATERIAL_ID) mat_id = 0;
+
+                    std::string key = mesh->nodeName + "_" + std::to_string(mat_id);
+                    
+                    if (batches.find(key) == batches.end()) {
+                        batches[key].name = mesh->nodeName;
+                        batches[key].material_id = mat_id;
+                    }
+                    ExportTriangle et;
+                    et.mesh = mesh.get();
+                    et.faceIndex = static_cast<uint32_t>(t);
+                    batches[key].triangles.push_back(et);
                 }
             }
-            
-            accepted_primitives++;
-
-            uint16_t mat_id = tri->getMaterialID(); 
-            std::string key = tri->getNodeName() + "_" + std::to_string(mat_id);
-            
-            // Note: repeated string construction is strictly unavoidable without changing data structures
-            // but we avoid the double-loop overhead now.
-            if (batches.find(key) == batches.end()) {
-                batches[key].name = tri->getNodeName();
-                batches[key].material_id = mat_id;
-            }
-            batches[key].triangles.push_back(tri);
         }
     }
     SCENE_LOG_INFO("[Export] Processing " + std::to_string(accepted_primitives) + " primitives.");
@@ -843,23 +966,23 @@ bool SceneExporter::exportScene(const std::string& filepath, SceneData& scene, c
 
         Matrix4x4 batchTransform = Matrix4x4::identity();
         if (!batch.triangles.empty()) {
-            batchTransform = batch.triangles[0]->getTransformMatrix();
+            batchTransform = batch.triangles[0].getTransformMatrix();
         }
 
         for (size_t i = 0; i < batch.triangles.size(); ++i) {
-            auto t = batch.triangles[i];
+            const auto& t = batch.triangles[i];
             
-            Vec3 v0 = t->getOriginalVertexPosition(0);
-            Vec3 v1 = t->getOriginalVertexPosition(1);
-            Vec3 v2 = t->getOriginalVertexPosition(2);
+            Vec3 v0 = t.getOriginalVertexPosition(0);
+            Vec3 v1 = t.getOriginalVertexPosition(1);
+            Vec3 v2 = t.getOriginalVertexPosition(2);
             
-            Vec3 n0 = t->getOriginalVertexNormal(0);
-            Vec3 n1 = t->getOriginalVertexNormal(1);
-            Vec3 n2 = t->getOriginalVertexNormal(2);
+            Vec3 n0 = t.getOriginalVertexNormal(0);
+            Vec3 n1 = t.getOriginalVertexNormal(1);
+            Vec3 n2 = t.getOriginalVertexNormal(2);
 
-             Vec2 uv0 = t->t_ref(0);
-             Vec2 uv1 = t->t_ref(1);
-             Vec2 uv2 = t->t_ref(2);
+             Vec2 uv0 = t.getUV(0);
+             Vec2 uv1 = t.getUV(1);
+             Vec2 uv2 = t.getUV(2);
         
              int baseIdx = (int)i * 3;
             
@@ -881,8 +1004,8 @@ bool SceneExporter::exportScene(const std::string& filepath, SceneData& scene, c
              mesh->mFaces[i].mIndices[1] = baseIdx + 1;
              mesh->mFaces[i].mIndices[2] = baseIdx + 2;
 
-             if (settings.export_skinning && t->hasAnySkinWeights()) {
-                 auto& weights = t->getVertexBoneWeights(); 
+             if (settings.export_skinning && t.hasAnySkinWeights()) {
+                 auto weights = t.getVertexBoneWeights(); 
                  if (!weights.empty()) {
                      for (int v = 0; v < 3; v++) {
                          if (v >= weights.size()) break;

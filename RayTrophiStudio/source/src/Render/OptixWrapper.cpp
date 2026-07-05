@@ -954,7 +954,9 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     OptixPipelineCompileOptions pipeline_options = {};
     pipeline_options.usesMotionBlur = false;
     pipeline_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_ANY;
-    pipeline_options.numPayloadValues = 2;
+    // 4 = max over ray types: radiance uses 2 (packed pointer), shadow uses 4
+    // (hit bit + RGB transmissive tint for coloured glass shadows).
+    pipeline_options.numPayloadValues = 4;
     pipeline_options.numAttributeValues = 2;
     pipeline_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
     pipeline_options.pipelineLaunchParamsVariableName = "optixLaunchParams";
@@ -1051,7 +1053,10 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     hit_shadow_desc.hitgroup.moduleCH = hitgroup_module; 
     hit_shadow_desc.hitgroup.entryFunctionNameCH = "__closesthit__shadow";
     hit_shadow_desc.hitgroup.moduleAH = hitgroup_module;
-    hit_shadow_desc.hitgroup.entryFunctionNameAH = "__anyhit__ah";
+    // Dedicated shadow any-hit: multiplies the RGB tint registers for transmissive
+    // surfaces (coloured glass shadows). __anyhit__ah must stay radiance-only —
+    // its payload registers hold a packed pointer, not the tint.
+    hit_shadow_desc.hitgroup.entryFunctionNameAH = "__anyhit__shadow";
     log_size = sizeof(log);
     OPTIX_CHECK(optixProgramGroupCreate(context, &hit_shadow_desc, 1, &pg_options, log, &log_size, &hit_shadow_pg));
 

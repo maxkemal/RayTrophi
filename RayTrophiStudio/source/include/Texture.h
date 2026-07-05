@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -59,6 +59,23 @@ private:
     }
 };
 
+class SRGBToLinearFloatLUT {
+public:
+    float table[256];
+
+    SRGBToLinearFloatLUT() {
+        for (int i = 0; i < 256; ++i) {
+            float f = i / 255.0f;
+            table[i] = (f <= 0.04045f) ? (f / 12.92f) : powf((f + 0.055f) / 1.055f, 2.4f);
+        }
+    }
+
+    static const SRGBToLinearFloatLUT& instance() {
+        static SRGBToLinearFloatLUT inst;
+        return inst;
+    }
+};
+
 
 struct CompactVec4 {
     uint8_t r, g, b, a;
@@ -68,18 +85,22 @@ struct CompactVec4 {
     }
 
     Vec3 to_linear_rgb(bool srgb, bool aces) const {
-        auto srgb_to_linear = [](uint8_t c) -> float {
-            float f = c / 255.0f;
-            return (f <= 0.04045f) ? (f / 12.92f) : powf((f + 0.055f) / 1.055f, 2.4f);
-            };
         auto tonemap = [](float x) -> float {
             float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
             return (x * (a * x + b)) / (x * (c * x + d) + e);
             };
 
-        float rL = srgb ? srgb_to_linear(r) : r / 255.0f;
-        float gL = srgb ? srgb_to_linear(g) : g / 255.0f;
-        float bL = srgb ? srgb_to_linear(b) : b / 255.0f;
+        float rL, gL, bL;
+        if (srgb) {
+            const float* lut = SRGBToLinearFloatLUT::instance().table;
+            rL = lut[r];
+            gL = lut[g];
+            bL = lut[b];
+        } else {
+            rL = r / 255.0f;
+            gL = g / 255.0f;
+            bL = b / 255.0f;
+        }
 
         if (aces) {
             rL = tonemap(rL);

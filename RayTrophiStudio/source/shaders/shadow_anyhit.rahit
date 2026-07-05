@@ -38,8 +38,9 @@ struct VkGeometryData {
     uint64_t materialAddr;
 };
 
-layout(buffer_reference, scalar) readonly buffer UVBuffer2    { vec2 u[]; };
-layout(buffer_reference, scalar) readonly buffer IndexBuffer2 { uint i[]; };
+layout(buffer_reference, scalar) readonly buffer UVBuffer2     { vec2 u[]; };
+layout(buffer_reference, scalar) readonly buffer IndexBuffer2  { uint i[]; };
+layout(buffer_reference, scalar) readonly buffer VertexBuffer2 { vec3 v[]; };
 
 // Descriptor bindings — MUST match closesthit.rchit set/binding layout exactly
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
@@ -48,8 +49,11 @@ layout(set = 0, binding = 4, scalar) readonly buffer GeometryBuffer  { VkGeometr
 layout(set = 0, binding = 5, scalar) readonly buffer InstanceBuffer  { VkInstanceData  i[]; } instances;
 layout(set = 0, binding = 6) uniform sampler2D materialTextures[];
 
-// Shadow payload (location=1, same as closesthit declaration)
-layout(location = 1) rayPayloadInEXT bool shadowOccluded;
+// Shadow payload (location=1, same as closesthit declaration).
+// rgb = accumulated transmissive tint along the shadow ray (init 1,1,1 by the caller),
+// w   = reached-light flag (init 0 by the caller; shadow_miss sets 1 on escape).
+// Accepting a hit (terminateRayEXT) leaves w=0 → fully occluded.
+layout(location = 1) rayPayloadInEXT vec4 shadowPayload;
 
 // Barycentrics from triangle intersection
 hitAttributeEXT vec2 baryCoord;
@@ -136,23 +140,73 @@ void main() {
     vec3 bary = vec3(1.0 - baryCoord.x - baryCoord.y, baryCoord.x, baryCoord.y);
     vec2 hitUV = vec2(0.5, 0.5);
     
+    // Triangle indices (shared by the UV lookup and the glass face-normal below)
+    uint ui0, ui1, ui2;
+    if (geo.indexAddr != 0) {
+        IndexBuffer2 iBuf = IndexBuffer2(geo.indexAddr);
+        ui0 = iBuf.i[gl_PrimitiveID * 3 + 0];
+        ui1 = iBuf.i[gl_PrimitiveID * 3 + 1];
+        ui2 = iBuf.i[gl_PrimitiveID * 3 + 2];
+    } else {
+        ui0 = uint(gl_PrimitiveID) * 3 + 0;
+        ui1 = uint(gl_PrimitiveID) * 3 + 1;
+        ui2 = uint(gl_PrimitiveID) * 3 + 2;
+    }
+
     if (geo.uvAddr != 0) {
         UVBuffer2 uvBuf = UVBuffer2(geo.uvAddr);
-        uint ui0, ui1, ui2;
-        if (geo.indexAddr != 0) {
-            IndexBuffer2 iBuf = IndexBuffer2(geo.indexAddr);
-            ui0 = iBuf.i[gl_PrimitiveID * 3 + 0];
-            ui1 = iBuf.i[gl_PrimitiveID * 3 + 1];
-            ui2 = iBuf.i[gl_PrimitiveID * 3 + 2];
-        } else {
-            ui0 = uint(gl_PrimitiveID) * 3 + 0;
-            ui1 = uint(gl_PrimitiveID) * 3 + 1;
-            ui2 = uint(gl_PrimitiveID) * 3 + 2;
-        }
         hitUV = uvBuf.u[ui0] * bary.x + uvBuf.u[ui1] * bary.y + uvBuf.u[ui2] * bary.z;
         // Vulkan shader coordinate origin differs; flip V to match closesthit / texture upload
         hitUV.y = 1.0 - hitUV.y;
         hitUV = applyMaterialUVTransform(mat, hitUV);
+    }
+
+    // --- Transmissive surface (glass/water): coloured PARTIAL shadow ---
+    // Light passes through with a sqrt(albedo) tint, but glass must still cast a
+    // shadow: refraction bends light AWAY from the straight shadow-ray path (the
+    // missing energy focuses elsewhere as a caustic this pass cannot render).
+    // Approximate with Fresnel loss plus a deviation falloff on the incidence
+    // angle: a flat pane facing the light stays bright, curved rims / grazing
+    // surfaces darken → the classic bright-core / dark-rim glass shadow.
+    // Applied once per interface crossed (entry + exit → closed objects darken twice).
+    float trValue = mat.transmission;
+    if (int(mat.transmission_tex) > 0) {
+        trValue = textureLod(materialTextures[nonuniformEXT(int(mat.transmission_tex))], hitUV, 0.0).r;
+    }
+    if (trValue > 0.001) {
+        vec3 tint = vec3(mat.albedo_r, mat.albedo_g, mat.albedo_b);
+        if (int(mat.albedo_tex) > 0) {
+            tint *= textureLod(materialTextures[nonuniformEXT(int(mat.albedo_tex))], hitUV, 0.0).rgb;
+        }
+        tint = clamp(tint, vec3(0.0), vec3(1.0));
+
+        float cosT = 1.0;
+        if (geo.vertexAddr != 0) {
+            VertexBuffer2 vb = VertexBuffer2(geo.vertexAddr);
+            vec3 e1 = vb.v[ui1] - vb.v[ui0];
+            vec3 e2 = vb.v[ui2] - vb.v[ui0];
+            vec3 faceN = normalize(vec3(cross(e1, e2) * mat3(gl_WorldToObjectEXT)));
+            cosT = abs(dot(faceN, normalize(gl_WorldRayDirectionEXT)));
+        }
+        // Per-channel IOR: with dispersion > 0 the Fresnel/bend terms differ per
+        // wavelength — blue bends (and darkens) more at the rim than red, giving
+        // the shadow a rainbow fringe (dispersion projected into the shadow, not
+        // just on the glass surface). dispersion = 0 → all channels identical.
+        float iorv = max(mat.ior, 1.0001);
+        vec3  ior3 = vec3(iorv);
+        if (mat.dispersion > 1e-3) {
+            float spread = (iorv - 1.0) * mat.dispersion * 0.06;
+            ior3 += vec3(-spread, 0.0, spread);
+        }
+        vec3 r0v = (vec3(1.0) - ior3) / (vec3(1.0) + ior3);
+        r0v *= r0v;
+        vec3 fresV    = r0v + (vec3(1.0) - r0v) * pow(1.0 - cosT, 5.0);
+        vec3 bendExpV = clamp(2.0 * (ior3 - vec3(1.0)), vec3(0.25), vec3(2.0));
+        vec3 bendV    = pow(vec3(max(cosT, 1e-3)), bendExpV);
+
+        shadowPayload.rgb *= sqrt(tint) * (trValue * (vec3(1.0) - fresV) * bendV);
+        ignoreIntersectionEXT;
+        return;
     }
 
     int opacityTexID = int(mat.opacity_tex);
@@ -181,7 +235,7 @@ void main() {
         return;
     }
     if (maskValue >= 0.999) {
-        shadowOccluded = true;
+        // Accepted hit: closest-hit is skipped and miss never runs, so w stays 0 → occluded.
         terminateRayEXT;
         return;
     }
@@ -199,8 +253,7 @@ void main() {
     float rnd = float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
 
     if (rnd < maskValue) {
-        shadowOccluded = true;
-        terminateRayEXT;
+        terminateRayEXT;   // accepted → w stays 0 → occluded
     } else {
         ignoreIntersectionEXT;
     }

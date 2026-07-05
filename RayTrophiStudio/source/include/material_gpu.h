@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -148,6 +148,9 @@ struct alignas(16) GpuMaterial {
     // 0 = plain white clearcoat (no behaviour change). Reuses the bubble thin-film formula.
     float clearcoat_iridescence    = 0.0f;  // tint strength (0 = off)
     float clearcoat_film_thickness = 0.55f; // hue cycle / film thickness (OPD scale)
+    // Spectral dispersion strength (Abbe-style). Per-path stochastic channel selection
+    // in transmission_scatter: 0 = off (legacy single-IOR glass), 1 = strong flint.
+    float dispersion = 0.0f;
 };
 
 /**
@@ -278,7 +281,8 @@ inline bool operator==(const GpuMaterial& a, const GpuMaterial& b) {
         fabsf(a.resin_dirt_color.y - b.resin_dirt_color.y) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.resin_dirt_color.z - b.resin_dirt_color.z) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.clearcoat_iridescence - b.clearcoat_iridescence) < FLOAT_COMPARE_EPSILON &&
-        fabsf(a.clearcoat_film_thickness - b.clearcoat_film_thickness) < FLOAT_COMPARE_EPSILON;
+        fabsf(a.clearcoat_film_thickness - b.clearcoat_film_thickness) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.dispersion - b.dispersion) < FLOAT_COMPARE_EPSILON;
 }
 
 namespace std {  
@@ -374,6 +378,7 @@ namespace std {
             hash_combine_f(h, m.resin_dirt_color.z);
             hash_combine_f(h, m.clearcoat_iridescence);
             hash_combine_f(h, m.clearcoat_film_thickness);
+            hash_combine_f(h, m.dispersion);
 
             return h;
         }  

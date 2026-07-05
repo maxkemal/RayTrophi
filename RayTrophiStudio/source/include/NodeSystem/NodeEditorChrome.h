@@ -34,7 +34,7 @@ namespace NodeSystem {
         layout.headerHeight = scaleNodeChromeMetric(zoom, 20.0f, 16.0f, 26.0f);
         layout.pinSpacing = scaleNodeChromeMetric(zoom, 18.0f, 14.0f, 24.0f);
         layout.pinRadius = scaleNodeChromeMetric(zoom, 5.0f, 4.0f, 7.5f);
-        layout.cornerRadius = scaleNodeChromeMetric(zoom, 6.0f, 4.0f, 9.0f);
+        layout.cornerRadius = scaleNodeChromeMetric(zoom, 4.0f, 3.0f, 8.0f);
         layout.bodyPadding = scaleNodeChromeMetric(zoom, 8.0f, 6.0f, 11.0f);
         layout.shadowOffset = scaleNodeChromeMetric(zoom, 4.0f, 2.5f, 6.5f);
         layout.collapsedPinSpacing = scaleNodeChromeMetric(zoom, 6.0f, 4.0f, 8.0f);
@@ -44,7 +44,7 @@ namespace NodeSystem {
         layout.showPinLabels = zoom >= 0.72f;
         layout.collapsed = node.collapsed;
 
-        const float minWidthScreen = scaleNodeChromeMetric(zoom, 160.0f, 110.0f, 240.0f);
+        const float minWidthScreen = scaleNodeChromeMetric(zoom, 140.0f, 96.0f, 200.0f);
         const float maxWidthScreen = scaleNodeChromeMetric(zoom, 220.0f, 150.0f, 280.0f);
         const float titleWidthClamped = std::min(titleWidthScreen, scaleNodeChromeMetric(zoom, 180.0f, 120.0f, 260.0f));
 

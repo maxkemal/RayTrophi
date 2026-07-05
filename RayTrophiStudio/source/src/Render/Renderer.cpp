@@ -546,6 +546,94 @@ float rt_sample_procedural_cloud_cpu(const Vec3& local_p, const VDBVolume* vdb, 
     const float edge_falloff = rt_cloud_smoothstep(0.0f, 0.08f, std::min(edge.x, edge.z));
     return d * rt_cloud_lerp(d, std::sqrt(std::max(d, 0.0f)), cumulus * 0.55f) * bottom * top * dome * edge_falloff * rt_cloud_lerp(4.6f, 3.4f, cumulus);
 }
+
+inline float pd_frac(float x) {
+    return x - std::floor(x);
+}
+
+float cpu_rh_hash13(const Vec3& p) {
+    float px = pd_frac(p.x * 0.1031f);
+    float py = pd_frac(p.y * 0.1031f);
+    float pz = pd_frac(p.z * 0.1031f);
+    float dot_val = px * (py + 33.33f) + py * (pz + 33.33f) + pz * (px + 33.33f);
+    px += dot_val;
+    py += dot_val;
+    pz += dot_val;
+    return pd_frac((px + py) * pz);
+}
+
+Vec3 cpu_rh_hash33(const Vec3& p) {
+    float x = p.x * 127.1f + p.y * 311.7f + p.z * 74.7f;
+    float y = p.x * 269.5f + p.y * 183.3f + p.z * 246.1f;
+    float z = p.x * 113.5f + p.y * 271.9f + p.z * 124.6f;
+    float rx = std::sin(x) * 43758.5453f;
+    float ry = std::sin(y) * 43758.5453f;
+    float rz = std::sin(z) * 43758.5453f;
+    return Vec3(rx - std::floor(rx), ry - std::floor(ry), rz - std::floor(rz));
+}
+
+float cpu_rh_vnoise(const Vec3& x) {
+    Vec3 i(std::floor(x.x), std::floor(x.y), std::floor(x.z));
+    Vec3 f(x.x - i.x, x.y - i.y, x.z - i.z);
+    f.x = f.x * f.x * f.x * (f.x * (f.x * 6.0f - 15.0f) + 10.0f);
+    f.y = f.y * f.y * f.y * (f.y * (f.y * 6.0f - 15.0f) + 10.0f);
+    f.z = f.z * f.z * f.z * (f.z * (f.z * 6.0f - 15.0f) + 10.0f);
+
+    float n000 = cpu_rh_hash13(i);
+    float n100 = cpu_rh_hash13(i + Vec3(1,0,0));
+    float n010 = cpu_rh_hash13(i + Vec3(0,1,0));
+    float n110 = cpu_rh_hash13(i + Vec3(1,1,0));
+    float n001 = cpu_rh_hash13(i + Vec3(0,0,1));
+    float n101 = cpu_rh_hash13(i + Vec3(1,0,1));
+    float n011 = cpu_rh_hash13(i + Vec3(0,1,1));
+    float n111 = cpu_rh_hash13(i + Vec3(1,1,1));
+
+    float nx00 = n000 * (1.0f - f.x) + n100 * f.x;
+    float nx10 = n010 * (1.0f - f.x) + n110 * f.x;
+    float nx01 = n001 * (1.0f - f.x) + n101 * f.x;
+    float nx11 = n011 * (1.0f - f.x) + n111 * f.x;
+    float nxy0 = nx00 * (1.0f - f.y) + nx10 * f.y;
+    float nxy1 = nx01 * (1.0f - f.y) + nx11 * f.y;
+    return nxy0 * (1.0f - f.z) + nxy1 * f.z;
+}
+
+float cpu_rh_fbm(Vec3 p) {
+    float v = 0.0f, a = 0.5f, tot = 0.0f;
+    for (int i = 0; i < 5; ++i) {
+        v   += a * std::abs(2.0f * cpu_rh_vnoise(p) - 1.0f);
+        tot += a;
+        p = p * 2.03f + Vec3(7.1f, 3.7f, 11.3f);
+        a *= 0.5f;
+    }
+    return v / std::max(tot, 1e-4f);
+}
+
+float cpu_rh_worley(const Vec3& p) {
+    Vec3 ip(std::floor(p.x), std::floor(p.y), std::floor(p.z));
+    Vec3 fp(p.x - ip.x, p.y - ip.y, p.z - ip.z);
+    float d = 1.0f;
+    for (int z = -1; z <= 1; ++z) {
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                Vec3 g(x, y, z);
+                Vec3 o = cpu_rh_hash33(ip + g);
+                d = std::min(d, (g + o - fp).length());
+            }
+        }
+    }
+    return d;
+}
+
+bool cpu_refract(const Vec3& uv, const Vec3& n, float etai_over_etat, Vec3& refracted) {
+    auto uv_normalized = uv.normalize();
+    float cos_theta = std::fmin(Vec3::dot(-uv_normalized, n), 1.0f);
+    Vec3 r_out_perp = etai_over_etat * (uv_normalized + cos_theta * n);
+    float k = 1.0f - r_out_perp.length_squared();
+    if (k < 0.0f) return false;
+    Vec3 r_out_parallel = -std::sqrt(k) * n;
+    refracted = (r_out_perp + r_out_parallel).normalize();
+    return true;
+}
 }
 
 bool Renderer::isCudaAvailable() {
@@ -3254,6 +3342,16 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
                     // the toggle in the UI still gives fixed-count behavior.
                     rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
                     rp.adaptiveThreshold = render_settings.variance_threshold;
+                    rp.causticsEnabled = render_settings.caustics_enabled;
+                    rp.causticsDebug = render_settings.caustics_debug;
+                    rp.causticsPhotons = render_settings.caustics_photons;
+                    rp.causticsCellSize = render_settings.caustics_cell_size;
+                    rp.causticsEnergy = render_settings.caustics_energy;
+        rp.causticsVolumetric = render_settings.caustics_volumetric;
+        rp.causticsVolDebug = render_settings.caustics_vol_debug;
+        rp.causticsVolStrength = render_settings.caustics_vol_strength;
+        rp.causticsVolDirect = render_settings.caustics_vol_direct;
+        rp.causticsVolNoise = render_settings.caustics_vol_noise;
                     m_backend->setRenderParams(rp);
                 }
             }
@@ -3453,6 +3551,16 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         rp.transmissionBounces = std::clamp(render_settings.transmission_bounces, 1, rp.maxBounces);
         rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
         rp.adaptiveThreshold = render_settings.variance_threshold;
+        rp.causticsEnabled = render_settings.caustics_enabled;
+        rp.causticsDebug = render_settings.caustics_debug;
+        rp.causticsPhotons = render_settings.caustics_photons;
+        rp.causticsCellSize = render_settings.caustics_cell_size;
+        rp.causticsEnergy = render_settings.caustics_energy;
+        rp.causticsVolumetric = render_settings.caustics_volumetric;
+        rp.causticsVolDebug = render_settings.caustics_vol_debug;
+        rp.causticsVolStrength = render_settings.caustics_vol_strength;
+        rp.causticsVolDirect = render_settings.caustics_vol_direct;
+        rp.causticsVolNoise = render_settings.caustics_vol_noise;
         m_backend->setRenderParams(rp);
         m_backend->resetAccumulation();
     }
@@ -4733,7 +4841,28 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
                                     // Corrected: No .pow member, do component-wise manually
                                     Vec3 bc = (base_color);
                                     Vec3 bc_pow(std::pow(bc.x, 0.5f), std::pow(bc.y, 0.5f), std::pow(bc.z, 0.5f));
-                                    transmission_filter = transmission_filter * bc_pow;
+                                    // Glass still casts a PARTIAL shadow: refraction bends light away
+                                    // from the straight shadow path (missing energy = unrendered caustic).
+                                    // Fresnel loss + incidence-angle deviation falloff; mirrors the GPU
+                                    // shadow any-hits (Vulkan shadow_anyhit.rahit / OptiX __anyhit__shadow).
+                                    // Per-channel IOR: dispersion > 0 makes the Fresnel/bend terms
+                                    // wavelength-dependent → rainbow fringe on the shadow rim.
+                                    float cosT = std::fabs(Vec3::dot(shadow_rec.normal, L));
+                                    float iorv = std::max(pbsdf->ior, 1.0001f);
+                                    float spread = (pbsdf->dispersion > 1e-3f)
+                                        ? (iorv - 1.0f) * pbsdf->dispersion * 0.06f : 0.0f;
+                                    const float ior_c[3] = { iorv - spread, iorv, iorv + spread };
+                                    float scale_c[3];
+                                    for (int c = 0; c < 3; ++c) {
+                                        float r0 = (1.0f - ior_c[c]) / (1.0f + ior_c[c]);
+                                        r0 *= r0;
+                                        float fres = r0 + (1.0f - r0) * std::pow(1.0f - cosT, 5.0f);
+                                        float bendExp = std::min(std::max(2.0f * (ior_c[c] - 1.0f), 0.25f), 2.0f);
+                                        float bend = std::pow(std::max(cosT, 1e-3f), bendExp);
+                                        scale_c[c] = tr * (1.0f - fres) * bend;
+                                    }
+                                    transmission_filter = transmission_filter * bc_pow
+                                        * Vec3(scale_c[0], scale_c[1], scale_c[2]);
                                 }
                             }
                         }
@@ -4872,6 +5001,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
     int diffuse_bounce_count = 0;
     int transmission_bounce_count = 0;
+    bool caustic_gathered = false;   // photon-map gather fires once per path (Vulkan parity)
     const int max_diffuse_bounces = std::clamp(render_settings.diffuse_bounces, 1, std::max(1, render_settings.max_bounces));
     const int max_transmission_bounces = std::clamp(render_settings.transmission_bounces, 1, std::max(1, render_settings.max_bounces));
 
@@ -6335,6 +6465,57 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
         Vec3f hit_pos = toVec3f(rec.point);
 
+        // --- Thin-shell BUBBLE (champagne / soda / soap-foam close-up) ---
+        if (rec.materialPtr && rec.materialPtr->getIsBubble()) {
+            Vec3 Nb = rec.interpolated_normal.normalize();
+            Vec3 wi = current_ray.direction.normalize();
+            float cosT = std::fmin(std::abs(Vec3::dot(wi, Nb)), 1.0f);
+            float bio = rec.materialPtr->getBubbleIor();
+            if (bio < 1.0001f) bio = 1.33f;
+            float r0 = (1.0f - bio) / (1.0f + bio);
+            r0 = r0 * r0;
+            float fres = r0 + (1.0f - r0) * std::pow(1.0f - cosT, 5.0f);
+            
+            Vec3 dir;
+            Vec3f att(1.0f);
+            Vec2 uv(rec.u, rec.v);
+            
+            if (Vec3::random_float() < fres) {
+                dir = Vec3::reflect(wi, Nb).normalize();
+                float bubbleFilm = rec.materialPtr->getBubbleFilm();
+                if (bubbleFilm > 1e-3f) {
+                    float opd = bubbleFilm * (1.0f / std::max(cosT, 0.15f));
+                    att = Vec3f(0.55f + 0.45f * std::cos(opd * 6.2831853f),
+                                0.55f + 0.45f * std::cos(opd * 6.2831853f + 2.0944f),
+                                0.55f + 0.45f * std::cos(opd * 6.2831853f + 4.1888f));
+                } else {
+                    att = Vec3f(1.0f);
+                }
+            } else {
+                dir = wi; // straight pass-through (thin shell)
+                Vec3 alb = rec.materialPtr->getPropertyValue(rec.materialPtr->albedoProperty, uv);
+                att = Vec3f(0.85f + 0.15f * alb.x,
+                            0.85f + 0.15f * alb.y,
+                            0.85f + 0.15f * alb.z);
+            }
+            
+            if (bounce == 0 && primary_hit && !(*primary_hit)) {
+                *primary_hit = true;
+                if (primary_albedo) *primary_albedo = rec.materialPtr->getPropertyValue(rec.materialPtr->albedoProperty, uv);
+                if (primary_normal) *primary_normal = Nb;
+                if (primary_depth) *primary_depth = rec.t;
+                if (primary_material_id) *primary_material_id = static_cast<uint32_t>(rec.materialID);
+                if (primary_world_position) *primary_world_position = rec.point;
+            }
+            
+            Vec3 emitted = rec.materialPtr->getEmission(uv, rec.point);
+            color += throughput * toVec3f(emitted);
+            
+            throughput *= att;
+            current_ray = Ray(rec.point + dir * 0.001f, dir);
+            continue; // Jump to next bounce
+        }
+
         // --- Extract material parameters (with texture sampling) ---
         Vec3f albedo(0.8f);
         float roughness = 0.5f;
@@ -6342,6 +6523,10 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         float specular = 0.5f;
         float opacity = 1.0f;
         float transmission = 0.0f;
+
+        bool resin_active = false;
+        float resin_density = 0.0f;
+        Vec3f resin_ext(0.0f);
         float clearcoatValue = 0.0f;
         float clearcoatRoughnessValue = 0.03f;
         float translucentValue = 0.0f;
@@ -6593,6 +6778,143 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     rec.surface_override.ior = iorValue;
                 }
 
+                // --- Resin evaluation (CPU parity with GPU closesthit) ---
+                float transmission_density = 0.0f;
+                Vec3 resin_color(1.0f);
+                float resin_roughness = 0.1f;
+                float resin_inclusion = 0.0f;
+                float resin_dirt = 0.0f;
+                float resin_inclusion_scale = 8.0f;
+                Vec3 resin_dirt_color(0.18f, 0.14f, 0.10f);
+
+                auto pbsdf = dynamic_cast<PrincipledBSDF*>(rec.materialPtr);
+                if (pbsdf) {
+                    transmission_density = pbsdf->getTransmissionDensity();
+                    resin_color = pbsdf->getResinColor();
+                    resin_roughness = pbsdf->getResinRoughness();
+                    resin_inclusion = pbsdf->getResinInclusion();
+                    resin_dirt = pbsdf->getResinDirt();
+                    resin_inclusion_scale = pbsdf->getResinInclusionScale();
+                    resin_dirt_color = pbsdf->getResinDirtColor();
+                }
+
+                if (transmission_density > 1e-4f) {
+                    float effIor = std::max(iorValue, 1.45f);
+                    float cosT = std::clamp(Vec3::dot(-current_ray.direction.normalize(), rec.interpolated_normal.normalize()), 0.0f, 1.0f);
+                    
+                    // Point Fresnel
+                    float r0 = (1.0f - effIor) / (1.0f + effIor);
+                    r0 = r0 * r0;
+                    float fres = r0 + (1.0f - r0) * std::pow(1.0f - cosT, 5.0f);
+
+                    if (Vec3::random_float() < fres) {
+                        Vec3 refl;
+                        Vec3 normal_vec = rec.interpolated_normal.normalize();
+                        Vec3 V = -current_ray.direction.normalize();
+                        if (resin_roughness < 0.02f) {
+                            refl = Vec3::reflect(current_ray.direction, normal_vec).normalize();
+                        } else {
+                            refl = pbsdf->sampleGGXVNDF(normal_vec, V, resin_roughness, Vec3::random_float(), Vec3::random_float());
+                            if (Vec3::dot(refl, normal_vec) <= 0.0f) {
+                                refl = Vec3::reflect(current_ray.direction, normal_vec).normalize();
+                            }
+                        }
+                        
+                        Vec3 emitted = rec.materialPtr ? rec.materialPtr->getEmission(rec.uv, rec.point) : Vec3(0.0f);
+                        color += throughput * toVec3f(emitted);
+                        
+                        current_ray = Ray(rec.point + normal_vec * 0.001f, refl);
+                        
+                        if (bounce == 0 && primary_hit && !(*primary_hit)) {
+                            *primary_hit = true;
+                            if (primary_albedo) *primary_albedo = Vec3(1.0f);
+                            if (primary_normal) *primary_normal = normal_vec;
+                            if (primary_depth) *primary_depth = rec.t;
+                            if (primary_material_id) *primary_material_id = static_cast<uint32_t>(rec.materialID);
+                            if (primary_world_position) *primary_world_position = rec.point;
+                        }
+                        continue;
+                    }
+
+                    Vec3 Tdir;
+                    Vec3 normal_vec = rec.interpolated_normal.normalize();
+                    if (!cpu_refract(current_ray.direction, normal_vec, 1.0f / effIor, Tdir)) {
+                        Tdir = current_ray.direction;
+                    }
+                    Tdir = Tdir.normalize();
+
+                    Vec3 T, B;
+                    Renderer::create_coordinate_system(rec.normal, T, B);
+                    Vec3 inPlane = Tdir - normal_vec * Vec3::dot(Tdir, normal_vec);
+                    Vec2 parUV = rec.uv 
+                               + Vec2(Vec3::dot(inPlane, T), Vec3::dot(inPlane, B))
+                                 * (transmission_density * 0.05f);
+
+                    if (pbsdf && pbsdf->albedoProperty.texture) {
+                        Vec2 transformedUV = pbsdf->applyTextureTransform(parUV.u, parUV.v);
+                        Vec3 alb = pbsdf->albedoProperty.texture->get_color_bilinear(transformedUV.u, transformedUV.v);
+                        albedo = toVec3f(alb).clamp(0.01f, 1.0f);
+                    }
+
+                    Vec3f ct = toVec3f(resin_color).clamp(0.0f, 1.0f);
+                    float cosV = std::max(std::abs(cosT), 0.25f);
+                    resin_ext = Vec3f((1.0f - ct.x) + 0.25f, (1.0f - ct.y) + 0.25f, (1.0f - ct.z) + 0.25f);
+                    resin_density = transmission_density;
+
+                    bool resinHasInclusions = (resin_inclusion > 0.001f || resin_dirt > 0.001f);
+                    if (resinHasInclusions) {
+                        const int RESIN_STEPS = 6;
+                        float dt = std::max(transmission_density, 1e-3f) / float(RESIN_STEPS);
+                        float scl = std::max(resin_inclusion_scale, 0.01f);
+                        Vec3 P = rec.point;
+                        Vec3f absorb(1.0f);
+                        bool dirtHit = false;
+                        for (int i = 0; i < RESIN_STEPS; ++i) {
+                            P += Tdir * dt;
+                            float dust = cpu_rh_fbm(P * scl);
+                            dust = dust * dust;
+                            float localExt = 1.0f + resin_inclusion * dust * 6.0f;
+                            absorb.x *= std::exp(-dt * resin_ext.x * localExt);
+                            absorb.y *= std::exp(-dt * resin_ext.y * localExt);
+                            absorb.z *= std::exp(-dt * resin_ext.z * localExt);
+
+                            if (resin_dirt > 0.001f) {
+                                float cell = cpu_rh_worley(P * scl * 3.0f);
+                                auto smoothstep_lambda = [](float edge0, float edge1, float x) {
+                                    float t = std::max(0.0f, std::min(1.0f, (x - edge0) / (edge1 - edge0)));
+                                    return t * t * (3.0f - 2.0f * t);
+                                };
+                                float speck = 1.0f - smoothstep_lambda(0.0f, 0.18f, cell);
+                                if (speck * resin_dirt > 0.5f) {
+                                    dirtHit = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (dirtHit) {
+                            albedo = toVec3f(resin_dirt_color) * absorb;
+                        } else {
+                            albedo *= absorb;
+                        }
+                    } else {
+                        float pathLen = 2.0f * transmission_density / cosV;
+                        albedo.x *= std::exp(-pathLen * resin_ext.x);
+                        albedo.y *= std::exp(-pathLen * resin_ext.y);
+                        albedo.z *= std::exp(-pathLen * resin_ext.z);
+                    }
+
+                    roughness = 1.0f;
+                    metallic = 0.0f;
+                    transmission = 0.0f;
+                    resin_active = true;
+
+                    rec.surface_override.valid = true;
+                    rec.surface_override.albedo = toVec3(albedo);
+                    rec.surface_override.roughness = roughness;
+                    rec.surface_override.metallic = metallic;
+                    rec.surface_override.transmission = transmission;
+                }
+
                 // NOTE: Emission is now retrieved polymorphically for all materials after scatter
             }
         }
@@ -6811,6 +7133,13 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             }
 
                             direct_light = clamp_contribution(direct_light, UnifiedConstants::MAX_CONTRIBUTION);
+
+                            if (resin_active) {
+                                float cosL = std::max(dot(N, wi), 0.05f);
+                                direct_light.x *= std::exp(-(resin_density / cosL) * resin_ext.x);
+                                direct_light.y *= std::exp(-(resin_density / cosL) * resin_ext.y);
+                                direct_light.z *= std::exp(-(resin_density / cosL) * resin_ext.z);
+                            }
                         }
 
                     }
@@ -6831,6 +7160,22 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         // Direct lighting ve emission zaten kendi BRDF değerlendirmesini içerir.
         // Post-scatter throughput kullanmak BRDF'i iki kez uygular (çift-BRDF hatası).
         color += throughput_for_nee * total_contribution;
+
+        // ── Photon caustic gather (CPU — Vulkan raygen Dilim 2 parity) ──────
+        // At the camera path's first diffuse vertex, add the photon-map caustic
+        // irradiance: LS⁺D light that BSDF sampling almost never finds. The
+        // photon side only splats crossed-glass paths, so this adds exactly
+        // what path tracing misses. Reflected radiance = albedo * E / π; the
+        // grid accumulates across passes, so divide by the pass count.
+        if (!caustic_gathered && !is_specular &&
+            render_settings.caustics_enabled && cpu_photon_grid && cpu_photon_grid->ready()) {
+            caustic_gathered = true;
+            const float passes = (float)(cpu_photon_grid->frameSeed + 1u);
+            const Vec3 cE = cpu_photon_grid->gather(rec.point);
+            Vec3f caustic = throughput_for_nee * albedo
+                          * (toVec3f(cE) * (0.31830988f / passes));
+            color += clamp_contribution(caustic, UnifiedConstants::MAX_CONTRIBUTION);
+        }
 
         if (is_specular && transmission > 0.01f) {
             if (++transmission_bounce_count > max_transmission_bounces) {
@@ -6933,6 +7278,10 @@ uint64_t Renderer::computeCPUCameraHash(const Camera& cam) const {
 void Renderer::resetCPUAccumulation() {
     cpu_accumulated_samples = 0;
     cpu_accumulation_valid = false;
+    if (cpu_photon_grid) {
+        cpu_photon_grid->clear();      // photon grid restarts with the accumulation
+        cpu_photon_grid->frameSeed = 0;
+    }
     cpu_last_camera_hash = 0;  // Reset camera hash for animation frames
     cpu_pixel_list_valid = false;  // Force pixel list rebuild + shuffle on next pass
     invalidateCPUDenoisedBuffer();
@@ -7396,6 +7745,204 @@ public:
 };
 } // namespace
 
+// ============================================================================
+// CPU photon caustics — parity with the Vulkan RT photon pass (photon.rgen).
+// Traced once per progressive pass; the grid accumulates across passes and
+// ray_color gathers at the camera path's first diffuse vertex. Same emission
+// model (target = union AABB of transmissive meshes, physical flux factors,
+// per-photon light cycling) and the same splat gate: only photons that REALLY
+// refracted through an interface count as caustic carriers.
+// ============================================================================
+void Renderer::traceCpuPhotons(SceneData& scene) {
+    extern RenderSettings render_settings;
+    const Hittable* bvh = scene.bvh.get();
+    if (!bvh) return;
+
+    // Local Vec3 helpers — the free cross()/dot() in this TU resolve to the
+    // Vec3f overloads from unified_types and do not accept Vec3.
+    auto cross3 = [](const Vec3& a, const Vec3& b) {
+        return Vec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+    };
+    auto dot3 = [](const Vec3& a, const Vec3& b) {
+        return a.x * b.x + a.y * b.y + a.z * b.z;
+    };
+
+    const bool fresh = !cpu_photon_grid;
+    if (fresh) cpu_photon_grid = std::make_unique<CpuPhotonGrid>();
+    CpuPhotonGrid& grid = *cpu_photon_grid;
+    grid.ensureAllocated();
+
+    // ── Emission target: world-space union AABB of caustic-caster triangles ──
+    // (transmission > 0 or Dielectric — same classification as the Vulkan
+    // adapter; per-material verdicts cached, flat mesh P is world-baked).
+    std::vector<int8_t> verdict(65536, -1);
+    auto isCaster = [&verdict](uint16_t id) -> bool {
+        int8_t& v = verdict[id];
+        if (v < 0) {
+            Material* m = MaterialManager::getInstance().getMaterial(id);
+            v = (m && (m->getTransmission(Vec2(0.5f, 0.5f)) > 0.001f ||
+                       m->type() == MaterialType::Dielectric)) ? 1 : 0;
+        }
+        return v == 1;
+    };
+    Vec3 mn(1e30f, 1e30f, 1e30f), mx(-1e30f, -1e30f, -1e30f);
+    bool anyCaster = false;
+    for (auto& obj : scene.world.objects) {
+        auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj);
+        if (!mesh || !mesh->geometry) continue;
+        const Vec3* P = mesh->geometry->get_positions();
+        const uint16_t* M = mesh->geometry->get_material_ids();
+        if (!P || !M) continue;
+        const size_t n = mesh->geometry->get_vertex_count();
+        for (size_t v = 0; v < n; ++v) {
+            if (!isCaster(M[v])) continue;
+            mn.x = std::min(mn.x, P[v].x); mx.x = std::max(mx.x, P[v].x);
+            mn.y = std::min(mn.y, P[v].y); mx.y = std::max(mx.y, P[v].y);
+            mn.z = std::min(mn.z, P[v].z); mx.z = std::max(mx.z, P[v].z);
+            anyCaster = true;
+        }
+    }
+    if (!anyCaster) return;   // no glass in scene: grid stays empty, gather adds 0
+
+    const Vec3 ctr = (mn + mx) * 0.5f;
+    const Vec3 dg = mx - mn;
+    const float halfDiag = 0.5f * std::sqrt(dg.x * dg.x + dg.y * dg.y + dg.z * dg.z);
+    const float rad = halfDiag * 1.15f + 0.005f;   // proportional margin (Vulkan parity)
+
+    // Scale-aware cell size: UI value is an upper bound (Vulkan parity).
+    grid.cellSize = std::min(std::max(0.001f, render_settings.caustics_cell_size),
+                             std::max(rad * (1.0f / 48.0f), 1e-4f));
+
+    std::vector<UnifiedLight> uls;
+    uls.reserve(scene.lights.size());
+    for (const auto& l : scene.lights) uls.push_back(toUnifiedLight(l));
+    const int L = (int)uls.size();
+    if (L == 0) return;
+
+    const int   N      = std::max(1024, render_settings.caustics_photons);
+    const float energy = render_settings.caustics_energy;
+
+    // Restart the grid when the LIGHTING or the caster bounds change — the
+    // image accumulation reset alone is not a reliable signal (a moved light
+    // otherwise keeps its stale caustic pattern forever), and the photon pass
+    // counter must not be tied to the pixel sample counter.
+    uint64_t stateHash = 1469598103934665603ull;
+    auto hashF = [&stateHash](float f) {
+        uint32_t u; std::memcpy(&u, &f, 4);
+        stateHash = (stateHash ^ u) * 1099511628211ull;
+    };
+    for (const auto& ul : uls) {
+        hashF(ul.position.x);  hashF(ul.position.y);  hashF(ul.position.z);
+        hashF(ul.direction.x); hashF(ul.direction.y); hashF(ul.direction.z);
+        hashF(ul.color.x);     hashF(ul.color.y);     hashF(ul.color.z);
+        hashF(ul.intensity);   hashF((float)ul.type);
+    }
+    hashF(ctr.x); hashF(ctr.y); hashF(ctr.z); hashF(rad);
+    hashF(grid.cellSize); hashF(energy); hashF((float)N);
+    if (fresh || cpu_accumulated_samples == 0 || stateHash != grid.stateHash) {
+        grid.clear();
+        grid.passCount = 0;
+        grid.stateHash = stateHash;
+    }
+    grid.frameSeed = grid.passCount++;
+
+    std::atomic<uint32_t> diagSplats{ 0 }, diagCrossed{ 0 };
+
+#pragma omp parallel for schedule(dynamic, 2048)
+    for (int i = 0; i < N; ++i) {
+        uint32_t rng = CpuPhotonGrid::scramble((uint32_t)i ^ CpuPhotonGrid::scramble(grid.frameSeed * 9781u + 1u));
+        auto rnd01 = [&rng]() { rng = CpuPhotonGrid::scramble(rng); return (float)rng * (1.0f / 4294967296.0f); };
+
+        const UnifiedLight& light = uls[i % L];
+
+        // Random point inside the target sphere (importance region).
+        const float tz  = 1.0f - 2.0f * rnd01();
+        const float phi = 6.2831853f * rnd01();
+        const float rxy = std::sqrt(std::max(0.0f, 1.0f - tz * tz));
+        const float trr = rad * std::cbrt(rnd01());
+        const Vec3 target = ctr + Vec3(rxy * std::cos(phi), rxy * std::sin(phi), tz) * trr;
+
+        Vec3 org, dir;
+        float flux;
+        if (light.type == (int)UnifiedLightType::Directional) {
+            // Parallel rays from a virtual disk upstream of the target.
+            dir = unit_vector(Vec3(light.direction.x, light.direction.y, light.direction.z));
+            const Vec3 up = (std::fabs(dir.y) < 0.99f) ? Vec3(0, 1, 0) : Vec3(1, 0, 0);
+            const Vec3 t = unit_vector(cross3(up, dir));
+            const Vec3 b = cross3(dir, t);
+            const float ang = 6.2831853f * rnd01();
+            const float dr  = rad * std::sqrt(rnd01());
+            org = ctr - dir * (2.0f * rad + 50.0f) + (t * std::cos(ang) + b * std::sin(ang)) * dr;
+            flux = 3.14159265f * rad * rad;                     // disk area × irradiance
+        } else {
+            if (light.type == (int)UnifiedLightType::Area) {
+                org = Vec3(light.position.x, light.position.y, light.position.z)
+                    + Vec3(light.area_u.x, light.area_u.y, light.area_u.z) * ((rnd01() - 0.5f) * std::max(light.area_width, 1e-3f))
+                    + Vec3(light.area_v.x, light.area_v.y, light.area_v.z) * ((rnd01() - 0.5f) * std::max(light.area_height, 1e-3f));
+            } else {
+                org = Vec3(light.position.x, light.position.y, light.position.z);
+            }
+            dir = unit_vector(target - org);
+            if (light.type == (int)UnifiedLightType::Spot) {
+                const Vec3 sd = unit_vector(Vec3(light.direction.x, light.direction.y, light.direction.z));
+                if (dot3(dir, sd) < light.outer_cone_cos) continue;   // outside the cone
+            }
+            const float dist = (ctr - org).length();
+            if (dist <= rad) {
+                flux = 12.566371f;                              // light inside target: 4π
+            } else {
+                const float sinT = std::clamp(rad / dist, 0.0f, 1.0f);
+                const float cosT = std::sqrt(std::max(0.0f, 1.0f - sinT * sinT));
+                flux = 6.2831853f * (1.0f - cosT);              // target cone solid angle
+            }
+        }
+
+        Vec3 power = Vec3(light.color.x, light.color.y, light.color.z) * light.intensity
+                   * (flux * (float)L * energy / (float)N);
+
+        Ray ray(org, dir);
+        ray.dispersion_channel = 0;
+        Vec3 tp(1.0f, 1.0f, 1.0f);
+        bool crossedGlass = false;
+        for (int bounce = 0; bounce < 8; ++bounce) {
+            HitRecord rec;
+            if (!bvh->hit(ray, 1e-3f, std::numeric_limits<float>::infinity(), rec, false)) break;
+            HitMaterialResolver::resolveSurfaceData(rec);
+            if (!rec.materialPtr) break;
+
+            Vec3 att;
+            Ray scattered;
+            bool is_spec = false;
+            if (!rec.materialPtr->scatter(ray, rec, att, scattered, is_spec)) break;
+            tp = tp * att;
+            if (std::max({ tp.x, tp.y, tp.z }) < 1e-4f) break;
+
+            // Crossing test: rec.normal faces the incoming ray, so a REFRACTED
+            // continuation leaves through the back side (mirror lobes stay in
+            // front and must NOT count as crossing — Vulkan BOUNCE_GLASS_REFLECT).
+            if (dot3(scattered.direction, rec.normal) < 0.0f) crossedGlass = true;
+
+            if (!is_spec) {                       // first diffuse hit: terminal
+                if (crossedGlass) {
+                    grid.splat(rec.point, power * tp, rng);
+                    diagSplats.fetch_add(1u, std::memory_order_relaxed);
+                }
+                break;
+            }
+            ray = scattered;
+        }
+        if (crossedGlass) diagCrossed.fetch_add(1u, std::memory_order_relaxed);
+    }
+
+    if (grid.frameSeed == 0u) {
+        SCENE_LOG_INFO("[CpuPhoton] restart | photons=" + std::to_string(N) +
+                       " crossedGlass=" + std::to_string(diagCrossed.load()) +
+                       " splatted=" + std::to_string(diagSplats.load()) +
+                       " target=(" + std::to_string(ctr.x) + "," + std::to_string(ctr.y) + "," + std::to_string(ctr.z) +
+                       ") r=" + std::to_string(rad) + " cell=" + std::to_string(grid.cellSize));
+    }
+}
+
 void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window, SceneData& scene, int samples_this_pass, int override_target_samples) {
     // [SAFETY CHECK] Prevent rendering if stopped or loading a new project
     // This prevents access violations when camera/scene data is being destroyed
@@ -7439,6 +7986,13 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
         cpu_material_id_buffer.resize(pixel_count, 0xFFFFFFFFu);
     }
     cpu_accumulation_valid = true;
+
+    // Photon caustic pass (CPU parity with Vulkan RT): trace this pass's photon
+    // batch into the world-space grid BEFORE the camera rays gather from it.
+    // The grid accumulates across passes; resetCPUAccumulation() clears it.
+    if (render_settings.caustics_enabled && !scene.lights.empty()) {
+        traceCpuPhotons(scene);
+    }
 
     // Ensure variance buffer is allocated for adaptive sampling
     if (cpu_variance_buffer.size() != pixel_count) {
@@ -8182,12 +8736,74 @@ void Renderer::rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<
 // Performance: ~1-5ms vs ~200-500ms for rebuildOptiXGeometry
 // ============================================================================
 void Renderer::updateBackendMaterials(SceneData& scene) {
-    // Only update the active render backend here. The dedicated viewport backend
-    // is synced explicitly by Main.cpp when an interactive viewport mode needs
-    // Material Preview data. Keeping these paths separate prevents startup and
-    // Solid->Rendered transitions from filling both render and raster texture
-    // pools with the same high-resolution material set.
+    struct TextureDirtySnapshot {
+        Texture* tex;
+        bool full;
+        int min_x, min_y, max_x, max_y;
+    };
+    std::vector<TextureDirtySnapshot> dirtySnapshot;
+
+    // Capture dirty state for all materials in MaterialManager
+    auto& mgr = MaterialManager::getInstance();
+    const auto& all_materials = mgr.getAllMaterials();
+    for (const auto& mat : all_materials) {
+        if (mat && mat->type() == MaterialType::PrincipledBSDF) {
+            auto* pbsdf = static_cast<PrincipledBSDF*>(mat.get());
+            auto capture = [&](const std::shared_ptr<Texture>& tex) {
+                if (!tex || !tex->vulkan_dirty) return;
+                dirtySnapshot.push_back({
+                    tex.get(),
+                    tex->vulkan_dirty_full,
+                    tex->vulkan_dirty_min_x,
+                    tex->vulkan_dirty_min_y,
+                    tex->vulkan_dirty_max_x,
+                    tex->vulkan_dirty_max_y
+                });
+            };
+            capture(pbsdf->albedoProperty.texture);
+            capture(pbsdf->normalProperty.texture);
+            capture(pbsdf->roughnessProperty.texture);
+            capture(pbsdf->metallicProperty.texture);
+            capture(pbsdf->emissionProperty.texture);
+            capture(pbsdf->opacityProperty.texture);
+            capture(pbsdf->transmissionProperty.texture);
+            capture(pbsdf->heightProperty.texture);
+        }
+    }
+
+    // Capture dirty state for all terrain splat maps
+    const auto& terrains = TerrainManager::getInstance().getTerrains();
+    for (const auto& t : terrains) {
+        if (t.splatMap && t.splatMap->vulkan_dirty) {
+            dirtySnapshot.push_back({
+                t.splatMap.get(),
+                t.splatMap->vulkan_dirty_full,
+                t.splatMap->vulkan_dirty_min_x,
+                t.splatMap->vulkan_dirty_min_y,
+                t.splatMap->vulkan_dirty_max_x,
+                t.splatMap->vulkan_dirty_max_y
+            });
+        }
+    }
+
+    // Sync active render backend (which clears dirty flags)
     updateBackendMaterials(scene, m_backend);
+
+    // Sync viewport backend if active and different
+    extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+    if (g_viewport_backend && g_viewport_backend.get() != m_backend) {
+        // Restore dirty states
+        for (const auto& snapshot : dirtySnapshot) {
+            if (!snapshot.tex) continue;
+            snapshot.tex->vulkan_dirty = true;
+            snapshot.tex->vulkan_dirty_full = snapshot.full;
+            snapshot.tex->vulkan_dirty_min_x = snapshot.min_x;
+            snapshot.tex->vulkan_dirty_min_y = snapshot.min_y;
+            snapshot.tex->vulkan_dirty_max_x = snapshot.max_x;
+            snapshot.tex->vulkan_dirty_max_y = snapshot.max_y;
+        }
+        updateBackendMaterials(scene, g_viewport_backend.get());
+    }
 }
 
 void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targetBackend) {
@@ -8403,6 +9019,8 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
                 data.transmissionTexture = getH(pbsdf->transmissionProperty.texture);
                 data.opacityTexture = getH(pbsdf->opacityProperty.texture);
                 data.heightTexture = getH(pbsdf->heightProperty.texture);
+                data.metallicTexChannel  = pbsdf->metallic_tex_channel;
+                data.roughnessTexChannel = pbsdf->roughness_tex_channel;
             }
 
             // Copy water-specific GPU params (live in GpuMaterial, not duplicated in PrincipledBSDF)
@@ -8537,6 +9155,8 @@ void Renderer::updateBackendMaterial(SceneData& scene, uint16_t material_id, Bac
         data.transmissionTexture = getH(pbsdf->transmissionProperty.texture);
         data.opacityTexture = getH(pbsdf->opacityProperty.texture);
         data.heightTexture = getH(pbsdf->heightProperty.texture);
+        data.metallicTexChannel  = pbsdf->metallic_tex_channel;
+        data.roughnessTexChannel = pbsdf->roughness_tex_channel;
     }
 
     if (mat->gpuMaterial) {

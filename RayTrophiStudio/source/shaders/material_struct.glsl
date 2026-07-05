@@ -69,9 +69,9 @@ struct Material {
     float resin_color_g;
     float resin_color_b;
     float transmission_density;
-    // Block 18: Resin coat layer params
+    // Block 18: Resin coat layer params + spectral dispersion
     float resin_roughness;
-    float _resin_pad0;
+    float dispersion;      // spectral dispersion strength (0 = off; repurposed _resin_pad0)
     float _resin_pad1;
     float _resin_pad2;
     // Block 19: Resin internal inclusions (dust/dirt march)

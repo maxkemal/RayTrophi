@@ -148,7 +148,11 @@ namespace MeshModifiers {
     enum class ModifierType {
         FlatSubdivision,
         SmoothSubdivision,
-        CatmullClark        // LIVE non-destructive Catmull-Clark (stencil engine + crease)
+        CatmullClark,       // LIVE non-destructive Catmull-Clark (stencil engine + crease)
+        Bevel               // RETIRED (2026-07-04, existed <1 day): stack bevel compounded over its
+                            // own output on every evaluate. Enum value kept so an old save's entry
+                            // deserializes to an inert modifier instead of garbage; bevel lives in
+                            // the Geo-DAG BevelNode and the Edit Mode edge-bevel tool.
     };
 
     struct ModifierData {
@@ -158,6 +162,8 @@ namespace MeshModifiers {
         int levels = 1;          // Blender-style VIEWPORT subdivision level (Solid / edit display)
         int renderLevels = 2;    // RENDER subdivision level (Rendered viewport / final quality)
         float smoothAngle = 0.5f;
+        float bevelWidth = 0.05f;   // retired Bevel modifier's params — kept for save-file tolerance
+        float bevelAngle = 30.0f;
 
         void serialize(nlohmann::json& j) const;
         void deserialize(const nlohmann::json& j);

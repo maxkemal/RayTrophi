@@ -1,4 +1,4 @@
-﻿#include "scene_ui.h"
+#include "scene_ui.h"
 #include "ui_modern.h"
 #include "imgui_internal.h"
 #include "HittableInstance.h"
@@ -16,6 +16,7 @@
 #include "Paint/TerrainPaintAdapter.h"
 #include "Paint/MeshPaintAdapter.h"
 #include "TerrainManager.h"
+#include "InstanceManager.h"   // Geo-DAG ScatterInstancesNode side effects (rebuildSceneObjects)
 #include "PrincipledBSDF.h"
 #include "Volumetric.h"
 #include "MaterialManager.h"
@@ -2463,6 +2464,13 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                 ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.40f, 1.0f), "Editing: %s", effectiveNodeName.c_str());
             }
 
+            // Faz 8a: entry point into the Geo-DAG node graph panel — parallel/optional to the
+            // ModifierStack UI below, does not affect it.
+            if (!selectedNodeName.empty() && UIWidgets::SecondaryButton("Edit Geometry Graph", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+                geometry_graph_active_object_name = selectedNodeName;
+                show_geometry_graph = true;
+            }
+
             if (!mesh_cache_valid) {
                 rebuildMeshCache(ctx.scene.world.objects);
             }
@@ -2562,6 +2570,9 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                         if (hasAnyOptions) ImGui::Spacing();
                         ImGui::SliderFloat("Loop Cut Pos", &mesh_loop_cut_position, 0.05f, 0.95f, "%.2f");
                         ImGui::TextDisabled("Relative position of the loop cut along ring edges.");
+                        // Bevel Width/Segments/Profile controls hidden while the Edit
+                        // Mode "Bevel Edge" tool is disabled (stale-cache issue — see the
+                        // commented-out EdgeBevel entry in edit_actions).
                         hasAnyOptions = true;
                     }
 
@@ -2971,6 +2982,14 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                             if (ImGui::SliderFloat("Smooth Weight", &mod.smoothAngle, 0.0f, 1.0f)) stackChanged = true;
                         }
 
+                        if (mod.type == MeshModifiers::ModifierType::Bevel) {
+                            // Retired same-day (2026-07-04): stack bevel compounded over its own
+                            // output. Old saves showing one of these are inert — point users at
+                            // the Geometry Graph Bevel node instead.
+                            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Retired modifier");
+                            ImGui::TextWrapped("Stack Bevel was removed - use the Geometry Graph's Bevel node (or Edit Mode edge bevel) instead. This entry does nothing and can be deleted.");
+                        }
+
                         UIWidgets::EndSection();
                     }
                     ImGui::PopID();
@@ -2989,6 +3008,11 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
                     modifierStack.modifiers.push_back(newMod);
                     stackChanged = true;
                 }
+                // NOTE: a stack "Bevel" modifier briefly existed here (2026-07-04) and was
+                // removed the same day: re-evaluating bevel over its own previous output on
+                // every stack pass compounds badly (double-bevel over narrow strips), while
+                // the Geo-DAG Bevel node always restarts from the pristine base mesh. Bevel
+                // lives in the Geometry Graph (Bevel node) and Edit Mode (selected edges).
 
                 // NOTE: the static "Bake to GPU (device-resident)" button was removed — a
                 // one-shot bake doesn't track cage edits/sculpt (the dense GPU mesh froze),
@@ -3335,6 +3359,7 @@ void SceneUI::drawTerrainPaintPanel(UIContext& ctx, TerrainObject* terrain) {
             }
             terrain->splatMap->updateGPU();
             ctx.renderer.resetCPUAccumulation();
+            ctx.renderer.updateBackendMaterials(ctx.scene);
             if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
             SCENE_LOG_INFO("Flow baked to splat alpha for: " + terrain->name);
         } else {
@@ -3392,12 +3417,9 @@ void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>
 
     auto syncPaintMaterials = [&]() {
         ctx.renderer.resetCPUAccumulation();
+        ctx.renderer.updateBackendMaterials(ctx.scene);
         if (ctx.backend_ptr) {
-            ctx.renderer.updateBackendMaterials(ctx.scene, ctx.backend_ptr);
             ctx.backend_ptr->resetAccumulation();
-        }
-        if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
-            ctx.renderer.updateBackendMaterials(ctx.scene, g_viewport_backend.get());
         }
     };
 
@@ -4303,12 +4325,9 @@ void SceneUI::drawPaintChannelTextureSlots(UIContext& ctx, Paint::MeshPaintAdapt
                 }
 
                 ctx.renderer.resetCPUAccumulation();
+                ctx.renderer.updateBackendMaterials(ctx.scene);
                 if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene, ctx.backend_ptr);
                     ctx.backend_ptr->resetAccumulation();
-                }
-                if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene, g_viewport_backend.get());
                 }
                 g_ProjectManager.markModified();
             }
@@ -4891,12 +4910,9 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
             }
             if (any_changed) {
                 ctx.renderer.resetCPUAccumulation();
+                ctx.renderer.updateBackendMaterials(ctx.scene);
                 if (ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene, ctx.backend_ptr);
                     ctx.backend_ptr->resetAccumulation();
-                }
-                if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
-                    ctx.renderer.updateBackendMaterials(ctx.scene, g_viewport_backend.get());
                 }
                 if (!composite->empty()) {
                     history.record(std::move(composite));
@@ -5254,6 +5270,27 @@ void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Tria
             }
             if (ImGui::Button("Sharpen##mask", ImVec2(fullW, 0.0f))) {
                 applySculptMaskOperation(4);
+            }
+
+            ImGui::Separator();
+            ImGui::TextDisabled("Field Attribute Bridge (Geo-DAG / Scatter)");
+            ImGui::SetNextItemWidth(fullW);
+            ImGui::InputText("##maskAttrName", sculpt_mask_attribute_name, sizeof(sculpt_mask_attribute_name));
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Attribute name to export to / import from — must match\nthe 'Mask Attr' field on mask-aware Geo-DAG nodes.");
+            }
+            if (ImGui::Button("Export to Attribute", ImVec2(halfW, 0.0f))) {
+                exportSculptMaskToAttribute(ctx, sculpt_mask_attribute_name);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Bake this painted mask onto the object as a Field attribute\nso Geo-DAG nodes (Noise Displace, Scatter Instances) can use it.\nPaint BEFORE building the graph, or after Apply.");
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Import from Attribute", ImVec2(halfW, 0.0f))) {
+                importAttributeToSculptMask(ctx, sculpt_mask_attribute_name);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Load an existing Field attribute (e.g. one written by a\nMask by Height/Slope/Noise node) into the paintable mask.");
             }
         }
 
@@ -5622,6 +5659,8 @@ void SceneUI::drawEditToolControls(UIContext& ctx, const std::shared_ptr<Triangl
             recalculateMeshNormals(ctx, true);
         } else if (action_type == 13) {
             recalculateMeshNormals(ctx, false);
+        } else if (action_type == 14) {
+            bevelSelectedEdges(ctx, mesh_edge_bevel_width, mesh_edge_bevel_segments, mesh_edge_bevel_round);
         }
     };
 
@@ -5644,6 +5683,13 @@ void SceneUI::drawEditToolControls(UIContext& ctx, const std::shared_ptr<Triangl
         { "VertexMerge", "Merge Center", "Merge Center\nCollapse selected vertices to their center point.", "Disabled: Requires at least 2 selected vertices.", UIWidgets::IconType::MergeVertices, ImVec4(0.78f, 0.70f, 1.0f, 1.0f), canMergeVertices, 4 },
         { "VertexWeldByDistance", "Weld Distance", "Weld Distance\nSnap nearby selected vertices together using the weld distance.", "Disabled: Requires at least 2 selected vertices.", UIWidgets::IconType::WeldVertices, ImVec4(0.72f, 0.84f, 1.0f, 1.0f), canWeldVertices, 5 },
         { "VertexDissolve", "Dissolve Vert", "Dissolve Vert\nRemove selected vertices, preserving surrounding faces.", "Disabled: Requires selected vertex/vertices.", UIWidgets::IconType::DissolveTopology, ImVec4(1.0f, 0.66f, 0.54f, 1.0f), (isVertexMode || isCombinedMode) && selectedVertexCount >= 1, 6 },
+        // "EdgeBevel" (action 14, SceneUI::bevelSelectedEdges) TEMPORARILY DISABLED
+        // (2026-07-04, user report): the bevel geometry itself is correct, but after the
+        // op the editable cache/overlay keeps showing the OLD topology — the new
+        // edges/faces never appear in the edit overlay, which reads as a broken result.
+        // Re-enable by restoring this entry once the post-op cache rebuild is fixed;
+        // the Geo-DAG Bevel node is unaffected and remains the supported path.
+        // { "EdgeBevel", "Bevel Edge", "Bevel Edge\nChamfer or round the selected edges (width, segments and profile in Tool Options).", "Disabled: Requires selected edge(s).", UIWidgets::IconType::LoopCutTool, ImVec4(0.98f, 0.80f, 0.42f, 1.0f), hasSelectedEdges, 14 },
         { "EdgeDissolve", "Dissolve Edge", "Dissolve Edge\nRemove selected edges, preserving polygon flow.", "Disabled: Requires selected edge(s).", UIWidgets::IconType::DissolveTopology, ImVec4(1.0f, 0.68f, 0.52f, 1.0f), hasSelectedEdges, 7 },
         { "FaceDelete", "Delete Face", "Delete Face\nRemove selected faces, leaving an open boundary.", "Disabled: Requires selected face(s).", UIWidgets::IconType::DeleteFaceTool, ImVec4(1.0f, 0.48f, 0.42f, 1.0f), hasSelectedFaces, 8 }
     };
@@ -6157,13 +6203,10 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         // the throttled mid-stroke updates. Paired with the 220 ms throttle in
         // the per-dab loop below. Both backends sync'd because g_viewport_backend
         // is the live raster MP viewport even when m_backend is Vulkan RT/OptiX.
+        ctx.renderer.updateBackendMaterials(ctx.scene);
         if (ctx.backend_ptr) {
-            ctx.renderer.updateBackendMaterials(ctx.scene, ctx.backend_ptr);
             ctx.backend_ptr->resetAccumulation();
             last_vulkan_paint_sync_time = static_cast<float>(ImGui::GetTime());
-        }
-        if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
-            ctx.renderer.updateBackendMaterials(ctx.scene, g_viewport_backend.get());
         }
     };
 
@@ -6833,4 +6876,323 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
             }
         }
     }
+}
+
+// ============================================================================
+// FAZ 8a — GEO-DAG TOOLBAR + EVALUATE (Geometry Graph panel)
+// ============================================================================
+// Fully additive alongside the ModifierStack UI above — untouched, still works exactly as
+// before. This is a separate, opt-in way to build the same kind of geometry chain via
+// GeometryNodesV2 (see scene_data.h's geometry_node_graphs map, scene_ui.cpp's "Geometry Graph"
+// window). No new .cpp/.vcxproj entry needed — this lives in the already-compiled TU that already
+// owns the "selected mesh object" + ModifierStack UI context.
+
+void SceneUI::drawGeometryGraphToolbar(UIContext& ctx, const std::string& objectName, GeometryNodesV2::GeometryNodeGraphV2& graph) {
+    ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "Object: %s", objectName.c_str());
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+
+    // A graph has exactly one implicit geometry source (GeometryContext::baseMesh == this
+    // object) and exactly one result sink (the Output node evaluateGeometryGraph reads from) —
+    // a second of either would be a dangling duplicate / ambiguous result, so both are capped
+    // at one here instead of letting evaluate() guess which one the user intended.
+    bool hasBaseMesh = false, hasOutput = false;
+    for (auto& n : graph.nodes) {
+        if (n->getTypeId() == "GeoV2.BaseMesh") hasBaseMesh = true;
+        else if (n->getTypeId() == "GeoV2.Output") hasOutput = true;
+    }
+
+    static int addNodeChoice = 2;
+    const char* nodeChoices[] = { "Base Mesh", "Object Source", "Subdivide", "Transform", "Mirror", "Array", "Extrude", "Inset", "Bevel", "Remesh", "Noise Displace", "Merge (Join)", "Weld", "Mask by Height", "Mask by Slope", "Mask by Noise", "Mask Remap", "Mask Math", "Scatter Instances", "Output" };
+    static const GeometryNodesV2::NodeType nodeChoiceTypes[] = {
+        GeometryNodesV2::NodeType::BaseMesh,
+        GeometryNodesV2::NodeType::ObjectSource,
+        GeometryNodesV2::NodeType::SubdivideCC,
+        GeometryNodesV2::NodeType::Transform,
+        GeometryNodesV2::NodeType::Mirror,
+        GeometryNodesV2::NodeType::Array,
+        GeometryNodesV2::NodeType::Extrude,
+        GeometryNodesV2::NodeType::Inset,
+        GeometryNodesV2::NodeType::Bevel,
+        GeometryNodesV2::NodeType::Remesh,
+        GeometryNodesV2::NodeType::NoiseDisplace,
+        GeometryNodesV2::NodeType::Merge,
+        GeometryNodesV2::NodeType::Weld,
+        GeometryNodesV2::NodeType::MaskByHeight,
+        GeometryNodesV2::NodeType::MaskBySlope,
+        GeometryNodesV2::NodeType::MaskNoise,
+        GeometryNodesV2::NodeType::MaskRemap,
+        GeometryNodesV2::NodeType::MaskMath,
+        GeometryNodesV2::NodeType::ScatterInstances,
+        GeometryNodesV2::NodeType::Output,
+    };
+    if (hasBaseMesh && addNodeChoice == 0) addNodeChoice = 2;
+    ImGui::SetNextItemWidth(160.0f);
+    ImGui::Combo("##GeoDagAddNode", &addNodeChoice, nodeChoices, IM_ARRAYSIZE(nodeChoices));
+    ImGui::SameLine();
+    if (UIWidgets::SecondaryButton("Add Node", ImVec2(100, 0))) {
+        const GeometryNodesV2::NodeType type = nodeChoiceTypes[addNodeChoice];
+        if (type == GeometryNodesV2::NodeType::BaseMesh && hasBaseMesh) {
+            addViewportMessage("Geometry Graph: only one Base Mesh node allowed per graph", 3.0f, ImVec4(1.0f, 0.7f, 0.3f, 1.0f));
+        } else if (type == GeometryNodesV2::NodeType::Output && hasOutput) {
+            addViewportMessage("Geometry Graph: only one Output node allowed per graph", 3.0f, ImVec4(1.0f, 0.7f, 0.3f, 1.0f));
+        } else {
+            // Drop new nodes to the right of whatever's already there so they don't stack on top.
+            float maxX = 60.0f;
+            for (auto& n : graph.nodes) maxX = (std::max)(maxX, n->x);
+            graph.addGeometryNode(type, maxX + 220.0f, 120.0f);
+        }
+    }
+    ImGui::SameLine();
+    if (UIWidgets::PrimaryButton("Evaluate", ImVec2(100, 0))) {
+        evaluateGeometryGraph(ctx, objectName, graph);
+    }
+    ImGui::SameLine();
+    // Blender modifier-Apply semantics: bake the current result as the object's NEW base
+    // mesh and reset the graph. Until Apply, every Evaluate re-runs from the pristine
+    // originalBaseMesh snapshot — which also means any manual work done on the evaluated
+    // result (sculpt, edit mode) would be silently thrown away by the next Evaluate.
+    // Apply is the explicit "I'm done, this is the mesh now" boundary that makes such
+    // follow-up work safe. graph.clear() empties nodes/links/groups; the window block
+    // re-creates the default Base Mesh -> Output pair next frame, and nulling
+    // originalBaseMesh makes the next Evaluate snapshot the APPLIED result as its base.
+    if (UIWidgets::SecondaryButton("Apply", ImVec2(100, 0))) {
+        if (evaluateGeometryGraph(ctx, objectName, graph)) {
+            graph.clear();
+            graph.originalBaseMesh = nullptr;
+            addViewportMessage("Geometry Graph applied: result is now '" + objectName + "'s base mesh", 3.0f, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Evaluate, bake the result as the new base mesh, and reset the graph.\nUse before sculpting/editing the result — plain Evaluate always restarts\nfrom the original mesh and would discard such changes.");
+    }
+    
+    ImGui::SameLine();
+    float availX = ImGui::GetContentRegionAvail().x;
+    const float buttonW = 120.0f;
+    if (availX > buttonW) {
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + availX - buttonW);
+    }
+    if (UIWidgets::SecondaryButton(geometry_graph_show_properties ? "Hide Sidebar" : "Show Sidebar", ImVec2(buttonW, 0))) {
+        geometry_graph_show_properties = !geometry_graph_show_properties;
+    }
+}
+
+bool SceneUI::evaluateGeometryGraph(UIContext& ctx, const std::string& objectName, GeometryNodesV2::GeometryNodeGraphV2& graph) {
+    // 1. Resolve the PRISTINE base mesh. Must come from graph.originalBaseMesh (snapshotted once
+    // when the graph was first created — see the "Geometry Graph" window block in scene_ui.cpp),
+    // NOT from a fresh direct_mesh_nodes lookup: after the first Evaluate, the scene's copy of
+    // this object IS the evaluated result (evaluateGeometryGraph replaced it below), so re-reading
+    // "the object's current mesh" here would silently re-run the graph on top of its own previous
+    // output every time (e.g. Subdivide compounding onto an already-subdivided mesh) instead of
+    // always starting fresh from the original import/edit.
+    if (!graph.originalBaseMesh) {
+        if (!mesh_cache_valid) {
+            rebuildMeshCache(ctx.scene.world.objects);
+        }
+        auto dmIt = direct_mesh_nodes.find(objectName);
+        if (dmIt == direct_mesh_nodes.end() || !dmIt->second.mesh) {
+            addViewportMessage("Geometry Graph: '" + objectName + "' is not a flat mesh (facade-only objects not yet supported)", 3.5f, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
+            return false;
+        }
+        graph.originalBaseMesh = dmIt->second.mesh;
+    }
+
+    // 2. Build domain context. Mark the graph dirty and clear stale errors/cache but do NOT call
+    // graph.evaluate() — that eagerly computes EVERY terminal node's outputs, including branches
+    // never wired into Output (e.g. a second Subdivide left dangling off Base Mesh), wasting work
+    // and needlessly running unrelated node compute() calls. Pulling only from Output below
+    // (GeometryNodeBase::getGeometryInput -> NodeBase::requestOutput) is already the graph's own
+    // pull-based lazy-eval design — it naturally only touches Output's actual ancestor chain.
+    GeometryNodesV2::GeometryContext gctx;
+    gctx.baseMesh = graph.originalBaseMesh;
+    gctx.objectName = objectName;   // ScatterInstancesNode: group naming + target binding
+    // ObjectSourceNode's cross-object lookup. Only alive during this synchronous evaluate —
+    // captures locals by reference, never stored. Asking for the graph's OWN object returns
+    // the pristine snapshot (same anti-compounding rule as baseMesh above), any other name
+    // resolves to that object's current flat mesh. direct_mesh_nodes may not have been
+    // refreshed by step 1 (it's skipped once originalBaseMesh is snapshotted), so validate
+    // the cache here before the resolver can be called.
+    if (!mesh_cache_valid) {
+        rebuildMeshCache(ctx.scene.world.objects);
+    }
+    gctx.resolveObjectMesh = [&](const std::string& name) -> std::shared_ptr<TriangleMesh> {
+        if (name == objectName) return graph.originalBaseMesh;
+        auto it = direct_mesh_nodes.find(name);
+        return (it != direct_mesh_nodes.end()) ? it->second.mesh : nullptr;
+    };
+    // Multi-material-aware facade gather (ScatterInstancesNode sources): one nodeName
+    // can own SEVERAL sibling TriangleMesh entries (multi-material import) and/or
+    // legacy per-face facades — collect them ALL, same as paintInstances' target scan.
+    gctx.gatherObjectFacades = [&](const std::string& name) -> std::vector<std::shared_ptr<Triangle>> {
+        std::vector<std::shared_ptr<Triangle>> tris;
+        for (const auto& obj : ctx.scene.world.objects) {
+            if (obj->isTriangle()) {
+                auto tri = std::static_pointer_cast<Triangle>(obj);
+                if (tri->getNodeName() == name) tris.push_back(tri);
+            } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                if (tm->nodeName == name && tm->geometry) {
+                    const size_t nTris = tm->num_triangles();
+                    tris.reserve(tris.size() + nTris);
+                    for (size_t t = 0; t < nTris; ++t) {
+                        tris.push_back(std::make_shared<Triangle>(tm, static_cast<uint32_t>(t)));
+                    }
+                }
+            }
+        }
+        return tris;
+    };
+
+    NodeSystem::EvaluationContext evalCtx(&graph);
+    evalCtx.setDomainContext(&gctx);
+    evalCtx.clearErrors();
+    evalCtx.clearCache();
+    graph.markAllDirty();
+
+    // 3. Pull the result. Prefer the explicit "GeoV2.Output" sink node (exactly one allowed per
+    // graph, enforced in drawGeometryGraphToolbar/the right-click "Add" menu) — this makes the
+    // result deterministic even with several parallel, unconnected branches off the same Base
+    // Mesh (e.g. two different Subdivide nodes), where "which terminal node wins" used to be an
+    // implementation detail (node array order) instead of something the user controls. Falls back
+    // to the old "any other terminal node" heuristic for graphs saved before Output existed.
+    auto pullGeometryFrom = [&](NodeSystem::NodeBase* node) -> std::shared_ptr<TriangleMesh> {
+        if (auto* geoNode = dynamic_cast<GeometryNodesV2::GeometryNodeBase*>(node)) {
+            if (geoNode->geometryNodeType == GeometryNodesV2::NodeType::Output) {
+                NodeSystem::GeometryValue mesh = geoNode->getGeometryInput(0, evalCtx);
+                if (mesh) return mesh;
+                return nullptr;
+            }
+        }
+        for (size_t i = 0; i < node->outputs.size(); ++i) {
+            if (node->outputs[i].dataType != NodeSystem::DataType::Geometry) continue;
+            NodeSystem::PinValue val = node->requestOutput(static_cast<int>(i), evalCtx);
+            NodeSystem::GeometryValue mesh;
+            if (NodeSystem::tryGetGeometry(val, mesh) && mesh) return mesh;
+        }
+        return nullptr;
+    };
+
+    std::shared_ptr<TriangleMesh> result;
+    for (auto& node : graph.nodes) {
+        if (node->getTypeId() == "GeoV2.Output") {
+            result = pullGeometryFrom(node.get());
+            break;
+        }
+    }
+    if (!result) {
+        for (auto& node : graph.nodes) {
+            if (!graph.isTerminalNode(node.get())) continue;
+            if (node->getTypeId() == "GeoV2.BaseMesh") continue;  // prefer a real downstream result
+            result = pullGeometryFrom(node.get());
+            if (result) break;
+        }
+    }
+    if (!result) {
+        for (auto& node : graph.nodes) {
+            if (!graph.isTerminalNode(node.get())) continue;
+            result = pullGeometryFrom(node.get());
+            if (result) break;
+        }
+    }
+
+    if (evalCtx.hasErrors()) {
+        const auto& errs = evalCtx.getErrors();
+        for (const auto& err : errs) {
+            SCENE_LOG_ERROR("Geometry Graph error (node " + std::to_string(err.nodeId) + "): " + err.message);
+        }
+        // Errors used to be console-only — a failing node (e.g. a missing mask
+        // attribute) LOOKED like "the node silently did nothing" unless the user
+        // happened to be watching the log. Surface the first one in the viewport.
+        if (!errs.empty()) {
+            addViewportMessage("Geometry Graph: " + errs.front().message, 4.5f, ImVec4(1.0f, 0.5f, 0.3f, 1.0f));
+        }
+    }
+
+    if (!result || !result->geometry || result->geometry->indices.empty()) {
+        addViewportMessage("Geometry Graph: evaluation produced no geometry", 3.5f, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
+        return false;
+    }
+
+    // Keep identity consistent with the object being replaced.
+    result->nodeName = objectName;
+    if (!result->transform && graph.originalBaseMesh->transform) {
+        result->transform = graph.originalBaseMesh->transform;
+    }
+
+    // 4. Apply back to the scene — filter out every existing object sharing this nodeName
+    // (mirrors the ModifierStack path's replaceEvaluatedMesh above: a multi-material object can
+    // have SEVERAL sibling TriangleMesh entries under one nodeName, not just one) and push the
+    // single new result in their place. NOTE: SubdivideCC's output is one merged TriangleMesh, so
+    // evaluating a multi-material object's graph collapses its materials into the first-touched
+    // one — a known limitation of this first slice, not yet addressed.
+    std::vector<std::shared_ptr<Hittable>> remainingObjects;
+    remainingObjects.reserve(ctx.scene.world.objects.size() + 1);
+    for (const auto& obj : ctx.scene.world.objects) {
+        if (obj->isTriangle()) {
+            auto tri = std::static_pointer_cast<Triangle>(obj);
+            if (tri->getNodeName() != objectName) remainingObjects.push_back(obj);
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (tm->nodeName != objectName) remainingObjects.push_back(obj);
+        } else {
+            remainingObjects.push_back(obj);
+        }
+    }
+    // Insert the result BEFORE any foliage-instance tail, not push_back at the very
+    // end: every CPU-side scan assumes "instances are the last N objects"
+    // (selectable = size - getTotalInstanceCount()), so a result appended AFTER the
+    // tail would be treated as foliage — invisible in hierarchy/picking even though
+    // the GPU (which iterates everything) still renders it.
+    {
+        size_t tail = 0;
+        while (tail < remainingObjects.size() &&
+               dynamic_cast<HittableInstance*>(remainingObjects[remainingObjects.size() - 1 - tail].get()) != nullptr) {
+            ++tail;
+        }
+        remainingObjects.insert(remainingObjects.end() - static_cast<std::ptrdiff_t>(tail), result);
+    }
+    ctx.scene.world.objects = std::move(remainingObjects);
+
+    // 4.5 Instance side effects (ScatterInstancesNode): rebuild InstanceManager's
+    // scene objects AFTER world.objects is finalized but BEFORE the BVH/backend
+    // rebuilds below, so freshly scattered instances are included in them.
+    if (gctx.instancesDirty) {
+        InstanceManager::getInstance().rebuildSceneObjects(ctx.scene);
+    }
+
+    // 5. Rebuild — mirrors replaceEvaluatedMesh's structural-change flag sequence.
+    mesh_cache_valid = false;
+    rebuildMeshCache(ctx.scene.world.objects);
+
+    // Re-point selection at the freshly rebuilt rep facade over `result` (mirrors
+    // replaceEvaluatedMesh's ctx.selection.selectObject(...) call) and refresh the gizmo/bbox.
+    // Without this, ctx.selection.selected.object kept pointing at the OLD TriangleMesh instance
+    // we just removed from world.objects — the move/rotate/scale gizmo (and pivot manipulation)
+    // stayed at the pre-evaluate position/shape since it was tracking a now-orphaned object that
+    // no longer visually exists, instead of the new evaluated result.
+    auto reselectIt = mesh_cache.find(objectName);
+    if (reselectIt != mesh_cache.end() && !reselectIt->second.empty()) {
+        // selectObject() internally calls updatePositionFromSelection(), which decomposes
+        // result->transform->getPivotMatrix() — since TransformNode now moves the actual
+        // pivot (not just the vertex data), the gizmo lands on the correct new position with
+        // no extra bbox math needed here.
+        ctx.selection.selectObject(reselectIt->second[0].second, -1, objectName);
+        updateBBoxCache(objectName);
+    }
+
+    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    ctx.renderer.resetCPUAccumulation();
+    if (ctx.backend_ptr) {
+        ctx.renderer.rebuildBackendGeometry(ctx.scene);
+    }
+
+    g_geometry_dirty = true;
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+    g_optix_rebuild_pending = true;
+    g_vulkan_rebuild_pending = true;
+    g_viewport_raster_rebuild_pending = true;
+
+    addViewportMessage("Geometry Graph evaluated: " + objectName, 2.5f, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
+    g_ProjectManager.markModified();
+    return true;
 }

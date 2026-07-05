@@ -126,6 +126,18 @@ struct RenderSettings {
     int max_samples = 128;
     float variance_threshold = 0.01f;
 
+    // Photon caustics (Faz 2 — Vulkan RT)
+    bool caustics_enabled = false;
+    bool caustics_debug = false;        // grid enerjisini doğrudan görselleştir (Dilim 1 doğrulama)
+    int caustics_photons = 262144;      // frame başına foton
+    float caustics_cell_size = 0.05f;   // hash grid hücre boyu (dünya birimi)
+    float caustics_energy = 1.0f;       // foton gücü kalibrasyon çarpanı
+    bool caustics_volumetric = false;   // Faz 2V: sis/toz içinde hacimsel caustic huzmeleri
+    bool caustics_vol_debug = false;    // volume grid'i march ile görselleştir (Dilim V1)
+    float caustics_vol_strength = 1.0f; // sigma_s (saçılma katsayısı) çarpanı
+    bool caustics_vol_direct = false;   // ışık→cam bacağı da huzme üretsin (direct shafts)
+    float caustics_vol_noise = 0.0f;    // heterojen toz türbülansı miktarı (0..1)
+
     // Denoiser
     bool use_denoiser = false;        // Viewport Denoiser
     bool render_use_denoiser = false;  // Final Render Denoiser

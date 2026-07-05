@@ -236,6 +236,15 @@ void VulkanViewportBackend::uploadTerrainLayerMaterials(const std::vector<Terrai
                         splatTex);
                 }
                 if (splatTex->vulkan_dirty) {
+                    if (sceneHandle.isValid() && m_sceneTextureManager) {
+                        int64_t pooledId = 0;
+                        if (m_sceneTextureManager->tryGetVulkanTextureId(
+                                sceneHandle, sceneTextureOwnerScope(), pooledId) &&
+                            pooledId != 0) {
+                            m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), pooledId);
+                            this->destroyTexture(pooledId);
+                        }
+                    }
                     auto oldIt = m_uploadedImageIDs.find(cacheKey);
                     if (oldIt != m_uploadedImageIDs.end()) {
                         int64_t oldId = oldIt->second;

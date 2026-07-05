@@ -135,7 +135,24 @@ bool materialCanUseOpaqueFastPath(uint32_t materialId) {
     if (materialId == MaterialManager::INVALID_MATERIAL_ID) return true;
     Material* mat = MaterialManager::getInstance().getMaterial(static_cast<uint16_t>(materialId));
     if (!mat) return true;
-    return !mat->isTransparent();
+    if (mat->isTransparent()) return false;
+    // Transmissive glass/water must NOT take the opaque fast path: the shadow
+    // any-hit implements coloured pass-through shadows (CPU shadow-walk parity),
+    // and VK_GEOMETRY_OPAQUE_BIT would silently keep their shadows solid black.
+    if (mat->getTransmission(Vec2(0.5f, 0.5f)) > 0.001f) return false;
+    if (mat->type() == MaterialType::Dielectric) return false;
+    return true;
+}
+
+// Photon caustics: transmissive (glass/water) materials define the photon
+// emission target — photons are aimed at these meshes' bounds, independent of
+// the camera (aiming at the camera focus made the caustic vanish on view change).
+bool materialIsCausticCaster(uint32_t materialId) {
+    if (materialId == MaterialManager::INVALID_MATERIAL_ID) return false;
+    Material* mat = MaterialManager::getInstance().getMaterial(static_cast<uint16_t>(materialId));
+    if (!mat) return false;
+    if (mat->getTransmission(Vec2(0.5f, 0.5f)) > 0.001f) return true;
+    return mat->type() == MaterialType::Dielectric;
 }
 
 bool parseScatterNodeName(const std::string& nodeName, int& groupId, uint32_t& instanceIndex) {
@@ -837,6 +854,8 @@ void VulkanDevice::shutdown() {
         if (m_rtDescriptorSetLayout) vkDestroyDescriptorSetLayout(m_device, m_rtDescriptorSetLayout, nullptr);
         
         destroyBuffer(m_sbtBuffer);
+        destroyBuffer(m_photonGridBuffer);
+        destroyBuffer(m_photonVolGridBuffer);
         destroyBuffer(m_materialBuffer);
         destroyBuffer(m_lightBuffer);
         destroyBuffer(m_geometryDataBuffer);
@@ -2672,6 +2691,8 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info) {
         dst.mask = src.mask;
         dst.instanceShaderBindingTableRecordOffset = src.sbtRecordOffset;
         dst.flags = src.frontFaceCCW ? VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR : 0;
+        if (src.opacityOverride == 1)      dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+        else if (src.opacityOverride == 2) dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
         dst.accelerationStructureReference = m_blasList[src.blasIndex].deviceAddress;
 
         vkInstances.push_back(dst);
@@ -2877,6 +2898,131 @@ void VulkanDevice::traceRays(uint32_t w, uint32_t h, uint32_t d) {
 }
 
 // ========================================================================
+// Photon caustic pass (Faz 2 / Dilim 1)
+// ========================================================================
+// Two-step: schedulePhotonPass() writes the header + arms a pending flag on
+// the CPU; recordPhotonPass() then records clear + photon trace + barriers at
+// the START of the camera trace command buffer. Recording into the SAME
+// command buffer is essential: a separate synchronous submit raced the async
+// ping-pong camera reads — the next frame's grid clear executed while the
+// previous frame's camera rays were still reading, so the grid appeared
+// mostly empty with occasional one-frame flashes.
+void VulkanDevice::schedulePhotonPass(const PhotonGridHeader& header, const PhotonGridHeader& volHeader, bool clearGrid) {
+    m_photonPassPending = false;
+    if (!m_rtPipelineReady || !m_hasPhotonRaygen || !fpCmdTraceRaysKHR || !m_tlas.accel) return;
+    if (!m_photonGridBuffer.buffer) return;
+    if (header.photonCount == 0 || header.lightCountReal == 0) return;
+
+    // Headers are host-written (CPU_TO_GPU buffers); the cell regions are
+    // cleared on-GPU inside the camera command buffer (only on accum reset).
+    if (void* mapped = mapBuffer(m_photonGridBuffer)) {
+        PhotonGridHeader h = header;
+        h.tableSize = m_photonTableSize;   // single authority: the allocated table
+        memcpy(mapped, &h, sizeof(PhotonGridHeader));
+        unmapBuffer(m_photonGridBuffer);
+    } else {
+        return;
+    }
+    if (m_photonVolGridBuffer.buffer) {
+        if (void* mapped = mapBuffer(m_photonVolGridBuffer)) {
+            PhotonGridHeader h = volHeader;
+            h.tableSize = m_photonTableSize;
+            memcpy(mapped, &h, sizeof(PhotonGridHeader));
+            unmapBuffer(m_photonVolGridBuffer);
+        }
+    }
+
+    m_pendingPhotonCount = header.photonCount;
+    m_pendingPhotonClear = clearGrid;
+    m_photonPassPending = true;
+}
+
+void VulkanDevice::disablePhotonGrid() {
+    m_photonPassPending = false;
+    if (m_photonGridBuffer.buffer) {
+        if (void* mapped = mapBuffer(m_photonGridBuffer)) {
+            static_cast<PhotonGridHeader*>(mapped)->debugMode = 0u;
+            unmapBuffer(m_photonGridBuffer);
+        }
+    }
+    if (m_photonVolGridBuffer.buffer) {
+        if (void* mapped = mapBuffer(m_photonVolGridBuffer)) {
+            static_cast<PhotonGridHeader*>(mapped)->debugMode = 0u;
+            unmapBuffer(m_photonVolGridBuffer);
+        }
+    }
+}
+
+void VulkanDevice::recordPhotonPass(VkCommandBuffer cmd) {
+    if (!m_photonPassPending) return;
+    m_photonPassPending = false;
+    if (!m_hasPhotonRaygen || !m_photonGridBuffer.buffer || !m_rtDescriptorSet) return;
+
+    if (m_pendingPhotonClear) {
+        // First frame after an accumulation reset: clear the cell region
+        // (header preserved). Subsequent frames ACCUMULATE photons on top —
+        // progressive photon mapping; readers divide by frameSeed+1.
+        const VkDeviceSize cellBytes = (VkDeviceSize)m_photonTableSize * 20ull; // 5 uints/cell: R,G,B,count,key
+        vkCmdFillBuffer(cmd, m_photonGridBuffer.buffer, sizeof(PhotonGridHeader), cellBytes, 0u);
+        if (m_photonVolGridBuffer.buffer) {
+            vkCmdFillBuffer(cmd, m_photonVolGridBuffer.buffer, sizeof(PhotonGridHeader), cellBytes, 0u);
+        }
+
+        VkMemoryBarrier clearBarrier{};
+        clearBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        clearBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        clearBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                             0, 1, &clearBarrier, 0, nullptr, 0, nullptr);
+    } else {
+        // Make the previous frame's photon atomics visible before adding more
+        // (the two ping-pong slots may overlap on the GPU).
+        VkMemoryBarrier prevBarrier{};
+        prevBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        prevBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        prevBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                             0, 1, &prevBarrier, 0, nullptr, 0, nullptr);
+    }
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+                            m_rtPipelineLayout, 0, 1, &m_rtDescriptorSet, 0, nullptr);
+
+    // Push a COPY of the camera push constants with lightCount zeroed so
+    // closesthit skips its per-bounce NEE work during photon tracing —
+    // photon.rgen reads the real light data from the LightBuffer via the grid
+    // header instead. lightCount sits at byte offset 72 (4x vec4 camera block +
+    // frameCount + minSamples); see CameraPushConstants in renderProgressive.
+    // The caller re-pushes the original constants for the camera trace after this.
+    if (!m_pushConstantData.empty()) {
+        std::vector<uint8_t> pc = m_pushConstantData;
+        if (pc.size() >= 76) std::memset(pc.data() + 72, 0, 4);
+        vkCmdPushConstants(cmd, m_rtPipelineLayout,
+            VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
+            0, (uint32_t)pc.size(), pc.data());
+    }
+
+    // 1D photon budget folded into a 2D launch.
+    const uint32_t launchW = 8192u;
+    const uint32_t launchH = std::max(1u, (m_pendingPhotonCount + launchW - 1u) / launchW);
+    fpCmdTraceRaysKHR(cmd, &m_sbtPhotonRegion, &m_sbtMissRegion,
+                      &m_sbtHitRegion, &m_sbtCallableRegion,
+                      launchW, launchH, 1);
+
+    // Photon grid writes → camera-trace reads (same command buffer).
+    VkMemoryBarrier gatherBarrier{};
+    gatherBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    gatherBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    gatherBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                         0, 1, &gatherBarrier, 0, nullptr, 0, nullptr);
+}
+
+// ========================================================================
 // RT Pipeline Creation
 // ========================================================================
 
@@ -2891,7 +3037,8 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
                                      const std::vector<std::uint32_t>& shadowMissSPV,
                                      const std::vector<std::uint32_t>& hairAnyHitSPV,
                                      const std::vector<std::uint32_t>& sphereClosestHitSPV,
-                                     const std::vector<std::uint32_t>& sphereIntersectionSPV) {
+                                     const std::vector<std::uint32_t>& sphereIntersectionSPV,
+                                     const std::vector<std::uint32_t>& photonRaygenSPV) {
     if (!hasHardwareRT() || !fpCreateRayTracingPipelinesKHR) {
         VK_ERROR() << "[VulkanDevice] Hardware RT not available" << std::endl;
         return false;
@@ -2922,11 +3069,13 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     VkShaderModule hairAnyHitModule = hairAnyHitSPV.empty()       ? VK_NULL_HANDLE : createModule(hairAnyHitSPV);
     VkShaderModule sphereChitModule = sphereClosestHitSPV.empty()   ? VK_NULL_HANDLE : createModule(sphereClosestHitSPV);
     VkShaderModule sphereIntModule  = sphereIntersectionSPV.empty() ? VK_NULL_HANDLE : createModule(sphereIntersectionSPV);
+    VkShaderModule photonRgenModule = photonRaygenSPV.empty()       ? VK_NULL_HANDLE : createModule(photonRaygenSPV);
 
     bool hasVolume     = (volChitModule  != VK_NULL_HANDLE && volIntModule  != VK_NULL_HANDLE);
     bool hasHair       = (hairChitModule != VK_NULL_HANDLE && hairIntModule != VK_NULL_HANDLE);
     bool hasSphere     = (sphereChitModule != VK_NULL_HANDLE && sphereIntModule != VK_NULL_HANDLE);
     bool hasShadowMiss = (shadowMissModule != VK_NULL_HANDLE);
+    bool hasPhoton     = (photonRgenModule != VK_NULL_HANDLE);
 
     if (raygenModule == VK_NULL_HANDLE || missModule == VK_NULL_HANDLE || chitModule == VK_NULL_HANDLE) {
         if (raygenModule) vkDestroyShaderModule(m_device, raygenModule, nullptr);
@@ -2938,6 +3087,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
         if (hairIntModule)    vkDestroyShaderModule(m_device, hairIntModule, nullptr);
         if (shadowMissModule) vkDestroyShaderModule(m_device, shadowMissModule, nullptr);
         if (hairAnyHitModule) vkDestroyShaderModule(m_device, hairAnyHitModule, nullptr);
+        if (photonRgenModule) vkDestroyShaderModule(m_device, photonRgenModule, nullptr);
         VK_ERROR() << "[VulkanDevice] Failed to load RT shader modules!" << std::endl;
         return false;
     }
@@ -3025,6 +3175,16 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
         stages.push_back(makeStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, sphereIntModule));
         VK_INFO() << "[VulkanDevice] Foam sphere shaders loaded (closesthit stage=" << sphereChitStageIdx
                   << ", intersection stage=" << sphereIntStageIdx << ")" << std::endl;
+    }
+
+    // Photon caustic raygen (Faz 2) — SECOND raygen group in the same pipeline.
+    // Photons reuse the existing hit/miss shaders; tracePhotons() dispatches with
+    // its own SBT raygen region pointing at this group's handle.
+    uint32_t photonStageIdx = VK_SHADER_UNUSED_KHR;
+    if (hasPhoton) {
+        photonStageIdx = (uint32_t)stages.size();
+        stages.push_back(makeStage(VK_SHADER_STAGE_RAYGEN_BIT_KHR, photonRgenModule));
+        VK_INFO() << "[VulkanDevice] Photon caustic raygen loaded (stage=" << photonStageIdx << ")" << std::endl;
     }
 
     // --- 3) Shader groups ---
@@ -3133,6 +3293,15 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
         VK_INFO() << "[VulkanDevice] Foam sphere procedural hit group added (group index " << sphereHitGroupIdx << ")" << std::endl;
     }
 
+    // Photon raygen group — appended AFTER all hit groups so the contiguous
+    // miss/hit SBT regions keep their existing group indices.
+    uint32_t photonGroupIdx = VK_SHADER_UNUSED_KHR;
+    if (hasPhoton) {
+        photonGroupIdx = (uint32_t)groups.size();
+        groups.push_back(makeGeneralGroup(photonStageIdx));
+        VK_INFO() << "[VulkanDevice] Photon caustic raygen group added (group index " << photonGroupIdx << ")" << std::endl;
+    }
+
     // --- 4) Descriptor set layout ---
     // Binding  0: Output Image
     // Binding  1: TLAS
@@ -3152,7 +3321,9 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     // Binding 15: Denoiser Normal AOV
     // Binding 17: Stylize AOV
     // Binding 18: Foam sphere SSBO (intersection + closest-hit)
-    VkDescriptorSetLayoutBinding bindings[19] = {};
+    // Binding 19: Photon caustic hash grid SSBO (photon raygen writes, camera
+    //             raygen debug-reads, closesthit gathers in Dilim 2)
+    VkDescriptorSetLayoutBinding bindings[21] = {};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[0].descriptorCount = 1;
@@ -3171,7 +3342,8 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     bindings[3].binding = 3;
     bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[3].descriptorCount = 1;
-    bindings[3].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    // RAYGEN added for photon.rgen (light-side emission reads the light buffer)
+    bindings[3].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_RAYGEN_BIT_KHR;
 
     bindings[4].binding = 4;
     bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -3254,9 +3426,22 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     bindings[18].descriptorCount = 1;
     bindings[18].stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 
+    // Binding 19: Photon caustic hash grid (header + cells, one SSBO)
+    bindings[19].binding = 19;
+    bindings[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[19].descriptorCount = 1;
+    bindings[19].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
+    // Binding 20: VOLUME photon grid (Faz 2V — photon raygen deposits along
+    // flight segments, camera raygen marches/reads it back).
+    bindings[20].binding = 20;
+    bindings[20].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[20].descriptorCount = 1;
+    bindings[20].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
     VkDescriptorSetLayoutCreateInfo dslCI{};
     dslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslCI.bindingCount = 19;
+    dslCI.bindingCount = 21;
     dslCI.pBindings = bindings;
     vkCreateDescriptorSetLayout(m_device, &dslCI, nullptr, &m_rtDescriptorSetLayout);
 
@@ -3346,6 +3531,13 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
         if (hasVolume) { volHitGroupIdx = (uint32_t)groups.size(); VkRayTracingShaderGroupCreateInfoKHR g{}; g.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR; g.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR; g.generalShader = VK_SHADER_UNUSED_KHR; g.closestHitShader = s2VolChitIdx; g.anyHitShader = VK_SHADER_UNUSED_KHR; g.intersectionShader = s2VolIntIdx; groups.push_back(g); }
         if (hasHair)   { hairHitGroupIdx = (uint32_t)groups.size(); VkRayTracingShaderGroupCreateInfoKHR g{}; g.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR; g.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR; g.generalShader = VK_SHADER_UNUSED_KHR; g.closestHitShader = s2HairChitIdx; g.anyHitShader = VK_SHADER_UNUSED_KHR; g.intersectionShader = s2HairIntIdx; groups.push_back(g); }
         if (hasSphere) { sphereHitGroupIdx = (uint32_t)groups.size(); VkRayTracingShaderGroupCreateInfoKHR g{}; g.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR; g.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR; g.generalShader = VK_SHADER_UNUSED_KHR; g.closestHitShader = s2SphereChitIdx; g.anyHitShader = VK_SHADER_UNUSED_KHR; g.intersectionShader = s2SphereIntIdx; groups.push_back(g); }
+        // Photon raygen re-added last (same ordering contract as the primary path)
+        if (hasPhoton) {
+            uint32_t s2PhotonIdx = (uint32_t)stages2.size();
+            stages2.push_back(makeStage(VK_SHADER_STAGE_RAYGEN_BIT_KHR, photonRgenModule));
+            photonGroupIdx = (uint32_t)groups.size();
+            groups.push_back(makeGeneralGroup(s2PhotonIdx));
+        }
         (void)r2RaygenGroup; (void)r2MissGroup;
 
         rtCI.stageCount = (uint32_t)stages2.size();
@@ -3372,6 +3564,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     if (hairAnyHitModule) vkDestroyShaderModule(m_device, hairAnyHitModule, nullptr);
     if (sphereChitModule) vkDestroyShaderModule(m_device, sphereChitModule, nullptr);
     if (sphereIntModule)  vkDestroyShaderModule(m_device, sphereIntModule, nullptr);
+    if (photonRgenModule) vkDestroyShaderModule(m_device, photonRgenModule, nullptr);
 
     if (result != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] vkCreateRayTracingPipelinesKHR failed: " << result << std::endl;
@@ -3444,6 +3637,16 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     m_sbtHitRegion.size   = (VkDeviceSize)numHitGroups * alignedHandleSize;
 
     m_sbtCallableRegion = {}; // No callable shaders
+
+    // Photon caustic raygen region (Faz 2) — same SBT buffer, its own raygen slot.
+    m_hasPhotonRaygen = hasPhoton && (photonGroupIdx != VK_SHADER_UNUSED_KHR);
+    if (m_hasPhotonRaygen) {
+        m_sbtPhotonRegion.deviceAddress = sbtAddr + (VkDeviceAddress)photonGroupIdx * alignedHandleSize;
+        m_sbtPhotonRegion.stride = alignedHandleSize;
+        m_sbtPhotonRegion.size   = alignedHandleSize;
+    } else {
+        m_sbtPhotonRegion = {};
+    }
 
     m_rtPipelineReady = true;
     VK_INFO() << "[VulkanDevice] RT pipeline + SBT created successfully! (groups=" << groupCount
@@ -3796,6 +3999,69 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
     w18.descriptorCount = 1;
     w18.pBufferInfo = &foamSphereInfo;
     writes.push_back(w18);
+
+    // Binding 19: Photon caustic hash grid (Faz 2). Created lazily; CPU_TO_GPU so
+    // tracePhotons() writes the 64-byte header directly before each pass while the
+    // cell region is cleared on-GPU with vkCmdFillBuffer.
+    if (!m_photonGridBuffer.buffer) {
+        BufferCreateInfo pgci;
+        pgci.size = sizeof(PhotonGridHeader) + (uint64_t)m_photonTableSize * 20ull; // 5 uints/cell: R,G,B,count,key
+        pgci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
+        pgci.location = MemoryLocation::CPU_TO_GPU;
+        pgci.initialData = nullptr;
+        m_photonGridBuffer = createBuffer(pgci);
+        if (m_photonGridBuffer.buffer) {
+            // Zero the whole buffer once — the header (incl. debugMode) must not
+            // start as garbage; raygen reads it every frame even when caustics
+            // are off. tracePhotons re-clears the cell region per pass on-GPU.
+            if (void* mapped = mapBuffer(m_photonGridBuffer)) {
+                memset(mapped, 0, (size_t)pgci.size);
+                unmapBuffer(m_photonGridBuffer);
+            }
+            VK_INFO() << "[VulkanDevice] Photon caustic grid allocated ("
+                      << (pgci.size >> 20) << " MB, " << m_photonTableSize << " cells)" << std::endl;
+        }
+    }
+    VkDescriptorBufferInfo photonGridInfo{};
+    photonGridInfo.buffer = m_photonGridBuffer.buffer ? m_photonGridBuffer.buffer : m_materialBuffer.buffer;
+    photonGridInfo.offset = 0;
+    photonGridInfo.range  = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet w19{};
+    w19.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w19.dstSet = m_rtDescriptorSet;
+    w19.dstBinding = 19;
+    w19.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w19.descriptorCount = 1;
+    w19.pBufferInfo = &photonGridInfo;
+    writes.push_back(w19);
+
+    // Binding 20: VOLUME photon grid (Faz 2V) — same layout/size as binding 19.
+    if (!m_photonVolGridBuffer.buffer) {
+        BufferCreateInfo pvci;
+        pvci.size = sizeof(PhotonGridHeader) + (uint64_t)m_photonTableSize * 20ull;
+        pvci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
+        pvci.location = MemoryLocation::CPU_TO_GPU;
+        pvci.initialData = nullptr;
+        m_photonVolGridBuffer = createBuffer(pvci);
+        if (m_photonVolGridBuffer.buffer) {
+            if (void* mapped = mapBuffer(m_photonVolGridBuffer)) {
+                memset(mapped, 0, (size_t)pvci.size);   // header must not start as garbage
+                unmapBuffer(m_photonVolGridBuffer);
+            }
+        }
+    }
+    VkDescriptorBufferInfo photonVolInfo{};
+    photonVolInfo.buffer = m_photonVolGridBuffer.buffer ? m_photonVolGridBuffer.buffer : m_materialBuffer.buffer;
+    photonVolInfo.offset = 0;
+    photonVolInfo.range  = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet w20{};
+    w20.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w20.dstSet = m_rtDescriptorSet;
+    w20.dstBinding = 20;
+    w20.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w20.descriptorCount = 1;
+    w20.pBufferInfo = &photonVolInfo;
+    writes.push_back(w20);
 
     // Update bindings immediately (safe local buffers)
     if (!writes.empty()) {
@@ -5134,6 +5400,10 @@ bool VulkanDevice::traceRaysAndReadback(uint32_t w, uint32_t h,
 
     VkCommandBuffer cmd = beginSingleTimeCommands();
     if (cmd == VK_NULL_HANDLE) return false;
+
+    // ── 0. Photon caustic pass (if scheduled) — same-buffer recording, see
+    //       recordPhotonPass for the race rationale.
+    recordPhotonPass(cmd);
 
     // ── 1. Bind pipeline + descriptors + push constants ───────────────────────
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtPipeline);
@@ -6545,6 +6815,11 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
 
     VkCommandBuffer cmd = fs.cmd;
 
+    // ── 0. Photon caustic pass (if scheduled) — must precede the camera trace
+    //       in the SAME command buffer so the grid clear/fill cannot race the
+    //       previous frame's in-flight camera reads.
+    recordPhotonPass(cmd);
+
     // ── 1. Trace ─────────────────────────────────────────────────────────────
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtPipeline);
     if (m_rtDescriptorSet)
@@ -7253,6 +7528,8 @@ void VulkanBackendAdapter::shutdown() {
 
     m_orderedVDBInstances.clear();
     m_meshRegistry.clear();
+    m_blasMaterialBounds.clear();
+    m_blasBuiltNonOpaque.clear();
     m_blasMaterialIds.clear();
     m_vkInstances.clear();
     m_lastObjects.clear();
@@ -7443,6 +7720,29 @@ uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& 
         }
     }
 
+    // Photon caustics: BLAS-local AABB per MATERIAL (which materials are caustic
+    // casters is decided per frame against the live MaterialManager — deciding
+    // here at upload time missed project loads where materials resolve later).
+    // Per-material so a flat mesh's one glass object doesn't inflate the photon
+    // target to the whole scene. Vertices may be LOCAL (P_orig) for
+    // solo/project-loaded meshes — the photon target applies the TLAS instance
+    // transform.
+    std::unordered_map<uint32_t, CausticBounds> causticMatBounds;
+    {
+        const size_t triN = (std::min)(materialIndices.size(), positions.size() / 9);
+        for (size_t t = 0; t < triN; ++t) {
+            auto ins = causticMatBounds.try_emplace(materialIndices[t],
+                CausticBounds{ 1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f });
+            CausticBounds& mb = ins.first->second;
+            for (size_t c = 0; c < 3; ++c) {
+                const size_t i = t * 9 + c * 3;
+                mb.minX = std::min(mb.minX, positions[i + 0]); mb.maxX = std::max(mb.maxX, positions[i + 0]);
+                mb.minY = std::min(mb.minY, positions[i + 1]); mb.maxY = std::max(mb.maxY, positions[i + 1]);
+                mb.minZ = std::min(mb.minZ, positions[i + 2]); mb.maxZ = std::max(mb.maxZ, positions[i + 2]);
+            }
+        }
+    }
+
     VulkanRT::BLASCreateInfo blasInfo;
     blasInfo.vertexData = positions.data();
     blasInfo.normalData = normals.data();
@@ -7471,12 +7771,17 @@ uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& 
 
     m_meshRegistry[meshName] = blasIndex;
     m_blasMaterialIds[blasIndex] = std::move(materialIndices);
+    m_blasBuiltNonOpaque[blasIndex] = !opaqueGeometry;
+    {
+        auto& entries = m_blasMaterialBounds[blasIndex];
+        entries.assign(causticMatBounds.begin(), causticMatBounds.end());
+    }
 
     // Reset geometry data buffer because a new BLAS was added
     if (m_device->m_geometryDataBuffer.buffer) {
         m_device->destroyBuffer(m_device->m_geometryDataBuffer);
     }
-    
+
    // SCENE_LOG_INFO("[Vulkan] Uploaded mesh: " + meshName + " (" + std::to_string(triangles.size()) + " tris)");
     return blasIndex;
 }
@@ -7545,6 +7850,23 @@ uint32_t VulkanBackendAdapter::uploadTriangleMeshIndexed(const TriangleMesh* mes
         if (!materialCanUseOpaqueFastPath(materialIndex)) { opaqueGeometry = false; break; }
     }
 
+    // Photon caustics: BLAS-local AABB per MATERIAL (caster decision is per frame
+    // — see the non-indexed path). These vertices are LOCAL P_orig when
+    // useOriginalSpace, so the photon target must apply the TLAS instance transform.
+    std::unordered_map<uint32_t, CausticBounds> causticMatBounds;
+    for (size_t t = 0; t < triCount; ++t) {
+        auto ins = causticMatBounds.try_emplace(materialIndices[t],
+            CausticBounds{ 1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f });
+        CausticBounds& mb = ins.first->second;
+        for (size_t c = 0; c < 3; ++c) {
+            const size_t vi = (size_t)indices[t * 3 + c] * 3;
+            if (vi + 2 >= positions.size()) continue;
+            mb.minX = std::min(mb.minX, positions[vi + 0]); mb.maxX = std::max(mb.maxX, positions[vi + 0]);
+            mb.minY = std::min(mb.minY, positions[vi + 1]); mb.maxY = std::max(mb.maxY, positions[vi + 1]);
+            mb.minZ = std::min(mb.minZ, positions[vi + 2]); mb.maxZ = std::max(mb.maxZ, positions[vi + 2]);
+        }
+    }
+
     VulkanRT::BLASCreateInfo blasInfo;
     blasInfo.vertexData = positions.data();
     blasInfo.normalData = normals.data();
@@ -7568,6 +7890,11 @@ uint32_t VulkanBackendAdapter::uploadTriangleMeshIndexed(const TriangleMesh* mes
     m_meshRegistry[meshName] = blasIndex;
     m_blasMaterialIds[blasIndex] = std::move(materialIndices);
     m_soloBlasIndexedMesh[blasIndex] = SoloIndexedMeshInfo{ const_cast<TriangleMesh*>(mesh), useOriginalSpace };
+    m_blasBuiltNonOpaque[blasIndex] = !opaqueGeometry;
+    {
+        auto& entries = m_blasMaterialBounds[blasIndex];
+        entries.assign(causticMatBounds.begin(), causticMatBounds.end());
+    }
 
     // Reset geometry data buffer because a new BLAS was added.
     if (m_device->m_geometryDataBuffer.buffer) {
@@ -7674,6 +8001,20 @@ uint32_t VulkanBackendAdapter::uploadDeviceResidentMesh(const std::string& meshN
     m_blasMaterialIds[blasIndex] = materialIds.empty()
         ? std::vector<uint32_t>(triCount, 0u)
         : materialIds;
+    m_blasBuiltNonOpaque[blasIndex] = !opaqueGeometry;
+    {
+        // Unique material list with INVERTED (empty) bounds — device-resident
+        // meshes have no host positions. The caustic target skips inverted
+        // boxes; the uploadMaterials opacity audit only needs the ids.
+        std::unordered_map<uint32_t, char> seen;
+        auto& entries = m_blasMaterialBounds[blasIndex];
+        entries.clear();
+        for (uint32_t mId : m_blasMaterialIds[blasIndex]) {
+            if (seen.emplace(mId, 0).second) {
+                entries.emplace_back(mId, CausticBounds{ 1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f });
+            }
+        }
+    }
 
     if (m_device->m_geometryDataBuffer.buffer) {
         m_device->destroyBuffer(m_device->m_geometryDataBuffer);
@@ -8527,6 +8868,8 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     SCENE_LOG_INFO("[Vulkan] Full scene/project rebuild triggered.");
     m_meshRegistry.clear();
+    m_blasMaterialBounds.clear();
+    m_blasBuiltNonOpaque.clear();
     m_blasMaterialIds.clear();
     m_vkInstances.clear();
     m_instanceSources.clear();
@@ -8763,6 +9106,14 @@ void VulkanBackendAdapter::updateInstanceMaterialBinding(const std::string& node
             instName = inst->node_name;
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
             instName = tri->getNodeName();
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+            // Flat (direct SoA) mesh: no facade, the node name lives on the
+            // TriangleMesh itself (same fix as setVisibilityByNodeName below).
+            // Without this branch a flat object's RT instance never matched, so
+            // ASSIGNING a different material only took effect after a full
+            // backend rebuild — while parameter edits worked, since those
+            // rewrite the material SSBO at the unchanged index.
+            instName = tm->nodeName;
         }
         if (instName.empty()) continue;
         if (!matchesNodeNameForInstance(instName, nodeName) &&
@@ -8810,6 +9161,41 @@ void VulkanBackendAdapter::updateInstanceMaterialBinding(const std::string& node
                                    ids.data(),
                                    ids.size() * sizeof(uint32_t),
                                    byteOffset);
+        }
+
+        // Keep the per-material caustic bounds keyed to the NEW id, and flip
+        // the per-instance opacity override if the assignment changed the
+        // mesh's opaque<->transmissive class (assigning a glass material to an
+        // opaque-built mesh must wake the shadow any-hit without a BLAS rebuild).
+        bool opacityFlipped = false;
+        for (uint32_t blasIndex : blasToUpload) {
+            auto bIt = m_blasMaterialBounds.find(blasIndex);
+            if (bIt != m_blasMaterialBounds.end()) {
+                for (auto& e : bIt->second) {
+                    if ((oldMatID < 0 || static_cast<int>(e.first) == oldMatID) &&
+                        static_cast<int>(e.first) != newMatID) {
+                        e.first = static_cast<uint32_t>(newMatID);
+                    }
+                }
+            }
+            auto builtIt = m_blasBuiltNonOpaque.find(blasIndex);
+            if (builtIt == m_blasBuiltNonOpaque.end() || bIt == m_blasMaterialBounds.end()) continue;
+            bool wantNonOpaque = false;
+            for (const auto& e : bIt->second) {
+                if (!materialCanUseOpaqueFastPath(e.first)) { wantNonOpaque = true; break; }
+            }
+            const uint8_t want = (wantNonOpaque == builtIt->second)
+                ? (uint8_t)0 : (wantNonOpaque ? (uint8_t)2 : (uint8_t)1);
+            for (auto& vi : m_vkInstances) {
+                if (vi.blasIndex != blasIndex || vi.opacityOverride == want) continue;
+                vi.opacityOverride = want;
+                opacityFlipped = true;
+            }
+        }
+        if (opacityFlipped) {
+            auto merged = m_vkInstances;
+            for (const auto& h : m_hairVkInstances) merged.push_back(h);
+            if (!merged.empty()) m_device->updateTLAS(merged);
         }
 
         if (instanceDataChanged) {
@@ -9955,23 +10341,12 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
             // estimate ~4x and triggered false-positive LRU eviction during
           // mesh paint, evicting freshly uploaded paint textures before
             // raster (and the active RT backend) could pick them up.
+            checkAndTrimVRAMThreshold();
             const uint64_t textureBytes = m_sceneTextureManager->totalResidentTextureBytes();
             const uint64_t warnThreshold = dedicatedVRAM * 7 / 10;
-            const uint64_t trimThreshold = dedicatedVRAM * 85 / 100;
-            const uint64_t trimTarget    = dedicatedVRAM * 6 / 10;
             const uint64_t usedMB  = textureBytes / (1024 * 1024);
             const uint64_t totalMB = dedicatedVRAM / (1024 * 1024);
-            if (textureBytes > trimThreshold) {
-                const std::string msg = "VRAM critical: ~" + std::to_string(usedMB) +
-                                        " MB texture / " + std::to_string(totalMB) +
-                                        " MB — LRU eviction triggered.";
-                SCENE_LOG_WARN("[Vulkan] " + msg);
-                if (m_statusCallback) m_statusCallback(msg, 2); // kirmizi
-                const size_t evicted = m_sceneTextureManager->trimVulkanBackingLRU(sceneTextureOwnerScope(), trimTarget);
-                if (evicted > 0 && m_statusCallback) {
-                    m_statusCallback("Evicted " + std::to_string(evicted) + " textures to free VRAM.", 1);
-                }
-            } else if (textureBytes > warnThreshold) {
+            if (textureBytes > warnThreshold && textureBytes <= dedicatedVRAM * 85 / 100) {
                 const std::string msg = "VRAM pressure: ~" + std::to_string(usedMB) +
                                         " MB texture / " + std::to_string(totalMB) + " MB.";
                 SCENE_LOG_WARN("[Vulkan] " + msg);
@@ -10271,6 +10646,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         gm.resin_color_b = static_cast<float>(m.resin_color.z);
         gm.transmission_density = m.transmission_density;
         gm.resin_roughness = m.resin_roughness;
+        gm.dispersion = m.dispersion;
         gm.resin_inclusion = m.resin_inclusion;
         gm.resin_dirt = m.resin_dirt;
         gm.resin_inclusion_scale = m.resin_inclusion_scale;
@@ -10706,6 +11082,12 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                 gm.flags |= (1u << 10);
             }
         }
+        // Bits 12-13 / 14-15: explicit user channel override for the metallic /
+        // roughness packed textures (0 = Auto, 1 = R, 2 = G, 3 = B). Overrides
+        // the auto policy above in the shader — non-ORM packings (RMA/MRA,
+        // metal-in-R maps) otherwise read the wrong channel and shade as metal.
+        gm.flags |= ((uint32_t)std::clamp(m.metallicTexChannel,  0, 3)) << 12;
+        gm.flags |= ((uint32_t)std::clamp(m.roughnessTexChannel, 0, 3)) << 14;
 
         // Bit 11: normal map is BC5-encoded. BC5 only stores RG (XY); the shader
         // must reconstruct Z = sqrt(1 - X² - Y²) instead of reading .b (which is
@@ -10785,6 +11167,42 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
             m_sceneTextureManager->logBudgetSummary("after-upload-materials");
         }
         m_textureUploadSummaryDirty = false;
+    }
+
+    // ── BLAS opacity audit ──────────────────────────────────────────────────
+    // VK_GEOMETRY_OPAQUE_BIT is baked into each BLAS from the materials as they
+    // were AT BUILD TIME. A material edit that turns transmission on (glass) or
+    // off left the BLAS stale — colored/transmissive shadows only woke up after
+    // a backend switch forced a full re-upload. Instead of rebuilding the BLAS,
+    // flip the per-instance FORCE_(NO_)OPAQUE override and refresh the TLAS —
+    // the same cheap operation as moving an object.
+    {
+        std::unordered_map<uint32_t, uint8_t> desired; // blasIndex -> override
+        for (const auto& bm : m_blasMaterialBounds) {
+            auto builtIt = m_blasBuiltNonOpaque.find(bm.first);
+            if (builtIt == m_blasBuiltNonOpaque.end()) continue;
+            bool wantNonOpaque = false;
+            for (const auto& e : bm.second) {
+                if (!materialCanUseOpaqueFastPath(e.first)) { wantNonOpaque = true; break; }
+            }
+            desired[bm.first] = (wantNonOpaque == builtIt->second)
+                ? (uint8_t)0 : (wantNonOpaque ? (uint8_t)2 : (uint8_t)1);
+        }
+        bool anyFlip = false;
+        for (auto& vi : m_vkInstances) {
+            auto dIt = desired.find(vi.blasIndex);
+            if (dIt == desired.end()) continue;
+            if (vi.opacityOverride != dIt->second) {
+                vi.opacityOverride = dIt->second;
+                anyFlip = true;
+            }
+        }
+        if (anyFlip) {
+            auto merged = m_vkInstances;
+            for (const auto& h : m_hairVkInstances) merged.push_back(h);
+            if (!merged.empty()) m_device->updateTLAS(merged);
+            SCENE_LOG_INFO("[Vulkan] Material sync flipped BLAS opacity override(s) — TLAS refreshed");
+        }
     }
     resetAccumulation();
     // Material SSBO and/or texture descriptors have just been rewritten. The
@@ -11008,6 +11426,7 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
     gm.resin_color_b = static_cast<float>(m.resin_color.z);
     gm.transmission_density = m.transmission_density;
     gm.resin_roughness = m.resin_roughness;
+    gm.dispersion = m.dispersion;
     gm.resin_inclusion = m.resin_inclusion;
     gm.resin_dirt = m.resin_dirt;
     gm.resin_inclusion_scale = m.resin_inclusion_scale;
@@ -11084,6 +11503,9 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
             gm.flags |= (1u << 10);
         }
     }
+    // Bits 12-13 / 14-15: explicit user channel override (see uploadMaterials).
+    gm.flags |= ((uint32_t)std::clamp(m.metallicTexChannel,  0, 3)) << 12;
+    gm.flags |= ((uint32_t)std::clamp(m.roughnessTexChannel, 0, 3)) << 14;
     if (m.normalTexture) {
         Texture* normalTex = resolveHostTexture(m.normalTexture);
         if (normalTex && normalTex->is_loaded()) {
@@ -11338,6 +11760,10 @@ void VulkanBackendAdapter::endBatchedTextureUpload() {
 int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, uint32_t height, uint32_t channels, bool srgb, bool isFloat) {
     if (!m_device || !m_device->isInitialized() || !data) return 0;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    
+    // Call VRAM check and eviction before allocating staging/image resources
+    checkAndTrimVRAMThreshold();
+    
     if (!m_inBatchedTextureUpload) m_device->waitIdle();
 
     VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
@@ -11376,7 +11802,7 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
             // Keep the viewport preview on mip 0 and let render backends use mips.
             mipLevels = 1;
         } else if (m_sceneTextureManager && dedicatedVRAM > 0) {
-            const float pressure = static_cast<float>(m_sceneTextureManager->totalEstimatedTextureBytes())
+            const float pressure = static_cast<float>(m_sceneTextureManager->totalResidentTextureBytes())
                                  / static_cast<float>(dedicatedVRAM);
             if (pressure < 0.50f) {
                 mipLevels = fullMips;
@@ -11532,7 +11958,49 @@ bool VulkanBackendAdapter::buildVulkanBackingRecord(int64_t textureHandle, Vulka
     outBacking.width = image.width;
     outBacking.height = image.height;
     outBacking.format = static_cast<uint32_t>(image.format);
+    outBacking.allocatedBytes = estimateImageStorageBytes(image.width, image.height, image.format, image.mipLevels);
     return outBacking.isValid();
+}
+
+void VulkanBackendAdapter::checkAndTrimVRAMThreshold() {
+    if (!m_sceneTextureManager) return;
+    const uint64_t dedicatedVRAM = m_device->getCapabilities().dedicatedVRAM;
+    if (dedicatedVRAM <= 0) return;
+
+    const uint64_t textureBytes = m_sceneTextureManager->totalResidentTextureBytes();
+    const uint64_t trimThreshold = dedicatedVRAM * 85 / 100;
+    const uint64_t trimTarget    = dedicatedVRAM * 6 / 10;
+    const uint64_t totalMB = dedicatedVRAM / (1024 * 1024);
+
+    if (textureBytes > trimThreshold) {
+        const std::string currentOwner = sceneTextureOwnerScope();
+        const std::string otherOwner = (currentOwner == "VulkanBackendAdapter") ? "VulkanViewportBackend" : "VulkanBackendAdapter";
+        
+        // First, try evicting all inactive textures from the other backend
+        const size_t otherEvicted = m_sceneTextureManager->trimVulkanBackingLRU(otherOwner, 0);
+        const uint64_t postOtherTextureBytes = m_sceneTextureManager->totalResidentTextureBytes();
+        const uint64_t postOtherUsedMB = postOtherTextureBytes / (1024 * 1024);
+        
+        if (otherEvicted > 0) {
+            SCENE_LOG_INFO("[Vulkan] Evicted " + std::to_string(otherEvicted) + 
+                           " textures from inactive backend (" + otherOwner + 
+                           ") to free VRAM. Post-evict VRAM: ~" + std::to_string(postOtherUsedMB) + " MB.");
+        }
+        
+        if (postOtherTextureBytes > trimThreshold) {
+            const std::string msg = "VRAM critical after inactive backend eviction: ~" + std::to_string(postOtherUsedMB) +
+                                    " MB texture / " + std::to_string(totalMB) +
+                                    " MB — LRU eviction of active backend triggered.";
+            SCENE_LOG_WARN("[Vulkan] " + msg);
+            if (m_statusCallback) m_statusCallback(msg, 2); // kirmizi
+            const size_t evicted = m_sceneTextureManager->trimVulkanBackingLRU(currentOwner, trimTarget);
+            if (evicted > 0 && m_statusCallback) {
+                m_statusCallback("Evicted " + std::to_string(evicted) + " active textures to free VRAM.", 1);
+            }
+        } else if (otherEvicted > 0 && m_statusCallback) {
+            m_statusCallback("Evicted " + std::to_string(otherEvicted) + " inactive textures to free VRAM.", 1);
+        }
+    }
 }
 
 void VulkanBackendAdapter::registerSceneTextureUpload(TextureHandle sceneHandle, int64_t textureHandle) {
@@ -11588,6 +12056,10 @@ int64_t VulkanBackendAdapter::uploadCompressedTexture2D(
 {
     if (!m_device || !m_device->isInitialized() || !data || dataSize == 0) return 0;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    
+    // Call VRAM check and eviction before allocating staging/image resources
+    checkAndTrimVRAMThreshold();
+    
     if (!m_inBatchedTextureUpload) m_device->waitIdle();
 
     const uint64_t expectedBytes = estimateImageStorageBytes(width, height, format);
@@ -12242,16 +12714,36 @@ void VulkanBackendAdapter::setRenderParams(const RenderParams& p) {
         m_useAdaptiveSampling != p.useAdaptiveSampling ||
         m_maxBounces != nextMaxBounces ||
         m_diffuseBounces != nextDiffuseBounces ||
-        m_transmissionBounces != nextTransmissionBounces) {
+        m_transmissionBounces != nextTransmissionBounces ||
+        m_causticsEnabled != p.causticsEnabled ||
+        m_causticsDebug != p.causticsDebug ||
+        m_causticsPhotons != p.causticsPhotons ||
+        m_causticsCellSize != p.causticsCellSize ||
+        m_causticsEnergy != p.causticsEnergy ||
+        m_causticsVolumetric != p.causticsVolumetric ||
+        m_causticsVolDebug != p.causticsVolDebug ||
+        m_causticsVolStrength != p.causticsVolStrength ||
+        m_causticsVolDirect != p.causticsVolDirect ||
+        m_causticsVolNoise != p.causticsVolNoise) {
         resetAccumulation();
     }
-    m_targetSamples = p.samplesPerPixel; 
+    m_targetSamples = p.samplesPerPixel;
     m_minSamples = clampedMinSamples;
     m_useAdaptiveSampling = p.useAdaptiveSampling;
     m_varianceThreshold = clampedThreshold;
     m_maxBounces = nextMaxBounces; // 0 = UI henüz set etmedi, mevcut değeri koru
     m_diffuseBounces = nextDiffuseBounces;
     m_transmissionBounces = nextTransmissionBounces;
+    m_causticsEnabled = p.causticsEnabled;
+    m_causticsDebug = p.causticsDebug;
+    m_causticsPhotons = p.causticsPhotons;
+    m_causticsCellSize = p.causticsCellSize;
+    m_causticsEnergy = p.causticsEnergy;
+    m_causticsVolumetric = p.causticsVolumetric;
+    m_causticsVolDebug = p.causticsVolDebug;
+    m_causticsVolStrength = p.causticsVolStrength;
+    m_causticsVolDirect = p.causticsVolDirect;
+    m_causticsVolNoise = p.causticsVolNoise;
 }
 
 void VulkanBackendAdapter::setCamera(const CameraParams& c) { 
@@ -16684,6 +17176,15 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             SCENE_LOG_INFO("[Vulkan] Shadow miss shader not found — shadow rays will use primary miss.");
         }
 
+        // Load Photon Caustic Raygen (optional — Faz 2 photon caustic pass)
+        std::vector<std::uint32_t> photonRgenSPV;
+        if (std::filesystem::exists(shaderDir + "/photon.spv")) {
+            photonRgenSPV = loadSPV(shaderDir + "/photon.spv");
+            SCENE_LOG_INFO("[Vulkan] Photon caustic raygen loaded successfully.");
+        } else {
+            SCENE_LOG_INFO("[Vulkan] photon.spv not found — photon caustics disabled.");
+        }
+
         // Load Skinning Compute Shader
         if (std::filesystem::exists(shaderDir + "/skinning.spv")) {
             std::vector<std::uint32_t> skinningSPV = loadSPV(shaderDir + "/skinning.spv");
@@ -16753,7 +17254,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         if (m_viewportMode == ViewportMode::Rendered) {
             if (!m_device->createRTPipeline(raygenSPV, missSPV, chitSPV, ahitSPV,
                     volChitSPV, volIntSPV, hairChitSPV, hairIntSPV, shadowMissSPV, hairAhitSPV,
-                    sphereChitSPV, sphereIntSPV)) {
+                    sphereChitSPV, sphereIntSPV, photonRgenSPV)) {
                 SCENE_LOG_ERROR("[Vulkan] Failed to create RT Pipeline.");
                 return;
             }
@@ -17062,6 +17563,114 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             &m_varianceImage,
             &m_denoiserPositionImage);
         m_device->setPushConstants(&pushConst, sizeof(CameraPushConstants));
+
+        // ── Photon caustic pass (Faz 2 / Dilim 1) ────────────────────────────
+        // Writes the grid header + arms the pass; the clear + photon trace is
+        // recorded INSIDE this frame's camera command buffer (recordPhotonPass)
+        // so it cannot race the async ping-pong camera reads.
+        // Volumetric shafts are INDEPENDENT of surface caustics: either feature
+        // arms the photon pass; ph.debugMode below decides whether the surface
+        // grid is gathered.
+        if ((m_causticsEnabled || m_causticsVolumetric || m_causticsVolDebug) &&
+            m_device->hasPhotonPipeline() && !m_cachedLights.empty()) {
+            VulkanRT::VulkanDevice::PhotonGridHeader ph{};
+            ph.originCell[0] = 0.0f; ph.originCell[1] = 0.0f; ph.originCell[2] = 0.0f;
+            // Emission target: the union AABB of transmissive meshes — camera-
+            // INDEPENDENT, so the caustic converges to the same distribution
+            // after every reset. (Aiming at the camera focus made the pattern
+            // vanish whenever the view changed.) Fallback: camera focus region.
+            Vec3 tgt = this->m_camera.lookAt;
+            float rad = std::max(3.0f, this->m_camera.focusDistance * 0.5f);
+            if (!m_blasMaterialBounds.empty() && !m_vkInstances.empty()) {
+                // Per-BLAS, per-material LOCAL bounds. Caster status is decided
+                // HERE, per frame, against the live MaterialManager — project
+                // loads can upload BLASes before their materials resolve, and
+                // material edits after upload must still move the target.
+                // The 8 box corners go through the live TLAS instance transform
+                // (solo/loaded meshes upload local P_orig verts), then union in
+                // WORLD space.
+                float mn[3] = { 1e30f, 1e30f, 1e30f };
+                float mx[3] = { -1e30f, -1e30f, -1e30f };
+                bool any = false;
+                for (const auto& vi : m_vkInstances) {
+                    auto bit = m_blasMaterialBounds.find(vi.blasIndex);
+                    if (bit == m_blasMaterialBounds.end()) continue;
+                    for (const auto& entry : bit->second) {
+                        if (!materialIsCausticCaster(entry.first)) continue;
+                        const CausticBounds& b = entry.second;
+                        if (b.minX > b.maxX) continue; // inverted = id-only entry (device-resident mesh)
+                        for (int corner = 0; corner < 8; ++corner) {
+                            Vec3 p((corner & 1) ? b.maxX : b.minX,
+                                   (corner & 2) ? b.maxY : b.minY,
+                                   (corner & 4) ? b.maxZ : b.minZ);
+                            Vec3 w = vi.transform.transform_point(p);
+                            mn[0] = std::min(mn[0], w.x); mx[0] = std::max(mx[0], w.x);
+                            mn[1] = std::min(mn[1], w.y); mx[1] = std::max(mx[1], w.y);
+                            mn[2] = std::min(mn[2], w.z); mx[2] = std::max(mx[2], w.z);
+                        }
+                        any = true;
+                    }
+                }
+                if (any) {
+                    tgt = Vec3((mn[0] + mx[0]) * 0.5f, (mn[1] + mx[1]) * 0.5f, (mn[2] + mx[2]) * 0.5f);
+                    const float dx = mx[0] - mn[0], dy = mx[1] - mn[1], dz = mx[2] - mn[2];
+                    // Enclosing sphere + PROPORTIONAL margin. A fixed +0.25
+                    // margin dominated tiny scenes (a 5 cm object got a ~0.3
+                    // target radius), which also drove the auto cell size —
+                    // the grid stayed far too coarse for zoomed-in objects.
+                    const float halfDiag = 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz);
+                    rad = halfDiag * 1.15f + 0.005f;
+                }
+            }
+            ph.emitCenter[0] = tgt.x; ph.emitCenter[1] = tgt.y; ph.emitCenter[2] = tgt.z;
+            ph.emitCenter[3] = rad;
+            // Scale-aware cell size: the UI value is an UPPER BOUND. A small
+            // (zoomed-in) glass object with a fixed 0.05-unit cell quantizes its
+            // whole caustic into a few giant blocks and the gathered energy
+            // smears into nothing — tie the cell to the target radius so the
+            // pattern always spans a useful number of cells. rad only changes on
+            // caster edits, which also reset accumulation (grid is cleared), so
+            // splat/read never disagree on the cell size mid-accumulation.
+            ph.originCell[3] = std::min(std::max(0.001f, m_causticsCellSize),
+                                        std::max(rad * (1.0f / 48.0f), 1e-4f));
+            ph.photonCount   = (uint32_t)std::max(1024, m_causticsPhotons);
+            ph.frameSeed     = m_currentSamples;
+            // mode 1 = surface debug viz, 2 = gather into shading (Dilim 2),
+            // 3 = VOLUME grid debug march (Faz 2V / Dilim V1),
+            // 0 = surface gather off (volumetric-only mode).
+            ph.debugMode     = m_causticsVolDebug ? 3u
+                             : (m_causticsEnabled ? (m_causticsDebug ? 1u : 2u) : 0u);
+            ph.lightIndex    = 0u;
+            ph.lightCountReal = (uint32_t)m_cachedLights.size();
+            ph.energyScale   = m_causticsEnergy;
+            ph.debugExposure = 1.0f;
+
+            // Volume grid header (Faz 2V): coarser cells (3x the surface grid),
+            // debugMode 1 arms the photon-side deposit, energyScale carries σs.
+            VulkanRT::VulkanDevice::PhotonGridHeader pv{};
+            pv.originCell[0] = 0.0f; pv.originCell[1] = 0.0f; pv.originCell[2] = 0.0f;
+            pv.originCell[3] = ph.originCell[3] * 3.0f;
+            pv.emitCenter[0] = ph.emitCenter[0]; pv.emitCenter[1] = ph.emitCenter[1];
+            pv.emitCenter[2] = ph.emitCenter[2]; pv.emitCenter[3] = ph.emitCenter[3];
+            pv.photonCount   = ph.photonCount;
+            pv.frameSeed     = ph.frameSeed;
+            pv.debugMode     = (m_causticsVolumetric || m_causticsVolDebug) ? 1u : 0u;
+            // lightIndex is unused by the volume grid — bit 0 repurposed as the
+            // direct-shaft flag (photon.rgen deposits the light->glass leg too).
+            pv.lightIndex    = m_causticsVolDirect ? 1u : 0u;
+            pv.lightCountReal = ph.lightCountReal;
+            pv.energyScale   = m_causticsVolStrength;   // σs knob
+            // debugExposure doubles as the dust-noise amount OUTSIDE vol-debug:
+            // raygen decodes noise = clamp(debugExposure - 1, 0, 1).
+            pv.debugExposure = m_causticsVolDebug ? 1.0f : (1.0f + m_causticsVolNoise);
+
+            // Grids accumulate across frames; clear only on accumulation reset.
+            m_device->schedulePhotonPass(ph, pv, m_currentSamples == 0);
+        } else if (m_device->hasPhotonPipeline()) {
+            // Caustics just turned off (or no lights): zero the header mode so
+            // raygen stops gathering from the stale grid.
+            m_device->disablePhotonGrid();
+        }
 
         // Prefer fused GPU path: trace + GPU tonemap + small LDR readback in one cmd buffer.
         // Falls back to legacy HDR readback + CPU tonemap loop when the tonemap pipeline or

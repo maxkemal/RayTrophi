@@ -276,6 +276,14 @@ public:
     float translucent = 0.0f;                           // Translucency amount (0-1)
     float anisotropic = 0.0f;                           // Surface anisotropy
     float transmission = 0.0f;                          // Glass/water transmission
+    float dispersion = 0.0f;                            // Spectral dispersion (Abbe-style, 0 = off)
+    // Packed-texture channel selection for the metallic/roughness texture slots:
+    // 0 = Auto (ORM convention: roughness .g / metallic .b; BC4/R8 uploads .r),
+    // 1 = R, 2 = G, 3 = B. Non-ORM packings (RMA/MRA, DirectX metal-in-R maps)
+    // read the wrong channel under Auto — classic symptom: surface shades as
+    // full metal even where the authored metallic value is 0.
+    int metallic_tex_channel = 0;
+    int roughness_tex_channel = 0;
     float sheen = 0.0f;                                 // Sheen amount (used as IS_WATER flag)
     float sheen_tint = 0.5f;                            // Sheen color tint
     SurfaceDepositionSettings surface_deposition;
@@ -286,7 +294,7 @@ public:
     float micro_detail_strength = 0.0f;  // 0 = disabled
     float micro_detail_scale    = 2.0f;  // World-space frequency
     float tile_break_strength   = 0.0f;  // UV tile-break
-
+    Vec3 sampleGGXVNDF(const Vec3& N, const Vec3& V, float roughness, float u1, float u2) const;
 private:
   
 
@@ -322,7 +330,7 @@ private:
   
     Vec2 applyTiling(float u, float v) const;
     Vec3 importanceSampleGGX(float u1, float u2, float roughness, const Vec3& N) const;
-    Vec3 sampleGGXVNDF(const Vec3& N, const Vec3& V, float roughness, float u1, float u2) const;
+  
 
   
 

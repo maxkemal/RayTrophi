@@ -95,6 +95,13 @@ Tek bir fiziksel temelli path tracer, üç hızlandırma backend'ini besler. Sah
 - **Küresel volumetrik bulutlar** (Henyey-Greenstein saçılım, adaptif ray marching, kapsama/yoğunluk/yükseklik/rüzgâr kontrolleri, yumuşak ufuk geçişi) — HDRI, düz renk veya Nishita gökyüzü üzerinde çalışır
 - Çoklu önem örneklemeli (MIS) yumuşak gölgeler
 
+### Foton caustic & volumetrik ışık huzmeleri
+- **Aşamalı (progressive) photon-map caustic** (Vulkan RT): ışık tarafındaki foton geçişi, kamera yolunun kullandığı RT pipeline'ını ve BSDF'leri aynen paylaşır; kırılan (LS⁺D) enerjiyi dünyaya sabit bir hash grid'e biriktirir — cam odak lekeleri, halka caustic'leri ve renkli cam desenleri gibi düz path tracing'in pratikte asla yakınsayamadığı efektler
+- **Spektral dispersiyon caustic'e bedava taşınır**: kamera ışınlarının kullandığı stokastik hero-dalga boyu taşıması fotonlarla birlikte yol alır — hem yüzey deseninde hem huzmelerde gökkuşağı saçakları
+- **Volume objesi gerektirmeyen hacimsel ışık huzmeleri**: fotonlar uçuş segmentleri boyunca ikinci, daha kaba bir dünya grid'ine de enerji bırakır; sınırlandırılmış bir kamera march'ı bunu görünür in-scatter'a çevirir. Cam bir obje ve bir ışık yeterli — sis veya katılımcı ortam kurulumu gerekmez. Saçılım şiddeti (sanal toz yoğunluğu), isteğe bağlı 3D türbülans modülasyonu ve ışık→cam bacağının da parladığı direct-shaft modu (point ışıklar karışım örneklemeli emisyona geçer, her yöne huzme verir)
+- Kameradan bağımsız dünya-uzayı hedefleme (fotonlar geçirgen objelerin canlı union sınırlarına nişan alır, her frame yeniden değerlendirilir), ölçek-duyarlı grid boyutlandırma, yumuşak koni-kernel ve trilinear yoğunluk okumaları
+- Dürüst sınırlar: şimdilik yalnız Vulkan RT (OptiX/CPU portları planda), huzmelerde izotropik faz, keskinlik grid çözünürlüğüyle sınırlı
+
 ### Örnekleme & post
 - Aşamalı **birikimsel path tracing** + **adaptif örnekleme** (örnekleri gürültülü bölgelere yoğunlaştırır)
 - Alan derinliği, hareket bulanıklığı
@@ -125,6 +132,7 @@ Tek bir fiziksel temelli path tracer, üç hızlandırma backend'ini besler. Sah
 | OIDN denoise | ✅ | ✅ | OptiX'in CUDA-interop yolu daha sıkı |
 | Adaptif / aşamalı render | ✅ | ✅ | Vulkan daha hızlı yakınsar (kare başı daha az ek yük) |
 | Stylize katmanı | ✅ | ✅ | CPU / Vulkan / OptiX eşleşen çıktı üretir |
+| Foton caustic + volumetrik ışık huzmeleri | ❌ | ✅ | Şimdilik yalnız Vulkan; foton geçişi kamera RT pipeline'ını paylaşır |
 
 > **Açıklama:** ✅ tam destek &nbsp;|&nbsp; 🧪 destekli, küçük çıktı farkları olabilir
 
@@ -395,8 +403,10 @@ RayTrophi/
 - ✅ SimCache disk kare pişirme + tam simülasyon serileştirme
 - ✅ CPU / Vulkan / OptiX eşitlikli Stylize katmanı
 - ✅ Sculpt modu (mesh + arazi) ve katmanlı mesh boyama
+- ✅ Aşamalı photon-map caustic + spektral dispersiyon + volumetrik ışık huzmeleri (Vulkan RT)
 
 **Planlanan / devam eden**
+- [ ] OptiX / CPU'da caustic; huzmeler için anizotropik faz ve gerçek yoğunluk alanları (VDB)
 - [ ] Varyasyonel katılar + ghost-fluid yüzeyin GPU portu (Faz 2)
 - [ ] Sıvı yüzey gerilimi, örtük viskozite, dar-bant/seyrek performans
 - [ ] Binned SAH / index tabanlı BVH / SBVH uzamsal bölme

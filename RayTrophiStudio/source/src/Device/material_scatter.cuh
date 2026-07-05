@@ -1,4 +1,4 @@
-﻿// Safe and stable BRDF + scatter implementation
+// Safe and stable BRDF + scatter implementation
 #pragma once
 #include "params.h"
 #include "vec3_utils.cuh"
@@ -12,6 +12,83 @@
 // Industry standard minimum alpha value (matches Disney/Cycles/PBRT)
 #define GPU_MIN_ALPHA 0.0001f
 #define GPU_MIN_DOT 0.0001f
+
+// --- Resin noise/hash helpers (GPU parity with Vulkan) ---
+__device__ __forceinline__ float rh_hash13(float3 p) {
+    float3 q = make_float3(p.x * 0.1031f, p.y * 0.1031f, p.z * 0.1031f);
+    q.x = q.x - floorf(q.x);
+    q.y = q.y - floorf(q.y);
+    q.z = q.z - floorf(q.z);
+    float dot_val = q.x * (q.y + 33.33f) + q.y * (q.z + 33.33f) + q.z * (q.x + 33.33f);
+    q.x += dot_val;
+    q.y += dot_val;
+    q.z += dot_val;
+    float r = (q.x + q.y) * q.z;
+    return r - floorf(r);
+}
+
+__device__ __forceinline__ float3 rh_hash33(float3 p) {
+    float x = p.x * 127.1f + p.y * 311.7f + p.z * 74.7f;
+    float y = p.x * 269.5f + p.y * 183.3f + p.z * 246.1f;
+    float z = p.x * 113.5f + p.y * 271.9f + p.z * 124.6f;
+    float rx = sinf(x) * 43758.5453f;
+    float ry = sinf(y) * 43758.5453f;
+    float rz = sinf(z) * 43758.5453f;
+    return make_float3(rx - floorf(rx), ry - floorf(ry), rz - floorf(rz));
+}
+
+__device__ __forceinline__ float rh_vnoise(float3 x) {
+    float3 i = make_float3(floorf(x.x), floorf(x.y), floorf(x.z));
+    float3 f = make_float3(x.x - i.x, x.y - i.y, x.z - i.z);
+    f.x = f.x * f.x * f.x * (f.x * (f.x * 6.0f - 15.0f) + 10.0f);
+    f.y = f.y * f.y * f.y * (f.y * (f.y * 6.0f - 15.0f) + 10.0f);
+    f.z = f.z * f.z * f.z * (f.z * (f.z * 6.0f - 15.0f) + 10.0f);
+
+    float n000 = rh_hash13(i);
+    float n100 = rh_hash13(make_float3(i.x + 1.0f, i.y, i.z));
+    float n010 = rh_hash13(make_float3(i.x, i.y + 1.0f, i.z));
+    float n110 = rh_hash13(make_float3(i.x + 1.0f, i.y + 1.0f, i.z));
+    float n001 = rh_hash13(make_float3(i.x, i.y, i.z + 1.0f));
+    float n101 = rh_hash13(make_float3(i.x + 1.0f, i.y, i.z + 1.0f));
+    float n011 = rh_hash13(make_float3(i.x, i.y + 1.0f, i.z + 1.0f));
+    float n111 = rh_hash13(make_float3(i.x + 1.0f, i.y + 1.0f, i.z + 1.0f));
+
+    float nx00 = n000 * (1.0f - f.x) + n100 * f.x;
+    float nx10 = n010 * (1.0f - f.x) + n110 * f.x;
+    float nx01 = n001 * (1.0f - f.x) + n101 * f.x;
+    float nx11 = n011 * (1.0f - f.x) + n111 * f.x;
+    float nxy0 = nx00 * (1.0f - f.y) + nx10 * f.y;
+    float nxy1 = nx01 * (1.0f - f.y) + nx11 * f.y;
+    return nxy0 * (1.0f - f.z) + nxy1 * f.z;
+}
+
+__device__ __forceinline__ float rh_fbm(float3 p) {
+    float v = 0.0f, a = 0.5f, tot = 0.0f;
+    for (int i = 0; i < 5; ++i) {
+        v   += a * fabsf(2.0f * rh_vnoise(p) - 1.0f);
+        tot += a;
+        p = make_float3(p.x * 2.03f + 7.1f, p.y * 2.03f + 3.7f, p.z * 2.03f + 11.3f);
+        a *= 0.5f;
+    }
+    return v / fmaxf(tot, 1e-4f);
+}
+
+__device__ __forceinline__ float rh_worley(float3 p) {
+    float3 ip = make_float3(floorf(p.x), floorf(p.y), floorf(p.z));
+    float3 fp = make_float3(p.x - ip.x, p.y - ip.y, p.z - ip.z);
+    float d = 1.0f;
+    for (int z = -1; z <= 1; ++z) {
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                float3 g = make_float3((float)x, (float)y, (float)z);
+                float3 o = rh_hash33(ip + g);
+                float3 diff = g + o - fp;
+                d = fminf(d, sqrtf(dot(diff, diff)));
+            }
+        }
+    }
+    return d;
+}
 
 __device__ inline bool ms_weather_active(const WeatherParams& weather) {
     return weather.enabled != 0 && weather.type != WEATHER_NONE &&
@@ -955,6 +1032,10 @@ __device__ bool transmission_scatter(
     // Resin needs real refraction to read as a solid volume — with IOR≈1 the ray
     // passes straight through and only darkens (no lensing / thickness cue).
     if (material.transmission_density > 1e-4f) ior = fmaxf(ior, 1.45f);
+    // Spectral dispersion state (selection happens AFTER the lobe decision below —
+    // only refracted paths disperse; the mirror lobe is wavelength-independent).
+    int    disp_out_ch = ray_in.dispersion_channel;   // 0 = unset, 1/2/3 = R/G/B
+    float3 disp_sel    = make_float3(1.0f, 1.0f, 1.0f);
     bool front_face = payload.front_face != 0;
     float3 macro_normal = N;
     float eta = front_face ? (1.0f / ior) : ior;
@@ -992,6 +1073,25 @@ __device__ bool transmission_scatter(
     bool cannot_refract = (eta * sin_theta > 1.0f);
     float reflect_prob = schlick(cos_theta, ior);
     bool do_reflect = cannot_refract || (random_float(rng) < reflect_prob);
+
+    // ── Spectral dispersion: ONLY the refracted lobe disperses (parity with Vulkan
+    // scatterGlass). Selecting before the lobe decision splashed ×3 mono-channel
+    // noise onto reflection-lit surfaces. Channel is picked ONCE per path and
+    // travels on the Ray so the exit interface refracts with the same channel IOR.
+    // Resin (transmission_density) path skipped.
+    if (!do_reflect && material.dispersion > 1e-3f && material.transmission_density <= 1e-4f) {
+        int ch = disp_out_ch - 1;
+        if (ch < 0) {
+            ch = min((int)(random_float(rng) * 3.0f), 2);
+            disp_sel = make_float3(ch == 0 ? 3.0f : 0.0f,
+                                   ch == 1 ? 3.0f : 0.0f,
+                                   ch == 2 ? 3.0f : 0.0f);
+            disp_out_ch = ch + 1;
+        }
+        float spread = (ior - 1.0f) * material.dispersion * 0.06f;  // half of total F–C spread
+        ior += (ch == 0) ? -spread : ((ch == 2) ? spread : 0.0f);
+        eta = front_face ? (1.0f / ior) : ior;   // refraction uses the channel IOR
+    }
 
     float3 direction;
     float3 offset_n;
@@ -1036,14 +1136,75 @@ __device__ bool transmission_scatter(
     // base extinction (0.25) makes Resin Depth darken even for a white resin;
     // resin_color tints which channels survive.
     if (real_depth && !do_reflect) {
+        float3 Tdir = normalize(direction);
+
+        // Reached the base: parallax-offset the base lookup along the refracted
+        // lateral travel. Always applied when resin layer is active.
+        float3 inPlane = Tdir - macro_normal * dot(Tdir, macro_normal);
+        float2 parUV = uv
+                     + make_float2(dot(inPlane, payload.tangent), dot(inPlane, payload.bitangent))
+                       * (material.transmission_density * 0.05f);
+
+        float3 base_tint = material.albedo;
+        if (payload.use_blended_data && !payload.water_surface_active) {
+            base_tint = payload.blended_albedo;
+        } else if (payload.has_albedo_tex) {
+            float2 par_material_uv = apply_material_uv_transform(material, parUV);
+            float4 tex = tex2D<float4>(payload.albedo_tex, par_material_uv.x, par_material_uv.y);
+            base_tint = (tex.y == 0.0f && tex.z == 0.0f) ?
+                make_float3(tex.x, tex.x, tex.x) :
+                make_float3(tex.x, tex.y, tex.z);
+        }
+
+        bool resinHasInclusions = (material.resin_inclusion > 0.001f || material.resin_dirt > 0.001f);
         float3 ct      = clamp3f(material.resin_color, 0.0f, 1.0f);
         float  cosV    = fmaxf(fabsf(dot(-unit_direction, macro_normal)), 0.25f);
-        float  pathLen = 2.0f * material.transmission_density / cosV;
         float3 ext     = make_float3((1.0f - ct.x) + 0.25f, (1.0f - ct.y) + 0.25f, (1.0f - ct.z) + 0.25f);
-        float3 absorb  = make_float3(expf(-pathLen * ext.x), expf(-pathLen * ext.y), expf(-pathLen * ext.z));
+        float3 absorb  = make_float3(1.0f, 1.0f, 1.0f);
+        bool dirtHit   = false;
+
+        if (resinHasInclusions) {
+            const int RESIN_STEPS = 6;
+            float dt  = fmaxf(material.transmission_density, 1e-3f) / float(RESIN_STEPS);
+            float scl = fmaxf(material.resin_inclusion_scale, 0.01f);
+            float3 P  = payload.position;
+            for (int i = 0; i < RESIN_STEPS; ++i) {
+                P = P + Tdir * dt;
+                float dust = rh_fbm(P * scl);
+                dust = dust * dust;
+                float localExt = 1.0f + material.resin_inclusion * dust * 6.0f;
+                absorb.x *= expf(-dt * ext.x * localExt);
+                absorb.y *= expf(-dt * ext.y * localExt);
+                absorb.z *= expf(-dt * ext.z * localExt);
+
+                if (material.resin_dirt > 0.001f) {
+                    float cell = rh_worley(P * scl * 3.0f);
+                    auto smoothstep_lambda = [](float edge0, float edge1, float x) {
+                        float t = fmaxf(0.0f, fminf(1.0f, (x - edge0) / (edge1 - edge0)));
+                        return t * t * (3.0f - 2.0f * t);
+                    };
+                    float speck = 1.0f - smoothstep_lambda(0.0f, 0.18f, cell);
+                    if (speck * material.resin_dirt > 0.5f) {
+                        dirtHit = true;
+                        break;
+                    }
+                }
+            }
+            if (dirtHit) {
+                base_tint = material.resin_dirt_color * absorb;
+            } else {
+                base_tint = base_tint * absorb;
+            }
+        } else {
+            float pathLen = 2.0f * material.transmission_density / cosV;
+            absorb  = make_float3(expf(-pathLen * ext.x), expf(-pathLen * ext.y), expf(-pathLen * ext.z));
+            base_tint = base_tint * absorb;
+        }
+
         float3 baseDir = cosine_sample_hemisphere(rng, macro_normal);
-        *attenuation   = clamp3f(tint, 0.0f, 1.0f) * absorb;
+        *attenuation   = clamp3f(base_tint, 0.0f, 1.0f) * disp_sel;
         *scattered     = Ray(offset_ray(payload.position, macro_normal), normalize(baseDir));
+        scattered->dispersion_channel = disp_out_ch;
         return true;
     }
 
@@ -1066,7 +1227,9 @@ __device__ bool transmission_scatter(
         );
     }
 
+    *attenuation = *attenuation * disp_sel;
     *scattered = Ray(offset_ray(payload.position, offset_n), normalize(direction));
+    scattered->dispersion_channel = disp_out_ch;
 
     return true;
 }

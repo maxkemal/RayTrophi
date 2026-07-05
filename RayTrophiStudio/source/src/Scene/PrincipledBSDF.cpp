@@ -386,6 +386,10 @@ bool PrincipledBSDF::scatter(
         Dielectric dielectricMat(
             ior, albedo, 0.1, 1.0, roughness, 0
         );
+        // Spectral dispersion is applied INSIDE Dielectric::scatter, and only on the
+        // refracted lobe (GPU parity) — the mirror lobe must stay white, otherwise
+        // reflections splash mono-channel colour onto other surfaces.
+        dielectricMat.dispersion = dispersion;
         is_specular = true; // Transmission is specular
         return dielectricMat.scatter(r_in, rec, attenuation, scattered, is_specular);
     }
