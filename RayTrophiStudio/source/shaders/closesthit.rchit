@@ -101,12 +101,14 @@ struct RayPayload {
     float    primaryMetallic;
     uint     bounceType;
     uint     primaryMaterialId;   // Stylize AOV: real material index of the primary hit
+    float    dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
-// Separate shadow payload storage to avoid corrupting the main payload during shadow tracing
-// Use rayPayloadInEXT here to match any-hit/miss declarations (avoid ABI mismatch)
-layout(location = 1) rayPayloadEXT bool shadowOccluded;
+// Separate shadow payload storage to avoid corrupting the main payload during shadow tracing.
+// rgb = transmissive tint accumulated by shadow any-hits (coloured glass shadows),
+// w   = reached-light flag. Init to (1,1,1,0) before each shadow trace; shadow_miss sets w=1.
+layout(location = 1) rayPayloadEXT vec4 shadowPayload;
 
 // ============================================================
 // Descriptor Bindings
@@ -1156,6 +1158,13 @@ const uint BOUNCE_RESIN = 4u;
 // Glass marble full-volume entry: tagged on the FRONT-face transmit so raygen
 // integrates the real interior segment (dust/dirt) before the next surface.
 const uint BOUNCE_MARBLE = 5u;
+// Glass mirror lobe (Fresnel reflect or TIR at an interface): the ray did NOT
+// cross the surface. Kept distinct from BOUNCE_TRANSMISSION so the photon pass
+// only counts real refractions as "crossed glass" — tagging reflections as
+// transmission made photons bounced off a sphere's OUTER surface splat a
+// mirrored ghost caustic on the floor. Camera-side raygen spends the same
+// transmission budget on it, so camera behavior is unchanged.
+const uint BOUNCE_GLASS_REFLECT = 6u;
 
 // --- Lambertian Diffuse ---
 void scatterDiffuse(vec3 hitPos, vec3 normal, vec3 albedo, inout uint seed) {
@@ -1225,7 +1234,7 @@ void scatterMetal(vec3 hitPos, vec3 normal, vec3 rayDir, vec3 albedo, float roug
 }
 
 // --- Dielectric Glass (Fresnel + TIR + Roughness) ---
-void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool frontFace, vec3 rayDir, vec3 albedo, float ior, float roughness, float transmissionDensity, vec3 resinColor, inout uint seed) {
+void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool frontFace, vec3 rayDir, vec3 albedo, float ior, float roughness, float transmissionDensity, vec3 resinColor, float dispersion, inout uint seed) {
     // Işığın hangi taraftan geldiğini belirle
     vec3  macroNormal  = safeNormalize(macroNormalIn, vec3(0.0, 1.0, 0.0));
     vec3  shadingNormal = safeNormalize(shadingNormalIn, macroNormal);
@@ -1260,6 +1269,26 @@ void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool fr
 
     bool realDepth = (transmissionDensity > 1e-4);
 
+    // ── Spectral dispersion: ONLY the refracted lobe disperses. The mirror lobe is
+    // wavelength-independent — selecting the hero channel before the lobe decision
+    // splashed ×3 mono-channel noise onto reflection-lit surfaces. Channel is chosen
+    // ONCE per path (payload.dispersionChannel persists, reset per path in raygen)
+    // so the exit interface refracts with the same channel IOR. Selection collapses
+    // attenuation to one channel ×3; blue bends more than red. Resin path skipped.
+    if (!doReflect && !realDepth && dispersion > 1e-3) {
+        int dispCh = int(payload.dispersionChannel) - 1;   // -1 = unset, 0/1/2 = R/G/B
+        if (dispCh < 0) {
+            dispCh = min(int(rnd(seed) * 3.0), 2);
+            vec3 sel = vec3(0.0);
+            sel[dispCh] = 3.0;
+            payload.attenuation *= sel;
+            payload.dispersionChannel = float(dispCh + 1);
+        }
+        float spread = (ior - 1.0) * dispersion * 0.06;    // half of the total F–C spread
+        ior += (dispCh == 0) ? -spread : ((dispCh == 2) ? spread : 0.0);
+        etaRatio = frontFace ? (1.0 / ior) : ior;          // refraction uses channel IOR
+    }
+
     // ── RESIN terminate-on-base: the refraction lobe travels the resin THICKNESS,
     // hits the actual base material albedo at that depth, and scatters back out
     // through the resin (absorb in + out). The object is OPAQUE under a refractive
@@ -1285,11 +1314,13 @@ void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool fr
 
     vec3 dir;
     vec3 offsetDir;
+    bool didRefract = false;               // true only when the ray actually crossed the interface
     if (doReflect) {
         dir       = reflect(rayDir, outNormal);
         offsetDir = macroNormal;           // Yüzeyin dışına offset
     } else {
         bool refractedSuccess = refractLikeOptix(rayDir, outNormal, etaRatio, dir);
+        didRefract = refractedSuccess;
         offsetDir = -macroNormal;          // Yüzeyin içine offset (refract için)
         if (!refractedSuccess) {
             dir = reflect(rayDir, macroNormal);
@@ -1301,6 +1332,7 @@ void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool fr
     if (!doReflect && dot(dir, macroNormal) >= 0.0) {
         dir = reflect(rayDir, macroNormal);
         offsetDir = macroNormal;
+        didRefract = false;
     }
 
     payload.scatterOrigin = offset_ray(hitPos, offsetDir);
@@ -1320,7 +1352,7 @@ void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool fr
         payload.attenuation *= transmissionColor;
     }
     payload.scattered     = true;
-    payload.bounceType     = BOUNCE_TRANSMISSION;
+    payload.bounceType     = didRefract ? BOUNCE_TRANSMISSION : BOUNCE_GLASS_REFLECT;
 }
 
 // ============================================================
@@ -1561,9 +1593,9 @@ bool estimateWaterDepthGL(vec3 hitPos, float maxDepth, out float waterDepth, out
 
     for (int i = 0; i < 7; ++i) {
         float mid = mix(low, high, 0.5);
-        shadowOccluded = true;
+        shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
         traceRayEXT(topLevelAS, probeFlags, 0x01, 0, 1, 1, probeOrigin, SHADOW_TMIN, probeDir, mid, 1);
-        if (shadowOccluded) {
+        if (shadowPayload.w < 0.5) {   // hit something → floor is within [low, mid]
             found = true;
             high = mid;
         } else {
@@ -1918,7 +1950,13 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
     // ── Build shading normal from wave perturbation ──────────────
     // waveNormal lives in a y-up tangent frame; project onto geoNormal's ONB
     vec3 tgt, btgt;
-    buildONB(geoNormal, tgt, btgt);
+    if (abs(geoNormal.y) > 0.999) {
+        tgt = vec3(1.0, 0.0, 0.0);
+        btgt = vec3(0.0, 0.0, 1.0);
+    } else {
+        tgt = normalize(cross(geoNormal, vec3(0.0, 0.0, 1.0)));
+        btgt = cross(tgt, geoNormal);
+    }
     vec3 shadingNormal = normalize(tgt * waveNormal.x + geoNormal * waveNormal.y + btgt * waveNormal.z);
     if (dot(shadingNormal, -rayDir) < 0.0) shadingNormal = geoNormal; // sanity
 
@@ -1951,7 +1989,7 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
     // (deep_color) into Dielectric, so refraction tint must not vary with foam.
     vec3 transmissionTint = deep_color;
     bool waterFrontFace = dot(rayDir, shadingNormal) < 0.0;
-    scatterGlass(hitPos, shadingNormal, shadingNormal, waterFrontFace, rayDir, transmissionTint, ior, mix(roughness, 0.8, totalFoam), 0.0, vec3(1.0), seed);
+    scatterGlass(hitPos, shadingNormal, shadingNormal, waterFrontFace, rayDir, transmissionTint, ior, mix(roughness, 0.8, totalFoam), 0.0, vec3(1.0), 0.0, seed);
 }
 
 // ============================================================
@@ -2534,12 +2572,23 @@ if (emissionTexID > 0) {
         // procedural sampling): dust = heterogeneous absorption at depth, dirt = opaque
         // worley specks that terminate early (their colour shows through the resin
         // already crossed), and the refracted lateral travel offsets the base lookup
-        // (parallax). Falls back to the cheap analytic path when inclusions are off.
+        // (parallax).
+        vec3 Tdir = refract(rayDir, worldNormal, 1.0 / effIor);
+        if (dot(Tdir, Tdir) < 1e-6) Tdir = rayDir;        // total internal reflection fallback
+        Tdir = normalize(Tdir);
+
+        // Reached the base: parallax-offset the base lookup along the refracted
+        // lateral travel. Always applied when resin layer is active.
+        vec3 inPlane = Tdir - worldNormal * dot(Tdir, worldNormal);
+        vec2 parUV = materialUV
+                   + vec2(dot(inPlane, surfaceTangent), dot(inPlane, surfaceBitangent))
+                     * (mat.transmission_density * 0.05);
+        if (albedoTexID > 0) {
+            albedo = texture(materialTextures[nonuniformEXT(albedoTexID)], parUV).rgb;
+        }
+
         bool resinHasInclusions = (mat.resin_inclusion > 0.001 || mat.resin_dirt > 0.001);
         if (resinHasInclusions) {
-            vec3 Tdir = refract(rayDir, worldNormal, 1.0 / effIor);
-            if (dot(Tdir, Tdir) < 1e-6) Tdir = rayDir;        // total internal reflection fallback
-            Tdir = normalize(Tdir);
             const int RESIN_STEPS = 6;
             float dt  = max(mat.transmission_density, 1e-3) / float(RESIN_STEPS);
             float scl = max(mat.resin_inclusion_scale, 0.01);
@@ -2565,13 +2614,6 @@ if (emissionTexID > 0) {
                 // Terminate on the dirt speck: its colour, dimmed by the resin crossed.
                 albedo = vec3(mat.resin_dirt_color_r, mat.resin_dirt_color_g, mat.resin_dirt_color_b) * absorb;
             } else {
-                // Reached the base: parallax-offset the base lookup along the refracted
-                // lateral travel, then apply the accumulated (heterogeneous) absorption.
-                vec3 inPlane = Tdir - worldNormal * dot(Tdir, worldNormal);
-                vec2 parUV = materialUV
-                           + vec2(dot(inPlane, surfaceTangent), dot(inPlane, surfaceBitangent))
-                             * (mat.transmission_density * 0.05);
-                if (albedoTexID > 0) albedo = texture(materialTextures[nonuniformEXT(albedoTexID)], parUV).rgb;
                 albedo *= absorb;
             }
         } else {
@@ -2631,12 +2673,12 @@ if (emissionTexID > 0) {
                     // (no return — direct lighting + diffuse BRDF below shade the speck)
                 } else {
                     // Hazy clear glass: refract through carrying the dust absorption.
-                    scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, albedo * gabsorb, ior, roughness, 0.0, vec3(1.0), payload.seed);
+                    scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, albedo * gabsorb, ior, roughness, 0.0, vec3(1.0), mat.dispersion, payload.seed);
                     return;
                 }
             } else {
                 // Chosen transmission path - act as Glass
-                scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, albedo, ior, roughness, 0.0, vec3(1.0), payload.seed);
+                scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, albedo, ior, roughness, 0.0, vec3(1.0), mat.dispersion, payload.seed);
                 return; // Immediately return, skipping direct lighting (Next Event Estimation)
             }
         } else {
@@ -2666,11 +2708,11 @@ if (emissionTexID > 0) {
                     float NdotL = max(dot(worldNormal, wi), 0.0);
                     if (NdotL > 1e-6) {
                         // Use a dedicated shadow payload so the main path payload isn't overwritten by shadow traversal
-                        // Conservative init: assume blocked. shadow_miss.rmiss (missIndex=1) sets false on escape.
-                        // any-hit with ignoreIntersectionEXT lets ray continue → eventually misses → shadow_miss → false
-                        // any-hit with terminateRayEXT → stays true (opaque shadow)
-                        // SkipClosestHit: geometry hit without opacity test → stays true (solid shadow)
-                        shadowOccluded = true;
+                        // Conservative init: w=0 (blocked). shadow_miss.rmiss (missIndex=1) sets w=1 on escape.
+                        // any-hit transmissive → rgb *= tint + ignoreIntersection (coloured glass shadow)
+                        // any-hit with terminateRayEXT → w stays 0 (opaque shadow)
+                        // SkipClosestHit: geometry hit without opacity test → w stays 0 (solid shadow)
+                        shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
                         // ULP-based offset: self-intersection-safe on thin/distant geometry
                         const uint FLAG_TERRAIN = (1u << 16);
                         bool useTerrainShadowNormal = (mat.flags & FLAG_TERRAIN) != 0u;
@@ -2683,15 +2725,15 @@ if (emissionTexID > 0) {
                         if (tmax > tmin) {
                             // No OpaqueEXT → any-hit shader tests transparency per pixel
                             // SkipClosestHit → no closest-hit overhead; shadow value set by any-hit/miss only
-                            // missIndex=1 → shadow_miss.rmiss sets shadowOccluded=false when ray escapes
+                            // missIndex=1 → shadow_miss.rmiss sets shadowPayload.w=1 when ray escapes
                             uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
                                              | gl_RayFlagsSkipClosestHitShaderEXT;
                             // mask 0x01 = triangles only — volume AABBs have mask 0x02 so
                             // they are invisible to shadow rays and cannot cast hard shadows.
                             traceRayEXT(topLevelAS, shadowFlags, 0x01, 0, 1, 1, shadowOrigin, tmin, wi, tmax, 1);
                         }
-                        float shadowVisibility = shadowOccluded ? 0.0 : 1.0;
-                        if (shadowVisibility > 1e-4) {
+                        vec3 shadowVisibility = (shadowPayload.w > 0.5) ? shadowPayload.rgb : vec3(0.0);
+                        if (any(greaterThan(shadowVisibility, vec3(1e-4)))) {
                             // Volumetric soft shadow: march through any volume AABB between surface and light.
                             // cam.pad0 carries float(volumeCount) from C++ renderProgressive each frame.
                             float volShadowTr = computeVolumeShadowTransmittance(shadowOrigin, wi, tmax);
@@ -2754,7 +2796,7 @@ if (emissionTexID > 0) {
         vec3 sunDir = normalize(worldData.w.sunDir);
         float NdotSun = max(dot(worldNormal, sunDir), 0.0);
         if (NdotSun > 1e-6) {
-            shadowOccluded = true;
+            shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
             // ULP-based offset: self-intersection-safe on thin/distant geometry
             const uint FLAG_TERRAIN = (1u << 16);
             bool useTerrainShadowNormal = (mat.flags & FLAG_TERRAIN) != 0u;
@@ -2769,7 +2811,7 @@ if (emissionTexID > 0) {
             // mask 0x01 = triangles only — volume AABBs skipped (handled by volumetric transmittance)
             traceRayEXT(topLevelAS, sunShadowFlags, 0x01, 0, 1, 1,
                         sunShadowOrigin, sunTmin, sunDir, sunTmax, 1);
-            float sunShadowVisibility = shadowOccluded ? 0.0 : 1.0;
+            float sunShadowVisibility = (shadowPayload.w > 0.5) ? 1.0 : 0.0;
             if (sunShadowVisibility > 1e-4) {
                 float sunVolTr = computeVolumeShadowTransmittance(sunShadowOrigin, sunDir, sunTmax);
                 vec3 V        = normalize(-rayDir);

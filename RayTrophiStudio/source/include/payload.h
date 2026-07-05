@@ -126,6 +126,8 @@ struct OptixHitResult {
     float3 blended_normal;     // Tangent space or World space? Let's assume standard logic handles Normal.
                                // Actually, normal is already computed and stored in 'normal' field above.
                                // So we don't need blended_normal.
+    float3 tangent;
+    float3 bitangent;
 
     // Path regularization (Müller 2018 / Arnold-style).
     // Set by the raygen loop AFTER each trace_ray call; consumed by

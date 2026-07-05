@@ -14,6 +14,7 @@ struct PBRMaterialSnapshot {
     float emissionStrength = 0.0f;
     float ior = 1.5f;
     float transmission = 0.0f;
+    float dispersion = 0.0f;   // spectral dispersion strength (0 = off)
     float opacity = 1.0f;
 
     float subsurface = 0.0f;
@@ -73,6 +74,7 @@ inline PBRMaterialSnapshot capturePBRMaterialSnapshot(const PrincipledBSDF& pbsd
     s.emissionStrength = pbsdf.emissionProperty.intensity;
     s.ior = pbsdf.ior;
     s.transmission = pbsdf.transmission;
+    s.dispersion = pbsdf.dispersion;
     s.opacity = pbsdf.opacityProperty.alpha;
 
     s.subsurface = pbsdf.getSubsurface();
@@ -129,6 +131,7 @@ inline void applyPBRMaterialSnapshotToGpuMaterial(const PBRMaterialSnapshot& s, 
         (float)(s.emission.z * s.emissionStrength));
     gpu.ior = s.ior;
     gpu.transmission = s.transmission;
+    gpu.dispersion = s.dispersion;
     gpu.opacity = s.opacity;
 
     gpu.subsurface = s.subsurface;
@@ -194,6 +197,7 @@ inline Backend::IBackend::MaterialData makeBackendMaterialDataFromSnapshot(const
     data.emissionStrength = s.emissionStrength;
     data.ior = s.ior;
     data.transmission = s.transmission;
+    data.dispersion = s.dispersion;
     data.opacity = s.opacity;
 
     data.subsurface = s.subsurface;

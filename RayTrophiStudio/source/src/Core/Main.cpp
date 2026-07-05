@@ -1285,6 +1285,16 @@ void reset_render_resolution(int w, int h)
         rp.transmissionBounces = std::clamp(render_settings.transmission_bounces, 1, rp.maxBounces);
         rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
         rp.adaptiveThreshold = render_settings.variance_threshold;
+        rp.causticsEnabled = render_settings.caustics_enabled;
+        rp.causticsDebug = render_settings.caustics_debug;
+        rp.causticsPhotons = render_settings.caustics_photons;
+        rp.causticsCellSize = render_settings.caustics_cell_size;
+        rp.causticsEnergy = render_settings.caustics_energy;
+        rp.causticsVolumetric = render_settings.caustics_volumetric;
+        rp.causticsVolDebug = render_settings.caustics_vol_debug;
+        rp.causticsVolStrength = render_settings.caustics_vol_strength;
+        rp.causticsVolDirect = render_settings.caustics_vol_direct;
+        rp.causticsVolNoise = render_settings.caustics_vol_noise;
         g_backend->setRenderParams(rp);
     }
     color_processor.resize(w, h);
@@ -2848,7 +2858,10 @@ int main(int argc, char* argv[]) try {
                     // panel) so shortcuts work whenever the app is focused, only blocked
                     // while editing a text field. SDL already delivers keys to the focused
                     // window only, so "app focused" is implicit.
-                    if (!ImGui::GetIO().WantTextInput) {
+                    // EXCEPTION: while the Geometry Graph node editor is focused, Delete is
+                    // claimed by NodeEditorUIV2 for node/link deletion (see scene_ui.cpp's
+                    // handleEditorShortcuts for the matching guard on the other Delete listener).
+                    if (!ImGui::GetIO().WantTextInput && !ui.geometry_graph_focused) {
                         ui.triggerDelete(ui_ctx);
                     }
                 }
@@ -4434,17 +4447,34 @@ int main(int argc, char* argv[]) try {
                             static int last_w = -1, last_h = -1, last_max = -1, last_min = -1, last_bounces = -1, last_diffuse_bounces = -1, last_transmission_bounces = -1;
                             static bool last_adaptive = false;
                             static float last_threshold = -1.0f;
+                            static bool last_caustics = false, last_caustics_debug = false;
+                            static int last_caustics_photons = -1;
+                            static float last_caustics_cell = -1.0f, last_caustics_energy = -1.0f;
+                            static bool last_caustics_volumetric = false, last_caustics_vol_debug = false;
+                            static float last_caustics_vol_strength = -1.0f;
+                            static bool last_caustics_vol_direct = false;
+                            static float last_caustics_vol_noise = -1.0f;
                             int current_max = render_settings.is_final_render_mode ? render_settings.final_render_samples : render_settings.max_samples;
 
                             if (activeViewportBackend != last_backend ||
-                                image_width != last_w || image_height != last_h || 
-                                current_max != last_max || 
+                                image_width != last_w || image_height != last_h ||
+                                current_max != last_max ||
                                 render_settings.min_samples != last_min ||
                                 render_settings.max_bounces != last_bounces ||
                                 render_settings.diffuse_bounces != last_diffuse_bounces ||
                                 render_settings.transmission_bounces != last_transmission_bounces ||
                                 render_settings.use_adaptive_sampling != last_adaptive ||
-                                std::abs(render_settings.variance_threshold - last_threshold) > 0.0001f) 
+                                std::abs(render_settings.variance_threshold - last_threshold) > 0.0001f ||
+                                render_settings.caustics_enabled != last_caustics ||
+                                render_settings.caustics_debug != last_caustics_debug ||
+                                render_settings.caustics_photons != last_caustics_photons ||
+                                std::abs(render_settings.caustics_cell_size - last_caustics_cell) > 1e-5f ||
+                                std::abs(render_settings.caustics_energy - last_caustics_energy) > 1e-5f ||
+                                render_settings.caustics_volumetric != last_caustics_volumetric ||
+                                render_settings.caustics_vol_debug != last_caustics_vol_debug ||
+                                std::abs(render_settings.caustics_vol_strength - last_caustics_vol_strength) > 1e-5f ||
+                                render_settings.caustics_vol_direct != last_caustics_vol_direct ||
+                                std::abs(render_settings.caustics_vol_noise - last_caustics_vol_noise) > 1e-5f)
                             {
                                 Backend::RenderParams rp = {};
                                 rp.imageWidth = image_width;
@@ -4456,6 +4486,16 @@ int main(int argc, char* argv[]) try {
                                 rp.transmissionBounces = std::clamp(render_settings.transmission_bounces, 1, rp.maxBounces);
                                 rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
                                 rp.adaptiveThreshold = render_settings.variance_threshold;
+                                rp.causticsEnabled = render_settings.caustics_enabled;
+                                rp.causticsDebug = render_settings.caustics_debug;
+                                rp.causticsPhotons = render_settings.caustics_photons;
+                                rp.causticsCellSize = render_settings.caustics_cell_size;
+                                rp.causticsEnergy = render_settings.caustics_energy;
+        rp.causticsVolumetric = render_settings.caustics_volumetric;
+        rp.causticsVolDebug = render_settings.caustics_vol_debug;
+        rp.causticsVolStrength = render_settings.caustics_vol_strength;
+        rp.causticsVolDirect = render_settings.caustics_vol_direct;
+        rp.causticsVolNoise = render_settings.caustics_vol_noise;
                                 activeViewportBackend->setRenderParams(rp);
 
                                 last_backend = activeViewportBackend;
@@ -4468,6 +4508,16 @@ int main(int argc, char* argv[]) try {
                                 last_transmission_bounces = render_settings.transmission_bounces;
                                 last_adaptive = render_settings.use_adaptive_sampling;
                                 last_threshold = render_settings.variance_threshold;
+                                last_caustics = render_settings.caustics_enabled;
+                                last_caustics_debug = render_settings.caustics_debug;
+                                last_caustics_photons = render_settings.caustics_photons;
+                                last_caustics_cell = render_settings.caustics_cell_size;
+                                last_caustics_energy = render_settings.caustics_energy;
+                                last_caustics_volumetric = render_settings.caustics_volumetric;
+                                last_caustics_vol_debug = render_settings.caustics_vol_debug;
+                                last_caustics_vol_strength = render_settings.caustics_vol_strength;
+                                last_caustics_vol_direct = render_settings.caustics_vol_direct;
+                                last_caustics_vol_noise = render_settings.caustics_vol_noise;
                             }
                         }
                         // Enter GPU render block when selected engine is GPU OR when

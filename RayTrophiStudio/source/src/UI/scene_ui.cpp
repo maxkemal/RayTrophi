@@ -1681,6 +1681,51 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
         UIWidgets::HelpMarker("Total is the global path limit. Diffuse limits indirect diffuse/SSS/translucent paths; Transmission limits glass and water continuation.");
 
         UIWidgets::Divider();
+        UIWidgets::ColoredHeader("Caustics (Photon, Vulkan RT)", ImVec4(0.55f, 0.85f, 1.0f, 1.0f));
+        ImGui::Checkbox("Enable Caustics##caustics", &ctx.render_settings.caustics_enabled);
+        UIWidgets::HelpMarker("Light-traced photon caustics for glass/water (Vulkan RT + CPU).\n"
+                              "Photons refract through transmissive surfaces and deposit into a\n"
+                              "world-space grid read back during shading.");
+        if (ctx.render_settings.caustics_enabled && ctx.render_settings.use_optix) {
+            UIWidgets::StatusIndicator("Caustics are not supported on the OptiX backend yet (Vulkan RT / CPU only)",
+                                       UIWidgets::StatusType::Warning);
+        }
+        if (ctx.render_settings.caustics_enabled) {
+            ImGui::Indent();
+            ImGui::Checkbox("Debug: show photon grid##causticsdbg", &ctx.render_settings.caustics_debug);
+            UIWidgets::HelpMarker("Replaces shading with the raw photon-grid energy at the primary hit\n"
+                                  "so photon placement can be verified (bright spot under the glass).");
+            ImGui::DragInt("Photons / frame##causticsn", &ctx.render_settings.caustics_photons, 1024, 8192, 4194304);
+            ImGui::DragFloat("Grid Cell Size##causticscs", &ctx.render_settings.caustics_cell_size, 0.005f, 0.005f, 2.0f, "%.3f");
+            ImGui::DragFloat("Energy##causticse", &ctx.render_settings.caustics_energy, 0.05f, 0.0f, 100.0f, "%.2f");
+            UIWidgets::HelpMarker("Global photon power multiplier (1 = physical). Also scales the\n"
+                                  "volumetric shafts — leave at 1 and use Scatter Strength for those.");
+            ImGui::Unindent();
+        }
+
+        UIWidgets::Divider();
+        UIWidgets::ColoredHeader("Volumetric Light Shafts (Photon, Vulkan RT)", ImVec4(0.55f, 0.85f, 1.0f, 1.0f));
+        ImGui::Checkbox("Volumetric (light shafts)##causticsvol", &ctx.render_settings.caustics_volumetric);
+        UIWidgets::HelpMarker("Photons deposit energy along their flight paths, making light\n"
+                              "visible as shafts — no fog or volume object needed. Independent\n"
+                              "of surface caustics; shares the photon budget above.");
+        if (ctx.render_settings.caustics_volumetric) {
+            ImGui::Indent();
+            ImGui::Checkbox("Debug: show volume grid##causticsvoldbg", &ctx.render_settings.caustics_vol_debug);
+            UIWidgets::HelpMarker("Marches the primary ray and shows the raw volume-grid energy\n"
+                                  "(the shafts) so photon placement can be verified.");
+            ImGui::DragFloat("Scatter Strength##causticsvols", &ctx.render_settings.caustics_vol_strength, 0.05f, 0.0f, 100.0f, "%.2f");
+            ImGui::Checkbox("Direct light shafts##causticsvoldir", &ctx.render_settings.caustics_vol_direct);
+            UIWidgets::HelpMarker("Also deposit the light-to-target leg of the beam, so the full\n"
+                                  "light path glows. Point lights emit half their photons\n"
+                                  "omnidirectionally in this mode (true light distribution).");
+            ImGui::SliderFloat("Shaft Noise##causticsvolnoise", &ctx.render_settings.caustics_vol_noise, 0.0f, 1.0f, "%.2f");
+            UIWidgets::HelpMarker("Heterogeneous dust: modulates shaft density with a static 3D\n"
+                                  "turbulence field for a wispy, volumetric look. 0 = uniform.");
+            ImGui::Unindent();
+        }
+
+        UIWidgets::Divider();
         UIWidgets::ColoredHeader("Denoiser (Viewport + Final + Sequence)", ImVec4(0.90f, 0.76f, 1.0f, 1.0f));
         if (ImGui::Checkbox("Enable Denoiser", &ctx.render_settings.use_denoiser)) {
             // Mirror to legacy 'render_use_denoiser' so the final single-frame
@@ -2097,7 +2142,7 @@ void SceneUI::drawDockSpaceHost(UIContext& ctx)
     // NOTE: bump this string whenever the default layout changes — a new id has no
     // persisted node in imgui.ini, so the correct default rebuilds and any stale
     // user layout (e.g. an old full-width bottom panel) is discarded automatically.
-    const ImGuiID dockspace_id = ImGui::GetID("RayTrophiDockSpace_v2");
+    const ImGuiID dockspace_id = ImGui::GetID("RayTrophiDockSpace_v3");
     this->dockspace_id = dockspace_id;
 
     // (Re)build the default layout once, or when the user requests a reset.
@@ -2121,13 +2166,14 @@ void SceneUI::drawDockSpaceHost(UIContext& ctx)
         ImGui::DockBuilderDockWindow("Timeline", dock_bottom);
         ImGui::DockBuilderDockWindow("Console", dock_bottom);
         ImGui::DockBuilderDockWindow("Terrain Graph", dock_bottom);
+        ImGui::DockBuilderDockWindow("Geometry Graph", dock_bottom);
         ImGui::DockBuilderDockWindow("AnimGraph", dock_bottom);
         ImGui::DockBuilderDockWindow("Asset Browser", dock_bottom);
         ImGui::DockBuilderFinish(dockspace_id);
         dock_bottom_id = dock_bottom;
     } else {
         // Fallback: scan active bottom windows to retrieve dock_bottom_id when loaded from ini
-        for (const char* name : {"Timeline", "Console", "Terrain Graph", "AnimGraph", "Asset Browser"}) {
+        for (const char* name : {"Timeline", "Console", "Terrain Graph", "Geometry Graph", "AnimGraph", "Asset Browser"}) {
             ImGuiWindow* win = ImGui::FindWindowByName(name);
             if (win && win->DockNode) {
                 ImGuiDockNode* node = win->DockNode;
@@ -2785,8 +2831,32 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                         ImGui::DragInt("Transmission Bounces", &ctx.render_settings.transmission_bounces, 1, 1, 64);
                         ctx.render_settings.diffuse_bounces = std::clamp(ctx.render_settings.diffuse_bounces, 1, ctx.render_settings.max_bounces);
                         ctx.render_settings.transmission_bounces = std::clamp(ctx.render_settings.transmission_bounces, 1, ctx.render_settings.max_bounces);
-                        
+
                         UIWidgets::HelpMarker("Total is the global path limit. Diffuse limits indirect diffuse/SSS/translucent paths; Transmission limits glass and water continuation.");
+
+                        UIWidgets::Divider();
+                        ImGui::Checkbox("Photon Caustics (Vulkan RT)##caustics2", &ctx.render_settings.caustics_enabled);
+                        if (ctx.render_settings.caustics_enabled && ctx.render_settings.use_optix) {
+                            UIWidgets::StatusIndicator("Caustics are not supported on the OptiX backend yet (Vulkan RT / CPU only)",
+                                                       UIWidgets::StatusType::Warning);
+                        }
+                        if (ctx.render_settings.caustics_enabled) {
+                            ImGui::Indent();
+                            ImGui::Checkbox("Debug: show photon grid##causticsdbg2", &ctx.render_settings.caustics_debug);
+                            ImGui::DragInt("Photons / frame##causticsn2", &ctx.render_settings.caustics_photons, 1024, 8192, 4194304);
+                            ImGui::DragFloat("Grid Cell Size##causticscs2", &ctx.render_settings.caustics_cell_size, 0.005f, 0.005f, 2.0f, "%.3f");
+                            ImGui::DragFloat("Energy##causticse2", &ctx.render_settings.caustics_energy, 0.05f, 0.0f, 100.0f, "%.2f");
+                            ImGui::Unindent();
+                        }
+                        ImGui::Checkbox("Volumetric (light shafts)##causticsvol2", &ctx.render_settings.caustics_volumetric);
+                        if (ctx.render_settings.caustics_volumetric) {
+                            ImGui::Indent();
+                            ImGui::Checkbox("Debug: show volume grid##causticsvoldbg2", &ctx.render_settings.caustics_vol_debug);
+                            ImGui::DragFloat("Scatter Strength##causticsvols2", &ctx.render_settings.caustics_vol_strength, 0.05f, 0.0f, 100.0f, "%.2f");
+                            ImGui::Checkbox("Direct light shafts##causticsvoldir2", &ctx.render_settings.caustics_vol_direct);
+                            ImGui::SliderFloat("Shaft Noise##causticsvolnoise2", &ctx.render_settings.caustics_vol_noise, 0.0f, 1.0f, "%.2f");
+                            ImGui::Unindent();
+                        }
                         UIWidgets::EndSection();
                     }
 
@@ -3595,7 +3665,10 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
 
     // Block only while typing in a text field, not whenever a panel has focus, so the
     // delete shortcut works whenever the app is focused (matches the N/Tab handlers below).
-    if (!io.WantTextInput && ctx.selection.hasSelection()) {
+    // EXCEPTION: while the Geometry Graph node editor is focused, Delete/Backspace is claimed
+    // by NodeEditorUIV2 for node/link deletion — without this, deleting a node in the graph
+    // also deleted the scene object the graph belongs to (same Delete keypress, two listeners).
+    if (!io.WantTextInput && ctx.selection.hasSelection() && !geometry_graph_focused) {
         handleDeleteShortcut(ctx);
     }
 
@@ -3719,7 +3792,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     float left_offset)
 {
     static float bottom_hold_timers[6] = { 0.0f };
-    static float bottom_flash_timers[6] = { 0.0f };
+    static float bottom_flash_timers[7] = { 0.0f };
 
     auto isBottomPanelFloating = [&](const char* window_name) -> bool {
         if (!docking_enabled) return false;
@@ -3864,6 +3937,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             show_terrain_graph  = (keep_index == 2) ? show_terrain_graph : false;
             show_anim_graph     = (keep_index == 3) ? show_anim_graph : false;
             show_asset_browser  = (keep_index == 4) ? show_asset_browser : false;
+            show_geometry_graph = (keep_index == 5) ? show_geometry_graph : false;
         };
         
         bool active_dope = show_animation_panel && (timeline.getEditorMode() == TimelineEditorMode::DopeSheet);
@@ -3954,6 +4028,22 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             focus_bottom_panel_next_frame = true;
         });
 
+        if (UIWidgets::HorizontalTab("Geometry", UIWidgets::IconType::Mesh, show_geometry_graph))
+        {
+            show_geometry_graph = !show_geometry_graph;
+            if (show_geometry_graph) {
+                closeOtherBottomPanels(5);
+                focus_bottom_panel_next_frame = true;
+            } else {
+                if (docking_enabled) dockToBottom("Geometry Graph");
+            }
+        }
+        handleBottomTabEvents(5, "Geometry Graph", show_geometry_graph, [&]() {
+            show_geometry_graph = true;
+            closeOtherBottomPanels(5);
+            focus_bottom_panel_next_frame = true;
+        });
+
         if (UIWidgets::HorizontalTab("Assets", UIWidgets::IconType::Assets, show_asset_browser))
         {
             show_asset_browser = !show_asset_browser;
@@ -3964,7 +4054,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                 if (docking_enabled) dockToBottom("Asset Browser");
             }
         }
-        handleBottomTabEvents(5, "Asset Browser", show_asset_browser, [&]() {
+        handleBottomTabEvents(6, "Asset Browser", show_asset_browser, [&]() {
             show_asset_browser = true;
             closeOtherBottomPanels(4);
             focus_bottom_panel_next_frame = true;
@@ -4164,7 +4254,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     ImGui::PopStyleVar(2);
 
     // ---------------- BOTTOM PANEL (Resizable) ----------------
-    bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_anim_graph || show_asset_browser);
+    bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_geometry_graph || show_anim_graph || show_asset_browser);
     if (!show_bottom) return;
 
     // Use class member for persistent height
@@ -4340,6 +4430,262 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             }
         }
 
+        if (show_geometry_graph) {
+            bool open = true;
+            geometry_graph_focused = false;  // re-armed below only if the window is actually focused this frame
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
+            ImGui::SetNextWindowSize(ImVec2(950, 450), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2((screen_x - 950) * 0.5f, (screen_y - 450) * 0.5f), ImGuiCond_FirstUseEver);
+            ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+            if (!isBottomPanelFloating("Geometry Graph")) {
+                flags |= ImGuiWindowFlags_NoTitleBar;
+            }
+            if (focus_bottom_panel_next_frame) {
+                ImGui::SetNextWindowFocus();
+            }
+            if (ImGui::Begin("Geometry Graph", &open, flags)) {
+                if (focus_bottom_panel_next_frame) {
+                    ImGui::SetWindowFocus();
+                }
+                geometry_graph_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
+
+                // Follow the current scene selection: switching to a different mesh object
+                // shows THAT object's own graph (auto Base Mesh if it doesn't have one yet)
+                // instead of silently continuing to operate on whatever was bound before.
+                // Anything OTHER than a mesh object being selected — nothing selected at all
+                // (e.g. the bound object was just deleted), or a non-mesh selection like a
+                // light/camera — drops the stale binding, rather than leaving the panel showing
+                // (and Evaluate silently operating on) whatever mesh was bound before.
+                if (ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object) {
+                    const std::string curSel = ctx.selection.selected.object->getNodeName();
+                    if (!curSel.empty() && curSel != geometry_graph_active_object_name) {
+                        geometry_graph_active_object_name = curSel;
+                    }
+                } else {
+                    geometry_graph_active_object_name.clear();
+                }
+
+                const std::string& objName = geometry_graph_active_object_name;
+                if (objName.empty()) {
+                    ImGui::TextColored(ImVec4(1, 1, 0, 1), "Select a mesh object and click 'Edit Geometry Graph' to open its graph.");
+                } else {
+                    auto& graphPtr = ctx.scene.geometry_node_graphs[objName];
+                    geometryNodeEditorUI.config.showMinimap = true;
+                    if (!graphPtr) {
+                        graphPtr = std::make_shared<GeometryNodesV2::GeometryNodeGraphV2>();
+                    }
+                    if (graphPtr->nodes.empty()) {
+                        // Default graph: Base Mesh wired straight into Output, ready to insert
+                        // nodes into the middle of. Output makes the result deterministic even
+                        // once several branches exist (see evaluateGeometryGraph) instead of
+                        // leaving it to whichever terminal node happens to be found first.
+                        auto* baseMeshNode = graphPtr->addGeometryNode(GeometryNodesV2::NodeType::BaseMesh, 60, 120);
+                        auto* outputNode = graphPtr->addGeometryNode(GeometryNodesV2::NodeType::Output, 340, 120);
+                        if (baseMeshNode && outputNode && !baseMeshNode->outputs.empty() && !outputNode->inputs.empty()) {
+                            graphPtr->addLink(baseMeshNode->outputs[0].id, outputNode->inputs[0].id);
+                        }
+                    }
+                    // Keep the Base Mesh node's title showing which object it's bound to —
+                    // it implicitly reads GeometryContext::baseMesh (== this object), and with
+                    // only one allowed per graph (enforced in drawGeometryGraphToolbar) there's
+                    // no ambiguity, but the label makes that explicit instead of silent.
+                    for (auto& n : graphPtr->nodes) {
+                        if (n->getTypeId() == "GeoV2.BaseMesh") {
+                            n->metadata.displayName = "Base Mesh: " + objName;
+                        }
+                    }
+                    drawGeometryGraphToolbar(ctx, objName, *graphPtr);
+                    ImGui::Separator();
+
+                    // Right-click on a NODE now opens NodeEditorUIV2's own built-in
+                    // "LocalNodeContextPopup" (Delete Node + group management) automatically —
+                    // that popup body already existed but nothing used to call OpenPopup for it,
+                    // fixed at the source (NodeEditorUIV2.h) so every node graph in the app
+                    // benefits, not just this one.
+                    // Right-click on EMPTY CANVAS opens the library's "LocalGraphContextPopup"
+                    // (group tools); we append our own "Add Base Mesh"/"Add Subdivide" items into
+                    // that SAME popup via the onDrawBackgroundMenu hook (also previously declared
+                    // but unused) instead of racing it with a second competing popup. Reassigned
+                    // every frame since it captures this frame's `graphPtr` by reference and is
+                    // only ever invoked synchronously inside `draw()` below, never stored.
+                    geometryNodeEditorUI.onDrawBackgroundMenu = [this, &graphPtr]() {
+                        bool hasBaseMesh = false, hasOutput = false;
+                        for (auto& n : graphPtr->nodes) {
+                            if (n->getTypeId() == "GeoV2.BaseMesh") hasBaseMesh = true;
+                            else if (n->getTypeId() == "GeoV2.Output") hasOutput = true;
+                        }
+                        
+                        ImVec2 spawnPos = geometryNodeEditorUI.mousePosOnRightClick;
+                        auto addNodeHelper = [&](GeometryNodesV2::NodeType type) {
+                            auto* n = graphPtr->addGeometryNode(type, spawnPos.x, spawnPos.y);
+                            geometryNodeEditorUI.onNodeAdded(*graphPtr, n);
+                        };
+
+                        if (ImGui::BeginMenu("Input / Output")) {
+                            if (ImGui::MenuItem("Base Mesh", nullptr, false, !hasBaseMesh)) {
+                                addNodeHelper(GeometryNodesV2::NodeType::BaseMesh);
+                            }
+                            if (ImGui::MenuItem("Object Source")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::ObjectSource);
+                            }
+                            if (ImGui::MenuItem("Output", nullptr, false, !hasOutput)) {
+                                addNodeHelper(GeometryNodesV2::NodeType::Output);
+                            }
+                            ImGui::EndMenu();
+                        }
+                        if (ImGui::BeginMenu("Mesh Modifiers")) {
+                            if (ImGui::MenuItem("Subdivide")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::SubdivideCC);
+                            }
+                            if (ImGui::MenuItem("Transform")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::Transform);
+                            }
+                            if (ImGui::MenuItem("Mirror")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::Mirror);
+                            }
+                            if (ImGui::MenuItem("Array")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::Array);
+                            }
+                            if (ImGui::MenuItem("Extrude")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::Extrude);
+                            }
+                            if (ImGui::MenuItem("Inset")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::Inset);
+                            }
+                            if (ImGui::MenuItem("Bevel")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::Bevel);
+                            }
+                            if (ImGui::MenuItem("Remesh")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::Remesh);
+                            }
+                            if (ImGui::MenuItem("Noise Displace")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::NoiseDisplace);
+                            }
+                            ImGui::EndMenu();
+                        }
+                        if (ImGui::BeginMenu("Topology / Combine")) {
+                            if (ImGui::MenuItem("Merge (Join)")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::Merge);
+                            }
+                            if (ImGui::MenuItem("Weld")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::Weld);
+                            }
+                            ImGui::EndMenu();
+                        }
+                        if (ImGui::BeginMenu("Masking")) {
+                            if (ImGui::MenuItem("Mask by Height")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::MaskByHeight);
+                            }
+                            if (ImGui::MenuItem("Mask by Slope")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::MaskBySlope);
+                            }
+                            if (ImGui::MenuItem("Mask by Noise")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::MaskNoise);
+                            }
+                            if (ImGui::MenuItem("Mask Remap")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::MaskRemap);
+                            }
+                            if (ImGui::MenuItem("Mask Math")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::MaskMath);
+                            }
+                            ImGui::EndMenu();
+                        }
+                        if (ImGui::BeginMenu("Scattering")) {
+                            if (ImGui::MenuItem("Scatter Instances")) {
+                                addNodeHelper(GeometryNodesV2::NodeType::ScatterInstances);
+                            }
+                            ImGui::EndMenu();
+                        }
+                    };
+
+                    // Object Source node's picker combo. Reassigned every frame (captures
+                    // this frame's ctx by reference — same lifetime contract as
+                    // onDrawBackgroundMenu above, only invoked synchronously inside this
+                    // frame's properties-panel drawContent() below). The list is built
+                    // lazily, only while the combo popup is open, from direct_mesh_nodes —
+                    // so a freshly imported/added object shows up the next time the picker
+                    // is opened, with zero per-frame tracking cost.
+                    GeometryNodesV2::g_sceneObjectListProvider = [this, &ctx]() {
+                        if (!mesh_cache_valid) {
+                            rebuildMeshCache(ctx.scene.world.objects);
+                        }
+                        std::vector<std::string> names;
+                        names.reserve(direct_mesh_nodes.size());
+                        for (const auto& kv : direct_mesh_nodes) {
+                            if (kv.second.mesh) names.push_back(kv.first);
+                        }
+                        std::sort(names.begin(), names.end());
+                        return names;
+                    };
+
+                    if (geometry_graph_show_properties) {
+                        float availWidth = ImGui::GetContentRegionAvail().x;
+                        float propsWidth = geometry_graph_properties_width;
+                        float canvasWidth = availWidth - propsWidth - 8.0f;
+                        if (canvasWidth < 100.0f) {
+                            canvasWidth = 100.0f;
+                            propsWidth = availWidth - canvasWidth - 8.0f;
+                        }
+
+                        ImGui::BeginChild("GeoDagCanvas", ImVec2(canvasWidth, 0), false);
+                        geometryNodeEditorUI.draw(*graphPtr);
+                        ImGui::EndChild();
+
+                        ImGui::SameLine();
+
+                        // Splitter Bar
+                        ImGui::Button("##GeoDagSplitter", ImVec2(4.0f, -1.0f));
+                        if (ImGui::IsItemActive()) {
+                            propsWidth -= ImGui::GetIO().MouseDelta.x;
+                            if (propsWidth < 150.0f) propsWidth = 150.0f;
+                            if (propsWidth > availWidth - 150.0f) propsWidth = availWidth - 150.0f;
+                            geometry_graph_properties_width = propsWidth;
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                        }
+
+                        ImGui::SameLine();
+                        ImGui::BeginChild("GeoDagProperties", ImVec2(0, 0), true);
+                        NodeSystem::NodeBase* selected = graphPtr->getNode(geometryNodeEditorUI.selectedNodeId);
+                        if (!selected) {
+                            ImGui::TextDisabled("Select a node to edit its parameters.");
+                        } else {
+                            const std::string title = selected->metadata.displayName.empty() ? selected->name : selected->metadata.displayName;
+                            ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "%s", title.c_str());
+                            if (!selected->metadata.description.empty()) {
+                                ImGui::TextWrapped("%s", selected->metadata.description.c_str());
+                            }
+                            ImGui::Separator();
+                            ImGui::Spacing();
+                            ImGui::PushItemWidth(-1.0f);
+                            selected->drawContent();
+                            ImGui::PopItemWidth();
+                        }
+                        ImGui::EndChild();
+                    } else {
+                        ImGui::BeginChild("GeoDagCanvas", ImVec2(0, 0), false);
+                        geometryNodeEditorUI.draw(*graphPtr);
+                        ImGui::EndChild();
+                    }
+                }
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+            if (!open) {
+                show_geometry_graph = false;
+                geometry_graph_focused = false;
+                geometry_graph_active_object_name.clear();
+                dockToBottom("Geometry Graph");
+                // The provider captured this frame's ctx by reference — clear it so a
+                // stale copy can never outlive the panel (nothing else invokes it, but
+                // a dangling std::function is not worth the risk).
+                GeometryNodesV2::g_sceneObjectListProvider = nullptr;
+            }
+        } else {
+            geometry_graph_focused = false;
+        }
+
         if (show_anim_graph) {
             bool open = true;
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
@@ -4460,7 +4806,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     // ImGui::PopStyleColor(); // Removed hardcoded color push
 
     // Draw flash borders
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 7; i++) {
         if (bottom_flash_timers[i] > 0.0f) {
             bottom_flash_timers[i] -= ImGui::GetIO().DeltaTime;
             const char* name = nullptr;
@@ -4468,7 +4814,8 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             else if (i == 2) name = "Console";
             else if (i == 3) name = "Terrain Graph";
             else if (i == 4) name = "AnimGraph";
-            else if (i == 5) name = "Asset Browser";
+            else if (i == 5) name = "Geometry Graph";
+            else if (i == 6) name = "Asset Browser";
 
             if (name) {
                 ImGuiWindow* win = ImGui::FindWindowByName(name);
@@ -4613,7 +4960,7 @@ bool SceneUI::drawOverlays(UIContext& ctx)
         }
 
         const bool show_bottom =
-            (show_animation_panel || show_scene_log || show_terrain_graph || show_anim_graph || show_asset_browser);
+            (show_animation_panel || show_scene_log || show_terrain_graph || show_geometry_graph || show_anim_graph || show_asset_browser);
         const float menu_height = getMainMenuReservedHeight();
         const float status_bar_height = 24.0f;
         const float left_offset = showSidePanel ? side_panel_width : 0.0f;
@@ -4626,7 +4973,7 @@ bool SceneUI::drawOverlays(UIContext& ctx)
                 bottom_docked = true;
             } else {
                 ImGuiID dockspace_id = this->dockspace_id;
-                for (const char* name : {"Timeline", "Console", "Terrain Graph", "AnimGraph", "Asset Browser"}) {
+                for (const char* name : {"Timeline", "Console", "Terrain Graph", "Geometry Graph", "AnimGraph", "Asset Browser"}) {
                     ImGuiWindow* win = ImGui::FindWindowByName(name);
                     if (win && win->Active && win->DockNode) {
                         ImGuiDockNode* node = win->DockNode;
@@ -5221,6 +5568,33 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
             if (auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i])) {
                 ctx.selection.selectObject(tri, -1, tri->getNodeName());
                 break;
+            }
+        }
+    }
+
+    // Restore the "foliage instances live at the TAIL of world.objects" invariant.
+    // create_scene appended the new objects at the very END — i.e. AFTER any existing
+    // instance tail (scatter brush or Geo-DAG Scatter node). Every CPU-side scan that
+    // computes `selectable = size - getTotalInstanceCount()` (rebuildMeshCache,
+    // hierarchy, picking, sync) would then treat the freshly imported object as
+    // foliage and silently hide it — the GPU paths iterate ALL objects and kept
+    // showing it, which made the bug look like "GPU has it, CPU caches don't".
+    // Rotate [instance tail | new imports] -> [new imports | instance tail]. The tail
+    // length is measured directly (walk back over HittableInstance) instead of
+    // trusting getTotalInstanceCount(), which also counts transient particle-bridge
+    // groups that are never expanded into world.objects.
+    {
+        auto& objs = ctx.scene.world.objects;
+        if (objs.size() > objects_before && objects_before > 0) {
+            size_t tail = 0;
+            while (tail < objects_before &&
+                   dynamic_cast<HittableInstance*>(objs[objects_before - 1 - tail].get()) != nullptr) {
+                ++tail;
+            }
+            if (tail > 0) {
+                std::rotate(objs.begin() + static_cast<std::ptrdiff_t>(objects_before - tail),
+                            objs.begin() + static_cast<std::ptrdiff_t>(objects_before),
+                            objs.end());
             }
         }
     }
@@ -8507,6 +8881,7 @@ std::string SceneUI::serialize() {
     j["show_terrain_tab"] = show_terrain_tab;
     j["show_system_tab"] = show_system_tab;
     j["show_terrain_graph"] = show_terrain_graph;
+    j["show_geometry_graph"] = show_geometry_graph;
     j["show_anim_graph"] = show_anim_graph;
     j["show_volumetric_tab"] = show_volumetric_tab;
     j["show_forcefield_tab"] = show_forcefield_tab;
@@ -8554,12 +8929,13 @@ std::string SceneUI::serialize() {
     j["show_scene_log"] = show_scene_log;
     j["show_animation_panel"] = show_animation_panel;
     j["show_terrain_graph"] = show_terrain_graph;
+    j["show_geometry_graph"] = show_geometry_graph;
     j["show_anim_graph"] = show_anim_graph;
     j["show_asset_browser"] = show_asset_browser;
 
     {
         nlohmann::json floating_panels = nlohmann::json::object();
-        for (const char* name : {"Timeline", "Console", "Terrain Graph", "AnimGraph", "Asset Browser"}) {
+        for (const char* name : {"Timeline", "Console", "Terrain Graph", "Geometry Graph", "AnimGraph", "Asset Browser"}) {
             ImGuiWindow* win = ImGui::FindWindowByName(name);
             bool is_floating = false; // Default to docked
             if (win) {
@@ -8652,6 +9028,7 @@ void SceneUI::deserialize(const std::string& data) {
         if (j.contains("show_terrain_tab")) show_terrain_tab = j["show_terrain_tab"];
         if (j.contains("show_system_tab")) show_system_tab = j["show_system_tab"];
         if (j.contains("show_terrain_graph")) show_terrain_graph = j["show_terrain_graph"];
+        if (j.contains("show_geometry_graph")) show_geometry_graph = j["show_geometry_graph"];
         if (j.contains("show_anim_graph")) show_anim_graph = j["show_anim_graph"];
         if (j.contains("show_volumetric_tab")) show_volumetric_tab = j["show_volumetric_tab"];
         if (j.contains("show_forcefield_tab")) show_forcefield_tab = j["show_forcefield_tab"];
@@ -8732,12 +9109,13 @@ void SceneUI::deserialize(const std::string& data) {
         if (j.contains("show_scene_log")) show_scene_log = j["show_scene_log"];
         if (j.contains("show_animation_panel")) show_animation_panel = j["show_animation_panel"];
         if (j.contains("show_terrain_graph")) show_terrain_graph = j["show_terrain_graph"];
+        if (j.contains("show_geometry_graph")) show_geometry_graph = j["show_geometry_graph"];
         if (j.contains("show_anim_graph")) show_anim_graph = j["show_anim_graph"];
         if (j.contains("show_asset_browser")) show_asset_browser = j["show_asset_browser"];
 
         if (j.contains("bottom_panels_floating") && j["bottom_panels_floating"].is_object()) {
             auto floating_panels = j["bottom_panels_floating"];
-            for (const char* name : {"Timeline", "Console", "Terrain Graph", "AnimGraph", "Asset Browser"}) {
+            for (const char* name : {"Timeline", "Console", "Terrain Graph", "Geometry Graph", "AnimGraph", "Asset Browser"}) {
                 if (floating_panels.contains(name)) {
                     bool is_floating = floating_panels[name].get<bool>();
                     if (is_floating) {

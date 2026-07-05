@@ -37,6 +37,7 @@ class Hittable;
 
 #include "TerrainNodesV2.h" // Terrain node graph V2 system
 #include "scene_ui_nodeeditor.hpp" // Terrain node editor UI
+#include "GeometryNodesV2.h" // Faz 8a Geo-DAG node graph system
 #include <fstream>
 #include <map>
 #include <set> // For lazy CPU sync
@@ -134,6 +135,12 @@ public:
     bool show_terrain_tab = true;     // DEFAULT OPEN
     bool show_system_tab = true;     // Default closed
     bool show_terrain_graph = false;  // Terrain node editor panel
+    bool show_geometry_graph = false; // Geo-DAG node editor panel (Faz 8a)
+    // Set each frame while the Geometry Graph window/canvas has keyboard focus, so
+    // handleEditorShortcuts can skip the global "delete selected object" shortcut and let
+    // NodeEditorUIV2 handle Delete/Backspace for its own node/link selection instead — otherwise
+    // deleting a node in the graph also deleted the scene object the graph belongs to.
+    bool geometry_graph_focused = false;
     bool show_anim_graph = false;     // Animation node editor panel
     bool show_volumetric_tab = true;  // Unified Volumetrics tab (VDB + Gas)
     bool show_forcefield_tab = true;   // Simulation tab (Default open)
@@ -223,6 +230,8 @@ public:
      void drawStylizePanel(UIContext& ctx);
      void drawSceneHierarchy(UIContext& ctx);  // Scene hierarchy / outliner panel
      void drawModifiersPanel(UIContext& ctx);  // Modifiers & Sculpting panel
+     void drawGeometryGraphToolbar(UIContext& ctx, const std::string& objectName, GeometryNodesV2::GeometryNodeGraphV2& graph); // Faz 8a: Add Node combo + Evaluate button
+     bool evaluateGeometryGraph(UIContext& ctx, const std::string& objectName, GeometryNodesV2::GeometryNodeGraphV2& graph); // Faz 8a: runs the graph and swaps the object's TriangleMesh in world.objects
      void drawSculptPanel(UIContext& ctx);      // Dedicated sculpt panel
      void activateEditWorkspace(UIContext& ctx);
      void activateSculptWorkspace(UIContext& ctx);
@@ -242,7 +251,7 @@ public:
      // oldID==INVALID to repaint all) AND remap the CPU Embree BVH in place (no full rebuild), so
      // CPU render reflects the change immediately. Returns true if handled as a direct mesh.
      bool repaintDirectMeshMaterial(UIContext& ctx, const std::string& name, uint16_t oldID, uint16_t newID);
-     void drawPrincipledBSDFEditor(class PrincipledBSDF* pbsdf, uint16_t mat_id, UIContext& ctx); // Reusable editor widget
+     void drawPrincipledBSDFEditor(class PrincipledBSDF* pbsdf, uint16_t mat_id, UIContext& ctx, bool showUvWorkflow = true); // Reusable editor widget
      void drawEditableMeshOverlay(UIContext& ctx); // Viewport edit overlay for selected mesh
      // GPU edit overlay: pushes editable-mesh wireframe/vertex/face data to the
      // raster viewport backend. Returns true when the GPU path is active this
@@ -300,6 +309,7 @@ public:
      bool insetSelectedMeshFaces(UIContext& ctx, float amount);
      bool loopCutSelectedEdges(UIContext& ctx, float t);
      bool dissolveSelectedEdges(UIContext& ctx);
+     bool bevelSelectedEdges(UIContext& ctx, float width, int segments, bool roundProfile);
      bool dissolveSelectedVertices(UIContext& ctx);
      // Mesh-edit ops + selection helpers (restored: these working-tree declarations were
      // lost when a concurrent edit clobbered scene_ui.h; definitions live in the .cpp).
@@ -819,6 +829,9 @@ public:
      float mesh_face_inset_amount = 0.25f;
      float mesh_vertex_weld_distance = 0.05f;
      float mesh_loop_cut_position = 0.5f;
+     float mesh_edge_bevel_width = 0.05f;
+     int   mesh_edge_bevel_segments = 2;
+     bool  mesh_edge_bevel_round = true;
      std::string modifier_panel_exit_object; // Object for which user manually exited edit mode
      bool mesh_edit_gpu_sync_pending = false;
      std::string mesh_edit_gpu_sync_object_name;
@@ -1073,6 +1086,19 @@ public:
     SculptMaskState sculpt_mask_state;
     // Mask buffer operations. operation: 0=Clear, 1=Invert, 2=Fill, 3=Smooth, 4=Sharpen.
     void applySculptMaskOperation(int operation);
+    // Text buffer for the sculpt-mask <-> Field-attribute bridge buttons (Mask panel).
+    char sculpt_mask_attribute_name[64] = "mask";
+    // Bakes sculpt_mask_state.values onto the object's CURRENT scene mesh as a named
+    // per-vertex float attribute (a Faz 8b Field — see GeometryNodesV2.h), matched by
+    // LOCAL position (bit-identical, via GeometryNodesV2::PositionValueLookup) since
+    // EditableMeshCache is welded (one vertex per position) while the flat mesh may have
+    // seam/soup duplicates at that same position. Targets direct_mesh_nodes[objectName],
+    // NOT a Geo-DAG graph's originalBaseMesh snapshot — paint before building the graph,
+    // or after Apply, or the write won't be seen (see [[project_geo_dag_faz8b_fields]]).
+    void exportSculptMaskToAttribute(UIContext& ctx, const std::string& attributeName);
+    // Reverse direction: reads a named Field attribute off the object's current scene
+    // mesh back into sculpt_mask_state (for further brush editing), same position-match.
+    void importAttributeToSculptMask(UIContext& ctx, const std::string& attributeName);
     // --- Dynamic wet-clay field ---------------------------------------------------
     // Per-vertex wetness, sized 1:1 with editable_mesh_cache.vertices and reset on cache
     // revision change. Brushes inject wetness into the verts they deposit into;
@@ -1508,7 +1534,14 @@ private:
     // Terrain Node Graph (V2 System)
     TerrainNodesV2::TerrainNodeGraphV2 terrainNodeGraph;
     TerrainNodesV2::TerrainNodeEditorUI terrainNodeEditorUI;
-    
+
+    // Geometry Node Graph (Faz 8a Geo-DAG) — generic NodeEditorUIV2::draw() directly, no
+    // terrain-style wrapper class needed for this first slice (no library/toolbar/preview yet).
+    NodeSystem::NodeEditorUIV2 geometryNodeEditorUI;
+    std::string geometry_graph_active_object_name;  // which object's graph the panel is showing
+    bool geometry_graph_show_properties = true;
+    float geometry_graph_properties_width = 260.0f;
+
 public:
     // Timeline Widget
     class TimelineWidget timeline;  // Timeline animation widget

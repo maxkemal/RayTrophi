@@ -21,6 +21,7 @@
 #include <thread>
 #include <atomic>
 #include <unordered_set>
+#include <cstdio>
 #include "HittableInstance.h"
 #include "EmbreeBVH.h"
 #include "Backend/IViewportBackend.h"
@@ -262,7 +263,12 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
         }
         
         ImGui::SliderFloat("Max Slope", &active_group->brush_settings.slope_max, 0.0f, 90.0f, "%.1f deg");
-        
+        ImGui::DragFloatRange2("Height Range", &active_group->brush_settings.height_min, &active_group->brush_settings.height_max,
+            1.0f, -100000.0f, 100000.0f, "Min: %.1f", "Max: %.1f");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Restricts placement to this world-space Y range.\nDefaults to -10/10 (terrain-scale) - widen this for objects\nfar from Y=0 or you'll silently get zero instances.");
+        }
+
         ImGui::Spacing();
         ImGui::Separator();
         
@@ -431,6 +437,90 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
                     active_group->target_node_name.clear();
                     // Clear should also revert target type to TERRAIN (no mesh restriction)
                     active_group->target_type = InstanceGroup::TargetType::TERRAIN;
+                }
+            }
+
+            // Faz 8b Field bridge: gate DENSITY and scale SIZE from two independent
+            // per-vertex float attributes on the target mesh (Blender vertex-group-per-
+            // slot style, not one attribute driving both) — the same Fields the Geo-DAG
+            // Mask nodes / sculpt-mask "Export to Attribute" button write. Picked from a
+            // dropdown of attributes actually present on the target (no typos, no blind
+            // free text); empty = off, no behavior change. Sampled barycentrically in
+            // paintInstances at the brush hit point.
+            {
+                auto& bs = active_group->brush_settings;
+                std::vector<std::string> availableAttrs;
+                if (!active_group->target_node_name.empty()) {
+                    std::unordered_set<TriangleMesh*> seen;
+                    for (auto& obj : ctx.scene.world.objects) {
+                        auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(obj);
+                        if (!tmesh || tmesh->nodeName != active_group->target_node_name || !tmesh->geometry) continue;
+                        if (!seen.insert(tmesh.get()).second) continue;
+                        for (auto& n : tmesh->geometry->listCustomAttributeNames()) {
+                            if (std::find(availableAttrs.begin(), availableAttrs.end(), n) == availableAttrs.end())
+                                availableAttrs.push_back(n);
+                        }
+                    }
+                }
+                auto attrPicker = [&](const char* label, std::string& attrValue) {
+                    ImGui::SetNextItemWidth(160);
+                    const char* preview = attrValue.empty() ? "<none>" : attrValue.c_str();
+                    if (ImGui::BeginCombo(label, preview)) {
+                        if (ImGui::Selectable("<none>", attrValue.empty())) attrValue.clear();
+                        for (const auto& n : availableAttrs) {
+                            const bool selected = (n == attrValue);
+                            if (ImGui::Selectable(n.c_str(), selected)) attrValue = n;
+                            if (selected) ImGui::SetItemDefaultFocus();
+                        }
+                        if (availableAttrs.empty()) ImGui::TextDisabled("(no attributes on target - paint/export a mask first)");
+                        ImGui::EndCombo();
+                    }
+                };
+                attrPicker("Density Mask", bs.density_mask_attribute);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("<none> = off. Otherwise gates placement by this Field\nattribute on the target mesh (e.g. from a Mask by\nHeight/Slope/Noise node, or the sculpt Mask panel's export).");
+                }
+                attrPicker("Scale Mask", bs.scale_mask_attribute);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("<none> = off. Independent of Density Mask - can be a\ndifferent attribute (e.g. size falls off near a patch edge\nwhile density stays gated by a separate paint mask).");
+                }
+                if (!bs.scale_mask_attribute.empty()) {
+                    ImGui::SetNextItemWidth(140);
+                    ImGui::SliderFloat("Scale Mask > Scale", &bs.scale_mask_influence, 0.0f, 1.0f);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("0 = scale mask ignored, 1 = instance scale fully follows it.");
+                    }
+                }
+            }
+
+            // Procedural fill (Target Count, area-weighted whole-surface sampling) — the
+            // non-brush alternative to hand-painting, same idea as the Geo-DAG Scatter
+            // Instances node: one pass places instances honoring Placement Rules below AND
+            // the Density/Scale masks above, instead of dragging the brush over the surface.
+            ImGui::Spacing();
+            if (ImGui::CollapsingHeader("Scatter (Fill)")) {
+                auto& bs2 = active_group->brush_settings;
+                ImGui::SetNextItemWidth(160);
+                ImGui::DragInt("Target Count", &bs2.target_count, 10, 0, 1000000);
+                ImGui::SetNextItemWidth(160);
+                ImGui::InputInt("Seed", &bs2.seed);
+                ImGui::SetNextItemWidth(160);
+                ImGui::DragFloat("Min Distance##fill", &bs2.min_distance, 0.05f, 0.0f, 100.0f);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("0 = off. Rejects a candidate if it lands closer than\nthis to an already-placed instance.");
+                }
+                if (UIWidgets::PrimaryButton("Scatter Fill (Replace)", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
+                    std::vector<std::shared_ptr<Triangle>> surf_tris =
+                        gatherFullScatterSourceTriangles(ctx, active_group->target_node_name);
+                    active_group->clearInstances();
+                    const int spawned = active_group->scatterFillMesh(surf_tris);
+                    SCENE_LOG_INFO("[Scatter] Fill: " + std::to_string(spawned) + "/" + std::to_string(bs2.target_count)
+                        + " instances on '" + active_group->target_node_name + "'.");
+                    active_group->gpu_dirty = true;
+                    rebuildScatterSceneMutation(ctx);
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Clears this group's existing instances and re-fills the\nwhole target surface in one pass (uses Placement Rules,\nDensity/Scale masks and Min Distance above).");
                 }
             }
         } else {

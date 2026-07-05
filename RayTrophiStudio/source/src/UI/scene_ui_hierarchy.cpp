@@ -179,8 +179,10 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     // ─────────────────────────────────────────────────────────────────────────
     // Engage whenever the app is focused; only block while typing in a text field
     // (WantTextInput) rather than whenever any UI panel has focus.
+    // EXCEPTION: the Geometry Graph node editor claims Delete for its own node/link deletion
+    // (see the matching guard in handleEditorShortcuts and Main.cpp's SDL key handler).
     if ((ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) &&
-        sel.hasSelection() && !ImGui::GetIO().WantTextInput) {
+        sel.hasSelection() && !ImGui::GetIO().WantTextInput && !geometry_graph_focused) {
         triggerDelete(ctx);
     }
 

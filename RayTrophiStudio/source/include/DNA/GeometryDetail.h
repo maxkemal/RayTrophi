@@ -9,6 +9,7 @@
 #include <type_traits>
 #include <array>
 #include <cstdint>
+#include <algorithm>
 #include "AlignedAllocator.h"
 #include "Vec3.h"
 #include "Vec2.h"
@@ -382,6 +383,22 @@ namespace DNA {
         }
 
         /**
+         * @brief Names of all custom/named attributes (paint layers, masks, groups) —
+         * add_attribute() always writes custom_base directly regardless of delta_stack
+         * state, so this is authoritative even mid-delta. Used to populate attribute
+         * picker dropdowns (UI) instead of free-text entry.
+         */
+        std::vector<std::string> listCustomAttributeNames() const {
+            std::vector<std::string> names;
+            names.reserve(custom_base.size());
+            for (const auto& [name, buf] : custom_base) {
+                if (buf) names.push_back(name);
+            }
+            std::sort(names.begin(), names.end());
+            return names;
+        }
+
+        /**
          * @brief Returns a pointer to the active/current attribute data.
          * If no deltas are present, returns the base snapshot directly (zero overhead!).
          */
@@ -479,6 +496,33 @@ namespace DNA {
             custom_active.clear();
             active_state_dirty = false;
             cached_pointers_dirty = true;
+        }
+
+        /**
+         * @brief Bake the current ACTIVE state (base + all deltas) into the base
+         * snapshot and clear the delta stack. Visually a no-op — the data the
+         * accessors return is unchanged — but afterwards in-place writes land in
+         * base and therefore SURVIVE copy-construction. Needed by consumers that
+         * deep-copy a mesh and then mutate it (Geo-DAG nodes): with a non-empty
+         * delta stack, their writes would go into the active clone, which the NEXT
+         * copy-construction silently discards (it copies base + deltas only).
+         */
+        void flatten_deltas() {
+            if (delta_stack.empty()) return;
+            {
+                std::lock_guard<std::mutex> lock(active_state_mutex);
+                evaluate_active_state_internal();
+                for (size_t i = 0; i < kCoreCount; ++i) {
+                    if (core_active[i]) core_base[i] = std::move(core_active[i]);
+                }
+                for (auto& [name, buf] : custom_active) {
+                    if (buf) custom_base[name] = std::move(buf);
+                }
+                custom_active.clear();
+                delta_stack.clear();
+                active_state_dirty = false;
+                cached_pointers_dirty = true;
+            }
         }
 
         /**

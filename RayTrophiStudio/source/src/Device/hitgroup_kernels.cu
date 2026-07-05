@@ -350,26 +350,19 @@ extern "C" __global__ void __closesthit__ch() {
              
              const float3 water_base_normal = final_normal;
              WaterResult wave_res = evaluateWater(hitPoint, water_base_normal, time, params);
-
-             // Build a synthetic ONB from the base normal — water meshes don't
-             // carry per-vertex tangents, so the global world_tangent here is
-             // typically (0,0,0). Reusing it yields NaN through normalize(),
-             // which then poisons water_shading_normal and silently flips the
-             // dot(>,0) check below into the fallback path (flat normal) — the
-             // exact symptom: OptiX showing static water with no wave shading.
-             // Vulkan's closesthit uses buildONB(geoNormal,...) for the same
-             // reason. Pick a helper axis that's least parallel to base_normal
-             // so the cross product stays well-conditioned.
-             const float3 water_helper = fabsf(water_base_normal.y) < 0.999f
-                 ? make_float3(0.0f, 1.0f, 0.0f)
-                 : make_float3(1.0f, 0.0f, 0.0f);
-             float3 water_tangent = normalize(cross(water_helper, water_base_normal));
-             float3 water_bitangent = normalize(cross(water_base_normal, water_tangent));
-             float3 water_shading_normal = normalize(
-                 water_tangent * wave_res.normal.x +
-                 water_base_normal * wave_res.normal.y +
-                 water_bitangent * wave_res.normal.z
-             );
+              float3 water_tangent, water_bitangent;
+              if (fabsf(water_base_normal.y) > 0.999f) {
+                  water_tangent = make_float3(1.0f, 0.0f, 0.0f);
+                  water_bitangent = make_float3(0.0f, 0.0f, 1.0f);
+              } else {
+                  water_tangent = normalize(cross(water_base_normal, make_float3(0.0f, 0.0f, 1.0f)));
+                  water_bitangent = cross(water_tangent, water_base_normal);
+              }
+              float3 water_shading_normal = normalize(
+                  water_tangent * wave_res.normal.x +
+                  water_base_normal * wave_res.normal.y +
+                  water_bitangent * wave_res.normal.z
+              );
              final_normal = dot(water_shading_normal, -rayDir) > 0.0f ? water_shading_normal : water_base_normal;
              
              // Measure actual water depth by tracing DOWN to the floor
@@ -484,6 +477,8 @@ extern "C" __global__ void __closesthit__ch() {
     payload->front_face = front_face ? 1 : 0;
     payload->material_id = hgd->material_id;
     payload->uv = uv;
+    payload->tangent = world_tangent;
+    payload->bitangent = world_bitangent;
     
     // Texture handles + flags: write only when the texture is bound so the
     // hot path keeps payload stores minimal. material_scatter / ray_color
@@ -606,6 +601,110 @@ extern "C" __global__ void __anyhit__ah() {
 // instead of dereferencing a packed pointer into a 400-byte struct.
 extern "C" __global__ void __closesthit__shadow() {
     optixSetPayload_0(1u);
+}
+
+// Shadow Any Hit — SEPARATE from __anyhit__ah because the shadow ray carries an
+// RGB transmissive tint in payload registers 1..3 (radiance rays keep a packed
+// pointer there). Transmissive glass/water multiplies the tint by sqrt(albedo)
+// and passes through (coloured shadows — CPU shadow-walk / Vulkan shadow_anyhit
+// parity); opacity cutouts keep the stochastic binary behaviour of __anyhit__ah.
+extern "C" __global__ void __anyhit__shadow() {
+    const HitGroupData* hgd = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
+    const GpuMaterial* mat = (hgd->material_id >= 0 && optixLaunchParams.materials)
+        ? &optixLaunchParams.materials[hgd->material_id] : nullptr;
+
+    // Interpolated UV (shared by transmission/albedo/opacity texture lookups)
+    float2 uv = make_float2(0.5f, 0.5f);
+    if (hgd->has_uvs) {
+        const unsigned int primIdx = optixGetPrimitiveIndex();
+        const uint3 tri = hgd->indices[primIdx];
+        float2 bary = optixGetTriangleBarycentrics();
+        float2 uv0 = hgd->uvs[tri.x];
+        float2 uv1 = hgd->uvs[tri.y];
+        float2 uv2 = hgd->uvs[tri.z];
+        uv = (1.0f - bary.x - bary.y) * uv0 + bary.x * uv1 + bary.y * uv2;
+        uv.y = 1.0f - uv.y;
+        if (mat) uv = apply_material_uv_transform(*mat, uv);
+    }
+
+    // --- Transmissive surface: coloured pass-through shadow ---
+    if (mat) {
+        float tr = mat->transmission;
+        if (hgd->has_transmission_tex) {
+            tr = tex2D<float4>(hgd->transmission_tex, uv.x, uv.y).x;
+        }
+        if (tr > 0.001f) {
+            float3 tint = mat->albedo;
+            if (hgd->has_albedo_tex) {
+                float4 tex = tex2D<float4>(hgd->albedo_tex, uv.x, uv.y);
+                tint = make_float3(tint.x * tex.x, tint.y * tex.y, tint.z * tex.z);
+            }
+            // Glass still casts a PARTIAL shadow: refraction bends light away from
+            // the straight shadow-ray path (the missing energy focuses elsewhere as
+            // a caustic this pass cannot render). Fresnel loss + incidence-angle
+            // deviation falloff: flat panes facing the light stay bright, curved
+            // rims darken → bright-core / dark-rim glass shadow. Applied per
+            // interface crossed (entry + exit). Mirrors Vulkan shadow_anyhit.rahit.
+            float cosT = 1.0f;
+            if (hgd->vertices && hgd->indices) {
+                const uint3 triN = hgd->indices[optixGetPrimitiveIndex()];
+                float3 e1 = hgd->vertices[triN.y] - hgd->vertices[triN.x];
+                float3 e2 = hgd->vertices[triN.z] - hgd->vertices[triN.x];
+                float3 wN = optixTransformNormalFromObjectToWorldSpace(cross(e1, e2));
+                float wLen = length(wN);
+                if (wLen > 1e-12f) {
+                    float3 dir = normalize(optixGetWorldRayDirection());
+                    cosT = fabsf(dot(wN, dir) / wLen);
+                }
+            }
+            // Per-channel IOR: with dispersion > 0 the Fresnel/bend terms differ per
+            // wavelength — blue bends (and darkens) more at the rim than red, giving
+            // the shadow a rainbow fringe. dispersion = 0 → all channels identical.
+            float iorv   = fmaxf(mat->ior, 1.0001f);
+            float spread = (mat->dispersion > 1e-3f) ? (iorv - 1.0f) * mat->dispersion * 0.06f : 0.0f;
+            float scale_c[3];
+            const float ior_c[3] = { iorv - spread, iorv, iorv + spread };
+            for (int c = 0; c < 3; ++c) {
+                float r0 = (1.0f - ior_c[c]) / (1.0f + ior_c[c]);
+                r0 *= r0;
+                float fres    = r0 + (1.0f - r0) * powf(1.0f - cosT, 5.0f);
+                float bendExp = fminf(fmaxf(2.0f * (ior_c[c] - 1.0f), 0.25f), 2.0f);
+                float bend    = powf(fmaxf(cosT, 1e-3f), bendExp);
+                scale_c[c]    = tr * (1.0f - fres) * bend;
+            }
+
+            float r = sqrtf(fminf(fmaxf(tint.x, 0.0f), 1.0f)) * scale_c[0];
+            float g = sqrtf(fminf(fmaxf(tint.y, 0.0f), 1.0f)) * scale_c[1];
+            float b = sqrtf(fminf(fmaxf(tint.z, 0.0f), 1.0f)) * scale_c[2];
+            optixSetPayload_1(__float_as_uint(__uint_as_float(optixGetPayload_1()) * r));
+            optixSetPayload_2(__float_as_uint(__uint_as_float(optixGetPayload_2()) * g));
+            optixSetPayload_3(__float_as_uint(__uint_as_float(optixGetPayload_3()) * b));
+            optixIgnoreIntersection();
+            return;
+        }
+    }
+
+    // --- Opacity cutout: stochastic binary shadow (mirrors __anyhit__ah) ---
+    float alpha = mat ? mat->opacity : 1.0f;
+    if (hgd->has_opacity_tex) {
+        float4 opacity_val = tex2D<float4>(hgd->opacity_tex, uv.x, uv.y);
+        float mask = (hgd->opacity_has_alpha) ? opacity_val.w : opacity_val.x;
+        alpha *= mask;
+    }
+    if (alpha < 0.1f) alpha = 0.0f;
+    if (alpha < 1.0f) {
+        float3 ray_origin = optixGetWorldRayOrigin();
+        float3 ray_dir = optixGetWorldRayDirection();
+        uint3 launch_idx = optixGetLaunchIndex();
+        float seed = ray_origin.x * 73.0f + ray_origin.y * 19.0f + ray_origin.z * 43.0f +
+                     ray_dir.x * 37.0f + ray_dir.y * 11.0f + ray_dir.z * 5.0f +
+                     (float)launch_idx.x * 0.1f + (float)launch_idx.y * 0.1f +
+                     (float)optixLaunchParams.frame_number * 13.0f;
+        float rnd = fmodf(fabsf(sinf(seed) * 43758.5453f), 1.0f);
+        if (rnd > alpha) {
+            optixIgnoreIntersection();
+        }
+    }
 }
 
 // Sphere Closest Hit — foam / fluid-splat point spheres (one sphere GAS holds

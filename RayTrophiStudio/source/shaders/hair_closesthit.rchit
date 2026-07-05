@@ -60,10 +60,12 @@ struct RayPayload {
     float primaryMetallic;
     uint  bounceType;
     uint  primaryMaterialId;   // Stylize AOV: real material index of the primary hit
+    float dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
-layout(location = 1) rayPayloadEXT   bool       shadowOccluded;
+// Shadow payload: rgb = transmissive tint, w = reached-light flag (0 = occluded).
+layout(location = 1) rayPayloadEXT   vec4       shadowPayload;
 
 // ─── Hit Attribute (hair_intersection.rint) ──────────────────────────────────
 hitAttributeEXT vec4 hairAttrib;
@@ -653,8 +655,8 @@ void main()
         if (dot(lightDir, lightDir) < 0.5) continue;
 
         // Shadow ray
-        vec3 shadowOrig = offset_ray(hitPoint, normal); 
-        shadowOccluded = true;
+        vec3 shadowOrig = offset_ray(hitPoint, normal);
+        shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
         traceRayEXT(
             topLevelAS,
             gl_RayFlagsTerminateOnFirstHitEXT |
@@ -665,7 +667,7 @@ void main()
             shadowOrig, HAIR_SHADOW_TMIN, lightDir, lightDist - 0.002,
             1
         );
-        if (shadowOccluded) continue;
+        if (shadowPayload.w < 0.5) continue;
 
         // Marschner BSDF evaluation
         vec3 bsdf = hair_bsdf_eval(V, lightDir, tangent, mat, sigma_a, h, vStrand);

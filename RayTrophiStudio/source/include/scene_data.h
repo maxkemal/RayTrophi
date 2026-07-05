@@ -35,6 +35,7 @@ inline std::atomic<int> g_active_sdf_bakes{0};
 #include "SurfaceMeshCache.h"
 #include "ColliderMeshBVH.h"
 #include "MeshModifiers.h"
+#include "GeometryNodesV2.h"
 #include "Paint/PaintTextureSet.h"
 #include "Paint/PaintLayerStack.h"
 
@@ -116,6 +117,10 @@ struct SceneData {
     // was added/edited (which doesn't change the frame number).
     mutable std::unordered_map<std::string, Matrix4x4> last_sim_pose_applied_;
     std::unordered_map<std::string, MeshModifiers::ModifierStack> mesh_modifiers;          // nodeName -> Modifier Stack
+    // Faz 8a Geo-DAG: parallel, optional per-object node graph (Base Mesh -> Subdivide (CC) -> ...).
+    // Fully additive alongside mesh_modifiers above — the linear ModifierStack panel is untouched
+    // and keeps working; this is a separate, opt-in way to build the same kind of geometry chain.
+    std::unordered_map<std::string, std::shared_ptr<GeometryNodesV2::GeometryNodeGraphV2>> geometry_node_graphs; // nodeName -> Geo-DAG graph
     std::unordered_map<std::string, Paint::PaintTextureSet> mesh_paint_texture_sets;       // nodeName#materialID -> texture set
     std::unordered_map<std::string, Paint::PaintLayerStack> mesh_paint_layer_stacks;      // nodeName#materialID -> layer stack
 

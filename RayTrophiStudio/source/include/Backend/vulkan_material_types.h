@@ -94,9 +94,9 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
     float resin_color_b;
     float transmission_density;  // 0 = legacy constant-thickness glass; >0 = real-distance Beer-Lambert
 
-    // Block 18: Resin coat layer params (16 bytes)
+    // Block 18: Resin coat layer params + spectral dispersion (16 bytes)
     float resin_roughness;       // resin coat gloss (reflect-lobe roughness), independent of base
-    float _resin_pad0;           // reserved: resin IOR
+    float dispersion;            // spectral dispersion strength (0 = off; repurposed _resin_pad0)
     float _resin_pad1;           // reserved: resin roughness texture handle
     float _resin_pad2;           // reserved: resin normal texture handle
 

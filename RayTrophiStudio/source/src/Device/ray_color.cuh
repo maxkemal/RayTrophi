@@ -2020,8 +2020,9 @@ __device__ float3 calculate_light_contribution(
     float3 origin = payload.position + shadow_normal * SCENE_EPSILON;
     Ray shadow_ray(origin, wi);
 
-    unsigned int shadow_hit = trace_shadow_ray(shadow_ray, SCENE_EPSILON, distance);
-    float shadow_visibility = shadow_hit ? 0.0f : 1.0f;
+    // Coloured shadow: transmissive surfaces tint the light instead of blocking it.
+    float3 shadow_tint = trace_shadow_ray_colored(shadow_ray, SCENE_EPSILON, distance);
+    float shadow_visibility = fmaxf(shadow_tint.x, fmaxf(shadow_tint.y, shadow_tint.z));
     if (shadow_visibility <= 1e-4f) return make_float3(0.0f, 0.0f, 0.0f);
     
     // Check VDB Occlusion (Volumetric Shadow)
@@ -2032,7 +2033,7 @@ __device__ float3 calculate_light_contribution(
     float pdf_brdf_val = pdf_brdf(material, wo, wi, payload.normal);
     float pdf_brdf_val_mis = clamp(pdf_brdf_val, 0.001f, 5000.0f);
 
-    float3 Li = light.color * light.intensity * attenuation * vdb_transmittance * shadow_visibility;
+    float3 Li = light.color * light.intensity * attenuation * vdb_transmittance * shadow_tint;
 
     // Resin: the direct light also travels through the coat to reach the base.
     // Absorb it over its ENTRY path (light-angle slant) so thick/tinted resin
@@ -2148,7 +2149,9 @@ __device__ float3 calculate_direct_lighting(
     float3 origin = payload.position + shadow_normal * shadow_bias;
     Ray shadow_ray(origin, wi);
 
-    if (trace_shadow_ray(shadow_ray, shadow_bias, distance) != 0u) return result;
+    // Coloured shadow: transmissive surfaces tint the light instead of blocking it.
+    float3 shadow_tint = trace_shadow_ray_colored(shadow_ray, shadow_bias, distance);
+    if (fmaxf(shadow_tint.x, fmaxf(shadow_tint.y, shadow_tint.z)) <= 1e-4f) return result;
 
     // ==== BRDF & PDF ====
     float3 f = evaluate_brdf(mat, payload, wo, wi);
@@ -2178,7 +2181,7 @@ __device__ float3 calculate_direct_lighting(
 
     float mis_weight = power_heuristic(pdf_light, pdf_brdf_val_mis);
 
-    float3 Li = light.color * light.intensity * attenuation;
+    float3 Li = light.color * light.intensity * attenuation * shadow_tint;
     result += (f * Li * NdotL) * mis_weight * light_count;
     return result;
 }

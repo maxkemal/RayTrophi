@@ -173,6 +173,28 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
     }
 
     bool do_reflect = cannot_refract || (Vec3::random_float() < reflect_prob);
+
+    // ── Spectral dispersion: ONLY the refracted lobe disperses (GPU backend parity —
+    // the mirror lobe is wavelength-independent). Channel is picked ONCE per path and
+    // travels on the Ray so the exit interface refracts with the same channel IOR.
+    // Selection collapses attenuation to one channel ×3; blue bends more than red.
+    int  disp_out_ch = r_in.dispersion_channel;   // 0 = unset, 1/2/3 = R/G/B
+    Vec3 disp_sel(1.0f, 1.0f, 1.0f);
+    if (!do_reflect && dispersion > 1e-3f) {
+        int ch = disp_out_ch - 1;
+        if (ch < 0) {
+            ch = std::min(static_cast<int>(Vec3::random_float() * 3.0f), 2);
+            disp_sel = Vec3(ch == 0 ? 3.0f : 0.0f,
+                            ch == 1 ? 3.0f : 0.0f,
+                            ch == 2 ? 3.0f : 0.0f);
+            disp_out_ch = ch + 1;
+        }
+        float iorCh  = ir[1];
+        float spread = (iorCh - 1.0f) * dispersion * 0.06f;  // half of total F–C spread
+        iorCh += (ch == 0) ? -spread : ((ch == 2) ? spread : 0.0f);
+        refract_ratio = rec.front_face ? (1.0f / iorCh) : iorCh;
+    }
+
     Vec3 direction;
     Vec3 offset_dir;
     if (do_reflect) {
@@ -204,6 +226,8 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
     }
 
     scattered = Ray(offset_ray_like_optix(rec.point, offset_dir), direction.normalize());
+    scattered.dispersion_channel = disp_out_ch;
+    attenuation = attenuation * disp_sel;
 
     return true;
 }

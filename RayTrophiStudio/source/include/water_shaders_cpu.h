@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -12,6 +12,8 @@
 #include "WaterShaderCommon.h"
 #include <cmath>
 #include <algorithm>
+#include <immintrin.h>
+#include "Vec3SIMD.h"
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WATER RESULT STRUCTURE
@@ -302,6 +304,17 @@ inline Vec3 calculateWaterAbsorptionCPU(
 // GERSTNER WAVE EVALUATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
+inline float hsum_256(__m256 v) {
+    __m128 vlow = _mm256_castps256_ps128(v);
+    __m128 vhigh = _mm256_extractf128_ps(v, 1);
+    __m128 vsum = _mm_add_ps(vlow, vhigh);
+    __m128 shuf = _mm_shuffle_ps(vsum, vsum, _MM_SHUFFLE(2, 3, 0, 1));
+    __m128 sums = _mm_add_ps(vsum, shuf);
+    shuf = _mm_shuffle_ps(sums, sums, _MM_SHUFFLE(1, 0, 3, 2));
+    sums = _mm_add_ps(sums, shuf);
+    return _mm_cvtss_f32(sums);
+}
+
 inline WaterResultCPU evaluateGerstnerWaveCPU(
     const Vec3& position,
     const Vec3& baseNormal,
@@ -310,37 +323,48 @@ inline WaterResultCPU evaluateGerstnerWaveCPU(
     float strength_mult,
     float freq_mult
 ) {
-    const int NUM_WAVES = 8;
-    float waveDirs[8][2] = {
-        {0.9806f, 0.1961f}, {0.7071f, 0.7071f}, {-0.1961f, 0.9806f}, {-0.7682f, 0.6402f},
-        {-0.9363f, -0.3511f}, {0.0f, -1.0f}, {0.5300f, -0.8480f}, {0.9138f, -0.4061f}
-    };
+    alignas(32) static const float kWaveDirsX[8] = { 0.9806f, 0.7071f, -0.1961f, -0.7682f, -0.9363f, 0.0f, 0.5300f, 0.9138f };
+    alignas(32) static const float kWaveDirsY[8] = { 0.1961f, 0.7071f, 0.9806f, 0.6402f, -0.3511f, -1.0f, -0.8480f, -0.4061f };
+    alignas(32) static const float kOctaveFreqs[8]  = { 1.0f, 1.8f, 3.24f, 5.832f, 10.4976f, 18.89568f, 34.012224f, 61.2220032f };
+    alignas(32) static const float kOctaveAmps[8]   = { 1.0f, 0.55f, 0.3025f, 0.166375f, 0.09150625f, 0.05032844f, 0.02768064f, 0.01522435f };
+    alignas(32) static const float kOctaveSpeeds[8] = { 1.0f, 1.1f, 1.21f, 1.331f, 1.4641f, 1.61051f, 1.771561f, 1.948717f };
 
-    float dHx = 0.0f, dHz = 0.0f, accumulatedHeight = 0.0f, jacobian = 1.0f;
-    float frequency = 0.2f * freq_mult;
-    float amplitude = 0.5f * strength_mult; // Adjusted base amplitude
-    float speed = 0.5f * speed_mult;
+    __m256 v_dx = _mm256_load_ps(kWaveDirsX);
+    __m256 v_dy = _mm256_load_ps(kWaveDirsY);
+    __m256 v_freq = _mm256_mul_ps(_mm256_set1_ps(0.2f * freq_mult), _mm256_load_ps(kOctaveFreqs));
+    __m256 v_amp = _mm256_mul_ps(_mm256_set1_ps(0.5f * strength_mult), _mm256_load_ps(kOctaveAmps));
+    __m256 v_speed = _mm256_mul_ps(_mm256_set1_ps(0.5f * speed_mult), _mm256_load_ps(kOctaveSpeeds));
 
-    for (int i = 0; i < NUM_WAVES; ++i) {
-        float dx = waveDirs[i][0], dy = waveDirs[i][1];
-        float x = position.x * dx + position.z * dy;
-        
-        float steepness = 0.5f; // Constant steepness for Gerstner waves
-        float phase = x * frequency + time * speed;
-        float c_ph = cosf(phase);
-        float s_ph = sinf(phase);
-        
-        float wa = frequency * amplitude;
-        dHx += dx * wa * c_ph;
-        dHz += dy * wa * c_ph;
-        jacobian -= steepness * wa * s_ph;
-        accumulatedHeight += amplitude * s_ph;
+    // x = position.x * dx + position.z * dy
+    __m256 v_x = _mm256_add_ps(_mm256_mul_ps(_mm256_set1_ps(position.x), v_dx),
+                               _mm256_mul_ps(_mm256_set1_ps(position.z), v_dy));
 
-        // Next Octave
-        frequency *= 1.8f; 
-        amplitude *= 0.55f; 
-        speed *= 1.1f;
-    }
+    // phase = x * frequency + time * speed
+    __m256 v_phase = _mm256_add_ps(_mm256_mul_ps(v_x, v_freq),
+                                   _mm256_mul_ps(_mm256_set1_ps(time), v_speed));
+
+    __m256 v_s_ph, v_c_ph;
+    Vec3SIMD::sincos_256(v_phase, &v_s_ph, &v_c_ph);
+
+    // wa = frequency * amplitude
+    __m256 v_wa = _mm256_mul_ps(v_freq, v_amp);
+
+    // dHx += dx * wa * c_ph
+    __m256 v_dHx = _mm256_mul_ps(_mm256_mul_ps(v_dx, v_wa), v_c_ph);
+
+    // dHz += dy * wa * c_ph
+    __m256 v_dHz = _mm256_mul_ps(_mm256_mul_ps(v_dy, v_wa), v_c_ph);
+
+    // jacobian -= steepness * wa * s_ph   (steepness = 0.5f)
+    __m256 v_jac = _mm256_mul_ps(_mm256_mul_ps(_mm256_set1_ps(0.5f), v_wa), v_s_ph);
+
+    // accumulatedHeight += amplitude * s_ph
+    __m256 v_height = _mm256_mul_ps(v_amp, v_s_ph);
+
+    float dHx = hsum_256(v_dHx);
+    float dHz = hsum_256(v_dHz);
+    float jacobian = 1.0f - hsum_256(v_jac);
+    float accumulatedHeight = hsum_256(v_height);
 
     // Constructed Normal
     Vec3 waveNormal = Vec3(-dHx, 1.0f, -dHz).normalize();

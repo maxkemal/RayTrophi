@@ -1,4 +1,4 @@
-﻿#include "Backend/SceneTextureManager.h"
+#include "Backend/SceneTextureManager.h"
 
 #include "globals.h"
 
@@ -676,7 +676,7 @@ uint64_t SceneTextureManager::totalResidentTextureBytes() const {
         for (const auto& [owner, backing] : record.vulkanBackingsByOwner) {
             (void)owner;
             if (backing.isValid()) {
-                total += record.estimatedBytes;
+                total += (backing.allocatedBytes > 0) ? backing.allocatedBytes : record.estimatedBytes;
             }
         }
         if (record.optixTextureId != 0) {
@@ -694,7 +694,7 @@ uint64_t SceneTextureManager::estimatedTextureBytesForOwner(const std::string& o
         (void)key;
         auto it = record.vulkanBackingsByOwner.find(ownerTag);
         if (it != record.vulkanBackingsByOwner.end() && it->second.isValid()) {
-            total += record.estimatedBytes;
+            total += (it->second.allocatedBytes > 0) ? it->second.allocatedBytes : record.estimatedBytes;
         }
     }
     return total;
@@ -737,8 +737,9 @@ size_t SceneTextureManager::trimVulkanBackingLRU(const std::string& ownerTag, ui
                 !backingIt->second.destroyFn) {
                 continue;
             }
+            uint64_t bytes = (backingIt->second.allocatedBytes > 0) ? backingIt->second.allocatedBytes : record.estimatedBytes;
             candidates.push_back({key, record.lastAccessCounter,
-                                  record.estimatedBytes, {}});
+                                  bytes, {}});
         }
 
         // Sort ascending by lastAccessCounter — oldest (LRU) first.
@@ -752,7 +753,7 @@ size_t SceneTextureManager::trimVulkanBackingLRU(const std::string& ownerTag, ui
         for (const auto& [key, record] : m_recordsByKey) {
             auto it = record.vulkanBackingsByOwner.find(ownerTag);
             if (it != record.vulkanBackingsByOwner.end() && it->second.isValid()) {
-                currentBytes += record.estimatedBytes;
+                currentBytes += (it->second.allocatedBytes > 0) ? it->second.allocatedBytes : record.estimatedBytes;
             }
         }
 
@@ -808,9 +809,10 @@ void SceneTextureManager::logBudgetSummary(const std::string& context) const {
         bool anyBacking = false;
         for (const auto& [owner, backing] : record.vulkanBackingsByOwner) {
             if (backing.isValid()) {
-                bytesByOwner[owner] += record.estimatedBytes;
+                uint64_t b = (backing.allocatedBytes > 0) ? backing.allocatedBytes : record.estimatedBytes;
+                bytesByOwner[owner] += b;
                 countByOwner[owner]++;
-                residentBytes += record.estimatedBytes;
+                residentBytes += b;
                 anyBacking = true;
             }
         }

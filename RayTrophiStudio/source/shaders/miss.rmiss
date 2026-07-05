@@ -52,6 +52,7 @@ struct RayPayload {
     float primaryMetallic;
     uint  bounceType;
     uint  primaryMaterialId;   // Stylize AOV: real material index of the primary hit
+    float dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;

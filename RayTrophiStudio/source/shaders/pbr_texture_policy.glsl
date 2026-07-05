@@ -14,6 +14,14 @@
 const uint VK_MAT_FLAG_ROUGHNESS_IN_R = (1u << 9);
 const uint VK_MAT_FLAG_METALLIC_IN_R  = (1u << 10);
 const uint VK_MAT_FLAG_NORMAL_BC5     = (1u << 11);
+// Bits 12-13 (metallic) / 14-15 (roughness): explicit USER channel override —
+// 0 = Auto (policy above), 1 = R, 2 = G, 3 = B. Set from the material UI for
+// non-ORM packings (RMA/MRA, DirectX metal-in-R maps), which under Auto read
+// the wrong channel and shade the whole surface as metal.
+
+float pbrSelectChannel(vec4 texel, uint sel) {
+    return (sel == 1u) ? texel.r : ((sel == 2u) ? texel.g : texel.b);
+}
 
 // Decode an encoded normal map texel ([0,1] range) to a tangent-space vector.
 // For BC5-compressed normals only RG carry data and B is always 0; Z must be
@@ -28,11 +36,15 @@ vec3 decodeNormalMapSample(vec3 nmSample, uint matFlags) {
 }
 
 float samplePackedRoughness(vec4 texel, float fallbackValue, uint matFlags) {
-    float v = ((matFlags & VK_MAT_FLAG_ROUGHNESS_IN_R) != 0u) ? texel.r : texel.g;
+    uint sel = (matFlags >> 14) & 3u;
+    float v = (sel != 0u) ? pbrSelectChannel(texel, sel)
+            : (((matFlags & VK_MAT_FLAG_ROUGHNESS_IN_R) != 0u) ? texel.r : texel.g);
     return clamp(v, fallbackValue, 1.0);
 }
 
 float samplePackedMetallic(vec4 texel, uint matFlags) {
-    float v = ((matFlags & VK_MAT_FLAG_METALLIC_IN_R) != 0u) ? texel.r : texel.b;
+    uint sel = (matFlags >> 12) & 3u;
+    float v = (sel != 0u) ? pbrSelectChannel(texel, sel)
+            : (((matFlags & VK_MAT_FLAG_METALLIC_IN_R) != 0u) ? texel.r : texel.b);
     return clamp(v, 0.0, 1.0);
 }

@@ -89,12 +89,15 @@ struct RayPayload {
     float primaryMetallic;
     uint  bounceType;
     uint  primaryMaterialId;   // Stylize AOV: real material index of the primary hit
+    float dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
 };
 
 const uint BOUNCE_TRANSPARENT = 3u;
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
-layout(location = 1) rayPayloadEXT bool shadowOccluded;
+// Shadow payload: rgb = transmissive tint, w = reached-light flag (0 = hit/occluded).
+// This shader only uses it as a binary probe (w), with OpaqueEXT so any-hits never run.
+layout(location = 1) rayPayloadEXT vec4 shadowPayload;
 
 // ============================================================
 // Descriptor Bindings
@@ -1100,17 +1103,17 @@ void main() {
                                    | gl_RayFlagsSkipClosestHitShaderEXT
                                    | gl_RayFlagsOpaqueEXT;
             const uint SOLID_MASK  = 0xFD;  // all solids, ignore other volume AABBs
-            shadowOccluded = true;
+            shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
             traceRayEXT(topLevelAS, SOLID_FLAGS, SOLID_MASK, 0, 1, 1,
                         rayOrigin, max(1e-4, tNear - 0.002), rayDir, probeFar + 0.002, 1);
-            if (shadowOccluded) {
+            if (shadowPayload.w < 0.5) {
                 float lo = max(tNear, 1e-4), hi = probeFar;
                 for (int it = 0; it < 6; ++it) {
                     float mid = (lo + hi) * 0.5;
-                    shadowOccluded = true;
+                    shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
                     traceRayEXT(topLevelAS, SOLID_FLAGS, SOLID_MASK, 0, 1, 1,
                                 rayOrigin, max(1e-4, lo - 0.002), rayDir, mid + 0.002, 1);
-                    if (shadowOccluded) hi = mid; else lo = mid;
+                    if (shadowPayload.w < 0.5) hi = mid; else lo = mid;
                 }
                 float solidT = lo;
                 // Absorption for the water the ray crossed before the solid.
@@ -1285,21 +1288,21 @@ void main() {
             const uint PROBE_MASK  = 0xFD; // ~0x02: check all solid geometry, ignore other volume AABBs
 
             // Initial check: any solid in [tNear, tFar]?
-            shadowOccluded = true;
+            shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
             traceRayEXT(topLevelAS, PROBE_FLAGS, PROBE_MASK, 0, 1, 1,
                         rayOrigin, max(1e-4, tNear - 0.002), rayDir, tFar + 0.002, 1);
-            if (shadowOccluded) {
+            if (shadowPayload.w < 0.5) {
                 // Binary search to find approximate t of first solid hit
                 float lo = tNear, hi = tFar;
                 int probeIters = cameraInsideVolume ? 2 : 5;
                 for (int it = 0; it < probeIters; it++) {
                     float mid = (lo + hi) * 0.5;
-                    shadowOccluded = true;
+                    shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
                     // Provide a small overlap in the search window to prevent near-misses
                     traceRayEXT(topLevelAS, PROBE_FLAGS, PROBE_MASK, 0, 1, 1,
                                 rayOrigin, max(1e-4, lo - 0.002), rayDir, mid + 0.002, 1);
-                    if (shadowOccluded) hi = mid;  // solid is in [lo, mid]
-                    else                lo = mid;  // solid is in (mid, hi]
+                    if (shadowPayload.w < 0.5) hi = mid;  // solid is in [lo, mid]
+                    else                       lo = mid;  // solid is in (mid, hi]
                 }
                 solidT = lo;
                 // Clamp march to just before the solid

@@ -19,6 +19,9 @@
 struct Ray {
     float3 origin;
     float3 direction;
+    // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B. Carried on the ray
+    // so the exit interface of a dispersive glass refracts with the same channel IOR.
+    int dispersion_channel = 0;
 
     __device__ __host__ Ray() {}
     __device__ __host__ Ray(const float3& o, const float3& d) : origin(o), direction(d) {}
@@ -35,6 +38,9 @@ class Ray {
 public:
     Vec3 origin;
     Vec3 direction;
+    // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B. Carried on the ray
+    // so the exit interface of a dispersive glass refracts with the same channel IOR.
+    int dispersion_channel = 0;
 
     Ray() {}
     Ray(const Vec3& origin, const Vec3& direction) : origin(origin), direction(direction) {}

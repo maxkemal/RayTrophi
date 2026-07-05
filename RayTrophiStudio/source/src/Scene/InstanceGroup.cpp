@@ -3,6 +3,8 @@
 #include "HittableInstance.h" // Added for wind update
 #include <random>
 #include <algorithm>
+#include <map>
+#include <cmath>
 #include "globals.h" // For SCENE_LOG_INFO
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -168,6 +170,8 @@ MeshSurfaceSampler::Sample MeshSurfaceSampler::sample(std::mt19937& rng) const {
     Vec3 v2 = tri->getV2();
 
     s.position = v0 * u + v1 * v + v2 * w;
+    s.triangle = tri;
+    s.bary_u = u; s.bary_v = v; s.bary_w = w;
 
     // Face normal
     Vec3 fn = (v1 - v0).cross(v2 - v0);
@@ -178,6 +182,88 @@ MeshSurfaceSampler::Sample MeshSurfaceSampler::sample(std::mt19937& rng) const {
     if (s.normal.y < 0.f) s.normal = -s.normal;
 
     return s;
+}
+
+namespace {
+    // Faz 8b Field bridge: barycentric-sample a named per-vertex float attribute on a
+    // triangle's parent flat mesh. Empty name / non-flat facade (no parentMesh) / attribute
+    // not found all resolve to 1.0 (unmasked) - same "missing = no-op" contract as the brush's
+    // paintInstances sampler and ScatterInstancesNode.
+    float sampleTriangleFieldAttribute(const std::shared_ptr<Triangle>& tri, float bu, float bv, float bw,
+                                        const std::string& attrName) {
+        if (attrName.empty() || !tri || !tri->parentMesh || !tri->parentMesh->geometry) return 1.0f;
+        const auto& mgeom = *tri->parentMesh->geometry;
+        const float* attr = mgeom.get_attribute_data<float>(attrName);
+        const int faceIdx = tri->getFaceIndex();
+        if (!attr || faceIdx < 0 || static_cast<size_t>(faceIdx) * 3 + 2 >= mgeom.indices.size()) return 1.0f;
+        const uint32_t i0 = mgeom.indices[static_cast<size_t>(faceIdx) * 3 + 0];
+        const uint32_t i1 = mgeom.indices[static_cast<size_t>(faceIdx) * 3 + 1];
+        const uint32_t i2 = mgeom.indices[static_cast<size_t>(faceIdx) * 3 + 2];
+        return bu * attr[i0] + bv * attr[i1] + bw * attr[i2];
+    }
+}
+
+int InstanceGroup::scatterFillMesh(const std::vector<std::shared_ptr<Triangle>>& surfaceTriangles) {
+    if (surfaceTriangles.empty()) return 0;
+
+    MeshSurfaceSampler mss;
+    mss.build(surfaceTriangles);
+    if (!mss.isValid()) return 0;
+
+    std::mt19937 rng(static_cast<uint32_t>(brush_settings.seed));
+    std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+
+    const int count = brush_settings.target_count;
+    int spawned = 0, attempts = 0;
+    const int max_attempts = (std::max)(count, 0) * 50;
+
+    const float min_dist_sq = brush_settings.min_distance * brush_settings.min_distance;
+    const bool check_overlap = brush_settings.min_distance > 0.01f;
+    const float cell_size = brush_settings.min_distance > 0.1f ? brush_settings.min_distance : 1.0f;
+    std::map<std::pair<int, int>, std::vector<Vec3>> grid;
+
+    while (spawned < count && attempts < max_attempts) {
+        ++attempts;
+        MeshSurfaceSampler::Sample s = mss.sample(rng);
+        if (!s.triangle) continue;
+
+        const float slope_deg = acosf(std::clamp(s.normal.y, -1.0f, 1.0f)) * 57.2958f;
+        if (slope_deg > brush_settings.slope_max) continue;
+        if (s.position.y < brush_settings.height_min || s.position.y > brush_settings.height_max) continue;
+
+        if (!brush_settings.density_mask_attribute.empty()) {
+            const float dval = sampleTriangleFieldAttribute(s.triangle, s.bary_u, s.bary_v, s.bary_w,
+                                                              brush_settings.density_mask_attribute);
+            if (dist01(rng) > dval) continue;   // rejection sampling — mask = density
+        }
+
+        if (check_overlap) {
+            const int cx = static_cast<int>(std::floor(s.position.x / cell_size));
+            const int cz = static_cast<int>(std::floor(s.position.z / cell_size));
+            bool collision = false;
+            for (int ddx = -1; ddx <= 1 && !collision; ++ddx)
+                for (int ddz = -1; ddz <= 1 && !collision; ++ddz) {
+                    auto git = grid.find({ cx + ddx, cz + ddz });
+                    if (git == grid.end()) continue;
+                    for (const auto& gp : git->second) {
+                        if ((gp - s.position).length_squared() < min_dist_sq) { collision = true; break; }
+                    }
+                }
+            if (collision) continue;
+            grid[{cx, cz}].push_back(s.position);
+        }
+
+        InstanceTransform inst = generateRandomTransform(s.position, s.normal);
+        if (!brush_settings.scale_mask_attribute.empty() && brush_settings.scale_mask_influence > 0.0f) {
+            const float sval = sampleTriangleFieldAttribute(s.triangle, s.bary_u, s.bary_v, s.bary_w,
+                                                              brush_settings.scale_mask_attribute);
+            const float f = 1.0f - brush_settings.scale_mask_influence * (1.0f - sval);
+            inst.scale = inst.scale * f;
+        }
+        addInstance(inst);
+        ++spawned;
+    }
+    return spawned;
 }
 
 InstanceTransform InstanceGroup::generateRandomTransform(const Vec3& position, const Vec3& normal) const {

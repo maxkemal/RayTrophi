@@ -95,6 +95,13 @@ A single physically-based path tracer feeds three acceleration backends. The sce
 - **Global volumetric clouds** (Henyey-Greenstein scattering, adaptive ray marching, coverage/density/altitude/wind controls, soft horizon fade) — works over HDRI, solid color, or Nishita sky
 - Soft shadows with multiple importance sampling (MIS)
 
+### Photon caustics & volumetric light shafts
+- **Progressive photon-mapped caustics** (Vulkan RT): a light-side photon pass reuses the same RT pipeline and BSDFs as the camera path, splatting refracted (LS⁺D) energy into a world-anchored hash grid that accumulates across frames — glass focus spots, ring caustics, and colored-glass patterns that plain path tracing practically never converges
+- **Spectral dispersion carries into caustics for free**: the same stochastic hero-wavelength transport used by camera rays rides along with photons, producing rainbow fringes in both the surface pattern and the shafts
+- **Volumetric light shafts without a volume object**: photons also deposit energy along their flight segments into a second, coarser world grid; a bounded camera march turns it into visible in-scatter. A glass object and a light are enough — no fog or participating-media setup. Includes scatter-strength (virtual dust density), optional 3D-turbulence density modulation, and a direct-shaft mode where the light→glass leg glows too (point lights switch to mixture-sampled emission so they stay omnidirectional)
+- Camera-independent world-space targeting (photons aim at the live union bounds of transmissive objects, re-evaluated per frame), scale-aware grid sizing, smooth cone-kernel and trilinear density reads
+- Honest limits: Vulkan RT only for now (OptiX/CPU ports planned), isotropic phase in the shafts, sharpness bounded by grid resolution
+
 ### Sampling & post
 - Progressive **accumulative path tracing** with **adaptive sampling** (focuses samples on noisy regions)
 - Depth of field, motion blur
@@ -125,6 +132,7 @@ A single physically-based path tracer feeds three acceleration backends. The sce
 | OIDN denoising | ✅ | ✅ | OptiX has the tighter CUDA-interop path |
 | Adaptive / progressive render | ✅ | ✅ | Vulkan converges faster (lower per-frame overhead) |
 | Stylize layer | ✅ | ✅ | CPU / Vulkan / OptiX produce matched output |
+| Photon caustics + volumetric light shafts | ❌ | ✅ | Vulkan-only for now; photon pass shares the camera RT pipeline |
 
 > **Legend:** ✅ full support &nbsp;|&nbsp; 🧪 supported, minor output differences possible
 
@@ -395,8 +403,10 @@ RayTrophi/
 - ✅ SimCache on-disk frame baking + full simulation serialization
 - ✅ Stylize layer with CPU / Vulkan / OptiX parity
 - ✅ Sculpt mode (mesh + terrain) and layered mesh paint
+- ✅ Progressive photon-mapped caustics + spectral dispersion + volumetric light shafts (Vulkan RT)
 
 **Planned / in progress**
+- [ ] Caustics on OptiX / CPU; anisotropic phase & real density fields (VDB) for the light shafts
 - [ ] GPU port of variational solids + ghost-fluid surface (Stage 2)
 - [ ] Fluid surface tension, implicit viscosity, narrow-band/sparse performance
 - [ ] Binned SAH / index-based BVH / SBVH spatial splits

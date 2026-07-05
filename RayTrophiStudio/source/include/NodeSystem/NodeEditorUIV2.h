@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -58,12 +58,12 @@ namespace NodeSystem {
             ImU32 nodeBodyColor = IM_COL32(34, 37, 45, 245);
             ImU32 nodeBorderColor = IM_COL32(66, 74, 92, 210);
             ImU32 nodeSelectedColor = IM_COL32(109, 180, 255, 255);
-            float nodeRounding = 10.0f;
+            float nodeRounding = 4.0f;
             float nodeBorderWidth = 1.5f;
             
             // Link
-            float linkThickness = 2.5f;
-            float linkSelectedThickness = 4.0f;
+            float linkThickness = 1.5f;
+            float linkSelectedThickness = 2.5f;
             
             // Group
             ImU32 groupBorderColor = IM_COL32(100, 100, 120, 180);
@@ -90,6 +90,33 @@ namespace NodeSystem {
         uint32_t draggingNodeId = 0;
         uint32_t draggingGroupId = 0;
         uint32_t resizingNodeId = 0;
+        
+        ImVec2 mousePosOnRightClick = ImVec2(0.0f, 0.0f);
+        uint32_t releasedLinkPinId = 0;
+
+        // Right-click context menu resolution: the background canvas's own hover+click check
+        // (handleInput(), runs FIRST in draw()) can't yet know whether a node/group drawn LATER
+        // in the same frame will also claim that same click, since node/group hit-testing hasn't
+        // happened yet at that point. Opening "LocalGraphContextPopup" immediately there meant
+        // right-clicking a node or group always opened the background/group-tools popup instead
+        // of the node's or group's own popup (background's OpenPopup call, being first in the
+        // frame, wins ImGui's same-frame-multiple-OpenPopup resolution). Fixed by deferring:
+        // background only marks a request here; node/group loops (drawn after) get first refusal
+        // and flip contextMenuClaimedByNodeOrGroup_ when THEY open their own popup; the actual
+        // OpenPopup("LocalGraphContextPopup") call happens once, right before drawPopups(), only
+        // if nothing claimed the click in between.
+        bool backgroundContextMenuRequested_ = false;
+        bool contextMenuClaimedByNodeOrGroup_ = false;
+        // Node/group right-click detection happens INSIDE a local ImGui::PushID(node.id/group.id
+        // + offset) scope (needed so multiple nodes'/groups' identically-named InvisibleButtons
+        // don't collide). ImGui::OpenPopup()/BeginPopup() resolve their id from the CURRENT id
+        // stack at the time each is called — calling OpenPopup while still inside that per-node
+        // PushID scope registers it under a DIFFERENT id than drawPopups()'s BeginPopup (called
+        // at the un-pushed root scope), so it could never actually be found/shown. These flags
+        // let the click be detected inside the PushID scope but the actual OpenPopup call happen
+        // right after the matching PopID(), at the same scope BeginPopup uses.
+        bool nodeContextMenuRequested_ = false;
+        bool groupContextMenuRequested_ = false;
         uint32_t resizingGroupId = 0;
         
         bool isCreatingLink = false;
@@ -126,6 +153,8 @@ namespace NodeSystem {
             isCreatingLink = false;
             linkStartPinId = 0;
             isBoxSelecting = false;
+            releasedLinkPinId = 0;
+            mousePosOnRightClick = ImVec2(0.0f, 0.0f);
         }
 
     private:
@@ -205,11 +234,46 @@ namespace NodeSystem {
                 drawMinimap(dl, graph);
             }
             
+            // Resolve the deferred background context menu request now that node/group
+            // hit-testing (which can claim the same click) has already run this frame.
+            if (backgroundContextMenuRequested_ && !contextMenuClaimedByNodeOrGroup_) {
+                ImGui::OpenPopup("LocalGraphContextPopup");
+            }
+            backgroundContextMenuRequested_ = false;
+            contextMenuClaimedByNodeOrGroup_ = false;
+
             // Context menu popups for group rename/color/delete
             drawPopups(graph);
-            
+
             ImGui::EndChild();
         }
+        void onNodeAdded(GraphBase& graph, NodeBase* newNode) {
+            if (releasedLinkPinId != 0 && newNode) {
+                Pin* dragPin = graph.findPin(releasedLinkPinId);
+                if (dragPin) {
+                    if (dragPin->kind == PinKind::Output) {
+                        for (auto& inPin : newNode->inputs) {
+                            if (dragPin->canConnectTo(inPin)) {
+                                graph.addLink(dragPin->id, inPin.id);
+                                if (onGraphModified) onGraphModified();
+                                break;
+                            }
+                        }
+                    }
+                    else if (dragPin->kind == PinKind::Input) {
+                        for (auto& outPin : newNode->outputs) {
+                            if (outPin.canConnectTo(*dragPin)) {
+                                graph.addLink(outPin.id, dragPin->id);
+                                if (onGraphModified) onGraphModified();
+                                break;
+                            }
+                        }
+                    }
+                }
+                releasedLinkPinId = 0; // Reset
+            }
+        }
+
 
     private:
         void drawPopups(GraphBase& graph) {
@@ -239,13 +303,18 @@ namespace NodeSystem {
                 }
                 
                 if (ImGui::MenuItem("Create Empty Group Frame")) {
-                    ImVec2 mouseRel = ImGui::GetMousePos();
-                    float graphX = (mouseRel.x - canvasPos_.x - scrollX) / zoom;
-                    float graphY = (mouseRel.y - canvasPos_.y - scrollY) / zoom;
-                    graph.createGroup("New Group", ImVec2(graphX, graphY), ImVec2(240, 160));
+                    graph.createGroup("New Group", mousePosOnRightClick, ImVec2(240, 160));
                     if (onGraphModified) onGraphModified();
                 }
-                
+
+                // Domain-specific extra items (e.g. "Add Base Mesh" / "Add Subdivide" for the
+                // Geo-DAG) appended into this SAME background popup instead of opening a second,
+                // competing one — was declared but never invoked before this.
+                if (onDrawBackgroundMenu) {
+                    ImGui::Separator();
+                    onDrawBackgroundMenu();
+                }
+
                 ImGui::EndPopup();
             }
             
@@ -274,9 +343,10 @@ namespace NodeSystem {
                     }
                     
                     if (ImGui::MenuItem("Delete Node")) {
-                        graph.removeNode(activeNode->id);
+                        const uint32_t deletedId = activeNode->id;
+                        graph.removeNode(deletedId);
                         selectedNodeId = 0;
-                        selectedNodeIds.erase(std::remove(selectedNodeIds.begin(), selectedNodeIds.end(), selectedNodeId), selectedNodeIds.end());
+                        selectedNodeIds.erase(std::remove(selectedNodeIds.begin(), selectedNodeIds.end(), deletedId), selectedNodeIds.end());
                         if (onGraphModified) onGraphModified();
                     }
                 }
@@ -460,10 +530,15 @@ namespace NodeSystem {
                 }
             }
             
-            // Context menu (right click on background)
+            // Context menu (right click on background) — deferred, see
+            // backgroundContextMenuRequested_'s comment: only actually opens (below, right
+            // before drawPopups()) if no node/group claims this same click afterward.
             if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                 selectedGroupId = 0;
-                ImGui::OpenPopup("LocalGraphContextPopup");
+                backgroundContextMenuRequested_ = true;
+                releasedLinkPinId = 0;
+                mousePosOnRightClick = ImVec2((ImGui::GetMousePos().x - canvasPos_.x - scrollX) / zoom,
+                                               (ImGui::GetMousePos().y - canvasPos_.y - scrollY) / zoom);
             }
             
             // Key presses & shortcuts
@@ -530,6 +605,11 @@ namespace NodeSystem {
                     if (targetPin != 0 && targetPin != linkStartPinId) {
                         graph.addLink(linkStartPinId, targetPin);
                         if (onGraphModified) onGraphModified();
+                    } else if (targetPin == 0) {
+                        releasedLinkPinId = linkStartPinId;
+                        mousePosOnRightClick = ImVec2((mouse.x - canvasPos_.x - scrollX) / zoom,
+                                                      (mouse.y - canvasPos_.y - scrollY) / zoom);
+                        backgroundContextMenuRequested_ = true;
                     }
                     
                     isCreatingLink = false;
@@ -593,6 +673,7 @@ namespace NodeSystem {
                     for (uint32_t nid : nodesToProcess) {
                         NodeBase* node = graph.getNode(nid);
                         if (node) {
+                            checkNodeDroppedOnLink(graph, *node);
                             float nodeCenterX = node->x + 80.0f;
                             float nodeCenterY = node->y + 40.0f;
                             uint32_t newGroupId = 0;
@@ -679,7 +760,7 @@ namespace NodeSystem {
             if (titleW < 10) titleW = ImGui::CalcTextSize(node.name.c_str()).x + padding * 2;
             NodeChromeLayout chrome = buildNodeChromeLayout(node, zoom, customW > 0.0f ? customW * zoom : 160.0f * zoom,
                 node.inputs.size(), node.outputs.size(), titleW);
-            chrome.cornerRadius = scaleNodeChromeMetric(zoom, config.nodeRounding, 8.0f, 16.0f);
+            chrome.cornerRadius = scaleNodeChromeMetric(zoom, config.nodeRounding, 3.0f, 12.0f);
 
             float finalWidth = chrome.width;
             float finalHeight = chrome.height;
@@ -753,14 +834,17 @@ namespace NodeSystem {
             dl->AddRectFilled(pos, ImVec2(pos.x + finalWidth, pos.y + finalHeight),
                 config.nodeBodyColor, cornerRadius);
             
-            // Header Base (Integrated Dark Charcoal)
-            dl->AddRectFilled(pos, ImVec2(pos.x + finalWidth, pos.y + headerH),
-                IM_COL32(26, 28, 33, 250), cornerRadius, ImDrawFlags_RoundCornersTop);
-            
             // Modern category color strip at the very top of the node (thin, Gaea/Houdini-style)
+            // Drawn first with a taller height to prevent ImGui from clamping the corner rounding due to height constraints
             float stripeHeight = 3.5f * zoom;
-            dl->AddRectFilled(pos, ImVec2(pos.x + finalWidth, pos.y + stripeHeight),
+            float stripeDrawHeight = std::max(stripeHeight, cornerRadius);
+            dl->AddRectFilled(pos, ImVec2(pos.x + finalWidth, pos.y + stripeDrawHeight),
                 headerCol, cornerRadius, ImDrawFlags_RoundCornersTop);
+            
+            // Header Base (Integrated Dark Charcoal)
+            // Drawn on top of the stripe, starting from stripeHeight, to overlay/clip the excess height of the stripe
+            dl->AddRectFilled(ImVec2(pos.x, pos.y + stripeHeight), ImVec2(pos.x + finalWidth, pos.y + headerH),
+                IM_COL32(26, 28, 33, 250), isCollapsed ? cornerRadius : 0.0f, isCollapsed ? ImDrawFlags_RoundCornersBottom : 0);
             
             // Subtle premium accent line just below the color stripe
             dl->AddLine(
@@ -913,10 +997,29 @@ namespace NodeSystem {
             }
             
             if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                // Right-clicking a node now also selects it and opens the built-in
+                // LocalNodeContextPopup (Delete Node / group management, see drawPopups()) —
+                // previously that popup body existed but nothing ever called OpenPopup for it,
+                // so right-click on a node did nothing but invoke onNodeContextMenu (if a caller
+                // bothered to set it up their own popup). Mirrors the group right-click pattern
+                // below (selectedGroupId set immediately before its OpenPopup call).
+                // NOTE: the actual OpenPopup() call is deferred to just after PopID() below —
+                // see nodeContextMenuRequested_'s comment for why (id-stack scope mismatch).
+                selectedNodeId = node.id;
+                if (std::find(selectedNodeIds.begin(), selectedNodeIds.end(), node.id) == selectedNodeIds.end()) {
+                    selectedNodeIds.clear();
+                    selectedNodeIds.push_back(node.id);
+                }
+                nodeContextMenuRequested_ = true;
                 if (onNodeContextMenu) onNodeContextMenu(node.id);
             }
-            
+
             ImGui::PopID();
+            if (nodeContextMenuRequested_) {
+                nodeContextMenuRequested_ = false;
+                ImGui::OpenPopup("LocalNodeContextPopup");
+                contextMenuClaimedByNodeOrGroup_ = true;  // suppress the background popup below
+            }
             } // end overlapsCanvas
         }
 
@@ -1060,14 +1163,14 @@ namespace NodeSystem {
             bool isHovered = isLinkHovered(p1, cp1, cp2, p2);
             
             float thickness = isSelected ? config.linkSelectedThickness : config.linkThickness;
-            thickness = std::max(1.5f, thickness * zoom);
+            thickness = std::max(1.0f, thickness * zoom);
             
             // 1. Draw glowing background shadow if selected or hovered
             if (isSelected) {
-                dl->AddBezierCubic(p1, cp1, cp2, p2, (col & 0x00FFFFFF) | 0x30000000, thickness + 6.0f * zoom);
-                dl->AddBezierCubic(p1, cp1, cp2, p2, (col & 0x00FFFFFF) | 0x60000000, thickness + 2.0f * zoom);
+                dl->AddBezierCubic(p1, cp1, cp2, p2, (col & 0x00FFFFFF) | 0x30000000, thickness + 3.0f * zoom);
+                dl->AddBezierCubic(p1, cp1, cp2, p2, (col & 0x00FFFFFF) | 0x60000000, thickness + 1.2f * zoom);
             } else if (isHovered) {
-                dl->AddBezierCubic(p1, cp1, cp2, p2, (col & 0x00FFFFFF) | 0x24000000, thickness + 4.0f * zoom);
+                dl->AddBezierCubic(p1, cp1, cp2, p2, (col & 0x00FFFFFF) | 0x20000000, thickness + 2.0f * zoom);
             }
             
             // 2. Draw core link line
@@ -1197,10 +1300,17 @@ namespace NodeSystem {
                     selectedNodeId = 0;
                 }
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                    // OpenPopup() deferred to just after PopID() below — see
+                    // groupContextMenuRequested_'s comment for why (id-stack scope mismatch).
                     selectedGroupId = group.id;
-                    ImGui::OpenPopup("LocalGroupContextPopup");
+                    groupContextMenuRequested_ = true;
                 }
                 ImGui::PopID();
+                if (groupContextMenuRequested_) {
+                    groupContextMenuRequested_ = false;
+                    ImGui::OpenPopup("LocalGroupContextPopup");
+                    contextMenuClaimedByNodeOrGroup_ = true;  // suppress the background popup below
+                }
             }
         }
 
@@ -1259,6 +1369,90 @@ namespace NodeSystem {
         ImVec2 nodeToScreen(float x, float y) {
             return ImVec2(canvasPos_.x + x * zoom + scrollX, 
                           canvasPos_.y + y * zoom + scrollY);
+        }
+        
+       
+        void checkNodeDroppedOnLink(GraphBase& graph, NodeBase& node) {
+            float customW = node.getCustomWidth();
+            float padding = scaleNodeChromeMetric(zoom, 10.0f, 7.0f, 14.0f);
+            float titleW = ImGui::CalcTextSize(node.metadata.displayName.c_str()).x + padding * 2;
+            if (titleW < 10) titleW = ImGui::CalcTextSize(node.name.c_str()).x + padding * 2;
+            NodeChromeLayout chrome = buildNodeChromeLayout(node, zoom, customW > 0.0f ? customW * zoom : 160.0f * zoom,
+                node.inputs.size(), node.outputs.size(), titleW);
+            
+            ImVec2 nodeScreenPos = nodeToScreen(node.x, node.y);
+            ImVec2 center = ImVec2(nodeScreenPos.x + chrome.width * 0.5f, nodeScreenPos.y + chrome.height * 0.5f);
+            
+            float threshold = 18.0f * zoom; // distance threshold
+            
+            for (auto& link : graph.links) {
+                NodeBase* startOwner = graph.getPinOwner(link.startPinId);
+                NodeBase* endOwner = graph.getPinOwner(link.endPinId);
+                if (!startOwner || !endOwner) continue;
+                if (startOwner->id == node.id || endOwner->id == node.id) continue;
+                
+                auto itStart = pinPositions_.find(link.startPinId);
+                auto itEnd = pinPositions_.find(link.endPinId);
+                if (itStart == pinPositions_.end() || itEnd == pinPositions_.end()) continue;
+                
+                ImVec2 p1 = itStart->second;
+                ImVec2 p2 = itEnd->second;
+                
+                float dist = std::abs(p1.x - p2.x);
+                float cpDist = std::max(dist * 0.5f, 50.0f * zoom);
+                ImVec2 cp1(p1.x + cpDist, p1.y);
+                ImVec2 cp2(p2.x - cpDist, p2.y);
+                
+                ImVec2 prev = p1;
+                bool onLink = false;
+                for (int i = 1; i <= 20; i++) {
+                    float t = (float)i / 20.0f;
+                    float u = 1.0f - t;
+                    ImVec2 p;
+                    p.x = u*u*u*p1.x + 3*u*u*t*cp1.x + 3*u*t*t*cp2.x + t*t*t*p2.x;
+                    p.y = u*u*u*p1.y + 3*u*u*t*cp1.y + 3*u*t*t*cp2.y + t*t*t*p2.y;
+                    
+                    float d = pointSegmentDistance(center, prev, p);
+                    if (d < threshold) {
+                        onLink = true;
+                        break;
+                    }
+                    prev = p;
+                }
+                
+                if (onLink) {
+                    Pin* outPin = graph.findPin(link.startPinId);
+                    Pin* inPin = graph.findPin(link.endPinId);
+                    if (!outPin || !inPin) continue;
+                    
+                    // Find compatible input on node
+                    Pin* compatibleIn = nullptr;
+                    for (auto& nIn : node.inputs) {
+                        if (outPin->canConnectTo(nIn)) {
+                            compatibleIn = &nIn;
+                            break;
+                        }
+                    }
+                    
+                    // Find compatible output on node
+                    Pin* compatibleOut = nullptr;
+                    for (auto& nOut : node.outputs) {
+                        if (nOut.canConnectTo(*inPin)) {
+                            compatibleOut = &nOut;
+                            break;
+                        }
+                    }
+                    
+                    if (compatibleIn && compatibleOut) {
+                        graph.removeLink(link.id);
+                        graph.addLink(outPin->id, compatibleIn->id);
+                        graph.addLink(compatibleOut->id, inPin->id);
+                        
+                        if (onGraphModified) onGraphModified();
+                        break; // Inserted successfully
+                    }
+                }
+            }
         }
         
         uint32_t findClosestPin(const ImVec2& mouse, float maxDist) {

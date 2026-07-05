@@ -20,8 +20,9 @@ layout(push_constant) uniform CameraPC {
     float exposure_factor;
 } cam;
 
-// Shadow payload (matches hair_closesthit.rchit location 1)
-layout(location = 1) rayPayloadInEXT bool shadowOccluded;
+// Shadow payload (matches hair_closesthit.rchit location 1).
+// rgb = transmissive tint (unused for hair), w = reached-light flag (0 = occluded).
+layout(location = 1) rayPayloadInEXT vec4 shadowPayload;
 
 // Attributes from procedural intersection (hair_intersection.rint)
 // x,y,z = tangent, w = v parameter along strand (0 to 1)
@@ -36,8 +37,7 @@ void main() {
     
     // Fast path: fully opaque root segments
     if (opacity >= 0.999) {
-        shadowOccluded = true;
-        terminateRayEXT;
+        terminateRayEXT;   // accepted → w stays 0 → occluded
         return;
     }
 
@@ -53,9 +53,7 @@ void main() {
     float rnd = float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
 
     if (rnd < opacity) {
-        // Occluded
-        shadowOccluded = true;
-        terminateRayEXT;
+        terminateRayEXT;   // accepted → w stays 0 → occluded
     } else {
         // Transparent - let the ray pass through
         ignoreIntersectionEXT;

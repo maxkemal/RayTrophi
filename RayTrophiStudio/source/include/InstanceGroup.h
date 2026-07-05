@@ -98,6 +98,10 @@ struct MeshSurfaceSampler {
     struct Sample {
         Vec3 position;
         Vec3 normal;    // Face normal, flipped to face upward hemisphere
+        std::shared_ptr<Triangle> triangle;  // Winning triangle (Faz 8b Field bridge: lets
+                                              // callers barycentric-sample a named mask attribute
+                                              // at this exact sample point via bary_u/v/w below)
+        float bary_u = 0.0f, bary_v = 0.0f, bary_w = 0.0f;
     };
 
     // Build area-weighted CDF from triangle list. Call once before sampling.
@@ -214,6 +218,18 @@ struct InstanceGroup {
         float y_offset_max = 0.0f;
         bool align_to_normal = true;            // Align Y-axis to surface normal
         float normal_influence = 1.0f;          // 0=world up, 1=full surface normal
+
+        // Faz 8b Field bridge: gate/scale MESH-target placement by per-vertex float
+        // attributes on the target TriangleMesh (same "mask" Fields the Geo-DAG Mask
+        // nodes / Noise Displace / Scatter Instances node write — see GeometryNodesV2.h).
+        // Split into independent DENSITY and SCALE roles (Blender vertex-group-per-slot
+        // style) instead of one attribute driving both — e.g. density from a paint mask,
+        // size falloff from a separate "edge distance" mask. Each is empty = off (no
+        // behavior change from before these fields existed). Sampled barycentrically at
+        // the brush hit point in paintInstances.
+        std::string density_mask_attribute;     // empty = off; gates whether an instance is placed
+        std::string scale_mask_attribute;        // empty = off; independent of density_mask_attribute
+        float scale_mask_influence = 1.0f;       // 0 = scale mask ignored; 1 = scale fully follows it
     };
     BrushSettings brush_settings;
 
@@ -274,7 +290,15 @@ struct InstanceGroup {
     void addInstance(const InstanceTransform& transform);
     void removeInstancesInRadius(const Vec3& center, float radius);
     void clearInstances();
-    
+
+    // Procedural CDF-based fill scatter over an explicit MESH surface (Target Count instances,
+    // area-weighted uniform sampling) — the non-brush counterpart to paintInstances, sharing the
+    // SAME Placement Rules (slope/height/min-distance) AND the Faz 8b Field bridge
+    // (density_mask_attribute gates placement, scale_mask_attribute scales instances), so a
+    // Geo-DAG/sculpt-exported mask behaves identically whether painted by hand or filled by this
+    // button. Does NOT clear existing instances first (caller's choice). Returns spawned count.
+    int scatterFillMesh(const std::vector<std::shared_ptr<Triangle>>& surfaceTriangles);
+
     // Generate random transform based on brush settings
     InstanceTransform generateRandomTransform(const Vec3& position, const Vec3& normal) const;
 };

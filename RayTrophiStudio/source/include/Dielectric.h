@@ -45,6 +45,9 @@ public:
     }
     Vec3 color; // Base color of the glass
     float caustic_intensity; // Intensity of the caustic effect
+    // Spectral dispersion strength (0 = off). Only the refracted lobe disperses;
+    // set by PrincipledBSDF before scatter (GPU backend parity).
+    float dispersion = 0.0f;
   
     float tint_factor; // How much the glass is tinted
     float scratch_density = 1.0f; // Density of scratches on the glass

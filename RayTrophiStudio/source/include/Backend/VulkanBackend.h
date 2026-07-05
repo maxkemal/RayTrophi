@@ -1,4 +1,4 @@
-﻿/*
+/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          VulkanBackend.h
@@ -282,6 +282,13 @@ struct TLASInstance {
     uint32_t sbtRecordOffset = 0;       // SBT hit group offset (0=triangle, 1=volume procedural)
     int scatterGroupId = -1;            // Direct InstanceManager lookup for expanded scatter groups
     uint32_t scatterInstanceIndex = UINT32_MAX;
+    // Per-instance opacity override: 0 = respect the BLAS geometry flag,
+    // 1 = FORCE_OPAQUE, 2 = FORCE_NO_OPAQUE. Lets a material edit that flips
+    // opaque<->transmissive take effect with only a TLAS refresh — the
+    // BLAS-level VK_GEOMETRY_OPAQUE_BIT is baked at build time and would
+    // otherwise need a full BLAS rebuild (the "glass shadow only wakes up on
+    // backend switch" bug).
+    uint8_t opacityOverride = 0;
 };
 
 struct VkInstanceData {
@@ -555,8 +562,54 @@ public:
                           const std::vector<std::uint32_t>& shadowMissSPV           = std::vector<std::uint32_t>(),
                           const std::vector<std::uint32_t>& hairAnyHitSPV           = std::vector<std::uint32_t>(),
                           const std::vector<std::uint32_t>& sphereClosestHitSPV     = std::vector<std::uint32_t>(),
-                          const std::vector<std::uint32_t>& sphereIntersectionSPV   = std::vector<std::uint32_t>());
-    
+                          const std::vector<std::uint32_t>& sphereIntersectionSPV   = std::vector<std::uint32_t>(),
+                          const std::vector<std::uint32_t>& photonRaygenSPV         = std::vector<std::uint32_t>());
+
+    // ========================================================================
+    // Photon caustic pass (Faz 2 / Dilim 1)
+    // ========================================================================
+    // Header of the photon hash-grid SSBO (binding 19). Mirrors the GLSL
+    // PhotonGridHeader in shaders/photon_grid.glsl byte-for-byte (std430).
+    struct PhotonGridHeader {
+        float originCell[4];   // xyz grid world origin, w = cell size
+        float emitCenter[4];   // xyz emission target centre, w = target radius
+        uint32_t tableSize;
+        uint32_t photonCount;
+        uint32_t frameSeed;
+        uint32_t debugMode;
+        uint32_t lightIndex;
+        uint32_t lightCountReal;
+        float energyScale;
+        float debugExposure;
+    };
+    static_assert(sizeof(PhotonGridHeader) == 64, "PhotonGridHeader must match shaders/photon_grid.glsl (64 bytes)");
+
+    bool hasPhotonPipeline() const { return m_hasPhotonRaygen; }
+    /// Schedules the photon pass for THIS frame's camera trace: writes the grid
+    /// header now and arms a pending flag; the clear + photon trace commands are
+    /// recorded at the START of the camera trace command buffer by
+    /// recordPhotonPass(). A separate synchronous submit raced the async
+    /// ping-pong camera reads — the next frame's grid clear ran while the
+    /// previous frame's camera rays were still reading, so the grid appeared
+    /// mostly empty with occasional flashes.
+    /// clearGrid: pass true ONLY on the first frame after an accumulation reset.
+    /// The grid ACCUMULATES photons across frames (progressive photon mapping) —
+    /// clearing every frame left each cell with only a handful of photons per
+    /// frame, i.e. huge Monte-Carlo variance (flickering blocks that fade in the
+    /// image accumulation). Readers normalize by frameSeed+1.
+    /// volHeader: header for the VOLUME grid (binding 20, Faz 2V) — debugMode
+    /// 0 disables the deposit entirely, energyScale carries σs.
+    void schedulePhotonPass(const PhotonGridHeader& header, const PhotonGridHeader& volHeader, bool clearGrid);
+    /// Records clear + photon trace + barriers into the given command buffer if
+    /// a pass is pending. Called by submitTraceTonemapAsync / traceRaysAndReadback
+    /// before their camera trace section. Pushes a copy of the camera push
+    /// constants with lightCount = 0 so closesthit skips NEE per photon bounce.
+    void recordPhotonPass(VkCommandBuffer cmd);
+    /// Host-writes debugMode = 0 into the grid header so raygen stops adding the
+    /// (stale) photon-grid caustic when the user turns caustics off mid-session —
+    /// the header otherwise keeps its last mode and the gather would keep firing.
+    void disablePhotonGrid();
+
     /**
      * @brief Bind RT descriptors (output image + TLAS)
      */
@@ -909,6 +962,17 @@ private:
     VkStridedDeviceAddressRegionKHR m_sbtMissRegion{};
     VkStridedDeviceAddressRegionKHR m_sbtHitRegion{};
     VkStridedDeviceAddressRegionKHR m_sbtCallableRegion{};
+
+    // Photon caustic pass (Faz 2): second raygen group in the same pipeline +
+    // world-space hash grid SSBO at binding 19.
+    bool m_hasPhotonRaygen = false;
+    VkStridedDeviceAddressRegionKHR m_sbtPhotonRegion{};
+    BufferHandle m_photonGridBuffer;
+    BufferHandle m_photonVolGridBuffer;        // Faz 2V: volume caustic grid (binding 20)
+    uint32_t m_photonTableSize = (1u << 20);   // cells (power of two), 20 B each (R,G,B,count,owner key)
+    bool m_photonPassPending = false;          // armed by schedulePhotonPass, consumed by recordPhotonPass
+    bool m_pendingPhotonClear = false;         // clear cells before tracing (first frame after accum reset)
+    uint32_t m_pendingPhotonCount = 0;
     
 
     
@@ -1233,6 +1297,7 @@ public:
     bool tryGetUploadedImageHandle(int64_t textureHandle, VulkanRT::ImageHandle& outImage) const;
     uint64_t textureCacheGeneration() const { return m_textureCacheGeneration; }
     bool buildVulkanBackingRecord(int64_t textureHandle, VulkanBackingRecord& outBacking) const;
+    void checkAndTrimVRAMThreshold();
     void registerSceneTextureUpload(TextureHandle sceneHandle, int64_t textureHandle);
 
     // In-place re-upload: write `data` into the existing VkImage at `textureID`,
@@ -1561,6 +1626,17 @@ protected:
     int m_maxBounces = 12;
     int m_diffuseBounces = 4;
     int m_transmissionBounces = 8;
+    // Photon caustics (Faz 2 / Dilim 1)
+    bool  m_causticsEnabled = false;
+    bool  m_causticsDebug = false;
+    int   m_causticsPhotons = 262144;
+    float m_causticsCellSize = 0.05f;
+    float m_causticsEnergy = 1.0f;
+    bool  m_causticsVolumetric = false;   // Faz 2V
+    bool  m_causticsVolDebug = false;
+    float m_causticsVolStrength = 1.0f;
+    bool  m_causticsVolDirect = false;
+    float m_causticsVolNoise = 0.0f;
     ViewportMode m_viewportMode = ViewportMode::Rendered;
     InteractiveViewportState m_interactiveViewport;
     bool m_loggedInteractiveViewportFallback = false;
@@ -1634,6 +1710,24 @@ protected:
     
     // Mesh registry (meshName -> BLAS index)
     std::unordered_map<std::string, uint32_t> m_meshRegistry;
+
+    // Photon caustics: per-BLAS, PER-MATERIAL local AABBs of the mesh's triangles,
+    // keyed by blasIndex. Whether a material is a caustic caster is decided EVERY
+    // FRAME against the live MaterialManager state — deciding it at upload time
+    // broke project loads, where BLAS upload can run before the imported
+    // materials resolve (and material edits after upload never re-evaluated).
+    // The bounds are BLAS-LOCAL: solo/project-loaded meshes upload LOCAL (P_orig)
+    // vertices and get their world placement from the TLAS instance transform,
+    // so the photon emission target transforms these by the live m_vkInstances
+    // transforms each frame. Cleared together with m_meshRegistry.
+    struct CausticBounds { float minX, minY, minZ, maxX, maxY, maxZ; };
+    std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, CausticBounds>>> m_blasMaterialBounds;
+
+    // Opacity each BLAS was BUILT with (true = built WITHOUT the OPAQUE fast-path
+    // bit). uploadMaterials() audits the live materials against this and flips the
+    // cheap per-instance FORCE_(NO_)OPAQUE override + TLAS refresh when a material
+    // edit changes a mesh's opaque<->transmissive class — no BLAS rebuild needed.
+    std::unordered_map<uint32_t, bool> m_blasBuiltNonOpaque;
 
     // CPU mirror of each BLAS's per-triangle material indices (blasIndex -> ids).
     // The hit shaders read materials through geo.materialAddr (baked into the

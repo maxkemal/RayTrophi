@@ -1498,6 +1498,34 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         }
         SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.mesh_modifiers.size()) + " mesh modifiers.");
 
+        // Geometry Node Graphs (Faz 8a Geo-DAG). Only graphs with at least one real
+        // operator node are saved — the default Base Mesh -> Output pair is recreated
+        // automatically by the Geometry Graph panel and carries no information. The
+        // pristine originalBaseMesh snapshot goes into the binary sidecar so a loaded
+        // graph's Evaluate starts from the true original instead of compounding onto
+        // the saved (already-evaluated) scene mesh.
+        {
+            if (progress_callback) progress_callback(84, "Saving geometry node graphs...");
+            root["geometry_node_graphs"] = json::object();
+            size_t savedGraphCount = 0;
+            measureBinarySection("geometry_node_graphs", [&]() {
+                for (const auto& [nodeName, graphPtr] : scene.geometry_node_graphs) {
+                    if (!graphPtr) continue;
+                    bool hasOperator = false;
+                    for (const auto& n : graphPtr->nodes) {
+                        const std::string t = n->getTypeId();
+                        if (t != "GeoV2.BaseMesh" && t != "GeoV2.Output") { hasOperator = true; break; }
+                    }
+                    if (!hasOperator) continue;
+                    json jg;
+                    GeometryNodesV2::serializeGeometryGraph(*graphPtr, jg, &out_bin);
+                    root["geometry_node_graphs"][nodeName] = jg;
+                    ++savedGraphCount;
+                }
+            });
+            SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(savedGraphCount) + " geometry node graphs.");
+        }
+
         // Paint Layer Stacks
         if (!scene.mesh_paint_layer_stacks.empty()) {
             if (progress_callback) progress_callback(84, "Saving paint layers...");
@@ -2010,6 +2038,24 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                         mod_selectable += newMesh.size(); // Track new non-foliage count
                         scene.world.objects = remainingObjects;
                     }
+                }
+            }
+
+            // Geometry Node Graphs (Faz 8a Geo-DAG). NOT auto-evaluated on load: the
+            // saved scene mesh IS the last evaluated result, so the scene already looks
+            // right — the graph (and its pristine originalBaseMesh from the binary
+            // sidecar) is just re-attached so the next Evaluate/Apply works correctly.
+            scene.geometry_node_graphs.clear();
+            {
+                simdjson::dom::element geo_graphs_el;
+                if (!root["geometry_node_graphs"].get(geo_graphs_el)) {
+                    if (progress_callback) progress_callback(78, "Loading geometry node graphs...");
+                    nlohmann::json jGraphs = sjsonToNlohmann(geo_graphs_el);
+                    for (auto it = jGraphs.begin(); it != jGraphs.end(); ++it) {
+                        auto graph = GeometryNodesV2::deserializeGeometryGraph(it.value(), &in_bin);
+                        if (graph) scene.geometry_node_graphs[it.key()] = graph;
+                    }
+                    SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.geometry_node_graphs.size()) + " geometry node graphs.");
                 }
             }
 

@@ -10,6 +10,8 @@
 #include "Triangle.h"
 #include "MeshProfileTimer.h"
 #include "HittableInstance.h"
+#include "GeometryNodesV2.h"   // sculpt-mask <-> Field attribute bridge (PositionValueLookup)
+#include "ProjectManager.h"    // g_ProjectManager.markModified()
 #include "ImGuizmo.h"
 #include "imgui.h"
 
@@ -9310,6 +9312,173 @@ bool SceneUI::dissolveSelectedEdges(UIContext& ctx) {
     return true;
 }
 
+bool SceneUI::bevelSelectedEdges(UIContext& ctx, float width, int segments, bool roundProfile) {
+    const std::string objectName =
+        (!active_mesh_edit_object_name.empty() ? active_mesh_edit_object_name :
+            (ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object
+                ? ctx.selection.selected.object->getNodeName()
+                : std::string{}));
+    if (objectName.empty() || width <= 0.0f || !ensureEditableMeshCache(ctx, objectName)) {
+        return false;
+    }
+
+    std::vector<int> selectedEdgeIds = editable_mesh_cache.selection.edge_ids;
+    std::sort(selectedEdgeIds.begin(), selectedEdgeIds.end());
+    selectedEdgeIds.erase(std::unique(selectedEdgeIds.begin(), selectedEdgeIds.end()), selectedEdgeIds.end());
+    if (selectedEdgeIds.empty()) {
+        return false;
+    }
+
+    std::vector<std::shared_ptr<Triangle>> currentDisplayMesh;
+    {
+        auto meshIt = mesh_cache.find(objectName);
+        if (meshIt == mesh_cache.end() || meshIt->second.empty()) {
+            return false;
+        }
+        std::unordered_set<const Triangle*> seenTriangles;
+        currentDisplayMesh.reserve(meshIt->second.size());
+        for (const auto& entry : meshIt->second) {
+            if (entry.second && seenTriangles.insert(entry.second.get()).second) {
+                currentDisplayMesh.push_back(entry.second);
+            }
+        }
+    }
+    if (currentDisplayMesh.empty()) {
+        return false;
+    }
+
+    std::vector<std::shared_ptr<Triangle>> currentBaseMesh;
+    {
+        auto baseIt = ctx.scene.base_mesh_cache.find(objectName);
+        currentBaseMesh = (baseIt != ctx.scene.base_mesh_cache.end() && !baseIt->second.empty())
+            ? cloneTriangleVectorForEdit(baseIt->second)
+            : cloneTriangleVectorForEdit(currentDisplayMesh);
+    }
+    const auto modifierIt = ctx.scene.mesh_modifiers.find(objectName);
+    const MeshModifiers::ModifierStack beforeModifierStack =
+        (modifierIt != ctx.scene.mesh_modifiers.end()) ? modifierIt->second : MeshModifiers::ModifierStack{};
+    const bool preserveModifierPreview = hasEnabledSubdivisionPreview(beforeModifierStack);
+    const std::vector<std::shared_ptr<Triangle>> beforeDisplayMesh = cloneTriangleVectorForEdit(currentDisplayMesh);
+
+    ensureEditableHalfEdge(); // lazy: half-edge is no longer built at cache-build time
+    if (!editable_mesh_cache.half_edge_valid ||
+        editable_mesh_cache.half_edge_build.skipped_polygons > 0) {
+        addViewportMessage("Bevel: mesh topology unavailable",
+                           2.4f, ImVec4(1.0f, 0.62f, 0.3f, 1.0f));
+        return false;
+    }
+
+    // Bevel is a pure REBUILD (bevelEdgesPolygons never mutates the half-edge mesh),
+    // but the shared cache copy may lag behind live vertex edits — sync a local copy
+    // like the other edge/face ops do.
+    MeshEdit::HalfEdgeMesh heMesh = editable_mesh_cache.half_edge;
+    syncHalfEdgePositionsFromCache(heMesh, editable_mesh_cache);
+
+    std::vector<bool> edgeFlags(heMesh.edges.size(), false);
+    int flagged = 0;
+    for (const int edgeId : selectedEdgeIds) {
+        if (edgeId < 0 || edgeId >= static_cast<int>(editable_mesh_cache.polygon_edges.size())) {
+            continue;
+        }
+        const auto& cacheEdge = editable_mesh_cache.polygon_edges[edgeId];
+        const MeshEdit::HEIndex heEdge = heMesh.findEdge(cacheEdge.v0, cacheEdge.v1);
+        if (heEdge == MeshEdit::kHEInvalid) {
+            continue;
+        }
+        edgeFlags[heEdge] = true;
+        ++flagged;
+    }
+    if (flagged <= 0) {
+        return false;
+    }
+
+    // Same core as the Geo-DAG Bevel node — only the edge SELECTION differs (explicit
+    // edit-mode selection here, dihedral angle there) and the materialization (template
+    // clones here so material/nodeName carry over, standalone facades there).
+    const std::vector<GeometryNodesV2::BevelPolygon> bevelPolys =
+        GeometryNodesV2::bevelEdgesPolygons(heMesh, edgeFlags, width, segments, roundProfile);
+    if (bevelPolys.empty()) {
+        addViewportMessage("Bevel: selected edges could not be beveled (boundary edges are skipped)",
+                           2.6f, ImVec4(1.0f, 0.62f, 0.3f, 1.0f));
+        return false;
+    }
+
+    const std::vector<std::shared_ptr<Triangle>>& templateSource =
+        preserveModifierPreview ? currentBaseMesh : currentDisplayMesh;
+    std::vector<std::shared_ptr<Triangle>> beveledMesh;
+    beveledMesh.reserve(bevelPolys.size() * 2);
+    for (const auto& poly : bevelPolys) {
+        if (poly.pts.size() < 3) {
+            continue;
+        }
+        std::shared_ptr<Triangle> templateTriangle = resolveEditablePolygonTemplateTriangle(
+            editable_mesh_cache, templateSource, static_cast<int>(poly.sourceFace));
+        if (!templateTriangle) {
+            continue;
+        }
+        const std::vector<Vec2> faceUVs = buildPolygonPlanarUVs(poly.pts, poly.normal);
+        // Round-profile strips carry per-point blended normals (faceA->faceB) so the
+        // bevel shades as one continuous curve instead of showing a facet crease right
+        // where the old sharp edge was (which visually reads as "the edge is still
+        // there" and hides the bevel).
+        const bool smooth = poly.ptNormals.size() == poly.pts.size();
+        for (size_t i = 1; i + 1 < poly.pts.size(); ++i) {
+            const Vec3 c = Vec3::cross(poly.pts[i] - poly.pts[0], poly.pts[i + 1] - poly.pts[0]);
+            if (c.length_squared() <= 1e-20f) {
+                continue;  // collinear sliver — skip
+            }
+            auto newTriangle = cloneTriangleForEdit(templateTriangle);
+            if (!newTriangle) {
+                continue;
+            }
+            const Vec3 n0 = smooth ? poly.ptNormals[0] : poly.normal;
+            const Vec3 n1 = smooth ? poly.ptNormals[i] : poly.normal;
+            const Vec3 n2 = smooth ? poly.ptNormals[i + 1] : poly.normal;
+            newTriangle->setOriginalVertexPosition(0, poly.pts[0]);
+            newTriangle->setOriginalVertexPosition(1, poly.pts[i]);
+            newTriangle->setOriginalVertexPosition(2, poly.pts[i + 1]);
+            newTriangle->setOriginalVertexNormal(0, n0);
+            newTriangle->setOriginalVertexNormal(1, n1);
+            newTriangle->setOriginalVertexNormal(2, n2);
+            newTriangle->set_normals(n0, n1, n2);
+            newTriangle->setUVCoordinates(faceUVs[0], faceUVs[i], faceUVs[i + 1]);
+            newTriangle->markAABBDirty();
+            newTriangle->updateTransformedVertices();
+            beveledMesh.push_back(newTriangle);
+        }
+    }
+    if (beveledMesh.empty()) {
+        return false;
+    }
+    for (size_t triangleIndex = 0; triangleIndex < beveledMesh.size(); ++triangleIndex) {
+        if (beveledMesh[triangleIndex]) {
+            beveledMesh[triangleIndex]->setFaceIndex(static_cast<int>(triangleIndex));
+        }
+    }
+
+    const std::vector<std::shared_ptr<Triangle>> afterDisplayMesh = evaluateDisplayMeshFromBase(beveledMesh, beforeModifierStack);
+    const std::vector<std::shared_ptr<Triangle>> afterBaseMesh = cloneTriangleVectorForEdit(beveledMesh);
+    const MeshModifiers::ModifierStack afterModifierStack = beforeModifierStack;
+    auto command = std::make_unique<ReplaceMeshGeometryCommand>(
+        objectName, beforeDisplayMesh, afterDisplayMesh, currentBaseMesh, afterBaseMesh,
+        beforeModifierStack, afterModifierStack);
+    command->execute(ctx);
+    history.record(std::move(command));
+    rebuildMeshCache(ctx.scene.world.objects);
+    applyMeshShadingSettings(ctx, objectName, true);
+
+    editable_mesh_cache = EditableMeshCache{};
+    mesh_overlay_cache = MeshOverlayCache{};
+    mesh_edit_layer = MeshEditLayer{};
+    pending_serialized_mesh_edit_layer = PendingSerializedMeshEditLayer{};
+    clearEditableMeshSelection();
+    active_mesh_edit_object_name = objectName;
+    ensureMeshEditLayer(ctx, objectName);
+    ensureEditableMeshCache(ctx, objectName);
+    addViewportMessage("Beveled selected edges", 2.0f, ImVec4(0.34f, 0.84f, 1.0f, 1.0f));
+    return true;
+}
+
 bool SceneUI::dissolveSelectedVertices(UIContext& ctx) {
     const std::string objectName =
         (!active_mesh_edit_object_name.empty() ? active_mesh_edit_object_name :
@@ -13988,6 +14157,114 @@ void SceneUI::applySculptMaskOperation(int operation) {
         }
     }
     ++mask.version;
+}
+
+// --- Sculpt mask <-> Field attribute bridge (Faz 8b) ----------------------------------
+// Lets a hand-painted sculpt mask drive Geo-DAG nodes (Noise Displace's Use Mask, Scatter
+// Instances) and the scatter brush's mask gating — the storage-of-record is always the
+// Field attribute (a named per-vertex float on GeometryDetail); sculpt masking stays the
+// fast interactive EDITOR for it. See [[project_geo_dag_faz8b_fields]].
+void SceneUI::exportSculptMaskToAttribute(UIContext& ctx, const std::string& attributeName) {
+    if (attributeName.empty()) {
+        addViewportMessage("Mask export: attribute name is empty", 3.0f, ImVec4(1.0f, 0.5f, 0.3f, 1.0f));
+        return;
+    }
+    SculptMaskState& mask = sculpt_mask_state;
+    if (!mask.has_any || mask.object_name.empty() || mask.values.empty()) {
+        addViewportMessage("Mask export: nothing painted yet", 3.0f, ImVec4(1.0f, 0.7f, 0.3f, 1.0f));
+        return;
+    }
+    if (mask.object_name != editable_mesh_cache.object_name ||
+        mask.cache_revision != editable_mesh_cache.revision) {
+        addViewportMessage("Mask export: mask is stale for the current edit cache (re-enter sculpt mode)", 3.5f, ImVec4(1.0f, 0.5f, 0.3f, 1.0f));
+        return;
+    }
+    auto it = direct_mesh_nodes.find(mask.object_name);
+    if (it == direct_mesh_nodes.end() || !it->second.mesh || !it->second.mesh->geometry) {
+        addViewportMessage("Mask export: '" + mask.object_name + "' is not a flat mesh object (facade-only objects not yet supported)", 3.5f, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
+        return;
+    }
+    auto& geom = *it->second.mesh->geometry;
+    const size_t dstVC = geom.get_vertex_count();
+    const Vec3* dstPo = geom.get_attribute_data<Vec3>("P_orig");
+    float* attr = GeometryNodesV2::ensureFloatAttribute(geom, attributeName);
+    if (!dstPo || !attr || dstVC == 0) {
+        addViewportMessage("Mask export: target mesh has no P_orig channel", 3.0f, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
+        return;
+    }
+
+    // Build the lookup from the WELDED cache (one entry per local position) -> mask value,
+    // then sample it once per FLAT mesh vertex (which may have several duplicates sharing
+    // that same position, e.g. UV seams) so every duplicate gets the same value.
+    const size_t cacheVC = (std::min)(editable_mesh_cache.vertices.size(), mask.values.size());
+    std::vector<Vec3> cachePos(cacheVC);
+    for (size_t i = 0; i < cacheVC; ++i) cachePos[i] = editable_mesh_cache.vertices[i].local_position;
+    GeometryNodesV2::PositionValueLookup lookup(cachePos.data(), mask.values.data(), cacheVC);
+
+    size_t matched = 0;
+    for (size_t v = 0; v < dstVC; ++v) {
+        const float m = lookup.sample(dstPo[v], -1.0f);
+        if (m >= 0.0f) { attr[v] = m; ++matched; }
+        else attr[v] = 0.0f;
+    }
+
+    if (matched == 0) {
+        addViewportMessage("Mask export: no matching vertices found (mesh may have been edited since painting)", 4.0f, ImVec4(1.0f, 0.5f, 0.3f, 1.0f));
+        return;
+    }
+    g_ProjectManager.markModified();
+    addViewportMessage("Mask exported to attribute '" + attributeName + "' (" + std::to_string(matched) + "/" + std::to_string(dstVC) + " verts matched)",
+                        3.0f, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
+}
+
+void SceneUI::importAttributeToSculptMask(UIContext& ctx, const std::string& attributeName) {
+    (void)ctx;
+    if (attributeName.empty()) {
+        addViewportMessage("Mask import: attribute name is empty", 3.0f, ImVec4(1.0f, 0.5f, 0.3f, 1.0f));
+        return;
+    }
+    if (editable_mesh_cache.object_name.empty() || editable_mesh_cache.vertices.empty()) {
+        addViewportMessage("Mask import: no active sculpt/edit target", 3.0f, ImVec4(1.0f, 0.7f, 0.3f, 1.0f));
+        return;
+    }
+    auto it = direct_mesh_nodes.find(editable_mesh_cache.object_name);
+    if (it == direct_mesh_nodes.end() || !it->second.mesh || !it->second.mesh->geometry) {
+        addViewportMessage("Mask import: '" + editable_mesh_cache.object_name + "' is not a flat mesh object", 3.5f, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
+        return;
+    }
+    auto& geom = *it->second.mesh->geometry;
+    const float* srcAttr = geom.get_attribute_data<float>(attributeName);
+    const Vec3* srcPo = geom.get_attribute_data<Vec3>("P_orig");
+    const size_t srcVC = geom.get_vertex_count();
+    if (!srcAttr) {
+        addViewportMessage("Mask import: attribute '" + attributeName + "' not found on this object", 3.5f, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
+        return;
+    }
+    if (!srcPo || srcVC == 0) {
+        addViewportMessage("Mask import: source mesh has no P_orig channel", 3.0f, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
+        return;
+    }
+
+    ensureSculptMaskSized(sculpt_mask_state, editable_mesh_cache, editable_mesh_cache.object_name);
+    SculptMaskState& mask = sculpt_mask_state;
+    GeometryNodesV2::PositionValueLookup lookup(srcPo, srcAttr, srcVC);
+
+    size_t matched = 0;
+    const size_t cacheVC = editable_mesh_cache.vertices.size();
+    for (size_t i = 0; i < cacheVC; ++i) {
+        const float v = lookup.sample(editable_mesh_cache.vertices[i].local_position, -1.0f);
+        if (v >= 0.0f) { mask.values[i] = std::clamp(v, 0.0f, 1.0f); ++matched; }
+    }
+    mask.has_any = false;
+    for (float v : mask.values) { if (v > 0.003f) { mask.has_any = true; break; } }
+    ++mask.version;
+
+    if (matched == 0) {
+        addViewportMessage("Mask import: no matching vertices found", 3.5f, ImVec4(1.0f, 0.5f, 0.3f, 1.0f));
+        return;
+    }
+    addViewportMessage("Mask imported from attribute '" + attributeName + "' (" + std::to_string(matched) + "/" + std::to_string(cacheVC) + " verts matched)",
+                        3.0f, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
 }
 
 bool SceneUI::syncGpuEditMeshOverlay(UIContext& ctx, const std::string& objectName,

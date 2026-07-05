@@ -36,6 +36,7 @@ layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 
 // Material struct — single source of truth shared by every material-reading shader.
 #include "material_struct.glsl"
+#include "photon_grid.glsl"
 
 struct LightData {
     vec4 position;
@@ -286,6 +287,7 @@ const uint BOUNCE_TRANSMISSION = 2u;
 const uint BOUNCE_TRANSPARENT = 3u;
 const uint BOUNCE_RESIN = 4u; // resin coat reflect + absorbing base (own small budget)
 const uint BOUNCE_MARBLE = 5u; // glass marble full-volume entry → integrate interior medium
+const uint BOUNCE_GLASS_REFLECT = 6u; // glass mirror lobe (no interface crossing) — spends the transmission budget like before
 const uint MAT_FLAG_MARBLE_VOLUME = (1u << 20);
 
 struct RayPayload {
@@ -305,12 +307,14 @@ struct RayPayload {
     float primaryMetallic;
     uint  bounceType;
     uint  primaryMaterialId;   // Stylize AOV: real material index of the primary hit
+    float dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
 };
 
 layout(location = 0) rayPayloadEXT RayPayload payload;
 
 // Location 1: Shadow payload
-layout(location = 1) rayPayloadEXT bool shadowOccluded;
+// Shadow payload: rgb = transmissive tint accumulated by shadow any-hits, w = reached-light flag.
+layout(location = 1) rayPayloadEXT vec4 shadowPayload;
 
 // ============================================================
 // PCG RNG
@@ -600,11 +604,12 @@ float godRaysSolarCoreFade(float sunDot, float sunSizeDeg) {
 }
 
 float traceGodRaysSunOcclusion(vec3 origin, vec3 sunDir, float maxDist) {
-    shadowOccluded = true;
+    shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
     uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
                      | gl_RayFlagsSkipClosestHitShaderEXT;
     traceRayEXT(topLevelAS, shadowFlags, 0x01, 0, 1, 1, origin, T_MIN, sunDir, maxDist, 1);
-    return shadowOccluded ? 0.0 : 1.0;
+    // Scalar visibility for god rays: luminance of the transmissive tint on escape.
+    return (shadowPayload.w > 0.5) ? dot(shadowPayload.rgb, vec3(0.2126, 0.7152, 0.0722)) : 0.0;
 }
 
 vec3 sampleGodRaysSunTransmittance(vec3 sunDir) {
@@ -671,6 +676,70 @@ vec3 computePrimaryGodRays(vec3 rayOrigin, vec3 rayDir, float maxDistance, inout
     }
 
     return godRayColor * worldData.w.godRaysIntensity;
+}
+
+// Light 3-octave turbulence for the shaft-noise modulation: rh_fbm's 5 octaves
+// ran per march step for every pixel in the shaft sphere — the two extra
+// octaves are sub-cell detail the volume grid can't resolve anyway.
+float shaftTurbulence(vec3 p) {
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 3; ++i) {
+        v += a * abs(2.0 * rh_vnoise(p) - 1.0);
+        p = p * 2.03 + vec3(7.1, 3.7, 11.3);
+        a *= 0.5;
+    }
+    return v * (1.0 / 0.875);   // amplitude sum 0.5+0.25+0.125
+}
+
+// ── VOLUMETRIC CAUSTIC IN-SCATTER (Faz 2V / Dilim V2) ───────────────────────
+// March the primary camera segment through the volume photon grid and return
+// the in-scattered radiance of the LS⁺(medium) shafts. The grid density D(x)
+// already includes σs (baked in at deposit time via energyScale), so with an
+// isotropic phase function L_s = D / 4π — photon directions are not stored,
+// so HG anisotropy is not possible here (would need a direction moment in the
+// cell; future dilim if wanted). Camera-side transmittance is left at 1: the
+// caustic medium is thin, and the fog mix that follows attenuates the shafts
+// the same way it does god rays. The march is bounded to the sphere the grid
+// can actually contain energy in: post-glass flight segments start inside the
+// photon target sphere, so 8× the target radius covers the focal shaft; rays
+// that miss it skip the march entirely (most pixels, in a typical scene).
+vec3 photonVolInScatter(vec3 ro, vec3 rd, float maxDist, inout uint seed) {
+    vec3  C = photonVolGrid.h.emitCenter.xyz;
+    float R = photonVolGrid.h.emitCenter.w * 8.0;
+    vec3 oc = ro - C;
+    float b = dot(oc, rd);
+    float cq = dot(oc, oc) - R * R;
+    float disc = b * b - cq;
+    if (disc <= 0.0) return vec3(0.0);
+    float sq = sqrt(disc);
+    float t0 = max(-b - sq, 0.0);
+    float t1 = min(-b + sq, maxDist);
+    if (t1 <= t0) return vec3(0.0);
+
+    const int VOL_STEPS = 16;
+    float dt = (t1 - t0) / float(VOL_STEPS);
+    float jitter = rnd(seed);
+    vec3 accum = vec3(0.0);
+
+    // Heterogeneous-medium look: modulate the (virtual) dust density with a
+    // static world-space turbulence field — mean-preserving (fbm ≈ 0.5 mean,
+    // so 1 + amt·(2·fbm−1) keeps overall shaft brightness), deterministic
+    // across passes so accumulation converges instead of averaging it away.
+    // Amount rides in h.debugExposure (unused outside vol-debug); feature
+    // size ≈ 4 volume cells. Cheap enough for the realtime path.
+    float noiseAmt = clamp(photonVolGrid.h.debugExposure - 1.0, 0.0, 1.0);
+    float nfreq = 0.25 / max(photonVolGrid.h.originCell.w, 1e-4);
+
+    for (int i = 0; i < VOL_STEPS; ++i) {
+        vec3 xp = ro + rd * (t0 + (float(i) + jitter) * dt);
+        vec3 d = photonVolReadTrilinear(xp);
+        if (noiseAmt > 0.001 && (d.r + d.g + d.b) > 0.0) {
+            d *= max(1.0 + noiseAmt * (2.0 * shaftTurbulence(xp * nfreq) - 1.0), 0.0);
+        }
+        accum += d;
+    }
+    float passes = float(photonVolGrid.h.frameSeed + 1u);
+    return accum * (dt / (12.5663706 * passes));   // Δt / 4π, per-pass normalized
 }
 
 // ============================================================
@@ -810,7 +879,11 @@ void main() {
     // (payload.scatterOrigin is overwritten each bounce, so we capture it once)
     vec3 firstHitPos   = vec3(0.0);
     bool firstHitValid = false;
+    bool causticGathered = false;   // photon-map gather fires once per path (Faz 2 / Dilim 2)
     payload.skipAABBs = false;
+    // Dispersion hero channel: reset once per PATH (not per bounce) so the exit
+    // interface of a dispersive glass refracts with the same channel as the entry.
+    payload.dispersionChannel = 0.0;
 
     int effectiveBounces = int(cam.maxBounces); // her zaman UI'dan gelir, C++ tarafı min 1 garantiliyor
     int effectiveDiffuseBounces = int(cam.diffuseBounces);
@@ -905,6 +978,22 @@ void main() {
 
         if (!payload.scattered) break;
 
+        // ── PHOTON CAUSTIC GATHER (Faz 2 / Dilim 2) ─────────────────────────
+        // At the first diffuse vertex of the camera path, add the photon-map
+        // caustic irradiance — the LS⁺D light that BSDF sampling almost never
+        // finds. The photon side splats ONLY crossedGlass paths, so this adds
+        // exactly what the path tracer is missing. For the cosine-sampled
+        // diffuse lobe attenuation == albedo, so the reflected caustic radiance
+        // is throughput * albedo * E / π.
+        if (photonGrid.h.debugMode == 2u && !causticGathered &&
+            payload.bounceType == BOUNCE_DIFFUSE) {
+            causticGathered = true;
+            float passes = float(photonGrid.h.frameSeed + 1u);
+            vec3 causticE = photonGridGather(payload.scatterOrigin) / passes;
+            vec3 caustic = throughput * payload.attenuation * causticE * 0.3183098862;
+            radiance += softClipFireflies(sanitizeRadiance(caustic), 64.0);
+        }
+
         throughput = sanitizeRadiance(throughput * payload.attenuation);
         throughput = softClipFireflies(throughput, 128.0);
 
@@ -926,7 +1015,8 @@ void main() {
             if (payload.bounceType == BOUNCE_DIFFUSE) {
                 diffuseBounceCount++;
                 if (diffuseBounceCount > effectiveDiffuseBounces) break;
-            } else if (payload.bounceType == BOUNCE_TRANSMISSION) {
+            } else if (payload.bounceType == BOUNCE_TRANSMISSION ||
+                       payload.bounceType == BOUNCE_GLASS_REFLECT) {
                 transmissionBounceCount++;
                 if (transmissionBounceCount > effectiveTransmissionBounces) break;
             } else if (payload.bounceType == BOUNCE_RESIN) {
@@ -953,6 +1043,18 @@ void main() {
     if (worldData.w.godRaysEnabled != 0) {
         float godRayMaxDist = firstHitValid ? length(firstHitPos - primaryRayOrigin) : 200000.0;
         radiance += computePrimaryGodRays(primaryRayOrigin, normalize(primaryRayDir), godRayMaxDist, seed);
+    }
+
+    // ── VOLUMETRIC CAUSTIC SHAFTS (Faz 2V / Dilim V2) ───────────────────────
+    // Added before the fog mix so fog attenuates the shafts the same way it
+    // attenuates god rays. No double-count: the volume grid holds ONLY
+    // crossedGlass (LS⁺) photon energy — direct light in the medium is the
+    // god-ray/fog systems' job. Skipped in volume-debug mode (mode 3 replaces
+    // the radiance with the raw grid view anyway).
+    if (photonVolGrid.h.debugMode == 1u && photonGrid.h.debugMode != 3u) {
+        float volMaxDist = firstHitValid ? length(firstHitPos - primaryRayOrigin) : 10000.0;
+        vec3 volCaustic = photonVolInScatter(primaryRayOrigin, normalize(primaryRayDir), volMaxDist, seed);
+        radiance += softClipFireflies(sanitizeRadiance(volCaustic), 64.0);
     }
 
     if (worldData.w.fogEnabled != 0 && worldData.w.fogDensity > 0.0) {
@@ -1053,6 +1155,43 @@ void main() {
         weatherDist *= (1.0 - clamp(firstHitTransmission, 0.0, 1.0));
         radiance = applyWeatherAtmosphere(radiance, normalize(primaryRayDir), weatherDist);
         radiance = applyWeatherPrecipitationOverlay(radiance, normalize(primaryRayDir), weatherDist);
+    }
+
+    // ── PHOTON CAUSTIC DEBUG (Faz 2 / Dilim 1) ──────────────────────────────
+    // Visualize the photon hash-grid energy at the primary hit, replacing the
+    // path radiance, so photon placement can be verified BEFORE the gather is
+    // wired into shading. A faint albedo term keeps the scene readable.
+    // ── VOLUME GRID DEBUG (Faz 2V / Dilim V1, mode 3) ───────────────────────
+    // March the primary segment and visualize the volume photon-grid energy
+    // density — verifies shaft placement before the in-scatter integration
+    // (Dilim V2), exactly like surface debug mode 1 did for Dilim 1.
+    if (photonGrid.h.debugMode == 3u) {
+        float passes = float(photonVolGrid.h.frameSeed + 1u);
+        float maxDist = firstHitValid ? length(firstHitPos - primaryRayOrigin) : 100.0;
+        maxDist = min(maxDist, 200.0);
+        const int VOL_DBG_STEPS = 24;
+        float dt = maxDist / float(VOL_DBG_STEPS);
+        vec3 accum = vec3(0.0);
+        vec3 pdir = normalize(primaryRayDir);
+        float jitter = rnd(seed);
+        for (int i = 0; i < VOL_DBG_STEPS; ++i) {
+            vec3 xp = primaryRayOrigin + pdir * ((float(i) + jitter) * dt);
+            accum += photonVolReadCell(xp);
+        }
+        radiance = accum * (dt * photonVolGrid.h.debugExposure / passes)
+                 + primaryAlbedo * 0.02;
+    }
+
+    if (photonGrid.h.debugMode == 1u && firstHitValid) {
+        // Grid accumulates photons across frames (cleared on accumulation reset);
+        // frameSeed == accumulated pass count - 1, so normalize by frameSeed+1.
+        // Also divide by the cell footprint (cs²) → shows IRRADIANCE, so the
+        // brightness stays comparable when the cell size is changed.
+        float passes = float(photonGrid.h.frameSeed + 1u);
+        float cs = max(photonGrid.h.originCell.w, 1e-4);
+        vec3 gridE = photonGridReadCell(firstHitPos)
+                   * (photonGrid.h.debugExposure / (passes * cs * cs));
+        radiance = gridE + primaryAlbedo * 0.02;
     }
 
     // Stochastic CA Channel Masking and Energy Conservation

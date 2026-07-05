@@ -309,15 +309,11 @@ public:
         // ========================================================================
         // RIGHT PANEL - PROPERTIES (with border)
         // ========================================================================
-        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.4f, 0.4f, 0.5f, 1.0f));
-        ImGui::BeginChild("NodeProperties", ImVec2(propertiesWidth, 0), true);
+        ImGui::BeginChild("NodeProperties", ImVec2(0, 0), true);
         ImGui::BeginDisabled(graphEvaluating);
         drawPropertiesPanel(graph);
         ImGui::EndDisabled();
         ImGui::EndChild();
-        ImGui::PopStyleColor();
-        ImGui::PopStyleVar();
     }
     
     void drawPropertiesPanel(TerrainNodeGraphV2& graph) {

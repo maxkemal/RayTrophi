@@ -1353,16 +1353,19 @@ inline void drawNodeCanvas(UIContext& ctx, AnimationGraph::AnimationNodeGraph* g
         // Node background
         drawList->AddRectFilled(nodePos, nodeMax, IM_COL32(34, 37, 45, 245), cornerRadius);
 
-        // Header Base (Integrated Dark Charcoal)
-        drawList->AddRectFilled(nodePos,
-            ImVec2(nodeMax.x, nodePos.y + headerHeight),
-            IM_COL32(26, 28, 33, 250), cornerRadius, ImDrawFlags_RoundCornersTop);
-
         // Modern category color strip at the very top of the node (thin, Gaea/Houdini-style)
+        // Drawn first with a taller height to prevent ImGui from clamping the corner rounding due to height constraints
         float stripeHeight = 3.5f * zoom;
+        float stripeDrawHeight = std::max(stripeHeight, cornerRadius);
         drawList->AddRectFilled(nodePos,
-            ImVec2(nodeMax.x, nodePos.y + stripeHeight),
+            ImVec2(nodeMax.x, nodePos.y + stripeDrawHeight),
             node->metadata.headerColor, cornerRadius, ImDrawFlags_RoundCornersTop);
+
+        // Header Base (Integrated Dark Charcoal)
+        // Drawn on top of the stripe, starting from stripeHeight, to overlay/clip the excess height of the stripe
+        drawList->AddRectFilled(ImVec2(nodePos.x, nodePos.y + stripeHeight),
+            ImVec2(nodeMax.x, nodePos.y + headerHeight),
+            IM_COL32(26, 28, 33, 250), isCollapsed ? cornerRadius : 0.0f, isCollapsed ? ImDrawFlags_RoundCornersBottom : 0);
 
         // Subtle premium accent line just below the color stripe
         drawList->AddLine(
@@ -1544,14 +1547,14 @@ inline void drawNodeCanvas(UIContext& ctx, AnimationGraph::AnimationNodeGraph* g
 
         ImU32 linkColor = isSelected ? IM_COL32(255, 200, 50, 255) :
             (isRuntimeActive ? IM_COL32(80, 255, 160, 255) : IM_COL32(200, 200, 100, 255));
-        float thickness = std::max(1.5f, (isSelected ? 4.0f : (isRuntimeActive ? 4.0f : 2.5f)) * zoom);
+        float thickness = std::max(1.0f, (isSelected ? 2.5f : (isRuntimeActive ? 2.5f : 1.5f)) * zoom);
         
         // 1. Draw glowing background shadow if selected or active
         if (isSelected) {
-            drawList->AddBezierCubic(p1, cp1, cp2, p2, (linkColor & 0x00FFFFFF) | 0x30000000, thickness + 6.0f * zoom);
-            drawList->AddBezierCubic(p1, cp1, cp2, p2, (linkColor & 0x00FFFFFF) | 0x60000000, thickness + 2.0f * zoom);
+            drawList->AddBezierCubic(p1, cp1, cp2, p2, (linkColor & 0x00FFFFFF) | 0x30000000, thickness + 3.0f * zoom);
+            drawList->AddBezierCubic(p1, cp1, cp2, p2, (linkColor & 0x00FFFFFF) | 0x60000000, thickness + 1.2f * zoom);
         } else if (isRuntimeActive) {
-            drawList->AddBezierCubic(p1, cp1, cp2, p2, (linkColor & 0x00FFFFFF) | 0x24000000, thickness + 4.0f * zoom);
+            drawList->AddBezierCubic(p1, cp1, cp2, p2, (linkColor & 0x00FFFFFF) | 0x24000000, thickness + 2.0f * zoom);
         }
         
         // 2. Draw core link line

@@ -34,6 +34,12 @@
 #include <atomic>
 #include "imgui.h"
 
+// Forward declaration only (not a full include) — DataType::Geometry's PinValue payload is
+// std::shared_ptr<TriangleMesh>, which is legal to hold in a std::variant/shared_ptr member
+// with an incomplete type (the deleter is captured at construction). Keeps NodeCore.h — included
+// by every node-system consumer — free of the Hittable/DNA::GeometryDetail include chain.
+class TriangleMesh;
+
 namespace NodeSystem {
 
     // ============================================================================
@@ -106,6 +112,12 @@ namespace NodeSystem {
      * Uses std::monostate for empty/unconnected pins.
      * This is the core data container for all node I/O.
      */
+    /// Geometry payload: reuses the same TriangleMesh (flat SoA / DNA::GeometryDetail) type
+    /// every other consumer in the codebase already knows how to handle (push directly into
+    /// scene.world.objects, hand to Vulkan/OptiX/Embree BLAS builders, etc.) — no new wrapper
+    /// type, and sharing the shared_ptr between DAG nodes is inherently zero-copy.
+    using GeometryValue = std::shared_ptr<TriangleMesh>;
+
     using PinValue = std::variant<
         std::monostate,             // Empty / None
         float,                      // Float
@@ -115,7 +127,8 @@ namespace NodeSystem {
         std::array<float, 3>,       // Vector3
         std::array<float, 4>,       // Vector4 / Color
         Image2DData,                // Image2D
-        std::string                 // String
+        std::string,                // String
+        GeometryValue                // Geometry (DataType::Geometry)
     >;
 
     // ============================================================================
@@ -374,6 +387,17 @@ namespace NodeSystem {
         if (auto* img = std::get_if<Image2DData>(&value)) { 
             out = *img; 
             return img->isValid(); 
+        }
+        return false;
+    }
+
+    /**
+     * @brief Try to extract a Geometry (TriangleMesh) value from a PinValue
+     */
+    inline bool tryGetGeometry(const PinValue& value, GeometryValue& out) {
+        if (auto* mesh = std::get_if<GeometryValue>(&value)) {
+            out = *mesh;
+            return static_cast<bool>(*mesh);
         }
         return false;
     }

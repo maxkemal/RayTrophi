@@ -1,4 +1,4 @@
-﻿/*
+/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          IBackend.h
@@ -86,6 +86,17 @@ struct RenderParams {
     int frameNumber;
     bool useAdaptiveSampling;
     float adaptiveThreshold;
+    // Photon caustics (Faz 2 — Vulkan RT only for now)
+    bool  causticsEnabled = false;
+    bool  causticsDebug = false;       // visualize the photon grid instead of shading
+    int   causticsPhotons = 262144;    // photons per frame
+    float causticsCellSize = 0.05f;    // hash-grid cell size (world units)
+    float causticsEnergy = 1.0f;       // photon power calibration knob
+    bool  causticsVolumetric = false;  // Faz 2V: volumetric caustic shafts in media
+    bool  causticsVolDebug = false;    // debug: march-visualize the volume grid
+    float causticsVolStrength = 1.0f;  // sigma_s scatter coefficient knob
+    bool  causticsVolDirect = false;   // also deposit the light->glass leg (direct shafts)
+    float causticsVolNoise = 0.0f;     // heterogeneous dust turbulence amount (0..1)
 };
 
 struct DenoiserFrameData {
@@ -340,6 +351,7 @@ public:
         float emissionStrength = 0.0f;
         float ior = 1.5f;
         float transmission = 0.0f;
+        float dispersion = 0.0f;  // spectral dispersion strength (0 = off)
         float opacity = 1.0f;
 
         // Subsurface / SSS
@@ -372,6 +384,11 @@ public:
         int64_t transmissionTexture = 0;
         int64_t opacityTexture = 0;
         int64_t heightTexture = 0;
+
+        // Packed-texture channel override for metallic/roughness slots:
+        // 0 = Auto (ORM: rough .g / metal .b, BC4/R8 → .r), 1 = R, 2 = G, 3 = B.
+        int metallicTexChannel = 0;
+        int roughnessTexChannel = 0;
 
         // Padding/flags for future use
         uint32_t flags = 0;

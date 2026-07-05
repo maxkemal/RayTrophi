@@ -1,5 +1,7 @@
 #include "MeshModifiers.h"
 #include "TriangleProxyConverter.h"
+#include "GeometryNodesV2.h"      // Faz 8a Geo-DAG node wrappers around this file's algorithms
+#include "NodeSystem/NodeRegistry.h"
 #include "SimulationCompute.h"   // shared Vulkan compute backend (GPU subdivision)
 #include "globals.h"             // g_gpu_subdivide_enabled, kGpuSubdivideMinTris, SCENE_LOG_INFO
 #include <algorithm>
@@ -1812,6 +1814,8 @@ namespace MeshModifiers {
         j["levels"] = levels;
         j["renderLevels"] = renderLevels;
         j["smoothAngle"] = smoothAngle;
+        j["bevelWidth"] = bevelWidth;
+        j["bevelAngle"] = bevelAngle;
     }
 
     void ModifierData::deserialize(const nlohmann::json& j) {
@@ -1822,7 +1826,10 @@ namespace MeshModifiers {
         // Backward compat: pre-Viewport/Render files default render level to the viewport level.
         renderLevels = j.contains("renderLevels") ? j["renderLevels"].get<int>() : levels;
         if (j.contains("smoothAngle")) smoothAngle = j["smoothAngle"].get<float>();
+        if (j.contains("bevelWidth")) bevelWidth = j["bevelWidth"].get<float>();
+        if (j.contains("bevelAngle")) bevelAngle = j["bevelAngle"].get<float>();
     }
+
 
     std::array<int, 6> ModifierStack::makeCreaseKey(const Vec3& a, const Vec3& b) {
         constexpr float s = 100000.0f;   // 0.01mm grid; matches cage vertex precision
@@ -1912,6 +1919,10 @@ namespace MeshModifiers {
                 }
                 currentMesh = catmullClarkSubDStencil(currentMesh, lvl, creaseFn);
             }
+            // ModifierType::Bevel deliberately has NO branch: the stack modifier was
+            // retired same-day (2026-07-04, compounded over its own output on every
+            // evaluate) — a leftover entry in an old save is inert. Bevel lives in the
+            // Geo-DAG BevelNode / Edit Mode instead.
         }
 
         // [PERF FIX] The convertToProxyMesh call is a no-op because its return value (TriangleMesh)
@@ -1962,4 +1973,949 @@ namespace MeshModifiers {
         }
     }
 
+} // namespace MeshModifiers
+
+// ============================================================================
+// GEO-DAG (Faz 8a) NODE SELF-REGISTRATION
+// ============================================================================
+// GeometryNodesV2 nodes live in their own namespace (they're generic — not
+// tied to MeshModifiers specifically), but their only current implementation
+// depends on this file's catmullClarkSubDStencil, so this is a convenient,
+// already-compiled home for their NodeRegistry registration without adding a
+// new .cpp / touching the MSBuild project file (this project's .vcxproj lists
+// .cpp files explicitly; headers don't need an entry, but a new .cpp would).
+// See NodeSystem/NodeRegistry.h and TerrainNodesV2.cpp's identical pattern.
+
+// ============================================================================
+// SCATTER INSTANCES NODE — compute() (Faz 8b)
+// ============================================================================
+// Lives here (not in GeometryNodesV2.h) because it needs InstanceManager, which
+// the header deliberately doesn't include (it's included by scene_data.h).
+#include "InstanceManager.h"
+#include <random>
+
+NodeSystem::PinValue GeometryNodesV2::ScatterInstancesNode::compute(int /*outputIndex*/, NodeSystem::EvaluationContext& ctx) {
+    NodeSystem::GeometryValue inMesh = getGeometryInput(0, ctx);
+    if (!inMesh || !inMesh->geometry || inMesh->geometry->indices.empty()) {
+        ctx.addError(id, "Scatter Instances: no input geometry");
+        return NodeSystem::PinValue{};
+    }
+    // The surface itself is untouched — every failure below reports an error but
+    // still passes the geometry through, so a scatter problem never destroys the
+    // mesh result of the chain (errors are surfaced in the viewport regardless).
+    auto passThrough = [&]() { return NodeSystem::GeometryValue(inMesh); };
+
+    auto* gctx = getGeometryContext(ctx);
+    if (!gctx) {
+        ctx.addError(id, "Scatter Instances: no geometry context");
+        return passThrough();
+    }
+    if (sourceObject[0] == '\0') {
+        ctx.addError(id, "Scatter Instances: no source object selected");
+        return passThrough();
+    }
+    // Gather ALL of the source's facades — a multi-material import owns several
+    // sibling TriangleMesh entries under one nodeName; resolving just one of them
+    // (the old resolveObjectMesh path) scattered instances with missing triangles
+    // and a single wrong material.
+    std::vector<std::shared_ptr<Triangle>> srcTris;
+    if (gctx->gatherObjectFacades) {
+        srcTris = gctx->gatherObjectFacades(sourceObject);
+    } else if (gctx->resolveObjectMesh) {
+        // Fallback for hosts that only wire the single-mesh resolver.
+        if (std::shared_ptr<TriangleMesh> srcMesh = gctx->resolveObjectMesh(sourceObject)) {
+            if (srcMesh->geometry && !srcMesh->geometry->indices.empty()) {
+                const size_t nTris = srcMesh->num_triangles();
+                srcTris.reserve(nTris);
+                for (size_t f = 0; f < nTris; ++f) {
+                    srcTris.push_back(std::make_shared<Triangle>(srcMesh, static_cast<uint32_t>(f)));
+                }
+            }
+        }
+    }
+    if (srcTris.empty()) {
+        ctx.addError(id, std::string("Scatter Instances: source '") + sourceObject + "' not found or has no geometry");
+        return passThrough();
+    }
+
+    // Stable group identity: generated once, then serialized with the node — so a
+    // re-Evaluate (this session or after a project reload) REPLACES the group
+    // instead of stacking a duplicate.
+    if (groupName[0] == '\0') {
+        snprintf(groupName, sizeof(groupName), "GeoDAG %s #%u", gctx->objectName.c_str(), id);
+    }
+
+    // ---- Sample the input surface (world space) -----------------------------
+    const auto& geom = *inMesh->geometry;
+    const Vec3* Po = geom.get_attribute_data<Vec3>("P_orig");
+    const auto& idx = geom.indices;
+    const size_t triCount = idx.size() / 3;
+    if (!Po || triCount == 0) {
+        ctx.addError(id, "Scatter Instances: input has no P_orig channel");
+        return passThrough();
+    }
+    const Matrix4x4 fT = inMesh->transform ? inMesh->transform->getFinal() : Matrix4x4();
+
+    const float* densityMaskAttr = nullptr;
+    if (useDensityMask) {
+        densityMaskAttr = geom.get_attribute_data<float>(densityMaskAttribute);
+        if (!densityMaskAttr) {
+            lastDensityMaskState = 0;
+            ctx.addError(id, std::string("Scatter Instances: density mask attribute '") + densityMaskAttribute
+                + "' not found — add a Mask node upstream (after Subdivide)");
+            return passThrough();
+        }
+        lastDensityMaskState = 1;
+    } else {
+        lastDensityMaskState = -1;
+    }
+    const float* scaleMaskAttr = nullptr;
+    if (useScaleMask) {
+        scaleMaskAttr = geom.get_attribute_data<float>(scaleMaskAttribute);
+        if (!scaleMaskAttr) {
+            lastScaleMaskState = 0;
+            ctx.addError(id, std::string("Scatter Instances: scale mask attribute '") + scaleMaskAttribute
+                + "' not found — add a Mask node upstream (after Subdivide)");
+            return passThrough();
+        }
+        lastScaleMaskState = 1;
+    } else {
+        lastScaleMaskState = -1;
+    }
+
+    // Area-weighted cumulative distribution over WORLD-space triangle areas.
+    std::vector<double> cdf(triCount, 0.0);
+    double totalArea = 0.0;
+    std::vector<Vec3> worldV(geom.get_vertex_count());
+    for (size_t v = 0; v < worldV.size(); ++v) worldV[v] = fT.transform_point(Po[v]);
+    for (size_t t = 0; t < triCount; ++t) {
+        const Vec3& A = worldV[idx[t * 3 + 0]];
+        const Vec3& B = worldV[idx[t * 3 + 1]];
+        const Vec3& C = worldV[idx[t * 3 + 2]];
+        const Vec3 cr = Vec3::cross(B - A, C - A);
+        totalArea += 0.5 * std::sqrt(static_cast<double>(cr.x) * cr.x + static_cast<double>(cr.y) * cr.y + static_cast<double>(cr.z) * cr.z);
+        cdf[t] = totalArea;
+    }
+    if (totalArea <= 0.0) {
+        ctx.addError(id, "Scatter Instances: input surface has zero area");
+        return passThrough();
+    }
+
+    std::mt19937 rng(static_cast<uint32_t>(seed));
+    std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+    std::uniform_real_distribution<double> distArea(0.0, totalArea);
+
+    struct Sample { Vec3 pos; Vec3 normal; float scaleMask; };
+    std::vector<Sample> samples;
+    samples.reserve(static_cast<size_t>((std::max)(count, 0)));
+
+    // Min-distance rejection: spatial-hash grid (cell = minDistance, same scheme as
+    // WeldNode) instead of an O(N^2) scan against every placed sample — matters once
+    // Count reaches the thousands. Cell membership only needs the CANDIDATE's own
+    // cell + 26 neighbors checked, since minDistance == cell size.
+    const bool useMinDist = minDistance > 0.0f;
+    const float invCell = useMinDist ? 1.0f / minDistance : 0.0f;
+    const float minDist2 = minDistance * minDistance;
+    auto cellKey = [](int x, int y, int z) -> uint64_t {
+        return (static_cast<uint64_t>(static_cast<uint32_t>(x) & 0x1FFFFF) << 42)
+             | (static_cast<uint64_t>(static_cast<uint32_t>(y) & 0x1FFFFF) << 21)
+             |  static_cast<uint64_t>(static_cast<uint32_t>(z) & 0x1FFFFF);
+    };
+    std::unordered_map<uint64_t, std::vector<uint32_t>> placedCells;
+
+    const int maxAttempts = (std::max)(count, 0) * 20;
+    for (int attempt = 0; attempt < maxAttempts && static_cast<int>(samples.size()) < count; ++attempt) {
+        const double r = distArea(rng);
+        const size_t t = static_cast<size_t>(std::lower_bound(cdf.begin(), cdf.end(), r) - cdf.begin());
+        if (t >= triCount) continue;
+        const uint32_t ia = idx[t * 3 + 0], ib = idx[t * 3 + 1], ic = idx[t * 3 + 2];
+
+        // Uniform barycentric sample (sqrt trick).
+        const float su = std::sqrt(dist01(rng));
+        const float r2 = dist01(rng);
+        const float b0 = 1.0f - su, b1 = su * (1.0f - r2), b2 = su * r2;
+
+        if (densityMaskAttr) {
+            const float dval = b0 * densityMaskAttr[ia] + b1 * densityMaskAttr[ib] + b2 * densityMaskAttr[ic];
+            if (dist01(rng) > dval) continue;   // rejection sampling — mask = density
+        }
+        float sval = 1.0f;
+        if (scaleMaskAttr) {
+            sval = b0 * scaleMaskAttr[ia] + b1 * scaleMaskAttr[ib] + b2 * scaleMaskAttr[ic];
+        }
+
+        const Vec3& A = worldV[ia];
+        const Vec3& B = worldV[ib];
+        const Vec3& C = worldV[ic];
+        const Vec3 pos = A * b0 + B * b1 + C * b2;
+
+        if (useMinDist) {
+            const int cx = static_cast<int>(std::floor(pos.x * invCell));
+            const int cy = static_cast<int>(std::floor(pos.y * invCell));
+            const int cz = static_cast<int>(std::floor(pos.z * invCell));
+            bool tooClose = false;
+            for (int dx = -1; dx <= 1 && !tooClose; ++dx)
+            for (int dy = -1; dy <= 1 && !tooClose; ++dy)
+            for (int dz = -1; dz <= 1 && !tooClose; ++dz) {
+                auto cit = placedCells.find(cellKey(cx + dx, cy + dy, cz + dz));
+                if (cit == placedCells.end()) continue;
+                for (const uint32_t si : cit->second) {
+                    const Vec3 diff = pos - samples[si].pos;
+                    if (diff.x * diff.x + diff.y * diff.y + diff.z * diff.z < minDist2) {
+                        tooClose = true;
+                        break;
+                    }
+                }
+            }
+            if (tooClose) continue;
+            placedCells[cellKey(cx, cy, cz)].push_back(static_cast<uint32_t>(samples.size()));
+        }
+
+        Sample s;
+        s.pos = pos;
+        const Vec3 fn = Vec3::cross(B - A, C - A);
+        const float len = std::sqrt(fn.x * fn.x + fn.y * fn.y + fn.z * fn.z);
+        s.normal = (len > 1e-12f) ? Vec3(fn.x / len, fn.y / len, fn.z / len) : Vec3(0.0f, 1.0f, 0.0f);
+        s.scaleMask = sval;
+        samples.push_back(s);
+    }
+
+    // ---- Create/replace the InstanceGroup -----------------------------------
+    auto& im = InstanceManager::getInstance();
+    if (InstanceGroup* existing = im.findGroupByName(groupName)) {
+        im.deleteGroup(existing->id);
+    }
+    if (samples.empty() || count <= 0) {
+        // Nothing to place (mask rejected everything / count 0) — group removed,
+        // surface passes through untouched.
+        lastPlaced = 0;
+        gctx->instancesDirty = true;
+        return passThrough();
+    }
+
+    const int gid = im.createGroup(groupName, sourceObject, {});
+    InstanceGroup* group = im.getGroup(gid);
+    if (!group) {
+        ctx.addError(id, "Scatter Instances: failed to create instance group");
+        return passThrough();
+    }
+
+    // Modern multi-source path (same contract ParticleRenderBridge uses: name +
+    // facades + computeCenter; BVH/centered triangles are built on demand).
+    {
+        ScatterSource src;
+        src.name = sourceObject;
+        src.triangles = std::move(srcTris);
+        src.weight = 1.0f;
+        src.computeCenter();
+        group->sources.push_back(std::move(src));
+    }
+
+    group->target_type = InstanceGroup::TargetType::MESH;
+    group->target_node_name = gctx->objectName;
+    auto& bs = group->brush_settings;
+    bs.use_global_settings = true;   // sources[0].settings untouched — globals below win
+    bs.seed = seed;
+    bs.target_count = count;
+    bs.scale_min = scaleMin;
+    bs.scale_max = scaleMax;
+    bs.rotation_random_y = yawRandom;
+    bs.rotation_random_xz = tiltRandom;
+    bs.align_to_normal = alignToNormal;
+    bs.normal_influence = normalInfluence;
+    bs.y_offset_min = 0.0f;
+    bs.y_offset_max = 0.0f;
+
+    for (const Sample& s : samples) {
+        InstanceTransform t = group->generateRandomTransform(s.pos, s.normal);
+        if (scaleMaskAttr && scaleMaskInfluence > 0.0f) {
+            // Independent scale role: instances at low-scale-mask spots come out smaller
+            // (small plants near a patch edge, full-size in the core) regardless of what
+            // (if anything) is gating density. Influence 0 disables the effect.
+            const float f = 1.0f - scaleMaskInfluence * (1.0f - s.scaleMask);
+            t.scale = t.scale * f;
+        }
+        group->addInstance(t);
+    }
+    group->gpu_dirty = true;
+
+    lastPlaced = static_cast<int>(samples.size());
+    gctx->instancesDirty = true;
+    return passThrough();
+}
+
+// ============================================================================
+// REMESH (VOXEL) NODE — compute() (Faz 8a)
+// ============================================================================
+// Blender-style voxel remesh: input surface → narrow-band SDF → marching cubes.
+// Lives here (not in GeometryNodesV2.h) because the marching-cubes tables are
+// ~4KB of static data that shouldn't ride into every TU including the header —
+// same declared-in-header/defined-here pattern as ScatterInstancesNode above.
+//
+// SDF construction is Bridson's classic makelevelset3 scheme:
+//   1. UNSIGNED distance: every triangle stamps the cells inside its inflated
+//      AABB with point-to-triangle distance (narrow band only).
+//   2. SIGN: per-(y,z) column ray parity — each triangle records where it
+//      crosses each column's X ray; a cell behind an odd number of crossings
+//      is inside. Robust for closed surfaces; open boundaries have no defined
+//      inside (documented node limitation, same as Blender's voxel remesher).
+//   3. Marching cubes (Paul Bourke tables — FoamSurface.cpp keeps its own
+//      deliberately self-contained copy of the same public-domain tables) with
+//      an edge-keyed vertex map, so the output comes out fully WELDED — no
+//      post-weld pass needed, and Laplacian smoothing has real adjacency.
+
+namespace {
+namespace remeshmc {
+
+static const int kEdgeTable[256] = {
+0x0,0x109,0x203,0x30a,0x406,0x50f,0x605,0x70c,0x80c,0x905,0xa0f,0xb06,0xc0a,0xd03,0xe09,0xf00,
+0x190,0x99,0x393,0x29a,0x596,0x49f,0x795,0x69c,0x99c,0x895,0xb9f,0xa96,0xd9a,0xc93,0xf99,0xe90,
+0x230,0x339,0x33,0x13a,0x636,0x73f,0x435,0x53c,0xa3c,0xb35,0x83f,0x936,0xe3a,0xf33,0xc39,0xd30,
+0x3a0,0x2a9,0x1a3,0xaa,0x7a6,0x6af,0x5a5,0x4ac,0xbac,0xaa5,0x9af,0x8a6,0xfaa,0xea3,0xda9,0xca0,
+0x460,0x569,0x663,0x76a,0x66,0x16f,0x265,0x36c,0xc6c,0xd65,0xe6f,0xf66,0x86a,0x963,0xa69,0xb60,
+0x5f0,0x4f9,0x7f3,0x6fa,0x1f6,0xff,0x3f5,0x2fc,0xdfc,0xcf5,0xfff,0xef6,0x9fa,0x8f3,0xbf9,0xaf0,
+0x650,0x759,0x453,0x55a,0x256,0x35f,0x55,0x15c,0xe5c,0xf55,0xc5f,0xd56,0xa5a,0xb53,0x859,0x950,
+0x7c0,0x6c9,0x5c3,0x4ca,0x3c6,0x2cf,0x1c5,0xcc,0xfcc,0xec5,0xdcf,0xcc6,0xbca,0xac3,0x9c9,0x8c0,
+0x8c0,0x9c9,0xac3,0xbca,0xcc6,0xdcf,0xec5,0xfcc,0xcc,0x1c5,0x2cf,0x3c6,0x4ca,0x5c3,0x6c9,0x7c0,
+0x950,0x859,0xb53,0xa5a,0xd56,0xc5f,0xf55,0xe5c,0x15c,0x55,0x35f,0x256,0x55a,0x453,0x759,0x650,
+0xaf0,0xbf9,0x8f3,0x9fa,0xef6,0xfff,0xcf5,0xdfc,0x2fc,0x3f5,0xff,0x1f6,0x6fa,0x7f3,0x4f9,0x5f0,
+0xb60,0xa69,0x963,0x86a,0xf66,0xe6f,0xd65,0xc6c,0x36c,0x265,0x16f,0x66,0x76a,0x663,0x569,0x460,
+0xca0,0xda9,0xea3,0xfaa,0x8a6,0x9af,0xaa5,0xbac,0x4ac,0x5a5,0x6af,0x7a6,0xaa,0x1a3,0x2a9,0x3a0,
+0xd30,0xc39,0xf33,0xe3a,0x936,0x83f,0xb35,0xa3c,0x53c,0x435,0x73f,0x636,0x13a,0x33,0x339,0x230,
+0xe90,0xf99,0xc93,0xd9a,0xa96,0xb9f,0x895,0x99c,0x69c,0x795,0x49f,0x596,0x29a,0x393,0x99,0x190,
+0xf00,0xe09,0xd03,0xc0a,0xb06,0xa0f,0x905,0x80c,0x70c,0x605,0x50f,0x406,0x30a,0x203,0x109,0x0 };
+
+static const int kTriTable[256][16] = {
+{-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,8,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,1,9,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{1,8,3,9,8,1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{1,2,10,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,8,3,1,2,10,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{9,2,10,0,2,9,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{2,8,3,2,10,8,10,9,8,-1,-1,-1,-1,-1,-1,-1},
+{3,11,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,11,2,8,11,0,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{1,9,0,2,3,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{1,11,2,1,9,11,9,8,11,-1,-1,-1,-1,-1,-1,-1},
+{3,10,1,11,10,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,10,1,0,8,10,8,11,10,-1,-1,-1,-1,-1,-1,-1},
+{3,9,0,3,11,9,11,10,9,-1,-1,-1,-1,-1,-1,-1},
+{9,8,10,10,8,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{4,7,8,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{4,3,0,7,3,4,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,1,9,8,4,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{4,1,9,4,7,1,7,3,1,-1,-1,-1,-1,-1,-1,-1},
+{1,2,10,8,4,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{3,4,7,3,0,4,1,2,10,-1,-1,-1,-1,-1,-1,-1},
+{9,2,10,9,0,2,8,4,7,-1,-1,-1,-1,-1,-1,-1},
+{2,10,9,2,9,7,2,7,3,7,9,4,-1,-1,-1,-1},
+{8,4,7,3,11,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{11,4,7,11,2,4,2,0,4,-1,-1,-1,-1,-1,-1,-1},
+{9,0,1,8,4,7,2,3,11,-1,-1,-1,-1,-1,-1,-1},
+{4,7,11,9,4,11,9,11,2,9,2,1,-1,-1,-1,-1},
+{3,10,1,3,11,10,7,8,4,-1,-1,-1,-1,-1,-1,-1},
+{1,11,10,1,4,11,1,0,4,7,11,4,-1,-1,-1,-1},
+{4,7,8,9,0,11,9,11,10,11,0,3,-1,-1,-1,-1},
+{4,7,11,4,11,9,9,11,10,-1,-1,-1,-1,-1,-1,-1},
+{9,5,4,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{9,5,4,0,8,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,5,4,1,5,0,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{8,5,4,8,3,5,3,1,5,-1,-1,-1,-1,-1,-1,-1},
+{1,2,10,9,5,4,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{3,0,8,1,2,10,4,9,5,-1,-1,-1,-1,-1,-1,-1},
+{5,2,10,5,4,2,4,0,2,-1,-1,-1,-1,-1,-1,-1},
+{2,10,5,3,2,5,3,5,4,3,4,8,-1,-1,-1,-1},
+{9,5,4,2,3,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,11,2,0,8,11,4,9,5,-1,-1,-1,-1,-1,-1,-1},
+{0,5,4,0,1,5,2,3,11,-1,-1,-1,-1,-1,-1,-1},
+{2,1,5,2,5,8,2,8,11,4,8,5,-1,-1,-1,-1},
+{10,3,11,10,1,3,9,5,4,-1,-1,-1,-1,-1,-1,-1},
+{4,9,5,0,8,1,8,10,1,8,11,10,-1,-1,-1,-1},
+{5,4,0,5,0,11,5,11,10,11,0,3,-1,-1,-1,-1},
+{5,4,8,5,8,10,10,8,11,-1,-1,-1,-1,-1,-1,-1},
+{9,7,8,5,7,9,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{9,3,0,9,5,3,5,7,3,-1,-1,-1,-1,-1,-1,-1},
+{0,7,8,0,1,7,1,5,7,-1,-1,-1,-1,-1,-1,-1},
+{1,5,3,3,5,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{9,7,8,9,5,7,10,1,2,-1,-1,-1,-1,-1,-1,-1},
+{10,1,2,9,5,0,5,3,0,5,7,3,-1,-1,-1,-1},
+{8,0,2,8,2,5,8,5,7,10,5,2,-1,-1,-1,-1},
+{2,10,5,2,5,3,3,5,7,-1,-1,-1,-1,-1,-1,-1},
+{7,9,5,7,8,9,3,11,2,-1,-1,-1,-1,-1,-1,-1},
+{9,5,7,9,7,2,9,2,0,2,7,11,-1,-1,-1,-1},
+{2,3,11,0,1,8,1,7,8,1,5,7,-1,-1,-1,-1},
+{11,2,1,11,1,7,7,1,5,-1,-1,-1,-1,-1,-1,-1},
+{9,5,8,8,5,7,10,1,3,10,3,11,-1,-1,-1,-1},
+{5,7,0,5,0,9,7,11,0,1,0,10,11,10,0,-1},
+{11,10,0,11,0,3,10,5,0,8,0,7,5,7,0,-1},
+{11,10,5,7,11,5,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{10,6,5,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,8,3,5,10,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{9,0,1,5,10,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{1,8,3,1,9,8,5,10,6,-1,-1,-1,-1,-1,-1,-1},
+{1,6,5,2,6,1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{1,6,5,1,2,6,3,0,8,-1,-1,-1,-1,-1,-1,-1},
+{9,6,5,9,0,6,0,2,6,-1,-1,-1,-1,-1,-1,-1},
+{5,9,8,5,8,2,5,2,6,3,2,8,-1,-1,-1,-1},
+{2,3,11,10,6,5,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{11,0,8,11,2,0,10,6,5,-1,-1,-1,-1,-1,-1,-1},
+{0,1,9,2,3,11,5,10,6,-1,-1,-1,-1,-1,-1,-1},
+{5,10,6,1,9,2,9,11,2,9,8,11,-1,-1,-1,-1},
+{6,3,11,6,5,3,5,1,3,-1,-1,-1,-1,-1,-1,-1},
+{0,8,11,0,11,5,0,5,1,5,11,6,-1,-1,-1,-1},
+{3,11,6,0,3,6,0,6,5,0,5,9,-1,-1,-1,-1},
+{6,5,9,6,9,11,11,9,8,-1,-1,-1,-1,-1,-1,-1},
+{5,10,6,4,7,8,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{4,3,0,4,7,3,6,5,10,-1,-1,-1,-1,-1,-1,-1},
+{1,9,0,5,10,6,8,4,7,-1,-1,-1,-1,-1,-1,-1},
+{10,6,5,1,9,7,1,7,3,7,9,4,-1,-1,-1,-1},
+{6,1,2,6,5,1,4,7,8,-1,-1,-1,-1,-1,-1,-1},
+{1,2,5,5,2,6,3,0,4,3,4,7,-1,-1,-1,-1},
+{8,4,7,9,0,5,0,6,5,0,2,6,-1,-1,-1,-1},
+{7,3,9,7,9,4,3,2,9,5,9,6,2,6,9,-1},
+{3,11,2,7,8,4,10,6,5,-1,-1,-1,-1,-1,-1,-1},
+{5,10,6,4,7,2,4,2,0,2,7,11,-1,-1,-1,-1},
+{0,1,9,4,7,8,2,3,11,5,10,6,-1,-1,-1,-1},
+{9,2,1,9,11,2,9,4,11,7,11,4,5,10,6,-1},
+{8,4,7,3,11,5,3,5,1,5,11,6,-1,-1,-1,-1},
+{5,1,11,5,11,6,1,0,11,7,11,4,0,4,11,-1},
+{0,5,9,0,6,5,0,3,6,11,6,3,8,4,7,-1},
+{6,5,9,6,9,11,4,7,9,7,11,9,-1,-1,-1,-1},
+{10,4,9,6,4,10,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{4,10,6,4,9,10,0,8,3,-1,-1,-1,-1,-1,-1,-1},
+{10,0,1,10,6,0,6,4,0,-1,-1,-1,-1,-1,-1,-1},
+{8,3,1,8,1,6,8,6,4,6,1,10,-1,-1,-1,-1},
+{1,4,9,1,2,4,2,6,4,-1,-1,-1,-1,-1,-1,-1},
+{3,0,8,1,2,9,2,4,9,2,6,4,-1,-1,-1,-1},
+{0,2,4,4,2,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{8,3,2,8,2,4,4,2,6,-1,-1,-1,-1,-1,-1,-1},
+{10,4,9,10,6,4,11,2,3,-1,-1,-1,-1,-1,-1,-1},
+{0,8,2,2,8,11,4,9,10,4,10,6,-1,-1,-1,-1},
+{3,11,2,0,1,6,0,6,4,6,1,10,-1,-1,-1,-1},
+{6,4,1,6,1,10,4,8,1,2,1,11,8,11,1,-1},
+{9,6,4,9,3,6,9,1,3,11,6,3,-1,-1,-1,-1},
+{8,11,1,8,1,0,11,6,1,9,1,4,6,4,1,-1},
+{3,11,6,3,6,0,0,6,4,-1,-1,-1,-1,-1,-1,-1},
+{6,4,8,11,6,8,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{7,10,6,7,8,10,8,9,10,-1,-1,-1,-1,-1,-1,-1},
+{0,7,3,0,10,7,0,9,10,6,7,10,-1,-1,-1,-1},
+{10,6,7,1,10,7,1,7,8,1,8,0,-1,-1,-1,-1},
+{10,6,7,10,7,1,1,7,3,-1,-1,-1,-1,-1,-1,-1},
+{1,2,6,1,6,8,1,8,9,8,6,7,-1,-1,-1,-1},
+{2,6,9,2,9,1,6,7,9,0,9,3,7,3,9,-1},
+{7,8,0,7,0,6,6,0,2,-1,-1,-1,-1,-1,-1,-1},
+{7,3,2,6,7,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{2,3,11,10,6,8,10,8,9,8,6,7,-1,-1,-1,-1},
+{2,0,7,2,7,11,0,9,7,6,7,10,9,10,7,-1},
+{1,8,0,1,7,8,1,10,7,6,7,10,2,3,11,-1},
+{11,2,1,11,1,7,10,6,1,6,7,1,-1,-1,-1,-1},
+{8,9,6,8,6,7,9,1,6,11,6,3,1,3,6,-1},
+{0,9,1,11,6,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{7,8,0,7,0,6,3,11,0,11,6,0,-1,-1,-1,-1},
+{7,11,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{7,6,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{3,0,8,11,7,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,1,9,11,7,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{8,1,9,8,3,1,11,7,6,-1,-1,-1,-1,-1,-1,-1},
+{10,1,2,6,11,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{1,2,10,3,0,8,6,11,7,-1,-1,-1,-1,-1,-1,-1},
+{2,9,0,2,10,9,6,11,7,-1,-1,-1,-1,-1,-1,-1},
+{6,11,7,2,10,3,10,8,3,10,9,8,-1,-1,-1,-1},
+{7,2,3,6,2,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{7,0,8,7,6,0,6,2,0,-1,-1,-1,-1,-1,-1,-1},
+{2,7,6,2,3,7,0,1,9,-1,-1,-1,-1,-1,-1,-1},
+{1,6,2,1,8,6,1,9,8,8,7,6,-1,-1,-1,-1},
+{10,7,6,10,1,7,1,3,7,-1,-1,-1,-1,-1,-1,-1},
+{10,7,6,1,7,10,1,8,7,1,0,8,-1,-1,-1,-1},
+{0,3,7,0,7,10,0,10,9,6,10,7,-1,-1,-1,-1},
+{7,6,10,7,10,8,8,10,9,-1,-1,-1,-1,-1,-1,-1},
+{6,8,4,11,8,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{3,6,11,3,0,6,0,4,6,-1,-1,-1,-1,-1,-1,-1},
+{8,6,11,8,4,6,9,0,1,-1,-1,-1,-1,-1,-1,-1},
+{9,4,6,9,6,3,9,3,1,11,3,6,-1,-1,-1,-1},
+{6,8,4,6,11,8,2,10,1,-1,-1,-1,-1,-1,-1,-1},
+{1,2,10,3,0,11,0,6,11,0,4,6,-1,-1,-1,-1},
+{4,11,8,4,6,11,0,2,9,2,10,9,-1,-1,-1,-1},
+{10,9,3,10,3,2,9,4,3,11,3,6,4,6,3,-1},
+{8,2,3,8,4,2,4,6,2,-1,-1,-1,-1,-1,-1,-1},
+{0,4,2,4,6,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{1,9,0,2,3,4,2,4,6,4,3,8,-1,-1,-1,-1},
+{1,9,4,1,4,2,2,4,6,-1,-1,-1,-1,-1,-1,-1},
+{8,1,3,8,6,1,8,4,6,6,10,1,-1,-1,-1,-1},
+{10,1,0,10,0,6,6,0,4,-1,-1,-1,-1,-1,-1,-1},
+{4,6,3,4,3,8,6,10,3,0,3,9,10,9,3,-1},
+{10,9,4,6,10,4,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{4,9,5,7,6,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,8,3,4,9,5,11,7,6,-1,-1,-1,-1,-1,-1,-1},
+{5,0,1,5,4,0,7,6,11,-1,-1,-1,-1,-1,-1,-1},
+{11,7,6,8,3,4,3,5,4,3,1,5,-1,-1,-1,-1},
+{9,5,4,10,1,2,7,6,11,-1,-1,-1,-1,-1,-1,-1},
+{6,11,7,1,2,10,0,8,3,4,9,5,-1,-1,-1,-1},
+{7,6,11,5,4,10,4,2,10,4,0,2,-1,-1,-1,-1},
+{3,4,8,3,5,4,3,2,5,10,5,2,11,7,6,-1},
+{7,2,3,7,6,2,5,4,9,-1,-1,-1,-1,-1,-1,-1},
+{9,5,4,0,8,6,0,6,2,6,8,7,-1,-1,-1,-1},
+{3,6,2,3,7,6,1,5,0,5,4,0,-1,-1,-1,-1},
+{6,2,8,6,8,7,2,1,8,4,8,5,1,5,8,-1},
+{9,5,4,10,1,6,1,7,6,1,3,7,-1,-1,-1,-1},
+{1,6,10,1,7,6,1,0,7,8,7,0,9,5,4,-1},
+{4,0,10,4,10,5,0,3,10,6,10,7,3,7,10,-1},
+{7,6,10,7,10,8,5,4,10,4,8,10,-1,-1,-1,-1},
+{6,9,5,6,11,9,11,8,9,-1,-1,-1,-1,-1,-1,-1},
+{3,6,11,0,6,3,0,5,6,0,9,5,-1,-1,-1,-1},
+{0,11,8,0,5,11,0,1,5,5,6,11,-1,-1,-1,-1},
+{6,11,3,6,3,5,5,3,1,-1,-1,-1,-1,-1,-1,-1},
+{1,2,10,9,5,11,9,11,8,11,5,6,-1,-1,-1,-1},
+{0,11,3,0,6,11,0,9,6,5,6,9,1,2,10,-1},
+{11,8,5,11,5,6,8,0,5,10,5,2,0,2,5,-1},
+{6,11,3,6,3,5,2,10,3,10,5,3,-1,-1,-1,-1},
+{5,8,9,5,2,8,5,6,2,3,8,2,-1,-1,-1,-1},
+{9,5,6,9,6,0,0,6,2,-1,-1,-1,-1,-1,-1,-1},
+{1,5,8,1,8,0,5,6,8,3,8,2,6,2,8,-1},
+{1,5,6,2,1,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{1,3,6,1,6,10,3,8,6,5,6,9,8,9,6,-1},
+{10,1,0,10,0,6,9,5,0,5,6,0,-1,-1,-1,-1},
+{0,3,8,5,6,10,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{10,5,6,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{11,5,10,7,5,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{11,5,10,11,7,5,8,3,0,-1,-1,-1,-1,-1,-1,-1},
+{5,11,7,5,10,11,1,9,0,-1,-1,-1,-1,-1,-1,-1},
+{10,7,5,10,11,7,9,8,1,8,3,1,-1,-1,-1,-1},
+{11,1,2,11,7,1,7,5,1,-1,-1,-1,-1,-1,-1,-1},
+{0,8,3,1,2,7,1,7,5,7,2,11,-1,-1,-1,-1},
+{9,7,5,9,2,7,9,0,2,2,11,7,-1,-1,-1,-1},
+{7,5,2,7,2,11,5,9,2,3,2,8,9,8,2,-1},
+{2,5,10,2,3,5,3,7,5,-1,-1,-1,-1,-1,-1,-1},
+{8,2,0,8,5,2,8,7,5,10,2,5,-1,-1,-1,-1},
+{9,0,1,5,10,3,5,3,7,3,10,2,-1,-1,-1,-1},
+{9,8,2,9,2,1,8,7,2,10,2,5,7,5,2,-1},
+{1,3,5,3,7,5,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,8,7,0,7,1,1,7,5,-1,-1,-1,-1,-1,-1,-1},
+{9,0,3,9,3,5,5,3,7,-1,-1,-1,-1,-1,-1,-1},
+{9,8,7,5,9,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{5,8,4,5,10,8,10,11,8,-1,-1,-1,-1,-1,-1,-1},
+{5,0,4,5,11,0,5,10,11,11,3,0,-1,-1,-1,-1},
+{0,1,9,8,4,10,8,10,11,10,4,5,-1,-1,-1,-1},
+{10,11,4,10,4,5,11,3,4,9,4,1,3,1,4,-1},
+{2,5,1,2,8,5,2,11,8,4,5,8,-1,-1,-1,-1},
+{0,4,11,0,11,3,4,5,11,2,11,1,5,1,11,-1},
+{0,2,5,0,5,9,2,11,5,4,5,8,11,8,5,-1},
+{9,4,5,2,11,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{2,5,10,3,5,2,3,4,5,3,8,4,-1,-1,-1,-1},
+{5,10,2,5,2,4,4,2,0,-1,-1,-1,-1,-1,-1,-1},
+{3,10,2,3,5,10,3,8,5,4,5,8,0,1,9,-1},
+{5,10,2,5,2,4,1,9,2,9,4,2,-1,-1,-1,-1},
+{8,4,5,8,5,3,3,5,1,-1,-1,-1,-1,-1,-1,-1},
+{0,4,5,1,0,5,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{8,4,5,8,5,3,9,0,5,0,3,5,-1,-1,-1,-1},
+{9,4,5,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{4,11,7,4,9,11,9,10,11,-1,-1,-1,-1,-1,-1,-1},
+{0,8,3,4,9,7,9,11,7,9,10,11,-1,-1,-1,-1},
+{1,10,11,1,11,4,1,4,0,7,4,11,-1,-1,-1,-1},
+{3,1,4,3,4,8,1,10,4,7,4,11,10,11,4,-1},
+{4,11,7,9,11,4,9,2,11,9,1,2,-1,-1,-1,-1},
+{9,7,4,9,11,7,9,1,11,2,11,1,0,8,3,-1},
+{11,7,4,11,4,2,2,4,0,-1,-1,-1,-1,-1,-1,-1},
+{11,7,4,11,4,2,8,3,4,3,2,4,-1,-1,-1,-1},
+{2,9,10,2,7,9,2,3,7,7,4,9,-1,-1,-1,-1},
+{9,10,7,9,7,4,10,2,7,8,7,0,2,0,7,-1},
+{3,7,10,3,10,2,7,4,10,1,10,0,4,0,10,-1},
+{1,10,2,8,7,4,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{4,9,1,4,1,7,7,1,3,-1,-1,-1,-1,-1,-1,-1},
+{4,9,1,4,1,7,0,8,1,8,7,1,-1,-1,-1,-1},
+{4,0,3,7,4,3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{4,8,7,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{9,10,8,10,11,8,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{3,0,9,3,9,11,11,9,10,-1,-1,-1,-1,-1,-1,-1},
+{0,1,10,0,10,8,8,10,11,-1,-1,-1,-1,-1,-1,-1},
+{3,1,10,11,3,10,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{1,2,11,1,11,9,9,11,8,-1,-1,-1,-1,-1,-1,-1},
+{3,0,9,3,9,11,1,2,9,2,11,9,-1,-1,-1,-1},
+{0,2,11,8,0,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{3,2,11,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{2,3,8,2,8,10,10,8,9,-1,-1,-1,-1,-1,-1,-1},
+{9,10,2,0,9,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{2,3,8,2,8,10,0,1,8,1,10,8,-1,-1,-1,-1},
+{1,10,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{1,3,8,9,1,8,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,9,1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{0,3,8,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
+{-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1} };
+
+// Corner offsets (Bourke ordering) and the two corners each of the 12 edges joins.
+static const int kCorner[8][3] = {
+    {0,0,0},{1,0,0},{1,0,1},{0,0,1},{0,1,0},{1,1,0},{1,1,1},{0,1,1} };
+static const int kEdgeCorner[12][2] = {
+    {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7} };
+
+// Ericson's closest-point-on-triangle (same routine ParticleSimulation.cpp keeps
+// as its own TU-local copy for collider voxelization — small enough to duplicate
+// rather than promote a physics TU's internal helper into a shared header).
+inline Vec3 closestPointOnTri(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c) {
+    const Vec3 ab = b - a, ac = c - a, ap = p - a;
+    const float d1 = Vec3::dot(ab, ap), d2 = Vec3::dot(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return a;
+    const Vec3 bp = p - b;
+    const float d3 = Vec3::dot(ab, bp), d4 = Vec3::dot(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return b;
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) return a + ab * (d1 / (d1 - d3));
+    const Vec3 cp = p - c;
+    const float d5 = Vec3::dot(ab, cp), d6 = Vec3::dot(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return c;
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) return a + ac * (d2 / (d2 - d6));
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return b + (c - b) * w;
+    }
+    const float denom = 1.0f / (va + vb + vc);
+    return a + ab * (vb * denom) + ac * (vc * denom);
+}
+
+} // namespace remeshmc
+} // namespace
+
+NodeSystem::PinValue GeometryNodesV2::RemeshNode::compute(int /*outputIndex*/, NodeSystem::EvaluationContext& ctx) {
+    using namespace remeshmc;
+
+    NodeSystem::GeometryValue inMesh = getGeometryInput(0, ctx);
+    if (!inMesh || !inMesh->geometry || inMesh->geometry->indices.empty()) {
+        ctx.addError(id, "Remesh: no input geometry");
+        return NodeSystem::PinValue{};
+    }
+    const auto& sg = *inMesh->geometry;
+    const Vec3* Po = sg.get_attribute_data<Vec3>("P_orig");
+    const size_t vc = sg.get_vertex_count();
+    const auto& srcIdx = sg.indices;
+    const size_t triCount = srcIdx.size() / 3;
+    if (!Po || vc == 0 || triCount == 0) {
+        ctx.addError(id, "Remesh: input has no P_orig channel");
+        return NodeSystem::PinValue{};
+    }
+    const uint16_t* srcMat = sg.get_material_ids();
+
+    // ---- Grid setup (LOCAL space — output shares the input's pivot) ----------
+    Vec3 bmin = Po[0], bmax = Po[0];
+    for (size_t v = 1; v < vc; ++v) {
+        bmin.x = (std::min)(bmin.x, Po[v].x); bmax.x = (std::max)(bmax.x, Po[v].x);
+        bmin.y = (std::min)(bmin.y, Po[v].y); bmax.y = (std::max)(bmax.y, Po[v].y);
+        bmin.z = (std::min)(bmin.z, Po[v].z); bmax.z = (std::max)(bmax.z, Po[v].z);
+    }
+    const Vec3 ext = bmax - bmin;
+    const float maxSide = (std::max)(ext.x, (std::max)(ext.y, ext.z));
+    if (maxSide <= 1e-8f) {
+        ctx.addError(id, "Remesh: degenerate input bounds");
+        return NodeSystem::PinValue{};
+    }
+    float h = relativeSize ? (std::max)(voxelSize, 0.002f) * maxSide : voxelSize;
+    if (h <= 1e-8f) {
+        ctx.addError(id, "Remesh: voxel size must be > 0");
+        return NodeSystem::PinValue{};
+    }
+
+    // Memory guard: dist+closestTri are 8 bytes/cell — cap the grid and coarsen
+    // the voxel size to fit instead of silently allocating gigabytes. 20M cells
+    // (~270^3) is ~160MB peak, released before the mesh is materialized.
+    const int pad = 3;
+    int nx = 0, ny = 0, nz = 0;
+    auto computeDims = [&]() {
+        nx = static_cast<int>(std::ceil(ext.x / h)) + 2 * pad + 1;
+        ny = static_cast<int>(std::ceil(ext.y / h)) + 2 * pad + 1;
+        nz = static_cast<int>(std::ceil(ext.z / h)) + 2 * pad + 1;
+    };
+    computeDims();
+    const size_t kMaxCells = 20'000'000;
+    while (static_cast<size_t>(nx) * ny * nz > kMaxCells) {
+        h *= 1.26f;   // ~2x cell count reduction per step
+        computeDims();
+    }
+    const size_t total = static_cast<size_t>(nx) * ny * nz;
+    const Vec3 origin = bmin - Vec3(pad * h, pad * h, pad * h);
+    lastGridX = nx; lastGridY = ny; lastGridZ = nz;
+
+    auto cellIndex = [nx, ny](int i, int j, int k) -> size_t {
+        return static_cast<size_t>(i) + static_cast<size_t>(j) * nx
+             + static_cast<size_t>(k) * nx * static_cast<size_t>(ny);
+    };
+    auto cellCenter = [&](int i, int j, int k) -> Vec3 {
+        return origin + Vec3((i + 0.5f) * h, (j + 0.5f) * h, (k + 0.5f) * h);
+    };
+
+    // ---- 1) Unsigned narrow-band distance (squared, sqrt'ed at the end) ------
+    const float band = 2.5f * h;
+    std::vector<float> dist2(total, band * band);
+    std::vector<int32_t> closestTri;
+    if (transferMaterial) closestTri.assign(total, -1);
+
+    // Cell-center c >= lo  <=>  i >= (lo - origin)/h - 0.5 ; symmetric for hi.
+    auto rangeLo = [&](float lo, float o) { return (std::max)(0, static_cast<int>(std::floor((lo - o) / h - 0.5f))); };
+    auto rangeHi = [&](float hi, float o, int n) { return (std::min)(n - 1, static_cast<int>(std::ceil((hi - o) / h - 0.5f))); };
+
+    for (size_t t = 0; t < triCount; ++t) {
+        const Vec3& A = Po[srcIdx[t * 3 + 0]];
+        const Vec3& B = Po[srcIdx[t * 3 + 1]];
+        const Vec3& C = Po[srcIdx[t * 3 + 2]];
+        const float lox = (std::min)(A.x, (std::min)(B.x, C.x)) - band;
+        const float hix = (std::max)(A.x, (std::max)(B.x, C.x)) + band;
+        const float loy = (std::min)(A.y, (std::min)(B.y, C.y)) - band;
+        const float hiy = (std::max)(A.y, (std::max)(B.y, C.y)) + band;
+        const float loz = (std::min)(A.z, (std::min)(B.z, C.z)) - band;
+        const float hiz = (std::max)(A.z, (std::max)(B.z, C.z)) + band;
+        const int i0 = rangeLo(lox, origin.x), i1 = rangeHi(hix, origin.x, nx);
+        const int j0 = rangeLo(loy, origin.y), j1 = rangeHi(hiy, origin.y, ny);
+        const int k0 = rangeLo(loz, origin.z), k1 = rangeHi(hiz, origin.z, nz);
+        for (int k = k0; k <= k1; ++k)
+        for (int j = j0; j <= j1; ++j)
+        for (int i = i0; i <= i1; ++i) {
+            const Vec3 p = cellCenter(i, j, k);
+            const Vec3 q = closestPointOnTri(p, A, B, C);
+            const Vec3 d = p - q;
+            const float dd = d.x * d.x + d.y * d.y + d.z * d.z;
+            const size_t ci = cellIndex(i, j, k);
+            if (dd < dist2[ci]) {
+                dist2[ci] = dd;
+                if (transferMaterial) closestTri[ci] = static_cast<int32_t>(t);
+            }
+        }
+    }
+
+    // ---- 2) Sign via per-(y,z)-column X-ray parity (makelevelset3) -----------
+    // Column sample point is nudged off the exact cell-center lattice so a ray
+    // grazing a shared triangle edge/vertex doesn't get counted by both (or
+    // neither) incident triangle — the classic parity tie-break, bought with a
+    // sub-1e-4-voxel bias instead of exact predicates.
+    const float jog = 1.3e-4f * h;
+    std::vector<std::vector<float>> columns(static_cast<size_t>(ny) * nz);
+    for (size_t t = 0; t < triCount; ++t) {
+        const Vec3& A = Po[srcIdx[t * 3 + 0]];
+        const Vec3& B = Po[srcIdx[t * 3 + 1]];
+        const Vec3& C = Po[srcIdx[t * 3 + 2]];
+        const float denom = (B.y - A.y) * (C.z - A.z) - (B.z - A.z) * (C.y - A.y);
+        if (std::fabs(denom) < 1e-14f) continue;   // edge-on to X; a closed mesh's other faces cover it
+        const float loy = (std::min)(A.y, (std::min)(B.y, C.y));
+        const float hiy = (std::max)(A.y, (std::max)(B.y, C.y));
+        const float loz = (std::min)(A.z, (std::min)(B.z, C.z));
+        const float hiz = (std::max)(A.z, (std::max)(B.z, C.z));
+        const int j0 = rangeLo(loy, origin.y), j1 = rangeHi(hiy, origin.y, ny);
+        const int k0 = rangeLo(loz, origin.z), k1 = rangeHi(hiz, origin.z, nz);
+        const float inv = 1.0f / denom;
+        for (int k = k0; k <= k1; ++k)
+        for (int j = j0; j <= j1; ++j) {
+            const float cy = origin.y + (j + 0.5f) * h + jog;
+            const float cz = origin.z + (k + 0.5f) * h + jog;
+            const float beta  = ((cy - A.y) * (C.z - A.z) - (cz - A.z) * (C.y - A.y)) * inv;
+            const float gamma = ((B.y - A.y) * (cz - A.z) - (B.z - A.z) * (cy - A.y)) * inv;
+            const float alpha = 1.0f - beta - gamma;
+            if (alpha < 0.0f || beta < 0.0f || gamma < 0.0f) continue;
+            columns[static_cast<size_t>(j) + static_cast<size_t>(k) * ny]
+                .push_back(alpha * A.x + beta * B.x + gamma * C.x);
+        }
+    }
+    std::vector<float> sdf(total);
+    for (int k = 0; k < nz; ++k)
+    for (int j = 0; j < ny; ++j) {
+        auto& xs = columns[static_cast<size_t>(j) + static_cast<size_t>(k) * ny];
+        std::sort(xs.begin(), xs.end());
+        size_t next = 0;
+        bool inside = false;
+        for (int i = 0; i < nx; ++i) {
+            const float cx = origin.x + (i + 0.5f) * h;
+            while (next < xs.size() && xs[next] < cx) { inside = !inside; ++next; }
+            const size_t ci = cellIndex(i, j, k);
+            const float d = std::sqrt(dist2[ci]);
+            sdf[ci] = inside ? -d : d;
+        }
+        xs.clear();
+        xs.shrink_to_fit();
+    }
+    dist2.clear();
+    dist2.shrink_to_fit();
+    columns.clear();
+    columns.shrink_to_fit();
+
+    // ---- 3) Marching cubes with an edge-keyed vertex map (welded output) -----
+    // An MC vertex lives on a lattice edge shared by up to 4 cubes; keying it by
+    // (lower corner cell, axis) makes every cube reuse the same index — the
+    // output is born welded, no coincident-position pass needed.
+    std::vector<Vec3> outP;
+    std::vector<uint32_t> outIdx;
+    std::unordered_map<uint64_t, uint32_t> edgeVerts;
+    outP.reserve(4096);
+    outIdx.reserve(8192);
+    edgeVerts.reserve(8192);
+
+    auto val = [&](int i, int j, int k) -> float { return sdf[cellIndex(i, j, k)]; };
+    const float iso = 0.0f;
+    for (int k = 0; k + 1 < nz; ++k)
+    for (int j = 0; j + 1 < ny; ++j)
+    for (int i = 0; i + 1 < nx; ++i) {
+        float cv[8];
+        int cubeindex = 0;
+        for (int c = 0; c < 8; ++c) {
+            cv[c] = val(i + kCorner[c][0], j + kCorner[c][1], k + kCorner[c][2]);
+            if (cv[c] < iso) cubeindex |= (1 << c);
+        }
+        const int edges = kEdgeTable[cubeindex];
+        if (edges == 0) continue;
+
+        uint32_t ev[12];
+        for (int e = 0; e < 12; ++e) {
+            if (!(edges & (1 << e))) continue;
+            const int a = kEdgeCorner[e][0], b = kEdgeCorner[e][1];
+            const int ai = i + kCorner[a][0], aj = j + kCorner[a][1], ak = k + kCorner[a][2];
+            const int bi = i + kCorner[b][0], bj = j + kCorner[b][1], bk = k + kCorner[b][2];
+            // Canonical key: the edge's lower corner + its axis (0=x, 1=y, 2=z).
+            const int li = (std::min)(ai, bi), lj = (std::min)(aj, bj), lk = (std::min)(ak, bk);
+            const int axis = (ai != bi) ? 0 : (aj != bj) ? 1 : 2;
+            const uint64_t key = (static_cast<uint64_t>(cellIndex(li, lj, lk)) << 2) | static_cast<uint64_t>(axis);
+            auto it = edgeVerts.find(key);
+            if (it != edgeVerts.end()) { ev[e] = it->second; continue; }
+            const float va = cv[a], vb = cv[b];
+            float tt = (std::fabs(vb - va) > 1e-12f) ? (iso - va) / (vb - va) : 0.5f;
+            if (tt < 0.0f) tt = 0.0f; else if (tt > 1.0f) tt = 1.0f;
+            const Vec3 pa = cellCenter(ai, aj, ak);
+            const Vec3 pb = cellCenter(bi, bj, bk);
+            const uint32_t nvi = static_cast<uint32_t>(outP.size());
+            outP.push_back(pa + (pb - pa) * tt);
+            edgeVerts.emplace(key, nvi);
+            ev[e] = nvi;
+        }
+
+        const int* tri = kTriTable[cubeindex];
+        for (int t = 0; tri[t] != -1; t += 3) {
+            // Same winding FoamSurface uses: with phi negative INSIDE, e0,e2,e1
+            // fronts the outward direction.
+            outIdx.push_back(ev[tri[t]]);
+            outIdx.push_back(ev[tri[t + 2]]);
+            outIdx.push_back(ev[tri[t + 1]]);
+        }
+    }
+    if (outIdx.empty()) {
+        ctx.addError(id, "Remesh: produced no surface - is the input a closed mesh? (Open sheets have no defined inside; try a smaller Voxel Size.)");
+        return NodeSystem::PinValue{};
+    }
+    lastTrisOut = static_cast<int>(outIdx.size() / 3);
+
+    // ---- 4) Optional Laplacian post-smooth (real adjacency — output is welded)
+    if (smoothIterations > 0 && smoothFactor > 0.0f) {
+        const size_t nv = outP.size();
+        std::vector<Vec3> acc(nv);
+        std::vector<uint32_t> cnt(nv);
+        for (int it = 0; it < smoothIterations; ++it) {
+            std::fill(acc.begin(), acc.end(), Vec3(0.0f, 0.0f, 0.0f));
+            std::fill(cnt.begin(), cnt.end(), 0u);
+            for (size_t e = 0; e + 2 < outIdx.size(); e += 3) {
+                const uint32_t a = outIdx[e], b = outIdx[e + 1], c = outIdx[e + 2];
+                acc[a] = acc[a] + outP[b] + outP[c]; cnt[a] += 2;
+                acc[b] = acc[b] + outP[c] + outP[a]; cnt[b] += 2;
+                acc[c] = acc[c] + outP[a] + outP[b]; cnt[c] += 2;
+            }
+            for (size_t v = 0; v < nv; ++v) {
+                if (cnt[v] == 0) continue;
+                const Vec3 avg = acc[v] * (1.0f / static_cast<float>(cnt[v]));
+                outP[v] = outP[v] + (avg - outP[v]) * smoothFactor;
+            }
+        }
+    }
+
+    // ---- 5) Materialize -------------------------------------------------------
+    // Smooth shading keeps the welded topology (area-weighted vertex normals via
+    // the shared helper). Flat shading needs per-face normals, and this pipeline
+    // stores normals per-vertex — so the flat path expands to soup (3 verts/tri),
+    // exactly how every other flat-shaded mesh in the app represents hard faces.
+    auto out = std::make_shared<TriangleMesh>();
+    out->transform = std::make_shared<Transform>();
+    if (inMesh->transform) *out->transform = *inMesh->transform;
+    out->geometry = std::make_shared<DNA::GeometryDetail>();
+    auto& dg = *out->geometry;
+    dg.add_attribute<Vec3>("P");
+    dg.add_attribute<Vec3>("N");
+    dg.add_attribute<Vec3>("P_orig");
+    dg.add_attribute<Vec3>("N_orig");
+    if (sg.has_attribute("uv")) dg.add_attribute<Vec2>("uv");     // zero-filled: a remesh has no UVs
+    if (srcMat) dg.add_attribute<uint16_t>("materialID");
+
+    // Nearest input triangle for a surface point: the containing cell is inside
+    // the stamped band (|phi| < ~h there), so its closestTri is set; fall back to
+    // a 3x3x3 neighborhood scan, then material 0.
+    auto materialAt = [&](const Vec3& p) -> uint16_t {
+        if (!transferMaterial || !srcMat || closestTri.empty()) return 0;
+        const int i = (std::max)(0, (std::min)(nx - 1, static_cast<int>((p.x - origin.x) / h)));
+        const int j = (std::max)(0, (std::min)(ny - 1, static_cast<int>((p.y - origin.y) / h)));
+        const int k = (std::max)(0, (std::min)(nz - 1, static_cast<int>((p.z - origin.z) / h)));
+        int32_t tri = closestTri[cellIndex(i, j, k)];
+        for (int dk = -1; dk <= 1 && tri < 0; ++dk)
+        for (int dj = -1; dj <= 1 && tri < 0; ++dj)
+        for (int di = -1; di <= 1 && tri < 0; ++di) {
+            const int ii = i + di, jj = j + dj, kk = k + dk;
+            if (ii < 0 || jj < 0 || kk < 0 || ii >= nx || jj >= ny || kk >= nz) continue;
+            tri = closestTri[cellIndex(ii, jj, kk)];
+        }
+        return (tri >= 0) ? srcMat[srcIdx[static_cast<size_t>(tri) * 3]] : static_cast<uint16_t>(0);
+    };
+
+    if (smoothShading) {
+        const size_t nv = outP.size();
+        dg.resize_vertices(nv);
+        Vec3* dPo = dg.get_attribute_data_mut<Vec3>("P_orig");
+        uint16_t* dMat = dg.get_attribute_data_mut<uint16_t>("materialID");
+        for (size_t v = 0; v < nv; ++v) {
+            dPo[v] = outP[v];
+            if (dMat) dMat[v] = materialAt(outP[v]);
+        }
+        dg.indices.assign(outIdx.begin(), outIdx.end());
+        recomputeOrigNormals(dg);
+    } else {
+        const size_t nt = outIdx.size() / 3;
+        dg.resize_vertices(nt * 3);
+        Vec3* dPo = dg.get_attribute_data_mut<Vec3>("P_orig");
+        Vec3* dNo = dg.get_attribute_data_mut<Vec3>("N_orig");
+        uint16_t* dMat = dg.get_attribute_data_mut<uint16_t>("materialID");
+        dg.indices.resize(nt * 3);
+        for (size_t t = 0; t < nt; ++t) {
+            const Vec3& a = outP[outIdx[t * 3 + 0]];
+            const Vec3& b = outP[outIdx[t * 3 + 1]];
+            const Vec3& c = outP[outIdx[t * 3 + 2]];
+            const Vec3 fn = Vec3::cross(b - a, c - a);
+            const float len = std::sqrt(fn.x * fn.x + fn.y * fn.y + fn.z * fn.z);
+            const Vec3 n = (len > 1e-12f) ? fn * (1.0f / len) : Vec3(0.0f, 1.0f, 0.0f);
+            const uint16_t m = materialAt(a);
+            for (int c3 = 0; c3 < 3; ++c3) {
+                const size_t dst = t * 3 + c3;
+                dPo[dst] = (c3 == 0) ? a : (c3 == 1) ? b : c;
+                if (dNo) dNo[dst] = n;
+                if (dMat) dMat[dst] = m;
+                dg.indices[dst] = static_cast<uint32_t>(dst);
+            }
+        }
+    }
+
+    rebakeFromOrig(*out);
+    return NodeSystem::GeometryValue(out);
+}
+
+namespace {
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::BaseMeshNode>      reg_GeoBaseMesh("GeoV2.BaseMesh");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::SubdivideCCNode>   reg_GeoSubdivideCC("GeoV2.SubdivideCC");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::TransformNode>     reg_GeoTransform("GeoV2.Transform");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::OutputNode>        reg_GeoOutput("GeoV2.Output");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::MirrorNode>        reg_GeoMirror("GeoV2.Mirror");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::NoiseDisplaceNode> reg_GeoNoiseDisplace("GeoV2.NoiseDisplace");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::MergeNode>         reg_GeoMerge("GeoV2.Merge");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::ObjectSourceNode>  reg_GeoObjectSource("GeoV2.ObjectSource");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::WeldNode>          reg_GeoWeld("GeoV2.Weld");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::MaskByHeightNode>  reg_GeoMaskByHeight("GeoV2.MaskByHeight");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::MaskBySlopeNode>   reg_GeoMaskBySlope("GeoV2.MaskBySlope");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::MaskNoiseNode>     reg_GeoMaskNoise("GeoV2.MaskNoise");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::MaskRemapNode>     reg_GeoMaskRemap("GeoV2.MaskRemap");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::MaskMathNode>      reg_GeoMaskMath("GeoV2.MaskMath");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::ScatterInstancesNode> reg_GeoScatterInstances("GeoV2.ScatterInstances");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::ArrayNode>         reg_GeoArray("GeoV2.Array");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::ExtrudeNode>       reg_GeoExtrude("GeoV2.Extrude");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::InsetNode>         reg_GeoInset("GeoV2.Inset");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::BevelNode>         reg_GeoBevel("GeoV2.Bevel");
+    NodeSystem::AutoRegisterNode<GeometryNodesV2::RemeshNode>        reg_GeoRemesh("GeoV2.Remesh");
 }

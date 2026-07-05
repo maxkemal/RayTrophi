@@ -4,6 +4,7 @@
  */
 
 #include "TerrainNodesV2.h"
+#include "NodeSystem/NodeRegistry.h"
 #include "scene_data.h"
 #include "TerrainManager.h"
 #include "TerrainFFT.h"  // FFT-accelerated noise with CUDA fallback
@@ -3277,9 +3278,61 @@ namespace TerrainNodesV2 {
     }
 
     // ============================================================================
+    // NODE REGISTRY SELF-REGISTRATION
+    // ============================================================================
+    // Registers every terrain node type under its existing getTypeId() string
+    // (already unique, already used for JSON serialization — see e.g. line
+    // ~224 `j["typeId"] = getTypeId();`) with the domain-agnostic NodeRegistry.
+    // This does NOT replace addTerrainNode()'s switch below (still the primary
+    // path for the Terrain tab's "Add Node" menu / NodeType enum) — it adds a
+    // second, generic creation path (NodeRegistry::instance().create(typeId))
+    // that a future cross-domain node editor (Faz 8) can use without needing
+    // to know about NodeType or link against TerrainNodesV2 directly. One
+    // static per type, all in this single TU, so registration runs exactly
+    // once per type regardless of how many other files include TerrainNodesV2.h.
+    namespace {
+        NodeSystem::AutoRegisterNode<HeightmapInputNode>     reg_HeightmapInput("TerrainV2.HeightmapInput");
+        NodeSystem::AutoRegisterNode<HardnessInputNode>      reg_HardnessInput("TerrainV2.HardnessInput");
+        NodeSystem::AutoRegisterNode<NoiseGeneratorNode>     reg_NoiseGenerator("TerrainV2.NoiseGenerator");
+        NodeSystem::AutoRegisterNode<HydraulicErosionNode>   reg_HydraulicErosion("TerrainV2.HydraulicErosion");
+        NodeSystem::AutoRegisterNode<ThermalErosionNode>     reg_ThermalErosion("TerrainV2.ThermalErosion");
+        NodeSystem::AutoRegisterNode<FluvialErosionNode>     reg_FluvialErosion("TerrainV2.FluvialErosion");
+        NodeSystem::AutoRegisterNode<WindErosionNode>        reg_WindErosion("TerrainV2.WindErosion");
+        NodeSystem::AutoRegisterNode<SedimentDepositionNode> reg_SedimentDeposition("TerrainV2.SedimentDeposition");
+        NodeSystem::AutoRegisterNode<AlluvialFanNode>        reg_AlluvialFan("TerrainV2.AlluvialFan");
+        NodeSystem::AutoRegisterNode<DeltaFormationNode>     reg_DeltaFormation("TerrainV2.DeltaFormation");
+        NodeSystem::AutoRegisterNode<ErosionWizardNode>      reg_ErosionWizard("TerrainV2.ErosionWizard");
+        NodeSystem::AutoRegisterNode<HeightOutputNode>       reg_HeightOutput("TerrainV2.HeightOutput");
+        NodeSystem::AutoRegisterNode<SplatOutputNode>        reg_SplatOutput("TerrainV2.SplatOutput");
+        NodeSystem::AutoRegisterNode<HardnessOutputNode>     reg_HardnessOutput("TerrainV2.HardnessOutput");
+        NodeSystem::AutoRegisterNode<MathNode>               reg_Math("TerrainV2.Math");
+        NodeSystem::AutoRegisterNode<BlendNode>              reg_Blend("TerrainV2.Blend");
+        NodeSystem::AutoRegisterNode<ClampNode>              reg_Clamp("TerrainV2.Clamp");
+        NodeSystem::AutoRegisterNode<InvertNode>             reg_Invert("TerrainV2.Invert");
+        NodeSystem::AutoRegisterNode<SlopeMaskNode>          reg_SlopeMask("TerrainV2.SlopeMask");
+        NodeSystem::AutoRegisterNode<HeightMaskNode>         reg_HeightMask("TerrainV2.HeightMask");
+        NodeSystem::AutoRegisterNode<CurvatureMaskNode>      reg_CurvatureMask("TerrainV2.CurvatureMask");
+        NodeSystem::AutoRegisterNode<FlowMaskNode>           reg_FlowMask("TerrainV2.FlowMask");
+        NodeSystem::AutoRegisterNode<ExposureMaskNode>       reg_ExposureMask("TerrainV2.ExposureMask");
+        NodeSystem::AutoRegisterNode<SmoothNode>             reg_Smooth("TerrainV2.Smooth");
+        NodeSystem::AutoRegisterNode<NormalizeNode>          reg_Normalize("TerrainV2.Normalize");
+        NodeSystem::AutoRegisterNode<TerraceNode>            reg_Terrace("TerrainV2.Terrace");
+        NodeSystem::AutoRegisterNode<EdgeFalloffNode>        reg_EdgeFalloff("TerrainV2.EdgeFalloff");
+        NodeSystem::AutoRegisterNode<MaskCombineNode>        reg_MaskCombine("TerrainV2.MaskCombine");
+        NodeSystem::AutoRegisterNode<OverlayNode>            reg_Overlay("TerrainV2.Overlay");
+        NodeSystem::AutoRegisterNode<ScreenNode>             reg_Screen("TerrainV2.Screen");
+        NodeSystem::AutoRegisterNode<AutoSplatNode>          reg_AutoSplat("TerrainV2.AutoSplat");
+        NodeSystem::AutoRegisterNode<MaskPaintNode>          reg_MaskPaint("TerrainV2.MaskPaint");
+        NodeSystem::AutoRegisterNode<MaskImageNode>          reg_MaskImage("TerrainV2.MaskImage");
+        NodeSystem::AutoRegisterNode<FaultNode>              reg_Fault("TerrainV2.Fault");
+        NodeSystem::AutoRegisterNode<MesaNode>               reg_Mesa("TerrainV2.Mesa");
+        NodeSystem::AutoRegisterNode<ShearNode>              reg_Shear("TerrainV2.Shear");
+    } // anonymous namespace
+
+    // ============================================================================
     // TERRAIN GRAPH V2 IMPLEMENTATION
     // ============================================================================
-    
+
     NodeSystem::NodeBase* TerrainNodeGraphV2::addTerrainNode(NodeType type, float x, float y) {
         NodeSystem::NodeBase* node = nullptr;
         

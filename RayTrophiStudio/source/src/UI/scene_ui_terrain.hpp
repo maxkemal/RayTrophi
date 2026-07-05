@@ -486,7 +486,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             uint16_t matID = MaterialManager::getInstance().getMaterialID(pMat->materialName);
 
                             // Call the reusable editor (member of SceneUI)
-                            drawPrincipledBSDFEditor(pMat.get(), matID, ctx);
+                            drawPrincipledBSDFEditor(pMat.get(), matID, ctx, false);
                         }
                     }
                     
@@ -538,7 +538,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
             ImGui::SetNextItemWidth(160.0f);
             ImGui::InputText("##NewFolName", newFolGroupName, 512);
             ImGui::SameLine();
-            if (UIWidgets::PrimaryButton("Create Layer", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 30))) {
+            if (UIWidgets::PrimaryButton("Create Layer", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
                 std::string gName = std::string(newFolGroupName);
                 if (gName.find("Foliage") == std::string::npos && gName.find("Scatter") == std::string::npos) 
                     gName = "Foliage_" + gName;
@@ -576,11 +576,46 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 if (group.name.find("Foliage") == std::string::npos && group.name.find("Scatter") == std::string::npos) continue; 
                 
                 ImGui::PushID((int)group.id);
-                // Header with icon placeholder spacing
+                
+                // Header is always colored in active theme accent color
+                ImGui::PushStyleColor(ImGuiCol_Text, ThemeManager::instance().current().colors.accent);
                 std::string headerLabel = "   " + group.name + " (" + std::to_string(group.instances.size()) + ")###Header" + std::to_string(group.id);
-                if (ImGui::TreeNode(headerLabel.c_str())) {
+                bool opened = ImGui::TreeNode(headerLabel.c_str());
+                ImGui::PopStyleColor();
+                
+                if (opened) {
                     ImVec2 hp = ImGui::GetItemRectMin();
                     UIWidgets::DrawIcon(UIWidgets::IconType::Scene, ImVec2(hp.x + 10, hp.y + 2), 14, 0xFFBBBBBB);
+                    
+                    auto BeginSubSection = [](const char* label, UIWidgets::IconType icon, const ImVec4& color = ImVec4(0.8f, 0.8f, 0.8f, 1.0f)) {
+                        ImGui::Spacing();
+                        ImGui::BeginGroup();
+                        ImGui::Indent(6.0f);
+                        
+                        ImGui::TextColored(color, "   %s", label);
+                        ImVec2 cp = ImGui::GetItemRectMin();
+                        UIWidgets::DrawIcon(icon, ImVec2(cp.x + 4, cp.y + 1), 12, ImGui::ColorConvertFloat4ToU32(color));
+                        ImGui::Spacing();
+                    };
+
+                    auto EndSubSection = []() {
+                        ImGui::Unindent(6.0f);
+                        ImGui::EndGroup();
+                        
+                        ImVec2 min = ImGui::GetItemRectMin();
+                        ImVec2 max = ImGui::GetItemRectMax();
+                        min.x -= 4.0f;
+                        min.y -= 4.0f;
+                        max.x += 4.0f;
+                        max.y += 4.0f;
+                        
+                        ImGui::GetWindowDrawList()->AddRect(min, max, ImGui::GetColorU32(ImGuiCol_Border, 0.40f), 4.0f);
+                        ImGui::Spacing();
+                    };
+
+                    ImGui::Spacing();
+                    ImGui::BeginGroup();
+                    ImGui::Indent(8.0f);
                     
                     // RENAME and IDENTITY
                     char renameBuf[512];
@@ -605,13 +640,8 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     ImGui::TextDisabled("(ID: %d)", group.id);
                     
                     // SOURCES
-                     ImGui::Separator();
-                     ImGui::Text("   Source Meshes:");
-                     {
-                         ImVec2 cp = ImGui::GetItemRectMin();
-                         UIWidgets::DrawIcon(UIWidgets::IconType::Mesh, ImVec2(cp.x + 4, cp.y + 1), 12, 0xFFBBBBBB);
-                     }
-                     ImGui::SameLine(); UIWidgets::HelpMarker("Select the 3D models to be used in this layer. If multiple models are added, they will be distributed randomly.");
+                    BeginSubSection("Source Meshes", UIWidgets::IconType::Mesh, ImVec4(0.8f, 0.8f, 0.8f, 0.9f));
+                    ImGui::SameLine(); UIWidgets::HelpMarker("Select the 3D models to be used in this layer. If multiple models are added, they will be distributed randomly.");
                      if (UIWidgets::SecondaryButton("Add Selected Object", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
                          if (ctx.selection.hasSelection()) {
                              std::string n = ctx.selection.selected.name;
@@ -702,46 +732,53 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                          ImGui::EndChild();
                          ImGui::EndPopup();
                      }
-                     
-                     // List Sources
-                     for (int s_i=0; s_i<group.sources.size(); s_i++) {
-                         ImGui::PushID(s_i);
-                         auto& src = group.sources[s_i];
-                         ImGui::Text("%s (W: %.1f)", src.name.c_str(), src.weight);
-                         ImGui::SameLine();
-                         if (ImGui::SmallButton("Edit")) ImGui::OpenPopup("SrcEdit");
-                         
-                         if (ImGui::BeginPopup("SrcEdit")) {
-                             ImGui::PushItemWidth(160.0f);
-                             ImGui::DragFloat("Weight", &src.weight, 0.1f);
-                             ImGui::DragFloatRange2("Scale", &src.settings.scale_min, &src.settings.scale_max, 0.01f, 0.001f, 1000.0f);
-                             ImGui::DragFloatRange2("Y-Off", &src.settings.y_offset_min, &src.settings.y_offset_max, 0.01f);
-                             ImGui::PopItemWidth();
-                             ImGui::EndPopup();
-                         }
-                         
-                         ImGui::SameLine();
-                         if (ImGui::SmallButton("X")) {
-                             group.sources.erase(group.sources.begin() + s_i);
-                             s_i--;
-                         }
-                         ImGui::PopID();
-                     }
-                     
-                     ImGui::Separator();
-                     ImGui::Separator();
 
-                     // ─── TARGET SURFACE ────────────────────────────────────────────────
-                     ImGui::Text("   Target Surface:");
-                     {
-                         ImVec2 cp2 = ImGui::GetItemRectMin();
-                         UIWidgets::DrawIcon(UIWidgets::IconType::World, ImVec2(cp2.x + 4, cp2.y + 1), 12, 0xFF88DDFF);
-                     }
-                     ImGui::SameLine(); UIWidgets::HelpMarker(
-                         "Scatter on terrain heightmap or on any mesh surface.\n"
-                         "  Terrain     - uses heightmap, splat map masks, slope/altitude filters.\n"
-                         "  Mesh Surface - scatters on triangle faces; normal_influence controls\n"
-                         "                orientation (0=upright for buildings, 1=normal-aligned for foliage).");
+                      // List Sources in a clean aligned table (handles long name clipping automatically)
+                      if (!group.sources.empty() && ImGui::BeginTable("##sources_table", 3, ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_SizingFixedFit)) {
+                          ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthStretch);
+                          ImGui::TableSetupColumn("##edit", ImGuiTableColumnFlags_WidthFixed, 42.0f);
+                          ImGui::TableSetupColumn("##delete", ImGuiTableColumnFlags_WidthFixed, 25.0f);
+
+                          for (int s_i = 0; s_i < (int)group.sources.size(); s_i++) {
+                              ImGui::PushID(s_i);
+                              auto& src = group.sources[s_i];
+
+                              ImGui::TableNextRow();
+                              ImGui::TableNextColumn();
+                              ImGui::Text("%s (W: %.1f)", src.name.c_str(), src.weight);
+
+                              ImGui::TableNextColumn();
+                              if (ImGui::SmallButton("Edit")) ImGui::OpenPopup("SrcEdit");
+
+                              if (ImGui::BeginPopup("SrcEdit")) {
+                                  ImGui::PushItemWidth(160.0f);
+                                  ImGui::DragFloat("Weight", &src.weight, 0.1f);
+                                  ImGui::DragFloatRange2("Scale", &src.settings.scale_min, &src.settings.scale_max, 0.01f, 0.001f, 1000.0f);
+                                  ImGui::DragFloatRange2("Y-Off", &src.settings.y_offset_min, &src.settings.y_offset_max, 0.01f);
+                                  ImGui::PopItemWidth();
+                                  ImGui::EndPopup();
+                              }
+
+                              ImGui::TableNextColumn();
+                              if (ImGui::SmallButton("X")) {
+                                  group.sources.erase(group.sources.begin() + s_i);
+                                  s_i--;
+                              }
+
+                              ImGui::PopID();
+                          }
+                          ImGui::EndTable();
+                      }
+
+                      EndSubSection();
+
+                      // ─── TARGET SURFACE ────────────────────────────────────────────────
+                      BeginSubSection("Target Surface", UIWidgets::IconType::World, ImVec4(0.5f, 0.8f, 1.0f, 0.9f));
+                      ImGui::SameLine(); UIWidgets::HelpMarker(
+                          "Scatter on terrain heightmap or on any mesh surface.\n"
+                          "  Terrain     - uses heightmap, splat map masks, slope/altitude filters.\n"
+                          "  Mesh Surface - scatters on triangle faces; normal_influence controls\n"
+                          "                orientation (0=upright for buildings, 1=normal-aligned for foliage).");
                      {
                          ImGui::PushItemWidth(160.0f);
                          const char* tgt_items[] = { "Terrain", "Mesh Surface" };
@@ -787,14 +824,10 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                              if (ImGui::IsItemHovered()) ImGui::SetTooltip("Enable normal-based orientation (uses Normal Influence above).");
                          }
                      }
-                     ImGui::Separator();
+                     EndSubSection();
 
                      // ACTIONS
-                     ImGui::Text("   Scatter Settings (Global):");
-                     {
-                         ImVec2 cp = ImGui::GetItemRectMin();
-                         UIWidgets::DrawIcon(UIWidgets::IconType::World, ImVec2(cp.x + 4, cp.y + 1), 12, 0xFFBBBBBB);
-                     }
+                     BeginSubSection("Scatter Settings", UIWidgets::IconType::Settings, ImVec4(0.8f, 0.8f, 0.8f, 0.9f));
                      ImGui::PushItemWidth(160.0f);
                      ImGui::DragInt("Target Count", &group.brush_settings.target_count, 100, 1, 10000000);
                      if (ImGui::IsItemHovered()) ImGui::SetTooltip("Total number of instances to spread across the whole terrain.");
@@ -802,63 +835,59 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                      ImGui::DragFloat("Min. Distance", &group.brush_settings.min_distance, 0.1f, 0.0f, 50.0f);
                      if (ImGui::IsItemHovered()) ImGui::SetTooltip("Minimum distance between instances (m). Prevents overlap.");
                      ImGui::PopItemWidth();
+                     EndSubSection();
                      
                      // Helper helper for brush state
                      bool is_active_group = (foliage_brush.active_group_id == group.id);
                      bool is_painting = foliage_brush.enabled && is_active_group && foliage_brush.mode == 0;
                      bool is_erasing = foliage_brush.enabled && is_active_group && foliage_brush.mode == 1;
 
-                     // Paint Button
-                     if (is_painting) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
-                     if (ImGui::Button("Paint (Add)", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 30))) {
-                         if (is_painting) {
-                             foliage_brush.enabled = false;
-                             foliage_brush.active_group_id = -1;
-                         } else {
-                             foliage_brush.enabled = true;
-                             foliage_brush.active_group_id = group.id;
-                             foliage_brush.mode = 0; // ADD
-                         }
-                     }
-                     if (is_painting) ImGui::PopStyleColor();
-                     
-                     ImGui::SameLine();
-                     
-                     // Erase Button
-                     if (is_erasing) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
-                     if (ImGui::Button("Erase (Remove)", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 30))) {
-                         if (is_erasing) {
-                             foliage_brush.enabled = false;
-                             foliage_brush.active_group_id = -1;
-                         } else {
-                             foliage_brush.enabled = true;
-                             foliage_brush.active_group_id = group.id;
-                             foliage_brush.mode = 1; // REMOVE
-                         }
-                     }
-                     if (is_erasing) ImGui::PopStyleColor();
+                       // BRUSH TOOLS
+                       BeginSubSection("Brush Tools", UIWidgets::IconType::Brush, ImVec4(0.4f, 0.9f, 0.5f, 0.9f));
 
-                     // Show Brush Settings if active
-                     if (is_active_group && foliage_brush.enabled) {
-                        ImGui::SameLine();
-                        ImGui::TextDisabled("(Active)");
-                        ImGui::PushItemWidth(160.0f);
-                        ImGui::DragFloat("radius##br", &foliage_brush.radius, 0.1f, 0.1f, 100.0f, "%.1f m");
-                        if (is_painting) {
-                            ImGui::DragInt("density##br", &foliage_brush.density, 1, 1, 20);
+                       // Paint Button
+                       bool active_paint = is_painting;
+                       if (UIWidgets::IconActionButton("paint_add", UIWidgets::IconType::PaintTool, "", active_paint, ImVec4(0.3f, 0.9f, 0.4f, 1.0f), ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 24.0f), "Paint Tool (Add Instances)")) {
+                           if (is_painting) {
+                               foliage_brush.enabled = false;
+                               foliage_brush.active_group_id = -1;
+                           } else {
+                               foliage_brush.enabled = true;
+                               foliage_brush.active_group_id = group.id;
+                               foliage_brush.mode = 0; // ADD
+                           }
+                       }
+                       
+                       ImGui::SameLine();
+                       
+                       // Erase Button
+                       bool active_erase = is_erasing;
+                       if (UIWidgets::IconActionButton("paint_remove", UIWidgets::IconType::EraseTool, "", active_erase, ImVec4(0.9f, 0.3f, 0.3f, 1.0f), ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 24.0f), "Erase Tool (Remove Instances)")) {
+                           if (is_erasing) {
+                               foliage_brush.enabled = false;
+                               foliage_brush.active_group_id = -1;
+                           } else {
+                               foliage_brush.enabled = true;
+                               foliage_brush.active_group_id = group.id;
+                               foliage_brush.mode = 1; // REMOVE
+                           }
+                       }
+
+                        // Show Brush Settings if active
+                        if (is_active_group && foliage_brush.enabled) {
+                           ImGui::PushItemWidth(160.0f);
+                           ImGui::DragFloat("radius##br", &foliage_brush.radius, 0.1f, 0.1f, 100.0f, "%.1f m");
+                           if (is_painting) {
+                               ImGui::DragInt("density##br", &foliage_brush.density, 1, 1, 20);
+                           }
+                           ImGui::PopItemWidth();
+                           ImGui::Checkbox("Lazy Update", &foliage_brush.lazy_update);
+                           if (ImGui::IsItemHovered()) ImGui::SetTooltip("Update scene only on mouse release (Better performance for large terrains)");
                         }
-                        ImGui::PopItemWidth();
-                        ImGui::Checkbox("Lazy Update", &foliage_brush.lazy_update);
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Update scene only on mouse release (Better performance for large terrains)");
-                     }
-                     
-                     ImGui::Separator();
+                        EndSubSection();
 
-                         UIWidgets::ColoredHeader("      Placement Rules", ImVec4(0.4f, 0.7f, 1.0f, 1.0f));
-                         {
-                             ImVec2 cp = ImGui::GetItemRectMin();
-                             UIWidgets::DrawIcon(UIWidgets::IconType::System, ImVec2(cp.x + 12, cp.y + 2), 14, 0xFFBBBBBB);
-                         }
+                      ImGui::Spacing();
+                      BeginSubSection("Placement Rules", UIWidgets::IconType::System, ImVec4(0.4f, 0.7f, 1.0f, 0.9f));
                         ImGui::SameLine(); UIWidgets::HelpMarker("Configures the growth logic of the foliage. Plants can be filtered by altitude, slope, and terrain shape.");
                         
                         ImGui::PushItemWidth(160.0f);
@@ -962,8 +991,9 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                              ImGui::DragFloat("Threshold##Ex", &group.brush_settings.exclusion_threshold, 0.05f, 0.0f, 1.0f);
                         }
                         } // if (t) - terrain splat/exclusion end
+                        EndSubSection();
 
-                        if (UIWidgets::PrimaryButton("Scatter", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.32f, 30))) {
+                        if (UIWidgets::PrimaryButton("Scatter", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.31f, 0))) {
                         group.clearInstances();
 
                         if (group.target_type == InstanceGroup::TargetType::MESH && !group.target_node_name.empty()) {
@@ -980,55 +1010,12 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         if (surf_tris.empty()) {
                             SCENE_LOG_WARN("Mesh Scatter: Target mesh not found or empty: " + group.target_node_name);
                         } else {
-                            MeshSurfaceSampler mss;
-                            mss.build(surf_tris);
-
-                            int   count       = group.brush_settings.target_count;
-                            std::mt19937 rng(group.brush_settings.seed);
-                            int   spawned     = 0;
-                            int   attempts    = 0;
-                            const int max_attempts = count * 50;
-
-                            float min_dist_sq  = group.brush_settings.min_distance * group.brush_settings.min_distance;
-                            bool  check_overlap = group.brush_settings.min_distance > 0.01f;
-                            float cell_size    = group.brush_settings.min_distance > 0.1f ? group.brush_settings.min_distance : 1.0f;
-                            std::map<std::pair<int,int>, std::vector<Vec3>> grid;
-
-                            while (spawned < count && attempts < max_attempts) {
-                                attempts++;
-                                MeshSurfaceSampler::Sample s = mss.sample(rng);
-
-                                // Slope check (angle between face normal and world-up)
-                                float slope_deg = acosf(std::clamp(s.normal.y, -1.0f, 1.0f)) * 57.2958f;
-                                if (slope_deg > group.brush_settings.slope_max) continue;
-
-                                // Height filter
-                                if (s.position.y < group.brush_settings.height_min ||
-                                    s.position.y > group.brush_settings.height_max) continue;
-
-                                // Min-distance overlap check
-                                if (check_overlap) {
-                                    int cx = (int)std::floor(s.position.x / cell_size);
-                                    int cz = (int)std::floor(s.position.z / cell_size);
-                                    bool collision = false;
-                                    for (int ddx = -1; ddx <= 1 && !collision; ++ddx)
-                                        for (int ddz = -1; ddz <= 1 && !collision; ++ddz) {
-                                            auto git = grid.find({cx+ddx, cz+ddz});
-                                            if (git != grid.end())
-                                                for (const auto& gp : git->second)
-                                                    if ((gp - s.position).length_squared() < min_dist_sq) { collision = true; break; }
-                                        }
-                                    if (collision) continue;
-                                    grid[{cx, cz}].push_back(s.position);
-                                }
-
-                                // generateRandomTransform already handles align_to_normal + normal_influence blend
-                                InstanceTransform inst = group.generateRandomTransform(s.position, s.normal);
-                                group.addInstance(inst);
-                                spawned++;
-                            }
+                            // Shared with the Scatter panel's own "Scatter (Fill)" button
+                            // (scene_ui_scatter.cpp) — one implementation, so Placement Rules AND
+                            // the Faz 8b Field density/scale masks behave identically everywhere.
+                            const int spawned = group.scatterFillMesh(surf_tris);
                             SCENE_LOG_INFO("Mesh scatter: " + std::to_string(spawned) + "/" +
-                                           std::to_string(count) + " instances on '" + group.target_node_name + "'.");
+                                           std::to_string(group.brush_settings.target_count) + " instances on '" + group.target_node_name + "'.");
                         }
                         } else {
                         // ─── TERRAIN SCATTER (original path) ─────────────────────────────────
@@ -1310,7 +1297,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         ctx.start_render = true;
                      }
                      ImGui::SameLine();
-                     if (UIWidgets::SecondaryButton("Clear", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.32f, 30))) {
+                     if (UIWidgets::SecondaryButton("Clear", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.31f, 0))) {
                          group.clearInstances();
                          SceneUI::syncInstancesToScene(ctx, group, true);
                          const bool hasVulkanViewportPath_clear = TerrainRenderBackendIsVulkan(ctx) || (g_viewport_backend != nullptr);
@@ -1349,7 +1336,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                          ctx.start_render = true;
                      }
                      ImGui::SameLine();
-                     if (UIWidgets::DangerButton("Delete", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.32f, 30))) {
+                     if (UIWidgets::DangerButton("Delete", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.31f, 0))) {
                          fol_remove_id = group.id;
                      }
                     
@@ -1416,6 +1403,23 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         }
                         ImGui::TreePop(); 
                     }
+                    
+                    // End of Card Group and border drawing
+                    ImGui::Unindent(8.0f);
+                    ImGui::EndGroup();
+                    
+                    ImVec2 min = ImGui::GetItemRectMin();
+                    ImVec2 max = ImGui::GetItemRectMax();
+                    min.x -= 6.0f;
+                    min.y -= 6.0f;
+                    max.x += 6.0f;
+                    max.y += 6.0f;
+
+                    const auto& theme = ThemeManager::instance().current();
+                    ImU32 borderColor = ImGui::ColorConvertFloat4ToU32(ImVec4(theme.colors.accent.x, theme.colors.accent.y, theme.colors.accent.z, 0.40f));
+
+                    ImGui::GetWindowDrawList()->AddRect(min, max, borderColor, 4.0f);
+                    ImGui::Spacing();
                     
                     ImGui::TreePop(); 
                 }

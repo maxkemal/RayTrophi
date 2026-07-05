@@ -500,6 +500,9 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
                 
                 // Scalar values
                 matJson["transmission"] = pbsdf->transmission;
+                matJson["dispersion"] = pbsdf->dispersion;
+                matJson["metallicTexChannel"] = pbsdf->metallic_tex_channel;
+                matJson["roughnessTexChannel"] = pbsdf->roughness_tex_channel;
                 matJson["clearcoat"] = pbsdf->getClearcoat();
                 matJson["clearcoatRoughness"] = pbsdf->getClearcoatRoughness();
                 matJson["anisotropic"] = pbsdf->anisotropic;
@@ -668,6 +671,9 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
             
             // Scalar values (with defaults for backward compatibility)
             pbsdf->transmission = matJson.value("transmission", 0.0f);
+            pbsdf->dispersion = matJson.value("dispersion", 0.0f);
+            pbsdf->metallic_tex_channel = matJson.value("metallicTexChannel", 0);
+            pbsdf->roughness_tex_channel = matJson.value("roughnessTexChannel", 0);
             pbsdf->setClearcoat(matJson.value("clearcoat", 0.0f), matJson.value("clearcoatRoughness", 0.03f));
             pbsdf->anisotropic = matJson.value("anisotropic", 0.0f);
             pbsdf->normalStrength = matJson.value("normalStrength", 1.0f);

@@ -27,6 +27,7 @@ struct VulkanBackingRecord {
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t format = 0;
+    uint64_t allocatedBytes = 0;
     // Optional lifecycle callback: called by destroyAndClearVulkanBacking /
     // destroyAllVulkanBackingForOwner to destroy the physical Vulkan objects.
     // Must be safe to call once; cleared immediately after invocation.
