@@ -7909,23 +7909,42 @@ uint32_t VulkanBackendAdapter::uploadTriangleMeshIndexed(const TriangleMesh* mes
 // the whole vertex array (still a refit, not a full rebuild).
 bool VulkanBackendAdapter::refitIndexedSoloBLAS(uint32_t blasIndex) {
     auto idxIt = m_soloBlasIndexedMesh.find(blasIndex);
-    if (idxIt == m_soloBlasIndexedMesh.end()) return false;
+    if (idxIt == m_soloBlasIndexedMesh.end()) {
+        SCENE_LOG_WARN("[refitIndexedSoloBLAS] Not found in m_soloBlasIndexedMesh");
+        return false;
+    }
     const SoloIndexedMeshInfo info = idxIt->second;
-    if (!info.mesh || !info.mesh->geometry) return false;
-    if (blasIndex >= m_device->m_blasList.size()) return false;
+    if (!info.mesh || !info.mesh->geometry) {
+        SCENE_LOG_WARN("[refitIndexedSoloBLAS] Mesh or geometry is null");
+        return false;
+    }
+    if (blasIndex >= m_device->m_blasList.size()) {
+        SCENE_LOG_WARN("[refitIndexedSoloBLAS] blasIndex out of bounds");
+        return false;
+    }
     const auto& blasHandle = m_device->m_blasList[blasIndex];
-    if (!blasHandle.allowUpdate || blasHandle.vertexCount == 0) return false;
+    if (!blasHandle.allowUpdate || blasHandle.vertexCount == 0) {
+        SCENE_LOG_WARN("[refitIndexedSoloBLAS] BLAS update not allowed or vertex count is 0");
+        return false;
+    }
 
     const DNA::GeometryDetail& geom = *info.mesh->geometry;
     const size_t vCount = geom.get_vertex_count();
-    if (vCount != blasHandle.vertexCount) return false; // topology changed -> let full rebuild run
+    if (vCount != blasHandle.vertexCount) {
+        SCENE_LOG_WARN("[refitIndexedSoloBLAS] Vertex count mismatch: geom=" + std::to_string(vCount) + ", blas=" + std::to_string(blasHandle.vertexCount));
+        return false;
+    }
 
     const Vec3* srcP = info.localSpace ? geom.get_positions_orig() : geom.get_positions();
     const Vec3* srcN = info.localSpace ? geom.get_normals_orig()   : geom.get_normals();
     if (!srcP) srcP = geom.get_positions();
     if (!srcN) srcN = geom.get_normals();
-    if (!srcP) return false;
+    if (!srcP) {
+        SCENE_LOG_WARN("[refitIndexedSoloBLAS] Position attribute not found");
+        return false;
+    }
 
+    SCENE_LOG_INFO("[refitIndexedSoloBLAS] Uploading " + std::to_string(vCount) + " vertices for BLAS " + std::to_string(blasIndex));
     std::vector<float> positions(vCount * 3);
     std::vector<float> normals(vCount * 3);
     for (size_t v = 0; v < vCount; ++v) {
@@ -8657,20 +8676,31 @@ bool VulkanBackendAdapter::updateInteractiveMesh(const std::string& nodeName,
 }
 
 bool VulkanBackendAdapter::refitFlatMeshBLAS(const std::string& nodeName) {
-    if (!m_device || !m_device->isInitialized() || !m_device->hasHardwareRT()) return false;
-    if (m_vkInstances.empty() || m_instanceSources.empty()) return false;
+    if (!m_device || !m_device->isInitialized() || !m_device->hasHardwareRT()) {
+        SCENE_LOG_WARN("[refitFlatMeshBLAS] Hardware RT or device not initialized");
+        return false;
+    }
+    if (m_vkInstances.empty() || m_instanceSources.empty()) {
+        SCENE_LOG_WARN("[refitFlatMeshBLAS] m_vkInstances or m_instanceSources empty");
+        return false;
+    }
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
         auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i]);
         if (!tm || !matchesNodeNameForInstance(tm->nodeName, nodeName)) continue;
         const uint32_t blasIndex = m_vkInstances[i].blasIndex;
-        if (blasIndex >= m_device->m_blasList.size()) return false;
-        // Flat meshes upload as indexed solo BLASes; refitIndexedSoloBLAS re-reads the mesh SoA
-        // directly (and refreshes this instance's TLAS transform), so the freshly baked rigid pose
-        // lands on the GPU as a cheap refit instead of a full per-frame rebuild.
-        if (m_soloBlasIndexedMesh.find(blasIndex) == m_soloBlasIndexedMesh.end()) return false;
+        if (blasIndex >= m_device->m_blasList.size()) {
+            SCENE_LOG_WARN("[refitFlatMeshBLAS] blasIndex out of bounds: " + std::to_string(blasIndex));
+            return false;
+        }
+        if (m_soloBlasIndexedMesh.find(blasIndex) == m_soloBlasIndexedMesh.end()) {
+            SCENE_LOG_WARN("[refitFlatMeshBLAS] blasIndex not found in m_soloBlasIndexedMesh: " + std::to_string(blasIndex));
+            return false;
+        }
+        SCENE_LOG_INFO("[refitFlatMeshBLAS] Routing to refitIndexedSoloBLAS for node: " + nodeName);
         return refitIndexedSoloBLAS(blasIndex);
     }
+    SCENE_LOG_WARN("[refitFlatMeshBLAS] No matching TriangleMesh instance found for name: " + nodeName);
     return false;
 }
 
@@ -8974,6 +9004,11 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
 }
 
 void VulkanBackendAdapter::showAllInstances() {}
+
+bool VulkanBackendAdapter::updateFlatMeshBLAS(const std::string& nodeName, const TriangleMesh* mesh) {
+    (void)mesh;
+    return refitFlatMeshBLAS(nodeName);
+}
 
 void VulkanBackendAdapter::updateSceneGeometry(const std::vector<std::shared_ptr<Hittable>>& o, const std::vector<Matrix4x4>& b) { 
     if (!m_device || !m_device->isInitialized()) return;
@@ -10653,6 +10688,17 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         gm.resin_dirt_color_r = static_cast<float>(m.resin_dirt_color.x);
         gm.resin_dirt_color_g = static_cast<float>(m.resin_dirt_color.y);
         gm.resin_dirt_color_b = static_cast<float>(m.resin_dirt_color.z);
+        gm.resin_shard = m.resin_shard;
+        gm.resin_shard_hue = m.resin_shard_hue;
+        gm.dust_color_a_r = static_cast<float>(m.dust_color_a.x);
+        gm.dust_color_a_g = static_cast<float>(m.dust_color_a.y);
+        gm.dust_color_a_b = static_cast<float>(m.dust_color_a.z);
+        gm.dust_style = static_cast<float>(m.dust_style);
+        gm.dust_color_b_r = static_cast<float>(m.dust_color_b.x);
+        gm.dust_color_b_g = static_cast<float>(m.dust_color_b.y);
+        gm.dust_color_b_b = static_cast<float>(m.dust_color_b.z);
+        gm.shard_shape = static_cast<float>(m.shard_shape);
+        if (m.resin_object_space) gm.flags |= VulkanRT::VK_MAT_FLAG_RESIN_OBJ_SPACE;
         if (m.glass_marble_volume) gm.flags |= VulkanRT::VK_MAT_FLAG_MARBLE_VOLUME;
         gm.uv_scale_x = static_cast<float>(m.uvScale.x);
         gm.uv_scale_y = static_cast<float>(m.uvScale.y);
@@ -11433,6 +11479,17 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
     gm.resin_dirt_color_r = static_cast<float>(m.resin_dirt_color.x);
     gm.resin_dirt_color_g = static_cast<float>(m.resin_dirt_color.y);
     gm.resin_dirt_color_b = static_cast<float>(m.resin_dirt_color.z);
+    gm.resin_shard = m.resin_shard;
+    gm.resin_shard_hue = m.resin_shard_hue;
+    gm.dust_color_a_r = static_cast<float>(m.dust_color_a.x);
+    gm.dust_color_a_g = static_cast<float>(m.dust_color_a.y);
+    gm.dust_color_a_b = static_cast<float>(m.dust_color_a.z);
+    gm.dust_style = static_cast<float>(m.dust_style);
+    gm.dust_color_b_r = static_cast<float>(m.dust_color_b.x);
+    gm.dust_color_b_g = static_cast<float>(m.dust_color_b.y);
+    gm.dust_color_b_b = static_cast<float>(m.dust_color_b.z);
+    gm.shard_shape = static_cast<float>(m.shard_shape);
+    if (m.resin_object_space) gm.flags |= VulkanRT::VK_MAT_FLAG_RESIN_OBJ_SPACE;
     if (m.glass_marble_volume) gm.flags |= VulkanRT::VK_MAT_FLAG_MARBLE_VOLUME;
     gm.uv_scale_x = static_cast<float>(m.uvScale.x);
     gm.uv_scale_y = static_cast<float>(m.uvScale.y);
@@ -15023,6 +15080,7 @@ bool VulkanBackendAdapter::cloneRtObjectByNodeName(
         return false;
     }
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_device->waitIdle();
 
     std::vector<size_t> sourceIndices;
     for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {

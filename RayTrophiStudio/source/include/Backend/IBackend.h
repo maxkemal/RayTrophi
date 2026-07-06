@@ -269,10 +269,8 @@ public:
      */
     virtual void showAllInstances() = 0;
     
-    /**
-     * @brief Update scene geometry (fast path for animation/skinning)
-     */
     virtual void updateSceneGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices) = 0;
+    virtual bool updateFlatMeshBLAS(const std::string& /*nodeName*/, const class TriangleMesh* /*mesh*/) { return false; }
 
     /**
      * @brief Update material for a specific instance
@@ -414,6 +412,13 @@ public:
         float resin_dirt = 0.0f;                   // opaque dirt-speck amount (early-return)
         float resin_inclusion_scale = 8.0f;        // procedural feature size
         Vec3  resin_dirt_color = Vec3(0.18f, 0.14f, 0.10f);
+        float resin_shard = 0.0f;                  // colored glass-shard amount
+        float resin_shard_hue = -1.0f;             // base hue 0..1; <0 = rainbow palette
+        bool  resin_object_space = true;           // interior anchored to the object (vs world)
+        int   dust_style = 0;                      // 0=Nebula(auto) 1=Billow 2=Wispy 3=Paint swirl
+        Vec3  dust_color_a = Vec3(1.0f, 1.0f, 1.0f);
+        Vec3  dust_color_b = Vec3(1.0f, 1.0f, 1.0f);
+        int   shard_shape = 0;                     // 0=round chips 1=faceted crystals
         bool  glass_marble_volume = false;         // full-volume marble medium march (raygen)
 
         // Procedural surface detail

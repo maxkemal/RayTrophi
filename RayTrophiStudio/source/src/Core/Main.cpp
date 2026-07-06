@@ -3516,20 +3516,7 @@ int main(int argc, char* argv[]) try {
 
                      if (g_backend && !interactiveViewportActive) {
                          if (auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
-                             bool partialUpdated = false;
-                             bool needsFullRefresh = false;
-                             for (const auto& water : WaterManager::getInstance().getWaterSurfaces()) {
-                                 if (water.name.empty() || water.mesh_triangles.empty()) continue;
-                                 const bool updated = vulkanBackend->updateMeshBLASPartial(
-                                     water.name,
-                                     water.mesh_triangles);
-                                 partialUpdated = partialUpdated || updated;
-                                 needsFullRefresh = needsFullRefresh || !updated;
-                             }
-                             if (needsFullRefresh || !partialUpdated) {
-                                 vulkanBackend->rebuildAccelerationStructure();
-                                 vulkanBackend->updateGeometry(scene.world.objects);
-                             }
+                             vulkanBackend->updateGeometry(scene.world.objects);
                          } else {
                              g_backend->updateSceneGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
                          }
@@ -6233,5 +6220,4 @@ catch (...) {
     emergencyStartupLog("[FATAL] Unhandled unknown exception in main");
     return 1;
 }
-
 

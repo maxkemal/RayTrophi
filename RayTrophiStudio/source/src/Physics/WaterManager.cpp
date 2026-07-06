@@ -1,8 +1,10 @@
-﻿#include "WaterSystem.h"
+#include "WaterSystem.h"
 #include "scene_data.h"
 #include "Renderer.h"
 #include "OptixWrapper.h"
 #include "Backend/IBackend.h"
+#include "Backend/VulkanBackend.h"
+#include "TriangleMesh.h"
 #include "MaterialManager.h"
 #include "PrincipledBSDF.h"
 #include "WaterMaterialSync.h"
@@ -13,12 +15,73 @@
 #include <map>      // For smooth normal calculation
 #include <cfloat>
 
+extern std::unique_ptr<Backend::IBackend> g_backend;
+
+
 // CUDA Library Linking
 #pragma comment(lib, "cufft.lib")
 #pragma comment(lib, "cudart.lib")
 #pragma comment(lib, "delayimp.lib") // Required for delay load in MSVC
 
 // #include "GeometryUtils.h" // Removed: Not needed for manual mesh generation
+
+namespace {
+std::shared_ptr<TriangleMesh> gridToFlatMesh(
+    const std::vector<Vec3>& positions,
+    const std::vector<Vec3>& normals,
+    const std::vector<Vec2>& uvs,
+    const std::vector<uint32_t>& indices,
+    uint16_t materialID,
+    const std::shared_ptr<Transform>& transform,
+    const std::string& nodeName) {
+    const size_t vCount = positions.size();
+    if (vCount == 0 || indices.empty()) return nullptr;
+
+    auto tm = std::make_shared<TriangleMesh>();
+    tm->transform = transform;
+    tm->nodeName = nodeName;
+    tm->geometry->resize_vertices(vCount);
+
+    tm->geometry->add_attribute<Vec3>("P");
+    tm->geometry->add_attribute<Vec3>("N");
+    tm->geometry->add_attribute<Vec3>("P_orig");
+    tm->geometry->add_attribute<Vec3>("N_orig");
+    tm->geometry->add_attribute<Vec2>("uv");
+    tm->geometry->add_attribute<uint16_t>("materialID");
+
+    Vec3* P  = tm->geometry->get_attribute_data_mut<Vec3>("P");
+    Vec3* N  = tm->geometry->get_attribute_data_mut<Vec3>("N");
+    Vec3* Po = tm->geometry->get_attribute_data_mut<Vec3>("P_orig");
+    Vec3* No = tm->geometry->get_attribute_data_mut<Vec3>("N_orig");
+    Vec2* UV = tm->geometry->get_attribute_data_mut<Vec2>("uv");
+    uint16_t* M = tm->geometry->get_attribute_data_mut<uint16_t>("materialID");
+
+    Matrix4x4 finalT = Matrix4x4::identity();
+    Matrix4x4 normalT = Matrix4x4::identity();
+    if (transform) {
+        finalT = transform->getFinal();
+        normalT = transform->getNormalTransform();
+    }
+
+    #pragma omp parallel for schedule(static) if(vCount >= 2048)
+    for (int i = 0; i < (int)vCount; ++i) {
+        const Vec3& lp = positions[(size_t)i];
+        const Vec3& ln = normals[(size_t)i];
+        if (Po) Po[i] = lp;
+        if (No) No[i] = ln;
+        if (P)  P[i]  = finalT.transform_point(lp);
+        if (N)  N[i]  = normalT.transform_vector(ln).normalize();
+        if (UV && !uvs.empty()) UV[i] = uvs[(size_t)i];
+        if (M)  M[i]  = materialID;
+    }
+
+    tm->geometry->indices.resize(indices.size());
+    for (size_t i = 0; i < indices.size(); ++i) tm->geometry->indices[i] = indices[i];
+
+    return tm;
+}
+}
+
 
 WaterSurface* WaterManager::getWaterSurface(int id) {
     for (auto& surf : water_surfaces) {
@@ -50,9 +113,9 @@ void WaterManager::removeWaterSurface(SceneData& scene, int id) {
         it->gpu_geo_state = nullptr;
     }
     
-    // 2. Remove triangles from scene
-    for (auto& tri : it->mesh_triangles) {
-        auto obj_it = std::find(scene.world.objects.begin(), scene.world.objects.end(), tri);
+    // 2. Remove flatMesh from scene
+    if (it->flatMesh) {
+        auto obj_it = std::find(scene.world.objects.begin(), scene.world.objects.end(), it->flatMesh);
         if (obj_it != scene.world.objects.end()) {
             scene.world.objects.erase(obj_it);
         }
@@ -315,11 +378,12 @@ float WaterManager::getSurfaceWorldExtent(const WaterSurface* surf) const {
         accumulate(p);
     }
 
-    if (!has_positions) {
-        for (const auto& tri : surf->mesh_triangles) {
-            if (!tri) continue;
-            for (int v = 0; v < 3; ++v) {
-                accumulate(tri->getOriginalVertexPosition(v));
+    if (!has_positions && surf->flatMesh && surf->flatMesh->geometry) {
+        const Vec3* origP = surf->flatMesh->geometry->get_positions_orig();
+        if (origP) {
+            size_t vCount = surf->flatMesh->num_vertices();
+            for (size_t i = 0; i < vCount; ++i) {
+                accumulate(origP[i]);
             }
         }
     }
@@ -332,10 +396,8 @@ float WaterManager::getSurfaceWorldExtent(const WaterSurface* surf) const {
     }
 
     Vec3 world_scale(1.0f, 1.0f, 1.0f);
-    if (surf->reference_triangle) {
-        if (Transform* t = surf->reference_triangle->getTransformPtr()) {
-            world_scale = t->scale;
-        }
+    if (surf->flatMesh && surf->flatMesh->transform) {
+        world_scale = surf->flatMesh->transform->scale;
     }
 
     extent_x *= fmaxf(fabsf(world_scale.x), 0.001f);
@@ -588,58 +650,63 @@ WaterSurface* WaterManager::createWaterPlane(SceneData& scene, const Vec3& pos, 
     if (segments < 2) segments = 2;
     if (segments > 256) segments = 256; // Limit for safety
     
+    int gridW = segments + 1;
+    int gridH = segments + 1;
     float step = size / segments;
-    // Create vertices around origin (local space) - pivot will be at center
     float half_size = size * 0.5f;
-    
+
+    std::vector<Vec3> grid_positions(gridW * gridH);
+    std::vector<Vec3> grid_normals(gridW * gridH, Vec3(0, 1, 0));
+    std::vector<Vec2> grid_uvs(gridW * gridH);
+
+    for (int z = 0; z < gridH; z++) {
+        for (int x = 0; x < gridW; x++) {
+            float x_pos = -half_size + (x * step);
+            float z_pos = -half_size + (z * step);
+            grid_positions[z * gridW + x] = Vec3(x_pos, 0.0f, z_pos);
+            grid_uvs[z * gridW + x] = Vec2((float)x / segments, (float)z / segments);
+        }
+    }
+
+    std::vector<uint32_t> grid_indices;
+    grid_indices.reserve(segments * segments * 6);
+    for (int z = 0; z < segments; z++) {
+        for (int x = 0; x < segments; x++) {
+            uint32_t i0 = z * gridW + x;
+            uint32_t i1 = z * gridW + (x + 1);
+            uint32_t i2 = (z + 1) * gridW + (x + 1);
+            uint32_t i3 = (z + 1) * gridW + x;
+
+            // Triangle 1
+            grid_indices.push_back(i0);
+            grid_indices.push_back(i1);
+            grid_indices.push_back(i2);
+
+            // Triangle 2
+            grid_indices.push_back(i0);
+            grid_indices.push_back(i2);
+            grid_indices.push_back(i3);
+        }
+    }
+
     // Transform stores the actual world position
     std::shared_ptr<Transform> shared_transform = std::make_shared<Transform>();
     Matrix4x4 world_transform = Matrix4x4::translation(pos);
     shared_transform->setBase(world_transform);
-    
-    for (int z = 0; z < segments; z++) {
-        for (int x = 0; x < segments; x++) {
-            // Local space coordinates (centered around origin)
-            float x0 = -half_size + (x * step);
-            float z0 = -half_size + (z * step);
-            float x1 = x0 + step;
-            float z1 = z0 + step;
-            
-            // Grid cell vertices in local space (y=0 at local origin)
-            Vec3 v0(x0, 0, z0);
-            Vec3 v1(x1, 0, z0);
-            Vec3 v2(x1, 0, z1);
-            Vec3 v3(x0, 0, z1);
-            
-            // UVs
-            float u0 = (float)x / segments;
-            float v_0 = (float)z / segments; // v_0 to avoid variable name conflict
-            float u1 = (float)(x + 1) / segments;
-            float v_1 = (float)(z + 1) / segments;
-            
-            Vec3 n(0, 1, 0); // Up normal
-            
-            // Triangle 1
-            auto tri1 = std::make_shared<Triangle>(v0, v1, v2, n, n, n, Vec2(u0, v_0), Vec2(u1, v_0), Vec2(u1, v_1), surf.material_id);
-            tri1->setTransformHandle(shared_transform);
-            tri1->setNodeName(surf.name);
-            
-            // Triangle 2
-            auto tri2 = std::make_shared<Triangle>(v0, v2, v3, n, n, n, Vec2(u0, v_0), Vec2(u1, v_1), Vec2(u0, v_1), surf.material_id);
-            tri2->setTransformHandle(shared_transform);
-            tri2->setNodeName(surf.name);
-            
-            surf.mesh_triangles.push_back(tri1);
-            surf.mesh_triangles.push_back(tri2);
-            
-            // Add to scene
-            scene.world.objects.push_back(tri1);
-            scene.world.objects.push_back(tri2);
-        }
-    }
-    
-    if (!surf.mesh_triangles.empty()) {
-        surf.reference_triangle = surf.mesh_triangles[0];
+
+    surf.flatMesh = gridToFlatMesh(
+        grid_positions,
+        grid_normals,
+        grid_uvs,
+        grid_indices,
+        surf.material_id,
+        shared_transform,
+        surf.name
+    );
+
+    // Add to scene
+    if (surf.flatMesh) {
+        scene.world.objects.push_back(surf.flatMesh);
     }
     
     water_surfaces.push_back(surf);
@@ -647,7 +714,7 @@ WaterSurface* WaterManager::createWaterPlane(SceneData& scene, const Vec3& pos, 
 }
 
 void WaterManager::updateWaterMesh(WaterSurface* surf) {
-    if (!surf) return;
+    if (!surf || !surf->flatMesh || !surf->flatMesh->geometry) return;
 
     invalidateGeometricAnimationState(surf);
     if (surf->type != WaterSurface::Type::Plane) return;
@@ -659,12 +726,10 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
 
     // Get world-space scale from transform so noise coords are scale-independent
     Vec3 world_scale(1.0f, 1.0f, 1.0f);
-    if (surf->reference_triangle) {
-        if (Transform* t = surf->reference_triangle->getTransformPtr()) {
-            world_scale = t->scale;
-            if (fabsf(world_scale.x) < 1e-6f) world_scale.x = 1.0f;
-            if (fabsf(world_scale.z) < 1e-6f) world_scale.z = 1.0f;
-        }
+    if (surf->flatMesh->transform) {
+        world_scale = surf->flatMesh->transform->scale;
+        if (fabsf(world_scale.x) < 1e-6f) world_scale.x = 1.0f;
+        if (fabsf(world_scale.z) < 1e-6f) world_scale.z = 1.0f;
     }
     const float domain_size = resolveWaveDomainSize(surf);
     const float domain_coord_scale = getLegacyDomainReferenceSize() / fmaxf(domain_size, 0.001f);
@@ -694,18 +759,14 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
     float detail_strength = surf->params.geo_detail_strength;
     bool smooth_normals = surf->params.geo_smooth_normals;
 
-    // ════════════════════════════════════════════════════════════════════════
-    // GERSTNER WAVE HELPER (Tessendorf-inspired, physically-based circular wave)
-    // ════════════════════════════════════════════════════════════════════════
     struct GerstnerWave {
         float amplitude;
         float k;        // wavenumber = 2*PI/wavelength
         float speed;
-        float Q;        // steepness (pre-divided by k*amp*numWaves)
+        float Q;        // steepness
         float dx, dz;   // direction unit vector
     };
 
-    // Build wave array ONCE outside the per-vertex lambda (avoid per-vertex heap allocation)
     const int NUM_WAVES = 6 + (swell_amp > 0.001f ? 1 : 0);
     std::vector<GerstnerWave> gerstner_waves;
     if (use_geo && noise_type == WaterWaveParams::NoiseType::Gerstner) {
@@ -750,7 +811,6 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
         if (!use_geo || noise_type != WaterWaveParams::NoiseType::Gerstner)
             return Vec3(x, 0.0f, z);
 
-        // Convert to world space for wave evaluation
         float wx = x * world_scale.x;
         float wz = z * world_scale.z;
 
@@ -764,9 +824,6 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
         return Vec3(x + result.x * chop, result.y, z + result.z * chop);
     };
     
-    // ════════════════════════════════════════════════════════════════════════
-    // TESSENDORF SIMPLIFIED (Predictable procedural ocean without FFT)
-    // ════════════════════════════════════════════════════════════════════════
     auto getTessendorfSimplified = [&](float x, float z) -> float {
         if (!use_geo || noise_type != WaterWaveParams::NoiseType::TessendorfSimple) 
             return 0.0f;
@@ -775,12 +832,7 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
         float amp = max_height;
         float freq = 1.0f / scale;
         
-        // Base direction from swell
-        float dirX = cosf(swell_dir);
-        float dirZ = sinf(swell_dir);
-        
         for (int i = 0; i < octaves; ++i) {
-            // Rotate direction slightly per octave
             float angle = (float)i * 0.3f * (1.0f - alignment);
             float dx = cosf(swell_dir + angle);
             float dz = sinf(swell_dir + angle);
@@ -788,12 +840,10 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
             float phase = (x * world_scale.x * dx + z * world_scale.z * dz) * freq;
             float wave = sinf(phase * 2.0f * 3.14159265f);
             
-            // Apply sharpening (sharper peaks)
             if (sharpening > 0.001f) {
                 wave = powf(fabsf(wave), 1.0f - sharpening * 0.5f) * (wave >= 0 ? 1.0f : -1.0f);
             }
             
-            // Damping for perpendicular
             float angleDiff = fabsf(angle);
             float dampFactor = 1.0f - damping * sinf(angleDiff);
             
@@ -802,17 +852,11 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
             amp *= persistence;
             freq *= lacunarity;
         }
-        
         return height;
     };
 
-    // ════════════════════════════════════════════════════════════════════════
-    // ADVANCED NOISE GENERATION (Original noise types with detail layer)
-    // ════════════════════════════════════════════════════════════════════════
     auto getNoiseValue = [&](float x, float z) -> float {
         if (!use_geo) return 0.0f;
-        
-        // Handle special wave types
         if (noise_type == WaterWaveParams::NoiseType::TessendorfSimple) {
             return getTessendorfSimplified(x, z);
         }
@@ -831,7 +875,6 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
             float n = perlin.noise(p);
             
             if (noise_type == WaterWaveParams::NoiseType::Ridge) {
-                // Ridged Multifractal
                 n = ridge_offset - fabsf(n);
                 n = n * n;
                 if (chop > 0.0f) n = powf(fmaxf(0.0f, n), chop);
@@ -844,7 +887,6 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
                 n = fabsf(n); 
             }
             else if (noise_type == WaterWaveParams::NoiseType::FBM) {
-                // Standard FBM
             }
             else if (noise_type == WaterWaveParams::NoiseType::Perlin) {
                 if (i > 0) {
@@ -853,7 +895,6 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
                 }
             }
             else if (noise_type == WaterWaveParams::NoiseType::Voronoi) {
-                // Simple worley-like approximation
                 float vx = floorf(nx * freq);
                 float vz = floorf(nz * freq);
                 float minDist = 1.0f;
@@ -877,12 +918,10 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
             freq *= lacunarity;
         }
         
-        // Normalization
         if (noise_type != WaterWaveParams::NoiseType::Ridge && maxAmp > 0.001f) {
             value /= maxAmp;
         }
         
-        // Add detail layer (high-frequency ripples)
         if (detail_strength > 0.001f) {
             float dx = (x * world_scale.x) / (scale / detail_scale);
             float dz = (z * world_scale.z) / (scale / detail_scale);
@@ -890,146 +929,81 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
             value += detail;
         }
         
-        // Apply sharpening (sharper wave peaks)
         if (sharpening > 0.001f && value > 0.0f) {
             value = powf(value, 1.0f + sharpening);
         }
         
         return value * max_height;
     };
-    
-    // ════════════════════════════════════════════════════════════════════════
-    // PHASE 1: Apply height displacement to all vertices
-    // ════════════════════════════════════════════════════════════════════════
-    
-    // First, collect unique vertex positions and their heights
-    // Using a map to store vertex position -> height
-    struct VertexKey {
-        int ix, iz; // Grid indices based on position
-        bool operator<(const VertexKey& o) const {
-            if (ix != o.ix) return ix < o.ix;
-            return iz < o.iz;
-        }
-    };
-    
-    std::map<VertexKey, Vec3> vertexPositions; // Displaced positions
-    std::map<VertexKey, Vec3> vertexNormals;   // Accumulated normals
-    std::map<VertexKey, int> vertexCounts;     // Count for averaging
-    
-    float epsilon = 0.001f;
-    auto makeKey = [epsilon](const Vec3& p) -> VertexKey {
-        // Quantize to grid to handle floating point precision
-        return { (int)roundf(p.x * 100.0f), (int)roundf(p.z * 100.0f) };
-    };
-    
-    // First pass: Displace vertices and store positions
-    for (auto& tri : surf->mesh_triangles) {
-        if (!tri) continue;
-        
-        for (int v = 0; v < 3; ++v) {
-            Vec3 p = tri->getOriginalVertexPosition(v);
-            VertexKey key = makeKey(p);
-            
-            if (vertexPositions.find(key) == vertexPositions.end()) {
-                Vec3 displaced = p;
-                
-                if (noise_type == WaterWaveParams::NoiseType::Gerstner) {
-                    displaced = getGerstnerDisplacement(p.x, p.z, 0.0f);
-                } else {
-                    displaced.y = getNoiseValue(p.x, p.z);
-                }
-                
-                vertexPositions[key] = displaced;
-                vertexNormals[key] = Vec3(0, 0, 0);
-                vertexCounts[key] = 0;
-            }
-        }
+
+    auto& geo = *surf->flatMesh->geometry;
+    size_t vCount = surf->flatMesh->num_vertices();
+    Vec3* P = geo.get_attribute_data_mut<Vec3>("P");
+    Vec3* N = geo.get_attribute_data_mut<Vec3>("N");
+    Vec3* Po = geo.get_attribute_data_mut<Vec3>("P_orig");
+    Vec3* No = geo.get_attribute_data_mut<Vec3>("N_orig");
+
+    Matrix4x4 finalT = Matrix4x4::identity();
+    Matrix4x4 normalT = Matrix4x4::identity();
+    if (surf->flatMesh->transform) {
+        finalT = surf->flatMesh->transform->getFinal();
+        normalT = surf->flatMesh->transform->getNormalTransform();
     }
-    
-    // ════════════════════════════════════════════════════════════════════════
-    // PHASE 2: Calculate face normals and accumulate for smooth shading
-    // ════════════════════════════════════════════════════════════════════════
-    
-    for (auto& tri : surf->mesh_triangles) {
-        if (!tri) continue;
-        
-        // Get displaced positions for this triangle
-        Vec3 orig0 = tri->getOriginalVertexPosition(0);
-        Vec3 orig1 = tri->getOriginalVertexPosition(1);
-        Vec3 orig2 = tri->getOriginalVertexPosition(2);
-        
-        VertexKey k0 = makeKey(orig0);
-        VertexKey k1 = makeKey(orig1);
-        VertexKey k2 = makeKey(orig2);
-        
-        Vec3 p0 = vertexPositions[k0];
-        Vec3 p1 = vertexPositions[k1];
-        Vec3 p2 = vertexPositions[k2];
-        
-        // Calculate face normal
-        Vec3 edge1 = p1 - p0;
-        Vec3 edge2 = p2 - p0;
-        Vec3 faceNormal = edge1.cross(edge2);
-        float len = faceNormal.length();
-        if (len > 0.0001f) {
-            faceNormal = faceNormal / len;
+
+    #pragma omp parallel for
+    for (int i = 0; i < (int)vCount; ++i) {
+        Vec3 lp = Po[i];
+        Vec3 displaced = lp;
+        if (noise_type == WaterWaveParams::NoiseType::Gerstner) {
+            displaced = getGerstnerDisplacement(lp.x, lp.z, 0.0f);
         } else {
-            faceNormal = Vec3(0, 1, 0);
+            displaced.y = getNoiseValue(lp.x, lp.z);
         }
-        
-        // Weight by face area (larger faces contribute more to smooth normal)
-        float area = len * 0.5f;
-        
-        // Accumulate normals (for smooth shading)
+        Po[i] = displaced;
+        P[i]  = finalT.transform_point(displaced);
+    }
+
+    // Recalculate normals
+    std::vector<Vec3> tempNormals(vCount, Vec3(0, 0, 0));
+    const auto& indices = geo.indices;
+    size_t triCount = indices.size() / 3;
+
+    for (size_t i = 0; i < triCount; ++i) {
+        uint32_t i0 = indices[i * 3 + 0];
+        uint32_t i1 = indices[i * 3 + 1];
+        uint32_t i2 = indices[i * 3 + 2];
+
+        Vec3 p0 = Po[i0];
+        Vec3 p1 = Po[i1];
+        Vec3 p2 = Po[i2];
+
+        Vec3 face_normal = (p1 - p0).cross(p2 - p0);
+        float len = face_normal.length();
+        if (len > 0.0001f) face_normal = face_normal / len;
+        else face_normal = Vec3(0, 1, 0);
+
         if (smooth_normals) {
-            vertexNormals[k0] = vertexNormals[k0] + faceNormal * area;
-            vertexNormals[k1] = vertexNormals[k1] + faceNormal * area;
-            vertexNormals[k2] = vertexNormals[k2] + faceNormal * area;
-            vertexCounts[k0]++;
-            vertexCounts[k1]++;
-            vertexCounts[k2]++;
+            tempNormals[i0] = tempNormals[i0] + face_normal;
+            tempNormals[i1] = tempNormals[i1] + face_normal;
+            tempNormals[i2] = tempNormals[i2] + face_normal;
         } else {
-            // Flat shading: each vertex gets face normal
-            vertexNormals[k0] = faceNormal;
-            vertexNormals[k1] = faceNormal;
-            vertexNormals[k2] = faceNormal;
+            tempNormals[i0] = face_normal;
+            tempNormals[i1] = face_normal;
+            tempNormals[i2] = face_normal;
         }
     }
-    
-    // Normalize accumulated normals
-    for (auto& [key, normal] : vertexNormals) {
-        float len = normal.length();
-        if (len > 0.0001f) {
-            normal = normal / len;
-        } else {
-            normal = Vec3(0, 1, 0);
-        }
+
+    #pragma omp parallel for
+    for (int i = 0; i < (int)vCount; ++i) {
+        float len = tempNormals[i].length();
+        Vec3 ln = len > 0.0001f ? (tempNormals[i] / len) : Vec3(0, 1, 0);
+        if (No) No[i] = ln;
+        if (N)  N[i]  = normalT.transform_vector(ln).normalize();
     }
-    
-    // ════════════════════════════════════════════════════════════════════════
-    // PHASE 3: Apply displaced positions and smooth normals to triangles
-    // ════════════════════════════════════════════════════════════════════════
-    
-    for (auto& tri : surf->mesh_triangles) {
-        if (!tri) continue;
-        
-        for (int v = 0; v < 3; ++v) {
-            Vec3 orig = tri->getOriginalVertexPosition(v);
-            VertexKey key = makeKey(orig);
-            
-            Vec3 newPos = vertexPositions[key];
-            Vec3 newNormal = vertexNormals[key];
-            
-            // Update position
-            tri->setVertexPosition(v, newPos);
-            tri->setOriginalVertexPosition(v, newPos);
-            
-            // Update normal (smooth or flat)
-            tri->setVertexNormal(v, newNormal);
-            tri->setOriginalVertexNormal(v, newNormal);
-        }
-        
-        tri->markAABBDirty();
+
+    // Trigger refit on the backend
+    if (g_backend) {
+        g_backend->updateFlatMeshBLAS(surf->name, surf->flatMesh.get());
     }
 }
 
@@ -1037,15 +1011,14 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
 // CACHE ORIGINAL POSITIONS (for animation base)
 // ════════════════════════════════════════════════════════════════════════════════
 void WaterManager::cacheOriginalPositions(WaterSurface* surf) {
-    if (!surf) return;
-    
+    if (!surf || !surf->flatMesh || !surf->flatMesh->geometry) return;
     surf->original_positions.clear();
     
-    for (auto& tri : surf->mesh_triangles) {
-        if (!tri) continue;
-        for (int v = 0; v < 3; ++v) {
-            surf->original_positions.push_back(tri->getOriginalVertexPosition(v));
-        }
+    const Vec3* origP = surf->flatMesh->geometry->get_positions_orig();
+    if (!origP) origP = surf->flatMesh->geometry->get_positions();
+    if (origP) {
+        size_t vCount = surf->flatMesh->num_vertices();
+        surf->original_positions.assign(origP, origP + vCount);
     }
 }
 
@@ -1053,20 +1026,12 @@ void WaterManager::cacheOriginalPositions(WaterSurface* surf) {
 // ANIMATED MESH UPDATE (time-based wave animation)
 // ════════════════════════════════════════════════════════════════════════════════
 bool WaterManager::updateAnimatedWaterMesh(WaterSurface* surf, float time) {
-    if (!surf) return false;
+    if (!surf || !surf->flatMesh || !surf->flatMesh->geometry) return false;
     if (!surf->params.use_geometric_waves) return false;
     
     // Cache original positions if not done yet
     if (surf->original_positions.empty()) {
-        // First time - need flat grid positions, not displaced ones
-        // This is a fallback - ideally call cacheOriginalPositions after initial creation
-        size_t idx = 0;
-        for (auto& tri : surf->mesh_triangles) {
-            if (!tri) continue;
-            for (int v = 0; v < 3; ++v) {
-                surf->original_positions.push_back(tri->getOriginalVertexPosition(v));
-            }
-        }
+        cacheOriginalPositions(surf);
     }
     if (surf->original_positions.empty()) return false;
     
@@ -1088,16 +1053,12 @@ bool WaterManager::updateAnimatedWaterMesh(WaterSurface* surf, float time) {
 
     // Get world-space scale from transform so noise coords are scale-independent
     Vec3 world_scale(1.0f, 1.0f, 1.0f);
-    if (surf->reference_triangle) {
-        Transform* rt = surf->reference_triangle->getTransformPtr();
-        if (rt) {
-            world_scale = rt->scale;
-            if (fabsf(world_scale.x) < 1e-6f) world_scale.x = 1.0f;
-            if (fabsf(world_scale.z) < 1e-6f) world_scale.z = 1.0f;
-        }
+    if (surf->flatMesh->transform) {
+        world_scale = surf->flatMesh->transform->scale;
+        if (fabsf(world_scale.x) < 1e-6f) world_scale.x = 1.0f;
+        if (fabsf(world_scale.z) < 1e-6f) world_scale.z = 1.0f;
     }
 
-    // Pre-compute Gerstner wave parameters ONCE (not per-vertex)
     struct AnimGerstnerWave { float k, speed, amplitude, Q, dx, dz; };
     std::vector<AnimGerstnerWave> anim_waves;
     if (noise_type == WaterWaveParams::NoiseType::Gerstner ||
@@ -1138,9 +1099,6 @@ bool WaterManager::updateAnimatedWaterMesh(WaterSurface* surf, float time) {
         }
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // ANIMATED GERSTNER WAVES
-    // ════════════════════════════════════════════════════════════════════════
     auto getAnimatedHeight = [&](float x, float z) -> Vec3 {
         Vec3 result(0, 0, 0);
 
@@ -1155,7 +1113,6 @@ bool WaterManager::updateAnimatedWaterMesh(WaterSurface* surf, float time) {
                 result.z += w.Q * w.amplitude * w.dz * cosf(phase);
             }
         } else {
-            // Simple animated noise (FBM, Ridge, etc.)
             float value = 0.0f;
             float amp = 1.0f;
             float freq = 1.0f;
@@ -1196,91 +1153,84 @@ bool WaterManager::updateAnimatedWaterMesh(WaterSurface* surf, float time) {
             if (maxAmp > 0.001f) value /= maxAmp;
             result.y = value * max_height;
         }
-        
         return result;
     };
-    
-    struct VertexKey {
-        int ix, iz;
-        bool operator<(const VertexKey& o) const {
-            if (ix != o.ix) return ix < o.ix;
-            return iz < o.iz;
-        }
-    };
-    auto makeKey = [](const Vec3& p) -> VertexKey {
-        return { (int)roundf(p.x * 100.0f), (int)roundf(p.z * 100.0f) };
-    };
 
-    std::map<VertexKey, Vec3> vertex_positions;
-    std::map<VertexKey, Vec3> vertex_normals;
+    auto& geo = *surf->flatMesh->geometry;
+    size_t vCount = surf->flatMesh->num_vertices();
+    Vec3* P = geo.get_attribute_data_mut<Vec3>("P");
+    Vec3* N = geo.get_attribute_data_mut<Vec3>("N");
+    Vec3* Po = geo.get_attribute_data_mut<Vec3>("P_orig");
+    Vec3* No = geo.get_attribute_data_mut<Vec3>("N_orig");
 
-    size_t idx = 0;
-    for (auto& tri : surf->mesh_triangles) {
-        if (!tri) continue;
-        for (int v = 0; v < 3; ++v) {
-            if (idx >= surf->original_positions.size()) break;
-            const Vec3& orig = surf->original_positions[idx++];
-            VertexKey key = makeKey(orig);
-            if (vertex_positions.find(key) == vertex_positions.end()) {
-                Vec3 disp = getAnimatedHeight(orig.x, orig.z);
-                vertex_positions[key] = Vec3(orig.x + disp.x * chop, disp.y, orig.z + disp.z * chop);
-                vertex_normals[key] = Vec3(0, 0, 0);
-            }
-        }
+    Matrix4x4 finalT = Matrix4x4::identity();
+    Matrix4x4 normalT = Matrix4x4::identity();
+    if (surf->flatMesh->transform) {
+        finalT = surf->flatMesh->transform->getFinal();
+        normalT = surf->flatMesh->transform->getNormalTransform();
     }
 
-    for (auto& tri : surf->mesh_triangles) {
-        if (!tri) continue;
-        Vec3 orig0 = tri->getOriginalVertexPosition(0);
-        Vec3 orig1 = tri->getOriginalVertexPosition(1);
-        Vec3 orig2 = tri->getOriginalVertexPosition(2);
-        Vec3 p0 = vertex_positions[makeKey(orig0)];
-        Vec3 p1 = vertex_positions[makeKey(orig1)];
-        Vec3 p2 = vertex_positions[makeKey(orig2)];
+    #pragma omp parallel for
+    for (int i = 0; i < (int)vCount; ++i) {
+        const Vec3& orig = surf->original_positions[i];
+        Vec3 disp = getAnimatedHeight(orig.x, orig.z);
+        Vec3 displaced = Vec3(orig.x + disp.x * chop, disp.y, orig.z + disp.z * chop);
+        Po[i] = displaced;
+        P[i]  = finalT.transform_point(displaced);
+    }
+
+    // Recalculate normals
+    std::vector<Vec3> tempNormals(vCount, Vec3(0, 0, 0));
+    const auto& indices = geo.indices;
+    size_t triCount = indices.size() / 3;
+
+    for (size_t i = 0; i < triCount; ++i) {
+        uint32_t i0 = indices[i * 3 + 0];
+        uint32_t i1 = indices[i * 3 + 1];
+        uint32_t i2 = indices[i * 3 + 2];
+
+        Vec3 p0 = Po[i0];
+        Vec3 p1 = Po[i1];
+        Vec3 p2 = Po[i2];
+
         Vec3 face_normal = (p1 - p0).cross(p2 - p0);
         float len = face_normal.length();
         if (len > 0.0001f) face_normal = face_normal / len;
         else face_normal = Vec3(0, 1, 0);
 
         if (surf->params.geo_smooth_normals) {
-            vertex_normals[makeKey(orig0)] = vertex_normals[makeKey(orig0)] + face_normal;
-            vertex_normals[makeKey(orig1)] = vertex_normals[makeKey(orig1)] + face_normal;
-            vertex_normals[makeKey(orig2)] = vertex_normals[makeKey(orig2)] + face_normal;
+            tempNormals[i0] = tempNormals[i0] + face_normal;
+            tempNormals[i1] = tempNormals[i1] + face_normal;
+            tempNormals[i2] = tempNormals[i2] + face_normal;
         } else {
-            vertex_normals[makeKey(orig0)] = face_normal;
-            vertex_normals[makeKey(orig1)] = face_normal;
-            vertex_normals[makeKey(orig2)] = face_normal;
+            tempNormals[i0] = face_normal;
+            tempNormals[i1] = face_normal;
+            tempNormals[i2] = face_normal;
         }
     }
 
-    for (auto& it : vertex_normals) {
-        float len = it.second.length();
-        it.second = len > 0.0001f ? (it.second / len) : Vec3(0, 1, 0);
+    #pragma omp parallel for
+    for (int i = 0; i < (int)vCount; ++i) {
+        float len = tempNormals[i].length();
+        Vec3 ln = len > 0.0001f ? (tempNormals[i] / len) : Vec3(0, 1, 0);
+        if (No) No[i] = ln;
+        if (N)  N[i]  = normalT.transform_vector(ln).normalize();
     }
 
-    idx = 0;
-    for (auto& tri : surf->mesh_triangles) {
-        if (!tri) continue;
-        for (int v = 0; v < 3; ++v) {
-            if (idx >= surf->original_positions.size()) break;
-            const Vec3& orig = surf->original_positions[idx++];
-            VertexKey key = makeKey(orig);
-            tri->setVertexPosition(v, vertex_positions[key]);
-            tri->setVertexNormal(v, vertex_normals[key]);
-        }
-        tri->markAABBDirty();
+    if (g_backend) {
+        g_backend->updateFlatMeshBLAS(surf->name, surf->flatMesh.get());
     }
-    return idx > 0;
+
+    return true;
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
 // GPU ANIMATED MESH UPDATE
 // ════════════════════════════════════════════════════════════════════════════════
 bool WaterManager::updateGPUAnimatedWaterMesh(WaterSurface* surf, float time) {
-    if (!surf) return false;
+    if (!surf || !surf->flatMesh || !surf->flatMesh->geometry) return false;
     if (!surf->params.use_geometric_waves) return false;
     if (!g_hasCUDA) {
-        // Fallback to CPU
         return updateAnimatedWaterMesh(surf, time);
     }
     
@@ -1292,13 +1242,11 @@ bool WaterManager::updateGPUAnimatedWaterMesh(WaterSurface* surf, float time) {
     int vertex_count = static_cast<int>(surf->original_positions.size());
     if (vertex_count == 0) return false;
     
-    // Initialize GPU state if needed
     GPUGeoWaveState* gpu_state = static_cast<GPUGeoWaveState*>(surf->gpu_geo_state);
     if (!gpu_state || !gpu_state->initialized) {
         gpu_state = new GPUGeoWaveState();
         surf->gpu_geo_state = gpu_state;
         
-        // Prepare original positions as float array
         std::vector<float> h_original(vertex_count * 3);
         for (int i = 0; i < vertex_count; ++i) {
             h_original[i * 3 + 0] = surf->original_positions[i].x;
@@ -1307,14 +1255,12 @@ bool WaterManager::updateGPUAnimatedWaterMesh(WaterSurface* surf, float time) {
         }
         
         if (!initGPUGeometricWaves(gpu_state, h_original.data(), vertex_count)) {
-            // Init failed, fallback to CPU
             delete gpu_state;
             surf->gpu_geo_state = nullptr;
             return updateAnimatedWaterMesh(surf, time);
         }
     }
     
-    // Prepare params
     GeoWaveParams params;
     params.time = time;
     params.wave_height = surf->params.geo_wave_height;
@@ -1331,83 +1277,80 @@ bool WaterManager::updateGPUAnimatedWaterMesh(WaterSurface* surf, float time) {
     params.domain_coord_scale = getLegacyDomainReferenceSize() / fmaxf(resolveWaveDomainSize(surf), 0.001f);
     params.noise_type = static_cast<int>(surf->params.geo_noise_type);
     
-    // Allocate output buffer
     std::vector<float> h_output(vertex_count * 3);
-    
-    // Run GPU kernel
     updateGPUGeometricWaves(gpu_state, &params, h_output.data());
     
-    struct VertexKey {
-        int ix, iz;
-        bool operator<(const VertexKey& o) const {
-            if (ix != o.ix) return ix < o.ix;
-            return iz < o.iz;
-        }
-    };
-    auto makeKey = [](const Vec3& p) -> VertexKey {
-        return { (int)roundf(p.x * 100.0f), (int)roundf(p.z * 100.0f) };
-    };
+    auto& geo = *surf->flatMesh->geometry;
+    size_t vCount = surf->flatMesh->num_vertices();
+    Vec3* P = geo.get_attribute_data_mut<Vec3>("P");
+    Vec3* N = geo.get_attribute_data_mut<Vec3>("N");
+    Vec3* Po = geo.get_attribute_data_mut<Vec3>("P_orig");
+    Vec3* No = geo.get_attribute_data_mut<Vec3>("N_orig");
 
-    std::map<VertexKey, Vec3> vertex_positions;
-    std::map<VertexKey, Vec3> vertex_normals;
-    for (int i = 0; i < vertex_count; ++i) {
-        const Vec3& orig = surf->original_positions[i];
-        VertexKey key = makeKey(orig);
-        vertex_positions[key] = Vec3(h_output[i * 3 + 0], h_output[i * 3 + 1], h_output[i * 3 + 2]);
-        vertex_normals[key] = Vec3(0, 0, 0);
+    Matrix4x4 finalT = Matrix4x4::identity();
+    Matrix4x4 normalT = Matrix4x4::identity();
+    if (surf->flatMesh->transform) {
+        finalT = surf->flatMesh->transform->getFinal();
+        normalT = surf->flatMesh->transform->getNormalTransform();
     }
 
-    for (auto& tri : surf->mesh_triangles) {
-        if (!tri) continue;
-        Vec3 orig0 = tri->getOriginalVertexPosition(0);
-        Vec3 orig1 = tri->getOriginalVertexPosition(1);
-        Vec3 orig2 = tri->getOriginalVertexPosition(2);
-        Vec3 p0 = vertex_positions[makeKey(orig0)];
-        Vec3 p1 = vertex_positions[makeKey(orig1)];
-        Vec3 p2 = vertex_positions[makeKey(orig2)];
+    #pragma omp parallel for
+    for (int i = 0; i < (int)vCount; ++i) {
+        Vec3 displaced(h_output[i * 3 + 0], h_output[i * 3 + 1], h_output[i * 3 + 2]);
+        Po[i] = displaced;
+        P[i]  = finalT.transform_point(displaced);
+    }
+
+    // Recalculate normals
+    std::vector<Vec3> tempNormals(vCount, Vec3(0, 0, 0));
+    const auto& indices = geo.indices;
+    size_t triCount = indices.size() / 3;
+
+    for (size_t i = 0; i < triCount; ++i) {
+        uint32_t i0 = indices[i * 3 + 0];
+        uint32_t i1 = indices[i * 3 + 1];
+        uint32_t i2 = indices[i * 3 + 2];
+
+        Vec3 p0 = Po[i0];
+        Vec3 p1 = Po[i1];
+        Vec3 p2 = Po[i2];
+
         Vec3 face_normal = (p1 - p0).cross(p2 - p0);
         float len = face_normal.length();
         if (len > 0.0001f) face_normal = face_normal / len;
         else face_normal = Vec3(0, 1, 0);
 
         if (surf->params.geo_smooth_normals) {
-            vertex_normals[makeKey(orig0)] = vertex_normals[makeKey(orig0)] + face_normal;
-            vertex_normals[makeKey(orig1)] = vertex_normals[makeKey(orig1)] + face_normal;
-            vertex_normals[makeKey(orig2)] = vertex_normals[makeKey(orig2)] + face_normal;
+            tempNormals[i0] = tempNormals[i0] + face_normal;
+            tempNormals[i1] = tempNormals[i1] + face_normal;
+            tempNormals[i2] = tempNormals[i2] + face_normal;
         } else {
-            vertex_normals[makeKey(orig0)] = face_normal;
-            vertex_normals[makeKey(orig1)] = face_normal;
-            vertex_normals[makeKey(orig2)] = face_normal;
+            tempNormals[i0] = face_normal;
+            tempNormals[i1] = face_normal;
+            tempNormals[i2] = face_normal;
         }
     }
 
-    for (auto& it : vertex_normals) {
-        float len = it.second.length();
-        it.second = len > 0.0001f ? (it.second / len) : Vec3(0, 1, 0);
+    #pragma omp parallel for
+    for (int i = 0; i < (int)vCount; ++i) {
+        float len = tempNormals[i].length();
+        Vec3 ln = len > 0.0001f ? (tempNormals[i] / len) : Vec3(0, 1, 0);
+        if (No) No[i] = ln;
+        if (N)  N[i]  = normalT.transform_vector(ln).normalize();
     }
 
-    size_t idx = 0;
-    for (auto& tri : surf->mesh_triangles) {
-        if (!tri) continue;
-        for (int v = 0; v < 3; ++v) {
-            if (idx >= (size_t)vertex_count) break;
-            const Vec3& orig = surf->original_positions[idx++];
-            VertexKey key = makeKey(orig);
-            tri->setVertexPosition(v, vertex_positions[key]);
-            tri->setVertexNormal(v, vertex_normals[key]);
-        }
-        tri->markAABBDirty();
+    if (g_backend) {
+        g_backend->updateFlatMeshBLAS(surf->name, surf->flatMesh.get());
     }
-    return idx > 0;
+
+    return true;
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
 // FFT-DRIVEN MESH DISPLACEMENT (Highest Quality - CPU Hybrid Version)
 // ════════════════════════════════════════════════════════════════════════════════
-// Downloads FFT data once, then processes all vertices on CPU with bilinear interpolation
-// More reliable than GPU kernel approach, compatible with geometric waves pattern
 bool WaterManager::updateFFTDrivenMesh(WaterSurface* surf, float time) {
-    if (!surf) return false;
+    if (!surf || !surf->flatMesh || !surf->flatMesh->geometry) return false;
     if (!surf->params.use_fft_ocean || !surf->params.use_fft_mesh_displacement) return false;
     if (!surf->fft_state || !g_hasCUDA) return false;
     
@@ -1425,12 +1368,10 @@ bool WaterManager::updateFFTDrivenMesh(WaterSurface* surf, float time) {
         return false;
     }
     
-    // Get FFT parameters
     float ocean_size = resolveWaveDomainSize(surf);
     float height_scale = surf->params.fft_mesh_height_scale;
     float choppiness = surf->params.fft_mesh_choppiness;
     
-    // Download FFT data to CPU (single batch copy)
     int N = 0;
     std::vector<float> h_height, h_disp_x, h_disp_z, h_normal_x, h_normal_z;
     
@@ -1452,19 +1393,6 @@ bool WaterManager::updateFFTDrivenMesh(WaterSurface* surf, float time) {
         return false;
     }
     
-    // DEBUG: Check FFT data range
-    static int debug_counter = 0;
-    if (debug_counter++ % 100 == 0) {
-        float minH = h_height[0], maxH = h_height[0];
-        for (int i = 1; i < N2; ++i) {
-            minH = fminf(minH, h_height[i]);
-            maxH = fmaxf(maxH, h_height[i]);
-        }
-        SCENE_LOG_INFO("[FFT Mesh] N=%d, Height range: [%.4f, %.4f], scale=%.2f, vertices=%d", 
-                       N, minH, maxH, height_scale, vertex_count);
-    }
-    
-    // Bilinear sampling lambda
     auto sampleBilinear = [&](const std::vector<float>& data, float u, float v) -> float {
         u = u - floorf(u);
         v = v - floorf(v);
@@ -1477,7 +1405,6 @@ bool WaterManager::updateFFTDrivenMesh(WaterSurface* surf, float time) {
         int ix1 = (ix0 + 1) % N;
         int iz1 = (iz0 + 1) % N;
         
-        // Ensure non-negative
         if (ix0 < 0) ix0 += N;
         if (iz0 < 0) iz0 += N;
         
@@ -1494,45 +1421,53 @@ bool WaterManager::updateFFTDrivenMesh(WaterSurface* surf, float time) {
         return v0 * (1.0f - tz) + v1 * tz;
     };
     
-    // Apply displacement to all vertices
-    size_t idx = 0;
-    for (auto& tri : surf->mesh_triangles) {
-        if (!tri) continue;
-        
-        for (int v = 0; v < 3; ++v) {
-            if (idx >= (size_t)vertex_count) break;
-            
-            const Vec3& orig = surf->original_positions[idx];
-            
-            // World position to UV
-            float u = orig.x / ocean_size;
-            float vv = orig.z / ocean_size;
-            
-            // Sample FFT data
-            float height = sampleBilinear(h_height, u, vv);
-            float disp_x = sampleBilinear(h_disp_x, u, vv);
-            float disp_z = sampleBilinear(h_disp_z, u, vv);
-            float nx = sampleBilinear(h_normal_x, u, vv);
-            float nz = sampleBilinear(h_normal_z, u, vv);
-            
-            // Apply displacement with scaling
-            Vec3 newPos(
-                orig.x + disp_x * choppiness,
-                orig.y + height * height_scale,
-                orig.z + disp_z * choppiness
-            );
-            
-            // Calculate normal
-            float ny = sqrtf(fmaxf(0.001f, 1.0f - nx * nx - nz * nz));
-            Vec3 newNormal = Vec3(nx, ny, nz).normalize();
-            
-            tri->setVertexPosition(v, newPos);
-            tri->setVertexNormal(v, newNormal);
-            idx++;
-        }
-        tri->markAABBDirty();
+    auto& geo = *surf->flatMesh->geometry;
+    size_t vCount = surf->flatMesh->num_vertices();
+    Vec3* P = geo.get_attribute_data_mut<Vec3>("P");
+    Vec3* N_attr = geo.get_attribute_data_mut<Vec3>("N");
+    Vec3* Po = geo.get_attribute_data_mut<Vec3>("P_orig");
+    Vec3* No = geo.get_attribute_data_mut<Vec3>("N_orig");
+
+    Matrix4x4 finalT = Matrix4x4::identity();
+    Matrix4x4 normalT = Matrix4x4::identity();
+    if (surf->flatMesh->transform) {
+        finalT = surf->flatMesh->transform->getFinal();
+        normalT = surf->flatMesh->transform->getNormalTransform();
     }
-    return idx > 0;
+
+    #pragma omp parallel for
+    for (int i = 0; i < (int)vCount; ++i) {
+        const Vec3& orig = surf->original_positions[i];
+        
+        float u = orig.x / ocean_size;
+        float vv = orig.z / ocean_size;
+        
+        float height = sampleBilinear(h_height, u, vv);
+        float disp_x = sampleBilinear(h_disp_x, u, vv);
+        float disp_z = sampleBilinear(h_disp_z, u, vv);
+        float nx = sampleBilinear(h_normal_x, u, vv);
+        float nz = sampleBilinear(h_normal_z, u, vv);
+        
+        Vec3 displaced(
+            orig.x + disp_x * choppiness,
+            orig.y + height * height_scale,
+            orig.z + disp_z * choppiness
+        );
+        
+        float ny = sqrtf(fmaxf(0.001f, 1.0f - nx * nx - nz * nz));
+        Vec3 ln = Vec3(nx, ny, nz).normalize();
+        
+        Po[i] = displaced;
+        P[i]  = finalT.transform_point(displaced);
+        if (No) No[i] = ln;
+        if (N_attr) N_attr[i] = normalT.transform_vector(ln).normalize();
+    }
+
+    if (g_backend) {
+        g_backend->updateFlatMeshBLAS(surf->name, surf->flatMesh.get());
+    }
+
+    return true;
 }
 
 // ============================================================================
@@ -1856,27 +1791,31 @@ nlohmann::json WaterManager::serialize() const {
         
         ws["type"] = (int)surf.type;
 
-        // Position (from reference triangle or first triangle)
-        if (surf.reference_triangle) {
-            Vec3 v0 = surf.reference_triangle->getOriginalVertexPosition(0);
-            ws["position"] = {v0.x, v0.y, v0.z};
+        // Position (from flatMesh transform)
+        if (surf.flatMesh && surf.flatMesh->transform) {
+            Vec3 translation = surf.flatMesh->transform->position;
+            ws["position"] = {translation.x, translation.y, translation.z};
         }
 
-        
         // Grid info (calculate from triangles count)
-        // triangles = segments * segments * 2
-        size_t tri_count = surf.mesh_triangles.size();
+        size_t tri_count = 0;
+        if (surf.flatMesh && surf.flatMesh->geometry) {
+            tri_count = surf.flatMesh->geometry->indices.size() / 3;
+        }
         int segments = static_cast<int>(sqrt(tri_count / 2));
+        if (segments < 2) segments = 2;
         ws["segments"] = segments;
         
-        // Calculate size from triangle vertices
-        if (surf.mesh_triangles.size() >= 2) {
-            // First vertex of first triangle and last vertex of last triangle
-            Vec3 v_first = surf.mesh_triangles[0]->getOriginalVertexPosition(0);
-            Vec3 v_last = surf.mesh_triangles.back()->getOriginalVertexPosition(2);
-            float size_x = std::abs(v_last.x - v_first.x);
-            float size_z = std::abs(v_last.z - v_first.z);
-            ws["size"] = std::max(size_x, size_z);
+        // Calculate size from flatMesh vertices
+        if (surf.flatMesh && surf.flatMesh->geometry && surf.flatMesh->num_vertices() > 0) {
+            const Vec3* origP = surf.flatMesh->geometry->get_positions_orig();
+            if (origP) {
+                Vec3 v_first = origP[0];
+                Vec3 v_last = origP[surf.flatMesh->num_vertices() - 1];
+                float size_x = std::abs(v_last.x - v_first.x);
+                float size_z = std::abs(v_last.z - v_first.z);
+                ws["size"] = std::max(size_x, size_z);
+            }
         }
         
         arr.push_back(ws);
@@ -2019,13 +1958,12 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
             surf.animate_mesh = true;
         }
 
-        // Find existing triangles in scene by nodeName (don't create new ones!)
+        // Find existing flatMesh in scene by nodeName (don't create new ones!)
         for (auto& obj : scene.world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (tri && tri->getNodeName() == surf.name) {
-                surf.mesh_triangles.push_back(tri);
-                if (!surf.reference_triangle) {
-                    surf.reference_triangle = tri;
+            if (auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                if (tmesh->nodeName == surf.name) {
+                    surf.flatMesh = tmesh;
+                    break;
                 }
             }
         }

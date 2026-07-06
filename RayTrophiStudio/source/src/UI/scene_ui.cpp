@@ -3156,14 +3156,27 @@ void SceneUI::validateSelectionAgainstScene(UIContext& ctx) {
     live_objects_by_name.reserve(ctx.scene.world.objects.size());
 
     for (size_t i = 0; i < ctx.scene.world.objects.size(); ++i) {
-        auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i]);
-        if (!tri) continue;
-
-        std::string node_name = tri->getNodeName();
-        if (node_name.empty()) node_name = tri->getNodeName();
-        if (node_name.empty()) continue;
-
-        live_objects_by_name.emplace(node_name, std::make_pair(static_cast<int>(i), tri));
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i])) {
+            std::string node_name = tri->getNodeName();
+            if (node_name.empty()) continue;
+            live_objects_by_name.emplace(node_name, std::make_pair(static_cast<int>(i), tri));
+        } else if (auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(ctx.scene.world.objects[i])) {
+            std::string node_name = tmesh->nodeName;
+            if (node_name.empty()) continue;
+            std::shared_ptr<Triangle> rep = nullptr;
+            auto rep_it = direct_mesh_rep_by_ptr.find(tmesh.get());
+            if (rep_it != direct_mesh_rep_by_ptr.end()) {
+                rep = rep_it->second;
+            } else {
+                auto d_it = direct_mesh_nodes.find(node_name);
+                if (d_it != direct_mesh_nodes.end()) {
+                    rep = d_it->second.rep;
+                }
+            }
+            if (rep) {
+                live_objects_by_name.emplace(node_name, std::make_pair(static_cast<int>(i), rep));
+            }
+        }
     }
 
     auto rebind_item = [&](SelectableItem& item) -> bool {

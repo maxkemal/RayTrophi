@@ -143,6 +143,12 @@ namespace {
         gpuMat.resin_dirt = mat.resin_dirt;
         gpuMat.resin_inclusion_scale = mat.resin_inclusion_scale;
         gpuMat.resin_dirt_color = make_float3(mat.resin_dirt_color.x, mat.resin_dirt_color.y, mat.resin_dirt_color.z);
+        gpuMat.resin_shard = mat.resin_shard;
+        gpuMat.resin_shard_hue = mat.resin_shard_hue;
+        gpuMat.dust_style = (float)mat.dust_style;
+        gpuMat.dust_color_a = make_float3(mat.dust_color_a.x, mat.dust_color_a.y, mat.dust_color_a.z);
+        gpuMat.dust_color_b = make_float3(mat.dust_color_b.x, mat.dust_color_b.y, mat.dust_color_b.z);
+        gpuMat.shard_shape = (float)mat.shard_shape;
         gpuMat.tile_break_strength = mat.tile_break_strength;
         gpuMat.micro_detail_strength = mat.micro_detail_strength;
         gpuMat.micro_detail_scale = mat.micro_detail_scale;
@@ -284,6 +290,11 @@ void OptixBackend::showAllInstances() {
 
 void OptixBackend::updateSceneGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices) {
     m_optix->updateTLASGeometry(objects, boneMatrices);
+}
+
+bool OptixBackend::updateFlatMeshBLAS(const std::string& nodeName, const TriangleMesh* mesh) {
+    if (!m_optix) return false;
+    return m_optix->updateFlatMeshBLAS(nodeName, mesh);
 }
 
 void OptixBackend::updateInstanceMaterialBinding(const std::string& nodeName, int oldMatID, int newMatID) {

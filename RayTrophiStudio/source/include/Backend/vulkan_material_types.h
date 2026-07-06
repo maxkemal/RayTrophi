@@ -97,8 +97,8 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
     // Block 18: Resin coat layer params + spectral dispersion (16 bytes)
     float resin_roughness;       // resin coat gloss (reflect-lobe roughness), independent of base
     float dispersion;            // spectral dispersion strength (0 = off; repurposed _resin_pad0)
-    float _resin_pad1;           // reserved: resin roughness texture handle
-    float _resin_pad2;           // reserved: resin normal texture handle
+    float resin_shard;           // colored glass-shard amount (repurposed _resin_pad1)
+    float resin_shard_hue;       // shard base hue 0..1; <0 = rainbow (repurposed _resin_pad2)
 
     // Block 19: Resin internal inclusions — dust/dirt march (16 bytes)
     float resin_inclusion;       // dust cloudiness amount (0 = off, analytic fallback)
@@ -111,6 +111,18 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
     float resin_dirt_color_b;
     float clearcoat_iridescence;    // thin-film tint on clearcoat lobe (0 = plain white)
     float clearcoat_film_thickness; // hue cycle / film thickness (OPD scale)
+
+    // Block 21: Interior Volume dust colour A + style (16 bytes)
+    float dust_color_a_r;           // paint/nebula colour pole A
+    float dust_color_a_g;
+    float dust_color_a_b;
+    float dust_style;               // 0=Nebula(auto) 1=Billow 2-colour 2=Wispy 3=Paint swirl
+
+    // Block 22: Interior Volume dust colour B + shard shape (16 bytes)
+    float dust_color_b_r;           // paint/nebula colour pole B
+    float dust_color_b_g;
+    float dust_color_b_b;
+    float shard_shape;              // 0=round chips, 1=elongated faceted crystals
 };
 
 // Single source of truth for the GPU material stride. Every material-reading shader
@@ -118,7 +130,7 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
 // this assert fires after adding a field, update material_struct.glsl too — a shader
 // copy that is shorter makes materials[idx] for idx>=1 read a shifted offset (wrong
 // textures / missing shadows / vanished objects). See bugfix history 2026-06-22.
-static_assert(sizeof(VkGpuMaterial) == 320, "VkGpuMaterial must stay 320 bytes (20x16); update shaders/material_struct.glsl to match");
+static_assert(sizeof(VkGpuMaterial) == 352, "VkGpuMaterial must stay 352 bytes (22x16); update shaders/material_struct.glsl to match");
 
 // Flag bits for VkGpuMaterial::flags
 static constexpr uint32_t VK_MAT_FLAG_TERRAIN = (1u << 16); // Splat-blended terrain material
@@ -126,6 +138,7 @@ static constexpr uint32_t VK_MAT_FLAG_WATER   = (1u << 17); // Explicit water su
 static constexpr uint32_t VK_MAT_FLAG_WATER_FFT_READY = (1u << 18); // height/normal slots contain FFT textures
 static constexpr uint32_t VK_MAT_FLAG_BUBBLE  = (1u << 19); // Thin-shell bubble (Fresnel rim + pass-through)
 static constexpr uint32_t VK_MAT_FLAG_MARBLE_VOLUME = (1u << 20); // Glass marble full-volume medium march (raygen)
+static constexpr uint32_t VK_MAT_FLAG_RESIN_OBJ_SPACE = (1u << 21); // Interior volume anchored in OBJECT space (moves with the mesh)
 
 /**
  * @brief Per-terrain splat-layer descriptor uploaded to binding 12.

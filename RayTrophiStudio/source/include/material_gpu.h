@@ -142,6 +142,12 @@ struct alignas(16) GpuMaterial {
     float resin_dirt = 0.0f;             // opaque dirt-speck amount (early-return)
     float resin_inclusion_scale = 8.0f;  // procedural feature size
     float3 resin_dirt_color = {0.18f, 0.14f, 0.10f};
+    float resin_shard = 0.0f;            // colored glass-shard amount
+    float resin_shard_hue = -1.0f;       // base hue 0..1; <0 = rainbow palette
+    float dust_style = 0.0f;             // 0=Nebula(auto) 1=Billow 2=Wispy 3=Paint swirl
+    float3 dust_color_a = {1.0f, 1.0f, 1.0f};
+    float3 dust_color_b = {1.0f, 1.0f, 1.0f};
+    float shard_shape = 0.0f;            // 0=round chips 1=faceted crystals
     // Iridescent clearcoat: thin-film tint on the clearcoat lobe (oil-slick / beetle-shell /
     // candy paint). Repurposed from the trailing implicit padding so the struct size/layout
     // is UNCHANGED (matches GLSL _resin2_pad0/_resin2_pad1, shared byte-for-byte).
@@ -280,6 +286,16 @@ inline bool operator==(const GpuMaterial& a, const GpuMaterial& b) {
         fabsf(a.resin_dirt_color.x - b.resin_dirt_color.x) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.resin_dirt_color.y - b.resin_dirt_color.y) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.resin_dirt_color.z - b.resin_dirt_color.z) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.resin_shard - b.resin_shard) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.resin_shard_hue - b.resin_shard_hue) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.dust_style - b.dust_style) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.dust_color_a.x - b.dust_color_a.x) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.dust_color_a.y - b.dust_color_a.y) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.dust_color_a.z - b.dust_color_a.z) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.dust_color_b.x - b.dust_color_b.x) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.dust_color_b.y - b.dust_color_b.y) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.dust_color_b.z - b.dust_color_b.z) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.shard_shape - b.shard_shape) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.clearcoat_iridescence - b.clearcoat_iridescence) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.clearcoat_film_thickness - b.clearcoat_film_thickness) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.dispersion - b.dispersion) < FLOAT_COMPARE_EPSILON;
@@ -376,6 +392,16 @@ namespace std {
             hash_combine_f(h, m.resin_dirt_color.x);
             hash_combine_f(h, m.resin_dirt_color.y);
             hash_combine_f(h, m.resin_dirt_color.z);
+            hash_combine_f(h, m.resin_shard);
+            hash_combine_f(h, m.resin_shard_hue);
+            hash_combine_f(h, m.dust_style);
+            hash_combine_f(h, m.dust_color_a.x);
+            hash_combine_f(h, m.dust_color_a.y);
+            hash_combine_f(h, m.dust_color_a.z);
+            hash_combine_f(h, m.dust_color_b.x);
+            hash_combine_f(h, m.dust_color_b.y);
+            hash_combine_f(h, m.dust_color_b.z);
+            hash_combine_f(h, m.shard_shape);
             hash_combine_f(h, m.clearcoat_iridescence);
             hash_combine_f(h, m.clearcoat_film_thickness);
             hash_combine_f(h, m.dispersion);

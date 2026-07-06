@@ -1402,13 +1402,6 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
     }
 
     std::unordered_set<const Triangle*> live_water_triangles;
-    for (const auto& surf : WaterManager::getInstance().getWaterSurfaces()) {
-        for (const auto& tri : surf.mesh_triangles) {
-            if (tri) {
-                live_water_triangles.insert(tri.get());
-            }
-        }
-    }
     
     // 3. UPDATE BLAS AND INSTANCE TRANSFORMS
     for (const auto& group : m_cached_groups) {
