@@ -84,6 +84,7 @@ Tek bir fiziksel temelli path tracer, üç hızlandırma backend'ini besler. Sah
 - **Principled BSDF** (Disney tarzı uber-shader): albedo, roughness, metallic, specular, clearcoat, sheen, anisotropy, transmission/IOR
 - **Lambertian, Metal, Dielectric** klasik modeller
 - **Yüzey-altı saçılım (SSS)**
+- **Resin / kalın cam katmanı**: opak bir tabanın üzerinde kırıcı, emici bir kaplama — Beer-Lambert derinlik tonu (Resin Color + Depth), bağımsız kaplama parlaklığı ve sahne ışını gerektirmeden kalınlık içinde march edilen prosedürel iç kapanımlar (toz bulutu, benek/kir); epoksi nehir masası, bilye, kehribar tarzı görünümler (üç backend'de de)
 - **Spektral / melanin tabanlı saç BSDF**
 - NanoVDB seyrek hacimler ve prosedürel gürültü yoğunluğuyla **volumetrik render**
 - Tam doku desteği (albedo, roughness, metallic, normal, emission, transmission, opacity), sRGB/linear yönetimi
