@@ -84,6 +84,7 @@ A single physically-based path tracer feeds three acceleration backends. The sce
 - **Principled BSDF** (Disney-style uber-shader): albedo, roughness, metallic, specular, clearcoat, sheen, anisotropy, transmission/IOR
 - **Lambertian, Metal, Dielectric** classic models
 - **Subsurface scattering (SSS)**
+- **Resin / thick-glass layer**: a refractive absorbing coat over an opaque base — Beer-Lambert depth tint (Resin Color + Depth), independent coat gloss, and procedural internal inclusions (dust cloudiness, specks/dirt) marched inside the thickness without scene rays; epoxy river tables, marbles, amber-style looks (all three backends)
 - **Spectral / melanin-based hair BSDF**
 - **Volumetric rendering** with NanoVDB sparse volumes and procedural noise density
 - Full texture support (albedo, roughness, metallic, normal, emission, transmission, opacity) with sRGB/linear handling
