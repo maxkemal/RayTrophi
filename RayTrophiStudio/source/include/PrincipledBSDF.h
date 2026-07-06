@@ -221,6 +221,20 @@ public:
     void setResinInclusionScale(float val) override;
     Vec3 getResinDirtColor() const override;
     void setResinDirtColor(const Vec3& val) override;
+    float getResinShard() const override;
+    void setResinShard(float val) override;
+    float getResinShardHue() const override;
+    void setResinShardHue(float val) override;
+    bool getResinObjectSpace() const override;
+    void setResinObjectSpace(bool val) override;
+    int getDustStyle() const override;
+    void setDustStyle(int val) override;
+    Vec3 getDustColorA() const override;
+    void setDustColorA(const Vec3& val) override;
+    Vec3 getDustColorB() const override;
+    void setDustColorB(const Vec3& val) override;
+    int getShardShape() const override;
+    void setShardShape(int val) override;
     bool getGlassMarbleVolume() const override;
     void setGlassMarbleVolume(bool val) override;
 
@@ -258,6 +272,13 @@ public:
         float resinDirt = 0.0f;                             // opaque dirt-speck amount
         float resinInclusionScale = 8.0f;                  // procedural feature size
         Vec3 resinDirtColor = Vec3(0.18f, 0.14f, 0.10f);    // speck tint
+        float resinShard = 0.0f;                            // colored glass-shard amount
+        float resinShardHue = -1.0f;                        // base hue 0..1; <0 = rainbow
+        bool resinObjectSpace = true;                       // interior anchored to the object
+        int dustStyle = 0;                                  // 0=Nebula(auto) 1=Billow 2=Wispy 3=Paint swirl
+        Vec3 dustColorA = Vec3(1.0f, 1.0f, 1.0f);           // 2-colour dust pole A (styles 1-3)
+        Vec3 dustColorB = Vec3(1.0f, 1.0f, 1.0f);           // 2-colour dust pole B (styles 1-3)
+        int shardShape = 0;                                 // 0=round chips 1=faceted crystals
         bool glassMarbleVolume = false;                     // Glass Marble FULL VOLUME
     };
 

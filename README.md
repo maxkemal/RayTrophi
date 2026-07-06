@@ -84,7 +84,7 @@ A single physically-based path tracer feeds three acceleration backends. The sce
 - **Principled BSDF** (Disney-style uber-shader): albedo, roughness, metallic, specular, clearcoat, sheen, anisotropy, transmission/IOR
 - **Lambertian, Metal, Dielectric** classic models
 - **Subsurface scattering (SSS)**
-- **Resin / thick-glass layer**: a refractive absorbing coat over an opaque base — Beer-Lambert depth tint (Resin Color + Depth), independent coat gloss, and procedural internal inclusions (dust cloudiness, specks/dirt) marched inside the thickness without scene rays; epoxy river tables, marbles, amber-style looks (all three backends)
+- **Interior Volume** (resin / glass-marble interiors): Beer-Lambert depth absorption over an opaque base or inside see-through glass (all three backends), plus a procedural interior system (Vulkan RT): deterministic DDA-traversed inclusions — sharp dirt specks, air bubbles, and colored glass shards (round chips or elongated faceted crystals that flash as the object turns) — and styled dust clouds (nebula, two-color billow, wispy streaks, domain-warped paint-swirl "ink in water"), all with object/world anchoring, curated interior presets, and no extra scene rays. Shard colors carry into photon caustics for stained-glass patterns
 - **Spectral / melanin-based hair BSDF**
 - **Volumetric rendering** with NanoVDB sparse volumes and procedural noise density
 - Full texture support (albedo, roughness, metallic, normal, emission, transmission, opacity) with sRGB/linear handling

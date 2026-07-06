@@ -537,6 +537,13 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
                 matJson["resinDirt"] = pbsdf->getResinDirt();
                 matJson["resinInclusionScale"] = pbsdf->getResinInclusionScale();
                 matJson["resinDirtColor"] = vec3ToJson(pbsdf->getResinDirtColor());
+                matJson["resinShard"] = pbsdf->getResinShard();
+                matJson["resinShardHue"] = pbsdf->getResinShardHue();
+                matJson["resinObjectSpace"] = pbsdf->getResinObjectSpace();
+                matJson["dustStyle"] = pbsdf->getDustStyle();
+                matJson["dustColorA"] = vec3ToJson(pbsdf->getDustColorA());
+                matJson["dustColorB"] = vec3ToJson(pbsdf->getDustColorB());
+                matJson["shardShape"] = pbsdf->getShardShape();
                 matJson["glassMarbleVolume"] = pbsdf->getGlassMarbleVolume();
 
                 // Legacy tiling fallback for older scene compatibility
@@ -712,6 +719,15 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
             pbsdf->setResinInclusionScale(matJson.value("resinInclusionScale", 8.0f));
             if (matJson.contains("resinDirtColor"))
                 pbsdf->setResinDirtColor(jsonToVec3(matJson["resinDirtColor"], Vec3(0.18f, 0.14f, 0.10f)));
+            pbsdf->setResinShard(matJson.value("resinShard", 0.0f));
+            pbsdf->setResinShardHue(matJson.value("resinShardHue", -1.0f));
+            pbsdf->setResinObjectSpace(matJson.value("resinObjectSpace", true));
+            pbsdf->setDustStyle(matJson.value("dustStyle", 0));
+            if (matJson.contains("dustColorA"))
+                pbsdf->setDustColorA(jsonToVec3(matJson["dustColorA"], Vec3(1.0f, 1.0f, 1.0f)));
+            if (matJson.contains("dustColorB"))
+                pbsdf->setDustColorB(jsonToVec3(matJson["dustColorB"], Vec3(1.0f, 1.0f, 1.0f)));
+            pbsdf->setShardShape(matJson.value("shardShape", 0));
             pbsdf->setGlassMarbleVolume(matJson.value("glassMarbleVolume", false));
 
             // Legacy tiling fallback

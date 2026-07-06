@@ -10,7 +10,65 @@
 #include "PrincipledBSDF.h"
 #include "TerrainManager.h"
 #include "WaterSystem.h"
+#include "TriangleMesh.h"
 #include "globals.h"
+
+namespace {
+std::shared_ptr<TriangleMesh> gridToFlatMesh(
+    const std::vector<Vec3>& positions,
+    const std::vector<Vec3>& normals,
+    const std::vector<Vec2>& uvs,
+    const std::vector<uint32_t>& indices,
+    uint16_t materialID,
+    const std::shared_ptr<Transform>& transform,
+    const std::string& nodeName) {
+    const size_t vCount = positions.size();
+    if (vCount == 0 || indices.empty()) return nullptr;
+
+    auto tm = std::make_shared<TriangleMesh>();
+    tm->transform = transform;
+    tm->nodeName = nodeName;
+    tm->geometry->resize_vertices(vCount);
+
+    tm->geometry->add_attribute<Vec3>("P");
+    tm->geometry->add_attribute<Vec3>("N");
+    tm->geometry->add_attribute<Vec3>("P_orig");
+    tm->geometry->add_attribute<Vec3>("N_orig");
+    tm->geometry->add_attribute<Vec2>("uv");
+    tm->geometry->add_attribute<uint16_t>("materialID");
+
+    Vec3* P  = tm->geometry->get_attribute_data_mut<Vec3>("P");
+    Vec3* N  = tm->geometry->get_attribute_data_mut<Vec3>("N");
+    Vec3* Po = tm->geometry->get_attribute_data_mut<Vec3>("P_orig");
+    Vec3* No = tm->geometry->get_attribute_data_mut<Vec3>("N_orig");
+    Vec2* UV = tm->geometry->get_attribute_data_mut<Vec2>("uv");
+    uint16_t* M = tm->geometry->get_attribute_data_mut<uint16_t>("materialID");
+
+    Matrix4x4 finalT = Matrix4x4::identity();
+    Matrix4x4 normalT = Matrix4x4::identity();
+    if (transform) {
+        finalT = transform->getFinal();
+        normalT = transform->getNormalTransform();
+    }
+
+    #pragma omp parallel for schedule(static) if(vCount >= 2048)
+    for (int i = 0; i < (int)vCount; ++i) {
+        const Vec3& lp = positions[(size_t)i];
+        const Vec3& ln = normals[(size_t)i];
+        if (Po) Po[i] = lp;
+        if (No) No[i] = ln;
+        if (P)  P[i]  = finalT.transform_point(lp);
+        if (N)  N[i]  = normalT.transform_vector(ln).normalize();
+        if (UV && !uvs.empty()) UV[i] = uvs[(size_t)i];
+        if (M)  M[i]  = materialID;
+    }
+
+    tm->geometry->indices.resize(indices.size());
+    for (size_t i = 0; i < indices.size(); ++i) tm->geometry->indices[i] = indices[i];
+
+    return tm;
+}
+}
 #include <algorithm>
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -81,25 +139,22 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
     // STEP 1: Remove old mesh from scene and WaterManager
     // ─────────────────────────────────────────────────────────────────────────
     // ─────────────────────────────────────────────────────────────────────────
-    // STEP 1: Remove old mesh from scene
+    // STEP 1: Remove old flatMesh from scene
     // ─────────────────────────────────────────────────────────────────────────
-    if (!river->meshTriangles.empty()) {
-        for (auto& tri : river->meshTriangles) {
-            auto it = std::find(scene.world.objects.begin(), scene.world.objects.end(), 
-                               std::static_pointer_cast<Hittable>(tri));
-            if (it != scene.world.objects.end()) {
-                scene.world.objects.erase(it);
-            }
+    if (river->flatMesh) {
+        auto it = std::find(scene.world.objects.begin(), scene.world.objects.end(), 
+                           river->flatMesh);
+        if (it != scene.world.objects.end()) {
+            scene.world.objects.erase(it);
         }
-        river->meshTriangles.clear();
+        river->flatMesh = nullptr;
     }
     else {
-        // Fallback: Check for existing objects with this river's name (e.g. from load)
-        // to prevent duplicate geometry if meshTriangles wasn't populated yet.
+        // Fallback: Check for existing TriangleMesh with this river's name
         auto it = scene.world.objects.begin();
         while (it != scene.world.objects.end()) {
-            if (auto tri = std::dynamic_pointer_cast<Triangle>(*it)) {
-                if (tri->getNodeName() == river->name) {
+            if (auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(*it)) {
+                if (tmesh->nodeName == river->name) {
                     it = scene.world.objects.erase(it);
                     continue;
                 }
@@ -344,42 +399,60 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
     }
     
     // ─────────────────────────────────────────────────────────────────────────
-    // STEP 5: Create shared transform and triangles
+    // STEP 5: Create shared transform and flat TriangleMesh
     // ─────────────────────────────────────────────────────────────────────────
     auto sharedTransform = std::make_shared<Transform>();
     sharedTransform->setBase(Matrix4x4::identity());
     
+    std::vector<Vec3> positions;
+    std::vector<Vec3> normals;
+    std::vector<Vec2> uvs;
+    positions.reserve((lengthSegs + 1) * (widthSegs + 1));
+    normals.reserve((lengthSegs + 1) * (widthSegs + 1));
+    uvs.reserve((lengthSegs + 1) * (widthSegs + 1));
+
+    for (int i = 0; i <= lengthSegs; ++i) {
+        for (int j = 0; j <= widthSegs; ++j) {
+            positions.push_back(grid[i][j].position);
+            normals.push_back(grid[i][j].normal);
+            uvs.push_back(grid[i][j].uv);
+        }
+    }
+
+    std::vector<uint32_t> indices;
+    indices.reserve(lengthSegs * widthSegs * 6);
+    int gridW = widthSegs + 1;
     for (int i = 0; i < lengthSegs; ++i) {
         for (int j = 0; j < widthSegs; ++j) {
-            auto& v00 = grid[i][j];
-            auto& v10 = grid[i + 1][j];
-            auto& v01 = grid[i][j + 1];
-            auto& v11 = grid[i + 1][j + 1];
-            
-            auto tri1 = std::make_shared<Triangle>(
-                v00.position, v10.position, v11.position,
-                v00.normal, v10.normal, v11.normal,
-                v00.uv, v10.uv, v11.uv,
-                waterMatID
-            );
-            tri1->setNodeName(river->name);
-            tri1->setTransformHandle(sharedTransform);
-            
-            auto tri2 = std::make_shared<Triangle>(
-                v00.position, v11.position, v01.position,
-                v00.normal, v11.normal, v01.normal,
-                v00.uv, v11.uv, v01.uv,
-                waterMatID
-            );
-            tri2->setNodeName(river->name);
-            tri2->setTransformHandle(sharedTransform);
-            
-            river->meshTriangles.push_back(tri1);
-            river->meshTriangles.push_back(tri2);
-            
-            scene.world.objects.push_back(tri1);
-            scene.world.objects.push_back(tri2);
+            uint32_t i00 = i * gridW + j;
+            uint32_t i10 = (i + 1) * gridW + j;
+            uint32_t i01 = i * gridW + (j + 1);
+            uint32_t i11 = (i + 1) * gridW + (j + 1);
+
+            // Triangle 1 (v00, v10, v11)
+            indices.push_back(i00);
+            indices.push_back(i10);
+            indices.push_back(i11);
+
+            // Triangle 2 (v00, v11, v01)
+            indices.push_back(i00);
+            indices.push_back(i11);
+            indices.push_back(i01);
         }
+    }
+
+    river->flatMesh = gridToFlatMesh(
+        positions,
+        normals,
+        uvs,
+        indices,
+        waterMatID,
+        sharedTransform,
+        river->name
+    );
+
+    if (river->flatMesh) {
+        scene.world.objects.push_back(river->flatMesh);
     }
     
     // ─────────────────────────────────────────────────────────────────────────
@@ -394,11 +467,8 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
         existingSurf->name = river->name;
         existingSurf->params = river->waterParams;
         existingSurf->material_id = waterMatID;
-        existingSurf->mesh_triangles = river->meshTriangles;
-        
-        if (!river->meshTriangles.empty()) {
-            existingSurf->reference_triangle = river->meshTriangles[0];
-        }
+        existingSurf->flatMesh = river->flatMesh;
+        existingSurf->type = WaterSurface::Type::River;
         
         river->waterSurfaceId = existingSurf->id;
         
@@ -412,12 +482,9 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
         waterSurf.name = river->name;
         waterSurf.params = river->waterParams;
         waterSurf.material_id = waterMatID;
-        waterSurf.mesh_triangles = river->meshTriangles;
+        waterSurf.flatMesh = river->flatMesh;
+        waterSurf.type = WaterSurface::Type::River;
         waterSurf.fft_state = nullptr;
-        
-        if (!river->meshTriangles.empty()) {
-            waterSurf.reference_triangle = river->meshTriangles[0];
-        }
         
         // Add to WaterManager's list
         waterMgr.getWaterSurfaces().push_back(waterSurf);
@@ -467,15 +534,15 @@ void RiverManager::removeRiver(SceneData& scene, int id) {
         WaterManager::getInstance().removeWaterSurface(scene, it->waterSurfaceId);
     }
     
-    // Remove triangles from scene (in case WaterManager didn't)
-    for (auto& tri : it->meshTriangles) {
+    // Remove flatMesh from scene (in case WaterManager didn't)
+    if (it->flatMesh) {
         auto objIt = std::find(scene.world.objects.begin(), scene.world.objects.end(),
-                               std::static_pointer_cast<Hittable>(tri));
+                               it->flatMesh);
         if (objIt != scene.world.objects.end()) {
             scene.world.objects.erase(objIt);
         }
+        it->flatMesh = nullptr;
     }
-    it->meshTriangles.clear();
     
     // Remove from list
     rivers.erase(it);

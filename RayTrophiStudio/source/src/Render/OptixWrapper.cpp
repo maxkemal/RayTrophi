@@ -4257,6 +4257,80 @@ bool OptixWrapper::updateTerrainBLASPartial(const std::string& node_name, Terrai
     return success;
 }
 
+bool OptixWrapper::updateFlatMeshBLAS(const std::string& node_name, const TriangleMesh* mesh) {
+    if (!accel_manager || !mesh || !use_tlas_mode) return false;
+    
+    // 1. Get material ID
+    uint16_t mat_id = 0;
+    if (mesh->geometry) {
+        const uint16_t* M = mesh->geometry->get_attribute_data<uint16_t>("materialID");
+        if (M) mat_id = M[0];
+    }
+
+    // 2. Find the BLAS ID
+    int blas_id = accel_manager->findBLAS(std::string(node_name), (int)mat_id, false);
+    if (blas_id == -1) {
+        // Try with chunk suffix
+        std::string chunk_name = node_name + "_Chunk";
+        blas_id = accel_manager->findBLAS(std::string(chunk_name), (int)mat_id, false);
+        
+        if (blas_id == -1) {
+            std::string alt_name = node_name;
+            if (mat_id > 0) alt_name += "_mat_" + std::to_string(mat_id);
+            blas_id = accel_manager->findBLAS(std::string(alt_name), (int)mat_id, false);
+            
+            if (blas_id == -1) {
+                std::string chunk_mat = chunk_name;
+                if (mat_id > 0) chunk_mat += "_mat_" + std::to_string(mat_id);
+                blas_id = accel_manager->findBLAS(std::string(chunk_mat), (int)mat_id, false);
+                
+                if (blas_id == -1) {
+                    SCENE_LOG_ERROR("updateFlatMeshBLAS: FAILED to find BLAS for flat mesh: " + node_name + " (MatID: " + std::to_string(mat_id) + ")");
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (!mesh->geometry) {
+        SCENE_LOG_WARN("updateFlatMeshBLAS: Mesh has no geometry! cannot update.");
+        return false;
+    }
+
+    const DNA::GeometryDetail& geo = *mesh->geometry;
+    const size_t tri_count = geo.indices.size() / 3;
+    if (tri_count == 0) {
+        SCENE_LOG_WARN("updateFlatMeshBLAS: Mesh has 0 triangles! cannot update.");
+        return false;
+    }
+
+    const Vec3* Po = geo.get_positions_orig();
+    const Vec3* No = geo.get_normals_orig();
+    if (!Po) {
+        SCENE_LOG_WARN("updateFlatMeshBLAS: Mesh has no position data! cannot update.");
+        return false;
+    }
+
+    MeshGeometry geom;
+    geom.mesh_name = node_name;
+    geom.vertices.reserve(tri_count * 3);
+    geom.normals.reserve(tri_count * 3);
+
+    for (size_t i = 0; i < geo.indices.size(); ++i) {
+        uint32_t vi = geo.indices[i];
+        geom.vertices.push_back(toFloat3(Po[vi]));
+        geom.normals.push_back(toFloat3(No ? No[vi] : Vec3(0.0f, 1.0f, 0.0f)));
+    }
+
+    bool success = accel_manager->updateMeshBLAS(blas_id, geom, false, true);
+    if (!success) {
+        SCENE_LOG_ERROR("updateFlatMeshBLAS: updateMeshBLAS returned FALSE for BLAS ID " + std::to_string(blas_id));
+    } else {
+        resetAccumulation();
+    }
+    return success;
+}
+
 bool OptixWrapper::updateMeshBLASFromTriangles(const std::string& node_name, const std::vector<std::shared_ptr<Triangle>>& triangles) {
     extern std::atomic<bool> g_optix_rebuild_in_progress;
     if (!accel_manager || triangles.empty() || !use_tlas_mode ||

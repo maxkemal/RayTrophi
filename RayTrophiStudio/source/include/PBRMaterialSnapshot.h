@@ -61,6 +61,13 @@ struct PBRMaterialSnapshot {
     float resinDirt = 0.0f;                    // opaque dirt-speck amount (early-return)
     float resinInclusionScale = 8.0f;          // procedural feature size
     Vec3  resinDirtColor = Vec3(0.18f, 0.14f, 0.10f);
+    float resinShard = 0.0f;                   // colored glass-shard amount
+    float resinShardHue = -1.0f;               // base hue 0..1; <0 = rainbow
+    bool  resinObjectSpace = true;             // interior anchored to the object
+    int   dustStyle = 0;                       // 0=Nebula(auto) 1=Billow 2=Wispy 3=Paint swirl
+    Vec3  dustColorA = Vec3(1.0f, 1.0f, 1.0f); // 2-colour dust pole A
+    Vec3  dustColorB = Vec3(1.0f, 1.0f, 1.0f); // 2-colour dust pole B
+    int   shardShape = 0;                      // 0=round chips 1=faceted crystals
     bool  glassMarbleVolume = false;           // full-volume marble medium march (vs front-shell)
 };
 
@@ -116,6 +123,13 @@ inline PBRMaterialSnapshot capturePBRMaterialSnapshot(const PrincipledBSDF& pbsd
     s.resinDirt = pbsdf.getResinDirt();
     s.resinInclusionScale = pbsdf.getResinInclusionScale();
     s.resinDirtColor = pbsdf.getResinDirtColor();
+    s.resinShard = pbsdf.getResinShard();
+    s.resinShardHue = pbsdf.getResinShardHue();
+    s.resinObjectSpace = pbsdf.getResinObjectSpace();
+    s.dustStyle = pbsdf.getDustStyle();
+    s.dustColorA = pbsdf.getDustColorA();
+    s.dustColorB = pbsdf.getDustColorB();
+    s.shardShape = pbsdf.getShardShape();
     s.glassMarbleVolume = pbsdf.getGlassMarbleVolume();
     return s;
 }
@@ -184,6 +198,12 @@ inline void applyPBRMaterialSnapshotToGpuMaterial(const PBRMaterialSnapshot& s, 
     gpu.resin_dirt = s.resinDirt;
     gpu.resin_inclusion_scale = s.resinInclusionScale;
     gpu.resin_dirt_color = make_float3((float)s.resinDirtColor.x, (float)s.resinDirtColor.y, (float)s.resinDirtColor.z);
+    gpu.resin_shard = s.resinShard;
+    gpu.resin_shard_hue = s.resinShardHue;
+    gpu.dust_style = (float)s.dustStyle;
+    gpu.dust_color_a = make_float3((float)s.dustColorA.x, (float)s.dustColorA.y, (float)s.dustColorA.z);
+    gpu.dust_color_b = make_float3((float)s.dustColorB.x, (float)s.dustColorB.y, (float)s.dustColorB.z);
+    gpu.shard_shape = (float)s.shardShape;
     if (s.glassMarbleVolume) gpu.flags |= GPU_MAT_FLAG_MARBLE_VOLUME;
 }
 
@@ -239,6 +259,13 @@ inline Backend::IBackend::MaterialData makeBackendMaterialDataFromSnapshot(const
     data.resin_dirt = s.resinDirt;
     data.resin_inclusion_scale = s.resinInclusionScale;
     data.resin_dirt_color = s.resinDirtColor;
+    data.resin_shard = s.resinShard;
+    data.resin_shard_hue = s.resinShardHue;
+    data.resin_object_space = s.resinObjectSpace;
+    data.dust_style = s.dustStyle;
+    data.dust_color_a = s.dustColorA;
+    data.dust_color_b = s.dustColorB;
+    data.shard_shape = s.shardShape;
     data.glass_marble_volume = s.glassMarbleVolume;
     return data;
 }

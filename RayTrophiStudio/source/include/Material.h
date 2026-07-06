@@ -230,6 +230,20 @@ public:
     virtual void setResinInclusionScale(float val) {}
     virtual Vec3 getResinDirtColor() const { return Vec3(0.18f, 0.14f, 0.10f); }
     virtual void setResinDirtColor(const Vec3& val) {}
+    virtual float getResinShard() const { return 0.0f; }
+    virtual void setResinShard(float val) {}
+    virtual float getResinShardHue() const { return -1.0f; }   // <0 = rainbow palette
+    virtual void setResinShardHue(float val) {}
+    virtual bool getResinObjectSpace() const { return true; }  // interior anchored to the object
+    virtual void setResinObjectSpace(bool val) {}
+    virtual int getDustStyle() const { return 0; }             // 0=Nebula 1=Billow 2=Wispy 3=Paint swirl
+    virtual void setDustStyle(int val) {}
+    virtual Vec3 getDustColorA() const { return Vec3(1.0f, 1.0f, 1.0f); }
+    virtual void setDustColorA(const Vec3& val) {}
+    virtual Vec3 getDustColorB() const { return Vec3(1.0f, 1.0f, 1.0f); }
+    virtual void setDustColorB(const Vec3& val) {}
+    virtual int getShardShape() const { return 0; }            // 0=chips 1=crystals
+    virtual void setShardShape(int val) {}
     virtual bool getGlassMarbleVolume() const { return false; }
     virtual void setGlassMarbleVolume(bool val) {}
 

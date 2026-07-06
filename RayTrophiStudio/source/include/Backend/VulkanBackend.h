@@ -1267,6 +1267,7 @@ public:
     void rebuildAccelerationStructure() override;
     void showAllInstances() override;
     void updateSceneGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices) override;
+    bool updateFlatMeshBLAS(const std::string& nodeName, const TriangleMesh* mesh) override;
     void updateInstanceMaterialBinding(const std::string& nodeName, int oldMatID, int newMatID) override;
     void setVisibilityByNodeName(const std::string& nodeName, bool visible) override;
     void updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) override;

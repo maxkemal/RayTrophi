@@ -1293,8 +1293,10 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         // Above the cap we fall back to the cached convex hull. A proper fix
         // for very dense meshes would be a GPU outline pass or a one-time
         // decimated proxy cached per selection — out of scope here.
+        TriangleMesh* pm = (!tris.empty() && tris[0].second->parentMesh) ? tris[0].second->parentMesh.get() : nullptr;
+        const int64_t tri_count = pm ? static_cast<int64_t>(pm->geometry->indices.size() / 3) : static_cast<int64_t>(tris.size());
         constexpr size_t MAX_TRIS_FOR_RASTER = 1000000;
-        if (tris.size() > MAX_TRIS_FOR_RASTER) return false;
+        if (static_cast<size_t>(tri_count) > MAX_TRIS_FOR_RASTER) return false;
         constexpr size_t tri_stride = 1;
 
         // pose_hash is hoisted to function scope so it can feed the per-frame
@@ -1424,7 +1426,7 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         cache_entry.hash = frame_hash;
 
         struct ProjTri { float x[3], y[3]; float mean_depth; bool valid; };
-        std::vector<ProjTri> projected(tris.size());
+        std::vector<ProjTri> projected(tri_count);
 
         int min_x = sw, min_y = sh, max_x = -1, max_y = -1;
         bool has_any = false;
@@ -1438,16 +1440,30 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         // single-threaded cost that pegged one core while orbiting the camera
         // with the object selected. The bbox/has_any reduction happens in a
         // cheap serial pass below instead of inside the parallel region.
-        const int64_t tri_count = static_cast<int64_t>(tris.size());
         #pragma omp parallel for schedule(dynamic, 4096) if(tri_count > 8192)
         for (int64_t i = 0; i < tri_count; i += static_cast<int64_t>(tri_stride)) {
             ProjTri& pt = projected[i];
             pt.valid = false;
-            const Triangle& T = *tris[i].second;
-            // Pull vertices: skinned → already world; else → local space + M below.
-            const Vec3& a = mesh_is_skinned ? T.getVertexPosition(0) : T.getOriginalVertexPosition(0);
-            const Vec3& b = mesh_is_skinned ? T.getVertexPosition(1) : T.getOriginalVertexPosition(1);
-            const Vec3& c = mesh_is_skinned ? T.getVertexPosition(2) : T.getOriginalVertexPosition(2);
+            
+            Vec3 a, b, c;
+            if (pm) {
+                const auto& idx = pm->geometry->indices;
+                const Vec3* P = nullptr;
+                if (mesh_is_skinned) {
+                    P = pm->geometry->get_positions();
+                } else {
+                    P = pm->geometry->get_positions_orig();
+                    if (!P) P = pm->geometry->get_positions();
+                }
+                a = P[idx[i * 3 + 0]];
+                b = P[idx[i * 3 + 1]];
+                c = P[idx[i * 3 + 2]];
+            } else {
+                const Triangle& T = *tris[i].second;
+                a = mesh_is_skinned ? T.getVertexPosition(0) : T.getOriginalVertexPosition(0);
+                b = mesh_is_skinned ? T.getVertexPosition(1) : T.getOriginalVertexPosition(1);
+                c = mesh_is_skinned ? T.getVertexPosition(2) : T.getOriginalVertexPosition(2);
+            }
 
             // Back-face cull (local frame for rigid, world frame for skinned).
             Vec3 e1(b.x - a.x, b.y - a.y, b.z - a.z);
@@ -1761,13 +1777,29 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         std::array<Vec3, K> bestPt;
         for (int k = 0; k < K; ++k) bestDot[k] = -1e30f;
 
-        for (const auto& tp : tris) {
-            const Triangle& T = *tp.second;
-            for (int v = 0; v < 3; ++v) {
-                const Vec3& p = T.getOriginalVertexPosition(v);
-                for (int k = 0; k < K; ++k) {
-                    float d = p.x * dirs[k].x + p.y * dirs[k].y + p.z * dirs[k].z;
-                    if (d > bestDot[k]) { bestDot[k] = d; bestPt[k] = p; }
+        TriangleMesh* pm = (!tris.empty() && tris[0].second->parentMesh) ? tris[0].second->parentMesh.get() : nullptr;
+        if (pm) {
+            const Vec3* origP = pm->geometry->get_positions_orig();
+            if (!origP) origP = pm->geometry->get_positions();
+            if (origP) {
+                size_t vCount = pm->geometry->get_vertex_count();
+                for (size_t v = 0; v < vCount; ++v) {
+                    const Vec3& p = origP[v];
+                    for (int k = 0; k < K; ++k) {
+                        float d = p.x * dirs[k].x + p.y * dirs[k].y + p.z * dirs[k].z;
+                        if (d > bestDot[k]) { bestDot[k] = d; bestPt[k] = p; }
+                    }
+                }
+            }
+        } else {
+            for (const auto& tp : tris) {
+                const Triangle& T = *tp.second;
+                for (int v = 0; v < 3; ++v) {
+                    const Vec3& p = T.getOriginalVertexPosition(v);
+                    for (int k = 0; k < K; ++k) {
+                        float d = p.x * dirs[k].x + p.y * dirs[k].y + p.z * dirs[k].z;
+                        if (d > bestDot[k]) { bestDot[k] = d; bestPt[k] = p; }
+                    }
                 }
             }
         }
@@ -3524,6 +3556,16 @@ mesh_edit_changed_confirmed:
         // ===========================================================================
         if (io.KeyShift && sel.hasSelection()) {
             triggerDuplicate(ctx);
+            // Capture start state for the newly created clone
+            if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+                if (!pivot_edit_mode) {
+                    auto transform = sel.selected.object->getTransformHandle();
+                    if (transform) {
+                        drag_start_state.matrix = transform->base;
+                        drag_object_name = sel.selected.object->getNodeName();
+                    }
+                }
+            }
         }
         else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
             // START LIGHT TRANSFORM RECORDING

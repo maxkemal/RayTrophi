@@ -1250,6 +1250,59 @@ void PrincipledBSDF::setResinDirtColor(const Vec3& val) {
     if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
     resin_ext->resinDirtColor = val;
 }
+float PrincipledBSDF::getResinShard() const {
+    return resin_ext ? resin_ext->resinShard : 0.0f;
+}
+void PrincipledBSDF::setResinShard(float val) {
+    if (val > 0.001f) {
+        if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+        resin_ext->resinShard = val;
+    } else if (resin_ext) {
+        resin_ext->resinShard = val;
+    }
+}
+float PrincipledBSDF::getResinShardHue() const {
+    return resin_ext ? resin_ext->resinShardHue : -1.0f;
+}
+void PrincipledBSDF::setResinShardHue(float val) {
+    if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+    resin_ext->resinShardHue = val;
+}
+bool PrincipledBSDF::getResinObjectSpace() const {
+    return resin_ext ? resin_ext->resinObjectSpace : true;
+}
+void PrincipledBSDF::setResinObjectSpace(bool val) {
+    if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+    resin_ext->resinObjectSpace = val;
+}
+int PrincipledBSDF::getDustStyle() const {
+    return resin_ext ? resin_ext->dustStyle : 0;
+}
+void PrincipledBSDF::setDustStyle(int val) {
+    if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+    resin_ext->dustStyle = val;
+}
+Vec3 PrincipledBSDF::getDustColorA() const {
+    return resin_ext ? resin_ext->dustColorA : Vec3(1.0f, 1.0f, 1.0f);
+}
+void PrincipledBSDF::setDustColorA(const Vec3& val) {
+    if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+    resin_ext->dustColorA = val;
+}
+Vec3 PrincipledBSDF::getDustColorB() const {
+    return resin_ext ? resin_ext->dustColorB : Vec3(1.0f, 1.0f, 1.0f);
+}
+void PrincipledBSDF::setDustColorB(const Vec3& val) {
+    if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+    resin_ext->dustColorB = val;
+}
+int PrincipledBSDF::getShardShape() const {
+    return resin_ext ? resin_ext->shardShape : 0;
+}
+void PrincipledBSDF::setShardShape(int val) {
+    if (!resin_ext) resin_ext = std::make_unique<ResinExtension>();
+    resin_ext->shardShape = val;
+}
 bool PrincipledBSDF::getGlassMarbleVolume() const {
     return resin_ext ? resin_ext->glassMarbleVolume : false;
 }

@@ -72,8 +72,8 @@ struct Material {
     // Block 18: Resin coat layer params + spectral dispersion
     float resin_roughness;
     float dispersion;      // spectral dispersion strength (0 = off; repurposed _resin_pad0)
-    float _resin_pad1;
-    float _resin_pad2;
+    float resin_shard;      // colored glass-shard amount (repurposed _resin_pad1)
+    float resin_shard_hue;  // shard base hue 0..1; <0 = rainbow (repurposed _resin_pad2)
     // Block 19: Resin internal inclusions (dust/dirt march)
     float resin_inclusion;
     float resin_dirt;
@@ -84,6 +84,16 @@ struct Material {
     float resin_dirt_color_b;
     float clearcoat_iridescence;
     float clearcoat_film_thickness;
+    // Block 21: Interior Volume dust colour A + style
+    float dust_color_a_r;
+    float dust_color_a_g;
+    float dust_color_a_b;
+    float dust_style;       // 0=Nebula(auto) 1=Billow 2-colour 2=Wispy 3=Paint swirl
+    // Block 22: Interior Volume dust colour B + shard shape
+    float dust_color_b_r;
+    float dust_color_b_g;
+    float dust_color_b_b;
+    float shard_shape;      // 0=round chips, 1=elongated faceted crystals
 };
 
 #endif // MATERIAL_STRUCT_GLSL

@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -62,7 +62,7 @@ struct RiverSpline {
     WaterWaveParams waterParams;
     
     // Generated mesh
-    std::vector<std::shared_ptr<Triangle>> meshTriangles;
+    std::shared_ptr<TriangleMesh> flatMesh;
     uint16_t material_id = 0;
     bool needsRebuild = true;
     

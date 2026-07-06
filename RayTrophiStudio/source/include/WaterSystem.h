@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -350,6 +350,8 @@ struct WaterWaveParams {
     }
 };
 
+class TriangleMesh;
+
 struct WaterSurface {
     enum class Type { Plane, River, Custom };
     Type type = Type::Plane;
@@ -358,9 +360,8 @@ struct WaterSurface {
     std::string name;
     WaterWaveParams params;
     
-    // The physics mesh (usually a grid plane)
-    std::shared_ptr<Triangle> reference_triangle; // To track position/transform
-    std::vector<std::shared_ptr<Triangle>> mesh_triangles;
+    // The physics mesh (flat TriangleMesh structure)
+    std::shared_ptr<TriangleMesh> flatMesh;
     
     // Original vertex positions (for animation - keeps base grid positions)
     std::vector<Vec3> original_positions;

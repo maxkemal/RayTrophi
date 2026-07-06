@@ -189,7 +189,7 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
 
             if (changed) {
                 selectedRiver->needsRebuild = true;
-                if (!selectedRiver->meshTriangles.empty()) {
+                if (selectedRiver->flatMesh) {
                     riverMgr.generateMesh(selectedRiver, ctx.scene);
                     extern bool g_bvh_rebuild_pending;
                     extern bool g_optix_rebuild_pending;
@@ -295,7 +295,7 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
 
                     if (changed) {
                         selectedRiver->needsRebuild = true;
-                        if (!selectedRiver->meshTriangles.empty()) {
+                        if (selectedRiver->flatMesh) {
                             riverMgr.generateMesh(selectedRiver, ctx.scene);
                             extern bool g_bvh_rebuild_pending;
                             extern bool g_optix_rebuild_pending;
@@ -641,7 +641,7 @@ inline void SceneUI::drawRiverGizmos(UIContext& ctx, bool& gizmo_hit) {
                     
                     // Rebuild the mesh after dragging
 
-                    if (river.needsRebuild && !river.meshTriangles.empty()) {
+                    if (river.needsRebuild && river.flatMesh) {
                         riverMgr.generateMesh(&river, ctx.scene);
                         
                         extern bool g_bvh_rebuild_pending;

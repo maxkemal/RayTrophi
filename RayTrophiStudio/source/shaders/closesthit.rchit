@@ -1142,6 +1142,260 @@ float rh_worley(vec3 p) {
     }
     return d;
 }
+// Worley F1 + the nearest seed point and its cell id. The seed point lets a
+// speck build a pseudo-normal (P - seed) so it shades as a tiny lit sphere
+// instead of a flat colour stamp; the cell id hashes per-speck size/colour/type.
+float rh_worley_pt(vec3 p, out vec3 seedPt, out vec3 cellId) {
+    vec3 ip = floor(p);
+    vec3 fp = fract(p);
+    float d = 1e9;
+    seedPt = ip; cellId = ip;
+    for (int z = -1; z <= 1; ++z)
+    for (int y = -1; y <= 1; ++y)
+    for (int x = -1; x <= 1; ++x) {
+        vec3 g = vec3(x, y, z);
+        vec3 o = rh_hash33(ip + g);
+        float dd = length(g + o - fp);
+        if (dd < d) { d = dd; seedPt = ip + g + o; cellId = ip + g; }
+    }
+    return d;
+}
+
+// ── Resin interior march, quality pass ──────────────────────────────────────
+// Shared by the resin-coat base and the glass-marble shell. Same recipe as the
+// volumetric caustic march: JITTERED stochastic stepping + progressive
+// accumulation replace brute-force step count, and SOFT densities replace the
+// old hard thresholds (fixed 6 steps + binary speck test = the coarse look).
+//   dust   — two-scale billowy fbm: extinction PLUS a milky in-scatter
+//            coverage, so wisps are VISIBLE, not just darkening
+//   specks — worley cells with per-speck hashed radius/colour/type: ~30% are
+//            BUBBLES (bright shell rim, no occlusion), the rest dirt that
+//            terminates stochastically with a soft edge (antialiases across
+//            accumulation) and shades as a top-lit micro-sphere via its
+//            pseudo-normal
+// Self-contained: no scene rays; cost only on resin/marble materials.
+struct ResinMarch {
+    vec3  absorb;      // transmittance through the crossed interior
+    float dustCover;   // milky wisp coverage, 0..1 (caller mixes toward dustTint)
+    vec3  dustTint;    // coverage-weighted NEBULA colour of the dust
+    bool  dirtHit;     // ray stopped on a dirt speck
+    vec3  dirtAlbedo;  // light-direction-shaded speck colour (valid when dirtHit)
+    float sparkle;     // bubble/shard rim highlight, transmittance-weighted
+    vec3  shardGlow;   // shards' own visible colour body (additive, T-weighted)
+};
+// hue → vivid rgb (saturation baked at 0.85) for the glass-shard palette.
+vec3 rh_hue(float h) {
+    vec3 rgb = clamp(abs(fract(vec3(h) + vec3(0.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
+    return mix(vec3(1.0), rgb, 0.85);
+}
+ResinMarch resinMarchInterior(vec3 origin, vec3 Tdir, float thickness,
+                              vec3 extBase, float inclusion, float dirtAmt,
+                              vec3 dirtColor, float shardAmt, float shardHue,
+                              vec3 dustBaseTint, vec3 lightDir,
+                              float scl, uint dustStyle, vec3 dustA, vec3 dustB,
+                              uint shardShape, inout uint seed) {
+    ResinMarch rm;
+    rm.absorb = vec3(1.0); rm.dustCover = 0.0; rm.dustTint = dustBaseTint;
+    rm.dirtHit = false; rm.dirtAlbedo = vec3(0.0); rm.sparkle = 0.0;
+    rm.shardGlow = vec3(0.0);
+    vec3  dustAcc  = vec3(0.0);
+    float coverRaw = 0.0;
+
+    // ── Phase A: dust — jittered stochastic march (unchanged recipe) ────────
+    const int STEPS = 12;
+    float dt  = max(thickness, 1e-3) / float(STEPS);
+    float jit = rnd(seed);
+    for (int i = 0; i < STEPS; ++i) {
+        vec3 P = origin + Tdir * ((float(i) + jit) * dt);
+        // Dust field + colour, by STYLE:
+        //   0 Nebula (auto)  — billow turbulence; colour drifts between the
+        //     derived base tint and its .gbr hue-rotation (legacy default).
+        //   1 Billow 2-colour — same field, colour mixes between the user's
+        //     A/B poles on a low frequency.
+        //   2 Wispy streaks  — anisotropically stretched ridged filaments
+        //     (long horizontal wisps), A/B coloured.
+        //   3 Paint swirl    — DOMAIN-WARPED fbm: ink-in-water curls; the
+        //     colour field is warped by the same flow so the A/B pigments
+        //     fold into each other like stirred paint.
+        float dust;
+        vec3  nb;
+        if (dustStyle == 1u) {
+            dust = rh_fbm(P * scl) * (0.6 + 0.8 * rh_vnoise(P * scl * 3.1));
+            nb   = mix(dustA, dustB,
+                       smoothstep(0.30, 0.70, rh_vnoise(P * scl * 0.5 + vec3(11.3))));
+        } else if (dustStyle == 2u) {
+            vec3 Ps = P * scl * vec3(2.4, 0.55, 2.4);
+            float n = rh_fbm(Ps);
+            dust = pow(1.0 - abs(2.0 * n - 1.0), 3.0);
+            nb   = mix(dustA, dustB,
+                       smoothstep(0.35, 0.65, rh_vnoise(Ps * 0.4 + vec3(5.9))));
+        } else if (dustStyle == 3u) {
+            vec3 wp = P * scl;
+            vec3 warp = vec3(rh_fbm(wp * 0.5),
+                             rh_fbm(wp * 0.5 + vec3(19.7)),
+                             rh_fbm(wp * 0.5 + vec3(47.3))) - 0.5;
+            dust = rh_fbm(wp + warp * 2.6);
+            nb   = mix(dustA, dustB,
+                       smoothstep(0.35, 0.65, rh_fbm(wp * 0.7 + warp * 1.8)));
+        } else {
+            dust = rh_fbm(P * scl) * (0.6 + 0.8 * rh_vnoise(P * scl * 3.1));
+            float hueT = smoothstep(0.25, 0.75, rh_vnoise(P * scl * 0.6 + vec3(31.7)));
+            nb   = mix(dustBaseTint, dustBaseTint.gbr, hueT);
+        }
+        dust = pow(dust, 2.0) * inclusion;                 // sparse wispy cores
+        float trAvg = dot(rm.absorb, vec3(0.3333));
+        float w    = dust * dt * 2.5 * trAvg;
+        coverRaw  += w;
+        dustAcc   += nb * w;
+        rm.absorb *= exp(-dt * (extBase + vec3(dust * 6.0)));
+    }
+    rm.dustCover = clamp(coverRaw, 0.0, 0.7);
+    if (coverRaw > 1e-4) rm.dustTint = clamp(dustAcc / coverRaw, 0.0, 1.0);
+
+    // ── Phase B: specks — 3D DDA cell walk, fully DETERMINISTIC ─────────────
+    // The speck field walks EVERY noise cell the ray crosses, in order (voxel
+    // DDA), independent of the dust march's sample points. The previous
+    // version only saw a speck when a dust sample happened to land in ITS
+    // cell — with a step spanning several cells most passes missed it, and
+    // accumulation averaged hit/miss into translucent, blurred blobs (the
+    // "flu lekeler" report). Population: one candidate per cell, existence
+    // hash < (dirt+shard) so the knobs control density; type split honours
+    // the dirt/shard ratio, bubbles take a fixed slice of the dirt share.
+    // Transmittance at a speck's depth is approximated channelwise as
+    // absorb^(t/tEnd) — consistent with Phase A without re-marching the dust.
+    float totalAmt = clamp(dirtAmt + shardAmt, 0.0, 1.0);
+    if (totalAmt > 0.001) {
+        float shardCut = shardAmt / max(dirtAmt + shardAmt, 1e-4);
+        float s3   = scl * 3.0;                 // world → speck noise space
+        vec3  qo   = origin * s3;
+        float tEnd = max(thickness, 1e-3) * s3;
+        vec3  cell = floor(qo);
+        vec3  sgn  = vec3(Tdir.x >= 0.0 ? 1.0 : -1.0,
+                          Tdir.y >= 0.0 ? 1.0 : -1.0,
+                          Tdir.z >= 0.0 ? 1.0 : -1.0);
+        vec3  ad   = max(abs(Tdir), vec3(1e-6));
+        vec3  tDelta = 1.0 / ad;
+        vec3  frac0  = qo - cell;
+        vec3  tMax = vec3(
+            (Tdir.x >= 0.0 ? 1.0 - frac0.x : frac0.x) / ad.x,
+            (Tdir.y >= 0.0 ? 1.0 - frac0.y : frac0.y) / ad.y,
+            (Tdir.z >= 0.0 ? 1.0 - frac0.z : frac0.z) / ad.z);
+        float tCur = 0.0;
+        for (int it = 0; it < 48 && tCur < tEnd; ++it) {
+            if (rh_hash13(cell + vec3(5.77)) < totalAmt) {
+                vec3  h      = rh_hash33(cell + 17.31);
+                vec3  seedPt = cell + rh_hash33(cell);  // same layout worley used
+                float rad    = mix(0.10, 0.26, h.x);    // per-speck size
+                vec3  oc     = qo - seedPt;
+                float bq     = dot(oc, Tdir);
+                float perp2  = dot(oc, oc) - bq * bq;
+                if (h.y < shardCut) {
+                    // GLASS SHARD: translucent colour chip. Tints what lies
+                    // behind it (stained glass) AND carries its own visible
+                    // colour body (shardGlow) so it reads on an opaque resin
+                    // base too, plus a bright rim glint. Palette: material
+                    // base hue ± hashed spread, or full rainbow when the hue
+                    // knob is negative. Shape 1 = CRYSTAL: an elongated
+                    // ellipsoid (random per-shard axis, ~2.6x) intersected in
+                    // squashed space, with the normal QUANTIZED to flat facets
+                    // — sharp lighting breaks read as cut crystal faces.
+                    float r = rad * 1.05;
+                    vec3  ocs = oc, ds = Tdir;
+                    if (shardShape == 1u) {
+                        vec3 axis = normalize(rh_hash33(cell + 3.3) - 0.5 + vec3(1e-4));
+                        const float k = 0.38;                 // 1/k ≈ 2.6x elongation
+                        ocs = oc  - axis * (dot(oc,  axis) * (1.0 - k));
+                        ds  = Tdir - axis * (dot(Tdir, axis) * (1.0 - k));
+                    }
+                    float A  = dot(ds, ds);
+                    float Bq = dot(ocs, ds);
+                    float Cq = dot(ocs, ocs) - r * r;
+                    float disc = Bq * Bq - A * Cq;
+                    if (disc > 0.0 && Bq < 0.0) {
+                        float tn = (-Bq - sqrt(disc)) / max(A, 1e-6);
+                        if (tn > 0.0 && tn < tEnd) {
+                            float hue  = (shardHue >= 0.0)
+                                       ? fract(shardHue + (h.z - 0.5) * 0.16) : h.z;
+                            vec3  sc   = rh_hue(hue);
+                            // closest-approach distance in (possibly squashed) space
+                            float dmin2 = max(Cq + r * r - Bq * Bq / max(A, 1e-6), 0.0);
+                            float grz  = sqrt(dmin2) / r;             // 0 centre → 1 graze
+                            float body = 1.0 - smoothstep(0.65, 1.0, grz);
+                            vec3  T    = pow(max(rm.absorb, vec3(1e-4)),
+                                             vec3(clamp(tn / tEnd, 0.0, 1.0)));
+                            float lit  = 1.0;
+                            if (shardShape == 1u) {
+                                // Faceted crystal shading: quantize the surface
+                                // normal into a per-shard rotated lattice and
+                                // light it — flat faces that FLASH as the light
+                                // or the object turns.
+                                vec3 pn = normalize(ocs + ds * tn);
+                                vec3 h2 = rh_hash33(cell + 91.3);
+                                vec3 fn = normalize(round(pn * 1.4 + (h2 - 0.5) * 0.8) + vec3(1e-3));
+                                pn = normalize(mix(pn, fn, 0.85));
+                                lit = 0.45 + 0.85 * max(dot(pn, lightDir), 0.0)
+                                    + pow(max(dot(pn, -Tdir), 0.0), 6.0) * 0.6;
+                            }
+                            rm.absorb    *= mix(vec3(1.0), sc, body * 0.85);
+                            rm.shardGlow += sc * T * (0.20 + 0.30 * body) * lit;
+                            rm.sparkle   += smoothstep(0.55, 0.95, grz) * 0.15
+                                          * dot(T, vec3(0.3333));
+                        }
+                    }
+                } else if (h.y < shardCut + 0.25 * (1.0 - shardCut)) {
+                    // BUBBLE: bright rim where the ray grazes the shell.
+                    float r = rad;
+                    if (perp2 < r * r && bq < 0.0) {
+                        float tn = -bq - sqrt(r * r - perp2);
+                        if (tn > 0.0 && tn < tEnd) {
+                            float grz = sqrt(perp2) / r;
+                            vec3  T   = pow(max(rm.absorb, vec3(1e-4)),
+                                            vec3(clamp(tn / tEnd, 0.0, 1.0)));
+                            rm.sparkle += smoothstep(0.45, 0.95, grz) * 0.30
+                                        * dot(T, vec3(0.3333));
+                        }
+                    }
+                } else {
+                    // DIRT: analytic ray-sphere — exact, identical every pass
+                    // (sharp silhouette). First hit terminates; cells are
+                    // visited in order so shard tints beyond it never apply.
+                    float r = rad * 0.95;
+                    if (perp2 < r * r && bq < 0.0) {
+                        float tn = -bq - sqrt(r * r - perp2);
+                        if (tn > 0.0 && tn < tEnd) {
+                            vec3 pn = normalize((qo + Tdir * tn) - seedPt);
+                            // REAL sampled light direction (surface NEE pick):
+                            // specks brighten on the light side, fall dark
+                            // opposite. No shadow ray: from inside an opaque-
+                            // based resin it would always self-occlude black.
+                            float ndl = max(dot(pn, lightDir), 0.0);
+                            float lit = 0.28 + 0.72 * ndl;
+                            float rim = pow(clamp(1.0 - abs(dot(pn, Tdir)), 0.0, 1.0), 3.0) * 0.25;
+                            vec3  col = dirtColor * (0.70 + 0.60 * h.z);
+                            float depthN = clamp(tn / tEnd, 0.0, 1.0);
+                            vec3  T   = pow(max(rm.absorb, vec3(1e-4)), vec3(depthN));
+                            rm.dirtAlbedo = clamp(col * lit + vec3(rim), 0.0, 1.0) * T;
+                            rm.dirtHit = true;
+                            // Trim the dust of the UNREACHED depth off the result.
+                            rm.absorb    = T;
+                            rm.dustCover *= depthN;
+                            break;
+                        }
+                    }
+                }
+            }
+            // advance to the next crossed cell
+            if (tMax.x < tMax.y && tMax.x < tMax.z) {
+                tCur = tMax.x; tMax.x += tDelta.x; cell.x += sgn.x;
+            } else if (tMax.y < tMax.z) {
+                tCur = tMax.y; tMax.y += tDelta.y; cell.y += sgn.y;
+            } else {
+                tCur = tMax.z; tMax.z += tDelta.z; cell.z += sgn.z;
+            }
+        }
+    }
+    return rm;
+}
 
 // ============================================================
 // Material Scatter Fonksiyonları
@@ -1155,6 +1409,10 @@ const uint BOUNCE_TRANSPARENT = 3u;
 // separately so raygen can cap them at a small dedicated budget — an
 // energy-preserving resin would otherwise run full-depth GI paths (TDR risk).
 const uint BOUNCE_RESIN = 4u;
+// Interior-volume anchor: bit 21 of mat.flags (VK_MAT_FLAG_RESIN_OBJ_SPACE).
+// Set = the dust/speck fields are evaluated in OBJECT space (the interior
+// moves/rotates with the mesh); clear = legacy world anchor (fixed in space).
+const uint MAT_FLAG_RESIN_OBJ_SPACE = (1u << 21);
 // Glass marble full-volume entry: tagged on the FRONT-face transmit so raygen
 // integrates the real interior segment (dust/dirt) before the next surface.
 const uint BOUNCE_MARBLE = 5u;
@@ -2587,34 +2845,57 @@ if (emissionTexID > 0) {
             albedo = texture(materialTextures[nonuniformEXT(albedoTexID)], parUV).rgb;
         }
 
-        bool resinHasInclusions = (mat.resin_inclusion > 0.001 || mat.resin_dirt > 0.001);
+        bool resinHasInclusions = (mat.resin_inclusion > 0.001 || mat.resin_dirt > 0.001 ||
+                                   mat.resin_shard > 0.001);
         if (resinHasInclusions) {
-            const int RESIN_STEPS = 6;
-            float dt  = max(mat.transmission_density, 1e-3) / float(RESIN_STEPS);
-            float scl = max(mat.resin_inclusion_scale, 0.01);
-            vec3  P      = hitPos;
-            vec3  absorb = vec3(1.0);
-            bool  dirtHit = false;
-            for (int i = 0; i < RESIN_STEPS; ++i) {
-                P += Tdir * dt;
-                // Dust cloudiness → extra extinction at this depth. Power curve makes
-                // it sparse/wispy (mostly clear, occasional dense cores) not flat haze.
-                float dust     = rh_fbm(P * scl);
-                dust           = pow(dust, 2.0);
-                float localExt = 1.0 + mat.resin_inclusion * dust * 6.0;
-                absorb *= exp(-dt * ext * localExt);
-                // Dirt specks → opaque early return (ray stops inside the resin).
-                if (mat.resin_dirt > 0.001) {
-                    float cell  = rh_worley(P * scl * 3.0);            // 0 at speck centres
-                    float speck = 1.0 - smoothstep(0.0, 0.18, cell);  // 1 inside a speck
-                    if (speck * mat.resin_dirt > 0.5) { dirtHit = true; break; }
+            // Sample one light direction at the surface for the interior march
+            // (cheap NEE-direction shading of the specks; no shadow rays).
+            vec3 resinLightDir = worldNormal;
+            {
+                float plsel; int li = pick_smart_light_gl(uvec2(0), hitPos, plsel);
+                if (li >= 0) {
+                    vec3 wi_; float d_; float a_;
+                    if (sample_light_direction_gl(lights.l[li], hitPos,
+                                                  rnd(payload.seed), rnd(payload.seed),
+                                                  wi_, d_, a_) && dot(wi_, wi_) > 1e-8) {
+                        resinLightDir = normalize(wi_);
+                    }
                 }
             }
-            if (dirtHit) {
-                // Terminate on the dirt speck: its colour, dimmed by the resin crossed.
-                albedo = vec3(mat.resin_dirt_color_r, mat.resin_dirt_color_g, mat.resin_dirt_color_b) * absorb;
+            // Anchor: object space marches the fields in the mesh's local frame
+            // (interior travels with the object); world space leaves the pattern
+            // fixed in space (a deliberate effect sometimes — e.g. moving through
+            // a "frozen" medium). The light direction rotates into the same frame
+            // so speck shading stays consistent.
+            vec3 mOrg = hitPos, mDir = Tdir, mLit = resinLightDir;
+            if ((mat.flags & MAT_FLAG_RESIN_OBJ_SPACE) != 0u) {
+                mOrg = gl_WorldToObjectEXT * vec4(hitPos, 1.0);
+                mDir = normalize(mat3(gl_WorldToObjectEXT) * Tdir);
+                mLit = normalize(mat3(gl_WorldToObjectEXT) * resinLightDir);
+            }
+            ResinMarch rm = resinMarchInterior(
+                mOrg, mDir, mat.transmission_density, ext,
+                mat.resin_inclusion, mat.resin_dirt,
+                vec3(mat.resin_dirt_color_r, mat.resin_dirt_color_g, mat.resin_dirt_color_b),
+                mat.resin_shard, mat.resin_shard_hue,
+                clamp(ct * 0.5 + vec3(0.45), 0.0, 1.0),   // dust base tint from resin colour
+                mLit,
+                max(mat.resin_inclusion_scale, 0.01),
+                uint(mat.dust_style + 0.5),
+                vec3(mat.dust_color_a_r, mat.dust_color_a_g, mat.dust_color_a_b),
+                vec3(mat.dust_color_b_r, mat.dust_color_b_g, mat.dust_color_b_b),
+                uint(mat.shard_shape + 0.5), payload.seed);
+            if (rm.dirtHit) {
+                // Terminate on the speck: light-direction-shaded colour, dimmed
+                // by the resin crossed.
+                albedo = rm.dirtAlbedo;
             } else {
-                albedo *= absorb;
+                // Milky nebula wisps are VISIBLE (mixed toward the marched
+                // colour), not just extra darkening; shards contribute their
+                // own colour body (visible even over a dark base) and
+                // bubble/shard rims sparkle.
+                albedo = mix(albedo * rm.absorb, rm.dustTint * rm.absorb, rm.dustCover);
+                albedo = clamp(albedo + rm.shardGlow + vec3(rm.sparkle), 0.0, 1.0);
             }
         } else {
             float pathLen = 2.0 * mat.transmission_density / cosV;
@@ -2636,7 +2917,8 @@ if (emissionTexID > 0) {
             // was disabled — it was too camera-angle dependent and the interior dust/dirt never
             // read as intended. The flag + serialize fields are kept dormant (saved scenes load
             // fine); inclusion-bearing glass now always uses the shell march below.
-            bool inclusionsOn = (mat.resin_inclusion > 0.001 || mat.resin_dirt > 0.001);
+            bool inclusionsOn = (mat.resin_inclusion > 0.001 || mat.resin_dirt > 0.001 ||
+                                 mat.resin_shard > 0.001);
             // GLASS MARBLE (shell): when inclusions are enabled on a GLASS base, march the
             // refracted ray through the interior — dust (haze) + dirt specks (opaque
             // early-return) — BEFORE refracting through, so light still passes through
@@ -2648,32 +2930,50 @@ if (emissionTexID > 0) {
                 if (dot(Tg, Tg) < 1e-6) Tg = rayDir;            // total internal reflection fallback
                 Tg = normalize(Tg);
                 float cosIn = max(abs(dot(Tg, -worldNormal)), 0.05);
-                const int GMS = 6;
-                float gdt  = (0.65 / cosIn) / float(GMS);       // matches scatterGlass thickness model
-                float gscl = max(mat.resin_inclusion_scale, 0.01);
-                vec3  Pg = hitPos;
-                vec3  gabsorb = vec3(1.0);
-                bool  gdirt = false;
-                for (int i = 0; i < GMS; ++i) {
-                    Pg += Tg * gdt;
-                    float dust = rh_fbm(Pg * gscl);
-                    dust = pow(dust, 2.0);                                      // sparse wispy cores
-                    gabsorb *= exp(-gdt * (mat.resin_inclusion * dust * 6.0));  // grey dust haze
-                    if (mat.resin_dirt > 0.001) {
-                        float cell  = rh_worley(Pg * gscl * 3.0);
-                        float speck = 1.0 - smoothstep(0.0, 0.18, cell);
-                        if (speck * mat.resin_dirt > 0.5) { gdirt = true; break; }
+                vec3 marbleLightDir = worldNormal;
+                {
+                    float plsel; int li = pick_smart_light_gl(uvec2(0), hitPos, plsel);
+                    if (li >= 0) {
+                        vec3 wi_; float d_; float a_;
+                        if (sample_light_direction_gl(lights.l[li], hitPos,
+                                                      rnd(payload.seed), rnd(payload.seed),
+                                                      wi_, d_, a_) && dot(wi_, wi_) > 1e-8) {
+                            marbleLightDir = normalize(wi_);
+                        }
                     }
                 }
-                if (gdirt) {
-                    // Opaque dirt speck suspended in the glass: shade as a lit diffuse
-                    // point (colour dimmed by the glass crossed) → fall through to NEE.
-                    albedo = vec3(mat.resin_dirt_color_r, mat.resin_dirt_color_g, mat.resin_dirt_color_b) * gabsorb;
+                vec3 gOrg = hitPos, gDir = Tg, gLit = marbleLightDir;
+                if ((mat.flags & MAT_FLAG_RESIN_OBJ_SPACE) != 0u) {
+                    gOrg = gl_WorldToObjectEXT * vec4(hitPos, 1.0);
+                    gDir = normalize(mat3(gl_WorldToObjectEXT) * Tg);
+                    gLit = normalize(mat3(gl_WorldToObjectEXT) * marbleLightDir);
+                }
+                ResinMarch rm = resinMarchInterior(
+                    gOrg, gDir, 0.65 / cosIn,                   // matches scatterGlass thickness model
+                    vec3(0.0),                                  // clear glass: dust is the only extinction
+                    mat.resin_inclusion, mat.resin_dirt,
+                    vec3(mat.resin_dirt_color_r, mat.resin_dirt_color_g, mat.resin_dirt_color_b),
+                    mat.resin_shard, mat.resin_shard_hue,
+                    vec3(0.85),                                 // neutral milky dust in clear glass
+                    gLit,
+                    max(mat.resin_inclusion_scale, 0.01),
+                    uint(mat.dust_style + 0.5),
+                    vec3(mat.dust_color_a_r, mat.dust_color_a_g, mat.dust_color_a_b),
+                    vec3(mat.dust_color_b_r, mat.dust_color_b_g, mat.dust_color_b_b),
+                    uint(mat.shard_shape + 0.5), payload.seed);
+                if (rm.dirtHit) {
+                    // Opaque speck suspended in the glass: baked-lit micro-sphere
+                    // colour (dimmed by the glass crossed) → fall through to NEE.
+                    albedo = rm.dirtAlbedo;
                     roughness = 1.0; metallic = 0.0; transmission = 0.0;
                     // (no return — direct lighting + diffuse BRDF below shade the speck)
                 } else {
-                    // Hazy clear glass: refract through carrying the dust absorption.
-                    scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, albedo * gabsorb, ior, roughness, 0.0, vec3(1.0), mat.dispersion, payload.seed);
+                    // Hazy glass: nebula dust whitens/tints (milky scatter
+                    // approximation), shards carry their own colour body,
+                    // bubble/shard rims sparkle; refract through.
+                    vec3 gal = mix(albedo * rm.absorb, rm.dustTint * rm.absorb, rm.dustCover * 0.8);
+                    gal = clamp(gal + rm.shardGlow + vec3(rm.sparkle), 0.0, 1.0);
+                    scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, gal, ior, roughness, 0.0, vec3(1.0), mat.dispersion, payload.seed);
                     return;
                 }
             } else {
