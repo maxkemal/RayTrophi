@@ -856,6 +856,7 @@ void VulkanDevice::shutdown() {
         destroyBuffer(m_sbtBuffer);
         destroyBuffer(m_photonGridBuffer);
         destroyBuffer(m_photonVolGridBuffer);
+        destroyBuffer(m_photonVolDirBuffer);
         destroyBuffer(m_materialBuffer);
         destroyBuffer(m_lightBuffer);
         destroyBuffer(m_geometryDataBuffer);
@@ -2967,6 +2968,10 @@ void VulkanDevice::recordPhotonPass(VkCommandBuffer cmd) {
         if (m_photonVolGridBuffer.buffer) {
             vkCmdFillBuffer(cmd, m_photonVolGridBuffer.buffer, sizeof(PhotonGridHeader), cellBytes, 0u);
         }
+        if (m_photonVolDirBuffer.buffer) {
+            vkCmdFillBuffer(cmd, m_photonVolDirBuffer.buffer, 0,
+                            (VkDeviceSize)m_photonTableSize * 16ull, 0u); // 4 ints/slot, no header
+        }
 
         VkMemoryBarrier clearBarrier{};
         clearBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -3323,7 +3328,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     // Binding 18: Foam sphere SSBO (intersection + closest-hit)
     // Binding 19: Photon caustic hash grid SSBO (photon raygen writes, camera
     //             raygen debug-reads, closesthit gathers in Dilim 2)
-    VkDescriptorSetLayoutBinding bindings[21] = {};
+    VkDescriptorSetLayoutBinding bindings[23] = {};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[0].descriptorCount = 1;
@@ -3439,9 +3444,24 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     bindings[20].descriptorCount = 1;
     bindings[20].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 
+    // Binding 21: Path-stats AOV (Debug Visualizer) — raygen-written running
+    // average of path throughput (rgb) + bounce count (a); tonemap reads it.
+    bindings[21].binding = 21;
+    bindings[21].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[21].descriptorCount = 1;
+    bindings[21].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+
+    // Binding 22: Photon DIRECTION grid (Debug Visualizer view 5) — parallel
+    // to the volume grid; photon.rgen deposits, camera raygen reads. Declared
+    // by photon_grid.glsl, which closesthit also includes.
+    bindings[22].binding = 22;
+    bindings[22].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[22].descriptorCount = 1;
+    bindings[22].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
     VkDescriptorSetLayoutCreateInfo dslCI{};
     dslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslCI.bindingCount = 21;
+    dslCI.bindingCount = 23;
     dslCI.pBindings = bindings;
     vkCreateDescriptorSetLayout(m_device, &dslCI, nullptr, &m_rtDescriptorSetLayout);
 
@@ -3661,7 +3681,8 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
                                      const ImageHandle* denoiserAlbedoImage,
                                      const ImageHandle* denoiserNormalImage,
                                      const ImageHandle* varianceImage,
-                                     const ImageHandle* denoiserPositionImage) {
+                                     const ImageHandle* denoiserPositionImage,
+                                     const ImageHandle* pathStatsImage) {
     if (!m_rtDescriptorSetLayout || !m_tlas.accel) {
         VK_ERROR() << "[VulkanDevice] Cannot bind RT descriptors: missing layout or TLAS" << std::endl;
         return;
@@ -3985,6 +4006,20 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
     w17.pImageInfo = &denoiserPositionInfo;
     writes.push_back(w17);
 
+    // Binding 21: Path-stats AOV (Debug Visualizer). Fallback to the output
+    // image so the binding is always valid.
+    VkDescriptorImageInfo pathStatsInfo{};
+    pathStatsInfo.imageView = (pathStatsImage && pathStatsImage->view) ? pathStatsImage->view : outputImage.view;
+    pathStatsInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet w21{};
+    w21.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w21.dstSet = m_rtDescriptorSet;
+    w21.dstBinding = 21;
+    w21.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w21.descriptorCount = 1;
+    w21.pImageInfo = &pathStatsInfo;
+    writes.push_back(w21);
+
     // Binding 18: Foam point-sphere SSBO (fallback to materialBuffer when no foam
     // exists yet, so the binding is always valid; the foam consumer re-uploads it).
     VkDescriptorBufferInfo foamSphereInfo{};
@@ -4062,6 +4097,35 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
     w20.descriptorCount = 1;
     w20.pBufferInfo = &photonVolInfo;
     writes.push_back(w20);
+
+    // Binding 22: photon DIRECTION grid (Debug Visualizer view 5) — 4 ints per
+    // slot, same tableSize as the volume grid. Lazy like the grids above.
+    if (!m_photonVolDirBuffer.buffer) {
+        BufferCreateInfo pdci;
+        pdci.size = (uint64_t)m_photonTableSize * 16ull; // 4 ints/slot
+        pdci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
+        pdci.location = MemoryLocation::CPU_TO_GPU;
+        pdci.initialData = nullptr;
+        m_photonVolDirBuffer = createBuffer(pdci);
+        if (m_photonVolDirBuffer.buffer) {
+            if (void* mapped = mapBuffer(m_photonVolDirBuffer)) {
+                memset(mapped, 0, (size_t)pdci.size);
+                unmapBuffer(m_photonVolDirBuffer);
+            }
+        }
+    }
+    VkDescriptorBufferInfo photonDirInfo{};
+    photonDirInfo.buffer = m_photonVolDirBuffer.buffer ? m_photonVolDirBuffer.buffer : m_materialBuffer.buffer;
+    photonDirInfo.offset = 0;
+    photonDirInfo.range  = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet w22{};
+    w22.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w22.dstSet = m_rtDescriptorSet;
+    w22.dstBinding = 22;
+    w22.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w22.descriptorCount = 1;
+    w22.pBufferInfo = &photonDirInfo;
+    writes.push_back(w22);
 
     // Update bindings immediately (safe local buffers)
     if (!writes.empty()) {
@@ -5557,7 +5621,13 @@ bool VulkanDevice::traceRaysTonemapAndReadback(uint32_t w, uint32_t h,
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_tonemapPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
         m_tonemapPipelineLayout, 0, 1, &tmDescSet, 0, nullptr);
-    struct TonemapPush { uint32_t width; uint32_t height; } tmPush{ w, h };
+    struct TonemapPush {
+        uint32_t width, height, debugView;
+        float exposure, heatScale, bounceScale, overlay;
+        float camX, camY, camZ;
+    } tmPush{ w, h, m_tmDebugView,
+              m_tmExposure, m_tmHeatScale, m_tmBounceScale, m_tmOverlay,
+              m_tmCam[0], m_tmCam[1], m_tmCam[2] };
     vkCmdPushConstants(cmd, m_tonemapPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
         0, sizeof(TonemapPush), &tmPush);
     const uint32_t gx = (w + 7) / 8;
@@ -6037,7 +6107,7 @@ bool VulkanDevice::createTonemapPipeline(const std::vector<uint32_t>& computeSPV
     // frame slots — images don't change frame-to-frame, only on resize (at which point
     // fences are drained before updateTonemapDescriptors rewrites it).
     const uint32_t kMaxSets = 1;
-    VkDescriptorPoolSize poolSizes[] = { {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxSets * 2} };
+    VkDescriptorPoolSize poolSizes[] = { {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxSets * 6} };
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.poolSizeCount = 1;
@@ -6045,20 +6115,19 @@ bool VulkanDevice::createTonemapPipeline(const std::vector<uint32_t>& computeSPV
     poolInfo.maxSets = kMaxSets;
     if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_tonemapDescPool) != VK_SUCCESS) return false;
 
-    // Layout: binding 0 = HDR input (storage image, read), binding 1 = LDR output (storage image, write).
-    VkDescriptorSetLayoutBinding bindings[2]{};
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    // Layout: 0 = HDR input, 1 = LDR output, 2-5 = Debug Visualizer AOVs
+    // (albedo / normal / position / path-stats), all storage images.
+    VkDescriptorSetLayoutBinding bindings[6]{};
+    for (uint32_t i = 0; i < 6; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 2;
+    layoutInfo.bindingCount = 6;
     layoutInfo.pBindings = bindings;
     if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_tonemapDescLayout) != VK_SUCCESS) {
         vkDestroyDescriptorPool(m_device, m_tonemapDescPool, nullptr);
@@ -6069,7 +6138,7 @@ bool VulkanDevice::createTonemapPipeline(const std::vector<uint32_t>& computeSPV
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     pc.offset = 0;
-    pc.size = 8; // uint width, uint height
+    pc.size = 40; // w,h,view + exposure,heatScale,bounceScale,overlay + camXYZ
 
     VkPipelineLayoutCreateInfo plInfo{};
     plInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -6134,31 +6203,36 @@ bool VulkanDevice::createTonemapPipeline(const std::vector<uint32_t>& computeSPV
     return true;
 }
 
-bool VulkanDevice::updateTonemapDescriptors(const VulkanRT::ImageHandle& hdrImage, const VulkanRT::ImageHandle& ldrImage) {
+bool VulkanDevice::updateTonemapDescriptors(const VulkanRT::ImageHandle& hdrImage, const VulkanRT::ImageHandle& ldrImage,
+                                            const VulkanRT::ImageHandle* aovAlbedo,
+                                            const VulkanRT::ImageHandle* aovNormal,
+                                            const VulkanRT::ImageHandle* aovPosition,
+                                            const VulkanRT::ImageHandle* aovStats) {
     if (m_tonemapDescSet == VK_NULL_HANDLE) return false;
     if (!hdrImage.view || !ldrImage.view) return false;
 
-    VkDescriptorImageInfo inInfo{};
-    inInfo.imageView = hdrImage.view;
-    inInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkDescriptorImageInfo outInfo{};
-    outInfo.imageView = ldrImage.view;
-    outInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    // 6 bindings: 0=HDR in, 1=LDR out, 2=albedo AOV, 3=normal AOV,
+    // 4=position AOV, 5=path-stats AOV. AOVs fall back to the HDR view so
+    // every layout binding is always valid (they're only read in debug views).
+    VkDescriptorImageInfo infos[6]{};
+    infos[0].imageView = hdrImage.view;
+    infos[1].imageView = ldrImage.view;
+    infos[2].imageView = (aovAlbedo   && aovAlbedo->view)   ? aovAlbedo->view   : hdrImage.view;
+    infos[3].imageView = (aovNormal   && aovNormal->view)   ? aovNormal->view   : hdrImage.view;
+    infos[4].imageView = (aovPosition && aovPosition->view) ? aovPosition->view : hdrImage.view;
+    infos[5].imageView = (aovStats    && aovStats->view)    ? aovStats->view    : hdrImage.view;
 
-    VkWriteDescriptorSet writes[2]{};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = m_tonemapDescSet;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    writes[0].pImageInfo = &inInfo;
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = m_tonemapDescSet;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorCount = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    writes[1].pImageInfo = &outInfo;
-    vkUpdateDescriptorSets(m_device, 2, writes, 0, nullptr);
+    VkWriteDescriptorSet writes[6]{};
+    for (uint32_t i = 0; i < 6; ++i) {
+        infos[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = m_tonemapDescSet;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[i].pImageInfo = &infos[i];
+    }
+    vkUpdateDescriptorSets(m_device, 6, writes, 0, nullptr);
     return true;
 }
 
@@ -6784,7 +6858,7 @@ bool VulkanDevice::submitDenoiserCopyAsync(const ImageHandle* srcs, const Buffer
 
 bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h,
     const VulkanRT::ImageHandle& hdrImage, const VulkanRT::ImageHandle& ldrImage,
-    const VulkanRT::BufferHandle& ldrStaging) {
+    const VulkanRT::BufferHandle& ldrStaging, bool doTrace) {
     if (slot >= kFrameSlotCount) return false;
     if (!m_rtPipelineReady || !fpCmdTraceRaysKHR || !m_tlas.accel) return false;
     if (m_tonemapPipeline == VK_NULL_HANDLE || m_tonemapDescSet == VK_NULL_HANDLE) return false;
@@ -6815,25 +6889,37 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
 
     VkCommandBuffer cmd = fs.cmd;
 
-    // ── 0. Photon caustic pass (if scheduled) — must precede the camera trace
-    //       in the SAME command buffer so the grid clear/fill cannot race the
-    //       previous frame's in-flight camera reads.
-    recordPhotonPass(cmd);
+    // doTrace=false: presentation refresh only — the accumulation image already
+    // holds the data; skip the photon pass + camera trace and just re-run
+    // tonemap (with the current tonemap push constants) + the LDR copy.
+    if (doTrace) {
+        // ── 0. Photon caustic pass (if scheduled) — must precede the camera trace
+        //       in the SAME command buffer so the grid clear/fill cannot race the
+        //       previous frame's in-flight camera reads.
+        recordPhotonPass(cmd);
 
-    // ── 1. Trace ─────────────────────────────────────────────────────────────
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtPipeline);
-    if (m_rtDescriptorSet)
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-            m_rtPipelineLayout, 0, 1, &m_rtDescriptorSet, 0, nullptr);
-    if (!m_pushConstantData.empty())
-        vkCmdPushConstants(cmd, m_rtPipelineLayout,
-            VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-            VK_SHADER_STAGE_MISS_BIT_KHR  | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
-            0, (uint32_t)m_pushConstantData.size(), m_pushConstantData.data());
-    fpCmdTraceRaysKHR(cmd, &m_sbtRaygenRegion, &m_sbtMissRegion,
-                      &m_sbtHitRegion, &m_sbtCallableRegion, w, h, 1);
+        // ── 1. Trace ─────────────────────────────────────────────────────────
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtPipeline);
+        if (m_rtDescriptorSet)
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+                m_rtPipelineLayout, 0, 1, &m_rtDescriptorSet, 0, nullptr);
+        if (!m_pushConstantData.empty())
+            vkCmdPushConstants(cmd, m_rtPipelineLayout,
+                VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+                VK_SHADER_STAGE_MISS_BIT_KHR  | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
+                0, (uint32_t)m_pushConstantData.size(), m_pushConstantData.data());
+        fpCmdTraceRaysKHR(cmd, &m_sbtRaygenRegion, &m_sbtMissRegion,
+                          &m_sbtHitRegion, &m_sbtCallableRegion, w, h, 1);
+    }
 
     // ── 2. RT write → compute read on HDR image ──────────────────────────────
+    // A global memory barrier rides along so the debug-AOV images (albedo /
+    // normal / position / path-stats, also RT-written and tonemap-read in the
+    // Debug Visualizer views) are covered without per-image barriers.
+    VkMemoryBarrier aovBarrier{};
+    aovBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    aovBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    aovBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     VkImageMemoryBarrier hdrBarrier{};
     hdrBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     hdrBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -6846,13 +6932,19 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
     hdrBarrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     vkCmdPipelineBarrier(cmd,
         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &hdrBarrier);
+        0, 1, &aovBarrier, 0, nullptr, 1, &hdrBarrier);
 
     // ── 3. Tonemap compute ───────────────────────────────────────────────────
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_tonemapPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
         m_tonemapPipelineLayout, 0, 1, &m_tonemapDescSet, 0, nullptr);
-    struct TonemapPush { uint32_t width; uint32_t height; } tmPush{ w, h };
+    struct TonemapPush {
+        uint32_t width, height, debugView;
+        float exposure, heatScale, bounceScale, overlay;
+        float camX, camY, camZ;
+    } tmPush{ w, h, m_tmDebugView,
+              m_tmExposure, m_tmHeatScale, m_tmBounceScale, m_tmOverlay,
+              m_tmCam[0], m_tmCam[1], m_tmCam[2] };
     vkCmdPushConstants(cmd, m_tonemapPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
         0, sizeof(TonemapPush), &tmPush);
     const uint32_t gx = (w + 7) / 8;
@@ -7459,6 +7551,10 @@ void VulkanBackendAdapter::shutdown() {
     }
     if (m_denoiserPositionImage.image) {
         m_device->destroyImage(m_denoiserPositionImage);
+    }
+    if (m_pathStatsImage.image) {
+        m_device->destroyImage(m_pathStatsImage);
+        m_pathStatsImage = {};
     }
     if (m_denoiserColorStagingBuffer.buffer) {
         m_device->destroyBuffer(m_denoiserColorStagingBuffer);
@@ -12784,6 +12880,34 @@ void VulkanBackendAdapter::setRenderParams(const RenderParams& p) {
         m_causticsVolNoise != p.causticsVolNoise) {
         resetAccumulation();
     }
+    // Debug views change what raygen WRITES → reset. Exception: view 14
+    // (sample heatmap) only remaps the accumulation at tonemap time — the
+    // whole point is inspecting the CURRENT adaptive distribution, so
+    // toggling it (or its exposure) must NOT wipe the data.
+    {
+        // Tonemap-side views (6-8 path stats, 10-13 AOVs, 14 heatmap) resolve
+        // at display time — switching among them, or tuning their exposure/
+        // overlay, must NOT reset the accumulation (that instant, reset-free
+        // behaviour is their whole point). Only the raygen-side views (1-4
+        // photon, 9 medium density) change what gets rendered.
+        const int rtViewOld = isTonemapSideView(m_debugView) ? 0 : m_debugView;
+        const int rtViewNew = isTonemapSideView(p.debugView) ? 0 : p.debugView;
+        if (rtViewOld != rtViewNew ||
+            (rtViewNew != 0 && (m_debugExposure != p.debugExposure ||
+                                m_debugOverlay != p.debugOverlay))) {
+            resetAccumulation();
+        }
+        // Any tonemap-side state change: no reset, but the presentation must
+        // refresh even if accumulation is already complete.
+        const bool tmOld = isTonemapSideView(m_debugView);
+        const bool tmNew = isTonemapSideView(p.debugView);
+        if ((tmOld || tmNew) &&
+            (m_debugView != p.debugView ||
+             (tmNew && (m_debugExposure != p.debugExposure ||
+                        m_debugOverlay != p.debugOverlay)))) {
+            m_tonemapRefreshPending = true;
+        }
+    }
     m_targetSamples = p.samplesPerPixel;
     m_minSamples = clampedMinSamples;
     m_useAdaptiveSampling = p.useAdaptiveSampling;
@@ -12801,6 +12925,9 @@ void VulkanBackendAdapter::setRenderParams(const RenderParams& p) {
     m_causticsVolStrength = p.causticsVolStrength;
     m_causticsVolDirect = p.causticsVolDirect;
     m_causticsVolNoise = p.causticsVolNoise;
+    m_debugView = p.debugView;
+    m_debugExposure = p.debugExposure;
+    m_debugOverlay = p.debugOverlay;
 }
 
 void VulkanBackendAdapter::setCamera(const CameraParams& c) { 
@@ -16824,12 +16951,42 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         return;
     }
     
-    if (isAccumulationComplete()) {
+    if (this->m_currentSamples >= this->m_targetSamples) {
+        // ── TONEMAP-ONLY PRESENTATION REFRESH ────────────────────────────────
+        // The sample-heatmap view (14) resolves at tonemap time; toggling it
+        // while accumulation is complete changes nothing on screen unless we
+        // re-run the tonemap. Do exactly that: no photon pass, no trace, no
+        // sample added — just tonemap the EXISTING accumulation with the new
+        // push constants, read it back into fb and present. Synchronous
+        // one-shot; ping-pong slot state is deliberately left untouched
+        // (fence reuse is safe — submit waits the slot fence internally).
+        if (m_tonemapRefreshPending) {
+            m_tonemapRefreshPending = false;
+            const bool canRefresh = m_device->hasTonemapPipeline()
+                                 && m_outputImage.image && m_tonemappedImage.image
+                                 && m_tonemappedStagings[0].buffer && m_tonemappedStagings[1].buffer;
+            if (canRefresh) {
+                updateTonemapDebugState();
+                const uint32_t slot = m_tonemappedFrameSlot;
+                if (m_device->submitTraceTonemapAsync(slot, (uint32_t)width, (uint32_t)height,
+                        m_outputImage, m_tonemappedImage, m_tonemappedStagings[slot], /*doTrace=*/false) &&
+                    m_device->waitFrameSlot(slot)) {
+                    std::vector<uint32_t>* framebuffer = static_cast<std::vector<uint32_t>*>(fb);
+                    const size_t pixelCount = (size_t)width * (size_t)height;
+                    if (framebuffer->size() != pixelCount) framebuffer->resize(pixelCount, 0u);
+                    m_device->downloadBuffer(m_tonemappedStagings[slot], framebuffer->data(),
+                                             pixelCount * sizeof(uint32_t));
+                    // fb now holds the refreshed pixels — the cached re-present
+                    // path below (and every later call) shows them.
+                }
+            }
+        }
         // [FIX] Even when done accumulating, re-present the last valid frame
         // so original_surface always has valid pixel data for display blit.
         rePresentCachedFrame();
         return;
     }
+    m_tonemapRefreshPending = false; // still accumulating: normal frames repaint anyway
 
     auto presentBackgroundOnly = [&]() {
         std::vector<uint32_t>* framebuffer = static_cast<std::vector<uint32_t>*>(fb);
@@ -16989,6 +17146,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         if (m_denoiserAlbedoImage.image) m_device->destroyImage(m_denoiserAlbedoImage);
         if (m_denoiserNormalImage.image) m_device->destroyImage(m_denoiserNormalImage);
         if (m_denoiserPositionImage.image) m_device->destroyImage(m_denoiserPositionImage);
+        if (m_pathStatsImage.image) m_device->destroyImage(m_pathStatsImage);
         if (m_denoiserColorStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserColorStagingBuffer);
         if (m_denoiserAlbedoStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserAlbedoStagingBuffer);
         if (m_denoiserNormalStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserNormalStagingBuffer);
@@ -17043,6 +17201,9 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         m_denoiserPositionImage = m_device->createImage2D(
             width, height, VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        m_pathStatsImage = m_device->createImage2D(
+            width, height, VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
 
         VulkanRT::BufferCreateInfo stagingInfo;
         const uint64_t bytesPerPixel = (outFmt == VK_FORMAT_R16G16B16A16_SFLOAT) ? 8ull : 16ull;
@@ -17077,7 +17238,9 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         // updateTonemapDescriptors is a no-op when the pipeline isn't ready yet
         // (pipeline init runs later in the same call); it will be retried below.
         if (m_tonemappedImage.image) {
-            m_device->updateTonemapDescriptors(m_outputImage, m_tonemappedImage);
+            m_device->updateTonemapDescriptors(m_outputImage, m_tonemappedImage,
+                &m_denoiserAlbedoImage, &m_denoiserNormalImage,
+                &m_denoiserPositionImage, &m_pathStatsImage);
         }
         m_tonemappedSlotInFlight[0] = false;
         m_tonemappedSlotInFlight[1] = false;
@@ -17143,6 +17306,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             if (m_denoiserAlbedoImage.image) m_device->destroyImage(m_denoiserAlbedoImage);
             if (m_denoiserNormalImage.image) m_device->destroyImage(m_denoiserNormalImage);
             if (m_denoiserPositionImage.image) m_device->destroyImage(m_denoiserPositionImage);
+            if (m_pathStatsImage.image) m_device->destroyImage(m_pathStatsImage);
             if (m_denoiserColorStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserColorStagingBuffer);
             if (m_denoiserAlbedoStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserAlbedoStagingBuffer);
             if (m_denoiserNormalStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserNormalStagingBuffer);
@@ -17159,6 +17323,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             m_denoiserAlbedoImage = {};
             m_denoiserNormalImage = {};
             m_denoiserPositionImage = {};
+            m_pathStatsImage = {};
             m_denoiserColorStagingBuffer = {};
             m_denoiserAlbedoStagingBuffer = {};
             m_denoiserNormalStagingBuffer = {};
@@ -17273,7 +17438,9 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
                 // images. The resize block already created them; we couldn't write the
                 // set there because the pipeline wasn't ready yet.
                 if (m_tonemappedImage.image && m_outputImage.image) {
-                    m_device->updateTonemapDescriptors(m_outputImage, m_tonemappedImage);
+                    m_device->updateTonemapDescriptors(m_outputImage, m_tonemappedImage,
+                        &m_denoiserAlbedoImage, &m_denoiserNormalImage,
+                        &m_denoiserPositionImage, &m_pathStatsImage);
                 }
             } else {
                 SCENE_LOG_ERROR("[Vulkan] Failed to create Tonemap compute pipeline; falling back to CPU tonemap.");
@@ -17423,6 +17590,13 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         uint32_t maxBounces; // UI'dan gelen toplam bounce limiti
         uint32_t diffuseBounces;
         uint32_t transmissionBounces;
+
+        // Debug Visualizer (appended: other RT stages declare a prefix of the
+        // block, so only raygen.rgen mirrors these fields)
+        uint32_t debugView;     // 0=off, see raygen CameraPC for the mode table
+        float    debugExposure; // false-color / energy gain
+        uint32_t debugFlags;    // reserved
+        float    debugParam;    // overlay: 0 = pure debug … 1 = pure beauty
     };
 
     CameraPushConstants pushConst{};
@@ -17492,6 +17666,11 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     pushConst.maxBounces = (uint32_t)std::max(1, m_maxBounces); // m_maxBounces her zaman UI'dan gelir
     pushConst.diffuseBounces = (uint32_t)std::clamp(m_diffuseBounces, 1, m_maxBounces);
     pushConst.transmissionBounces = (uint32_t)std::clamp(m_transmissionBounces, 1, m_maxBounces);
+
+    pushConst.debugView = (uint32_t)std::max(0, m_debugView);
+    pushConst.debugExposure = std::max(0.0f, m_debugExposure);
+    pushConst.debugFlags = 0u;
+    pushConst.debugParam = std::clamp(m_debugOverlay, 0.0f, 1.0f);
 
     pushConst.shakeEnabled = this->m_camera.shake_enabled ? 1 : 0;
     if (pushConst.shakeEnabled) {
@@ -17609,6 +17788,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             if (m_denoiserAlbedoImage.image) clears.push_back({&m_denoiserAlbedoImage, 0,0,0,0});
             if (m_denoiserNormalImage.image) clears.push_back({&m_denoiserNormalImage, 0.5f,0.5f,0.5f,0});
             if (m_denoiserPositionImage.image) clears.push_back({&m_denoiserPositionImage, 0,0,0,0});
+            if (m_pathStatsImage.image)      clears.push_back({&m_pathStatsImage, 0,0,0,0});
             m_device->clearImages(clears);
         }
         m_imagesCleared = false; // consumed — next reset can clear again
@@ -17619,7 +17799,12 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             &m_denoiserAlbedoImage,
             &m_denoiserNormalImage,
             &m_varianceImage,
-            &m_denoiserPositionImage);
+            &m_denoiserPositionImage,
+            &m_pathStatsImage);
+        // Tonemap-side debug views (6/7/8 = path stats, 10-13 = first-hit AOVs,
+        // 14 = sample heatmap) resolve at display time from persistent AOVs so
+        // beauty accumulation + adaptive statistics keep running undisturbed.
+        updateTonemapDebugState();
         m_device->setPushConstants(&pushConst, sizeof(CameraPushConstants));
 
         // ── Photon caustic pass (Faz 2 / Dilim 1) ────────────────────────────
@@ -17628,8 +17813,12 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         // so it cannot race the async ping-pong camera reads.
         // Volumetric shafts are INDEPENDENT of surface caustics: either feature
         // arms the photon pass; ph.debugMode below decides whether the surface
-        // grid is gathered.
-        if ((m_causticsEnabled || m_causticsVolumetric || m_causticsVolDebug) &&
+        // grid is gathered. The Debug Visualizer's photon views (1=vol grid,
+        // 2=shafts, 3=surface energy, 4=cells) arm the pass too, so the views
+        // work even with the beauty features switched off.
+        const bool dbgNeedVolGrid  = (m_debugView == 1 || m_debugView == 2 || m_debugView == 5);
+        const bool dbgNeedSurfGrid = (m_debugView == 3 || m_debugView == 4);
+        if ((m_causticsEnabled || m_causticsVolumetric || dbgNeedVolGrid || dbgNeedSurfGrid) &&
             m_device->hasPhotonPipeline() && !m_cachedLights.empty()) {
             VulkanRT::VulkanDevice::PhotonGridHeader ph{};
             ph.originCell[0] = 0.0f; ph.originCell[1] = 0.0f; ph.originCell[2] = 0.0f;
@@ -17693,11 +17882,11 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
                                         std::max(rad * (1.0f / 48.0f), 1e-4f));
             ph.photonCount   = (uint32_t)std::max(1024, m_causticsPhotons);
             ph.frameSeed     = m_currentSamples;
-            // mode 1 = surface debug viz, 2 = gather into shading (Dilim 2),
-            // 3 = VOLUME grid debug march (Faz 2V / Dilim V1),
-            // 0 = surface gather off (volumetric-only mode).
-            ph.debugMode     = m_causticsVolDebug ? 3u
-                             : (m_causticsEnabled ? (m_causticsDebug ? 1u : 2u) : 0u);
+            // PHOTON-PASS control only (the debug DISPLAY is keyed on the
+            // cam.debugView push constant in raygen now): 2 = gather into
+            // shading, 1 = deposit-only (surface splats armed for the debug
+            // views, no gather), 0 = surface grid off (volumetric-only mode).
+            ph.debugMode     = m_causticsEnabled ? 2u : (dbgNeedSurfGrid ? 1u : 0u);
             ph.lightIndex    = 0u;
             ph.lightCountReal = (uint32_t)m_cachedLights.size();
             ph.energyScale   = m_causticsEnergy;
@@ -17712,15 +17901,19 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             pv.emitCenter[2] = ph.emitCenter[2]; pv.emitCenter[3] = ph.emitCenter[3];
             pv.photonCount   = ph.photonCount;
             pv.frameSeed     = ph.frameSeed;
-            pv.debugMode     = (m_causticsVolumetric || m_causticsVolDebug) ? 1u : 0u;
+            // 1 = deposits armed; 2 = deposits + DIRECTION grid (view 5 —
+            // photon.rgen pays the extra atomics only in that mode).
+            pv.debugMode     = (m_causticsVolumetric || dbgNeedVolGrid)
+                             ? ((m_debugView == 5) ? 2u : 1u) : 0u;
             // lightIndex is unused by the volume grid — bit 0 repurposed as the
             // direct-shaft flag (photon.rgen deposits the light->glass leg too).
             pv.lightIndex    = m_causticsVolDirect ? 1u : 0u;
             pv.lightCountReal = ph.lightCountReal;
             pv.energyScale   = m_causticsVolStrength;   // σs knob
-            // debugExposure doubles as the dust-noise amount OUTSIDE vol-debug:
-            // raygen decodes noise = clamp(debugExposure - 1, 0, 1).
-            pv.debugExposure = m_causticsVolDebug ? 1.0f : (1.0f + m_causticsVolNoise);
+            // debugExposure doubles as the dust-noise amount (raygen decodes
+            // noise = clamp(debugExposure - 1, 0, 1)). Debug-view display gain
+            // now travels in the cam.debugExposure push constant instead.
+            pv.debugExposure = 1.0f + m_causticsVolNoise;
 
             // Grids accumulate across frames; clear only on accumulation reset.
             m_device->schedulePhotonPass(ph, pv, m_currentSamples == 0);
@@ -18582,6 +18775,11 @@ bool VulkanBackendAdapter::isAccumulationComplete() const {
     if (shouldUseInteractiveViewport()) {
         return false;
     }
+    // A pending tonemap-side refresh (sample heatmap toggle) must let one more
+    // renderProgressive call through — it runs tonemap-only, adds no sample.
+    if (m_tonemapRefreshPending) {
+        return false;
+    }
     return this->m_currentSamples >= this->m_targetSamples;
 }
 
@@ -19362,6 +19560,7 @@ void VulkanBackendAdapter::resetAccumulation() {
         if (m_denoiserAlbedoImage.image) clears.push_back({&m_denoiserAlbedoImage, 0,0,0,0});
         if (m_denoiserNormalImage.image) clears.push_back({&m_denoiserNormalImage, 0.5f,0.5f,0.5f,0});
         if (m_denoiserPositionImage.image) clears.push_back({&m_denoiserPositionImage, 0,0,0,0});
+        if (m_pathStatsImage.image)      clears.push_back({&m_pathStatsImage, 0,0,0,0});
         m_device->clearImages(clears);
         m_imagesCleared = true;
     }

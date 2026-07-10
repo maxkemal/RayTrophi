@@ -3352,6 +3352,9 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         rp.causticsVolStrength = render_settings.caustics_vol_strength;
         rp.causticsVolDirect = render_settings.caustics_vol_direct;
         rp.causticsVolNoise = render_settings.caustics_vol_noise;
+        rp.debugView = render_settings.debug_view;
+        rp.debugExposure = render_settings.debug_exposure;
+        rp.debugOverlay = render_settings.debug_overlay;
                     m_backend->setRenderParams(rp);
                 }
             }
@@ -3561,6 +3564,9 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         rp.causticsVolStrength = render_settings.caustics_vol_strength;
         rp.causticsVolDirect = render_settings.caustics_vol_direct;
         rp.causticsVolNoise = render_settings.caustics_vol_noise;
+        rp.debugView = render_settings.debug_view;
+        rp.debugExposure = render_settings.debug_exposure;
+        rp.debugOverlay = render_settings.debug_overlay;
         m_backend->setRenderParams(rp);
         m_backend->resetAccumulation();
     }

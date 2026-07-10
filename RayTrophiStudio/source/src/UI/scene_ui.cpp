@@ -1692,9 +1692,6 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
         }
         if (ctx.render_settings.caustics_enabled) {
             ImGui::Indent();
-            ImGui::Checkbox("Debug: show photon grid##causticsdbg", &ctx.render_settings.caustics_debug);
-            UIWidgets::HelpMarker("Replaces shading with the raw photon-grid energy at the primary hit\n"
-                                  "so photon placement can be verified (bright spot under the glass).");
             ImGui::DragInt("Photons / frame##causticsn", &ctx.render_settings.caustics_photons, 1024, 8192, 4194304);
             ImGui::DragFloat("Grid Cell Size##causticscs", &ctx.render_settings.caustics_cell_size, 0.005f, 0.005f, 2.0f, "%.3f");
             ImGui::DragFloat("Energy##causticse", &ctx.render_settings.caustics_energy, 0.05f, 0.0f, 100.0f, "%.2f");
@@ -1711,9 +1708,6 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
                               "of surface caustics; shares the photon budget above.");
         if (ctx.render_settings.caustics_volumetric) {
             ImGui::Indent();
-            ImGui::Checkbox("Debug: show volume grid##causticsvoldbg", &ctx.render_settings.caustics_vol_debug);
-            UIWidgets::HelpMarker("Marches the primary ray and shows the raw volume-grid energy\n"
-                                  "(the shafts) so photon placement can be verified.");
             ImGui::DragFloat("Scatter Strength##causticsvols", &ctx.render_settings.caustics_vol_strength, 0.05f, 0.0f, 100.0f, "%.2f");
             ImGui::Checkbox("Direct light shafts##causticsvoldir", &ctx.render_settings.caustics_vol_direct);
             UIWidgets::HelpMarker("Also deposit the light-to-target leg of the beam, so the full\n"
@@ -1723,6 +1717,92 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
             UIWidgets::HelpMarker("Heterogeneous dust: modulates shaft density with a static 3D\n"
                                   "turbulence field for a wispy, volumetric look. 0 = uniform.");
             ImGui::Unindent();
+        }
+
+        UIWidgets::Divider();
+        UIWidgets::ColoredHeader("Debug Visualizer (Vulkan RT)", ImVec4(1.0f, 0.62f, 0.42f, 1.0f));
+        {
+            const char* dv_items[] = {
+                "Off", "Photon Grid (volume)", "Light Shaft Density",
+                "Photon Energy (surface)", "Caustic Cells", "Photon Directions",
+                "Bounce Count", "Transmission", "Absorption", "Medium Density (interior)",
+                "Normal (first hit)", "Albedo (first hit)", "Depth", "Material ID",
+                "Sample Heatmap"
+            };
+            const char* dv_tips[] = {
+                "Normal beauty render — debug visualizer off.",
+                "Marches the primary ray through the VOLUME photon grid and shows the raw "
+                "deposited energy — verifies shaft & photon placement in space.\n"
+                "Arms the photon pass automatically (even with caustics off).",
+                "The volumetric in-scatter integral on its own: the light shafts without "
+                "the scene. Arms the photon pass automatically.",
+                "SURFACE photon-grid irradiance at the first hit — bright areas are where "
+                "caustic energy lands. Arms the photon pass automatically.",
+                "Same surface-grid data, but every hash cell gets a stable colour — shows "
+                "the grid tiling. Use it to tune Grid Cell Size.",
+                "Average photon FLOW direction per volume cell, RGB = XYZ (e.g. green = "
+                "photons travelling up). Brightness follows the deposited energy. Arms "
+                "the photon pass + direction grid automatically.",
+                "Viridis heatmap of path depth per pixel. Yellow = paths that reach the "
+                "bounce limit (glass/GI hotspots); purple = terminated early.",
+                "Surviving path throughput — the colour a white backlight would keep after "
+                "crossing this pixel's path. Amber glass reads amber; dense dust darkens.",
+                "What the path LOST on the way: 1 - throughput, per channel.",
+                "Interior Volume dust-coverage integral along the (refracted) view ray; "
+                "opaque specks flash white. Materials without an interior read ~0 "
+                "(dark purple).",
+                "First-hit shading normal in world space (RGB = XYZ). Winding, normal-map "
+                "and sculpt shading bugs show instantly.",
+                "First-hit base colour after texturing — exactly the denoiser's albedo "
+                "feed. UV / texture-pipeline check.",
+                "Distance to the first hit as an exponential ramp. Exposure tunes the "
+                "range: higher = shorter falloff. Near = dark, far = yellow.",
+                "Stable hash colour per material — multi-material import & assignment "
+                "check. Only 'no hit' is black (material ID 0 is valid).",
+                "Per-pixel ACCUMULATED SAMPLE COUNT, read at display time — the beauty "
+                "render keeps accumulating underneath and toggling never resets it. Best "
+                "with Adaptive Sampling on; Exposure scales the ramp."
+            };
+            int dv = std::clamp(ctx.render_settings.debug_view, 0, 14);
+            if (ImGui::BeginCombo("View Mode##dbgview", dv_items[dv])) {
+                for (int i = 0; i < 15; ++i) {
+                    const bool unavailable = false; // all 15 views live
+                    if (unavailable) ImGui::BeginDisabled();
+                    if (ImGui::Selectable(dv_items[i], dv == i)) {
+                        ctx.render_settings.debug_view = i;
+                        // Kick one render-loop pass even when accumulation is
+                        // complete — the change tracker only runs inside the
+                        // render block, and the tonemap-only refresh (heatmap)
+                        // adds no sample, so this is what makes the toggle
+                        // show up without camera motion.
+                        ctx.start_render = true;
+                    }
+                    if (unavailable) ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                        ImGui::SetTooltip("%s", dv_tips[i]);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (dv != 0) {
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextDisabled("%s", dv_tips[dv]);
+                ImGui::PopTextWrapPos();
+            }
+            if (ctx.render_settings.debug_view != 0) {
+                ImGui::Indent();
+                if (ImGui::DragFloat("Exposure##dbgexp", &ctx.render_settings.debug_exposure, 0.05f, 0.0f, 1000.0f, "%.2f"))
+                    ctx.start_render = true;
+                if (ImGui::SliderFloat("Overlay Beauty##dbgovl", &ctx.render_settings.debug_overlay, 0.0f, 1.0f, "%.2f"))
+                    ctx.start_render = true;
+                UIWidgets::HelpMarker("0 = pure debug view, 1 = pure beauty — mix to see the\n"
+                                      "debug data ghosted over the rendered image.");
+                if (ctx.render_settings.use_optix) {
+                    UIWidgets::StatusIndicator("Debug views run on the Vulkan RT backend only",
+                                               UIWidgets::StatusType::Warning);
+                }
+                ImGui::Unindent();
+            }
         }
 
         UIWidgets::Divider();
@@ -2842,7 +2922,6 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                         }
                         if (ctx.render_settings.caustics_enabled) {
                             ImGui::Indent();
-                            ImGui::Checkbox("Debug: show photon grid##causticsdbg2", &ctx.render_settings.caustics_debug);
                             ImGui::DragInt("Photons / frame##causticsn2", &ctx.render_settings.caustics_photons, 1024, 8192, 4194304);
                             ImGui::DragFloat("Grid Cell Size##causticscs2", &ctx.render_settings.caustics_cell_size, 0.005f, 0.005f, 2.0f, "%.3f");
                             ImGui::DragFloat("Energy##causticse2", &ctx.render_settings.caustics_energy, 0.05f, 0.0f, 100.0f, "%.2f");
@@ -2851,11 +2930,77 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                         ImGui::Checkbox("Volumetric (light shafts)##causticsvol2", &ctx.render_settings.caustics_volumetric);
                         if (ctx.render_settings.caustics_volumetric) {
                             ImGui::Indent();
-                            ImGui::Checkbox("Debug: show volume grid##causticsvoldbg2", &ctx.render_settings.caustics_vol_debug);
                             ImGui::DragFloat("Scatter Strength##causticsvols2", &ctx.render_settings.caustics_vol_strength, 0.05f, 0.0f, 100.0f, "%.2f");
                             ImGui::Checkbox("Direct light shafts##causticsvoldir2", &ctx.render_settings.caustics_vol_direct);
                             ImGui::SliderFloat("Shaft Noise##causticsvolnoise2", &ctx.render_settings.caustics_vol_noise, 0.0f, 1.0f, "%.2f");
                             ImGui::Unindent();
+                        }
+                        UIWidgets::Divider();
+                        {
+                            const char* dv_items2[] = {
+                                "Off", "Photon Grid (volume)", "Light Shaft Density",
+                                "Photon Energy (surface)", "Caustic Cells", "Photon Directions",
+                                "Bounce Count", "Transmission", "Absorption", "Medium Density (interior)",
+                                "Normal (first hit)", "Albedo (first hit)", "Depth", "Material ID",
+                                "Sample Heatmap"
+                            };
+                            const char* dv_tips2[] = {
+                                "Normal beauty render — debug visualizer off.",
+                                "Raw VOLUME photon-grid energy along the primary ray — verifies "
+                                "shaft & photon placement. Arms the photon pass automatically.",
+                                "The volumetric in-scatter integral alone: shafts without the "
+                                "scene. Arms the photon pass automatically.",
+                                "SURFACE photon-grid irradiance at the first hit — where caustic "
+                                "energy lands. Arms the photon pass automatically.",
+                                "Surface grid with a stable colour per hash cell — shows the "
+                                "tiling; use to tune Grid Cell Size.",
+                                "Average photon flow direction per volume cell, RGB = XYZ; "
+                                "brightness = deposited energy. Arms the photon pass.",
+                                "Viridis heatmap of path depth. Yellow = bounce-limit paths, "
+                                "purple = terminated early.",
+                                "Surviving path throughput — the colour a white backlight keeps "
+                                "after crossing this pixel's path.",
+                                "What the path lost: 1 - throughput, per channel.",
+                                "Interior Volume dust integral along the view ray; specks flash "
+                                "white; non-interior materials read ~0.",
+                                "First-hit world-space shading normal (RGB = XYZ).",
+                                "First-hit base colour after texturing (denoiser albedo feed).",
+                                "Distance to first hit, exponential ramp; Exposure tunes range.",
+                                "Stable hash colour per material; only 'no hit' is black "
+                                "(material ID 0 is valid).",
+                                "Per-pixel accumulated sample count at display time — beauty "
+                                "keeps accumulating; toggling never resets. Best with Adaptive "
+                                "Sampling on."
+                            };
+                            int dv = std::clamp(ctx.render_settings.debug_view, 0, 14);
+                            if (ImGui::BeginCombo("Debug View##dbgview2", dv_items2[dv])) {
+                                for (int i = 0; i < 15; ++i) {
+                                    const bool unavailable = false; // all 15 views live
+                                    if (unavailable) ImGui::BeginDisabled();
+                                    if (ImGui::Selectable(dv_items2[i], dv == i)) {
+                                        ctx.render_settings.debug_view = i;
+                                        ctx.start_render = true; // change tracker runs only inside the render block
+                                    }
+                                    if (unavailable) ImGui::EndDisabled();
+                                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                                        ImGui::SetTooltip("%s", dv_tips2[i]);
+                                    }
+                                }
+                                ImGui::EndCombo();
+                            }
+                            if (dv != 0) {
+                                ImGui::PushTextWrapPos(0.0f);
+                                ImGui::TextDisabled("%s", dv_tips2[dv]);
+                                ImGui::PopTextWrapPos();
+                            }
+                            if (ctx.render_settings.debug_view != 0) {
+                                ImGui::Indent();
+                                if (ImGui::DragFloat("Exposure##dbgexp2", &ctx.render_settings.debug_exposure, 0.05f, 0.0f, 1000.0f, "%.2f"))
+                                    ctx.start_render = true;
+                                if (ImGui::SliderFloat("Overlay Beauty##dbgovl2", &ctx.render_settings.debug_overlay, 0.0f, 1.0f, "%.2f"))
+                                    ctx.start_render = true;
+                                ImGui::Unindent();
+                            }
                         }
                         UIWidgets::EndSection();
                     }

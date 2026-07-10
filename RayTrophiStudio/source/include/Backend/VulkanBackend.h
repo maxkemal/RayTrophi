@@ -618,7 +618,8 @@ public:
                            const ImageHandle* denoiserAlbedoImage = nullptr,
                            const ImageHandle* denoiserNormalImage = nullptr,
                            const ImageHandle* varianceImage = nullptr,
-                           const ImageHandle* denoiserPositionImage = nullptr);
+                           const ImageHandle* denoiserPositionImage = nullptr,
+                           const ImageHandle* pathStatsImage = nullptr);
     void updateRTTextureDescriptor(uint32_t slot, const ImageHandle& image);
     void clearImage(const ImageHandle& image, float r, float g, float b, float a);
 
@@ -842,17 +843,42 @@ public:
     // Async path — records into persistent cmd buffer for the given slot and submits
     // signaling that slot's fence. Does NOT wait. Adapter must call waitFrameSlot()
     // before reading the staging buffer or reusing the same slot.
+    // doTrace=false skips the photon pass + camera trace and only re-runs the
+    // tonemap + LDR copy on the EXISTING accumulation image — used to refresh
+    // the presentation (e.g. sample-heatmap toggle) without adding a sample.
     bool submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h,
                                  const ImageHandle& hdrImage,
                                  const ImageHandle& ldrImage,
-                                 const BufferHandle& ldrStaging);
+                                 const BufferHandle& ldrStaging,
+                                 bool doTrace = true);
     bool waitFrameSlot(uint32_t slot, uint64_t timeoutNs = UINT64_MAX);
     // Updates the persistent tonemap descriptor set with new image views. Caller MUST
     // ensure no in-flight submission references the previous binding (drain fences first).
-    bool updateTonemapDescriptors(const ImageHandle& hdrImage, const ImageHandle& ldrImage);
+    bool updateTonemapDescriptors(const ImageHandle& hdrImage, const ImageHandle& ldrImage,
+                                  const ImageHandle* aovAlbedo = nullptr,
+                                  const ImageHandle* aovNormal = nullptr,
+                                  const ImageHandle* aovPosition = nullptr,
+                                  const ImageHandle* aovStats = nullptr);
     bool hasTonemapPipeline() const { return m_tonemapPipeline != VK_NULL_HANDLE; }
+    // Debug Visualizer views resolved at tonemap time (6/7/8 = path stats,
+    // 10-13 = first-hit AOVs, 14 = sample heatmap). heatScale = exposure /
+    // maxSamples, bounceScale = exposure / maxBounces; cam origin drives the
+    // Depth ramp; overlay mixes the beauty image back in.
+    void setTonemapDebug(uint32_t view, float exposure, float heatScale,
+                         float bounceScale, float overlay,
+                         float camX, float camY, float camZ) {
+        m_tmDebugView = view; m_tmExposure = exposure; m_tmHeatScale = heatScale;
+        m_tmBounceScale = bounceScale; m_tmOverlay = overlay;
+        m_tmCam[0] = camX; m_tmCam[1] = camY; m_tmCam[2] = camZ;
+    }
     static constexpr uint32_t kFrameSlotCount = 2;
 
+    uint32_t m_tmDebugView = 0;
+    float    m_tmExposure = 1.0f;
+    float    m_tmHeatScale = 0.0f;
+    float    m_tmBounceScale = 0.0f;
+    float    m_tmOverlay = 0.0f;
+    float    m_tmCam[3] = { 0.0f, 0.0f, 0.0f };
     VkPipeline m_tonemapPipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_tonemapPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_tonemapDescLayout = VK_NULL_HANDLE;
@@ -969,6 +995,7 @@ private:
     VkStridedDeviceAddressRegionKHR m_sbtPhotonRegion{};
     BufferHandle m_photonGridBuffer;
     BufferHandle m_photonVolGridBuffer;        // Faz 2V: volume caustic grid (binding 20)
+    BufferHandle m_photonVolDirBuffer;         // Debug view 5: photon direction grid (binding 22, 4 ints/slot)
     uint32_t m_photonTableSize = (1u << 20);   // cells (power of two), 20 B each (R,G,B,count,owner key)
     bool m_photonPassPending = false;          // armed by schedulePhotonPass, consumed by recordPhotonPass
     bool m_pendingPhotonClear = false;         // clear cells before tracing (first frame after accum reset)
@@ -1638,6 +1665,32 @@ protected:
     float m_causticsVolStrength = 1.0f;
     bool  m_causticsVolDirect = false;
     float m_causticsVolNoise = 0.0f;
+    // Debug Visualizer (Render Settings → Debug); see raygen CameraPC mode table
+    int   m_debugView = 0;
+    float m_debugExposure = 1.0f;
+    float m_debugOverlay = 0.0f;
+    // Tonemap-side debug state changed while accumulation is complete: the next
+    // renderProgressive call re-runs ONLY tonemap + readback (no trace, no
+    // sample added) so the toggle shows up without waiting for camera motion.
+    bool  m_tonemapRefreshPending = false;
+    // Views resolved at tonemap time from persistent AOVs — instant, reset-free.
+    static bool isTonemapSideView(int v) {
+        return v == 6 || v == 7 || v == 8 || (v >= 10 && v <= 14);
+    }
+    // Push the current debug-view state down to the tonemap dispatch.
+    void updateTonemapDebugState() {
+        if (!m_device) return;
+        const float e = (m_debugExposure > 0.0f) ? m_debugExposure : 0.0f;
+        float ovl = m_debugOverlay;
+        ovl = (ovl < 0.0f) ? 0.0f : ((ovl > 1.0f) ? 1.0f : ovl);
+        m_device->setTonemapDebug(
+            isTonemapSideView(m_debugView) ? (uint32_t)m_debugView : 0u,
+            e,
+            (m_targetSamples > 0) ? (e / (float)m_targetSamples) : 0.0f,
+            (m_maxBounces > 0) ? (e / (float)m_maxBounces) : 0.0f,
+            ovl,
+            m_camera.origin.x, m_camera.origin.y, m_camera.origin.z);
+    }
     ViewportMode m_viewportMode = ViewportMode::Rendered;
     InteractiveViewportState m_interactiveViewport;
     bool m_loggedInteractiveViewportFallback = false;
@@ -1672,6 +1725,10 @@ protected:
     // no CUDA interop needed since stylize is a CPU post pass.
     VulkanRT::ImageHandle m_denoiserPositionImage;
     VulkanRT::BufferHandle m_denoiserPositionStagingBuffer;
+    // Debug Visualizer path-stats AOV (rgba16f): rgb = path throughput avg,
+    // a = bounce count avg. Raygen binding 21; tonemap reads it for the
+    // Transmission / Absorption / Bounce Count views.
+    VulkanRT::ImageHandle m_pathStatsImage;
 
     // GPU stylize: host-visible color SSBO (graded surface round-trip) + params SSBO.
     // Persistent; color buffer reallocated on resolution change.
