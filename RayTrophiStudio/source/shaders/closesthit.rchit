@@ -64,6 +64,16 @@ layout(push_constant) uniform CameraPC {
     float shakeRotY;
     float shakeRotZ;
     float waterTime;   // Wall-clock seconds for water animation
+    uint  maxBounces;
+    uint  diffuseBounces;
+    uint  transmissionBounces;
+
+    // Debug Visualizer (must stay offset-identical to raygen's CameraPC)
+    uint  debugView;      // 9 = Medium Density: closesthit terminates at the
+                          // first hit and returns the dust-coverage integral
+    float debugExposure;
+    uint  debugFlags;
+    float debugParam;
 } cam;
 
 // ============================================================
@@ -1188,6 +1198,60 @@ vec3 rh_hue(float h) {
     vec3 rgb = clamp(abs(fract(vec3(h) + vec3(0.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
     return mix(vec3(1.0), rgb, 0.85);
 }
+// Self-shadow inside the speck lattice: a short DDA from a lit speck TOWARD
+// the light, testing only the lattice (no scene rays — from inside an
+// opaque-based resin those always self-occlude on the enclosing surface).
+// Dirt spheres block the light; shard chips TINT the shadow like stained
+// glass; bubbles and dust are ignored. 8 cells ≈ a few speck diameters —
+// enough for the neighbour-shadowing depth cue, cheap enough per lit speck.
+vec3 resinSpeckShadow(vec3 qFrom, vec3 ldir, float totalAmt, float shardCut,
+                      float shardHue) {
+    vec3 shadow = vec3(1.0);
+    vec3 cell  = floor(qFrom);
+    vec3 cell0 = cell;
+    vec3 sgn = vec3(ldir.x >= 0.0 ? 1.0 : -1.0,
+                    ldir.y >= 0.0 ? 1.0 : -1.0,
+                    ldir.z >= 0.0 ? 1.0 : -1.0);
+    vec3 ad = max(abs(ldir), vec3(1e-6));
+    vec3 tDelta = 1.0 / ad;
+    vec3 fr = qFrom - cell;
+    vec3 tMax = vec3((ldir.x >= 0.0 ? 1.0 - fr.x : fr.x) / ad.x,
+                     (ldir.y >= 0.0 ? 1.0 - fr.y : fr.y) / ad.y,
+                     (ldir.z >= 0.0 ? 1.0 - fr.z : fr.z) / ad.z);
+    for (int it = 0; it < 8; ++it) {
+        if (!all(equal(cell, cell0)) &&
+            rh_hash13(cell + vec3(5.77)) < totalAmt) {
+            vec3  h      = rh_hash33(cell + 17.31);
+            vec3  seedPt = cell + rh_hash33(cell);
+            float rad    = mix(0.10, 0.26, h.x);
+            vec3  oc     = qFrom - seedPt;
+            float bq     = dot(oc, ldir);
+            float perp2  = dot(oc, oc) - bq * bq;
+            if (bq < 0.0) {
+                if (h.y < shardCut) {
+                    float r = rad * 1.05;
+                    if (perp2 < r * r) {
+                        float hue = (shardHue >= 0.0)
+                                  ? fract(shardHue + (h.z - 0.5) * 0.16) : h.z;
+                        shadow *= mix(vec3(1.0), rh_hue(hue), 0.6);
+                    }
+                } else if (h.y >= shardCut + 0.25 * (1.0 - shardCut)) {
+                    float r = rad * 0.95;
+                    if (perp2 < r * r) { shadow *= 0.18; break; }
+                }
+            }
+        }
+        if (tMax.x < tMax.y && tMax.x < tMax.z) {
+            tMax.x += tDelta.x; cell.x += sgn.x;
+        } else if (tMax.y < tMax.z) {
+            tMax.y += tDelta.y; cell.y += sgn.y;
+        } else {
+            tMax.z += tDelta.z; cell.z += sgn.z;
+        }
+    }
+    return shadow;
+}
+
 ResinMarch resinMarchInterior(vec3 origin, vec3 Tdir, float thickness,
                               vec3 extBase, float inclusion, float dirtAmt,
                               vec3 dirtColor, float shardAmt, float shardHue,
@@ -1323,18 +1387,25 @@ ResinMarch resinMarchInterior(vec3 origin, vec3 Tdir, float thickness,
                             float body = 1.0 - smoothstep(0.65, 1.0, grz);
                             vec3  T    = pow(max(rm.absorb, vec3(1e-4)),
                                              vec3(clamp(tn / tEnd, 0.0, 1.0)));
-                            float lit  = 1.0;
+                            vec3 lit = vec3(1.0);
                             if (shardShape == 1u) {
                                 // Faceted crystal shading: quantize the surface
                                 // normal into a per-shard rotated lattice and
                                 // light it — flat faces that FLASH as the light
-                                // or the object turns.
+                                // or the object turns. Neighbouring specks
+                                // self-shadow the directional term (stained-
+                                // glass tinted when the occluder is a shard).
                                 vec3 pn = normalize(ocs + ds * tn);
                                 vec3 h2 = rh_hash33(cell + 91.3);
                                 vec3 fn = normalize(round(pn * 1.4 + (h2 - 0.5) * 0.8) + vec3(1e-3));
                                 pn = normalize(mix(pn, fn, 0.85));
-                                lit = 0.45 + 0.85 * max(dot(pn, lightDir), 0.0)
-                                    + pow(max(dot(pn, -Tdir), 0.0), 6.0) * 0.6;
+                                vec3 sshadow = (body > 0.2)
+                                    ? resinSpeckShadow(qo + Tdir * tn, lightDir,
+                                                       totalAmt, shardCut, shardHue)
+                                    : vec3(1.0);
+                                lit = vec3(0.45)
+                                    + (0.85 * max(dot(pn, lightDir), 0.0)) * sshadow
+                                    + vec3(pow(max(dot(pn, -Tdir), 0.0), 6.0) * 0.6);
                             }
                             rm.absorb    *= mix(vec3(1.0), sc, body * 0.85);
                             rm.shardGlow += sc * T * (0.20 + 0.30 * body) * lit;
@@ -1366,10 +1437,14 @@ ResinMarch resinMarchInterior(vec3 origin, vec3 Tdir, float thickness,
                             vec3 pn = normalize((qo + Tdir * tn) - seedPt);
                             // REAL sampled light direction (surface NEE pick):
                             // specks brighten on the light side, fall dark
-                            // opposite. No shadow ray: from inside an opaque-
-                            // based resin it would always self-occlude black.
+                            // opposite. No scene shadow ray (would always
+                            // self-occlude inside an opaque-based resin) —
+                            // instead the LATTICE self-shadows: neighbouring
+                            // dirt blocks the directional term, shards tint it.
+                            vec3  sshadow = resinSpeckShadow(qo + Tdir * tn, lightDir,
+                                                             totalAmt, shardCut, shardHue);
                             float ndl = max(dot(pn, lightDir), 0.0);
-                            float lit = 0.28 + 0.72 * ndl;
+                            vec3  lit = vec3(0.28) + (0.72 * ndl) * sshadow;
                             float rim = pow(clamp(1.0 - abs(dot(pn, Tdir)), 0.0, 1.0), 3.0) * 0.25;
                             vec3  col = dirtColor * (0.70 + 0.60 * h.z);
                             float depthN = clamp(tn / tEnd, 0.0, 1.0);
@@ -2786,13 +2861,66 @@ if (emissionTexID > 0) {
     vec3  resinExt     = vec3(0.0);
     float resinDensity = 0.0;
 
-    if (mat.transmission_density > 1e-4) {
+    // ── DEBUG VIEW 9: MEDIUM DENSITY ────────────────────────────────────────
+    // Visualize the Interior Volume dust field: terminate every camera path at
+    // the first hit and return the dust-coverage integral along the (refracted)
+    // view ray — lobe gates and Fresnel are bypassed so the field itself is
+    // shown, not its lit appearance. Materials without an interior return 0
+    // (dark purple in the viridis ramp); opaque specks flash 1.0. Photon paths
+    // die here too while the view is active — the grids reset on view exit.
+    if (cam.debugView == 9u) {
+        vec3 mdOut = vec3(0.0);
+        bool hasInterior = (mat.transmission_density > 1e-4 ||
+                            mat.resin_inclusion > 0.001 || mat.resin_dirt > 0.001 ||
+                            mat.resin_shard > 0.001);
+        if (hasInterior) {
+            float effIor = max(ior, 1.45);
+            vec3 Tdir = refract(rayDir, worldNormal, surfaceFrontFace ? (1.0 / effIor) : effIor);
+            if (dot(Tdir, Tdir) < 1e-6) Tdir = rayDir;
+            Tdir = normalize(Tdir);
+            float thick = (mat.transmission_density > 1e-4) ? mat.transmission_density : 0.65;
+            vec3 mOrg = hitPos, mDir = Tdir, mLit = worldNormal;
+            if ((mat.flags & MAT_FLAG_RESIN_OBJ_SPACE) != 0u) {
+                mOrg = gl_WorldToObjectEXT * vec4(hitPos, 1.0);
+                mDir = normalize(mat3(gl_WorldToObjectEXT) * Tdir);
+                mLit = normalize(mat3(gl_WorldToObjectEXT) * worldNormal);
+            }
+            ResinMarch rm = resinMarchInterior(
+                mOrg, mDir, thick, vec3(0.0),
+                mat.resin_inclusion, mat.resin_dirt,
+                vec3(mat.resin_dirt_color_r, mat.resin_dirt_color_g, mat.resin_dirt_color_b),
+                mat.resin_shard, mat.resin_shard_hue,
+                vec3(0.85), mLit,
+                max(mat.resin_inclusion_scale, 0.01),
+                uint(mat.dust_style + 0.5),
+                vec3(mat.dust_color_a_r, mat.dust_color_a_g, mat.dust_color_a_b),
+                vec3(mat.dust_color_b_r, mat.dust_color_b_g, mat.dust_color_b_b),
+                uint(mat.shard_shape + 0.5), payload.seed);
+            mdOut = rm.dirtHit ? vec3(1.0) : vec3(clamp(rm.dustCover, 0.0, 1.0));
+        }
+        payload.radiance      = mdOut;
+        payload.attenuation   = vec3(0.0);
+        payload.scatterOrigin = hitPos;   // firstHitValid gate in raygen
+        payload.scattered     = false;
+        return;
+    }
+
+    // MODE BLEND: with Interior Depth active, Transmission is a CONTINUOUS
+    // mix between the opaque resin coat and the see-through translucent
+    // stone — the lobe is picked stochastically with probability =
+    // transmission, so accumulation converges to t·stone + (1-t)·coat.
+    // (The old hard threshold at 0.5 flipped the whole material between two
+    // looks in one slider tick.) t=0 is the classic coat, t=1 pure stone
+    // (amber/jade: real-distance Beer-Lambert on interior segments, photons
+    // keep crossing → amber caustics); in between the stone body picks up an
+    // increasingly opaque milky skin. Plain glass (no depth) is untouched.
+    bool takeGlassLobe = (transmission > 0.01) && (rnd(payload.seed) < transmission);
+    if (mat.transmission_density > 1e-4 && !takeGlassLobe) {
         // RESIN: a refractive ABSORBING layer over an OPAQUE base. Fresnel-split the
         // surface — the reflection lobe is the glossy resin top (specular, skips NEE);
         // light that enters reaches the base, which we tint by the coat absorption over
         // the thickness and shade as a normal diffuse surface, so the base gets full
-        // direct lighting (NEE) + indirect (deeper, cleaner). A small base extinction
-        // (0.25) makes Resin Depth darken even for a white resin; resinColor tints.
+        // direct lighting (NEE) + indirect (deeper, cleaner).
         float effIor = max(ior, 1.45);
         float cosT   = clamp(dot(-rayDir, worldNormal), 0.0, 1.0);
         float fres   = schlickFresnel(cosT, effIor);
@@ -2823,7 +2951,13 @@ if (emissionTexID > 0) {
         // opaque diffuse surface → falls through to direct lighting (NEE) + BRDF below.
         vec3  ct      = clamp(resinColor, vec3(0.0), vec3(1.0));
         float cosV    = max(abs(cosT), 0.25);
-        vec3  ext     = (vec3(1.0) - ct) + vec3(0.25);
+        // Physical absorption: per-channel coefficient ∝ (1 - tint), so a warm
+        // tint passes its own hue and swallows the complement (amber glows red,
+        // kills blue) instead of darkening everything. The old flat +0.25 base
+        // extinction blackened even a WHITE interior at depth — the base term
+        // now scales with tint darkness only (clear tint = pure lensing).
+        float ctMax   = max(ct.r, max(ct.g, ct.b));
+        vec3  ext     = (vec3(1.0) - ct) * 1.35 + vec3(0.22 * (1.0 - ctMax));
 
         // --- Resin INTERNAL inclusions (Phase 1) -----------------------------------
         // March the refracted ray through the resin thickness (no scene rays — pure
@@ -2911,14 +3045,44 @@ if (emissionTexID > 0) {
         resinDensity  = mat.transmission_density;
         // (no return — direct lighting + diffuse BRDF below shade the tinted base)
     }
-    else if (transmission > 0.01) {
-        if (rnd(payload.seed) < transmission) {
+    else if (takeGlassLobe) {
+        {
             // NOTE: glass-marble FULL VOLUME (real-interior medium march, MAT_FLAG_MARBLE_VOLUME)
             // was disabled — it was too camera-angle dependent and the interior dust/dirt never
             // read as intended. The flag + serialize fields are kept dormant (saved scenes load
             // fine); inclusion-bearing glass now always uses the shell march below.
             bool inclusionsOn = (mat.resin_inclusion > 0.001 || mat.resin_dirt > 0.001 ||
                                  mat.resin_shard > 0.001);
+            // TRANSLUCENT STONE (amber/jade): Interior Depth on a transmissive
+            // body = REAL-DISTANCE Beer-Lambert. gl_HitTEXT is the actual
+            // length of the segment that just arrived at this hit; it only ran
+            // through the interior when the hit is a back face (ray inside), so
+            // entry hits absorb nothing. Each internal segment (exit legs, TIR
+            // bounces) absorbs its own true length — thick centres deepen,
+            // thin edges stay clear, photons keep crossing (amber caustics).
+            // Applied DIRECTLY to the path throughput, not via scatterGlass's
+            // albedo parameter: scatterGlass remaps its albedo through a FIXED
+            // optical thickness (exp(-(1-tint)*0.65/cos)) — folding the real
+            // Beer-Lambert factor in there crushed it to a faint constant tint
+            // (even a fully absorbed channel survived at ~0.52 per interface)
+            // and the reflect/TIR lobe dropped it entirely. The segment behind
+            // this hit was already traversed — its absorption is unconditional,
+            // whatever lobe the ray takes next.
+            if (mat.transmission_density > 1e-4 && !surfaceFrontFace) {
+                vec3  sct   = clamp(vec3(mat.resin_color_r, mat.resin_color_g, mat.resin_color_b),
+                                    vec3(0.0), vec3(1.0));
+                float sMax  = max(sct.r, max(sct.g, sct.b));
+                vec3  sExt  = (vec3(1.0) - sct) * 1.35 + vec3(0.22 * (1.0 - sMax));
+                payload.attenuation *= exp(-gl_HitTEXT * sExt * mat.transmission_density);
+            }
+            // STONE COLOUR MODEL: with Interior Depth active, the transmitted
+            // colour comes from the REAL-DISTANCE absorption alone — the
+            // surface albedo tint (the hack for depthless coloured glass)
+            // fades out. Otherwise a saturated Base Color pre-kills exactly
+            // the channels the depth gradient needs: a pure green albedo made
+            // Depth look like it did nothing (same image at 0 and 8).
+            vec3 glassBase = mix(albedo, vec3(1.0),
+                                 clamp(mat.transmission_density * 10.0, 0.0, 1.0));
             // GLASS MARBLE (shell): when inclusions are enabled on a GLASS base, march the
             // refracted ray through the interior — dust (haze) + dirt specks (opaque
             // early-return) — BEFORE refracting through, so light still passes through
@@ -2927,8 +3091,16 @@ if (emissionTexID > 0) {
             // scene rays: the march is procedural; scatterGlass does the real refraction.
             if (inclusionsOn) {
                 vec3 Tg = refract(rayDir, worldNormal, surfaceFrontFace ? (1.0 / ior) : ior);
-                if (dot(Tg, Tg) < 1e-6) Tg = rayDir;            // total internal reflection fallback
-                Tg = normalize(Tg);
+                // TIR'da interior: refract() returns the zero vector when the
+                // inside->outside angle is past critical — the continuation is
+                // then CERTAIN to be the internal reflection, so march the
+                // interior along it. The structure used to vanish exactly in
+                // the marble's mirror zones because the march followed an exit
+                // refraction that does not exist there. (At non-critical exit
+                // angles the Fresnel lobe choice is probabilistic and the
+                // legacy exit-side march approximation is kept.)
+                bool tirCertain = dot(Tg, Tg) < 1e-6;
+                Tg = tirCertain ? reflect(rayDir, worldNormal) : normalize(Tg);
                 float cosIn = max(abs(dot(Tg, -worldNormal)), 0.05);
                 vec3 marbleLightDir = worldNormal;
                 {
@@ -2963,7 +3135,8 @@ if (emissionTexID > 0) {
                     uint(mat.shard_shape + 0.5), payload.seed);
                 if (rm.dirtHit) {
                     // Opaque speck suspended in the glass: baked-lit micro-sphere
-                    // colour (dimmed by the glass crossed) → fall through to NEE.
+                    // colour (stone depth already in the throughput) →
+                    // fall through to NEE.
                     albedo = rm.dirtAlbedo;
                     roughness = 1.0; metallic = 0.0; transmission = 0.0;
                     // (no return — direct lighting + diffuse BRDF below shade the speck)
@@ -2971,21 +3144,23 @@ if (emissionTexID > 0) {
                     // Hazy glass: nebula dust whitens/tints (milky scatter
                     // approximation), shards carry their own colour body,
                     // bubble/shard rims sparkle; refract through.
-                    vec3 gal = mix(albedo * rm.absorb, rm.dustTint * rm.absorb, rm.dustCover * 0.8);
+                    vec3 gal = mix(glassBase * rm.absorb, rm.dustTint * rm.absorb, rm.dustCover * 0.8);
                     gal = clamp(gal + rm.shardGlow + vec3(rm.sparkle), 0.0, 1.0);
                     scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, gal, ior, roughness, 0.0, vec3(1.0), mat.dispersion, payload.seed);
                     return;
                 }
             } else {
-                // Chosen transmission path - act as Glass
-                scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, albedo, ior, roughness, 0.0, vec3(1.0), mat.dispersion, payload.seed);
+                // Chosen transmission path - act as Glass (with stone depth
+                // absorption when Interior Depth is set on a transmissive body)
+                scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, glassBase, ior, roughness, 0.0, vec3(1.0), mat.dispersion, payload.seed);
                 return; // Immediately return, skipping direct lighting (Next Event Estimation)
             }
-        } else {
-            // Chosen base path (diffuse/metal), compensate probability weight
-            payload.attenuation *= (1.0 / max(1.0 - transmission, 0.01));
-            transmission = 0.0;
         }
+    }
+    else if (transmission > 0.01) {
+        // Chosen base path (diffuse/metal), compensate probability weight
+        payload.attenuation *= (1.0 / max(1.0 - transmission, 0.01));
+        transmission = 0.0;
     }
 
     // ----------------------------------------------------------
