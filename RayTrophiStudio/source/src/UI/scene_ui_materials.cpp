@@ -1638,11 +1638,11 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
             changed = true;
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Interior Volume: thick glass / resin depth absorption (independent of the\n"
-                              "Transmission slider). > 0 turns the material into a resin body over an opaque\n"
-                              "base; colour deepens with the REAL distance light travels inside — deep centre,\n"
-                              "clear thin edges. IOR is auto-raised for lensing. For a SEE-THROUGH glass\n"
-                              "marble keep this at 0 and raise Transmission instead.");
+            ImGui::SetTooltip("Interior Volume: depth absorption. With Transmission <= 0.5 this is a resin\n"
+                              "body over an OPAQUE base. With Transmission > 0.5 it becomes a TRANSLUCENT\n"
+                              "STONE (amber/jade): see-through, colour deepens with the real distance light\n"
+                              "travels inside (thick centre, clear edges) and the material KEEPS casting\n"
+                              "caustics. Interior Tint drives which wavelengths survive the depth.");
         if (pbsdf->getTransmissionDensity() > 0.001f) {
             ImGui::Indent();
             float resinCol[3] = { (float)pbsdf->getResinColor().x, (float)pbsdf->getResinColor().y, (float)pbsdf->getResinColor().z };
@@ -1669,12 +1669,18 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         //   - Resin (Resin Depth > 0): opaque base under the coat.
         //   - Glass Marble (base Transmission high, no Resin Depth): real see-through
         //     glass with volumetric dust/dirt inside (independent of the resin coat).
-        bool resinMode = pbsdf->getTransmissionDensity() > 0.001f;
-        bool glassMarbleMode = (transmission > 0.5f) && !resinMode;
-        if (resinMode || glassMarbleMode) {
+        // Mode split mirrors the shader: Interior Depth + Trans > 0.5 =
+        // TRANSLUCENT STONE (amber/jade: see-through + real-distance depth
+        // absorption, stays a caustic caster); Trans <= 0.5 = resin coat over
+        // an opaque base; Trans > 0.5 without depth = clear glass marble.
+        bool stoneMode = pbsdf->getTransmissionDensity() > 0.001f && transmission > 0.5f;
+        bool resinMode = pbsdf->getTransmissionDensity() > 0.001f && transmission <= 0.5f;
+        bool glassMarbleMode = (transmission > 0.5f) && !stoneMode;
+        if (resinMode || glassMarbleMode || stoneMode) {
             ImGui::Indent();
             ImGui::Separator();
-            ImGui::TextDisabled(glassMarbleMode ? "Interior Volume (Glass Marble \xE2\x80\x94 see-through)"
+            ImGui::TextDisabled(stoneMode ? "Interior Volume (Translucent Stone \xE2\x80\x94 amber/jade, casts caustics)"
+                              : glassMarbleMode ? "Interior Volume (Glass Marble \xE2\x80\x94 see-through)"
                                                  : "Interior Volume (resin \xE2\x80\x94 opaque base)");
             // Curated interior presets — one click sets the whole inclusion
             // stack; every value remains hand-editable afterwards.
@@ -1840,12 +1846,14 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
                                       "World: the pattern stays fixed in space \xE2\x80\x94 a moving object appears\n"
                                       "to pass THROUGH a frozen medium (deliberate effect).");
             }
-            if (glassMarbleMode) {
+            if (glassMarbleMode || stoneMode) {
                 // Full Volume (real-interior medium march) was retired — too camera-angle
                 // dependent and the interior dust/dirt never read as intended. Inclusion glass
                 // uses the front-shell approximation only. Keep the flag dormant/off.
                 pbsdf->setGlassMarbleVolume(false);
-                ImGui::TextDisabled("Glass Marble: light passes through (see-through) + shell inclusions.");
+                ImGui::TextDisabled(stoneMode
+                    ? "Translucent Stone: see-through + depth absorption; remains a caustic caster."
+                    : "Glass Marble: light passes through (see-through) + shell inclusions.");
             }
             ImGui::Unindent();
         }

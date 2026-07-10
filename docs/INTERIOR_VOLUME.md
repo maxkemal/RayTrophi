@@ -16,8 +16,14 @@ Two modes share one implementation:
 
 | Mode | Trigger | Behaviour |
 |---|---|---|
-| **Resin coat** | `Interior Depth > 0` | refractive absorbing layer over an **opaque** base; the base albedo is read with a refraction-parallax UV offset |
-| **Glass marble** | `Transmission > 0.5`, `Interior Depth = 0` | real see-through glass; the interior structure is sampled on the entry shell, then the ray refracts through normally |
+| **Resin coat** | `Interior Depth > 0`, coat lobe | refractive absorbing layer over an **opaque** base; the base albedo is read with a refraction-parallax UV offset |
+| **Glass marble** | glass lobe | real see-through glass; the interior structure is sampled on the entry shell, then the ray refracts through normally; depth absorption (Beer-Lambert with the interior tint) is applied directly to the path throughput on interior segments |
+
+When both `Interior Depth` and `Transmission` are non-zero, the lobe is chosen
+**stochastically per sample** with probability `Transmission` — the estimator
+converges to `t·marble + (1−t)·coat`, a continuous blend between translucent
+stone and coated resin (no hard threshold; earlier builds switched at
+`Transmission = 0.5`, which produced a visible seam).
 
 ## Why this is worth describing as a system
 
@@ -128,10 +134,16 @@ are listed so nobody mistakes the model for ground truth.
   swirl is the most expensive style (~5 fbm/step).
 - Phase B: ≤48 DDA cells × 1 hash (empty cell) or ~2 hashes + one quadratic
   (occupied). Cheaper than the 27-hash worley lookups it replaced.
-- Measured on the development scene (RTX-class GPU, 1080p): a full-screen
-  marble with dust + shards renders interactively at the same order as plain
-  glass; the feature has never been the frame-time bottleneck in our tests.
-  (No formal benchmark yet — see roadmap.)
+- Measured on the development scene (RTX-class GPU, 1080p, July 2026) with
+  a shader-bisect kit (interior march compiled out vs. in, speck self-shadow
+  off vs. on, and the pre-feature closest-hit as baseline): the interior
+  march is **within measurement noise of plain glass** — near-zero cost at
+  `Interior Depth = 0` and no meaningful frame-time regression with dust and
+  specks enabled. When subsurface scattering is enabled on the same material,
+  **SSS dominates the frame time by a wide margin**; the interior march is
+  not the bottleneck in any configuration we tested. These are qualitative
+  bisect results, not a per-style ms/sample table — that table remains on
+  the roadmap.
 
 ## Interaction with photon caustics
 
@@ -156,8 +168,9 @@ serialize to the scene JSON; legacy scenes load with identical defaults.
 
 Planned, in rough priority order — none of it promised on a date:
 
-1. **Formal benchmark** — publish honest frame-time numbers for each dust
-   style and speck density on a reference scene.
+1. **Formal benchmark** — publish honest per-style ms/sample numbers on a
+   reference scene. (A first bisect pass is done — see the cost model above;
+   the per-style table is still owed.)
 2. **OptiX / CPU port** — the material fields already travel through the
    shared structs; the march itself is Vulkan-only today.
 3. **Interior on internal reflections** — re-sample the interior when a ray
