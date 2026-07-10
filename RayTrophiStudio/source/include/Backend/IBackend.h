@@ -97,6 +97,10 @@ struct RenderParams {
     float causticsVolStrength = 1.0f;  // sigma_s scatter coefficient knob
     bool  causticsVolDirect = false;   // also deposit the light->glass leg (direct shafts)
     float causticsVolNoise = 0.0f;     // heterogeneous dust turbulence amount (0..1)
+    // Debug Visualizer (Vulkan RT) — exclusive false-color views; mode table in raygen CameraPC
+    int   debugView = 0;
+    float debugExposure = 1.0f;
+    float debugOverlay = 0.0f;         // 0 = pure debug … 1 = pure beauty
 };
 
 struct DenoiserFrameData {

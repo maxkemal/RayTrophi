@@ -1295,6 +1295,9 @@ void reset_render_resolution(int w, int h)
         rp.causticsVolStrength = render_settings.caustics_vol_strength;
         rp.causticsVolDirect = render_settings.caustics_vol_direct;
         rp.causticsVolNoise = render_settings.caustics_vol_noise;
+        rp.debugView = render_settings.debug_view;
+        rp.debugExposure = render_settings.debug_exposure;
+        rp.debugOverlay = render_settings.debug_overlay;
         g_backend->setRenderParams(rp);
     }
     color_processor.resize(w, h);
@@ -4441,6 +4444,9 @@ int main(int argc, char* argv[]) try {
                             static float last_caustics_vol_strength = -1.0f;
                             static bool last_caustics_vol_direct = false;
                             static float last_caustics_vol_noise = -1.0f;
+                            static int last_debug_view = -1;
+                            static float last_debug_exposure = -1.0f;
+                            static float last_debug_overlay = -1.0f;
                             int current_max = render_settings.is_final_render_mode ? render_settings.final_render_samples : render_settings.max_samples;
 
                             if (activeViewportBackend != last_backend ||
@@ -4461,7 +4467,10 @@ int main(int argc, char* argv[]) try {
                                 render_settings.caustics_vol_debug != last_caustics_vol_debug ||
                                 std::abs(render_settings.caustics_vol_strength - last_caustics_vol_strength) > 1e-5f ||
                                 render_settings.caustics_vol_direct != last_caustics_vol_direct ||
-                                std::abs(render_settings.caustics_vol_noise - last_caustics_vol_noise) > 1e-5f)
+                                std::abs(render_settings.caustics_vol_noise - last_caustics_vol_noise) > 1e-5f ||
+                                render_settings.debug_view != last_debug_view ||
+                                std::abs(render_settings.debug_exposure - last_debug_exposure) > 1e-5f ||
+                                std::abs(render_settings.debug_overlay - last_debug_overlay) > 1e-5f)
                             {
                                 Backend::RenderParams rp = {};
                                 rp.imageWidth = image_width;
@@ -4483,6 +4492,9 @@ int main(int argc, char* argv[]) try {
         rp.causticsVolStrength = render_settings.caustics_vol_strength;
         rp.causticsVolDirect = render_settings.caustics_vol_direct;
         rp.causticsVolNoise = render_settings.caustics_vol_noise;
+        rp.debugView = render_settings.debug_view;
+        rp.debugExposure = render_settings.debug_exposure;
+        rp.debugOverlay = render_settings.debug_overlay;
                                 activeViewportBackend->setRenderParams(rp);
 
                                 last_backend = activeViewportBackend;
@@ -4505,6 +4517,9 @@ int main(int argc, char* argv[]) try {
                                 last_caustics_vol_strength = render_settings.caustics_vol_strength;
                                 last_caustics_vol_direct = render_settings.caustics_vol_direct;
                                 last_caustics_vol_noise = render_settings.caustics_vol_noise;
+                                last_debug_view = render_settings.debug_view;
+                                last_debug_exposure = render_settings.debug_exposure;
+                                last_debug_overlay = render_settings.debug_overlay;
                             }
                         }
                         // Enter GPU render block when selected engine is GPU OR when

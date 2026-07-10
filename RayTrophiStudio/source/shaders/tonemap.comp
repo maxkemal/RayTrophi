@@ -10,11 +10,50 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform readonly  image2D inHDR;   // rgba16f or rgba32f
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D outLDR; // R8G8B8A8_UNORM
+// Debug Visualizer AOVs — written by raygen every frame regardless of view,
+// so these views resolve at DISPLAY time (instant toggle, no accumulation reset).
+layout(set = 0, binding = 2) uniform readonly image2D aovAlbedo;   // rgb = first-hit albedo avg, a = samples
+layout(set = 0, binding = 3) uniform readonly image2D aovNormal;   // rgb = avg(normal*0.5+0.5), a = samples
+layout(set = 0, binding = 4) uniform readonly image2D aovPosition; // rgb = world pos; a: 0=miss, 1=unknown mat, >=2 = matId+2
+layout(set = 0, binding = 5) uniform readonly image2D aovStats;    // rgb = path throughput avg, a = bounce avg
 
 layout(push_constant) uniform Push {
-    uint width;
-    uint height;
+    uint  width;
+    uint  height;
+    uint  debugView;   // tonemap-side views: 6,7,8 (stats) 10-13 (AOV) 14 (heatmap); 0 = off
+    float exposure;    // debug gain (Exposure UI knob)
+    float heatScale;   // sampleCount -> t   (exposure / maxSamples)
+    float bounceScale; // bounceCount -> t   (exposure / maxBounces)
+    float overlay;     // 0 = pure debug ... 1 = pure beauty
+    float camX;        // camera origin (world) for the Depth ramp
+    float camY;
+    float camZ;
 } pc;
+
+// Stable hash colour per material id (PCG avalanche).
+vec3 dvHashColor(uint id) {
+    uint h = id * 73856093u ^ 19349663u;
+    h = h * 747796405u + 2891336453u;
+    uint w2 = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    h = (w2 >> 22u) ^ w2;
+    return vec3(0.35) + 0.65 * vec3(float(h & 255u),
+                                    float((h >> 8u) & 255u),
+                                    float((h >> 16u) & 255u)) / 255.0;
+}
+
+// Viridis false-color LUT (Zucker polynomial fit) — same ramp as raygen's
+// debug views so the visual language stays consistent.
+vec3 dvViridis(float t) {
+    t = clamp(t, 0.0, 1.0);
+    const vec3 c0 = vec3( 0.2777273,  0.0054073,  0.3340998);
+    const vec3 c1 = vec3( 0.1050930,  1.4046135,  1.3845902);
+    const vec3 c2 = vec3(-0.3308618,  0.2148476,  0.0950952);
+    const vec3 c3 = vec3(-4.6342305, -5.7991010,-19.3324410);
+    const vec3 c4 = vec3( 6.2282699, 14.1799334, 56.6905526);
+    const vec3 c5 = vec3( 4.7763850,-13.7451454,-65.3530326);
+    const vec3 c6 = vec3(-5.4354559,  4.6458526, 26.3124352);
+    return clamp(c0 + t*(c1 + t*(c2 + t*(c3 + t*(c4 + t*(c5 + t*c6))))), 0.0, 1.0);
+}
 
 float sanitize(float v) {
     if (isnan(v)) return 0.0;
@@ -38,12 +77,57 @@ void main() {
     float b = sanitize(hdr.b);
 
     // Reinhard
-    r = r / (r + 1.0);
-    g = g / (g + 1.0);
-    b = b / (b + 1.0);
+    vec3 beauty = vec3(r / (r + 1.0), g / (g + 1.0), b / (b + 1.0));
+
+    // ── DEBUG VISUALIZER — display-time views ────────────────────────────────
+    // These read persistent AOVs (or the accumulation alpha) that raygen keeps
+    // writing regardless of the view, so toggling them never disturbs the
+    // beauty accumulation or the adaptive-sampling statistics.
+    if (pc.debugView != 0u) {
+        vec3 dbg = vec3(0.0);
+        if (pc.debugView == 14u) {
+            // SAMPLE HEATMAP — per-pixel accumulated sample count (hdr alpha).
+            dbg = dvViridis(sanitize(hdr.a) * pc.heatScale);
+        } else if (pc.debugView == 6u) {
+            // BOUNCE COUNT — average substantive path depth.
+            dbg = dvViridis(clamp(imageLoad(aovStats, ivec2(px)).a * pc.bounceScale, 0.0, 1.0));
+        } else if (pc.debugView == 7u) {
+            // TRANSMISSION — surviving path throughput (colored).
+            dbg = clamp(imageLoad(aovStats, ivec2(px)).rgb * pc.exposure, 0.0, 1.0);
+        } else if (pc.debugView == 8u) {
+            // ABSORPTION — what the path lost (1 - throughput).
+            vec3 tp = clamp(imageLoad(aovStats, ivec2(px)).rgb, 0.0, 1.0);
+            dbg = clamp((vec3(1.0) - tp) * pc.exposure, 0.0, 1.0);
+        } else if (pc.debugView == 10u || pc.debugView == 11u) {
+            // NORMAL / ALBEDO — first-hit AOVs; miss pixels gated to black via
+            // the position AOV's hit flag (the albedo/normal fallbacks store
+            // grey/black with a valid sample count, so their own alpha can't gate).
+            float hitFlag = imageLoad(aovPosition, ivec2(px)).a;
+            if (hitFlag > 0.5) {
+                dbg = (pc.debugView == 10u)
+                    ? clamp(imageLoad(aovNormal, ivec2(px)).rgb, 0.0, 1.0)
+                    : clamp(imageLoad(aovAlbedo, ivec2(px)).rgb, 0.0, 1.0);
+            }
+        } else if (pc.debugView == 12u) {
+            // DEPTH — exponential distance ramp from the position AOV.
+            vec4 p = imageLoad(aovPosition, ivec2(px));
+            if (p.a > 0.5) {
+                float d = length(p.rgb - vec3(pc.camX, pc.camY, pc.camZ));
+                dbg = dvViridis(1.0 - exp(-d * 0.05 * pc.exposure));
+            }
+        } else if (pc.debugView == 13u) {
+            // MATERIAL ID — a: 0=miss(black), 1=unknown(grey), >=2 hash colour.
+            float enc = imageLoad(aovPosition, ivec2(px)).a;
+            if (enc >= 1.5)      dbg = dvHashColor(uint(enc - 1.5));
+            else if (enc > 0.5)  dbg = vec3(0.25);
+        }
+        vec3 outc = mix(dbg, beauty, clamp(pc.overlay, 0.0, 1.0));
+        imageStore(outLDR, ivec2(px), vec4(linToSrgb(outc.r), linToSrgb(outc.g), linToSrgb(outc.b), 1.0));
+        return;
+    }
 
     // Linear -> sRGB (matches CPU LUT analytic form, no quantization)
-    vec4 ldr = vec4(linToSrgb(r), linToSrgb(g), linToSrgb(b), 1.0);
+    vec4 ldr = vec4(linToSrgb(beauty.r), linToSrgb(beauty.g), linToSrgb(beauty.b), 1.0);
 
     imageStore(outLDR, ivec2(px), ldr);
 }

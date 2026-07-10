@@ -184,6 +184,11 @@ layout(set = 0, binding = 16, r32f) uniform image2D varianceImage;
 // Written last-wins per sample (geometry is stable); CPU stylize reconstructs surface-
 // locked strokes / depth scaling from it. Always rgba32f — half-float can't hold world coords.
 layout(set = 0, binding = 17, rgba32f) uniform image2D denoiserPositionImage;
+// Path-stats AOV (Debug Visualizer): rgb = surviving path throughput (avg),
+// a = substantive bounce count (avg). Written every frame regardless of view
+// so Transmission/Absorption/Bounce Count resolve at TONEMAP time — toggling
+// them never resets the beauty accumulation.
+layout(set = 0, binding = 21, rgba16f) uniform image2D pathStatsImage;
 
 // ════════════════════════════════════════════════════════════════════════════════
 // Binding 9: Volume Instances SSBO (OptiX-compatible volumetric data)
@@ -278,6 +283,18 @@ layout(push_constant) uniform CameraPC {
     uint  maxBounces;  // UI'dan gelen toplam bounce limiti
     uint  diffuseBounces;
     uint  transmissionBounces;
+
+    // ── Debug Visualizer (Render Settings → Debug) ──────────────
+    // APPENDED fields: other RT stages declare a PREFIX of this block
+    // and never read past transmissionBounces, so only raygen recompiles.
+    uint  debugView;      // 0=off 1=photon grid(vol) 2=light shafts 3=photon energy
+                          // 4=caustic cells 5=(directions, Faz2) 6=bounce count
+                          // 7=transmission 8=absorption 9=medium density(closesthit)
+                          // 10=normal 11=albedo 12=depth 13=material id
+                          // 14=sample heatmap (tonemap-side; raygen ignores >=14)
+    float debugExposure;  // false-color / energy gain
+    uint  debugFlags;     // reserved
+    float debugParam;     // overlay: 0 = pure debug … 1 = pure beauty
 } cam;
 
 // ============================================================
@@ -743,6 +760,35 @@ vec3 photonVolInScatter(vec3 ro, vec3 rd, float maxDist, inout uint seed) {
 }
 
 // ============================================================
+// Debug Visualizer helpers
+// ============================================================
+// Viridis false-color LUT (Zucker polynomial fit) — shared visual language
+// for all scalar debug views.
+vec3 dvViridis(float t) {
+    t = clamp(t, 0.0, 1.0);
+    const vec3 c0 = vec3( 0.2777273,  0.0054073,  0.3340998);
+    const vec3 c1 = vec3( 0.1050930,  1.4046135,  1.3845902);
+    const vec3 c2 = vec3(-0.3308618,  0.2148476,  0.0950952);
+    const vec3 c3 = vec3(-4.6342305, -5.7991010,-19.3324410);
+    const vec3 c4 = vec3( 6.2282699, 14.1799334, 56.6905526);
+    const vec3 c5 = vec3( 4.7763850,-13.7451454,-65.3530326);
+    const vec3 c6 = vec3(-5.4354559,  4.6458526, 26.3124352);
+    return clamp(c0 + t*(c1 + t*(c2 + t*(c3 + t*(c4 + t*(c5 + t*c6))))), 0.0, 1.0);
+}
+
+// Stable per-cell tint for the Caustic Cells view (PCG avalanche after the
+// spatial hash — see the spatial-hash mirror-symmetry lesson).
+vec3 dvCellColor(ivec3 c) {
+    uint h = uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u;
+    h = h * 747796405u + 2891336453u;
+    uint w = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    h = (w >> 22u) ^ w;
+    return vec3(0.35) + 0.65 * vec3(float((h      ) & 255u),
+                                    float((h >>  8u) & 255u),
+                                    float((h >> 16u) & 255u)) / 255.0;
+}
+
+// ============================================================
 // Main
 // ============================================================
 void main() {
@@ -899,7 +945,8 @@ void main() {
     const int RESIN_MAX_BOUNCES = 2;
     int maxTotalPasses = effectiveBounces + 32; // Allow up to 32 extra passes for transparent/volume skipping
 
-    for (int bounce = 0, totalPasses = 0; bounce < effectiveBounces && totalPasses < maxTotalPasses; totalPasses++) {
+    int bounce = 0;      // hoisted: Bounce Count debug view reads it after the loop
+    for (int totalPasses = 0; bounce < effectiveBounces && totalPasses < maxTotalPasses; totalPasses++) {
 
         // Consume skipAABBs flag set by previous bounce (volume solid detection)
         bool useSkipAABBs = payload.skipAABBs;
@@ -1049,9 +1096,9 @@ void main() {
     // Added before the fog mix so fog attenuates the shafts the same way it
     // attenuates god rays. No double-count: the volume grid holds ONLY
     // crossedGlass (LS⁺) photon energy — direct light in the medium is the
-    // god-ray/fog systems' job. Skipped in volume-debug mode (mode 3 replaces
-    // the radiance with the raw grid view anyway).
-    if (photonVolGrid.h.debugMode == 1u && photonGrid.h.debugMode != 3u) {
+    // god-ray/fog systems' job. Skipped in the debug views that visualize the
+    // volume grid themselves (they replace the radiance anyway).
+    if (photonVolGrid.h.debugMode == 1u && cam.debugView != 1u && cam.debugView != 2u) {
         float volMaxDist = firstHitValid ? length(firstHitPos - primaryRayOrigin) : 10000.0;
         vec3 volCaustic = photonVolInScatter(primaryRayOrigin, normalize(primaryRayDir), volMaxDist, seed);
         radiance += softClipFireflies(sanitizeRadiance(volCaustic), 64.0);
@@ -1157,41 +1204,97 @@ void main() {
         radiance = applyWeatherPrecipitationOverlay(radiance, normalize(primaryRayDir), weatherDist);
     }
 
-    // ── PHOTON CAUSTIC DEBUG (Faz 2 / Dilim 1) ──────────────────────────────
-    // Visualize the photon hash-grid energy at the primary hit, replacing the
-    // path radiance, so photon placement can be verified BEFORE the gather is
-    // wired into shading. A faint albedo term keeps the scene readable.
-    // ── VOLUME GRID DEBUG (Faz 2V / Dilim V1, mode 3) ───────────────────────
-    // March the primary segment and visualize the volume photon-grid energy
-    // density — verifies shaft placement before the in-scatter integration
-    // (Dilim V2), exactly like surface debug mode 1 did for Dilim 1.
-    if (photonGrid.h.debugMode == 3u) {
-        float passes = float(photonVolGrid.h.frameSeed + 1u);
-        float maxDist = firstHitValid ? length(firstHitPos - primaryRayOrigin) : 100.0;
-        maxDist = min(maxDist, 200.0);
-        const int VOL_DBG_STEPS = 24;
-        float dt = maxDist / float(VOL_DBG_STEPS);
-        vec3 accum = vec3(0.0);
-        vec3 pdir = normalize(primaryRayDir);
-        float jitter = rnd(seed);
-        for (int i = 0; i < VOL_DBG_STEPS; ++i) {
-            vec3 xp = primaryRayOrigin + pdir * ((float(i) + jitter) * dt);
-            accum += photonVolReadCell(xp);
-        }
-        radiance = accum * (dt * photonVolGrid.h.debugExposure / passes)
-                 + primaryAlbedo * 0.02;
-    }
+    // ── DEBUG VISUALIZER (Render Settings → Debug) ──────────────────────────
+    // Exclusive false-color views that REPLACE the beauty output; debugParam
+    // mixes the beauty image back in (overlay). Stochastic views (grid march,
+    // shafts) converge under the normal progressive accumulation like
+    // everything else. Photon-based views (1-4) require the photon pass — the
+    // backend arms it automatically for these modes.
+    // Views 6-8, 10-13 and 14 are AOV/ACCUMULATION-STATE views resolved in
+    // tonemap.comp — raygen must keep rendering beauty for those (that is what
+    // makes them instant and reset-free).
+    if ((cam.debugView >= 1u && cam.debugView <= 5u) || cam.debugView == 9u) {
+        vec3 dbg = vec3(0.0);
 
-    if (photonGrid.h.debugMode == 1u && firstHitValid) {
-        // Grid accumulates photons across frames (cleared on accumulation reset);
-        // frameSeed == accumulated pass count - 1, so normalize by frameSeed+1.
-        // Also divide by the cell footprint (cs²) → shows IRRADIANCE, so the
-        // brightness stays comparable when the cell size is changed.
-        float passes = float(photonGrid.h.frameSeed + 1u);
-        float cs = max(photonGrid.h.originCell.w, 1e-4);
-        vec3 gridE = photonGridReadCell(firstHitPos)
-                   * (photonGrid.h.debugExposure / (passes * cs * cs));
-        radiance = gridE + primaryAlbedo * 0.02;
+        if (cam.debugView == 1u) {
+            // PHOTON GRID — march the primary segment, raw volume-grid energy
+            // density (verifies shaft/deposit placement; Faz 2V Dilim V1 view).
+            float passes = float(photonVolGrid.h.frameSeed + 1u);
+            float maxDist = firstHitValid ? length(firstHitPos - primaryRayOrigin) : 100.0;
+            maxDist = min(maxDist, 200.0);
+            const int VOL_DBG_STEPS = 24;
+            float dt = maxDist / float(VOL_DBG_STEPS);
+            vec3 accum = vec3(0.0);
+            vec3 pdir = normalize(primaryRayDir);
+            float jitter = rnd(seed);
+            for (int i = 0; i < VOL_DBG_STEPS; ++i) {
+                vec3 xp = primaryRayOrigin + pdir * ((float(i) + jitter) * dt);
+                accum += photonVolReadCell(xp);
+            }
+            dbg = accum * (dt * cam.debugExposure / passes) + primaryAlbedo * 0.02;
+        }
+        else if (cam.debugView == 2u) {
+            // LIGHT SHAFT DENSITY — the in-scatter integral, isolated from the
+            // beauty image (shafts only, nothing else).
+            float volMaxDist = firstHitValid ? length(firstHitPos - primaryRayOrigin) : 10000.0;
+            dbg = photonVolInScatter(primaryRayOrigin, normalize(primaryRayDir), volMaxDist, seed)
+                * cam.debugExposure + primaryAlbedo * 0.02;
+        }
+        else if (cam.debugView == 3u || cam.debugView == 4u) {
+            // PHOTON ENERGY / CAUSTIC CELLS — surface-grid irradiance at the
+            // first hit. Normalized by pass count and cell footprint (cs²) so
+            // brightness stays comparable when the cell size changes. The
+            // Cells variant tints each hash cell with a stable colour to show
+            // the grid tiling (cell-size tuning aid).
+            if (firstHitValid) {
+                float passes = float(photonGrid.h.frameSeed + 1u);
+                float cs = max(photonGrid.h.originCell.w, 1e-4);
+                vec3 gridE = photonGridReadCell(firstHitPos)
+                           * (cam.debugExposure / (passes * cs * cs));
+                if (cam.debugView == 4u) {
+                    ivec3 cell = ivec3(floor((firstHitPos - photonGrid.h.originCell.xyz) / cs));
+                    gridE = dvCellColor(cell) * (0.04 + luminance(gridE));
+                }
+                dbg = gridE + primaryAlbedo * 0.02;
+            }
+        }
+        else if (cam.debugView == 5u) {
+            // PHOTON DIRECTIONS — average photon FLOW direction per volume
+            // cell, RGB = XYZ·0.5+0.5, brightness = deposited energy. March
+            // the primary segment and blend cell directions weighted by their
+            // energy (the direction grid is armed via vol debugMode == 2).
+            float maxDist = firstHitValid ? length(firstHitPos - primaryRayOrigin) : 100.0;
+            maxDist = min(maxDist, 200.0);
+            const int DIR_STEPS = 24;
+            float ddt = maxDist / float(DIR_STEPS);
+            vec3 pdir = normalize(primaryRayDir);
+            float jitter = rnd(seed);
+            vec3 dirAcc = vec3(0.0);
+            float eAcc = 0.0;
+            for (int i = 0; i < DIR_STEPS; ++i) {
+                vec3 xp = primaryRayOrigin + pdir * ((float(i) + jitter) * ddt);
+                vec3 e = photonVolReadCell(xp);
+                float l = e.r + e.g + e.b;
+                if (l <= 0.0) continue;
+                dirAcc += photonVolDirRead(xp) * l;
+                eAcc += l;
+            }
+            if (eAcc > 0.0 && dot(dirAcc, dirAcc) > 1e-8) {
+                float passes = float(photonVolGrid.h.frameSeed + 1u);
+                float lum = clamp(eAcc * ddt * cam.debugExposure / passes, 0.0, 1.0);
+                dbg = (normalize(dirAcc) * 0.5 + 0.5) * (0.15 + 0.85 * lum);
+            }
+            dbg += primaryAlbedo * 0.02;
+        }
+        else if (cam.debugView == 9u) {
+            // MEDIUM DENSITY — closesthit terminated the path at the first hit
+            // and wrote the interior dust-coverage integral into the radiance
+            // (0 for materials without an interior; specks flash 1.0).
+            dbg = firstHitValid
+                ? dvViridis(clamp(radiance.r * cam.debugExposure, 0.0, 1.0))
+                : vec3(0.0);
+        }
+        radiance = mix(dbg, radiance, clamp(cam.debugParam, 0.0, 1.0));
     }
 
     // Stochastic CA Channel Masking and Energy Conservation
@@ -1241,6 +1344,16 @@ void main() {
 
     imageStore(accumImage, ivec2(pixel), vec4(newAcc, newTotalSamples));
     imageStore(varianceImage, ivec2(pixel), vec4(combinedM2, 0.0, 0.0, 0.0));
+
+    // Path-stats AOV: same running-average contract as the denoiser AOVs.
+    {
+        vec4 oldStats = (cam.frameCount > 0u) ? imageLoad(pathStatsImage, ivec2(pixel)) : vec4(0.0);
+        vec4 sampleStats = vec4(clamp(throughput, vec3(0.0), vec3(1.0)), float(bounce));
+        vec4 newStats = (prevSamples > 0.0)
+            ? (oldStats * prevSamples + sampleStats) / newTotalSamples
+            : sampleStats;
+        imageStore(pathStatsImage, ivec2(pixel), newStats);
+    }
 
     vec4 oldDenoiserColor = (cam.frameCount > 0u) ? imageLoad(denoiserColorImage, ivec2(pixel)) : vec4(0.0);
     vec3 newDenoiserColor = (oldDenoiserColor.a > 0.0)

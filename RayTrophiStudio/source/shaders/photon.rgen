@@ -267,9 +267,14 @@ void main() {
                 int k = clamp(int(segLen / vcs), 1, 8);
                 vec3 w = power * throughput *
                          (photonVolGrid.h.energyScale * segLen * (1.0 - t0) / float(k));
+                // vol debugMode 2 = Photon Directions view armed: also record
+                // the flight direction per cell (zero extra atomics otherwise).
+                bool depositDir = (photonVolGrid.h.debugMode == 2u);
                 for (int i = 0; i < k; ++i) {
                     float t = t0 + (1.0 - t0) * ((float(i) + rnd(seed)) / float(k));
-                    photonVolSplat(org + dir * (t * segLen), w, seed);
+                    vec3 xp = org + dir * (t * segLen);
+                    photonVolSplat(xp, w, seed);
+                    if (depositDir) photonVolDirSplat(xp, dir);
                 }
             }
         }

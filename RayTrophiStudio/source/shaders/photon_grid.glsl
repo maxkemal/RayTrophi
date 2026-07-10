@@ -95,6 +95,42 @@ uint photonVolSlot(ivec3 c) {
     return s & (photonVolGrid.h.tableSize - 1u);
 }
 
+// ── FAZ 2 DEBUG: photon DIRECTION grid (binding 22) ─────────────────────────
+// Parallel to the volume grid (same slot indexing/ownership): per slot 4 ints,
+// xyz = Σ(direction·256) fixed-point signed, w = deposit count. Written by
+// photon.rgen ONLY when the vol header debugMode == 2 (Photon Directions view
+// armed — zero atomic cost otherwise), read by raygen view 5. Average FLOW
+// direction per cell; magnitude carries no meaning (readers normalize).
+layout(set = 0, binding = 22, std430) buffer PhotonVolDirBuf {
+    int d[];
+} photonVolDir;
+
+void photonVolDirSplat(vec3 p, vec3 dir) {
+    ivec3 c = photonVolCellCoord(p);
+    uint slot = photonVolSlot(c);
+    // Same ownership rule as the energy splat — never blend directions from
+    // an aliased cell.
+    if (photonVolGrid.cells[slot * 5u + 4u] != photonGridCellKey(c)) return;
+    uint idx = slot * 4u;
+    ivec3 q = ivec3(round(dir * 256.0));
+    if (q.x != 0) atomicAdd(photonVolDir.d[idx + 0u], q.x);
+    if (q.y != 0) atomicAdd(photonVolDir.d[idx + 1u], q.y);
+    if (q.z != 0) atomicAdd(photonVolDir.d[idx + 2u], q.z);
+    atomicAdd(photonVolDir.d[idx + 3u], 1);
+}
+
+// Average photon flow direction at p (normalized; 0 when the cell is empty).
+vec3 photonVolDirRead(vec3 p) {
+    ivec3 c = photonVolCellCoord(p);
+    uint slot = photonVolSlot(c);
+    if (photonVolGrid.cells[slot * 5u + 4u] != photonGridCellKey(c)) return vec3(0.0);
+    uint idx = slot * 4u;
+    vec3 v = vec3(float(photonVolDir.d[idx + 0u]),
+                  float(photonVolDir.d[idx + 1u]),
+                  float(photonVolDir.d[idx + 2u]));
+    return (dot(v, v) > 1e-6) ? normalize(v) : vec3(0.0);
+}
+
 uint photonGridRandState(inout uint s) {
     s = s * 747796405u + 2891336453u;
     uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
