@@ -24,7 +24,7 @@ echo.
 REM Compile compute shaders (.comp)
 for %%f in (%SHADER_DIR%\*.comp) do (
     echo Compiling: %%~nxf
-    "%GLSLC%" "%%f" -o "%OUTPUT_DIR%\%%~nf.spv" --target-env=vulkan1.3
+    "%GLSLC%" "%%f" -o "%OUTPUT_DIR%\%%~nf.spv" --target-env=vulkan1.3 -O
     if errorlevel 1 (
         echo FAILED: %%~nxf
         goto :error
@@ -36,7 +36,7 @@ REM Compile raster shaders (.vert, .frag)
 for %%e in (vert frag) do (
     for %%f in (%SHADER_DIR%\*.%%e) do (
         echo Compiling: %%~nxf
-        "%GLSLC%" "%%f" -o "%OUTPUT_DIR%\%%~nf.spv" --target-env=vulkan1.3
+        "%GLSLC%" "%%f" -o "%OUTPUT_DIR%\%%~nf.spv" --target-env=vulkan1.3 -O
         if errorlevel 1 (
             echo FAILED: %%~nxf
             goto :error
@@ -53,7 +53,7 @@ for %%e in (rgen rmiss rchit rahit rint) do (
             echo   SKIPPING: %%~nxf ^(replaced by shadow_anyhit.rahit^)
         ) else (
             echo Compiling: %%~nxf
-            "%GLSLC%" "%%f" -o "%OUTPUT_DIR%\%%~nf.spv" --target-env=vulkan1.3 --target-spv=spv1.4
+            "%GLSLC%" "%%f" -o "%OUTPUT_DIR%\%%~nf.spv" --target-env=vulkan1.3 --target-spv=spv1.4 -O
             if errorlevel 1 (
                 echo FAILED: %%~nxf
                 goto :error
@@ -70,7 +70,7 @@ REM Also compile any extra top-level shaders (e.g. shaders\sculpt.comp)
 REM Also compile any extra top-level shaders (e.g. raytrac_sdl2\shaders\sculpt.comp)
 if exist "%~dp0shaders\sculpt.comp" (
     echo Compiling extra shader: sculpt.comp
-    "%GLSLC%" "%~dp0shaders\sculpt.comp" -o "%OUTPUT_DIR%\sculpt.spv" --target-env=vulkan1.3
+    "%GLSLC%" "%~dp0shaders\sculpt.comp" -o "%OUTPUT_DIR%\sculpt.spv" --target-env=vulkan1.3 -O
     if errorlevel 1 (
         echo FAILED: sculpt.comp
         goto :error
