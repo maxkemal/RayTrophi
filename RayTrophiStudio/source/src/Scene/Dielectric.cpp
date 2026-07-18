@@ -57,7 +57,9 @@ float Dielectric::get_opacity(const Vec2& uv) const {
     return 1.0f;  // Dielectric materyal tamamen opak, bu yüzden 1.0 döndür
 }
 
-Vec3 Dielectric::getEmission(const Vec2& uv, const Vec3& p) const {
+Vec3 Dielectric::getEmission(const Vec2& uv, const Vec3& p, float pointiness, const Vec3& objectOrigin,
+                             const float* attribs, const float* objectPos,
+                             const Vec3* shadingNormal, const Vec3& viewDir) const {
     return Vec3(0.0f, 0.0, 0.0f);
 }
 Vec3 Dielectric::calculate_reflected_attenuation(const Vec3& base_color, const Vec3& fresnel_factor) const {

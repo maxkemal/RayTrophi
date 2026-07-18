@@ -240,11 +240,19 @@ public:
      * @brief Upload triangle mesh geometry
      * @param triangles Vector of triangle data
      * @param meshName Unique identifier for this mesh
+     * @param cornerAttribs Optional Attribute-node channels for this EXPANDED soup:
+     *        triangles.size() * 3 * kMatAttribSlots floats, corner-major, i.e. the value
+     *        for corner c of triangle t at [(t*3 + c) * kMatAttribSlots + slot]. Corner-major
+     *        because the soup BLAS has no index buffer — its vertex id IS the corner id.
+     *        Null (the default, and what a source with no SoA link can supply) uploads no
+     *        block, and the shader then reads every channel as 0 = unpainted — which is
+     *        exactly what the CPU reads for the same geometry, so the two stay in step.
      * @return Mesh handle/index
      */
     virtual uint32_t uploadTriangles(
         const std::vector<TriangleData>& triangles,
-        const std::string& meshName
+        const std::string& meshName,
+        const std::vector<float>* cornerAttribs = nullptr
     ) = 0;
     
     /**
@@ -275,6 +283,22 @@ public:
     
     virtual void updateSceneGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices) = 0;
     virtual bool updateFlatMeshBLAS(const std::string& /*nodeName*/, const class TriangleMesh* /*mesh*/) { return false; }
+
+    /**
+     * @brief Was the uploaded geometry built with the per-vertex pointiness attribute?
+     *
+     * Only meaningful where a material program can read the Geometry node's Pointiness
+     * output (Vulkan RT). A graph that newly reads it needs one geometry re-upload; the
+     * node editor asks here instead of rebuilding on every edit. Backends without the
+     * attribute answer true so nothing tries to re-upload for them.
+     */
+    virtual bool geometryHasPointiness() const { return true; }
+
+    /**
+     * @brief Was the uploaded geometry built with the per-vertex named-attribute block?
+     * Same one-time re-upload gate as geometryHasPointiness, for the Attribute node.
+     */
+    virtual bool geometryHasAttributes() const { return true; }
 
     /**
      * @brief Update material for a specific instance
@@ -453,6 +477,8 @@ public:
     static constexpr uint32_t MAT_FLAG_TERRAIN = (1u << 16); // Splat-blended terrain material
     static constexpr uint32_t MAT_FLAG_WATER   = (1u << 17); // Explicit water surface material
     static constexpr uint32_t MAT_FLAG_WATER_FFT_READY = (1u << 18); // Vulkan height/normal slots contain FFT textures
+    static constexpr uint32_t MAT_FLAG_WATER_LAKE = (1u << 22); // Fetch-limited inland water profile
+    static constexpr uint32_t MAT_FLAG_WATER_RIVER = (1u << 23); // UV-flow-aligned river profile
 
     /**
      * @brief Per-terrain layer descriptor for splat-map based blending.
@@ -466,11 +492,24 @@ public:
     };
 
     virtual void uploadMaterials(const std::vector<MaterialData>& materials) = 0;
+
+    /// Faz 2b: upload the flattened per-pixel material-program buffer (produced by
+    /// MaterialNodesV2::flattenMaterialPrograms) indexed 1:1 with the material
+    /// list just uploaded. `words` is the raw uint stream; empty clears programs.
+    /// Default no-op — only the Vulkan RT backend interprets it (OptiX/CPU ignore).
+    virtual void uploadMaterialPrograms(const std::vector<uint32_t>& words) { (void)words; }
+
     virtual bool updateMaterial(uint32_t materialIndex, const MaterialData& material) {
         (void)materialIndex;
         (void)material;
         return false;
     }
+
+    /// Monotonic counter bumped whenever the backend purges its uploaded-texture
+    /// cache (every GPU texture id handed out before the purge becomes invalid).
+    /// Callers that upload tables containing texture ids (material SSBO, program
+    /// stream) compare it across calls to detect a mid-sequence purge and re-upload.
+    virtual uint64_t textureCacheGeneration() const { return 0; }
 
     /**
      * @brief Upload terrain layer descriptors for splat-map blending (Vulkan path).
@@ -563,6 +602,14 @@ public:
      */
     virtual void setInteractiveViewportMatcapPreset(int preset) { (void)preset; }
     /* custom matcap support removed */
+    
+    /**
+     * @brief Resolve a CPU texture pointer to a GPU bindless texture array index.
+     *        Used by material program flattening to embed hardware texture IDs into VM instructions.
+     */
+    virtual uint32_t resolveTextureHandle(int64_t texturePtr, int textureType = 0, bool forceLinear = false, bool preferSingleChannel = false) { 
+        (void)texturePtr; (void)textureType; (void)forceLinear; (void)preferSingleChannel; return 0; 
+    }
     
     // ========================================================================
     // Rendering

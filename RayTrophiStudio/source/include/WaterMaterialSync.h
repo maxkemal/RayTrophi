@@ -15,6 +15,8 @@ inline float activeWaveStrength(float wave_strength) {
 
 inline SurfaceParams surfaceParamsFromGpuMaterial(const GpuMaterial& gpu, float time_seconds = 0.0f) {
     SurfaceParams out;
+    if ((gpu.flags & GPU_MAT_FLAG_WATER_RIVER) != 0) out.profile = SurfaceProfile::River;
+    else if ((gpu.flags & GPU_MAT_FLAG_WATER_LAKE) != 0) out.profile = SurfaceProfile::Lake;
     out.wave_speed = gpu.anisotropic;
     out.wave_strength = gpu.sheen;
     out.wave_frequency = gpu.sheen_tint;
@@ -97,6 +99,9 @@ inline void applySurfaceParamsToGpuMaterial(
     gpu.opacity = 1.0f;
     gpu.metallic = 0.0f;
     gpu.flags |= GPU_MAT_FLAG_WATER;
+    gpu.flags &= ~(GPU_MAT_FLAG_WATER_LAKE | GPU_MAT_FLAG_WATER_RIVER);
+    if (params.profile == SurfaceProfile::Lake) gpu.flags |= GPU_MAT_FLAG_WATER_LAKE;
+    if (params.profile == SurfaceProfile::River) gpu.flags |= GPU_MAT_FLAG_WATER_RIVER;
     gpu.micro_detail_strength = params.micro_detail_strength;
     gpu.micro_detail_scale = params.micro_detail_scale;
     gpu.micro_anim_speed = params.micro_anim_speed;
@@ -137,6 +142,9 @@ inline void applySurfaceParamsToBackendMaterialData(
     data.sheen = activeWaveStrength(params.wave_strength);
     data.sheenTint = params.wave_frequency;
     data.flags |= Backend::IBackend::MAT_FLAG_WATER;
+    data.flags &= ~(Backend::IBackend::MAT_FLAG_WATER_LAKE | Backend::IBackend::MAT_FLAG_WATER_RIVER);
+    if (params.profile == SurfaceProfile::Lake) data.flags |= Backend::IBackend::MAT_FLAG_WATER_LAKE;
+    if (params.profile == SurfaceProfile::River) data.flags |= Backend::IBackend::MAT_FLAG_WATER_RIVER;
     data.micro_detail_strength = params.micro_detail_strength;
     data.micro_detail_scale = params.micro_detail_scale;
     data.foam_threshold = params.foam_threshold;

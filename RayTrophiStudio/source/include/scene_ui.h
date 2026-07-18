@@ -37,6 +37,7 @@ class Hittable;
 
 #include "TerrainNodesV2.h" // Terrain node graph V2 system
 #include "scene_ui_nodeeditor.hpp" // Terrain node editor UI
+#include "scene_ui_materialnodes.hpp" // Material node editor UI (MaterialNodesV2 Faz 1)
 #include "GeometryNodesV2.h" // Faz 8a Geo-DAG node graph system
 #include <fstream>
 #include <map>
@@ -135,12 +136,19 @@ public:
     bool show_terrain_tab = true;     // DEFAULT OPEN
     bool show_system_tab = true;     // Default closed
     bool show_terrain_graph = false;  // Terrain node editor panel
+    // Terrain Graph owns Delete/Backspace while focused, just like the geometry
+    // and material graph editors. This prevents the same key event from also
+    // deleting the selected terrain object through global/SDL shortcuts.
+    bool terrain_graph_focused = false;
     bool show_geometry_graph = false; // Geo-DAG node editor panel (Faz 8a)
     // Set each frame while the Geometry Graph window/canvas has keyboard focus, so
     // handleEditorShortcuts can skip the global "delete selected object" shortcut and let
     // NodeEditorUIV2 handle Delete/Backspace for its own node/link selection instead — otherwise
     // deleting a node in the graph also deleted the scene object the graph belongs to.
     bool geometry_graph_focused = false;
+    bool show_material_graph = false; // Material node editor panel (MaterialNodesV2 Faz 1)
+    // Same shortcut-guard as geometry_graph_focused, for the Material Graph window.
+    bool material_graph_focused = false;
     bool show_anim_graph = false;     // Animation node editor panel
     bool show_volumetric_tab = true;  // Unified Volumetrics tab (VDB + Gas)
     bool show_forcefield_tab = true;   // Simulation tab (Default open)
@@ -182,6 +190,8 @@ public:
     static void applyVDBImportOrientation(class VDBVolume& vdb, int orientation_preset, const std::string& source_hint = "");
 
     static void syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only);
+    static void syncNodeFoliageToScene(UIContext& ctx, TerrainObject* terrain,
+                                       const std::vector<int>& groupIds);
     static void syncVDBVolumesToGPU(UIContext& ctx);
 
     void appendInstancesToScene(UIContext& ctx, InstanceGroup& group, size_t start_index);
@@ -1539,10 +1549,13 @@ private:
     // terrain-style wrapper class needed for this first slice (no library/toolbar/preview yet).
     NodeSystem::NodeEditorUIV2 geometryNodeEditorUI;
     std::string geometry_graph_active_object_name;  // which object's graph the panel is showing
+    MaterialNodesV2::MaterialNodeEditorUI materialNodeEditorUI;
     bool geometry_graph_show_properties = true;
     float geometry_graph_properties_width = 260.0f;
 
 public:
+    void releaseTerrainNodePreviewTexture() { terrainNodeEditorUI.releaseMaskPreviewTexture(); }
+
     // Timeline Widget
     class TimelineWidget timeline;  // Timeline animation widget
     // Terrain Node Graph accessors for serialization

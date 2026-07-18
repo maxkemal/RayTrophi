@@ -16,6 +16,7 @@
 #include "Paint/TerrainPaintAdapter.h"
 #include "Paint/MeshPaintAdapter.h"
 #include "TerrainManager.h"
+#include "TerrainNodesV2.h"
 #include "InstanceManager.h"   // Geo-DAG ScatterInstancesNode side effects (rebuildSceneObjects)
 #include "PrincipledBSDF.h"
 #include "Volumetric.h"
@@ -412,6 +413,11 @@ UIWidgets::IconType getPaintToolIcon(Paint::BrushTool tool) {
         case Paint::BrushTool::Fill:   return UIWidgets::IconType::FillTool;
         case Paint::BrushTool::Clone:  return UIWidgets::IconType::CloneTool;
         case Paint::BrushTool::Spray:  return UIWidgets::IconType::SprayTool;
+        case Paint::BrushTool::Smudge: return UIWidgets::IconType::SmudgeTool;
+        case Paint::BrushTool::Dodge:  return UIWidgets::IconType::DodgeTool;
+        case Paint::BrushTool::Burn:   return UIWidgets::IconType::BurnTool;
+        case Paint::BrushTool::Sharpen: return UIWidgets::IconType::SharpenTool;
+        case Paint::BrushTool::Eyedropper: return UIWidgets::IconType::EyedropperTool;
     }
     return UIWidgets::IconType::PaintTool;
 }
@@ -2159,6 +2165,90 @@ void SceneUI::ensurePaintBrushPresets() {
     spray.spray_spread = 0.75f;
     spray.spray_droplet_size = 0.18f;
     add_preset("Soft Spray", spray);
+
+    Paint::BrushSettings pencil;
+    pencil.radius = 3.0f;
+    pencil.strength = 0.6f;
+    pencil.falloff = 0.85f;
+    pencil.spacing = 0.05f;
+    pencil.alpha_preset = Paint::BrushAlphaPreset::Noise;
+    add_preset("Pencil", pencil);
+
+    Paint::BrushSettings fountain_pen;
+    fountain_pen.radius = 6.0f;
+    fountain_pen.strength = 1.0f;
+    fountain_pen.falloff = 0.1f;
+    fountain_pen.shape = Paint::BrushShape::Flat;
+    fountain_pen.shape_aspect = 3.0f;
+    fountain_pen.follow_stroke_angle = true;
+    add_preset("Fountain Pen", fountain_pen);
+
+    Paint::BrushSettings charcoal;
+    charcoal.radius = 12.0f;
+    charcoal.strength = 0.4f;
+    charcoal.falloff = 0.9f;
+    charcoal.flow = 0.7f;
+    charcoal.alpha_preset = Paint::BrushAlphaPreset::Noise;
+    add_preset("Charcoal", charcoal);
+
+    Paint::BrushSettings spatula;
+    spatula.radius = 32.0f;
+    spatula.strength = 0.85f;
+    spatula.falloff = 0.2f;
+    spatula.paint_mode = Paint::BrushPaintMode::Oil;
+    spatula.shape = Paint::BrushShape::Flat;
+    spatula.shape_aspect = 5.0f;
+    spatula.shape_roundness = 0.1f;
+    spatula.follow_stroke_angle = true;
+    spatula.write_height_mask = true;
+    spatula.height_contribution = 0.75f;
+    add_preset("Palette Knife", spatula);
+
+    Paint::BrushSettings scraper;
+    scraper.tool = Paint::BrushTool::Erase;
+    scraper.radius = 24.0f;
+    scraper.strength = 1.0f;
+    scraper.falloff = 0.05f;
+    scraper.shape = Paint::BrushShape::Flat;
+    scraper.shape_aspect = 4.0f;
+    scraper.shape_roundness = 0.2f;
+    scraper.follow_stroke_angle = true;
+    add_preset("Scraper Knife", scraper);
+
+    Paint::BrushSettings bristle;
+    bristle.radius = 28.0f;
+    bristle.strength = 0.75f;
+    bristle.falloff = 0.4f;
+    bristle.paint_mode = Paint::BrushPaintMode::Oil;
+    bristle.shape = Paint::BrushShape::Flat;
+    bristle.shape_aspect = 3.0f;
+    bristle.shape_roundness = 0.75f;
+    bristle.alpha_preset = Paint::BrushAlphaPreset::Scratch;
+    bristle.follow_stroke_angle = true;
+    bristle.write_height_mask = true;
+    bristle.height_contribution = 0.45f;
+    add_preset("Bristle Spreader", bristle);
+
+    Paint::BrushSettings dodge_light;
+    dodge_light.tool = Paint::BrushTool::Dodge;
+    dodge_light.radius = 36.0f;
+    dodge_light.strength = 0.5f;
+    dodge_light.falloff = 0.75f;
+    add_preset("Dodge", dodge_light);
+
+    Paint::BrushSettings burn_dark;
+    burn_dark.tool = Paint::BrushTool::Burn;
+    burn_dark.radius = 36.0f;
+    burn_dark.strength = 0.5f;
+    burn_dark.falloff = 0.75f;
+    add_preset("Burn", burn_dark);
+
+    Paint::BrushSettings sharpen_det;
+    sharpen_det.tool = Paint::BrushTool::Sharpen;
+    sharpen_det.radius = 24.0f;
+    sharpen_det.strength = 0.4f;
+    sharpen_det.falloff = 0.5f;
+    add_preset("Sharpen", sharpen_det);
 }
 
 void SceneUI::ensureSculptBrushPresets() {
@@ -3205,16 +3295,27 @@ void SceneUI::drawTerrainPaintPanel(UIContext& ctx, TerrainObject* terrain) {
         return;
     }
 
+    auto refreshTerrainSplatConsumers = [&]() {
+        ctx.renderer.resetCPUAccumulation();
+        // Renderer snapshots/restores texture dirty state while updating the
+        // render and viewport backends, so call it even when ctx.backend_ptr is
+        // null (the common Solid/standalone viewport case).
+        ctx.renderer.updateBackendMaterials(ctx.scene);
+        if (g_backend) g_backend->resetAccumulation();
+        if (g_viewport_backend &&
+            reinterpret_cast<const void*>(g_viewport_backend.get()) !=
+                reinterpret_cast<const void*>(g_backend.get())) {
+            g_viewport_backend->resetAccumulation();
+        }
+        ctx.start_render = true;
+    };
+
     if (terrain->layers.empty() || !terrain->splatMap) {
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.45f, 1.0f), "Terrain paint needs initialized layers and a splat map.");
         if (UIWidgets::PrimaryButton("Initialize Terrain Layers", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
             TerrainManager::getInstance().initLayers(terrain);
             paint_mode_state.setAdapter(std::make_shared<Paint::TerrainPaintAdapter>(terrain));
-            ctx.renderer.resetCPUAccumulation();
-            if (ctx.backend_ptr) {
-                ctx.renderer.updateBackendMaterials(ctx.scene);
-                ctx.backend_ptr->resetAccumulation();
-            }
+            refreshTerrainSplatConsumers();
         }
         return;
     }
@@ -3263,11 +3364,7 @@ void SceneUI::drawTerrainPaintPanel(UIContext& ctx, TerrainObject* terrain) {
                 else if (paint_mode_state.active_layer_index == 3) p.a = 255;
             }
             terrain->splatMap->updateGPU();
-            ctx.renderer.resetCPUAccumulation();
-            if (ctx.backend_ptr) {
-                ctx.renderer.updateBackendMaterials(ctx.scene);
-                ctx.backend_ptr->resetAccumulation();
-            }
+            refreshTerrainSplatConsumers();
             SCENE_LOG_INFO("Filled terrain paint mask for active layer on: " + terrain->name);
         }
     }
@@ -3297,6 +3394,22 @@ void SceneUI::drawTerrainPaintPanel(UIContext& ctx, TerrainObject* terrain) {
     UIWidgets::Divider();
     UIWidgets::ColoredHeader("Mask & Splat Tools", ImVec4(0.85f, 0.68f, 0.40f, 1.0f));
 
+    bool graphAppliesSplat = false;
+    if (terrain->nodeGraph) {
+        for (const auto& node : terrain->nodeGraph->nodes) {
+            auto* splatOutput = dynamic_cast<TerrainNodesV2::SplatOutputNode*>(node.get());
+            if (splatOutput && splatOutput->autoApplyToTerrain) {
+                graphAppliesSplat = true;
+                break;
+            }
+        }
+    }
+    if (graphAppliesSplat) {
+        ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.35f, 1.0f), "Splat source: Terrain Node Graph");
+        ImGui::TextWrapped("Import replaces the current map, but the next full graph Evaluate will apply Splat Output again. Disable 'Apply to Terrain' on Splat Output to keep a manual import.");
+        ImGui::Spacing();
+    }
+
     ImGui::PushItemWidth(160.0f);
     SceneUI::DrawSmartFloat("mhmin_paint", "Height Start", &terrain->am_height_min, 0.0f, 500.0f, "%.1f", false, nullptr, 12);
     SceneUI::DrawSmartFloat("mhmax_paint", "Height End", &terrain->am_height_max, 0.0f, 500.0f, "%.1f", false, nullptr, 12);
@@ -3306,11 +3419,8 @@ void SceneUI::drawTerrainPaintPanel(UIContext& ctx, TerrainObject* terrain) {
 
     if (UIWidgets::PrimaryButton("Generate Mask##terrain_paint", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
         TerrainManager::getInstance().autoMask(terrain, 0.0f, 0.0f, terrain->am_height_min, terrain->am_height_max, terrain->am_slope);
-        ctx.renderer.resetCPUAccumulation();
-        if (ctx.backend_ptr) {
-            ctx.renderer.updateBackendMaterials(ctx.scene);
-            ctx.backend_ptr->resetAccumulation();
-        }
+        refreshTerrainSplatConsumers();
+        ProjectManager::getInstance().markModified();
         SCENE_LOG_INFO("Auto-mask generated for: " + terrain->name);
     }
 
@@ -3321,11 +3431,8 @@ void SceneUI::drawTerrainPaintPanel(UIContext& ctx, TerrainObject* terrain) {
         std::string path = SceneUI::openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp\0All Files\0*.*\0");
         if (!path.empty()) {
             TerrainManager::getInstance().importSplatMap(terrain, path);
-            ctx.renderer.resetCPUAccumulation();
-            if (ctx.backend_ptr) {
-                ctx.renderer.updateBackendMaterials(ctx.scene);
-                ctx.backend_ptr->resetAccumulation();
-            }
+            refreshTerrainSplatConsumers();
+            ProjectManager::getInstance().markModified();
         }
     }
 
@@ -3345,7 +3452,8 @@ void SceneUI::drawTerrainPaintPanel(UIContext& ctx, TerrainObject* terrain) {
             for (int y = 0; y < sh; y++) {
                 for (int x = 0; x < sw; x++) {
                     float u = (float)x / (float)(sw > 1 ? sw - 1 : 1);
-                    float v = (float)y / (float)(sh > 1 ? sh - 1 : 1);
+                    // Splat storage row 0 corresponds to terrain UV/Z 1.
+                    float v = 1.0f - (float)y / (float)(sh > 1 ? sh - 1 : 1);
                     int fx = std::clamp((int)(u * (w - 1) + 0.5f), 0, w - 1);
                     int fy = std::clamp((int)(v * (h - 1) + 0.5f), 0, h - 1);
 
@@ -3358,9 +3466,8 @@ void SceneUI::drawTerrainPaintPanel(UIContext& ctx, TerrainObject* terrain) {
                 }
             }
             terrain->splatMap->updateGPU();
-            ctx.renderer.resetCPUAccumulation();
-            ctx.renderer.updateBackendMaterials(ctx.scene);
-            if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+            refreshTerrainSplatConsumers();
+            ProjectManager::getInstance().markModified();
             SCENE_LOG_INFO("Flow baked to splat alpha for: " + terrain->name);
         } else {
             SCENE_LOG_WARN("Please run erosion first to generate a flow map.");
@@ -4411,7 +4518,12 @@ void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Trian
             { "PaintToolStamp", "Stamp\nPlaces a stamped alpha or texture imprint.", Paint::BrushTool::Stamp },
             { "PaintToolFill", "Fill\nFills the whole target with the current value.", Paint::BrushTool::Fill },
             { "PaintToolClone", "Clone\nCopies paint from a sampled source area.", Paint::BrushTool::Clone },
-            { "PaintToolSpray", "Spray\nScatters many small droplets across the brush radius.", Paint::BrushTool::Spray }
+            { "PaintToolSpray", "Spray\nScatters many small droplets across the brush radius.", Paint::BrushTool::Spray },
+            { "PaintToolSmudge", "Smudge\nSmudges and blends colors locally.", Paint::BrushTool::Smudge },
+            { "PaintToolDodge", "Dodge\nBrightens color values in the paint region.", Paint::BrushTool::Dodge },
+            { "PaintToolBurn", "Burn\nDarkens color values in the paint region.", Paint::BrushTool::Burn },
+            { "PaintToolSharpen", "Sharpen\nIncreases sharpness/contrast of edges.", Paint::BrushTool::Sharpen },
+            { "PaintToolEyedropper", "Eyedropper\nSamples color or channel values directly from the model.", Paint::BrushTool::Eyedropper }
         };
 
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(tool_gap, tool_gap));
@@ -6312,6 +6424,21 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         }
         alpha_rotate_drag_active = false;
     }
+    if (paint_mode_state.brush.tool == Paint::BrushTool::Eyedropper) {
+        if (is_target_hit && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            Paint::PaintTextureSet* set = adapter->getTextureSet();
+            std::shared_ptr<Texture> active_texture = set ? set->getTexture(paint_mode_state.active_channel) : nullptr;
+            if (active_texture) {
+                const Vec3 sampled = active_texture->get_color_bilinear(rec.uv.u, rec.uv.v);
+                paint_mode_state.brush.color = sampled;
+                if (Paint::BrushChannelInput* input = getBrushChannelInput(paint_mode_state.brush, paint_mode_state.active_channel)) {
+                    input->color = sampled;
+                }
+            }
+        }
+        return;
+    }
+
     if (paint_mode_state.brush.tool == Paint::BrushTool::Clone &&
         io.KeyCtrl &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
@@ -6323,7 +6450,18 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         return;
     }
     if (has_hit && is_target_hit) {
-        drawMeshPaintPreview(ctx, rec, *adapter, paint_mode_state.brush, paint_mode_state.active_channel, false, can_rotate_brush_orientation && io.KeyCtrl);
+        Paint::BrushSettings preview_brush = paint_mode_state.brush;
+        if (paint_mode_state.stroke.active && paint_mode_state.brush.follow_stroke_angle && paint_mode_state.stroke.has_last_uv) {
+            const float du = rec.uv.u - paint_mode_state.stroke.last_u;
+            const float dv = rec.uv.v - paint_mode_state.stroke.last_v;
+            if ((du * du + dv * dv) > 1e-8f) {
+                const float stroke_angle = std::atan2(dv, du) * 57.2957795f;
+                preview_brush.alpha_rotation_degrees = wrapBrushAngleDegrees(
+                    paint_mode_state.brush.alpha_rotation_degrees + stroke_angle + 90.0f);
+            }
+        }
+
+        drawMeshPaintPreview(ctx, rec, *adapter, preview_brush, paint_mode_state.active_channel, false, can_rotate_brush_orientation && io.KeyCtrl);
         for (int i = 1; i < 8; ++i) {
             const bool mx = (i & 1) && paint_mode_state.brush.mirror_x;
             const bool my = (i & 2) && paint_mode_state.brush.mirror_y;
@@ -6335,7 +6473,7 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
             HitRecord mirrored_hit;
             if (resolveMirroredMeshPaintHit(ctx, *adapter, rec, mx, my, mz, mirrored_hit)) {
                 Paint::BrushSettings mirrored_brush = makeMirroredBrushForHit(
-                    paint_mode_state.brush,
+                    preview_brush,
                     rec,
                     mirrored_hit,
                     mx,
@@ -6476,6 +6614,10 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
     }
 
     Paint::BrushSettings dab_brush = paint_mode_state.brush;
+    if (dab_brush.tool == Paint::BrushTool::Smudge) {
+        dab_brush.tool = Paint::BrushTool::Paint;
+        dab_brush.paint_mode = Paint::BrushPaintMode::Smudge;
+    }
     Vec2 dab_uv = rec.uv;
     if (paint_mode_state.brush.follow_stroke_angle && paint_mode_state.stroke.has_last_uv) {
         const float du = rec.uv.u - paint_mode_state.stroke.last_u;
@@ -6483,7 +6625,7 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
         if ((du * du + dv * dv) > 1e-8f) {
             const float stroke_angle = std::atan2(dv, du) * 57.2957795f;
             dab_brush.alpha_rotation_degrees = wrapBrushAngleDegrees(
-                paint_mode_state.brush.alpha_rotation_degrees + stroke_angle);
+                paint_mode_state.brush.alpha_rotation_degrees + stroke_angle + 90.0f);
         }
     }
     if (paint_mode_state.brush.tool == Paint::BrushTool::Stamp) {
@@ -6512,7 +6654,8 @@ void SceneUI::handleMeshPaint(UIContext& ctx) {
     }    float current_deposit_ratio = 1.0f;
 
     if ((paint_mode_state.brush.tool == Paint::BrushTool::Paint ||
-         paint_mode_state.brush.tool == Paint::BrushTool::Stamp) &&
+         paint_mode_state.brush.tool == Paint::BrushTool::Stamp ||
+         paint_mode_state.brush.tool == Paint::BrushTool::Smudge) &&
         (paint_mode_state.active_channel == Paint::PaintChannel::BaseColor ||
          paint_mode_state.active_channel == Paint::PaintChannel::Emission)) {
         Paint::PaintTextureSet* set = adapter->getTextureSet();

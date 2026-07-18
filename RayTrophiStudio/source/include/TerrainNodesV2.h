@@ -31,6 +31,7 @@
 #include <memory>
 #include <atomic>
 #include <chrono>
+#include <functional>
 
 namespace TerrainNodesV2 {
 
@@ -78,10 +79,19 @@ namespace TerrainNodesV2 {
         TerrainObject* terrain = nullptr;
         int width = 0;
         int height = 0;
+        // Inspector/thumbnail pulls must be observational. Nodes which publish
+        // auxiliary data (flowMap, hardnessMap, etc.) gate those writes on this.
+        bool publishTerrainState = true;
         
         // Scale values - preserved throughout evaluation
         float scale_xz = 100.0f;
         float scale_y = 10.0f;
+        // Main-thread snapshot used by async climate evaluation. Worker nodes
+        // never dereference SceneData/World directly.
+        bool has_scene_sun = false;
+        float scene_sun_x = 0.0f;
+        float scene_sun_y = 1.0f;
+        float scene_sun_z = 0.0f;
         
         // Default resolution when terrain is not yet initialized
         static constexpr int DEFAULT_RESOLUTION = 256;
@@ -158,7 +168,44 @@ namespace TerrainNodesV2 {
         SplatOutput,
         HardnessOutput,
         // Inputs
-        HardnessInput
+        HardnessInput,
+        // Appended for serialized enum stability.
+        Resample,
+        ChannelExtract,
+        SplatCompose,
+        Remap,
+        MaskMorphology,
+        // Geological data and surface synthesis. Appended for enum stability.
+        WetnessMap,
+        SoilDepth,
+        Lithology,
+        Strata,
+        SurfaceComposer,
+        // Climate, snow and glacial processing. Appended for enum stability.
+        Climate,
+        Snowfall,
+        SnowSettle,
+        SnowMeltFreeze,
+        GlacierFlow,
+        SnowClimate,
+        MaskAdjust,
+        // Shared analysis/field publishing. Appended for serialized enum stability.
+        TerrainAnalysis,
+        TerrainFieldsOutput,
+        BiomeComposer,
+        // Hydrology and automatic river authoring. Appended for serialized enum stability.
+        WatershedAnalysis,
+        RiverNetwork,
+        RiverSplineOutput,
+        RiverBedCarve,
+        LakeBasin,
+        LakeSurfaceOutput,
+        RiverHydraulics,
+        // Foliage authoring recipes. Runtime instances remain owned by InstanceManager.
+        // Appended for serialized enum stability.
+        FoliageLayer,
+        FoliageSet,
+        FoliageOutput
     };
 
     // ============================================================================
@@ -173,18 +220,30 @@ namespace TerrainNodesV2 {
     class TerrainNodeBase : public NodeSystem::NodeBase {
     public:
         NodeType terrainNodeType;
+        // Explicit side-effect/output publication gate. Computational nodes
+        // remain pull-driven; terrain/scene sink nodes are skipped when false.
+        bool publicationEnabled = true;
         
         TerrainContext* getTerrainContext(NodeSystem::EvaluationContext& ctx) {
             return ctx.getDomainContext<TerrainContext>();
         }
         
-        // Helper to get Image2D from input
-        NodeSystem::Image2DData getHeightInput(int inputIndex, NodeSystem::EvaluationContext& ctx) {
+        // Raw Image2D access for nodes that intentionally accept multi-channel
+        // payloads (Channel Extract and Splat Output).
+        NodeSystem::Image2DData getImageInput(int inputIndex, NodeSystem::EvaluationContext& ctx) {
             NodeSystem::PinValue val = getInputValue(inputIndex, ctx);
             if (auto* img = std::get_if<NodeSystem::Image2DData>(&val)) {
-                return *img;
+                if (img->isValid()) return *img;
             }
             return NodeSystem::Image2DData{};
+        }
+
+        // Terrain height/mask operators are single-channel by contract. Keeping
+        // this check at the common input boundary prevents RGBA splat/erosion
+        // payloads from reaching algorithms that allocate only width*height.
+        NodeSystem::Image2DData getHeightInput(int inputIndex, NodeSystem::EvaluationContext& ctx) {
+            NodeSystem::Image2DData img = getImageInput(inputIndex, ctx);
+            return (img.isValid() && img.channels == 1) ? img : NodeSystem::Image2DData{};
         }
         
         // Helper to create output image
@@ -223,6 +282,7 @@ namespace TerrainNodesV2 {
             j["nodeType"] = static_cast<int>(terrainNodeType);
             j["typeId"] = getTypeId();
             j["name"] = name;
+            j["publicationEnabled"] = publicationEnabled;
         }
         
         /**
@@ -233,6 +293,7 @@ namespace TerrainNodesV2 {
             if (j.contains("x")) x = j["x"].get<float>();
             if (j.contains("y")) y = j["y"].get<float>();
             if (j.contains("name")) name = j["name"].get<std::string>();
+            publicationEnabled = j.value("publicationEnabled", true);
         }
     };
 
@@ -353,8 +414,17 @@ namespace TerrainNodesV2 {
 
             auto result = createHeightOutput(w, h);
 
-            if (terrain->heightmap.data.size() == (size_t)(w * h)) {
-                *result.data = terrain->heightmap.data;
+            const size_t expected = static_cast<size_t>(w) * h;
+            // Terrain mode is the authored graph SOURCE, not the previous graph
+            // result. Reading heightmap.data here made every Evaluate feed the
+            // last Hydraulic/Fluvial/Carve output back into the chain and
+            // accumulate erosion indefinitely.
+            if (terrain->original_heightmap_data.size() != expected &&
+                terrain->heightmap.data.size() == expected) {
+                terrain->original_heightmap_data = terrain->heightmap.data;
+            }
+            if (terrain->original_heightmap_data.size() == expected) {
+                *result.data = terrain->original_heightmap_data;
             }
             
             // Apply Edge Falloff if enabled
@@ -660,7 +730,7 @@ namespace TerrainNodesV2 {
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Erosion Map", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+                "Erosion Map", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, 4));
             
             metadata.displayName = "Hydraulic Erosion";
             metadata.category = "Erosion";
@@ -786,18 +856,32 @@ namespace TerrainNodesV2 {
             name = "Fluvial Erosion";
             terrainNodeType = NodeType::FluvialErosion;
             
-            // Fluvial erosion uses lower sediment capacity than hydraulic
-            params.sedimentCapacity = 1.0f;
+            // Long-lived runoff parcels are required for catchment-scale channels.
+            // These defaults describe a persistent river-forming rainfall event,
+            // while existing serialized nodes retain their authored values.
+            params.iterations = 250000;
+            params.dropletLifetime = 384;
+            params.inertia = 0.25f;
+            params.sedimentCapacity = 1.5f;
+            params.erodeSpeed = 0.12f;
+            params.depositSpeed = 0.20f;
+            params.evaporateSpeed = 0.001f;
+            params.erosionRadius = 4;
+            params.minSlope = 0.003f;
             
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Height In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow Guide", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Erosion Map", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+                "Erosion Map", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, 4));
             
             metadata.displayName = "Fluvial Erosion";
             metadata.category = "Erosion";
@@ -1225,9 +1309,10 @@ namespace TerrainNodesV2 {
             name = "Splat Output";
             terrainNodeType = NodeType::SplatOutput;
             
-            // Accept 4-channel splat data or height for auto-conversion
+            // Explicit four-channel splat payload. Single-channel masks must be
+            // combined through Splat Compose first.
             inputs.push_back(NodeSystem::Pin::createInput(
-                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, false, 4));
             
             metadata.displayName = "Splat Output";
             metadata.category = "Output";
@@ -1581,9 +1666,11 @@ namespace TerrainNodesV2 {
      */
     class FlowMaskNode : public TerrainNodeBase {
     public:
-        int iterations = 16;          // Flow simulation iterations (increased for more detail)
+        int detailLevel = 6;          // 1=main rivers, 8=finest tributaries
+        int bankSpread = 1;           // Small channel-width expansion, never global blur
         float strength = 1.0f;        // Flow strength multiplier
-        float decay = 0.8f;           // Flow decay per step (lowered for longer flow paths)
+        float decay = 0.995f;         // Discharge retained at each downstream step
+        float channelSoftness = 0.06f;// Soft transition around the selected detail threshold
         bool normalize = true;        // Normalize output to 0-1
         
         FlowMaskNode() {
@@ -1608,17 +1695,27 @@ namespace TerrainNodesV2 {
 
         void serializeToJson(nlohmann::json& j) const override {
             TerrainNodeBase::serializeToJson(j);
-            j["iterations"] = iterations;
+            j["detailLevel"] = detailLevel;
+            j["bankSpread"] = bankSpread;
             j["strength"] = strength;
             j["decay"] = decay;
+            j["channelSoftness"] = channelSoftness;
             j["normalize"] = normalize;
         }
 
         void deserializeFromJson(const nlohmann::json& j) override {
             TerrainNodeBase::deserializeFromJson(j);
-            if (j.contains("iterations")) iterations = j["iterations"].get<int>();
+            if (j.contains("detailLevel")) {
+                detailLevel = clampValue(j["detailLevel"].get<int>(), 1, 8);
+            } else if (j.contains("iterations")) {
+                // Backward compatibility: the old 1..32 blur count becomes a
+                // genuine 1..8 tributary-detail selection.
+                detailLevel = clampValue((j["iterations"].get<int>() + 3) / 4, 1, 8);
+            }
+            if (j.contains("bankSpread")) bankSpread = clampValue(j["bankSpread"].get<int>(), 0, 4);
             if (j.contains("strength")) strength = j["strength"].get<float>();
-            if (j.contains("decay")) decay = j["decay"].get<float>();
+            if (j.contains("decay")) decay = clampValue(j["decay"].get<float>(), 0.95f, 1.0f);
+            if (j.contains("channelSoftness")) channelSoftness = clampValue(j["channelSoftness"].get<float>(), 0.01f, 0.20f);
             if (j.contains("normalize")) normalize = j["normalize"].get<bool>();
         }
     };
@@ -1995,7 +2092,7 @@ namespace TerrainNodesV2 {
     };
 
     // ============================================================================
-    // PROCEDURAL TEXTURE NODES (Gaea-style)
+    // PROCEDURAL TEXTURE NODES
     // ============================================================================
     
     /**
@@ -2042,7 +2139,7 @@ namespace TerrainNodesV2 {
             
             // 4-channel output for splat map
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, 4));
             
             metadata.displayName = "Auto Splat";
             metadata.category = "Texture";
@@ -2167,7 +2264,20 @@ namespace TerrainNodesV2 {
             if (j.contains("bufferHeight")) bufferHeight = j["bufferHeight"].get<int>();
             if (j.contains("paintBuffer") && j["paintBuffer"].is_array()) {
                 paintBuffer = j["paintBuffer"].get<std::vector<float>>();
-                needsInit = false;
+                constexpr int kMaxPaintDimension = 8192;
+                const bool dimensionsValid = bufferWidth > 0 && bufferHeight > 0 &&
+                    bufferWidth <= kMaxPaintDimension && bufferHeight <= kMaxPaintDimension;
+                const size_t expected = dimensionsValid
+                    ? static_cast<size_t>(bufferWidth) * static_cast<size_t>(bufferHeight)
+                    : 0u;
+                if (paintBuffer.size() == expected && expected > 0) {
+                    needsInit = false;
+                } else {
+                    paintBuffer.clear();
+                    bufferWidth = 0;
+                    bufferHeight = 0;
+                    needsInit = true;
+                }
             }
         }
     };
@@ -2223,11 +2333,12 @@ namespace TerrainNodesV2 {
             if (j.contains("filePath")) {
                 std::string path = j["filePath"].get<std::string>();
                 strncpy(filePath, path.c_str(), sizeof(filePath) - 1);
-                loadMaskFromFile();
+                filePath[sizeof(filePath) - 1] = '\0';
             }
             if (j.contains("contrast")) contrast = j["contrast"].get<float>();
             if (j.contains("brightness")) brightness = j["brightness"].get<float>();
             if (j.contains("invert")) invert = j["invert"].get<bool>();
+            if (strlen(filePath) > 0) loadMaskFromFile();
         }
     };
 
@@ -2398,6 +2509,1606 @@ namespace TerrainNodesV2 {
     };
 
     // ============================================================================
+    // IMAGE CONTRACT / AUTHORING UTILITY NODES
+    // ============================================================================
+
+    enum class ResampleFilter { Nearest = 0, Bilinear = 1 };
+    enum class ResampleSemantic { Height = 0, Mask = 1 };
+
+    class ResampleNode : public TerrainNodeBase {
+    public:
+        int targetWidth = 512;
+        int targetHeight = 512;
+        bool matchReference = true;
+        ResampleFilter filter = ResampleFilter::Bilinear;
+        ResampleSemantic semanticMode = ResampleSemantic::Height;
+
+        ResampleNode() {
+            name = "Resample";
+            terrainNodeType = NodeType::Resample;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Source", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Reference", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Generic, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Result", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            metadata.displayName = "Resample";
+            metadata.category = "Utility";
+            metadata.headerColor = IM_COL32(80, 145, 180, 255);
+            headerColor = ImVec4(0.3f, 0.55f, 0.7f, 1.0f);
+        }
+
+        void syncSemantic() {
+            const auto semantic = semanticMode == ResampleSemantic::Height
+                ? NodeSystem::ImageSemantic::Height : NodeSystem::ImageSemantic::Mask;
+            inputs[0].imageSemantic = semantic;
+            inputs[0].updateVisualCache();
+            outputs[0].imageSemantic = semantic;
+            outputs[0].updateVisualCache();
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.Resample"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["targetWidth"] = targetWidth;
+            j["targetHeight"] = targetHeight;
+            j["matchReference"] = matchReference;
+            j["filter"] = static_cast<int>(filter);
+            j["semanticMode"] = static_cast<int>(semanticMode);
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            targetWidth = clampValue(j.value("targetWidth", targetWidth), 2, 8192);
+            targetHeight = clampValue(j.value("targetHeight", targetHeight), 2, 8192);
+            matchReference = j.value("matchReference", matchReference);
+            filter = static_cast<ResampleFilter>(clampValue(j.value("filter", 1), 0, 1));
+            semanticMode = static_cast<ResampleSemantic>(clampValue(j.value("semanticMode", 0), 0, 1));
+            syncSemantic();
+        }
+    };
+
+    class ChannelExtractNode : public TerrainNodeBase {
+    public:
+        int channel = 0;
+        bool invert = false;
+        ChannelExtractNode() {
+            name = "Channel Extract";
+            terrainNodeType = NodeType::ChannelExtract;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "RGBA", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Generic, false, 0));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Channel Extract";
+            metadata.category = "Utility";
+            metadata.headerColor = IM_COL32(150, 95, 175, 255);
+            headerColor = ImVec4(0.58f, 0.38f, 0.68f, 1.0f);
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.ChannelExtract"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j); j["channel"] = channel; j["invert"] = invert;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            channel = clampValue(j.value("channel", channel), 0, 3);
+            invert = j.value("invert", invert);
+        }
+    };
+
+    class SplatComposeNode : public TerrainNodeBase {
+    public:
+        bool normalize = true;
+        SplatComposeNode() {
+            name = "Splat Compose";
+            terrainNodeType = NodeType::SplatCompose;
+            for (const char* channelName : {"R", "G", "B", "A"}) {
+                inputs.push_back(NodeSystem::Pin::createInput(
+                    channelName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            }
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, 4));
+            metadata.displayName = "Splat Compose";
+            metadata.category = "Texture";
+            metadata.headerColor = IM_COL32(195, 135, 55, 255);
+            headerColor = ImVec4(0.76f, 0.52f, 0.22f, 1.0f);
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.SplatCompose"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j); j["normalize"] = normalize;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j); normalize = j.value("normalize", normalize);
+        }
+    };
+
+    class RemapNode : public TerrainNodeBase {
+    public:
+        float inputMin = 0.0f, inputMax = 1.0f;
+        float outputMin = 0.0f, outputMax = 1.0f;
+        float gamma = 1.0f;
+        bool clampOutput = true;
+        bool maskMode = false;
+        RemapNode() {
+            name = "Remap";
+            terrainNodeType = NodeType::Remap;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            metadata.displayName = "Remap";
+            metadata.category = "Filter";
+            metadata.headerColor = IM_COL32(90, 150, 195, 255);
+            headerColor = ImVec4(0.35f, 0.58f, 0.76f, 1.0f);
+        }
+        void syncSemantic() {
+            const auto semantic = maskMode ? NodeSystem::ImageSemantic::Mask : NodeSystem::ImageSemantic::Height;
+            inputs[0].imageSemantic = semantic; inputs[0].updateVisualCache();
+            outputs[0].imageSemantic = semantic; outputs[0].updateVisualCache();
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.Remap"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["inputMin"] = inputMin; j["inputMax"] = inputMax;
+            j["outputMin"] = outputMin; j["outputMax"] = outputMax;
+            j["gamma"] = gamma; j["clampOutput"] = clampOutput; j["maskMode"] = maskMode;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            inputMin = j.value("inputMin", inputMin); inputMax = j.value("inputMax", inputMax);
+            outputMin = j.value("outputMin", outputMin); outputMax = j.value("outputMax", outputMax);
+            gamma = clampValue(j.value("gamma", gamma), 0.01f, 8.0f);
+            clampOutput = j.value("clampOutput", clampOutput);
+            maskMode = j.value("maskMode", maskMode);
+            syncSemantic();
+        }
+    };
+
+    class MaskAdjustNode : public TerrainNodeBase {
+    public:
+        float intensity = 1.0f;
+        float brightness = 0.0f;
+        float contrast = 1.0f;
+        float gamma = 1.0f;
+        float mix = 1.0f;
+        bool invert = false;
+        bool clampOutput = true;
+
+        MaskAdjustNode() {
+            name = "Mask Adjust";
+            terrainNodeType = NodeType::MaskAdjust;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Effect Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Mask Adjust";
+            metadata.category = "Filter";
+            metadata.headerColor = IM_COL32(130, 105, 190, 255);
+            headerColor = ImVec4(0.51f, 0.41f, 0.75f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.MaskAdjust"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["intensity"] = intensity; j["brightness"] = brightness;
+            j["contrast"] = contrast; j["gamma"] = gamma; j["mix"] = mix;
+            j["invert"] = invert; j["clampOutput"] = clampOutput;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            intensity = clampValue(j.value("intensity", intensity), 0.0f, 8.0f);
+            brightness = clampValue(j.value("brightness", brightness), -2.0f, 2.0f);
+            contrast = clampValue(j.value("contrast", contrast), 0.0f, 8.0f);
+            gamma = clampValue(j.value("gamma", gamma), 0.05f, 8.0f);
+            mix = clampValue(j.value("mix", mix), 0.0f, 1.0f);
+            invert = j.value("invert", invert);
+            clampOutput = j.value("clampOutput", clampOutput);
+        }
+    };
+
+    enum class MaskMorphologyOp { Dilate = 0, Erode = 1, Blur = 2 };
+    class MaskMorphologyNode : public TerrainNodeBase {
+    public:
+        MaskMorphologyOp operation = MaskMorphologyOp::Blur;
+        int radius = 2;
+        int iterations = 1;
+        MaskMorphologyNode() {
+            name = "Mask Morphology";
+            terrainNodeType = NodeType::MaskMorphology;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Mask Morphology";
+            metadata.category = "Mask";
+            metadata.headerColor = IM_COL32(165, 95, 185, 255);
+            headerColor = ImVec4(0.64f, 0.37f, 0.72f, 1.0f);
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.MaskMorphology"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["operation"] = static_cast<int>(operation); j["radius"] = radius; j["iterations"] = iterations;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            operation = static_cast<MaskMorphologyOp>(clampValue(j.value("operation", 2), 0, 2));
+            radius = clampValue(j.value("radius", radius), 1, 12);
+            iterations = clampValue(j.value("iterations", iterations), 1, 8);
+        }
+    };
+
+    // Reusable topographic fields for biome, material and foliage branches.
+    // Every output is solved together and inserted into EvaluationContext cache.
+    class TerrainAnalysisNode : public TerrainNodeBase {
+    public:
+        float valleyScale = 0.08f;
+        float curvatureScale = 1.0f;
+        int neighborhoodRadius = 4;
+
+        TerrainAnalysisNode() {
+            name = "Terrain Analysis";
+            terrainNodeType = NodeType::TerrainAnalysis;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            for (const char* outputName : {"Slope", "Concavity", "Convexity", "Valley", "Wetness"}) {
+                outputs.push_back(NodeSystem::Pin::createOutput(
+                    outputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            }
+            metadata.displayName = "Terrain Analysis";
+            metadata.category = "Data Maps";
+            metadata.description = "Cached slope, curvature, valley and wetness fields";
+            metadata.headerColor = IM_COL32(62, 145, 180, 255);
+            headerColor = ImVec4(0.24f, 0.57f, 0.71f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.TerrainAnalysis"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["valleyScale"] = valleyScale;
+            j["curvatureScale"] = curvatureScale;
+            j["neighborhoodRadius"] = neighborhoodRadius;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            valleyScale = clampValue(j.value("valleyScale", valleyScale), 0.005f, 0.5f);
+            curvatureScale = clampValue(j.value("curvatureScale", curvatureScale), 0.05f, 10.0f);
+            neighborhoodRadius = clampValue(j.value("neighborhoodRadius", neighborhoodRadius), 1, 64);
+        }
+    };
+
+    // Priority-flood watershed solve shared by fluvial carving, river extraction,
+    // biome wetness and future lake/floodplain nodes. Flow Direction is encoded
+    // as 0 for an outlet or (D8 direction + 1) / 9 for downstream cells.
+    class WatershedAnalysisNode : public TerrainNodeBase {
+    public:
+        float rainfall = 1.0f;
+        float flatEpsilon = 0.00001f;
+
+        WatershedAnalysisNode() {
+            name = "Watershed Analysis";
+            terrainNodeType = NodeType::WatershedAnalysis;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Filled Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            for (const char* outputName : {"Accumulation", "Flow Direction", "Drainage Basins"}) {
+                outputs.push_back(NodeSystem::Pin::createOutput(
+                    outputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            }
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Catchment Area", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            metadata.displayName = "Watershed Analysis";
+            metadata.category = "Hydrology";
+            metadata.description = "Depression-safe D8 drainage, accumulation and catchments";
+            metadata.headerColor = IM_COL32(48, 132, 190, 255);
+            headerColor = ImVec4(0.19f, 0.52f, 0.75f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.WatershedAnalysis"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["rainfall"] = rainfall;
+            j["flatEpsilon"] = flatEpsilon;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            rainfall = clampValue(j.value("rainfall", rainfall), 0.001f, 100.0f);
+            flatEpsilon = clampValue(j.value("flatEpsilon", flatEpsilon), 0.0000001f, 0.01f);
+        }
+    };
+
+    // Converts the depression fill delta into explicit lake bodies. Raster
+    // outputs feed materials/foliage today; pendingWaterBodies is published on
+    // the main thread as the stable contract for lake mesh generation next.
+    class LakeBasinNode : public TerrainNodeBase {
+    public:
+        float minimumDepthMeters = 0.10f;
+        float minimumAreaSquareMeters = 4.0f;
+        int maximumLakes = 64;
+        bool includeClosedBasins = true;
+        std::vector<WaterBodyData> pendingWaterBodies;
+
+        LakeBasinNode() {
+            name = "Lake Basin";
+            terrainNodeType = NodeType::LakeBasin;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Original Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Filled Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Lake Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Lake Depth", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Water Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            for (const char* outputName : {"Shoreline", "Spill Points", "Lake IDs"}) {
+                outputs.push_back(NodeSystem::Pin::createOutput(
+                    outputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            }
+            metadata.displayName = "Lake Basin";
+            metadata.category = "Hydrology";
+            metadata.description = "Extracts lake levels, shorelines, storage and spill outlets";
+            metadata.headerColor = IM_COL32(35, 145, 190, 255);
+            headerColor = ImVec4(0.14f, 0.57f, 0.75f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void publishWaterBodies(TerrainObject* terrain) const;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.LakeBasin"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["minimumDepthMeters"] = minimumDepthMeters;
+            j["minimumAreaSquareMeters"] = minimumAreaSquareMeters;
+            j["maximumLakes"] = maximumLakes;
+            j["includeClosedBasins"] = includeClosedBasins;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            minimumDepthMeters = clampValue(j.value("minimumDepthMeters", minimumDepthMeters), 0.001f, 1000.0f);
+            minimumAreaSquareMeters = clampValue(j.value("minimumAreaSquareMeters", minimumAreaSquareMeters), 0.001f, 1000000000.0f);
+            maximumLakes = clampValue(j.value("maximumLakes", maximumLakes), 1, 4096);
+            includeClosedBasins = j.value("includeClosedBasins", includeClosedBasins);
+        }
+    };
+
+    // Main-thread sink that converts analytical lake fields into owned water
+    // meshes. Marching-squares cell polygons preserve shoreline holes and avoid
+    // the block expansion produced by one-quad-per-wet-sample generation.
+    class LakeSurfaceOutputNode : public TerrainNodeBase {
+    public:
+        float surfaceOffsetMeters = 0.02f;
+        float uvScaleMeters = 4.0f;
+        int maximumGeneratedLakes = 32;
+        bool generateWaterMeshes = true;
+        int sourceLakeNodeId = -1;
+        std::vector<int> generatedWaterSurfaceIds;
+        std::array<NodeSystem::Image2DData, 4> pendingFields;
+
+        LakeSurfaceOutputNode() {
+            name = "Lake Surface Output";
+            terrainNodeType = NodeType::LakeSurfaceOutput;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Lake Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Lake Depth", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Lake Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Lake IDs", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Lake Surface Output";
+            metadata.category = "Output";
+            metadata.description = "Builds owned WaterSurface meshes from analytical lakes";
+            metadata.headerColor = IM_COL32(25, 155, 198, 255);
+            headerColor = ImVec4(0.10f, 0.61f, 0.78f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        bool applyGeneratedLakes(struct ::SceneData& scene, TerrainObject* terrain);
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.LakeSurfaceOutput"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["surfaceOffsetMeters"] = surfaceOffsetMeters;
+            j["uvScaleMeters"] = uvScaleMeters;
+            j["maximumGeneratedLakes"] = maximumGeneratedLakes;
+            j["generateWaterMeshes"] = generateWaterMeshes;
+            j["generatedWaterSurfaceIds"] = generatedWaterSurfaceIds;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            surfaceOffsetMeters = clampValue(j.value("surfaceOffsetMeters", surfaceOffsetMeters), -10.0f, 10.0f);
+            uvScaleMeters = clampValue(j.value("uvScaleMeters", uvScaleMeters), 0.01f, 100000.0f);
+            maximumGeneratedLakes = clampValue(j.value("maximumGeneratedLakes", maximumGeneratedLakes), 1, 4096);
+            generateWaterMeshes = j.value("generateWaterMeshes", generateWaterMeshes);
+            generatedWaterSurfaceIds = j.value("generatedWaterSurfaceIds", std::vector<int>{});
+        }
+    };
+
+    // Converts the watershed's continuous accumulation/direction fields into a
+    // pruned, topologically ordered stream network suitable for spline output.
+    class RiverNetworkNode : public TerrainNodeBase {
+    public:
+        float catchmentThreshold = 0.0015f;
+        int minimumBranchLength = 8;
+
+        RiverNetworkNode() {
+            name = "River Network";
+            terrainNodeType = NodeType::RiverNetwork;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Accumulation", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            for (const char* outputName : {"Channels", "Stream Order", "Sources"}) {
+                outputs.push_back(NodeSystem::Pin::createOutput(
+                    outputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            }
+            metadata.displayName = "River Network";
+            metadata.category = "Hydrology";
+            metadata.description = "Extracts and prunes a connected stream hierarchy";
+            metadata.headerColor = IM_COL32(42, 151, 203, 255);
+            headerColor = ImVec4(0.16f, 0.59f, 0.80f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.RiverNetwork"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["catchmentThreshold"] = catchmentThreshold;
+            j["minimumBranchLength"] = minimumBranchLength;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            catchmentThreshold = clampValue(j.value("catchmentThreshold", catchmentThreshold), 0.00001f, 0.95f);
+            minimumBranchLength = clampValue(j.value("minimumBranchLength", minimumBranchLength), 2, 256);
+        }
+    };
+
+    // Quasi-steady 1D hydraulic solve over the extracted D8 channel graph.
+    // Discharge is catchment/rainfall driven; trapezoidal normal depth follows
+    // Manning and the reverse graph pass enforces a downstream water profile.
+    class RiverHydraulicsNode : public TerrainNodeBase {
+    public:
+        float rainfallMillimetersPerHour = 25.0f;
+        float runoffCoefficient = 0.35f;
+        float dischargeScale = 1.0f;
+        float manningRoughness = 0.035f;
+        float widthCoefficient = 4.5f;
+        float widthExponent = 0.50f;
+        float minimumWidthMeters = 0.35f;
+        float maximumWidthMeters = 80.0f;
+        float minimumDepthMeters = 0.05f;
+        float maximumDepthMeters = 12.0f;
+        float bankSideSlope = 1.5f;
+        float minimumBedSlope = 0.0001f;
+        float minimumSurfaceSlope = 0.00002f;
+        float surfaceOffsetMeters = 0.03f;
+        float bankFreeboardRatio = 0.35f;
+        float minimumFreeboardMeters = 0.08f;
+        float maximumFreeboardMeters = 2.0f;
+
+        RiverHydraulicsNode() {
+            name = "River Hydraulics";
+            terrainNodeType = NodeType::RiverHydraulics;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Bed Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Catchment Area", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Channels", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Lake Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Lake Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Reference Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
+            for (const char* outputName : {"Discharge", "River Width", "Water Depth", "Flow Speed",
+                                           "Water Level", "Froude", "Foam Potential"}) {
+                outputs.push_back(NodeSystem::Pin::createOutput(
+                    outputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            }
+            metadata.displayName = "River Hydraulics";
+            metadata.category = "Hydrology";
+            metadata.description = "Manning discharge, normal depth, velocity and whitewater state";
+            metadata.headerColor = IM_COL32(28, 126, 176, 255);
+            headerColor = ImVec4(0.11f, 0.49f, 0.69f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.RiverHydraulics"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["rainfallMillimetersPerHour"] = rainfallMillimetersPerHour;
+            j["runoffCoefficient"] = runoffCoefficient;
+            j["dischargeScale"] = dischargeScale;
+            j["manningRoughness"] = manningRoughness;
+            j["widthCoefficient"] = widthCoefficient;
+            j["widthExponent"] = widthExponent;
+            j["minimumWidthMeters"] = minimumWidthMeters;
+            j["maximumWidthMeters"] = maximumWidthMeters;
+            j["minimumDepthMeters"] = minimumDepthMeters;
+            j["maximumDepthMeters"] = maximumDepthMeters;
+            j["bankSideSlope"] = bankSideSlope;
+            j["minimumBedSlope"] = minimumBedSlope;
+            j["minimumSurfaceSlope"] = minimumSurfaceSlope;
+            j["surfaceOffsetMeters"] = surfaceOffsetMeters;
+            j["bankFreeboardRatio"] = bankFreeboardRatio;
+            j["minimumFreeboardMeters"] = minimumFreeboardMeters;
+            j["maximumFreeboardMeters"] = maximumFreeboardMeters;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            rainfallMillimetersPerHour = clampValue(j.value("rainfallMillimetersPerHour", rainfallMillimetersPerHour), 0.0f, 2000.0f);
+            runoffCoefficient = clampValue(j.value("runoffCoefficient", runoffCoefficient), 0.0f, 1.0f);
+            dischargeScale = clampValue(j.value("dischargeScale", dischargeScale), 0.001f, 10000.0f);
+            manningRoughness = clampValue(j.value("manningRoughness", manningRoughness), 0.005f, 0.3f);
+            widthCoefficient = clampValue(j.value("widthCoefficient", widthCoefficient), 0.01f, 100.0f);
+            widthExponent = clampValue(j.value("widthExponent", widthExponent), 0.1f, 1.0f);
+            minimumWidthMeters = clampValue(j.value("minimumWidthMeters", minimumWidthMeters), 0.05f, 100.0f);
+            maximumWidthMeters = clampValue(j.value("maximumWidthMeters", maximumWidthMeters), minimumWidthMeters, 2000.0f);
+            minimumDepthMeters = clampValue(j.value("minimumDepthMeters", minimumDepthMeters), 0.005f, 20.0f);
+            maximumDepthMeters = clampValue(j.value("maximumDepthMeters", maximumDepthMeters), minimumDepthMeters, 500.0f);
+            bankSideSlope = clampValue(j.value("bankSideSlope", bankSideSlope), 0.0f, 10.0f);
+            minimumBedSlope = clampValue(j.value("minimumBedSlope", minimumBedSlope), 0.000001f, 1.0f);
+            minimumSurfaceSlope = clampValue(j.value("minimumSurfaceSlope", minimumSurfaceSlope), 0.0f, 0.1f);
+            surfaceOffsetMeters = clampValue(j.value("surfaceOffsetMeters", surfaceOffsetMeters), 0.0f, 10.0f);
+            bankFreeboardRatio = clampValue(j.value("bankFreeboardRatio", bankFreeboardRatio), 0.0f, 5.0f);
+            minimumFreeboardMeters = clampValue(j.value("minimumFreeboardMeters", minimumFreeboardMeters), 0.0f, 20.0f);
+            maximumFreeboardMeters = clampValue(
+                j.value("maximumFreeboardMeters", maximumFreeboardMeters), minimumFreeboardMeters, 100.0f);
+        }
+    };
+
+    // Non-destructive height operator driven by the extracted channel field.
+    // Width and depth grow with contributing area, while overlapping channel
+    // stamps use a max-depth field instead of repeatedly subtracting height.
+    class RiverBedCarveNode : public TerrainNodeBase {
+    public:
+        float minimumWidth = 0.5f;
+        float maximumWidth = 4.0f;
+        float minimumDepth = 0.08f;
+        float maximumDepth = 0.65f;
+        float bankSoftness = 0.65f;
+
+        RiverBedCarveNode() {
+            name = "River Bed Carve";
+            terrainNodeType = NodeType::RiverBedCarve;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Channels", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "River Width", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Water Depth", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Reference Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Water Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Carved Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "River Bed", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "River Bed Carve";
+            metadata.category = "Hydrology";
+            metadata.description = "Area-scaled, non-destructive channel and bank carving";
+            metadata.headerColor = IM_COL32(38, 139, 184, 255);
+            headerColor = ImVec4(0.15f, 0.55f, 0.72f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.RiverBedCarve"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["minimumWidth"] = minimumWidth; j["maximumWidth"] = maximumWidth;
+            j["minimumDepth"] = minimumDepth; j["maximumDepth"] = maximumDepth;
+            j["bankSoftness"] = bankSoftness;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            minimumWidth = clampValue(j.value("minimumWidth", minimumWidth), 0.1f, 100.0f);
+            maximumWidth = clampValue(j.value("maximumWidth", maximumWidth), minimumWidth, 500.0f);
+            minimumDepth = clampValue(j.value("minimumDepth", minimumDepth), 0.0f, 50.0f);
+            maximumDepth = clampValue(j.value("maximumDepth", maximumDepth), minimumDepth, 200.0f);
+            bankSoftness = clampValue(j.value("bankSoftness", bankSoftness), 0.05f, 1.0f);
+        }
+    };
+
+    // Main-thread sink: vectorizes connected channel segments and owns only the
+    // RiverManager entries it generated. Manual rivers remain untouched.
+    class RiverSplineOutputNode : public TerrainNodeBase {
+    public:
+        float minimumWidth = 0.35f;
+        float maximumWidth = 3.5f;
+        float depthScale = 0.22f;
+        int minimumSplinePoints = 2;
+        int pointSpacing = 3;
+        int maximumRivers = 24;
+        bool generateWaterMeshes = true;
+        std::vector<int> generatedRiverIds;
+
+        struct PendingPoint {
+            float x = 0.0f;
+            float y = 0.0f;
+            float strength = 0.0f;
+            float surfaceHeight = 0.0f;
+            float widthMeters = 0.0f;
+            float depthMeters = 0.0f;
+            float flowSpeed = 0.0f;
+            float discharge = 0.0f;
+            float froude = 0.0f;
+            float foamPotential = 0.0f;
+            int sourceIndex = -1;
+        };
+        struct PendingPath {
+            std::vector<PendingPoint> points;
+            float importance = 0.0f;
+            float lengthCells = 0.0f;
+        };
+        std::vector<PendingPath> pendingPaths;
+
+        RiverSplineOutputNode() {
+            name = "River Spline Output";
+            terrainNodeType = NodeType::RiverSplineOutput;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Accumulation", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow Direction", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Channels", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Lake Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Lake Level", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
+            for (const char* inputName : {"River Width", "Water Depth", "Flow Speed", "Discharge",
+                                          "Froude", "Foam Potential", "River Water Level"}) {
+                inputs.push_back(NodeSystem::Pin::createInput(
+                    inputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height, true));
+            }
+            metadata.displayName = "River Spline Output";
+            metadata.category = "Output";
+            metadata.description = "Creates owned RiverSpline branches from a river network";
+            metadata.headerColor = IM_COL32(35, 167, 214, 255);
+            headerColor = ImVec4(0.14f, 0.65f, 0.84f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        bool applyGeneratedRivers(struct ::SceneData& scene, TerrainObject* terrain);
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.RiverSplineOutput"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["minimumWidth"] = minimumWidth;
+            j["maximumWidth"] = maximumWidth;
+            j["depthScale"] = depthScale;
+            j["minimumSplinePoints"] = minimumSplinePoints;
+            j["pointSpacing"] = pointSpacing;
+            j["maximumRivers"] = maximumRivers;
+            j["generateWaterMeshes"] = generateWaterMeshes;
+            j["generatedRiverIds"] = generatedRiverIds;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            minimumWidth = clampValue(j.value("minimumWidth", minimumWidth), 0.1f, 100.0f);
+            maximumWidth = clampValue(j.value("maximumWidth", maximumWidth), minimumWidth, 500.0f);
+            depthScale = clampValue(j.value("depthScale", depthScale), 0.01f, 20.0f);
+            minimumSplinePoints = clampValue(j.value("minimumSplinePoints", minimumSplinePoints), 2, 512);
+            pointSpacing = clampValue(j.value("pointSpacing", pointSpacing), 1, 64);
+            maximumRivers = clampValue(j.value("maximumRivers", maximumRivers), 1, 256);
+            generateWaterMeshes = j.value("generateWaterMeshes", generateWaterMeshes);
+            generatedRiverIds = j.value("generatedRiverIds", std::vector<int>{});
+        }
+    };
+
+    // Explicit sink for persistent named fields. Mesh publication is deferred to
+    // TerrainManager's main-thread mesh finalize path.
+    class TerrainFieldsOutputNode : public TerrainNodeBase {
+    public:
+        TerrainFieldsOutputNode() {
+            name = "Terrain Fields Output";
+            terrainNodeType = NodeType::TerrainFieldsOutput;
+            for (const char* inputName : {"Slope", "Concavity", "Convexity", "Valley", "Wetness",
+                                          "Forest", "Grass", "Rock", "Alpine",
+                                          "Flow Accumulation", "Flow Direction", "Drainage Basins",
+                                          "River Channels", "Stream Order", "River Sources", "River Bed",
+                                          "Lake Mask", "Lake Depth", "Lake Level", "Lake Shoreline",
+                                          "Lake Spill Points", "Lake IDs", "Catchment Area",
+                                          "River Discharge", "River Width", "River Water Depth", "River Flow Speed",
+                                          "River Water Level", "River Froude", "River Foam Potential"}) {
+                inputs.push_back(NodeSystem::Pin::createInput(
+                    inputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            }
+            metadata.displayName = "Terrain Fields Output";
+            metadata.category = "Output";
+            metadata.description = "Publishes terrain, biome and hydrology fields for downstream systems";
+            metadata.headerColor = IM_COL32(55, 170, 135, 255);
+            headerColor = ImVec4(0.22f, 0.67f, 0.53f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        std::string getTypeId() const override { return "TerrainV2.TerrainFieldsOutput"; }
+    };
+
+    enum class BiomeClimatePreset {
+        Custom = 0,
+        TemperateMixed,
+        LushValleys,
+        AlpineTundra,
+        AridHighlands,
+        BorealMountains
+    };
+
+    // Produces a mutually normalized four-biome partition. Every output is
+    // solved together and cached, so material and foliage branches reuse the
+    // exact same classification without recomputing terrain analysis.
+    class BiomeComposerNode : public TerrainNodeBase {
+    public:
+        BiomeClimatePreset preset = BiomeClimatePreset::TemperateMixed;
+        float forestCeiling = 0.72f;
+        float alpineLine = 0.68f;
+        float forestMoisture = 0.32f;
+        float rockSlope = 0.48f;
+        float transition = 0.10f;
+        float exposureDrying = 0.30f;
+
+        BiomeComposerNode() {
+            name = "Biome Composer";
+            terrainNodeType = NodeType::BiomeComposer;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            for (const char* inputName : {"Slope", "Valley", "Wetness", "Exposure"}) {
+                inputs.push_back(NodeSystem::Pin::createInput(
+                    inputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            }
+            for (const char* outputName : {"Forest", "Grass", "Rock", "Alpine"}) {
+                outputs.push_back(NodeSystem::Pin::createOutput(
+                    outputName, NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            }
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Biome Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, 4));
+            metadata.displayName = "Biome Composer";
+            metadata.category = "Data Maps";
+            metadata.headerColor = IM_COL32(74, 154, 92, 255);
+            headerColor = ImVec4(0.29f, 0.60f, 0.36f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        static const char* getPresetName(BiomeClimatePreset value);
+        void applyPreset(BiomeClimatePreset value);
+        std::string getTypeId() const override { return "TerrainV2.BiomeComposer"; }
+        float getCustomWidth() const override { return 180.0f; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["biomePreset"] = static_cast<int>(preset);
+            j["forestCeiling"] = forestCeiling;
+            j["alpineLine"] = alpineLine;
+            j["forestMoisture"] = forestMoisture;
+            j["rockSlope"] = rockSlope;
+            j["transition"] = transition;
+            j["exposureDrying"] = exposureDrying;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            // Graphs saved before biome presets already contain explicit values;
+            // keep those exact values and classify them as Custom.
+            preset = j.contains("biomePreset")
+                ? static_cast<BiomeClimatePreset>(clampValue(j.value("biomePreset", 0), 0, 5))
+                : BiomeClimatePreset::Custom;
+            forestCeiling = clampValue(j.value("forestCeiling", forestCeiling), 0.0f, 1.0f);
+            alpineLine = clampValue(j.value("alpineLine", alpineLine), 0.0f, 1.0f);
+            forestMoisture = clampValue(j.value("forestMoisture", forestMoisture), 0.0f, 1.0f);
+            rockSlope = clampValue(j.value("rockSlope", rockSlope), 0.0f, 1.0f);
+            transition = clampValue(j.value("transition", transition), 0.01f, 0.35f);
+            exposureDrying = clampValue(j.value("exposureDrying", exposureDrying), 0.0f, 1.0f);
+        }
+    };
+
+    // Describes one existing InstanceGroup without owning its sources or generated
+    // transforms. The Custom output transports a compact JSON recipe through the
+    // generic node system; FoliageOutput applies it on the main thread.
+    class FoliageLayerNode : public TerrainNodeBase {
+    public:
+        struct AssetRef {
+            std::string id;
+            std::string name;
+            std::string relativeEntryPath;
+            float weight = 1.0f;
+            float targetHeight = 0.0f;
+            float heightVariation = 0.15f;
+            bool alignToNormal = false;
+            float normalInfluence = 0.0f;
+        };
+        std::string instanceGroupName;
+        int instanceGroupId = -1;
+        bool useAssetLibrary = false;
+        std::string assetBiome = "Auto";
+        std::string assetSearch;
+        std::vector<AssetRef> assetSources;
+        // Transient property-panel hook. The node never owns UI textures; the
+        // SceneUI thumbnail cache supplies them only while properties are drawn.
+        std::function<ImTextureID(const std::string&, int&, int&)> propertyThumbnailProvider;
+        bool settingsCaptured = false;
+        bool layerEnabled = true;
+        float densityMultiplier = 1.0f;
+        int targetCount = 1000;
+        int seed = 1234;
+        float minimumDistance = 0.5f;
+        float maximumSlopeDegrees = 45.0f;
+        float minimumHeight = -10.0f;
+        float maximumHeight = 10.0f;
+        std::string densityField;
+        std::string exclusionField;
+        float exclusionThreshold = 0.5f;
+        std::string scaleField;
+        float scaleFieldInfluence = 1.0f;
+
+        FoliageLayerNode() {
+            name = "Foliage Layer";
+            terrainNodeType = NodeType::FoliageLayer;
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Layer", NodeSystem::DataType::Custom));
+            metadata.displayName = "Foliage Layer";
+            metadata.category = "Foliage";
+            metadata.description = "Binds one distribution rule to an existing foliage layer";
+            metadata.headerColor = IM_COL32(74, 145, 78, 255);
+            headerColor = ImVec4(0.29f, 0.57f, 0.31f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.FoliageLayer"; }
+        float getCustomWidth() const override { return 300.0f; }
+        void serializeToJson(nlohmann::json& j) const override;
+        void deserializeFromJson(const nlohmann::json& j) override;
+    };
+
+    // Lightweight organizational parent. Each input remains a separate
+    // distribution rule; set-level controls are non-destructive multipliers.
+    class FoliageSetNode : public TerrainNodeBase {
+    public:
+        std::string setName = "Biome Foliage";
+        bool setEnabled = true;
+        float densityMultiplier = 1.0f;
+        int seedOffset = 0;
+
+        FoliageSetNode() {
+            name = "Foliage Set / Biome";
+            terrainNodeType = NodeType::FoliageSet;
+            for (int i = 0; i < 8; ++i) {
+                inputs.push_back(NodeSystem::Pin::createInput(
+                    std::string("Layer ") + std::to_string(i + 1),
+                    NodeSystem::DataType::Custom, NodeSystem::ImageSemantic::Generic, true));
+            }
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Foliage Set", NodeSystem::DataType::Custom));
+            metadata.displayName = "Foliage Set / Biome";
+            metadata.category = "Foliage";
+            metadata.description = "Groups independent foliage rules for batch control";
+            metadata.headerColor = IM_COL32(52, 126, 64, 255);
+            headerColor = ImVec4(0.20f, 0.49f, 0.25f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.FoliageSet"; }
+        float getCustomWidth() const override { return 190.0f; }
+        void serializeToJson(nlohmann::json& j) const override;
+        void deserializeFromJson(const nlohmann::json& j) override;
+    };
+
+    // Main-thread sink. It updates authoring settings and can lazily materialize
+    // Asset Library sources without inserting hidden objects into the scene.
+    class FoliageOutputNode : public TerrainNodeBase {
+    public:
+        bool scatterOnApply = true;
+        int lastAppliedLayerCount = 0;
+        int lastMissingLayerCount = 0;
+        int lastMissingAssetCount = 0;
+        int lastSpawnedInstanceCount = 0;
+        std::vector<int> lastScatteredGroupIds;
+
+        FoliageOutputNode() {
+            name = "Foliage Output";
+            terrainNodeType = NodeType::FoliageOutput;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Foliage Set", NodeSystem::DataType::Custom));
+            metadata.displayName = "Foliage Output";
+            metadata.category = "Output";
+            metadata.description = "Applies node recipes to existing foliage instance groups";
+            metadata.headerColor = IM_COL32(42, 158, 91, 255);
+            headerColor = ImVec4(0.16f, 0.62f, 0.36f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.FoliageOutput"; }
+        void serializeToJson(nlohmann::json& j) const override;
+        void deserializeFromJson(const nlohmann::json& j) override;
+    };
+
+    // ============================================================================
+    // GEOLOGICAL DATA MAPS AND SURFACE SYNTHESIS
+    // ============================================================================
+
+    class WetnessMapNode : public TerrainNodeBase {
+    public:
+        float flowInfluence = 0.55f;
+        float concavityInfluence = 0.25f;
+        float flatnessInfluence = 0.20f;
+        float evaporation = 0.15f;
+
+        WetnessMapNode() {
+            name = "Wetness Map";
+            terrainNodeType = NodeType::WetnessMap;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Soil", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Wetness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Wetness Map";
+            metadata.category = "Data Map";
+            metadata.headerColor = IM_COL32(60, 135, 180, 255);
+            headerColor = ImVec4(0.24f, 0.53f, 0.71f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.WetnessMap"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["flowInfluence"] = flowInfluence;
+            j["concavityInfluence"] = concavityInfluence;
+            j["flatnessInfluence"] = flatnessInfluence;
+            j["evaporation"] = evaporation;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            flowInfluence = clampValue(j.value("flowInfluence", flowInfluence), 0.0f, 2.0f);
+            concavityInfluence = clampValue(j.value("concavityInfluence", concavityInfluence), 0.0f, 2.0f);
+            flatnessInfluence = clampValue(j.value("flatnessInfluence", flatnessInfluence), 0.0f, 2.0f);
+            evaporation = clampValue(j.value("evaporation", evaporation), 0.0f, 1.0f);
+        }
+    };
+
+    class SoilDepthNode : public TerrainNodeBase {
+    public:
+        float production = 0.45f;
+        float depositionInfluence = 0.35f;
+        float concavityInfluence = 0.30f;
+        float slopeLoss = 0.55f;
+
+        SoilDepthNode() {
+            name = "Soil Depth";
+            terrainNodeType = NodeType::SoilDepth;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Soil Depth", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Soil Depth";
+            metadata.category = "Data Map";
+            metadata.headerColor = IM_COL32(135, 105, 65, 255);
+            headerColor = ImVec4(0.53f, 0.41f, 0.25f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.SoilDepth"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["production"] = production;
+            j["depositionInfluence"] = depositionInfluence;
+            j["concavityInfluence"] = concavityInfluence;
+            j["slopeLoss"] = slopeLoss;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            production = clampValue(j.value("production", production), 0.0f, 2.0f);
+            depositionInfluence = clampValue(j.value("depositionInfluence", depositionInfluence), 0.0f, 2.0f);
+            concavityInfluence = clampValue(j.value("concavityInfluence", concavityInfluence), 0.0f, 2.0f);
+            slopeLoss = clampValue(j.value("slopeLoss", slopeLoss), 0.0f, 2.0f);
+        }
+    };
+
+    class LithologyNode : public TerrainNodeBase {
+    public:
+        int layerCount = 8;
+        float layerThickness = 4.0f;
+        float baseHardness = 0.50f;
+        float hardnessContrast = 0.70f;
+        float dipDegrees = 8.0f;
+        float dipAzimuth = 35.0f;
+        float warpStrength = 0.35f;
+        int seed = 137;
+
+        LithologyNode() {
+            name = "Lithology";
+            terrainNodeType = NodeType::Lithology;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Warp", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Geology ID", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Lithology";
+            metadata.category = "Geology";
+            metadata.headerColor = IM_COL32(150, 100, 72, 255);
+            headerColor = ImVec4(0.59f, 0.39f, 0.28f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.Lithology"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["layerCount"] = layerCount; j["layerThickness"] = layerThickness;
+            j["baseHardness"] = baseHardness; j["hardnessContrast"] = hardnessContrast;
+            j["dipDegrees"] = dipDegrees; j["dipAzimuth"] = dipAzimuth;
+            j["warpStrength"] = warpStrength; j["seed"] = seed;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            layerCount = clampValue(j.value("layerCount", layerCount), 2, 32);
+            layerThickness = clampValue(j.value("layerThickness", layerThickness), 0.05f, 1000.0f);
+            baseHardness = clampValue(j.value("baseHardness", baseHardness), 0.0f, 1.0f);
+            hardnessContrast = clampValue(j.value("hardnessContrast", hardnessContrast), 0.0f, 1.0f);
+            dipDegrees = clampValue(j.value("dipDegrees", dipDegrees), -75.0f, 75.0f);
+            dipAzimuth = j.value("dipAzimuth", dipAzimuth);
+            warpStrength = clampValue(j.value("warpStrength", warpStrength), 0.0f, 2.0f);
+            seed = j.value("seed", seed);
+        }
+    };
+
+    class StrataNode : public TerrainNodeBase {
+    public:
+        float layerThickness = 4.0f;
+        float dipDegrees = 8.0f;
+        float dipAzimuth = 35.0f;
+        float reliefStrength = 0.015f;
+        float edgeSharpness = 2.0f;
+
+        StrataNode() {
+            name = "Strata";
+            terrainNodeType = NodeType::Strata;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Strata";
+            metadata.category = "Geology";
+            metadata.headerColor = IM_COL32(165, 110, 70, 255);
+            headerColor = ImVec4(0.65f, 0.43f, 0.27f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.Strata"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["layerThickness"] = layerThickness; j["dipDegrees"] = dipDegrees;
+            j["dipAzimuth"] = dipAzimuth; j["reliefStrength"] = reliefStrength;
+            j["edgeSharpness"] = edgeSharpness;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            layerThickness = clampValue(j.value("layerThickness", layerThickness), 0.05f, 1000.0f);
+            dipDegrees = clampValue(j.value("dipDegrees", dipDegrees), -75.0f, 75.0f);
+            dipAzimuth = j.value("dipAzimuth", dipAzimuth);
+            reliefStrength = clampValue(j.value("reliefStrength", reliefStrength), 0.0f, 0.25f);
+            edgeSharpness = clampValue(j.value("edgeSharpness", edgeSharpness), 0.25f, 8.0f);
+        }
+    };
+
+    class SurfaceComposerNode : public TerrainNodeBase {
+    public:
+        float textureScale = 12.0f;
+        float patchiness = 0.35f;
+        float slopeInfluence = 0.65f;
+        float soilInfluence = 0.80f;
+        float flowInfluence = 0.45f;
+        float wetnessInfluence = 0.75f;
+        float hardnessInfluence = 0.60f;
+        float grassInfluence = 1.0f;
+        float rockInfluence = 1.0f;
+        float snowInfluence = 1.0f;
+        float iceInfluence = 0.85f;
+        float contrast = 1.25f;
+        int seed = 73;
+
+        SurfaceComposerNode() {
+            name = "Surface Composer";
+            terrainNodeType = NodeType::SurfaceComposer;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Soil", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Wetness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Snow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Ice", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            // Appended to preserve serialized pin-index compatibility. Erosion
+            // Flow and climate Meltwater are merged internally into splat A.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Meltwater", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            // Explicit authored layers are appended so old serialized pin indices
+            // remain stable. When either pin is unconnected, the legacy
+            // height/slope/soil synthesis remains available as a fallback.
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Grass / Base", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Rock / Slope", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Surface Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Splat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, 4));
+            metadata.displayName = "Surface Composer";
+            metadata.category = "Texture";
+            metadata.headerColor = IM_COL32(190, 135, 52, 255);
+            headerColor = ImVec4(0.75f, 0.53f, 0.20f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.SurfaceComposer"; }
+        float getCustomWidth() const override { return 175.0f; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["textureScale"] = textureScale; j["patchiness"] = patchiness;
+            j["slopeInfluence"] = slopeInfluence; j["soilInfluence"] = soilInfluence;
+            j["flowInfluence"] = flowInfluence; j["wetnessInfluence"] = wetnessInfluence;
+            j["hardnessInfluence"] = hardnessInfluence; j["snowInfluence"] = snowInfluence;
+            j["grassInfluence"] = grassInfluence; j["rockInfluence"] = rockInfluence;
+            j["iceInfluence"] = iceInfluence; j["contrast"] = contrast; j["seed"] = seed;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            textureScale = clampValue(j.value("textureScale", textureScale), 1.0f, 256.0f);
+            patchiness = clampValue(j.value("patchiness", patchiness), 0.0f, 1.0f);
+            slopeInfluence = clampValue(j.value("slopeInfluence", slopeInfluence), 0.0f, 2.0f);
+            soilInfluence = clampValue(j.value("soilInfluence", soilInfluence), 0.0f, 2.0f);
+            flowInfluence = clampValue(j.value("flowInfluence", flowInfluence), 0.0f, 2.0f);
+            wetnessInfluence = clampValue(j.value("wetnessInfluence", wetnessInfluence), 0.0f, 2.0f);
+            hardnessInfluence = clampValue(j.value("hardnessInfluence", hardnessInfluence), 0.0f, 2.0f);
+            grassInfluence = clampValue(j.value("grassInfluence", grassInfluence), 0.0f, 2.0f);
+            rockInfluence = clampValue(j.value("rockInfluence", rockInfluence), 0.0f, 2.0f);
+            snowInfluence = clampValue(j.value("snowInfluence", snowInfluence), 0.0f, 2.0f);
+            iceInfluence = clampValue(j.value("iceInfluence", iceInfluence), 0.0f, 2.0f);
+            contrast = clampValue(j.value("contrast", contrast), 0.1f, 4.0f);
+            seed = j.value("seed", seed);
+        }
+    };
+
+    enum class SnowClimatePreset {
+        Custom = 0,
+        AlpineBalanced,
+        DeepWinter,
+        SpringThaw,
+        WindblownPeaks,
+        GlacierValley
+    };
+
+    class SnowClimateNode : public TerrainNodeBase {
+    public:
+        SnowClimatePreset preset = SnowClimatePreset::AlpineBalanced;
+        float snowfallMeters = 0.45f;
+        float maxDepthMeters = 1.80f;
+        bool affectGeometry = true;
+        float geometryAmount = 1.0f;
+        float coverageAmount = 1.0f;
+        bool relativeSnowLine = true;
+        float snowLineFraction = 0.58f;
+        float snowLineBlendFraction = 0.12f;
+        float snowLine = 6.0f;
+        float snowLineTransition = 2.5f;
+        float baseTemperature = -3.0f;
+        float lapseRate = 6.5f;
+        float meltAmount = 0.18f;
+        float solarMelt = 0.30f;
+        float refreezeRate = 0.35f;
+        float valleyCapture = 0.75f;
+        float transportRate = 0.32f;
+        float slipAngle = 38.0f;
+        int settleIterations = 18;
+        int waterIterations = 10;
+        float windStrength = 0.08f;
+        float windAzimuth = 0.0f;
+        bool useSceneSun = true;
+        float sunAzimuth = 135.0f;
+        float sunElevation = 35.0f;
+
+        SnowClimateNode() {
+            name = "Snow Layer";
+            terrainNodeType = NodeType::SnowClimate;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Base Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Exposure", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Surface Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Snow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Ice", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Meltwater", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Avalanche", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Snow Layer";
+            metadata.category = "Snow & Ice";
+            metadata.headerColor = IM_COL32(105, 180, 220, 255);
+            headerColor = ImVec4(0.41f, 0.71f, 0.86f, 1.0f);
+        }
+
+        static const char* getPresetName(SnowClimatePreset value);
+        void applyPreset(SnowClimatePreset value);
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.SnowClimate"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["solverVersion"] = 2;
+            j["preset"] = static_cast<int>(preset);
+            j["snowfallMeters"] = snowfallMeters; j["maxDepthMeters"] = maxDepthMeters;
+            j["affectGeometry"] = affectGeometry; j["geometryAmount"] = geometryAmount;
+            j["coverageAmount"] = coverageAmount;
+            j["relativeSnowLine"] = relativeSnowLine; j["snowLineFraction"] = snowLineFraction;
+            j["snowLineBlendFraction"] = snowLineBlendFraction;
+            j["snowLine"] = snowLine; j["snowLineTransition"] = snowLineTransition;
+            j["baseTemperature"] = baseTemperature; j["lapseRate"] = lapseRate;
+            j["meltAmount"] = meltAmount; j["solarMelt"] = solarMelt; j["refreezeRate"] = refreezeRate;
+            j["valleyCapture"] = valleyCapture; j["transportRate"] = transportRate;
+            j["slipAngle"] = slipAngle; j["settleIterations"] = settleIterations;
+            j["waterIterations"] = waterIterations; j["windStrength"] = windStrength;
+            j["windAzimuth"] = windAzimuth; j["useSceneSun"] = useSceneSun;
+            j["sunAzimuth"] = sunAzimuth; j["sunElevation"] = sunElevation;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (name == "Snow Climate") name = "Snow Layer";
+            preset = static_cast<SnowClimatePreset>(clampValue(j.value("preset", static_cast<int>(preset)), 0, 5));
+            // Migration from the first Snow Climate version, whose presets
+            // stored only an absolute metre snow line. Named presets can safely
+            // receive their new relative defaults; Custom values stay untouched.
+            if (!j.contains("snowLineFraction") && preset != SnowClimatePreset::Custom) applyPreset(preset);
+            snowfallMeters = clampValue(j.value("snowfallMeters", snowfallMeters), 0.0f, 1000.0f);
+            maxDepthMeters = clampValue(j.value("maxDepthMeters", maxDepthMeters), 0.01f, 1000.0f);
+            affectGeometry = j.value("affectGeometry", affectGeometry);
+            geometryAmount = clampValue(j.value("geometryAmount", geometryAmount), 0.0f, 2.0f);
+            coverageAmount = clampValue(j.value("coverageAmount", coverageAmount), 0.0f, 2.0f);
+            relativeSnowLine = j.value("relativeSnowLine", relativeSnowLine);
+            snowLineFraction = clampValue(j.value("snowLineFraction", snowLineFraction), 0.0f, 1.0f);
+            snowLineBlendFraction = clampValue(j.value("snowLineBlendFraction", snowLineBlendFraction), 0.001f, 1.0f);
+            snowLine = j.value("snowLine", snowLine);
+            snowLineTransition = clampValue(j.value("snowLineTransition", snowLineTransition), 0.01f, 1000.0f);
+            baseTemperature = clampValue(j.value("baseTemperature", baseTemperature), -80.0f, 60.0f);
+            lapseRate = clampValue(j.value("lapseRate", lapseRate), 0.0f, 20.0f);
+            meltAmount = clampValue(j.value("meltAmount", meltAmount), 0.0f, 1.0f);
+            solarMelt = clampValue(j.value("solarMelt", solarMelt), 0.0f, 1.0f);
+            refreezeRate = clampValue(j.value("refreezeRate", refreezeRate), 0.0f, 1.0f);
+            valleyCapture = clampValue(j.value("valleyCapture", valleyCapture), 0.0f, 2.0f);
+            transportRate = clampValue(j.value("transportRate", transportRate), 0.0f, 1.0f);
+            slipAngle = clampValue(j.value("slipAngle", slipAngle), 5.0f, 80.0f);
+            settleIterations = clampValue(j.value("settleIterations", settleIterations), 1, 64);
+            waterIterations = clampValue(j.value("waterIterations", waterIterations), 1, 64);
+            windStrength = clampValue(j.value("windStrength", windStrength), 0.0f, 1.0f);
+            windAzimuth = j.value("windAzimuth", windAzimuth);
+            useSceneSun = j.value("useSceneSun", useSceneSun);
+            sunAzimuth = j.value("sunAzimuth", sunAzimuth);
+            sunElevation = clampValue(j.value("sunElevation", sunElevation), -89.0f, 89.0f);
+            if (j.value("solverVersion", 1) < 2 && preset != SnowClimatePreset::Custom) {
+                // Version 1 presets used depths far outside the default
+                // terrain's physical scale. Migrate named presets to the
+                // stable solver values while retaining the artist's new
+                // geometry/coverage choices when they already exist.
+                const bool savedAffectGeometry = affectGeometry;
+                const float savedGeometryAmount = geometryAmount;
+                const float savedCoverageAmount = coverageAmount;
+                applyPreset(preset);
+                affectGeometry = savedAffectGeometry;
+                geometryAmount = savedGeometryAmount;
+                coverageAmount = savedCoverageAmount;
+            }
+        }
+    };
+
+    class ClimateNode : public TerrainNodeBase {
+    public:
+        float seaLevelTemperature = 4.0f;
+        float lapseRate = 6.5f;
+        float freezePoint = 0.0f;
+        float temperatureTransition = 3.0f;
+        float snowLine = 6.0f;
+        float snowLineTransition = 2.0f;
+        float solarHeating = 4.0f;
+        float sunAzimuth = 180.0f;
+        float sunElevation = 35.0f;
+
+        ClimateNode() {
+            name = "Climate";
+            terrainNodeType = NodeType::Climate;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Exposure", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Coldness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Solar Heat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Climate";
+            metadata.category = "Snow & Ice";
+            metadata.headerColor = IM_COL32(80, 145, 190, 255);
+            headerColor = ImVec4(0.31f, 0.57f, 0.75f, 1.0f);
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.Climate"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["seaLevelTemperature"] = seaLevelTemperature; j["lapseRate"] = lapseRate;
+            j["freezePoint"] = freezePoint; j["temperatureTransition"] = temperatureTransition;
+            j["snowLine"] = snowLine; j["snowLineTransition"] = snowLineTransition;
+            j["solarHeating"] = solarHeating; j["sunAzimuth"] = sunAzimuth;
+            j["sunElevation"] = sunElevation;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            seaLevelTemperature = clampValue(j.value("seaLevelTemperature", seaLevelTemperature), -50.0f, 50.0f);
+            lapseRate = clampValue(j.value("lapseRate", lapseRate), 0.0f, 20.0f);
+            freezePoint = clampValue(j.value("freezePoint", freezePoint), -20.0f, 10.0f);
+            temperatureTransition = clampValue(j.value("temperatureTransition", temperatureTransition), 0.1f, 20.0f);
+            snowLine = j.value("snowLine", snowLine);
+            snowLineTransition = clampValue(j.value("snowLineTransition", snowLineTransition), 0.01f, 1000.0f);
+            solarHeating = clampValue(j.value("solarHeating", solarHeating), 0.0f, 20.0f);
+            sunAzimuth = j.value("sunAzimuth", sunAzimuth);
+            sunElevation = clampValue(j.value("sunElevation", sunElevation), 1.0f, 89.0f);
+        }
+    };
+
+    class SnowfallNode : public TerrainNodeBase {
+    public:
+        float amount = 0.80f;
+        float snowLine = 6.0f;
+        float snowLineTransition = 2.0f;
+        float slopeAdhesion = 0.45f;
+        float sunLoss = 0.35f;
+        float windScour = 0.20f;
+        float patchScale = 18.0f;
+        int seed = 211;
+
+        SnowfallNode() {
+            name = "Snowfall";
+            terrainNodeType = NodeType::Snowfall;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Coldness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Exposure", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Snow Mass", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Snowfall";
+            metadata.category = "Snow & Ice";
+            metadata.headerColor = IM_COL32(175, 210, 230, 255);
+            headerColor = ImVec4(0.68f, 0.82f, 0.90f, 1.0f);
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.Snowfall"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["amount"] = amount; j["snowLine"] = snowLine; j["snowLineTransition"] = snowLineTransition;
+            j["slopeAdhesion"] = slopeAdhesion; j["sunLoss"] = sunLoss; j["windScour"] = windScour;
+            j["patchScale"] = patchScale; j["seed"] = seed;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            amount = clampValue(j.value("amount", amount), 0.0f, 4.0f);
+            snowLine = j.value("snowLine", snowLine);
+            snowLineTransition = clampValue(j.value("snowLineTransition", snowLineTransition), 0.01f, 1000.0f);
+            slopeAdhesion = clampValue(j.value("slopeAdhesion", slopeAdhesion), 0.0f, 1.0f);
+            sunLoss = clampValue(j.value("sunLoss", sunLoss), 0.0f, 1.0f);
+            windScour = clampValue(j.value("windScour", windScour), 0.0f, 1.0f);
+            patchScale = clampValue(j.value("patchScale", patchScale), 1.0f, 256.0f);
+            seed = j.value("seed", seed);
+        }
+    };
+
+    class SnowSettleNode : public TerrainNodeBase {
+    public:
+        int iterations = 8;
+        float slipAngle = 38.0f;
+        float avalancheRate = 0.35f;
+        float compaction = 0.15f;
+        float windAzimuth = 45.0f;
+        float windStrength = 0.12f;
+        float depthScale = 0.025f;
+
+        SnowSettleNode() {
+            name = "Snow Settle";
+            terrainNodeType = NodeType::SnowSettle;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Snow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Settled Snow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Snow Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            metadata.displayName = "Snow Settle";
+            metadata.category = "Snow & Ice";
+            metadata.headerColor = IM_COL32(145, 190, 220, 255);
+            headerColor = ImVec4(0.57f, 0.75f, 0.86f, 1.0f);
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.SnowSettle"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["iterations"] = iterations; j["slipAngle"] = slipAngle; j["avalancheRate"] = avalancheRate;
+            j["compaction"] = compaction; j["windAzimuth"] = windAzimuth;
+            j["windStrength"] = windStrength; j["depthScale"] = depthScale;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            iterations = clampValue(j.value("iterations", iterations), 1, 64);
+            slipAngle = clampValue(j.value("slipAngle", slipAngle), 5.0f, 80.0f);
+            avalancheRate = clampValue(j.value("avalancheRate", avalancheRate), 0.0f, 1.0f);
+            compaction = clampValue(j.value("compaction", compaction), 0.0f, 1.0f);
+            windAzimuth = j.value("windAzimuth", windAzimuth);
+            windStrength = clampValue(j.value("windStrength", windStrength), 0.0f, 0.5f);
+            depthScale = clampValue(j.value("depthScale", depthScale), 0.0f, 0.25f);
+        }
+    };
+
+    class SnowMeltFreezeNode : public TerrainNodeBase {
+    public:
+        float meltRate = 0.55f;
+        float solarMelt = 0.45f;
+        float freezeRate = 0.45f;
+        float iceCompaction = 0.15f;
+
+        SnowMeltFreezeNode() {
+            name = "Snow Melt / Freeze";
+            terrainNodeType = NodeType::SnowMeltFreeze;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Snow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Coldness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Solar Heat", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Wetness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Snow", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Meltwater", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Ice", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Snow Melt / Freeze";
+            metadata.category = "Snow & Ice";
+            metadata.headerColor = IM_COL32(90, 170, 210, 255);
+            headerColor = ImVec4(0.35f, 0.67f, 0.82f, 1.0f);
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.SnowMeltFreeze"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["meltRate"] = meltRate; j["solarMelt"] = solarMelt;
+            j["freezeRate"] = freezeRate; j["iceCompaction"] = iceCompaction;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            meltRate = clampValue(j.value("meltRate", meltRate), 0.0f, 1.0f);
+            solarMelt = clampValue(j.value("solarMelt", solarMelt), 0.0f, 1.0f);
+            freezeRate = clampValue(j.value("freezeRate", freezeRate), 0.0f, 1.0f);
+            iceCompaction = clampValue(j.value("iceCompaction", iceCompaction), 0.0f, 1.0f);
+        }
+    };
+
+    class GlacierFlowNode : public TerrainNodeBase {
+    public:
+        int iterations = 10;
+        float flowStrength = 0.25f;
+        float iceDepthScale = 0.04f;
+        float carvingStrength = 0.004f;
+        float depositionStrength = 0.0015f;
+
+        GlacierFlowNode() {
+            name = "Glacier Flow";
+            terrainNodeType = NodeType::GlacierFlow;
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Ice", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Glacial Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Ice", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            metadata.displayName = "Glacier Flow";
+            metadata.category = "Snow & Ice";
+            metadata.headerColor = IM_COL32(70, 155, 200, 255);
+            headerColor = ImVec4(0.27f, 0.61f, 0.78f, 1.0f);
+        }
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.GlacierFlow"; }
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["iterations"] = iterations; j["flowStrength"] = flowStrength;
+            j["iceDepthScale"] = iceDepthScale; j["carvingStrength"] = carvingStrength;
+            j["depositionStrength"] = depositionStrength;
+        }
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            iterations = clampValue(j.value("iterations", iterations), 1, 64);
+            flowStrength = clampValue(j.value("flowStrength", flowStrength), 0.0f, 0.75f);
+            iceDepthScale = clampValue(j.value("iceDepthScale", iceDepthScale), 0.0f, 0.25f);
+            carvingStrength = clampValue(j.value("carvingStrength", carvingStrength), 0.0f, 0.05f);
+            depositionStrength = clampValue(j.value("depositionStrength", depositionStrength), 0.0f, 0.05f);
+        }
+    };
+
+    // ============================================================================
     // TERRAIN GRAPH WRAPPER
     // ============================================================================
     
@@ -2406,6 +4117,13 @@ namespace TerrainNodesV2 {
      */
     class TerrainNodeGraphV2 : public NodeSystem::GraphBase {
     public:
+        enum class DirtyEvaluationImpact {
+            None,
+            MaterialOnly,
+            FoliageOnly,
+            GeometryOrScene
+        };
+
         TerrainNodeGraphV2() = default;
         
         // Factory method for creating nodes by type
@@ -2426,11 +4144,14 @@ namespace TerrainNodesV2 {
         // Phase A (safe to call from a worker thread): pulls HeightOutputNode,
         // writes terrain->heightmap.data. No GPU/backend calls. Returns true if
         // heightmap data was updated (mirrors evaluateTerrain's early-returns).
-        bool evaluateTerrainHeightData(TerrainObject* terrain, NodeSystem::EvaluationContext& ctx);
+        bool evaluateTerrainHeightData(TerrainObject* terrain, NodeSystem::EvaluationContext& ctx,
+                                       uint32_t previewNodeId = 0);
 
-        // Phase B (MAIN THREAD ONLY): pulls Splat/Hardness output nodes — touches
-        // TerrainObject::splatMap->updateGPU(), a GPU texture upload.
-        void evaluateTerrainAuxOutputs(TerrainObject* terrain, NodeSystem::EvaluationContext& ctx);
+        // Phase B (MAIN THREAD ONLY): pulls Splat/Hardness/field outputs and
+        // applies RiverSpline sinks. This may upload textures and mutate scene
+        // geometry through RiverManager.
+        bool evaluateTerrainAuxOutputs(TerrainObject* terrain, struct ::SceneData& scene,
+                                       NodeSystem::EvaluationContext& ctx);
 
         // Phase C (MAIN THREAD ONLY): resize/topology-mismatch mesh rebuild —
         // touches scene.world.objects / mesh_triangles, shared with render/BVH.
@@ -2441,12 +4162,31 @@ namespace TerrainNodesV2 {
         // evaluation is already in flight for this graph.
         void evaluateTerrainAsync(TerrainObject* terrain, struct ::SceneData& scene);
 
+        // Transient selected-node preview. The selected node becomes a temporary
+        // terminal and only its upstream dependency subgraph is pulled. Cached
+        // PinValues from the previous evaluation are reused when still valid.
+        // Preview never becomes authored terrain state; restoreTerrainPreview()
+        // returns to the last committed Height Output result.
+        void evaluateTerrainPreviewAsync(uint32_t nodeId, TerrainObject* terrain, struct ::SceneData& scene);
+        bool restoreTerrainPreview(TerrainObject* terrain, struct ::SceneData& scene);
+        bool isPreviewActive() const { return previewActive_; }
+        uint32_t previewNodeId() const { return displayedPreviewNodeId_; }
+
         // Call once per frame from the node-editor draw path (main thread). If the
         // background phase A has finished, runs phases B+C synchronously and
         // returns true (caller should then fire the usual GPU/backend rebuild
         // flags, same as the old synchronous button handler did). Returns false
         // while still evaluating or when nothing is pending.
         bool pollEvaluateAsync();
+
+        // Classifies the currently dirty downstream contract. A mask edit that
+        // reaches only Splat Output can reuse the committed height cache and
+        // update material textures without touching terrain geometry/BVH.
+        DirtyEvaluationImpact classifyDirtyEvaluationImpact();
+        bool evaluateDirtyMaterialOutputs(TerrainObject* terrain, struct ::SceneData& scene);
+        bool evaluateDirtyFoliageOutputs(TerrainObject* terrain);
+        std::vector<int> getLastScatteredFoliageGroupIds() const;
+        bool hasEvaluationCache() const { return cachedEvalContext_ != nullptr; }
 
         // True if the most recent finalizeTerrainMesh() call had to take the full
         // rebuild branch (terrain resolution/topology changed — new Triangle
@@ -2463,16 +4203,65 @@ namespace TerrainNodesV2 {
 
         // GraphBase overrides so NodeEditorUIV2::drawNode() can show a per-node
         // "currently active" indicator + overall progress generically.
-        bool isEvaluatingAsync() const override { return isEvaluating.load(); }
+        // Keep consumers locked until the completed worker result has also gone
+        // through pollEvaluateAsync() and its main-thread finalize phase.
+        bool isEvaluatingAsync() const override { return isEvaluating.load() || evalFuture_.valid(); }
         uint32_t currentAsyncNodeId() const override {
             return activeEvalContext ? activeEvalContext->getCurrentNodeId() : 0;
         }
         float asyncEvalProgress() const override {
             return activeEvalContext ? activeEvalContext->getProgress() : 0.0f;
         }
+        NodeSystem::NodeEvaluationState asyncNodeState(uint32_t nodeId) const override {
+            if (activeEvalContext) return activeEvalContext->getNodeState(nodeId);
+            if (cachedEvalContext_) return cachedEvalContext_->getNodeState(nodeId);
+            return NodeSystem::NodeEvaluationState::Idle;
+        }
+
+        // Reuse the most recent terrain-evaluation cache for lightweight UI
+        // previews. This avoids pulling an expensive node chain a second time
+        // merely to display one of the outputs it already produced.
+        bool getCachedImageOutput(uint32_t nodeId, int outputIndex,
+                                  NodeSystem::Image2DData& image) const {
+            NodeSystem::NodeBase* node = getNode(nodeId);
+            if (!node || node->dirty || !cachedEvalContext_ ||
+                !cachedEvalContext_->hasCachedValue(nodeId, outputIndex)) {
+                return false;
+            }
+            NodeSystem::PinValue value = cachedEvalContext_->getCachedValue(nodeId, outputIndex);
+            const auto* cachedImage = std::get_if<NodeSystem::Image2DData>(&value);
+            if (!cachedImage || !cachedImage->isValid()) return false;
+            image = *cachedImage;
+            return true;
+        }
 
         // Create a default graph with basic nodes
         void createDefaultGraph(TerrainObject* terrain);
+
+        // Non-destructive authoring helper: inserts a Snow Climate node before
+        // the active Height Output and wires its material outputs to the active
+        // Surface Composer/Splat Output chain. Existing grass/rock/flow inputs
+        // on the composer are preserved.
+        bool addSnowLayerSetup(float x = 520.0f, float y = 120.0f);
+
+        // Non-destructive biome authoring helper. Reuses an existing analysis,
+        // exposure, composer and fields-output chain when present, otherwise
+        // creates and wires the missing nodes from the active Height Output source.
+        bool addBiomeFieldsSetup(BiomeClimatePreset preset,
+                                 float x = 520.0f, float y = 120.0f);
+
+        // Adds four independent biome-driven foliage layers (forest, grass,
+        // rock and alpine), grouped under one Foliage Set and output sink.
+        bool addBiomeFoliageSetup(float x = 1120.0f, float y = 120.0f);
+
+        // Non-destructive hydrology branch from the active authored height.
+        // The Height Output connection is not replaced; the new branch publishes
+        // a watershed, vector river network and owned RiverSpline sink.
+        bool addRiverNetworkSetup(float x = 520.0f, float y = 520.0f);
+
+        // Destructive example/template graph built from the same public nodes
+        // artists use manually. Intended as a learnable starting point.
+        void createSnowyMountainValleyGraph(TerrainObject* terrain);
         
         // ========================================================================
         // SERIALIZATION
@@ -2497,6 +4286,25 @@ namespace TerrainNodesV2 {
         std::unique_ptr<TerrainContext> activeTerrainCtx_;
         std::atomic<bool> lastEvaluateResized_{false};
         std::atomic<bool> lastFinalizeWasFullRebuild_{false};
+        std::atomic<bool> lastHeightDataUpdated_{false};
+        std::shared_ptr<NodeSystem::EvaluationContext> cachedEvalContext_;
+        std::unique_ptr<TerrainContext> cachedTerrainCtx_;
+        bool pendingEvaluationIsPreview_ = false;
+        uint32_t pendingPreviewNodeId_ = 0;
+        uint32_t displayedPreviewNodeId_ = 0;
+        bool previewActive_ = false;
+        int committedPreviewWidth_ = 0;
+        int committedPreviewHeight_ = 0;
+        float committedPreviewScaleXZ_ = 100.0f;
+        float committedPreviewScaleY_ = 10.0f;
+        std::vector<float> committedPreviewHeightData_;
+        std::vector<float> committedPreviewFlowMap_;
+        std::vector<float> committedPreviewHardnessMap_;
+        std::vector<float> committedPreviewErosionMapRGBA_;
+
+        void captureCommittedTerrainForPreview(TerrainObject* terrain);
+        void restoreCommittedTerrainData(TerrainObject* terrain);
+        void clearCommittedPreviewSnapshot();
     };
 
 } // namespace TerrainNodesV2

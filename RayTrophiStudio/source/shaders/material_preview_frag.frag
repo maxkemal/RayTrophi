@@ -19,6 +19,13 @@ layout(location = 0) out vec4 outColor;
 layout(set = 0, binding = 0, std430) readonly buffer MaterialBuffer {
     GpuMaterial materials[];
 };
+// COLD half of the split material record (see material_struct.glsl). The
+// preview only touches it for micro-detail / sheen / SSS tint, loaded at the
+// use sites via the macro below.
+layout(set = 0, binding = 4, std430) readonly buffer MaterialExtBuffer {
+    MaterialExt materialsExt[];
+};
+#define matx materialsExt[materialIndex]
 
 // Texture array — same slots as RT pipeline binding 6
 // Access guarded by albedo_tex/normal_tex > 0 checks.
@@ -402,9 +409,9 @@ void main() {
     // ── Procedural detail: subtle color variation + dirt + roughness ──
     // micro_detail_strength drives all world-space effects without touching UVs.
     // tile_break_strength (above) is separate — warps UV only when needed.
-    if (mat.micro_detail_strength > 0.0) {
-        float sc  = max(mat.micro_detail_scale, 0.5);
-        float str = mat.micro_detail_strength;
+    if (matx.micro_detail_strength > 0.0) {
+        float sc  = max(matx.micro_detail_scale, 0.5);
+        float str = matx.micro_detail_strength;
 
         // Subtle world-space luminance variation — preserves texture detail,
         // breaks the "too clean" uniform look. ±8% max, independent seed.
@@ -476,10 +483,10 @@ void main() {
     }
 
     // ── Sheen / SSS material params ──
-    float sheenWeight    = clamp(mat.sheen, 0.0, 1.0);
-    vec3  sheenColor     = mix(vec3(1.0), albedo, clamp(mat.sheen_tint, 0.0, 1.0)) * sheenWeight;
+    float sheenWeight    = clamp(matx.sheen, 0.0, 1.0);
+    vec3  sheenColor     = mix(vec3(1.0), albedo, clamp(matx.sheen_tint, 0.0, 1.0)) * sheenWeight;
     float sssAmount      = clamp(mat.subsurface_amount, 0.0, 1.0);
-    vec3  sssColor       = vec3(mat.subsurface_r, mat.subsurface_g, mat.subsurface_b);
+    vec3  sssColor       = vec3(matx.subsurface_r, matx.subsurface_g, matx.subsurface_b);
 
     vec3 diffuseLit  = vec3(0.0);
     vec3 specularLit = vec3(0.0);

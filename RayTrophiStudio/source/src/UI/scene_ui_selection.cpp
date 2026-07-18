@@ -479,6 +479,13 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 for (auto& [obj_name, tris] : mesh_cache) {
                     if (tris.empty()) continue;
                     if (!tris[0].second->getTransformPtr()) continue;
+
+                    // Skinning already owns GeometryDetail::P/N. Rigidly copying
+                    // P_orig through the object transform here destroys the live
+                    // animated pose immediately before the CPU pick ray. The later
+                    // skin pass may legitimately skip on an unchanged pose hash, so
+                    // this overwrite must never happen for either facade or flat rigs.
+                    if (tris[0].second->hasAnySkinWeights()) continue;
                     
                     // Compare against last synced transform to avoid redundant calculations
                     Transform* t_ptr = tris[0].second->getTransformPtr();
@@ -604,7 +611,9 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 }
             }
 
-            std::vector<Triangle*> skin_work;
+            std::vector<Triangle*> legacy_skin_work;
+            std::vector<TriangleMesh*> flat_skin_work;
+            std::unordered_set<TriangleMesh*> queued_flat_meshes;
             for (auto& [obj_name, tris] : mesh_cache) {
                 if (tris.empty() || !tris[0].second->hasAnySkinWeights()) continue;
                 // Root transform joins the hash (apply_skinning output depends
@@ -613,32 +622,59 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 Matrix4x4 m = tris[0].second->getTransformMatrix();
                 for (int r = 0; r < 3; ++r)
                     for (int c = 0; c < 4; ++c) mixSkinF(m.m[r][c]);
+
+                // A direct flat mesh must remain in LOCAL skinned space;
+                // TriangleMesh::hit() applies its Transform exactly once. Calling
+                // the representative facade's legacy apply_skinning() would bake
+                // the root transform into P and make CPU picking double-transform it.
+                bool hasDirectFlatMesh = false;
+                for (const auto& pair : tris) {
+                    const int objectIndex = pair.first;
+                    if (objectIndex < 0 ||
+                        static_cast<size_t>(objectIndex) >= ctx.scene.world.objects.size()) continue;
+                    auto flatMesh = std::dynamic_pointer_cast<TriangleMesh>(
+                        ctx.scene.world.objects[static_cast<size_t>(objectIndex)]);
+                    if (!flatMesh || !flatMesh->hasSkinWeights()) continue;
+                    hasDirectFlatMesh = true;
+                    if (queued_flat_meshes.insert(flatMesh.get()).second) {
+                        flat_skin_work.push_back(flatMesh.get());
+                    }
+                }
+                if (hasDirectFlatMesh) {
+                    continue;
+                }
+
                 for (auto& pair : tris) {
                     if (pair.second && pair.second->hasSkinData()) {
-                        skin_work.push_back(pair.second.get());
+                        legacy_skin_work.push_back(pair.second.get());
                     }
                 }
             }
 
             static uint64_t s_last_pick_skin_hash = 0;
-            if (!skin_work.empty() && skin_hash != s_last_pick_skin_hash) {
+            if ((!legacy_skin_work.empty() || !flat_skin_work.empty()) &&
+                skin_hash != s_last_pick_skin_hash) {
+                for (TriangleMesh* mesh : flat_skin_work) {
+                    if (mesh) mesh->applySkinning(pick_bones);
+                }
+
                 auto runSkinRange = [&](size_t s, size_t e) {
                     for (size_t i = s; i < e; ++i) {
-                        skin_work[i]->apply_skinning(pick_bones);
+                        legacy_skin_work[i]->apply_skinning(pick_bones);
                     }
                 };
                 const size_t kParallelSkinThreshold = 8192;
                 unsigned skinThreads = std::thread::hardware_concurrency();
                 if (skinThreads == 0) skinThreads = 4;
-                if (skin_work.size() < kParallelSkinThreshold || skinThreads < 2) {
-                    runSkinRange(0, skin_work.size());
+                if (legacy_skin_work.size() < kParallelSkinThreshold || skinThreads < 2) {
+                    runSkinRange(0, legacy_skin_work.size());
                 } else {
-                    const size_t chunk = (skin_work.size() + skinThreads - 1) / skinThreads;
+                    const size_t chunk = (legacy_skin_work.size() + skinThreads - 1) / skinThreads;
                     std::vector<std::future<void>> futures;
                     futures.reserve(skinThreads);
                     for (unsigned t = 0; t < skinThreads; ++t) {
                         const size_t s = t * chunk;
-                        const size_t e = (std::min)(s + chunk, skin_work.size());
+                        const size_t e = (std::min)(s + chunk, legacy_skin_work.size());
                         if (s >= e) break;
                         futures.push_back(std::async(std::launch::async, runSkinRange, s, e));
                     }
@@ -646,7 +682,8 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 }
                 s_last_pick_skin_hash = skin_hash;
                 SCENE_LOG_INFO("Synced skinned mesh vertices for viewport selection (" +
-                               std::to_string(skin_work.size()) + " tris)");
+                               std::to_string(flat_skin_work.size()) + " flat meshes, " +
+                               std::to_string(legacy_skin_work.size()) + " legacy tris)");
             }
         }
 
@@ -1135,19 +1172,22 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     } else {
                         ctx.selection.selectObject(first_tri, index, first_tri->getNodeName());
                         
-                        // TERRAIN CONNECTION: Check if this is a terrain chunk
+                        // Bind terrain tools/graph by the persistent mesh ID. Name
+                        // lookup remains only for legacy meshes without terrain_id.
+                        TerrainObject* terrain = first_tri->terrain_id >= 0
+                            ? TerrainManager::getInstance().getTerrain(first_tri->terrain_id)
+                            : nullptr;
                         std::string tName = first_tri->getNodeName();
-                        if (tName.find("Terrain_") == 0) {
+                        if (!terrain && tName.find("Terrain_") == 0) {
                             size_t chunkPos = tName.find("_Chunk");
                             if (chunkPos != std::string::npos) {
                                 tName = tName.substr(0, chunkPos);
                             }
-                            auto terrain = TerrainManager::getInstance().getTerrainByName(tName);
-                            if (terrain) {
-                                terrain_brush.active_terrain_id = terrain->id;
-                                show_terrain_tab = true;
-                                //SCENE_LOG_INFO("Terrain selected via GPU pick: " + tName);
-                            }
+                            terrain = TerrainManager::getInstance().getTerrainByName(tName);
+                        }
+                        if (terrain) {
+                            terrain_brush.active_terrain_id = terrain->id;
+                            show_terrain_tab = true;
                         }
                     }
                     return; // GPU pick selection done
@@ -1280,18 +1320,20 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                             ctx.selection.selectObject(found_tri, index, found_tri->getNodeName());
                            // SCENE_LOG_INFO("Selected via CPU Viewport: " + found_tri->nodeName);
 
-                            // TERRAIN CONNECTION: Check if this is a terrain chunk
+                            TerrainObject* terrain = found_tri->terrain_id >= 0
+                                ? TerrainManager::getInstance().getTerrain(found_tri->terrain_id)
+                                : nullptr;
                             std::string tName = found_tri->getNodeName();
-                            if (tName.find("Terrain_") == 0) {
+                            if (!terrain && tName.find("Terrain_") == 0) {
                                 size_t chunkPos = tName.find("_Chunk");
                                 if (chunkPos != std::string::npos) {
                                     tName = tName.substr(0, chunkPos);
                                 }
-                                auto terrain = TerrainManager::getInstance().getTerrainByName(tName);
-                                if (terrain) {
-                                    terrain_brush.active_terrain_id = terrain->id;
-                                    show_terrain_tab = true;
-                                }
+                                terrain = TerrainManager::getInstance().getTerrainByName(tName);
+                            }
+                            if (terrain) {
+                                terrain_brush.active_terrain_id = terrain->id;
+                                show_terrain_tab = true;
                             }
                         }
                     } else {
@@ -1349,21 +1391,60 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 else if (rec.tri_mesh) {
                     if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
                     auto repIt = direct_mesh_rep_by_ptr.find(rec.tri_mesh);
-                    if (repIt != direct_mesh_rep_by_ptr.end() && repIt->second) {
-                        auto found_tri = repIt->second;
+                    std::shared_ptr<Triangle> found_tri =
+                        (repIt != direct_mesh_rep_by_ptr.end()) ? repIt->second : nullptr;
+                    std::shared_ptr<TriangleMesh> found_mesh;
+                    int direct_index = -1;
+
+                    for (size_t i = 0; i < ctx.scene.world.objects.size(); ++i) {
+                        auto world_mesh = std::dynamic_pointer_cast<TriangleMesh>(ctx.scene.world.objects[i]);
+                        if (world_mesh && world_mesh.get() == rec.tri_mesh) {
+                            found_mesh = world_mesh;
+                            direct_index = static_cast<int>(i);
+                            break;
+                        }
+                    }
+
+                    // A live import/topology swap can produce a valid flat hit
+                    // before the UI representative cache is refreshed. Resolve the
+                    // canonical world mesh by identity and create only the single
+                    // lightweight selection handle needed by the legacy gizmo API.
+                    if (!found_tri) {
+                        if (found_mesh) {
+                            auto& world_mesh = found_mesh;
+                            const size_t faceCount = world_mesh->geometry
+                                ? world_mesh->geometry->indices.size() / 3
+                                : 0;
+                            const uint32_t repFace = faceCount > 0
+                                ? (std::min)(rec.tri_face, static_cast<uint32_t>(faceCount - 1))
+                                : 0u;
+                            found_tri = std::make_shared<Triangle>(world_mesh, repFace);
+                            const std::string cacheName = world_mesh->nodeName.empty()
+                                ? "Unnamed"
+                                : world_mesh->nodeName;
+                            direct_mesh_rep_by_ptr[world_mesh.get()] = found_tri;
+                            direct_mesh_nodes[cacheName] = DirectMeshNode{ world_mesh, direct_index, found_tri };
+                            mesh_cache[cacheName].push_back({ direct_index, found_tri });
+                            tri_to_index[found_tri.get()] = direct_index;
+                        }
+                    }
+
+                    if (found_tri && found_mesh) {
                         auto idxIt = tri_to_index.find(found_tri.get());
-                        int index = (idxIt != tri_to_index.end()) ? idxIt->second : -1;
+                        int index = (idxIt != tri_to_index.end()) ? idxIt->second : direct_index;
                         const std::string& name = rec.tri_mesh->nodeName;
                         if (ctrl_held) {
                             SelectableItem item;
                             item.type = SelectableType::Object;
                             item.object = found_tri;
+                            item.mesh_object = found_mesh;
+                            item.mesh_face_index = rec.tri_face;
                             item.object_index = index;
                             item.name = name;
                             if (ctx.selection.isSelected(item)) ctx.selection.removeFromSelection(item);
                             else ctx.selection.addToSelection(item);
                         } else {
-                            ctx.selection.selectObject(found_tri, index, name);
+                            ctx.selection.selectObject(found_mesh, index, name, rec.tri_face, found_tri);
                         }
                     }
                 }
@@ -1903,12 +1984,14 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
     std::unordered_set<std::string> assignedNames;   // Track names assigned to clones
     
     for (const auto& item : itemsToDuplicate) {
-        if (item.type == SelectableType::Object && item.object) {
+        if (item.type == SelectableType::Object && (item.mesh_object || item.object)) {
             
             // Use item.name as primary, fallback to nodeName
             std::string targetName = item.name;
             if (targetName.empty()) {
-                targetName = item.object->getNodeName();
+                targetName = item.mesh_object
+                    ? item.mesh_object->nodeName
+                    : item.object->getNodeName();
             }
             if (targetName.empty()) targetName = "Unnamed";
             
@@ -1938,7 +2021,7 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
             // transform, then register/commit it below. The standard geometry rebuild propagates to
             // every backend (CPU BVH, Vulkan RT, OptiX) — no facade-specific incremental clone.
             {
-                std::shared_ptr<TriangleMesh> srcFlat = std::dynamic_pointer_cast<TriangleMesh>(item.object);
+                std::shared_ptr<TriangleMesh> srcFlat = item.mesh_object;
                 if (!srcFlat) {
                     auto dit = direct_mesh_nodes.find(targetName);
                     if (dit != direct_mesh_nodes.end()) srcFlat = dit->second.mesh;
@@ -1962,8 +2045,11 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
 
             // Create Unique Transform
             std::shared_ptr<Transform> newTransform = std::make_shared<Transform>();
-            if (Transform* th = item.object->getTransformPtr()) {
-                *newTransform = *th;
+            Transform* sourceTransform = item.mesh_object && item.mesh_object->transform
+                ? item.mesh_object->transform.get()
+                : (item.object ? item.object->getTransformPtr() : nullptr);
+            if (sourceTransform) {
+                *newTransform = *sourceTransform;
             }
 
             // Duplicate Triangles - search by targetName
@@ -2137,7 +2223,9 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
 
             SelectableItem newItem;
             newItem.type = SelectableType::Object;
-            newItem.object = rep; // flat selection handle is the representative facade (direct-mesh convention)
+            newItem.mesh_object = newMesh;
+            newItem.mesh_face_index = 0;
+            newItem.object = rep; // temporary compatibility handle for legacy property tools
             newItem.object_index = idx;
             newItem.name = newName;
             Matrix4x4 pivotMat = newMesh->transform->getPivotMatrix();

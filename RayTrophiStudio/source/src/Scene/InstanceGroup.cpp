@@ -1,6 +1,10 @@
 ﻿#include "InstanceGroup.h"
 #include "Triangle.h"
+#include "TriangleMesh.h"
 #include "HittableInstance.h" // Added for wind update
+#include "TerrainSystem.h"
+#include "Texture.h"
+#include "Transform.h"
 #include <random>
 #include <algorithm>
 #include <map>
@@ -16,20 +20,67 @@ ScatterSource::ScatterSource(const std::string& n, const std::vector<std::shared
     computeCenter();
 }
 
+ScatterSource::ScatterSource(
+    const std::string& n,
+    const std::vector<std::shared_ptr<TriangleMesh>>& meshes)
+    : name(n), flat_meshes(meshes) {
+    computeCenter();
+}
+
 void ScatterSource::computeCenter() {
     mesh_center = Vec3(0, 0, 0);
+    has_local_bbox = false;
+
+    if (!flat_meshes.empty()) {
+        Vec3 bboxMin(1e9f, 1e9f, 1e9f);
+        Vec3 bboxMax(-1e9f, -1e9f, -1e9f);
+        bool hasBounds = false;
+        for (const auto& mesh : flat_meshes) {
+            if (!mesh) continue;
+            AABB bounds;
+            if (!mesh->bounding_box(0.0f, 0.0f, bounds)) continue;
+            bboxMin = Vec3::min(bboxMin, bounds.min);
+            bboxMax = Vec3::max(bboxMax, bounds.max);
+            hasBounds = true;
+        }
+        if (hasBounds) {
+            mesh_center = (bboxMin + bboxMax) * 0.5f;
+            mesh_center.y = bboxMin.y;
+            local_bbox = AABB(bboxMin, bboxMax);
+            has_local_bbox = true;
+        }
+        return;
+    }
+
     int vertex_count = 0;
+    Vec3 bboxMin(1e9f, 1e9f, 1e9f);
+    Vec3 bboxMax(-1e9f, -1e9f, -1e9f);
     
     for (const auto& tri : triangles) {
         mesh_center = mesh_center + tri->getV0();
         mesh_center = mesh_center + tri->getV1();
         mesh_center = mesh_center + tri->getV2();
+        bboxMin = Vec3::min(bboxMin, Vec3::min(tri->getV0(), Vec3::min(tri->getV1(), tri->getV2())));
+        bboxMax = Vec3::max(bboxMax, Vec3::max(tri->getV0(), Vec3::max(tri->getV1(), tri->getV2())));
         vertex_count += 3;
     }
     
     if (vertex_count > 0) {
         mesh_center = mesh_center / (float)vertex_count;
+        local_bbox = AABB(bboxMin, bboxMax);
+        has_local_bbox = true;
     }
+}
+
+size_t ScatterSource::sourceTriangleCount() const {
+    if (!flat_meshes.empty()) {
+        size_t total = 0;
+        for (const auto& mesh : flat_meshes) {
+            if (mesh) total += mesh->num_triangles();
+        }
+        return total;
+    }
+    return triangles.size();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -190,12 +241,12 @@ namespace {
     // not found all resolve to 1.0 (unmasked) - same "missing = no-op" contract as the brush's
     // paintInstances sampler and ScatterInstancesNode.
     float sampleTriangleFieldAttribute(const std::shared_ptr<Triangle>& tri, float bu, float bv, float bw,
-                                        const std::string& attrName) {
-        if (attrName.empty() || !tri || !tri->parentMesh || !tri->parentMesh->geometry) return 1.0f;
+                                        const std::string& attrName, float missingValue = 1.0f) {
+        if (attrName.empty() || !tri || !tri->parentMesh || !tri->parentMesh->geometry) return missingValue;
         const auto& mgeom = *tri->parentMesh->geometry;
         const float* attr = mgeom.get_attribute_data<float>(attrName);
         const int faceIdx = tri->getFaceIndex();
-        if (!attr || faceIdx < 0 || static_cast<size_t>(faceIdx) * 3 + 2 >= mgeom.indices.size()) return 1.0f;
+        if (!attr || faceIdx < 0 || static_cast<size_t>(faceIdx) * 3 + 2 >= mgeom.indices.size()) return missingValue;
         const uint32_t i0 = mgeom.indices[static_cast<size_t>(faceIdx) * 3 + 0];
         const uint32_t i1 = mgeom.indices[static_cast<size_t>(faceIdx) * 3 + 1];
         const uint32_t i2 = mgeom.indices[static_cast<size_t>(faceIdx) * 3 + 2];
@@ -236,6 +287,11 @@ int InstanceGroup::scatterFillMesh(const std::vector<std::shared_ptr<Triangle>>&
                                                               brush_settings.density_mask_attribute);
             if (dist01(rng) > dval) continue;   // rejection sampling — mask = density
         }
+        if (!brush_settings.exclusion_mask_attribute.empty()) {
+            const float eval = sampleTriangleFieldAttribute(s.triangle, s.bary_u, s.bary_v, s.bary_w,
+                                                              brush_settings.exclusion_mask_attribute, -1.0f);
+            if (eval >= 0.0f && eval >= brush_settings.exclusion_threshold) continue;
+        }
 
         if (check_overlap) {
             const int cx = static_cast<int>(std::floor(s.position.x / cell_size));
@@ -261,6 +317,172 @@ int InstanceGroup::scatterFillMesh(const std::vector<std::shared_ptr<Triangle>>&
             inst.scale = inst.scale * f;
         }
         addInstance(inst);
+        ++spawned;
+    }
+    return spawned;
+}
+
+int InstanceGroup::scatterFillTerrain(TerrainObject* terrain) {
+    if (!terrain || terrain->heightmap.width < 3 || terrain->heightmap.height < 3 ||
+        terrain->heightmap.data.empty() || brush_settings.target_count <= 0) return 0;
+
+    const int width = terrain->heightmap.width;
+    const int height = terrain->heightmap.height;
+    const float terrainScale = terrain->heightmap.scale_xz;
+    const float cellX = terrainScale / static_cast<float>((std::max)(1, width - 1));
+    const float cellZ = terrainScale / static_cast<float>((std::max)(1, height - 1));
+    std::mt19937 rng(static_cast<uint32_t>(brush_settings.seed));
+    std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+
+    auto sampleNamedField = [&](const std::string& fieldName, float u, float v) -> float {
+        if (fieldName.empty()) return 1.0f;
+        const auto it = terrain->analysisFields.find(fieldName);
+        const size_t expected = static_cast<size_t>(width) * height;
+        if (it == terrain->analysisFields.end() || !it->second || it->second->size() != expected) {
+            return -1.0f; // fail open, matching brush and legacy Scatter
+        }
+        const auto& field = *it->second;
+        const float gx = std::clamp(u, 0.0f, 1.0f) * (width - 1);
+        const float gz = std::clamp(v, 0.0f, 1.0f) * (height - 1);
+        const int x0 = static_cast<int>(gx), z0 = static_cast<int>(gz);
+        const int x1 = (std::min)(x0 + 1, width - 1);
+        const int z1 = (std::min)(z0 + 1, height - 1);
+        const float ax = gx - x0, az = gz - z0;
+        auto at = [&](int x, int z) { return field[static_cast<size_t>(z) * width + x]; };
+        const float a = at(x0, z0) * (1.0f - ax) + at(x1, z0) * ax;
+        const float b = at(x0, z1) * (1.0f - ax) + at(x1, z1) * ax;
+        return std::clamp(a * (1.0f - az) + b * az, 0.0f, 1.0f);
+    };
+
+    auto sampleSplat = [&](int channel, float u, float v) -> float {
+        if (channel < 0 || channel > 3 || !terrain->splatMap ||
+            !terrain->splatMap->is_loaded() || terrain->splatMap->pixels.empty()) return -1.0f;
+        const int texW = terrain->splatMap->width;
+        const int texH = terrain->splatMap->height;
+        if (texW <= 0 || texH <= 0) return -1.0f;
+        const int x = std::clamp(static_cast<int>(u * (texW - 1)), 0, texW - 1);
+        const int y = std::clamp(static_cast<int>((1.0f - v) * (texH - 1)), 0, texH - 1);
+        const size_t pixelIndex = static_cast<size_t>(y) * texW + x;
+        if (pixelIndex >= terrain->splatMap->pixels.size()) return -1.0f;
+        const auto& pixel = terrain->splatMap->pixels[pixelIndex];
+        if (channel == 0) return pixel.r / 255.0f;
+        if (channel == 1) return pixel.g / 255.0f;
+        if (channel == 2) return pixel.b / 255.0f;
+        return pixel.a / 255.0f;
+    };
+
+    const float minDistanceSq = brush_settings.min_distance * brush_settings.min_distance;
+    const bool checkOverlap = brush_settings.min_distance > 0.01f;
+    const float cellSize = brush_settings.min_distance > 0.1f ? brush_settings.min_distance : 1.0f;
+    std::map<std::pair<int, int>, std::vector<Vec3>> occupied;
+    const int target = brush_settings.target_count;
+    const int maxAttempts = target * 100;
+    int spawned = 0;
+
+    for (int attempt = 0; spawned < target && attempt < maxAttempts; ++attempt) {
+        const float u = dist01(rng);
+        const float v = dist01(rng);
+
+        if (!brush_settings.density_mask_attribute.empty()) {
+            const float densityField = sampleNamedField(brush_settings.density_mask_attribute, u, v);
+            if (densityField >= 0.0f && dist01(rng) > densityField) continue;
+        }
+        const float exclusionField = sampleNamedField(brush_settings.exclusion_mask_attribute, u, v);
+        if (!brush_settings.exclusion_mask_attribute.empty() && exclusionField >= 0.0f &&
+            exclusionField >= brush_settings.exclusion_threshold) continue;
+
+        const float splat = sampleSplat(brush_settings.splat_map_channel, u, v);
+        if (splat >= 0.0f && (splat < 0.2f || dist01(rng) > splat)) continue;
+        const float exclusionSplat = sampleSplat(brush_settings.exclusion_channel, u, v);
+        if (exclusionSplat >= brush_settings.exclusion_threshold) continue;
+
+        const float gx = u * (width - 1);
+        const float gz = v * (height - 1);
+        const int x0 = static_cast<int>(gx), z0 = static_cast<int>(gz);
+        const int x1 = (std::min)(x0 + 1, width - 1);
+        const int z1 = (std::min)(z0 + 1, height - 1);
+        const float fx = gx - x0, fz = gz - z0;
+        const float h00 = terrain->heightmap.getHeight(x0, z0);
+        const float h10 = terrain->heightmap.getHeight(x1, z0);
+        const float h01 = terrain->heightmap.getHeight(x0, z1);
+        const float h11 = terrain->heightmap.getHeight(x1, z1);
+        const float localHeight = (h00 * (1.0f - fx) + h10 * fx) * (1.0f - fz) +
+                                  (h01 * (1.0f - fx) + h11 * fx) * fz;
+        if (localHeight < brush_settings.height_min || localHeight > brush_settings.height_max) continue;
+
+        int step = (std::max)(1, brush_settings.curvature_step);
+        if (width <= step * 2 || height <= step * 2) continue;
+        const int sx = std::clamp(static_cast<int>(gx + 0.5f), step, width - 1 - step);
+        const int sz = std::clamp(static_cast<int>(gz + 0.5f), step, height - 1 - step);
+        const auto normalizedHeight = [&](int x, int z) {
+            return terrain->heightmap.data[static_cast<size_t>(z) * width + x];
+        };
+        const float hl = normalizedHeight(sx - step, sz);
+        const float hr = normalizedHeight(sx + step, sz);
+        const float hu = normalizedHeight(sx, sz - step);
+        const float hd = normalizedHeight(sx, sz + step);
+        const float hc = normalizedHeight(sx, sz);
+        const float dx = ((hr - hl) * terrain->heightmap.scale_y) / (2.0f * cellX * step);
+        const float dz = ((hd - hu) * terrain->heightmap.scale_y) / (2.0f * cellZ * step);
+        const float slopeDegrees = std::atan(std::sqrt(dx * dx + dz * dz)) * 57.2958f;
+        if (slopeDegrees > brush_settings.slope_max) continue;
+
+        if (brush_settings.slope_direction_influence > 0.01f && slopeDegrees > 2.0f) {
+            float aspect = std::atan2(-dx, -dz) * 57.2958f;
+            if (aspect < 0.0f) aspect += 360.0f;
+            float difference = std::fabs(aspect - brush_settings.slope_direction_angle);
+            if (difference > 180.0f) difference = 360.0f - difference;
+            const float directionalWeight = (std::max)(0.0f, std::cos(difference * 0.0174533f));
+            const float probability = (1.0f - brush_settings.slope_direction_influence) +
+                brush_settings.slope_direction_influence * directionalWeight;
+            if (dist01(rng) > probability) continue;
+        }
+
+        const float curvature = ((hl + hr + hu + hd) - 4.0f * hc) /
+            static_cast<float>(step * step) * 1000.0f;
+        const bool ridge = curvature < brush_settings.curvature_min;
+        const bool gully = curvature > brush_settings.curvature_max;
+        if ((ridge && !brush_settings.allow_ridges) ||
+            (gully && !brush_settings.allow_gullies) ||
+            (!ridge && !gully && !brush_settings.allow_flats)) continue;
+
+        Vec3 worldPosition(u * terrainScale, localHeight, v * terrainScale);
+        Vec3 worldNormal(-dx, 1.0f, -dz);
+        worldNormal = worldNormal.normalize();
+        if (terrain->transform) {
+            terrain->transform->updateFinal();
+            worldPosition = terrain->transform->final.transform_point(worldPosition);
+            worldNormal = terrain->transform->getNormalTransform().transform_vector(worldNormal).normalize();
+        }
+
+        if (checkOverlap) {
+            const int cellKeyX = static_cast<int>(std::floor(worldPosition.x / cellSize));
+            const int cellKeyZ = static_cast<int>(std::floor(worldPosition.z / cellSize));
+            bool collision = false;
+            for (int ox = -1; ox <= 1 && !collision; ++ox) {
+                for (int oz = -1; oz <= 1 && !collision; ++oz) {
+                    const auto it = occupied.find({cellKeyX + ox, cellKeyZ + oz});
+                    if (it == occupied.end()) continue;
+                    for (const Vec3& point : it->second) {
+                        if ((point - worldPosition).length_squared() < minDistanceSq) {
+                            collision = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (collision) continue;
+            occupied[{cellKeyX, cellKeyZ}].push_back(worldPosition);
+        }
+
+        InstanceTransform instance = generateRandomTransform(worldPosition, worldNormal);
+        const float scaleField = sampleNamedField(brush_settings.scale_mask_attribute, u, v);
+        if (!brush_settings.scale_mask_attribute.empty() && scaleField >= 0.0f &&
+            brush_settings.scale_mask_influence > 0.0f) {
+            const float factor = 1.0f - brush_settings.scale_mask_influence * (1.0f - scaleField);
+            instance.scale = instance.scale * factor;
+        }
+        addInstance(instance);
         ++spawned;
     }
     return spawned;

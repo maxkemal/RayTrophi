@@ -1,19 +1,32 @@
 // sim_fluid_p2g_normalize.comp
 // Divides velocity field by weight field in-place. One thread per face.
+//
+// BINDING LAYOUT: the host dispatches normalize with the SAME 5-buffer list as
+// the scatter pass (positions, velocities, affine, vel_field, wt_field) and the
+// CUDA dispatcher reads vel/weight from indices [3]/[4]. This shader must
+// mirror that. The old 2-binding version was bound against a 5-binding
+// descriptor set (incompatible layout = UB): bindings 0/1 resolved to the
+// PARTICLE POSITION/VELOCITY buffers, so every step "normalized" positions by
+// velocities on the GPU — the next component's scatter then read garbage
+// positions and sprayed the velocity field (particles scattering outward
+// instead of falling; the long-standing Vulkan "no proper flow" symptom).
 #version 450
 layout(local_size_x = 256) in;
 
 // push constant layout matches FluidP2GGpuConstants exactly.
 layout(push_constant) uniform PC {
     int nx; int ny; int nz;
-    int particle_count; // field 4 (unused here)
+    int particle_count; // unused here
     int component;
     float origin_x; float origin_y; float origin_z;
     float voxel_size;
 } pc;
 
-layout(set = 0, binding = 0) buffer VelField    { float vel_field[]; };
-layout(set = 0, binding = 1) buffer WeightField { float wt_field[];  };
+layout(set = 0, binding = 0) readonly buffer Positions  { float pos_data[]; };  // unused
+layout(set = 0, binding = 1) readonly buffer Velocities { float vel_data[]; };  // unused
+layout(set = 0, binding = 2) readonly buffer Affine     { float affine[];   };  // unused
+layout(set = 0, binding = 3) buffer VelField            { float vel_field[]; };
+layout(set = 0, binding = 4) buffer WeightField         { float wt_field[];  };
 
 void main() {
     uint id = gl_GlobalInvocationID.x;

@@ -2,6 +2,7 @@
 #include "Ray.h"
 #include "AABB.h"
 #include "globals.h"
+#include "MeshPointiness.h"
 #include <cmath>
 #include <mutex>
 
@@ -713,6 +714,13 @@ bool Triangle::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool 
 
     // Barycentric weights (u, v, w)
     float w = 1.0f - u - v;
+
+    rec.pointiness = MeshAttr::samplePointiness(parentMesh.get(), faceIndex, w, u, v);
+    MeshAttr::sampleMaterialAttributes(parentMesh.get(), faceIndex, w, u, v, rec.mat_attrib);
+    rec.object_origin = MeshAttr::objectOrigin(getTransformPtr());
+    rec.object_position = rec.point;
+    MeshAttr::sampleObjectPosition(parentMesh.get(), faceIndex, w, u, v, rec.object_position);
+    rec.view_dir = (-r.direction).normalize();   // Fresnel / Layer Weight
 
     // Interpolate normal directly with barycentric coordinates
     rec.interpolated_normal =

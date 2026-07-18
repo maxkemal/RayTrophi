@@ -36,6 +36,7 @@ inline std::atomic<int> g_active_sdf_bakes{0};
 #include "ColliderMeshBVH.h"
 #include "MeshModifiers.h"
 #include "GeometryNodesV2.h"
+#include "MaterialNodesV2.h"
 #include "Paint/PaintTextureSet.h"
 #include "Paint/PaintLayerStack.h"
 
@@ -121,6 +122,9 @@ struct SceneData {
     // Fully additive alongside mesh_modifiers above — the linear ModifierStack panel is untouched
     // and keeps working; this is a separate, opt-in way to build the same kind of geometry chain.
     std::unordered_map<std::string, std::shared_ptr<GeometryNodesV2::GeometryNodeGraphV2>> geometry_node_graphs; // nodeName -> Geo-DAG graph
+    // Material node graphs (Faz 1): per-MATERIAL (not per-object) graph that folds
+    // into the existing PrincipledBSDF on Apply — see MaterialNodesV2.h header.
+    std::unordered_map<std::string, std::shared_ptr<MaterialNodesV2::MaterialNodeGraphV2>> material_node_graphs; // materialName -> graph
     std::unordered_map<std::string, Paint::PaintTextureSet> mesh_paint_texture_sets;       // nodeName#materialID -> texture set
     std::unordered_map<std::string, Paint::PaintLayerStack> mesh_paint_layer_stacks;      // nodeName#materialID -> layer stack
 

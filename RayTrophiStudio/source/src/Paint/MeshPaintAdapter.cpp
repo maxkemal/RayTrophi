@@ -317,7 +317,7 @@ struct BrushFootprintSample {
 BrushFootprintSample sampleBrushFootprint(const BrushSettings& brush, float dx, float dy, float radius_x, float radius_y) {
     float x = dx / std::max(0.001f, radius_x);
     float y = dy / std::max(0.001f, radius_y);
-    rotateBrushCoords(x, y, brush.alpha_rotation_degrees);
+    rotateBrushCoords(x, y, -brush.alpha_rotation_degrees);
 
     const float aspect_scale = brushShapeAspectScale(brush);
     x /= aspect_scale;
@@ -2888,7 +2888,7 @@ bool MeshPaintAdapter::paintAtUV(PaintChannel channel, const Vec2& uv, const Bru
     const float strength = std::clamp(brush.strength * brush.flow * dt * 60.0f, 0.0f, 1.0f);
     const CompactVec4 erase_pixel = defaultChannelPixel(channel);
     std::vector<CompactVec4> source_pixels;
-    if (brush.tool == BrushTool::Soften) {
+    if (brush.tool == BrushTool::Soften || brush.tool == BrushTool::Sharpen) {
         source_pixels = texture->pixels;
     }
 
@@ -2909,7 +2909,7 @@ bool MeshPaintAdapter::paintAtUV(PaintChannel channel, const Vec2& uv, const Bru
             const float texture_alpha = sampleBrushPaintTextureAlpha(channel, brush, nx, ny);
             const CompactVec4 brush_pixel = makeBrushTexturePixel(channel, brush, nx, ny);
             const float weight = computeBrushWeightNormalized(dist_norm, radius_px,
-                                    std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * texture_alpha * strength;
+                                     std::clamp(brush.falloff, 0.0f, 1.0f)) * alpha_mask * texture_alpha * strength;
             if (weight <= 0.001f) {
                 continue;
             }
@@ -2947,6 +2947,69 @@ bool MeshPaintAdapter::paintAtUV(PaintChannel channel, const Vec2& uv, const Bru
                     blendPixelChannel(pixel.r, avg_r, weight);
                     blendPixelChannel(pixel.g, avg_g, weight);
                     blendPixelChannel(pixel.b, avg_b, weight);
+                }
+            } else if (brush.tool == BrushTool::Sharpen) {
+                Vec3 sum(0.0f, 0.0f, 0.0f);
+                int sample_count = 0;
+                for (int oy = -1; oy <= 1; ++oy) {
+                    const int sy = std::clamp(py + oy, 0, height - 1);
+                    for (int ox = -1; ox <= 1; ++ox) {
+                        const int sx = std::clamp(px + ox, 0, width - 1);
+                        const CompactVec4& src = source_pixels[static_cast<size_t>(sy) * static_cast<size_t>(width) + static_cast<size_t>(sx)];
+                        sum.x += static_cast<float>(src.r);
+                        sum.y += static_cast<float>(src.g);
+                        sum.z += static_cast<float>(src.b);
+                        ++sample_count;
+                    }
+                }
+                const float avg_r = sum.x / static_cast<float>(sample_count);
+                const float avg_g = sum.y / static_cast<float>(sample_count);
+                const float avg_b = sum.z / static_cast<float>(sample_count);
+
+                const float factor = 1.5f;
+                const float center_r = static_cast<float>(pixel.r);
+                const float center_g = static_cast<float>(pixel.g);
+                const float center_b = static_cast<float>(pixel.b);
+
+                const uint8_t sharp_r = static_cast<uint8_t>(std::clamp(center_r + (center_r - avg_r) * factor, 0.0f, 255.0f));
+                const uint8_t sharp_g = static_cast<uint8_t>(std::clamp(center_g + (center_g - avg_g) * factor, 0.0f, 255.0f));
+                const uint8_t sharp_b = static_cast<uint8_t>(std::clamp(center_b + (center_b - avg_b) * factor, 0.0f, 255.0f));
+
+                if (channel == PaintChannel::Mask) {
+                    blendHeightMaskPixelChannels(pixel, CompactVec4(sharp_r, sharp_g, sharp_b, 255), weight);
+                } else {
+                    blendPixelChannel(pixel.r, sharp_r, weight);
+                    blendPixelChannel(pixel.g, sharp_g, weight);
+                    blendPixelChannel(pixel.b, sharp_b, weight);
+                }
+            } else if (brush.tool == BrushTool::Dodge) {
+                if (channel == PaintChannel::Mask) {
+                    float val = static_cast<float>(pixel.r) / 255.0f;
+                    val = std::min(val + weight * 0.5f, 1.0f);
+                    const uint8_t byte_val = static_cast<uint8_t>(val * 255.0f + 0.5f);
+                    pixel.r = byte_val; pixel.g = byte_val; pixel.b = byte_val;
+                } else {
+                    float r_f = static_cast<float>(pixel.r) / 255.0f;
+                    float g_f = static_cast<float>(pixel.g) / 255.0f;
+                    float b_f = static_cast<float>(pixel.b) / 255.0f;
+                    r_f = r_f + (1.0f - r_f) * weight * 0.5f;
+                    g_f = g_f + (1.0f - g_f) * weight * 0.5f;
+                    b_f = b_f + (1.0f - b_f) * weight * 0.5f;
+                    pixel.r = static_cast<uint8_t>(std::clamp(r_f * 255.0f + 0.5f, 0.0f, 255.0f));
+                    pixel.g = static_cast<uint8_t>(std::clamp(g_f * 255.0f + 0.5f, 0.0f, 255.0f));
+                    pixel.b = static_cast<uint8_t>(std::clamp(b_f * 255.0f + 0.5f, 0.0f, 255.0f));
+                }
+            } else if (brush.tool == BrushTool::Burn) {
+                if (channel == PaintChannel::Mask) {
+                    float val = static_cast<float>(pixel.r) / 255.0f;
+                    val = std::max(val * (1.0f - weight * 0.5f), 0.0f);
+                    const uint8_t byte_val = static_cast<uint8_t>(val * 255.0f + 0.5f);
+                    pixel.r = byte_val; pixel.g = byte_val; pixel.b = byte_val;
+                } else {
+                    const float factor = 1.0f - weight * 0.5f;
+                    pixel.r = static_cast<uint8_t>(std::clamp(static_cast<float>(pixel.r) * factor, 0.0f, 255.0f));
+                    pixel.g = static_cast<uint8_t>(std::clamp(static_cast<float>(pixel.g) * factor, 0.0f, 255.0f));
+                    pixel.b = static_cast<uint8_t>(std::clamp(static_cast<float>(pixel.b) * factor, 0.0f, 255.0f));
                 }
             } else {
                 if (channel == PaintChannel::Mask) {
@@ -3675,6 +3738,61 @@ PaintDirtyRect MeshPaintAdapter::paintLayerAtUV(int layer_index, PaintChannel ch
                 pixel.a = static_cast<uint8_t>(std::clamp(
                     static_cast<float>(pixel.a) + (asum * inv - static_cast<float>(pixel.a)) * weight,
                     0.0f, 255.0f));
+            } else if (brush.tool == BrushTool::Sharpen) {
+                Vec3 sum(0.0f, 0.0f, 0.0f);
+                int sample_count = 0;
+                for (int oy = -1; oy <= 1; ++oy) {
+                    const int sy = std::clamp(py + oy, 0, height - 1);
+                    for (int ox = -1; ox <= 1; ++ox) {
+                        const int sx = std::clamp(px + ox, 0, width - 1);
+                        const CompactVec4& src = pixels[static_cast<size_t>(sy) * static_cast<size_t>(width) + static_cast<size_t>(sx)];
+                        sum.x += static_cast<float>(src.r);
+                        sum.y += static_cast<float>(src.g);
+                        sum.z += static_cast<float>(src.b);
+                        ++sample_count;
+                    }
+                }
+                const float avg_r = sum.x / static_cast<float>(sample_count);
+                const float avg_g = sum.y / static_cast<float>(sample_count);
+                const float avg_b = sum.z / static_cast<float>(sample_count);
+
+                const float factor = 1.5f;
+                const float center_r = static_cast<float>(pixel.r);
+                const float center_g = static_cast<float>(pixel.g);
+                const float center_b = static_cast<float>(pixel.b);
+
+                const uint8_t sharp_r = static_cast<uint8_t>(std::clamp(center_r + (center_r - avg_r) * factor, 0.0f, 255.0f));
+                const uint8_t sharp_g = static_cast<uint8_t>(std::clamp(center_g + (center_g - avg_g) * factor, 0.0f, 255.0f));
+                const uint8_t sharp_b = static_cast<uint8_t>(std::clamp(center_b + (center_b - avg_b) * factor, 0.0f, 255.0f));
+
+                blendPixelChannel(pixel.r, sharp_r, weight);
+                blendPixelChannel(pixel.g, sharp_g, weight);
+                blendPixelChannel(pixel.b, sharp_b, weight);
+            } else if (brush.tool == BrushTool::Dodge) {
+                float r_f = static_cast<float>(pixel.r) / 255.0f;
+                float g_f = static_cast<float>(pixel.g) / 255.0f;
+                float b_f = static_cast<float>(pixel.b) / 255.0f;
+                r_f = r_f + (1.0f - r_f) * weight * 0.5f;
+                g_f = g_f + (1.0f - g_f) * weight * 0.5f;
+                b_f = b_f + (1.0f - b_f) * weight * 0.5f;
+                pixel.r = static_cast<uint8_t>(std::clamp(r_f * 255.0f + 0.5f, 0.0f, 255.0f));
+                pixel.g = static_cast<uint8_t>(std::clamp(g_f * 255.0f + 0.5f, 0.0f, 255.0f));
+                pixel.b = static_cast<uint8_t>(std::clamp(b_f * 255.0f + 0.5f, 0.0f, 255.0f));
+                
+                const float src_a = std::clamp(weight, 0.0f, 1.0f);
+                const float dst_a = static_cast<float>(pixel.a) / 255.0f;
+                const float out_a = dst_a + (1.0f - dst_a) * src_a * 0.5f;
+                pixel.a = static_cast<uint8_t>(std::clamp(out_a * 255.0f, 0.0f, 255.0f));
+            } else if (brush.tool == BrushTool::Burn) {
+                const float factor = 1.0f - weight * 0.5f;
+                pixel.r = static_cast<uint8_t>(std::clamp(static_cast<float>(pixel.r) * factor, 0.0f, 255.0f));
+                pixel.g = static_cast<uint8_t>(std::clamp(static_cast<float>(pixel.g) * factor, 0.0f, 255.0f));
+                pixel.b = static_cast<uint8_t>(std::clamp(static_cast<float>(pixel.b) * factor, 0.0f, 255.0f));
+                
+                const float src_a = std::clamp(weight, 0.0f, 1.0f);
+                const float dst_a = static_cast<float>(pixel.a) / 255.0f;
+                const float out_a = dst_a + (1.0f - dst_a) * src_a * 0.5f;
+                pixel.a = static_cast<uint8_t>(std::clamp(out_a * 255.0f, 0.0f, 255.0f));
             } else if (scalar_channel && layer->meta.blend_mode == LayerBlendMode::Normal) {
                 const float layer_opacity = std::clamp(layer->meta.opacity, 0.0f, 1.0f);
                 const float target_value = static_cast<float>(brush_pixel.r) / 255.0f;

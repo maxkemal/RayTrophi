@@ -241,13 +241,21 @@ void notifyIfVcRuntimeMissing() {
 #endif
 
 std::string startupCrashLogPath() {
+    // Deliberately does NOT touch std::filesystem.
+    //
+    // This runs from the top-level crash handler, and the crash it most needs to survive
+    // is a STACK OVERFLOW. Windows does not restore the stack guard page automatically:
+    // once it is consumed, the next call that needs a few KB of stack faults. std::filesystem
+    // ::path is exactly that call — it converts through MultiByteToWideChar — so the process
+    // died with an access violation INSIDE the logger and the real reason was never written
+    // down. Plain char arithmetic on a fixed buffer keeps this handler shallow.
     char exePath[MAX_PATH] = {};
     DWORD len = GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-    if (len > 0 && len < MAX_PATH) {
-        try {
-            std::filesystem::path p(exePath);
-            return (p.parent_path() / "StartupCrash.log").string();
-        } catch (...) {
+    if (len == 0 || len >= MAX_PATH) return "StartupCrash.log";
+    for (DWORD i = len; i-- > 0;) {
+        if (exePath[i] == '\\' || exePath[i] == '/') {
+            exePath[i] = '\0';
+            return std::string(exePath) + "\\StartupCrash.log";
         }
     }
     return "StartupCrash.log";
@@ -2864,7 +2872,8 @@ int main(int argc, char* argv[]) try {
                     // EXCEPTION: while the Geometry Graph node editor is focused, Delete is
                     // claimed by NodeEditorUIV2 for node/link deletion (see scene_ui.cpp's
                     // handleEditorShortcuts for the matching guard on the other Delete listener).
-                    if (!ImGui::GetIO().WantTextInput && !ui.geometry_graph_focused) {
+                    if (!ImGui::GetIO().WantTextInput &&
+                        !ui.terrain_graph_focused && !ui.geometry_graph_focused && !ui.material_graph_focused) {
                         ui.triggerDelete(ui_ctx);
                     }
                 }
@@ -3502,7 +3511,11 @@ int main(int argc, char* argv[]) try {
              }
 
              if (timeline_drives_water) {
-                 WaterUpdateResult water_update = WaterManager::getInstance().update(time_seconds);
+                 const float water_time = WaterManager::getInstance().resolvePreviewWaterTime(
+                     static_cast<float>(SDL_GetTicks()) / 1000.0f,
+                     current_volume_frame, timeline_fps);
+                 if (g_backend) g_backend->setTime(water_time, water_time);
+                 WaterUpdateResult water_update = WaterManager::getInstance().update(water_time);
                  if (water_update.material_changed || water_update.mesh_changed) {
                      for (auto& water : WaterManager::getInstance().getWaterSurfaces()) {
                          if (water.material_id != MaterialManager::INVALID_MATERIAL_ID) {
@@ -3518,16 +3531,17 @@ int main(int argc, char* argv[]) try {
                              ui.viewport_settings.shading_mode);
 
                      if (g_backend && !interactiveViewportActive) {
-                         if (auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
-                             vulkanBackend->updateGeometry(scene.world.objects);
-                         } else {
+                         // Geometry Waves updates the existing flat mesh and
+                         // refits its Vulkan BLAS inside WaterManager. Calling
+                         // updateGeometry here rebuilt the whole scene a second
+                         // time and defeated the modifier contract.
+                         if (!dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
                              g_backend->updateSceneGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
                          }
                          g_backend->resetAccumulation();
                      }
 
                      g_cpu_bvh_refit_pending = true;
-                     g_mesh_cache_dirty = true;
                      ray_renderer.resetCPUAccumulation();
                  }
              }
@@ -3544,8 +3558,33 @@ int main(int argc, char* argv[]) try {
              }
              
         } else if (!timeline_playing) {
-             // Static update (for editor changes)
-             WaterManager::getInstance().update(0.0f);
+             // Geometry-wave modifiers continue to support Realtime preview and
+             // Timeline scrubbing while playback is stopped. Static resolves to
+             // a frozen time and therefore becomes a no-op after the first frame.
+             if (timeline_drives_water) {
+                 const float water_fps = static_cast<float>(std::max(1, render_settings.animation_fps));
+                 const float water_time = WaterManager::getInstance().resolvePreviewWaterTime(
+                     static_cast<float>(SDL_GetTicks()) / 1000.0f,
+                     current_volume_frame, water_fps);
+                 if (g_backend) g_backend->setTime(water_time, water_time);
+                 WaterUpdateResult water_update = WaterManager::getInstance().update(water_time);
+                 if (water_update.material_changed) {
+                     for (auto& water : WaterManager::getInstance().getWaterSurfaces()) {
+                         if (water.material_id != MaterialManager::INVALID_MATERIAL_ID) {
+                             WaterManager::getInstance().syncSurfaceMaterial(&water);
+                             ray_renderer.updateBackendMaterial(scene, water.material_id);
+                         }
+                     }
+                 }
+                 if (water_update.mesh_changed) {
+                     g_cpu_bvh_refit_pending = true;
+                     ray_renderer.resetCPUAccumulation();
+                     if (g_backend) g_backend->resetAccumulation();
+                 }
+                 if (WaterManager::getInstance().getPreviewTimeMode() == WaterPreviewTimeMode::Realtime) {
+                     start_render = true;
+                 }
+             }
         }
         } // end skip_backend_for_anim guard (gas + timeline)
 
@@ -5789,6 +5828,8 @@ int main(int argc, char* argv[]) try {
         scene.setDeformRefitActive(deform_refit_path_live);
 
         // Play → pause: force ONE full backend rebuild on the active GPU renderer.
+        // Water-only playback keeps its bounded topology-stable refit; other
+        // animation may still request one quality rebuild on the pause edge.
         // During playback the per-frame motion path only REFITS the acceleration
         // structure (TLAS UPDATE + mesh BLAS refit) — fast, but a refit keeps the
         // tree topology from the geometry's earlier positions, so after a stretch
@@ -5799,8 +5840,11 @@ int main(int argc, char* argv[]) try {
         {
             const bool anim_active =
                 ui.timeline.isPlaying() || ui_ctx.render_settings.animation_is_playing;
+            const bool water_only_animation =
+                timeline_drives_water && !timeline_drives_wind && scene.animationDataList.empty();
             static bool s_prev_anim_active = false;
-            if (s_prev_anim_active && !anim_active && !interactive_viewport_active) {
+            if (s_prev_anim_active && !anim_active && !interactive_viewport_active &&
+                !water_only_animation) {
                 if (active_optix_backend)         g_optix_rebuild_pending = true;
                 else if (active_vulkan_render_backend) g_vulkan_rebuild_pending = true;
             }
@@ -6212,6 +6256,7 @@ int main(int argc, char* argv[]) try {
         try { g_viewport_backend->shutdown(); } catch (...) {}
         g_viewport_backend.reset();
     }
+    ui.releaseTerrainNodePreviewTexture();
     SDL_DestroyTexture(raytrace_texture);
     ImGui_ImplSDLRenderer2_Shutdown();
     ImGui_ImplSDL2_Shutdown();
@@ -6228,11 +6273,17 @@ int main(int argc, char* argv[]) try {
 }
 
 catch (const std::exception& e) {
+    // Give the stack guard page back before doing anything that needs stack. Harmless
+    // when the exception was an ordinary one; the difference between a written log and
+    // an access violation in the logger when it was a stack overflow.
+    _resetstkoflw();
     emergencyStartupLog(std::string("[FATAL] Unhandled std::exception in main: ") + e.what());
     return 1;
 }
 catch (...) {
-    emergencyStartupLog("[FATAL] Unhandled unknown exception in main");
+    _resetstkoflw();
+    emergencyStartupLog("[FATAL] Unhandled unknown exception in main. "
+                        "If this followed work in the node editor, suspect a stack overflow "
+                        "from a cyclic node graph (Graph::addLink now refuses to create one).");
     return 1;
 }
-

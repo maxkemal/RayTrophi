@@ -1,0 +1,71 @@
+// sim_fluid_cg_spmv_dot.comp
+// MGPCG fused: As = A*s (free-surface Poisson matrix, PLAIN branch — same
+// stencil as sim_fluid_cg_spmv) AND partials[workgroup] = block sum of s*As
+// in DOUBLE, in one dispatch. Name and buffer order match the CUDA fused
+// kernel's plain form (search, mask, diag, As, partials); the variational
+// 8-buffer form is NOT ported — the host routes variational/GFM to the CPU
+// on Vulkan. Dispatched with dot_blocks groups (== cell_groups).
+// Requires shaderFloat64 (gated in the backend like sim_fluid_cg_dot).
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   boundary;
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int   iterations;
+    int   parity;
+    float density_correction;
+    int   particles_per_cell;
+    int   variational;
+    int   gfm_active;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Search { float s[]; };
+layout(set = 0, binding = 1) readonly buffer Mask   { float fluid_mask[]; };
+layout(set = 0, binding = 2) readonly buffer Diag   { float diag[]; };
+layout(set = 0, binding = 3) buffer OutAs           { float As[]; };
+layout(set = 0, binding = 4) buffer Partials        { double partials[]; };
+
+shared double sdata[256];
+
+void main() {
+    int  cell_count = pc.nx * pc.ny * pc.nz;
+    uint tid = gl_LocalInvocationID.x;
+    int  id  = int(gl_GlobalInvocationID.x);
+
+    double contrib = 0.0LF;
+    if (id < cell_count) {
+        float As_val = 0.0;
+        if (fluid_mask[id] > 0.5) {
+            int i = id % pc.nx;
+            int j = (id / pc.nx) % pc.ny;
+            int k = id / (pc.nx * pc.ny);
+            float nsum = 0.0;
+            #define CG_SPMV_N(ni, nj, nk) \
+                if ((ni) >= 0 && (ni) < pc.nx && (nj) >= 0 && (nj) < pc.ny && (nk) >= 0 && (nk) < pc.nz) { \
+                    int _n = (ni) + (nj)*pc.nx + (nk)*pc.nx*pc.ny; \
+                    if (fluid_mask[_n] > 0.5) nsum += s[_n]; \
+                }
+            CG_SPMV_N(i - 1, j,     k    )
+            CG_SPMV_N(i + 1, j,     k    )
+            CG_SPMV_N(i,     j - 1, k    )
+            CG_SPMV_N(i,     j + 1, k    )
+            CG_SPMV_N(i,     j,     k - 1)
+            CG_SPMV_N(i,     j,     k + 1)
+            #undef CG_SPMV_N
+            As_val = diag[id] * s[id] - nsum;
+        }
+        As[id] = As_val;
+        contrib = double(s[id]) * double(As_val);
+    }
+    sdata[tid] = contrib;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) sdata[tid] += sdata[tid + stride];
+        barrier();
+    }
+    if (tid == 0u) partials[gl_WorkGroupID.x] = sdata[0];
+}

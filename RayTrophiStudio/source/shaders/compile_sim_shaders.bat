@@ -21,6 +21,16 @@ glslc "%SHADER_DIR%sim_fluid_density_splat.comp"      -o "%SHADER_DIR%sim_fluid_
 glslc "%SHADER_DIR%sim_fluid_density_clear.comp"     -o "%SHADER_DIR%sim_fluid_density_clear.spv"     --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_fluid_g2p.comp"                -o "%SHADER_DIR%sim_fluid_g2p.spv"                --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_fluid_free_surface_sor.comp"   -o "%SHADER_DIR%sim_fluid_free_surface_sor.spv"   --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_fluid_divergence.comp"         -o "%SHADER_DIR%sim_fluid_divergence.spv"         --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_fluid_subtract_gradient.comp"  -o "%SHADER_DIR%sim_fluid_subtract_gradient.spv"  --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_fluid_cg_build_diag.comp"      -o "%SHADER_DIR%sim_fluid_cg_build_diag.spv"      --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_fluid_cg_residual_init.comp"   -o "%SHADER_DIR%sim_fluid_cg_residual_init.spv"   --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_fluid_cg_spmv.comp"            -o "%SHADER_DIR%sim_fluid_cg_spmv.spv"            --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_fluid_cg_jacobi.comp"          -o "%SHADER_DIR%sim_fluid_cg_jacobi.spv"          --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_fluid_cg_copy.comp"            -o "%SHADER_DIR%sim_fluid_cg_copy.spv"            --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_fluid_cg_axpy.comp"            -o "%SHADER_DIR%sim_fluid_cg_axpy.spv"            --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_fluid_cg_zpby.comp"            -o "%SHADER_DIR%sim_fluid_cg_zpby.spv"            --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_fluid_cg_dot.comp"             -o "%SHADER_DIR%sim_fluid_cg_dot.spv"             --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_grid_divergence.comp"          -o "%SHADER_DIR%sim_grid_divergence.spv"          --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_grid_sor.comp"                 -o "%SHADER_DIR%sim_grid_sor.spv"                 --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_grid_subtract_gradient.comp"   -o "%SHADER_DIR%sim_grid_subtract_gradient.spv"   --target-env=vulkan1.2

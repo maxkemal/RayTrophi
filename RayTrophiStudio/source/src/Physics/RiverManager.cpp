@@ -189,10 +189,12 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
         gpu->ior = wp.ior;
         gpu->metallic = 0.0f;
         
-        // Water flag (sheen > 0 = IS_WATER)
-        gpu->sheen = 0.01f;  // > 0 = IS_WATER
-        gpu->anisotropic = 0.0f;
-        gpu->sheen_tint = 0.0f;
+        // Explicit Vulkan/CPU water contract. River shading follows ribbon UVs;
+        // it must not masquerade as an ocean merely through the legacy sheen bit.
+        gpu->flags |= GPU_MAT_FLAG_WATER | GPU_MAT_FLAG_WATER_RIVER;
+        gpu->sheen = (std::max)(wp.wave_strength, 0.001f);
+        gpu->anisotropic = wp.wave_speed;
+        gpu->sheen_tint = wp.wave_frequency;
         
         gpu->clearcoat = wp.shore_foam_intensity;
         gpu->clearcoat_roughness = wp.caustic_intensity;
@@ -215,6 +217,9 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
         gpu->foam_threshold = wp.foam_threshold;
         gpu->fft_ocean_size = wp.fft_ocean_size;
         gpu->fft_choppiness = wp.fft_choppiness;
+        gpu->fft_wind_speed = wp.fft_wind_speed;
+        gpu->fft_wind_direction = wp.fft_wind_direction;
+        gpu->fft_time_scale = wp.fft_time_scale;
         
         // Sync pbsdf properties so Renderer doesn't override with incorrect values
         water_mat->albedoProperty.color = Vec3(wp.deep_color.x, wp.deep_color.y, wp.deep_color.z);
@@ -238,22 +243,97 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
         Vec3 position;
         Vec3 normal;
         Vec2 uv;
+        Vec3 flowDirection;
+        float depth = 0.0f;
+        float flowSpeed = 0.0f;
+        float discharge = 0.0f;
+        float froude = 0.0f;
+        float foamPotential = 0.0f;
+        float riverS = 0.0f;
+        float riverT = 0.0f;
+        float riverWidth = 1.0f;
     };
     
     std::vector<std::vector<VertexInfo>> grid(lengthSegs + 1, std::vector<VertexInfo>(widthSegs + 1));
+
+    // Build a stable 2D ribbon frame before emitting cross sections. Sampling
+    // sampleRight() independently at every point makes the frame rotate abruptly
+    // around tight Bezier control points; wide adjacent sections then intersect
+    // and appear as repeated knots. A capped miter join preserves the apparent
+    // width while keeping neighboring cross sections ordered.
+    std::vector<Vec3> centerline(static_cast<size_t>(lengthSegs) + 1u);
+    std::vector<float> sampledWidths(static_cast<size_t>(lengthSegs) + 1u, 1.0f);
+    for (int i = 0; i <= lengthSegs; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(lengthSegs);
+        centerline[static_cast<size_t>(i)] = river->spline.samplePosition(t);
+        sampledWidths[static_cast<size_t>(i)] = (std::max)(river->spline.sampleUserData1(t), 0.02f);
+    }
+    for (int i = 1; i < lengthSegs; ++i) {
+        Vec3 incoming = centerline[static_cast<size_t>(i)] - centerline[static_cast<size_t>(i - 1)];
+        Vec3 outgoing = centerline[static_cast<size_t>(i + 1)] - centerline[static_cast<size_t>(i)];
+        incoming.y = 0.0f;
+        outgoing.y = 0.0f;
+        const float incomingLength = incoming.length();
+        const float outgoingLength = outgoing.length();
+        if (incomingLength < 1e-5f || outgoingLength < 1e-5f) continue;
+        incoming = incoming * (1.0f / incomingLength);
+        outgoing = outgoing * (1.0f / outgoingLength);
+        const float turnAngle = std::acos(std::clamp(incoming.dot(outgoing), -1.0f, 1.0f));
+        if (turnAngle > 0.05f) {
+            const float localRadius = (std::min)(incomingLength, outgoingLength) /
+                (std::max)(2.0f * std::sin(turnAngle * 0.5f), 0.05f);
+            sampledWidths[static_cast<size_t>(i)] = (std::min)(
+                sampledWidths[static_cast<size_t>(i)], localRadius * 1.6f);
+        }
+    }
+    // Width changes are hydrologically meaningful, but a one-sample spike is
+    // not. Smooth only the sampling noise; endpoints retain authored values.
+    for (int pass = 0; pass < 2 && lengthSegs > 2; ++pass) {
+        std::vector<float> sourceWidths = sampledWidths;
+        for (int i = 1; i < lengthSegs; ++i) {
+            sampledWidths[static_cast<size_t>(i)] =
+                sourceWidths[static_cast<size_t>(i - 1)] * 0.25f +
+                sourceWidths[static_cast<size_t>(i)] * 0.50f +
+                sourceWidths[static_cast<size_t>(i + 1)] * 0.25f;
+        }
+    }
     
     float accumulatedLength = 0.0f;
     Vec3 prevCenter = river->spline.samplePosition(0);
+    Vec3 previousRight(0.0f);
     
     for (int i = 0; i <= lengthSegs; ++i) {
         float t = (float)i / (float)lengthSegs;
         
         // Sample main properties
-        Vec3 centerPos = river->spline.samplePosition(t);
-        Vec3 tangent = river->spline.sampleTangent(t);
-        Vec3 rightVec = river->spline.sampleRight(t);
-        float width = river->spline.sampleUserData1(t);
-        float depth = river->spline.sampleUserData2(t);
+        Vec3 centerPos = centerline[static_cast<size_t>(i)];
+        float width = sampledWidths[static_cast<size_t>(i)];
+        const RiverSpline::HydraulicPoint hydraulic = river->sampleHydraulics(t);
+        const float waterDepth = (std::max)(river->sampleDepth(t), 0.0f);
+
+        const Vec3 previousCenter = centerline[static_cast<size_t>((std::max)(i - 1, 0))];
+        const Vec3 nextCenter = centerline[static_cast<size_t>((std::min)(i + 1, lengthSegs))];
+        Vec3 incoming = centerPos - previousCenter;
+        Vec3 outgoing = nextCenter - centerPos;
+        incoming.y = 0.0f;
+        outgoing.y = 0.0f;
+        if (incoming.length() < 1e-5f) incoming = outgoing;
+        if (outgoing.length() < 1e-5f) outgoing = incoming;
+        incoming = incoming.length() > 1e-5f ? incoming.normalize() : Vec3(1, 0, 0);
+        outgoing = outgoing.length() > 1e-5f ? outgoing.normalize() : incoming;
+        Vec3 flowDirection = incoming + outgoing;
+        flowDirection = flowDirection.length() > 1e-5f ? flowDirection.normalize() : outgoing;
+        Vec3 rightIn = incoming.cross(Vec3(0, 1, 0)).normalize();
+        Vec3 rightOut = outgoing.cross(Vec3(0, 1, 0)).normalize();
+        if (rightIn.dot(rightOut) < 0.0f) rightOut = rightOut * -1.0f;
+        Vec3 rightVec = rightIn + rightOut;
+        rightVec = rightVec.length() > 1e-5f ? rightVec.normalize() : rightOut;
+        if (i > 0 && previousRight.length() > 1e-5f && rightVec.dot(previousRight) < 0.0f) {
+            rightVec = rightVec * -1.0f;
+        }
+        previousRight = rightVec;
+        const float miterDenominator = (std::max)(std::fabs(rightVec.dot(rightOut)), 0.65f);
+        const float joinScale = (std::min)(1.0f / miterDenominator, 1.45f);
         
         // Calculate Slope (Vertical descent)
         // Look ahead and behind to smooth slope calculation
@@ -298,7 +378,7 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
         for (int j = 0; j <= widthSegs; ++j) {
             float widthT = (float)j / (float)widthSegs; // 0.0 to 1.0 (Left to Right)
             float offsetMult = (widthT - 0.5f) * 2.0f;  // -1.0 to 1.0
-            float offset = offsetMult * (width * 0.5f);
+            float offset = offsetMult * (width * 0.5f) * joinScale;
             
             // Calculate XZ position along width
             Vec3 vertPos = centerPos + rightVec * offset;
@@ -377,7 +457,12 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
             Vec3 vertNormal(0, 1, 0);
             
             Vec2 uv(uCoord, widthT);
-            grid[i][j] = { vertPos, vertNormal, uv };
+            const float crossSectionDepth = waterDepth *
+                (1.0f - std::pow((std::min)(std::fabs(offsetMult), 1.0f), 4.0f));
+            grid[i][j] = {vertPos, vertNormal, uv, flowDirection, crossSectionDepth,
+                          hydraulic.flowSpeed, hydraulic.discharge, hydraulic.froude,
+                          hydraulic.foamPotential, accumulatedLength, widthT,
+                          width * joinScale};
         }
     }
     
@@ -407,15 +492,42 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
     std::vector<Vec3> positions;
     std::vector<Vec3> normals;
     std::vector<Vec2> uvs;
+    std::vector<Vec3> flowDirections;
+    std::vector<float> waterDepths;
+    std::vector<float> flowSpeeds;
+    std::vector<float> discharges;
+    std::vector<float> froudes;
+    std::vector<float> foamPotentials;
+    std::vector<float> riverS;
+    std::vector<float> riverT;
+    std::vector<float> riverWidths;
     positions.reserve((lengthSegs + 1) * (widthSegs + 1));
     normals.reserve((lengthSegs + 1) * (widthSegs + 1));
     uvs.reserve((lengthSegs + 1) * (widthSegs + 1));
+    flowDirections.reserve((lengthSegs + 1) * (widthSegs + 1));
+    waterDepths.reserve((lengthSegs + 1) * (widthSegs + 1));
+    flowSpeeds.reserve((lengthSegs + 1) * (widthSegs + 1));
+    discharges.reserve((lengthSegs + 1) * (widthSegs + 1));
+    froudes.reserve((lengthSegs + 1) * (widthSegs + 1));
+    foamPotentials.reserve((lengthSegs + 1) * (widthSegs + 1));
+    riverS.reserve((lengthSegs + 1) * (widthSegs + 1));
+    riverT.reserve((lengthSegs + 1) * (widthSegs + 1));
+    riverWidths.reserve((lengthSegs + 1) * (widthSegs + 1));
 
     for (int i = 0; i <= lengthSegs; ++i) {
         for (int j = 0; j <= widthSegs; ++j) {
             positions.push_back(grid[i][j].position);
             normals.push_back(grid[i][j].normal);
             uvs.push_back(grid[i][j].uv);
+            flowDirections.push_back(grid[i][j].flowDirection);
+            waterDepths.push_back(grid[i][j].depth);
+            flowSpeeds.push_back(grid[i][j].flowSpeed);
+            discharges.push_back(grid[i][j].discharge);
+            froudes.push_back(grid[i][j].froude);
+            foamPotentials.push_back(grid[i][j].foamPotential);
+            riverS.push_back(grid[i][j].riverS);
+            riverT.push_back(grid[i][j].riverT);
+            riverWidths.push_back(grid[i][j].riverWidth);
         }
     }
 
@@ -450,6 +562,48 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
         sharedTransform,
         river->name
     );
+
+    if (river->flatMesh && river->flatMesh->geometry) {
+        auto& geometry = *river->flatMesh->geometry;
+        if (!geometry.has_attribute("river_flow_direction")) geometry.add_attribute<Vec3>("river_flow_direction");
+        if (!geometry.has_attribute("river_flow_velocity")) geometry.add_attribute<Vec3>("river_flow_velocity");
+        if (!geometry.has_attribute("water_depth")) geometry.add_attribute<float>("water_depth");
+        if (!geometry.has_attribute("shore_factor")) geometry.add_attribute<float>("shore_factor");
+        if (!geometry.has_attribute("river_water_depth")) geometry.add_attribute<float>("river_water_depth");
+        if (!geometry.has_attribute("river_flow_speed")) geometry.add_attribute<float>("river_flow_speed");
+        if (!geometry.has_attribute("river_discharge")) geometry.add_attribute<float>("river_discharge");
+        if (!geometry.has_attribute("river_froude")) geometry.add_attribute<float>("river_froude");
+        if (!geometry.has_attribute("river_foam_potential")) geometry.add_attribute<float>("river_foam_potential");
+        if (!geometry.has_attribute("river_s")) geometry.add_attribute<float>("river_s");
+        if (!geometry.has_attribute("river_t")) geometry.add_attribute<float>("river_t");
+        if (!geometry.has_attribute("river_width")) geometry.add_attribute<float>("river_width");
+        Vec3* flowAttribute = geometry.get_attribute_data_mut<Vec3>("river_flow_direction");
+        Vec3* velocityAttribute = geometry.get_attribute_data_mut<Vec3>("river_flow_velocity");
+        float* standardDepthAttribute = geometry.get_attribute_data_mut<float>("water_depth");
+        float* shoreAttribute = geometry.get_attribute_data_mut<float>("shore_factor");
+        float* depthAttribute = geometry.get_attribute_data_mut<float>("river_water_depth");
+        float* speedAttribute = geometry.get_attribute_data_mut<float>("river_flow_speed");
+        float* dischargeAttribute = geometry.get_attribute_data_mut<float>("river_discharge");
+        float* froudeAttribute = geometry.get_attribute_data_mut<float>("river_froude");
+        float* foamAttribute = geometry.get_attribute_data_mut<float>("river_foam_potential");
+        float* sAttribute = geometry.get_attribute_data_mut<float>("river_s");
+        float* tAttribute = geometry.get_attribute_data_mut<float>("river_t");
+        float* widthAttribute = geometry.get_attribute_data_mut<float>("river_width");
+        for (size_t vertex = 0; vertex < positions.size(); ++vertex) {
+            if (flowAttribute) flowAttribute[vertex] = flowDirections[vertex];
+            if (velocityAttribute) velocityAttribute[vertex] = flowDirections[vertex] * flowSpeeds[vertex];
+            if (standardDepthAttribute) standardDepthAttribute[vertex] = waterDepths[vertex];
+            if (shoreAttribute) shoreAttribute[vertex] = std::fabs(riverT[vertex] * 2.0f - 1.0f);
+            if (depthAttribute) depthAttribute[vertex] = waterDepths[vertex];
+            if (speedAttribute) speedAttribute[vertex] = flowSpeeds[vertex];
+            if (dischargeAttribute) dischargeAttribute[vertex] = discharges[vertex];
+            if (froudeAttribute) froudeAttribute[vertex] = froudes[vertex];
+            if (foamAttribute) foamAttribute[vertex] = foamPotentials[vertex];
+            if (sAttribute) sAttribute[vertex] = riverS[vertex];
+            if (tAttribute) tAttribute[vertex] = riverT[vertex];
+            if (widthAttribute) widthAttribute[vertex] = riverWidths[vertex];
+        }
+    }
 
     if (river->flatMesh) {
         scene.world.objects.push_back(river->flatMesh);

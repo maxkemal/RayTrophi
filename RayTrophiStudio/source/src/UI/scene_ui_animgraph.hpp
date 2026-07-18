@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <set>
 #include "Triangle.h" // Added for dynamic_pointer_cast<Triangle>
+#include "TriangleMesh.h"
 #include "imgui.h"
 #include <string>
 #include <unordered_set>
@@ -659,12 +660,31 @@ inline void drawNodePropertiesPanel(UIContext& ctx,
         uint32_t nodeId = g_animGraphUI.selectedNodeIds[0];
         auto* node = graph->findNodeById(nodeId);
         if (node) {
+            // Clip playback state belongs to the runtime instance. Mirror it
+            // into the inspector before drawing so the node's Play/Pause and
+            // Reset controls operate on what the renderer is actually using.
+            AnimationGraph::AnimClipNode* assetClip =
+                dynamic_cast<AnimationGraph::AnimClipNode*>(node);
+            AnimationGraph::AnimClipNode* runtimeClip = nullptr;
+            if (assetClip && runtimeGraph && runtimeGraph != graph) {
+                runtimeClip = dynamic_cast<AnimationGraph::AnimClipNode*>(
+                    runtimeGraph->findNodeById(nodeId));
+                if (runtimeClip) {
+                    assetClip->currentTime = runtimeClip->currentTime;
+                    assetClip->isPlaying = runtimeClip->isPlaying;
+                }
+            }
+
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "[%s]", node->metadata.displayName.c_str());
             ImGui::Separator();
             ImGui::PushID(node->id);
             node->drawContent();
             ImGui::PopID();
             syncRuntimeNodeFromAsset(graph, runtimeGraph, node->id);
+            if (assetClip && runtimeClip) {
+                runtimeClip->currentTime = assetClip->currentTime;
+                runtimeClip->isPlaying = assetClip->isPlaying;
+            }
             
             // Special UI explicitly for State Machine addition just to make sure we assign correct Pin IDs
             if (node->getTypeId() == "StateMachine") {
@@ -795,10 +815,14 @@ inline void drawNodePropertiesPanel(UIContext& ctx,
 inline void drawAnimationClipsPanel(UIContext& ctx, float height = 0.0f, bool wrapInChild = true) {
     // Determine which animator to use
     AnimationController* animCtrl = nullptr;
+    SceneData::ImportedModelContext* activeModelCtx = nullptr;
+    AnimationGraph::AnimationNodeGraph* runtimeGraph = nullptr;
     if (!g_animGraphUI.activeCharacter.empty()) {
         for (auto& mctx : ctx.scene.importedModelContexts) {
             if (mctx.importName == g_animGraphUI.activeCharacter) {
+                activeModelCtx = &mctx;
                 animCtrl = mctx.animator.get();
+                runtimeGraph = mctx.runtimeGraph ? mctx.runtimeGraph.get() : mctx.graph.get();
                 break;
             }
         }
@@ -809,6 +833,7 @@ inline void drawAnimationClipsPanel(UIContext& ctx, float height = 0.0f, bool wr
     
     // Fallback to singleton for non-model animations (e.g. camera/light)
     if (!animCtrl) animCtrl = &AnimationController::getInstance();
+    const bool useGraphPlayback = activeModelCtx && activeModelCtx->useAnimGraph && runtimeGraph;
     
     const auto& clips = animCtrl->getAllClips();
     
@@ -832,7 +857,18 @@ inline void drawAnimationClipsPanel(UIContext& ctx, float height = 0.0f, bool wr
         for (size_t i = 0; i < clips.size(); ++i) {
             const auto& clip = clips[i];
             
-            bool isPlaying = (animCtrl->getCurrentClipName() == clip.name);
+            bool isPlaying = false;
+            if (useGraphPlayback) {
+                for (const auto& node : runtimeGraph->nodes) {
+                    auto* clipNode = dynamic_cast<AnimationGraph::AnimClipNode*>(node.get());
+                    if (clipNode && clipNode->clipName == clip.name && clipNode->isPlaying) {
+                        isPlaying = true;
+                        break;
+                    }
+                }
+            } else {
+                isPlaying = (animCtrl->getCurrentClipName() == clip.name);
+            }
             
             ImGui::PushID(static_cast<int>(i));
             
@@ -853,7 +889,26 @@ inline void drawAnimationClipsPanel(UIContext& ctx, float height = 0.0f, bool wr
             
             // Play button
             if (ImGui::SmallButton(isPlaying ? "Stop" : "Play")) {
-                if (isPlaying) {
+                if (useGraphPlayback) {
+                    if (isPlaying) {
+                        runtimeGraph->stopPlayback();
+                    } else {
+                        // Clip-library preview drives the runtime graph, not the
+                        // legacy controller. Reuse the first clip player in the
+                        // graph and leave the editable asset untouched.
+                        for (auto& node : runtimeGraph->nodes) {
+                            auto* clipNode = dynamic_cast<AnimationGraph::AnimClipNode*>(node.get());
+                            if (!clipNode) continue;
+                            clipNode->clipName = clip.name;
+                            clipNode->currentTime = clipNode->startTime;
+                            clipNode->isPlaying = true;
+                            break;
+                        }
+                        activeModelCtx->animGraphFollowTimeline = false;
+                        animCtrl->setPaused(false);
+                    }
+                    requestAnimGraphViewportWake(ctx);
+                } else if (isPlaying) {
                     animCtrl->stopAll();
                 } else {
                     animCtrl->play(clip.name, 0.2f);
@@ -2215,16 +2270,44 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
     // 1. BIDIRECTIONAL SELECTION SYNC: Viewport -> UI
     if (ctx.selection.hasSelection() && ctx.selection.selected.type == SelectableType::Object) {
         std::string selName = ctx.selection.selected.name;
-        
-        // If it's a member of an imported model, use model name instead
+
+        // Resolve the selected facade/proxy back to its canonical imported-model
+        // context. Flat selection keeps a representative Triangle while the
+        // context owns TriangleMesh, so name-only matching is not sufficient.
+        SceneData::ImportedModelContext* selectedModelCtx = nullptr;
+        SceneData::ImportedModelContext* prefixCandidate = nullptr;
+        size_t longestPrefix = 0;
         for (auto& mctx : ctx.scene.importedModelContexts) {
+            const std::string prefix = mctx.importName + "_";
+            if (selName == mctx.importName ||
+                (!mctx.importName.empty() && selName.rfind(prefix, 0) == 0)) {
+                if (mctx.importName.size() > longestPrefix) {
+                    prefixCandidate = &mctx;
+                    longestPrefix = mctx.importName.size();
+                }
+            }
+
             for (auto& member : mctx.members) {
                 auto tri = std::dynamic_pointer_cast<Triangle>(member);
-                if (tri && tri->getNodeName() == selName) {
-                    selName = mctx.importName;
+                auto mesh = std::dynamic_pointer_cast<TriangleMesh>(member);
+                const bool triangleMatch = tri &&
+                    ((ctx.selection.selected.object && tri.get() == ctx.selection.selected.object.get()) ||
+                     tri->getNodeName() == selName);
+                const bool flatParentMatch = mesh && ctx.selection.selected.object &&
+                    ctx.selection.selected.object->parentMesh.get() == mesh.get();
+                const bool transformMatch = mesh && ctx.selection.selected.object && mesh->transform &&
+                    ctx.selection.selected.object->getTransformPtr() == mesh->transform.get();
+                const bool flatNameMatch = mesh && mesh->nodeName == selName;
+                if (triangleMatch || flatParentMatch || transformMatch || flatNameMatch) {
+                    selectedModelCtx = &mctx;
                     break;
                 }
             }
+            if (selectedModelCtx) break;
+        }
+        if (!selectedModelCtx) selectedModelCtx = prefixCandidate;
+        if (selectedModelCtx) {
+            selName = selectedModelCtx->importName;
         }
 
         // Only auto-switch if we have a graph or it's a known character
@@ -2410,25 +2493,48 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
         ImGui::Spacing();
     }
 
-    // Auto-create graph for active character if missing
+    // Adopt the renderer-created runtime graph as the editable asset.  This is
+    // especially important for flat TriangleMesh imports: runtime animation is
+    // ready before this panel is ever opened, so the UI must not replace it with
+    // an empty Final Pose graph.
     if (!g_animGraphUI.activeCharacter.empty() &&
         g_animGraphUI.graphs.find(getAnimGraphAssetKeyForCharacter(ctx.scene, g_animGraphUI.activeCharacter)) == g_animGraphUI.graphs.end()) {
 
         std::string assetKey = getAnimGraphAssetKeyForCharacter(ctx.scene, g_animGraphUI.activeCharacter);
-        g_animGraphUI.graphs[assetKey] = std::make_shared<AnimationGraph::AnimationNodeGraph>();
-        auto& graph = g_animGraphUI.graphs[assetKey];
+        if (auto* runtimeGraph = getRuntimeGraphForCharacter(ctx.scene, g_animGraphUI.activeCharacter)) {
+            g_animGraphUI.graphs[assetKey] = runtimeGraph->clone();
+            g_animGraphUI.runtimeStaleAssetKeys.erase(assetKey);
+        } else {
+            auto graph = std::make_shared<AnimationGraph::AnimationNodeGraph>();
+            auto clips = getCharacterAnimationClips(ctx.scene, g_animGraphUI.activeCharacter);
 
-        // Add default Final Pose node
-        auto finalNode = std::make_unique<AnimationGraph::FinalPoseNode>();
-        finalNode->x = 600; finalNode->y = 300;
-        finalNode->id = graph->nextNodeId++;
-        finalNode->inputs[0].id = graph->nextPinId++;
-        finalNode->inputs[0].nodeId = finalNode->id;
+            AnimationGraph::AnimClipNode* clipNode = nullptr;
+            if (!clips.empty() && clips.front() && !clips.front()->name.empty()) {
+                clipNode = graph->addNode<AnimationGraph::AnimClipNode>();
+                clipNode->clipName = clips.front()->name;
+                clipNode->loop = true;
+                clipNode->x = 100.0f;
+                clipNode->y = 100.0f;
+            }
 
-        graph->outputNode = finalNode.get();
-        graph->nodes.push_back(std::move(finalNode));
-        markAnimGraphRuntimeStale(ctx.scene, g_animGraphUI.activeCharacter);
-        syncRuntimeGraphFromAsset(ctx.scene, g_animGraphUI.activeCharacter);
+            auto* finalNode = graph->addNode<AnimationGraph::FinalPoseNode>();
+            finalNode->x = 400.0f;
+            finalNode->y = 100.0f;
+            if (clipNode && !clipNode->outputs.empty() && !finalNode->inputs.empty()) {
+                graph->connect(clipNode->outputs[0].id, finalNode->inputs[0].id);
+            }
+
+            g_animGraphUI.graphs[assetKey] = graph;
+            markAnimGraphRuntimeStale(ctx.scene, g_animGraphUI.activeCharacter);
+            syncRuntimeGraphFromAsset(ctx.scene, g_animGraphUI.activeCharacter);
+            if (clipNode) {
+                if (auto* mctx = findImportedModelContext(ctx.scene, g_animGraphUI.activeCharacter)) {
+                    mctx->useAnimGraph = true;
+                    mctx->animGraphFollowTimeline = false;
+                    mctx->restPoseApplied = false;
+                }
+            }
+        }
     }
 
     if (!g_animGraphUI.activeCharacter.empty()) {

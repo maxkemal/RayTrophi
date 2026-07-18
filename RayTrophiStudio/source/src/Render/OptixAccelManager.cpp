@@ -1402,6 +1402,7 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
     }
 
     std::unordered_set<const Triangle*> live_water_triangles;
+    std::unordered_set<int> updatedSkinningBlas;
     
     // 3. UPDATE BLAS AND INSTANCE TRANSFORMS
     for (const auto& group : m_cached_groups) {
@@ -1425,6 +1426,7 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
             MeshGeometry dummyGeom;
             dummyGeom.vertices.resize(blas.vertex_count); 
             updateMeshBLAS(group.blas_idx, dummyGeom, true, false);
+            updatedSkinningBlas.insert(group.blas_idx);
             continue;
         }
 
@@ -1498,6 +1500,31 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
             (!blas.weld_corner_map.empty() && liveGeom.vertices.size() == blas.weld_corner_map.size());
         if (liveSizeOk) {
             updateMeshBLAS(group.blas_idx, liveGeom, false, false);
+        }
+    }
+
+    // Flat skinned TriangleMesh BLASes have no facade triangles, so they do not
+    // appear in m_cached_groups. They still own the same bind/influence buffers;
+    // dispatch them directly and refit once per pose.
+    if (d_boneMatricesPtr) {
+        for (int blasIndex = 0; blasIndex < static_cast<int>(mesh_blas_list.size()); ++blasIndex) {
+            if (updatedSkinningBlas.count(blasIndex)) continue;
+            MeshBLAS& blas = mesh_blas_list[blasIndex];
+            if (!blas.hasSkinningData || blas.vertex_count == 0) continue;
+            launchSkinningKernel(
+                reinterpret_cast<float3*>(blas.d_bindPoses),
+                reinterpret_cast<float3*>(blas.d_bindNormals),
+                reinterpret_cast<int4*>(blas.d_boneIndices),
+                reinterpret_cast<float4*>(blas.d_boneWeights),
+                reinterpret_cast<float*>(d_boneMatricesPtr),
+                reinterpret_cast<float3*>(blas.d_vertices),
+                reinterpret_cast<float3*>(blas.d_normals),
+                static_cast<int>(blas.vertex_count),
+                static_cast<int>(boneMatrices.size()),
+                stream);
+            MeshGeometry dummyGeom;
+            dummyGeom.vertices.resize(blas.vertex_count);
+            updateMeshBLAS(blasIndex, dummyGeom, true, false);
         }
     }
     

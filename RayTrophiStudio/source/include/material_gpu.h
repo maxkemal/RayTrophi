@@ -18,6 +18,8 @@
 // Float comparison epsilon
 constexpr float FLOAT_COMPARE_EPSILON = 1e-4f;
 static constexpr int GPU_MAT_FLAG_WATER = (1 << 17);
+static constexpr int GPU_MAT_FLAG_WATER_LAKE = (1 << 22);
+static constexpr int GPU_MAT_FLAG_WATER_RIVER = (1 << 23);
 // Thin-shell BUBBLE material (champagne / soda / soap-foam close-up). The BSDF
 // treats the surface as a thin dielectric shell: Fresnel rim reflection vs a
 // STRAIGHT pass-through (no net refraction bending), so it reads as a bright-

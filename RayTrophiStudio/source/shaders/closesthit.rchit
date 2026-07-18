@@ -88,31 +88,15 @@ const float SHADOW_TMIN = 1e-3;   // Shadow rays: avoid near-field self/adjacent
 const float OPACITY_THRESHOLD = 0.5;  // Alpha cutout threshold
 const uint MAT_FLAG_WATER = (1u << 17);
 const uint MAT_FLAG_WATER_FFT_READY = (1u << 18);
+const uint MAT_FLAG_WATER_LAKE = (1u << 22);
+const uint MAT_FLAG_WATER_RIVER = (1u << 23);
 const uint MAT_FLAG_BUBBLE = (1u << 19);
 const uint MAT_FLAG_MARBLE_VOLUME = (1u << 20); // glass marble full-volume medium march (raygen integrates interior)
 
 // ============================================================
-// Payload — raygen shader ile eşleşmeli
+// Payload — shared ABI, single source of truth
 // ============================================================
-struct RayPayload {
-    vec3     radiance;
-    vec3     attenuation;
-    vec3     scatterOrigin;
-    vec3     scatterDir;
-    uint     seed;
-    bool     scattered;
-    bool     hitEmissive;
-    uint     occluded;
-    bool     skipAABBs;    // set by volume_closesthit when a solid surface is found inside
-    vec3     primaryAlbedo;
-    vec3     primaryNormal;
-    uint     primaryHit;
-    float    primaryTransmission;
-    float    primaryMetallic;
-    uint     bounceType;
-    uint     primaryMaterialId;   // Stylize AOV: real material index of the primary hit
-    float    dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
-};
+#include "rt_payload.glsl"
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
 // Separate shadow payload storage to avoid corrupting the main payload during shadow tracing.
@@ -127,6 +111,7 @@ layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
 
 // Material struct — single source of truth shared by every material-reading shader.
 #include "material_struct.glsl"
+#include "water_v3.glsl"
 
 float wrapRepeat(float x) {
     float r = mod(x, 1.0);
@@ -204,6 +189,10 @@ struct VkGeometryData {
     uint64_t uvAddr;
     uint64_t indexAddr;
     uint64_t materialAddr;
+    uint64_t pointinessAddr;  // per-vertex pointiness (Geometry node); 0 = not uploaded
+    uint64_t attribAddr;      // per-vertex named attributes (Attribute node), INTERLEAVED
+                              // MP_ATTRIB_SLOTS floats per vertex; 0 = not uploaded
+    uint64_t waterAddr;       // per-vertex hydrology: three vec4 records; 0 = absent
 };
 
 struct VkInstanceData {
@@ -212,6 +201,12 @@ struct VkInstanceData {
 };
 
 layout(set = 0, binding = 2, scalar) readonly buffer MaterialBuffer  { Material     m[]; } materials;
+// COLD material fields (split record, see material_struct.glsl). Accessed via
+// the `matx` macro below so every read is an independent SSBO load AT ITS USE
+// SITE — the loads sink into the feature-gated branches (SSS/water/bubble/
+// resin/dust) instead of joining a monolithic per-hit struct fetch.
+layout(set = 0, binding = 24, scalar) readonly buffer MaterialExtBuffer { MaterialExt m[]; } materialsExt;
+#define matx materialsExt.m[matIndex]
 layout(set = 0, binding = 3, scalar) readonly buffer LightBuffer     { LightData    l[]; } lights;
 layout(set = 0, binding = 4, scalar) readonly buffer GeometryBuffer  { VkGeometryData g[]; } geometries;
 layout(set = 0, binding = 5, scalar) readonly buffer InstanceBuffer  { VkInstanceData  i[]; } instances;
@@ -414,16 +409,29 @@ void pnanovdb_buf_write_uint64(pnanovdb_buf_t buf, uint byte_offset, uvec2 value
 #include "PNanoVDB.h"
 #include "procedural_detail.glsl"
 
-// Trilinear NanoVDB float grid sampler — inputs in VDB native world-space
-float ch_sampleNanoVDB(uint64_t gridAddr, vec3 worldPos) {
-    if (gridAddr == 0u) return 0.0;
-    pnanovdb_buf_t buf; buf.address = gridAddr;
-    pnanovdb_grid_handle_t gridH; gridH.address.byte_offset = 0u;
-    pnanovdb_tree_handle_t treeH = pnanovdb_grid_get_tree(buf, gridH);
-    pnanovdb_root_handle_t rootH = pnanovdb_tree_get_root(buf, treeH);
-    pnanovdb_map_handle_t   mapH = pnanovdb_grid_get_map(buf, gridH);
-    pnanovdb_readaccessor_t acc;
-    pnanovdb_readaccessor_init(acc, rootH);
+// Ambient Occlusion node: the material VM does not trace rays itself — it calls out to
+// the stage it runs in. Closest-hit is the ONE stage that may trace (the NEE shadow ray
+// below already does, so the recursion depth this needs is depth the pipeline is already
+// paying for), so it defines MP_HAS_AO and supplies the tracer. Prototype here, body
+// after the RNG (rnd) it needs; ray-gen and the shadow any-hit do not include this VM at
+// all, so nothing else can accidentally trace from a stage where tracing is illegal.
+#define MP_HAS_AO 1
+float mp_traceAO(vec3 p, vec3 n, float dist, int samples, bool inside);
+
+// Bevel node: same contract. The probe rays reuse the shadow payload with a MARKER in .w
+// (see mp_traceBevel below and the probe branch at the top of shadow_anyhit.rahit).
+#define MP_HAS_BEVEL 1
+vec3 mp_traceBevel(vec3 p, vec3 n, float radius, int samples);
+
+#include "material_program.glsl"   // Faz 2b: per-pixel material-graph VM (binding 23)
+
+// Trilinear NanoVDB float grid sampler with a CALLER-OWNED accessor — the
+// pnanovdb_readaccessor caches the root→leaf tree path, so a march loop must
+// init it once per volume and reuse it across steps (per-sample re-init walks
+// the whole tree for all 8 taps again — the exact per-sample-reinit trap the
+// volume closesthit already avoids).
+float ch_sampleNanoVDBAcc(pnanovdb_buf_t buf, pnanovdb_map_handle_t mapH,
+                          inout pnanovdb_readaccessor_t acc, vec3 worldPos) {
     pnanovdb_vec3_t wPos; wPos.x = worldPos.x; wPos.y = worldPos.y; wPos.z = worldPos.z;
     pnanovdb_vec3_t iPos = pnanovdb_map_apply_inverse(buf, mapH, wPos);
     vec3 p0 = floor(vec3(iPos.x, iPos.y, iPos.z) - 0.5);
@@ -513,8 +521,12 @@ float ch_proceduralCloudDensity(VkVolumeInstance vol, vec3 lp, vec3 bmin, vec3 b
 
 // World-pos → object-space density for shadow ray march.
 // type 0 (homogeneous): density=1.0,  type 1 (noise): fbm density,
-// type 2 (NanoVDB): real trilinear grid sample via ch_sampleNanoVDB.
-float ch_volDensity(VkVolumeInstance vol, vec3 wp) {
+// type 2 (NanoVDB): real trilinear grid sample via the caller's accessor.
+// vdbReady + buf/map/acc come from the caller, initialized ONCE per volume —
+// see computeVolumeShadowTransmittance.
+float ch_volDensity(VkVolumeInstance vol, vec3 wp,
+                    pnanovdb_buf_t vdbBuf, pnanovdb_map_handle_t vdbMapH,
+                    inout pnanovdb_readaccessor_t vdbAcc, bool vdbReady) {
     vec3 lp;
     lp.x = vol.inv_transform[0]*wp.x + vol.inv_transform[1]*wp.y + vol.inv_transform[2]*wp.z + vol.inv_transform[3];
     lp.y = vol.inv_transform[4]*wp.x + vol.inv_transform[5]*wp.y + vol.inv_transform[6]*wp.z + vol.inv_transform[7];
@@ -532,15 +544,14 @@ float ch_volDensity(VkVolumeInstance vol, vec3 wp) {
         density *= smoothstep(0.0, 0.1, min(min(ed.x, ed.y), ed.z));
     } else if (vol.volume_type == 2) {
         // NanoVDB: sample the actual grid data.
-        // Guard: vdb_grid_address may be 0 when the source VDB file is missing or
-        // the Vulkan buffer has not yet been uploaded (e.g. project opened without
-        // the original .vdb file present).  Dereferencing address 0 = GPU crash.
-        if (vol.vdb_grid_address != 0) {
+        // vdbReady is false when vdb_grid_address == 0 (source VDB missing /
+        // buffer not yet uploaded) — dereferencing address 0 = GPU crash.
+        if (vdbReady) {
             vec3 vdbWorldPos = lp;
             vdbWorldPos.x -= vol.pivot_offset[0];
             vdbWorldPos.y -= vol.pivot_offset[1];
             vdbWorldPos.z -= vol.pivot_offset[2];
-            density = ch_sampleNanoVDB(vol.vdb_grid_address, vdbWorldPos);
+            density = ch_sampleNanoVDBAcc(vdbBuf, vdbMapH, vdbAcc, vdbWorldPos);
         } else {
             // Fallback: procedural noise so the volume still renders visibly
             vec3 span = max(bmax - bmin, vec3(1e-5));
@@ -570,6 +581,23 @@ float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float m
         if (vol.volume_type == 3 || vol.source_type == 3) continue;
         float sigma_t = vol.scatter_coefficient + vol.absorption_coefficient;
         if (sigma_t < EPS || vol.density_multiplier < EPS) continue;
+
+        // NanoVDB persistent accessor — initialized ONCE per volume and reused
+        // by every density sample of this march (tauHint + all steps). The
+        // accessor caches the root→leaf path; the old per-sample init re-walked
+        // the whole tree for each of the 8 trilinear taps, every step.
+        pnanovdb_buf_t          vdbBuf;
+        pnanovdb_map_handle_t   vdbMapH;
+        pnanovdb_readaccessor_t vdbAcc;
+        bool vdbReady = (vol.volume_type == 2) && (vol.vdb_grid_address != 0);
+        if (vdbReady) {
+            vdbBuf.address = vol.vdb_grid_address;
+            pnanovdb_grid_handle_t gridH; gridH.address.byte_offset = 0u;
+            pnanovdb_tree_handle_t treeH = pnanovdb_grid_get_tree(vdbBuf, gridH);
+            pnanovdb_root_handle_t rootH = pnanovdb_tree_get_root(vdbBuf, treeH);
+            vdbMapH = pnanovdb_grid_get_map(vdbBuf, gridH);
+            pnanovdb_readaccessor_init(vdbAcc, rootH);
+        }
 
         vec3 lo, ld;
         lo.x = vol.inv_transform[0] * shadowOrigin.x + vol.inv_transform[1] * shadowOrigin.y + vol.inv_transform[2] * shadowOrigin.z + vol.inv_transform[3];
@@ -601,7 +629,8 @@ float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float m
         int reqSteps = clamp(vol.shadow_steps, 1, 64);
         float segLen = tFW - tNW;
         if (segLen <= 1e-5) continue;
-        float dMid = ch_volDensity(vol, shadowOrigin + lightDir * (tNW + 0.5 * segLen));
+        float dMid = ch_volDensity(vol, shadowOrigin + lightDir * (tNW + 0.5 * segLen),
+                                   vdbBuf, vdbMapH, vdbAcc, vdbReady);
         float tauHint = max(0.0, dMid) * sigma_t * segLen;
         if (tauHint <= 0.02) continue;
         float stepScale = clamp(sqrt(tauHint), 0.25, 1.0);
@@ -613,7 +642,7 @@ float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float m
         float opticalDepth = 0.0;
         for (int s = 0; s < steps; s++) {
             vec3 sp = shadowOrigin + lightDir * (tNW + (float(s) + jitter + 0.5) * stepW);
-            float d = ch_volDensity(vol, sp);
+            float d = ch_volDensity(vol, sp, vdbBuf, vdbMapH, vdbAcc, vdbReady);
             opticalDepth += d * sigma_t * stepW;
             if (opticalDepth > 10.0) break;
         }
@@ -647,6 +676,9 @@ layout(buffer_reference, scalar) readonly buffer NormalBuffer { vec3 n[]; };
 layout(buffer_reference, scalar) readonly buffer UVBuffer     { vec2 u[]; };
 layout(buffer_reference, scalar) readonly buffer IndexBuffer  { uint i[]; };
 layout(buffer_reference, scalar) readonly buffer MaterialIndexBuffer { uint m[]; };
+layout(buffer_reference, scalar) readonly buffer PointinessBuffer    { float p[]; };
+layout(buffer_reference, scalar) readonly buffer AttribBuffer        { float a[]; };
+layout(buffer_reference, scalar) readonly buffer WaterVertexBuffer   { vec4 w[]; };
 
 // Hit attributes (barycentrics)
 hitAttributeEXT vec2 baryCoord;
@@ -680,6 +712,119 @@ void buildONB(in vec3 n, out vec3 tangent, out vec3 bitangent) {
 }
 
 vec3 safeNormalize(vec3 v, vec3 fallback);
+
+// ============================================================
+// Ambient Occlusion tracer (material VM's AO op — see MP_HAS_AO above)
+// ============================================================
+// Cosine-weighted hemisphere around the shading normal, `samples` shadow rays, each
+// capped at `dist`. Reuses the EXACT machinery the NEE shadow ray uses: same payload
+// (location 1), same miss shader (index 1, sets w = 1 on escape), same triangles-only
+// mask 0x01 — so an alpha-cut leaf occludes AO exactly as it occludes a light, and a
+// volume AABB (mask 0x02) does not occlude at all.
+//
+// COST: this multiplies the ray count of every shading call that runs an AO chain by
+// `samples`. It is the only node in the graph that does that. Nothing here is cached.
+float mp_traceAO(vec3 p, vec3 n, float dist, int samples, bool inside) {
+    vec3 nrm = safeNormalize(n, vec3(0.0, 1.0, 0.0));
+    if (inside) nrm = -nrm;                      // occlusion of the cavity BEHIND the surface
+    samples = clamp(samples, 1, 64);
+
+    vec3 t, b;
+    buildONB(nrm, t, b);
+
+    // Seed from the SHADING POINT, not the pixel: a camera-seeded AO crawls over a static
+    // surface as the camera moves. payload.seed adds the per-sample decorrelation that
+    // lets the estimate average out across accumulation.
+    uint seed = payload.seed
+              ^ (floatBitsToUint(p.x) * 73856093u)
+              ^ (floatBitsToUint(p.y) * 19349663u)
+              ^ (floatBitsToUint(p.z) * 83492791u);
+
+    vec3 origin = p + nrm * SHADOW_TMIN;
+    int hits = 0;
+    for (int s = 0; s < samples; ++s) {
+        float r1 = rnd(seed);
+        float r2 = rnd(seed);
+        float phi = 6.2831853 * r1;
+        float sq = sqrt(r2);                     // cosine-weighted
+        vec3 dir = t * (cos(phi) * sq) + b * (sin(phi) * sq) + nrm * sqrt(max(0.0, 1.0 - r2));
+
+        shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);   // conservative: blocked until the miss says otherwise
+        uint aoFlags = gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT;
+        traceRayEXT(topLevelAS, aoFlags, 0x01, 0, 1, 1, origin, SHADOW_TMIN, dir, max(dist, SHADOW_TMIN * 2.0), 1);
+        if (shadowPayload.w <= 0.5) ++hits;
+    }
+    return 1.0 - float(hits) / float(samples);
+}
+
+// ============================================================
+// Bevel tracer (material VM's Bevel op — see MP_HAS_BEVEL above)
+// ============================================================
+// Rounded-edge shading normal = the AREA-AVERAGE of the surface normal over the part
+// of the scene inside a sphere of `radius` around the shading point, distance-weighted.
+// Estimated with `samples` random CHORDS through that sphere: a uniform direction, a
+// uniform disk offset perpendicular to it, and a segment spanning the sphere; the
+// any-hit adds EVERY intersection's stored normal, weighted by (1 - dist/R), into the
+// payload. A hard edge then SHADES like a fillet while the silhouette stays as modeled.
+//
+// Why chords and not rays cast from the shading point (three shipped attempts document
+// the difference): from-P sampling sees the face it stands on in half of all directions
+// but an edge's neighbor face in only a quarter, so the blend over-rotates past the mid
+// normal on BOTH sides of the edge and the normal JUMPS at the exact crest line — a
+// sharp seam right where the rounding should be smoothest. The area estimator is
+// continuous in P and lands on the mid normal at the crest by symmetry.
+//
+// The probes cannot invoke this closest-hit recursively (payload clobber + recursion
+// budget), and rayQuery's feature bit is not enabled on the device — so they reuse the
+// SHADOW pipeline in a probe mode flagged by the payload w's SIGN BIT (the shadow path
+// only ever writes +0.0 / +1.0 there, so bit 31 is unambiguous):
+//   w   = packHalf2x16(vec2(h, diskR)) | 0x80000000  (h = chord half-length, diskR =
+//         the chord's offset from P; sphere radius = sqrt(h^2 + diskR^2)),
+//   xyz = running sum of weighted stored normals (the miss shader only touches .w,
+//         so the sum survives traversal officially "missing").
+// MIRROR: MatOp::Bevel in MaterialProgram.h — same estimator, only the RNG differs.
+vec3 mp_traceBevel(vec3 p, vec3 nIn, float radius, int samples) {
+    vec3 n = safeNormalize(nIn, vec3(0.0, 1.0, 0.0));
+    radius = max(radius, 1e-5);
+    samples = clamp(samples, 1, 16);
+
+    // Shading-point seed (camera-stable, like AO) with a different salt so a graph
+    // using both ops does not correlate their sample patterns.
+    uint seed = payload.seed
+              ^ (floatBitsToUint(p.x) * 0xB5297A4Du)
+              ^ (floatBitsToUint(p.y) * 0x68E31DA4u)
+              ^ (floatBitsToUint(p.z) * 0x1B56C4E9u);
+
+    // Tiny N seed only breaks the tie when every chord misses (a needle tip);
+    // anywhere normal it is noise-floor against the accumulated real weights.
+    vec3 accum = n * 0.05;
+    for (int s = 0; s < samples; ++s) {
+        float r1 = rnd(seed);
+        float r2 = rnd(seed);
+        float z = 1.0 - 2.0 * r1;                // chord axis: uniform sphere
+        float phi = 6.2831853 * r2;
+        float sxy = sqrt(max(0.0, 1.0 - z * z));
+        vec3 D = vec3(cos(phi) * sxy, sin(phi) * sxy, z);
+
+        vec3 e1, e2;
+        buildONB(D, e1, e2);
+        float r3 = rnd(seed);
+        float r4 = rnd(seed);
+        float diskR = radius * sqrt(r3) * 0.999; // uniform disk; keep h > 0
+        float ph2 = 6.2831853 * r4;
+        float h = sqrt(max(radius * radius - diskR * diskR, 0.0));
+        vec3 origin = p + e1 * (cos(ph2) * diskR) + e2 * (sin(ph2) * diskR) - D * h;
+
+        // NoOpaque forces the any-hit to run on opaque-flagged BLASes too; no
+        // TerminateOnFirstHit — the any-hit must see EVERY crossing to accumulate.
+        shadowPayload = vec4(0.0, 0.0, 0.0,
+            uintBitsToFloat(packHalf2x16(vec2(h, diskR)) | 0x80000000u));
+        uint probeFlags = gl_RayFlagsSkipClosestHitShaderEXT | gl_RayFlagsNoOpaqueEXT;
+        traceRayEXT(topLevelAS, probeFlags, 0x01, 0, 1, 1, origin, 0.0, D, 2.0 * h, 1);
+        accum += shadowPayload.xyz;
+    }
+    return safeNormalize(accum, n);
+}
 
 bool buildSurfaceTBN(
     vec3 objV0, vec3 objV1, vec3 objV2,
@@ -909,6 +1054,31 @@ float pdf_brdf_gl(vec3 N, vec3 V, vec3 L, float roughness) {
 }
 
 // Pick smart light (importance-based) - simplified GPU-parity using rnd
+// Selection weight of one light — kept in a helper so the two-pass walk below
+// (sum, then CDF re-walk) computes identical values WITHOUT materializing a
+// per-light array. The old float weights[128] was a dynamically indexed local
+// array: 512 bytes of scratch memory per invocation on every closesthit,
+// a pure occupancy tax. Recomputing the weight is a handful of ALU ops against
+// an SSBO read that is warm in cache on the second pass.
+float smart_light_weight_gl(int i, vec3 hit_pos) {
+    int t = int(lights.l[i].position.w + 0.5);
+    if (t == 1) return 0.0; // directional — handled by the uniform branch above
+    vec3 delta = lights.l[i].position.xyz - hit_pos;
+    float dist = max(length(delta), 1.0);
+    float intensity = gc_luminance(lights.l[i].color.rgb) * lights.l[i].color.a;
+    if (t == 0) {
+        // Point light: account for spherical sampling area (4*pi*r^2) so selection pdf
+        // and per-light sampling pdf are consistent (avoids intensity scaling with radius).
+        float area = 4.0 * PI * lights.l[i].params.x * lights.l[i].params.x;
+        return (1.0 / (dist * dist)) * intensity * area;
+    } else if (t == 2) {
+        return (1.0 / (dist * dist)) * intensity * min(lights.l[i].params.y * lights.l[i].params.z, 10.0);
+    } else if (t == 3) {
+        return (1.0 / (dist * dist)) * intensity * 0.8;
+    }
+    return 0.0;
+}
+
 int pick_smart_light_gl(uvec2 dummySize, vec3 hit_pos, out float pdf_out) {
     int light_count = int(cam.lightCount);
     if (light_count == 0) { pdf_out = 0.0; return -1; }
@@ -938,40 +1108,27 @@ int pick_smart_light_gl(uvec2 dummySize, vec3 hit_pos, out float pdf_out) {
         rng = (rng - dir_prob) / max(1.0 - dir_prob, 1e-6);
         prob_to_reach = 1.0 - dir_prob;
     }
-    // Weighted selection
-    float weights[128];
+    // Weighted selection — two passes over the light list (sum, then CDF walk),
+    // no per-light array. Also lifts the old 128-light cap: every light gets a
+    // selection weight now, not just the first 128.
     float total = 0.0;
-    int max_l = (light_count < 128) ? light_count : 128;
-    for (int i = 0; i < max_l; ++i) {
-        float w = 0.0;
-        if (int(lights.l[i].position.w + 0.5) != 1) {
-            vec3 delta = lights.l[i].position.xyz - hit_pos;
-            float dist = max(length(delta), 1.0);
-            float intensity = gc_luminance(lights.l[i].color.rgb) * lights.l[i].color.a;
-            int t = int(lights.l[i].position.w + 0.5);
-            if (t == 0) {
-                // Point light: account for spherical sampling area (4*pi*r^2) so selection pdf
-                // and per-light sampling pdf are consistent (avoids intensity scaling with radius).
-                float area = 4.0 * PI * lights.l[i].params.x * lights.l[i].params.x;
-                w = (1.0 / (dist * dist)) * intensity * area;
-            } else if (t == 2) {
-                w = (1.0 / (dist * dist)) * intensity * min(lights.l[i].params.y * lights.l[i].params.z, 10.0);
-            } else if (t == 3) {
-                w = (1.0 / (dist * dist)) * intensity * 0.8;
-            }
-        }
-        weights[i] = w; total += w;
-    }
-    int sel = max_l - 1;
+    for (int i = 0; i < light_count; ++i) total += smart_light_weight_gl(i, hit_pos);
     if (total < 1e-6) {
-        sel = int(rng * float(light_count)) % light_count;
+        int sel = int(rng * float(light_count)) % light_count;
         pdf_out = prob_to_reach * (1.0 / float(light_count));
         return sel;
     }
     float r = rng * total;
     float acc = 0.0;
-    for (int i = 0; i < max_l; ++i) { acc += weights[i]; if (r <= acc) { sel = i; break; } }
-    pdf_out = prob_to_reach * (weights[sel] / total);
+    int sel = light_count - 1;
+    float selW = 0.0;
+    for (int i = 0; i < light_count; ++i) {
+        float w = smart_light_weight_gl(i, hit_pos);
+        acc += w;
+        selW = w; // if the walk never breaks (numeric edge), fall back to the last light
+        if (r <= acc) { sel = i; break; }
+    }
+    pdf_out = prob_to_reach * (selW / total);
     return sel;
 }
 
@@ -998,8 +1155,10 @@ vec3 cosineSampleHemisphere(vec3 normal, inout uint seed) {
     return normalize(tangent * x + bitangent * y + normal * z);
 }
 
-// GGX NDF hemisphere sampling — sadece scatterGlass tarafından kullanılıyor
-// PDF = D(h) * cos(theta_h) / (4 * dot(v, h))
+// GGX NDF half-vector sampling — only scatterGlass uses this helper.
+// Returning the reflected direction here caused scatterGlass to treat that
+// direction as a normal and reflect/refract a second time. Roughness == 0
+// bypassed the bug, while any small positive value flattened water detail.
 vec3 ggxSampleHemisphere(vec3 normal, vec3 viewDir, float roughness, inout uint seed) {
     float r1    = rnd(seed);
     float r2    = rnd(seed);
@@ -1016,7 +1175,7 @@ vec3 ggxSampleHemisphere(vec3 normal, vec3 viewDir, float roughness, inout uint 
     buildONB(normal, tangent, bitangent);
     vec3 halfVec = normalize(tangent * halfVecLocal.x + bitangent * halfVecLocal.y + normal * halfVecLocal.z);
 
-    return reflect(-viewDir, halfVec);
+    return halfVec;
 }
 
 // GGX VNDF sampling (Heitz 2018) — scatterMetal için
@@ -1192,11 +1351,53 @@ struct ResinMarch {
     vec3  dirtAlbedo;  // light-direction-shaded speck colour (valid when dirtHit)
     float sparkle;     // bubble/shard rim highlight, transmittance-weighted
     vec3  shardGlow;   // shards' own visible colour body (additive, T-weighted)
+    vec3  dustGlow;    // forward-scatter excess past the coverage clamp —
+                       // the backlit silver lining (additive, like shardGlow)
 };
 // hue → vivid rgb (saturation baked at 0.85) for the glass-shard palette.
 vec3 rh_hue(float h) {
     vec3 rgb = clamp(abs(fract(vec3(h) + vec3(0.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
     return mix(vec3(1.0), rgb, 0.85);
+}
+// Dust density field only, no colour — MUST mirror the density half of the
+// style branches in resinMarchInterior's Phase A (the colour half stays
+// fused there because it shares intermediates like the swirl warp). Used by
+// the light march below so the self-shadow sees exactly the field it shadows.
+float rh_dustDensity(vec3 P, float scl, uint dustStyle) {
+    float dust;
+    if (dustStyle == 2u) {
+        float n = rh_fbm(P * scl * vec3(2.4, 0.55, 2.4));
+        dust = pow(1.0 - abs(2.0 * n - 1.0), 3.0);
+    } else if (dustStyle == 3u) {
+        vec3 wp = P * scl;
+        vec3 warp = vec3(rh_fbm(wp * 0.5),
+                         rh_fbm(wp * 0.5 + vec3(19.7)),
+                         rh_fbm(wp * 0.5 + vec3(47.3))) - 0.5;
+        dust = rh_fbm(wp + warp * 2.6);
+    } else {   // styles 0/1 share the billow field (they differ in colour only)
+        dust = rh_fbm(P * scl) * (0.6 + 0.8 * rh_vnoise(P * scl * 3.1));
+    }
+    return pow(dust, 2.0);
+}
+// Dust transmittance TOWARD THE LIGHT: 3 jittered steps through the dust
+// field only (no scene rays, no lattice). One mechanism buys two behaviours:
+// dense cores shadow themselves (lit side bright, core dark) and shadow the
+// specks suspended below them. σt matches the camera march (dust * 6).
+float rh_dustLightTr(vec3 P, vec3 ldir, float scl, uint dustStyle,
+                     float inclusion, float span, float jit) {
+    float ldt = span / 3.0;
+    float tau = 0.0;
+    for (int j = 0; j < 3; ++j)
+        tau += rh_dustDensity(P + ldir * ((float(j) + jit) * ldt), scl, dustStyle);
+    return exp(-tau * inclusion * ldt * 6.0);
+}
+// Dual-lobe phase, 4π-normalized (isotropic = 1): 65% forward HG g=0.55 —
+// the backlit "silver lining" — plus 35% isotropic so side/back lighting
+// never goes fully dark. NOT a parameter: one curated look, zero ABI growth.
+float rh_dustPhase(float cosT) {
+    const float g = 0.55, g2 = g * g;
+    float hgN = (1.0 - g2) * pow(max(1.0 + g2 - 2.0 * g * cosT, 1e-3), -1.5);
+    return mix(1.0, hgN, 0.65);
 }
 // Self-shadow inside the speck lattice: a short DDA from a lit speck TOWARD
 // the light, testing only the lattice (no scene rays — from inside an
@@ -1261,9 +1462,18 @@ ResinMarch resinMarchInterior(vec3 origin, vec3 Tdir, float thickness,
     ResinMarch rm;
     rm.absorb = vec3(1.0); rm.dustCover = 0.0; rm.dustTint = dustBaseTint;
     rm.dirtHit = false; rm.dirtAlbedo = vec3(0.0); rm.sparkle = 0.0;
-    rm.shardGlow = vec3(0.0);
+    rm.shardGlow = vec3(0.0); rm.dustGlow = vec3(0.0);
     vec3  dustAcc  = vec3(0.0);
     float coverRaw = 0.0;
+    vec3  glowAcc  = vec3(0.0);
+    // Directional single scatter: the phase angle is fixed per march (light
+    // and view directions are constant), the light transmittance is marched
+    // lazily and cached for two steps (halves the light-march cost; the
+    // field is low-frequency at that scale).
+    float lSpan  = max(thickness, 1e-3) * 0.6;
+    float phMix  = rh_dustPhase(dot(lightDir, Tdir));
+    float Tlight = 1.0;
+    int   tlAge  = 99;
 
     // ── Phase A: dust — jittered stochastic march (unchanged recipe) ────────
     const int STEPS = 12;
@@ -1309,12 +1519,33 @@ ResinMarch resinMarchInterior(vec3 origin, vec3 Tdir, float thickness,
         dust = pow(dust, 2.0) * inclusion;                 // sparse wispy cores
         float trAvg = dot(rm.absorb, vec3(0.3333));
         float w    = dust * dt * 2.5 * trAvg;
-        coverRaw  += w;
-        dustAcc   += nb * w;
+        if (w > 1e-5) {
+            // LIT VOLUME MODEL (single scatter + multi-scatter floor):
+            //   lit = ambient + Tlight·phase (directional single scatter)
+            //       + (1-Tlight)·floor (light absorbed on the way partially
+            //         re-emerging as diffuse glow — the cheap stand-in for
+            //         multiple scattering; energy-limited, never > absorbed).
+            // Calibrated so an unshadowed side-lit step ≈ 1.0 (the confirmed
+            // pre-TUR-9 look); backlit forward peak reaches ~4 and the excess
+            // past the coverage clamp goes out as ADDITIVE dustGlow.
+            if (tlAge >= 2) {
+                Tlight = rh_dustLightTr(P, lightDir, scl, dustStyle,
+                                        inclusion, lSpan, jit);
+                tlAge = 0;
+            }
+            float lit = min(0.25 + 1.15 * Tlight * phMix
+                                 + 0.45 * (1.0 - Tlight), 4.0);
+            float cw = w * min(lit, 1.2);
+            coverRaw += cw;
+            dustAcc  += nb * cw;
+            glowAcc  += nb * w * (max(lit, 1.2) - 1.2) * 0.35;
+        }
+        tlAge++;
         rm.absorb *= exp(-dt * (extBase + vec3(dust * 6.0)));
     }
     rm.dustCover = clamp(coverRaw, 0.0, 0.7);
     if (coverRaw > 1e-4) rm.dustTint = clamp(dustAcc / coverRaw, 0.0, 1.0);
+    rm.dustGlow = min(glowAcc, vec3(1.5));
 
     // ── Phase B: specks — 3D DDA cell walk, fully DETERMINISTIC ─────────────
     // The speck field walks EVERY noise cell the ray crosses, in order (voxel
@@ -1403,6 +1634,10 @@ ResinMarch resinMarchInterior(vec3 origin, vec3 Tdir, float thickness,
                                     ? resinSpeckShadow(qo + Tdir * tn, lightDir,
                                                        totalAmt, shardCut, shardHue)
                                     : vec3(1.0);
+                                if (body > 0.2 && inclusion > 1e-3)
+                                    sshadow *= rh_dustLightTr(origin + Tdir * (tn / s3),
+                                                              lightDir, scl, dustStyle,
+                                                              inclusion, lSpan, 0.5);
                                 lit = vec3(0.45)
                                     + (0.85 * max(dot(pn, lightDir), 0.0)) * sshadow
                                     + vec3(pow(max(dot(pn, -Tdir), 0.0), 6.0) * 0.6);
@@ -1443,6 +1678,12 @@ ResinMarch resinMarchInterior(vec3 origin, vec3 Tdir, float thickness,
                             // dirt blocks the directional term, shards tint it.
                             vec3  sshadow = resinSpeckShadow(qo + Tdir * tn, lightDir,
                                                              totalAmt, shardCut, shardHue);
+                            // Dense dust above also shadows the speck (same
+                            // short light march the dust shades itself with).
+                            if (inclusion > 1e-3)
+                                sshadow *= rh_dustLightTr(origin + Tdir * (tn / s3),
+                                                          lightDir, scl, dustStyle,
+                                                          inclusion, lSpan, 0.5);
                             float ndl = max(dot(pn, lightDir), 0.0);
                             vec3  lit = vec3(0.28) + (0.72 * ndl) * sshadow;
                             float rim = pow(clamp(1.0 - abs(dot(pn, Tdir)), 0.0, 1.0), 3.0) * 0.25;
@@ -1454,6 +1695,7 @@ ResinMarch resinMarchInterior(vec3 origin, vec3 Tdir, float thickness,
                             // Trim the dust of the UNREACHED depth off the result.
                             rm.absorb    = T;
                             rm.dustCover *= depthN;
+                            rm.dustGlow  *= depthN;
                             break;
                         }
                     }
@@ -1609,13 +1851,14 @@ void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool fr
     // so the exit interface refracts with the same channel IOR. Selection collapses
     // attenuation to one channel ×3; blue bends more than red. Resin path skipped.
     if (!doReflect && !realDepth && dispersion > 1e-3) {
-        int dispCh = int(payload.dispersionChannel) - 1;   // -1 = unset, 0/1/2 = R/G/B
+        int dispCh = int((payload.primaryMeta & PL_DISP_MASK) >> PL_DISP_SHIFT) - 1;   // -1 = unset, 0/1/2 = R/G/B
         if (dispCh < 0) {
             dispCh = min(int(rnd(seed) * 3.0), 2);
             vec3 sel = vec3(0.0);
             sel[dispCh] = 3.0;
             payload.attenuation *= sel;
-            payload.dispersionChannel = float(dispCh + 1);
+            payload.primaryMeta = (payload.primaryMeta & ~PL_DISP_MASK)
+                                | (uint(dispCh + 1) << PL_DISP_SHIFT);
         }
         float spread = (ior - 1.0) * dispersion * 0.06;    // half of the total F–C spread
         ior += (dispCh == 0) ? -spread : ((dispCh == 2) ? spread : 0.0);
@@ -1686,6 +1929,162 @@ void scatterGlass(vec3 hitPos, vec3 macroNormalIn, vec3 shadingNormalIn, bool fr
     }
     payload.scattered     = true;
     payload.bounceType     = didRefract ? BOUNCE_TRANSMISSION : BOUNCE_GLASS_REFLECT;
+}
+
+// Explicit-light response for Water V3. The generic material NEE block is
+// intentionally bypassed by the water fast path, so water needs its own
+// dielectric GGX estimator or scene lights only appear through secondary rays.
+void addWaterV3DirectLighting(vec3 hitPos,
+                              vec3 carrierNormalIn,
+                              vec3 macroNormalIn,
+                              vec3 shadingNormalIn,
+                              vec3 rayDir,
+                              float ior,
+                              float roughness,
+                              float foamCoverage,
+                              inout uint seed) {
+    if (cam.lightCount == 0u) return;
+
+    vec3 carrierNormal = safeNormalize(carrierNormalIn, vec3(0.0, 1.0, 0.0));
+    vec3 macroNormal = safeNormalize(macroNormalIn, carrierNormal);
+    vec3 N = safeNormalize(shadingNormalIn, macroNormal);
+    vec3 V = safeNormalize(-rayDir, macroNormal);
+    float NdotV = max(dot(N, V), 0.0);
+    if (NdotV <= 1e-5 || dot(macroNormal, V) <= 1e-5) return;
+
+    float pdfSelect = 0.0;
+    int lightIndex = pick_smart_light_gl(uvec2(0), hitPos, pdfSelect);
+    if (lightIndex < 0 || pdfSelect <= 0.0) return;
+
+    vec3 L;
+    float distanceToLight;
+    float lightAttenuation;
+    if (!sample_light_direction_gl(lights.l[lightIndex], hitPos,
+                                   rnd(seed), rnd(seed),
+                                   L, distanceToLight, lightAttenuation)) return;
+    L = safeNormalize(L, macroNormal);
+    float NdotL = max(dot(N, L), 0.0);
+    if (NdotL <= 1e-5 || dot(macroNormal, L) <= 1e-5) return;
+
+    // Offsetting with the interpolated normal can leave the origin below an
+    // adjacent triangle. Always use the true oriented carrier face here.
+    vec3 shadowOrigin = offset_ray(hitPos, carrierNormal);
+    float tMax = min(max(distanceToLight - 1e-3, SHADOW_TMIN * 2.0), 10000.0);
+    shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
+    uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
+                     | gl_RayFlagsSkipClosestHitShaderEXT;
+    traceRayEXT(topLevelAS, shadowFlags, 0x01, 0, 1, 1,
+                shadowOrigin, SHADOW_TMIN, L, tMax, 1);
+    vec3 visibility = shadowPayload.w > 0.5 ? shadowPayload.rgb : vec3(0.0);
+    if (!any(greaterThan(visibility, vec3(1e-4)))) return;
+
+    vec3 H = safeNormalize(V + L, N);
+    float NdotH = max(dot(N, H), 1e-5);
+    float VdotH = max(dot(V, H), 1e-5);
+    float safeRoughness = clamp(roughness, 0.02, 1.0);
+    float alpha = max(safeRoughness * safeRoughness, 1e-4);
+    float alpha2 = alpha * alpha;
+    float dDenom = NdotH * NdotH * (alpha2 - 1.0) + 1.0;
+    float D = alpha2 / max(PI * dDenom * dDenom, 1e-8);
+    float k = (safeRoughness + 1.0);
+    k = (k * k) * 0.125;
+    float Gv = NdotV / max(NdotV * (1.0 - k) + k, 1e-5);
+    float Gl = NdotL / max(NdotL * (1.0 - k) + k, 1e-5);
+    float f0Scalar = pow((max(ior, 1.0001) - 1.0) / (max(ior, 1.0001) + 1.0), 2.0);
+    vec3 F = vec3(f0Scalar) + (vec3(1.0) - vec3(f0Scalar)) * pow(1.0 - VdotH, 5.0);
+    vec3 dielectricSpecular = F * D * (Gv * Gl) / max(4.0 * NdotV * NdotL, 1e-6);
+
+    float foam = clamp(foamCoverage, 0.0, 1.0);
+    vec3 foamDiffuse = mix(vec3(0.72, 0.76, 0.75), vec3(0.98), foam) * INV_PI;
+    vec3 brdf = dielectricSpecular * (1.0 - foam) + foamDiffuse * foam;
+    vec3 Li = lights.l[lightIndex].color.rgb * lights.l[lightIndex].color.a * lightAttenuation;
+
+    int lightType = int(lights.l[lightIndex].position.w + 0.5);
+    bool deltaLight = lightType == 0 || lightType == 1;
+    float estimatorWeight;
+    if (deltaLight) {
+        estimatorWeight = 1.0 / max(pdfSelect, 1e-6);
+    } else {
+        float lightPdf = compute_light_pdf_gl(lights.l[lightIndex], distanceToLight, 1.0) * pdfSelect;
+        float bsdfPdf = pdf_brdf_gl(N, V, L, safeRoughness);
+        estimatorWeight = power_heuristic(lightPdf, bsdfPdf) / max(lightPdf, 1e-6);
+    }
+
+    float volumeTransmittance = computeVolumeShadowTransmittance(shadowOrigin, L, tMax);
+    vec3 contribution = brdf * Li * NdotL * estimatorWeight
+                      * visibility * volumeTransmittance;
+    contribution = clamp(max(contribution, vec3(0.0)), vec3(0.0), vec3(1e4));
+    payload.radiance += clamp(payload.attenuation, vec3(0.0), vec3(1e2)) * contribution;
+}
+
+// Water V3 dielectric sampler. The true carrier face owns interface crossing
+// and ray offsets, the smooth macro normal owns Fresnel, and the resolved
+// surface normal owns reflection/refraction detail.
+void scatterWaterV3Dielectric(vec3 hitPos,
+                              vec3 carrierNormalIn,
+                              vec3 macroNormalIn,
+                              vec3 shadingNormalIn,
+                              bool frontFace,
+                              vec3 rayDir,
+                              vec3 bodyTint,
+                              float waterDepth,
+                              float absorptionDensity,
+                              float ior,
+                              float roughness,
+                              inout uint seed) {
+    vec3 carrierNormal = safeNormalize(carrierNormalIn, vec3(0.0, 1.0, 0.0));
+    vec3 macroNormal = safeNormalize(macroNormalIn, carrierNormal);
+    vec3 shadingNormal = safeNormalize(shadingNormalIn, macroNormal);
+    if (dot(shadingNormal, macroNormal) < 0.0) shadingNormal = -shadingNormal;
+
+    float safeIor = max(ior, 1.0001);
+    float etaRatio = frontFace ? (1.0 / safeIor) : safeIor;
+    vec3 facetNormal = shadingNormal;
+
+    // Resolved waves stay present at every roughness. GGX only represents the
+    // unresolved distribution around that already-resolved normal.
+    if (roughness > 0.0005) {
+        float sampleRoughness = max(roughness, 0.004);
+        vec3 sampledFacet = ggxSampleHemisphere(shadingNormal, -rayDir,
+                                                sampleRoughness, seed);
+        float blend = smoothstep(0.0, 0.035, roughness);
+        facetNormal = safeNormalize(mix(shadingNormal, sampledFacet, blend), shadingNormal);
+        if (dot(facetNormal, macroNormal) < 0.02) facetNormal = shadingNormal;
+    }
+
+    float cosTheta = clamp(dot(-rayDir, macroNormal), 0.0, 1.0);
+    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+    bool totalInternalReflection = etaRatio * sinTheta > 1.0;
+    bool reflectLobe = totalInternalReflection || rnd(seed) < schlickFresnel(cosTheta, safeIor);
+
+    vec3 direction;
+    vec3 offsetDirection;
+    bool crossedInterface = false;
+    if (reflectLobe) {
+        direction = reflect(rayDir, facetNormal);
+        offsetDirection = carrierNormal;
+        if (dot(direction, carrierNormal) <= 0.0) direction = reflect(rayDir, carrierNormal);
+    } else {
+        crossedInterface = refractLikeOptix(rayDir, facetNormal, etaRatio, direction);
+        offsetDirection = -carrierNormal;
+        if (!crossedInterface || dot(direction, carrierNormal) >= 0.0) {
+            direction = reflect(rayDir, carrierNormal);
+            offsetDirection = carrierNormal;
+            crossedInterface = false;
+        }
+    }
+
+    payload.scatterOrigin = offset_ray(hitPos, offsetDirection);
+    payload.scatterDir = safeNormalize(direction, reflect(rayDir, macroNormal));
+    if (crossedInterface) {
+        float cosineThroughSurface = max(abs(dot(payload.scatterDir, -macroNormal)), 0.12);
+        float opticalDistance = min(max(waterDepth, 0.02) / cosineThroughSurface, 40.0);
+        vec3 extinction = (vec3(1.0) - clamp(bodyTint, vec3(0.0), vec3(0.999))) *
+                          (0.12 + max(absorptionDensity, 0.0) * 0.35);
+        payload.attenuation *= exp(-extinction * opticalDistance);
+    }
+    payload.scattered = true;
+    payload.bounceType = crossedInterface ? BOUNCE_TRANSMISSION : BOUNCE_GLASS_REFLECT;
 }
 
 // ============================================================
@@ -1845,18 +2244,18 @@ void scatterTranslucent(vec3 hitPos, vec3 normal, vec3 albedo, inout uint seed) 
 // WATER — Gerstner Waves + Micro-Detail Ripples (IS_WATER path)
 //
 // Parameter packing from WaterManager.cpp:
-//   mat.anisotropic          = wave_speed
-//   mat.sheen                = wave_strength  (IS_WATER flag when > 0)
-//   mat.sheen_tint           = wave_frequency
+//   matx.anisotropic          = wave_speed
+//   matx.sheen                = wave_strength  (IS_WATER flag when > 0)
+//   matx.sheen_tint           = wave_frequency
 //   mat.emission_r/g/b       = shallow_color
 //   mat.albedo_r/g/b         = deep_color
 //   mat.translucent          = foam_level
 //   mat.subsurface_amount    = depth_max / 100
-//   mat.fft_time_scale       = animation speed multiplier
-//   mat.micro_detail_strength= micro ripple strength
-//   mat.micro_detail_scale   = micro ripple scale
-//   mat.foam_threshold       = foam appearance threshold
-//   mat.fft_wind_speed       = wind speed for micro ripples
+//   matx.fft_time_scale       = animation speed multiplier
+//   matx.micro_detail_strength= micro ripple strength
+//   matx.micro_detail_scale   = micro ripple scale
+//   matx.foam_threshold       = foam appearance threshold
+//   matx.fft_wind_speed       = wind speed for micro ripples
 // ============================================================
 
 // --- Hash / Noise helpers (mirrors water_shaders_cpu.h) ---
@@ -1918,29 +2317,34 @@ bool estimateWaterDepthGL(vec3 hitPos, float maxDepth, out float waterDepth, out
 
     float low = SHADOW_TMIN;
     float high = waterDepth;
-    bool found = false;
     vec3 probeOrigin = hitPos - vec3(0.0, 0.05, 0.0);
     vec3 probeDir = vec3(0.0, -1.0, 0.0);
+    // OpaqueEXT: this is a DEPTH HEURISTIC, not lighting — running the shadow
+    // any-hit (full material fetch + transmissive tint math per candidate) for
+    // every probe bought nothing. Cutout/glass under the water now count as
+    // floor, which is fine for a depth-tint estimate.
     uint probeFlags = gl_RayFlagsTerminateOnFirstHitEXT
-                    | gl_RayFlagsSkipClosestHitShaderEXT;
+                    | gl_RayFlagsSkipClosestHitShaderEXT
+                    | gl_RayFlagsOpaqueEXT;
 
-    for (int i = 0; i < 7; ++i) {
+    // Existence probe over the whole window first: open water (no floor within
+    // maxDepth — the common deep-ocean case) exits after ONE trace instead of
+    // seven blind bisections.
+    shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
+    traceRayEXT(topLevelAS, probeFlags, 0x01, 0, 1, 1, probeOrigin, SHADOW_TMIN, probeDir, high, 1);
+    if (shadowPayload.w >= 0.5) return false;
+
+    for (int i = 0; i < 6; ++i) {
         float mid = mix(low, high, 0.5);
         shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
         traceRayEXT(topLevelAS, probeFlags, 0x01, 0, 1, 1, probeOrigin, SHADOW_TMIN, probeDir, mid, 1);
-        if (shadowPayload.w < 0.5) {   // hit something → floor is within [low, mid]
-            found = true;
-            high = mid;
-        } else {
-            low = mid;
-        }
+        if (shadowPayload.w < 0.5) high = mid;   // floor is within [low, mid]
+        else                       low = mid;
     }
 
-    if (found) {
-        waterDepth = high;
-        floorPosition = hitPos - vec3(0.0, waterDepth, 0.0);
-    }
-    return found;
+    waterDepth = high;
+    floorPosition = hitPos - vec3(0.0, waterDepth, 0.0);
+    return true;
 }
 
 bool weatherActive() {
@@ -2144,6 +2548,7 @@ void applyWeatherSurface(vec3 hitPos, vec3 normal, vec3 supportNormal, inout vec
 // --- Multi-octave Gerstner waves (8 waves, matches CPU/CUDA impl) ---
 void evaluateWaterGerstner(vec3 pos, float time,
                            float speed_mult, float strength_mult, float freq_mult,
+                           float travel_direction,
                            out vec3 waveNormal, out float foam)
 {
     const vec2 dirs[8] = vec2[8](
@@ -2158,8 +2563,12 @@ void evaluateWaterGerstner(vec3 pos, float time,
     float amplitude = 0.5 * strength_mult;
     float speed     = 0.5 * speed_mult;
 
+    float cd = cos(travel_direction);
+    float sd = sin(travel_direction);
     for (int i = 0; i < 8; ++i) {
-        vec2  d     = dirs[i];
+        vec2 baseDir = dirs[i];
+        vec2 d = vec2(baseDir.x * cd - baseDir.y * sd,
+                      baseDir.x * sd + baseDir.y * cd);
         float x     = pos.x * d.x + pos.z * d.y;
         float phase = x * frequency + time * speed;
         float cp = cos(phase), sp = sin(phase);
@@ -2182,7 +2591,10 @@ void evaluateWaterGerstner(vec3 pos, float time,
 }
 
 // --- Main water scatter entry ---
-void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
+void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 carrierNormal, vec3 rayDir,
+                  uint waterProfile, vec2 surfaceUV,
+                  vec3 flowTangent, vec3 crossTangent,
+                  vec4 hydrologyA, vec4 hydrologyB, vec4 hydrologyC,
                   float wave_speed, float wave_strength, float wave_freq,
                   float foam_level, float foam_threshold,
                   float micro_strength, float micro_scale,
@@ -2195,6 +2607,7 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
                   float caustic_intensity, float caustic_scale, float caustic_speed,
                   vec3 shallow_color, vec3 deep_color,
                   float ior, float roughness,
+                  bool writePrimaryNormal,
                   inout uint seed)
 {
     // OptiX parity: FFT simulation is already time-scaled before textures are generated.
@@ -2203,7 +2616,20 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
     float time = cam.waterTime;
 
     // ── Gerstner wave normal + foam ─────────────────────────────
-    bool useFFTOcean = fft_height_tex > 0u && fft_normal_tex > 0u && fft_ocean_size > 0.001;
+    bool isRiver = waterProfile == 2u;
+    bool isLake = waterProfile == 1u;
+    WaterV3Hydrology hydrology = waterV3DecodeHydrology(hydrologyA, hydrologyB, hydrologyC);
+    // Hydrology stores physical metres independently from texture UVs. The
+    // legacy U convention was 0.5 units per metre, so retain that artistic
+    // scale while making the cross-channel axis use the same unit.
+    vec2 riverMetricUV = hydrology.width > 0.001
+        ? vec2(hydrology.alongDistance, hydrology.crossDistance) * 0.5
+        : surfaceUV;
+    float riverSpeed = (hydrology.speed > 0.001 ? hydrology.speed : 1.0) * max(wave_speed, 0.01);
+    float rapidResponse = waterV3RapidResponse(hydrology.froude);
+    float dischargeResponse = 1.0 + min(log2(1.0 + hydrology.discharge) * 0.06, 0.35);
+    float riverStrength = wave_strength * dischargeResponse * mix(0.65, 1.65, rapidResponse);
+    bool useFFTOcean = !isRiver && fft_height_tex > 0u && fft_normal_tex > 0u && fft_ocean_size > 0.001;
     vec3  waveNormal;
     float foam;
     if (useFFTOcean) {
@@ -2217,38 +2643,60 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
         }
         float fftNy = sqrt(max(0.0, 1.0 - dot(fftSlopeXZ, fftSlopeXZ)));
         vec3 fftNormal = normalize(vec3(fftSlopeXZ.x, max(fftNy, 0.001), fftSlopeXZ.y));
-        waveNormal = fftNormal;
+        waveNormal = isLake ? normalize(mix(vec3(0.0, 1.0, 0.0), fftNormal, 0.42)) : fftNormal;
         float fftSlope = clamp(1.0 - fftNormal.y, 0.0, 1.0);
         foam = smoothstep(max(foam_threshold, 0.05), 1.0, fftSlope * 2.0 + abs(fftHeight) * 0.25);
+    } else if (isRiver) {
+        waterV3EvaluateRiverSpectrum(riverMetricUV, time, hydrology,
+                                     riverSpeed, riverStrength, wave_freq,
+                                     waveNormal, foam);
     } else {
-        evaluateWaterGerstner(hitPos, time, wave_speed, wave_strength, wave_freq,
+        evaluateWaterGerstner(hitPos, time, wave_speed, wave_strength, wave_freq, wind_direction,
                               waveNormal, foam);
     }
     float foamSignal = foam;
+    // Preserve the continuous analytic/flow-scale normal separately. The
+    // capillary FBM below is intentionally shading-only; exposing its finite-
+    // difference cell boundaries to the denoiser normal AOV makes them look
+    // like persistent glass cracks.
+    vec3 macroWaveNormal = waveNormal;
+    float riverFoamBreakup = 0.5;
 
     // ── Micro-detail capillary ripples ──────────────────────────
     if (micro_strength > 0.001) {
+        if (isRiver) {
+            // Foam coverage remains analytic, while the established FBM
+            // micro-normal character below is restored for river rendering.
+            vec3 unusedRiverMicroNormal;
+            waterV3EvaluateRiverCapillary(riverMetricUV, time,
+                                           riverSpeed * max(micro_anim_speed, 0.001),
+                                           micro_strength, micro_scale,
+                                           unusedRiverMicroNormal, riverFoamBreakup);
+        }
         // micro_scale is authored in world space. Do not scale it by the FFT
         // ocean tile size, or large water surfaces lose their capillary detail.
         float sc = max(micro_scale, 0.001);
-        float wind_dx = cos(wind_direction);
-        float wind_dz = sin(wind_direction);
+        float wind_dx = isRiver ? 1.0 : cos(wind_direction);
+        float wind_dz = isRiver ? 0.0 : sin(wind_direction);
         float cross_dx = -wind_dz;
         float cross_dz = wind_dx;
-        float base_speed = sqrt(max(1.0, wind_speed)) * max(micro_anim_speed, 0.001);
+        float base_speed = isRiver
+            ? riverSpeed * max(micro_anim_speed, 0.001)
+            : sqrt(max(1.0, wind_speed)) * max(micro_anim_speed, 0.001);
         float morph = max(micro_morph_speed, 0.001);
+        vec2 surfaceCoord = isRiver ? riverMetricUV : hitPos.xz;
 
         float off1_x = wind_dx * time * base_speed + sin(time * 0.3 * morph) * 0.5;
         float off1_z = wind_dz * time * base_speed + cos(time * 0.2 * morph) * 0.5;
-        vec2 p1 = vec2(hitPos.x * sc + off1_x, hitPos.z * sc + off1_z);
+        vec2 p1 = surfaceCoord * sc + vec2(off1_x, off1_z);
 
         float off2_x = (wind_dx * 0.7 + cross_dx * 0.3) * time * base_speed * 0.6 + cos(time * 0.15 * morph + 1.5) * 0.8;
         float off2_z = (wind_dz * 0.7 + cross_dz * 0.3) * time * base_speed * 0.6 + sin(time * 0.25 * morph + 2.0) * 0.8;
-        vec2 p2 = vec2(hitPos.x * sc * 0.5 + off2_x, hitPos.z * sc * 0.5 + off2_z);
+        vec2 p2 = surfaceCoord * sc * 0.5 + vec2(off2_x, off2_z);
 
         float off3_x = cross_dx * time * base_speed * 0.4 + sin(time * 0.5 * morph + 3.0) * 0.3;
         float off3_z = cross_dz * time * base_speed * 0.4 + cos(time * 0.4 * morph + 1.0) * 0.3;
-        vec2 p3 = vec2(hitPos.x * sc * 2.0 + off3_x, hitPos.z * sc * 2.0 + off3_z);
+        vec2 p3 = surfaceCoord * sc * 2.0 + vec2(off3_x, off3_z);
 
         const float dx = 0.01;
         float h1_c = water_fbm(p1);
@@ -2269,35 +2717,67 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
         float dsdz = (hz - hc) / dx;
         float microGain = 1.0;
         vec3 microN = normalize(vec3(-dsdx * micro_strength * microGain, 1.0, -dsdz * micro_strength * microGain));
-        waveNormal  = normalize(waveNormal + microN);
+
+        // Compose resolved wave and capillary detail in slope space. Adding two
+        // unit normals directly halves both slopes near (0,1,0), which made the
+        // Vulkan surface look flat precisely when the dielectric roughness was
+        // low enough to expose the normal-field quality.
+        waveNormal = waterV3ComposeSlopeNormals(waveNormal, microN);
 
         // Micro-peak foam (replaces/supplements Gerstner foam for FFT-style look)
         float microSlope = clamp(hc * 0.5 + 0.5, 0.0, 1.0);
         float scaledFoamNoise = max(foam_noise_scale, 0.001);
-        float foamBreakup = water_fbm(vec2(hitPos.x * scaledFoamNoise + off1_x * 0.5,
-                                           hitPos.z * scaledFoamNoise + off1_z * 0.5)) * 0.5 + 0.5;
-        float microFoam  = clamp((microSlope + (foamBreakup - 0.5) * 0.35 - foam_threshold) * 5.0, 0.0, 1.0);
+        float foamBreakup = water_fbm(surfaceCoord * scaledFoamNoise + vec2(off1_x, off1_z) * 0.5) * 0.5 + 0.5;
+        float stableFoamBreakup = isRiver ? riverFoamBreakup : foamBreakup;
+        float microFoam  = clamp((microSlope + (stableFoamBreakup - 0.5) * 0.35 - foam_threshold) * 5.0, 0.0, 1.0);
         foamSignal = max(foamSignal, microFoam);
     }
+    WaterV3SurfaceSample waterSurface;
+    waterSurface.macroNormalTS = macroWaveNormal;
+    waterSurface.shadingNormalTS = waveNormal;
+    waterSurface.foamProduction = clamp(foamSignal, 0.0, 1.0);
+    waterSurface.depth = hydrology.depth;
+    waterSurface.bankProximity = hydrology.bankProximity;
+    waterSurface.speed = hydrology.speed;
+    waterSurface.froude = hydrology.froude;
 
     // ── Build shading normal from wave perturbation ──────────────
     // waveNormal lives in a y-up tangent frame; project onto geoNormal's ONB
     vec3 tgt, btgt;
-    if (abs(geoNormal.y) > 0.999) {
+    if (isRiver && dot(flowTangent, flowTangent) > 1e-6) {
+        tgt = normalize(flowTangent - geoNormal * dot(flowTangent, geoNormal));
+        btgt = normalize(crossTangent - geoNormal * dot(crossTangent, geoNormal));
+        if (dot(cross(tgt, btgt), geoNormal) < 0.0) btgt = -btgt;
+    } else if (abs(geoNormal.y) > 0.999) {
         tgt = vec3(1.0, 0.0, 0.0);
         btgt = vec3(0.0, 0.0, 1.0);
     } else {
         tgt = normalize(cross(geoNormal, vec3(0.0, 0.0, 1.0)));
         btgt = cross(tgt, geoNormal);
     }
-    vec3 shadingNormal = normalize(tgt * waveNormal.x + geoNormal * waveNormal.y + btgt * waveNormal.z);
+    vec3 shadingNormal = waterV3TangentToWorld(waterSurface.shadingNormalTS, tgt, geoNormal, btgt);
     if (dot(shadingNormal, -rayDir) < 0.0) shadingNormal = geoNormal; // sanity
+
+    vec3 macroShadingNormal = waterV3TangentToWorld(waterSurface.macroNormalTS, tgt, geoNormal, btgt);
+    if (dot(macroShadingNormal, -rayDir) < 0.0) macroShadingNormal = geoNormal;
+
+    // The generic primary AOV is recorded before this water fast path and only
+    // knows the static carrier normal. Replace it for the camera hit after the
+    // resolved wave field exists, otherwise the Vulkan denoiser interprets the
+    // water as a flat plane and removes macro/capillary reflection detail.
+    if (writePrimaryNormal) {
+        payload.primaryNrm = plPackNormal(macroShadingNormal);
+    }
 
     float maxProbeDepth = max(depth_max, 0.1);
     float waterDepth = maxProbeDepth;
     vec3 floorPosition = hitPos - vec3(0.0, waterDepth, 0.0);
     bool foundFloor = false;
-    if (shore_foam_intensity > 0.01 || absorption_density > 0.01 || caustic_intensity > 0.01) {
+    if (isRiver && waterSurface.depth > 0.001) {
+        waterDepth = min(waterSurface.depth, maxProbeDepth);
+        floorPosition = hitPos - vec3(0.0, waterDepth, 0.0);
+        foundFloor = true;
+    } else if (shore_foam_intensity > 0.01 || absorption_density > 0.01 || caustic_intensity > 0.01) {
         foundFloor = estimateWaterDepthGL(hitPos, maxProbeDepth, waterDepth, floorPosition);
     }
     vec3 baseWaterColor = calculateDepthColorGL(waterDepth, depth_max, shallow_color, deep_color);
@@ -2307,22 +2787,56 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
         baseWaterColor += shallow_color * causticVal * caustic_intensity * causticFade;
     }
     float shoreFoam = 0.0;
-    if (shore_foam_intensity > 0.01 && foundFloor) {
+    if (isRiver && shore_foam_intensity > 0.01) {
+        shoreFoam = waterSurface.bankProximity * waterSurface.bankProximity
+                  * shore_foam_intensity * mix(0.35, 1.0, riverFoamBreakup);
+    } else if (shore_foam_intensity > 0.01 && foundFloor) {
         shoreFoam = calculateShoreFoamGL(waterDepth, shore_foam_distance, shore_foam_intensity, hitPos, time, max(foam_noise_scale, 0.001));
     }
-    float totalFoam = min(foamSignal * foam_level + shoreFoam, 1.0);
-    float cosNV = 0.0;
+    vec2 foamCoord = isRiver ? riverMetricUV : hitPos.xz;
+    vec2 foamDrift = isRiver ? vec2(time * riverSpeed * 0.12, 0.0)
+                             : vec2(cos(wind_direction), sin(wind_direction)) * time * 0.08;
+    float foamBreakup = isRiver
+        ? riverFoamBreakup
+        : water_fbm(foamCoord * max(foam_noise_scale, 0.001) + foamDrift) * 0.5 + 0.5;
+    float producedFoam = min(waterSurface.foamProduction * foam_level + shoreFoam, 1.0);
+    float totalFoam = waterV3FoamCoverage(producedFoam, foamBreakup, foam_threshold);
 
-    // ── Depth-based color blend ──────────────────────────────────
-    float tDepth   = 1.0 - cosNV;  // grazing angle → deeper look
+    // Authored roughness controls only unresolved gloss. Direct explicit-light
+    // response and indirect dielectric scattering share this exact value.
+    float capillaryRoughness = clamp(micro_strength * 0.18, 0.004, 0.035);
+    float waterRoughness = max(roughness, capillaryRoughness);
+    bool waterFrontFace = dot(rayDir, carrierNormal) < 0.0;
+    if (waterFrontFace) {
+        addWaterV3DirectLighting(hitPos, carrierNormal, macroShadingNormal,
+                                 shadingNormal, rayDir,
+                                 ior, mix(waterRoughness, 0.8, totalFoam),
+                                 totalFoam, seed);
+    }
 
-    // ── Blend foam (white crest) ─────────────────────────────────
-    // CPU parity: foam/depth color is for visible BRDF/direct albedo only.
-    // PrincipledBSDF::scatter sends the constant water material albedo
-    // (deep_color) into Dielectric, so refraction tint must not vary with foam.
-    vec3 transmissionTint = deep_color;
-    bool waterFrontFace = dot(rayDir, shadingNormal) < 0.0;
-    scatterGlass(hitPos, shadingNormal, shadingNormal, waterFrontFace, rayDir, transmissionTint, ior, mix(roughness, 0.8, totalFoam), 0.0, vec3(1.0), 0.0, seed);
+    // Foam is a shading lobe, not animated geometry. This avoids the legacy
+    // foam-sphere BLAS/TLAS rebuild path while still producing whitewater.
+    if (totalFoam > 0.001 && rnd(seed) < totalFoam) {
+        vec3 foamColor = mix(vec3(0.72, 0.76, 0.75), vec3(0.98), totalFoam);
+        scatterDiffuse(hitPos, shadingNormal, foamColor, seed);
+        return;
+    }
+
+    // The downward RT probe provides local optical depth. Use its shallow/deep
+    // result for dielectric attenuation instead of one constant tint.
+    vec3 transmissionTint = clamp(baseWaterColor, vec3(0.001), vec3(1.0));
+
+    // Keep interface classification/Fresnel on the real carrier geometry while
+    // using the resolved wave normal only for reflection/refraction direction.
+    // This mirrors the CPU path's rec.normal vs rec.interpolated_normal split.
+    // Authored roughness controls unresolved gloss; it must not switch off the
+    // resolved normal field. A small capillary floor avoids a singular delta
+    // lobe while preserving visibly glassy water at low authored roughness.
+    scatterWaterV3Dielectric(hitPos, carrierNormal, macroShadingNormal,
+                             shadingNormal, waterFrontFace,
+                             rayDir, transmissionTint, waterDepth,
+                             absorption_density, ior,
+                             mix(waterRoughness, 0.8, totalFoam), seed);
 }
 
 // ============================================================
@@ -2395,6 +2909,50 @@ void main() {
     vec3 hitPos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
     vec3 rayDir = normalize(gl_WorldRayDirectionEXT);
 
+    // Geometry-node Pointiness: same barycentric blend of the same per-vertex attribute the
+    // CPU render interpolates (MeshPointiness.h). 0.5 (flat) whenever the block is absent —
+    // no graph reads it, or this is a device-resident BLAS.
+    float hitPointiness = 0.5;
+    if (geo.pointinessAddr != 0) {
+        PointinessBuffer ptBuf = PointinessBuffer(geo.pointinessAddr);
+        hitPointiness = ptBuf.p[i0] * bary.x + ptBuf.p[i1] * bary.y + ptBuf.p[i2] * bary.z;
+    }
+
+    // Attribute node: the named per-vertex channels (sculpt/Geo-DAG masks, paint layers),
+    // interleaved MP_ATTRIB_SLOTS floats per vertex, blended with the same barycentrics the
+    // CPU uses (MeshAttr::sampleMaterialAttributes) so both backends read one value. Absent
+    // block => all zeros = "unpainted", which is what the CPU returns too.
+    float hitAttribs[MP_ATTRIB_SLOTS];
+    for (int ai = 0; ai < MP_ATTRIB_SLOTS; ++ai) hitAttribs[ai] = 0.0;
+    if (geo.attribAddr != 0) {
+        AttribBuffer atBuf = AttribBuffer(geo.attribAddr);
+        for (int ai = 0; ai < MP_ATTRIB_SLOTS; ++ai) {
+            hitAttribs[ai] = atBuf.a[i0 * MP_ATTRIB_SLOTS + ai] * bary.x
+                           + atBuf.a[i1 * MP_ATTRIB_SLOTS + ai] * bary.y
+                           + atBuf.a[i2 * MP_ATTRIB_SLOTS + ai] * bary.z;
+        }
+    }
+
+    // Hydrology is a dedicated geometry stream, not a material-node attribute.
+    // A = flow direction XZ, water depth, bank proximity.
+    // B = flow speed, discharge, Froude number, authored foam potential.
+    // C = along-channel metres, normalized cross coordinate, local width, reserved.
+    vec4 hitWaterA = vec4(0.0);
+    vec4 hitWaterB = vec4(0.0);
+    vec4 hitWaterC = vec4(0.0);
+    if (geo.waterAddr != 0) {
+        WaterVertexBuffer waterBuf = WaterVertexBuffer(geo.waterAddr);
+        hitWaterA = waterBuf.w[i0 * 3 + 0] * bary.x
+                  + waterBuf.w[i1 * 3 + 0] * bary.y
+                  + waterBuf.w[i2 * 3 + 0] * bary.z;
+        hitWaterB = waterBuf.w[i0 * 3 + 1] * bary.x
+                  + waterBuf.w[i1 * 3 + 1] * bary.y
+                  + waterBuf.w[i2 * 3 + 1] * bary.z;
+        hitWaterC = waterBuf.w[i0 * 3 + 2] * bary.x
+                  + waterBuf.w[i1 * 3 + 2] * bary.y
+                  + waterBuf.w[i2 * 3 + 2] * bary.z;
+    }
+
     // Compute UV coordinates if available
     vec2 hitUV = vec2(0.0);
     if (geo.uvAddr != 0) {
@@ -2404,6 +2962,15 @@ void main() {
         uv2 = uvBuf.u[i2];
         hitUV = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
     }
+
+    // The RAW mesh UV, before the Vulkan V-flip. The material program runs in THIS
+    // space, because that is the space the CPU VM runs in (it is handed rec.u/rec.v
+    // straight off the hit record). Any program op that does explicit V math — the
+    // Mapping node, MatOp::MatMapping — would otherwise compute on (u, 1-v) here and
+    // on (u, v) there, and the two renders would quietly disagree. The GPU's TexColor
+    // does the V-flip at sample time instead (material_program.glsl), which is exactly
+    // what the CPU's get_color_bilinear already does internally.
+    vec2 rawUV = hitUV;
 
     // Vulkan shader coordinate origin differs; flip V to match OptiX (and texture upload)
     hitUV.y = 1.0 - hitUV.y;
@@ -2556,6 +3123,51 @@ void main() {
     float transmission = clamp(mat.transmission, 0.0, 1.0);
     vec2 materialUV = applyMaterialUVTransform(mat, hitUV);
 
+    // ── Faz 2b: per-pixel material program (mirrors the CPU MaterialProgram VM).
+    // Overrides the driven slots point-by-point (Noise/Voronoi/Checker/Ramp/Mix
+    // chains) using the RAW mesh UV — the same space the CPU VM runs in.
+    // Procedural bump: the program can drive a tangent-space normal (Bump node).
+    // Captured here, applied at the normal-map section below (needs the TBN).
+    bool mpHasNormal = false;
+    bool mpNormalWorld = false;   // Bevel: mpTangentNormal is a WORLD normal, skip the TBN
+    vec3 mpTangentNormal = vec3(0.0, 0.0, 1.0);
+    uint mpWritten = 0u;   // slots the program owns — bound textures must NOT overwrite them
+    uint mp_procOff = matProgramOffset(matIndex);
+    if (mp_procOff != MATPROG_NONE) {
+        // Object Info: the instance's world origin, free from the TLAS transform. The CPU
+        // fills HitRecord::object_origin from the translation of the very same matrix, so
+        // both backends hash identical bits and a scattered rock keeps its color.
+        vec3 hitObjOrigin = gl_ObjectToWorldEXT[3];
+        // Object-space shading point for the procedural "Object Space" toggle: the BLAS
+        // vertices ARE object space, so this is a barycentric blend of values already loaded
+        // — no inverse transform. The CPU builds it the same way out of the mesh's P_orig.
+        // Falls back to the world point when there is no vertex buffer, so a missing value
+        // can never silently swap one space for the other.
+        vec3 hitObjPos = (geo.vertexAddr != 0)
+            ? (objV0 * bary.x + objV1 * bary.y + objV2 * bary.z)
+            : hitPos;
+        // gview: toward the viewer, i.e. the direction this ray CAME from. Fresnel /
+        // Layer Weight are the only consumers; on a secondary bounce it is that bounce's
+        // incoming direction, which is exactly what a path tracer should ask them about.
+        vec3 hitView = normalize(-gl_WorldRayDirectionEXT);
+        MatProgOut mp = evalMaterialProgram(mp_procOff, rawUV, hitPos, worldNormal, hitPointiness, hitObjOrigin,
+                                            hitAttribs, hitObjPos, hitView);
+        mpWritten = mp.written;
+        if ((mp.written & MP_SLOT_BASECOLOR)        != 0u) albedo       = max(mp.baseColor, vec3(0.0));
+        if ((mp.written & MP_SLOT_ROUGHNESS)        != 0u) roughness    = clamp(mp.roughness, 0.0, 1.0);
+        if ((mp.written & MP_SLOT_METALLIC)         != 0u) metallic     = clamp(mp.metallic, 0.0, 1.0);
+        if ((mp.written & MP_SLOT_SPECULAR)         != 0u) specular     = clamp(mp.specular, 0.0, 1.0);
+        if ((mp.written & MP_SLOT_TRANSMISSION)     != 0u) transmission = clamp(mp.transmission, 0.0, 1.0);
+        if ((mp.written & MP_SLOT_EMISSIONCOLOR)    != 0u) emColor      = mp.emissionColor;
+        if ((mp.written & MP_SLOT_EMISSIONSTRENGTH) != 0u) emStrength   = max(mp.emissionStrength, 0.0);
+        if ((mp.written & MP_SLOT_IOR)              != 0u) ior          = (mp.ior > 0.01) ? mp.ior : ior;
+        if ((mp.written & MP_SLOT_NORMAL)           != 0u) {
+            mpHasNormal = true;
+            mpTangentNormal = mp.normal;
+            mpNormalWorld = mp.normalWorld;
+        }
+    }
+
     // Procedural tile-break: perturb UV before any texture sampling.
     // Independent slider — set to 0 to keep albedo maps clean.
     if (mat.tile_break_strength > 0.0 &&
@@ -2569,62 +3181,28 @@ void main() {
     //    SONRASI atanır (aşağıda) — texture'ın rengi override edebilmesi için
     // ----------------------------------------------------------
 
-    // Sample albedo texture
+    // Sample albedo texture.
+    // Skipped when the program owns the slot: a Mix Material blends BOTH sides'
+    // textures per-pixel, and the fold still binds one of them to the slot (it has
+    // only one to give). Letting that single bound texture land here would overwrite
+    // the blend with A's or B's texture and hard-switch at Fac 0.5 — the exact
+    // behaviour the per-pixel mix exists to replace. The CPU path already resolves
+    // this the same way: applyProgramSurface runs AFTER the texture fetch and wins.
     int albedoTexID = int(mat.albedo_tex);
-    if (albedoTexID > 0) {
+    if (albedoTexID > 0 && (mpWritten & MP_SLOT_BASECOLOR) == 0u) {
         albedo = texture(materialTextures[nonuniformEXT(albedoTexID)], materialUV).rgb;
     }
     
     // ----------------------------------------------------------------
-    // OPACITY DECISION
+    // OPACITY: resolved in the ANY-HIT now (shadow_anyhit.rahit camera-mode
+    // branch). Camera/bounce/photon rays are traced WITHOUT OpaqueEXT, so
+    // alpha-cutout candidates are stochastically ignored during traversal —
+    // a hit that reaches this shader has already passed the alpha test and
+    // must shade as opaque. The old in-closesthit stochastic pass-through
+    // (emit BOUNCE_TRANSPARENT, re-trace from raygen) cost a full payload
+    // round trip per foliage layer and is gone with it.
     // ----------------------------------------------------------------
-    // Two clean modes:
-    //
-    // Mode 1: opacity_tex is explicitly connected
-    //   1a: opacity_tex == albedo_tex  → RGBA texture, opacity is in .a channel
-    //   1b: opacity_tex != albedo_tex  → standalone grayscale mask, opacity is in .r channel
-    //
-    // Mode 2: No opacity_tex → mat.opacity for glass/transmission only
-    // ----------------------------------------------------------------
-    int opacityTexID = int(mat.opacity_tex);
-    float finalAlpha = mat.opacity;
-    
-    if (opacityTexID > 0) {
-        // --- MODE 1: Explicit opacity texture connected ---
-        // Bit 8 of mat.flags is set by C++ if the opacity texture has RGBA alpha data.
-        // Bit 8 clear = standalone grayscale mask → use R channel (luminance)
-        // Bit 8 set   = RGBA texture with opacity in alpha → use A channel
-        float maskValue;
-        if ((mat.flags & 256u) != 0u) {
-            maskValue = texture(materialTextures[nonuniformEXT(opacityTexID)], materialUV).a;
-        } else {
-            maskValue = texture(materialTextures[nonuniformEXT(opacityTexID)], materialUV).r;
-        }
-        finalAlpha *= maskValue;
-    }
-    
-    if (finalAlpha < 0.1) {
-        finalAlpha = 0.0;
-    }
-    
-    if (finalAlpha < 0.99) {
-        // Stochastic transparency matching OptiX `anyhit` implementation
-        float randVal = rnd(payload.seed);
-        if (randVal > finalAlpha) {
-            // Transparent pixel — ray continues forward cleanly.
-            // Push ray safely to the BACK side of the triangle using offset_ray.
-            // geomNormal already faces the incoming ray (due to flip earlier).
-            // So -geomNormal points to the other side of the surface.
-            payload.radiance      = vec3(0.0);
-            payload.hitEmissive   = false;
-            payload.scatterOrigin = offset_ray(hitPos, -geomNormal);
-            payload.scatterDir    = rayDir;
-            payload.scattered     = true;
-            payload.bounceType     = BOUNCE_TRANSPARENT;
-            return;
-        }
-    }
-    
+
     // ── Thin-shell BUBBLE (champagne / soda / soap-foam close-up) ──────────────
     // A bubble is a THIN dielectric film: light either Fresnel-reflects off the
     // shell (bright silver rim, strong at grazing) or passes STRAIGHT through (a
@@ -2637,14 +3215,14 @@ void main() {
         // normal, so the rim curves smoothly across a sphere (parity with OptiX N).
         vec3  Nb   = normalize(worldNormal);
         float cosT = min(abs(dot(rayDir, Nb)), 1.0);
-        float bio  = (mat.bubble_ior > 1.0001) ? mat.bubble_ior : 1.33;
+        float bio  = (matx.bubble_ior > 1.0001) ? matx.bubble_ior : 1.33;
         float r0   = (1.0 - bio) / (1.0 + bio); r0 = r0 * r0;
         float fres = r0 + (1.0 - r0) * pow(1.0 - cosT, 5.0);
         vec3 dir, att;
         if (rnd(payload.seed) < fres) {
             dir = reflect(rayDir, Nb);                  // bright Fresnel rim
-            if (mat.bubble_film > 1e-3) {
-                float opd = mat.bubble_film * (1.0 / max(cosT, 0.15));
+            if (matx.bubble_film > 1e-3) {
+                float opd = matx.bubble_film * (1.0 / max(cosT, 0.15));
                 att = vec3(0.55 + 0.45 * cos(opd * 6.2831853),
                            0.55 + 0.45 * cos(opd * 6.2831853 + 2.0944),
                            0.55 + 0.45 * cos(opd * 6.2831853 + 4.1888));
@@ -2658,12 +3236,12 @@ void main() {
             payload.scatterOrigin = offset_ray(hitPos, -geomNormal);
         }
         payload.radiance            = vec3(0.0);
-        payload.hitEmissive         = false;
         payload.scatterDir          = dir;
         payload.attenuation        *= att;
         payload.scattered           = true;
         payload.bounceType          = BOUNCE_SPECULAR;
-        payload.primaryTransmission = 1.0;              // aerial parity (don't wash bubble)
+        // aerial parity (don't wash bubble): transmission=1 in the AOV pack (albedo.b stays 0)
+        payload.primaryABT          = packHalf2x16(vec2(0.0, 1.0));
         return;
     }
 
@@ -2675,9 +3253,9 @@ void main() {
     }
 
 
-   // Sample emission texture
+   // Sample emission texture (skipped when the program drives Emission Color — see albedo)
 int emissionTexID = int(mat.emission_tex);
-if (emissionTexID > 0) {
+if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
     vec3 emTex = texture(materialTextures[nonuniformEXT(emissionTexID)], materialUV).rgb;
     // Emission texture is authoritative; intensity remains controlled by emission strength.
     emColor = emTex;
@@ -2690,26 +3268,27 @@ if (emissionTexID > 0) {
 }
     // Texture sampling bitti — artık kesin emColor belli, radiance'ı şimdi ata
     payload.radiance = emColor * emStrength;
-    payload.hitEmissive = (length(payload.radiance) > 0.001);
     
-    // Sample transmission texture (for glass/transparent materials)
+    // Sample transmission texture (for glass/transparent materials).
+    // Skipped when the program drives Transmission — the CPU's applyProgramSurface
+    // overwrites transmission after its own fetch, so the GPU has to yield too.
     int transmissionTexID = int(mat.transmission_tex);
-    if (transmissionTexID > 0) {
+    if (transmissionTexID > 0 && (mpWritten & MP_SLOT_TRANSMISSION) == 0u) {
         float trans = texture(materialTextures[nonuniformEXT(transmissionTexID)], materialUV).r;
         transmission = clamp(trans, 0.0, 1.0);
     }
     
-    // Sample roughness texture
+    // Sample roughness texture (skipped when the program drives Roughness — see albedo)
     int roughTexID = int(mat.roughness_tex);
-    if (roughTexID > 0) {
+    if (roughTexID > 0 && (mpWritten & MP_SLOT_ROUGHNESS) == 0u) {
         float r = samplePackedRoughness(
             texture(materialTextures[nonuniformEXT(roughTexID)], materialUV), 0.0, mat.flags);
         roughness = clamp(r, 0.0, 1.0);
     }
 
-    // Sample metallic texture
+    // Sample metallic texture (skipped when the program drives Metallic — see albedo)
     int metallicTexID = int(mat.metallic_tex);
-    if (metallicTexID > 0) {
+    if (metallicTexID > 0 && (mpWritten & MP_SLOT_METALLIC) == 0u) {
         float m = samplePackedMetallic(
             texture(materialTextures[nonuniformEXT(metallicTexID)], materialUV), mat.flags);
         metallic = clamp(m, 0.0, 1.0);
@@ -2723,9 +3302,9 @@ if (emissionTexID > 0) {
     // ── Procedural detail: subtle color variation + dirt + roughness ──────────
     // micro_detail_strength drives all world-space effects without touching UVs.
     // tile_break_strength (above) is the separate UV-warp control.
-    if (mat.micro_detail_strength > 0.0) {
-        float sc  = max(mat.micro_detail_scale, 0.5);
-        float str = mat.micro_detail_strength;
+    if (matx.micro_detail_strength > 0.0) {
+        float sc  = max(matx.micro_detail_scale, 0.5);
+        float str = matx.micro_detail_strength;
 
         // Subtle world-space luminance variation — ±8% max, independent seed
         float colorVar   = pd_vnoise3(hitPos * sc * 0.7 + vec3(31.4, 17.2, 42.9));
@@ -2746,14 +3325,14 @@ if (emissionTexID > 0) {
 
     // Apply normal map if present (perturb surface normal)
     int normalTexID = int(mat.normal_tex);
-    bool isWaterMaterial = ((mat.flags & MAT_FLAG_WATER) != 0u) || mat.sheen > 0.001;
+    bool isWaterMaterial = ((mat.flags & MAT_FLAG_WATER) != 0u) || matx.sheen > 0.001;
     bool waterUsesFFT = isWaterMaterial &&
                         ((mat.flags & MAT_FLAG_WATER_FFT_READY) != 0u) &&
                         mat.height_tex > 0u &&
                         mat.normal_tex > 0u &&
-                        mat.fft_ocean_size > 0.001 &&
-                        abs(mat.anisotropic) < 1e-5 &&
-                        abs(mat.sheen_tint) < 1e-5;
+                        matx.fft_ocean_size > 0.001 &&
+                        abs(matx.anisotropic) < 1e-5 &&
+                        abs(matx.sheen_tint) < 1e-5;
     vec3 tangentNormal = worldNormal;  // Default to geometry normal
     if (normalTexID > 0 && !waterUsesFFT) {
         // Sample normal map (OpenGL format: RGB = normal direction).
@@ -2791,18 +3370,39 @@ if (emissionTexID > 0) {
         }
     }
 
+    // Procedural bump (Bump node -> program Normal slot). mpTangentNormal is ALREADY
+    // a tangent-space normal (-dh/du, -dh/dv, 1)*k with strength baked — no decode,
+    // no re-scale. Same TBN transform as the texture path; mirrors CPU apply_normal_map.
+    // EXCEPT when the program flagged it WORLD-space (Bevel): that normal is final as-is,
+    // and pushing it through the UV tangent frame would twist it by the UV layout.
+    if (mpHasNormal && !waterUsesFFT) {
+        vec3 perturbed;
+        if (mpNormalWorld) {
+            perturbed = safeNormalize(mpTangentNormal, worldNormal);
+        } else {
+            vec3 tsN = normalize(mpTangentNormal);
+            perturbed = normalize(
+                surfaceTangent * tsN.x +
+                surfaceBitangent * tsN.y +
+                worldNormal * tsN.z
+            );
+        }
+        if (dot(perturbed, -rayDir) > 0.0) tangentNormal = perturbed;
+    }
+
     vec3 weatherSupportNormal = safeNormalize(mix(weatherMacroNormal, tangentNormal, 0.85), weatherMacroNormal);
     applyWeatherSurface(hitPos, tangentNormal, weatherSupportNormal, albedo, roughness, metallic);
     roughness = clamp(roughness, 0.0, 1.0);
     metallic = clamp(metallic, 0.0, 1.0);
 
-    if (payload.primaryHit == 0u) {
-        payload.primaryAlbedo = albedo;
-        payload.primaryNormal = worldNormal;
-        payload.primaryHit = 1u;
-        payload.primaryTransmission = transmission;
-        payload.primaryMetallic = metallic;
-        payload.primaryMaterialId = matIndex;   // Stylize AOV: real material boundary for outlines
+    const bool primarySurfacePending = (payload.primaryMeta & PL_PRIMARY_DONE) == 0u;
+    if (primarySurfacePending) {
+        payload.primaryARG  = packHalf2x16(albedo.rg);
+        payload.primaryABT  = packHalf2x16(vec2(albedo.b, transmission));
+        payload.primaryNrm  = plPackNormal(worldNormal);
+        // Stylize AOV: real material boundary for outlines (16-bit id space)
+        payload.primaryMeta = (payload.primaryMeta & PL_DISP_MASK)
+                            | PL_PRIMARY_DONE | (matIndex & PL_MATID_MASK);
     }
     worldNormal = tangentNormal;
     worldNormal = weatherSurfaceNormal(hitPos, worldNormal, weatherSupportNormal);
@@ -2813,35 +3413,48 @@ if (emissionTexID > 0) {
     // Must run BEFORE transmission/direct-lighting/diffuse paths.
     // ----------------------------------------------------------
     if (isWaterMaterial) {
+        vec3 waterFlowTangent = surfaceTangent;
+        vec3 waterCrossTangent = surfaceBitangent;
+        if ((mat.flags & MAT_FLAG_WATER_RIVER) != 0u && dot(hitWaterA.xy, hitWaterA.xy) > 1e-6) {
+            vec3 objectFlow = normalize(vec3(hitWaterA.x, 0.0, hitWaterA.y));
+            waterFlowTangent = normalize(mat3(gl_ObjectToWorldEXT) * objectFlow);
+            waterFlowTangent = normalize(waterFlowTangent - worldNormal * dot(waterFlowTangent, worldNormal));
+            waterCrossTangent = normalize(cross(worldNormal, waterFlowTangent));
+        }
         scatterWater(
-            hitPos, worldNormal, rayDir,
-            /*wave_speed*/     mat.anisotropic,
-            /*wave_strength*/  mat.sheen,
-            /*wave_freq*/      mat.sheen_tint,
+            hitPos, worldNormal, geomNormal, rayDir,
+            ((mat.flags & MAT_FLAG_WATER_RIVER) != 0u) ? 2u :
+            (((mat.flags & MAT_FLAG_WATER_LAKE) != 0u) ? 1u : 0u),
+            rawUV, waterFlowTangent, waterCrossTangent,
+            hitWaterA, hitWaterB, hitWaterC,
+            /*wave_speed*/     matx.anisotropic,
+            /*wave_strength*/  matx.sheen,
+            /*wave_freq*/      matx.sheen_tint,
             /*foam_level*/     mat.translucent,
-            /*foam_threshold*/ mat.foam_threshold,
-            /*micro_strength*/ mat.micro_detail_strength,
-            /*micro_scale*/    mat.micro_detail_scale,
-            /*micro_anim*/     mat.micro_anim_speed,
-            /*micro_morph*/    mat.micro_morph_speed,
-            /*foam_noise*/     mat.foam_noise_scale,
-            /*wind_dir*/       mat.fft_wind_direction,
-            /*wind_speed*/     mat.fft_wind_speed,
-            /*fft_time_scale*/ mat.fft_time_scale,
-            /*fft_ocean_size*/ mat.fft_ocean_size,
-            /*fft_height_tex*/ 0u,
-            /*fft_normal_tex*/ 0u,
+            /*foam_threshold*/ matx.foam_threshold,
+            /*micro_strength*/ matx.micro_detail_strength,
+            /*micro_scale*/    matx.micro_detail_scale,
+            /*micro_anim*/     matx.micro_anim_speed,
+            /*micro_morph*/    matx.micro_morph_speed,
+            /*foam_noise*/     matx.foam_noise_scale,
+            /*wind_dir*/       matx.fft_wind_direction,
+            /*wind_speed*/     matx.fft_wind_speed,
+            /*fft_time_scale*/ matx.fft_time_scale,
+            /*fft_ocean_size*/ matx.fft_ocean_size,
+            /*fft_height_tex*/ waterUsesFFT ? mat.height_tex : 0u,
+            /*fft_normal_tex*/ waterUsesFFT ? mat.normal_tex : 0u,
             /*depth_max*/      mat.subsurface_amount * 100.0,
-            /*absorption*/     mat.subsurface_scale,
-            /*shore_dist*/     mat.subsurface_radius_r,
+            /*absorption*/     matx.subsurface_scale,
+            /*shore_dist*/     matx.subsurface_radius_r,
             /*shore_int*/      mat.clearcoat,
             /*caustic_int*/    mat.clearcoat_roughness,
-            /*caustic_scale*/  mat.subsurface_radius_g,
-            /*caustic_speed*/  mat.subsurface_anisotropy,
+            /*caustic_scale*/  matx.subsurface_radius_g,
+            /*caustic_speed*/  matx.subsurface_anisotropy,
             /*shallow_color*/  vec3(mat.emission_r, mat.emission_g, mat.emission_b),
             /*deep_color*/     vec3(mat.albedo_r,   mat.albedo_g,   mat.albedo_b),
             /*ior*/            (mat.ior > 0.01) ? mat.ior : 1.333,
-            /*roughness*/      clamp(mat.roughness, 0.0, 0.15),
+            /*roughness*/      clamp(mat.roughness, 0.0, 1.0),
+            /*primary AOV*/    primarySurfacePending,
             payload.seed
         );
         return;
@@ -2853,7 +3466,7 @@ if (emissionTexID > 0) {
     // OptiX-like probablilistic branching based on transmission weight.
     // ----------------------------------------------------------
     vec3 directAttenuation = payload.attenuation;
-    vec3  resinColor = vec3(mat.resin_color_r, mat.resin_color_g, mat.resin_color_b);
+    vec3  resinColor = vec3(matx.resin_color_r, matx.resin_color_g, matx.resin_color_b);
 
     // Carried into the NEE block below so direct light reaching the base also gets
     // absorbed on its ENTRY path through the resin (at the light's angle).
@@ -2870,15 +3483,15 @@ if (emissionTexID > 0) {
     // die here too while the view is active — the grids reset on view exit.
     if (cam.debugView == 9u) {
         vec3 mdOut = vec3(0.0);
-        bool hasInterior = (mat.transmission_density > 1e-4 ||
-                            mat.resin_inclusion > 0.001 || mat.resin_dirt > 0.001 ||
-                            mat.resin_shard > 0.001);
+        bool hasInterior = (matx.transmission_density > 1e-4 ||
+                            matx.resin_inclusion > 0.001 || matx.resin_dirt > 0.001 ||
+                            matx.resin_shard > 0.001);
         if (hasInterior) {
             float effIor = max(ior, 1.45);
             vec3 Tdir = refract(rayDir, worldNormal, surfaceFrontFace ? (1.0 / effIor) : effIor);
             if (dot(Tdir, Tdir) < 1e-6) Tdir = rayDir;
             Tdir = normalize(Tdir);
-            float thick = (mat.transmission_density > 1e-4) ? mat.transmission_density : 0.65;
+            float thick = (matx.transmission_density > 1e-4) ? matx.transmission_density : 0.65;
             vec3 mOrg = hitPos, mDir = Tdir, mLit = worldNormal;
             if ((mat.flags & MAT_FLAG_RESIN_OBJ_SPACE) != 0u) {
                 mOrg = gl_WorldToObjectEXT * vec4(hitPos, 1.0);
@@ -2887,15 +3500,15 @@ if (emissionTexID > 0) {
             }
             ResinMarch rm = resinMarchInterior(
                 mOrg, mDir, thick, vec3(0.0),
-                mat.resin_inclusion, mat.resin_dirt,
-                vec3(mat.resin_dirt_color_r, mat.resin_dirt_color_g, mat.resin_dirt_color_b),
-                mat.resin_shard, mat.resin_shard_hue,
+                matx.resin_inclusion, matx.resin_dirt,
+                vec3(matx.resin_dirt_color_r, matx.resin_dirt_color_g, matx.resin_dirt_color_b),
+                matx.resin_shard, matx.resin_shard_hue,
                 vec3(0.85), mLit,
-                max(mat.resin_inclusion_scale, 0.01),
-                uint(mat.dust_style + 0.5),
-                vec3(mat.dust_color_a_r, mat.dust_color_a_g, mat.dust_color_a_b),
-                vec3(mat.dust_color_b_r, mat.dust_color_b_g, mat.dust_color_b_b),
-                uint(mat.shard_shape + 0.5), payload.seed);
+                max(matx.resin_inclusion_scale, 0.01),
+                uint(matx.dust_style + 0.5),
+                vec3(matx.dust_color_a_r, matx.dust_color_a_g, matx.dust_color_a_b),
+                vec3(matx.dust_color_b_r, matx.dust_color_b_g, matx.dust_color_b_b),
+                uint(matx.shard_shape + 0.5), payload.seed);
             mdOut = rm.dirtHit ? vec3(1.0) : vec3(clamp(rm.dustCover, 0.0, 1.0));
         }
         payload.radiance      = mdOut;
@@ -2915,7 +3528,7 @@ if (emissionTexID > 0) {
     // keep crossing → amber caustics); in between the stone body picks up an
     // increasingly opaque milky skin. Plain glass (no depth) is untouched.
     bool takeGlassLobe = (transmission > 0.01) && (rnd(payload.seed) < transmission);
-    if (mat.transmission_density > 1e-4 && !takeGlassLobe) {
+    if (matx.transmission_density > 1e-4 && !takeGlassLobe) {
         // RESIN: a refractive ABSORBING layer over an OPAQUE base. Fresnel-split the
         // surface — the reflection lobe is the glossy resin top (specular, skips NEE);
         // light that enters reaches the base, which we tint by the coat absorption over
@@ -2925,7 +3538,7 @@ if (emissionTexID > 0) {
         float cosT   = clamp(dot(-rayDir, worldNormal), 0.0, 1.0);
         float fres   = schlickFresnel(cosT, effIor);
         // Coat gloss is the resin LAYER's own roughness, independent of the base.
-        float resinRough = clamp(mat.resin_roughness, 0.0, 1.0);
+        float resinRough = clamp(matx.resin_roughness, 0.0, 1.0);
         if (rnd(payload.seed) < fres) {
             vec3 V = -rayDir;
             vec3 refl;
@@ -2974,13 +3587,13 @@ if (emissionTexID > 0) {
         vec3 inPlane = Tdir - worldNormal * dot(Tdir, worldNormal);
         vec2 parUV = materialUV
                    + vec2(dot(inPlane, surfaceTangent), dot(inPlane, surfaceBitangent))
-                     * (mat.transmission_density * 0.05);
+                     * (matx.transmission_density * 0.05);
         if (albedoTexID > 0) {
             albedo = texture(materialTextures[nonuniformEXT(albedoTexID)], parUV).rgb;
         }
 
-        bool resinHasInclusions = (mat.resin_inclusion > 0.001 || mat.resin_dirt > 0.001 ||
-                                   mat.resin_shard > 0.001);
+        bool resinHasInclusions = (matx.resin_inclusion > 0.001 || matx.resin_dirt > 0.001 ||
+                                   matx.resin_shard > 0.001);
         if (resinHasInclusions) {
             // Sample one light direction at the surface for the interior march
             // (cheap NEE-direction shading of the specks; no shadow rays).
@@ -3008,17 +3621,17 @@ if (emissionTexID > 0) {
                 mLit = normalize(mat3(gl_WorldToObjectEXT) * resinLightDir);
             }
             ResinMarch rm = resinMarchInterior(
-                mOrg, mDir, mat.transmission_density, ext,
-                mat.resin_inclusion, mat.resin_dirt,
-                vec3(mat.resin_dirt_color_r, mat.resin_dirt_color_g, mat.resin_dirt_color_b),
-                mat.resin_shard, mat.resin_shard_hue,
+                mOrg, mDir, matx.transmission_density, ext,
+                matx.resin_inclusion, matx.resin_dirt,
+                vec3(matx.resin_dirt_color_r, matx.resin_dirt_color_g, matx.resin_dirt_color_b),
+                matx.resin_shard, matx.resin_shard_hue,
                 clamp(ct * 0.5 + vec3(0.45), 0.0, 1.0),   // dust base tint from resin colour
                 mLit,
-                max(mat.resin_inclusion_scale, 0.01),
-                uint(mat.dust_style + 0.5),
-                vec3(mat.dust_color_a_r, mat.dust_color_a_g, mat.dust_color_a_b),
-                vec3(mat.dust_color_b_r, mat.dust_color_b_g, mat.dust_color_b_b),
-                uint(mat.shard_shape + 0.5), payload.seed);
+                max(matx.resin_inclusion_scale, 0.01),
+                uint(matx.dust_style + 0.5),
+                vec3(matx.dust_color_a_r, matx.dust_color_a_g, matx.dust_color_a_b),
+                vec3(matx.dust_color_b_r, matx.dust_color_b_g, matx.dust_color_b_b),
+                uint(matx.shard_shape + 0.5), payload.seed);
             if (rm.dirtHit) {
                 // Terminate on the speck: light-direction-shaded colour, dimmed
                 // by the resin crossed.
@@ -3029,10 +3642,10 @@ if (emissionTexID > 0) {
                 // own colour body (visible even over a dark base) and
                 // bubble/shard rims sparkle.
                 albedo = mix(albedo * rm.absorb, rm.dustTint * rm.absorb, rm.dustCover);
-                albedo = clamp(albedo + rm.shardGlow + vec3(rm.sparkle), 0.0, 1.0);
+                albedo = clamp(albedo + rm.shardGlow + rm.dustGlow + vec3(rm.sparkle), 0.0, 1.0);
             }
         } else {
-            float pathLen = 2.0 * mat.transmission_density / cosV;
+            float pathLen = 2.0 * matx.transmission_density / cosV;
             albedo       *= exp(-pathLen * ext);
         }
         roughness     = 1.0;
@@ -3042,7 +3655,7 @@ if (emissionTexID > 0) {
         // also attenuated by its own (light-angle) path length, not just the albedo tint.
         resinActive   = true;
         resinExt      = ext;
-        resinDensity  = mat.transmission_density;
+        resinDensity  = matx.transmission_density;
         // (no return — direct lighting + diffuse BRDF below shade the tinted base)
     }
     else if (takeGlassLobe) {
@@ -3051,8 +3664,8 @@ if (emissionTexID > 0) {
             // was disabled — it was too camera-angle dependent and the interior dust/dirt never
             // read as intended. The flag + serialize fields are kept dormant (saved scenes load
             // fine); inclusion-bearing glass now always uses the shell march below.
-            bool inclusionsOn = (mat.resin_inclusion > 0.001 || mat.resin_dirt > 0.001 ||
-                                 mat.resin_shard > 0.001);
+            bool inclusionsOn = (matx.resin_inclusion > 0.001 || matx.resin_dirt > 0.001 ||
+                                 matx.resin_shard > 0.001);
             // TRANSLUCENT STONE (amber/jade): Interior Depth on a transmissive
             // body = REAL-DISTANCE Beer-Lambert. gl_HitTEXT is the actual
             // length of the segment that just arrived at this hit; it only ran
@@ -3068,12 +3681,12 @@ if (emissionTexID > 0) {
             // and the reflect/TIR lobe dropped it entirely. The segment behind
             // this hit was already traversed — its absorption is unconditional,
             // whatever lobe the ray takes next.
-            if (mat.transmission_density > 1e-4 && !surfaceFrontFace) {
-                vec3  sct   = clamp(vec3(mat.resin_color_r, mat.resin_color_g, mat.resin_color_b),
+            if (matx.transmission_density > 1e-4 && !surfaceFrontFace) {
+                vec3  sct   = clamp(vec3(matx.resin_color_r, matx.resin_color_g, matx.resin_color_b),
                                     vec3(0.0), vec3(1.0));
                 float sMax  = max(sct.r, max(sct.g, sct.b));
                 vec3  sExt  = (vec3(1.0) - sct) * 1.35 + vec3(0.22 * (1.0 - sMax));
-                payload.attenuation *= exp(-gl_HitTEXT * sExt * mat.transmission_density);
+                payload.attenuation *= exp(-gl_HitTEXT * sExt * matx.transmission_density);
             }
             // STONE COLOUR MODEL: with Interior Depth active, the transmitted
             // colour comes from the REAL-DISTANCE absorption alone — the
@@ -3082,7 +3695,7 @@ if (emissionTexID > 0) {
             // the channels the depth gradient needs: a pure green albedo made
             // Depth look like it did nothing (same image at 0 and 8).
             vec3 glassBase = mix(albedo, vec3(1.0),
-                                 clamp(mat.transmission_density * 10.0, 0.0, 1.0));
+                                 clamp(matx.transmission_density * 10.0, 0.0, 1.0));
             // GLASS MARBLE (shell): when inclusions are enabled on a GLASS base, march the
             // refracted ray through the interior — dust (haze) + dirt specks (opaque
             // early-return) — BEFORE refracting through, so light still passes through
@@ -3123,16 +3736,16 @@ if (emissionTexID > 0) {
                 ResinMarch rm = resinMarchInterior(
                     gOrg, gDir, 0.65 / cosIn,                   // matches scatterGlass thickness model
                     vec3(0.0),                                  // clear glass: dust is the only extinction
-                    mat.resin_inclusion, mat.resin_dirt,
-                    vec3(mat.resin_dirt_color_r, mat.resin_dirt_color_g, mat.resin_dirt_color_b),
-                    mat.resin_shard, mat.resin_shard_hue,
+                    matx.resin_inclusion, matx.resin_dirt,
+                    vec3(matx.resin_dirt_color_r, matx.resin_dirt_color_g, matx.resin_dirt_color_b),
+                    matx.resin_shard, matx.resin_shard_hue,
                     vec3(0.85),                                 // neutral milky dust in clear glass
                     gLit,
-                    max(mat.resin_inclusion_scale, 0.01),
-                    uint(mat.dust_style + 0.5),
-                    vec3(mat.dust_color_a_r, mat.dust_color_a_g, mat.dust_color_a_b),
-                    vec3(mat.dust_color_b_r, mat.dust_color_b_g, mat.dust_color_b_b),
-                    uint(mat.shard_shape + 0.5), payload.seed);
+                    max(matx.resin_inclusion_scale, 0.01),
+                    uint(matx.dust_style + 0.5),
+                    vec3(matx.dust_color_a_r, matx.dust_color_a_g, matx.dust_color_a_b),
+                    vec3(matx.dust_color_b_r, matx.dust_color_b_g, matx.dust_color_b_b),
+                    uint(matx.shard_shape + 0.5), payload.seed);
                 if (rm.dirtHit) {
                     // Opaque speck suspended in the glass: baked-lit micro-sphere
                     // colour (stone depth already in the throughput) →
@@ -3145,7 +3758,7 @@ if (emissionTexID > 0) {
                     // approximation), shards carry their own colour body,
                     // bubble/shard rims sparkle; refract through.
                     vec3 gal = mix(glassBase * rm.absorb, rm.dustTint * rm.absorb, rm.dustCover * 0.8);
-                    gal = clamp(gal + rm.shardGlow + vec3(rm.sparkle), 0.0, 1.0);
+                    gal = clamp(gal + rm.shardGlow + rm.dustGlow + vec3(rm.sparkle), 0.0, 1.0);
                     scatterGlass(hitPos, worldNormal, worldNormal, surfaceFrontFace, rayDir, gal, ior, roughness, 0.0, vec3(1.0), mat.dispersion, payload.seed);
                     return;
                 }
@@ -3318,10 +3931,10 @@ if (emissionTexID > 0) {
     }
     float translucent        = clamp(mat.translucent, 0.0, 1.0);
     float subsurfaceAmount   = clamp(mat.subsurface_amount, 0.0, 1.0);
-    vec3  subsurfaceColor    = max(vec3(mat.subsurface_r, mat.subsurface_g, mat.subsurface_b), vec3(0.001));
-    vec3  subsurfaceRadius   = max(vec3(mat.subsurface_radius_r, mat.subsurface_radius_g, mat.subsurface_radius_b), vec3(0.001));
-    float subsurfaceScale    = max(mat.subsurface_scale, 0.001);
-    float subsurfaceAniso    = clamp(mat.subsurface_anisotropy, -0.99, 0.99);
+    vec3  subsurfaceColor    = max(vec3(matx.subsurface_r, matx.subsurface_g, matx.subsurface_b), vec3(0.001));
+    vec3  subsurfaceRadius   = max(vec3(matx.subsurface_radius_r, matx.subsurface_radius_g, matx.subsurface_radius_b), vec3(0.001));
+    float subsurfaceScale    = max(matx.subsurface_scale, 0.001);
+    float subsurfaceAniso    = clamp(matx.subsurface_anisotropy, -0.99, 0.99);
 
     // ----------------------------------------------------------
     // 5. Scatter kararı — Full Principled BSDF
@@ -3344,7 +3957,7 @@ if (emissionTexID > 0) {
         float ccProb = clearcoat * ccFresnel;
         if (rnd(payload.seed) < ccProb) {
             scatterClearcoat(hitPos, worldNormal, rayDir, clearcoatRoughness,
-                             mat.clearcoat_iridescence, mat.clearcoat_film_thickness, payload.seed);
+                             matx.clearcoat_iridescence, matx.clearcoat_film_thickness, payload.seed);
             // Compensate selection probability
             payload.attenuation *= (1.0 / max(ccProb, 0.01));
             return;

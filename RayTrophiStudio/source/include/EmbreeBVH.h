@@ -112,6 +112,7 @@ public:
         size_t vertex_offset = 0;
         size_t vertex_count = 0;
         Matrix4x4 last_xform;
+        uint64_t last_pose_hash = 0;
         // Facade-less (direct SoA TriangleMesh) group: the refit must bake world = getFinal()*P_orig
         // (like build does) instead of memcpy-ing the SoA "P" cache, which isn't re-baked on a
         // transform-only change. Lets a keyframed/physics flat mesh REFIT instead of full-rebuild.
