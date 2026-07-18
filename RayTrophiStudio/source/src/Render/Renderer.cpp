@@ -40,6 +40,7 @@
 #include "VolumeShader.h"
 #include "Triangle.h"
 #include "TriangleMesh.h"   // import-flat collapse in create_scene (upcast TriangleMesh -> Hittable)
+#include "MeshPointiness.h" // Geometry-node Pointiness: per-vertex cache + hit-time sampling
 #include "Mesh.h"
 #include "AABB.h"
 #include "Ray.h"
@@ -1554,16 +1555,10 @@ static int directional_pick_count = 0;
 // ============================================================================
 
 void Renderer::initializeAnimationSystem(SceneData& scene) {
+    animation_groups_dirty = true;
+
     // Initialize per-model animators
     for (auto& ctx : scene.importedModelContexts) {
-        if (!ctx.hasAnimation) {
-            continue;
-        }
-
-        if (!ctx.animator) {
-            ctx.animator = std::make_shared<AnimationController>();
-        }
-
         // Filter clips for this model
         std::vector<std::shared_ptr<AnimationData>> modelClips;
         for (auto& anim : scene.animationDataList) {
@@ -1572,13 +1567,54 @@ void Renderer::initializeAnimationSystem(SceneData& scene) {
             }
         }
 
+        // Some importers/projects do not persist hasAnimation reliably.  The
+        // actual model-owned clip list is the authoritative signal.
+        if (!modelClips.empty()) {
+            ctx.hasAnimation = true;
+        }
+        if (!ctx.hasAnimation) {
+            continue;
+        }
+
+        if (!ctx.animator) {
+            ctx.animator = std::make_shared<AnimationController>();
+        }
+
         ctx.animator->registerClips(modelClips);
         ctx.ozzAnimationSet = OzzRuntime::buildStubAnimationSet(ctx.importName, scene.boneData, modelClips);
 
         if (!modelClips.empty()) {
-            // [FIX] Do NOT auto-play on import.
-            // Keep character in Bind Pose (T-Pose) until an animation node is added to AnimGraph.
-            // ctx.animator->play(modelClips[0]->name, 0.0f);
+            // A newly imported animated model must have an evaluable chain.
+            // Preserve saved/user-authored graphs; only seed Clip -> Final Pose
+            // when the context has no graph at all.
+            if (!ctx.runtimeGraph && ctx.graph) {
+                ctx.runtimeGraph = ctx.graph->clone();
+            }
+            if (!ctx.runtimeGraph && !ctx.graph && !modelClips.front()->name.empty()) {
+                auto graph = std::make_shared<AnimationGraph::AnimationNodeGraph>();
+                auto* clipNode = graph->addNode<AnimationGraph::AnimClipNode>();
+                clipNode->clipName = modelClips.front()->name;
+                clipNode->loop = true;
+                clipNode->x = 100.0f;
+                clipNode->y = 100.0f;
+
+                auto* finalNode = graph->addNode<AnimationGraph::FinalPoseNode>();
+                finalNode->x = 400.0f;
+                finalNode->y = 100.0f;
+
+                if (!clipNode->outputs.empty() && !finalNode->inputs.empty()) {
+                    graph->connect(clipNode->outputs[0].id, finalNode->inputs[0].id);
+                }
+
+                ctx.animGraphAssetKey = ctx.importName;
+                ctx.runtimeGraph = graph;
+                ctx.graph = graph; // Legacy alias; UI adopts a clone as its editable asset.
+                ctx.useAnimGraph = true;
+                ctx.animGraphFollowTimeline = false;
+                ctx.restPoseApplied = false;
+                SCENE_LOG_INFO("[Renderer] Seeded default AnimGraph for model: " + ctx.importName +
+                    " (Clip: " + modelClips.front()->name + ")");
+            }
             SCENE_LOG_INFO("[Renderer] Created animator for model: " + ctx.importName + " (Clips: " + std::to_string(modelClips.size()) + ")");
             if (ctx.ozzAnimationSet && ctx.ozzAnimationSet->hasScaffoldData()) {
                 size_t trackCount = 0;
@@ -1740,6 +1776,14 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                         for (auto& member : ctx.members) {
                             if (auto tri = std::dynamic_pointer_cast<Triangle>(member)) {
                                 Transform* h = tri->getTransformPtr();
+                                if (h && std::find(processed.begin(), processed.end(), h) == processed.end()) {
+                                    h->position = h->position + horizontalDelta;
+                                    h->updateMatrix();
+                                    h->markDirty();
+                                    processed.push_back(h);
+                                }
+                            } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(member)) {
+                                Transform* h = mesh->transform.get();
                                 if (h && std::find(processed.begin(), processed.end(), h) == processed.end()) {
                                     h->position = h->position + horizontalDelta;
                                     h->updateMatrix();
@@ -1966,6 +2010,20 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
             if (changed || ozzPoseAdvanced) {
                 modelChanged = true;
 
+                // Project-loaded contexts do not serialize runtime member pointers.
+                // Reconnect both legacy facades and canonical flat meshes before
+                // root motion or per-model skinning consumes the list.
+                if (ctx.members.empty() && !ctx.importName.empty()) {
+                    const std::string prefix = ctx.importName + "_";
+                    for (auto& obj : scene.world.objects) {
+                        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                            if (tri->getNodeName().find(prefix) == 0) ctx.members.push_back(tri);
+                        } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                            if (mesh->nodeName.find(prefix) == 0) ctx.members.push_back(mesh);
+                        }
+                    }
+                }
+
 
                 // --- ROOT MOTION (Pivot movement) ---
                 if (ctx.useRootMotion && !usedOzzRuntime) {
@@ -1977,6 +2035,13 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                         for (auto& member : ctx.members) {
                             if (auto tri = std::dynamic_pointer_cast<Triangle>(member)) {
                                 Transform* h = tri->getTransformPtr();
+                                if (h && std::find(processed.begin(), processed.end(), h) == processed.end()) {
+                                    h->position = h->position + horizontalDelta;
+                                    h->updateMatrix(); h->markDirty();
+                                    processed.push_back(h);
+                                }
+                            } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(member)) {
+                                Transform* h = mesh->transform.get();
                                 if (h && std::find(processed.begin(), processed.end(), h) == processed.end()) {
                                     h->position = h->position + horizontalDelta;
                                     h->updateMatrix(); h->markDirty();
@@ -2005,6 +2070,11 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                         auto tri = std::dynamic_pointer_cast<Triangle>(obj);
                         if (tri && tri->getNodeName().find(prefix) == 0) {
                             ctx.members.push_back(tri);
+                            continue;
+                        }
+                        auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj);
+                        if (mesh && mesh->nodeName.find(prefix) == 0) {
+                            ctx.members.push_back(mesh);
                         }
                     }
                 }
@@ -2013,6 +2083,11 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                     auto tri = std::dynamic_pointer_cast<Triangle>(member);
                     if (tri && tri->hasSkinData()) {
                         tri->apply_skinning(modelBoneMatrices);
+                        continue;
+                    }
+                    auto mesh = std::dynamic_pointer_cast<TriangleMesh>(member);
+                    if (mesh && mesh->hasSkinWeights()) {
+                        mesh->applySkinning(modelBoneMatrices);
                     }
                 }
             }
@@ -2082,17 +2157,31 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                 std::unordered_map<void*, size_t> transformToGroup;
                 for (auto& obj : scene.world.objects) {
                     auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                    if (!tri) continue;
-                    void* transformKey = tri->getTransformPtr();
+                    if (tri) {
+                        void* transformKey = tri->getTransformPtr();
+                        if (transformToGroup.find(transformKey) == transformToGroup.end()) {
+                            transformToGroup[transformKey] = animation_groups.size();
+                            AnimatableGroup newGroup;
+                            newGroup.nodeName = tri->getNodeName();
+                            newGroup.isSkinned = tri->hasSkinData();
+                            newGroup.transformHandle = tri->getTransformHandle();
+                            animation_groups.push_back(newGroup);
+                        }
+                        animation_groups[transformToGroup[transformKey]].triangles.push_back(tri);
+                        continue;
+                    }
+                    auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj);
+                    if (!mesh || !mesh->transform) continue;
+                    void* transformKey = mesh->transform.get();
                     if (transformToGroup.find(transformKey) == transformToGroup.end()) {
                         transformToGroup[transformKey] = animation_groups.size();
                         AnimatableGroup newGroup;
-                        newGroup.nodeName = tri->getNodeName();
-                        newGroup.isSkinned = tri->hasSkinData();
-                        newGroup.transformHandle = tri->getTransformHandle();
+                        newGroup.nodeName = mesh->nodeName;
+                        newGroup.isSkinned = mesh->hasSkinWeights();
+                        newGroup.transformHandle = mesh->transform;
                         animation_groups.push_back(newGroup);
                     }
-                    animation_groups[transformToGroup[transformKey]].triangles.push_back(tri);
+                    animation_groups[transformToGroup[transformKey]].meshes.push_back(mesh);
                 }
                 animation_groups_dirty = false;
             }
@@ -2102,6 +2191,9 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                     if (apply_cpu_skinning) {
                         for (auto& tri : group.triangles) {
                             tri->apply_skinning(static_cast<const std::vector<Matrix4x4>&>(this->finalBoneMatrices));
+                        }
+                        for (auto& mesh : group.meshes) {
+                            mesh->applySkinning(static_cast<const std::vector<Matrix4x4>&>(this->finalBoneMatrices));
                         }
                     }
                 }
@@ -2214,17 +2306,31 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                     std::unordered_map<void*, size_t> transformToGroup;
                     for (auto& obj : scene.world.objects) {
                         auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                        if (!tri) continue;
-                        void* key = tri->getTransformPtr();
+                        if (tri) {
+                            void* key = tri->getTransformPtr();
+                            if (transformToGroup.find(key) == transformToGroup.end()) {
+                                transformToGroup[key] = animation_groups.size();
+                                AnimatableGroup ng;
+                                ng.nodeName       = tri->getNodeName();
+                                ng.isSkinned      = tri->hasSkinData();
+                                ng.transformHandle = tri->getTransformHandle();
+                                animation_groups.push_back(ng);
+                            }
+                            animation_groups[transformToGroup[key]].triangles.push_back(tri);
+                            continue;
+                        }
+                        auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj);
+                        if (!mesh || !mesh->transform) continue;
+                        void* key = mesh->transform.get();
                         if (transformToGroup.find(key) == transformToGroup.end()) {
                             transformToGroup[key] = animation_groups.size();
                             AnimatableGroup ng;
-                            ng.nodeName       = tri->getNodeName();
-                            ng.isSkinned      = tri->hasSkinData();
-                            ng.transformHandle = tri->getTransformHandle();
+                            ng.nodeName = mesh->nodeName;
+                            ng.isSkinned = mesh->hasSkinWeights();
+                            ng.transformHandle = mesh->transform;
                             animation_groups.push_back(ng);
                         }
-                        animation_groups[transformToGroup[key]].triangles.push_back(tri);
+                        animation_groups[transformToGroup[key]].meshes.push_back(mesh);
                     }
                     animation_groups_dirty = false;
                 }
@@ -2398,11 +2504,40 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
             return idx;
         };
 
+        auto addMeshToGroups = [&](const std::shared_ptr<TriangleMesh>& mesh) -> size_t {
+            if (!mesh || !mesh->transform) return SIZE_MAX;
+            const bool isSkinned = mesh->hasSkinWeights();
+            if (!isSkinned && !isNodeAnimated(mesh->nodeName)) return SIZE_MAX;
+
+            void* transformKey = mesh->transform.get();
+            auto it = transformToGroup.find(transformKey);
+            size_t idx;
+            if (it == transformToGroup.end()) {
+                idx = animation_groups.size();
+                transformToGroup[transformKey] = idx;
+                AnimatableGroup newGroup;
+                newGroup.nodeName = mesh->nodeName;
+                newGroup.isSkinned = isSkinned;
+                newGroup.transformHandle = mesh->transform;
+                animation_groups.push_back(newGroup);
+            } else {
+                idx = it->second;
+                animation_groups[idx].isSkinned = animation_groups[idx].isSkinned || isSkinned;
+            }
+            animation_groups[idx].meshes.push_back(mesh);
+            return idx;
+        };
+
         for (auto& obj : scene.world.objects) {
             if (!obj) continue;
 
             if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
                 addTriangleToGroups(tri);
+                continue;
+            }
+
+            if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                addMeshToGroups(mesh);
                 continue;
             }
 
@@ -2434,7 +2569,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 
     // --- 2. Ad�m: Gruplar� Animasyon T�r�ne G�re G�ncelle ---
     for (auto& group : animation_groups) {
-        if (group.triangles.empty()) continue;
+        if (group.triangles.empty() && group.meshes.empty()) continue;
 
         if (group.isSkinned) {
             // Skeleton animation modifies geometry
@@ -2442,6 +2577,9 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
             if (apply_cpu_skinning) {
                 for (auto& tri : group.triangles) {
                     tri->apply_skinning(static_cast<const std::vector<Matrix4x4>&>(finalBoneMatrices));
+                }
+                for (auto& mesh : group.meshes) {
+                    mesh->applySkinning(static_cast<const std::vector<Matrix4x4>&>(finalBoneMatrices));
                 }
             }
         }
@@ -3710,6 +3848,36 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree, bool skip_sync) {
         return;
     }
 
+    // Geometry-node Pointiness: rebuild the per-vertex caches the CPU hit path
+    // interpolates. This is THE recompute point — every geometry edit that changes the
+    // surface funnels through a BVH rebuild. Nothing runs unless some live material
+    // graph actually reads Pointiness, and the meshes' caches then stay empty, which is
+    // what makes samplePointiness() a null-check in the hot path.
+    // Attribute node's named per-vertex channels ride the same gate + the same rebuild
+    // point: they are gathered out of GeometryDetail's string-keyed custom map into the
+    // interleaved block the hit path and the Vulkan upload both read (see TriangleMesh::
+    // material_attribs). Collected together with pointiness so the mesh set is walked once.
+    const bool needPointiness = MeshAttr::anyMaterialUsesPointiness();
+    const bool needAttributes = MeshAttr::anyMaterialUsesAttributes();
+    if (needPointiness || needAttributes) {
+        MESH_PROFILE_SCOPE("Renderer::rebuildBVH(vertex attributes)");
+        std::unordered_set<TriangleMesh*> meshes;
+        for (const auto& obj : scene.world.objects) {
+            if (!obj) continue;
+            if (obj->isTriangleMesh()) {
+                meshes.insert(static_cast<TriangleMesh*>(obj.get()));
+            } else if (obj->isTriangle()) {
+                // Facade triangles all share one parent mesh's SoA — compute it once.
+                meshes.insert(static_cast<Triangle*>(obj.get())->parentMesh.get());
+            }
+        }
+        meshes.erase(nullptr);
+        for (TriangleMesh* m : meshes) {
+            if (needPointiness) MeshAttr::computeMeshPointiness(*m);
+            if (needAttributes) MeshAttr::computeMeshMaterialAttributes(*m);
+        }
+    }
+
     if (use_embree) {
         auto embree_bvh = std::make_shared<EmbreeBVH>();
         embree_bvh->build(all_hittables);
@@ -3931,7 +4099,8 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
     modelCtx.loader = newLoader;
     modelCtx.importName = newLoader->currentImportName;
     modelCtx.animGraphAssetKey = modelCtx.importName;
-    modelCtx.hasAnimation = (newLoader->getScene() && newLoader->getScene()->mNumAnimations > 0);
+    modelCtx.hasAnimation = !loaded_animations.empty() ||
+        (newLoader->getScene() && newLoader->getScene()->mNumAnimations > 0);
     modelCtx.globalInverseTransform = loaded_bone_data.globalInverseTransform;
 
     update_progress(40, "Processing triangles...");
@@ -3961,39 +4130,32 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
         scene.boneData.weightedBoneNames.clear();
     }
 
-    // 1. Update Triangle Bone Indices with Offset
+    // 1. Move this import's local bone indices into the scene-global range.
+    // Canonical imported skin weights live on the shared GeometryDetail, not in
+    // Triangle::skinData. Shift each parent mesh once; keep the standalone fallback
+    // for genuinely legacy triangles.
     if (hasBones && boneIndexOffset > 0) {
-        const size_t triCount = loaded_triangles.size();
-        auto shiftRange = [&loaded_triangles, boneIndexOffset](size_t s, size_t e) {
-            for (size_t i = s; i < e; ++i) {
-                auto& tri = loaded_triangles[i];
-                if (tri->hasSkinData()) {
-                    auto& vertexWeightsList = tri->getVertexBoneWeights();
-                    for (auto& vertexWeights : vertexWeightsList) {
-                        for (auto& bw : vertexWeights) {
-                            bw.first += boneIndexOffset;
-                        }
+        std::unordered_set<TriangleMesh*> shiftedMeshes;
+        for (auto& tri : loaded_triangles) {
+            if (!tri) continue;
+            if (tri->parentMesh && tri->parentMesh->geometry) {
+                TriangleMesh* mesh = tri->parentMesh.get();
+                if (!shiftedMeshes.insert(mesh).second) continue;
+                for (auto& vertexWeights : mesh->geometry->skin_weights) {
+                    for (auto& influence : vertexWeights) {
+                        influence.first += static_cast<int>(boneIndexOffset);
+                    }
+                }
+                continue;
+            }
+            if (tri->hasAnySkinWeights()) {
+                auto& vertexWeightsList = tri->getVertexBoneWeights();
+                for (auto& vertexWeights : vertexWeightsList) {
+                    for (auto& influence : vertexWeights) {
+                        influence.first += static_cast<int>(boneIndexOffset);
                     }
                 }
             }
-        };
-
-        constexpr size_t kBoneShiftParallelThreshold = 8192;
-        if (triCount < kBoneShiftParallelThreshold) {
-            shiftRange(0, triCount);
-        } else {
-            const unsigned int hw = std::max(2u, std::thread::hardware_concurrency());
-            const size_t chunks = std::min<size_t>(hw, (triCount + 8191) / 8192);
-            const size_t chunkSize = (triCount + chunks - 1) / chunks;
-            std::vector<std::future<void>> futures;
-            futures.reserve(chunks);
-            for (size_t c = 0; c < chunks; ++c) {
-                const size_t s = c * chunkSize;
-                const size_t e = std::min(s + chunkSize, triCount);
-                if (s >= e) break;
-                futures.push_back(std::async(std::launch::async, shiftRange, s, e));
-            }
-            for (auto& f : futures) f.get();
         }
     }
 
@@ -4065,18 +4227,16 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
             constexpr size_t kMinFlatFaces = 1;
             std::unordered_map<TriangleMesh*, std::shared_ptr<TriangleMesh>> flatGroups;
             std::unordered_map<TriangleMesh*, size_t> faceCounts;
-            std::unordered_set<TriangleMesh*> disqualified;
             for (size_t i = objects_before; i < scene.world.objects.size(); ++i) {
                 auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
                 if (!tri || !tri->parentMesh) continue;
                 TriangleMesh* pm = tri->parentMesh.get();
-                if (tri->hasSkinData()) { disqualified.insert(pm); continue; }
                 flatGroups[pm] = tri->parentMesh;
                 faceCounts[pm]++;
             }
             bool anyCollapse = false;
             for (const auto& kv : faceCounts) {
-                if (kv.second >= kMinFlatFaces && !disqualified.count(kv.first)) { anyCollapse = true; break; }
+                if (kv.second >= kMinFlatFaces) { anyCollapse = true; break; }
             }
             if (anyCollapse) {
                 std::vector<std::shared_ptr<Hittable>> rebuilt;
@@ -4086,7 +4246,7 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
                     if (i < objects_before) { rebuilt.push_back(scene.world.objects[i]); continue; }
                     auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
                     TriangleMesh* pm = (tri && tri->parentMesh) ? tri->parentMesh.get() : nullptr;
-                    const bool collapse = pm && !disqualified.count(pm) && faceCounts[pm] >= kMinFlatFaces;
+                    const bool collapse = pm && faceCounts[pm] >= kMinFlatFaces;
                     if (collapse) {
                         if (emitted.insert(pm).second) rebuilt.push_back(flatGroups[pm]); // one TriangleMesh per group
                     } else {
@@ -4098,7 +4258,19 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
                                " mesh(es) to flat TriangleMesh");
             }
         }
+
+        // ImportedModelContext must not retain the per-face facades after the
+        // world switches to canonical flat Hittables.
+        if (!scene.importedModelContexts.empty() && scene.world.objects.size() >= objects_before) {
+            auto& importedMembers = scene.importedModelContexts.back().members;
+            importedMembers.assign(scene.world.objects.begin() + static_cast<std::ptrdiff_t>(objects_before),
+                                   scene.world.objects.end());
+        }
     }
+
+    // Scene topology and the transform->mesh ownership changed. A previously
+    // built animation cache (append import) must not hide the new flat rig.
+    animation_groups_dirty = true;
 
     // Initialize animation system for the new model
     if (modelCtx.hasAnimation) {
@@ -4269,7 +4441,16 @@ void Renderer::apply_normal_map(HitRecord& rec) {
         return;
     }
 
-    if (material->has_normal_map()) {
+    // Procedural bump: the material's per-pixel program can drive a tangent-space
+    // normal (MatSlot::Normal, from a Bump node) with NO texture. Detect it so the
+    // TBN block below runs even without a bound normal map.
+    PrincipledBSDF* pbsdfNM = dynamic_cast<PrincipledBSDF*>(material);
+    const bool hasProgramNormal =
+        pbsdfNM && pbsdfNM->proceduralProgram && pbsdfNM->proceduralProgram->active &&
+        (pbsdfNM->proceduralProgram->drivenSlots &
+         (1u << static_cast<uint32_t>(MaterialNodesV2::MatSlot::Normal))) != 0u;
+
+    if (material->has_normal_map() || hasProgramNormal) {
         Vec3 tangent(1.0f, 0.0f, 0.0f);
         Vec3 bitangent(0.0f, 1.0f, 0.0f);
         bool has_uv_tangent = false;
@@ -4311,12 +4492,35 @@ void Renderer::apply_normal_map(HitRecord& rec) {
             create_coordinate_system(rec.normal, tangent, bitangent);
         }
 
-        Vec3 normal_from_map = material->get_normal_from_map(rec.u, rec.v);
-        normal_from_map = normal_from_map * 2.0 - Vec3(1.0, 1.0, 1.0);
-
-        float normal_strength = material->get_normal_strength();
-        normal_from_map.x *= normal_strength;
-        normal_from_map.y *= normal_strength;
+        Vec3 normal_from_map;
+        if (hasProgramNormal) {
+            // Bump output is ALREADY a tangent-space normal (-dh/du, -dh/dv, 1)*k
+            // with strength baked in — no [0,1]->[-1,1] decode, no re-scale.
+            const float pp[3] = { (float)rec.point.x, (float)rec.point.y, (float)rec.point.z };
+            const float pn[3] = { (float)rec.normal.x, (float)rec.normal.y, (float)rec.normal.z };
+            const float po[3] = { rec.object_origin.x, rec.object_origin.y, rec.object_origin.z };
+            const float pobj[3] = { rec.object_position.x, rec.object_position.y, rec.object_position.z };
+            const float pv[3] = { rec.view_dir.x, rec.view_dir.y, rec.view_dir.z };
+            const auto o = MaterialNodesV2::evalMaterialProgram(*pbsdfNM->proceduralProgram,
+                                                                rec.u, rec.v, pp, pn, rec.pointiness, po,
+                                                                rec.mat_attrib, pobj,
+                                                                (rec.view_dir.length_squared() > 1e-8f) ? pv : nullptr);
+            if (o.normalIsWorld) {
+                // Bevel: the program produced a WORLD-space normal — final as-is. Pushing
+                // it through the UV tangent frame below would twist it by the UV layout
+                // (the same reason the GPU consumer branches on mp.normalWorld).
+                rec.interpolated_normal = orient_shading_normal(
+                    Vec3(o.normal[0], o.normal[1], o.normal[2]).normalize(), rec.normal);
+                return;
+            }
+            normal_from_map = Vec3(o.normal[0], o.normal[1], o.normal[2]);
+        } else {
+            normal_from_map = material->get_normal_from_map(rec.u, rec.v);
+            normal_from_map = normal_from_map * 2.0 - Vec3(1.0, 1.0, 1.0);
+            float normal_strength = material->get_normal_strength();
+            normal_from_map.x *= normal_strength;
+            normal_from_map.y *= normal_strength;
+        }
 
         Mat3x3 TBN(tangent, bitangent, rec.normal);
         rec.interpolated_normal = orient_shading_normal(TBN * normal_from_map, rec.normal);
@@ -4520,12 +4724,16 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         albedo = material->getPropertyValue(material->albedoProperty, uv);
         metallic = material->getPropertyValue(material->metallicProperty, uv).z;
         roughness = material->getPropertyValue(material->roughnessProperty, uv).y;
-        
+
         // Try to get clearcoat from material
         if (auto pMat = dynamic_cast<PrincipledBSDF*>(material)) {
             clearcoat = pMat->getClearcoat();
             clearcoatRoughness = pMat->getClearcoatRoughness();
             specularAmount = pMat->getSpecularValue(uv);
+            // Same choke point as the path tracer's shading block: the graph's folded
+            // slots are a 5-sample average, so a texture/Noise chain must resolve per
+            // pixel here too or the direct lighting stays flat.
+            pMat->applyProgramSurface(rec, &albedo, &roughness, &metallic, &specularAmount, nullptr);
         }
     }
     Vec3 F0 = Vec3::lerp(Vec3(std::clamp(0.08f * specularAmount, 0.0f, 0.08f)), albedo, metallic);
@@ -6507,14 +6715,23 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             
             if (bounce == 0 && primary_hit && !(*primary_hit)) {
                 *primary_hit = true;
-                if (primary_albedo) *primary_albedo = rec.materialPtr->getPropertyValue(rec.materialPtr->albedoProperty, uv);
+                if (primary_albedo) {
+                    Vec3 pAlb = rec.materialPtr->getPropertyValue(rec.materialPtr->albedoProperty, uv);
+                    // Denoiser guide AOV: it must carry the per-pixel color too, or OIDN
+                    // gets a flat albedo for a textured/procedural surface and smears its detail.
+                    if (auto* pb = dynamic_cast<PrincipledBSDF*>(rec.materialPtr))
+                        pb->applyProgramSurface(rec, &pAlb, nullptr, nullptr, nullptr, nullptr);
+                    *primary_albedo = pAlb;
+                }
                 if (primary_normal) *primary_normal = Nb;
                 if (primary_depth) *primary_depth = rec.t;
                 if (primary_material_id) *primary_material_id = static_cast<uint32_t>(rec.materialID);
                 if (primary_world_position) *primary_world_position = rec.point;
             }
             
-            Vec3 emitted = rec.materialPtr->getEmission(uv, rec.point);
+            const float emObjPos[3] = { rec.object_position.x, rec.object_position.y, rec.object_position.z };
+            Vec3 emitted = rec.materialPtr->getEmission(uv, rec.point, rec.pointiness, rec.object_origin,
+                                                        rec.mat_attrib, emObjPos, &rec.normal, rec.view_dir);
             color += throughput * toVec3f(emitted);
             
             throughput *= att;
@@ -6584,12 +6801,18 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 } else {
                     // Albedo
                     Vec3 alb = pbsdf->getPropertyValue(pbsdf->albedoProperty, uv);
-                    albedo = toVec3f(alb).clamp(0.01f, 1.0f);
-
                     roughness = pbsdf->getRoughnessValue(uv);
                     metallic = pbsdf->getMetallicValue(uv);
                     specular = pbsdf->getSpecularValue(uv);
                     transmission = pbsdf->getTransmission(uv);
+
+                    // The slots above are the node graph's FOLDED average; a spatially
+                    // varying chain (texture -> Bright/Contrast, Noise, ColorRamp) only
+                    // resolves per pixel here. Without this the BRDF/NEE below would shade
+                    // the 5-sample average — a flat blob — while Vulkan RT shades per pixel.
+                    pbsdf->applyProgramSurface(rec, &alb, &roughness, &metallic, &specular, &transmission);
+
+                    albedo = toVec3f(alb).clamp(0.01f, 1.0f);
                     clearcoatValue = pbsdf->getClearcoat();
                     clearcoatRoughnessValue = pbsdf->getClearcoatRoughness();
                     translucentValue = pbsdf->translucent;
@@ -6826,7 +7049,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             }
                         }
                         
-                        Vec3 emitted = rec.materialPtr ? rec.materialPtr->getEmission(rec.uv, rec.point) : Vec3(0.0f);
+                        Vec3 emitted = rec.materialPtr ? rec.materialPtr->getEmission(rec.uv, rec.point, rec.pointiness, rec.object_origin, rec.mat_attrib,
+                                                                      &rec.object_position.x, &rec.normal, rec.view_dir) : Vec3(0.0f);
                         color += throughput * toVec3f(emitted);
                         
                         current_ray = Ray(rec.point + normal_vec * 0.001f, refl);
@@ -6984,7 +7208,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         // Vulkan closesthit: payload.radiance = emColor * emStrength (before scatter decision)
         // Vulkan raygen: radiance += throughput * payload.radiance (before scatter check)
         // This ensures emissive-only surfaces still contribute even if scatter fails.
-        Vec3 emitted = rec.materialPtr ? rec.materialPtr->getEmission(rec.uv, rec.point) : Vec3(0.0f);
+        Vec3 emitted = rec.materialPtr ? rec.materialPtr->getEmission(rec.uv, rec.point, rec.pointiness, rec.object_origin, rec.mat_attrib,
+                                                                      &rec.object_position.x, &rec.normal, rec.view_dir) : Vec3(0.0f);
         emission = toVec3f(emitted);
 
         // --- Scatter ray (GPU Parity: Happens before contribution accumulation) ---
@@ -8123,10 +8348,59 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
         render_bvh = &composite_bvh;
     }
 
+    // Ambient Occlusion node (material graph): the VM traces no rays itself, it calls out
+    // to the host. On CPU that means this hook — the SAME BVH the pass traverses, so AO
+    // sees exactly the geometry the camera rays see (particles included, via the composite).
+    // Installed per worker because the hook pointer is thread_local.
+    struct MatAOHook {
+        static bool occluded(const void* user, const float o[3], const float d[3], float tmax) {
+            const Hittable* bvh = static_cast<const Hittable*>(user);
+            if (!bvh) return false;
+            return bvh->occluded(Ray(Vec3(o[0], o[1], o[2]), Vec3(d[0], d[1], d[2])), 1e-4f, tmax);
+        }
+        // Bevel probe: closest hit in [tmin, tmax] with its STORED (outward) normal —
+        // front_face undoes set_face_normal, because the Bevel op's probe chords cross
+        // closed geometry from inside as often as outside and face-forwarding would tilt
+        // the average the wrong way. No filtering here: the op marches tmin forward to
+        // enumerate EVERY crossing along the chord (its area estimator needs all of
+        // them — see MatOp::Bevel in MaterialProgram.h and the probe branch in
+        // shadow_anyhit.rahit, which is the GPU half of the same contract).
+        static bool probe(const void* user, const float o[3], const float d[3],
+                          float tmin, float tmax,
+                          float outNormal[3], float* outT) {
+            const Hittable* bvh = static_cast<const Hittable*>(user);
+            if (!bvh) return false;
+            HitRecord rec;
+            if (!bvh->hit(Ray(Vec3(o[0], o[1], o[2]), Vec3(d[0], d[1], d[2])),
+                          std::max(tmin, 1e-6f), tmax, rec, true)) {
+                return false;
+            }
+            const Vec3 n = rec.front_face ? rec.normal : -rec.normal;
+            outNormal[0] = static_cast<float>(n.x);
+            outNormal[1] = static_cast<float>(n.y);
+            outNormal[2] = static_cast<float>(n.z);
+            *outT = static_cast<float>(rec.t);
+            return true;
+        }
+    };
+
     // Worker function for progressive accumulation
     auto progressive_worker = [&](int thread_id) {
         std::mt19937 rng(std::random_device{}() + thread_id + cpu_accumulated_samples * 1337);
         std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+        // Lives for the whole worker; the thread_local pointer dies with the thread.
+        // Seeded per PASS so the AO estimate decorrelates across samples and averages out
+        // in the accumulation buffer instead of freezing one hemisphere pattern in place.
+        MaterialNodesV2::MatAOContext aoCtx;
+        aoCtx.occluded = &MatAOHook::occluded;
+        aoCtx.probe    = &MatAOHook::probe;      // Bevel
+        aoCtx.user     = render_bvh;
+        aoCtx.seed     = static_cast<uint32_t>(cpu_accumulated_samples) * 9781u + static_cast<uint32_t>(thread_id);
+        MaterialNodesV2::g_matAOContext = &aoCtx;
+        struct AOScopeGuard {
+            ~AOScopeGuard() { MaterialNodesV2::g_matAOContext = nullptr; }
+        } aoGuard;
 
         while (!should_stop.load(std::memory_order_relaxed)) {
             // Check global stop flag or FORCE STOP from UI
@@ -9000,11 +9274,17 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
 
         std::vector<Backend::IBackend::MaterialData> backendMaterials;
         backendMaterials.reserve(all_materials.size());
+        // Faz 2b: per-material-index program pointers (1:1 with backendMaterials),
+        // flattened + uploaded after uploadMaterials so the Vulkan RT shader can
+        // interpret procedural chains per pixel. null = no program (folded path).
+        std::vector<const MaterialNodesV2::MaterialProgram*> perMatPrograms;
+        perMatPrograms.reserve(all_materials.size());
 
         for (size_t i = 0; i < all_materials.size(); ++i) {
             const auto& mat = all_materials[i];
             Backend::IBackend::MaterialData data = {};
-            if (!mat) { backendMaterials.push_back(data); continue; }
+            const MaterialNodesV2::MaterialProgram* progPtr = nullptr;
+            if (!mat) { backendMaterials.push_back(data); perMatPrograms.push_back(nullptr); continue; }
 
             data.albedo = mat->albedo;
             data.ior = mat->ior;
@@ -9027,6 +9307,7 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
                 data.heightTexture = getH(pbsdf->heightProperty.texture);
                 data.metallicTexChannel  = pbsdf->metallic_tex_channel;
                 data.roughnessTexChannel = pbsdf->roughness_tex_channel;
+                progPtr = pbsdf->proceduralProgram.get();
             }
 
             // Copy water-specific GPU params (live in GpuMaterial, not duplicated in PrincipledBSDF)
@@ -9063,12 +9344,38 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
             }
 
             backendMaterials.push_back(data);
+            perMatPrograms.push_back(progPtr);
         }
 
         if (backend) {
-            backend->uploadMaterials(backendMaterials);
-            if (!terrainLayers.empty())
+            auto uploadMaterialTables = [&]() {
+                backend->uploadMaterials(backendMaterials);
+                // Faz 2b: flatten + upload the material programs (no-op on non-Vulkan
+                // backends). Cheap when no material carries a program (empty table).
+                if (backend->getInfo().type == Backend::BackendType::VULKAN_RT) {
+                    auto getTexIDFn = [backend](Texture* tex) -> uint32_t {
+                        if (!tex) return 0;
+                        return backend->resolveTextureHandle(reinterpret_cast<int64_t>(tex), 0, false);
+                    };
+                    backend->uploadMaterialPrograms(MaterialNodesV2::flattenMaterialPrograms(perMatPrograms, getTexIDFn));
+                }
+            };
+            uploadMaterialTables();
+            if (!terrainLayers.empty()) {
+                // uploadTerrainLayerMaterials may purge the backend's texture cache when
+                // the descriptor-slot counter crosses its threshold. That purge invalidates
+                // every texture id already baked into the material SSBO / program stream
+                // uploaded above (the splat maps get re-uploaded inside the call, so the
+                // terrain layer SSBO itself stays valid). Detect the purge via the cache
+                // generation and rebuild the tables once — the retry cannot purge again
+                // because the id counter was just reset.
+                const uint64_t texGenBefore = backend->textureCacheGeneration();
                 backend->uploadTerrainLayerMaterials(terrainLayers);
+                if (backend->textureCacheGeneration() != texGenBefore) {
+                    SCENE_LOG_WARN("[Renderer] Texture cache purged during terrain layer upload; re-uploading material tables.");
+                    uploadMaterialTables();
+                }
+            }
             WorldData wd = world.getGPUData();
             VolumetricRenderer::syncVolumetricData(scene, backend, &wd);
             backend->resetAccumulation();
@@ -9077,6 +9384,32 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
     catch (std::exception& e) {
         SCENE_LOG_ERROR(std::string("[Renderer] updateBackendMaterials failed: ") + e.what());
     }
+}
+
+void Renderer::syncMaterialProgramsToBackend(Backend::IBackend* targetBackend) {
+    Backend::IBackend* backend = targetBackend ? targetBackend : m_backend;
+    if (!backend) return;
+    if (backend->getInfo().type != Backend::BackendType::VULKAN_RT) return;
+
+    // Build the per-material-index program list in the SAME order the material
+    // buffer uses (MaterialManager::getAllMaterials()), then flatten + upload.
+    // Lets a live node-graph edit refresh the GPU program without a full
+    // material re-sync (updateBackendMaterial only touches one VkGpuMaterial).
+    const auto& all_materials = MaterialManager::getInstance().getAllMaterials();
+    std::vector<const MaterialNodesV2::MaterialProgram*> perMatPrograms;
+    perMatPrograms.reserve(all_materials.size());
+    for (const auto& mat : all_materials) {
+        const MaterialNodesV2::MaterialProgram* p = nullptr;
+        if (mat && mat->type() == MaterialType::PrincipledBSDF) {
+            p = static_cast<PrincipledBSDF*>(mat.get())->proceduralProgram.get();
+        }
+        perMatPrograms.push_back(p);
+    }
+    auto getTexIDFn = [backend](Texture* tex) -> uint32_t {
+        if (!tex) return 0;
+        return backend->resolveTextureHandle(reinterpret_cast<int64_t>(tex), 0, false);
+    };
+    backend->uploadMaterialPrograms(MaterialNodesV2::flattenMaterialPrograms(perMatPrograms, getTexIDFn));
 }
 
 void Renderer::updateBackendMaterial(SceneData& scene, uint16_t material_id) {

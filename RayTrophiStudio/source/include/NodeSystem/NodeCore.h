@@ -32,6 +32,7 @@
 #include <any>
 #include <unordered_map>
 #include <atomic>
+#include <limits>
 #include "imgui.h"
 
 // Forward declaration only (not a full include) — DataType::Geometry's PinValue payload is
@@ -39,6 +40,11 @@
 // with an incomplete type (the deleter is captured at construction). Keeps NodeCore.h — included
 // by every node-system consumer — free of the Hittable/DNA::GeometryDetail include chain.
 class TriangleMesh;
+
+// Same forward-declare pattern for DataType::Material's payload: a CPU-side snapshot of a full
+// material parameter set + texture bindings (defined in MaterialNodesV2.h). Keeps NodeCore.h
+// free of the Material/Texture include chain.
+namespace MaterialNodesV2 { struct ShadeState; }
 
 namespace NodeSystem {
 
@@ -102,7 +108,16 @@ namespace NodeSystem {
         int channels = 1;
         ImageSemantic semantic = ImageSemantic::Generic;
         
-        bool isValid() const { return data && !data->empty() && width > 0 && height > 0; }
+        bool isValid() const {
+            if (!data || width <= 0 || height <= 0 || channels <= 0) return false;
+            const size_t w = static_cast<size_t>(width);
+            const size_t h = static_cast<size_t>(height);
+            const size_t c = static_cast<size_t>(channels);
+            if (w > (std::numeric_limits<size_t>::max)() / h) return false;
+            const size_t pixels = w * h;
+            if (pixels > (std::numeric_limits<size_t>::max)() / c) return false;
+            return data->size() == pixels * c;
+        }
         size_t pixelCount() const { return static_cast<size_t>(width) * height; }
     };
 
@@ -118,6 +133,11 @@ namespace NodeSystem {
     /// type, and sharing the shared_ptr between DAG nodes is inherently zero-copy.
     using GeometryValue = std::shared_ptr<TriangleMesh>;
 
+    /// Material payload: full shading parameter set + texture bindings snapshot
+    /// (MaterialNodesV2::ShadeState). Shared between MaterialRef / MixMaterial /
+    /// Output nodes by shared_ptr — zero-copy through the graph.
+    using MaterialValue = std::shared_ptr<MaterialNodesV2::ShadeState>;
+
     using PinValue = std::variant<
         std::monostate,             // Empty / None
         float,                      // Float
@@ -128,7 +148,8 @@ namespace NodeSystem {
         std::array<float, 4>,       // Vector4 / Color
         Image2DData,                // Image2D
         std::string,                // String
-        GeometryValue                // Geometry (DataType::Geometry)
+        GeometryValue,              // Geometry (DataType::Geometry)
+        MaterialValue               // Material (DataType::Material)
     >;
 
     // ============================================================================
@@ -232,10 +253,18 @@ namespace NodeSystem {
         PinKind kind = PinKind::Input;
         DataType dataType = DataType::None;
         ImageSemantic imageSemantic = ImageSemantic::Generic;  ///< For Image2D pins
+        int imageChannels = 1;                                 ///< 0 accepts any channel count
         
         // Connection rules
         bool allowMultipleConnections = false;  ///< Allow multiple inputs (for blend nodes)
         bool optional = false;                  ///< Can remain unconnected without error
+
+        // Editor-only: pin belongs to a collapsed group on the node (e.g. the
+        // Material Output's optional socket groups). A hidden pin is not drawn
+        // and not registered for interaction (pinPositions_ skips it), so it
+        // can't be link-targeted. Callers must never hide a CONNECTED pin —
+        // NodeEditorUIV2 draws links from cached pin positions.
+        bool hidden = false;
         
         // Values
         PinValue defaultValue;          ///< Fallback when unconnected
@@ -257,6 +286,12 @@ namespace NodeSystem {
             if (kind == other.kind) return false;
             if (nodeId == other.nodeId) return false;
             
+            if (dataType == DataType::Image2D && other.dataType == DataType::Image2D) {
+                if (imageChannels > 0 && other.imageChannels > 0 &&
+                    imageChannels != other.imageChannels) return false;
+                return true;
+            }
+
             // Type compatibility
             if (dataType == other.dataType) return true;
             
@@ -266,9 +301,12 @@ namespace NodeSystem {
                 (dataType == DataType::Int && other.dataType == DataType::Float)) {
                 return true;
             }
-            
-            // Image2D with different semantics can connect (height -> mask input)
-            if (dataType == DataType::Image2D && other.dataType == DataType::Image2D) {
+
+            // Float <-> Vector3 (material graphs: Noise Fac -> Base Color,
+            // Image Texture Color -> Roughness, ...). Consumers convert via
+            // splat / channel-average helpers.
+            if ((dataType == DataType::Float && other.dataType == DataType::Vector3) ||
+                (dataType == DataType::Vector3 && other.dataType == DataType::Float)) {
                 return true;
             }
             
@@ -292,12 +330,13 @@ namespace NodeSystem {
          */
         static Pin createInput(const std::string& name, DataType type, 
                                ImageSemantic semantic = ImageSemantic::Generic,
-                               bool isOptional = false) {
+                               bool isOptional = false, int channels = 1) {
             Pin pin;
             pin.name = name;
             pin.kind = PinKind::Input;
             pin.dataType = type;
             pin.imageSemantic = semantic;
+            pin.imageChannels = channels;
             pin.optional = isOptional;
             pin.updateVisualCache();
             return pin;
@@ -307,12 +346,14 @@ namespace NodeSystem {
          * @brief Create an output pin
          */
         static Pin createOutput(const std::string& name, DataType type,
-                                ImageSemantic semantic = ImageSemantic::Generic) {
+                                ImageSemantic semantic = ImageSemantic::Generic,
+                                int channels = 1) {
             Pin pin;
             pin.name = name;
             pin.kind = PinKind::Output;
             pin.dataType = type;
             pin.imageSemantic = semantic;
+            pin.imageChannels = channels;
             pin.updateVisualCache();
             return pin;
         }
@@ -398,6 +439,17 @@ namespace NodeSystem {
         if (auto* mesh = std::get_if<GeometryValue>(&value)) {
             out = *mesh;
             return static_cast<bool>(*mesh);
+        }
+        return false;
+    }
+
+    /**
+     * @brief Try to extract a Material (ShadeState) value from a PinValue
+     */
+    inline bool tryGetMaterial(const PinValue& value, MaterialValue& out) {
+        if (auto* mat = std::get_if<MaterialValue>(&value)) {
+            out = *mat;
+            return static_cast<bool>(*mat);
         }
         return false;
     }

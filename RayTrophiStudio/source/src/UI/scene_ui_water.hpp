@@ -123,21 +123,43 @@ void rebuildWaterSceneMutation(UIContext& ctx, bool updateMaterials) {
 inline bool SceneUI::drawWaterSurfaceMaterialEditor(UIContext& ctx, WaterSurface& surf, bool allow_delete) {
     bool changed = false;
 
-    const char* preset_names[] = {
-        "Custom (Manual Settings)",
-        "Calm Ocean",
-        "Stormy Ocean",
-        "Tropical Ocean (Crystal)",
-        "Lake (Still)",
-        "River (Flowing)",
-        "Pool (Very Calm)",
-        "Pond (Murky)"
-    };
+    const char* profileName = "Ocean";
+    if (surf.type == WaterSurface::Type::River) profileName = "River";
+    else if (surf.type == WaterSurface::Type::Lake) profileName = "Lake";
+    ImGui::TextDisabled("Vulkan RT Profile");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.30f, 0.82f, 1.0f, 1.0f), "%s", profileName);
+    ImGui::SetItemTooltip("The render profile is owned by the water geometry. Presets tune its appearance; they do not change a lake mesh into a river.");
 
-    int preset_idx = static_cast<int>(surf.params.current_preset);
+    const char* preset_names[4] = { "Custom", nullptr, nullptr, nullptr };
+    WaterWaveParams::WaterPreset preset_values[4] = { WaterWaveParams::WaterPreset::Custom };
+    int preset_count = 1;
+    if (surf.type == WaterSurface::Type::River) {
+        preset_names[preset_count] = "River Flow";
+        preset_values[preset_count++] = WaterWaveParams::WaterPreset::River;
+    } else if (surf.type == WaterSurface::Type::Lake) {
+        preset_names[preset_count] = "Still Lake";
+        preset_values[preset_count++] = WaterWaveParams::WaterPreset::Lake;
+        preset_names[preset_count] = "Clear Pool";
+        preset_values[preset_count++] = WaterWaveParams::WaterPreset::Pool;
+        preset_names[preset_count] = "Murky Pond";
+        preset_values[preset_count++] = WaterWaveParams::WaterPreset::Pond;
+    } else {
+        preset_names[preset_count] = "Calm Ocean";
+        preset_values[preset_count++] = WaterWaveParams::WaterPreset::CalmOcean;
+        preset_names[preset_count] = "Stormy Ocean";
+        preset_values[preset_count++] = WaterWaveParams::WaterPreset::StormyOcean;
+        preset_names[preset_count] = "Tropical Ocean";
+        preset_values[preset_count++] = WaterWaveParams::WaterPreset::TropicalOcean;
+    }
+
+    int preset_idx = 0;
+    for (int i = 1; i < preset_count; ++i) {
+        if (preset_values[i] == surf.params.current_preset) preset_idx = i;
+    }
     ImGui::SetNextItemWidth(-1);
-    if (ImGui::Combo("Preset", &preset_idx, preset_names, IM_ARRAYSIZE(preset_names))) {
-        WaterWaveParams::WaterPreset new_preset = static_cast<WaterWaveParams::WaterPreset>(preset_idx);
+    if (ImGui::Combo("Preset", &preset_idx, preset_names, preset_count)) {
+        WaterWaveParams::WaterPreset new_preset = preset_values[preset_idx];
         if (new_preset != WaterWaveParams::WaterPreset::Custom) {
             surf.params.applyPreset(new_preset);
             changed = true;
@@ -149,16 +171,31 @@ inline bool SceneUI::drawWaterSurfaceMaterialEditor(UIContext& ctx, WaterSurface
     if (BeginWaterSection("Colors", ImVec4(0.0f, 0.8f, 0.8f, 1.0f))) {
         changed |= ImGui::ColorEdit3("Shallow Color", &surf.params.shallow_color.x);
         changed |= ImGui::ColorEdit3("Deep Color", &surf.params.deep_color.x);
-        changed |= ImGui::ColorEdit3("Absorption Tint", &surf.params.absorption_color.x);
         EndWaterSection();
     }
 
     if (BeginWaterSection("Depth & Optics", ImVec4(0.0f, 0.2f, 0.6f, 1.0f), false)) {
         changed |= SceneUI::DrawSmartFloat("shared_w_ior", "IOR", &surf.params.ior, 1.0f, 2.0f, "%.3f", false, nullptr, 16);
         changed |= SceneUI::DrawSmartFloat("shared_w_rgh", "Roughness", &surf.params.roughness, 0.0f, 0.2f, "%.3f", false, nullptr, 16);
-        changed |= SceneUI::DrawSmartFloat("shared_w_clr", "Clarity", &surf.params.clarity, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
         changed |= SceneUI::DrawSmartFloat("shared_w_dmax", "Max Depth", &surf.params.depth_max, 1.0f, 100.0f, "%.1f m", false, nullptr, 16);
         changed |= SceneUI::DrawSmartFloat("shared_w_absd", "Absorption Density", &surf.params.absorption_density, 0.0f, 2.0f, "%.2f", false, nullptr, 16);
+        EndWaterSection();
+    }
+
+    if (BeginWaterSection("Surface Motion", ImVec4(0.18f, 0.62f, 1.0f, 1.0f))) {
+        const char* speedLabel = surf.type == WaterSurface::Type::River ? "Flow Speed" : "Wave Speed";
+        const char* strengthLabel = surf.type == WaterSurface::Type::River ? "Ripple Strength" : "Wave Strength";
+        changed |= SceneUI::DrawSmartFloat("shared_w_speed", speedLabel, &surf.params.wave_speed, 0.0f, 8.0f, "%.2f", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_strength", strengthLabel, &surf.params.wave_strength, 0.0f, 2.0f, "%.3f", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_frequency", "Wave Frequency", &surf.params.wave_frequency, 0.02f, 8.0f, "%.2f", false, nullptr, 16);
+
+        if (surf.type != WaterSurface::Type::River) {
+            float directionDegrees = surf.params.fft_wind_direction * 180.0f / 3.14159265f;
+            if (SceneUI::DrawSmartFloat("shared_w_direction", "Travel Direction", &directionDegrees, 0.0f, 360.0f, "%.0f deg", false, nullptr, 16)) {
+                surf.params.fft_wind_direction = directionDegrees * 3.14159265f / 180.0f;
+                changed = true;
+            }
+        }
         EndWaterSection();
     }
 
@@ -176,6 +213,13 @@ inline bool SceneUI::drawWaterSurfaceMaterialEditor(UIContext& ctx, WaterSurface
         changed |= SceneUI::DrawSmartFloat("shared_w_msc", "Micro Detail Scale", &surf.params.micro_detail_scale, 1.0f, 100.0f, "%.1f", false, nullptr, 16);
         changed |= SceneUI::DrawSmartFloat("shared_w_mas", "Micro Anim Speed", &surf.params.micro_anim_speed, 0.01f, 1.0f, "%.3f", false, nullptr, 16);
         changed |= SceneUI::DrawSmartFloat("shared_w_mms", "Micro Morph Speed", &surf.params.micro_morph_speed, 0.1f, 5.0f, "%.2f", false, nullptr, 16);
+        EndWaterSection();
+    }
+
+    if (BeginWaterSection("Caustics", ImVec4(0.25f, 0.85f, 0.70f, 1.0f), false)) {
+        changed |= SceneUI::DrawSmartFloat("shared_w_ci", "Intensity", &surf.params.caustic_intensity, 0.0f, 2.0f, "%.2f", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_cs", "Scale", &surf.params.caustic_scale, 0.1f, 20.0f, "%.2f", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_csp", "Animation Speed", &surf.params.caustic_speed, 0.0f, 5.0f, "%.2f", false, nullptr, 16);
         EndWaterSection();
     }
 
@@ -283,6 +327,10 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 selected_water_surface_id = -1;
                 return;
             }
+#if 0
+            // Legacy CUDA FFT and animated mesh authoring UI. Kept temporarily
+            // as implementation reference while the native Vulkan compute
+            // spectrum is built; it is deliberately not exposed to artists.
             bool changed = false;
             bool geom_changed = false;     // wave shape params → mesh rebuild required
             bool fft_geom_changed = false; // FFT mesh params → FFT mesh rebuild required
@@ -848,7 +896,7 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 // Reset accumulation and sync GPU materials for real-time preview
                 syncWaterMaterialPreview(ctx, surf);
             }
-            
+#endif
         }
     }
 }

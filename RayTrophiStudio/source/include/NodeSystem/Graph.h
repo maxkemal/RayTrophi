@@ -136,6 +136,46 @@ namespace NodeSystem {
         // ========================================================================
         
         /**
+         * @brief Would producer(startPinId) -> consumer(endPinId) close a CYCLE?
+         *
+         * Nothing else in the system defends against one. Every walker over a graph recurses
+         * on its inputs with no visited set — the evaluator, and the material program
+         * compiler's subtreeSupported / subtreeSpatial / compileNode / compileMatSlot. A
+         * single loop drawn in the editor therefore does not misbehave, it recurses until the
+         * stack is gone. And a Windows stack overflow (0xC00000FD) is unrecoverable: the
+         * guard page is consumed, so even the top-level catch(...) handler faults as soon as
+         * it calls anything deep — the crash surfaces as an access violation inside the crash
+         * LOGGER, with the real reason never written down.
+         *
+         * The link closes a loop exactly when `end`'s node already feeds `start`'s node, so
+         * walk UPSTREAM from start and see whether we reach end. Iterative + visited, so it
+         * stays safe even if a malformed graph somehow already contains a cycle.
+         *
+         * The UI uses this too, so a pin that would close a loop is never offered as a snap
+         * target in the first place.
+         */
+        bool wouldCreateCycle(uint32_t startPinId, uint32_t endPinId) {
+            NodeBase* src = getPinOwner(startPinId);
+            NodeBase* dst = getPinOwner(endPinId);
+            if (!src || !dst) return false;
+            if (src == dst) return true;   // self-link
+
+            std::vector<NodeBase*> stack{ src };
+            std::unordered_set<NodeBase*> seen{ src };
+            while (!stack.empty()) {
+                NodeBase* n = stack.back();
+                stack.pop_back();
+                if (n == dst) return true;
+                for (const auto& l : links) {
+                    if (getPinOwner(l.endPinId) != n) continue;
+                    NodeBase* producer = getPinOwner(l.startPinId);
+                    if (producer && seen.insert(producer).second) stack.push_back(producer);
+                }
+            }
+            return false;
+        }
+
+        /**
          * @brief Create a link between two pins
          * @returns Link ID, or 0 if failed
          */
@@ -158,6 +198,10 @@ namespace NodeSystem {
             
             if (!start->canConnectTo(*end)) {
                 return 0; // Type incompatible
+            }
+
+            if (wouldCreateCycle(startPinId, endPinId)) {
+                return 0;
             }
 
             // Avoid duplicate links for the same pin pair.
@@ -384,6 +428,7 @@ namespace NodeSystem {
         virtual bool isEvaluatingAsync() const { return false; }
         virtual uint32_t currentAsyncNodeId() const { return 0; }
         virtual float asyncEvalProgress() const { return 0.0f; }
+        virtual NodeEvaluationState asyncNodeState(uint32_t) const { return NodeEvaluationState::Idle; }
 
         /**
          * @brief Check if a node is terminal (no downstream connections)

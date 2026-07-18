@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -102,6 +103,15 @@ public:
     virtual void endFrame() {}
     virtual void synchronize() {}
 
+    // Transfer batching. Between begin/end, uploadBuffer/downloadBuffer MAY be
+    // deferred by the backend (single submission at end); downloaded data is
+    // only valid after endTransferBatch() returns true. Defaults are no-ops so
+    // immediate backends (CPU/CUDA — where every copy is already cheap) keep
+    // their semantics. The Vulkan backend uses this to collapse N staged
+    // copies (each a vkQueueSubmit + fence wait) into one submission.
+    virtual void beginTransferBatch() {}
+    virtual bool endTransferBatch() { return true; }
+
     // Returns the raw backend pointer for a buffer (CUDA device pointer, etc.) or
     // nullptr if unsupported. Lets a backend-aware caller interop directly.
     virtual void* nativeBufferPtr(ComputeBufferHandle handle) const {
@@ -185,6 +195,8 @@ public:
     void beginFrame(uint64_t frame_index);
     void endFrame();
     void synchronize();
+    void beginTransferBatch();
+    bool endTransferBatch();
 
     void* nativeBufferPtr(ComputeBufferHandle handle) const;
     bool dispatch(const ComputeDispatch& cmd);
@@ -211,6 +223,11 @@ createVulkanSimulationComputeBackend(const SimulationComputeVulkanContext& ctx);
 // back to CPU) when no Vulkan compute device is available. Implemented in
 // SimulationComputeVulkan.cpp.
 ISimulationComputeBackend* acquireSharedMeshComputeBackend();
+
+// Serializes complete multi-dispatch transactions on the process-wide Vulkan
+// compute backend. The backend owns a single command buffer/descriptor pool, so
+// callers must hold this lock from their first buffer creation through cleanup.
+std::recursive_mutex& sharedMeshComputeMutex();
 
 // Tear down the shared mesh compute backend. Call while its VkDevice is still valid
 // (before vkDestroyDevice on a backend switch / shutdown); acquire rebuilds on next use.

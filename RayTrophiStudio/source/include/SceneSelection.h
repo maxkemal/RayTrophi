@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <cstdint>
 #include "Vec3.h"
 #include "matrix4x4.h"
 #include "AABB.h"
@@ -22,6 +23,7 @@ class Light;
 class Camera;
 class Hittable;
 class Triangle;
+class TriangleMesh;
 class VDBVolume;
 class GasVolume;
 
@@ -72,6 +74,10 @@ struct SelectableItem {
     std::shared_ptr<Light> light = nullptr;
     std::shared_ptr<Camera> camera = nullptr;
     std::shared_ptr<Triangle> object = nullptr;  // For mesh objects
+    // Canonical flat selection identity. `object` remains a single representative
+    // facade only while legacy property tools are migrated away from Triangle*.
+    std::shared_ptr<TriangleMesh> mesh_object = nullptr;
+    uint32_t mesh_face_index = 0;
     std::shared_ptr<VDBVolume> vdb_volume = nullptr; // For VDB volumes
     std::shared_ptr<GasVolume> gas_volume = nullptr; // For Gas volumes
     std::shared_ptr<Physics::ForceField> force_field = nullptr; // For Force fields
@@ -97,7 +103,10 @@ struct SelectableItem {
 
     bool operator==(const SelectableItem& other) const {
         if (type != other.type) return false;
-        if (type == SelectableType::Object) return object == other.object;
+        if (type == SelectableType::Object) {
+            if (mesh_object || other.mesh_object) return mesh_object == other.mesh_object;
+            return object == other.object;
+        }
         if (type == SelectableType::Light) return light == other.light;
         if (type == SelectableType::Camera) return camera == other.camera;
         if (type == SelectableType::CameraTarget) return camera == other.camera; // Same camera for target
@@ -117,6 +126,8 @@ struct SelectableItem {
         light = nullptr;
         camera = nullptr;
         object = nullptr;
+        mesh_object = nullptr;
+        mesh_face_index = 0;
         vdb_volume = nullptr;
         gas_volume = nullptr;
         force_field = nullptr;
@@ -153,6 +164,9 @@ public:
    
     // Selection Methods
     void selectObject(std::shared_ptr<Triangle> obj, int index, const std::string& name = "Object");
+    void selectObject(std::shared_ptr<TriangleMesh> mesh, int index,
+                      const std::string& name = "Object", uint32_t face_index = 0,
+                      std::shared_ptr<Triangle> compatibility_facade = nullptr);
     void selectLight(std::shared_ptr<Light> light, int index = -1, const std::string& name = "Light");
     void selectVDBVolume(std::shared_ptr<VDBVolume> vdb, int index = -1, const std::string& name = "VDB Volume");
     void selectGasVolume(std::shared_ptr<GasVolume> gas, int index = -1, const std::string& name = "Gas Volume");

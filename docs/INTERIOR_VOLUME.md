@@ -61,7 +61,18 @@ the rest of the path tracer.
 - Extinction: `absorb *= exp(-dt · (ext_base + dust·k))`, dust from billowy
   two-frequency fbm shaped with `pow(x,2)` for sparse wispy cores.
 - The dust is **visible**, not just darkening: a coverage-weighted color is
-  mixed into the result (milky in-scatter approximation).
+  mixed into the result.
+- The dust is **lit as a volume** (directional single scattering): each
+  occupied step marches 3 short jittered steps *toward the sampled light*
+  through the same density field, and weights its contribution by
+  `transmittance · phase`. The phase is a fixed dual lobe — 65% forward HG
+  (g = 0.55) + 35% isotropic — so backlit dust glows with the classic
+  "silver lining" while side/back lighting never goes fully dark. Light
+  absorbed on the way re-emerges partially as an energy-limited diffuse
+  floor (the cheap stand-in for multiple scattering). One mechanism buys
+  two behaviours: dense cores shadow **themselves** and shadow the **specks**
+  suspended below them. The light transmittance is cached for two camera
+  steps (the field is low-frequency at that scale) to halve the cost.
 - Four selectable styles: **Nebula** (auto tint derived from the interior
   color and its hue-rotated complement), **Billow 2-color**, **Wispy streaks**
   (anisotropically stretched ridged filaments), **Paint swirl** (domain-warped
@@ -108,16 +119,24 @@ This is an **appearance model**, not physically-based volumetric transport:
 
 1. **Single entry interface.** The interior is sampled once, at the first
    crossing. Internal reflections do not see it again.
-2. **No interior self-shadowing.** Specks are lit by the sampled NEE
-   *direction* only — a shadow ray from inside an opaque-based resin would
-   always self-occlude to black, so none is traced. Dense dust does not
-   shadow the specks either.
-3. **Reciprocity is broken** by the additive shard-glow term. Light going the
-   other way does not see the inverse of it.
+2. **Interior self-shadowing is heuristic, not traced.** No scene shadow
+   rays (from inside an opaque-based resin they would always self-occlude to
+   black). Instead: specks shadow each other via a short lattice DDA toward
+   the light (dirt blocks, shards tint the shadow like stained glass), and
+   the dust field shadows both itself and the specks via a 3-step light
+   march through the density field. Both see only the sampled NEE
+   *direction*, not the full light set.
+3. **Reciprocity is broken** by the additive shard-glow and dust-glow
+   (forward-scatter excess) terms. Light going the other way does not see
+   the inverse of them.
 4. **Transmittance interpolation** (`absorb^(t/t_end)`) is exact only for
    homogeneous media; heterogeneous dust makes it an approximation.
-5. **No multiple scattering.** Milkiness is approximated by whitening the
-   attenuation, not by simulating it.
+5. **Multiple scattering is approximated, not simulated.** Single scattering
+   is directional (dual-lobe phase × marched light transmittance); the
+   multiply-scattered remainder is a diffuse floor proportional to the light
+   absorbed on the way — energy-limited, but with no real angular or spatial
+   diffusion. Deep milky media remain SSS's domain, deliberately: a random
+   walk here would rebuild SSS at higher cost.
 6. Speck spheres near a cell boundary can extend slightly into neighbouring
    cells; a ray clipping that overhang through the neighbour is missed.
 7. In object-anchor mode, feature *density* stays fixed in world terms under
@@ -131,7 +150,9 @@ are listed so nobody mistakes the model for ground truth.
 - Everything runs **only on materials with the feature enabled** — no cost to
   the rest of the scene, no BVH growth, no memory beyond ~8 material floats.
 - Phase A: 12 steps × (1–5 fbm evaluations depending on dust style). Paint
-  swirl is the most expensive style (~5 fbm/step).
+  swirl is the most expensive style (~5 fbm/step). The lit-volume light
+  march adds ≤6 cached light marches × 3 density evaluations, and only on
+  steps that actually hold dust — empty steps skip it entirely.
 - Phase B: ≤48 DDA cells × 1 hash (empty cell) or ~2 hashes + one quadratic
   (occupied). Cheaper than the 27-hash worley lookups it replaced.
 - Measured on the development scene (RTX-class GPU, 1080p, July 2026) with
@@ -175,9 +196,9 @@ Planned, in rough priority order — none of it promised on a date:
    shared structs; the march itself is Vulkan-only today.
 3. **Interior on internal reflections** — re-sample the interior when a ray
    exits via total internal reflection (fixes limitation 1 for marbles).
-4. **Cheap interior self-shadowing** — a second short DDA toward the light
-   through the speck lattice only (no scene rays), so dense inclusions shade
-   each other.
+4. ~~**Cheap interior self-shadowing**~~ — done: lattice DDA toward the
+   light (specks shade each other, shards tint the shadow) plus a 3-step
+   dust light march (dense dust shades itself and the specks).
 5. **Density from textures / VDB** — replace or modulate the procedural dust
    with an artist-authored 3D texture or a simulation field (shares the
    volumetric-caustics V3 machinery).

@@ -34,6 +34,7 @@
 #include <cmath>
 #include <algorithm>
 #include <functional>
+#include <utility>
 
 namespace NodeSystem {
 
@@ -73,6 +74,11 @@ namespace NodeSystem {
             bool showMinimap = false;
             float minimapSize = 150.0f;
             ImU32 minimapBgColor = IM_COL32(20, 20, 25, 200);
+
+            // Inline node-body content (NodeBase::wantsInlineContent).
+            // Widgets don't zoom-scale, so they only render close to 1:1.
+            bool inlineNodeContent = true;
+            float inlineContentMinZoom = 0.8f;
         } config;
 
         // ========================================================================
@@ -107,6 +113,8 @@ namespace NodeSystem {
         // if nothing claimed the click in between.
         bool backgroundContextMenuRequested_ = false;
         bool contextMenuClaimedByNodeOrGroup_ = false;
+        bool linkCreateMenuRequested_ = false;
+        bool linkCreatePopupWasOpen_ = false;
         // Node/group right-click detection happens INSIDE a local ImGui::PushID(node.id/group.id
         // + offset) scope (needed so multiple nodes'/groups' identically-named InvisibleButtons
         // don't collide). ImGui::OpenPopup()/BeginPopup() resolve their id from the CURRENT id
@@ -133,7 +141,16 @@ namespace NodeSystem {
         std::function<void()> onBackgroundContextMenu;
         std::function<void(uint32_t nodeId)> onNodeContextMenu;
         std::function<void()> onDrawBackgroundMenu;
+        // Domain-specific searchable node picker shown when a link is released
+        // over empty canvas. The domain owns node creation; onNodeAdded() then
+        // performs the type-compatible auto connection.
+        std::function<void()> onDrawLinkCreateMenu;
         std::function<void()> onGraphModified;
+
+        // 0 = complete graph. A non-zero group id turns the editor into a layer
+        // workspace: only that group's nodes are shown and cross-layer links are
+        // represented by explicit input/output boundary ports.
+        uint32_t focusedGroupId = 0;
 
         /**
          * @brief Reset editor state (zoom, scroll, selection)
@@ -146,6 +163,7 @@ namespace NodeSystem {
             selectedNodeIds.clear();
             selectedLinkId = 0;
             selectedGroupId = 0;
+            focusedGroupId = 0;
             draggingNodeId = 0;
             draggingGroupId = 0;
             resizingNodeId = 0;
@@ -154,11 +172,17 @@ namespace NodeSystem {
             linkStartPinId = 0;
             isBoxSelecting = false;
             releasedLinkPinId = 0;
+            linkCreateMenuRequested_ = false;
+            linkCreatePopupWasOpen_ = false;
             mousePosOnRightClick = ImVec2(0.0f, 0.0f);
         }
 
     private:
+        struct LinkScreenGeometry {
+            ImVec2 p1, cp1, cp2, p2;
+        };
         std::unordered_map<uint32_t, ImVec2> pinPositions_;
+        std::unordered_map<uint32_t, LinkScreenGeometry> linkScreenGeometry_;
 
     public:
         ImVec2 canvasPos_;
@@ -194,6 +218,11 @@ namespace NodeSystem {
             ImDrawList* dl = ImGui::GetWindowDrawList();
             canvasPos_ = ImGui::GetCursorScreenPos();
             canvasSize_ = ImGui::GetContentRegionAvail();
+
+            // Keep custom graph primitives inside the child canvas. Oversized frames used
+            // to bleed into adjacent panels and read as translucent "ghost" geometry.
+            dl->PushClipRect(canvasPos_,
+                ImVec2(canvasPos_.x + canvasSize_.x, canvasPos_.y + canvasSize_.y), true);
             
             // Background
             dl->AddRectFilled(canvasPos_, 
@@ -202,26 +231,80 @@ namespace NodeSystem {
             
             // Grid
             drawGrid(dl);
+
+            // Keep the serialized layer interface contract synchronized with
+            // cross-layer topology before any hit testing or rendering.
+            synchronizeLayerInterfaces(graph);
             
             // Input handling
             handleInput(graph);
             
             // Reset pin cache
             pinPositions_.clear();
+            linkScreenGeometry_.clear();
             
             // Draw groups (behind nodes)
             for (auto& group : graph.groups) {
+                if (focusedGroupId != 0) continue;
                 drawGroup(dl, group);
             }
             
             // Draw nodes
             for (auto& node : graph.nodes) {
+                if (!isNodeVisible(graph, *node)) continue;
                 drawNode(dl, *node, graph);
             }
             
-            // Draw links
+            // Draw internal links. In layer view, crossing links terminate at explicit
+            // canvas-edge interface ports instead of disappearing or spanning other layers.
+            std::vector<Link*> incomingBoundaryLinks;
+            std::vector<Link*> outgoingBoundaryLinks;
             for (auto& link : graph.links) {
-                drawLink(dl, link, graph);
+                Pin* startPin = graph.findPin(link.startPinId);
+                Pin* endPin = graph.findPin(link.endPinId);
+                NodeBase* startNode = startPin ? graph.getNode(startPin->nodeId) : nullptr;
+                NodeBase* endNode = endPin ? graph.getNode(endPin->nodeId) : nullptr;
+                const bool startVisible = startNode && isNodeVisible(graph, *startNode);
+                const bool endVisible = endNode && isNodeVisible(graph, *endNode);
+                if (startVisible && endVisible) {
+                    drawLink(dl, link, graph);
+                } else if (focusedGroupId != 0 && startVisible != endVisible) {
+                    (endVisible ? incomingBoundaryLinks : outgoingBoundaryLinks).push_back(&link);
+                }
+            }
+
+            auto drawBoundarySet = [&](std::vector<Link*>& boundaryLinks, bool incoming) {
+                std::sort(boundaryLinks.begin(), boundaryLinks.end(), [this, &graph, incoming](const Link* a, const Link* b) {
+                    const LayerInterfacePort* aPort = findLayerInterfacePort(graph, *a, incoming);
+                    const LayerInterfacePort* bPort = findLayerInterfacePort(graph, *b, incoming);
+                    const uint32_t aKey = aPort ? aPort->id : (incoming ? a->startPinId : a->endPinId);
+                    const uint32_t bKey = bPort ? bPort->id : (incoming ? b->startPinId : b->endPinId);
+                    if (aKey != bKey) return aKey < bKey;
+                    return a->id < b->id;
+                });
+                uint32_t previousPortKey = 0;
+                int row = -1;
+                for (Link* link : boundaryLinks) {
+                    LayerInterfacePort* port = findLayerInterfacePort(graph, *link, incoming);
+                    const uint32_t portKey = port ? port->id : (incoming ? link->startPinId : link->endPinId);
+                    const bool firstForPort = portKey != previousPortKey;
+                    if (firstForPort) {
+                        ++row;
+                        previousPortKey = portKey;
+                    }
+                    drawLayerBoundaryLink(dl, *link, graph, incoming, row, firstForPort, port);
+                }
+                return row + 1;
+            };
+            int incomingRows = drawBoundarySet(incomingBoundaryLinks, true);
+            int outgoingRows = drawBoundarySet(outgoingBoundaryLinks, false);
+            if (NodeGroup* focused = graph.getGroup(focusedGroupId)) {
+                for (const LayerInterfacePort& port : focused->interfacePorts) {
+                    if (port.connected) continue;
+                    const bool incoming = port.direction == LayerPortDirection::Input;
+                    drawDisconnectedLayerPort(dl, graph, port, incoming,
+                                              incoming ? incomingRows++ : outgoingRows++);
+                }
             }
             
             // Draw creating link
@@ -233,6 +316,8 @@ namespace NodeSystem {
             if (config.showMinimap) {
                 drawMinimap(dl, graph);
             }
+
+            dl->PopClipRect();
             
             // Resolve the deferred background context menu request now that node/group
             // hit-testing (which can claim the same click) has already run this frame.
@@ -241,6 +326,12 @@ namespace NodeSystem {
             }
             backgroundContextMenuRequested_ = false;
             contextMenuClaimedByNodeOrGroup_ = false;
+
+            if (linkCreateMenuRequested_) {
+                ImGui::OpenPopup("LocalLinkCreatePopup");
+                linkCreatePopupWasOpen_ = true;
+            }
+            linkCreateMenuRequested_ = false;
 
             // Context menu popups for group rename/color/delete
             drawPopups(graph);
@@ -274,9 +365,169 @@ namespace NodeSystem {
             }
         }
 
+        void autoArrangeGroup(GraphBase& graph, uint32_t groupId) {
+            if (NodeGroup* group = graph.getGroup(groupId)) {
+                autoArrangeGroupContents(graph, *group);
+                if (onGraphModified) onGraphModified();
+            }
+        }
+
+        Link* findVisibleLinkAt(GraphBase& graph, const ImVec2& mouse, float threshold = 15.0f) {
+            for (auto& link : graph.links) {
+                const auto geometry = linkScreenGeometry_.find(link.id);
+                if (geometry == linkScreenGeometry_.end()) continue;
+                ImVec2 previous = geometry->second.p1;
+                for (int step = 1; step <= 24; ++step) {
+                    const float t = static_cast<float>(step) / 24.0f;
+                    const ImVec2 point = getBezierPoint(
+                        geometry->second.p1, geometry->second.cp1,
+                        geometry->second.cp2, geometry->second.p2, t);
+                    const ImVec2 v(point.x - previous.x, point.y - previous.y);
+                    const ImVec2 w(mouse.x - previous.x, mouse.y - previous.y);
+                    const float len2 = v.x * v.x + v.y * v.y;
+                    const float projection = len2 > 0.0001f
+                        ? std::clamp((w.x * v.x + w.y * v.y) / len2, 0.0f, 1.0f) : 0.0f;
+                    const ImVec2 closest(previous.x + v.x * projection, previous.y + v.y * projection);
+                    if (std::hypot(mouse.x - closest.x, mouse.y - closest.y) <= threshold) {
+                        return &link;
+                    }
+                    previous = point;
+                }
+            }
+            return nullptr;
+        }
+
+        void synchronizeLayerInterfaces(GraphBase& graph) {
+            if (syncLayerInterfaces(graph) && onGraphModified) onGraphModified();
+        }
+
 
     private:
+        LayerInterfacePort* findLayerInterfacePort(GraphBase& graph, const Link& link, bool incoming) {
+            NodeGroup* group = graph.getGroup(focusedGroupId);
+            if (!group) return nullptr;
+            const LayerPortDirection direction = incoming ? LayerPortDirection::Input : LayerPortDirection::Output;
+            const uint32_t internalPinId = incoming ? link.endPinId : link.startPinId;
+            const uint32_t externalPinId = incoming ? link.startPinId : link.endPinId;
+            for (auto& port : group->interfacePorts) {
+                if (port.direction == direction && port.internalPinId == internalPinId &&
+                    port.externalPinId == externalPinId) return &port;
+            }
+            for (auto& port : group->interfacePorts) {
+                if (port.direction != direction) continue;
+                if ((incoming && port.externalPinId == externalPinId) ||
+                    (!incoming && port.internalPinId == internalPinId)) return &port;
+            }
+            return nullptr;
+        }
+
+        bool syncLayerInterfaces(GraphBase& graph) {
+            bool changed = false;
+            for (NodeGroup& group : graph.groups) {
+                std::vector<bool> wasConnected;
+                wasConnected.reserve(group.interfacePorts.size());
+                for (auto& port : group.interfacePorts) {
+                    wasConnected.push_back(port.connected);
+                    port.connected = false;
+                }
+
+                for (const Link& link : graph.links) {
+                    NodeBase* startNode = graph.getPinOwner(link.startPinId);
+                    NodeBase* endNode = graph.getPinOwner(link.endPinId);
+                    if (!startNode || !endNode) continue;
+                    const bool startInside = startNode->groupId == group.id;
+                    const bool endInside = endNode->groupId == group.id;
+                    if (startInside == endInside) continue;
+
+                    const LayerPortDirection direction = endInside
+                        ? LayerPortDirection::Input : LayerPortDirection::Output;
+                    const uint32_t internalPinId = endInside ? link.endPinId : link.startPinId;
+                    const uint32_t externalPinId = endInside ? link.startPinId : link.endPinId;
+                    Pin* internalPin = graph.findPin(internalPinId);
+                    if (!internalPin) continue;
+
+                    LayerInterfacePort* matched = nullptr;
+                    enum class MatchKind { None, Exact, Primary, Secondary } matchKind = MatchKind::None;
+                    for (auto& port : group.interfacePorts) {
+                        if (port.direction != direction) continue;
+                        if (port.internalPinId == internalPinId && port.externalPinId == externalPinId) {
+                            matched = &port; matchKind = MatchKind::Exact; break;
+                        }
+                    }
+                    if (!matched) {
+                        for (auto& port : group.interfacePorts) {
+                            if (port.direction != direction) continue;
+                            const bool primaryMatch = direction == LayerPortDirection::Input
+                                ? port.externalPinId == externalPinId
+                                : port.internalPinId == internalPinId;
+                            if (primaryMatch) { matched = &port; matchKind = MatchKind::Primary; break; }
+                        }
+                    }
+                    if (!matched) {
+                        for (auto& port : group.interfacePorts) {
+                            if (port.direction != direction) continue;
+                            const bool secondaryMatch = direction == LayerPortDirection::Input
+                                ? port.internalPinId == internalPinId
+                                : port.externalPinId == externalPinId;
+                            if (secondaryMatch) { matched = &port; matchKind = MatchKind::Secondary; break; }
+                        }
+                    }
+
+                    if (!matched) {
+                        LayerInterfacePort port;
+                        port.id = group.nextInterfacePortId++;
+                        port.direction = direction;
+                        port.name = internalPin->name;
+                        port.internalPinId = internalPinId;
+                        port.externalPinId = externalPinId;
+                        port.dataType = internalPin->dataType;
+                        port.imageSemantic = internalPin->imageSemantic;
+                        port.imageChannels = internalPin->imageChannels;
+                        group.interfacePorts.push_back(std::move(port));
+                        matched = &group.interfacePorts.back();
+                        matchKind = MatchKind::Exact;
+                        changed = true;
+                    }
+
+                    // Splicing inside a layer changes the internal endpoint;
+                    // splicing outside changes the external endpoint. Preserve
+                    // the port id/name and refresh only the moved side. For
+                    // fan-out links the first crossing remains the representative.
+                    if (matchKind == MatchKind::Secondary ||
+                        (matchKind == MatchKind::Primary && !matched->connected)) {
+                        if (matched->internalPinId != internalPinId || matched->externalPinId != externalPinId) {
+                            matched->internalPinId = internalPinId;
+                            matched->externalPinId = externalPinId;
+                            changed = true;
+                        }
+                    }
+                    matched->dataType = internalPin->dataType;
+                    matched->imageSemantic = internalPin->imageSemantic;
+                    matched->imageChannels = internalPin->imageChannels;
+                    matched->connected = true;
+                }
+
+                for (size_t i = 0; i < group.interfacePorts.size(); ++i) {
+                    const bool oldConnected = i < wasConnected.size() ? wasConnected[i] : false;
+                    if (oldConnected != group.interfacePorts[i].connected) changed = true;
+                }
+            }
+            return changed;
+        }
+
         void drawPopups(GraphBase& graph) {
+            // Searchable, domain-provided node picker opened by dropping a link
+            // on empty canvas. It deliberately has its own popup so the normal
+            // right-click graph menu remains unchanged.
+            if (ImGui::BeginPopup("LocalLinkCreatePopup")) {
+                if (onDrawLinkCreateMenu) onDrawLinkCreateMenu();
+                ImGui::EndPopup();
+            } else if (linkCreatePopupWasOpen_) {
+                // Escape/click-away cancels the pending auto connection.
+                releasedLinkPinId = 0;
+                linkCreatePopupWasOpen_ = false;
+            }
+
             // Background Context Menu
             if (ImGui::BeginPopup("LocalGraphContextPopup")) {
                 if (ImGui::MenuItem("Create Group Frame", "Ctrl+G", nullptr, !selectedNodeIds.empty())) {
@@ -326,6 +577,22 @@ namespace NodeSystem {
                     ImGui::Separator();
                     
                     if (activeNode->groupId != 0) {
+                        if (ImGui::BeginMenu("Move to Layer")) {
+                            for (auto& g : graph.groups) {
+                                if (g.id == activeNode->groupId) continue;
+                                if (ImGui::MenuItem(g.name.c_str())) {
+                                    const uint32_t oldGroupId = activeNode->groupId;
+                                    graph.removeNodeFromGroups(activeNode->id);
+                                    graph.addNodeToGroup(activeNode->id, g.id);
+                                    if (NodeGroup* oldGroup = graph.getGroup(oldGroupId)) {
+                                        fitGroupToContents(graph, *oldGroup);
+                                    }
+                                    fitGroupToContents(graph, g);
+                                    if (onGraphModified) onGraphModified();
+                                }
+                            }
+                            ImGui::EndMenu();
+                        }
                         if (ImGui::MenuItem("Remove from Group")) {
                             graph.removeNodeFromGroups(activeNode->id);
                             if (onGraphModified) onGraphModified();
@@ -384,6 +651,21 @@ namespace NodeSystem {
                             selectedNodeId = selectedNodeIds.back();
                         }
                     }
+
+                    if (ImGui::MenuItem(group->collapsed ? "Expand Layer" : "Collapse Layer")) {
+                        group->collapsed = !group->collapsed;
+                        if (onGraphModified) onGraphModified();
+                    }
+
+                    if (ImGui::MenuItem("Fit Frame to Nodes", nullptr, false, !group->nodeIds.empty())) {
+                        fitGroupToContents(graph, *group);
+                        if (onGraphModified) onGraphModified();
+                    }
+
+                    if (ImGui::MenuItem("Auto Arrange Layer", nullptr, false, !group->nodeIds.empty())) {
+                        autoArrangeGroupContents(graph, *group);
+                        if (onGraphModified) onGraphModified();
+                    }
                     
                     if (ImGui::MenuItem("Remove All Nodes")) {
                         for (uint32_t nid : group->nodeIds) {
@@ -406,6 +688,77 @@ namespace NodeSystem {
         // ========================================================================
         // GRID
         // ========================================================================
+
+        bool isNodeVisible(GraphBase& graph, const NodeBase& node) const {
+            if (focusedGroupId != 0) return node.groupId == focusedGroupId;
+            if (node.groupId == 0) return true;
+            const NodeGroup* group = graph.getGroup(node.groupId);
+            return !(group && group->collapsed);
+        }
+
+        static void fitGroupToContents(GraphBase& graph, NodeGroup& group) {
+            float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
+            for (uint32_t nodeId : group.nodeIds) {
+                NodeBase* node = graph.getNode(nodeId);
+                if (!node) continue;
+                const float customWidth = node->getCustomWidth();
+                const float width = node->uiWidth > 0.0f ? node->uiWidth
+                    : (customWidth > 0.0f ? customWidth : 180.0f);
+                int visibleInputs = 0, visibleOutputs = 0;
+                for (const Pin& pin : node->inputs) if (!pin.hidden) ++visibleInputs;
+                for (const Pin& pin : node->outputs) if (!pin.hidden) ++visibleOutputs;
+                const float height = node->collapsed ? 34.0f
+                    : 54.0f + 22.0f * static_cast<float>(std::max(visibleInputs, visibleOutputs));
+                minX = std::min(minX, node->x);
+                minY = std::min(minY, node->y);
+                maxX = std::max(maxX, node->x + width);
+                maxY = std::max(maxY, node->y + height);
+            }
+            if (minX == FLT_MAX) return;
+            constexpr float sidePad = 24.0f;
+            constexpr float topPad = 44.0f;
+            constexpr float bottomPad = 24.0f;
+            group.position = ImVec2(minX - sidePad, minY - topPad);
+            group.size = ImVec2((maxX - minX) + sidePad * 2.0f,
+                                (maxY - minY) + topPad + bottomPad);
+        }
+
+        static void autoArrangeGroupContents(GraphBase& graph, NodeGroup& group) {
+            if (group.nodeIds.empty()) return;
+            constexpr float topPad = 46.0f;
+            constexpr float sidePad = 24.0f;
+            constexpr float columnGap = 34.0f;
+            constexpr float rowGap = 26.0f;
+            const int columns = group.nodeIds.size() > 2 ? 2 : 1;
+            float cellWidth = 180.0f;
+            auto nodeSize = [](const NodeBase& node) {
+                int inCount = 0, outCount = 0;
+                for (const Pin& pin : node.inputs) if (!pin.hidden) ++inCount;
+                for (const Pin& pin : node.outputs) if (!pin.hidden) ++outCount;
+                const float custom = node.getCustomWidth();
+                const float width = node.uiWidth > 0.0f ? node.uiWidth
+                    : (custom > 0.0f ? custom : 180.0f);
+                const float height = node.collapsed ? 34.0f
+                    : 54.0f + 22.0f * static_cast<float>(std::max(inCount, outCount));
+                return ImVec2(width, height);
+            };
+            for (uint32_t nodeId : group.nodeIds) {
+                if (NodeBase* node = graph.getNode(nodeId)) {
+                    cellWidth = std::max(cellWidth, nodeSize(*node).x);
+                }
+            }
+            float y[2] = {group.position.y + topPad, group.position.y + topPad};
+            for (uint32_t nodeId : group.nodeIds) {
+                NodeBase* node = graph.getNode(nodeId);
+                if (!node) continue;
+                const ImVec2 size = nodeSize(*node);
+                const int column = columns == 1 ? 0 : (y[0] <= y[1] ? 0 : 1);
+                node->x = group.position.x + sidePad + column * (cellWidth + columnGap);
+                node->y = y[column];
+                y[column] += size.y + rowGap;
+            }
+            fitGroupToContents(graph, group);
+        }
         
         void drawGrid(ImDrawList* dl) {
             float minorStep = config.gridSizeMinor * zoom;
@@ -457,9 +810,15 @@ namespace NodeSystem {
             ImGui::SetNextItemAllowOverlap(); // must precede the item in ImGui 1.92+
             ImGui::InvisibleButton("##CanvasInput", canvasSize_,
                 ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle | ImGuiButtonFlags_MouseButtonRight);
+
+            // Popups and text search own navigation while open. In particular,
+            // a trackball/middle-button gesture or wheel used over the searchable
+            // link-create menu must never leak through to the graph canvas.
+            const bool canvasGestureBlocked =
+                ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) || ImGui::GetIO().WantTextInput;
             
             // Pan (middle mouse) & Box Selection start
-            if (ImGui::IsItemActive()) {
+            if (!canvasGestureBlocked && ImGui::IsItemActive()) {
                 if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
                     scrollX += ImGui::GetIO().MouseDelta.x;
                     scrollY += ImGui::GetIO().MouseDelta.y;
@@ -494,6 +853,7 @@ namespace NodeSystem {
                     // Only select if the drag distance is significant (not a click)
                     if (std::abs(maxX - minX) > 4.0f || std::abs(maxY - minY) > 4.0f) {
                         for (auto& node : graph.nodes) {
+                            if (!isNodeVisible(graph, *node)) continue;
                             ImVec2 nPos = nodeToScreen(node->x, node->y);
                             // Estimate node center
                             ImVec2 nCenter(nPos.x + 80.0f * zoom, nPos.y + 40.0f * zoom);
@@ -513,8 +873,17 @@ namespace NodeSystem {
                 }
             }
             
-            // Zoom (scroll wheel)
-            if (ImGui::IsItemHovered()) {
+            // Zoom is a canvas-window gesture. Testing only the background item made the
+            // wheel stop whenever a node/group InvisibleButton overlapped the pointer.
+            const ImVec2 mouseNow = ImGui::GetMousePos();
+            const bool mouseInsideCanvas =
+                mouseNow.x >= canvasPos_.x && mouseNow.y >= canvasPos_.y &&
+                mouseNow.x < canvasPos_.x + canvasSize_.x &&
+                mouseNow.y < canvasPos_.y + canvasSize_.y;
+            const bool canvasHovered = mouseInsideCanvas &&
+                ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem |
+                                       ImGuiHoveredFlags_ChildWindows);
+            if (canvasHovered && !canvasGestureBlocked) {
                 float wheel = ImGui::GetIO().MouseWheel;
                 if (wheel != 0) {
                     float oldZoom = zoom;
@@ -600,7 +969,7 @@ namespace NodeSystem {
                 // Finish link on release
                 if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
                     ImVec2 mouse = ImGui::GetMousePos();
-                    uint32_t targetPin = findClosestPin(mouse, 20.0f * zoom);
+                    uint32_t targetPin = findClosestPin(graph, mouse, 20.0f * zoom);
                     
                     if (targetPin != 0 && targetPin != linkStartPinId) {
                         graph.addLink(linkStartPinId, targetPin);
@@ -609,7 +978,13 @@ namespace NodeSystem {
                         releasedLinkPinId = linkStartPinId;
                         mousePosOnRightClick = ImVec2((mouse.x - canvasPos_.x - scrollX) / zoom,
                                                       (mouse.y - canvasPos_.y - scrollY) / zoom);
-                        backgroundContextMenuRequested_ = true;
+                        if (onDrawLinkCreateMenu) {
+                            linkCreateMenuRequested_ = true;
+                        } else {
+                            // Backward-compatible fallback for domains that have
+                            // not supplied a link-drop node picker yet.
+                            backgroundContextMenuRequested_ = true;
+                        }
                     }
                     
                     isCreatingLink = false;
@@ -674,11 +1049,25 @@ namespace NodeSystem {
                         NodeBase* node = graph.getNode(nid);
                         if (node) {
                             checkNodeDroppedOnLink(graph, *node);
+                            NodeGroup* currentGroup = node->groupId ? graph.getGroup(node->groupId) : nullptr;
+                            const bool logicalLayer = currentGroup &&
+                                (currentGroup->comment == "Auto-managed terrain layer" ||
+                                 focusedGroupId == currentGroup->id);
+                            if (logicalLayer) {
+                                // Layer ownership is semantic, never a hit-test side effect.
+                                // Moving anywhere on the infinite layer canvas keeps membership;
+                                // the All-view frame simply refits to the new member bounds.
+                                fitGroupToContents(graph, *currentGroup);
+                                continue;
+                            }
                             float nodeCenterX = node->x + 80.0f;
                             float nodeCenterY = node->y + 40.0f;
                             uint32_t newGroupId = 0;
                             
                             for (auto& g : graph.groups) {
+                                // Auto-managed layers accept nodes only through explicit
+                                // Move to Layer / active-layer creation, never spatial overlap.
+                                if (g.comment == "Auto-managed terrain layer") continue;
                                 if (nodeCenterX >= g.position.x && nodeCenterX <= g.position.x + g.size.x &&
                                     nodeCenterY >= g.position.y && nodeCenterY <= g.position.y + g.size.y) {
                                     newGroupId = g.id;
@@ -727,40 +1116,137 @@ namespace NodeSystem {
         // NODE
         // ========================================================================
         
+        static int visiblePinCount(const std::vector<Pin>& pins) {
+            int n = 0;
+            for (const auto& p : pins) if (!p.hidden) ++n;
+            return n;
+        }
+
+        /// Row layout of a node's INPUT side: every visible pin gets a row, and every section
+        /// (NodeBase::inputSectionLabel) gets a header row above its first pin.
+        ///
+        /// The header row is emitted even when the section is COLLAPSED and all of its pins
+        /// are therefore hidden — otherwise a section you close disappears entirely and there
+        /// is nothing left on the node to click to bring it back.
+        ///
+        /// Both the drawing path and the CULLED path go through this. They used to compute
+        /// pin Y independently as index*spacing, and any divergence between the two shows up
+        /// as links detaching from their sockets the moment a node scrolls off screen.
+        struct InputRowLayout {
+            std::vector<int> rowOfInput;                  ///< -1 = hidden
+            std::vector<std::pair<int, int>> sections;    ///< (input index that starts it, header row)
+            int totalRows = 0;
+        };
+
+        static InputRowLayout buildInputRowMap(const NodeBase& node) {
+            InputRowLayout L;
+            L.rowOfInput.assign(node.inputs.size(), -1);
+            int row = 0;
+            for (size_t i = 0; i < node.inputs.size(); ++i) {
+                const int idx = static_cast<int>(i);
+                if (node.inputSectionLabel(idx) != nullptr) {
+                    L.sections.emplace_back(idx, row);
+                    ++row;
+                }
+                if (node.inputs[i].hidden) continue;
+                L.rowOfInput[i] = row++;
+            }
+            L.totalRows = row;
+            return L;
+        }
+
+        /// One socket-section heading on the node body: a chevron, the label, and a hairline
+        /// to the node's right edge. DRAWING ONLY — the click target is created after
+        /// ChannelsMerge (see drawNode), because every other ImGui item on the node is too
+        /// and mixing real widgets into a split draw channel is how you get a node that
+        /// renders under its own body.
+        /// Shared geometry for the section-header adornments (enable toggle + "..." overflow).
+        /// The visual pass and the interaction pass both need the same rects — two copies of
+        /// this arithmetic is how a hit target drifts off its pixels.
+        void sectionAdornMetrics(NodeBase& node, int secFirst, float& toggleW, float& extraW) {
+            const float tR = std::clamp(4.0f * zoom, 3.0f, 5.5f);
+            toggleW = (node.inputSectionToggle(secFirst) != nullptr) ? tR * 2.0f + 8.0f : 0.0f;
+            extraW  = node.inputSectionHasExtra(secFirst) ? std::max(12.0f, 14.0f * zoom) : 0.0f;
+        }
+
+        /// `rightInset` reserves space for the header adornments so the hairline stops before
+        /// them; `labelAlpha` < 1 dims a DISABLED feature-group's title — the "this whole
+        /// group is off" cue you can read without finding the toggle first.
+        void drawInputSectionHeaderVisual(ImDrawList* dl, bool open, const char* label,
+                                          ImVec2 rowTopLeft, float nodeWidth,
+                                          float rowHeight, float padding,
+                                          float rightInset = 0.0f, float labelAlpha = 1.0f) {
+            const float cy = rowTopLeft.y + rowHeight * 0.5f;
+            const float x0 = rowTopLeft.x + padding;
+
+            const float s = std::max(3.0f, 3.5f * zoom);
+            const int la = static_cast<int>(255.0f * labelAlpha);
+            const ImU32 chev = IM_COL32(190, 195, 205, la);
+            if (open) {
+                dl->AddTriangleFilled(ImVec2(x0, cy - s * 0.6f), ImVec2(x0 + s * 2.0f, cy - s * 0.6f),
+                                      ImVec2(x0 + s, cy + s * 0.8f), chev);
+            } else {
+                dl->AddTriangleFilled(ImVec2(x0, cy - s), ImVec2(x0 + s * 1.6f, cy),
+                                      ImVec2(x0, cy + s), chev);
+            }
+
+            const float tx = x0 + s * 2.0f + 6.0f * zoom;
+            const ImVec2 ts = ImGui::CalcTextSize(label);
+            dl->AddText(ImVec2(tx, cy - ts.y * 0.5f), IM_COL32(205, 210, 220, la), label);
+
+            const float lineX = tx + ts.x + 6.0f * zoom;
+            const float rightX = rowTopLeft.x + nodeWidth - padding - rightInset;
+            if (rightX > lineX) {
+                dl->AddLine(ImVec2(lineX, cy), ImVec2(rightX, cy), IM_COL32(255, 255, 255, 22), 1.0f);
+            }
+        }
+
         void drawNode(ImDrawList* dl, NodeBase& node, GraphBase& graph) {
             ImVec2 pos = nodeToScreen(node.x, node.y);
             float padding = scaleNodeChromeMetric(zoom, 10.0f, 7.0f, 14.0f);
-            
-            // Estimate node size for culling (use max possible size)
-            float estWidth = 500.0f * zoom;
-            float estHeight = 400.0f * zoom;
+
+            // Culling must use the SAME dynamic layout as rendering. A fixed 400px
+            // estimate dropped tall field/output nodes while their lower sockets were still
+            // visible, making them appear to vanish permanently during pan/zoom.
+            float customW = node.getCustomWidth();
+            float titleW = ImGui::CalcTextSize(node.metadata.displayName.c_str()).x + padding * 2;
+            if (titleW < 10) titleW = ImGui::CalcTextSize(node.name.c_str()).x + padding * 2;
+            const bool showInlineContent = config.inlineNodeContent && !node.collapsed &&
+                zoom >= config.inlineContentMinZoom && node.wantsInlineContent();
+            const InputRowLayout rows = buildInputRowMap(node);
+            const int inputRows = rows.totalRows;
+            NodeChromeLayout chrome = buildNodeChromeLayout(node, zoom,
+                customW > 0.0f ? customW * zoom : 160.0f * zoom,
+                static_cast<size_t>(inputRows), visiblePinCount(node.outputs), titleW,
+                showInlineContent ? node.inlineContentHeight_ : 0.0f);
+            chrome.cornerRadius = scaleNodeChromeMetric(zoom, config.nodeRounding, 3.0f, 12.0f);
+            const float cullMargin = std::max(8.0f, chrome.shadowOffset + 3.0f);
             
             // Frustum culling - skip nodes completely outside canvas
-            if (pos.x + estWidth < canvasPos_.x || pos.x > canvasPos_.x + canvasSize_.x ||
-                pos.y + estHeight < canvasPos_.y || pos.y > canvasPos_.y + canvasSize_.y) {
+            if (pos.x + chrome.width + cullMargin < canvasPos_.x ||
+                pos.x - cullMargin > canvasPos_.x + canvasSize_.x ||
+                pos.y + chrome.height + cullMargin < canvasPos_.y ||
+                pos.y - cullMargin > canvasPos_.y + canvasSize_.y) {
                 // Still need to cache pin positions for link drawing
-                const float headerH = scaleNodeChromeMetric(zoom, 26.0f, 22.0f, 38.0f);
-                const float pinSpacing = scaleNodeChromeMetric(zoom, 22.0f, 16.0f, 30.0f);
-                const float minWidth = scaleNodeChromeMetric(zoom, 160.0f, 110.0f, 240.0f);
-                float pinStartY = pos.y + headerH + padding;
-                
+                const float inputStartY = getNodePinStartY(chrome, pos.y, static_cast<size_t>(inputRows));
+                const float outputStartY = getNodePinStartY(chrome, pos.y, visiblePinCount(node.outputs));
+                const float rowStep = node.collapsed ? chrome.collapsedPinSpacing : chrome.pinSpacing;
+                int visibleInput = 0;
                 for (int i = 0; i < (int)node.inputs.size(); i++) {
-                    pinPositions_[node.inputs[i].id] = ImVec2(pos.x, pinStartY + i * pinSpacing + pinSpacing * 0.5f);
+                    if (node.inputs[i].hidden) continue;
+                    const int row = node.collapsed ? visibleInput : rows.rowOfInput[i];
+                    pinPositions_[node.inputs[i].id] = ImVec2(pos.x, inputStartY + row * rowStep);
+                    ++visibleInput;
                 }
+                int visOut = 0;
                 for (int i = 0; i < (int)node.outputs.size(); i++) {
-                    pinPositions_[node.outputs[i].id] = ImVec2(pos.x + minWidth, pinStartY + i * pinSpacing + pinSpacing * 0.5f);
+                    if (node.outputs[i].hidden) continue;
+                    pinPositions_[node.outputs[i].id] = ImVec2(
+                        pos.x + chrome.width, outputStartY + visOut * rowStep);
+                    ++visOut;
                 }
                 return; // Skip full rendering
             }
-            
-            float customW = node.getCustomWidth();
-            
-            // Calculate title width (capped)
-            float titleW = ImGui::CalcTextSize(node.metadata.displayName.c_str()).x + padding * 2;
-            if (titleW < 10) titleW = ImGui::CalcTextSize(node.name.c_str()).x + padding * 2;
-            NodeChromeLayout chrome = buildNodeChromeLayout(node, zoom, customW > 0.0f ? customW * zoom : 160.0f * zoom,
-                node.inputs.size(), node.outputs.size(), titleW);
-            chrome.cornerRadius = scaleNodeChromeMetric(zoom, config.nodeRounding, 3.0f, 12.0f);
 
             float finalWidth = chrome.width;
             float finalHeight = chrome.height;
@@ -775,19 +1261,49 @@ namespace NodeSystem {
             dl->ChannelsSplit(2);
             dl->ChannelsSetCurrent(1);
 
-            float inputPinStartY = getNodePinStartY(chrome, pos.y, node.inputs.size());
-            float outputPinStartY = getNodePinStartY(chrome, pos.y, node.outputs.size());
+            float inputPinStartY = getNodePinStartY(chrome, pos.y, static_cast<size_t>(inputRows));
+            float outputPinStartY = getNodePinStartY(chrome, pos.y, visiblePinCount(node.outputs));
 
+            // Inline pin value widgets are real ImGui items: only near 1:1 zoom, where an
+            // unscaled frame still lines up with its (zoom-scaled) pin row.
+            const bool showPinWidgets = !isCollapsed && node.wantsInlinePinWidgets() &&
+                zoom >= config.inlineContentMinZoom;
+
+            const float rowStep = isCollapsed ? chrome.collapsedPinSpacing : chrome.pinSpacing;
+            int visIn = 0;
             for (int i = 0; i < (int)node.inputs.size(); i++) {
                 Pin& pin = node.inputs[i];
-                ImVec2 pinPos(pos.x, inputPinStartY + i * (isCollapsed ? chrome.collapsedPinSpacing : chrome.pinSpacing));
+                if (pin.hidden) continue;  // collapsed pin group — not drawn, not interactable
+                const int row = isCollapsed ? visIn : rows.rowOfInput[i];
+                ImVec2 pinPos(pos.x, inputPinStartY + row * rowStep);
+                ++visIn;
                 pinPositions_[pin.id] = pinPos;
                 drawPin(dl, pinPos, pin, true, (!isCollapsed && showPinLabels) ? chrome.labelWidth : 0.0f);
             }
 
+            // Section headings (a collapsed node is a title bar with sockets — headings there
+            // would be noise, so they are skipped along with the labels).
+            if (!isCollapsed && showTitle) {
+                for (const auto& sec : rows.sections) {
+                    const char* label = node.inputSectionLabel(sec.first);
+                    if (!label) continue;
+                    float tw = 0.0f, ew = 0.0f;
+                    sectionAdornMetrics(node, sec.first, tw, ew);
+                    const bool* t = node.inputSectionToggle(sec.first);
+                    drawInputSectionHeaderVisual(dl, node.isInputSectionOpen(sec.first), label,
+                                                 ImVec2(pos.x, inputPinStartY + sec.second * rowStep),
+                                                 finalWidth, rowStep, padding,
+                                                 tw + ew + ((tw + ew) > 0.0f ? 4.0f : 0.0f),
+                                                 (t && !*t) ? 0.45f : 1.0f);
+                }
+            }
+
+            int visOut = 0;
             for (int i = 0; i < (int)node.outputs.size(); i++) {
                 Pin& pin = node.outputs[i];
-                ImVec2 pinPos(pos.x + finalWidth, outputPinStartY + i * (isCollapsed ? chrome.collapsedPinSpacing : chrome.pinSpacing));
+                if (pin.hidden) continue;
+                ImVec2 pinPos(pos.x + finalWidth, outputPinStartY + visOut * (isCollapsed ? chrome.collapsedPinSpacing : chrome.pinSpacing));
+                ++visOut;
                 pinPositions_[pin.id] = pinPos;
                 drawPin(dl, pinPos, pin, false, (!isCollapsed && showPinLabels) ? chrome.labelWidth : 0.0f);
             }
@@ -833,7 +1349,29 @@ namespace NodeSystem {
             // Body
             dl->AddRectFilled(pos, ImVec2(pos.x + finalWidth, pos.y + finalHeight),
                 config.nodeBodyColor, cornerRadius);
-            
+
+            // Section group cards — what actually makes 30 rows read as 8 GROUPS instead of
+            // one wall of sockets: each section sits on its own faint panel, its header row a
+            // touch brighter so it reads as a title. Pure draw-list; the hairline + chevron
+            // from drawInputSectionHeaderVisual land on top of this.
+            if (!isCollapsed && showTitle && !rows.sections.empty()) {
+                for (size_t s = 0; s < rows.sections.size(); ++s) {
+                    const int startRow = rows.sections[s].second;
+                    // A collapsed section's card is just its header row (its pins are hidden,
+                    // so the NEXT section's header row bounds it immediately).
+                    const int endRow = (s + 1 < rows.sections.size())
+                        ? rows.sections[s + 1].second - 1
+                        : inputRows - 1;
+                    const float y0 = inputPinStartY + startRow * chrome.pinSpacing;
+                    const float y1 = inputPinStartY + endRow * chrome.pinSpacing + chrome.pinSpacing * 0.55f;
+                    dl->AddRectFilled(ImVec2(pos.x + 3.0f, y0), ImVec2(pos.x + finalWidth - 3.0f, y1),
+                        IM_COL32(255, 255, 255, 7), 4.0f);
+                    dl->AddRectFilled(ImVec2(pos.x + 3.0f, y0),
+                        ImVec2(pos.x + finalWidth - 3.0f, y0 + chrome.pinSpacing * 0.92f),
+                        IM_COL32(255, 255, 255, 11), 4.0f, ImDrawFlags_RoundCornersTop);
+                }
+            }
+
             // Modern category color strip at the very top of the node (thin, Gaea/Houdini-style)
             // Drawn first with a taller height to prevent ImGui from clamping the corner rounding due to height constraints
             float stripeHeight = 3.5f * zoom;
@@ -869,7 +1407,10 @@ namespace NodeSystem {
             // reports as currently active (see GraphBase::isEvaluatingAsync /
             // currentAsyncNodeId / asyncEvalProgress — default no-ops for graphs
             // that don't support background evaluation, so this is a no-op there).
-            if (graph.isEvaluatingAsync() && graph.currentAsyncNodeId() == node.id) {
+            const NodeEvaluationState evalState = graph.asyncNodeState(node.id);
+            const bool nodeRunning = graph.isEvaluatingAsync() &&
+                (evalState == NodeEvaluationState::Running || graph.currentAsyncNodeId() == node.id);
+            if (nodeRunning) {
                 float pulse = 0.5f + 0.5f * sinf((float)ImGui::GetTime() * 6.0f);
                 ImU32 glowCol = IM_COL32(120, 220, 255, (int)(120 + 100 * pulse));
                 dl->AddRect(ImVec2(pos.x - 2.0f, pos.y - 2.0f), ImVec2(pos.x + finalWidth + 2.0f, pos.y + finalHeight + 2.0f),
@@ -882,6 +1423,32 @@ namespace NodeSystem {
                     IM_COL32(20, 24, 30, 200));
                 dl->AddRectFilled(barMin, ImVec2(pos.x + 1.0f + (finalWidth - 2.0f) * progress, pos.y + finalHeight - 1.0f),
                     IM_COL32(120, 220, 255, 235));
+            }
+
+            // Persist per-node state after the active cursor moves on. This makes
+            // a pull evaluation readable as a sequence across the whole DAG:
+            // blue = processing, green = completed, cyan = cache hit, red = failed.
+            const bool showDirtyState = !graph.isEvaluatingAsync() && node.dirty;
+            if (evalState != NodeEvaluationState::Idle || showDirtyState) {
+                ImU32 stateColor = IM_COL32(120, 220, 255, 255);
+                if (evalState == NodeEvaluationState::Idle && showDirtyState) stateColor = IM_COL32(240, 170, 70, 255);
+                else if (evalState == NodeEvaluationState::Completed) stateColor = IM_COL32(90, 220, 135, 255);
+                else if (evalState == NodeEvaluationState::Cached) stateColor = IM_COL32(80, 205, 225, 255);
+                else if (evalState == NodeEvaluationState::Failed) stateColor = IM_COL32(245, 85, 85, 255);
+
+                const float radius = std::clamp(4.0f * zoom, 3.0f, 6.0f);
+                const ImVec2 center(pos.x + finalWidth - padding * 0.75f,
+                                    pos.y + headerH * 0.5f);
+                dl->AddCircleFilled(center, radius + 1.5f, IM_COL32(12, 14, 18, 230));
+                dl->AddCircleFilled(center, radius, stateColor);
+                if (evalState == NodeEvaluationState::Completed || evalState == NodeEvaluationState::Cached) {
+                    dl->AddRect(ImVec2(pos.x - 1.0f, pos.y - 1.0f),
+                                ImVec2(pos.x + finalWidth + 1.0f, pos.y + finalHeight + 1.0f),
+                                (evalState == NodeEvaluationState::Cached)
+                                    ? IM_COL32(80, 205, 225, 80)
+                                    : IM_COL32(90, 220, 135, 65),
+                                cornerRadius, 0, 1.0f);
+                }
             }
 
             dl->ChannelsMerge();
@@ -1020,6 +1587,142 @@ namespace NodeSystem {
                 ImGui::OpenPopup("LocalNodeContextPopup");
                 contextMenuClaimedByNodeOrGroup_ = true;  // suppress the background popup below
             }
+                // ── Socket sections + inline pin values ──────────────────────
+                // Real ImGui items, so they belong here (after ChannelsMerge) with the rest
+                // of the node's interaction — the pin loop above only drew their pixels.
+                if (!isCollapsed && showTitle) {
+                    for (const auto& sec : rows.sections) {
+                        // Header adornments (enable toggle, "..." overflow popup). Drawn as
+                        // node chrome — draw-list glyphs over invisible hit targets — NOT as
+                        // stock ImGui widgets: a raw Checkbox on the header ignored the zoom,
+                        // dwarfed the 3px chevron next to it, and read as a foreign control
+                        // pasted on top of the node. They stay OUT of the click-to-collapse
+                        // strip (two overlapping items both take the same click), so the
+                        // strip ends where they begin.
+                        bool* secToggle = node.inputSectionToggle(sec.first);
+                        const bool hasExtra = node.inputSectionHasExtra(sec.first);
+                        float toggleW = 0.0f, extraW = 0.0f;
+                        sectionAdornMetrics(node, sec.first, toggleW, extraW);
+                        const float reserved = (toggleW + extraW > 0.0f) ? toggleW + extraW + padding : 0.0f;
+                        const float headerY = inputPinStartY + sec.second * rowStep;
+                        const float cy = headerY + rowStep * 0.5f;
+
+                        ImGui::SetCursorScreenPos(ImVec2(pos.x + 2.0f, headerY));
+                        ImGui::PushID(static_cast<int>(node.id + 4000000u + static_cast<uint32_t>(sec.first)));
+                        ImGui::InvisibleButton("##section",
+                            ImVec2(std::max(8.0f, finalWidth - 4.0f - reserved), std::max(6.0f, rowStep)));
+                        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) node.toggleInputSection(sec.first);
+                        if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                        ImGui::PopID();
+
+                        float rightX = pos.x + finalWidth - padding;
+                        if (secToggle) {
+                            rightX -= toggleW;
+                            const ImVec2 c(rightX + toggleW * 0.5f, cy);
+                            const float tR = std::clamp(4.0f * zoom, 3.0f, 5.5f);
+
+                            ImGui::SetCursorScreenPos(ImVec2(rightX, cy - rowStep * 0.4f));
+                            ImGui::PushID(static_cast<int>(node.id + 4500000u + static_cast<uint32_t>(sec.first)));
+                            ImGui::InvisibleButton("##secOn", ImVec2(toggleW, rowStep * 0.8f));
+                            const bool hov = ImGui::IsItemHovered();
+                            if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                                *secToggle = !*secToggle;
+                                node.dirty = true;
+                            }
+                            if (hov) {
+                                const char* lbl = node.inputSectionLabel(sec.first);
+                                ImGui::SetTooltip("%s: %s (click to toggle)",
+                                                  lbl ? lbl : "Feature", *secToggle ? "on" : "off");
+                            }
+                            ImGui::PopID();
+
+                            // Power glyph: ring + tick. On = accent ring with a lit core, off =
+                            // dim hollow ring — state readable without the tooltip.
+                            const ImU32 col = *secToggle
+                                ? (hov ? IM_COL32(150, 240, 190, 255) : IM_COL32(110, 215, 165, 235))
+                                : (hov ? IM_COL32(200, 205, 215, 220) : IM_COL32(125, 130, 140, 150));
+                            const float th = std::max(1.2f, 1.4f * zoom);
+                            dl->AddCircle(c, tR, col, 0, th);
+                            dl->AddLine(ImVec2(c.x, c.y - tR * 1.35f), ImVec2(c.x, c.y - tR * 0.15f), col, th);
+                            if (*secToggle) dl->AddCircleFilled(c, tR * 0.4f, col);
+                            rightX -= 2.0f;
+                        }
+                        if (hasExtra) {
+                            rightX -= extraW;
+                            ImGui::SetCursorScreenPos(ImVec2(rightX, cy - rowStep * 0.4f));
+                            ImGui::PushID(static_cast<int>(node.id + 4600000u + static_cast<uint32_t>(sec.first)));
+                            ImGui::InvisibleButton("##secExtra", ImVec2(extraW, rowStep * 0.8f));
+                            const bool hov = ImGui::IsItemHovered();
+                            if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) ImGui::OpenPopup("##secExtraPopup");
+                            if (hov) ImGui::SetTooltip("More parameters");
+                            if (ImGui::BeginPopup("##secExtraPopup")) {
+                                node.drawInputSectionExtra(sec.first);
+                                ImGui::EndPopup();
+                            }
+
+                            const ImU32 col = hov ? IM_COL32(220, 225, 235, 255) : IM_COL32(150, 155, 165, 190);
+                            const float dR = std::max(1.1f, 1.4f * zoom);
+                            const float dSp = std::max(3.5f, 4.2f * zoom);
+                            const ImVec2 dc(rightX + extraW * 0.5f, cy);
+                            dl->AddCircleFilled(ImVec2(dc.x - dSp, dc.y), dR, col);
+                            dl->AddCircleFilled(dc, dR, col);
+                            dl->AddCircleFilled(ImVec2(dc.x + dSp, dc.y), dR, col);
+                            ImGui::PopID();
+                        }
+                    }
+
+                    // Value editor for each UNCONNECTED pin, on the pin's own row. This is what
+                    // puts the node's NUMBERS on the node instead of a bare column of socket
+                    // names. A connected pin has no default to show — the wire drives it.
+                    if (showPinWidgets) {
+                        for (int i = 0; i < (int)node.inputs.size(); i++) {
+                            const Pin& pin = node.inputs[i];
+                            if (pin.hidden || graph.getInputSource(pin.id) != nullptr) continue;
+                            const float labelW = ImGui::CalcTextSize(pin.name.c_str()).x;
+                            const float wStart = pos.x + padding + labelW + 10.0f;
+                            const float wWidth = (pos.x + finalWidth - padding - 4.0f) - wStart;
+                            if (wWidth < 40.0f) continue;
+                            const float pinY = inputPinStartY + rows.rowOfInput[i] * rowStep;
+                            const float frameH = ImGui::GetFrameHeight();
+                            ImGui::SetCursorScreenPos(ImVec2(wStart, pinY - frameH * 0.5f));
+                            ImGui::PushID(static_cast<int>(node.id + 3000000u + static_cast<uint32_t>(i)));
+                            if (node.drawInputInlineWidget(i, wWidth)) node.dirty = true;
+                            ImGui::PopID();
+                        }
+                    }
+                }
+
+                // ── Inline node-body content ─────────────────────────────────
+                // Rendered as real ImGui widgets below the pin block. The whole
+                // canvas sits behind a SetNextItemAllowOverlap InvisibleButton,
+                // so these items take click priority the same way the header
+                // button does. Height is measured and cached for next frame's
+                // chrome layout (1-frame lag on first show — invisible).
+                if (showInlineContent) {
+                    // inputRows, not the pin count: section headers occupy rows too, and the
+                    // body content has to start below the LAST of them.
+                    const int maxVis = std::max(inputRows, visiblePinCount(node.outputs));
+                    const float contentTop = pos.y + headerH + chrome.bodyPadding +
+                        static_cast<float>(maxVis) * chrome.pinSpacing + 2.0f;
+                    const ImVec2 clipMin(pos.x + 2.0f, contentTop);
+                    // First frame the height is unmeasured (0): clip generously so
+                    // the measuring pass can run; correct height applies next frame.
+                    const float clipBottom = (node.inlineContentHeight_ > 0.0f)
+                        ? std::max(pos.y + finalHeight - 2.0f, clipMin.y + 1.0f)
+                        : clipMin.y + 400.0f;
+                    const ImVec2 clipMax(pos.x + finalWidth - 2.0f, clipBottom);
+                    ImGui::SetCursorScreenPos(ImVec2(pos.x + padding, contentTop));
+                    ImGui::PushID(static_cast<int>(node.id + 2000000u));
+                    ImGui::PushClipRect(clipMin, clipMax, true);
+                    ImGui::BeginGroup();
+                    node.drawContent();
+                    ImGui::EndGroup();
+                    ImGui::PopClipRect();
+                    node.inlineContentHeight_ = ImGui::GetItemRectSize().y + 8.0f;
+                    ImGui::PopID();
+                } else if (!node.wantsInlineContent()) {
+                    node.inlineContentHeight_ = 0.0f;
+                }
             } // end overlapsCanvas
         }
 
@@ -1158,6 +1861,7 @@ namespace NodeSystem {
             float cpDist = std::max(dist * 0.5f, 50.0f * zoom);
             ImVec2 cp1(p1.x + cpDist, p1.y);
             ImVec2 cp2(p2.x - cpDist, p2.y);
+            linkScreenGeometry_[link.id] = {p1, cp1, cp2, p2};
             
             bool isSelected = (selectedLinkId == link.id);
             bool isHovered = isLinkHovered(p1, cp1, cp2, p2);
@@ -1208,6 +1912,154 @@ namespace NodeSystem {
             }
         }
 
+        void drawLayerBoundaryLink(ImDrawList* dl, Link& link, GraphBase& graph,
+                                   bool incoming, int row, bool drawPortCard,
+                                   const LayerInterfacePort* interfacePort) {
+            Pin* sourcePin = graph.findPin(link.startPinId);
+            Pin* targetPin = graph.findPin(link.endPinId);
+            if (!sourcePin || !targetPin) return;
+            const uint32_t internalPinId = incoming ? link.endPinId : link.startPinId;
+            const auto internalIt = pinPositions_.find(internalPinId);
+            if (internalIt == pinPositions_.end()) return;
+
+            constexpr float cardWidth = 132.0f;
+            constexpr float rowHeight = 24.0f;
+            constexpr float topOffset = 30.0f;
+            const float y = canvasPos_.y + topOffset + 22.0f + row * rowHeight;
+            const ImVec2 cardMin = incoming
+                ? ImVec2(canvasPos_.x + 6.0f, y)
+                : ImVec2(canvasPos_.x + canvasSize_.x - cardWidth - 6.0f, y);
+            const ImVec2 cardMax(cardMin.x + cardWidth, cardMin.y + rowHeight - 3.0f);
+            const ImVec2 boundaryPin = incoming
+                ? ImVec2(cardMax.x, (cardMin.y + cardMax.y) * 0.5f)
+                : ImVec2(cardMin.x, (cardMin.y + cardMax.y) * 0.5f);
+            const ImVec2 internalPin = internalIt->second;
+            const ImVec2 p1 = incoming ? boundaryPin : internalPin;
+            const ImVec2 p2 = incoming ? internalPin : boundaryPin;
+
+            ImU32 color = sourcePin->cachedColor ? sourcePin->cachedColor
+                                                  : IM_COL32(150, 150, 160, 255);
+            if (link.colorOverride != 0) color = link.colorOverride;
+            const float cp = std::max(55.0f * zoom, std::abs(p2.x - p1.x) * 0.42f);
+            const ImVec2 cp1(p1.x + cp, p1.y);
+            const ImVec2 cp2(p2.x - cp, p2.y);
+            linkScreenGeometry_[link.id] = {p1, cp1, cp2, p2};
+            dl->AddBezierCubic(p1, cp1, cp2, p2,
+                               color, std::max(1.0f, config.linkThickness * zoom));
+
+            const bool hovered = isLinkHovered(p1, cp1, cp2, p2);
+            if (hovered) {
+                dl->AddBezierCubic(p1, cp1, cp2, p2, IM_COL32(255, 255, 255, 55),
+                                   std::max(2.0f, (config.linkThickness + 1.0f) * zoom));
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    selectedLinkId = link.id;
+                    selectedNodeId = 0;
+                    if (onLinkSelected) onLinkSelected(link.id);
+                }
+            }
+
+            if (!drawPortCard) return;
+            dl->AddRectFilled(cardMin, cardMax, IM_COL32(24, 28, 36, 238), 4.0f);
+            dl->AddRect(cardMin, cardMax, (color & 0x00FFFFFF) | 0x90000000, 4.0f);
+            dl->AddCircleFilled(boundaryPin, 4.5f, color);
+
+            // The boundary socket is a real interaction proxy for the hidden
+            // external endpoint. Registering that actual pin id gives layer
+            // ports the same drag/type/cycle/replacement behavior as node pins.
+            if (interfacePort) {
+                drawLayerPortInteraction(dl, graph, *interfacePort, boundaryPin, color, true);
+            }
+
+            NodeBase* externalNode = graph.getPinOwner(incoming ? link.startPinId : link.endPinId);
+            std::string label = interfacePort && !interfacePort->name.empty()
+                ? interfacePort->name : (incoming ? sourcePin->name : targetPin->name);
+            if (!interfacePort && externalNode) {
+                const std::string& owner = externalNode->metadata.displayName.empty()
+                    ? externalNode->name : externalNode->metadata.displayName;
+                label += incoming ? "  < " : "  > ";
+                label += owner;
+            }
+            if (interfacePort) label += "  [P" + std::to_string(interfacePort->id) + "]";
+            label = fitTextToWidth(label, cardWidth - 16.0f);
+            const ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
+            const float textX = incoming ? cardMin.x + 7.0f : cardMax.x - 7.0f - textSize.x;
+            dl->AddText(ImVec2(textX, cardMin.y + (cardMax.y - cardMin.y - textSize.y) * 0.5f),
+                        IM_COL32(220, 225, 235, 255), label.c_str());
+
+            if (row == 0) {
+                const char* heading = incoming ? "LAYER INPUTS" : "LAYER OUTPUTS";
+                const ImVec2 headingSize = ImGui::CalcTextSize(heading);
+                const float headingX = incoming ? cardMin.x : cardMax.x - headingSize.x;
+                dl->AddText(ImVec2(headingX, canvasPos_.y + 8.0f),
+                            IM_COL32(125, 175, 225, 220), heading);
+            }
+        }
+
+        void drawDisconnectedLayerPort(ImDrawList* dl, GraphBase& graph,
+                                       const LayerInterfacePort& port,
+                                       bool incoming, int row) {
+            constexpr float cardWidth = 132.0f;
+            constexpr float rowHeight = 24.0f;
+            constexpr float topOffset = 30.0f;
+            const float y = canvasPos_.y + topOffset + 22.0f + row * rowHeight;
+            const ImVec2 cardMin = incoming
+                ? ImVec2(canvasPos_.x + 6.0f, y)
+                : ImVec2(canvasPos_.x + canvasSize_.x - cardWidth - 6.0f, y);
+            const ImVec2 cardMax(cardMin.x + cardWidth, cardMin.y + rowHeight - 3.0f);
+            const ImVec2 boundaryPin = incoming
+                ? ImVec2(cardMax.x, (cardMin.y + cardMax.y) * 0.5f)
+                : ImVec2(cardMin.x, (cardMin.y + cardMax.y) * 0.5f);
+            dl->AddRectFilled(cardMin, cardMax, IM_COL32(42, 25, 29, 238), 4.0f);
+            dl->AddRect(cardMin, cardMax, IM_COL32(220, 75, 75, 210), 4.0f, 0, 1.5f);
+            Pin* proxyPin = graph.findPin(port.externalPinId);
+            const ImU32 pinColor = proxyPin && proxyPin->cachedColor
+                ? proxyPin->cachedColor : IM_COL32(220, 95, 95, 255);
+            dl->AddCircleFilled(boundaryPin, 4.5f, pinColor);
+            drawLayerPortInteraction(dl, graph, port, boundaryPin, pinColor, false);
+            std::string label = port.name + "  [P" + std::to_string(port.id) + "] !";
+            label = fitTextToWidth(label, cardWidth - 16.0f);
+            const ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
+            const float textX = incoming ? cardMin.x + 7.0f : cardMax.x - 7.0f - textSize.x;
+            dl->AddText(ImVec2(textX, cardMin.y + (cardMax.y - cardMin.y - textSize.y) * 0.5f),
+                        IM_COL32(255, 175, 175, 255), label.c_str());
+        }
+
+        void drawLayerPortInteraction(ImDrawList* dl, GraphBase& graph,
+                                      const LayerInterfacePort& port,
+                                      const ImVec2& center, ImU32 color,
+                                      bool connected) {
+            Pin* proxyPin = graph.findPin(port.externalPinId);
+            if (!proxyPin) return;
+
+            // The external node is hidden in focused-layer view, so its real pin
+            // id can safely occupy the boundary position in the common pin map.
+            // findClosestPin()/drawCreatingLink() then require no special cases.
+            pinPositions_[proxyPin->id] = center;
+
+            const float radius = std::max(5.0f, 5.0f * zoom);
+            dl->AddCircle(center, radius, color, 0, 1.25f);
+            ImGui::SetCursorScreenPos(ImVec2(center.x - radius * 2.0f,
+                                             center.y - radius * 2.0f));
+            ImGui::PushID(static_cast<int>(focusedGroupId));
+            ImGui::PushID(static_cast<int>(port.id));
+            ImGui::InvisibleButton("LayerPort", ImVec2(radius * 4.0f, radius * 4.0f));
+            if (ImGui::IsItemHovered()) {
+                dl->AddCircle(center, radius * 1.55f, IM_COL32(255, 255, 255, 130), 0, 2.0f);
+                ImGui::SetTooltip("%s layer %s: drag to %s",
+                    connected ? "Connected" : "Disconnected",
+                    port.direction == LayerPortDirection::Input ? "input" : "output",
+                    port.direction == LayerPortDirection::Input ? "an internal input" : "an internal output");
+            }
+            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f) &&
+                !isCreatingLink) {
+                isCreatingLink = true;
+                linkStartPinId = proxyPin->id;
+                linkStartType = proxyPin->dataType;
+            }
+            ImGui::PopID();
+            ImGui::PopID();
+        }
+
         void drawCreatingLink(ImDrawList* dl) {
             auto it = pinPositions_.find(linkStartPinId);
             if (it == pinPositions_.end()) return;
@@ -1230,13 +2082,18 @@ namespace NodeSystem {
         
         void drawGroup(ImDrawList* dl, NodeGroup& group) {
             ImVec2 pos = nodeToScreen(group.position.x, group.position.y);
-            ImVec2 size(group.size.x * zoom, group.size.y * zoom);
+            ImVec2 size = group.collapsed
+                ? ImVec2(std::max(150.0f, 24.0f + ImGui::CalcTextSize(group.name.c_str()).x) * zoom,
+                         34.0f * zoom)
+                : ImVec2(group.size.x * zoom, group.size.y * zoom);
             
             float radius = 8.0f * zoom;
             
             ImVec4 colF = ImGui::ColorConvertU32ToFloat4(group.color);
-            // Soft translucent group backdrop
-            ImU32 bgCol = ImGui::ColorConvertFloat4ToU32(ImVec4(colF.x, colF.y, colF.z, 0.05f));
+            // Expanded frames preserve grid readability; collapsed groups become compact,
+            // clearly visible subsystem-layer tiles.
+            ImU32 bgCol = ImGui::ColorConvertFloat4ToU32(
+                ImVec4(colF.x, colF.y, colF.z, group.collapsed ? 0.20f : 0.035f));
             
             // Background
             dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bgCol, radius);
@@ -1251,23 +2108,25 @@ namespace NodeSystem {
                 isSelected ? 1.8f * zoom : 1.0f * zoom);
             
             // Resize Handle (Gaea-style)
-            ImVec2 resizeMin(pos.x + size.x - 12.0f * zoom, pos.y + size.y - 12.0f * zoom);
-            ImVec2 resizeMax(pos.x + size.x, pos.y + size.y);
-            ImU32 handleCol = (resizingGroupId == group.id) ? config.nodeSelectedColor : IM_COL32(160, 160, 170, 120);
-            dl->AddTriangleFilled(
-                ImVec2(resizeMax.x, resizeMin.y),
-                ImVec2(resizeMin.x, resizeMax.y),
-                resizeMax,
-                handleCol
-            );
+            if (!group.collapsed) {
+                ImVec2 resizeMin(pos.x + size.x - 12.0f * zoom, pos.y + size.y - 12.0f * zoom);
+                ImVec2 resizeMax(pos.x + size.x, pos.y + size.y);
+                ImU32 handleCol = (resizingGroupId == group.id) ? config.nodeSelectedColor : IM_COL32(160, 160, 170, 120);
+                dl->AddTriangleFilled(
+                    ImVec2(resizeMax.x, resizeMin.y),
+                    ImVec2(resizeMin.x, resizeMax.y),
+                    resizeMax,
+                    handleCol
+                );
 
-            ImGui::SetCursorScreenPos(resizeMin);
-            ImGui::PushID((int)group.id + 7000000);
-            ImGui::InvisibleButton("GroupResize", ImVec2(resizeMax.x - resizeMin.x, resizeMax.y - resizeMin.y));
-            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-                resizingGroupId = group.id;
+                ImGui::SetCursorScreenPos(resizeMin);
+                ImGui::PushID((int)group.id + 7000000);
+                ImGui::InvisibleButton("GroupResize", ImVec2(resizeMax.x - resizeMin.x, resizeMax.y - resizeMin.y));
+                if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                    resizingGroupId = group.id;
+                }
+                ImGui::PopID();
             }
-            ImGui::PopID();
             
             // Title Badge (translucent tab at the top-left)
             if (zoom > 0.3f && !group.name.empty()) {
@@ -1298,6 +2157,10 @@ namespace NodeSystem {
                     selectedGroupId = group.id;
                     selectedNodeIds.clear();
                     selectedNodeId = 0;
+                }
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    group.collapsed = !group.collapsed;
+                    if (onGraphModified) onGraphModified();
                 }
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
                     // OpenPopup() deferred to just after PopID() below — see
@@ -1334,11 +2197,13 @@ namespace NodeSystem {
             // Calculate bounds
             float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
             for (auto& node : graph.nodes) {
+                if (!isNodeVisible(graph, *node)) continue;
                 minX = std::min(minX, node->x);
                 minY = std::min(minY, node->y);
                 maxX = std::max(maxX, node->x + 200);
                 maxY = std::max(maxY, node->y + 100);
             }
+            if (minX == FLT_MAX) return;
             
             float rangeX = maxX - minX + 100;
             float rangeY = maxY - minY + 100;
@@ -1346,6 +2211,7 @@ namespace NodeSystem {
             
             // Draw nodes
             for (auto& node : graph.nodes) {
+                if (!isNodeVisible(graph, *node)) continue;
                 float nx = mmPos.x + 10 + (node->x - minX) * scale;
                 float ny = mmPos.y + 10 + (node->y - minY) * scale;
                 ImU32 col = node->metadata.headerColor ? node->metadata.headerColor 
@@ -1373,13 +2239,26 @@ namespace NodeSystem {
         
        
         void checkNodeDroppedOnLink(GraphBase& graph, NodeBase& node) {
+            // Auto-splice is a placement convenience for a fresh/unconnected
+            // node only. Repositioning an already wired node must never mutate
+            // its graph merely because its body crosses another cable.
+            const bool nodeAlreadyConnected = std::any_of(
+                graph.links.begin(), graph.links.end(),
+                [&graph, &node](const Link& link) {
+                    const NodeBase* startOwner = graph.getPinOwner(link.startPinId);
+                    const NodeBase* endOwner = graph.getPinOwner(link.endPinId);
+                    return (startOwner && startOwner->id == node.id) ||
+                           (endOwner && endOwner->id == node.id);
+                });
+            if (nodeAlreadyConnected) return;
+
             float customW = node.getCustomWidth();
             float padding = scaleNodeChromeMetric(zoom, 10.0f, 7.0f, 14.0f);
             float titleW = ImGui::CalcTextSize(node.metadata.displayName.c_str()).x + padding * 2;
             if (titleW < 10) titleW = ImGui::CalcTextSize(node.name.c_str()).x + padding * 2;
             NodeChromeLayout chrome = buildNodeChromeLayout(node, zoom, customW > 0.0f ? customW * zoom : 160.0f * zoom,
-                node.inputs.size(), node.outputs.size(), titleW);
-            
+                visiblePinCount(node.inputs), visiblePinCount(node.outputs), titleW);
+
             ImVec2 nodeScreenPos = nodeToScreen(node.x, node.y);
             ImVec2 center = ImVec2(nodeScreenPos.x + chrome.width * 0.5f, nodeScreenPos.y + chrome.height * 0.5f);
             
@@ -1391,17 +2270,13 @@ namespace NodeSystem {
                 if (!startOwner || !endOwner) continue;
                 if (startOwner->id == node.id || endOwner->id == node.id) continue;
                 
-                auto itStart = pinPositions_.find(link.startPinId);
-                auto itEnd = pinPositions_.find(link.endPinId);
-                if (itStart == pinPositions_.end() || itEnd == pinPositions_.end()) continue;
-                
-                ImVec2 p1 = itStart->second;
-                ImVec2 p2 = itEnd->second;
-                
-                float dist = std::abs(p1.x - p2.x);
-                float cpDist = std::max(dist * 0.5f, 50.0f * zoom);
-                ImVec2 cp1(p1.x + cpDist, p1.y);
-                ImVec2 cp2(p2.x - cpDist, p2.y);
+                const auto geometry = linkScreenGeometry_.find(link.id);
+                if (geometry == linkScreenGeometry_.end()) continue;
+
+                const ImVec2 p1 = geometry->second.p1;
+                const ImVec2 p2 = geometry->second.p2;
+                const ImVec2 cp1 = geometry->second.cp1;
+                const ImVec2 cp2 = geometry->second.cp2;
                 
                 ImVec2 prev = p1;
                 bool onLink = false;
@@ -1425,55 +2300,142 @@ namespace NodeSystem {
                     Pin* inPin = graph.findPin(link.endPinId);
                     if (!outPin || !inPin) continue;
                     
-                    // Find compatible input on node
+                    auto compatibilityScore = [](const Pin& candidate, const Pin& reference) {
+                        if (!candidate.canConnectTo(reference) && !reference.canConnectTo(candidate)) return -1;
+                        int score = candidate.dataType == reference.dataType ? 100 : 0;
+                        if (candidate.dataType == DataType::Image2D && reference.dataType == DataType::Image2D) {
+                            if (candidate.imageSemantic == reference.imageSemantic) score += 50;
+                            else if (candidate.imageSemantic == ImageSemantic::Generic ||
+                                     reference.imageSemantic == ImageSemantic::Generic) score += 10;
+                            if (candidate.imageChannels == reference.imageChannels) score += 20;
+                        }
+                        return score;
+                    };
+
+                    // Find the semantically closest compatible input/output.
                     Pin* compatibleIn = nullptr;
+                    int bestInputScore = -1;
                     for (auto& nIn : node.inputs) {
-                        if (outPin->canConnectTo(nIn)) {
+                        const int score = compatibilityScore(nIn, *outPin);
+                        if (score > bestInputScore) {
+                            bestInputScore = score;
                             compatibleIn = &nIn;
-                            break;
                         }
                     }
-                    
-                    // Find compatible output on node
+
                     Pin* compatibleOut = nullptr;
+                    int bestOutputScore = -1;
                     for (auto& nOut : node.outputs) {
-                        if (nOut.canConnectTo(*inPin)) {
+                        const int score = compatibilityScore(nOut, *inPin);
+                        if (score > bestOutputScore) {
+                            bestOutputScore = score;
                             compatibleOut = &nOut;
-                            break;
                         }
                     }
-                    
+
                     if (compatibleIn && compatibleOut) {
-                        graph.removeLink(link.id);
-                        graph.addLink(outPin->id, compatibleIn->id);
-                        graph.addLink(compatibleOut->id, inPin->id);
-                        
-                        if (onGraphModified) onGraphModified();
+                        const uint32_t oldLinkId = link.id;
+                        const uint32_t oldStartPinId = outPin->id;
+                        const uint32_t oldEndPinId = inPin->id;
+                        graph.removeLink(oldLinkId);
+                        const uint32_t incomingId = graph.addLink(oldStartPinId, compatibleIn->id);
+                        const uint32_t outgoingId = graph.addLink(compatibleOut->id, oldEndPinId);
+                        if (incomingId == 0 || outgoingId == 0) {
+                            if (incomingId != 0) graph.removeLink(incomingId);
+                            if (outgoingId != 0) graph.removeLink(outgoingId);
+                            graph.addLink(oldStartPinId, oldEndPinId);
+                        } else if (onGraphModified) {
+                            onGraphModified();
+                        }
                         break; // Inserted successfully
                     }
                 }
             }
         }
         
-        uint32_t findClosestPin(const ImVec2& mouse, float maxDist) {
-            uint32_t closest = 0;
-            float bestDist = maxDist;
-            
+        uint32_t findClosestPin(GraphBase& graph, const ImVec2& mouse, float maxDist) {
+            // Type-aware two-tier snap. The old plain nearest-pin snap with a
+            // 20px radius exceeded the ~18px pin spacing, so a release between
+            // two sockets silently landed on the neighbor — e.g. a texture
+            // meant for Base Color binding to Metallic — which reads as "wrong
+            // texture / wrong UV" in the render. Now:
+            //   1) pins the dragged link cannot connect to are skipped entirely,
+            //   2) an EXACT type match beats a merely convertible one
+            //      (Float<->Vector3) regardless of distance.
+            // Follow-up: "exact type wins REGARDLESS of distance" over-corrected. With a
+            // column of mixed-type sockets, aiming straight at a convertible pin still
+            // snapped to an exact-type pin one slot away — the link visibly jumped to the
+            // socket ABOVE the one under the cursor. Distance decides now; an exact type
+            // match only wins as a TIEBREAK, when it is within kExactBias of the nearest
+            // convertible one (well under a pin spacing, so it can never reach a neighbour).
+            //
+            // Also skipped outright: the dragged pin's own node, and any pin that would
+            // close a CYCLE. A cycle is not a cosmetic mistake here — every recursive walk
+            // over the graph runs without a visited set, so one loop is a stack overflow
+            // (0xC00000FD) and takes the process down. Not offering the pin is the cheapest
+            // place to stop it; GraphBase::addLink refuses it again as a backstop.
+            constexpr float kExactBias = 6.0f;
+
+            Pin* startPin = linkStartPinId ? graph.findPin(linkStartPinId) : nullptr;
+            NodeBase* startNode = linkStartPinId ? graph.getPinOwner(linkStartPinId) : nullptr;
+
+            uint32_t closestExact = 0;
+            float bestExact = maxDist;
+            uint32_t closestConv = 0;
+            float bestConv = maxDist;
+
             for (auto& [pinId, pos] : pinPositions_) {
                 if (pinId == linkStartPinId) continue;
-                float d = std::hypot(pos.x - mouse.x, pos.y - mouse.y);
-                if (d < bestDist) {
-                    bestDist = d;
-                    closest = pinId;
+                const float d = std::hypot(pos.x - mouse.x, pos.y - mouse.y);
+                if (d >= maxDist) continue;
+
+                if (!startPin) {
+                    if (d < bestConv) { bestConv = d; closestConv = pinId; }
+                    continue;
+                }
+                Pin* cand = graph.findPin(pinId);
+                if (!cand) continue;
+                if (startNode && graph.getPinOwner(pinId) == startNode) continue;   // same node
+                if (!startPin->canConnectTo(*cand) && !cand->canConnectTo(*startPin)) continue;
+
+                // Resolve producer -> consumer for the cycle test, whichever end was dragged.
+                const bool startIsOutput = (startPin->kind == PinKind::Output);
+                const uint32_t producerPin = startIsOutput ? linkStartPinId : pinId;
+                const uint32_t consumerPin = startIsOutput ? pinId : linkStartPinId;
+                if (graph.wouldCreateCycle(producerPin, consumerPin)) continue;
+
+                if (cand->dataType == startPin->dataType) {
+                    if (d < bestExact) { bestExact = d; closestExact = pinId; }
+                } else {
+                    if (d < bestConv) { bestConv = d; closestConv = pinId; }
                 }
             }
-            
-            return closest;
+
+            if (closestExact && closestConv) {
+                return (bestExact <= bestConv + kExactBias) ? closestExact : closestConv;
+            }
+            return closestExact ? closestExact : closestConv;
         }
         
         bool isLinkHovered(const ImVec2& p1, const ImVec2& cp1, 
                           const ImVec2& cp2, const ImVec2& p2) {
             ImVec2 mouse = ImGui::GetMousePos();
+
+            // Links are custom draw-list primitives rather than ImGui items, so
+            // their hit test must explicitly obey the canvas interaction domain.
+            // Without this guard, an off-canvas Bezier/control point could pass
+            // beneath the Properties panel; clicking a slider then selected that
+            // link and cleared selectedNodeId.
+            const bool mouseInsideCanvas =
+                mouse.x >= canvasPos_.x && mouse.y >= canvasPos_.y &&
+                mouse.x < canvasPos_.x + canvasSize_.x &&
+                mouse.y < canvasPos_.y + canvasSize_.y;
+            if (!mouseInsideCanvas ||
+                !ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem |
+                                        ImGuiHoveredFlags_ChildWindows)) {
+                return false;
+            }
+
             float threshold = 10.0f;
             
             ImVec2 prev = p1;

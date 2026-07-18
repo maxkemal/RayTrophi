@@ -29,8 +29,23 @@ layout(location = 1) rayPayloadInEXT vec4 shadowPayload;
 hitAttributeEXT vec4 hairAttrib; 
 
 void main() {
+    // ---- CAMERA / BOUNCE / PHOTON RAYS -------------------------------------
+    // Since camera rays dropped gl_RayFlagsOpaqueEXT (alpha cutout moved into
+    // the triangle any-hit), this shader runs for them too. The shadow logic
+    // below is WRONG for a camera ray: terminateRayEXT commits the FIRST hair
+    // candidate the BVH happens to test — not the closest hit — so a strand
+    // BEHIND a wall could beat the wall and render in front of it (and
+    // shadowPayload aliases the location-0 path payload, so writing it would
+    // corrupt radiance). Discriminator: every shadow/probe trace sets
+    // gl_RayFlagsSkipClosestHitShaderEXT; camera rays never do. Plain return =
+    // accept the candidate and let traversal keep searching for the true
+    // closest hit — identical to the old OpaqueEXT behavior for hair.
+    if ((gl_IncomingRayFlagsEXT & gl_RayFlagsSkipClosestHitShaderEXT) == 0u) {
+        return;
+    }
+
     float v = hairAttrib.w;
-    
+
     // Tip transparency (Matches OptiX logic: 1.0 - v * 0.3)
     // At root (v=0), opacity is 1.0. At tip (v=1), opacity is 0.7.
     float opacity = 1.0 - v * 0.3;

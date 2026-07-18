@@ -28,6 +28,8 @@
 #include <algorithm>
 #include <cctype>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <thread>
 #include <chrono>
 #ifdef _WIN32
@@ -1526,6 +1528,26 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
             SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(savedGraphCount) + " geometry node graphs.");
         }
 
+        // Material Node Graphs (MaterialNodesV2 Faz 1) — structure only (no binary
+        // payload; textures are referenced by name and re-resolved on load). A graph
+        // with just the default Output node still carries the user's seeded values,
+        // but it is equivalent to the material itself, so only graphs with at least
+        // one additional node are saved.
+        {
+            root["material_node_graphs"] = json::object();
+            size_t savedMatGraphCount = 0;
+            for (const auto& [matName, graphPtr] : scene.material_node_graphs) {
+                if (!graphPtr || graphPtr->nodes.size() <= 1) continue;
+                json jg;
+                MaterialNodesV2::serializeMaterialGraph(*graphPtr, jg);
+                root["material_node_graphs"][matName] = jg;
+                ++savedMatGraphCount;
+            }
+            if (savedMatGraphCount > 0) {
+                SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(savedMatGraphCount) + " material node graphs.");
+            }
+        }
+
         // Paint Layer Stacks
         if (!scene.mesh_paint_layer_stacks.empty()) {
             if (progress_callback) progress_callback(84, "Saving paint layers...");
@@ -1618,8 +1640,18 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         {
             ScopedPerfTimer timer("saveProject serialize textures");
             const bool embed_textures = (save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::Embedded);
+            // Textures the material node graphs reference but no material slot holds (an
+            // Image Texture behind a Bright/Contrast, ColorRamp, Mix, ...). Without these the
+            // project saves a graph pointing at a texture it never stored.
+            std::vector<std::shared_ptr<Texture>> graph_textures;
+            for (const auto& [matName, graphPtr] : scene.material_node_graphs) {
+                if (!graphPtr) continue;
+                for (auto& tex : MaterialNodesV2::collectGraphTextures(*graphPtr)) {
+                    graph_textures.push_back(std::move(tex));
+                }
+            }
             measureBinarySection("textures", [&]() {
-                root["textures"] = serializeTextures(out_bin, embed_textures);
+                root["textures"] = serializeTextures(out_bin, embed_textures, graph_textures);
             });
         }
         
@@ -2030,12 +2062,37 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
 
                     if (!baseTriangles.empty() && !stack.modifiers.empty()) {
                         scene.base_mesh_cache[nodeName] = baseTriangles;
-                        auto newMesh = stack.evaluate(baseTriangles);
+                        const bool hasWater = std::any_of(
+                            stack.modifiers.begin(), stack.modifiers.end(),
+                            [](const MeshModifiers::ModifierData& modifier) {
+                                return modifier.enabled &&
+                                       modifier.type == MeshModifiers::ModifierType::WaterSurface;
+                            });
+                        const bool hasSimpleSubdivision = std::any_of(
+                            stack.modifiers.begin(), stack.modifiers.end(),
+                            [](const MeshModifiers::ModifierData& modifier) {
+                                return modifier.enabled &&
+                                       modifier.type == MeshModifiers::ModifierType::FlatSubdivision;
+                            });
+                        std::shared_ptr<TriangleMesh> evaluatedMesh;
+                        auto newMesh = (hasWater || hasSimpleSubdivision)
+                            ? stack.evaluate(baseTriangles, false, &evaluatedMesh)
+                            : stack.evaluate(baseTriangles, false);
                         // Insert new mesh BEFORE foliage tail in a single range insertion
                         // (prevents quadratic complexity O(N*M) which freezes on high-poly meshes)
                         size_t insert_pos = remainingObjects.size() - mod_foliage_count;
-                        remainingObjects.insert(remainingObjects.begin() + insert_pos, newMesh.begin(), newMesh.end());
-                        mod_selectable += newMesh.size(); // Track new non-foliage count
+                        if (evaluatedMesh) {
+                            evaluatedMesh->nodeName = nodeName;
+                            remainingObjects.insert(remainingObjects.begin() + insert_pos, evaluatedMesh);
+                            ++mod_selectable;
+                            if (hasWater) {
+                                WaterManager::getInstance().bindExistingWaterMesh(
+                                    evaluatedMesh, WaterSurface::Type::Plane);
+                            }
+                        } else {
+                            remainingObjects.insert(remainingObjects.begin() + insert_pos, newMesh.begin(), newMesh.end());
+                            mod_selectable += newMesh.size(); // Track new non-foliage count
+                        }
                         scene.world.objects = remainingObjects;
                     }
                 }
@@ -2056,6 +2113,52 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                         if (graph) scene.geometry_node_graphs[it.key()] = graph;
                     }
                     SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.geometry_node_graphs.size()) + " geometry node graphs.");
+                }
+            }
+
+            // Material Node Graphs (MaterialNodesV2 Faz 1). NOT auto-applied on load:
+            // the saved material values ARE the last applied result — the graph is just
+            // re-attached so the next Apply works. Runs after materials deserialize, so
+            // texture-by-name references resolve against the live session first.
+            scene.material_node_graphs.clear();
+            {
+                simdjson::dom::element mat_graphs_el;
+                if (!root["material_node_graphs"].get(mat_graphs_el)) {
+                    nlohmann::json jGraphs = sjsonToNlohmann(mat_graphs_el);
+                    for (auto it = jGraphs.begin(); it != jGraphs.end(); ++it) {
+                        auto graph = MaterialNodesV2::deserializeMaterialGraph(it.value());
+                        if (graph) scene.material_node_graphs[it.key()] = graph;
+                    }
+                    if (!scene.material_node_graphs.empty()) {
+                        SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.material_node_graphs.size()) + " material node graphs.");
+                    }
+                    // Resolve the graphs' Image Texture references NOW, while the embedded
+                    // blob cache is still alive — clearEmbeddedTextureCache() runs at the end
+                    // of this load. A graph texture behind a manipulation node is bound to no
+                    // material slot, so nothing else has already pulled it out of the cache,
+                    // and by the time the editor lazily resolved it the blobs were gone: the
+                    // node came back empty. Resolving here also hands every node the SAME
+                    // Texture object the materials use, instead of a private duplicate.
+                    size_t resolvedGraphTextures = 0;
+                    for (const auto& [matName, graphPtr] : scene.material_node_graphs) {
+                        if (!graphPtr) continue;
+                        resolvedGraphTextures += MaterialNodesV2::collectGraphTextures(*graphPtr).size();
+                    }
+                    if (resolvedGraphTextures > 0) {
+                        SCENE_LOG_INFO("[ProjectManager] Resolved " + std::to_string(resolvedGraphTextures) +
+                                       " material-graph textures.");
+                    }
+
+                    // Rebuild the compiled per-pixel programs (textures are resolved by now, so
+                    // their chains compile with the right texture handles). Without this the
+                    // graph did nothing until the node editor was opened on that material and
+                    // Live was toggled — the only thing that re-ran the compile.
+                    const size_t activePrograms =
+                        MaterialNodesV2::compileGraphProgramsForScene(scene.material_node_graphs);
+                    if (activePrograms > 0) {
+                        SCENE_LOG_INFO("[ProjectManager] Compiled " + std::to_string(activePrograms) +
+                                       " per-pixel material programs from node graphs.");
+                    }
                 }
             }
 
@@ -2322,12 +2425,27 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     // Rebuild members
     for (auto& ctx : scene.importedModelContexts) {
         if (ctx.importName.empty()) continue;
+        if (!ctx.hasAnimation) {
+            for (const auto& animation : scene.animationDataList) {
+                if (animation &&
+                    (animation->modelName == ctx.importName ||
+                     (animation->modelName.empty() && scene.importedModelContexts.size() == 1))) {
+                    ctx.hasAnimation = true;
+                    break;
+                }
+            }
+        }
         ctx.members.clear();
         std::string prefix = ctx.importName + "_";
         for (size_t i = 0; i < selectable_count; ++i) {
             auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
             if (tri && tri->getNodeName().find(prefix) == 0) {
                 ctx.members.push_back(tri);
+                continue;
+            }
+            auto mesh = std::dynamic_pointer_cast<TriangleMesh>(scene.world.objects[i]);
+            if (mesh && mesh->nodeName.find(prefix) == 0) {
+                ctx.members.push_back(mesh);
             }
         }
         ctx.rebuildSkeletonRepresentation(scene.boneData);
@@ -2469,18 +2587,16 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
             constexpr size_t kMinFlatFaces = 1;
             std::unordered_map<TriangleMesh*, std::shared_ptr<TriangleMesh>> flatGroups;
             std::unordered_map<TriangleMesh*, size_t> faceCounts;
-            std::unordered_set<TriangleMesh*> disqualified;
             for (size_t i = objects_before; i < scene.world.objects.size(); ++i) {
                 auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
                 if (!tri || !tri->parentMesh) continue; // standalone / non-facade → leave as-is
                 TriangleMesh* pm = tri->parentMesh.get();
-                if (tri->hasSkinData()) { disqualified.insert(pm); continue; }
                 flatGroups[pm] = tri->parentMesh;
                 faceCounts[pm]++;
             }
             bool anyCollapse = false;
             for (const auto& [pm, count] : faceCounts) {
-                if (count >= kMinFlatFaces && !disqualified.count(pm)) { anyCollapse = true; break; }
+                if (count >= kMinFlatFaces) { anyCollapse = true; break; }
             }
             if (anyCollapse) {
                 std::vector<std::shared_ptr<Hittable>> rebuilt;
@@ -2490,8 +2606,7 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
                     if (i < objects_before) { rebuilt.push_back(scene.world.objects[i]); continue; }
                     auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
                     TriangleMesh* pm = (tri && tri->parentMesh) ? tri->parentMesh.get() : nullptr;
-                    const bool collapse = pm && !disqualified.count(pm) &&
-                                          faceCounts[pm] >= kMinFlatFaces;
+                    const bool collapse = pm && faceCounts[pm] >= kMinFlatFaces;
                     if (collapse) {
                         if (emitted.insert(pm).second) {
                             rebuilt.push_back(flatGroups[pm]); // one TriangleMesh Hittable per group
@@ -2973,14 +3088,12 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
         extern bool g_dense_mesh_as_hittable;
         if (!g_dense_mesh_as_hittable) return;
         std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>> legacyGroups;
-        int genuine_rig_facades = 0;
         for (const auto& obj : scene.world.objects) {
             auto t = std::dynamic_pointer_cast<Triangle>(obj);
             if (!t || t->parentMesh) continue;        // mesh-group facade handled elsewhere
             // hasAnySkinWeights() = REAL non-empty bone weights, NOT hasSkinData() (struct merely
             // allocated). A phantom skin (skinData!=0, all-empty weights — Tripo/imports) collapses
             // to flat; a genuine rig stays facade (SoA skinning write-back is a later increment).
-            if (t->hasAnySkinWeights()) { ++genuine_rig_facades; continue; }
             const std::string& nn = t->getNodeName();
             if (nn.empty()) continue;                 // unnamed loose tris stay as-is
             legacyGroups[nn].push_back(t);
@@ -3001,7 +3114,7 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
             auto t = std::dynamic_pointer_cast<Triangle>(obj);
             // Predicate MUST mirror the collection loop (hasAnySkinWeights, not hasSkinData), or a
             // phantom-skin facade is collected but never dropped → flat built then discarded.
-            if (t && !t->parentMesh && !t->hasAnySkinWeights()) {
+            if (t && !t->parentMesh) {
                 auto it = flatByNode.find(t->getNodeName());
                 if (it != flatByNode.end()) {
                     if (emitted.insert(t->getNodeName()).second) rebuilt.push_back(it->second);
@@ -3012,9 +3125,7 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
         }
         scene.world.objects = std::move(rebuilt);
         SCENE_LOG_INFO("[open-flat] collapsed " + std::to_string(flatByNode.size()) +
-                       " standalone facade mesh(es) to flat TriangleMesh" +
-                       (genuine_rig_facades ? " (" + std::to_string(genuine_rig_facades) +
-                                              " genuine-rig facades kept)" : ""));
+                       " standalone facade mesh(es) to flat TriangleMesh");
     };
 
     if (version >= 8) {
@@ -3125,7 +3236,7 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
             if (has_skin) {
                 for (const auto& w : triMesh->geometry->skin_weights) { if (!w.empty()) { real_has_skin = true; break; } }
             }
-            const bool emit_flat = g_dense_mesh_as_hittable && !real_has_skin && numTriangles >= 1;
+            const bool emit_flat = g_dense_mesh_as_hittable && numTriangles >= 1;
             if (has_skin && !real_has_skin)
                 SCENE_LOG_INFO(std::string("[open-flat] mesh-group node='") + nodeName +
                                "' phantom skin stripped -> FLAT");
@@ -3743,7 +3854,8 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
 // TEXTURE SERIALIZATION (Path or Embed)
 // ============================================================================
 
-json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textures) {
+json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textures,
+                                       const std::vector<std::shared_ptr<Texture>>& extra_textures) {
     ScopedPerfTimer total_timer("serializeTextures total");
     json arr = json::array();
     
@@ -3772,17 +3884,27 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
     
     SCENE_LOG_INFO("Starting texture serialization for " + std::to_string(mgr.getMaterialCount()) + " materials.");
 
-    for (size_t i = 0; i < mgr.getMaterialCount(); ++i) {
-        auto mat = mgr.getMaterial(static_cast<uint16_t>(i));
-        if (!mat) continue;
+    // One pass per material, plus a FINAL pass (i == materialCount) for textures that no
+    // material slot holds — the node graphs' Image Texture nodes. Their texture only feeds a
+    // slot through a manipulation node, so the graph is its only owner; walking material
+    // slots alone wrote projects that came back with an unresolvable texture reference.
+    const size_t materialCount = mgr.getMaterialCount();
+    for (size_t i = 0; i <= materialCount; ++i) {
+        PrincipledBSDF* pbsdf = nullptr;
+        if (i < materialCount) {
+            auto mat = mgr.getMaterial(static_cast<uint16_t>(i));
+            if (!mat) continue;
 
-        // CRITICAL FIX: Must cast to PrincipledBSDF to access texture properties correctly!
-        // Material base class may have different/shadowed albedoProperty member
-        if (mat->type() != MaterialType::PrincipledBSDF) continue;
-        
-        PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(mat);
-        if (!pbsdf) continue;
-        
+            // CRITICAL FIX: Must cast to PrincipledBSDF to access texture properties correctly!
+            // Material base class may have different/shadowed albedoProperty member
+            if (mat->type() != MaterialType::PrincipledBSDF) continue;
+
+            pbsdf = dynamic_cast<PrincipledBSDF*>(mat);
+            if (!pbsdf) continue;
+        } else if (extra_textures.empty()) {
+            continue;
+        }
+
         // Check all texture properties - use PrincipledBSDF pointer for correct member access
         auto checkTexture = [&](MaterialProperty& prop, const std::string& usage) {
             if (prop.texture && prop.texture->is_loaded()) {
@@ -4206,15 +4328,39 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
             }
         };
         
-        // Use PrincipledBSDF pointer for correct texture property access
-        checkTexture(pbsdf->albedoProperty, "albedo");
-        checkTexture(pbsdf->normalProperty, "normal");
-        checkTexture(pbsdf->roughnessProperty, "roughness");
-        checkTexture(pbsdf->metallicProperty, "metallic");
-        checkTexture(pbsdf->emissionProperty, "emission");
-        checkTexture(pbsdf->heightProperty, "height");
-        checkTexture(pbsdf->opacityProperty, "opacity");
-        checkTexture(pbsdf->transmissionProperty, "transmission");
+        if (pbsdf) {
+            // Use PrincipledBSDF pointer for correct texture property access
+            checkTexture(pbsdf->albedoProperty, "albedo");
+            checkTexture(pbsdf->normalProperty, "normal");
+            checkTexture(pbsdf->roughnessProperty, "roughness");
+            checkTexture(pbsdf->metallicProperty, "metallic");
+            checkTexture(pbsdf->emissionProperty, "emission");
+            checkTexture(pbsdf->heightProperty, "height");
+            checkTexture(pbsdf->opacityProperty, "opacity");
+            checkTexture(pbsdf->transmissionProperty, "transmission");
+            continue;
+        }
+
+        // Graph-only textures. `usage` decides the encoder (JPG vs PNG) and the TextureType
+        // the loader rebuilds them with, so it must come from the texture's own role — a
+        // normal/roughness map re-imported as sRGB albedo would come back wrong.
+        for (const auto& tex : extra_textures) {
+            if (!tex || !tex->is_loaded()) continue;
+            std::string usage = "albedo";
+            switch (tex->type) {
+                case TextureType::Normal:       usage = "normal"; break;
+                case TextureType::Roughness:    usage = "roughness"; break;
+                case TextureType::Metallic:     usage = "metallic"; break;
+                case TextureType::Specular:     usage = "specular"; break;
+                case TextureType::Emission:     usage = "emission"; break;
+                case TextureType::Opacity:      usage = "opacity"; break;
+                case TextureType::Transmission: usage = "transmission"; break;
+                default: break;
+            }
+            MaterialProperty prop;   // texture_map already de-dupes against the slot pass
+            prop.texture = tex;
+            checkTexture(prop, usage);
+        }
     }
     
     SCENE_LOG_INFO("[ProjectManager] Serialized " + std::to_string(arr.size()) + " textures.");
@@ -4227,6 +4373,44 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                    ", bin-bytes: " + std::to_string(texture_bin_bytes_written) +
                    ", project-local-bytes: " + std::to_string(project_local_bytes_written));
     return arr;
+}
+
+// Declared in MaterialNodesV2.h (which ProjectManager.h can't include — scene_data.h closes
+// the cycle). A material graph's Image Texture may be the ONLY reference to a texture, so
+// after a load there is no material slot to share an object with and, if the texture was
+// embedded, no file on disk either. This is the one place that can hand it back.
+// The map keeps one Texture per name: without it every node minted its own copy.
+std::shared_ptr<Texture> resolveEmbeddedProjectTexture(const std::string& name) {
+    if (name.empty()) return nullptr;
+
+    static std::mutex cacheMutex;
+    static std::unordered_map<std::string, std::weak_ptr<Texture>> cache;
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        auto it = cache.find(name);
+        if (it != cache.end()) {
+            if (auto alive = it->second.lock()) return alive;
+            cache.erase(it);
+        }
+    }
+
+    auto& pm = ProjectManager::getInstance();
+    const ProjectManager::EmbeddedTextureData* embedded = pm.getEmbeddedTexture(name);
+    std::shared_ptr<Texture> tex;
+    if (embedded && !embedded->data.empty()) {
+        tex = std::make_shared<Texture>(embedded->data, embedded->type, name);
+    } else if (const std::string* remapped = pm.getTexturePathRemap(name)) {
+        // Saved as a project-local file under a new path; the graph still stores the original name.
+        tex = std::make_shared<Texture>(*remapped, TextureType::Albedo);
+    }
+    if (!tex || !tex->is_loaded()) return nullptr;
+
+    tex->name = name;   // keep the name the graph (and the project manifest) refers to
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        cache[name] = tex;
+    }
+    return tex;
 }
 
 void ProjectManager::deserializeTextures(const json& j, std::ifstream& bin_in, const std::string& project_dir) {

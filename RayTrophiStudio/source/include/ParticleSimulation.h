@@ -394,6 +394,11 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle cg_As;         // As = A*s
     ComputeBufferHandle cg_diag;       // diagonal (in-bounds neighbour count)
     ComputeBufferHandle cg_partials;   // double[] block partial sums
+    // Device-resident CG scalars (Vulkan fast path): [0]=sigma [1]=sigma0
+    // [2]=sAs [3]=alpha [4]=beta [5]=sigma_new [6]=degenerate flag. Keeping
+    // alpha/beta on the GPU collapses the per-dot submit+fence round-trips
+    // (the dominant Vulkan MGPCG cost) into one tiny download every K iters.
+    ComputeBufferHandle cg_scalars;    // double[7]
     // Variational solid coupling (GPU Stage 1): MAC-face fractional open weights
     // (uint8_t->float conversion happens on upload) and per-cell solid velocity.
     ComputeBufferHandle var_u_weight;   // float[(nx+1)*ny*nz]

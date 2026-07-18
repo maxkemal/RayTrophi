@@ -283,6 +283,33 @@ Vec3 applyDisneyMultiScattering(const Vec3& specular, const Vec3& F0,
 }
 
 
+void PrincipledBSDF::applyProgramSurface(const HitRecord& rec,
+                                         Vec3* albedo, float* roughness, float* metallic,
+                                         float* specular, float* transmission) const {
+    if (!proceduralProgram || !proceduralProgram->active) return;
+
+    const float pp[3] = { static_cast<float>(rec.point.x), static_cast<float>(rec.point.y), static_cast<float>(rec.point.z) };
+    const float pn[3] = { static_cast<float>(rec.normal.x), static_cast<float>(rec.normal.y), static_cast<float>(rec.normal.z) };
+    const float po3[3] = { rec.object_origin.x, rec.object_origin.y, rec.object_origin.z };
+    const float pobj[3] = { rec.object_position.x, rec.object_position.y, rec.object_position.z };
+    // A zero view vector means the producer had no ray to give; hand the VM null rather
+    // than (0,0,0), so it falls back to the normal (head-on) instead of computing a
+    // cosine against a degenerate vector.
+    const float pview[3] = { rec.view_dir.x, rec.view_dir.y, rec.view_dir.z };
+    const bool hasView = (rec.view_dir.length_squared() > 1e-8f);
+    const MaterialNodesV2::MatProgramOutputs po =
+        MaterialNodesV2::evalMaterialProgram(*proceduralProgram,
+                                             static_cast<float>(rec.u), static_cast<float>(rec.v), pp, pn,
+                                             rec.pointiness, po3, rec.mat_attrib, pobj,
+                                             hasView ? pview : nullptr);
+    using MaterialNodesV2::MatSlot;
+    if (albedo       && po.has(MatSlot::BaseColor))    *albedo       = Vec3(po.baseColor[0], po.baseColor[1], po.baseColor[2]);
+    if (roughness    && po.has(MatSlot::Roughness))    *roughness    = po.roughness;
+    if (metallic     && po.has(MatSlot::Metallic))     *metallic     = po.metallic;
+    if (specular     && po.has(MatSlot::Specular))     *specular     = po.specular;
+    if (transmission && po.has(MatSlot::Transmission)) *transmission = po.transmission;
+}
+
 bool PrincipledBSDF::scatter(
     const Ray& r_in,
     const HitRecord& rec,
@@ -310,6 +337,11 @@ bool PrincipledBSDF::scatter(
         metallic = getMetallicValue(Vec2(rec.u, rec.v));
         specular = getSpecularValue(Vec2(rec.u, rec.v));
         transmissionValue = getTransmission(Vec2(rec.u, rec.v));
+
+        // ── Faz 2a per-pixel material program ────────────────────────────────
+        // Overrides the driven slots point-by-point (texture/Noise/Voronoi/Checker/Ramp
+        // chains). Null / inactive = folded constants above stand (zero cost).
+        applyProgramSurface(rec, &albedo, &roughness, &metallic, &specular, &transmissionValue);
     }
 
     // ── Procedural surface detail ────────────────────────────────────────────
@@ -464,6 +496,9 @@ float PrincipledBSDF::pdf(const HitRecord& rec, const Vec3& incoming, const Vec3
     } else {
         metallic = getMetallicValue(Vec2(rec.u, rec.v));
         roughness = getRoughnessValue(Vec2(rec.u, rec.v));
+        // Faz 2a: keep the PDF's roughness/metallic in lockstep with scatter's
+        // per-pixel program, or importance-sampling MIS weights would drift.
+        applyProgramSurface(rec, nullptr, &roughness, &metallic, nullptr, nullptr);
     }
     float cos_theta = std::fmax(Vec3::dot(rec.normal, outgoing), 0.0f);
     Vec3 emission = getPropertyValue(emissionProperty, Vec2(rec.u, rec.v));

@@ -30,7 +30,8 @@ public:
     BackendInfo getInfo() const override;
     GpuMemoryStats getMemoryStats() const override;
 
-    uint32_t uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName) override;
+    uint32_t uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName,
+                             const std::vector<float>* cornerAttribs = nullptr) override;
     uint32_t uploadHairStrands(const std::vector<HairStrandData>& strands, const std::string& groomName) override;
     void updateMeshTransform(uint32_t meshHandle, const Matrix4x4& transform) override;
     void rebuildAccelerationStructure() override;

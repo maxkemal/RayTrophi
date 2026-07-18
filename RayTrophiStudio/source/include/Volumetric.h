@@ -31,7 +31,12 @@ public:
     virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered, bool& is_specular) const override;
     
     // Emissions
-    virtual Vec3 getEmission(const Vec2& uv, const Vec3& p) const override;
+    virtual Vec3 getEmission(const Vec2& uv, const Vec3& p, float pointiness = 0.5f,
+                             const Vec3& objectOrigin = Vec3(),
+                             const float* attribs = nullptr,
+                             const float* objectPos = nullptr,
+                             const Vec3* shadingNormal = nullptr,
+                             const Vec3& viewDir = Vec3()) const override;
     virtual Vec3 getEmission() const override;
 
     // Helper methods

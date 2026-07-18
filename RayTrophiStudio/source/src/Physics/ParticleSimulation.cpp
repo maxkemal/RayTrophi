@@ -1248,7 +1248,8 @@ void splatFluidDensityCPU(SimulationGridDomainState& state, const Fluid::APICSol
 
 bool ensureGpuFluidParticleBuffers(SimulationGridDomainState& state,
                                    SimulationComputeContext* compute,
-                                   SimulationGridDomainComputeBuffers& gpu_buffers) {
+                                   SimulationGridDomainComputeBuffers& gpu_buffers,
+                                   bool upload_positions_only = false) {
     const std::size_t particle_count = state.particles.size();
     if (!compute || particle_count == 0) {
         return false;
@@ -1301,15 +1302,24 @@ bool ensureGpuFluidParticleBuffers(SimulationGridDomainState& state,
         return false;
     }
 
-    return compute->uploadBuffer(gpu_buffers.fluid_positions,
-                                 state.particles.position.data(),
-                                 position_bytes) &&
-           compute->uploadBuffer(gpu_buffers.fluid_velocities,
-                                 state.particles.velocity.data(),
-                                 velocity_bytes) &&
-           compute->uploadBuffer(gpu_buffers.fluid_affine,
-                                 state.particles.affine.data(),
-                                 affine_bytes);
+    // One batched submission for all three particle streams (on Vulkan each
+    // separate uploadBuffer is a queue submit + fence wait). Consumers that
+    // only read positions (density splat after advection) skip the velocity +
+    // affine streams — ~80% of the per-call upload volume.
+    compute->beginTransferBatch();
+    bool ok = compute->uploadBuffer(gpu_buffers.fluid_positions,
+                                    state.particles.position.data(),
+                                    position_bytes);
+    if (!upload_positions_only) {
+        ok = ok &&
+             compute->uploadBuffer(gpu_buffers.fluid_velocities,
+                                   state.particles.velocity.data(),
+                                   velocity_bytes) &&
+             compute->uploadBuffer(gpu_buffers.fluid_affine,
+                                   state.particles.affine.data(),
+                                   affine_bytes);
+    }
+    return compute->endTransferBatch() && ok;
 }
 
 bool runGpuFluidParticleIntegrateForces(SimulationGridDomainState& state,
@@ -1393,6 +1403,10 @@ void enforceGridSolidFaceBoundaries(FluidSim::FluidGrid& grid) {
         return;
     }
 
+    // Runs inside the (timed) GPU pressure path every substep when colliders
+    // exist — single-threaded it was a hidden multi-ms cost at high res. Each
+    // face write is independent; parallelize over k slabs.
+    #pragma omp parallel for schedule(static)
     for (int k = 0; k < grid.nz; ++k) {
         for (int j = 0; j < grid.ny; ++j) {
             for (int i = 0; i <= grid.nx; ++i) {
@@ -1404,6 +1418,7 @@ void enforceGridSolidFaceBoundaries(FluidSim::FluidGrid& grid) {
         }
     }
 
+    #pragma omp parallel for schedule(static)
     for (int k = 0; k < grid.nz; ++k) {
         for (int j = 0; j <= grid.ny; ++j) {
             for (int i = 0; i < grid.nx; ++i) {
@@ -1415,6 +1430,7 @@ void enforceGridSolidFaceBoundaries(FluidSim::FluidGrid& grid) {
         }
     }
 
+    #pragma omp parallel for schedule(static)
     for (int k = 0; k <= grid.nz; ++k) {
         for (int j = 0; j < grid.ny; ++j) {
             for (int i = 0; i < grid.nx; ++i) {
@@ -1437,9 +1453,11 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         grid.vel_x.empty() || grid.vel_y.empty() || grid.vel_z.empty()) {
         return false;
     }
+    const auto p2g_phase0 = SimulationClock::now();
     if (!ensureGpuFluidParticleBuffers(state, compute, gpu_buffers)) {
         return false;
     }
+    const auto p2g_phase1 = SimulationClock::now(); // particle upload done
 
     ComputeBufferHandle velocity_fields[3] = {
         gpu_buffers.vel_x,
@@ -1507,11 +1525,35 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         ok = ok && compute->dispatch(cmd);
     }
     compute->synchronize();
+    const auto p2g_phase2 = SimulationClock::now(); // dispatches + sync done
 
+    compute->beginTransferBatch();
     ok = ok &&
          compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
          compute->downloadBuffer(gpu_buffers.vel_y, grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
          compute->downloadBuffer(gpu_buffers.vel_z, grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
+    ok = compute->endTransferBatch() && ok;
+
+    // Phase breakdown, averaged and logged every ~240 substeps so the real
+    // bottleneck (transfer vs kernel vs sync) is visible per backend without a
+    // profiler. Negligible overhead; remove once the perf work settles.
+    {
+        static float s_up = 0.0f, s_disp = 0.0f, s_down = 0.0f;
+        static int   s_n = 0;
+        s_up   += elapsedMilliseconds(p2g_phase0, p2g_phase1);
+        s_disp += elapsedMilliseconds(p2g_phase1, p2g_phase2);
+        s_down += elapsedMilliseconds(p2g_phase2, SimulationClock::now());
+        if (++s_n >= 240) {
+            const float inv = 1.0f / static_cast<float>(s_n);
+            SCENE_LOG_INFO("[FluidGPU P2G avg ms] backend=" + std::string(compute->backendName()) +
+                           " particle_upload=" + std::to_string(s_up * inv) +
+                           " dispatch+sync=" + std::to_string(s_disp * inv) +
+                           " field_download=" + std::to_string(s_down * inv) +
+                           " particles=" + std::to_string(particle_count));
+            s_up = s_disp = s_down = 0.0f;
+            s_n = 0;
+        }
+    }
     return ok;
 }
 
@@ -1527,7 +1569,8 @@ bool runGpuFluidDensitySplat(SimulationGridDomainState& state,
         return false;
     }
 
-    if (!ensureGpuFluidParticleBuffers(state, compute, gpu_buffers) ||
+    if (!ensureGpuFluidParticleBuffers(state, compute, gpu_buffers,
+                                       /*upload_positions_only=*/true) ||
         !gpu_buffers.density.valid()) {
         return false;
     }
@@ -1645,8 +1688,12 @@ bool runGpuFluidFreeSurfacePressure(SimulationGridDomainState& state,
     cmd.constants      = &c;
     cmd.constants_size = sizeof(c);
 
+    // Mask-aware free-surface divergence/gradient kernels now exist on BOTH
+    // GPU backends (Vulkan port of the CUDA fluid kernels); the gas-domain
+    // sim_grid_* fallback is no longer used for liquids.
     const bool use_cuda_fluid_projection =
-        compute->backendType() == ComputeBackendType::CUDA;
+        compute->backendType() == ComputeBackendType::CUDA ||
+        compute->backendType() == ComputeBackendType::VulkanCompute;
     ComputeBufferHandle fluid_divergence_bufs[5] = {
         gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z,
         gpu_buffers.fluid_mask, gpu_buffers.divergence
@@ -1742,11 +1789,16 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         std::max({grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size()}));
 
     // Upload velocity (already reflects boundary + viscosity from CPU) + mask.
+    // Batched: one submission instead of four (Vulkan submit+fence per copy).
+    const auto mg_upload_begin = SimulationClock::now();
+    compute->beginTransferBatch();
     bool ok = compute->uploadBuffer(gpu_buffers.vel_x,      grid.vel_x.data(),      grid.vel_x.size() * sizeof(float)) &&
               compute->uploadBuffer(gpu_buffers.vel_y,      grid.vel_y.data(),      grid.vel_y.size() * sizeof(float)) &&
               compute->uploadBuffer(gpu_buffers.vel_z,      grid.vel_z.data(),      grid.vel_z.size() * sizeof(float)) &&
               compute->uploadBuffer(gpu_buffers.fluid_mask, fluid_mask_cpu.data(),  fluid_mask_cpu.size() * sizeof(float));
+    ok = compute->endTransferBatch() && ok;
     if (!ok) return false;
+    const float mg_upload_ms = elapsedMilliseconds(mg_upload_begin, SimulationClock::now());
 
     const bool is_variational = fluid_params.variational_solids &&
                                 (grid.u_weight.size() == grid.vel_x.size()) &&
@@ -1836,11 +1888,23 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     };
 
     // divergence = (div u)/h  (positive; the residual_init kernel negates it).
-    // CUDA has a fluid-mask-aware path that mirrors the CPU free-surface solver:
-    // solid neighbours contribute zero flux, and later gradient subtraction
-    // updates only fluid/air faces while zeroing true solid faces.
+    // Both GPU backends now carry the fluid-mask-aware path that mirrors the
+    // CPU free-surface solver: solid neighbours contribute zero flux, and later
+    // gradient subtraction updates only fluid/air faces while zeroing true
+    // solid faces. (Vulkan: Faz 1 port — plain path only, see gate below.)
     const bool use_cuda_fluid_projection =
-        compute->backendType() == ComputeBackendType::CUDA;
+        compute->backendType() == ComputeBackendType::CUDA ||
+        compute->backendType() == ComputeBackendType::VulkanCompute;
+
+    // Faz 1 Vulkan MGPCG port covers only the PLAIN free-surface system. When
+    // the sim actually carries variational solid weights or a GFM level set,
+    // the Vulkan kernels would silently solve the wrong (binary-solid) matrix —
+    // fall back to the CPU PCG, which fully supports both.
+    if (compute->backendType() == ComputeBackendType::VulkanCompute &&
+        ((fluid_params.variational_solids && grid.u_weight.size() == grid.vel_x.size()) ||
+         (fluid_params.ghost_fluid_surface && grid.fluid_phi.size() == cell_count))) {
+        return false;
+    }
     ComputeBufferHandle proj_bufs[5] = {
         gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z,
         gpu_buffers.pressure, gpu_buffers.divergence
@@ -2119,6 +2183,158 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         return dotProduct(gpu_buffers.cg_search, gpu_buffers.cg_As, out);
     };
 
+    const double rel_tol_pre = std::clamp(static_cast<double>(fluid_params.pressure_relative_residual),
+                                          1.0e-8, 1.0e-2);
+    const double tol_pre     = rel_tol_pre * rel_tol_pre;             // relative on r.z
+    const int    max_iter_pre = std::max(1, fluid_params.pressure_iterations);
+
+    // ── GPU fast path: device-resident CG scalars ────────────────────────────
+    // The generic loop below downloads a dot product TWICE per iteration —
+    // a full vkQueueSubmit/vkWaitForFences on Vulkan, a blocking stream sync
+    // on CUDA (the HUD's "MGPCG dot sync" measured that at ~80% of the CUDA
+    // pressure solve). Here alpha/beta/sigma live in a 7-double GPU buffer
+    // (sim_fluid_cg_scalar_step tree-reduces the block partials on 256
+    // threads); the host only synchronizes + downloads 56 bytes every K
+    // iterations for the convergence check. Fused kernels (spmv+dot,
+    // jacobi+dot, paired axpy) keep it at 6 dispatches per iteration.
+    // Plain branch only: variational/GFM stay on the generic loop (Vulkan
+    // already CPU-fallbacks those upstream), and CUDA keeps the generic loop
+    // when the multigrid preconditioner is available — this branch is
+    // Jacobi-only and must not silently swap the preconditioner.
+    const bool device_scalar_cg =
+        gpu_buffers.cg_scalars.valid() && !is_variational && !is_gfm &&
+        (compute->backendType() == ComputeBackendType::VulkanCompute ||
+         (compute->backendType() == ComputeBackendType::CUDA &&
+          (!fluid_params.pressure_multigrid_preconditioner ||
+           gpu_buffers.mg_levels.empty())));
+    if (device_scalar_cg) {
+        const auto mg_loop_begin = SimulationClock::now();
+        c.iterations = static_cast<int>(dot_blocks); // partials count for scalar_step
+
+        // z = M^-1 r + partials(r.z) fused ; sigma0 ; s = z
+        { ComputeBufferHandle b[4] = { gpu_buffers.cg_residual, gpu_buffers.cg_diag,
+                                       gpu_buffers.cg_z, gpu_buffers.cg_partials };
+          ok = dispatch1("sim_fluid_cg_jacobi_dot", b, 4, dot_blocks); }
+        c.parity = 0; // op: sigma = sum; sigma0 = sigma
+        { ComputeBufferHandle b[2] = { gpu_buffers.cg_partials, gpu_buffers.cg_scalars };
+          ok = ok && dispatch1("sim_fluid_cg_scalar_step", b, 2, 1); }
+        { ComputeBufferHandle b[2] = { gpu_buffers.cg_search, gpu_buffers.cg_z };
+          ok = ok && dispatch1("sim_fluid_cg_copy", b, 2, cell_groups); }
+
+        constexpr int kCheckEvery = 8;
+        double host_scalars[7] = {};
+        int done_iters = 0;
+        while (ok && done_iters < max_iter_pre) {
+            const int batch = std::min(kCheckEvery, max_iter_pre - done_iters);
+            for (int k = 0; k < batch && ok; ++k) {
+                // As = A s + partials(s.As) fused ; alpha = sigma/sAs
+                { ComputeBufferHandle b[5] = { gpu_buffers.cg_search, gpu_buffers.fluid_mask,
+                                               gpu_buffers.cg_diag, gpu_buffers.cg_As,
+                                               gpu_buffers.cg_partials };
+                  ok = dispatch1("sim_fluid_cg_spmv_dot", b, 5, dot_blocks); }
+                c.parity = 1; // op: sAs + alpha
+                { ComputeBufferHandle b[2] = { gpu_buffers.cg_partials, gpu_buffers.cg_scalars };
+                  ok = ok && dispatch1("sim_fluid_cg_scalar_step", b, 2, 1); }
+                // p += alpha s ; r -= alpha As (fused pair)
+                { ComputeBufferHandle b[5] = { gpu_buffers.pressure, gpu_buffers.cg_search,
+                                               gpu_buffers.cg_residual, gpu_buffers.cg_As,
+                                               gpu_buffers.cg_scalars };
+                  ok = ok && dispatch1("sim_fluid_cg_axpy2_dev", b, 5, cell_groups); }
+                // z = M^-1 r + partials(r.z) fused ; sigma_new ; beta
+                { ComputeBufferHandle b[4] = { gpu_buffers.cg_residual, gpu_buffers.cg_diag,
+                                               gpu_buffers.cg_z, gpu_buffers.cg_partials };
+                  ok = ok && dispatch1("sim_fluid_cg_jacobi_dot", b, 4, dot_blocks); }
+                c.parity = 2; // op: sigma_new + beta (+ sigma = sigma_new)
+                { ComputeBufferHandle b[2] = { gpu_buffers.cg_partials, gpu_buffers.cg_scalars };
+                  ok = ok && dispatch1("sim_fluid_cg_scalar_step", b, 2, 1); }
+                // s = z + beta s
+                { ComputeBufferHandle b[3] = { gpu_buffers.cg_search, gpu_buffers.cg_z, gpu_buffers.cg_scalars };
+                  ok = ok && dispatch1("sim_fluid_cg_zpby_dev", b, 3, cell_groups); }
+            }
+            if (!ok) break;
+            done_iters += batch;
+
+            const auto dot_begin = SimulationClock::now();
+            compute->synchronize();
+            if (!compute->downloadBuffer(gpu_buffers.cg_scalars, host_scalars, sizeof(host_scalars))) {
+                ok = false;
+                break;
+            }
+            dot_ms += elapsedMilliseconds(dot_begin, SimulationClock::now());
+            ++dot_count;
+
+            const double sigma0_dev    = host_scalars[1];
+            const double sigma_new_dev = host_scalars[5];
+            if (host_scalars[6] != 0.0) break;              // degenerate (no fluid rows)
+            if (sigma0_dev <= 0.0) break;                    // nothing to solve
+            if (sigma_new_dev <= tol_pre * sigma0_dev) break; // converged
+        }
+        if (!ok) return false;
+
+        if (mgpcg_stats) {
+            mgpcg_stats->pressure_cg_iterations = done_iters;
+            mgpcg_stats->pressure_cg_max_iterations = max_iter_pre;
+            mgpcg_stats->pressure_cg_dot_count = dot_count;
+            mgpcg_stats->pressure_cg_dot_ms = dot_ms;
+            mgpcg_stats->pressure_cg_multigrid = false;
+            mgpcg_stats->pressure_cg_final_relative_residual =
+                (host_scalars[1] > 0.0)
+                    ? std::sqrt(std::max(0.0, host_scalars[5]) / host_scalars[1])
+                    : 0.0;
+        }
+
+        // Subtract pressure gradient from velocity (shared tail below expects
+        // the generic loop's locals — do it here and return directly).
+        ComputeBufferHandle vk_grad_bufs[5] = {
+            gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z,
+            gpu_buffers.pressure, gpu_buffers.fluid_mask
+        };
+        cmd.kernel          = "sim_fluid_subtract_gradient";
+        cmd.buffers         = vk_grad_bufs;
+        cmd.buffer_count    = 5;
+        cmd.constants       = &c;
+        cmd.constants_size  = sizeof(c);
+        cmd.groups.groups_x = (max_faces + threads - 1u) / threads;
+        cmd.groups.groups_y = 1;
+        cmd.groups.groups_z = 1;
+        const auto mg_tail_begin = SimulationClock::now();
+        ok = compute->dispatch(cmd);
+        compute->synchronize();
+
+        compute->beginTransferBatch();
+        ok = ok &&
+             compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
+             compute->downloadBuffer(gpu_buffers.vel_y, grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
+             compute->downloadBuffer(gpu_buffers.vel_z, grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
+        ok = compute->endTransferBatch() && ok;
+
+        // Phase breakdown, averaged and logged every ~240 substeps (see the
+        // matching block in runGpuFluidP2G). cg=init+iterations+syncs,
+        // tail=gradient dispatch+sync+velocity download.
+        {
+            static float s_up = 0.0f, s_cg = 0.0f, s_tail = 0.0f;
+            static float s_iters = 0.0f;
+            static int   s_n = 0;
+            s_up   += mg_upload_ms;
+            s_cg   += elapsedMilliseconds(mg_loop_begin, mg_tail_begin);
+            s_tail += elapsedMilliseconds(mg_tail_begin, SimulationClock::now());
+            s_iters += static_cast<float>(done_iters);
+            if (++s_n >= 240) {
+                const float inv = 1.0f / static_cast<float>(s_n);
+                SCENE_LOG_INFO("[FluidGPU MGPCG avg ms] backend=" + std::string(compute->backendName()) +
+                               " upload=" + std::to_string(s_up * inv) +
+                               " cg_loop=" + std::to_string(s_cg * inv) +
+                               " grad+download=" + std::to_string(s_tail * inv) +
+                               " iters=" + std::to_string(s_iters * inv) +
+                               " cells=" + std::to_string(cell_count));
+                s_up = s_cg = s_tail = s_iters = 0.0f;
+                s_n = 0;
+            }
+        }
+        return ok;
+    }
+
+    const auto mg_loop_begin = SimulationClock::now();
     double sigma = 0.0;
     if (!jacobiAndDot(sigma)) return false;
     // s = z
@@ -2126,10 +2342,8 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
       if (!dispatch1("sim_fluid_cg_copy", b, 2, cell_groups)) return false; }
 
     const double sigma0   = sigma;
-    const double rel_tol   = std::clamp(static_cast<double>(fluid_params.pressure_relative_residual),
-                                        1.0e-8, 1.0e-2);
-    const double tol       = rel_tol * rel_tol;                       // relative on r.z
-    const int    max_iter  = std::max(1, fluid_params.pressure_iterations);
+    const double tol      = tol_pre;                                  // relative on r.z
+    const int    max_iter = max_iter_pre;
     int iterations_used = 0;
 
     if (sigma0 > 0.0) {
@@ -2201,14 +2415,40 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     cmd.groups.groups_x = (max_faces + threads - 1u) / threads;
     cmd.groups.groups_y = 1;
     cmd.groups.groups_z = 1;
+    const auto mg_tail_begin = SimulationClock::now();
     ok = compute->dispatch(cmd);
     compute->synchronize();
 
     // Download updated velocities for CPU boundary re-enforcement and G2P.
+    compute->beginTransferBatch();
     ok = ok &&
          compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
          compute->downloadBuffer(gpu_buffers.vel_y, grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
          compute->downloadBuffer(gpu_buffers.vel_z, grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
+    ok = compute->endTransferBatch() && ok;
+
+    // Phase breakdown for the generic/CUDA path — mirrors the Vulkan
+    // device-scalar branch above so both backends print a comparable line.
+    {
+        static float s_up = 0.0f, s_cg = 0.0f, s_tail = 0.0f;
+        static float s_iters = 0.0f;
+        static int   s_n = 0;
+        s_up   += mg_upload_ms;
+        s_cg   += elapsedMilliseconds(mg_loop_begin, mg_tail_begin);
+        s_tail += elapsedMilliseconds(mg_tail_begin, SimulationClock::now());
+        s_iters += static_cast<float>(iterations_used);
+        if (++s_n >= 240) {
+            const float inv = 1.0f / static_cast<float>(s_n);
+            SCENE_LOG_INFO("[FluidGPU MGPCG avg ms] backend=" + std::string(compute->backendName()) +
+                           " upload=" + std::to_string(s_up * inv) +
+                           " cg_loop=" + std::to_string(s_cg * inv) +
+                           " grad+download=" + std::to_string(s_tail * inv) +
+                           " iters=" + std::to_string(s_iters * inv) +
+                           " cells=" + std::to_string(cell_count));
+            s_up = s_cg = s_tail = s_iters = 0.0f;
+            s_n = 0;
+        }
+    }
     return ok;
 }
 
@@ -2242,6 +2482,7 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
     // Upload post-projection velocities (may already be up-to-date after
     // runGpuFluidFreeSurfacePressure, but we re-upload to be safe when the
     // caller has modified the CPU copy via boundary enforcement).
+    compute->beginTransferBatch();
     bool ok = compute->uploadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
               compute->uploadBuffer(gpu_buffers.vel_y, grid.vel_y.data(), grid.vel_y.size() * sizeof(float)) &&
               compute->uploadBuffer(gpu_buffers.vel_z, grid.vel_z.data(), grid.vel_z.size() * sizeof(float));
@@ -2263,6 +2504,7 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
     ok = ok && compute->uploadBuffer(gpu_buffers.fluid_velocities,
                                      particles.velocity.data(),
                                      n * sizeof(Vec3));
+    ok = compute->endTransferBatch() && ok;
     if (!ok) return false;
 
     FluidG2PGpuConstants c;
@@ -2280,7 +2522,11 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
     c.max_velocity      = fluid_params.max_velocity;
     c.dt                = dt;
     c.has_flip_snapshot = has_flip_snapshot ? 1 : 0;
-    c.use_solid_flip_limiter = compute->backendType() == ComputeBackendType::CUDA ? 1 : 0;
+    // Same limiter on both GPU backends (the Vulkan g2p shader now carries the
+    // fluid_mask binding + wall-axis damping, 1:1 with the CUDA kernel).
+    c.use_solid_flip_limiter =
+        (compute->backendType() == ComputeBackendType::CUDA ||
+         compute->backendType() == ComputeBackendType::VulkanCompute) ? 1 : 0;
     c.affine_damping    = fluid_params.affine_damping;
     c.max_affine        = fluid_params.max_affine;
 
@@ -2307,6 +2553,7 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
     ok = compute->dispatch(cmd);
     compute->synchronize();
 
+    compute->beginTransferBatch();
     ok = ok &&
          compute->downloadBuffer(gpu_buffers.fluid_velocities,
                                  particles.velocity.data(),
@@ -2314,6 +2561,7 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
          compute->downloadBuffer(gpu_buffers.fluid_affine,
                                  particles.affine.data(),
                                  n * sizeof(Fluid::AffineC));
+    ok = compute->endTransferBatch() && ok;
     return ok;
 }
 
@@ -4205,7 +4453,13 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
             static_cast<std::size_t>(max_auto_res) *
             static_cast<std::size_t>(max_auto_res);
         constexpr std::size_t MAX_GRID_DOMAIN_CELLS_HARD_CAP = 134217728; // 512^3 OOM guard
-        const float y_aspect = std::clamp(extent.y / max_extent, 0.01f, 1.0f);
+        // Flat-domain headroom is capped at 4x knob^3. The old 0.01 floor let a
+        // thin-Y domain inflate the budget up to 100x — with knob=512 that meant
+        // sailing straight into the hard cap (134M cells), and the real memory
+        // hog scales with CELLS: ~8 particles/fluid-cell x 64B (SoA pos/vel/
+        // affine/flags) + CPU grid ~37B/cell + GPU mirrors ~70B/cell => tens of
+        // GB. 4x keeps the thin-slab benefit without the runaway footprint.
+        const float y_aspect = std::clamp(extent.y / max_extent, 0.25f, 1.0f);
         const std::size_t adaptive_budget = std::min(
             static_cast<std::size_t>(static_cast<double>(knob_budget) / static_cast<double>(y_aspect)),
             MAX_GRID_DOMAIN_CELLS_HARD_CAP);
@@ -4238,16 +4492,21 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
         domain.max_auto_resolution = max_auto_res;
 
         const uint32_t channels = domain.channels;
+        // Liquid domains skip the combustion channels (temperature/fuel/
+        // interaction) entirely — 3 floats/cell saved, which matters at high
+        // resolution. A type switch (Fluid <-> Gas) must force a re-allocate
+        // even when the resolution is unchanged.
+        const bool wants_gas_channels = (domain.type != SimulationDomainType::Fluid);
         const bool layout_changed =
             !state.valid ||
             state.resolution_x != res_x ||
             state.resolution_y != res_y ||
             state.resolution_z != res_z ||
-            state.channels != channels;
+            state.channels != channels ||
+            state.grid.allocate_gas_channels != wants_gas_channels;
         if (layout_changed) {
-            // FluidGrid always allocates every channel (MAC staggered layout);
-            // the channel mask now gates injection/use, not allocation.
             state.grid.sparse_mode_enabled = domain.use_sparse_tiles || (domain.backend == SimulationDomainBackend::CPU_SparseVDB);
+            state.grid.allocate_gas_channels = wants_gas_channels;
             state.grid.resize(res_x, res_y, res_z, voxel_size, mn);
             ++state.version;
         } else {
@@ -4948,11 +5207,18 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             // or a "no GPU dispatch" warning) so the outcome is visible without
             // needing an env var. Env var RAYTROPHI_MGPCG_SELFTEST can force it
             // too, but it is no longer required.
-            // Validated PASS (GPU CG matches CPU PCG to float precision), so the
-            // self-test no longer auto-runs. Re-enable on demand by setting the
-            // env var RAYTROPHI_MGPCG_SELFTEST (runs once, logs the result).
+            // Auto-runs once per session on ANY GPU dispatch backend (CUDA and
+            // Vulkan) so the PASS/FAIL line lands in the Console without launch
+            // parameters — the user cannot pass env vars, and having the line
+            // on both backends makes the perf/parity comparison symmetric.
+            // Once the Vulkan port is long-term stable this can be demoted to
+            // env-var-only again.
             static bool s_mgpcg_selftest_done = false;
-            if (!s_mgpcg_selftest_done && std::getenv("RAYTROPHI_MGPCG_SELFTEST") != nullptr) {
+            const bool gpu_selftest_wanted =
+                context.compute &&
+                context.compute->supportsDispatch();
+            if (!s_mgpcg_selftest_done &&
+                (gpu_selftest_wanted || std::getenv("RAYTROPHI_MGPCG_SELFTEST") != nullptr)) {
                 s_mgpcg_selftest_done = true;
                 SCENE_LOG_INFO(std::string("[MGPCG SelfTest] Running GPU MGPCG correctness self-test..."));
                 validateGpuFluidMGPCG(context.compute);
@@ -5027,6 +5293,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                         fluid_params.flip_blend > 0.0f;
                     bool upload_ok = true;
                     if (has_flip) {
+                        context.compute->beginTransferBatch();
                         upload_ok =
                             context.compute->uploadBuffer(gpu_buffers.scratch_vel_x,
                                 state.grid.vel_x.data(), state.grid.vel_x.size() * sizeof(float)) &&
@@ -5034,6 +5301,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                 state.grid.vel_y.data(), state.grid.vel_y.size() * sizeof(float)) &&
                             context.compute->uploadBuffer(gpu_buffers.scratch_vel_z,
                                 state.grid.vel_z.data(), state.grid.vel_z.size() * sizeof(float));
+                        upload_ok = context.compute->endTransferBatch() && upload_ok;
                     }
 
                     // GPU pressure projection (MGPCG). Build the fluid mask from
@@ -6218,6 +6486,7 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
     ensureComputeBuffer(compute, buffers.cg_diag,     "GridDomainCGDiag",     cell_bytes, usage);
     const std::size_t cg_blocks = (cell_count + 255u) / 256u;
     ensureComputeBuffer(compute, buffers.cg_partials, "GridDomainCGPartials", cg_blocks * sizeof(double), usage);
+    ensureComputeBuffer(compute, buffers.cg_scalars,  "GridDomainCGScalars",  7 * sizeof(double), usage);
 
     if (compute.backendType() == ComputeBackendType::CUDA) {
         std::vector<SimulationGridDomainMGLevelBuffers> wanted_levels;

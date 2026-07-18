@@ -15,6 +15,7 @@
 #include <string>
 #include <cstring>
 #include <algorithm>
+#include <unordered_map>
 #include "Vec3.h"
 #include "TriangleMesh.h"
 #include "FoliageFwd.h"
@@ -111,6 +112,14 @@ struct TerrainObject {
     uint16_t material_id = 0;
     
     bool dirty_mesh = false; // Flag to rebuild mesh from heightmap
+
+    // Terrain node evaluation may run its expensive height phase on a worker.
+    // Erosion routines historically rebuilt the render mesh as a side effect;
+    // during graph evaluation that would create/replace flatMesh off-thread,
+    // before it can be registered in SceneData.  The graph enables this guard
+    // while computing and performs the single authoritative mesh update during
+    // its main-thread finalize phase.
+    bool defer_mesh_updates = false;
     
     // Terrain Layer System
     std::shared_ptr<class Texture> splatMap;   // RGBA Splat Map (Control Texture)
@@ -128,6 +137,16 @@ struct TerrainObject {
 
     // Packed erosion helper map: RGBA = erosion / deposition / flow / influence
     std::vector<float> erosionMapRGBA; // Same resolution as heightmap, 4 channels
+
+    // Derived named fields published by explicit terrain graph output nodes.
+    // updateTerrainMesh mirrors valid fields to flatMesh vertex attributes on
+    // the main thread so foliage/scatter can sample them barycentrically.
+    std::unordered_map<std::string, std::shared_ptr<std::vector<float>>> analysisFields;
+
+    // Analytical river/lake descriptions produced by terrain hydrology nodes.
+    // These remain independent from generated WaterSurface meshes so a water
+    // body can be regenerated, LODed or simulated without losing its identity.
+    std::vector<WaterBodyData> waterBodies;
 
     // Non-destructive editing support (Node Graph)
     std::vector<float> original_heightmap_data; // Initial state before node graph evaluation

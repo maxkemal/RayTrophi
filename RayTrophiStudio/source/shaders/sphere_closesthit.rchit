@@ -28,26 +28,8 @@ const uint  BOUNCE_SPECULAR     = 0u;
 const uint  BOUNCE_DIFFUSE      = 1u;
 const uint  BOUNCE_TRANSMISSION = 2u;
 
-// ─── Payload (must match raygen.rgen) ────────────────────────────────────────
-struct RayPayload {
-    vec3     radiance;
-    vec3     attenuation;
-    vec3     scatterOrigin;
-    vec3     scatterDir;
-    uint     seed;
-    bool     scattered;
-    bool     hitEmissive;
-    uint     occluded;
-    bool     skipAABBs;
-    vec3     primaryAlbedo;
-    vec3     primaryNormal;
-    uint     primaryHit;
-    float    primaryTransmission;
-    float    primaryMetallic;
-    uint     bounceType;
-    uint     primaryMaterialId;
-    float    dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
-};
+// ─── Payload (shared ABI, single source of truth) ────────────────────────────
+#include "rt_payload.glsl"
 layout(location = 0) rayPayloadInEXT RayPayload payload;
 
 // ─── Hit attribute from sphere_intersection.rint ─────────────────────────────
@@ -119,16 +101,14 @@ void main()
     // (raygen resets it per bounce), so this is the full material emission, matching
     // closesthit.rchit's `radiance = emColor * emStrength`.
     payload.radiance   += payload.attenuation * emission;
-    payload.hitEmissive = (dot(emission, emission) > 1e-6);
 
     // Primary AOV (first surface hit only) for the denoiser / stylize pass.
-    if (payload.primaryHit == 0u) {
-        payload.primaryAlbedo       = albedo;
-        payload.primaryNormal       = N;
-        payload.primaryHit          = 1u;
-        payload.primaryTransmission = transmission;
-        payload.primaryMetallic     = 0.0;
-        payload.primaryMaterialId   = matIdx;
+    if ((payload.primaryMeta & PL_PRIMARY_DONE) == 0u) {
+        payload.primaryARG  = packHalf2x16(albedo.rg);
+        payload.primaryABT  = packHalf2x16(vec2(albedo.b, transmission));
+        payload.primaryNrm  = plPackNormal(N);
+        payload.primaryMeta = (payload.primaryMeta & PL_DISP_MASK)
+                            | PL_PRIMARY_DONE | (matIdx & PL_MATID_MASK);
     }
 
     if (rnd(seed) < transmission) {

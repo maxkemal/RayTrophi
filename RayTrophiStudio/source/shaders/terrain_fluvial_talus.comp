@@ -1,0 +1,104 @@
+// Mass-conserving angle-of-repose relaxation for freshly deposited fluvial soil.
+// Run after each runoff/apply batch so repeated alluvial deposits cannot build
+// needle-like peaks or near-vertical ridges.  Relaxation is limited to cells touched
+// by runoff and only moves material downhill when the physical slope exceeds the
+// stable loose-soil angle (~32 degrees, tan(theta) ~= 0.625).
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    int brushRadius; int dropletLifetime;
+    float inertia; float sedimentCapacity; float minSlope; float erodeSpeed;
+    float depositSpeed; float evaporateSpeed; float gravity; float cellSize;
+    float heightScale; float flowBoost; float flowNormalization; float flatSlope;
+    float meanderStrength; float maxErosionFraction; float flowDecay; float depositSpread;
+    uint seed; uint seedOffset; uint hasHardness; uint hasMask;
+    uint dropletCount; uint batchIndex; float minWater; uint _pad;
+} pc;
+
+layout(set = 0, binding = 0) buffer Height { float heightmap[]; };
+layout(set = 0, binding = 1) readonly buffer Flow { float flowMap[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    int x = id % pc.mapWidth;
+    int y = id / pc.mapWidth;
+    if (x <= 1 || x >= pc.mapWidth - 2 || y <= 1 || y >= pc.mapHeight - 2) return;
+
+    // Uniform rain visits most cells eventually, but meaningful runoff/deposition
+    // quickly raises this value above the single-visit range.
+    float localFlow = max(flowMap[id], 0.0);
+    for (int oy = -1; oy <= 1; ++oy) {
+        for (int ox = -1; ox <= 1; ++ox) {
+            localFlow = max(localFlow, max(flowMap[(y + oy) * pc.mapWidth + (x + ox)], 0.0));
+        }
+    }
+    float activity = smoothstep(0.20, 3.0, localFlow);
+    if (activity <= 0.0) return;
+
+    float h = heightmap[id];
+    if (isnan(h) || isinf(h) || h <= 0.0) return;
+
+    const int dx[8] = int[8](-1, 0, 1, -1, 1, -1, 0, 1);
+    const int dy[8] = int[8](-1, -1, -1, 0, 0, 1, 1, 1);
+    const float distance[8] = float[8](1.41421356, 1.0, 1.41421356, 1.0,
+                                      1.0, 1.41421356, 1.0, 1.41421356);
+
+    // Fresh alluvium on a plain cannot retain the same repose angle as a rocky bank.
+    // Detect macro-flat, flow-active terrain and relax only there toward a shallow
+    // depositional grade.  This removes parcel/fan scallops without blurring slopes.
+    float gx = (heightmap[y * pc.mapWidth + (x + 2)] -
+                heightmap[y * pc.mapWidth + (x - 2)]) * pc.heightScale /
+               max(0.001, 4.0 * pc.cellSize);
+    float gy = (heightmap[(y + 2) * pc.mapWidth + x] -
+                heightmap[(y - 2) * pc.mapWidth + x]) * pc.heightScale /
+               max(0.001, 4.0 * pc.cellSize);
+    float macroSlope = length(vec2(gx, gy));
+    float alluvialPlain = (1.0 - smoothstep(pc.flatSlope * 0.75,
+                                            pc.flatSlope * 3.0,
+                                            macroSlope)) *
+                           smoothstep(2.0, 24.0, localFlow);
+    float stableTalus = mix(0.625, 0.12, alluvialPlain);
+    float excess[8];
+    int neighbor[8];
+    float totalExcess = 0.0;
+
+    for (int d = 0; d < 8; ++d) {
+        int nx = x + dx[d];
+        int ny = y + dy[d];
+        int n = ny * pc.mapWidth + nx;
+        neighbor[d] = n;
+
+        float rawDifference = h - heightmap[n];
+        float physicalSlope = rawDifference * pc.heightScale /
+            max(0.001, pc.cellSize * distance[d]);
+        if (physicalSlope > stableTalus) {
+            // Convert only the above-talus portion back to normalized height units.
+            excess[d] = (physicalSlope - stableTalus) * pc.cellSize * distance[d] /
+                        max(pc.heightScale, 0.001);
+            totalExcess += excess[d];
+        } else {
+            excess[d] = 0.0;
+        }
+    }
+
+    if (totalExcess <= 1e-8) return;
+
+    // A conservative fraction avoids oscillation with the in-place atomic update.
+    // Repeated batch passes converge toward the talus limit without blurring valleys.
+    float moveAmount = totalExcess * 0.24 * activity;
+    moveAmount = min(moveAmount, h * 0.035);
+    if (moveAmount <= 1e-8) return;
+
+    atomicAdd(heightmap[id], -moveAmount);
+    for (int d = 0; d < 8; ++d) {
+        if (excess[d] > 0.0) {
+            atomicAdd(heightmap[neighbor[d]], moveAmount * (excess[d] / totalExcess));
+        }
+    }
+}

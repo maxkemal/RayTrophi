@@ -3,6 +3,7 @@
 #include "Renderer.h"
 #include "OptixWrapper.h"
 #include "Backend/IBackend.h"
+#include "Backend/IViewportBackend.h"
 #include "Backend/VulkanBackend.h"
 #include "TriangleMesh.h"
 #include "MaterialManager.h"
@@ -16,6 +17,7 @@
 #include <cfloat>
 
 extern std::unique_ptr<Backend::IBackend> g_backend;
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 
 
 // CUDA Library Linking
@@ -26,6 +28,15 @@ extern std::unique_ptr<Backend::IBackend> g_backend;
 // #include "GeometryUtils.h" // Removed: Not needed for manual mesh generation
 
 namespace {
+void updateWaveDeformRasterPreview(WaterSurface* surf) {
+    if (!g_solid_viewport_active || !g_viewport_backend || !surf || !surf->flatMesh) return;
+    // Flat SoA raster meshes already own a CPU mirror and a dirty-range upload
+    // path. Updating this one node keeps Solid/Matcap live without rebuilding
+    // the viewport geometry or touching unrelated mesh buffers.
+    g_viewport_backend->updateRasterMeshFromMeshSoA(
+        surf->flatMesh->nodeName, surf->flatMesh.get());
+}
+
 std::shared_ptr<TriangleMesh> gridToFlatMesh(
     const std::vector<Vec3>& positions,
     const std::vector<Vec3>& normals,
@@ -90,6 +101,64 @@ WaterSurface* WaterManager::getWaterSurface(int id) {
     return nullptr;
 }
 
+WaterSurface* WaterManager::getWaterSurfaceByNodeName(const std::string& nodeName) {
+    for (auto& surf : water_surfaces) {
+        if (surf.name == nodeName ||
+            (surf.flatMesh && surf.flatMesh->nodeName == nodeName)) return &surf;
+    }
+    return nullptr;
+}
+
+WaterSurface* WaterManager::bindExistingWaterMesh(
+    const std::shared_ptr<TriangleMesh>& mesh,
+    WaterSurface::Type type) {
+    if (!mesh || !mesh->geometry || mesh->nodeName.empty() ||
+        mesh->num_vertices() == 0 || mesh->num_triangles() == 0) return nullptr;
+
+    if (WaterSurface* existing = getWaterSurfaceByNodeName(mesh->nodeName)) {
+        if (existing->flatMesh != mesh ||
+            existing->original_positions.size() != mesh->num_vertices() ||
+            existing->bound_index_count != mesh->geometry->indices.size()) {
+            invalidateGeometricAnimationState(existing);
+            existing->flatMesh = mesh;
+            existing->owns_scene_mesh = false;
+            cacheOriginalPositions(existing);
+        }
+        const uint16_t* materialIds =
+            mesh->geometry->get_attribute_data<uint16_t>("materialID");
+        if (materialIds && mesh->num_vertices() > 0) existing->material_id = materialIds[0];
+        return existing;
+    }
+
+    WaterSurface surface;
+    surface.id = next_id++;
+    surface.name = mesh->nodeName;
+    surface.type = type;
+    surface.flatMesh = mesh;
+    surface.owns_scene_mesh = false;
+    surface.params.use_fft_ocean = false;
+    surface.params.use_fft_mesh_displacement = false;
+    surface.params.use_geometric_waves = true;
+    surface.params.geo_wave_height = 0.15f;
+    surface.params.geo_wave_scale = 5.0f;
+    surface.animate_mesh = true;
+    surface.use_gpu_animation = false;
+
+    const uint16_t* materialIds =
+        mesh->geometry->get_attribute_data<uint16_t>("materialID");
+    surface.material_id = (materialIds && mesh->num_vertices() > 0)
+        ? materialIds[0]
+        : MaterialManager::INVALID_MATERIAL_ID;
+
+    water_surfaces.push_back(std::move(surface));
+    WaterSurface* bound = &water_surfaces.back();
+    cacheOriginalPositions(bound);
+    if (bound->material_id != MaterialManager::INVALID_MATERIAL_ID) {
+        syncSurfaceMaterial(bound);
+    }
+    return bound;
+}
+
 void WaterManager::removeWaterSurface(SceneData& scene, int id) {
     // 1. Check if surface exists
     auto it = std::find_if(water_surfaces.begin(), water_surfaces.end(), 
@@ -113,8 +182,9 @@ void WaterManager::removeWaterSurface(SceneData& scene, int id) {
         it->gpu_geo_state = nullptr;
     }
     
-    // 2. Remove flatMesh from scene
-    if (it->flatMesh) {
+    // 2. Generated water owns its object; a modifier-bound surface only
+    // borrows the evaluated mesh and must leave it in the scene.
+    if (it->owns_scene_mesh && it->flatMesh) {
         auto obj_it = std::find(scene.world.objects.begin(), scene.world.objects.end(), it->flatMesh);
         if (obj_it != scene.world.objects.end()) {
             scene.world.objects.erase(obj_it);
@@ -172,10 +242,20 @@ WaterUpdateResult WaterManager::update(float waterTime) {
     bool has_animated_water = false;
 
     for (auto& surf : water_surfaces) {
+        // CUDA FFT mesh displacement remains retired. Geometry Waves is a
+        // topology-stable mesh deformer and is allowed to animate through the
+        // flat-mesh BLAS refit path below.
+        surf.params.use_fft_ocean = false;
+        surf.params.use_fft_mesh_displacement = false;
+
+        // Water rendering is Vulkan-RT-first. Do not run the legacy CUDA -> CPU
+        // download -> Vulkan upload bridge. Ocean spectrum generation will be
+        // reintroduced only through a native Vulkan compute resource.
+        const bool usesOceanFFT = false;
         // ════════════════════════════════════════════════════════════════════════
         // FFT OCEAN UPDATE (GPU-side animation - shader based)
         // ════════════════════════════════════════════════════════════════════════
-        if (surf.params.use_fft_ocean && g_hasCUDA) {
+        if (usesOceanFFT && g_hasCUDA) {
             // Manage FFT State
             if (!surf.fft_state) {
                  FFTOceanState* state = new FFTOceanState();
@@ -273,7 +353,7 @@ WaterUpdateResult WaterManager::update(float waterTime) {
         // ════════════════════════════════════════════════════════════════════════
         // Uses FFT ocean data to displace mesh vertices - combines the best of both:
         // Film-quality FFT waves + Physical mesh for raytracing/shadows
-        if (surf.params.use_fft_ocean && surf.params.use_fft_mesh_displacement) {
+        if (usesOceanFFT && surf.params.use_fft_mesh_displacement) {
             has_animated_water = true;
             float target_animation_time = waterTime * resolveSharedAnimationSpeed(&surf);
             if (!has_last_simulation_time || fabsf(target_animation_time - surf.animation_time) > 1e-6f) {
@@ -303,7 +383,7 @@ WaterUpdateResult WaterManager::update(float waterTime) {
             }
         }
 
-        if (surf.params.use_fft_ocean || surf.animate_mesh || surf.params.wave_strength > 0.0001f) {
+        if (usesOceanFFT || surf.animate_mesh || surf.params.wave_strength > 0.0001f) {
             has_animated_water = true;
         }
     }
@@ -447,6 +527,13 @@ void WaterManager::syncSurfaceMaterial(WaterSurface* surf) {
     const float resolved_domain_size = resolveWaveDomainSize(surf);
     const float resolved_animation_speed = resolveSharedAnimationSpeed(surf);
     WaterShader::SurfaceParams shader_params = surf->params.toShaderParams(0.0f, resolved_domain_size);
+    if (surf->type == WaterSurface::Type::River) {
+        shader_params.profile = WaterShader::SurfaceProfile::River;
+    } else if (surf->type == WaterSurface::Type::Lake) {
+        shader_params.profile = WaterShader::SurfaceProfile::Lake;
+    } else {
+        shader_params.profile = WaterShader::SurfaceProfile::Ocean;
+    }
     shader_params.animation_speed = resolved_animation_speed;
 
     auto pbsdf = dynamic_cast<PrincipledBSDF*>(mat);
@@ -458,7 +545,7 @@ void WaterManager::syncSurfaceMaterial(WaterSurface* surf) {
         auto& gpu = mat->gpuMaterial;
         cudaTextureObject_t fft_height_tex = 0;
         cudaTextureObject_t fft_normal_tex = 0;
-        if (g_hasCUDA && surf->params.use_fft_ocean && surf->fft_state) {
+        if (g_hasCUDA && surf->type != WaterSurface::Type::River && surf->params.use_fft_ocean && surf->fft_state) {
             FFTOceanState* state = static_cast<FFTOceanState*>(surf->fft_state);
             if (state && state->initialized && state->tex_height != 0 && state->tex_normal != 0) {
                 fft_height_tex = state->tex_height;
@@ -478,7 +565,8 @@ bool WaterManager::syncVulkanFFTTexturesForMaterial(uint16_t material_id, Backen
     }
 
     for (auto& surf : water_surfaces) {
-        if (surf.material_id != material_id || !surf.params.use_fft_ocean || !surf.fft_state) {
+        if (surf.material_id != material_id || surf.type == WaterSurface::Type::River ||
+            !surf.params.use_fft_ocean || !surf.fft_state) {
             continue;
         }
 
@@ -541,7 +629,7 @@ bool WaterManager::syncVulkanFFTTexturesForMaterial(uint16_t material_id, Backen
 
 cudaTextureObject_t WaterManager::getFirstFFTHeightMap() {
     for (const auto& surf : water_surfaces) {
-        if (g_hasCUDA && surf.params.use_fft_ocean && surf.fft_state) {
+        if (g_hasCUDA && surf.type != WaterSurface::Type::River && surf.params.use_fft_ocean && surf.fft_state) {
             FFTOceanState* state = static_cast<FFTOceanState*>(surf.fft_state);
             if (state && state->initialized && state->tex_height != 0) {
                 return state->tex_height;
@@ -710,6 +798,56 @@ WaterSurface* WaterManager::createWaterPlane(SceneData& scene, const Vec3& pos, 
     }
     
     water_surfaces.push_back(surf);
+    return &water_surfaces.back();
+}
+
+WaterSurface* WaterManager::createWaterFromIndexedMesh(
+    SceneData& scene,
+    const std::string& name,
+    const std::vector<Vec3>& positions,
+    const std::vector<Vec2>& uvs,
+    const std::vector<uint32_t>& indices,
+    const std::shared_ptr<Transform>& transform,
+    WaterSurface::Type type,
+    const WaterWaveParams& params,
+    const std::vector<float>& waterDepth,
+    const std::vector<float>& shoreFactor) {
+    if (positions.empty() || indices.empty() || (indices.size() % 3u) != 0u) return nullptr;
+
+    WaterSurface surf;
+    surf.id = next_id++;
+    surf.name = name;
+    surf.type = type;
+    surf.params = params;
+
+    auto& materialManager = MaterialManager::getInstance();
+    const std::string materialName = "Water_Mat_" + name;
+    surf.material_id = materialManager.getMaterialID(materialName);
+    if (surf.material_id == MaterialManager::INVALID_MATERIAL_ID) {
+        auto waterMaterial = std::make_shared<PrincipledBSDF>();
+        waterMaterial->materialName = materialName;
+        waterMaterial->gpuMaterial = std::make_shared<GpuMaterial>();
+        surf.material_id = materialManager.addMaterial(materialName, waterMaterial);
+    }
+    syncSurfaceMaterial(&surf);
+
+    std::vector<Vec3> normals(positions.size(), Vec3(0.0f, 1.0f, 0.0f));
+    surf.flatMesh = gridToFlatMesh(
+        positions, normals, uvs, indices, surf.material_id, transform, name);
+    if (!surf.flatMesh || !surf.flatMesh->geometry) return nullptr;
+
+    auto& geometry = *surf.flatMesh->geometry;
+    const auto copyScalarAttribute = [&](const char* attributeName, const std::vector<float>& source) {
+        if (source.size() != positions.size()) return;
+        if (!geometry.has_attribute(attributeName)) geometry.add_attribute<float>(attributeName);
+        float* destination = geometry.get_attribute_data_mut<float>(attributeName);
+        if (destination) std::copy(source.begin(), source.end(), destination);
+    };
+    copyScalarAttribute("water_depth", waterDepth);
+    copyScalarAttribute("shore_factor", shoreFactor);
+
+    scene.world.objects.push_back(surf.flatMesh);
+    water_surfaces.push_back(std::move(surf));
     return &water_surfaces.back();
 }
 
@@ -1013,12 +1151,17 @@ void WaterManager::updateWaterMesh(WaterSurface* surf) {
 void WaterManager::cacheOriginalPositions(WaterSurface* surf) {
     if (!surf || !surf->flatMesh || !surf->flatMesh->geometry) return;
     surf->original_positions.clear();
+    surf->original_normals.clear();
     
     const Vec3* origP = surf->flatMesh->geometry->get_positions_orig();
     if (!origP) origP = surf->flatMesh->geometry->get_positions();
     if (origP) {
         size_t vCount = surf->flatMesh->num_vertices();
         surf->original_positions.assign(origP, origP + vCount);
+        surf->bound_index_count = surf->flatMesh->geometry->indices.size();
+        const Vec3* origN = surf->flatMesh->geometry->get_normals_orig();
+        if (!origN) origN = surf->flatMesh->geometry->get_normals();
+        if (origN) surf->original_normals.assign(origN, origN + vCount);
     }
 }
 
@@ -1174,7 +1317,7 @@ bool WaterManager::updateAnimatedWaterMesh(WaterSurface* surf, float time) {
     for (int i = 0; i < (int)vCount; ++i) {
         const Vec3& orig = surf->original_positions[i];
         Vec3 disp = getAnimatedHeight(orig.x, orig.z);
-        Vec3 displaced = Vec3(orig.x + disp.x * chop, disp.y, orig.z + disp.z * chop);
+        Vec3 displaced = Vec3(orig.x + disp.x * chop, orig.y + disp.y, orig.z + disp.z * chop);
         Po[i] = displaced;
         P[i]  = finalT.transform_point(displaced);
     }
@@ -1198,6 +1341,18 @@ bool WaterManager::updateAnimatedWaterMesh(WaterSurface* surf, float time) {
         if (len > 0.0001f) face_normal = face_normal / len;
         else face_normal = Vec3(0, 1, 0);
 
+        // Water meshes can arrive with either triangle winding. Preserve the
+        // authored normal hemisphere so Solid's directional lighting does not
+        // turn the deformed surface black while Matcap still appears correct.
+        if (surf->original_normals.size() == vCount) {
+            const Vec3 reference = surf->original_normals[i0] +
+                                   surf->original_normals[i1] +
+                                   surf->original_normals[i2];
+            if (reference.length() > 0.0001f && Vec3::dot(face_normal, reference) < 0.0f) {
+                face_normal = -face_normal;
+            }
+        }
+
         if (surf->params.geo_smooth_normals) {
             tempNormals[i0] = tempNormals[i0] + face_normal;
             tempNormals[i1] = tempNormals[i1] + face_normal;
@@ -1212,7 +1367,11 @@ bool WaterManager::updateAnimatedWaterMesh(WaterSurface* surf, float time) {
     #pragma omp parallel for
     for (int i = 0; i < (int)vCount; ++i) {
         float len = tempNormals[i].length();
-        Vec3 ln = len > 0.0001f ? (tempNormals[i] / len) : Vec3(0, 1, 0);
+        Vec3 fallback = surf->original_normals.size() == vCount
+            ? surf->original_normals[i]
+            : Vec3(0, 1, 0);
+        Vec3 ln = len > 0.0001f ? (tempNormals[i] / len) : fallback;
+        if (fallback.length() > 0.0001f && Vec3::dot(ln, fallback) < 0.0f) ln = -ln;
         if (No) No[i] = ln;
         if (N)  N[i]  = normalT.transform_vector(ln).normalize();
     }
@@ -1220,7 +1379,62 @@ bool WaterManager::updateAnimatedWaterMesh(WaterSurface* surf, float time) {
     if (g_backend) {
         g_backend->updateFlatMeshBLAS(surf->name, surf->flatMesh.get());
     }
+    updateWaveDeformRasterPreview(surf);
 
+    return true;
+}
+
+bool WaterManager::restoreAnimatedWaterMesh(WaterSurface* surf) {
+    if (!surf || !surf->flatMesh || !surf->flatMesh->geometry ||
+        surf->original_positions.empty()) return false;
+
+    auto& geo = *surf->flatMesh->geometry;
+    const size_t vCount = surf->flatMesh->num_vertices();
+    if (surf->original_positions.size() != vCount) return false;
+
+    Vec3* P = geo.get_attribute_data_mut<Vec3>("P");
+    Vec3* N = geo.get_attribute_data_mut<Vec3>("N");
+    Vec3* Po = geo.get_attribute_data_mut<Vec3>("P_orig");
+    Vec3* No = geo.get_attribute_data_mut<Vec3>("N_orig");
+    if (!P || !Po) return false;
+
+    Matrix4x4 finalT = Matrix4x4::identity();
+    Matrix4x4 normalT = Matrix4x4::identity();
+    if (surf->flatMesh->transform) {
+        finalT = surf->flatMesh->transform->getFinal();
+        normalT = surf->flatMesh->transform->getNormalTransform();
+    }
+    for (size_t i = 0; i < vCount; ++i) {
+        Po[i] = surf->original_positions[i];
+        P[i] = finalT.transform_point(Po[i]);
+    }
+
+    std::vector<Vec3> normals = surf->original_normals;
+    if (normals.size() != vCount) {
+        normals.assign(vCount, Vec3(0.0f));
+        const auto& indices = geo.indices;
+        for (size_t tri = 0; tri + 2 < indices.size(); tri += 3) {
+            const uint32_t i0 = indices[tri + 0];
+            const uint32_t i1 = indices[tri + 1];
+            const uint32_t i2 = indices[tri + 2];
+            if (i0 >= vCount || i1 >= vCount || i2 >= vCount) continue;
+            Vec3 face = (Po[i1] - Po[i0]).cross(Po[i2] - Po[i0]);
+            const float length = face.length();
+            face = length > 1e-6f ? face / length : Vec3(0.0f, 1.0f, 0.0f);
+            normals[i0] = normals[i0] + face;
+            normals[i1] = normals[i1] + face;
+            normals[i2] = normals[i2] + face;
+        }
+    }
+    for (size_t i = 0; i < vCount; ++i) {
+        const float length = normals[i].length();
+        const Vec3 localNormal = length > 1e-6f ? normals[i] / length : Vec3(0.0f, 1.0f, 0.0f);
+        if (No) No[i] = localNormal;
+        if (N) N[i] = normalT.transform_vector(localNormal).normalize();
+    }
+
+    if (g_backend) g_backend->updateFlatMeshBLAS(surf->name, surf->flatMesh.get());
+    updateWaveDeformRasterPreview(surf);
     return true;
 }
 
@@ -1351,7 +1565,8 @@ bool WaterManager::updateGPUAnimatedWaterMesh(WaterSurface* surf, float time) {
 // ════════════════════════════════════════════════════════════════════════════════
 bool WaterManager::updateFFTDrivenMesh(WaterSurface* surf, float time) {
     if (!surf || !surf->flatMesh || !surf->flatMesh->geometry) return false;
-    if (!surf->params.use_fft_ocean || !surf->params.use_fft_mesh_displacement) return false;
+    if (surf->type == WaterSurface::Type::River || !surf->params.use_fft_ocean ||
+        !surf->params.use_fft_mesh_displacement) return false;
     if (!surf->fft_state || !g_hasCUDA) return false;
     
     FFTOceanState* fft_state = static_cast<FFTOceanState*>(surf->fft_state);
@@ -1569,12 +1784,10 @@ void WaterManager::applyKeyframe(WaterSurface* surf, const WaterKeyframe& kf) {
         updateWaterMesh(surf);
         cacheOriginalPositions(surf);
         
-        // CPU BVH needs refresh for picking / CPU rendering, but GPU backends should
-        // consume water deformation through their normal per-frame update paths.
-        // For timeline playback, forcing full OptiX/Vulkan rebuilds here causes the
-        // water shading/state to get stomped every frame.
-        extern bool g_bvh_rebuild_pending;
-        g_bvh_rebuild_pending = true;
+        // Parameter animation keeps the same vertices and indices. The backend
+        // update above refits the GPU BLAS; Embree only needs a deform refit.
+        extern bool g_cpu_bvh_refit_pending;
+        g_cpu_bvh_refit_pending = true;
     }
     
     // FFT changes are picked up automatically by update() on next frame
@@ -1589,6 +1802,8 @@ void WaterManager::invalidateGeometricAnimationState(WaterSurface* surf) {
 
     surf->animation_time = 0.0f;
     surf->original_positions.clear();
+    surf->original_normals.clear();
+    surf->bound_index_count = 0;
 
     if (surf->gpu_geo_state) {
         GPUGeoWaveState* gpu_state = static_cast<GPUGeoWaveState*>(surf->gpu_geo_state);
@@ -1698,6 +1913,7 @@ nlohmann::json WaterManager::serialize() const {
         ws["id"] = surf.id;
         ws["name"] = surf.name;
         ws["material_id"] = surf.material_id;
+        ws["owns_scene_mesh"] = surf.owns_scene_mesh;
         
         // Wave params
         ws["wave_speed"] = surf.params.wave_speed;
@@ -1848,6 +2064,7 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
         surf.id = ws.value("id", next_id++);
         surf.name = ws.value("name", "Water_Plane_" + std::to_string(surf.id));
         surf.material_id = ws.value("material_id", 0);
+        surf.owns_scene_mesh = ws.value("owns_scene_mesh", true);
         
         // Restore wave params
         surf.params.wave_speed = ws.value("wave_speed", 1.0f);
@@ -1951,12 +2168,12 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
         int preset_val = ws.value("current_preset", 0);
         surf.params.current_preset = static_cast<WaterWaveParams::WaterPreset>(preset_val);
         
-        // Animation state
-        surf.animate_mesh = ws.value("animate_mesh", false);
-        surf.use_gpu_animation = ws.value("use_gpu_animation", true);
-        if (surf.params.use_geometric_waves || (surf.params.use_fft_ocean && surf.params.use_fft_mesh_displacement)) {
-            surf.animate_mesh = true;
-        }
+        // Animation state. CUDA FFT displacement stays retired, while the
+        // topology-stable Geometry Waves modifier is restored from the scene.
+        surf.params.use_fft_ocean = false;
+        surf.params.use_fft_mesh_displacement = false;
+        surf.animate_mesh = surf.params.use_geometric_waves;
+        surf.use_gpu_animation = false;
 
         // Find existing flatMesh in scene by nodeName (don't create new ones!)
         for (auto& obj : scene.world.objects) {

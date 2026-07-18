@@ -29,10 +29,16 @@ namespace NodeSystem {
     };
 
     inline NodeChromeLayout buildNodeChromeLayout(const NodeBase& node, float zoom,
-        float defaultWidthScreen, size_t inputCount, size_t outputCount, float titleWidthScreen) {
+        float defaultWidthScreen, size_t inputCount, size_t outputCount, float titleWidthScreen,
+        float contentHeightScreen = 0.0f) {
         NodeChromeLayout layout;
         layout.headerHeight = scaleNodeChromeMetric(zoom, 20.0f, 16.0f, 26.0f);
-        layout.pinSpacing = scaleNodeChromeMetric(zoom, 18.0f, 14.0f, 24.0f);
+        // A node that draws real ImGui widgets on its pin rows (NodeBase::pinRowHeight)
+        // needs a row taller than a bare label's 18px, or the frames overlap their neighbours.
+        const float rowBase = node.pinRowHeight();
+        layout.pinSpacing = (rowBase > 0.0f)
+            ? scaleNodeChromeMetric(zoom, rowBase, rowBase * 0.7f, rowBase * 1.4f)
+            : scaleNodeChromeMetric(zoom, 18.0f, 14.0f, 24.0f);
         layout.pinRadius = scaleNodeChromeMetric(zoom, 5.0f, 4.0f, 7.5f);
         layout.cornerRadius = scaleNodeChromeMetric(zoom, 4.0f, 3.0f, 8.0f);
         layout.bodyPadding = scaleNodeChromeMetric(zoom, 8.0f, 6.0f, 11.0f);
@@ -53,14 +59,29 @@ namespace NodeSystem {
             ? node.uiWidth
             : ((customWidth > 0.0f) ? customWidth : std::max(minWidthScreen / zoom, titleWidthClamped / zoom));
 
-        layout.width = std::clamp(baseWidth * zoom, minWidthScreen, maxWidthScreen);
+        // The max clamp exists to stop AUTO-sized nodes running away with a long title. An
+        // explicit getCustomWidth() or a user resize is a stated intent, not a suggestion —
+        // clamping those to 220px silently capped every wide node (and made the resize handle
+        // look broken past that point).
+        const float explicitWidth = std::max(node.uiWidth, customWidth);
+        const float maxAllowed = (explicitWidth > 0.0f)
+            ? std::max(maxWidthScreen, explicitWidth * zoom)
+            : maxWidthScreen;
+        layout.width = std::clamp(baseWidth * zoom, minWidthScreen, maxAllowed);
 
         const int maxPins = static_cast<int>(std::max(inputCount, outputCount));
         const float pinsHeight = maxPins > 0 ? (maxPins * layout.pinSpacing + layout.bodyPadding) : 0.0f;
+        // Height must grow with the pin count. The old hard cap
+        // (min(..., ~220px)) clipped any node with ~11+ pins — e.g. the Material
+        // Output node — drawing its lower sockets past the body border. The cap
+        // only ever mattered for pin-heavy nodes (nothing else contributes to
+        // height here), so it protected nothing worth keeping.
+        // contentHeightScreen: inline node-body widgets (see NodeBase::
+        // wantsInlineContent) — already in screen pixels, NOT zoom-scaled,
+        // because ImGui widgets don't scale with canvas zoom.
         layout.height = layout.collapsed
             ? layout.headerHeight
-            : std::min(layout.headerHeight + pinsHeight + layout.bodyPadding,
-                scaleNodeChromeMetric(zoom, 220.0f, 90.0f, 280.0f));
+            : layout.headerHeight + pinsHeight + layout.bodyPadding + contentHeightScreen;
 
         layout.labelWidth = std::max(0.0f, layout.width - layout.bodyPadding * 2.0f - layout.pinRadius * 2.0f - 8.0f);
         return layout;

@@ -1,0 +1,53 @@
+// sim_fluid_cg_jacobi_dot.comp
+// MGPCG fused: z = M^-1 r (Jacobi: z = r/diag, non-fluid diag==0 -> 0) AND
+// partials[workgroup] = block sum of r*z in DOUBLE, in one dispatch.
+// Same math as sim_fluid_cg_jacobi followed by sim_fluid_cg_dot — fusing them
+// halves the dispatch+barrier count of the preconditioner step. Name and
+// buffer order match the CUDA fused kernel (residual, diag, z, partials) so
+// the host's fused path is backend-agnostic. Dispatched with dot_blocks
+// groups (== cell_groups: one thread per cell, block size 256).
+// Requires shaderFloat64 (gated in the backend like sim_fluid_cg_dot).
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   boundary;
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int   iterations;
+    int   parity;
+    float density_correction;
+    int   particles_per_cell;
+    int   variational;
+    int   gfm_active;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Residual { float r[]; };
+layout(set = 0, binding = 1) readonly buffer Diag     { float diag[]; };
+layout(set = 0, binding = 2) buffer Z                 { float z[]; };
+layout(set = 0, binding = 3) buffer Partials          { double partials[]; };
+
+shared double sdata[256];
+
+void main() {
+    int  cell_count = pc.nx * pc.ny * pc.nz;
+    uint tid = gl_LocalInvocationID.x;
+    int  id  = int(gl_GlobalInvocationID.x);
+
+    double contrib = 0.0LF;
+    if (id < cell_count) {
+        float d  = diag[id];
+        float zz = (d > 0.5) ? (r[id] / d) : 0.0;
+        z[id] = zz;
+        contrib = double(r[id]) * double(zz);
+    }
+    sdata[tid] = contrib;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) sdata[tid] += sdata[tid + stride];
+        barrier();
+    }
+    if (tid == 0u) partials[gl_WorkGroupID.x] = sdata[0];
+}

@@ -234,6 +234,7 @@ namespace UIWidgets {
         CameraHud, ViewOverlays, PivotEdit, PivotCenter, Sensitivity, Settings,
         Play, Pause, Stop, Duplicate, Help, AddKey, RemoveKey,
         PaintTool, EraseTool, SoftenTool, StampTool, FillTool, CloneTool, SprayTool,
+        SmudgeTool, DodgeTool, BurnTool, SharpenTool, EyedropperTool,
         GrabTool, InflateTool, SmoothTool, FlattenTool, DrawTool, LayerTool,
         PinchTool, ClayTool, ClayStripsTool, CreaseTool, ScrapeTool, MaskTool, DrawSharpTool, NudgeTool, BlobTool, SculptFillTool, SnakeHookTool, ElasticDeformTool,
         VertexMode, EdgeMode, FaceMode,

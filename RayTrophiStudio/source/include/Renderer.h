@@ -69,6 +69,7 @@ class PrincipledBSDF;
 class Dielectric;
 class Material;
 class Triangle;
+class TriangleMesh;
 class Mesh;
 class AABB;
 class Ray;
@@ -202,6 +203,12 @@ public:
     void updateBackendMaterials(SceneData& scene, Backend::IBackend* targetBackend);
     void updateBackendMaterial(SceneData& scene, uint16_t material_id);
     void updateBackendMaterial(SceneData& scene, uint16_t material_id, Backend::IBackend* targetBackend);
+
+    // Faz 2b: re-flatten + re-upload the per-pixel material-program buffer
+    // (Vulkan RT only). Called on live material-node-graph edits so procedural
+    // changes (Noise/ColorRamp/...) show immediately, without a full material
+    // re-sync. No-op on non-Vulkan backends.
+    void syncMaterialProgramsToBackend(Backend::IBackend* targetBackend = nullptr);
 
     // Update Gas Volumes on backend (fast path - no geometry rebuild)
     // Updates texture handles, transforms, and shader parameters for gas volumes
@@ -366,6 +373,7 @@ private:
         bool isSkinned;
         std::shared_ptr<Transform> transformHandle;
         std::vector<std::shared_ptr<Triangle>> triangles;
+        std::vector<std::shared_ptr<TriangleMesh>> meshes;
         // HittableInstance wrappers whose source_triangles share this
         // transformHandle. Cached at animation_groups build time so the
         // per-frame keyframe update can sync inst->transform directly,

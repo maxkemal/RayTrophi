@@ -737,8 +737,8 @@ void TimelineWidget::draw(UIContext& ctx) {
                             ctx.renderer.updateBackendMaterial(ctx.scene, surf->material_id);
                         }
                         ctx.renderer.resetCPUAccumulation();
-                        g_bvh_rebuild_pending = true;
-                        g_optix_rebuild_pending = true;
+                        // Keyed wave parameters deform a topology-stable mesh.
+                        g_cpu_bvh_refit_pending = true;
                         if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                     }
                 }
@@ -762,9 +762,10 @@ void TimelineWidget::draw(UIContext& ctx) {
                 float frame_time = static_cast<float>(current_frame) / fps;
                 WaterUpdateResult waterUpdate = WaterManager::getInstance().update(frame_time);
                 if (waterUpdate.mesh_changed) {
-                    // Water mesh changed - need geometry update
-                    g_bvh_rebuild_pending = true;
-                    g_optix_rebuild_pending = true;
+                    // Geometry Waves only deform existing vertices. The water
+                    // manager already refits the active GPU BLAS; keep the CPU
+                    // scene on its cheap topology-stable Embree refit path too.
+                    g_cpu_bvh_refit_pending = true;
                 }
                 if (waterUpdate.requiresAccumulationReset() && ctx.backend_ptr) {
                     ctx.backend_ptr->resetAccumulation();
