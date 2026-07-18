@@ -1524,9 +1524,13 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         cmd.groups.groups_x = (field_count + threads - 1u) / threads;
         ok = ok && compute->dispatch(cmd);
     }
-    compute->synchronize();
-    const auto p2g_phase2 = SimulationClock::now(); // dispatches + sync done
+    const auto p2g_phase2 = SimulationClock::now(); // dispatches recorded
 
+    // No synchronize() here: on Vulkan the download batch records its copies
+    // into the same command buffer and flushes uploads+dispatches+downloads
+    // with ONE submit+fence (each extra submit costs ~0.3-1ms of WDDM latency
+    // on Windows). On CUDA downloadBuffer is a blocking same-stream memcpy,
+    // ordered after the kernels by the stream.
     compute->beginTransferBatch();
     ok = ok &&
          compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
@@ -1569,11 +1573,13 @@ bool runGpuFluidDensitySplat(SimulationGridDomainState& state,
         return false;
     }
 
+    const auto ds_begin = SimulationClock::now();
     if (!ensureGpuFluidParticleBuffers(state, compute, gpu_buffers,
                                        /*upload_positions_only=*/true) ||
         !gpu_buffers.density.valid()) {
         return false;
     }
+    const auto ds_upload_end = SimulationClock::now();
 
     FluidDensitySplatGpuConstants constants;
     constants.nx = grid.nx;
@@ -1611,13 +1617,41 @@ bool runGpuFluidDensitySplat(SimulationGridDomainState& state,
     cmd.buffer_count = 2;
     cmd.groups.groups_x = (static_cast<uint32_t>(constants.particle_count) + threads - 1u) / threads;
     ok = ok && compute->dispatch(cmd);
-    compute->synchronize();
+    const auto ds_dispatch_end = SimulationClock::now();
 
+    // One submit for upload+clear+splat+download (see the P2G tail note).
+    compute->beginTransferBatch();
     ok = ok && compute->downloadBuffer(gpu_buffers.density,
                                        grid.density.data(),
                                        grid.density.size() * sizeof(float));
+    ok = compute->endTransferBatch() && ok;
+    const auto ds_download_end = SimulationClock::now();
     if (ok) {
         updateFluidDensityStats(state);
+    }
+
+    // Phase breakdown, averaged and logged every ~240 calls (same scheme as
+    // the P2G/MGPCG blocks) — the Vulkan density pass measured ~8x CUDA's and
+    // the split tells whether it is the positions upload, the dispatch+sync,
+    // the density download, or the CPU stats pass.
+    {
+        static float s_up = 0.0f, s_disp = 0.0f, s_down = 0.0f, s_stats = 0.0f;
+        static int   s_n = 0;
+        s_up    += elapsedMilliseconds(ds_begin, ds_upload_end);
+        s_disp  += elapsedMilliseconds(ds_upload_end, ds_dispatch_end);
+        s_down  += elapsedMilliseconds(ds_dispatch_end, ds_download_end);
+        s_stats += elapsedMilliseconds(ds_download_end, SimulationClock::now());
+        if (++s_n >= 240) {
+            const float inv = 1.0f / static_cast<float>(s_n);
+            SCENE_LOG_INFO("[FluidGPU DensitySplat avg ms] backend=" + std::string(compute->backendName()) +
+                           " particle_upload=" + std::to_string(s_up * inv) +
+                           " dispatch+sync=" + std::to_string(s_disp * inv) +
+                           " density_download=" + std::to_string(s_down * inv) +
+                           " cpu_stats=" + std::to_string(s_stats * inv) +
+                           " particles=" + std::to_string(particle_count));
+            s_up = s_disp = s_down = s_stats = 0.0f;
+            s_n = 0;
+        }
     }
     return ok;
 }
@@ -2254,9 +2288,15 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
             if (!ok) break;
             done_iters += batch;
 
+            // Batched download = barrier + copy recorded into the same command
+            // buffer, then ONE submit+fence for the whole K-iteration block
+            // (the old synchronize + immediate download cost two fences).
             const auto dot_begin = SimulationClock::now();
-            compute->synchronize();
-            if (!compute->downloadBuffer(gpu_buffers.cg_scalars, host_scalars, sizeof(host_scalars))) {
+            compute->beginTransferBatch();
+            bool check_ok = compute->downloadBuffer(gpu_buffers.cg_scalars,
+                                                    host_scalars, sizeof(host_scalars));
+            check_ok = compute->endTransferBatch() && check_ok;
+            if (!check_ok) {
                 ok = false;
                 break;
             }
@@ -2299,8 +2339,9 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         cmd.groups.groups_z = 1;
         const auto mg_tail_begin = SimulationClock::now();
         ok = compute->dispatch(cmd);
-        compute->synchronize();
 
+        // No synchronize(): the download batch flushes gradient dispatch +
+        // downloads in one submit (see the P2G tail note).
         compute->beginTransferBatch();
         ok = ok &&
              compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
@@ -2322,6 +2363,7 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
             if (++s_n >= 240) {
                 const float inv = 1.0f / static_cast<float>(s_n);
                 SCENE_LOG_INFO("[FluidGPU MGPCG avg ms] backend=" + std::string(compute->backendName()) +
+                               " mode=dev-scalar" +
                                " upload=" + std::to_string(s_up * inv) +
                                " cg_loop=" + std::to_string(s_cg * inv) +
                                " grad+download=" + std::to_string(s_tail * inv) +
@@ -2417,9 +2459,9 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     cmd.groups.groups_z = 1;
     const auto mg_tail_begin = SimulationClock::now();
     ok = compute->dispatch(cmd);
-    compute->synchronize();
 
     // Download updated velocities for CPU boundary re-enforcement and G2P.
+    // No synchronize(): the batch flushes in one submit (see the P2G note).
     compute->beginTransferBatch();
     ok = ok &&
          compute->downloadBuffer(gpu_buffers.vel_x, grid.vel_x.data(), grid.vel_x.size() * sizeof(float)) &&
@@ -2440,6 +2482,7 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         if (++s_n >= 240) {
             const float inv = 1.0f / static_cast<float>(s_n);
             SCENE_LOG_INFO("[FluidGPU MGPCG avg ms] backend=" + std::string(compute->backendName()) +
+                           " mode=generic" +
                            " upload=" + std::to_string(s_up * inv) +
                            " cg_loop=" + std::to_string(s_cg * inv) +
                            " grad+download=" + std::to_string(s_tail * inv) +
@@ -2551,8 +2594,9 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
     cmd.constants_size = sizeof(c);
     cmd.groups.groups_x = (static_cast<uint32_t>(c.particle_count) + threads - 1u) / threads;
     ok = compute->dispatch(cmd);
-    compute->synchronize();
 
+    // No synchronize(): the download batch flushes uploads+dispatch+downloads
+    // in one submit (see the P2G tail note).
     compute->beginTransferBatch();
     ok = ok &&
          compute->downloadBuffer(gpu_buffers.fluid_velocities,

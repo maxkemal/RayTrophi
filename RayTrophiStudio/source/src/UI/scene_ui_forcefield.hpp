@@ -1557,19 +1557,35 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 if (ImGui::CollapsingHeader("Compute Device & Backend", ImGuiTreeNodeFlags_DefaultOpen)) {
                     ImGui::Spacing();
 
+                // The CPU Sparse OpenVDB backend was removed from the UI: for
+                // fluids it never differed from Dense, and for gas the sparse
+                // path fell back to the dense step whenever a collider was
+                // present. Legacy projects that saved it are coerced to Dense
+                // (the `use_sparse_tiles` checkbox below still controls sparse
+                // grid mode independently). The enum value stays for project
+                // file compatibility.
+                if (domain.backend == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) {
+                    domain.backend = RayTrophiSim::SimulationDomainBackend::CPU_Dense;
+                }
                 const char* backends[] = {
                     "CPU (Dense - Standard)",
                     "GPU (CUDA - High Speed)",
-                    "CPU (Sparse OpenVDB - Low Memory)",
-                    "GPU (Vulkan - EXPERIMENTAL / test only)"
+                    "GPU (Vulkan Compute)"
                 };
-                int current_backend = static_cast<int>(domain.backend);
+                const RayTrophiSim::SimulationDomainBackend backend_values[] = {
+                    RayTrophiSim::SimulationDomainBackend::CPU_Dense,
+                    RayTrophiSim::SimulationDomainBackend::GPU_Compute,
+                    RayTrophiSim::SimulationDomainBackend::GPU_Vulkan
+                };
+                int current_backend = 0;
+                for (int bi = 0; bi < 3; ++bi)
+                    if (backend_values[bi] == domain.backend) current_backend = bi;
                 extern bool g_hasCUDA;
                 extern bool g_hasVulkanComputeSim;
 
                 ImGui::SetNextItemWidth(-FLT_MIN);
-                if (ImGui::Combo("##DomainBackend", &current_backend, backends, 4)) {
-                    domain.backend = static_cast<RayTrophiSim::SimulationDomainBackend>(current_backend);
+                if (ImGui::Combo("##DomainBackend", &current_backend, backends, 3)) {
+                    domain.backend = backend_values[current_backend];
                     extern bool g_gas_volumes_dirty;
                     g_gas_volumes_dirty = true;
                     ui_ctx.start_render = true;
@@ -1580,11 +1596,10 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("Selects which hardware execution unit running the simulation solver:\n\n"
                                       "1. CPU (Dense): Stable standard processor solver. Ideal for small-scale tests.\n"
-                                      "2. GPU (CUDA): Fully hardware-accelerated ultra-fast GPU compute mode. Recommended for large domains.\n"
-                                      "3. CPU (Sparse OpenVDB): Sparse grid system skips empty air cells containing no gas/smoke, saving memory.\n"
-                                      "4. GPU (Vulkan): EXPERIMENTAL / under development. The fluid (APIC) solve is\n"
-                                      "   not yet correct on Vulkan (driver float-atomic accumulation issue) — for\n"
-                                      "   testing only. Use CPU (Dense) or GPU (CUDA) for correct fluid results.");
+                                      "2. GPU (CUDA): Fully hardware-accelerated GPU compute. Recommended on NVIDIA.\n"
+                                      "3. GPU (Vulkan Compute): Cross-vendor GPU compute solver (APIC fluid + MGPCG\n"
+                                      "   pressure). Produces the same results as CPU/CUDA; CUDA is currently the\n"
+                                      "   faster of the two GPU paths.");
                 }
 
                 ImGui::Spacing();
@@ -1593,12 +1608,6 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                         ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f), "  [GPU Status: Vulkan Compute Active]");
                     else
                         ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "  [GPU Status: Vulkan Compute - SPIR-V shaders missing, CPU fallback]");
-                    // Vulkan fluid solve is still under development — flag it so it
-                    // isn't mistaken for a production-ready path. CPU/CUDA are correct.
-                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
-                        "  WARNING: Vulkan fluid solve is EXPERIMENTAL (under development).");
-                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
-                        "  Fluid does not flow correctly here yet — use CPU or CUDA for real runs.");
                 } else if (g_hasCUDA) {
                     ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.5f, 1.0f), "  [GPU Status: CUDA Acceleration Active]");
                 } else {
@@ -1997,8 +2006,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                         ImGui::DragFloat("Turbulence Strength", &domain.turbulence_strength, 0.01f, 0.0f, 50.0f, "%.3f");
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip("Adds divergence-free swirling detail on top of the solved motion.\n"
-                                              "0 = off. Modulated by local density/heat/edges so still air stays calm.\n"
-                                              "Not applied on the Sparse VDB backend.");
+                                              "0 = off. Modulated by local density/heat/edges so still air stays calm.");
                         }
                         if (domain.turbulence_strength > 0.0f) {
                             ImGui::DragFloat("Noise Scale", &domain.turbulence_scale, 0.02f, 0.05f, 20.0f, "%.2f");

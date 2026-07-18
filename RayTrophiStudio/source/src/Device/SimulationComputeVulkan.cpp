@@ -101,11 +101,9 @@ public:
         for (auto& dl : m_descLayouts)
             if (dl != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_device, dl, nullptr);
         if (m_descPool)  vkDestroyDescriptorPool(m_device, m_descPool, nullptr);
-        if (m_stagingBuf) {
-            vkUnmapMemory(m_device, m_stagingMem);
-            vkDestroyBuffer(m_device, m_stagingBuf, nullptr);
-            vkFreeMemory(m_device, m_stagingMem, nullptr);
-        }
+        destroyStaging(m_stagingUp);
+        destroyStaging(m_stagingDown);
+        for (auto& s : m_retiredStaging) destroyStaging(s);
         if (m_copyCmdBuf) vkFreeCommandBuffers(m_device, m_cmdPool, 1, &m_copyCmdBuf);
         if (m_cmdBuf)    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &m_cmdBuf);
         if (m_cmdPool)   vkDestroyCommandPool(m_device, m_cmdPool, nullptr);
@@ -233,6 +231,12 @@ public:
     bool destroyBuffer(ComputeBufferHandle h) override {
         auto it = m_buffers.find(h.id);
         if (it == m_buffers.end()) return false;
+        // The recorded-but-unsubmitted command buffer may still reference this
+        // VkBuffer (recorded transfers/dispatches can outlive a phase that
+        // bailed out before its synchronize). Freeing it now would make the
+        // next submit touch a destroyed handle — adaptive domains hit exactly
+        // this by resizing buffers between steps. Flush first.
+        if (m_recording) synchronize();
         if (it->second.buffer) vkDestroyBuffer(m_device, it->second.buffer, nullptr);
         if (it->second.memory) vkFreeMemory(m_device, it->second.memory, nullptr);
         m_buffers.erase(it);
@@ -242,6 +246,7 @@ public:
     bool resizeBuffer(ComputeBufferHandle h, std::size_t new_size) override {
         auto it = m_buffers.find(h.id);
         if (it == m_buffers.end() || it->second.size >= new_size) return it != m_buffers.end();
+        if (m_recording) synchronize(); // see destroyBuffer — same stale-handle window
         if (it->second.buffer) vkDestroyBuffer(m_device, it->second.buffer, nullptr);
         if (it->second.memory) vkFreeMemory(m_device, it->second.memory, nullptr);
         it->second = {};
@@ -296,23 +301,36 @@ public:
             return true;
         }
 
-        // Batch mode: queue the op; one submission covers the whole batch.
-        if (m_batchActive) {
-            m_batchOps.push_back({ it->second.buffer, dst_offset, size_bytes,
-                                   const_cast<void*>(data), m_batchBytes, true });
-            m_batchBytes += (size_bytes + 7u) & ~std::size_t(7);
+        // Recorded path: the copy goes INTO the compute command buffer instead
+        // of its own submit+fence round-trip. On Windows every
+        // vkQueueSubmit+vkWaitForFences costs ~0.3-1ms wall regardless of size
+        // (WDDM scheduling latency) — with 3 submits per sim phase that tax,
+        // not bandwidth, dominated the transfer timings. Taken whenever a
+        // batch is active or recorded work already exists (call order with the
+        // recorded stream must be preserved). Host data is captured into
+        // staging immediately, so the caller may reuse its buffer right away;
+        // the GPU copy lands with the next synchronize().
+        if (m_batchActive || m_recording || m_stagingUpCursor > 0) {
+            const std::size_t off =
+                stagingReserve(m_stagingUp, m_stagingUpCursor, size_bytes, /*for_download=*/false);
+            if (off == SIZE_MAX || !ensureRecording()) return false;
+            std::memcpy(static_cast<uint8_t*>(m_stagingUp.mapped) + off, data, size_bytes);
+            VkBufferCopy region{ off, dst_offset, static_cast<VkDeviceSize>(size_bytes) };
+            vkCmdCopyBuffer(m_cmdBuf, m_stagingUp.buf, it->second.buffer, 1, &region);
+            if (m_batchActive) m_batchHasUploads = true; // one barrier at endTransferBatch
+            else               recordUploadBarrier();
             return true;
         }
 
-        // Persistent (grow-only, persistently mapped) staging buffer. The old
-        // create/map/copy/destroy-per-call pattern was the dominant CPU cost of
-        // the MGPCG pressure solve on Vulkan: every CG dot product downloads
-        // the block partials, so a single substep issued hundreds of staging
-        // allocations. submitCopyImmediate waits the fence before returning, so
-        // reuse is race-free.
-        if (!ensureStaging(size_bytes)) return false;
-        std::memcpy(m_stagingMapped, data, size_bytes);
-        submitCopyImmediate(m_stagingBuf, it->second.buffer, size_bytes, 0, dst_offset);
+        // Cold path (no recorded work pending): immediate copy + fence. The
+        // reserved staging region is rolled back after the fence — the wait
+        // guarantees it is reusable.
+        const std::size_t off =
+            stagingReserve(m_stagingUp, m_stagingUpCursor, size_bytes, /*for_download=*/false);
+        if (off == SIZE_MAX) return false;
+        std::memcpy(static_cast<uint8_t*>(m_stagingUp.mapped) + off, data, size_bytes);
+        submitCopyImmediate(m_stagingUp.buf, it->second.buffer, size_bytes, off, dst_offset);
+        m_stagingUpCursor = off;
         return true;
     }
 
@@ -326,85 +344,60 @@ public:
 
         auto* self = const_cast<VulkanSimulationComputeBackend*>(this);
         if (m_batchActive) {
-            // Deferred: `data` is filled when endTransferBatch() runs.
-            self->m_batchOps.push_back({ it->second.buffer, src_offset, size_bytes,
-                                         data, self->m_batchBytes, false });
-            self->m_batchBytes += (size_bytes + 7u) & ~std::size_t(7);
+            // Recorded: barrier (once per batch) + copy go into the compute
+            // command buffer, AFTER the already-recorded dispatches; the host
+            // memcpy runs after the fence in synchronize(), which
+            // endTransferBatch() triggers. `data` is valid when
+            // endTransferBatch() returns.
+            const std::size_t off =
+                self->stagingReserve(self->m_stagingDown, self->m_stagingDownCursor,
+                                     size_bytes, /*for_download=*/true);
+            if (off == SIZE_MAX || !self->ensureRecording()) return false;
+            if (!self->m_batchDownBarrierDone) {
+                self->recordDownloadBarrier();
+                self->m_batchDownBarrierDone = true;
+            }
+            VkBufferCopy region{ src_offset, off, static_cast<VkDeviceSize>(size_bytes) };
+            vkCmdCopyBuffer(self->m_cmdBuf, it->second.buffer, self->m_stagingDown.buf, 1, &region);
+            // Capture the mapping NOW: if a later reserve grows/retires this
+            // staging buffer, the retired mapping stays valid until the fence.
+            self->m_pendingDownloads.push_back(
+                { data, static_cast<const uint8_t*>(self->m_stagingDown.mapped) + off, size_bytes });
             return true;
         }
-        if (!self->ensureStaging(size_bytes)) return false;
-        self->submitCopyImmediate(it->second.buffer, m_stagingBuf, size_bytes, src_offset, 0);
-        std::memcpy(data, m_stagingMapped, size_bytes);
+        const std::size_t off =
+            self->stagingReserve(self->m_stagingDown, self->m_stagingDownCursor,
+                                 size_bytes, /*for_download=*/true);
+        if (off == SIZE_MAX) return false;
+        self->submitCopyImmediate(it->second.buffer, m_stagingDown.buf, size_bytes, src_offset, off);
+        std::memcpy(data, static_cast<const uint8_t*>(m_stagingDown.mapped) + off, size_bytes);
+        self->m_stagingDownCursor = off;
         return true;
     }
 
-    // Collapse every queued upload/download into ONE command buffer submission
-    // (one fence wait) instead of one per copy. Downloaded host pointers are
-    // written here, before endTransferBatch() returns.
+    // Transfer batches record their copies into the compute command buffer.
+    // An upload-only batch produces NO submission — the copies (and one
+    // TRANSFER→COMPUTE barrier) simply precede the dispatches recorded after
+    // it, and everything lands in the phase's single synchronize(). A batch
+    // containing downloads ends with one submit+fence covering uploads,
+    // dispatches AND downloads; the downloaded host pointers are valid when
+    // endTransferBatch() returns.
     void beginTransferBatch() override {
         m_batchActive = true;
-        m_batchOps.clear();
-        m_batchBytes = 0;
+        m_batchHasUploads = false;
+        m_batchDownBarrierDone = false;
     }
 
     bool endTransferBatch() override {
         m_batchActive = false;
-        if (m_batchOps.empty()) return true;
-        if (!ensureStaging(m_batchBytes)) { m_batchOps.clear(); return false; }
-
-        for (const auto& op : m_batchOps) {
-            if (op.upload)
-                std::memcpy(static_cast<uint8_t*>(m_stagingMapped) + op.stagingOff,
-                            op.host, op.size);
+        if (m_batchHasUploads) {
+            recordUploadBarrier();
+            m_batchHasUploads = false;
         }
-
-        if (m_copyCmdBuf == VK_NULL_HANDLE) {
-            VkCommandBufferAllocateInfo ai{};
-            ai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-            ai.commandPool        = m_cmdPool;
-            ai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            ai.commandBufferCount = 1;
-            if (vkAllocateCommandBuffers(m_device, &ai, &m_copyCmdBuf) != VK_SUCCESS) {
-                m_batchOps.clear();
-                return false;
-            }
+        if (!m_pendingDownloads.empty()) {
+            synchronize(); // one submit+fence; flushes m_pendingDownloads
         }
-        vkResetCommandBuffer(m_copyCmdBuf, 0);
-        VkCommandBufferBeginInfo bi{};
-        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(m_copyCmdBuf, &bi);
-        for (const auto& op : m_batchOps) {
-            VkBufferCopy region{};
-            if (op.upload) {
-                region.srcOffset = op.stagingOff;
-                region.dstOffset = op.devOff;
-                region.size      = op.size;
-                vkCmdCopyBuffer(m_copyCmdBuf, m_stagingBuf, op.devBuf, 1, &region);
-            } else {
-                region.srcOffset = op.devOff;
-                region.dstOffset = op.stagingOff;
-                region.size      = op.size;
-                vkCmdCopyBuffer(m_copyCmdBuf, op.devBuf, m_stagingBuf, 1, &region);
-            }
-        }
-        vkEndCommandBuffer(m_copyCmdBuf);
-
-        VkSubmitInfo si{};
-        si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.commandBufferCount = 1;
-        si.pCommandBuffers    = &m_copyCmdBuf;
-        vkQueueSubmit(m_queue, 1, &si, m_fence);
-        vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, UINT64_MAX);
-        vkResetFences(m_device, 1, &m_fence);
-
-        for (const auto& op : m_batchOps) {
-            if (!op.upload)
-                std::memcpy(op.host,
-                            static_cast<const uint8_t*>(m_stagingMapped) + op.stagingOff,
-                            op.size);
-        }
-        m_batchOps.clear();
+        m_batchDownBarrierDone = false;
         return true;
     }
 
@@ -428,6 +421,16 @@ public:
         vkResetCommandBuffer(m_cmdBuf, 0);
         vkResetDescriptorPool(m_device, m_descPool, 0);
         m_recording = false;
+
+        // Recorded transfers are now complete: flush deferred download
+        // memcpys, release retired staging buffers, rewind the cursors.
+        for (const auto& pd : m_pendingDownloads)
+            std::memcpy(pd.host, pd.src, pd.size);
+        m_pendingDownloads.clear();
+        for (auto& s : m_retiredStaging) destroyStaging(s);
+        m_retiredStaging.clear();
+        m_stagingUpCursor = 0;
+        m_stagingDownCursor = 0;
     }
 
     // ── Dispatch ──────────────────────────────────────────────────────────────
@@ -569,26 +572,42 @@ private:
     bool     m_has_float_atomics = false;
     bool     m_has_shader_float64 = false;
 
-    // Persistent staging + copy command buffer (see ensureStaging /
-    // submitCopyImmediate).
-    VkBuffer        m_stagingBuf    = VK_NULL_HANDLE;
-    VkDeviceMemory  m_stagingMem    = VK_NULL_HANDLE;
-    std::size_t     m_stagingCap    = 0;
-    void*           m_stagingMapped = nullptr;
+    // Persistent staging + copy command buffer (see stagingReserve /
+    // submitCopyImmediate). Direction-split: the upload staging prefers
+    // write-combined memory (fast streaming host writes, snoop-free GPU DMA
+    // reads), the download staging prefers host-cached (readback from WC
+    // memory is ~0.3GB/s — the 13x-slower-downloads lesson).
+    struct Staging {
+        VkBuffer       buf    = VK_NULL_HANDLE;
+        VkDeviceMemory mem    = VK_NULL_HANDLE;
+        std::size_t    cap    = 0;
+        void*          mapped = nullptr;
+    };
+    Staging         m_stagingUp;
+    Staging         m_stagingDown;
     VkCommandBuffer m_copyCmdBuf    = VK_NULL_HANDLE;
 
     // Transfer batch state (beginTransferBatch/endTransferBatch).
-    struct BatchXfer {
-        VkBuffer    devBuf;
-        std::size_t devOff;
+    bool m_batchActive          = false;
+    bool m_batchHasUploads      = false; // batch records copies; one barrier at end
+    bool m_batchDownBarrierDone = false; // COMPUTE→TRANSFER barrier once per batch
+    // Staging cursors persist across batches until synchronize(): recorded
+    // copies reference their staging regions until the fence. Reset in
+    // synchronize().
+    std::size_t m_stagingUpCursor = 0;
+    std::size_t m_stagingDownCursor = 0;
+    // Downloads recorded into the command buffer; the host memcpy happens
+    // after the fence in synchronize(). `src` points into a staging mapping
+    // (possibly of a retired buffer — kept alive until that same fence).
+    struct PendingDownload {
+        void*       host;
+        const void* src;
         std::size_t size;
-        void*       host;       // src for uploads, dst for downloads
-        std::size_t stagingOff;
-        bool        upload;
     };
-    bool                   m_batchActive = false;
-    std::vector<BatchXfer> m_batchOps;
-    std::size_t            m_batchBytes = 0;
+    std::vector<PendingDownload> m_pendingDownloads;
+    // Staging buffers replaced (grown) while recorded copies still reference
+    // them — destroyed after the next fence.
+    std::vector<Staging> m_retiredStaging;
 
     // ── Initialization ────────────────────────────────────────────────────────
 
@@ -874,7 +893,15 @@ private:
         return UINT32_MAX;
     }
 
-    bool createStagingBuffer(std::size_t size,
+    void destroyStaging(Staging& s) {
+        if (s.buf == VK_NULL_HANDLE) return;
+        vkUnmapMemory(m_device, s.mem);
+        vkDestroyBuffer(m_device, s.buf, nullptr);
+        vkFreeMemory(m_device, s.mem, nullptr);
+        s = {};
+    }
+
+    bool createStagingBuffer(std::size_t size, bool for_download,
                               VkBuffer& outBuf, VkDeviceMemory& outMem) {
         VkBufferCreateInfo bci{};
         bci.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -885,20 +912,27 @@ private:
 
         VkMemoryRequirements req{};
         vkGetBufferMemoryRequirements(m_device, outBuf, &req);
-        // Prefer HOST_CACHED: the staging buffer is shared by uploads AND
-        // downloads, and reading back from non-cached (write-combined) host
-        // memory is catastrophically slow (~0.3 GB/s memcpy — measured 13x
-        // slower field downloads vs CUDA). Cached+coherent exists on every
-        // desktop vendor; fall back to plain coherent if a driver lacks it.
-        uint32_t mt = findMemType(req.memoryTypeBits,
-                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
-                                  VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
-        if (mt == UINT32_MAX) {
-            mt = findMemType(req.memoryTypeBits,
-                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        // Download staging MUST prefer HOST_CACHED: reading back from
+        // write-combined host memory is ~0.3GB/s (measured 13x slower field
+        // downloads vs CUDA). Upload staging prefers plain coherent (WC):
+        // streaming host writes are fastest there and the GPU's DMA read
+        // doesn't have to snoop the CPU cache. Both fall back to whatever
+        // coherent host-visible type the driver offers.
+        constexpr VkMemoryPropertyFlags kBase =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        uint32_t mt = UINT32_MAX;
+        if (for_download) {
+            mt = findMemType(req.memoryTypeBits, kBase | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        } else {
+            VkPhysicalDeviceMemoryProperties memProps{};
+            vkGetPhysicalDeviceMemoryProperties(m_physDevice, &memProps);
+            for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+                const VkMemoryPropertyFlags f = memProps.memoryTypes[i].propertyFlags;
+                if ((req.memoryTypeBits & (1u << i)) && (f & kBase) == kBase &&
+                    (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) == 0) { mt = i; break; }
+            }
         }
+        if (mt == UINT32_MAX) mt = findMemType(req.memoryTypeBits, kBase);
         if (mt == UINT32_MAX) { vkDestroyBuffer(m_device, outBuf, nullptr); return false; }
 
         VkMemoryAllocateInfo ai{};
@@ -913,31 +947,58 @@ private:
         return true;
     }
 
-    // Grow-only persistently-mapped staging buffer shared by upload/download.
-    // Safe to reuse because every submitCopyImmediate waits its fence before
-    // returning (no in-flight consumer of the previous contents).
-    bool ensureStaging(std::size_t size) {
-        if (m_stagingBuf != VK_NULL_HANDLE && size <= m_stagingCap) return true;
-        if (m_stagingBuf != VK_NULL_HANDLE) {
-            vkUnmapMemory(m_device, m_stagingMem);
-            vkDestroyBuffer(m_device, m_stagingBuf, nullptr);
-            vkFreeMemory(m_device, m_stagingMem, nullptr);
-            m_stagingBuf = VK_NULL_HANDLE;
-            m_stagingMem = VK_NULL_HANDLE;
-            m_stagingMapped = nullptr;
-            m_stagingCap = 0;
+    // Reserve `size` bytes in the (grow-only, persistently mapped) staging
+    // buffer at its cursor; returns the region's offset or SIZE_MAX. If a
+    // grow is needed while recorded copies still reference the current buffer
+    // (cursor > 0), the old buffer is RETIRED — kept alive until the next
+    // fence — instead of destroyed.
+    std::size_t stagingReserve(Staging& s, std::size_t& cursor,
+                               std::size_t size, bool for_download) {
+        const std::size_t aligned = (size + 7u) & ~std::size_t(7);
+        if (s.buf == VK_NULL_HANDLE || cursor + aligned > s.cap) {
+            const std::size_t cap = std::max<std::size_t>({ aligned, s.cap * 2, 1u << 20 });
+            if (s.buf != VK_NULL_HANDLE && cursor > 0) {
+                m_retiredStaging.push_back(s);
+                s = {};
+            } else {
+                destroyStaging(s);
+            }
+            cursor = 0;
+            if (!createStagingBuffer(cap, for_download, s.buf, s.mem)) return SIZE_MAX;
+            if (vkMapMemory(m_device, s.mem, 0, cap, 0, &s.mapped) != VK_SUCCESS) {
+                vkDestroyBuffer(m_device, s.buf, nullptr);
+                vkFreeMemory(m_device, s.mem, nullptr);
+                s = {};
+                return SIZE_MAX;
+            }
+            s.cap = cap;
         }
-        std::size_t cap = std::max<std::size_t>({ size, m_stagingCap * 2, 1u << 20 });
-        if (!createStagingBuffer(cap, m_stagingBuf, m_stagingMem)) return false;
-        if (vkMapMemory(m_device, m_stagingMem, 0, cap, 0, &m_stagingMapped) != VK_SUCCESS) {
-            vkDestroyBuffer(m_device, m_stagingBuf, nullptr);
-            vkFreeMemory(m_device, m_stagingMem, nullptr);
-            m_stagingBuf = VK_NULL_HANDLE;
-            m_stagingMem = VK_NULL_HANDLE;
-            return false;
-        }
-        m_stagingCap = cap;
-        return true;
+        const std::size_t base = cursor;
+        cursor += aligned;
+        return base;
+    }
+
+    // Barriers pairing recorded transfer copies with the surrounding compute
+    // dispatches inside the shared command buffer.
+    void recordUploadBarrier() {
+        VkMemoryBarrier mb{};
+        mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(m_cmdBuf,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
+    void recordDownloadBarrier() {
+        VkMemoryBarrier mb{};
+        mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(m_cmdBuf,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 1, &mb, 0, nullptr, 0, nullptr);
     }
 
     void submitCopyImmediate(VkBuffer src, VkBuffer dst, std::size_t size,
