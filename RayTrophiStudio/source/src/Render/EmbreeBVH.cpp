@@ -2,6 +2,7 @@
 #include "HittableInstance.h"
 #include "VDBVolume.h" // Add VDB support
 #include "VDBVolumeManager.h"
+#include "MeshPointiness.h"
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -259,12 +260,14 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
                     // in the dynamic-triangle refit list), which left the CPU picking BVH at a stale
                     // position while Vulkan rendered the current one. Baking from P_orig keeps both
                     // backends in lockstep on every rebuild.
-                    const Vec3* origP = group.mesh->geometry->get_positions_orig();
-                    if (!origP) origP = group.mesh->geometry->get_attribute_data<Vec3>("P");
-                    if (origP) {
+                    const Vec3* sourceP = group.mesh->hasSkinWeights()
+                        ? group.mesh->geometry->get_positions()
+                        : group.mesh->geometry->get_positions_orig();
+                    if (!sourceP) sourceP = group.mesh->geometry->get_attribute_data<Vec3>("P");
+                    if (sourceP) {
                         #pragma omp parallel for num_threads(get_omp_threads_limit()) schedule(static)
                         for (int v = 0; v < (int)vCount; ++v) {
-                            vertex_buffer[vertex_offset + v] = initial_xform.transform_point(origP[v]);
+                            vertex_buffer[vertex_offset + v] = initial_xform.transform_point(sourceP[v]);
                         }
                     }
                 } else {
@@ -275,7 +278,9 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
                 }
 
                 // Add to active_mesh_groups for fast refitting
-                active_mesh_groups.push_back({group.mesh, vertex_offset, vCount, initial_xform, group.facadeless});
+                active_mesh_groups.push_back({group.mesh, vertex_offset, vCount, initial_xform,
+                                              group.mesh->geometry->last_skinned_pose_hash,
+                                              group.facadeless});
             }
 
             if (group.facadeless) {
@@ -694,22 +699,27 @@ void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::sha
                     for (int i = 0; i < (int)group_count; ++i) {
                         auto& group = active_mesh_groups[i];
                         Matrix4x4 current_xform = group.mesh->transform ? group.mesh->transform->getFinal() : Matrix4x4::identity();
-                        if (!(group.last_xform == current_xform)) {
+                        const uint64_t currentPoseHash = group.mesh && group.mesh->geometry
+                            ? group.mesh->geometry->last_skinned_pose_hash
+                            : 0;
+                        if (!(group.last_xform == current_xform) || group.last_pose_hash != currentPoseHash) {
                             if (group.facadeless) {
                                 // Self-bake world = getFinal()*P_orig (same math as build + Vulkan RT).
                                 // The "P" cache isn't re-baked on a transform-only change for a flat
                                 // mesh, so memcpy-ing it would refit to a stale pose (the old "only the
                                 // rep facade moved" bug). P_orig is authoritative local rest (also what
                                 // sculpt/rigid deform write), so this stays correct under deformation too.
-                                const Vec3* origP = group.mesh->geometry->get_positions_orig();
-                                if (!origP) origP = group.mesh->geometry->get_attribute_data<Vec3>("P");
-                                if (origP) {
+                                const Vec3* sourceP = group.mesh->hasSkinWeights()
+                                    ? group.mesh->geometry->get_positions()
+                                    : group.mesh->geometry->get_positions_orig();
+                                if (!sourceP) sourceP = group.mesh->geometry->get_attribute_data<Vec3>("P");
+                                if (sourceP) {
                                     Vec3* dst = vertex_buffer + group.vertex_offset;
                                     const Matrix4x4 xf = current_xform;
                                     const int vCount = (int)group.vertex_count;
                                     #pragma omp parallel for num_threads(bakeThreads) schedule(static) if(vCount >= 8192)
                                     for (int v = 0; v < vCount; ++v) {
-                                        dst[v] = xf.transform_point(origP[v]);
+                                        dst[v] = xf.transform_point(sourceP[v]);
                                     }
                                     any_dirty += 1;
                                 }
@@ -721,6 +731,7 @@ void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::sha
                                 }
                             }
                             group.last_xform = current_xform;
+                            group.last_pose_hash = currentPoseHash;
                         }
                     }
                 }
@@ -1039,6 +1050,17 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
                 rec.tri_mesh = tri.mesh_ptr;
                 rec.tri_face = tri.face_index;
             }
+            rec.pointiness = MeshAttr::samplePointiness(rec.tri_mesh, rec.tri_face, w, u, v);
+            MeshAttr::sampleMaterialAttributes(rec.tri_mesh, rec.tri_face, w, u, v, rec.mat_attrib);
+            rec.object_position = rec.point;   // transformless geometry: world IS object space
+            MeshAttr::sampleObjectPosition(rec.tri_mesh, rec.tri_face, w, u, v, rec.object_position);
+            // Object Info origin. The facade carries its own shared Transform; a flat (SoA)
+            // mesh carries the mesh's. Both mirror what the Vulkan uploader hands the TLAS
+            // for the same object, so the two backends hash the same bits.
+            rec.object_origin = tri.original_ptr
+                ? MeshAttr::objectOrigin(tri.original_ptr->getTransformPtr())
+                : (tri.mesh_ptr ? MeshAttr::objectOrigin(tri.mesh_ptr->transform.get()) : Vec3());
+            rec.view_dir = (-ray.direction).normalize();   // Fresnel / Layer Weight
             return true;
         }
         else if (hit_instance) {
@@ -1086,6 +1108,33 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
                               rec.tri_mesh = tri.original_ptr->parentMesh.get();
                               rec.tri_face = tri.original_ptr->faceIndex;
                           }
+                          // Pointiness reads the SOURCE mesh's per-vertex cache — an instance
+                          // shares its source's topology, and the measure is transform-invariant.
+                          rec.pointiness = MeshAttr::samplePointiness(
+                              tri.original_ptr ? tri.original_ptr->parentMesh.get() : tri.mesh_ptr,
+                              tri.original_ptr ? tri.original_ptr->faceIndex : tri.face_index,
+                              w, u, v);
+                          // Named attributes come from the SOURCE mesh too — an instance shares
+                          // its source's per-vertex channels (a painted mask travels with the
+                          // geometry), exactly like pointiness above.
+                          MeshAttr::sampleMaterialAttributes(
+                              tri.original_ptr ? tri.original_ptr->parentMesh.get() : tri.mesh_ptr,
+                              tri.original_ptr ? tri.original_ptr->faceIndex : tri.face_index,
+                              w, u, v, rec.mat_attrib);
+                          // Object space of an INSTANCE = the source mesh's local space (its BLAS
+                          // is what Vulkan instances), so this is the source's bind pose — which
+                          // is exactly why a 3D noise in object space stops swimming per instance.
+                          rec.object_position = rec.point;
+                          MeshAttr::sampleObjectPosition(
+                              tri.original_ptr ? tri.original_ptr->parentMesh.get() : tri.mesh_ptr,
+                              tri.original_ptr ? tri.original_ptr->faceIndex : tri.face_index,
+                              w, u, v, rec.object_position);
+                          // Object Info origin: the INSTANCE's placement, not the source mesh's —
+                          // this is the whole point of the node under Scatter (10k instances of one
+                          // mesh, each a different tint). Vulkan reads the identical matrix as
+                          // gl_ObjectToWorldEXT on the same instance.
+                          rec.object_origin = inst->transform.getTranslation();
+                          rec.view_dir = (-ray.direction).normalize();   // Fresnel / Layer Weight
                           return true;
                      }
                 }

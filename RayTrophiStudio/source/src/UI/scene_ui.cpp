@@ -45,7 +45,7 @@
 #include "scene_ui_guides.hpp" // Viewport guides (safe areas, letterbox, grids)
 #include "TimelineWidget.h"   // Custom timeline widget
 #include "scene_data.h"
-#include "scene_ui_water.hpp"   // Water panel implementation
+#include "scene_ui_water_v2.hpp"   // Vulkan-first Water V2 panel
 #include "scene_ui_river.hpp"   // River spline editor
 #include "WaterSystem.h"        // Water Manager for update loop
 #include "scene_ui_terrain.hpp" // Terrain panel implementation
@@ -3298,16 +3298,20 @@ void SceneUI::validateSelectionAgainstScene(UIContext& ctx) {
     }
 
     std::unordered_map<std::string, std::pair<int, std::shared_ptr<Triangle>>> live_objects_by_name;
+    std::unordered_map<std::string, std::shared_ptr<TriangleMesh>> live_meshes_by_name;
     live_objects_by_name.reserve(ctx.scene.world.objects.size());
+    live_meshes_by_name.reserve(ctx.scene.world.objects.size());
 
     for (size_t i = 0; i < ctx.scene.world.objects.size(); ++i) {
         if (auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i])) {
             std::string node_name = tri->getNodeName();
             if (node_name.empty()) continue;
             live_objects_by_name.emplace(node_name, std::make_pair(static_cast<int>(i), tri));
+            if (tri->parentMesh) live_meshes_by_name.emplace(node_name, tri->parentMesh);
         } else if (auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(ctx.scene.world.objects[i])) {
             std::string node_name = tmesh->nodeName;
             if (node_name.empty()) continue;
+            live_meshes_by_name.emplace(node_name, tmesh);
             std::shared_ptr<Triangle> rep = nullptr;
             auto rep_it = direct_mesh_rep_by_ptr.find(tmesh.get());
             if (rep_it != direct_mesh_rep_by_ptr.end()) {
@@ -3339,6 +3343,13 @@ void SceneUI::validateSelectionAgainstScene(UIContext& ctx) {
                 }
 
                 item.object = it->second.second;
+                auto mesh_it = live_meshes_by_name.find(node_name);
+                item.mesh_object = mesh_it != live_meshes_by_name.end()
+                    ? mesh_it->second
+                    : item.object->parentMesh;
+                if (item.object && item.object->parentMesh == item.mesh_object) {
+                    item.mesh_face_index = item.object->faceIndex;
+                }
                 item.object_index = it->second.first;
                 item.name = node_name;
                 return true;
@@ -3400,6 +3411,8 @@ void SceneUI::validateSelectionAgainstScene(UIContext& ctx) {
             changed = true;
         } else if (rebound_primary.type != ctx.selection.selected.type ||
                    rebound_primary.object != ctx.selection.selected.object ||
+                   rebound_primary.mesh_object != ctx.selection.selected.mesh_object ||
+                   rebound_primary.mesh_face_index != ctx.selection.selected.mesh_face_index ||
                    rebound_primary.light != ctx.selection.selected.light ||
                    rebound_primary.camera != ctx.selection.selected.camera ||
                    rebound_primary.vdb_volume != ctx.selection.selected.vdb_volume ||
@@ -3503,8 +3516,12 @@ void SceneUI::draw(UIContext& ctx)
              std::vector<std::shared_ptr<Hittable>> selected_hittables;
              if (SceneExporter::getInstance().settings.export_selected_only) {
                  for (const auto& item : ctx.selection.multi_selection) {
-                     if (item.type == SelectableType::Object && item.object) {
-                         selected_hittables.push_back(item.object);
+                     if (item.type == SelectableType::Object) {
+                         if (item.mesh_object) {
+                             selected_hittables.push_back(item.mesh_object);
+                         } else if (item.object) {
+                             selected_hittables.push_back(item.object);
+                         }
                      }
                  }
              }
@@ -3826,7 +3843,8 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
     // EXCEPTION: while the Geometry Graph node editor is focused, Delete/Backspace is claimed
     // by NodeEditorUIV2 for node/link deletion — without this, deleting a node in the graph
     // also deleted the scene object the graph belongs to (same Delete keypress, two listeners).
-    if (!io.WantTextInput && ctx.selection.hasSelection() && !geometry_graph_focused) {
+    if (!io.WantTextInput && ctx.selection.hasSelection() &&
+        !terrain_graph_focused && !geometry_graph_focused && !material_graph_focused) {
         handleDeleteShortcut(ctx);
     }
 
@@ -3949,8 +3967,11 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     float screen_y,
     float left_offset)
 {
-    static float bottom_hold_timers[6] = { 0.0f };
-    static float bottom_flash_timers[7] = { 0.0f };
+    // Sized for the highest tab_index passed to handleBottomTabEvents below (7 =
+    // Material Graph) + 1. The old sizes (6/7) were already overrun by the Asset
+    // Browser's tab_index 6 on the hold-timer array.
+    static float bottom_hold_timers[8] = { 0.0f };
+    static float bottom_flash_timers[8] = { 0.0f };
 
     auto isBottomPanelFloating = [&](const char* window_name) -> bool {
         if (!docking_enabled) return false;
@@ -4096,6 +4117,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             show_anim_graph     = (keep_index == 3) ? show_anim_graph : false;
             show_asset_browser  = (keep_index == 4) ? show_asset_browser : false;
             show_geometry_graph = (keep_index == 5) ? show_geometry_graph : false;
+            show_material_graph = (keep_index == 6) ? show_material_graph : false;
         };
         
         bool active_dope = show_animation_panel && (timeline.getEditorMode() == TimelineEditorMode::DopeSheet);
@@ -4199,6 +4221,22 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         handleBottomTabEvents(5, "Geometry Graph", show_geometry_graph, [&]() {
             show_geometry_graph = true;
             closeOtherBottomPanels(5);
+            focus_bottom_panel_next_frame = true;
+        });
+
+        if (UIWidgets::HorizontalTab("Material", UIWidgets::IconType::Graph, show_material_graph))
+        {
+            show_material_graph = !show_material_graph;
+            if (show_material_graph) {
+                closeOtherBottomPanels(6);
+                focus_bottom_panel_next_frame = true;
+            } else {
+                if (docking_enabled) dockToBottom("Material Graph");
+            }
+        }
+        handleBottomTabEvents(7, "Material Graph", show_material_graph, [&]() {
+            show_material_graph = true;
+            closeOtherBottomPanels(6);
             focus_bottom_panel_next_frame = true;
         });
 
@@ -4412,7 +4450,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     ImGui::PopStyleVar(2);
 
     // ---------------- BOTTOM PANEL (Resizable) ----------------
-    bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_geometry_graph || show_anim_graph || show_asset_browser);
+    bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_geometry_graph || show_material_graph || show_anim_graph || show_asset_browser);
     if (!show_bottom) return;
 
     // Use class member for persistent height
@@ -4539,6 +4577,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
 
         if (show_terrain_graph) {
             bool open = true;
+            terrain_graph_focused = false;
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
             ImGui::SetNextWindowSize(ImVec2(950, 450), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowPos(ImVec2((screen_x - 950) * 0.5f, (screen_y - 450) * 0.5f), ImGuiCond_FirstUseEver);
@@ -4553,6 +4592,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                 if (focus_bottom_panel_next_frame) {
                     ImGui::SetWindowFocus();
                 }
+                terrain_graph_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
                 terrain_brush.enabled = false;
                 TerrainObject* activeTerrain = nullptr;
                 if (terrain_brush.active_terrain_id != -1) {
@@ -4575,6 +4615,26 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                              return SceneUI::saveFileDialogW(filter, L"png");
                          };
                     }
+                    terrainNodeEditorUI.onFoliageThumbnail = [this, &ctx](
+                        const std::string& relativePath, int& width, int& height) -> ImTextureID {
+                        for (const auto& asset : FoliageAssets::catalog(false).getAssets()) {
+                            if (asset.relative_entry_path.generic_string() != relativePath ||
+                                !asset.has_preview) continue;
+                            SDL_Texture* texture = nullptr;
+                            if (ensureAssetBrowserThumbnailTexture(
+                                    ctx, asset.preview_path, texture, width, height) && texture) {
+                                return (ImTextureID)texture;
+                            }
+                            break;
+                        }
+                        width = 0;
+                        height = 0;
+                        return ImTextureID{};
+                    };
+                    terrainNodeEditorUI.onFoliageScattered = [&ctx](
+                        TerrainObject* terrain, const std::vector<int>& groupIds) {
+                        SceneUI::syncNodeFoliageToScene(ctx, terrain, groupIds);
+                    };
                     terrainNodeEditorUI.draw(ctx, *activeTerrain->nodeGraph, activeTerrain);
                 } else {
                      ImGui::TextColored(ImVec4(1, 1, 0, 1), "Please select a terrain to edit its node graph.");
@@ -4584,8 +4644,11 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             ImGui::PopStyleVar();
             if (!open) {
                 show_terrain_graph = false;
+                terrain_graph_focused = false;
                 dockToBottom("Terrain Graph");
             }
+        } else {
+            terrain_graph_focused = false;
         }
 
         if (show_geometry_graph) {
@@ -4844,6 +4907,43 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             geometry_graph_focused = false;
         }
 
+        if (show_material_graph) {
+            bool open = true;
+            material_graph_focused = false;  // re-armed below only if the window is actually focused this frame
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
+            ImGui::SetNextWindowSize(ImVec2(950, 450), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2((screen_x - 950) * 0.5f, (screen_y - 450) * 0.5f), ImGuiCond_FirstUseEver);
+            ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+            if (!isBottomPanelFloating("Material Graph")) {
+                flags |= ImGuiWindowFlags_NoTitleBar;
+            }
+            if (focus_bottom_panel_next_frame) {
+                ImGui::SetNextWindowFocus();
+            }
+            if (ImGui::Begin("Material Graph", &open, flags)) {
+                if (focus_bottom_panel_next_frame) {
+                    ImGui::SetWindowFocus();
+                }
+                material_graph_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows);
+
+                if (!materialNodeEditorUI.onOpenFileDialog) {
+                    materialNodeEditorUI.onOpenFileDialog = [](const wchar_t* filter) -> std::string {
+                        return SceneUI::openFileDialogW(filter);
+                    };
+                }
+                materialNodeEditorUI.draw(ctx, ctx.scene.material_node_graphs);
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+            if (!open) {
+                show_material_graph = false;
+                material_graph_focused = false;
+                dockToBottom("Material Graph");
+            }
+        } else {
+            material_graph_focused = false;
+        }
+
         if (show_anim_graph) {
             bool open = true;
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
@@ -4944,6 +5044,26 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                              return SceneUI::saveFileDialogW(filter, L"png");
                          };
                     }
+                    terrainNodeEditorUI.onFoliageThumbnail = [this, &ctx](
+                        const std::string& relativePath, int& width, int& height) -> ImTextureID {
+                        for (const auto& asset : FoliageAssets::catalog(false).getAssets()) {
+                            if (asset.relative_entry_path.generic_string() != relativePath ||
+                                !asset.has_preview) continue;
+                            SDL_Texture* texture = nullptr;
+                            if (ensureAssetBrowserThumbnailTexture(
+                                    ctx, asset.preview_path, texture, width, height) && texture) {
+                                return (ImTextureID)texture;
+                            }
+                            break;
+                        }
+                        width = 0;
+                        height = 0;
+                        return ImTextureID{};
+                    };
+                    terrainNodeEditorUI.onFoliageScattered = [&ctx](
+                        TerrainObject* terrain, const std::vector<int>& groupIds) {
+                        SceneUI::syncNodeFoliageToScene(ctx, terrain, groupIds);
+                    };
                     terrainNodeEditorUI.draw(ctx, *activeTerrain->nodeGraph, activeTerrain);
                 }
                 else {
@@ -5118,7 +5238,7 @@ bool SceneUI::drawOverlays(UIContext& ctx)
         }
 
         const bool show_bottom =
-            (show_animation_panel || show_scene_log || show_terrain_graph || show_geometry_graph || show_anim_graph || show_asset_browser);
+            (show_animation_panel || show_scene_log || show_terrain_graph || show_geometry_graph || show_material_graph || show_anim_graph || show_asset_browser);
         const float menu_height = getMainMenuReservedHeight();
         const float status_bar_height = 24.0f;
         const float left_offset = showSidePanel ? side_panel_width : 0.0f;
@@ -5425,7 +5545,8 @@ void SceneUI::drawAssetDragGhost(UIContext& ctx, const std::string& asset_name, 
 bool SceneUI::appendAnimationClipAssetToScene(UIContext& ctx, const AssetRecord& asset, const std::string& display_name)
 {
     auto loader = std::make_shared<AssimpLoader>();
-    auto [loaded_triangles, loaded_animations, loaded_bone_data] = loader->loadModelToTriangles(asset.entry_path.string(), nullptr, "");
+    auto [loaded_triangles, loaded_animations, loaded_bone_data] =
+        loader->loadModelToTriangles(asset.entry_path.string(), nullptr, "", false);
     (void)loaded_triangles;
     (void)loaded_bone_data;
 
@@ -9040,6 +9161,7 @@ std::string SceneUI::serialize() {
     j["show_system_tab"] = show_system_tab;
     j["show_terrain_graph"] = show_terrain_graph;
     j["show_geometry_graph"] = show_geometry_graph;
+    j["show_material_graph"] = show_material_graph;
     j["show_anim_graph"] = show_anim_graph;
     j["show_volumetric_tab"] = show_volumetric_tab;
     j["show_forcefield_tab"] = show_forcefield_tab;
@@ -9088,6 +9210,7 @@ std::string SceneUI::serialize() {
     j["show_animation_panel"] = show_animation_panel;
     j["show_terrain_graph"] = show_terrain_graph;
     j["show_geometry_graph"] = show_geometry_graph;
+    j["show_material_graph"] = show_material_graph;
     j["show_anim_graph"] = show_anim_graph;
     j["show_asset_browser"] = show_asset_browser;
 
@@ -9187,6 +9310,7 @@ void SceneUI::deserialize(const std::string& data) {
         if (j.contains("show_system_tab")) show_system_tab = j["show_system_tab"];
         if (j.contains("show_terrain_graph")) show_terrain_graph = j["show_terrain_graph"];
         if (j.contains("show_geometry_graph")) show_geometry_graph = j["show_geometry_graph"];
+        if (j.contains("show_material_graph")) show_material_graph = j["show_material_graph"];
         if (j.contains("show_anim_graph")) show_anim_graph = j["show_anim_graph"];
         if (j.contains("show_volumetric_tab")) show_volumetric_tab = j["show_volumetric_tab"];
         if (j.contains("show_forcefield_tab")) show_forcefield_tab = j["show_forcefield_tab"];
@@ -9268,6 +9392,7 @@ void SceneUI::deserialize(const std::string& data) {
         if (j.contains("show_animation_panel")) show_animation_panel = j["show_animation_panel"];
         if (j.contains("show_terrain_graph")) show_terrain_graph = j["show_terrain_graph"];
         if (j.contains("show_geometry_graph")) show_geometry_graph = j["show_geometry_graph"];
+        if (j.contains("show_material_graph")) show_material_graph = j["show_material_graph"];
         if (j.contains("show_anim_graph")) show_anim_graph = j["show_anim_graph"];
         if (j.contains("show_asset_browser")) show_asset_browser = j["show_asset_browser"];
 

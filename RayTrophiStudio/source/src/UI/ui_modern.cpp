@@ -1720,6 +1720,107 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
                 dl->AddCircleFilled(ImVec2(cp.x + r * 0.2f, cp.y + r * 0.4f), 2.0f, IM_COL32(80, 255, 255, 230));
             }
             break;
+        case IconType::SmudgeTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Smudge lines (curved trails representing blending)
+                dl->PathClear();
+                dl->PathArcTo(cp, r * 0.65f, 2.5f, 4.8f);
+                dl->PathStroke(IM_COL32(180, 100, 255, 180), false, thickness * 2.2f);
+                
+                dl->PathClear();
+                dl->PathArcTo(ImVec2(cp.x - r * 0.1f, cp.y + r * 0.1f), r * 0.6f, 2.5f, 4.8f);
+                dl->PathStroke(IM_COL32(255, 100, 180, 140), false, thickness * 1.8f);
+                
+                // Finger tip circle smudge
+                ImVec2 fingerPos = ImVec2(cp.x + cosf(4.8f) * r * 0.65f, cp.y + sinf(4.8f) * r * 0.65f);
+                dl->AddCircleFilled(fingerPos, thickness * 2.5f, IM_COL32(230, 230, 250, 255));
+                dl->AddCircle(fingerPos, thickness * 2.5f, IM_COL32(180, 100, 255, 255), 12, 1.0f);
+            }
+            break;
+        case IconType::DodgeTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Glowing sun representing lightening exposure
+                float sunR = r * 0.35f;
+                dl->AddCircleFilled(cp, sunR, IM_COL32(255, 235, 100, 240));
+                dl->AddCircle(cp, sunR, IM_COL32(255, 255, 255, 255), 16, thickness * 0.8f);
+                
+                for (int i = 0; i < 8; ++i) {
+                    float angle = i * (6.2831853f / 8.0f);
+                    ImVec2 rayStart(cp.x + cosf(angle) * (sunR + 1.5f), cp.y + sinf(angle) * (sunR + 1.5f));
+                    ImVec2 rayEnd(cp.x + cosf(angle) * (sunR + r * 0.35f), cp.y + sinf(angle) * (sunR + r * 0.35f));
+                    dl->AddLine(rayStart, rayEnd, IM_COL32(255, 220, 50, 240), thickness * 1.1f);
+                }
+            }
+            break;
+        case IconType::BurnTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Crescent moon representing darkening
+                float moonR = r * 0.5f;
+                ImVec2 mOffset = ImVec2(cp.x - r * 0.15f, cp.y - r * 0.15f);
+                
+                dl->PathClear();
+                dl->PathArcTo(cp, moonR, -1.8f, 1.8f);
+                dl->PathArcTo(mOffset, moonR * 0.9f, 1.8f, -1.8f, 16);
+                dl->PathFillConvex(IM_COL32(110, 110, 240, 220));
+                
+                dl->PathClear();
+                dl->PathArcTo(cp, moonR, -1.8f, 1.8f);
+                dl->PathStroke(IM_COL32(200, 200, 255, 255), false, thickness * 0.8f);
+            }
+            break;
+        case IconType::SharpenTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Sharp high contrast star representation
+                ImVec2 sc = cp;
+                float sr = r * 0.6f;
+                ImVec2 star_pts[] = {
+                    ImVec2(sc.x, sc.y - sr),
+                    ImVec2(sc.x + sr * 0.20f, sc.y - sr * 0.20f),
+                    ImVec2(sc.x + sr, sc.y),
+                    ImVec2(sc.x + sr * 0.20f, sc.y + sr * 0.20f),
+                    ImVec2(sc.x, sc.y + sr),
+                    ImVec2(sc.x - sr * 0.20f, sc.y + sr * 0.20f),
+                    ImVec2(sc.x - sr, sc.y),
+                    ImVec2(sc.x - sr * 0.20f, sc.y - sr * 0.20f)
+                };
+                dl->AddConvexPolyFilled(star_pts, 8, IM_COL32(0, 240, 255, 180));
+                dl->AddPolyline(star_pts, 8, IM_COL32(255, 255, 255, 255), ImDrawFlags_Closed, thickness * 1.2f);
+                
+                dl->AddCircleFilled(ImVec2(cp.x - r * 0.4f, cp.y - r * 0.4f), 1.5f, IM_COL32(255, 255, 255, 255));
+            }
+            break;
+        case IconType::EyedropperTool:
+            {
+                float r = is * 0.48f;
+                drawBaseClaySphere(cp, r);
+                
+                // Pipette pipette slanted from top-right to bottom-left
+                float pr = r * 0.8f;
+                ImVec2 tip = ImVec2(cp.x - pr * 0.4f, cp.y + pr * 0.4f);
+                ImVec2 top = ImVec2(cp.x + pr * 0.4f, cp.y - pr * 0.4f);
+                
+                dl->AddLine(tip, top, IM_COL32(220, 220, 220, 255), thickness * 3.0f);
+                dl->AddCircleFilled(top, pr * 0.25f, IM_COL32(255, 80, 80, 255));
+                
+                ImVec2 ringCenter = ImVec2(cp.x + pr * 0.2f, cp.y - pr * 0.2f);
+                dl->AddCircleFilled(ringCenter, pr * 0.15f, IM_COL32(100, 100, 100, 255));
+                
+                ImVec2 dropPos = ImVec2(tip.x - pr * 0.25f, tip.y + pr * 0.25f);
+                dl->AddCircleFilled(dropPos, 2.0f, IM_COL32(50, 220, 255, 255));
+            }
+            break;
         case IconType::GrabTool:
             {
                 float r = is * 0.48f;

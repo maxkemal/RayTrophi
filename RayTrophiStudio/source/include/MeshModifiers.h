@@ -149,10 +149,11 @@ namespace MeshModifiers {
         FlatSubdivision,
         SmoothSubdivision,
         CatmullClark,       // LIVE non-destructive Catmull-Clark (stencil engine + crease)
-        Bevel               // RETIRED (2026-07-04, existed <1 day): stack bevel compounded over its
+        Bevel,              // RETIRED (2026-07-04, existed <1 day): stack bevel compounded over its
                             // own output on every evaluate. Enum value kept so an old save's entry
                             // deserializes to an inert modifier instead of garbage; bevel lives in
                             // the Geo-DAG BevelNode and the Edit Mode edge-bevel tool.
+        WaterSurface       // Appended for serialized enum stability. Topology-stable consumer.
     };
 
     struct ModifierData {

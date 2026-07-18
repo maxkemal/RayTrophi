@@ -1640,6 +1640,75 @@ __global__ void fluid_cg_dot_kernel(const float* x, const float* y,
     if (tid == 0) partials[blockIdx.x] = sdata[0];
 }
 
+// ── Device-resident CG scalars ────────────────────────────────────────────────
+// The generic CG loop downloads a dot product (blocking sync + copy) TWICE per
+// iteration — the HUD's "MGPCG dot sync" showed that eating ~80% of the CUDA
+// pressure solve. These three kernels keep alpha/beta/sigma in a 7-double GPU
+// buffer so the host only syncs for the convergence check every K iterations.
+// Scalars layout: [0]=sigma [1]=sigma0 [2]=sAs [3]=alpha [4]=beta [5]=sigma_new
+// [6]=degenerate. Mirrors sim_fluid_cg_scalar_step/axpy2_dev/zpby_dev.comp.
+
+// One 256-thread block: strided per-thread sums over the block partials +
+// shared-mem tree reduction, then thread 0 applies op:
+//   op 0: sigma = sum; sigma0 = sigma; degenerate = 0
+//   op 1: sAs = sum; alpha = sigma/sAs (degenerate=1 if |sAs|<1e-30)
+//   op 2: sigma_new = sum; beta = sigma_new/sigma; sigma = sigma_new
+__global__ void fluid_cg_scalar_step_kernel(const double* partials,
+                                            double* scalars,
+                                            int n, int op) {
+    __shared__ double sdata[256];
+    const int tid = threadIdx.x;
+    double local_sum = 0.0;
+    for (int i = tid; i < n; i += 256) local_sum += partials[i];
+    sdata[tid] = local_sum;
+    __syncthreads();
+    for (int stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) sdata[tid] += sdata[tid + stride];
+        __syncthreads();
+    }
+    if (tid != 0) return;
+    const double sum = sdata[0];
+    if (op == 0) {
+        scalars[0] = sum;
+        scalars[1] = sum;
+        scalars[6] = 0.0;
+    } else if (op == 1) {
+        scalars[2] = sum;
+        if (fabs(sum) < 1e-30) {
+            scalars[3] = 0.0;
+            scalars[6] = 1.0; // degenerate: no fluid rows — freeze the state
+        } else {
+            scalars[3] = scalars[0] / sum; // alpha = sigma/sAs
+        }
+    } else {
+        scalars[5] = sum;
+        scalars[4] = (scalars[0] > 0.0) ? (sum / scalars[0]) : 0.0; // beta
+        scalars[0] = sum;
+    }
+}
+
+// p += alpha*s ; r -= alpha*As, alpha from scalars[3]. No-op when degenerate.
+__global__ void fluid_cg_axpy2_dev_kernel(float* p, const float* s,
+                                          float* r, const float* As,
+                                          const double* scalars, int cell_count) {
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= cell_count) return;
+    if (scalars[6] != 0.0) return;
+    const float a = static_cast<float>(scalars[3]);
+    p[id] += a * s[id];
+    r[id] -= a * As[id];
+}
+
+// s = z + beta*s, beta from scalars[4]. No-op when degenerate.
+__global__ void fluid_cg_zpby_dev_kernel(float* s, const float* z,
+                                         const double* scalars, int cell_count) {
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= cell_count) return;
+    if (scalars[6] != 0.0) return;
+    const float b = static_cast<float>(scalars[4]);
+    s[id] = z[id] + b * s[id];
+}
+
 } // namespace
 
 class CudaSimulationComputeBackend final : public ISimulationComputeBackend {
@@ -2104,6 +2173,9 @@ public:
             kernel == "sim_fluid_cg_copy" ||
             kernel == "sim_fluid_cg_axpy" ||
             kernel == "sim_fluid_cg_zpby" ||
+            kernel == "sim_fluid_cg_scalar_step" ||
+            kernel == "sim_fluid_cg_axpy2_dev" ||
+            kernel == "sim_fluid_cg_zpby_dev" ||
             kernel == "sim_fluid_cg_dot") {
             if (!cmd.constants || cmd.constants_size < sizeof(GridProjectionConstants)) return false;
             const GridProjectionConstants c = *static_cast<const GridProjectionConstants*>(cmd.constants);
@@ -2210,6 +2282,28 @@ public:
                 const float* z    = static_cast<const float*>(nativeBufferPtr(cmd.buffers[1]));
                 if (!s || !z) return false;
                 fluid_cg_zpby_kernel<<<grid, block>>>(s, z, cell_count, scalar);
+            } else if (kernel == "sim_fluid_cg_scalar_step") {
+                if (cmd.buffer_count < 2) return false;          // [partials, scalars]; iterations=n, parity=op
+                const double* partials = static_cast<const double*>(nativeBufferPtr(cmd.buffers[0]));
+                double* scalars        = static_cast<double*>(nativeBufferPtr(cmd.buffers[1]));
+                if (!partials || !scalars) return false;
+                fluid_cg_scalar_step_kernel<<<1, 256>>>(partials, scalars, c.iterations, c.parity);
+            } else if (kernel == "sim_fluid_cg_axpy2_dev") {
+                if (cmd.buffer_count < 5) return false;          // [p, s, r, As, scalars]
+                float* p          = static_cast<float*>(nativeBufferPtr(cmd.buffers[0]));
+                const float* s    = static_cast<const float*>(nativeBufferPtr(cmd.buffers[1]));
+                float* r          = static_cast<float*>(nativeBufferPtr(cmd.buffers[2]));
+                const float* As   = static_cast<const float*>(nativeBufferPtr(cmd.buffers[3]));
+                const double* sc  = static_cast<const double*>(nativeBufferPtr(cmd.buffers[4]));
+                if (!p || !s || !r || !As || !sc) return false;
+                fluid_cg_axpy2_dev_kernel<<<grid, block>>>(p, s, r, As, sc, cell_count);
+            } else if (kernel == "sim_fluid_cg_zpby_dev") {
+                if (cmd.buffer_count < 3) return false;          // [s, z, scalars]
+                float* s          = static_cast<float*>(nativeBufferPtr(cmd.buffers[0]));
+                const float* z    = static_cast<const float*>(nativeBufferPtr(cmd.buffers[1]));
+                const double* sc  = static_cast<const double*>(nativeBufferPtr(cmd.buffers[2]));
+                if (!s || !z || !sc) return false;
+                fluid_cg_zpby_dev_kernel<<<grid, block>>>(s, z, sc, cell_count);
             } else { // sim_fluid_cg_dot
                 if (cmd.buffer_count < 3) return false;          // [x, y, partials(double*)]
                 const float* x    = static_cast<const float*>(nativeBufferPtr(cmd.buffers[0]));

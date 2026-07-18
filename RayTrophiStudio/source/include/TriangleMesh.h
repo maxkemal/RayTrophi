@@ -10,6 +10,7 @@
 
 class Transform;
 class ParallelBVHNode;
+class Matrix4x4;
 
 /**
      * @brief Contiguous memory container for a triangle mesh.
@@ -36,6 +37,26 @@ public:
     // Optional Local BVH for CPU raytracing
     std::shared_ptr<ParallelBVHNode> local_bvh;
 
+    // Per-SoA-vertex pointiness (Geometry node's Pointiness output): 0.5 flat, >0.5 a
+    // convex ridge, <0.5 a concave crease. Empty unless some live material graph reads
+    // it — rebuilt from the live SoA by MeshAttr::computeMeshPointiness (MeshPointiness.h)
+    // on every BVH rebuild, and interpolated barycentrically at the hit.
+    std::vector<float> pointiness;
+
+    // Attribute node: the named per-vertex float channels a material graph reads (sculpt /
+    // Geo-DAG masks, paint layers, vertex groups), gathered out of GeometryDetail's custom
+    // attribute map into ONE interleaved block — kMatAttribSlots floats per vertex,
+    // material_attribs[vertexId * kMatAttribSlots + slot].
+    //
+    // The map is the authoring format and the wrong thing to read at a hit: it is keyed by
+    // std::string, so sampling it per shading point would hash a string in the hot path.
+    // Interleaving also happens to be exactly the layout the GPU block wants (one address,
+    // constant stride), so CPU and Vulkan interpolate the identical bytes.
+    //
+    // Empty unless some live material graph reads an Attribute node — rebuilt by
+    // MeshAttr::computeMeshMaterialAttributes on every BVH rebuild.
+    std::vector<float> material_attribs;
+
     TriangleMesh();
     virtual ~TriangleMesh() = default;
 
@@ -58,4 +79,9 @@ public:
     inline size_t num_triangles() const { 
         return geometry ? geometry->indices.size() / 3 : 0; 
     }
+
+    // Canonical flat-mesh skinning helpers. Skin weights live per SoA vertex in
+    // GeometryDetail; no Triangle facade is required to query or deform them.
+    bool hasSkinWeights() const;
+    bool applySkinning(const std::vector<Matrix4x4>& finalBoneMatrices);
 };

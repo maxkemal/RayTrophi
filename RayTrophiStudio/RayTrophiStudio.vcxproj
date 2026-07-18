@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -299,6 +299,7 @@
     <ClInclude Include="source\src\Device\CloudNoise.cuh" />
     <ClInclude Include="source\src\Device\fft_ocean.cuh" />
     <None Include="source\shaders\closesthit.rchit" />
+    <None Include="source\shaders\water_v3.glsl" />
     <None Include="source\shaders\miss.rmiss" />
     <None Include="source\shaders\raygen.rgen" />
     <None Include="source\shaders\shadow_anyhit.rchit" />
@@ -323,7 +324,7 @@
     <ClInclude Include="source\src\UI\scene_ui_nodeeditor.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_river.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_terrain.hpp" />
-    <ClInclude Include="source\src\UI\scene_ui_water.hpp" />
+    <ClInclude Include="source\src\UI\scene_ui_water_v2.hpp" />
     <ClInclude Include="source\src\Device\water_shaders.cuh" />
     <None Include="source\src\Device\scatter_volume_step.h" />
     <None Include="source\src\Device\material_scatter.cuh" />
@@ -336,6 +337,7 @@
     <ClInclude Include="source\include\AnimatedObject.h" />
     <ClInclude Include="source\include\AreaLight.h" />
     <ClInclude Include="source\include\AssetRegistry.h" />
+    <ClInclude Include="source\include\FoliageAssetLibrary.h" />
     <ClInclude Include="source\include\AssimpLoader.h" />
     <ClInclude Include="source\include\Camera.h" />
     <ClInclude Include="source\include\Dielectric.h" />
@@ -379,7 +381,11 @@
     <ClInclude Include="source\include\CPUInfo.h" />
     <ClInclude Include="source\include\ColorProcessingParams.h" />
     <ClInclude Include="source\include\MaterialManager.h" />
+    <ClInclude Include="source\include\MaterialNodesV2.h" />
+    <ClInclude Include="source\include\MaterialProceduralMath.h" />
+    <ClInclude Include="source\include\MaterialProgram.h" />
     <ClInclude Include="source\include\MeshModifiers.h" />
+    <ClInclude Include="source\include\MeshPointiness.h" />
     <ClInclude Include="source\include\Paint\IPaintSurfaceAdapter.h" />
     <ClInclude Include="source\include\Paint\MeshPaintAdapter.h" />
     <ClInclude Include="source\include\Paint\PaintLayer.h" />
@@ -1265,6 +1271,7 @@
     <ClCompile Include="source\src\Animation\OzzRuntime.cpp" />
     <ClCompile Include="source\src\Backend\OptixBackend.cpp" />
     <ClCompile Include="source\src\Backend\SceneTextureManager.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanDevicePipelines.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp" />
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp" />
     <ClCompile Include="source\src\Paint\PaintLayerStack.cpp" />
@@ -1280,6 +1287,7 @@
     <ClCompile Include="source\src\Animation\AnimationNodes.cpp" />
     <ClCompile Include="source\src\Scene\AreaLight.cpp" />
     <ClCompile Include="source\src\Scene\AssetRegistry.cpp" />
+    <ClCompile Include="source\src\Scene\FoliageAssetLibrary.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_mesh_overlay.cpp" />
     <ClCompile Include="source\src\Utils\TriangleProxyConverter.cpp" />
     <ClCompile Include="source\src\Viewport\ViewportSceneSync.cpp" />
@@ -1384,6 +1392,7 @@
     <ClCompile Include="source\src\Physics\WaterManager.cpp" />
     <ClCompile Include="source\src\Scene\World.cpp" />
     <ClCompile Include="source\src\Scene\MaterialManager.cpp" />
+    <ClCompile Include="source\src\Scene\MaterialNodesV2.cpp" />
     <ClCompile Include="external\imgui\imgui.cpp" />
     <ClCompile Include="external\imgui\imgui_draw.cpp" />
     <ClCompile Include="external\imgui\imgui_impl_sdl2.cpp" />

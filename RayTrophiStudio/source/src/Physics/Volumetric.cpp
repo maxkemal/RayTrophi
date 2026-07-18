@@ -117,8 +117,10 @@ Vec3 Volumetric::getVolumetricEmission(const Vec3& p, const Vec3& dir, const Vec
     return march_volume(p, dir, dummy_T, aabb_min, aabb_max);
 }
 
-Vec3 Volumetric::getEmission(const Vec2& uv, const Vec3& p) const {
-    return Vec3(0); 
+Vec3 Volumetric::getEmission(const Vec2& uv, const Vec3& p, float pointiness, const Vec3& objectOrigin,
+                             const float* attribs, const float* objectPos,
+                             const Vec3* shadingNormal, const Vec3& viewDir) const {
+    return Vec3(0);
 }
 
 Vec3 Volumetric::getEmission() const {

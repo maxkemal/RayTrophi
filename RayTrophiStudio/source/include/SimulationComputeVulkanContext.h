@@ -19,6 +19,11 @@ struct SimulationComputeVulkanContext {
     // float atomicAdd; running them without this enabled is undefined behaviour
     // (wrong velocity field). The sim compute backend gates those kernels on it.
     bool     shader_atomic_float_enabled = false;
+    // True only when the core shaderFloat64 feature was ENABLED on the logical
+    // device. The MGPCG dot-product kernel (sim_fluid_cg_dot) accumulates its
+    // block partials in double; the backend gates that kernel on this flag and
+    // the host falls back to the CPU PCG when it is false.
+    bool     shader_float64_enabled = false;
 };
 
 } // namespace RayTrophiSim

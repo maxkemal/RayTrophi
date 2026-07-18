@@ -1,18 +1,27 @@
 // =============================================================================
 // material_struct.glsl — SINGLE SOURCE OF TRUTH for the Vulkan PBR material.
 // =============================================================================
-// Mirrors VulkanRT::VkGpuMaterial (include/Backend/vulkan_material_types.h)
-// byte-for-byte: 20 blocks x 16 bytes = 320 bytes. std430 / scalar array stride
-// is therefore 320.
+// The material record is SPLIT into two SSBOs so a hit only fetches what it
+// uses (the old monolithic struct had grown to 352 bytes and every hit paid
+// the whole record):
 //
-// CRITICAL: every shader that reads the `materials` buffer MUST use THIS struct
-// (via #include) and nothing else. A private/shorter copy makes materials[idx]
-// for any idx >= 1 read a SHIFTED offset, which previously caused:
-//   - missing shadows on multi-material objects (shadow_anyhit had a 256-byte copy)
-//   - wrong textures + vanished objects in material preview (frag had a 256-byte copy)
+//   `Material`    — HOT core, binding 2. 10 blocks x 16 B = 160 B stride.
+//                   Read by every closesthit / shadow any-hit invocation.
+//                   Mirrors VulkanRT::VkGpuMaterialCore byte-for-byte.
+//   `MaterialExt` — COLD extension, binding 24 (RT set) / binding 4 (material
+//                   preview set). 13 blocks x 16 B = 208 B stride. Read ONLY
+//                   inside feature-gated branches (SSS lobe, water fast path,
+//                   bubble, resin/interior volume, iridescent clearcoat).
+//                   Mirrors VulkanRT::VkGpuMaterialExt byte-for-byte.
 //
-// When adding/removing a field, update ONLY: this file, VkGpuMaterial, and the
-// CPU-side static_assert(sizeof(VkGpuMaterial) == 320) — never per-shader copies.
+// CRITICAL: every shader that reads these buffers MUST use THESE structs (via
+// #include) and nothing else. A private/shorter copy makes materials[idx] for
+// any idx >= 1 read a SHIFTED offset (wrong textures / missing shadows /
+// vanished objects — see bugfix history 2026-06-22).
+//
+// When adding/removing a field, update ONLY: this file, VkGpuMaterialCore/Ext +
+// splitGpuMaterial() (include/Backend/vulkan_material_types.h), and the
+// static_asserts there — never per-shader copies.
 // =============================================================================
 #ifndef MATERIAL_STRUCT_GLSL
 #define MATERIAL_STRUCT_GLSL
@@ -24,76 +33,53 @@ struct Material {
     float emission_r, emission_g, emission_b, emission_strength;
     // Block 3: PBR properties
     float roughness, metallic, ior, transmission;
-    // Block 4: Subsurface color + amount
-    float subsurface_r, subsurface_g, subsurface_b, subsurface_amount;
-    // Block 5: Subsurface radius + scale
-    float subsurface_radius_r, subsurface_radius_g, subsurface_radius_b, subsurface_scale;
-    // Block 6: Coatings & Translucency
-    float clearcoat, clearcoat_roughness, translucent, subsurface_anisotropy;
-    // Block 7: Additional properties
-    float anisotropic, sheen, sheen_tint;
-    uint flags;
-    // Block 8: Water/Extra params
-    float fft_amplitude, fft_time_scale, micro_detail_strength, micro_detail_scale;
-    // Block 9: Extra water params
-    float foam_threshold, fft_ocean_size, fft_choppiness, fft_wind_speed;
-    // Block 10: Extra water animation params
-    float micro_anim_speed, micro_morph_speed, foam_noise_scale, fft_wind_direction;
-    // Block 11: UV transform core
+    // Block 4: Lobe probabilities (read every scatter decision)
+    float clearcoat, clearcoat_roughness, translucent, subsurface_amount;
+    // Block 5: Specular / normal / dispersion + flags
+    float specular, normal_strength, dispersion;
+    uint  flags;
+    // Block 6: UV transform core
     float uv_scale_x, uv_scale_y, uv_offset_x, uv_offset_y;
-    // Block 12: UV transform extra
+    // Block 7: UV transform extra
     float uv_rotation_degrees, uv_tiling_x, uv_tiling_y;
-    uint uv_wrap_mode;
-    // Block 13: Standard Textures (first 4)
+    uint  uv_wrap_mode;
+    // Block 8: Standard textures (first 4)
     uint albedo_tex;
     uint normal_tex;
     uint roughness_tex;
     uint metallic_tex;
-    // Block 14: Standard Textures (second 4)
+    // Block 9: Standard textures (second 4)
     uint emission_tex;
-    uint height_tex;
     uint opacity_tex;
     uint transmission_tex;
-    // Block 15: Reserved + terrain layer index
-    float subsurface_ior;
-    uint _terrain_layer_idx;
-    float normal_strength;
-    float tile_break_strength;
-    // Block 16: Specular controls
-    float specular;
     uint specular_tex;
-    float bubble_ior;
-    float bubble_film;
-    // Block 17: Resin interior absorption (thick glass / glass-marble depth)
-    float resin_color_r;
-    float resin_color_g;
-    float resin_color_b;
-    float transmission_density;
-    // Block 18: Resin coat layer params + spectral dispersion
-    float resin_roughness;
-    float dispersion;      // spectral dispersion strength (0 = off; repurposed _resin_pad0)
-    float resin_shard;      // colored glass-shard amount (repurposed _resin_pad1)
-    float resin_shard_hue;  // shard base hue 0..1; <0 = rainbow (repurposed _resin_pad2)
-    // Block 19: Resin internal inclusions (dust/dirt march)
-    float resin_inclusion;
-    float resin_dirt;
-    float resin_inclusion_scale;
-    float resin_dirt_color_r;
-    // Block 20: Resin dirt colour tail + iridescent clearcoat
-    float resin_dirt_color_g;
-    float resin_dirt_color_b;
-    float clearcoat_iridescence;
-    float clearcoat_film_thickness;
-    // Block 21: Interior Volume dust colour A + style
-    float dust_color_a_r;
-    float dust_color_a_g;
-    float dust_color_a_b;
-    float dust_style;       // 0=Nebula(auto) 1=Billow 2-colour 2=Wispy 3=Paint swirl
-    // Block 22: Interior Volume dust colour B + shard shape
-    float dust_color_b_r;
-    float dust_color_b_g;
-    float dust_color_b_b;
-    float shard_shape;      // 0=round chips, 1=elongated faceted crystals
+    // Block 10: Tile break + terrain layer + height/FFT texture slot
+    float tile_break_strength;
+    uint  _terrain_layer_idx;
+    uint  height_tex;
+    float _core_pad0;
+};
+
+struct MaterialExt {
+    // Block 1-2: Subsurface scattering
+    float subsurface_r, subsurface_g, subsurface_b, subsurface_scale;
+    float subsurface_radius_r, subsurface_radius_g, subsurface_radius_b, subsurface_anisotropy;
+    // Block 3: Legacy water controls (anisotropic=wave_speed, sheen=wave_strength,
+    //          sheen_tint=wave_frequency) + reserved
+    float anisotropic, sheen, sheen_tint, subsurface_ior;
+    // Block 4-6: Water FFT / micro detail
+    float fft_amplitude, fft_time_scale, micro_detail_strength, micro_detail_scale;
+    float foam_threshold, fft_ocean_size, fft_choppiness, fft_wind_speed;
+    float micro_anim_speed, micro_morph_speed, foam_noise_scale, fft_wind_direction;
+    // Block 7-10: Bubble + resin / interior volume
+    float bubble_ior, bubble_film, resin_roughness, resin_shard;
+    float resin_shard_hue, resin_color_r, resin_color_g, resin_color_b;
+    float transmission_density, resin_inclusion, resin_dirt, resin_inclusion_scale;
+    float resin_dirt_color_r, resin_dirt_color_g, resin_dirt_color_b, clearcoat_iridescence;
+    // Block 11-13: Iridescence tail + interior dust
+    float clearcoat_film_thickness, dust_color_a_r, dust_color_a_g, dust_color_a_b;
+    float dust_style, dust_color_b_r, dust_color_b_g, dust_color_b_b;
+    float shard_shape, _ext_pad0, _ext_pad1, _ext_pad2;
 };
 
 #endif // MATERIAL_STRUCT_GLSL

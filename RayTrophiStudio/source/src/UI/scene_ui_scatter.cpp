@@ -11,6 +11,7 @@
 #include "renderer.h"
 #include "OptixWrapper.h"
 #include "SceneSelection.h"
+#include "ProjectManager.h"
 #include "scene_data.h"
 #include "Triangle.h"
 #include "imgui.h"
@@ -96,23 +97,41 @@ void rebuildScatterSceneMutation(UIContext& ctx, bool additive_only = false) {
 // hierarchy fix). Walk world.objects for every TriangleMesh/Triangle matching node_name and
 // materialize every face of every sibling mesh, falling back to legacy per-face facades already
 // present in world.objects (pre-flat / non-imported objects).
-std::vector<std::shared_ptr<Triangle>> gatherFullScatterSourceTriangles(UIContext& ctx, const std::string& node_name) {
-    std::vector<std::shared_ptr<Triangle>> out;
+ScatterSource gatherScatterSource(UIContext& ctx, const std::string& node_name) {
+    ScatterSource out;
+    out.name = node_name;
     std::unordered_set<TriangleMesh*> seenMeshes;
     for (auto& obj : ctx.scene.world.objects) {
         if (auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
             if (tmesh->nodeName != node_name || !tmesh->geometry) continue;
             if (!seenMeshes.insert(tmesh.get()).second) continue;
-            const size_t nTris = tmesh->num_triangles();
-            out.reserve(out.size() + nTris);
-            for (size_t f = 0; f < nTris; ++f) {
-                out.push_back(std::make_shared<Triangle>(tmesh, static_cast<uint32_t>(f)));
-            }
+            out.flat_meshes.push_back(tmesh);
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-            if (tri->getNodeName() == node_name) out.push_back(tri);
+            if (tri->getNodeName() == node_name) out.triangles.push_back(tri);
         }
     }
+    // Prefer the canonical flat representation if both handles exist.
+    if (!out.flat_meshes.empty()) out.triangles.clear();
+    out.computeCenter();
     return out;
+}
+
+// Target-surface sampling still consumes triangle references. Keep this adapter
+// transient; source meshes stored by foliage/scatter never retain these facades.
+std::vector<std::shared_ptr<Triangle>> gatherFullScatterSourceTriangles(
+    UIContext& ctx, const std::string& node_name) {
+    ScatterSource source = gatherScatterSource(ctx, node_name);
+    if (!source.triangles.empty()) return std::move(source.triangles);
+
+    std::vector<std::shared_ptr<Triangle>> facades;
+    facades.reserve(source.sourceTriangleCount());
+    for (const auto& mesh : source.flat_meshes) {
+        if (!mesh) continue;
+        for (size_t face = 0; face < mesh->num_triangles(); ++face) {
+            facades.push_back(std::make_shared<Triangle>(mesh, static_cast<uint32_t>(face)));
+        }
+    }
+    return facades;
 }
 }
 
@@ -218,9 +237,9 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
                     // sibling TriangleMesh (the UI selection handle) — materialize the full
                     // geometry instead so the scatter source is the whole object, not one
                     // triangle per material.
-                    std::vector<std::shared_ptr<Triangle>> source_tris = gatherFullScatterSourceTriangles(ctx, name);
-                    if (!source_tris.empty()) {
-                        active_group->sources.emplace_back(name, source_tris);
+                    ScatterSource source = gatherScatterSource(ctx, name);
+                    if (source.sourceTriangleCount() > 0) {
+                        active_group->sources.push_back(std::move(source));
                     }
                     ImGui::CloseCurrentPopup();
                 }
@@ -285,10 +304,10 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
                 // Flat (SoA) objects live in world.objects as TriangleMesh, not per-face Triangle
                 // facades — a Triangle-only scan found nothing for them (and multi-material
                 // imports split into several sibling TriangleMesh sharing this nodeName).
-                std::vector<std::shared_ptr<Triangle>> selected_tris = gatherFullScatterSourceTriangles(ctx, node_name);
+                ScatterSource source = gatherScatterSource(ctx, node_name);
 
-                if (!selected_tris.empty()) {
-                    active_group->sources.emplace_back(node_name, selected_tris);
+                if (source.sourceTriangleCount() > 0) {
+                    active_group->sources.push_back(std::move(source));
                     SCENE_LOG_INFO("[Scatter] Added " + node_name + " to layer " + active_group->name);
                 }
             }
@@ -480,6 +499,15 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("<none> = off. Otherwise gates placement by this Field\nattribute on the target mesh (e.g. from a Mask by\nHeight/Slope/Noise node, or the sculpt Mask panel's export).");
                 }
+                attrPicker("Exclusion Mask", bs.exclusion_mask_attribute);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Rejects placement where this Field is greater than or\nequal to Exclusion Threshold. Works alongside the legacy\nRGBA exclusion channel.");
+                }
+                if (!bs.exclusion_mask_attribute.empty() &&
+                    active_group->target_type != InstanceGroup::TargetType::TERRAIN) {
+                    ImGui::SetNextItemWidth(140);
+                    ImGui::SliderFloat("Exclusion Threshold##field", &bs.exclusion_threshold, 0.0f, 1.0f, "%.2f");
+                }
                 attrPicker("Scale Mask", bs.scale_mask_attribute);
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("<none> = off. Independent of Density Mask - can be a\ndifferent attribute (e.g. size falls off near a patch edge\nwhile density stays gated by a separate paint mask).");
@@ -619,6 +647,30 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
     UIWidgets::PopControlSurfaceStyle();
 
 }
+
+void SceneUI::syncNodeFoliageToScene(UIContext& ctx, TerrainObject* terrain,
+                                     const std::vector<int>& groupIds) {
+    if (!terrain || groupIds.empty()) return;
+    InstanceManager& manager = InstanceManager::getInstance();
+    int syncedGroups = 0;
+    size_t totalInstances = 0;
+    for (int groupId : groupIds) {
+        InstanceGroup* group = manager.getGroup(groupId);
+        if (!group || group->transient ||
+            group->target_type != InstanceGroup::TargetType::TERRAIN) continue;
+        syncInstancesToScene(ctx, *group, false);
+        group->gpu_dirty = true;
+        totalInstances += group->instances.size();
+        ++syncedGroups;
+    }
+    if (syncedGroups == 0) return;
+
+    rebuildScatterSceneMutation(ctx);
+    ProjectManager::getInstance().markModified();
+    SCENE_LOG_INFO("[Terrain Foliage Nodes] Synced " + std::to_string(syncedGroups) +
+                   " layers / " + std::to_string(totalInstances) + " instances.");
+}
+
 void SceneUI::syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only) {
     // 1. Compute Prefix for identification
     // 1. Compute Prefix for identification
@@ -663,6 +715,17 @@ void SceneUI::syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool cl
 
     for (auto& source : group.sources) {
         if (!source.bvh || !source.centered_triangles_ptr) {
+             const bool canonicalFlatSource = !source.flat_meshes.empty();
+             if (source.triangles.empty() && canonicalFlatSource) {
+                 source.triangles.reserve(source.sourceTriangleCount());
+                 for (const auto& mesh : source.flat_meshes) {
+                     if (!mesh) continue;
+                     for (size_t face = 0; face < mesh->num_triangles(); ++face) {
+                         source.triangles.push_back(
+                             std::make_shared<Triangle>(mesh, static_cast<uint32_t>(face)));
+                     }
+                 }
+             }
              if (source.triangles.empty()) continue;
 
              // Calculate Center (Pivot)
@@ -747,6 +810,11 @@ void SceneUI::syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool cl
              auto bvh = std::make_shared<EmbreeBVH>();
              bvh->build(hittables_for_bvh);
              source.bvh = bvh;
+             if (canonicalFlatSource) {
+                 // The scene mesh is the authoritative source. Do not retain a
+                 // second full facade set after the centered runtime copy exists.
+                 std::vector<std::shared_ptr<Triangle>>().swap(source.triangles);
+             }
              SCENE_LOG_INFO("[Scatter] Built Source BVH for source: " + source.name);
         }
     }

@@ -182,7 +182,8 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     // EXCEPTION: the Geometry Graph node editor claims Delete for its own node/link deletion
     // (see the matching guard in handleEditorShortcuts and Main.cpp's SDL key handler).
     if ((ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) &&
-        sel.hasSelection() && !ImGui::GetIO().WantTextInput && !geometry_graph_focused) {
+        sel.hasSelection() && !ImGui::GetIO().WantTextInput &&
+        !terrain_graph_focused && !geometry_graph_focused && !material_graph_focused) {
         triggerDelete(ctx);
     }
 
@@ -1244,18 +1245,21 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             sel.selectObject(first_pair.second, first_pair.first, name);
                         }
                         
-                        // TERRAIN CONNECTION: Check if this is a terrain chunk
-                        if (name.find("Terrain_") == 0) {
+                        // Persistent terrain_id is authoritative after save/load and
+                        // also survives artist renaming. Keep the name path for old data.
+                        TerrainObject* terrain = first_pair.second->terrain_id >= 0
+                            ? TerrainManager::getInstance().getTerrain(first_pair.second->terrain_id)
+                            : nullptr;
+                        if (!terrain && name.find("Terrain_") == 0) {
                             std::string tName = name;
                             size_t chunkPos = tName.find("_Chunk");
                             if (chunkPos != std::string::npos) tName = tName.substr(0, chunkPos);
-                            
-                            auto terrain = TerrainManager::getInstance().getTerrainByName(tName);
-                            if (terrain) {
-                                terrain_brush.active_terrain_id = terrain->id;
-                                show_terrain_tab = true;
-                                SCENE_LOG_INFO("Terrain selected: " + tName);
-                            }
+
+                            terrain = TerrainManager::getInstance().getTerrainByName(tName);
+                        }
+                        if (terrain) {
+                            terrain_brush.active_terrain_id = terrain->id;
+                            show_terrain_tab = true;
                         }
                     }
                 }
@@ -2945,4 +2949,3 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     ImGui::PopStyleVar(7);
     UIWidgets::PopControlSurfaceStyle();
 }
-

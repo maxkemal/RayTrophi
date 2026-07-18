@@ -74,12 +74,14 @@ public:
                                    VkPhysicalDevice physDevice,
                                    VkQueue computeQueue,
                                    uint32_t queueFamily,
-                                   bool atomicFloatEnabled)
+                                   bool atomicFloatEnabled,
+                                   bool shaderFloat64Enabled)
         : m_device(device)
         , m_physDevice(physDevice)
         , m_queue(computeQueue)
         , m_queueFamily(queueFamily)
-        , m_has_float_atomics(atomicFloatEnabled) {
+        , m_has_float_atomics(atomicFloatEnabled)
+        , m_has_shader_float64(shaderFloat64Enabled) {
         if (!m_device || !m_physDevice || !m_queue) return;
         if (!initCommandPool())     return;
         if (!initDescriptorPool())  return;
@@ -99,6 +101,12 @@ public:
         for (auto& dl : m_descLayouts)
             if (dl != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_device, dl, nullptr);
         if (m_descPool)  vkDestroyDescriptorPool(m_device, m_descPool, nullptr);
+        if (m_stagingBuf) {
+            vkUnmapMemory(m_device, m_stagingMem);
+            vkDestroyBuffer(m_device, m_stagingBuf, nullptr);
+            vkFreeMemory(m_device, m_stagingMem, nullptr);
+        }
+        if (m_copyCmdBuf) vkFreeCommandBuffers(m_device, m_cmdPool, 1, &m_copyCmdBuf);
         if (m_cmdBuf)    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &m_cmdBuf);
         if (m_cmdPool)   vkDestroyCommandPool(m_device, m_cmdPool, nullptr);
         if (m_fence)     vkDestroyFence(m_device, m_fence, nullptr);
@@ -154,23 +162,9 @@ public:
         VkMemoryRequirements req{};
         vkGetBufferMemoryRequirements(m_device, buf, &req);
 
-        uint32_t memType = findMemType(req.memoryTypeBits,
-                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (memType == UINT32_MAX) {
-            // Fallback: host-visible (integrated GPU / APU)
-            memType = findMemType(req.memoryTypeBits,
-                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        }
-        if (memType == UINT32_MAX) {
-            vkDestroyBuffer(m_device, buf, nullptr);
-            return {};
-        }
-
         VkMemoryAllocateInfo ai{};
-        ai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        ai.allocationSize  = req.size;
-        ai.memoryTypeIndex = memType;
+        ai.sType          = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        ai.allocationSize = req.size;
 
         // Address-capable allocation so vkGetBufferDeviceAddress works for BLAS interop.
         VkMemoryAllocateFlagsInfo allocFlags{};
@@ -180,15 +174,57 @@ public:
             ai.pNext = &allocFlags;
         }
 
-        VkDeviceMemory mem = VK_NULL_HANDLE;
-        if (vkAllocateMemory(m_device, &ai, nullptr, &mem) != VK_SUCCESS) {
-            vkDestroyBuffer(m_device, buf, nullptr);
-            return {};
+        // Try ReBAR first (device-local + host-visible: shader speed of VRAM,
+        // uploads become one memcpy). VRAM pressure can make this allocation
+        // fail even when the heap is large — fall back silently.
+        VkDeviceMemory mem    = VK_NULL_HANDLE;
+        void*          mapped = nullptr;
+        const uint32_t barType = findBarMemType(req.memoryTypeBits);
+        if (barType != UINT32_MAX) {
+            ai.memoryTypeIndex = barType;
+            if (vkAllocateMemory(m_device, &ai, nullptr, &mem) == VK_SUCCESS) {
+                if (vkMapMemory(m_device, mem, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+                    vkFreeMemory(m_device, mem, nullptr);
+                    mem    = VK_NULL_HANDLE;
+                    mapped = nullptr;
+                }
+            }
+        }
+
+        if (mem == VK_NULL_HANDLE) {
+            uint32_t memType = findMemType(req.memoryTypeBits,
+                                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            if (memType == UINT32_MAX) {
+                // Fallback: host-visible (integrated GPU / APU)
+                memType = findMemType(req.memoryTypeBits,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            }
+            if (memType == UINT32_MAX) {
+                vkDestroyBuffer(m_device, buf, nullptr);
+                return {};
+            }
+            ai.memoryTypeIndex = memType;
+            if (vkAllocateMemory(m_device, &ai, nullptr, &mem) != VK_SUCCESS) {
+                vkDestroyBuffer(m_device, buf, nullptr);
+                return {};
+            }
         }
         vkBindBufferMemory(m_device, buf, mem, 0);
 
+        // One-time diagnostic so the Console shows whether the ReBAR path
+        // engaged (BIOS ReBAR off => 256MB BAR heap => rejected by the >=1GB
+        // heap check, and uploads silently keep using staging copies).
+        static bool s_bar_logged = false;
+        if (!s_bar_logged) {
+            s_bar_logged = true;
+            logSimulationComputeInfo(mapped
+                ? "[SimComputeVk] ReBAR active: sim buffers are device-local host-visible (uploads = direct memcpy)."
+                : "[SimComputeVk] ReBAR unavailable; uploads use staging copies.");
+        }
+
         uint64_t id = m_nextId++;
-        m_buffers[id] = { buf, mem, desc.size_bytes };
+        m_buffers[id] = { buf, mem, desc.size_bytes, mapped };
         ComputeBufferHandle h;
         h.id = id;
         return h;
@@ -249,20 +285,34 @@ public:
         if (it == m_buffers.end() || !data || size_bytes == 0) return false;
         if (dst_offset + size_bytes > it->second.size) return false;
 
-        // Create staging buffer, map, copy, submit transfer, destroy staging.
-        VkBuffer staging = VK_NULL_HANDLE;
-        VkDeviceMemory stagingMem = VK_NULL_HANDLE;
-        if (!createStagingBuffer(size_bytes, staging, stagingMem)) return false;
+        // ReBAR buffer: the destination is host-visible VRAM — write it
+        // directly, no staging copy / submit / fence. Safe even mid-batch or
+        // while recording: every GPU submission in this backend is fence-waited
+        // before returning, so there is never in-flight work reading the
+        // buffer, and coherent host writes are visible to any later submit.
+        if (it->second.mapped) {
+            std::memcpy(static_cast<uint8_t*>(it->second.mapped) + dst_offset,
+                        data, size_bytes);
+            return true;
+        }
 
-        void* mapped = nullptr;
-        vkMapMemory(m_device, stagingMem, 0, size_bytes, 0, &mapped);
-        std::memcpy(mapped, data, size_bytes);
-        vkUnmapMemory(m_device, stagingMem);
+        // Batch mode: queue the op; one submission covers the whole batch.
+        if (m_batchActive) {
+            m_batchOps.push_back({ it->second.buffer, dst_offset, size_bytes,
+                                   const_cast<void*>(data), m_batchBytes, true });
+            m_batchBytes += (size_bytes + 7u) & ~std::size_t(7);
+            return true;
+        }
 
-        submitCopyImmediate(staging, it->second.buffer, size_bytes, 0, dst_offset);
-
-        vkDestroyBuffer(m_device, staging, nullptr);
-        vkFreeMemory(m_device, stagingMem, nullptr);
+        // Persistent (grow-only, persistently mapped) staging buffer. The old
+        // create/map/copy/destroy-per-call pattern was the dominant CPU cost of
+        // the MGPCG pressure solve on Vulkan: every CG dot product downloads
+        // the block partials, so a single substep issued hundreds of staging
+        // allocations. submitCopyImmediate waits the fence before returning, so
+        // reuse is race-free.
+        if (!ensureStaging(size_bytes)) return false;
+        std::memcpy(m_stagingMapped, data, size_bytes);
+        submitCopyImmediate(m_stagingBuf, it->second.buffer, size_bytes, 0, dst_offset);
         return true;
     }
 
@@ -274,22 +324,87 @@ public:
         if (it == m_buffers.end() || !data || size_bytes == 0) return false;
         if (src_offset + size_bytes > it->second.size) return false;
 
-        VkBuffer staging = VK_NULL_HANDLE;
-        VkDeviceMemory stagingMem = VK_NULL_HANDLE;
-        if (!const_cast<VulkanSimulationComputeBackend*>(this)
-                ->createStagingBuffer(size_bytes, staging, stagingMem))
-            return false;
+        auto* self = const_cast<VulkanSimulationComputeBackend*>(this);
+        if (m_batchActive) {
+            // Deferred: `data` is filled when endTransferBatch() runs.
+            self->m_batchOps.push_back({ it->second.buffer, src_offset, size_bytes,
+                                         data, self->m_batchBytes, false });
+            self->m_batchBytes += (size_bytes + 7u) & ~std::size_t(7);
+            return true;
+        }
+        if (!self->ensureStaging(size_bytes)) return false;
+        self->submitCopyImmediate(it->second.buffer, m_stagingBuf, size_bytes, src_offset, 0);
+        std::memcpy(data, m_stagingMapped, size_bytes);
+        return true;
+    }
 
-        const_cast<VulkanSimulationComputeBackend*>(this)
-            ->submitCopyImmediate(it->second.buffer, staging, size_bytes, src_offset, 0);
+    // Collapse every queued upload/download into ONE command buffer submission
+    // (one fence wait) instead of one per copy. Downloaded host pointers are
+    // written here, before endTransferBatch() returns.
+    void beginTransferBatch() override {
+        m_batchActive = true;
+        m_batchOps.clear();
+        m_batchBytes = 0;
+    }
 
-        void* mapped = nullptr;
-        vkMapMemory(m_device, stagingMem, 0, size_bytes, 0, &mapped);
-        std::memcpy(data, mapped, size_bytes);
-        vkUnmapMemory(m_device, stagingMem);
+    bool endTransferBatch() override {
+        m_batchActive = false;
+        if (m_batchOps.empty()) return true;
+        if (!ensureStaging(m_batchBytes)) { m_batchOps.clear(); return false; }
 
-        vkDestroyBuffer(m_device, staging, nullptr);
-        vkFreeMemory(m_device, stagingMem, nullptr);
+        for (const auto& op : m_batchOps) {
+            if (op.upload)
+                std::memcpy(static_cast<uint8_t*>(m_stagingMapped) + op.stagingOff,
+                            op.host, op.size);
+        }
+
+        if (m_copyCmdBuf == VK_NULL_HANDLE) {
+            VkCommandBufferAllocateInfo ai{};
+            ai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            ai.commandPool        = m_cmdPool;
+            ai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            ai.commandBufferCount = 1;
+            if (vkAllocateCommandBuffers(m_device, &ai, &m_copyCmdBuf) != VK_SUCCESS) {
+                m_batchOps.clear();
+                return false;
+            }
+        }
+        vkResetCommandBuffer(m_copyCmdBuf, 0);
+        VkCommandBufferBeginInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(m_copyCmdBuf, &bi);
+        for (const auto& op : m_batchOps) {
+            VkBufferCopy region{};
+            if (op.upload) {
+                region.srcOffset = op.stagingOff;
+                region.dstOffset = op.devOff;
+                region.size      = op.size;
+                vkCmdCopyBuffer(m_copyCmdBuf, m_stagingBuf, op.devBuf, 1, &region);
+            } else {
+                region.srcOffset = op.devOff;
+                region.dstOffset = op.stagingOff;
+                region.size      = op.size;
+                vkCmdCopyBuffer(m_copyCmdBuf, op.devBuf, m_stagingBuf, 1, &region);
+            }
+        }
+        vkEndCommandBuffer(m_copyCmdBuf);
+
+        VkSubmitInfo si{};
+        si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers    = &m_copyCmdBuf;
+        vkQueueSubmit(m_queue, 1, &si, m_fence);
+        vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, UINT64_MAX);
+        vkResetFences(m_device, 1, &m_fence);
+
+        for (const auto& op : m_batchOps) {
+            if (!op.upload)
+                std::memcpy(op.host,
+                            static_cast<const uint8_t*>(m_stagingMapped) + op.stagingOff,
+                            op.size);
+        }
+        m_batchOps.clear();
         return true;
     }
 
@@ -329,8 +444,22 @@ public:
                                     kernel == "terrain_thermal_hardness" ||
                                     kernel == "terrain_stream_power" ||
                                     kernel == "terrain_wind" ||
-                                    kernel == "terrain_hydraulic_droplet");
+                                    kernel == "terrain_hydraulic_droplet" ||
+                                    kernel == "terrain_fluvial_runoff" ||
+                                    kernel == "terrain_fluvial_talus");
         if (needs_atomics && !m_has_float_atomics) return false;
+
+        // The MGPCG dot / device-scalar kernels work in double — running them
+        // without the shaderFloat64 device feature is UB. Failing here sends
+        // the host cleanly to the CPU PCG fallback.
+        if (!m_has_shader_float64 &&
+            (kernel == "sim_fluid_cg_dot" ||
+             kernel == "sim_fluid_cg_scalar_step" ||
+             kernel == "sim_fluid_cg_axpy_dev" ||
+             kernel == "sim_fluid_cg_zpby_dev" ||
+             kernel == "sim_fluid_cg_jacobi_dot" ||
+             kernel == "sim_fluid_cg_spmv_dot" ||
+             kernel == "sim_fluid_cg_axpy2_dev")) return false;
 
         auto pit = m_pipelines.find(kernel);
         if (pit == m_pipelines.end()) return false;
@@ -399,7 +528,10 @@ public:
 private:
     // ── Internal types ────────────────────────────────────────────────────────
 
-    static constexpr uint32_t MAX_BINDINGS      = 9;
+    // 10 bindings needed by sim_fluid_g2p (9 particle/velocity buffers +
+    // fluid_mask for the solid FLIP limiter). Raising this only grows the
+    // per-count descriptor layout table.
+    static constexpr uint32_t MAX_BINDINGS      = 10;
     static constexpr uint32_t MAX_DESC_SETS     = 512;
     static constexpr uint32_t MAX_PUSH_CONSTANT = 128;
 
@@ -407,6 +539,7 @@ private:
         VkBuffer       buffer = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
         std::size_t    size   = 0;
+        void*          mapped = nullptr; // non-null: ReBAR (device-local host-visible) — uploads are direct memcpy
     };
 
     struct PipelineEntry {
@@ -434,6 +567,28 @@ private:
     bool     m_ready          = false;
     bool     m_recording      = false;
     bool     m_has_float_atomics = false;
+    bool     m_has_shader_float64 = false;
+
+    // Persistent staging + copy command buffer (see ensureStaging /
+    // submitCopyImmediate).
+    VkBuffer        m_stagingBuf    = VK_NULL_HANDLE;
+    VkDeviceMemory  m_stagingMem    = VK_NULL_HANDLE;
+    std::size_t     m_stagingCap    = 0;
+    void*           m_stagingMapped = nullptr;
+    VkCommandBuffer m_copyCmdBuf    = VK_NULL_HANDLE;
+
+    // Transfer batch state (beginTransferBatch/endTransferBatch).
+    struct BatchXfer {
+        VkBuffer    devBuf;
+        std::size_t devOff;
+        std::size_t size;
+        void*       host;       // src for uploads, dst for downloads
+        std::size_t stagingOff;
+        bool        upload;
+    };
+    bool                   m_batchActive = false;
+    std::vector<BatchXfer> m_batchOps;
+    std::size_t            m_batchBytes = 0;
 
     // ── Initialization ────────────────────────────────────────────────────────
 
@@ -576,14 +731,53 @@ private:
             { "sim_fluid_clear_float",              "sim_fluid_clear_float.spv",           1, 36 },
             { "sim_fluid_particle_integrate_forces","sim_fluid_particle_forces.spv",       1, 36 },
             { "sim_fluid_p2g_scatter",              "sim_fluid_p2g_scatter.spv",           5, 36 },
-            { "sim_fluid_p2g_normalize",            "sim_fluid_p2g_normalize.spv",         2, 36 },
+            // Normalize shares the scatter pass's 5-buffer dispatch (vel/weight
+            // at bindings 3/4 — CUDA index parity). Registering it as 2 bound a
+            // 5-binding set on a 2-binding layout (UB): bindings 0/1 hit the
+            // particle position/velocity buffers → positions corrupted per step.
+            { "sim_fluid_p2g_normalize",            "sim_fluid_p2g_normalize.spv",         5, 36 },
             { "sim_fluid_density_clear",            "sim_fluid_density_clear.spv",         1, 36 },
             { "sim_fluid_density_splat",            "sim_fluid_density_splat.spv",         2, 36 },
-            { "sim_fluid_g2p",                      "sim_fluid_g2p.spv",                   9, 64 },
-            { "sim_fluid_free_surface_sor",         "sim_fluid_free_surface_sor.spv",      3, 36 },
-            { "sim_grid_divergence",                "sim_grid_divergence.spv",             5, 36 },
-            { "sim_grid_sor",                       "sim_grid_sor.spv",                    5, 36 },
-            { "sim_grid_subtract_gradient",         "sim_grid_subtract_gradient.spv",      5, 36 },
+            // FluidG2PGpuConstants = 17 fields x 4 = 68 (has use_solid_flip_limiter);
+            // buffer 10 = fluid_mask (solid FLIP limiter parity with CUDA).
+            { "sim_fluid_g2p",                      "sim_fluid_g2p.spv",                  10, 68 },
+            // GridProjectionGpuConstants = 13 fields x 4 = 52. The shaders may
+            // declare only the leading fields; the pipeline range must cover the
+            // full struct the host pushes (old 36 made vkCmdPushConstants exceed
+            // the range → validation error / UB on the gas + SOR paths).
+            { "sim_fluid_free_surface_sor",         "sim_fluid_free_surface_sor.spv",      3, 52 },
+            { "sim_grid_divergence",                "sim_grid_divergence.spv",             5, 52 },
+            { "sim_grid_sor",                       "sim_grid_sor.spv",                    5, 52 },
+            { "sim_grid_subtract_gradient",         "sim_grid_subtract_gradient.spv",      5, 52 },
+            // MGPCG free-surface pressure solve (Faz 1 Vulkan port of the CUDA
+            // sim_fluid_cg_* family — plain path only: non-variational, non-GFM,
+            // non-fused reductions, no multigrid; the host's generic path covers
+            // exactly this subset on non-CUDA backends).
+            { "sim_fluid_divergence",               "sim_fluid_divergence.spv",            5, 52 },
+            { "sim_fluid_subtract_gradient",        "sim_fluid_subtract_gradient.spv",     5, 52 },
+            { "sim_fluid_cg_build_diag",            "sim_fluid_cg_build_diag.spv",         2, 52 },
+            { "sim_fluid_cg_residual_init",         "sim_fluid_cg_residual_init.spv",      4, 52 },
+            { "sim_fluid_cg_spmv",                  "sim_fluid_cg_spmv.spv",               4, 52 },
+            { "sim_fluid_cg_jacobi",                "sim_fluid_cg_jacobi.spv",             3, 52 },
+            { "sim_fluid_cg_copy",                  "sim_fluid_cg_copy.spv",               2, 52 },
+            { "sim_fluid_cg_axpy",                  "sim_fluid_cg_axpy.spv",               2, 52 },
+            { "sim_fluid_cg_zpby",                  "sim_fluid_cg_zpby.spv",               2, 52 },
+            // Double-precision block partials → requires shaderFloat64 (gated in
+            // dispatch(); pipeline creation simply fails without the feature).
+            { "sim_fluid_cg_dot",                   "sim_fluid_cg_dot.spv",                3, 52 },
+            // Device-resident CG scalars (alpha/beta/sigma live on the GPU) —
+            // collapses per-dot submit+fence round-trips into one small download
+            // every K iterations. All three read/write double scalars →
+            // shaderFloat64-gated like sim_fluid_cg_dot.
+            { "sim_fluid_cg_scalar_step",           "sim_fluid_cg_scalar_step.spv",        2, 52 },
+            { "sim_fluid_cg_axpy_dev",              "sim_fluid_cg_axpy_dev.spv",           3, 52 },
+            { "sim_fluid_cg_zpby_dev",              "sim_fluid_cg_zpby_dev.spv",           3, 52 },
+            // Fused CG kernels (CUDA name/buffer-order parity, plain branch only;
+            // + axpy2_dev, Vulkan-only fused p/r pair update). Cut the device-
+            // scalar loop from 9 to 6 dispatches+barriers per iteration.
+            { "sim_fluid_cg_jacobi_dot",            "sim_fluid_cg_jacobi_dot.spv",         4, 52 },
+            { "sim_fluid_cg_spmv_dot",              "sim_fluid_cg_spmv_dot.spv",           5, 52 },
+            { "sim_fluid_cg_axpy2_dev",             "sim_fluid_cg_axpy2_dev.spv",          5, 52 },
             { "sim_grid_advect_scalar",             "sim_grid_advect_scalar.spv",          5, 20 },
             { "sim_grid_advect_velocity",           "sim_grid_advect_velocity.spv",        6, 20 },
             { "sim_grid_velocity_dissipate_clamp",  "sim_grid_velocity_dissipate.spv",     3, 20 },
@@ -626,6 +820,11 @@ private:
             // the "Hydraulic" node — user found droplet's organic channel character
             // clearly better). 18 fields x 4 bytes = 72.
             { "terrain_hydraulic_droplet",          "terrain_hydraulic_droplet.spv",        3, 72 },
+            // Device-resident particle runoff: height/material plus persistent scalar
+            // discharge and XY channel-direction memory.  All share 112-byte constants.
+            { "terrain_fluvial_runoff",             "terrain_fluvial_runoff.spv",           9, 112 },
+            { "terrain_fluvial_apply",              "terrain_fluvial_apply.spv",            6, 112 },
+            { "terrain_fluvial_talus",              "terrain_fluvial_talus.spv",            2, 112 },
             // GPU flow-accumulation for Fluvial (iterative relaxation approximation of
             // the CPU priority-flood + MFD accumulation — see terrain_flow_*.comp
             // headers for the algorithm notes).
@@ -650,6 +849,31 @@ private:
         return UINT32_MAX;
     }
 
+    // ReBAR memory type: DEVICE_LOCAL + HOST_VISIBLE + HOST_COHERENT, but only
+    // when its heap is >=1GB — without resizable BAR the device-local
+    // host-visible window is just 256MB and it is shared with the graphics
+    // backend (this app renders through Vulkan RT), so we must not squat on it.
+    // Buffers landing here run at full VRAM speed for shaders while host
+    // uploads become a plain memcpy over PCIe (no staging copy, no submit, no
+    // fence). Host READS from this memory are write-combined-slow — downloads
+    // must keep going through the cached staging path.
+    uint32_t findBarMemType(uint32_t typeBits) const {
+        VkPhysicalDeviceMemoryProperties memProps{};
+        vkGetPhysicalDeviceMemoryProperties(m_physDevice, &memProps);
+        constexpr VkMemoryPropertyFlags kBar =
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+            if ((typeBits & (1u << i)) &&
+                (memProps.memoryTypes[i].propertyFlags & kBar) == kBar &&
+                memProps.memoryHeaps[memProps.memoryTypes[i].heapIndex].size >=
+                    (VkDeviceSize(1) << 30))
+                return i;
+        }
+        return UINT32_MAX;
+    }
+
     bool createStagingBuffer(std::size_t size,
                               VkBuffer& outBuf, VkDeviceMemory& outMem) {
         VkBufferCreateInfo bci{};
@@ -661,9 +885,20 @@ private:
 
         VkMemoryRequirements req{};
         vkGetBufferMemoryRequirements(m_device, outBuf, &req);
+        // Prefer HOST_CACHED: the staging buffer is shared by uploads AND
+        // downloads, and reading back from non-cached (write-combined) host
+        // memory is catastrophically slow (~0.3 GB/s memcpy — measured 13x
+        // slower field downloads vs CUDA). Cached+coherent exists on every
+        // desktop vendor; fall back to plain coherent if a driver lacks it.
         uint32_t mt = findMemType(req.memoryTypeBits,
                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                                  VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+        if (mt == UINT32_MAX) {
+            mt = findMemType(req.memoryTypeBits,
+                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        }
         if (mt == UINT32_MAX) { vkDestroyBuffer(m_device, outBuf, nullptr); return false; }
 
         VkMemoryAllocateInfo ai{};
@@ -678,35 +913,64 @@ private:
         return true;
     }
 
+    // Grow-only persistently-mapped staging buffer shared by upload/download.
+    // Safe to reuse because every submitCopyImmediate waits its fence before
+    // returning (no in-flight consumer of the previous contents).
+    bool ensureStaging(std::size_t size) {
+        if (m_stagingBuf != VK_NULL_HANDLE && size <= m_stagingCap) return true;
+        if (m_stagingBuf != VK_NULL_HANDLE) {
+            vkUnmapMemory(m_device, m_stagingMem);
+            vkDestroyBuffer(m_device, m_stagingBuf, nullptr);
+            vkFreeMemory(m_device, m_stagingMem, nullptr);
+            m_stagingBuf = VK_NULL_HANDLE;
+            m_stagingMem = VK_NULL_HANDLE;
+            m_stagingMapped = nullptr;
+            m_stagingCap = 0;
+        }
+        std::size_t cap = std::max<std::size_t>({ size, m_stagingCap * 2, 1u << 20 });
+        if (!createStagingBuffer(cap, m_stagingBuf, m_stagingMem)) return false;
+        if (vkMapMemory(m_device, m_stagingMem, 0, cap, 0, &m_stagingMapped) != VK_SUCCESS) {
+            vkDestroyBuffer(m_device, m_stagingBuf, nullptr);
+            vkFreeMemory(m_device, m_stagingMem, nullptr);
+            m_stagingBuf = VK_NULL_HANDLE;
+            m_stagingMem = VK_NULL_HANDLE;
+            return false;
+        }
+        m_stagingCap = cap;
+        return true;
+    }
+
     void submitCopyImmediate(VkBuffer src, VkBuffer dst, std::size_t size,
                               VkDeviceSize srcOff, VkDeviceSize dstOff) {
-        // Use a separate one-shot command buffer so uploads/downloads don't
-        // interleave with the main compute recording.
-        VkCommandBufferAllocateInfo ai{};
-        ai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        ai.commandPool        = m_cmdPool;
-        ai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        ai.commandBufferCount = 1;
-        VkCommandBuffer cb = VK_NULL_HANDLE;
-        vkAllocateCommandBuffers(m_device, &ai, &cb);
+        // Persistent copy command buffer (separate from the main compute
+        // recording), reset per use — the pool is created resettable (the main
+        // cmdbuf is already vkResetCommandBuffer'd every synchronize()).
+        if (m_copyCmdBuf == VK_NULL_HANDLE) {
+            VkCommandBufferAllocateInfo ai{};
+            ai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            ai.commandPool        = m_cmdPool;
+            ai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            ai.commandBufferCount = 1;
+            if (vkAllocateCommandBuffers(m_device, &ai, &m_copyCmdBuf) != VK_SUCCESS) return;
+        }
+        vkResetCommandBuffer(m_copyCmdBuf, 0);
 
         VkCommandBufferBeginInfo bi{};
         bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(cb, &bi);
+        vkBeginCommandBuffer(m_copyCmdBuf, &bi);
 
         VkBufferCopy region{ srcOff, dstOff, static_cast<VkDeviceSize>(size) };
-        vkCmdCopyBuffer(cb, src, dst, 1, &region);
-        vkEndCommandBuffer(cb);
+        vkCmdCopyBuffer(m_copyCmdBuf, src, dst, 1, &region);
+        vkEndCommandBuffer(m_copyCmdBuf);
 
         VkSubmitInfo si{};
         si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.commandBufferCount = 1;
-        si.pCommandBuffers    = &cb;
+        si.pCommandBuffers    = &m_copyCmdBuf;
         vkQueueSubmit(m_queue, 1, &si, m_fence);
         vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, UINT64_MAX);
         vkResetFences(m_device, 1, &m_fence);
-        vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cb);
     }
 
     bool ensureRecording() {
@@ -730,7 +994,8 @@ createVulkanSimulationComputeBackend(const SimulationComputeVulkanContext& ctx) 
         static_cast<VkPhysicalDevice>(ctx.physical_device),
         static_cast<VkQueue>(ctx.compute_queue),
         ctx.queue_family_index,
-        ctx.shader_atomic_float_enabled);
+        ctx.shader_atomic_float_enabled,
+        ctx.shader_float64_enabled);
     if (!backend->supportsDispatch()) return nullptr;
     return backend;
 }
@@ -750,8 +1015,14 @@ namespace RayTrophiSim {
 // (matches the lifetime of the Vulkan device, which outlives all mesh ops).
 static std::unique_ptr<ISimulationComputeBackend> s_sharedMeshBackend;
 static void* s_sharedMeshBackendDevice = nullptr;
+static std::recursive_mutex s_sharedMeshComputeMutex;
+
+std::recursive_mutex& sharedMeshComputeMutex() {
+    return s_sharedMeshComputeMutex;
+}
 
 ISimulationComputeBackend* acquireSharedMeshComputeBackend() {
+    std::lock_guard<std::recursive_mutex> lock(s_sharedMeshComputeMutex);
     void* curDev = g_vulkan_sim_compute_ctx.device;
     // Backend switch (e.g. Vulkan RT -> OptiX -> Vulkan RT): the VkDevice our cached
     // backend was built on was destroyed and a new one created. releaseSharedMeshCompute-
@@ -775,6 +1046,7 @@ ISimulationComputeBackend* acquireSharedMeshComputeBackend() {
 // valid (i.e. before vkDestroyDevice) so its buffers/pipelines are freed cleanly; a later
 // acquire then rebuilds against whatever device is current.
 void releaseSharedMeshComputeBackend() {
+    std::lock_guard<std::recursive_mutex> lock(s_sharedMeshComputeMutex);
     s_sharedMeshBackend.reset();
     s_sharedMeshBackendDevice = nullptr;
 }

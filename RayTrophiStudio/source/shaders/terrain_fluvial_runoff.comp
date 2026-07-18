@@ -1,0 +1,495 @@
+// Particle-based fluvial runoff.  This deliberately shares the successful
+// hydraulic droplet model's local transport behaviour instead of solving a
+// boundary-seeded global flow field.  Droplets accumulate discharge and write
+// erosion/deposition deltas; terrain_fluvial_apply.comp commits one batch.
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    int brushRadius; int dropletLifetime;
+    float inertia; float sedimentCapacity; float minSlope; float erodeSpeed;
+    float depositSpeed; float evaporateSpeed; float gravity; float cellSize;
+    float heightScale; float flowBoost; float flowNormalization; float flatSlope;
+    float meanderStrength; float maxErosionFraction; float flowDecay; float depositSpread;
+    uint seed; uint seedOffset; uint hasHardness; uint hasMask;
+    uint dropletCount; uint batchIndex; float minWater; uint _pad;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Height    { float heightmap[]; };
+layout(set = 0, binding = 1) readonly buffer Hardness  { float hardnessMap[]; };
+layout(set = 0, binding = 2) readonly buffer Mask      { float maskMap[]; };
+layout(set = 0, binding = 3) buffer Flow               { float flowMap[]; };
+layout(set = 0, binding = 4) buffer ErosionDelta       { float erosionDelta[]; };
+layout(set = 0, binding = 5) buffer DepositionDelta    { float depositionDelta[]; };
+layout(set = 0, binding = 6) buffer FlowDirectionX     { float flowDirectionX[]; };
+layout(set = 0, binding = 7) buffer FlowDirectionY     { float flowDirectionY[]; };
+struct RunoffParcelState {
+    vec4 positionDirection; // posX, posY, dirX, dirY
+    vec4 transport;         // speed, water, sediment, alive
+    vec4 routingMeta;       // flatResidence, routeConfidence, reserved...
+};
+layout(set = 0, binding = 8) buffer ParcelStates       { RunoffParcelState parcelStates[]; };
+
+uint rngState;
+
+uint continuationSegmentCount() { return max(pc._pad & 0xffffu, 1u); }
+float authoredTravelLength() { return max(float(pc._pad >> 16u), 32.0); }
+
+uint mixBits(uint x) {
+    x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u;
+    x *= 0x846ca68bu; x ^= x >> 16u;
+    return x;
+}
+
+void rngInit(uint value) { rngState = value == 0u ? 1u : value; }
+
+float rngNext() {
+    rngState ^= rngState << 13u;
+    rngState ^= rngState >> 17u;
+    rngState ^= rngState << 5u;
+    return float(rngState) * (1.0 / 4294967296.0);
+}
+
+float sampleHeight(float x, float y) {
+    x = clamp(x, 0.0, float(pc.mapWidth - 1));
+    y = clamp(y, 0.0, float(pc.mapHeight - 1));
+    int x0 = int(floor(x)); int y0 = int(floor(y));
+    int x1 = min(x0 + 1, pc.mapWidth - 1);
+    int y1 = min(y0 + 1, pc.mapHeight - 1);
+    float tx = x - float(x0); float ty = y - float(y0);
+    float a = mix(heightmap[y0 * pc.mapWidth + x0], heightmap[y0 * pc.mapWidth + x1], tx);
+    float b = mix(heightmap[y1 * pc.mapWidth + x0], heightmap[y1 * pc.mapWidth + x1], tx);
+    return mix(a, b, ty);
+}
+
+float sampleHardness(float x, float y) {
+    if (pc.hasHardness == 0u) return 0.0;
+    x = clamp(x, 0.0, float(pc.mapWidth - 1));
+    y = clamp(y, 0.0, float(pc.mapHeight - 1));
+    int x0 = int(floor(x)); int y0 = int(floor(y));
+    int x1 = min(x0 + 1, pc.mapWidth - 1);
+    int y1 = min(y0 + 1, pc.mapHeight - 1);
+    float tx = x - float(x0); float ty = y - float(y0);
+    float a = mix(hardnessMap[y0 * pc.mapWidth + x0], hardnessMap[y0 * pc.mapWidth + x1], tx);
+    float b = mix(hardnessMap[y1 * pc.mapWidth + x0], hardnessMap[y1 * pc.mapWidth + x1], tx);
+    return mix(a, b, ty);
+}
+
+float sampleMask(float x, float y) {
+    if (pc.hasMask == 0u) return 1.0;
+    x = clamp(x, 0.0, float(pc.mapWidth - 1));
+    y = clamp(y, 0.0, float(pc.mapHeight - 1));
+    int x0 = int(floor(x)); int y0 = int(floor(y));
+    int x1 = min(x0 + 1, pc.mapWidth - 1);
+    int y1 = min(y0 + 1, pc.mapHeight - 1);
+    float tx = x - float(x0); float ty = y - float(y0);
+    float a = mix(maskMap[y0 * pc.mapWidth + x0], maskMap[y0 * pc.mapWidth + x1], tx);
+    float b = mix(maskMap[y1 * pc.mapWidth + x0], maskMap[y1 * pc.mapWidth + x1], tx);
+    return mix(a, b, ty);
+}
+
+vec3 addFlowState(float x, float y, float amount, vec2 direction) {
+    int x0 = int(floor(x)); int y0 = int(floor(y));
+    int x1 = x0 + 1; int y1 = y0 + 1;
+    if (x0 < 0 || y0 < 0 || x1 >= pc.mapWidth || y1 >= pc.mapHeight) return vec3(0.0);
+    float tx = x - float(x0); float ty = y - float(y0);
+    float w00 = (1.0 - tx) * (1.0 - ty);
+    float w10 = tx * (1.0 - ty);
+    float w01 = (1.0 - tx) * ty;
+    float w11 = tx * ty;
+    // atomicAdd returns the value before this parcel's contribution.  Reading
+    // discharge this way avoids a non-atomic read racing other parcel writes.
+    float f00 = atomicAdd(flowMap[y0 * pc.mapWidth + x0], amount * w00);
+    float f10 = atomicAdd(flowMap[y0 * pc.mapWidth + x1], amount * w10);
+    float f01 = atomicAdd(flowMap[y1 * pc.mapWidth + x0], amount * w01);
+    float f11 = atomicAdd(flowMap[y1 * pc.mapWidth + x1], amount * w11);
+    float previousFlow = f00 * w00 + f10 * w10 + f01 * w01 + f11 * w11;
+
+    // Scalar discharge alone cannot make later rainfall follow an established
+    // channel.  Keep a persistent, discharge-weighted direction field so runoff
+    // parcels converge into the same beds and tributaries merge coherently.
+    int directionX = clamp(int(round(x)), 0, pc.mapWidth - 1);
+    int directionY = clamp(int(round(y)), 0, pc.mapHeight - 1);
+    int directionIndex = directionY * pc.mapWidth + directionX;
+    float previousDirectionX = atomicAdd(flowDirectionX[directionIndex], direction.x * amount);
+    float previousDirectionY = atomicAdd(flowDirectionY[directionIndex], direction.y * amount);
+    return vec3(previousFlow, previousDirectionX, previousDirectionY);
+}
+
+float reserveErosion(int idx, float requested) {
+    if (requested <= 0.0) return 0.0;
+    float budget = max(heightmap[idx], 0.0) * pc.maxErosionFraction;
+    float previous = atomicAdd(erosionDelta[idx], requested);
+    float accepted = clamp(budget - previous, 0.0, requested);
+    float rejected = requested - accepted;
+    if (rejected > 0.0) atomicAdd(erosionDelta[idx], -rejected);
+    return accepted;
+}
+
+float addErosion(float x, float y, float amount) {
+    int x0 = int(floor(x)); int y0 = int(floor(y));
+    int x1 = x0 + 1; int y1 = y0 + 1;
+    if (x0 < 0 || y0 < 0 || x1 >= pc.mapWidth || y1 >= pc.mapHeight) return 0.0;
+    float tx = x - float(x0); float ty = y - float(y0);
+    float accepted = 0.0;
+    accepted += reserveErosion(y0 * pc.mapWidth + x0, amount * (1.0 - tx) * (1.0 - ty));
+    accepted += reserveErosion(y0 * pc.mapWidth + x1, amount * tx * (1.0 - ty));
+    accepted += reserveErosion(y1 * pc.mapWidth + x0, amount * (1.0 - tx) * ty);
+    accepted += reserveErosion(y1 * pc.mapWidth + x1, amount * tx * ty);
+    return accepted;
+}
+
+float reserveDeposition(int idx, float requested) {
+    if (requested <= 0.0) return 0.0;
+    // Limit one batch's vertical growth to a fraction of one physical cell.  Excess
+    // remains carried by the parcel instead of becoming a one-pixel sediment needle.
+    // The low half of `_pad` carries the continuation-segment count.  Split one
+    // physical per-cell budget over all continuation segments so Travel Length changes
+    // reach and deposition footprint, never the maximum vertical pile height.
+    float segmentCount = float(continuationSegmentCount());
+    float budget = max(1e-7,
+        0.18 * pc.cellSize / max(pc.heightScale, 0.001) / segmentCount);
+    float previous = atomicAdd(depositionDelta[idx], requested);
+    float accepted = clamp(budget - previous, 0.0, requested);
+    float rejected = requested - accepted;
+    if (rejected > 0.0) atomicAdd(depositionDelta[idx], -rejected);
+    return accepted;
+}
+
+float addDeposition(float x, float y, float amount) {
+    int x0 = int(floor(x)); int y0 = int(floor(y));
+    int x1 = x0 + 1; int y1 = y0 + 1;
+    if (x0 < 0 || y0 < 0 || x1 >= pc.mapWidth || y1 >= pc.mapHeight) return 0.0;
+    float tx = x - float(x0); float ty = y - float(y0);
+    float accepted = 0.0;
+    accepted += reserveDeposition(y0 * pc.mapWidth + x0, amount * (1.0 - tx) * (1.0 - ty));
+    accepted += reserveDeposition(y0 * pc.mapWidth + x1, amount * tx * (1.0 - ty));
+    accepted += reserveDeposition(y1 * pc.mapWidth + x0, amount * (1.0 - tx) * ty);
+    accepted += reserveDeposition(y1 * pc.mapWidth + x1, amount * tx * ty);
+    return accepted;
+}
+
+// Cross-flow scatter creates a channel cross-section instead of stamping circular
+// discs at every high-discharge cell.
+float erodeCrossSection(float x, float y, float dirX, float dirY, float amount, int radius) {
+    radius = clamp(radius, 1, 12);
+    float nx = -dirY; float ny = dirX;
+    float weightSum = 0.0;
+    float accepted = 0.0;
+    for (int k = -radius; k <= radius; ++k) {
+        float t = abs(float(k)) / float(radius + 1);
+        weightSum += (1.0 - t) * (1.0 - t);
+    }
+    for (int k = -radius; k <= radius; ++k) {
+        float t = abs(float(k)) / float(radius + 1);
+        float weight = (1.0 - t) * (1.0 - t) / max(weightSum, 1e-6);
+        accepted += addErosion(x + nx * float(k), y + ny * float(k), amount * weight);
+    }
+    return accepted;
+}
+
+float depositFan(float x, float y, float dirX, float dirY, float amount, int radius) {
+    radius = clamp(radius, 1, 10);
+    float nx = -dirY; float ny = dirX;
+    float weightSum = 0.0;
+    const int downstreamSlices = 3;
+    for (int along = 0; along < downstreamSlices; ++along) {
+        for (int k = -radius; k <= radius; ++k) {
+            float lateral = abs(float(k)) / float(radius + 1);
+            float downstream = float(along) / float(downstreamSlices);
+            weightSum += (1.0 - lateral) * (1.0 - downstream * 0.35);
+        }
+    }
+    float accepted = 0.0;
+    for (int along = 0; along < downstreamSlices; ++along) {
+        for (int k = -radius; k <= radius; ++k) {
+            float lateral = abs(float(k)) / float(radius + 1);
+            float downstream = float(along) / float(downstreamSlices);
+            float weight = (1.0 - lateral) * (1.0 - downstream * 0.35) /
+                           max(weightSum, 1e-6);
+            accepted += addDeposition(x + nx * float(k) + dirX * float(along) * 0.75,
+                                      y + ny * float(k) + dirY * float(along) * 0.75,
+                                      amount * weight);
+        }
+    }
+    return accepted;
+}
+
+float hash2(int xi, int yi) {
+    uint h = uint(xi) * 374761393u + uint(yi) * 668265263u + pc.seed * 2246822519u;
+    h = (h ^ (h >> 13u)) * 1274126177u;
+    h ^= h >> 16u;
+    return float(h & 0x00ffffffu) / float(0x01000000u);
+}
+
+float valueNoise(float x, float y) {
+    const float scale = 24.0;
+    float fx = x / scale; float fy = y / scale;
+    int ix = int(floor(fx)); int iy = int(floor(fy));
+    float tx = fx - float(ix); float ty = fy - float(iy);
+    float sx = tx * tx * (3.0 - 2.0 * tx);
+    float sy = ty * ty * (3.0 - 2.0 * ty);
+    return mix(mix(hash2(ix, iy), hash2(ix + 1, iy), sx),
+               mix(hash2(ix, iy + 1), hash2(ix + 1, iy + 1), sx), sy);
+}
+
+vec2 physicalGradient(float x, float y, float radius) {
+    float denom = max(0.001, 2.0 * radius * pc.cellSize);
+    float gx = (sampleHeight(x + radius, y) - sampleHeight(x - radius, y)) * pc.heightScale / denom;
+    float gy = (sampleHeight(x, y + radius) - sampleHeight(x, y - radius)) * pc.heightScale / denom;
+    return vec2(gx, gy);
+}
+
+void main() {
+    uint droplet = gl_GlobalInvocationID.x;
+    if (droplet >= pc.dropletCount) return;
+
+    rngInit(mixBits(droplet + pc.seedOffset * 747796405u + pc.seed * 2891336453u +
+                    pc.batchIndex * 2246822519u));
+
+    float posX; float posY; float dirX; float dirY;
+    float speed; float water; float sediment; float flatResidence;
+    float routeConfidence;
+    bool alive = true;
+    if (pc.batchIndex == 0u) {
+        posX = 2.0 + rngNext() * float(max(1, pc.mapWidth - 5));
+        posY = 2.0 + rngNext() * float(max(1, pc.mapHeight - 5));
+        dirX = 0.0; dirY = 0.0;
+        speed = 1.0; water = 1.0; sediment = 0.0; flatResidence = 0.0;
+        routeConfidence = 0.0;
+    } else {
+        RunoffParcelState state = parcelStates[droplet];
+        if (state.transport.w < 0.5) return;
+        posX = state.positionDirection.x;
+        posY = state.positionDirection.y;
+        dirX = state.positionDirection.z;
+        dirY = state.positionDirection.w;
+        speed = state.transport.x;
+        water = state.transport.y;
+        sediment = state.transport.z;
+        flatResidence = state.routingMeta.x;
+        routeConfidence = state.routingMeta.y;
+    }
+
+    for (int step = 0; step < pc.dropletLifetime; ++step) {
+        if (posX <= 2.0 || posX >= float(pc.mapWidth - 3) ||
+            posY <= 2.0 || posY >= float(pc.mapHeight - 3)) {
+            alive = false;
+            break;
+        }
+
+        float maskValue = sampleMask(posX, posY);
+        if (maskValue < 0.001) {
+            alive = false;
+            break;
+        }
+
+        vec2 grad = physicalGradient(posX, posY, 1.0);
+        float localSlope = length(grad);
+        float flatBlend = 1.0 - smoothstep(pc.flatSlope * 0.35, pc.flatSlope, localSlope);
+
+        // Multi-scale terrain guidance is always present at low strength, becoming
+        // dominant on flats.  It lets runoff cross small pits instead of terminating
+        // after a handful of pixels, without bringing back a global flood solve.
+        vec2 coarse = physicalGradient(posX, posY, 4.0);
+        vec2 broad = physicalGradient(posX, posY, 12.0);
+        vec2 catchmentGradient = coarse * 0.65 + broad * 0.35;
+        grad = mix(grad, catchmentGradient, 0.12 + flatBlend * 0.68);
+
+        if (flatBlend > 0.0) {
+            float nX = valueNoise(posX + 1.0, posY) - valueNoise(posX - 1.0, posY);
+            float nY = valueNoise(posX, posY + 1.0) - valueNoise(posX, posY - 1.0);
+            grad += vec2(nX, nY) * pc.meanderStrength * flatBlend;
+        }
+
+        vec2 downhill = -grad;
+        float downhillLength = length(downhill);
+        if (downhillLength > 1e-7) downhill /= downhillLength;
+        else downhill = normalize(vec2(rngNext() - 0.5, rngNext() - 0.5) + vec2(1e-4));
+
+        vec2 direction = vec2(dirX, dirY) * pc.inertia + downhill * (1.0 - pc.inertia);
+        float directionLength = length(direction);
+        if (directionLength < 1e-6) direction = downhill;
+        else direction /= directionLength;
+
+        vec3 flowState = addFlowState(posX, posY, water, direction);
+        float discharge = max(flowState.x, 0.0);
+        vec2 rememberedDirection = flowState.yz;
+        float rememberedLength = length(rememberedDirection);
+        float directionalCoherence = clamp(rememberedLength /
+            max(discharge + water, 1e-4), 0.0, 1.0);
+        if (rememberedLength > 1e-5) {
+            rememberedDirection /= rememberedLength;
+            // Never force a parcel upstream when two catchments meet.  Compatible
+            // historical directions increasingly dominate as discharge builds.
+            float agreement = dot(direction, rememberedDirection);
+            float memoryWeight = smoothstep(2.0, 24.0, discharge) *
+                                 smoothstep(-0.15, 0.35, agreement) *
+                                 mix(0.20, 1.0, directionalCoherence) *
+                                 mix(0.72, 0.94, routeConfidence);
+            direction = normalize(mix(direction, rememberedDirection, memoryWeight));
+        }
+        dirX = direction.x; dirY = direction.y;
+
+        float newX = posX + dirX;
+        float newY = posY + dirY;
+        if (newX <= 1.0 || newX >= float(pc.mapWidth - 2) ||
+            newY <= 1.0 || newY >= float(pc.mapHeight - 2)) {
+            alive = false;
+            break;
+        }
+
+        float oldHeight = sampleHeight(posX, posY);
+        float newHeight = sampleHeight(newX, newY);
+        float deltaHeight = newHeight - oldHeight;
+        float downhillSlope = max(-deltaHeight * pc.heightScale / max(pc.cellSize, 0.001), 0.0);
+        float flatness = 1.0 - smoothstep(pc.flatSlope * 0.25, pc.flatSlope, downhillSlope);
+
+        float broadSlope = length(catchmentGradient);
+        bool unresolvedFlat = downhillSlope < pc.flatSlope * 0.12 &&
+                              broadSlope < pc.flatSlope * 0.25;
+        flatResidence = unresolvedFlat ? flatResidence + 1.0 : max(0.0, flatResidence - 2.0);
+
+        // Uniform rain is allowed everywhere, but a parcel born on a plain must not
+        // manufacture a drainage basin from tiny numerical height differences.  A
+        // real hillslope establishes route confidence; that confidence then persists
+        // long enough for its connected runoff to cross and gently incise a plain.
+        float terrainDrive = smoothstep(pc.flatSlope * 1.25,
+                                        pc.flatSlope * 2.75,
+                                        broadSlope);
+        routeConfidence = clamp(routeConfidence + terrainDrive * 0.12 -
+                                (1.0 - terrainDrive) * 0.0035, 0.0, 1.0);
+
+        // Directional concentration separates a tributary from unrelated droplets
+        // visiting the same flat cell.  Random local rainfall cancels in the vector
+        // field even when its scalar visit count becomes large.
+        // One slightly tilted pixel is not a catchment.  Require several consecutive
+        // broad-slope steps before local rainfall may erode; established tributaries
+        // can continue across the plain only when they retain real stream power.
+        float hillslopeRunoff = terrainDrive *
+                               smoothstep(0.12, 0.45, routeConfidence);
+
+        // Bed erosion follows stream power, not scalar water occupancy.  A depression
+        // may hold a lot of nearly stationary water, but with no hydraulic gradient it
+        // cannot excavate a pit.  On a very flat bed the required coherent discharge
+        // rises; a merged river can still incise because Q and directional coherence
+        // are high while unrelated rainfall cancels in the direction field.
+        float hydraulicSlope = max(downhillSlope, broadSlope * 0.15);
+        float hydraulicFlatness = 1.0 - smoothstep(pc.flatSlope * 0.20,
+                                                   pc.flatSlope * 1.25,
+                                                   hydraulicSlope);
+        float relativeDischarge = (discharge + water) /
+                                  max(pc.flowNormalization, 1.0);
+        float velocityFactor = clamp(speed / 0.25, 0.25, 4.0);
+        float streamPower = relativeDischarge * velocityFactor *
+                            (hydraulicSlope / max(pc.flatSlope, 1e-4));
+        float requiredPower = mix(0.20, 0.80, hydraulicFlatness);
+        float connectedChannel = routeConfidence *
+                                 smoothstep(0.30, 0.78, directionalCoherence) *
+                                 smoothstep(requiredPower,
+                                            requiredPower * 2.5,
+                                            streamPower);
+        float erosionPermission = max(hillslopeRunoff, connectedChannel);
+
+        float q = clamp(log2(1.0 + discharge / max(pc.flowNormalization, 1.0)), 0.0, 4.0);
+        float capacity = max(pc.minSlope,
+            downhillSlope * speed * water * pc.sedimentCapacity * (1.0 + pc.flowBoost * q));
+
+        float hardnessFactor = 1.0 - sampleHardness(posX, posY) * 0.9;
+        if (deltaHeight > 0.0) {
+            // Crossing one interpolation/micro-relief step is not a physical basin.
+            // Slow the parcel here; capacity loss below performs any real settling
+            // over multiple downstream cells instead of building a contour terrace.
+            speed *= 0.88;
+        } else if (sediment > capacity) {
+            float requestedDeposit = min(sediment,
+                (sediment - capacity) * pc.depositSpeed + sediment * flatness * 0.02);
+            if (requestedDeposit > 0.0) {
+                int fanRadius = clamp(2 + int(round(flatness * pc.depositSpread + q)), 2, 10);
+                float actualDeposit = depositFan(
+                    posX, posY, dirX, dirY, requestedDeposit, fanRadius);
+                sediment -= actualDeposit;
+            }
+        } else {
+            float requested = (capacity - sediment) * pc.erodeSpeed;
+            // Never invent relief to make a channel: even a high-Q river can remove
+            // only material supported by an actual downhill hydraulic gradient.
+            // This eliminates self-deepening stagnant pools on plateaus and plains.
+            float availableDrop = max(-deltaHeight, 0.0);
+            float erode = min(requested, min(availableDrop, oldHeight * 0.02));
+            erode *= hardnessFactor * maskValue * erosionPermission;
+            if (erode > 1e-7) {
+                int channelRadius = clamp(int(round(float(pc.brushRadius) *
+                    (0.55 + 0.20 * sqrt(1.0 + q)))), 1, 12);
+                float actualErosion = erodeCrossSection(
+                    posX, posY, dirX, dirY, erode, channelRadius);
+                sediment += actualErosion;
+            }
+        }
+
+        float speedBefore = speed;
+        float worldDrop = clamp(-deltaHeight * pc.heightScale, -1.0, 1.0);
+        speed = sqrt(max(0.001, speed * speed + worldDrop * pc.gravity * 0.1));
+        // Shallow runoff may become slow, but it does not disappear.  Keep a small
+        // transport floor so coarse guidance can carry it across micro-depressions.
+        speed = max(speed, mix(0.06, 0.14, smoothstep(1.0, 16.0, discharge)));
+        water *= 1.0 - pc.evaporateSpeed;
+
+        float slowdown = clamp((speedBefore - speed) / max(speedBefore, 0.1), 0.0, 1.0);
+        if (sediment > 0.0 && (flatness > 0.0 || slowdown > 0.0)) {
+            float authoredTravel = authoredTravelLength();
+            float globalStep = float(pc.batchIndex) * 32.0 + float(step);
+            float remainingTravel = max(authoredTravel - globalStep, 1.0);
+            float flatEndWindow = flatness *
+                (1.0 - smoothstep(0.0, 96.0, remainingTravel));
+            // Settle continuously as transport capacity fades.  Near the authored
+            // end, suspended load on a plain is released across the final ~96 cells,
+            // never as a single terminal parcel stamp.
+            float physicalSettling = (0.01 + 0.10 * flatness + 0.12 * slowdown) *
+                                     pc.depositSpeed;
+            float requestedDeposit = sediment * physicalSettling;
+            requestedDeposit = min(requestedDeposit, sediment);
+            if (requestedDeposit > 1e-7) {
+                int fanRadius = clamp(2 + int(round(flatness * pc.depositSpread + q)), 2, 10);
+                float actualDeposit = depositFan(
+                    posX, posY, dirX, dirY, requestedDeposit, fanRadius);
+                sediment -= actualDeposit;
+            }
+
+            if (sediment > 1e-7 && flatEndWindow > 0.0) {
+                // Never force all remaining load into the last numerical cell.  Any
+                // load that still exceeds local capacity remains suspended outflow.
+                float distributedRate = flatEndWindow / max(remainingTravel, 16.0);
+                float distributedDeposit = min(sediment, sediment * distributedRate);
+                int fanRadius = clamp(2 + int(round(flatness * pc.depositSpread + q)), 2, 10);
+                // Use the normal reservation path here as well: merged long-travel
+                // parcels may not bypass the anti-spike budget downstream.
+                float actualDeposit = depositFan(
+                    posX, posY, dirX, dirY, distributedDeposit, fanRadius);
+                sediment -= actualDeposit;
+            }
+        }
+
+        posX = newX; posY = newY;
+        // Once a parcel has genuinely reached an unresolved plain/basin, continuing
+        // it for the rest of a long Travel value only revisits and piles the same
+        // cells.  High-discharge channels receive a longer allowance to cross plains.
+        float authoredTravel = authoredTravelLength();
+        float flatTravelLimit = 48.0 + min(discharge, 64.0) * 2.0 +
+                                routeConfidence * authoredTravel;
+        if (flatResidence > flatTravelLimit) {
+            alive = false;
+            break;
+        }
+        if (water < pc.minWater) {
+            alive = false;
+            break;
+        }
+    }
+
+    parcelStates[droplet].positionDirection = vec4(posX, posY, dirX, dirY);
+    parcelStates[droplet].transport = vec4(speed, water, sediment, alive ? 1.0 : 0.0);
+    parcelStates[droplet].routingMeta = vec4(flatResidence, routeConfidence, 0.0, 0.0);
+}

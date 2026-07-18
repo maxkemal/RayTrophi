@@ -28,9 +28,20 @@
 #include <chrono>
 #include <stdexcept>
 #include <algorithm>
+#include <mutex>
+#include <unordered_set>
+#include <limits>
 
         
 namespace NodeSystem {
+
+    enum class NodeEvaluationState : uint8_t {
+        Idle = 0,
+        Running,
+        Completed,
+        Cached,
+        Failed
+    };
 
     // Forward declarations
     struct Node;
@@ -101,8 +112,10 @@ namespace NodeSystem {
          * @returns Empty PinValue (monostate) if not cached
          */
         PinValue getCachedValue(uint32_t nodeId, int outputIndex) const {
-            auto it = cache_.find(makeCacheKey(nodeId, outputIndex));
+            const uint64_t key = makeCacheKey(nodeId, outputIndex);
+            auto it = cache_.find(key);
             if (it != cache_.end()) {
+                cacheLastUse_[key] = ++cacheUseCounter_;
                 return it->second;
             }
             return PinValue{}; // monostate
@@ -112,7 +125,9 @@ namespace NodeSystem {
          * @brief Store computed value in cache
          */
         void setCachedValue(uint32_t nodeId, int outputIndex, const PinValue& value) {
-            cache_[makeCacheKey(nodeId, outputIndex)] = value;
+            const uint64_t key = makeCacheKey(nodeId, outputIndex);
+            cache_[key] = value;
+            cacheLastUse_[key] = ++cacheUseCounter_;
         }
         
         /**
@@ -120,6 +135,7 @@ namespace NodeSystem {
          */
         void clearCache() {
             cache_.clear();
+            cacheLastUse_.clear();
         }
         
         /**
@@ -128,6 +144,7 @@ namespace NodeSystem {
         void clearNodeCache(uint32_t nodeId) {
             for (auto it = cache_.begin(); it != cache_.end(); ) {
                 if ((it->first >> 32) == nodeId) {
+                    cacheLastUse_.erase(it->first);
                     it = cache_.erase(it);
                 } else {
                     ++it;
@@ -157,6 +174,11 @@ namespace NodeSystem {
         void setTotalNodes(int total) {
             totalNodes_.store(total);
             completedNodes_.store(0);
+            progress_.store(0.0f);
+            currentNodeId_.store(0);
+            activeNodeStack_.clear();
+            std::lock_guard<std::mutex> lock(nodeStatesMutex_);
+            nodeStates_.clear();
         }
 
         /**
@@ -164,7 +186,10 @@ namespace NodeSystem {
          * node-editor UI to draw a per-node "active" indicator).
          */
         void beginNode(uint32_t nodeId) {
+            activeNodeStack_.push_back(nodeId);
             currentNodeId_.store(nodeId);
+            std::lock_guard<std::mutex> lock(nodeStatesMutex_);
+            nodeStates_[nodeId] = NodeEvaluationState::Running;
         }
 
         /**
@@ -172,6 +197,20 @@ namespace NodeSystem {
          * completed/total progress fraction.
          */
         void endNode() {
+            uint32_t finishedNode = 0;
+            if (!activeNodeStack_.empty()) {
+                finishedNode = activeNodeStack_.back();
+                activeNodeStack_.pop_back();
+            }
+            if (finishedNode != 0) {
+                std::lock_guard<std::mutex> lock(nodeStatesMutex_);
+                auto it = nodeStates_.find(finishedNode);
+                if (it == nodeStates_.end() || it->second != NodeEvaluationState::Failed) {
+                    nodeStates_[finishedNode] = NodeEvaluationState::Completed;
+                }
+            }
+            currentNodeId_.store(activeNodeStack_.empty() ? 0u : activeNodeStack_.back());
+
             int total = totalNodes_.load();
             if (total > 0) {
                 int done = completedNodes_.fetch_add(1) + 1;
@@ -179,7 +218,77 @@ namespace NodeSystem {
             }
         }
 
+        size_t approximateImageCacheBytes() const {
+            std::unordered_set<const void*> seen;
+            size_t bytes = 0;
+            for (const auto& [key, value] : cache_) {
+                (void)key;
+                const auto* image = std::get_if<Image2DData>(&value);
+                if (!image || !image->data || !seen.insert(image->data.get()).second) continue;
+                bytes += image->data->size() * sizeof(float);
+            }
+            return bytes;
+        }
+
+        // Budgeted persistent preview cache. Evicts least-recently-used image
+        // outputs but keeps the selected node's payload pinned. Scalar values are
+        // tiny and remain cached.
+        void enforceImageCacheBudget(size_t maxBytes, uint32_t protectedNodeId = 0) {
+            while (approximateImageCacheBytes() > maxBytes) {
+                auto victim = cache_.end();
+                uint64_t oldestUse = (std::numeric_limits<uint64_t>::max)();
+                for (auto it = cache_.begin(); it != cache_.end(); ++it) {
+                    if ((it->first >> 32) == protectedNodeId) continue;
+                    const auto* image = std::get_if<Image2DData>(&it->second);
+                    if (!image || !image->data) continue;
+                    const auto useIt = cacheLastUse_.find(it->first);
+                    const uint64_t use = useIt != cacheLastUse_.end() ? useIt->second : 0;
+                    if (use < oldestUse) {
+                        oldestUse = use;
+                        victim = it;
+                    }
+                }
+                // A selected RGBA payload can exceed the whole budget by itself
+                // (for example an 8K erosion map). Prefer keeping it, but never
+                // let the protected entry turn the budget into an unbounded pin.
+                if (victim == cache_.end() && protectedNodeId != 0) {
+                    for (auto it = cache_.begin(); it != cache_.end(); ++it) {
+                        const auto* image = std::get_if<Image2DData>(&it->second);
+                        if (!image || !image->data) continue;
+                        const auto useIt = cacheLastUse_.find(it->first);
+                        const uint64_t use = useIt != cacheLastUse_.end() ? useIt->second : 0;
+                        if (use < oldestUse) {
+                            oldestUse = use;
+                            victim = it;
+                        }
+                    }
+                }
+                if (victim == cache_.end()) break;
+                cacheLastUse_.erase(victim->first);
+                cache_.erase(victim);
+            }
+        }
+
         uint32_t getCurrentNodeId() const { return currentNodeId_.load(); }
+
+        void markNodeCached(uint32_t nodeId) {
+            std::lock_guard<std::mutex> lock(nodeStatesMutex_);
+            auto it = nodeStates_.find(nodeId);
+            if (it == nodeStates_.end() || it->second == NodeEvaluationState::Idle) {
+                nodeStates_[nodeId] = NodeEvaluationState::Cached;
+            }
+        }
+
+        void markNodeFailed(uint32_t nodeId) {
+            std::lock_guard<std::mutex> lock(nodeStatesMutex_);
+            nodeStates_[nodeId] = NodeEvaluationState::Failed;
+        }
+
+        NodeEvaluationState getNodeState(uint32_t nodeId) const {
+            std::lock_guard<std::mutex> lock(nodeStatesMutex_);
+            auto it = nodeStates_.find(nodeId);
+            return it != nodeStates_.end() ? it->second : NodeEvaluationState::Idle;
+        }
 
         /**
          * @brief Report FRACTIONAL progress (0..1) of the node currently being
@@ -217,6 +326,7 @@ namespace NodeSystem {
          */
         void addError(uint32_t nodeId, const std::string& message) {
             errors_.push_back({ nodeId, message });
+            markNodeFailed(nodeId);
         }
         
         struct EvaluationError {
@@ -263,6 +373,8 @@ namespace NodeSystem {
         GraphBase* graph_ = nullptr;
         std::any domainContext_;
         std::unordered_map<uint64_t, PinValue> cache_;
+        mutable std::unordered_map<uint64_t, uint64_t> cacheLastUse_;
+        mutable uint64_t cacheUseCounter_ = 0;
         std::vector<EvaluationError> errors_;
         
         std::atomic<float> progress_{0.0f};
@@ -270,6 +382,9 @@ namespace NodeSystem {
         std::atomic<uint32_t> currentNodeId_{0};
         std::atomic<int> totalNodes_{0};
         std::atomic<int> completedNodes_{0};
+        std::vector<uint32_t> activeNodeStack_;
+        mutable std::mutex nodeStatesMutex_;
+        std::unordered_map<uint32_t, NodeEvaluationState> nodeStates_;
         
         std::chrono::high_resolution_clock::time_point startTime_;
     };
@@ -278,8 +393,28 @@ namespace NodeSystem {
     // NODE GROUP (Visual Organization)
     // ============================================================================
     
+    enum class LayerPortDirection : uint8_t {
+        Input = 0,
+        Output = 1
+    };
+
+    // Persistent interface contract for a semantic graph layer. Endpoint ids
+    // are refreshed when a boundary link is spliced, while id/name survive so
+    // the artist-facing port does not disappear because topology changed.
+    struct LayerInterfacePort {
+        uint32_t id = 0;
+        LayerPortDirection direction = LayerPortDirection::Input;
+        std::string name;
+        uint32_t internalPinId = 0;
+        uint32_t externalPinId = 0;
+        DataType dataType = DataType::None;
+        ImageSemantic imageSemantic = ImageSemantic::Generic;
+        int imageChannels = 1;
+        bool connected = false;
+    };
+
     /**
-     * @brief Visual grouping of nodes (Gaea's "Frame" concept)
+     * @brief Visual grouping plus persistent layer interface contract
      */
     struct NodeGroup {
         uint32_t id = 0;
@@ -291,6 +426,9 @@ namespace NodeSystem {
         ImU32 color = IM_COL32(80, 80, 100, 100);
         
         std::vector<uint32_t> nodeIds;  ///< Contained nodes
+        std::vector<LayerInterfacePort> interfacePorts;
+        uint32_t nextInterfacePortId = 1;
+        bool publicationEnabled = true; ///< Enables this layer's explicit sink/output publication
         bool collapsed = false;
         bool locked = false;            ///< Prevent accidental movement
         

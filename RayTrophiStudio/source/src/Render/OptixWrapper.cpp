@@ -3456,14 +3456,8 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
         if (!tm || !tm->geometry) continue;
         DNA::GeometryDetail* geo = tm->geometry.get();
 
-        // Defensive: a genuinely skinned flat mesh would need bone-driven vertex deform we do not
-        // wire here. Flat emission already excludes real skin, but guard anyway.
         bool real_skin = false;
         for (const auto& w : geo->skin_weights) { if (!w.empty()) { real_skin = true; break; } }
-        if (real_skin) {
-            SCENE_LOG_WARN("[OptiX flat] skipping skinned flat mesh '" + tm->nodeName + "' (not yet supported)");
-            continue;
-        }
 
         const Vec3* P = geo->get_positions_orig();
         if (!P) P = geo->get_positions();
@@ -3498,7 +3492,8 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
             MeshGeometry geom;
             geom.original_name = base_name;
             geom.material_id = mat;
-            geom.mesh_name = base_name + "_mat_" + std::to_string(mat) + "_static";
+            geom.mesh_name = base_name + "_mat_" + std::to_string(mat) +
+                (real_skin ? "_skinned" : "_static");
 
             const size_t fcount = faces.size();
             geom.vertices.resize(fcount * 3);
@@ -3506,6 +3501,10 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
             geom.uvs.resize(fcount * 3);
             geom.colors.assign(fcount * 3, make_float3(0.0f, 0.0f, 0.0f));
             geom.indices.resize(fcount);
+            if (real_skin) {
+                geom.boneIndices.resize(fcount * 3, make_int4(-1, -1, -1, -1));
+                geom.boneWeights.resize(fcount * 3, make_float4(0.0f, 0.0f, 0.0f, 0.0f));
+            }
 
             for (size_t fi = 0; fi < fcount; ++fi) {
                 const uint32_t f = faces[fi];
@@ -3515,6 +3514,19 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                     geom.vertices[base + k] = (vi < nVerts) ? toFloat3(P[vi]) : make_float3(0, 0, 0);
                     geom.normals[base + k]  = (N && vi < nVerts) ? toFloat3(N[vi]) : make_float3(0, 1, 0);
                     geom.uvs[base + k]      = (UV && vi < nVerts) ? make_float2(UV[vi].x, UV[vi].y) : make_float2(0, 0);
+                    if (real_skin && vi < geo->skin_weights.size()) {
+                        int4 indices4 = make_int4(-1, -1, -1, -1);
+                        float4 weights4 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                        int* indexSlots = &indices4.x;
+                        float* weightSlots = &weights4.x;
+                        const auto& influences = geo->skin_weights[vi];
+                        for (size_t influence = 0; influence < 4 && influence < influences.size(); ++influence) {
+                            indexSlots[influence] = influences[influence].first;
+                            weightSlots[influence] = influences[influence].second;
+                        }
+                        geom.boneIndices[base + k] = indices4;
+                        geom.boneWeights[base + k] = weights4;
+                    }
                 }
                 geom.indices[fi] = make_uint3(static_cast<uint32_t>(base),
                                               static_cast<uint32_t>(base + 1),

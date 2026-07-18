@@ -205,6 +205,7 @@ namespace MeshModifiers {
         // rounding may differ in the last bits).
         bool subdivideLinearGpu(std::vector<PodTri>& mesh, int levels) {
             using namespace RayTrophiSim;
+            std::lock_guard<std::recursive_mutex> computeLock(sharedMeshComputeMutex());
             ISimulationComputeBackend* backend = acquireSharedMeshComputeBackend();
             if (!backend || mesh.empty() || levels <= 0) return false;
 
@@ -350,7 +351,45 @@ namespace MeshModifiers {
         PodMeshMeta meta;
         std::vector<PodTri> pod = trianglesToPod(facades, meta);
         if (pod.empty()) return nullptr;
-        return podToFlatMesh(pod, meta);
+        auto mesh = podToFlatMesh(pod, meta);
+        if (!mesh || !mesh->geometry) return mesh;
+
+        // Preserve legacy/project-loaded rig weights while removing the facades.
+        // The flat result is unwelded (3 vertices per face), so every corner maps
+        // exactly to its source influence list.
+        bool hasSkinWeights = false;
+        for (const auto& triangle : facades) {
+            if (triangle && triangle->hasAnySkinWeights()) {
+                hasSkinWeights = true;
+                break;
+            }
+        }
+        if (hasSkinWeights) {
+            const size_t vertexCount = facades.size() * 3;
+            mesh->geometry->skin_weights.resize(vertexCount);
+            for (size_t face = 0; face < facades.size(); ++face) {
+                const auto& triangle = facades[face];
+                if (!triangle) continue;
+                for (int corner = 0; corner < 3; ++corner) {
+                    mesh->geometry->skin_weights[face * 3 + static_cast<size_t>(corner)] =
+                        triangle->getSkinBoneWeights(corner);
+                }
+            }
+
+            // Skinned P/N stay mesh-local; the object Transform is applied once by
+            // TriangleMesh/TLAS. podToFlatMesh world-bakes static P/N, so restore bind data.
+            const Vec3* bindPositions = mesh->geometry->get_positions_orig();
+            const Vec3* bindNormals = mesh->geometry->get_normals_orig();
+            Vec3* positions = mesh->geometry->get_positions_mut();
+            Vec3* normals = mesh->geometry->get_normals_mut();
+            if (bindPositions && positions) {
+                std::memcpy(positions, bindPositions, vertexCount * sizeof(Vec3));
+            }
+            if (bindNormals && normals) {
+                std::memcpy(normals, bindNormals, vertexCount * sizeof(Vec3));
+            }
+        }
+        return mesh;
     }
 
     std::vector<std::shared_ptr<Triangle>> SubdivideSubD(const std::vector<std::shared_ptr<Triangle>>& inputMesh, int levels) {
@@ -1409,6 +1448,7 @@ namespace MeshModifiers {
                                     std::vector<Vec3>& outNormals) {
             using namespace RayTrophiSim;
             if (plan.levels.empty()) return false;            // nothing to refine on GPU
+            std::lock_guard<std::recursive_mutex> computeLock(sharedMeshComputeMutex());
             ISimulationComputeBackend* backend = acquireSharedMeshComputeBackend();
             if (!backend) return false;
 
@@ -1605,6 +1645,7 @@ namespace MeshModifiers {
         out = {};
         if (plan.levels.empty()) return false;
         if (static_cast<int>(cagePositions.size()) != plan.cageVertCount) return false;
+        std::lock_guard<std::recursive_mutex> computeLock(sharedMeshComputeMutex());
         ISimulationComputeBackend* backend = acquireSharedMeshComputeBackend();
         if (!backend) return false;
 
@@ -1741,6 +1782,7 @@ namespace MeshModifiers {
     void releaseCCDeviceGeometry(CCDeviceGeometry& geo) {
         if (geo.bufferId == 0) { geo = {}; return; }
         using namespace RayTrophiSim;
+        std::lock_guard<std::recursive_mutex> computeLock(sharedMeshComputeMutex());
         ISimulationComputeBackend* backend = acquireSharedMeshComputeBackend();
         if (backend) {
             ComputeBufferHandle h; h.id = geo.bufferId; h.backend = ComputeBackendType::VulkanCompute;
@@ -1869,10 +1911,35 @@ namespace MeshModifiers {
         // consumes facades between stages, keeps the proven facade path.
         if (outMesh) {
             *outMesh = nullptr;
-            int enabledCount = 0;
+            int enabledGeometryCount = 0;
+            bool hasEnabledWater = false;
             const ModifierData* only = nullptr;
-            for (const auto& m : modifiers) { if (m.enabled) { ++enabledCount; only = &m; } }
-            if (enabledCount == 1 && only && only->type == ModifierType::CatmullClark) {
+            for (const auto& m : modifiers) {
+                if (!m.enabled) continue;
+                if (m.type == ModifierType::WaterSurface) {
+                    hasEnabledWater = true;
+                    continue;
+                }
+                ++enabledGeometryCount;
+                only = &m;
+            }
+            if (enabledGeometryCount == 0 && hasEnabledWater && !baseMesh.empty()) {
+                if (baseMesh.front()->parentMesh && baseMesh.front()->parentMesh->geometry) {
+                    const auto& source = baseMesh.front()->parentMesh;
+                    auto clone = std::make_shared<TriangleMesh>();
+                    clone->geometry = std::make_shared<DNA::GeometryDetail>(*source->geometry);
+                    clone->nodeName = source->nodeName;
+                    clone->transform = source->transform;
+                    clone->terrain_id = source->terrain_id;
+                    clone->pointiness = source->pointiness;
+                    clone->material_attribs = source->material_attribs;
+                    *outMesh = std::move(clone);
+                } else {
+                    *outMesh = facadesToFlatMesh(baseMesh);
+                }
+                if (*outMesh) return {};
+            }
+            if (enabledGeometryCount == 1 && only && only->type == ModifierType::CatmullClark) {
                 const int lvl = forRender ? only->renderLevels : only->levels;
                 EdgeCreaseFn creaseFn;
                 if (!edgeCreases.empty()) {
@@ -1883,7 +1950,7 @@ namespace MeshModifiers {
             }
             // Simple (linear / FlatSubdivision) — the "Simple" subdivision mode — also emits ONE
             // flat TriangleMesh (no facades), matching the Catmull-Clark fast path above.
-            if (enabledCount == 1 && only && only->type == ModifierType::FlatSubdivision) {
+            if (enabledGeometryCount == 1 && only && only->type == ModifierType::FlatSubdivision) {
                 const int lvl = forRender ? only->renderLevels : only->levels;
                 *outMesh = subdivideSimpleToFlatMesh(baseMesh, lvl);
                 if (*outMesh) {
@@ -1894,15 +1961,23 @@ namespace MeshModifiers {
         }
 
         std::vector<std::shared_ptr<Triangle>> currentMesh = baseMesh;
+        bool hasEnabledWater = false;
+        bool hasEnabledSimpleSubdivision = false;
 
         // Apply modifiers sequentially
         for (const auto& mod : modifiers) {
             if (!mod.enabled) continue;
 
+            if (mod.type == ModifierType::WaterSurface) {
+                hasEnabledWater = true;
+                continue;
+            }
+
             // Blender-style Viewport vs Render subdivision level.
             const int lvl = forRender ? mod.renderLevels : mod.levels;
 
             if (mod.type == ModifierType::FlatSubdivision) {
+                hasEnabledSimpleSubdivision = true;
                 currentMesh = SubdivideSubD(currentMesh, lvl);
             } else if (mod.type == ModifierType::SmoothSubdivision) {
                 // LIVE "Smooth Subdivision" uses the lightweight linear+Laplacian path so
@@ -1919,10 +1994,23 @@ namespace MeshModifiers {
                 }
                 currentMesh = catmullClarkSubDStencil(currentMesh, lvl, creaseFn);
             }
+            // WaterSurface deliberately does not alter topology here. The UI/runtime
+            // binds WaterManager to this evaluated output and applies its animated
+            // position-only deformation after the subdivision stack has completed.
             // ModifierType::Bevel deliberately has NO branch: the stack modifier was
             // retired same-day (2026-07-04, compounded over its own output on every
             // evaluate) — a leftover entry in an old save is inert. Bevel lives in the
             // Geo-DAG BevelNode / Edit Mode instead.
+        }
+
+        // Water needs one stable indexed SoA mesh for per-frame BLAS refit, and
+        // Simple subdivision is itself a flat-output modifier. Materialize any
+        // facade-producing intermediate only once after the stack has evaluated.
+        if (outMesh && (hasEnabledWater || hasEnabledSimpleSubdivision) && !currentMesh.empty()) {
+            *outMesh = currentMesh.front()->parentMesh
+                ? currentMesh.front()->parentMesh
+                : facadesToFlatMesh(currentMesh);
+            if (*outMesh) return {};
         }
 
         // [PERF FIX] The convertToProxyMesh call is a no-op because its return value (TriangleMesh)

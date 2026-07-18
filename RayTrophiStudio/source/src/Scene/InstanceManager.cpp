@@ -5,6 +5,7 @@
 #include "OptixWrapper.h"
 #include "Backend/IBackend.h"
 #include "FoliageWindSystem.h"
+#include "FoliageAssetLibrary.h"
 #include "TerrainManager.h"
 #include "globals.h"
 #include <cstdint>
@@ -196,20 +197,26 @@ int InstanceManager::paintInstances(int group_id, const Vec3& center, const Vec3
             // parentMesh, e.g. non-flat objects) have no attribute storage to sample —
             // sampled value stays 1.0 (unmasked) for them, same as "attribute not found".
             const std::string& density_attr_name = group->brush_settings.density_mask_attribute;
+            const std::string& exclusion_attr_name = group->brush_settings.exclusion_mask_attribute;
             const std::string& scale_attr_name = group->brush_settings.scale_mask_attribute;
-            auto sampleFieldAttribute = [&](const std::string& attrName) -> float {
-                if (attrName.empty() || !best_tri || !best_tri->parentMesh || !best_tri->parentMesh->geometry) return 1.0f;
+            auto sampleFieldAttribute = [&](const std::string& attrName, float missingValue = 1.0f) -> float {
+                if (attrName.empty()) return missingValue;
+                if (!best_tri || !best_tri->parentMesh || !best_tri->parentMesh->geometry) {
+                    const float terrainField = TerrainManager::getInstance().sampleAnalysisField(
+                        surface_pos.x, surface_pos.z, attrName);
+                    return terrainField >= 0.0f ? terrainField : missingValue;
+                }
                 const auto& mgeom = *best_tri->parentMesh->geometry;
                 const float* attr = mgeom.get_attribute_data<float>(attrName);
                 const int faceIdx = best_tri->getFaceIndex();
-                if (!attr || faceIdx < 0 || static_cast<size_t>(faceIdx) * 3 + 2 >= mgeom.indices.size()) return 1.0f;
+                if (!attr || faceIdx < 0 || static_cast<size_t>(faceIdx) * 3 + 2 >= mgeom.indices.size()) return missingValue;
                 const Vec3 e0 = best_v1 - best_v0;
                 const Vec3 e1 = best_v2 - best_v0;
                 const Vec3 e2 = surface_pos - best_v0;
                 const float d00 = e0.dot(e0), d01 = e0.dot(e1), d11 = e1.dot(e1);
                 const float d20 = e2.dot(e0), d21 = e2.dot(e1);
                 const float denom = d00 * d11 - d01 * d01;
-                if (std::fabs(denom) <= 1e-12f) return 1.0f;
+                if (std::fabs(denom) <= 1e-12f) return missingValue;
                 const float bw = (d11 * d20 - d01 * d21) / denom;
                 const float bv = (d00 * d21 - d01 * d20) / denom;
                 const float bu = 1.0f - bv - bw;
@@ -220,6 +227,13 @@ int InstanceManager::paintInstances(int group_id, const Vec3& center, const Vec3
             };
             if (!density_attr_name.empty() && sampleFieldAttribute(density_attr_name) <= 0.001f) {
                 continue;  // mask gates placement, same rejection idea as splat/exclusion below
+            }
+            if (!exclusion_attr_name.empty()) {
+                const float exclusion_sample = sampleFieldAttribute(exclusion_attr_name, -1.0f);
+                if (exclusion_sample >= 0.0f &&
+                    exclusion_sample >= group->brush_settings.exclusion_threshold) {
+                    continue;
+                }
             }
 
             // If group requests splat-map masking (terrain channels), respect it: only add when mask allows
@@ -732,6 +746,7 @@ json InstanceManager::serialize(std::ostream* binaryOut) {
             {"slope_direction_influence", group.brush_settings.slope_direction_influence},
             {"use_global_settings", group.brush_settings.use_global_settings},
             {"density_mask_attribute", group.brush_settings.density_mask_attribute},
+            {"exclusion_mask_attribute", group.brush_settings.exclusion_mask_attribute},
             {"scale_mask_attribute", group.brush_settings.scale_mask_attribute},
             {"scale_mask_influence", group.brush_settings.scale_mask_influence}
         };
@@ -755,6 +770,8 @@ json InstanceManager::serialize(std::ostream* binaryOut) {
         for (const auto& src : group.sources) {
             json j_src;
             j_src["name"] = src.name;
+            if (!src.asset_id.empty()) j_src["asset_id"] = src.asset_id;
+            if (!src.asset_relative_path.empty()) j_src["asset_relative_path"] = src.asset_relative_path;
             j_src["weight"] = src.weight;
             j_src["settings"] = {
                 {"scale_min", src.settings.scale_min},
@@ -953,6 +970,7 @@ void InstanceManager::deserialize(const json& j, SceneData& scene) {
             group.brush_settings.slope_direction_influence = s.value("slope_direction_influence", 0.0f);
             group.brush_settings.use_global_settings = s.value("use_global_settings", false);
             group.brush_settings.density_mask_attribute = s.value("density_mask_attribute", s.value("mask_attribute", std::string()));
+            group.brush_settings.exclusion_mask_attribute = s.value("exclusion_mask_attribute", std::string());
             group.brush_settings.scale_mask_attribute = s.value("scale_mask_attribute", s.value("mask_attribute", std::string()));
             group.brush_settings.scale_mask_influence = s.value("scale_mask_influence", s.value("mask_scale_influence", 1.0f));
         }
@@ -979,6 +997,8 @@ void InstanceManager::deserialize(const json& j, SceneData& scene) {
             for (const auto& j_src : j_group["sources"]) {
                 ScatterSource src;
                 src.name = j_src.value("name", "");
+                src.asset_id = j_src.value("asset_id", "");
+                src.asset_relative_path = j_src.value("asset_relative_path", "");
                 src.weight = j_src.value("weight", 1.0f);
                 
                 if (j_src.contains("settings")) {
@@ -998,20 +1018,26 @@ void InstanceManager::deserialize(const json& j, SceneData& scene) {
                     src.settings.wind_phase_offset = s.value("wind_phase_offset", 0.0f);
                 }
                 
-                // Re-link triangles from Scene (flat-aware: a scatter source may now be ONE flat
-                // SoA TriangleMesh, not a per-face facade soup — materialize its facades).
-                for (const auto& obj : scene.world.objects) {
-                    if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-                        if (tri->getNodeName() == src.name) src.triangles.push_back(tri);
-                    } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
-                        if (tm->nodeName == src.name && tm->geometry) {
-                            const size_t nTris = tm->num_triangles();
-                            for (size_t t = 0; t < nTris; ++t)
-                                src.triangles.push_back(std::make_shared<Triangle>(tm, static_cast<uint32_t>(t)));
+                if (!src.asset_relative_path.empty()) {
+                    ScatterSource loaded;
+                    if (FoliageAssets::loadScatterSource(src.asset_relative_path, src.name,
+                                                         src.weight, loaded)) {
+                        loaded.settings = src.settings;
+                        src = std::move(loaded);
+                    }
+                } else {
+                    // Re-link canonical flat meshes without materializing one facade per face.
+                    // Legacy triangle-soup projects keep using `triangles` as a fallback.
+                    for (const auto& obj : scene.world.objects) {
+                        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                            if (tri->getNodeName() == src.name) src.triangles.push_back(tri);
+                        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+                            if (tm->nodeName == src.name && tm->geometry) src.flat_meshes.push_back(tm);
                         }
                     }
+                    if (!src.flat_meshes.empty()) src.triangles.clear();
+                    src.computeCenter();
                 }
-                src.computeCenter();
                 group.sources.push_back(src);
             }
         }
@@ -1087,25 +1113,17 @@ void InstanceManager::deserializeFast(simdjson::dom::element el, SceneData& scen
         }
     }
     auto resolveSourceTriangles =
-        [&tri_by_name, &flat_by_name](const std::string& name) -> std::vector<std::shared_ptr<Triangle>> {
+        [&tri_by_name](const std::string& name) -> std::vector<std::shared_ptr<Triangle>> {
         auto it = tri_by_name.find(name);
         if (it != tri_by_name.end()) return it->second;
-        auto fit = flat_by_name.find(name);
-        if (fit != flat_by_name.end() && !fit->second.empty()) {
-            std::vector<std::shared_ptr<Triangle>> facades;
-            for (const auto& tm : fit->second) {
-                if (!tm || !tm->geometry) continue;
-                const size_t nTris = tm->num_triangles();
-                facades.reserve(facades.size() + nTris);
-                for (size_t t = 0; t < nTris; ++t)
-                    facades.push_back(std::make_shared<Triangle>(tm, static_cast<uint32_t>(t)));
-            }
-            if (!facades.empty()) {
-                tri_by_name[name] = facades; // cache so repeated source refs reuse the same facades
-                return facades;
-            }
-        }
         return {};
+    };
+    auto resolveSourceMeshes =
+        [&flat_by_name](const std::string& name) -> std::vector<std::shared_ptr<TriangleMesh>> {
+        auto it = flat_by_name.find(name);
+        return it != flat_by_name.end()
+            ? it->second
+            : std::vector<std::shared_ptr<TriangleMesh>>{};
     };
 
     for (simdjson::dom::element j_group : arr) {
@@ -1150,6 +1168,8 @@ void InstanceManager::deserializeFast(simdjson::dom::element el, SceneData& scen
               if (!s_el["density_mask_attribute"].get(mv)) bs.density_mask_attribute = sj_str(mv);
               else if (!s_el["mask_attribute"].get(mv)) bs.density_mask_attribute = sj_str(mv); }
             { simdjson::dom::element mv;
+              if (!s_el["exclusion_mask_attribute"].get(mv)) bs.exclusion_mask_attribute = sj_str(mv); }
+            { simdjson::dom::element mv;
               if (!s_el["scale_mask_attribute"].get(mv)) bs.scale_mask_attribute = sj_str(mv);
               else if (!s_el["mask_attribute"].get(mv)) bs.scale_mask_attribute = sj_str(mv); }
             if (!s_el["scale_mask_influence"].get(v)) bs.scale_mask_influence = (float)sj_double(v, 1.0);
@@ -1186,6 +1206,8 @@ void InstanceManager::deserializeFast(simdjson::dom::element el, SceneData& scen
             for (simdjson::dom::element j_src : src_arr) {
                 ScatterSource src;
                 { simdjson::dom::element v; if (!j_src["name"].get(v)) src.name = sj_str(v); }
+                { simdjson::dom::element v; if (!j_src["asset_id"].get(v)) src.asset_id = sj_str(v); }
+                { simdjson::dom::element v; if (!j_src["asset_relative_path"].get(v)) src.asset_relative_path = sj_str(v); }
                 { simdjson::dom::element v; if (!j_src["weight"].get(v)) src.weight = (float)sj_double(v, 1.0); }
 
                 simdjson::dom::element ss_el;
@@ -1207,10 +1229,18 @@ void InstanceManager::deserializeFast(simdjson::dom::element el, SceneData& scen
                     if (!ss_el["wind_phase_offset"].get(v)) ss.wind_phase_offset = (float)sj_double(v, 0.0);
                 }
 
-                // Re-link triangles from scene using pre-built lookup (flat-aware: materializes
-                // a flat TriangleMesh source's facades on demand).
-                src.triangles = resolveSourceTriangles(src.name);
-                src.computeCenter();
+                if (!src.asset_relative_path.empty()) {
+                    ScatterSource loaded;
+                    if (FoliageAssets::loadScatterSource(src.asset_relative_path, src.name,
+                                                         src.weight, loaded)) {
+                        loaded.settings = src.settings;
+                        src = std::move(loaded);
+                    }
+                } else {
+                    src.flat_meshes = resolveSourceMeshes(src.name);
+                    if (src.flat_meshes.empty()) src.triangles = resolveSourceTriangles(src.name);
+                    src.computeCenter();
+                }
                 group.sources.push_back(std::move(src));
             }
         }
@@ -1270,14 +1300,24 @@ void InstanceManager::rebuildSceneObjects(SceneData& scene) {
         // 5-30 unique prefabs (trees, grass, rocks), each with thousands of
         // triangles — serializing them was the dominant cost on project load.
         auto buildOneSource = [](ScatterSource& source) {
-            if (source.triangles.empty()) return;
-
+            const bool canonicalFlatSource = !source.flat_meshes.empty();
             if (source.bvh) {
                 if (!source.has_local_bbox) {
                     source.has_local_bbox = source.bvh->bounding_box(0, 0, source.local_bbox);
                 }
                 return;
             }
+            if (source.triangles.empty() && canonicalFlatSource) {
+                source.triangles.reserve(source.sourceTriangleCount());
+                for (const auto& mesh : source.flat_meshes) {
+                    if (!mesh) continue;
+                    for (size_t face = 0; face < mesh->num_triangles(); ++face) {
+                        source.triangles.push_back(
+                            std::make_shared<Triangle>(mesh, static_cast<uint32_t>(face)));
+                    }
+                }
+            }
+            if (source.triangles.empty()) return;
 
             // Determine Bounds to find Center (Pivot)
             Vec3 mesh_bbox_min(1e9, 1e9, 1e9);
@@ -1339,6 +1379,9 @@ void InstanceManager::rebuildSceneObjects(SceneData& scene) {
             embree->build(source_hittables);
             source.bvh = embree;
             source.has_local_bbox = source.bvh->bounding_box(0, 0, source.local_bbox);
+            if (canonicalFlatSource) {
+                std::vector<std::shared_ptr<Triangle>>().swap(source.triangles);
+            }
             SCENE_LOG_INFO("[InstanceManager] Built Centered BVH (Baked Transform) for restored source: " + source.name);
         };
 
@@ -1348,7 +1391,7 @@ void InstanceManager::rebuildSceneObjects(SceneData& scene) {
         heavy_source_indices.reserve(group.sources.size());
         for (size_t si = 0; si < group.sources.size(); ++si) {
             auto& source = group.sources[si];
-            if (source.triangles.empty()) continue;
+            if (source.triangles.empty() && source.flat_meshes.empty()) continue;
             if (!source.bvh) {
                 heavy_source_indices.push_back(si);
             } else if (!source.has_local_bbox) {

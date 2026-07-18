@@ -36,11 +36,16 @@ struct VkGeometryData {
     uint64_t uvAddr;
     uint64_t indexAddr;
     uint64_t materialAddr;
+    uint64_t pointinessAddr;  // unused here; the struct must stay byte-identical across
+                              // every shader that reads the geometry SSBO (binding 4)
+    uint64_t attribAddr;      // ditto (per-vertex named attributes, read in closesthit)
+    uint64_t waterAddr;       // ditto (per-vertex hydrology, read in closesthit)
 };
 
 layout(buffer_reference, scalar) readonly buffer UVBuffer2     { vec2 u[]; };
 layout(buffer_reference, scalar) readonly buffer IndexBuffer2  { uint i[]; };
 layout(buffer_reference, scalar) readonly buffer VertexBuffer2 { vec3 v[]; };
+layout(buffer_reference, scalar) readonly buffer NormalBuffer2 { vec3 n[]; };   // bevel probe
 
 // Descriptor bindings — MUST match closesthit.rchit set/binding layout exactly
 layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
@@ -53,10 +58,18 @@ layout(set = 0, binding = 6) uniform sampler2D materialTextures[];
 // rgb = accumulated transmissive tint along the shadow ray (init 1,1,1 by the caller),
 // w   = reached-light flag (init 0 by the caller; shadow_miss sets 1 on escape).
 // Accepting a hit (terminateRayEXT) leaves w=0 → fully occluded.
+//
+// PROBE MODE (Bevel node): flagged by w's SIGN BIT — the shadow path only ever writes
+// +0.0 / +1.0 there. w carries packHalf2x16(vec2(chord half-length h, chord offset
+// diskR)) with bit 31 forced on; xyz is a running SUM of distance-weighted stored
+// normals this shader accumulates over EVERY intersection, ignoring each one so
+// traversal keeps going. The ray always "misses" officially — shadow_miss only touches
+// .w, so the sum survives. See mp_traceBevel in closesthit.rchit.
 layout(location = 1) rayPayloadInEXT vec4 shadowPayload;
 
 // Barycentrics from triangle intersection
 hitAttributeEXT vec2 baryCoord;
+
 
 layout(buffer_reference, scalar) readonly buffer MaterialIndexBuffer { uint m[]; };
 const float ALPHA_SHADOW_NEAR_IGNORE_T = 2e-3;
@@ -125,7 +138,116 @@ vec2 applyMaterialUVTransform(Material mat, vec2 originalUV) {
 void main() {
     VkInstanceData inst = instances.i[gl_InstanceID];
     VkGeometryData geo  = geometries.g[inst.blasIndex];
-    
+
+    // ---- CAMERA / BOUNCE / PHOTON RAYS: alpha-cutout test ------------------
+    // Every location-1 (shadow/probe) trace in this pipeline sets
+    // gl_RayFlagsSkipClosestHitShaderEXT; camera, bounce and photon rays never
+    // do — that bit is the mode discriminator. These rays carry the big path
+    // payload at location 0, which `shadowPayload` below ALIASES — this branch
+    // must neither read nor write it.
+    //
+    // Cutout used to be resolved in closesthit as a full "transparent pass":
+    // detect alpha, emit a pass-through scatter, re-trace from raygen — one
+    // whole payload round trip per foliage layer. Here it costs one
+    // ignoreIntersection during traversal instead. Fully opaque materials never
+    // reach this shader at all (VK_GEOMETRY_OPAQUE_BIT is baked per BLAS /
+    // force-flipped per instance from the live materials).
+    if ((gl_IncomingRayFlagsEXT & gl_RayFlagsSkipClosestHitShaderEXT) == 0u) {
+        uint camMatIndex = inst.materialIndex;
+        if (geo.materialAddr != 0) {
+            MaterialIndexBuffer cmi = MaterialIndexBuffer(geo.materialAddr);
+            camMatIndex = cmi.m[gl_PrimitiveID];
+        }
+        Material cmat = materials.m[camMatIndex];
+        float alpha = cmat.opacity;
+        int aTexID = int(cmat.opacity_tex);
+        if (aTexID > 0) {
+            vec3 abary = vec3(1.0 - baryCoord.x - baryCoord.y, baryCoord.x, baryCoord.y);
+            vec2 auv = vec2(0.5);
+            if (geo.uvAddr != 0) {
+                uint a0, a1, a2;
+                if (geo.indexAddr != 0) {
+                    IndexBuffer2 aib = IndexBuffer2(geo.indexAddr);
+                    a0 = aib.i[gl_PrimitiveID * 3 + 0];
+                    a1 = aib.i[gl_PrimitiveID * 3 + 1];
+                    a2 = aib.i[gl_PrimitiveID * 3 + 2];
+                } else {
+                    a0 = uint(gl_PrimitiveID) * 3 + 0;
+                    a1 = uint(gl_PrimitiveID) * 3 + 1;
+                    a2 = uint(gl_PrimitiveID) * 3 + 2;
+                }
+                UVBuffer2 auvBuf = UVBuffer2(geo.uvAddr);
+                auv = auvBuf.u[a0] * abary.x + auvBuf.u[a1] * abary.y + auvBuf.u[a2] * abary.z;
+                auv.y = 1.0 - auv.y;   // V-flip — matches closesthit texture sampling
+                auv = applyMaterialUVTransform(cmat, auv);
+            }
+            // Bit 8 of flags: RGBA texture, opacity in .a; clear: grayscale mask in .r
+            alpha *= ((cmat.flags & 256u) != 0u)
+                ? textureLod(materialTextures[nonuniformEXT(aTexID)], auv, 0.0).a
+                : textureLod(materialTextures[nonuniformEXT(aTexID)], auv, 0.0).r;
+        }
+        if (alpha >= 0.99) return;              // opaque enough — accept the hit
+        if (alpha < 0.1) ignoreIntersectionEXT; // closesthit parity: <0.1 snaps to fully transparent
+        // Stochastic transparency, P(accept) = alpha. Same per-pixel/sample/hit
+        // seed scheme as the shadow path below so accumulation converges.
+        uint aseed = uint(gl_LaunchIDEXT.x) * 1973u + uint(gl_LaunchIDEXT.y) * 9277u;
+        aseed ^= cam.frameCount * 83492791u;
+        aseed ^= uint(gl_PrimitiveID) * 26699u;
+        aseed ^= floatBitsToUint(gl_HitTEXT) * 2531011u;
+        aseed = aseed * 747796405u + 2891336453u;
+        uint aword = ((aseed >> ((aseed >> 28u) + 4u)) ^ aseed) * 277803737u;
+        float arnd = float((aword >> 22u) ^ aword) * (1.0 / 4294967296.0);
+        if (arnd >= alpha) ignoreIntersectionEXT;
+        return;                                  // accept — closesthit shades it opaque
+    }
+
+    // ---- Bevel probe mode (see the payload comment above) -----------------
+    // Runs BEFORE any material work: the probe wants raw geometry. Alpha cutouts are
+    // deliberately treated as solid here — beveling the edge of an alpha-card leaf is
+    // meaningless, and the probe chords are too short (~cm) to care.
+    uint bevelWBits = floatBitsToUint(shadowPayload.w);
+    if ((bevelWBits & 0x80000000u) != 0u) {
+        vec3 bary = vec3(1.0 - baryCoord.x - baryCoord.y, baryCoord.x, baryCoord.y);
+        uint pi0, pi1, pi2;
+        if (geo.indexAddr != 0) {
+            IndexBuffer2 iBuf = IndexBuffer2(geo.indexAddr);
+            pi0 = iBuf.i[gl_PrimitiveID * 3 + 0];
+            pi1 = iBuf.i[gl_PrimitiveID * 3 + 1];
+            pi2 = iBuf.i[gl_PrimitiveID * 3 + 2];
+        } else {
+            pi0 = uint(gl_PrimitiveID) * 3 + 0;
+            pi1 = uint(gl_PrimitiveID) * 3 + 1;
+            pi2 = uint(gl_PrimitiveID) * 3 + 2;
+        }
+        vec3 n = vec3(0.0);
+        if (geo.normalAddr != 0) {
+            NormalBuffer2 nb = NormalBuffer2(geo.normalAddr);
+            n = nb.n[pi0] * bary.x + nb.n[pi1] * bary.y + nb.n[pi2] * bary.z;
+        } else if (geo.vertexAddr != 0) {
+            VertexBuffer2 vb = VertexBuffer2(geo.vertexAddr);
+            n = cross(vb.v[pi1] - vb.v[pi0], vb.v[pi2] - vb.v[pi0]);
+        }
+        if (dot(n, n) > 1e-12) {
+            // Object -> world for a NORMAL: v * mat3(WorldToObject) applies its
+            // transpose = the inverse-transpose of ObjectToWorld — same idiom as the
+            // glass faceN below. Keep the STORED (outward) orientation — do NOT
+            // face-forward: chords cross closed geometry from inside as often as
+            // outside, and flipping against the ray would tilt the average inward.
+            n = normalize(vec3(n * mat3(gl_WorldToObjectEXT)));
+            // Weight by 3D distance from the SHADING POINT, not by ray-t: the chord
+            // passes the shading point at t = h with perpendicular offset diskR, so
+            // dist^2 = diskR^2 + (t - h)^2 and the sphere radius is sqrt(h^2 + diskR^2).
+            vec2 hoff = unpackHalf2x16(bevelWBits & 0x7FFFFFFFu);
+            float h = hoff.x, dR = hoff.y;
+            float dt = gl_HitTEXT - h;
+            float dist = sqrt(dR * dR + dt * dt);
+            float R = sqrt(h * h + dR * dR);
+            float w = max(0.0, 1.0 - dist / max(R, 1e-8));
+            shadowPayload.xyz += n * w;
+        }
+        ignoreIntersectionEXT;   // never accept: keep traversal feeding the sum
+    }
+
     uint matIndex = inst.materialIndex;
     if (geo.materialAddr != 0) {
         MaterialIndexBuffer mi = MaterialIndexBuffer(geo.materialAddr);

@@ -777,7 +777,10 @@ public:
     // @param material: Optional default material (Opsiyonel varsayılan materyal)
     // @return: Triangles, Animation Data, Bone Data (Üçgenler, Animasyon, Kemik Verileri)
     std::tuple<std::vector<std::shared_ptr<Triangle>>, std::vector<std::shared_ptr<AnimationData>>, BoneData>
-        loadModelToTriangles(const std::string& filename, const std::shared_ptr<Material>& material = nullptr, const std::string& import_prefix = "") {
+        loadModelToTriangles(const std::string& filename,
+                             const std::shared_ptr<Material>& material = nullptr,
+                             const std::string& import_prefix = "",
+                             bool load_geometry = true) {
         g_assimpLoaderCurrentImportFilePath = filename;
 
         if (import_prefix.empty()) {
@@ -947,16 +950,20 @@ public:
         SCENE_LOG_INFO("Building Bone Data...");
         buildBoneData(scene, boneData);
 
-        // Paralel texture ön yüklemesi: processMaterial her çağrısı cache'e düşer.
-        prefetchTextures(scene);
+        // Animation-only clip imports do not need texture/material caches.
+        if (load_geometry) prefetchTextures(scene);
 
         std::vector<std::shared_ptr<Triangle>> triangles;
         std::vector<std::shared_ptr<AnimationData>> animationDataList;
         OptixGeometryData geometry_data;
 
-        SCENE_LOG_INFO("Processing nodes to extract triangles...");
-        processNodeToTriangles(scene->mRootNode, scene, triangles, boneData, &geometry_data);
-        SCENE_LOG_INFO("Triangle extraction completed: " + std::to_string(triangles.size()) + " triangles processed.");
+        if (load_geometry) {
+            SCENE_LOG_INFO("Processing nodes to extract triangles...");
+            processNodeToTriangles(scene->mRootNode, scene, triangles, boneData, &geometry_data);
+            SCENE_LOG_INFO("Triangle extraction completed: " + std::to_string(triangles.size()) + " triangles processed.");
+        } else {
+            SCENE_LOG_INFO("Animation-only import: geometry and material extraction skipped.");
+        }
 
         // NOTE: Bone weights now assigned inside processNodeToTriangles -> processTriangles
         

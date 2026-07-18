@@ -1,0 +1,44 @@
+// Commits one particle-runoff batch and clears its delta buffers.  The discharge
+// field remains device-resident and decays slowly so later batches reinforce real
+// catchments without a global flow-accumulation solve.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int mapWidth; int mapHeight;
+    int brushRadius; int dropletLifetime;
+    float inertia; float sedimentCapacity; float minSlope; float erodeSpeed;
+    float depositSpeed; float evaporateSpeed; float gravity; float cellSize;
+    float heightScale; float flowBoost; float flowNormalization; float flatSlope;
+    float meanderStrength; float maxErosionFraction; float flowDecay; float depositSpread;
+    uint seed; uint seedOffset; uint hasHardness; uint hasMask;
+    uint dropletCount; uint batchIndex; float minWater; uint _pad;
+} pc;
+
+layout(set = 0, binding = 0) buffer Height          { float heightmap[]; };
+layout(set = 0, binding = 1) buffer Flow            { float flowMap[]; };
+layout(set = 0, binding = 2) buffer ErosionDelta    { float erosionDelta[]; };
+layout(set = 0, binding = 3) buffer DepositionDelta { float depositionDelta[]; };
+layout(set = 0, binding = 4) buffer FlowDirectionX  { float flowDirectionX[]; };
+layout(set = 0, binding = 5) buffer FlowDirectionY  { float flowDirectionY[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int total = pc.mapWidth * pc.mapHeight;
+    if (id >= total) return;
+
+    float h = heightmap[id];
+    float erode = max(erosionDelta[id], 0.0);
+    float deposit = max(depositionDelta[id], 0.0);
+    if (!isnan(h) && !isinf(h) && !isnan(erode) && !isinf(erode) &&
+        !isnan(deposit) && !isinf(deposit)) {
+        float erosionCap = max(h, 0.0) * pc.maxErosionFraction;
+        heightmap[id] = max(0.0, h - min(erode, erosionCap) + deposit);
+    }
+
+    erosionDelta[id] = 0.0;
+    depositionDelta[id] = 0.0;
+    flowMap[id] = max(0.0, flowMap[id]) * clamp(pc.flowDecay, 0.0, 1.0);
+    flowDirectionX[id] *= clamp(pc.flowDecay, 0.0, 1.0);
+    flowDirectionY[id] *= clamp(pc.flowDecay, 0.0, 1.0);
+}

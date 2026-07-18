@@ -72,25 +72,8 @@ layout(push_constant) uniform CameraPC {
 // ============================================================
 // Payload — raygen/closesthit ile tam eşleşme
 // ============================================================
-struct RayPayload {
-    vec3  radiance;
-    vec3  attenuation;
-    vec3  scatterOrigin;
-    vec3  scatterDir;
-    uint  seed;
-    bool  scattered;
-    bool  hitEmissive;
-    uint  occluded;
-    bool  skipAABBs;    // set when solid surface detected inside volume
-    vec3  primaryAlbedo;
-    vec3  primaryNormal;
-    uint  primaryHit;
-    float primaryTransmission;
-    float primaryMetallic;
-    uint  bounceType;
-    uint  primaryMaterialId;   // Stylize AOV: real material index of the primary hit
-    float dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
-};
+// Payload — shared ABI, single source of truth
+#include "rt_payload.glsl"
 
 const uint BOUNCE_TRANSPARENT = 3u;
 
@@ -1132,7 +1115,6 @@ void main() {
                 payload.scatterDir    = rayDir;
                 payload.skipAABBs     = true;
                 payload.scattered     = true;
-                payload.hitEmissive   = false;
                 payload.bounceType    = 0u;
                 return;
             }
@@ -1146,7 +1128,6 @@ void main() {
             payload.scatterOrigin = rayOrigin + rayDir * (tFar + 0.002);
             payload.scatterDir    = rayDir;
             payload.scattered     = true;
-            payload.hitEmissive   = false;
             payload.bounceType    = BOUNCE_TRANSPARENT;
             return;
         }
@@ -1243,10 +1224,9 @@ void main() {
         payload.scatterOrigin       = hitPos + outDir * 0.003;
         payload.scatterDir          = outDir;
         payload.scattered           = true;
-        payload.hitEmissive         = false;
-        payload.primaryAlbedo       = vol.scatter_color;
-        payload.primaryNormal       = N;
-        payload.primaryTransmission = 1.0;
+        payload.primaryARG          = packHalf2x16(vol.scatter_color.rg);
+        payload.primaryABT          = packHalf2x16(vec2(vol.scatter_color.b, 1.0));
+        payload.primaryNrm          = plPackNormal(N);
         payload.bounceType          = 0u;
         return;
     }
@@ -1313,7 +1293,6 @@ void main() {
                     payload.scatterOrigin = rayOrigin + rayDir * max(solidT - 0.01, tNear);
                     payload.scatterDir = rayDir;
                     payload.scattered = true;
-                    payload.hitEmissive = false;
                     payload.skipAABBs = true;
                     return;
                 }
@@ -1562,7 +1541,6 @@ void main() {
         payload.scatterOrigin = rayOrigin + rayDir * (solidT - 0.01);
         payload.scatterDir    = rayDir;
         payload.scattered     = true;
-        payload.hitEmissive   = false;
         payload.skipAABBs     = true;
         return;
     }
@@ -1573,12 +1551,13 @@ void main() {
     // being treated as first-hit geometry, which overemphasized weak density
     // regions in Vulkan RT denoiser output compared to OptiX.
     bool primaryVolumeInteraction = didScatter || volumeOpacity > 0.04 || volumeContribution > 5e-4;
-    if (payload.primaryHit == 0u && primaryVolumeInteraction) {
-        payload.primaryAlbedo = vol.scatter_color;
-        payload.primaryNormal = -rayDir;
-        payload.primaryHit = 1u;
-        payload.primaryTransmission = transmittance;
-        payload.primaryMetallic = 0.0;
+    if ((payload.primaryMeta & PL_PRIMARY_DONE) == 0u && primaryVolumeInteraction) {
+        payload.primaryARG  = packHalf2x16(vol.scatter_color.rg);
+        payload.primaryABT  = packHalf2x16(vec2(vol.scatter_color.b, transmittance));
+        payload.primaryNrm  = plPackNormal(-rayDir);
+        // Material id stays 0xFFFF: volumes have no scene material index.
+        payload.primaryMeta = (payload.primaryMeta & PL_DISP_MASK)
+                            | PL_PRIMARY_DONE | PL_MATID_MASK;
     }
 
     if (didScatter && transmittance < 0.99) {
@@ -1595,17 +1574,15 @@ void main() {
         payload.scatterDir    = newDir;
         payload.attenuation  *= vol.scatter_color * transmittance;
         payload.scattered     = true;
-        payload.hitEmissive   = false;
     } else {
         // No scatter — attenuate throughput by volume transmittance
         payload.attenuation *= vec3(transmittance);
-        
+
         // Set scattered = true with original direction to let the ray continue through
         // Ensure forward progress to avoid re-hitting the same boundary when camera is inside.
         payload.scatterOrigin = rayOrigin + rayDir * (tFar + 0.002);
         payload.scatterDir    = rayDir;
         payload.scattered     = (transmittance > 0.01); // Stop if fully absorbed
-        payload.hitEmissive   = (vol.emission_mode >= 1 && transmittance < 0.99);
         if (volumeOpacity <= 0.04 && volumeContribution <= 5e-4) {
             payload.bounceType = BOUNCE_TRANSPARENT;
         }
