@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -279,8 +279,13 @@ private:
 };
 class Texture {
 public:
+    uint64_t m_uid;
+
     Texture(const aiTexture* tex, TextureType type, const std::string& name = "")
         : type(type), is_srgb(type == TextureType::Albedo), is_aces(type == TextureType::Emission) {
+        static std::atomic<uint64_t> s_nextUid{ 1 };
+        m_uid = s_nextUid.fetch_add(1);
+
         if (!tex) {
             SCENE_LOG_WARN("Texture pointer null, skip");
             return;
@@ -331,6 +336,8 @@ public:
     // ===== Constructor Disk Yüklemesi - img_load_fast ile =====
     Texture(const std::string& filename, TextureType type)
         : type(type), is_srgb(type == TextureType::Albedo), is_aces(type == TextureType::Emission) {
+        static std::atomic<uint64_t> s_nextUid{ 1 };
+        m_uid = s_nextUid.fetch_add(1);
 
         m_is_loaded = false;
         is_gpu_uploaded = false;
@@ -590,6 +597,8 @@ public:
     Texture(const std::string& name, int w, int h, TextureType type)
         : name(name), width(w), height(h), type(type),
         is_srgb(type == TextureType::Albedo), is_aces(type == TextureType::Emission) {
+        static std::atomic<uint64_t> s_nextUid{ 1 };
+        m_uid = s_nextUid.fetch_add(1);
 
         pixels.resize(width * height);
         m_is_loaded = true;
@@ -604,6 +613,8 @@ public:
     // Disk I/O yapmadan doğrudan bellekten yükler - daha hızlı ve temp dosya gerektirmez
     Texture(const std::vector<char>& buffer, TextureType type, const std::string& textureName = "")
         : type(type), is_srgb(type == TextureType::Albedo), is_aces(type == TextureType::Emission) {
+        static std::atomic<uint64_t> s_nextUid{ 1 };
+        m_uid = s_nextUid.fetch_add(1);
         
         m_is_loaded = false;
         is_gpu_uploaded = false;
@@ -708,6 +719,8 @@ public:
     // ===== Constructor Raw Data (Standard Vectors) =====
     Texture(int w, int h, int channels, const std::vector<unsigned char>& data, TextureType type, const std::string& textureName = "")
         : type(type), is_srgb(type == TextureType::Albedo), is_aces(type == TextureType::Emission) {
+        static std::atomic<uint64_t> s_nextUid{ 1 };
+        m_uid = s_nextUid.fetch_add(1);
         
         width = w;
         height = h;
@@ -1317,6 +1330,7 @@ public:
     std::vector<float4> float_pixels; // For HDR
     bool is_hdr = false;
     std::string name; // Texture name/path
+    TextureType type = TextureType::Unknown;
 private:
     // ===== decode_raw() OPTIMIZED - SIMD + Paralel =====
     void decode_raw(const aiTexture* tex) {
@@ -1489,7 +1503,7 @@ private:
 
     std::vector<uint8_t> alphas;  // float yerine 1 byte kullanıyoruz
 
-    TextureType type = TextureType::Unknown;
+   
 
     cudaArray_t cuda_array = nullptr;
     cudaTextureObject_t tex_obj = 0;

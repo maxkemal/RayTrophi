@@ -24,11 +24,13 @@
 #include <algorithm>
 #include "InstanceManager.h"
 #include "InstanceGroup.h"
+#include "FoliageAssetLibrary.h"
 #include "RiverSpline.h"
 #include <thread>
 #include <chrono>
 #include <unordered_set>
 #include <atomic>
+#include <cmath>
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern std::unique_ptr<Backend::IBackend> g_backend;
@@ -641,6 +643,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     
                     // SOURCES
                     BeginSubSection("Source Meshes", UIWidgets::IconType::Mesh, ImVec4(0.8f, 0.8f, 0.8f, 0.9f));
+                    #if 0 // Legacy source picker retained temporarily for migration/reference.
                     ImGui::SameLine(); UIWidgets::HelpMarker("Select the 3D models to be used in this layer. If multiple models are added, they will be distributed randomly.");
                      if (UIWidgets::SecondaryButton("Add Selected Object", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
                          if (ctx.selection.hasSelection()) {
@@ -650,23 +653,22 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                              // them, and multi-material imports split into several sibling
                              // TriangleMesh sharing this nodeName. Materialize every face of every
                              // matching sibling instead (mirrors the Scatter Brush panel fix).
-                             std::vector<std::shared_ptr<Triangle>> tris;
+                             std::vector<std::shared_ptr<TriangleMesh>> flatMeshes;
+                             std::vector<std::shared_ptr<Triangle>> legacyTriangles;
                              std::unordered_set<TriangleMesh*> seenMeshes;
                              for (auto& obj : ctx.scene.world.objects) {
                                  if (auto tmesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
                                      if (tmesh->nodeName != n || !tmesh->geometry) continue;
                                      if (!seenMeshes.insert(tmesh.get()).second) continue;
-                                     const size_t nTris = tmesh->num_triangles();
-                                     tris.reserve(tris.size() + nTris);
-                                     for (size_t f = 0; f < nTris; ++f) {
-                                         tris.push_back(std::make_shared<Triangle>(tmesh, static_cast<uint32_t>(f)));
-                                     }
+                                     flatMeshes.push_back(tmesh);
                                  } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-                                     if (tri->getNodeName() == n) tris.push_back(tri);
+                                     if (tri->getNodeName() == n) legacyTriangles.push_back(tri);
                                  }
                              }
-                             if (!tris.empty()) {
-                                 group.sources.emplace_back(n, tris);
+                             if (!flatMeshes.empty()) {
+                                 group.sources.emplace_back(n, flatMeshes);
+                             } else if (!legacyTriangles.empty()) {
+                                 group.sources.emplace_back(n, legacyTriangles);
                              } else {
                                   SCENE_LOG_WARN("Selection invalid.");
                              }
@@ -707,24 +709,23 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                  // facade per sibling TriangleMesh (the UI selection handle) —
                                  // materialize the full geometry of every sibling instead so the
                                  // foliage source is the whole object, not one triangle per material.
-                                 std::vector<std::shared_ptr<Triangle>> source_tris;
+                                 std::vector<std::shared_ptr<TriangleMesh>> flatMeshes;
+                                 std::vector<std::shared_ptr<Triangle>> legacyTriangles;
                                  std::unordered_set<TriangleMesh*> seenMeshes;
                                  for (const auto& pair : tris_list) {
                                      TriangleMesh* pm = pair.second ? pair.second->parentMesh.get() : nullptr;
                                      if (pm && pm->geometry) {
                                          if (!seenMeshes.insert(pm).second) continue;
-                                         const size_t nTris = pm->num_triangles();
-                                         source_tris.reserve(source_tris.size() + nTris);
-                                         for (size_t f = 0; f < nTris; ++f) {
-                                             source_tris.push_back(std::make_shared<Triangle>(pair.second->parentMesh, static_cast<uint32_t>(f)));
-                                         }
+                                         flatMeshes.push_back(pair.second->parentMesh);
                                      } else if (pair.second) {
-                                         source_tris.push_back(pair.second);
+                                         legacyTriangles.push_back(pair.second);
                                      }
                                  }
 
-                                 if (!source_tris.empty()) {
-                                     group.sources.emplace_back(name, source_tris);
+                                 if (!flatMeshes.empty()) {
+                                     group.sources.emplace_back(name, flatMeshes);
+                                 } else if (!legacyTriangles.empty()) {
+                                     group.sources.emplace_back(name, legacyTriangles);
                                  }
                                  ImGui::CloseCurrentPopup();
                              }
@@ -769,6 +770,290 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                           }
                           ImGui::EndTable();
                       }
+
+                    #endif
+
+                    ImGui::SameLine();
+                    UIWidgets::HelpMarker(
+                        "Add sources from biome recommendations, the Asset Library, or scene objects. "
+                        "Terrain UI and Foliage nodes edit the same shared source list.");
+
+                    auto hasSceneSource = [&](const std::string& sourceName) {
+                        return std::any_of(group.sources.begin(), group.sources.end(),
+                            [&](const ScatterSource& source) {
+                                return source.asset_relative_path.empty() && source.name == sourceName;
+                            });
+                    };
+                    auto hasLibrarySource = [&](const std::string& relativePath) {
+                        return std::any_of(group.sources.begin(), group.sources.end(),
+                            [&](const ScatterSource& source) {
+                                return source.asset_relative_path == relativePath;
+                            });
+                    };
+                    auto addSceneSource = [&](const std::string& sourceName) {
+                        if (sourceName.empty() || hasSceneSource(sourceName)) return;
+                        std::vector<std::shared_ptr<TriangleMesh>> flatMeshes;
+                        std::vector<std::shared_ptr<Triangle>> legacyTriangles;
+                        std::unordered_set<TriangleMesh*> seenMeshes;
+                        for (auto& object : ctx.scene.world.objects) {
+                            if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(object)) {
+                                if (mesh->nodeName != sourceName || !mesh->geometry) continue;
+                                if (seenMeshes.insert(mesh.get()).second) flatMeshes.push_back(mesh);
+                            } else if (auto triangle = std::dynamic_pointer_cast<Triangle>(object)) {
+                                if (triangle->getNodeName() == sourceName) legacyTriangles.push_back(triangle);
+                            }
+                        }
+                        if (!flatMeshes.empty()) group.sources.emplace_back(sourceName, flatMeshes);
+                        else if (!legacyTriangles.empty()) group.sources.emplace_back(sourceName, legacyTriangles);
+                        else return;
+                        group.gpu_dirty = true;
+                    };
+                    auto findAssetRecord = [&](const std::string& relativePath) -> const AssetRecord* {
+                        for (const auto& asset : FoliageAssets::catalog(false).getAssets()) {
+                            if (asset.relative_entry_path.generic_string() == relativePath) return &asset;
+                        }
+                        return nullptr;
+                    };
+                    auto showAssetPreview = [&](const AssetRecord& asset) {
+                        if (!ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) return;
+                        ImGui::BeginTooltip();
+                        ImGui::TextUnformatted(asset.name.c_str());
+                        ImGui::TextDisabled("%s / %s", asset.category.c_str(), asset.subcategory.c_str());
+                        SDL_Texture* previewTexture = nullptr;
+                        int previewWidth = 0;
+                        int previewHeight = 0;
+                        if (asset.has_preview && ensureAssetBrowserThumbnailTexture(
+                                ctx, asset.preview_path, previewTexture, previewWidth, previewHeight) &&
+                            previewTexture && previewWidth > 0 && previewHeight > 0) {
+                            const float maxPreview = 260.0f;
+                            const float previewScale = (std::min)(maxPreview / previewWidth,
+                                                                  maxPreview / previewHeight);
+                            ImGui::Image((ImTextureID)previewTexture,
+                                ImVec2(previewWidth * previewScale, previewHeight * previewScale));
+                        } else {
+                            ImGui::TextDisabled("No preview image");
+                        }
+                        ImGui::EndTooltip();
+                    };
+                    auto addLibrarySource = [&](const AssetRecord& asset) {
+                        const std::string relativePath = asset.relative_entry_path.generic_string();
+                        if (relativePath.empty() || hasLibrarySource(relativePath)) return;
+                        ScatterSource source;
+                        std::string error;
+                        if (!FoliageAssets::loadScatterSource(relativePath, asset.name, 1.0f, source, &error)) {
+                            if (!error.empty()) SCENE_LOG_WARN(error);
+                            return;
+                        }
+                        const std::string layerType = group.name + " " +
+                            group.brush_settings.density_mask_attribute;
+                        FoliageAssets::configurePlacement(source,
+                            FoliageAssets::defaultTargetHeight(layerType), 0.15f, false, 0.0f);
+                        group.brush_settings.use_global_settings = false;
+                        group.sources.push_back(std::move(source));
+                        group.gpu_dirty = true;
+                    };
+
+                    if (UIWidgets::SecondaryButton("Add Source...",
+                            ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
+                        ImGui::OpenPopup("FoliageSourcePicker");
+                    }
+                    ImGui::SameLine();
+                    if (UIWidgets::SecondaryButton("Add Selected",
+                            ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0)) &&
+                        ctx.selection.hasSelection()) {
+                        addSceneSource(ctx.selection.selected.name);
+                    }
+
+                    ImGui::SetNextWindowSize(ImVec2(520.0f, 430.0f), ImGuiCond_Appearing);
+                    if (ImGui::BeginPopup("FoliageSourcePicker")) {
+                        static char pickerFilter[96] = "";
+                        ImGui::SetNextItemWidth(-1.0f);
+                        ImGui::InputTextWithHint("##FoliagePickerFilter", "Search sources...",
+                                                 pickerFilter, sizeof(pickerFilter));
+                        if (ImGui::BeginTabBar("##FoliageSourceTabs")) {
+                            auto drawAssetCandidates = [&](const std::vector<const AssetRecord*>& candidates) {
+                                ImGui::BeginChild("##AssetCandidates", ImVec2(0, 330.0f), true);
+                                for (const AssetRecord* asset : candidates) {
+                                    if (!asset) continue;
+                                    const std::string relativePath = asset->relative_entry_path.generic_string();
+                                    const bool alreadyAdded = hasLibrarySource(relativePath);
+                                    const std::string label = alreadyAdded
+                                        ? "[Added] " + asset->name : asset->name;
+                                    if (ImGui::Selectable(label.c_str(), alreadyAdded) && !alreadyAdded) {
+                                        addLibrarySource(*asset);
+                                    }
+                                    showAssetPreview(*asset);
+                                }
+                                ImGui::EndChild();
+                            };
+
+                            if (ImGui::BeginTabItem("Recommended")) {
+                                const std::string layerType = group.name + " " +
+                                    group.brush_settings.density_mask_attribute;
+                                drawAssetCandidates(FoliageAssets::recommendedAssets(
+                                    layerType, "Auto", pickerFilter));
+                                ImGui::EndTabItem();
+                            }
+                            if (ImGui::BeginTabItem("Asset Library")) {
+                                drawAssetCandidates(FoliageAssets::recommendedAssets(
+                                    "", "Auto", pickerFilter));
+                                ImGui::EndTabItem();
+                            }
+                            if (ImGui::BeginTabItem("Scene Objects")) {
+                                if (mesh_cache.empty()) rebuildMeshCache(ctx.scene.world.objects);
+                                ImGui::BeginChild("##SceneCandidates", ImVec2(0, 330.0f), true);
+                                for (const auto& [sourceName, triangles] : mesh_cache) {
+                                    (void)triangles;
+                                    if (sourceName.empty() || sourceName.find("_inst_") == 0) continue;
+                                    if (pickerFilter[0] != '\0' &&
+                                        sourceName.find(pickerFilter) == std::string::npos) continue;
+                                    const bool alreadyAdded = hasSceneSource(sourceName);
+                                    const std::string label = alreadyAdded
+                                        ? "[Added] " + sourceName : sourceName;
+                                    if (ImGui::Selectable(label.c_str(), alreadyAdded) && !alreadyAdded) {
+                                        addSceneSource(sourceName);
+                                    }
+                                }
+                                ImGui::EndChild();
+                                ImGui::EndTabItem();
+                            }
+                            ImGui::EndTabBar();
+                        }
+                        ImGui::EndPopup();
+                    }
+
+                    static char addedSourceFilter[80] = "";
+                    ImGui::SetNextItemWidth(-1.0f);
+                    ImGui::InputTextWithHint("##AddedSourceFilter", "Filter added sources...",
+                                             addedSourceFilter, sizeof(addedSourceFilter));
+                    int removeSourceIndex = -1;
+
+                    auto drawSourceCategory = [&](const char* categoryLabel,
+                                                  bool librarySources,
+                                                  int sourceCount) {
+                        if (sourceCount <= 0) return;
+                        const std::string header = std::string(categoryLabel) + " (" +
+                            std::to_string(sourceCount) + ")";
+                        if (!ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) return;
+                        ImGui::PushID(categoryLabel);
+                        if (ImGui::BeginTable("##SourceCategory", 5,
+                                ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_SizingFixedFit |
+                                ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
+                            ImGui::TableSetupColumn("##thumb", ImGuiTableColumnFlags_WidthFixed, 38.0f);
+                            ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthStretch);
+                            ImGui::TableSetupColumn("Weight", ImGuiTableColumnFlags_WidthFixed, 64.0f);
+                            ImGui::TableSetupColumn("##edit", ImGuiTableColumnFlags_WidthFixed, 42.0f);
+                            ImGui::TableSetupColumn("##delete", ImGuiTableColumnFlags_WidthFixed, 25.0f);
+                            for (int sourceIndex = 0;
+                                 sourceIndex < static_cast<int>(group.sources.size()); ++sourceIndex) {
+                                auto& source = group.sources[static_cast<size_t>(sourceIndex)];
+                                const bool isLibrary = !source.asset_relative_path.empty();
+                                if (isLibrary != librarySources) continue;
+                                if (addedSourceFilter[0] != '\0' &&
+                                    source.name.find(addedSourceFilter) == std::string::npos) continue;
+                                const AssetRecord* asset = isLibrary
+                                    ? findAssetRecord(source.asset_relative_path) : nullptr;
+                                ImGui::PushID(sourceIndex);
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                SDL_Texture* thumbnail = nullptr;
+                                int thumbnailWidth = 0;
+                                int thumbnailHeight = 0;
+                                if (asset && asset->has_preview && ensureAssetBrowserThumbnailTexture(
+                                        ctx, asset->preview_path, thumbnail,
+                                        thumbnailWidth, thumbnailHeight) && thumbnail) {
+                                    ImGui::Image((ImTextureID)thumbnail, ImVec2(32.0f, 32.0f));
+                                    showAssetPreview(*asset);
+                                } else {
+                                    ImGui::TextDisabled(isLibrary ? "LIB" : "SCN");
+                                }
+                                ImGui::TableNextColumn();
+                                ImGui::TextUnformatted(source.name.c_str());
+                                if (asset) showAssetPreview(*asset);
+                                ImGui::TableNextColumn();
+                                ImGui::SetNextItemWidth(58.0f);
+                                if (ImGui::DragFloat("##Weight", &source.weight,
+                                                    0.05f, 0.0f, 100.0f, "%.2f")) {
+                                    group.gpu_dirty = true;
+                                }
+                                ImGui::TableNextColumn();
+                                if (ImGui::SmallButton("Edit")) ImGui::OpenPopup("SrcEdit");
+                                if (ImGui::BeginPopup("SrcEdit")) {
+                                    ImGui::PushItemWidth(180.0f);
+                                    float targetHeight = 0.0f;
+                                    float variation = 0.15f;
+                                    if (source.has_local_bbox) {
+                                        const float meshHeight = source.local_bbox.max.y -
+                                            source.local_bbox.min.y;
+                                        const float centerScale = (source.settings.scale_min +
+                                            source.settings.scale_max) * 0.5f;
+                                        targetHeight = meshHeight * centerScale;
+                                        const float scaleSum = source.settings.scale_min +
+                                            source.settings.scale_max;
+                                        if (scaleSum > 1e-5f) {
+                                            variation = (source.settings.scale_max -
+                                                source.settings.scale_min) / scaleSum;
+                                        }
+                                    }
+                                    bool placementChanged = ImGui::DragFloat("Target Height",
+                                        &targetHeight, 0.1f, 0.01f, 10000.0f, "%.2f m");
+                                    int variationPercent = static_cast<int>(
+                                        std::round(variation * 100.0f));
+                                    if (ImGui::SliderInt("Variation", &variationPercent,
+                                                         0, 95, "%d%%")) {
+                                        variation = variationPercent * 0.01f;
+                                        placementChanged = true;
+                                    }
+                                    bool alignToNormal = source.settings.align_to_normal;
+                                    if (ImGui::Checkbox("Follow Slope", &alignToNormal)) {
+                                        placementChanged = true;
+                                    }
+                                    float normalInfluence = source.settings.normal_influence;
+                                    if (alignToNormal && ImGui::SliderFloat("Normal Influence",
+                                            &normalInfluence, 0.0f, 1.0f, "%.2f")) {
+                                        placementChanged = true;
+                                    }
+                                    if (placementChanged) {
+                                        FoliageAssets::configurePlacement(source, targetHeight,
+                                            variation, alignToNormal, normalInfluence);
+                                        group.brush_settings.use_global_settings = false;
+                                        group.gpu_dirty = true;
+                                    }
+                                    if (ImGui::DragFloatRange2("Y Offset",
+                                            &source.settings.y_offset_min,
+                                            &source.settings.y_offset_max, 0.01f)) {
+                                        group.gpu_dirty = true;
+                                    }
+                                    ImGui::PopItemWidth();
+                                    ImGui::EndPopup();
+                                }
+                                ImGui::TableNextColumn();
+                                if (ImGui::SmallButton("X")) removeSourceIndex = sourceIndex;
+                                ImGui::PopID();
+                            }
+                            ImGui::EndTable();
+                        }
+                        ImGui::PopID();
+                    };
+
+                    int librarySourceCount = 0;
+                    int sceneSourceCount = 0;
+                    for (const auto& source : group.sources) {
+                        if (source.asset_relative_path.empty()) ++sceneSourceCount;
+                        else ++librarySourceCount;
+                    }
+                    drawSourceCategory("Asset Library", true, librarySourceCount);
+                    drawSourceCategory("Scene Objects", false, sceneSourceCount);
+                    if (group.sources.empty()) ImGui::TextDisabled("No sources added");
+                    if (removeSourceIndex >= 0 &&
+                        removeSourceIndex < static_cast<int>(group.sources.size())) {
+                        group.sources.erase(group.sources.begin() + removeSourceIndex);
+                        group.clearInstances();
+                        group.source_bvh.reset();
+                        group.source_triangles_ptr.reset();
+                        group.blas_id = -1;
+                        group.gpu_dirty = true;
+                    }
 
                       EndSubSection();
 
@@ -990,6 +1275,48 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                              ImGui::SetNextItemWidth(80);
                              ImGui::DragFloat("Threshold##Ex", &group.brush_settings.exclusion_threshold, 0.05f, 0.0f, 1.0f);
                         }
+
+                        // Named terrain fields are produced once by Terrain Analysis and
+                        // reused by every foliage layer. Density and scale intentionally
+                        // remain independent so a biome can occupy valleys while plant
+                        // size follows wetness (or any other published field).
+                        {
+                            std::vector<std::string> terrainFields;
+                            terrainFields.reserve(t->analysisFields.size());
+                            for (const auto& [fieldName, fieldData] : t->analysisFields) {
+                                if (fieldData && fieldData->size() == t->heightmap.data.size())
+                                    terrainFields.push_back(fieldName);
+                            }
+                            std::sort(terrainFields.begin(), terrainFields.end());
+                            auto fieldPicker = [&](const char* label, std::string& value) {
+                                ImGui::SetNextItemWidth(160.0f);
+                                const char* preview = value.empty() ? "<none>" : value.c_str();
+                                if (ImGui::BeginCombo(label, preview)) {
+                                    if (ImGui::Selectable("<none>", value.empty())) value.clear();
+                                    for (const auto& fieldName : terrainFields) {
+                                        const bool selected = value == fieldName;
+                                        if (ImGui::Selectable(fieldName.c_str(), selected)) value = fieldName;
+                                        if (selected) ImGui::SetItemDefaultFocus();
+                                    }
+                                    if (terrainFields.empty())
+                                        ImGui::TextDisabled("Connect Terrain Analysis to Terrain Fields Output");
+                                    ImGui::EndCombo();
+                                }
+                            };
+                            fieldPicker("Density Field", group.brush_settings.density_mask_attribute);
+                            fieldPicker("Exclusion Field", group.brush_settings.exclusion_mask_attribute);
+                            if (group.brush_settings.exclusion_channel == -1 &&
+                                !group.brush_settings.exclusion_mask_attribute.empty()) {
+                                ImGui::SetNextItemWidth(160.0f);
+                                ImGui::SliderFloat("Exclusion Threshold##Field", &group.brush_settings.exclusion_threshold,
+                                                   0.0f, 1.0f, "%.2f");
+                            }
+                            fieldPicker("Scale Field", group.brush_settings.scale_mask_attribute);
+                            if (!group.brush_settings.scale_mask_attribute.empty()) {
+                                ImGui::SetNextItemWidth(160.0f);
+                                ImGui::SliderFloat("Scale Field Influence", &group.brush_settings.scale_mask_influence, 0.0f, 1.0f);
+                            }
+                        }
                         } // if (t) - terrain splat/exclusion end
                         EndSubSection();
 
@@ -1041,12 +1368,40 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         float scale = t->heightmap.scale_xz;
                         float hmCellSizeX = scale / (float)(std::max(1, t->heightmap.width - 1));
                         float hmCellSizeZ = scale / (float)(std::max(1, t->heightmap.height - 1));
+                        auto sampleNamedTerrainField = [&](const std::string& fieldName, float u, float v) -> float {
+                            if (fieldName.empty()) return 1.0f;
+                            const auto fieldIt = t->analysisFields.find(fieldName);
+                            if (fieldIt == t->analysisFields.end() || !fieldIt->second ||
+                                fieldIt->second->size() != t->heightmap.data.size()) return -1.0f;
+                            const auto& field = *fieldIt->second;
+                            const float gx = u * (t->heightmap.width - 1);
+                            const float gz = v * (t->heightmap.height - 1);
+                            const int ix0 = static_cast<int>(gx), iz0 = static_cast<int>(gz);
+                            const int ix1 = std::min(ix0 + 1, t->heightmap.width - 1);
+                            const int iz1 = std::min(iz0 + 1, t->heightmap.height - 1);
+                            const float ax = gx - ix0, az = gz - iz0;
+                            auto sample = [&](int x, int z) { return field[static_cast<size_t>(z) * t->heightmap.width + x]; };
+                            const float v0 = sample(ix0, iz0) * (1.0f - ax) + sample(ix1, iz0) * ax;
+                            const float v1 = sample(ix0, iz1) * (1.0f - ax) + sample(ix1, iz1) * ax;
+                            return std::clamp(v0 * (1.0f - az) + v1 * az, 0.0f, 1.0f);
+                        };
 
                         while (spawned < count && attempts < max_attempts) {
                             attempts++;
                             
                             float r1 = dist(rng);
                             float r2 = dist(rng);
+
+                            if (!group.brush_settings.density_mask_attribute.empty()) {
+                                const float densityField = sampleNamedTerrainField(
+                                    group.brush_settings.density_mask_attribute, r1, r2);
+                                if (densityField >= 0.0f && dist(rng) > densityField) continue;
+                            }
+                            if (!group.brush_settings.exclusion_mask_attribute.empty()) {
+                                const float exclusionField = sampleNamedTerrainField(
+                                    group.brush_settings.exclusion_mask_attribute, r1, r2);
+                                if (exclusionField >= group.brush_settings.exclusion_threshold) continue;
+                            }
                             
                             // Splat Map Mask Check (Importance Sampling Rejection)
                             if (group.brush_settings.splat_map_channel >= 0 && t->splatMap && t->splatMap->is_loaded() && !t->splatMap->pixels.empty()) {
@@ -1250,6 +1605,15 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             
                             // Generate Instance (World Space)
                             InstanceTransform inst = group.generateRandomTransform(worldPos, Vec3(0, 1, 0));
+                            if (!group.brush_settings.scale_mask_attribute.empty() &&
+                                group.brush_settings.scale_mask_influence > 0.0f) {
+                                const float fieldValue = sampleNamedTerrainField(
+                                    group.brush_settings.scale_mask_attribute, r1, r2);
+                                if (fieldValue >= 0.0f) {
+                                    const float factor = 1.0f - group.brush_settings.scale_mask_influence * (1.0f - fieldValue);
+                                    inst.scale = inst.scale * factor;
+                                }
+                            }
                             group.addInstance(inst);
                             spawned++;
                         }

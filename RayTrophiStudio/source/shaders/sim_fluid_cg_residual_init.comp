@@ -1,0 +1,42 @@
+// sim_fluid_cg_residual_init.comp
+// MGPCG: r0 = b = -div*h*h/dt at fluid cells (0 elsewhere); pressure reset 0.
+// 1:1 port of the CUDA fluid_cg_residual_init_kernel, including the Bridson
+// density-targeted projection term (mask carries per-cell particle COUNT;
+// over-packed cells get a synthetic positive RHS so pressure expels particles).
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   boundary;
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int   iterations;
+    int   parity;
+    float density_correction;
+    int   particles_per_cell;
+    int   variational;
+    int   gfm_active;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Divergence { float divergence[]; };
+layout(set = 0, binding = 1) readonly buffer Mask       { float fluid_mask[]; };
+layout(set = 0, binding = 2) buffer Residual            { float r[]; };
+layout(set = 0, binding = 3) buffer Pressure            { float pressure[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= pc.nx * pc.ny * pc.nz) return;
+    pressure[id] = 0.0;
+    if (fluid_mask[id] < 0.5) { r[id] = 0.0; return; }
+    float h      = pc.voxel_size > 1e-6 ? pc.voxel_size : 1.0;
+    float inv_dt = pc.dt > 1e-8 ? 1.0 / pc.dt : 0.0;
+    float rhs = -divergence[id] * h * h * inv_dt;
+    if (pc.density_correction > 0.0 && pc.particles_per_cell > 0) {
+        float over = fluid_mask[id] - float(pc.particles_per_cell);
+        if (over > 0.0)
+            rhs += pc.density_correction * (h * inv_dt) * over / float(pc.particles_per_cell);
+    }
+    r[id] = rhs;
+}

@@ -1,0 +1,27 @@
+// sim_fluid_cg_copy.comp
+// MGPCG: dst = src (cell-sized float vectors). Port of fluid_cg_copy_kernel.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   boundary;
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int   iterations;
+    int   parity;
+    float density_correction;
+    int   particles_per_cell;
+    int   variational;
+    int   gfm_active;
+} pc;
+
+layout(set = 0, binding = 0) buffer Dst          { float dst[]; };
+layout(set = 0, binding = 1) readonly buffer Src { float src[]; };
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= pc.nx * pc.ny * pc.nz) return;
+    dst[id] = src[id];
+}

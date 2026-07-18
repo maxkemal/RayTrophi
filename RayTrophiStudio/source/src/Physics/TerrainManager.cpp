@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <array>
 #include "Texture.h"
 #include "Material.h" // Ensure Material class is fully defined
 #include "InstanceManager.h"
@@ -232,25 +233,44 @@ std::shared_ptr<TriangleMesh> gridToFlatMesh(
 
     return tm;
 }
+
+// A TerrainObject owns exactly one scene object.  Keep this invariant centralized:
+// graph evaluation may rebuild/register the mesh before a load/create path reaches
+// its own finalization step, so a blind push_back can otherwise register the same
+// shared_ptr more than once.
+static void registerTerrainMeshOnce(SceneData& scene, const std::shared_ptr<TriangleMesh>& mesh) {
+    if (!mesh) return;
+
+    auto& objects = scene.world.objects;
+    objects.erase(std::remove_if(objects.begin(), objects.end(),
+        [&](const std::shared_ptr<Hittable>& object) {
+            return object.get() == mesh.get();
+        }), objects.end());
+    objects.push_back(mesh);
+}
 } // namespace
 
 void TerrainManager::removeTerrain(SceneData& scene, int id) {
-    auto it = std::find_if(terrains.begin(), terrains.end(),
-        [id](const TerrainObject& t) { return t.id == id; });
-
-    if (it == terrains.end()) return;
-
-    // Remove the terrain's single flat mesh from scene
-    if (it->flatMesh) {
-        auto obj_it = std::find_if(scene.world.objects.begin(), scene.world.objects.end(),
-            [&](const std::shared_ptr<Hittable>& obj) { return obj.get() == it->flatMesh.get(); });
-        if (obj_it != scene.world.objects.end()) {
-            scene.world.objects.erase(obj_it);
+    for (auto it = terrains.begin(); it != terrains.end();) {
+        if (it->id != id) {
+            ++it;
+            continue;
         }
-    }
 
-    // Actually remove from terrain list
-    terrains.erase(it);
+        // Remove every scene occurrence. Older load paths could register the same
+        // pointer twice, while malformed state could also contain two owners with
+        // the same persistent ID.
+        if (it->flatMesh) {
+            Hittable* mesh = it->flatMesh.get();
+            auto& objects = scene.world.objects;
+            objects.erase(std::remove_if(objects.begin(), objects.end(),
+                [&](const std::shared_ptr<Hittable>& object) {
+                    return object.get() == mesh;
+                }), objects.end());
+        }
+
+        it = terrains.erase(it);
+    }
 }
 // Optimization: Use unordered_set for O(1) lookup
 #include <unordered_set>
@@ -295,6 +315,7 @@ TerrainObject* TerrainManager::createTerrain(SceneData& scene, int resolution, f
     terrain.heightmap.scale_xz = size;
     terrain.heightmap.scale_y = 10.0f; // Default range
     terrain.heightmap.data.resize(resolution * resolution, 0.0f);
+    terrain.original_heightmap_data = terrain.heightmap.data;
     
     // Create Material
     auto mat = std::make_shared<PrincipledBSDF>();
@@ -329,7 +350,7 @@ TerrainObject* TerrainManager::createTerrain(SceneData& scene, int resolution, f
     initLayers(ptr);
 
     // Add to Scene
-    if (ptr->flatMesh) scene.world.objects.push_back(ptr->flatMesh);
+    registerTerrainMeshOnce(scene, ptr->flatMesh);
 
     return ptr;
 }
@@ -480,12 +501,13 @@ TerrainObject* TerrainManager::createTerrainFromHeightmap(SceneData& scene, cons
     
     // Generate Mesh (with smoothing for heightmaps)
     smoothTerrain(ptr, 1);
+    ptr->original_heightmap_data = ptr->heightmap.data;
     
     // Initialize Layer System (Splat Map + 4 Layers)
     initLayers(ptr);
 
     // Add to Scene
-    if (ptr->flatMesh) scene.world.objects.push_back(ptr->flatMesh);
+    registerTerrainMeshOnce(scene, ptr->flatMesh);
 
     return ptr;
 }
@@ -891,6 +913,14 @@ Vec3 TerrainManager::calculateNormal(TerrainObject* terrain, int x, int z) {
 void TerrainManager::updateTerrainMesh(TerrainObject* terrain, bool signalRebuild) {
     if (!terrain) return;
 
+    // Node graph erosion operates on the heightmap first and finalizes geometry
+    // once, on the main thread.  Do not let an intermediate erosion routine
+    // create an orphan flatMesh (or mutate a live mesh from the worker thread).
+    if (terrain->defer_mesh_updates) {
+        terrain->dirty_mesh = true;
+        return;
+    }
+
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
     float scale = terrain->heightmap.scale_xz;
@@ -995,6 +1025,38 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain, bool signalRebuil
         }
     }
 
+    // Publish graph-derived named terrain fields only after the canonical mesh
+    // exists and on the main-thread finalize path. This keeps worker evaluation
+    // height/data-only while giving foliage a zero-conversion vertex-field bridge.
+    if (terrain->flatMesh && terrain->flatMesh->geometry) {
+        auto& geometry = *terrain->flatMesh->geometry;
+        static const std::array<const char*, 22> knownTerrainFields = {
+            "terrain.slope", "terrain.concavity", "terrain.convexity",
+            "terrain.valley", "terrain.wetness", "biome.forest",
+            "biome.grass", "biome.rock", "biome.alpine",
+            "hydrology.accumulation", "hydrology.direction", "hydrology.basins",
+            "hydrology.channels", "hydrology.stream_order", "hydrology.sources",
+            "hydrology.river_bed", "hydrology.lake_mask", "hydrology.lake_depth",
+            "hydrology.lake_level", "hydrology.lake_shoreline",
+            "hydrology.lake_spill", "hydrology.lake_id"
+        };
+        const size_t vertexCount = geometry.get_vertex_count();
+        for (const char* fieldName : knownTerrainFields) {
+            const auto fieldIt = terrain->analysisFields.find(fieldName);
+            const bool valid = fieldIt != terrain->analysisFields.end() &&
+                fieldIt->second && fieldIt->second->size() == vertexCount;
+            if (!valid) {
+                geometry.remove_custom_attribute(fieldName);
+                continue;
+            }
+            if (!geometry.has_attribute(fieldName)) geometry.add_attribute<float>(fieldName);
+            float* destination = geometry.get_attribute_data_mut<float>(fieldName);
+            if (destination) {
+                std::copy(fieldIt->second->begin(), fieldIt->second->end(), destination);
+            }
+        }
+    }
+
     // Clear dirty regions after full update
     terrain->dirty_region.clear();
 
@@ -1014,14 +1076,15 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain, bool signalRebuil
 void TerrainManager::rebuildTerrainMesh(SceneData& scene, TerrainObject* terrain) {
     if (!terrain) return;
 
-    // 1. Remove the old flat mesh from scene (single-Hittable erase, was an
-    // unordered_set + remove_if bulk-erase of thousands of facade triangles).
+    // 1. Remove every old registration. This also repairs scenes loaded by the
+    // former deserialize path which could contain the same mesh twice.
     auto& objs = scene.world.objects;
     if (terrain->flatMesh) {
-        auto it = std::find_if(objs.begin(), objs.end(), [&](const std::shared_ptr<Hittable>& obj) {
-            return obj.get() == terrain->flatMesh.get();
-        });
-        if (it != objs.end()) objs.erase(it);
+        Hittable* old_mesh = terrain->flatMesh.get();
+        objs.erase(std::remove_if(objs.begin(), objs.end(),
+            [&](const std::shared_ptr<Hittable>& object) {
+                return object.get() == old_mesh;
+            }), objs.end());
     }
 
     // 2. Drop the old mesh so updateTerrainMesh() treats this as a full rebuild
@@ -1031,7 +1094,7 @@ void TerrainManager::rebuildTerrainMesh(SceneData& scene, TerrainObject* terrain
     updateTerrainMesh(terrain);
 
     // 4. Add the new flat mesh to scene
-    if (terrain->flatMesh) objs.push_back(terrain->flatMesh);
+    registerTerrainMeshOnce(scene, terrain->flatMesh);
 
     // 5. Flag for rebuild
     extern bool g_bvh_rebuild_pending;
@@ -1370,17 +1433,36 @@ void TerrainManager::resizeSplatMap(TerrainObject* terrain) {
     int srcW = terrain->splatMap->width;
     int srcH = terrain->splatMap->height;
     
-    // Skip if already correct size
-    if (srcW == targetW && srcH == targetH) return;
+    const size_t targetPixelCount = static_cast<size_t>(targetW) * static_cast<size_t>(targetH);
+    const bool sourceStorageValid =
+        srcW > 0 && srcH > 0 &&
+        terrain->splatMap->pixels.size() ==
+            static_cast<size_t>(srcW) * static_cast<size_t>(srcH);
+
+    // Metadata alone is not sufficient: a resolution transition or interrupted
+    // import can leave width/height current while the CPU pixel vector still has
+    // the old allocation.
+    if (srcW == targetW && srcH == targetH &&
+        terrain->splatMap->pixels.size() == targetPixelCount) return;
     
     SCENE_LOG_INFO("[TerrainManager] Resizing splatmap from " + std::to_string(srcW) + "x" + std::to_string(srcH) + 
                    " to " + std::to_string(targetW) + "x" + std::to_string(targetH));
     
-    // Create new pixel buffer
-    std::vector<CompactVec4> newPixels(targetW * targetH);
+    // Create new pixel buffer. If the old metadata/storage pair is inconsistent,
+    // it cannot be sampled safely; reset to the base layer instead of indexing an
+    // unknown layout.
+    std::vector<CompactVec4> newPixels(targetPixelCount);
+    if (!sourceStorageValid) {
+        for (auto& p : newPixels) {
+            p.r = 255;
+            p.g = 0;
+            p.b = 0;
+            p.a = 0;
+        }
+    }
     
     // Bilinear interpolation
-    for (int y = 0; y < targetH; ++y) {
+    for (int y = 0; sourceStorageValid && y < targetH; ++y) {
         for (int x = 0; x < targetW; ++x) {
             // Normalized coordinates [0, 1]
             float u = (float)x / (float)(targetW > 1 ? targetW - 1 : 1);
@@ -1533,11 +1615,40 @@ void TerrainManager::paintSplatMap(TerrainObject* terrain, const Vec3& hitPoint,
 
 void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float heightWeight, float heightMin, float heightMax, float slopeSteepness) {
     if (!terrain || !terrain->splatMap) return;
+
+    // Height/flow/erosion vectors are replaced by terrain-node evaluation. Do not
+    // read them until the worker result has completed its main-thread finalize.
+    if (terrain->nodeGraph && terrain->nodeGraph->isEvaluatingAsync()) {
+        SCENE_LOG_WARN("[autoMask] Terrain node evaluation is still pending; mask generation skipped.");
+        return;
+    }
+
+    const int hmW = terrain->heightmap.width;
+    const int hmH = terrain->heightmap.height;
+    if (hmW < 2 || hmH < 2) return;
+
+    const size_t heightPixelCount = static_cast<size_t>(hmW) * static_cast<size_t>(hmH);
+    if (terrain->heightmap.data.size() != heightPixelCount) {
+        SCENE_LOG_WARN("[autoMask] Heightmap dimensions do not match its CPU buffer; mask generation skipped.");
+        return;
+    }
+
+    // Resolution changes must update both texture metadata and its CPU storage
+    // before the y*w+x write loop below.
+    resizeSplatMap(terrain);
+    if (terrain->splatMap->width <= 0 || terrain->splatMap->height <= 0 ||
+        terrain->splatMap->pixels.size() !=
+            static_cast<size_t>(terrain->splatMap->width) * terrain->splatMap->height) {
+        SCENE_LOG_WARN("[autoMask] Splat map storage is invalid after resize; mask generation skipped.");
+        return;
+    }
     
-    // Automatically calculate flow if missing
-    if (terrain->flowMap.empty()) {
+    // A non-empty map can still belong to the previous terrain resolution.
+    if (terrain->flowMap.size() != heightPixelCount) {
         calculateFlowMap(terrain);
     }
+
+    const bool hasFlowMap = terrain->flowMap.size() == heightPixelCount;
 
     int w = terrain->splatMap->width;
     int h = terrain->splatMap->height;
@@ -1549,7 +1660,7 @@ void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float h
                    ", scale_xz=" + std::to_string(scale) + ", scale_y=" + std::to_string(max_h));
 
     const bool hasErosionMap =
-        terrain->erosionMapRGBA.size() == static_cast<size_t>(terrain->heightmap.width) * terrain->heightmap.height * 4;
+        terrain->erosionMapRGBA.size() == heightPixelCount * 4;
     
     // Calculate cell size for correct slope calculation (Rise / Run)
     // Run = Distance between HEIGHTMAP pixels in world space (since we sample neighbors in heightmap)
@@ -1650,7 +1761,7 @@ void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float h
                 erosionInfluence = std::clamp(terrain->erosionMapRGBA[eIdx + 3], 0.0f, 1.0f);
             }
             
-            if (!terrain->flowMap.empty()) {
+            if (hasFlowMap) {
                 float flowVal = terrain->flowMap[hy * terrain->heightmap.width + hx];
                 
                 // --- GAEA STYLE HIERARCHY ---
@@ -1712,7 +1823,9 @@ void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float h
 }
 
 void TerrainManager::importSplatMap(TerrainObject* terrain, const std::string& filepath) {
-    if (!terrain || !terrain->splatMap) return;
+    if (!terrain) return;
+    if (!terrain->splatMap) initLayers(terrain);
+    if (!terrain->splatMap) return;
     
     int w, h, channels;
     unsigned char* img = stbi_load(filepath.c_str(), &w, &h, &channels, 4);
@@ -1723,20 +1836,22 @@ void TerrainManager::importSplatMap(TerrainObject* terrain, const std::string& f
     
     terrain->splatMap->width = w;
     terrain->splatMap->height = h;
-    terrain->splatMap->pixels.resize(w * h);
+    terrain->splatMap->pixels.resize(static_cast<size_t>(w) * h);
     
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
-            int idx = y * w + x;
-            terrain->splatMap->pixels[idx].r = img[idx * 4 + 0];
-            terrain->splatMap->pixels[idx].g = img[idx * 4 + 1];
-            terrain->splatMap->pixels[idx].b = img[idx * 4 + 2];
-            terrain->splatMap->pixels[idx].a = img[idx * 4 + 3];
+            const int srcIdx = y * w + x;
+            const int dstIdx = ((h - 1) - y) * w + x;
+            terrain->splatMap->pixels[dstIdx].r = img[srcIdx * 4 + 0];
+            terrain->splatMap->pixels[dstIdx].g = img[srcIdx * 4 + 1];
+            terrain->splatMap->pixels[dstIdx].b = img[srcIdx * 4 + 2];
+            terrain->splatMap->pixels[dstIdx].a = img[srcIdx * 4 + 3];
         }
     }
     
     stbi_image_free(img);
     terrain->splatMap->m_is_loaded = true;
+    terrain->splatMap->markVulkanDirtyFull();
     
     // Ensure it matches terrain dimensions
     resizeSplatMap(terrain);
@@ -1774,7 +1889,7 @@ void TerrainManager::exportSplatMap(TerrainObject* terrain, const std::string& f
             rgba[dst_idx * 4 + 0] = p.r;
             rgba[dst_idx * 4 + 1] = p.g;
             rgba[dst_idx * 4 + 2] = p.b;
-            rgba[dst_idx * 4 + 3] = 255;
+            rgba[dst_idx * 4 + 3] = p.a;
         }
     }
     
@@ -2435,7 +2550,28 @@ void TerrainManager::windErosion(TerrainObject* terrain, float strength, float d
     SCENE_LOG_INFO("Wind erosion completed (shadow zone + saltation model)");
 }
 
-void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosionParams& p, const std::vector<float>& mask, const std::function<void(float)>& progressCallback) {
+static bool applyNormalizedFluvialFlowGuide(TerrainObject* terrain,
+                                             const std::vector<float>& flowGuide,
+                                             int w, int h) {
+    const size_t count = static_cast<size_t>(w) * h;
+    if (!terrain || flowGuide.size() != count || count == 0) return false;
+    terrain->flowMap.resize(count);
+    // Watershed publishes accumulation normalized to its largest basin. Mapping
+    // that value back to the full pixel count makes a 2K/4K terrain inject
+    // millions of units into sqrt(A), immediately saturating the legacy
+    // stream-power carver. A bounded effective catchment keeps the same channel
+    // hierarchy and threshold semantics without resolution-dependent incision.
+    const float contributingAreaScale = static_cast<float>((std::min)(count, size_t{4096}));
+    for (size_t i = 0; i < count; ++i) {
+        terrain->flowMap[i] = std::clamp(flowGuide[i], 0.0f, 1.0f) * contributingAreaScale;
+    }
+    return true;
+}
+
+void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosionParams& p,
+                                    const std::vector<float>& mask,
+                                    const std::function<void(float)>& progressCallback,
+                                    const std::vector<float>& flowGuide) {
     if (!terrain) return;
 
     int w = terrain->heightmap.width;
@@ -2444,6 +2580,7 @@ void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosi
     float cellSize = terrain->heightmap.scale_xz / w;
     bool hasHardness = !terrain->hardnessMap.empty();
     bool hasMask = !mask.empty() && mask.size() == w * h;
+    const bool usePrescribedFlow = flowGuide.size() == height.size();
 
     SCENE_LOG_INFO("[CPU Fluvial] Starting Stream Power River Carver...");
 
@@ -2486,6 +2623,7 @@ void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosi
 
     std::vector<float> globalFilledHeight;
     auto updateFlowCPU = [&]() {
+        if (applyNormalizedFluvialFlowGuide(terrain, flowGuide, w, h)) return;
         std::vector<float> filledHeight = height;
         const float noiseAmplitude = 0.03f;
         for (int ny = 0; ny < h; ++ny) {
@@ -2607,10 +2745,11 @@ void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosi
 
     int numPasses = std::max(1, p.iterations / 1000);
     if (numPasses > 10) numPasses = 10;
+    if (usePrescribedFlow) numPasses = (std::min)(numPasses, 2);
 
     std::vector<float> erosionAmount(w * h, 0.0f);
-    const float Ks = p.erodeSpeed * 0.02f;
-    const float maxPassErosionFraction = 0.2f;
+    const float Ks = p.erodeSpeed * 0.02f * (usePrescribedFlow ? 0.12f : 1.0f);
+    const float maxPassErosionFraction = usePrescribedFlow ? 0.005f : 0.2f;
 
     for (int pass = 0; pass < numPasses; ++pass) {
         if (progressCallback) {
@@ -3142,66 +3281,66 @@ void TerrainManager::updateFromTrack(TerrainObject* terrain, const ObjectAnimati
 
 using json = nlohmann::json;
 
-void TerrainManager::saveHeightmapBinary(const TerrainObject* terrain, const std::string& filepath) const {
-    if (!terrain) return;
-    
+namespace {
+bool saveHeightmapBinaryData(const std::vector<float>& data, uint32_t width, uint32_t height,
+                             const std::string& filepath) {
+    if (data.size() != static_cast<size_t>(width) * height) return false;
     std::ofstream file(filepath, std::ios::binary);
-    if (!file.is_open()) {
-        SCENE_LOG_ERROR("Failed to save heightmap binary: " + filepath);
-        return;
-    }
-    
-    // Header
-    const char magic[4] = {'R', 'T', 'H', 'M'}; // RayTrophi HeightMap
-    uint32_t version = 1;
-    uint32_t width = terrain->heightmap.width;
-    uint32_t height = terrain->heightmap.height;
-    
+    if (!file.is_open()) return false;
+    const char magic[4] = {'R', 'T', 'H', 'M'};
+    const uint32_t version = 1;
     file.write(magic, 4);
     file.write(reinterpret_cast<const char*>(&version), sizeof(version));
     file.write(reinterpret_cast<const char*>(&width), sizeof(width));
     file.write(reinterpret_cast<const char*>(&height), sizeof(height));
-    
-    // Float data
-    file.write(reinterpret_cast<const char*>(terrain->heightmap.data.data()), 
-               terrain->heightmap.data.size() * sizeof(float));
-    
-    file.close();
+    file.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    return file.good();
+}
+
+bool loadHeightmapBinaryData(std::vector<float>& data, uint32_t& width, uint32_t& height,
+                             const std::string& filepath) {
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file.is_open()) return false;
+    char magic[4]{};
+    uint32_t version = 0;
+    file.read(magic, 4);
+    file.read(reinterpret_cast<char*>(&version), sizeof(version));
+    file.read(reinterpret_cast<char*>(&width), sizeof(width));
+    file.read(reinterpret_cast<char*>(&height), sizeof(height));
+    if (!file.good() || magic[0] != 'R' || magic[1] != 'T' ||
+        magic[2] != 'H' || magic[3] != 'M' || version != 1 || width == 0 || height == 0) {
+        return false;
+    }
+    data.resize(static_cast<size_t>(width) * height);
+    file.read(reinterpret_cast<char*>(data.data()), data.size() * sizeof(float));
+    return file.good();
+}
+} // namespace
+
+void TerrainManager::saveHeightmapBinary(const TerrainObject* terrain, const std::string& filepath) const {
+    if (!terrain) return;
+    const uint32_t width = static_cast<uint32_t>(terrain->heightmap.width);
+    const uint32_t height = static_cast<uint32_t>(terrain->heightmap.height);
+    if (!saveHeightmapBinaryData(terrain->heightmap.data, width, height, filepath)) {
+        SCENE_LOG_ERROR("Failed to save heightmap binary: " + filepath);
+        return;
+    }
     SCENE_LOG_INFO("Saved heightmap binary: " + filepath + " (" + std::to_string(width) + "x" + std::to_string(height) + ")");
 }
 
 void TerrainManager::loadHeightmapBinary(TerrainObject* terrain, const std::string& filepath) {
     if (!terrain) return;
     
-    std::ifstream file(filepath, std::ios::binary);
-    if (!file.is_open()) {
-        SCENE_LOG_ERROR("Failed to load heightmap binary: " + filepath);
-        return;
-    }
-    
-    // Read header
-    char magic[4];
-    uint32_t version, width, height;
-    
-    file.read(magic, 4);
-    if (magic[0] != 'R' || magic[1] != 'T' || magic[2] != 'H' || magic[3] != 'M') {
+    uint32_t width = 0, height = 0;
+    std::vector<float> loaded;
+    if (!loadHeightmapBinaryData(loaded, width, height, filepath)) {
         SCENE_LOG_ERROR("Invalid heightmap binary format: " + filepath);
         return;
     }
-    
-    file.read(reinterpret_cast<char*>(&version), sizeof(version));
-    file.read(reinterpret_cast<char*>(&width), sizeof(width));
-    file.read(reinterpret_cast<char*>(&height), sizeof(height));
-    
-    // Read float data
     terrain->heightmap.width = width;
     terrain->heightmap.height = height;
-    terrain->heightmap.data.resize(width * height);
-    
-    file.read(reinterpret_cast<char*>(terrain->heightmap.data.data()), 
-              terrain->heightmap.data.size() * sizeof(float));
-    
-    file.close();
+    terrain->heightmap.data = std::move(loaded);
+    terrain->original_heightmap_data = terrain->heightmap.data;
     SCENE_LOG_INFO("Loaded heightmap binary: " + filepath + " (" + std::to_string(width) + "x" + std::to_string(height) + ")");
 }
 
@@ -3230,6 +3369,7 @@ json TerrainManager::serialize(const std::string& terrainDir) const {
 
         std::string hmFilename = safeProjName + "_" + t.name + "_heightmap_" + std::to_string(t.id) + ".png";
         std::string binFilename = safeProjName + "_" + t.name + "_heightmap_" + std::to_string(t.id) + ".rthm";
+        std::string sourceBinFilename = safeProjName + "_" + t.name + "_height_source_" + std::to_string(t.id) + ".rthm";
 
         tJson["heightmap"] = {
             {"width", t.heightmap.width},
@@ -3237,12 +3377,27 @@ json TerrainManager::serialize(const std::string& terrainDir) const {
             {"scale_xz", t.heightmap.scale_xz},
             {"scale_y", t.heightmap.scale_y},
             {"file", hmFilename},
-            {"binary_file", binFilename}
+            {"binary_file", binFilename},
+            {"source_binary_file", sourceBinFilename}
         };
         
         // Save binary heightmap (Float32 fidelity)
         std::string binPath = (std::filesystem::path(terrainDir) / binFilename).string();
         saveHeightmapBinary(&t, binPath);
+
+        // Persist the authored Terrain-mode input separately from the evaluated
+        // output. Without this, reopening a project would promote the final
+        // eroded result to the next evaluation's source and accumulate carving.
+        const std::vector<float>& sourceHeight =
+            t.original_heightmap_data.size() == t.heightmap.data.size()
+                ? t.original_heightmap_data : t.heightmap.data;
+        const std::string sourceBinPath =
+            (std::filesystem::path(terrainDir) / sourceBinFilename).string();
+        if (!saveHeightmapBinaryData(sourceHeight,
+                static_cast<uint32_t>(t.heightmap.width),
+                static_cast<uint32_t>(t.heightmap.height), sourceBinPath)) {
+            SCENE_LOG_ERROR("Failed to save terrain source heightmap: " + sourceBinPath);
+        }
 
         // Save heightmap as PNG (Preview / Legacy)
         std::string hmPath = (std::filesystem::path(terrainDir) / hmFilename).string();
@@ -3385,10 +3540,28 @@ void TerrainManager::deserialize(const json& data, const std::string& terrainDir
         return;
     }
     
+    std::unordered_set<int> loaded_ids;
     for (const auto& tJson : data["terrains"]) {
         TerrainObject terrain;
-        
-        terrain.id = tJson.value("id", next_id++);
+
+        // Do not use value("id", next_id++): the default argument is evaluated
+        // even when an ID exists, causing next_id to drift on every load.
+        terrain.id = tJson.contains("id") ? tJson["id"].get<int>() : next_id++;
+        if (!loaded_ids.insert(terrain.id).second) {
+            SCENE_LOG_WARN("[TerrainManager] Duplicate terrain ID " +
+                           std::to_string(terrain.id) + " in project; ignoring duplicate entry");
+            continue;
+        }
+
+        // deserialize supports callers that intentionally retain manager state.
+        // Replace an existing terrain with the same persistent ID instead of
+        // allowing getTerrain(id) and the graph editor to bind ambiguously.
+        if (getTerrain(terrain.id)) {
+            SCENE_LOG_WARN("[TerrainManager] Replacing existing terrain ID " +
+                           std::to_string(terrain.id) + " during deserialize");
+            removeTerrain(scene, terrain.id);
+        }
+
         terrain.name = tJson.value("name", "Terrain_" + std::to_string(terrain.id));
         terrain.material_id = tJson.value("material_id", 0);
         
@@ -3439,6 +3612,28 @@ void TerrainManager::deserialize(const json& data, const std::string& terrainDir
                     // Initialize flat heightmap
                     terrain.heightmap.data.resize(terrain.heightmap.width * terrain.heightmap.height, 0.0f);
                 }
+            }
+
+            bool loadedAuthoredSource = false;
+            if (hm.contains("source_binary_file")) {
+                const std::string sourcePath = (std::filesystem::path(terrainDir) /
+                    hm["source_binary_file"].get<std::string>()).string();
+                uint32_t sourceWidth = 0, sourceHeight = 0;
+                std::vector<float> sourceData;
+                loadedAuthoredSource = loadHeightmapBinaryData(
+                    sourceData, sourceWidth, sourceHeight, sourcePath) &&
+                    sourceWidth == static_cast<uint32_t>(terrain.heightmap.width) &&
+                    sourceHeight == static_cast<uint32_t>(terrain.heightmap.height);
+                if (loadedAuthoredSource) {
+                    terrain.original_heightmap_data = std::move(sourceData);
+                } else {
+                    SCENE_LOG_WARN("Terrain source heightmap missing or invalid: " + sourcePath);
+                }
+            }
+            if (!loadedAuthoredSource) {
+                // Legacy project: at least freeze the loaded terrain so repeated
+                // Evaluate calls stop compounding from this point onward.
+                terrain.original_heightmap_data = terrain.heightmap.data;
             }
         }
         
@@ -3627,8 +3822,9 @@ void TerrainManager::deserialize(const json& data, const std::string& terrainDir
         // Generate mesh
         updateTerrainMesh(ptr);
 
-        // Add flat mesh to scene
-        if (ptr->flatMesh) scene.world.objects.push_back(ptr->flatMesh);
+        // evaluateTerrain() may already have rebuilt and registered this mesh.
+        // Canonicalize to one scene entry instead of blindly appending it again.
+        registerTerrainMeshOnce(scene, ptr->flatMesh);
     }
     
     SCENE_LOG_INFO("[TerrainManager] Deserialized " + std::to_string(terrains.size()) + " terrains (format v" + std::to_string(version) + ")");
@@ -3745,6 +3941,7 @@ void TerrainManager::initCuda() {
 static bool hydraulicErosionGpuVulkan(TerrainObject* terrain, const HydraulicErosionParams& p,
                                       const std::vector<float>& mask) {
     using namespace RayTrophiSim;
+    std::lock_guard<std::recursive_mutex> computeLock(sharedMeshComputeMutex());
     ISimulationComputeBackend* backend = acquireSharedMeshComputeBackend();
     if (!backend) return false;
 
@@ -4148,6 +4345,7 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
 // fall back to the CUDA/CPU path.
 static bool thermalErosionGpuVulkan(TerrainObject* terrain, const ThermalErosionParams& p) {
     using namespace RayTrophiSim;
+    std::lock_guard<std::recursive_mutex> computeLock(sharedMeshComputeMutex());
     ISimulationComputeBackend* backend = acquireSharedMeshComputeBackend();
     if (!backend) return false;
 
@@ -4365,6 +4563,273 @@ void TerrainManager::thermalErosionGPU(TerrainObject* terrain, const ThermalEros
                    (hasHardness ? " with hardness." : "."));
 }
 
+// Fast device-resident fluvial runoff.  Unlike the legacy stream-power path below,
+// this uses particle transport, keeps discharge on the GPU between batches, and
+// carries sediment until it is deposited.  The CPU fluvial implementation remains
+// untouched; the legacy Vulkan/CUDA stream-power path is retained as a fallback.
+static bool fluvialRunoffGpuVulkan(TerrainObject* terrain,
+                                   const HydraulicErosionParams& p,
+                                   const std::vector<float>& mask) {
+    using namespace RayTrophiSim;
+    std::lock_guard<std::recursive_mutex> computeLock(sharedMeshComputeMutex());
+    ISimulationComputeBackend* backend = acquireSharedMeshComputeBackend();
+    if (!backend) return false;
+
+    const int w = terrain->heightmap.width;
+    const int h = terrain->heightmap.height;
+    const int numPixels = w * h;
+    if (w < 8 || h < 8 || numPixels <= 0) return false;
+
+    const size_t mapSize = (size_t)numPixels * sizeof(float);
+    const bool hasHardness = terrain->hardnessMap.size() == (size_t)numPixels;
+    const bool hasMask = mask.size() == (size_t)numPixels;
+
+    struct RunoffPushConstants {
+        int mapWidth, mapHeight;
+        int brushRadius, dropletLifetime;
+        float inertia, sedimentCapacity, minSlope, erodeSpeed;
+        float depositSpeed, evaporateSpeed, gravity, cellSize;
+        float heightScale, flowBoost, flowNormalization, flatSlope;
+        float meanderStrength, maxErosionFraction, flowDecay, depositSpread;
+        uint32_t seed, seedOffset, hasHardness, hasMask;
+        uint32_t dropletCount, batchIndex;
+        float minWater;
+        uint32_t pad;
+    } pc{};
+    static_assert(sizeof(RunoffPushConstants) == 112,
+                  "must match terrain_fluvial_*.comp push constants");
+
+    pc.mapWidth = w;
+    pc.mapHeight = h;
+    pc.brushRadius = std::clamp(p.erosionRadius, 1, 12);
+    pc.dropletLifetime = std::clamp(p.dropletLifetime, 32, 1024);
+    pc.inertia = std::clamp(p.inertia, 0.12f, 0.98f);
+    pc.sedimentCapacity = std::max(p.sedimentCapacity, 0.05f);
+    pc.minSlope = std::max(p.minSlope, 0.0001f);
+    pc.erodeSpeed = std::clamp(p.erodeSpeed, 0.001f, 2.0f);
+    pc.depositSpeed = std::clamp(p.depositSpeed, 0.0f, 1.0f);
+    pc.evaporateSpeed = std::clamp(p.evaporateSpeed, 0.0001f, 0.02f);
+    pc.gravity = std::max(p.gravity, 0.1f);
+    pc.cellSize = std::max(0.001f, terrain->heightmap.scale_xz / (float)w);
+    pc.heightScale = std::max(0.001f, terrain->heightmap.scale_y);
+    pc.flowBoost = 0.65f;
+    pc.flowNormalization = 16.0f;
+    pc.flatSlope = std::max(0.01f, pc.minSlope * 4.0f);
+    pc.meanderStrength = pc.flatSlope * 1.5f;
+    pc.maxErosionFraction = 0.010f;
+    // Applied after every 32-cell continuation segment.  Slow decay preserves the
+    // accumulated catchment field across the full authored travel distance.
+    pc.flowDecay = 0.9995f;
+    pc.depositSpread = std::clamp((float)pc.brushRadius * 0.75f + 1.0f, 2.0f, 8.0f);
+    pc.seed = (uint32_t)rand();
+    pc.hasHardness = hasHardness ? 1u : 0u;
+    pc.hasMask = hasMask ? 1u : 0u;
+    pc.minWater = 0.01f;
+
+    constexpr int kBatchSize = 16384;
+    constexpr int kTravelSegmentLength = 32;
+    const int totalTravelLength = pc.dropletLifetime;
+    const uint32_t continuationSegments = (uint32_t)(
+        (totalTravelLength + kTravelSegmentLength - 1) / kTravelSegmentLength);
+    // Low 16 bits: continuation count. High 16 bits: exact authored travel.
+    // The exact value lets the shader distribute final flat settling correctly when
+    // Travel Length is not an integer multiple of the 32-cell continuation size.
+    pc.pad = ((uint32_t)totalTravelLength << 16u) |
+             (continuationSegments & 0xffffu);
+
+    ComputeBufferDesc d;
+    d.size_bytes = mapSize;
+    ComputeBufferDesc parcelStateDesc;
+    parcelStateDesc.size_bytes = (size_t)kBatchSize * 12u * sizeof(float);
+    ComputeBufferHandle hHeight = backend->createBuffer(d);
+    ComputeBufferHandle hHardness = backend->createBuffer(d);
+    ComputeBufferHandle hMask = backend->createBuffer(d);
+    ComputeBufferHandle hFlow = backend->createBuffer(d);
+    ComputeBufferHandle hErosion = backend->createBuffer(d);
+    ComputeBufferHandle hDeposition = backend->createBuffer(d);
+    ComputeBufferHandle hFlowDirectionX = backend->createBuffer(d);
+    ComputeBufferHandle hFlowDirectionY = backend->createBuffer(d);
+    ComputeBufferHandle hParcelStates = backend->createBuffer(parcelStateDesc);
+    auto cleanup = [&]() {
+        if (hHeight.valid()) backend->destroyBuffer(hHeight);
+        if (hHardness.valid()) backend->destroyBuffer(hHardness);
+        if (hMask.valid()) backend->destroyBuffer(hMask);
+        if (hFlow.valid()) backend->destroyBuffer(hFlow);
+        if (hErosion.valid()) backend->destroyBuffer(hErosion);
+        if (hDeposition.valid()) backend->destroyBuffer(hDeposition);
+        if (hFlowDirectionX.valid()) backend->destroyBuffer(hFlowDirectionX);
+        if (hFlowDirectionY.valid()) backend->destroyBuffer(hFlowDirectionY);
+        if (hParcelStates.valid()) backend->destroyBuffer(hParcelStates);
+    };
+
+    bool ok = hHeight.valid() && hHardness.valid() && hMask.valid() && hFlow.valid() &&
+              hErosion.valid() && hDeposition.valid() && hFlowDirectionX.valid() &&
+              hFlowDirectionY.valid() && hParcelStates.valid();
+    std::vector<float> zeros((size_t)numPixels, 0.0f);
+    std::vector<float> ones;
+    if (ok) ok = backend->uploadBuffer(hHeight, terrain->heightmap.data.data(), mapSize);
+    if (ok) ok = backend->uploadBuffer(hHardness,
+        hasHardness ? terrain->hardnessMap.data() : zeros.data(), mapSize);
+    if (ok) {
+        if (hasMask) ok = backend->uploadBuffer(hMask, mask.data(), mapSize);
+        else {
+            ones.assign((size_t)numPixels, 1.0f);
+            ok = backend->uploadBuffer(hMask, ones.data(), mapSize);
+        }
+    }
+    if (ok) ok = backend->uploadBuffer(hFlow, zeros.data(), mapSize);
+    if (ok) ok = backend->uploadBuffer(hErosion, zeros.data(), mapSize);
+    if (ok) ok = backend->uploadBuffer(hDeposition, zeros.data(), mapSize);
+    if (ok) ok = backend->uploadBuffer(hFlowDirectionX, zeros.data(), mapSize);
+    if (ok) ok = backend->uploadBuffer(hFlowDirectionY, zeros.data(), mapSize);
+    if (!ok) {
+        cleanup();
+        return false;
+    }
+
+    // Each parcel's authored reach is split into 32-cell GPU continuation segments.
+    // Height/delta application between segments preserves the visually correct short-
+    // step erosion character while parcel state carries water and sediment to plains.
+    const uint32_t mapGroups = (uint32_t)((numPixels + 255) / 256);
+    int processed = 0;
+    int recordedDispatches = 0;
+    while (ok && processed < p.iterations) {
+        const int count = std::min(kBatchSize, p.iterations - processed);
+        pc.seedOffset = (uint32_t)processed;
+        pc.dropletCount = (uint32_t)count;
+
+        int traveled = 0;
+        uint32_t segmentIndex = 0;
+        while (ok && traveled < totalTravelLength) {
+            const int segmentSteps = std::min(kTravelSegmentLength, totalTravelLength - traveled);
+            pc.dropletLifetime = segmentSteps;
+            pc.batchIndex = segmentIndex; // zero initializes, later values continue state
+
+            ComputeBufferHandle runoffBuffers[9] = {
+                hHeight, hHardness, hMask, hFlow, hErosion, hDeposition,
+                hFlowDirectionX, hFlowDirectionY, hParcelStates
+            };
+            ComputeDispatch runoff;
+            runoff.kernel = "terrain_fluvial_runoff";
+            runoff.groups.groups_x = (uint32_t)((count + 255) / 256);
+            runoff.buffers = runoffBuffers;
+            runoff.buffer_count = 9;
+            runoff.constants = &pc;
+            runoff.constants_size = sizeof(pc);
+            ok = backend->dispatch(runoff);
+            ++recordedDispatches;
+            if (!ok) break;
+
+            ComputeBufferHandle applyBuffers[6] = {
+                hHeight, hFlow, hErosion, hDeposition, hFlowDirectionX, hFlowDirectionY
+            };
+            ComputeDispatch apply;
+            apply.kernel = "terrain_fluvial_apply";
+            apply.groups.groups_x = mapGroups;
+            apply.buffers = applyBuffers;
+            apply.buffer_count = 6;
+            apply.constants = &pc;
+            apply.constants_size = sizeof(pc);
+            ok = backend->dispatch(apply);
+            ++recordedDispatches;
+
+            traveled += segmentSteps;
+            ++segmentIndex;
+
+            // Talus every second segment (and at the final segment) is enough to
+            // prevent spikes without turning the continuation chain into a blur.
+            if (ok && (((segmentIndex & 1u) == 0u) || traveled >= totalTravelLength)) {
+                ComputeBufferHandle talusBuffers[2] = { hHeight, hFlow };
+                ComputeDispatch talus;
+                talus.kernel = "terrain_fluvial_talus";
+                talus.groups.groups_x = mapGroups;
+                talus.buffers = talusBuffers;
+                talus.buffer_count = 2;
+                talus.constants = &pc;
+                talus.constants_size = sizeof(pc);
+                ok = backend->dispatch(talus);
+                ++recordedDispatches;
+            }
+
+            // Vulkan's shared descriptor pool has 512 sets.  Submit before reaching
+            // the limit; buffers and parcel continuation state remain device-resident.
+            if (ok && recordedDispatches >= 400) {
+                backend->synchronize();
+                recordedDispatches = 0;
+            }
+        }
+
+        processed += count;
+    }
+
+    pc.dropletLifetime = totalTravelLength;
+
+    // A few cheap settling passes after the last rainfall wave remove any residual
+    // one-cell peaks while retaining channel banks below the physical talus limit.
+    for (int settlePass = 0; ok && settlePass < 5; ++settlePass) {
+        ComputeBufferHandle talusBuffers[2] = { hHeight, hFlow };
+        ComputeDispatch talus;
+        talus.kernel = "terrain_fluvial_talus";
+        talus.groups.groups_x = mapGroups;
+        talus.buffers = talusBuffers;
+        talus.buffer_count = 2;
+        talus.constants = &pc;
+        talus.constants_size = sizeof(pc);
+        ok = backend->dispatch(talus);
+    }
+
+    if (ok) {
+        backend->synchronize();
+        ok = backend->downloadBuffer(hHeight, terrain->heightmap.data.data(), mapSize);
+    }
+    if (ok) {
+        terrain->flowMap.assign((size_t)numPixels, 0.0f);
+        ok = backend->downloadBuffer(hFlow, terrain->flowMap.data(), mapSize);
+    }
+
+    cleanup();
+    if (!ok) {
+        SCENE_LOG_WARN("[GPU Fluvial] Particle runoff failed; trying legacy stream-power fallback.");
+    }
+    return ok;
+}
+
+float TerrainManager::sampleAnalysisField(float worldX, float worldZ, const std::string& fieldName) const {
+    if (fieldName.empty()) return 1.0f;
+
+    for (const auto& terrain : terrains) {
+        const auto fieldIt = terrain.analysisFields.find(fieldName);
+        if (fieldIt == terrain.analysisFields.end() || !fieldIt->second) continue;
+
+        const Heightmap& hm = terrain.heightmap;
+        const auto& field = *fieldIt->second;
+        const size_t expected = static_cast<size_t>(hm.width) * hm.height;
+        if (hm.width < 2 || hm.height < 2 || hm.scale_xz <= 0.0f || field.size() != expected) continue;
+
+        Vec3 localPos(worldX, 0.0f, worldZ);
+        if (terrain.transform) {
+            const Matrix4x4 inv = terrain.transform->getFinal().inverse();
+            localPos = inv.multiplyVector(Vec4(worldX, 0.0f, worldZ, 1.0f)).xyz();
+        }
+        if (localPos.x < 0.0f || localPos.x > hm.scale_xz ||
+            localPos.z < 0.0f || localPos.z > hm.scale_xz) continue;
+
+        const float gridX = std::clamp(localPos.x / hm.scale_xz, 0.0f, 1.0f) * (hm.width - 1);
+        const float gridZ = std::clamp(localPos.z / hm.scale_xz, 0.0f, 1.0f) * (hm.height - 1);
+        const int x0 = static_cast<int>(std::floor(gridX));
+        const int z0 = static_cast<int>(std::floor(gridZ));
+        const int x1 = std::min(x0 + 1, hm.width - 1);
+        const int z1 = std::min(z0 + 1, hm.height - 1);
+        const float fx = gridX - x0;
+        const float fz = gridZ - z0;
+        auto at = [&](int x, int z) { return field[static_cast<size_t>(z) * hm.width + x]; };
+        const float a = at(x0, z0) * (1.0f - fx) + at(x1, z0) * fx;
+        const float b = at(x0, z1) * (1.0f - fx) + at(x1, z1) * fx;
+        return std::clamp(a * (1.0f - fz) + b * fz, 0.0f, 1.0f);
+    }
+    return -1.0f;
+}
+
 // Tries GPU flow-accumulation: depression-fill (terrain_flow_fill.comp, ping-pong
 // Jacobi relaxation) -> outflow weights (terrain_flow_weights.comp, one-time) -> flow
 // accumulation (terrain_flow_accumulate.comp, ping-pong relaxation). Approximates the
@@ -4380,6 +4845,7 @@ void TerrainManager::thermalErosionGPU(TerrainObject* terrain, const ThermalEros
 // same as every other pass-count constant introduced this migration.
 static bool computeFlowMapGpuVulkan(TerrainObject* terrain, float cellSize) {
     using namespace RayTrophiSim;
+    std::lock_guard<std::recursive_mutex> computeLock(sharedMeshComputeMutex());
     ISimulationComputeBackend* backend = acquireSharedMeshComputeBackend();
     if (!backend) return false;
 
@@ -4509,8 +4975,10 @@ static bool fluvialStreamPowerGpuVulkan(TerrainObject* terrain,
                                         const TerrainPhysics::StreamPowerParamsGPU& sp,
                                         int numPasses,
                                         const std::vector<float>& mask,
-                                        const std::function<void()>& updateFlowCPU) {
+                                        const std::function<void()>& updateFlowCPU,
+                                        bool usePrescribedFlow) {
     using namespace RayTrophiSim;
+    std::lock_guard<std::recursive_mutex> computeLock(sharedMeshComputeMutex());
     ISimulationComputeBackend* backend = acquireSharedMeshComputeBackend();
     if (!backend) return false;
 
@@ -4548,7 +5016,8 @@ static bool fluvialStreamPowerGpuVulkan(TerrainObject* terrain,
     std::vector<float> zeroAccum(numPixels, 0.0f);
 
     for (int pass = 0; ok && pass < numPasses; ++pass) {
-        if (!computeFlowMapGpuVulkan(terrain, sp.cellSize)) updateFlowCPU();
+        if (usePrescribedFlow) updateFlowCPU();
+        else if (!computeFlowMapGpuVulkan(terrain, sp.cellSize)) updateFlowCPU();
 
         ok = backend->uploadBuffer(hHeight, height.data(), mapSize);
         if (ok) ok = backend->uploadBuffer(hFlow, terrain->flowMap.data(), mapSize);
@@ -4588,8 +5057,21 @@ static bool fluvialStreamPowerGpuVulkan(TerrainObject* terrain,
     return ok;
 }
 
-void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& p, const std::vector<float>& mask) {
+void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& p,
+                                       const std::vector<float>& mask,
+                                       const std::vector<float>& flowGuide) {
     if (!terrain) return;
+
+    const bool usePrescribedFlow = flowGuide.size() == terrain->heightmap.data.size();
+    SCENE_LOG_INFO(usePrescribedFlow
+        ? "[GPU Fluvial] Starting watershed-guided stream power..."
+        : "[GPU Fluvial] Starting device-resident particle runoff...");
+    if (!usePrescribedFlow && fluvialRunoffGpuVulkan(terrain, p, mask)) {
+        updateTerrainMesh(terrain);
+        terrain->dirty_mesh = true;
+        SCENE_LOG_INFO("[GPU Fluvial] Particle runoff complete (transport + deposition).");
+        return;
+    }
 
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
@@ -4601,14 +5083,19 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
     sp.mapWidth = w; sp.mapHeight = h;
     sp.cellSize = cellSize;
     sp.heightScale = terrain->heightmap.scale_y;
-    sp.erodeSpeed = p.erodeSpeed;
+    // Particle-runoff defaults use very large iteration counts. When a fixed
+    // watershed guide selects the stream-power fallback, use a deliberately
+    // conservative coefficient/cap so the same channel is not excavated to
+    // bedrock over repeated passes.
+    sp.erodeSpeed = p.erodeSpeed * (usePrescribedFlow ? 0.12f : 1.0f);
     sp.sedimentCapacity = p.sedimentCapacity;
     sp.minSlope = p.minSlope;
     sp.erosionRadius = p.erosionRadius;
-    sp.maxPassErosionFraction = 0.2f;
+    sp.maxPassErosionFraction = usePrescribedFlow ? 0.005f : 0.2f;
 
     int numPasses = std::max(1, p.iterations / 1000); // 1 pass per 1000 iterations for carving
     if (numPasses > 10) numPasses = 10;
+    if (usePrescribedFlow) numPasses = (std::min)(numPasses, 2);
 
     // --------------------------------------------------------
     // Step 1: Flow Accumulation (CPU for accuracy, then HtoD) — shared by both backends
@@ -4669,6 +5156,7 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
     };
 
     auto updateFlowCPU = [&]() {
+        if (applyNormalizedFluvialFlowGuide(terrain, flowGuide, w, h)) return;
         std::vector<float> filledHeight = height;
         const float noiseAmplitude = 0.03f;
         for (int ny = 0; ny < h; ++ny) {
@@ -4786,7 +5274,8 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
     // --------------------------------------------------------
     SCENE_LOG_INFO("[GPU Fluvial] Starting High-Power River Carver...");
 
-    if (fluvialStreamPowerGpuVulkan(terrain, sp, numPasses, mask, updateFlowCPU)) {
+    if (fluvialStreamPowerGpuVulkan(
+            terrain, sp, numPasses, mask, updateFlowCPU, usePrescribedFlow)) {
         updateTerrainMesh(terrain);
         terrain->dirty_mesh = true;
         SCENE_LOG_INFO("[GPU Fluvial] River Carving Complete (Vulkan compute).");
@@ -4797,7 +5286,7 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
         initCuda();
         if (!cudaInitialized) {
             SCENE_LOG_WARN("[GPU Fluvial] CUDA not initialized. Falling back to CPU fluvial erosion.");
-            fluvialErosion(terrain, p, mask);
+            fluvialErosion(terrain, p, mask, std::function<void(float)>{}, flowGuide);
             return;
         }
     }
@@ -4864,6 +5353,7 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
 // dispatch. See project_terrain_erosion_gpu_migration memory.
 static bool windErosionGpuVulkan(TerrainObject* terrain, float strength, float direction, int iterations) {
     using namespace RayTrophiSim;
+    std::lock_guard<std::recursive_mutex> computeLock(sharedMeshComputeMutex());
     ISimulationComputeBackend* backend = acquireSharedMeshComputeBackend();
     if (!backend) return false;
 

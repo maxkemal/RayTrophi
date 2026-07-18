@@ -130,8 +130,13 @@ public:
     // the whole duration a single erosion node is running.
     void hydraulicErosion(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {}, const std::function<void(float)>& progressCallback = nullptr);
     void hydraulicErosionAdvanced(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
-    void fluvialErosion(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {}, const std::function<void(float)>& progressCallback = nullptr);
-    void fluvialErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
+    void fluvialErosion(TerrainObject* terrain, const HydraulicErosionParams& params,
+                        const std::vector<float>& mask = {},
+                        const std::function<void(float)>& progressCallback = nullptr,
+                        const std::vector<float>& flowGuide = {});
+    void fluvialErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& params,
+                           const std::vector<float>& mask = {},
+                           const std::vector<float>& flowGuide = {});
     void hydraulicErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
     void thermalErosionGPU(TerrainObject* terrain, const ThermalErosionParams& params, const std::vector<float>& mask = {});
     void thermalErosion(TerrainObject* terrain, const ThermalErosionParams& params, const std::vector<float>& mask = {}, const std::function<void(float)>& progressCallback = nullptr);
@@ -279,6 +284,10 @@ public:
     // Sample splat map channel value (0..1) at world XZ coordinate for the terrain containing the point
     // channel: 0=R,1=G,2=B,3=A. Returns -1.0f if no splat data or out of bounds.
     float sampleSplatChannel(float worldX, float worldZ, int channel) const;
+    // Samples a named, graph-published terrain field (terrain.slope,
+    // terrain.valley, terrain.wetness, ...). Returns 1 when no field is
+    // requested and -1 when the requested field cannot be sampled.
+    float sampleAnalysisField(float worldX, float worldZ, const std::string& fieldName) const;
     
     // ===========================================================================
     // RIVER BED CARVING (for River System integration)

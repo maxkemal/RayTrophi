@@ -23,12 +23,21 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <algorithm>
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // RIVER SPLINE
 // Uses BezierSpline with userData1 = width, userData2 = depth
 // ═══════════════════════════════════════════════════════════════════════════════
 struct RiverSpline {
+    struct HydraulicPoint {
+        float discharge = 0.0f;       // m3/s
+        float flowSpeed = 0.0f;       // m/s
+        float froude = 0.0f;
+        float foamPotential = 0.0f;
+        float surfaceElevation = 0.0f;
+    };
+
     struct PhysicsParams {
         bool enableTurbulence = false;       // Enable rapid waves (Default: OFF for flat surface)
         bool enableBanking = false;          // Enable curve banking
@@ -57,6 +66,9 @@ struct RiverSpline {
     // userData1 = river width at each point
     // userData2 = water depth below terrain
     BezierSpline spline;
+    // Kept parallel to spline.points so manual rivers remain compatible while
+    // generated rivers can carry physically meaningful shader/simulation data.
+    std::vector<HydraulicPoint> hydraulics;
     
     // Water visual parameters (shared with WaterSystem)
     WaterWaveParams waterParams;
@@ -83,6 +95,7 @@ struct RiverSpline {
     void addControlPoint(const Vec3& position, float width = 2.0f, float depth = 0.5f) {
         spline.points.emplace_back(position, width);
         spline.points.back().userData2 = depth;
+        hydraulics.emplace_back();
         if (spline.points.size() > 1) {
             spline.calculateAutoTangents();
         }
@@ -91,6 +104,9 @@ struct RiverSpline {
     
     void removeControlPoint(int index) {
         spline.removePoint(index);
+        if (index >= 0 && index < static_cast<int>(hydraulics.size())) {
+            hydraulics.erase(hydraulics.begin() + index);
+        }
         needsRebuild = true;
     }
     
@@ -109,6 +125,30 @@ struct RiverSpline {
     Vec3 sampleRight(float t) const { return spline.sampleRight(t); }
     float sampleWidth(float t) const { return spline.sampleUserData1(t); }
     float sampleDepth(float t) const { return spline.sampleUserData2(t); }
+
+    void setHydraulicPoint(int index, const HydraulicPoint& value) {
+        if (index < 0 || index >= static_cast<int>(spline.points.size())) return;
+        if (hydraulics.size() < spline.points.size()) hydraulics.resize(spline.points.size());
+        hydraulics[static_cast<size_t>(index)] = value;
+    }
+
+    HydraulicPoint sampleHydraulics(float t) const {
+        if (hydraulics.empty()) return {};
+        if (hydraulics.size() == 1 || spline.points.size() <= 1) return hydraulics.front();
+        const float scaled = (std::min)((std::max)(t, 0.0f), 1.0f) *
+            static_cast<float>(hydraulics.size() - 1);
+        const size_t first = (std::min)(static_cast<size_t>(scaled), hydraulics.size() - 1);
+        const size_t second = (std::min)(first + 1, hydraulics.size() - 1);
+        const float blend = scaled - static_cast<float>(first);
+        const auto lerp = [blend](float a, float b) { return a + (b - a) * blend; };
+        HydraulicPoint value;
+        value.discharge = lerp(hydraulics[first].discharge, hydraulics[second].discharge);
+        value.flowSpeed = lerp(hydraulics[first].flowSpeed, hydraulics[second].flowSpeed);
+        value.froude = lerp(hydraulics[first].froude, hydraulics[second].froude);
+        value.foamPotential = lerp(hydraulics[first].foamPotential, hydraulics[second].foamPotential);
+        value.surfaceElevation = lerp(hydraulics[first].surfaceElevation, hydraulics[second].surfaceElevation);
+        return value;
+    }
     
     // ─────────────────────────────────────────────────────────────────────────
     // Serialization helpers
@@ -125,13 +165,21 @@ struct RiverSpline {
         
         // Control points
         nlohmann::json pointsJson = nlohmann::json::array();
-        for (const auto& pt : spline.points) {
+        for (size_t pointIndex = 0; pointIndex < spline.points.size(); ++pointIndex) {
+            const auto& pt = spline.points[pointIndex];
+            const HydraulicPoint hydraulic = pointIndex < hydraulics.size()
+                ? hydraulics[pointIndex] : HydraulicPoint{};
             nlohmann::json pj;
             pj["position"] = { pt.position.x, pt.position.y, pt.position.z };
             pj["tangentIn"] = { pt.tangentIn.x, pt.tangentIn.y, pt.tangentIn.z };
             pj["tangentOut"] = { pt.tangentOut.x, pt.tangentOut.y, pt.tangentOut.z };
             pj["width"] = pt.userData1;
             pj["depth"] = pt.userData2;
+            pj["discharge"] = hydraulic.discharge;
+            pj["flowSpeed"] = hydraulic.flowSpeed;
+            pj["froude"] = hydraulic.froude;
+            pj["foamPotential"] = hydraulic.foamPotential;
+            pj["surfaceElevation"] = hydraulic.surfaceElevation;
             pj["autoTangent"] = pt.autoTangent;
             pj["handleMode"] = static_cast<int>(pt.handleMode);
             pointsJson.push_back(pj);
@@ -161,6 +209,7 @@ struct RiverSpline {
         spline.isClosed = j.value("isClosed", false);
         
         spline.clear();
+        hydraulics.clear();
         if (j.contains("controlPoints")) {
             for (const auto& pj : j["controlPoints"]) {
                 BezierControlPoint pt;
@@ -182,6 +231,13 @@ struct RiverSpline {
                 pt.handleMode = static_cast<BezierControlPoint::HandleMode>(pj.value("handleMode", 2));
                 
                 spline.points.push_back(pt);
+                HydraulicPoint hydraulic;
+                hydraulic.discharge = pj.value("discharge", 0.0f);
+                hydraulic.flowSpeed = pj.value("flowSpeed", 0.0f);
+                hydraulic.froude = pj.value("froude", 0.0f);
+                hydraulic.foamPotential = pj.value("foamPotential", 0.0f);
+                hydraulic.surfaceElevation = pj.value("surfaceElevation", pt.position.y);
+                hydraulics.push_back(hydraulic);
             }
         }
         

@@ -167,6 +167,7 @@ namespace NodeSystem {
         PinValue requestOutput(int outputIndex, EvaluationContext& ctx) {
             // Check cache first
             if (!dirty && ctx.hasCachedValue(id, outputIndex)) {
+                ctx.markNodeCached(id);
                 return ctx.getCachedValue(id, outputIndex);
             }
             
@@ -223,12 +224,76 @@ namespace NodeSystem {
         
         /**
          * @brief Draw custom content inside the node body
-         * 
+         *
          * Override to add sliders, checkboxes, preview images, etc.
          * Use ImGui calls here.
          */
         virtual void drawContent() {}
-        
+
+        /**
+         * @brief Opt in to rendering drawContent() INSIDE the node body on the
+         * canvas (NodeEditorUIV2 draws it below the pins when zoom is close
+         * enough). Off by default — properties-panel-only nodes are unaffected.
+         * Widgets are NOT zoom-scaled; keep content compact.
+         */
+        virtual bool wantsInlineContent() const { return false; }
+
+        /// Measured screen-pixel height of the last inline drawContent() render
+        /// (set by NodeEditorUIV2; consumed next frame to size the node body).
+        float inlineContentHeight_ = 0.0f;
+
+        // ---- Socket sections + inline pin values (Blender-style parameter node) ----
+        // A node with 30 sockets (the uber-material Output) is unreadable as one flat pin
+        // list, and pushing its values into the properties panel means the node shows a
+        // column of names with no numbers on it. These three hooks let a node group its
+        // input pins under headings drawn ON the node and put each unconnected pin's value
+        // widget on the pin's own row. Every hook is a no-op by default, so no other graph
+        // (terrain, geo, anim) changes shape.
+
+        /// Section heading to draw ABOVE input pin `index`, or nullptr for "no new section".
+        /// Only consulted for pins that are actually visible.
+        virtual const char* inputSectionLabel(int index) const { (void)index; return nullptr; }
+
+        /// Is the section that starts at input pin `index` expanded? Collapsed sections hide
+        /// their unconnected pins (the node itself decides that via Pin::hidden); this only
+        /// drives the header's chevron and click target.
+        virtual bool isInputSectionOpen(int index) const { (void)index; return true; }
+
+        /// User clicked the section header that starts at input pin `index`.
+        virtual void toggleInputSection(int index) { (void)index; }
+
+        /// Optional ENABLE toggle for the section starting at input pin `index` (nullptr =
+        /// none). Drawn as a small checkbox right-aligned in the section's header row; the
+        /// editor sets `dirty` when it flips. For sections that ARE a feature (a thin-shell
+        /// bubble, a coat) rather than a bundle of always-on parameters — without this, the
+        /// enable flag needs its own row somewhere else, under a second copy of the same
+        /// heading, which is exactly the "why are there two Bubbles" confusion it replaces.
+        virtual bool* inputSectionToggle(int index) { (void)index; return nullptr; }
+
+        /// Does the section starting at input pin `index` have overflow parameters that don't
+        /// fit on pin rows? Advertised as a "..." button on the section's own header; clicking
+        /// opens a popup whose body is drawInputSectionExtra. This keeps a group's parameters
+        /// in ONE place — a shared "advanced" block elsewhere on the node splits the group in
+        /// two under the same heading, and which copy is authoritative becomes a guess.
+        virtual bool inputSectionHasExtra(int index) const { (void)index; return false; }
+
+        /// Popup body for the section's overflow parameters. Same contract as drawContent:
+        /// set `dirty` yourself when a value changes.
+        virtual void drawInputSectionExtra(int index) { (void)index; }
+
+        /// Draw the value editor for UNCONNECTED input pin `index`, right-aligned on the
+        /// pin's row, within `width` screen px. Return true if the value changed.
+        /// Only called when wantsInlinePinWidgets() is on and the zoom is near 1:1.
+        virtual bool drawInputInlineWidget(int index, float width) { (void)index; (void)width; return false; }
+
+        /// Opt in to the two hooks above. Also widens the pin rows to fit real ImGui frames.
+        virtual bool wantsInlinePinWidgets() const { return false; }
+
+        /// Pin row height in unscaled px (0 = editor default). A node drawing real widgets on
+        /// its pin rows needs a taller row than a bare label does.
+        virtual float pinRowHeight() const { return 0.0f; }
+
+
         /**
          * @brief Draw custom header content (after title)
          */

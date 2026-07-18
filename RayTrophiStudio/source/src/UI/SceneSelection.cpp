@@ -2,6 +2,7 @@
 #include "Light.h"
 #include "Camera.h"
 #include "Triangle.h"
+#include "TriangleMesh.h"
 #include "Matrix4x4.h"
 #include "PointLight.h"
 #include "DirectionalLight.h"
@@ -12,10 +13,23 @@
 #include "GasVolume.h"
 #include "ForceField.h" 
 #include <algorithm>
+#include <utility>
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE SELECTION IMPLEMENTATION
 // ═══════════════════════════════════════════════════════════════════════════════
+
+namespace {
+Transform* selectedObjectTransform(const SelectableItem& item) {
+    if (item.mesh_object && item.mesh_object->transform) return item.mesh_object->transform.get();
+    return item.object ? item.object->getTransformPtr() : nullptr;
+}
+
+bool selectedObjectBounds(const SelectableItem& item, AABB& bounds) {
+    if (item.mesh_object) return item.mesh_object->bounding_box(0, 0, bounds);
+    return item.object && item.object->bounding_box(0, 0, bounds);
+}
+}
 
 void SceneSelection::updatePositionFromSelection() {
     if (!selected.is_valid()) return;
@@ -47,9 +61,9 @@ void SceneSelection::updatePositionFromSelection() {
             break;
             
         case SelectableType::Object:
-            if (selected.object) {
+            if (selected.mesh_object || selected.object) {
                 // Get transform from TransformHandle if available
-                Transform* transform = selected.object->getTransformPtr();
+                Transform* transform = selectedObjectTransform(selected);
                 if (transform) {
                     Matrix4x4 mat = transform->getPivotMatrix();
                     mat.decompose(selected.position, selected.rotation, selected.scale);
@@ -58,7 +72,7 @@ void SceneSelection::updatePositionFromSelection() {
                     // use bounding box center (handles legacy world-space vertex data)
                     if (selected.position.length() < 0.001f) {
                         AABB bounds;
-                        if (selected.object->bounding_box(0, 0, bounds)) {
+                        if (selectedObjectBounds(selected, bounds)) {
                             Vec3 bb_center = (bounds.min + bounds.max) * 0.5f;
                             // Only use BB center if mesh is clearly not at origin
                             if (bb_center.length() > 1.0f) {
@@ -69,7 +83,7 @@ void SceneSelection::updatePositionFromSelection() {
                 } else {
                     // Fallback: Get center of bounding box as position
                     AABB bounds;
-                    if (selected.object->bounding_box(0, 0, bounds)) {
+                    if (selectedObjectBounds(selected, bounds)) {
                         selected.position = (bounds.min + bounds.max) * 0.5f;
                     }
                     selected.rotation = Vec3(0, 0, 0);
@@ -151,8 +165,8 @@ static void ApplyTransformToItem(SelectableItem& item, const Matrix4x4& delta_tr
             break;
             
         case SelectableType::Object:
-            if (item.object) {
-                Transform* transform = item.object->getTransformPtr();
+            if (item.mesh_object || item.object) {
+                Transform* transform = selectedObjectTransform(item);
                 if (transform) {
                     Matrix4x4 current = transform->getPivotMatrix();
                     // Note: This applies delta in World Space relative to object
@@ -264,8 +278,8 @@ Matrix4x4 SceneSelection::getSelectionMatrix() const {
             break;
             
         case SelectableType::Object:
-            if (selected.object) {
-                Transform* transform = selected.object->getTransformPtr();
+            if (selected.mesh_object || selected.object) {
+                Transform* transform = selectedObjectTransform(selected);
                 if (transform) {
                     result = transform->getPivotMatrix();
                 }
@@ -333,12 +347,21 @@ bool SceneSelection::isSelected(const SelectableItem& item) const {
     for (const auto& s : multi_selection) {
         if (s.type != item.type) continue;
         
-        // For objects, compare by unique identifiers (index or transform pointer) to support duplicate names
+        // Flat meshes own object identity.  The Triangle pointer is only a
+        // compatibility facade for tools that have not migrated yet.
         if (s.type == SelectableType::Object) {
+            if (s.mesh_object || item.mesh_object) {
+                if (s.mesh_object && item.mesh_object &&
+                    s.mesh_object == item.mesh_object) return true;
+
+                Transform* s_trans = selectedObjectTransform(s);
+                Transform* item_trans = selectedObjectTransform(item);
+                if (s_trans && s_trans == item_trans) return true;
+            }
             if (s.object_index >= 0 && s.object_index == item.object_index) return true;
             if (s.object && item.object) {
-                Transform* s_trans = s.object->getTransformPtr();
-                Transform* item_trans = item.object->getTransformPtr();
+                Transform* s_trans = selectedObjectTransform(s);
+                Transform* item_trans = selectedObjectTransform(item);
                 if (s_trans && s_trans == item_trans) return true;
             }
             if (s.object == item.object) return true;
@@ -372,13 +395,21 @@ bool SceneSelection::isSelected(const SelectableItem& item) const {
 void SceneSelection::addToSelection(const SelectableItem& item) {
     if (!item.is_valid()) return;
 
+    SelectableItem canonicalItem = item;
+    if (canonicalItem.type == SelectableType::Object &&
+        !canonicalItem.mesh_object && canonicalItem.object &&
+        canonicalItem.object->parentMesh) {
+        canonicalItem.mesh_object = canonicalItem.object->parentMesh;
+        canonicalItem.mesh_face_index = canonicalItem.object->faceIndex;
+    }
+
     // Check if already selected
-    if (!isSelected(item)) {
-        multi_selection.push_back(item);
+    if (!isSelected(canonicalItem)) {
+        multi_selection.push_back(canonicalItem);
     }
     
     // Make this the active/primary selection
-    selected = item;
+    selected = canonicalItem;
     updatePositionFromSelection();
 }
 
@@ -389,10 +420,18 @@ void SceneSelection::removeFromSelection(const SelectableItem& item) {
             if (s.type != item.type) return false;
             
             if (s.type == SelectableType::Object) {
+                if (s.mesh_object || item.mesh_object) {
+                    if (s.mesh_object && item.mesh_object &&
+                        s.mesh_object == item.mesh_object) return true;
+
+                    Transform* s_trans = selectedObjectTransform(s);
+                    Transform* item_trans = selectedObjectTransform(item);
+                    if (s_trans && s_trans == item_trans) return true;
+                }
                 if (s.object_index >= 0 && s.object_index == item.object_index) return true;
                 if (s.object && item.object) {
-                    Transform* s_trans = s.object->getTransformPtr();
-                    Transform* item_trans = item.object->getTransformPtr();
+                    Transform* s_trans = selectedObjectTransform(s);
+                    Transform* item_trans = selectedObjectTransform(item);
                     if (s_trans && s_trans == item_trans) return true;
                 }
                 return s.object == item.object;
@@ -448,6 +487,29 @@ void SceneSelection::selectObject(std::shared_ptr<Triangle> obj, int index, cons
     SelectableItem item;
     item.type = SelectableType::Object;
     item.object = obj;
+    if (obj && obj->parentMesh) {
+        item.mesh_object = obj->parentMesh;
+        item.mesh_face_index = obj->faceIndex;
+    }
+    item.object_index = index;
+    item.name = name;
+    addToSelection(item);
+}
+
+void SceneSelection::selectObject(std::shared_ptr<TriangleMesh> mesh, int index,
+                                  const std::string& name, uint32_t face_index,
+                                  std::shared_ptr<Triangle> compatibility_facade) {
+    clearSelection();
+    SelectableItem item;
+    item.type = SelectableType::Object;
+    item.mesh_object = std::move(mesh);
+    item.mesh_face_index = face_index;
+    if (!compatibility_facade && item.mesh_object && item.mesh_object->num_triangles() > 0) {
+        const uint32_t safeFace = (std::min)(
+            face_index, static_cast<uint32_t>(item.mesh_object->num_triangles() - 1));
+        compatibility_facade = std::make_shared<Triangle>(item.mesh_object, safeFace);
+    }
+    item.object = std::move(compatibility_facade);
     item.object_index = index;
     item.name = name;
     addToSelection(item);

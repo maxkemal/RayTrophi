@@ -787,6 +787,17 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
         root["geometry_node_graphs"][nodeName] = jg;
     }
 
+    // 8.7 Material Node Graphs (MaterialNodesV2 Faz 1) — structure only; textures
+    // are referenced by name. Graphs with just the default Output node are skipped
+    // (equivalent to the material itself).
+    root["material_node_graphs"] = json::object();
+    for (const auto& [matName, graphPtr] : scene.material_node_graphs) {
+        if (!graphPtr || graphPtr->nodes.size() <= 1) continue;
+        json jg;
+        MaterialNodesV2::serializeMaterialGraph(*graphPtr, jg);
+        root["material_node_graphs"][matName] = jg;
+    }
+
     // 9.6 Particle Systems
     root["active_particle_system_index"] = scene.active_particle_system_index;
     root["particle_systems"] = json::array();
@@ -1170,6 +1181,24 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         }
     }
 
+    // 9.46 Material Node Graphs (MaterialNodesV2 Faz 1) — re-attached, not auto-applied
+    // (the saved material values are the last applied result).
+    scene.material_node_graphs.clear();
+    {
+        simdjson::dom::element matGraphsRoot;
+        if (!root["material_node_graphs"].get(matGraphsRoot)) {
+            nlohmann::json jGraphs = sjsonToNlohmann(matGraphsRoot);
+            for (auto it = jGraphs.begin(); it != jGraphs.end(); ++it) {
+                auto graph = MaterialNodesV2::deserializeMaterialGraph(it.value());
+                if (graph) scene.material_node_graphs[it.key()] = graph;
+            }
+            // The FOLD is restored with the material, but the compiled per-pixel program is a
+            // RAM-only artifact — rebuild it here, or the graph's per-pixel chains do nothing
+            // until the node editor is opened on that material.
+            MaterialNodesV2::compileGraphProgramsForScene(scene.material_node_graphs);
+        }
+    }
+
     // 9.5 Modifiers
     scene.mesh_modifiers.clear();
     scene.base_mesh_cache.clear();
@@ -1203,9 +1232,33 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
 
             if (!baseTriangles.empty() && !stack.modifiers.empty()) {
                 scene.base_mesh_cache[nodeName] = baseTriangles;
-                auto newMesh = stack.evaluate(baseTriangles);
-                for (const auto& tri : newMesh) {
-                    remainingObjects.push_back(tri); // tri is a std::shared_ptr<Triangle> matching new mesh
+                const bool hasWater = std::any_of(
+                    stack.modifiers.begin(), stack.modifiers.end(),
+                    [](const MeshModifiers::ModifierData& modifier) {
+                        return modifier.enabled &&
+                               modifier.type == MeshModifiers::ModifierType::WaterSurface;
+                    });
+                const bool hasSimpleSubdivision = std::any_of(
+                    stack.modifiers.begin(), stack.modifiers.end(),
+                    [](const MeshModifiers::ModifierData& modifier) {
+                        return modifier.enabled &&
+                               modifier.type == MeshModifiers::ModifierType::FlatSubdivision;
+                    });
+                std::shared_ptr<TriangleMesh> evaluatedMesh;
+                auto newMesh = (hasWater || hasSimpleSubdivision)
+                    ? stack.evaluate(baseTriangles, false, &evaluatedMesh)
+                    : stack.evaluate(baseTriangles, false);
+                if (evaluatedMesh) {
+                    evaluatedMesh->nodeName = nodeName;
+                    remainingObjects.push_back(evaluatedMesh);
+                    if (hasWater) {
+                        WaterManager::getInstance().bindExistingWaterMesh(
+                            evaluatedMesh, WaterSurface::Type::Plane);
+                    }
+                } else {
+                    for (const auto& tri : newMesh) {
+                        remainingObjects.push_back(tri);
+                    }
                 }
                 scene.world.objects = remainingObjects;
             }

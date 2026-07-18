@@ -18,10 +18,48 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <cstdint>
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WATER SYSTEM DATA STRUCTURES
 // ═══════════════════════════════════════════════════════════════════════════════
+
+enum class WaterBodyType : uint8_t {
+    River = 0,
+    Lake,
+    Reservoir,
+    Wetland
+};
+
+// Shared terrain-to-water contract. Terrain hydrology owns the analytical
+// description; WaterManager consumes it later to build render meshes without
+// having to reinterpret masks or solve lake levels a second time. Coordinates
+// are terrain-local and metric except for grid coordinates.
+struct WaterBodyData {
+    uint64_t id = 0;
+    int sourceNodeId = -1;
+    int terrainId = -1;
+    int waterSurfaceId = -1;
+    WaterBodyType type = WaterBodyType::Lake;
+    std::string name;
+
+    float surfaceElevation = 0.0f;
+    float maximumDepth = 0.0f;
+    float area = 0.0f;
+    float volume = 0.0f;
+    int cellCount = 0;
+
+    Vec3 centroid = Vec3(0.0f);
+    Vec3 boundsMin = Vec3(0.0f);
+    Vec3 boundsMax = Vec3(0.0f);
+    Vec3 spillPoint = Vec3(0.0f);
+    int spillGridX = -1;
+    int spillGridY = -1;
+    int outletGridX = -1;
+    int outletGridY = -1;
+    bool closedBasin = true;
+    float fieldValue = 0.0f;
+};
 
 struct WaterWaveParams {
     // Wave dynamics
@@ -128,6 +166,13 @@ struct WaterWaveParams {
 
     WaterShader::SurfaceParams toShaderParams(float time_seconds = 0.0f, float resolved_domain_size = -1.0f) const {
         WaterShader::SurfaceParams out;
+        if (current_preset == WaterPreset::River) {
+            out.profile = WaterShader::SurfaceProfile::River;
+        } else if (current_preset == WaterPreset::Lake ||
+                   current_preset == WaterPreset::Pond ||
+                   current_preset == WaterPreset::Pool) {
+            out.profile = WaterShader::SurfaceProfile::Lake;
+        }
         out.wave_speed = wave_speed;
         out.wave_strength = wave_strength;
         out.wave_frequency = wave_frequency;
@@ -170,6 +215,9 @@ struct WaterWaveParams {
         
         switch (preset) {
             case WaterPreset::CalmOcean:
+                wave_speed = 0.55f;
+                wave_strength = 0.18f;
+                wave_frequency = 0.65f;
                 // FFT settings for calm ocean
                 use_fft_ocean = true;
                 fft_resolution = 256;
@@ -196,6 +244,9 @@ struct WaterWaveParams {
                 break;
                 
             case WaterPreset::StormyOcean:
+                wave_speed = 1.50f;
+                wave_strength = 0.80f;
+                wave_frequency = 1.20f;
                 use_fft_ocean = true;
                 fft_resolution = 256;
                 fft_ocean_size = 150.0f;
@@ -222,6 +273,9 @@ struct WaterWaveParams {
                 break;
                 
             case WaterPreset::TropicalOcean:
+                wave_speed = 0.45f;
+                wave_strength = 0.12f;
+                wave_frequency = 0.55f;
                 use_fft_ocean = true;
                 fft_resolution = 256;
                 fft_ocean_size = 80.0f;
@@ -249,6 +303,9 @@ struct WaterWaveParams {
                 break;
                 
             case WaterPreset::Lake:
+                wave_speed = 0.25f;
+                wave_strength = 0.035f;
+                wave_frequency = 0.45f;
                 use_fft_ocean = true;
                 fft_resolution = 128;
                 fft_ocean_size = 50.0f;
@@ -275,7 +332,12 @@ struct WaterWaveParams {
                 break;
                 
             case WaterPreset::River:
-                use_fft_ocean = true;
+                wave_speed = 1.50f;
+                wave_strength = 0.06f;
+                wave_frequency = 1.10f;
+                // Rivers are spline/UV-flow surfaces, not cropped ocean tiles.
+                // Vulkan RT animates their normals and foam in the ribbon frame.
+                use_fft_ocean = false;
                 fft_resolution = 128;
                 fft_ocean_size = 30.0f;  // Smaller for river
                 fft_wind_speed = 4.0f;
@@ -295,12 +357,15 @@ struct WaterWaveParams {
                 micro_anim_speed = 0.2f;  // Faster - flowing
                 micro_morph_speed = 0.5f;
                 // River mesh displacement
-                use_fft_mesh_displacement = true;
+                use_fft_mesh_displacement = false;
                 fft_mesh_height_scale = 20.0f;
                 fft_mesh_choppiness = 0.5f;
                 break;
                 
             case WaterPreset::Pool:
+                wave_speed = 0.12f;
+                wave_strength = 0.01f;
+                wave_frequency = 0.35f;
                 use_fft_ocean = false;  // No FFT - very calm
                 use_fft_mesh_displacement = false;
                 // Pool colors
@@ -317,6 +382,9 @@ struct WaterWaveParams {
                 break;
                 
             case WaterPreset::Pond:
+                wave_speed = 0.18f;
+                wave_strength = 0.02f;
+                wave_frequency = 0.40f;
                 use_fft_ocean = true;
                 fft_resolution = 64;
                 fft_ocean_size = 20.0f;
@@ -347,13 +415,24 @@ struct WaterWaveParams {
                 // Keep current values
                 break;
         }
+
+        // Vulkan RT is the authoritative water path. The previous ocean mode
+        // ran CUDA FFT, downloaded it to the CPU, then uploaded it again to
+        // Vulkan every refresh. Keep those legacy fields only for the dormant
+        // CPU/OptiX fallback until the native Vulkan compute spectrum lands.
+        if (preset != WaterPreset::Custom) {
+            use_fft_ocean = false;
+            use_fft_mesh_displacement = false;
+            use_geometric_waves = false;
+        }
     }
 };
 
 class TriangleMesh;
 
 struct WaterSurface {
-    enum class Type { Plane, River, Custom };
+    // Keep new values appended for serialized enum stability.
+    enum class Type { Plane, River, Custom, Lake };
     Type type = Type::Plane;
     
     int id = -1;
@@ -362,9 +441,14 @@ struct WaterSurface {
     
     // The physics mesh (flat TriangleMesh structure)
     std::shared_ptr<TriangleMesh> flatMesh;
+    // Generated terrain/ocean water owns its scene object. A Water modifier only
+    // binds an existing evaluated mesh and must never delete that object.
+    bool owns_scene_mesh = true;
     
     // Original vertex positions (for animation - keeps base grid positions)
     std::vector<Vec3> original_positions;
+    std::vector<Vec3> original_normals;
+    size_t bound_index_count = 0; // Runtime topology guard for modifier rebinding.
     
     // Material ID used for this water
     uint16_t material_id = 0;
@@ -420,12 +504,33 @@ public:
     
     // Create water from existing mesh triangles (e.g. from Terrain)
     WaterSurface* createWaterFromMesh(SceneData& scene, const std::string& name, const std::vector<std::shared_ptr<Triangle>>& triangles);
+
+    // Shared indexed-mesh entry used by terrain lakes and future reservoirs.
+    WaterSurface* createWaterFromIndexedMesh(
+        SceneData& scene,
+        const std::string& name,
+        const std::vector<Vec3>& positions,
+        const std::vector<Vec2>& uvs,
+        const std::vector<uint32_t>& indices,
+        const std::shared_ptr<Transform>& transform,
+        WaterSurface::Type type,
+        const WaterWaveParams& params,
+        const std::vector<float>& waterDepth = {},
+        const std::vector<float>& shoreFactor = {});
+
+    // Non-destructive modifier entry: register or rebind an existing evaluated
+    // TriangleMesh without copying it or adding a duplicate scene object.
+    WaterSurface* bindExistingWaterMesh(
+        const std::shared_ptr<TriangleMesh>& mesh,
+        WaterSurface::Type type = WaterSurface::Type::Plane);
+    WaterSurface* getWaterSurfaceByNodeName(const std::string& nodeName);
     
     // Update mesh geometry based on physics parameters (static, called once)
     void updateWaterMesh(WaterSurface* surf);
     
     // Update mesh with animation - CPU path (called each frame for animated surfaces)
     bool updateAnimatedWaterMesh(WaterSurface* surf, float time);
+    bool restoreAnimatedWaterMesh(WaterSurface* surf);
     
     // Update mesh with animation - GPU path (much faster for large meshes)
     bool updateGPUAnimatedWaterMesh(WaterSurface* surf, float time);

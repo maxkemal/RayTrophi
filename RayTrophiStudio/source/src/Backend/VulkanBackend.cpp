@@ -1,4 +1,4 @@
-/*
+﻿/*
  * =========================================================================
  * Project:       RayTrophi Studio
  * File:          VulkanBackend.cpp
@@ -12,6 +12,7 @@
 #include "Stylize/StylizeKernel.h"
 #include "MeshModifiers.h"   // Phase 3d: CCDeviceGeometry release for device-resident meshes
 #include "SimulationCompute.h" // Phase 3d: release shared mesh compute backend before device destroy
+#include "MeshPointiness.h"  // Geometry-node Pointiness: per-vertex attribute uploaded with the BLAS
 #include "globals.h"
 #include <SDL_surface.h>
 #include <iostream>
@@ -194,6 +195,9 @@ bool refreshVulkanGeometryDataBinding(VulkanRT::VulkanDevice* device) {
         d.uvAddr = blas.uvBuffer.deviceAddress;
         d.indexAddr = blas.indexBuffer.deviceAddress;
         d.materialAddr = blas.materialIndexBuffer.buffer ? blas.materialIndexBuffer.deviceAddress : 0;
+        d.pointinessAddr = blas.pointinessBuffer.buffer ? blas.pointinessBuffer.deviceAddress : 0;
+        d.attribAddr = blas.attribBuffer.buffer ? blas.attribBuffer.deviceAddress : 0;
+        d.waterAddr = blas.waterBuffer.buffer ? blas.waterBuffer.deviceAddress : 0;
         geoData.push_back(d);
     }
 
@@ -825,6 +829,9 @@ void VulkanDevice::shutdown() {
                 safeDestroy(blas.uvBuffer);
                 safeDestroy(blas.indexBuffer);
                 safeDestroy(blas.materialIndexBuffer);
+                safeDestroy(blas.pointinessBuffer);
+                safeDestroy(blas.attribBuffer);
+                safeDestroy(blas.waterBuffer);
             }
             safeDestroy(blas.baseVertexBuffer);
             safeDestroy(blas.baseNormalBuffer);
@@ -858,6 +865,7 @@ void VulkanDevice::shutdown() {
         destroyBuffer(m_photonVolGridBuffer);
         destroyBuffer(m_photonVolDirBuffer);
         destroyBuffer(m_materialBuffer);
+        destroyBuffer(m_materialExtBuffer);
         destroyBuffer(m_lightBuffer);
         destroyBuffer(m_geometryDataBuffer);
         destroyBuffer(m_instanceDataBuffer);
@@ -866,6 +874,7 @@ void VulkanDevice::shutdown() {
         destroyBuffer(m_hairMaterialBuffer);
         destroyBuffer(m_hairSegmentBuffer);
         destroyBuffer(m_terrainLayerBuffer);
+        destroyBuffer(m_matProgramBuffer);
 
         m_rtPipelineReady = false;
 
@@ -1216,6 +1225,10 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     // kernels — they do not use shared-memory float atomics.
     const bool canUseAtomicFloat = hasAtomicFloat &&
         supportedAtomicFloatFeatures.shaderBufferFloat32AtomicAdd == VK_TRUE;
+    // Core FP64 feature — needed by the sim compute MGPCG dot kernel
+    // (double block partials, CPU-PCG-parity accumulation). Optional: absent
+    // (e.g. some Intel Arc drivers) → the fluid pressure solve stays on CPU.
+    const bool canUseShaderFloat64 = supportedFeatures.features.shaderFloat64 == VK_TRUE;
     if (hasAtomicFloat && !canUseAtomicFloat) {
         VK_WARN() << "[VulkanDevice] shader_atomic_float extension present but shaderBufferFloat32AtomicAdd is unsupported; fluid P2G stays on CPU." << std::endl;
     }
@@ -1273,6 +1286,7 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     VkPhysicalDeviceFeatures2 features2{};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.features.samplerAnisotropy = canUseSamplerAnisotropy ? VK_TRUE : VK_FALSE;
+    features2.features.shaderFloat64 = canUseShaderFloat64 ? VK_TRUE : VK_FALSE;
 
     VkPhysicalDeviceBufferDeviceAddressFeatures bdaFeatures{};
     bdaFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
@@ -1344,6 +1358,7 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     bool enabledDescIdx = (result == VK_SUCCESS) && canUseDescIdx;
     bool enabledSamplerAnisotropy = (result == VK_SUCCESS) && canUseSamplerAnisotropy;
     bool enabledAtomicFloat = (result == VK_SUCCESS) && canUseAtomicFloat;
+    bool enabledShaderFloat64 = (result == VK_SUCCESS) && canUseShaderFloat64;
     if (result != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] vkCreateDevice failed: " << result << std::endl;
         // Log requested extensions for diagnostics
@@ -1378,6 +1393,7 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         // Must latch false so the sim compute backend keeps fluid P2G on CPU
         // instead of invoking undefined float-atomic behaviour.
         enabledAtomicFloat = false;
+        enabledShaderFloat64 = false;
         VK_INFO() << "[VulkanDevice] Device created with fallback (no HW RT, descriptor indexing disabled). Continuing in compute mode." << std::endl;
     }
     // Latch enabled-at-create descriptor indexing state into capabilities.
@@ -1396,8 +1412,12 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     // so the sim compute backend can safely run fluid P2G scatter / density splat
     // on the GPU. False on the fallback path → those kernels stay on CPU.
     g_vulkan_sim_compute_ctx.shader_atomic_float_enabled = enabledAtomicFloat;
+    g_vulkan_sim_compute_ctx.shader_float64_enabled = enabledShaderFloat64;
     if (enabledAtomicFloat) {
         VK_INFO() << "[VulkanDevice] VK_EXT_shader_atomic_float enabled; fluid P2G/density can run on Vulkan GPU." << std::endl;
+    }
+    if (enabledShaderFloat64) {
+        VK_INFO() << "[VulkanDevice] shaderFloat64 enabled; fluid MGPCG pressure solve can run on Vulkan GPU." << std::endl;
     }
 
     return true;
@@ -2039,7 +2059,21 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
     bool hasMaterials = (info.materialIndexData && info.materialIndexCount > 0) || (info.useDeviceGeometry && info.materialIndexCount > 0);
     uint64_t matSize = hasMaterials ? (uint64_t)info.materialIndexCount * sizeof(uint32_t) : 0;
 
-    uint64_t totalGeomSize = vertSize + normSize + uvSize + idxSize + matSize;
+    // Per-vertex pointiness rides at the END of the combined buffer, so the device-resident
+    // (Phase 3d) layout — vert|norm|uv|idx|mat, written by the CC compute — keeps its offsets
+    // untouched. That mode simply carries no pointiness block (addr stays 0 => flat fallback).
+    uint64_t ptSize = (!info.useDeviceGeometry && info.pointinessData) ? (uint64_t)info.vertexCount * sizeof(float) : 0;
+
+    // Named per-vertex attributes (Attribute node) ride at the very end, after pointiness,
+    // for the same reason: the device-resident layout must keep its offsets. INTERLEAVED
+    // kMatAttribSlots floats per vertex — one block, one address, constant stride, so the
+    // shader needs no vertex count and VkGeometryData grows by a single field.
+    uint64_t atSize = (!info.useDeviceGeometry && info.attribData)
+        ? (uint64_t)info.vertexCount * sizeof(float) * MaterialNodesV2::kMatAttribSlots : 0;
+    uint64_t waterSize = (!info.useDeviceGeometry && info.waterData)
+        ? (uint64_t)info.vertexCount * sizeof(float) * 12u : 0;
+
+    uint64_t totalGeomSize = vertSize + normSize + uvSize + idxSize + matSize + ptSize + atSize + waterSize;
 
     // Base device address of the (combined) geometry: a buffer we allocate+upload in host
     // mode, or the caller's pre-written GPU buffer in device-resident mode.
@@ -2068,7 +2102,10 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
         if (normSize && info.normalData) { uploadBuffer(geometryBuffer, info.normalData, normSize, off); off += normSize; }
         if (uvSize && info.uvData)       { uploadBuffer(geometryBuffer, info.uvData, uvSize, off); off += uvSize; }
         if (idxSize && info.indexData)   { uploadBuffer(geometryBuffer, info.indexData, idxSize, off); off += idxSize; }
-        if (matSize && info.materialIndexData) { uploadBuffer(geometryBuffer, info.materialIndexData, matSize, off); }
+        if (matSize && info.materialIndexData) { uploadBuffer(geometryBuffer, info.materialIndexData, matSize, off); off += matSize; }
+        if (ptSize) { uploadBuffer(geometryBuffer, info.pointinessData, ptSize, off); off += ptSize; }
+        if (atSize) { uploadBuffer(geometryBuffer, info.attribData, atSize, off); off += atSize; }
+        if (waterSize) { uploadBuffer(geometryBuffer, info.waterData, waterSize, off); }
     }
     
     // Build skinning separate buffers if required
@@ -2264,10 +2301,23 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
         blasHandle.materialIndexBuffer = geometryBuffer;
         blasHandle.materialIndexBuffer.deviceAddress = geomBase + vertSize + normSize + uvSize + idxSize;
     }
-    
+    if (ptSize) {
+        blasHandle.pointinessBuffer = geometryBuffer;
+        blasHandle.pointinessBuffer.deviceAddress = geomBase + vertSize + normSize + uvSize + idxSize + matSize;
+    }
+    if (atSize) {
+        blasHandle.attribBuffer = geometryBuffer;
+        blasHandle.attribBuffer.deviceAddress = geomBase + vertSize + normSize + uvSize + idxSize + matSize + ptSize;
+    }
+    if (waterSize) {
+        blasHandle.waterBuffer = geometryBuffer;
+        blasHandle.waterBuffer.deviceAddress = geomBase + vertSize + normSize + uvSize + idxSize + matSize + ptSize + atSize;
+    }
+
     // Store dynamic update / skinning state.
     blasHandle.hasSkinning = info.hasSkinning;
     blasHandle.allowUpdate = info.allowUpdate;
+    blasHandle.geometryFlags = geometry.flags;
     blasHandle.vertexCount = info.vertexCount;
     blasHandle.indexCount = info.indexCount;
     if (info.hasSkinning) {
@@ -2390,12 +2440,12 @@ bool VulkanDevice::dispatchSkinningToBuffers(BufferHandle& baseVertexBuffer,
     return true;
 }
 
-void VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, const float* newNormals) {
-    if (!hasHardwareRT() || !fpCmdBuildAccelerationStructuresKHR) return;
-    if (blasIndex >= m_blasList.size()) return;
+bool VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, const float* newNormals) {
+    if (!hasHardwareRT() || !fpCmdBuildAccelerationStructuresKHR) return false;
+    if (blasIndex >= m_blasList.size()) return false;
     
     AccelStructHandle& blasHandle = m_blasList[blasIndex];
-    if (blasHandle.accel == VK_NULL_HANDLE || !blasHandle.allowUpdate || blasHandle.vertexCount == 0) return;
+    if (blasHandle.accel == VK_NULL_HANDLE || !blasHandle.allowUpdate || blasHandle.vertexCount == 0) return false;
 
     if (newVertices) {
         uploadBuffer(blasHandle.vertexBuffer, newVertices, (uint64_t)blasHandle.vertexCount * 12);
@@ -2435,7 +2485,10 @@ void VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, cons
     VkAccelerationStructureGeometryKHR geometry{};
     geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
     geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-    geometry.flags = 0;
+    // Vulkan MODE_UPDATE requires every geometry flag to be identical to the
+    // original build. Terrain is commonly built OPAQUE; changing that to zero here
+    // is invalid and can crash inside the driver instead of producing a clean error.
+    geometry.flags = blasHandle.geometryFlags;
     geometry.geometry.triangles = triangles;
 
     uint32_t primitiveCount = hasIndices ? (blasHandle.indexCount / 3) : (blasHandle.vertexCount / 3);
@@ -2454,12 +2507,21 @@ void VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, cons
     sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
     fpGetAccelerationStructureBuildSizesKHR(m_device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &primitiveCount, &sizeInfo);
 
+    // MODE_UPDATE requires updateScratchSize (not buildScratchSize), and the scratch
+    // device address must respect minAccelerationStructureScratchOffsetAlignment.
+    const uint64_t scratchAlignment =
+        m_capabilities.minScratchAlignment > 0 ? m_capabilities.minScratchAlignment : 128;
+    const uint64_t updateScratchSize = sizeInfo.updateScratchSize;
+    const uint64_t alignedScratchSize =
+        (updateScratchSize + scratchAlignment - 1) & ~(scratchAlignment - 1);
+    if (alignedScratchSize == 0) return false;
+
     BufferCreateInfo scratchBufInfo;
-    scratchBufInfo.size = sizeInfo.buildScratchSize;
+    scratchBufInfo.size = alignedScratchSize;
     scratchBufInfo.usage = BufferUsage::STORAGE;
     scratchBufInfo.location = MemoryLocation::GPU_ONLY;
     auto scratchBuffer = createBuffer(scratchBufInfo);
-    if (!scratchBuffer.buffer) return;
+    if (!scratchBuffer.buffer) return false;
 
     buildInfo.scratchData.deviceAddress = scratchBuffer.deviceAddress;
 
@@ -2470,12 +2532,13 @@ void VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, cons
     VkCommandBuffer cmd = beginSingleTimeCommands();
     if (cmd == VK_NULL_HANDLE) {
         destroyBuffer(scratchBuffer);
-        return;
+        return false;
     }
     fpCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRangeInfo);
     endSingleTimeCommands(cmd);
 
     destroyBuffer(scratchBuffer);
+    return true;
 }
 
 // ========================================================================
@@ -3328,7 +3391,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     // Binding 18: Foam sphere SSBO (intersection + closest-hit)
     // Binding 19: Photon caustic hash grid SSBO (photon raygen writes, camera
     //             raygen debug-reads, closesthit gathers in Dilim 2)
-    VkDescriptorSetLayoutBinding bindings[23] = {};
+    VkDescriptorSetLayoutBinding bindings[25] = {};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[0].descriptorCount = 1;
@@ -3459,9 +3522,25 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     bindings[22].descriptorCount = 1;
     bindings[22].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
 
+    // Binding 23: Faz 2b material-program VM stream (flattened node graphs),
+    // read by closest-hit's material_program.glsl interpreter.
+    bindings[23].binding = 23;
+    bindings[23].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[23].descriptorCount = 1;
+    bindings[23].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
+    // Binding 24: COLD material fields (VkGpuMaterialExt) — the feature-gated
+    // half of the split material record (SSS/water/bubble/resin/dust). Only
+    // closesthit reads it; the shadow any-hit path stays entirely on the hot
+    // core buffer (binding 2).
+    bindings[24].binding = 24;
+    bindings[24].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[24].descriptorCount = 1;
+    bindings[24].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
     VkDescriptorSetLayoutCreateInfo dslCI{};
     dslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslCI.bindingCount = 23;
+    dslCI.bindingCount = 25;
     dslCI.pBindings = bindings;
     vkCreateDescriptorSetLayout(m_device, &dslCI, nullptr, &m_rtDescriptorSetLayout);
 
@@ -3697,7 +3776,10 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
         defaultMat.specular = 0.5f;
         defaultMat.ior = 1.45f;
         defaultMat.transmission = 0.0f;
-        updateMaterialBuffer(&defaultMat, sizeof(VulkanRT::VkGpuMaterial), 1);
+        VulkanRT::VkGpuMaterialCore defaultCore{};
+        VulkanRT::VkGpuMaterialExt  defaultExt{};
+        VulkanRT::splitGpuMaterial(defaultMat, defaultCore, defaultExt);
+        updateMaterialBuffer(&defaultCore, sizeof(defaultCore), &defaultExt, sizeof(defaultExt), 1);
     }
     if (!m_lightBuffer.buffer) {
         VulkanRT::VkGpuLight defaultLight{};
@@ -3734,6 +3816,9 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
             d.uvAddr = blas.uvBuffer.deviceAddress;
             d.indexAddr = blas.indexBuffer.deviceAddress;
             d.materialAddr = blas.materialIndexBuffer.buffer ? blas.materialIndexBuffer.deviceAddress : 0;
+            d.pointinessAddr = blas.pointinessBuffer.buffer ? blas.pointinessBuffer.deviceAddress : 0;
+            d.attribAddr = blas.attribBuffer.buffer ? blas.attribBuffer.deviceAddress : 0;
+            d.waterAddr = blas.waterBuffer.buffer ? blas.waterBuffer.deviceAddress : 0;
             geoData.push_back(d);
         }
         BufferCreateInfo ci;
@@ -3772,11 +3857,18 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
     asWrite.accelerationStructureCount = 1;
     asWrite.pAccelerationStructures = &m_tlas.accel;
 
-    // binding 2: Materials
+    // binding 2: Materials (hot core records)
     VkDescriptorBufferInfo matInfo{};
     matInfo.buffer = m_materialBuffer.buffer;
     matInfo.offset = 0;
     matInfo.range = VK_WHOLE_SIZE;
+
+    // binding 24: Material EXT (cold, feature-gated records). Fallback to the
+    // core buffer so the binding is never null before the first material upload.
+    VkDescriptorBufferInfo matExtInfo{};
+    matExtInfo.buffer = m_materialExtBuffer.buffer ? m_materialExtBuffer.buffer : m_materialBuffer.buffer;
+    matExtInfo.offset = 0;
+    matExtInfo.range = VK_WHOLE_SIZE;
 
     // binding 3: Lights
     VkDescriptorBufferInfo lightInfo{};
@@ -3826,7 +3918,7 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
     w1.pNext = &asWrite;
     writes.push_back(w1);
 
-    // Binding 2 (Materials)
+    // Binding 2 (Materials — hot core)
     VkWriteDescriptorSet w2{};
     w2.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     w2.dstSet = m_rtDescriptorSet;
@@ -3835,6 +3927,16 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
     w2.descriptorCount = 1;
     w2.pBufferInfo = &matInfo;
     writes.push_back(w2);
+
+    // Binding 24 (Materials — cold ext)
+    VkWriteDescriptorSet w24{};
+    w24.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w24.dstSet = m_rtDescriptorSet;
+    w24.dstBinding = 24;
+    w24.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w24.descriptorCount = 1;
+    w24.pBufferInfo = &matExtInfo;
+    writes.push_back(w24);
 
     // Binding 3 (Lights)
     VkWriteDescriptorSet w3{};
@@ -3945,6 +4047,26 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
     w12.descriptorCount = 1;
     w12.pBufferInfo = &terrainLayerInfo;
     writes.push_back(w12);
+
+    // Binding 23: Faz 2b material-program SSBO. Guarantee a valid buffer so the
+    // descriptor is always complete — an empty stream (single 0 word) means
+    // materialCount=0, so every proc-offset lookup returns NONE and no program runs.
+    if (!m_matProgramBuffer.buffer) {
+        const uint32_t emptyProg = 0u;
+        updateMatProgramBuffer(&emptyProg, sizeof(uint32_t));
+    }
+    VkDescriptorBufferInfo matProgInfo{};
+    matProgInfo.buffer = m_matProgramBuffer.buffer;
+    matProgInfo.offset = 0;
+    matProgInfo.range  = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet w23{};
+    w23.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w23.dstSet = m_rtDescriptorSet;
+    w23.dstBinding = 23;
+    w23.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w23.descriptorCount = 1;
+    w23.pBufferInfo = &matProgInfo;
+    writes.push_back(w23);
 
     VkDescriptorImageInfo denoiserColorInfo{};
     denoiserColorInfo.imageView = (denoiserColorImage && denoiserColorImage->view) ? denoiserColorImage->view : outputImage.view;
@@ -4281,34 +4403,42 @@ void VulkanDevice::removePendingRTTextureDescriptor(const ImageHandle& image) {
 }
 
 
-void VulkanDevice::updateMaterialBuffer(const void* data, uint64_t size, uint32_t count) {
-    if (m_materialBuffer.size < size) {
-        if (m_materialBuffer.buffer) destroyBuffer(m_materialBuffer);
-        
+void VulkanDevice::updateMaterialBuffer(const void* coreData, uint64_t coreSize,
+                                        const void* extData, uint64_t extSize, uint32_t count) {
+    // Grow-and-rebind helper shared by the core (binding 2) and ext (binding 24)
+    // halves of the split material record.
+    auto ensureBuffer = [this](BufferHandle& buf, uint64_t size, uint32_t binding) {
+        if (buf.size >= size) return;
+        if (buf.buffer) destroyBuffer(buf);
+
         BufferCreateInfo ci;
         ci.size = size > 1024 ? size : 1024; // Min size
         ci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
         ci.location = MemoryLocation::GPU_ONLY;
-        m_materialBuffer = createBuffer(ci);
+        buf = createBuffer(ci);
 
         // Update descriptor if set already exists
         if (m_rtDescriptorSet != VK_NULL_HANDLE) {
-            VkDescriptorBufferInfo matInfo{};
-            matInfo.buffer = m_materialBuffer.buffer;
-            matInfo.offset = 0;
-            matInfo.range = VK_WHOLE_SIZE;
+            VkDescriptorBufferInfo info{};
+            info.buffer = buf.buffer;
+            info.offset = 0;
+            info.range = VK_WHOLE_SIZE;
 
-            VkWriteDescriptorSet w2{};
-            w2.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            w2.dstSet = m_rtDescriptorSet;
-            w2.dstBinding = 2;
-            w2.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            w2.descriptorCount = 1;
-            w2.pBufferInfo = &matInfo;
-            vkUpdateDescriptorSets(m_device, 1, &w2, 0, nullptr);
+            VkWriteDescriptorSet w{};
+            w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.dstSet = m_rtDescriptorSet;
+            w.dstBinding = binding;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w.descriptorCount = 1;
+            w.pBufferInfo = &info;
+            vkUpdateDescriptorSets(m_device, 1, &w, 0, nullptr);
         }
-    }
-    uploadBuffer(m_materialBuffer, data, size);
+    };
+
+    ensureBuffer(m_materialBuffer, coreSize, 2);
+    ensureBuffer(m_materialExtBuffer, extSize, 24);
+    uploadBuffer(m_materialBuffer, coreData, coreSize);
+    uploadBuffer(m_materialExtBuffer, extData, extSize);
     m_materialCount = count;
 }
 
@@ -4453,6 +4583,41 @@ void VulkanDevice::updateTerrainLayerBuffer(const void* data, uint64_t size, uin
     uploadBuffer(m_terrainLayerBuffer, data, size);
     m_terrainLayerCount = count;
    // VK_INFO() << "[VulkanDevice] updateTerrainLayerBuffer - " << count << " terrain layers uploaded (" << size << " bytes)" << std::endl;
+}
+
+void VulkanDevice::updateMatProgramBuffer(const void* data, uint64_t size) {
+    if (size == 0 || data == nullptr) return;
+    if (m_matProgramBuffer.size < size) {
+        if (m_matProgramBuffer.buffer) {
+            // destroyBuffer is immediate (no deferred-deletion queue) — drain any
+            // async GPU work still reading the old buffer before freeing it. Only
+            // hit on growth past capacity, never on first creation or in-place upload.
+            waitIdle();
+            destroyBuffer(m_matProgramBuffer);
+        }
+        BufferCreateInfo ci;
+        ci.size = size > 256 ? size : 256; // Min 256 bytes
+        ci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
+        ci.location = MemoryLocation::GPU_ONLY;
+        m_matProgramBuffer = createBuffer(ci);
+
+        // Rebind descriptor binding 23 to the (re)allocated buffer.
+        if (m_rtDescriptorSet != VK_NULL_HANDLE) {
+            VkDescriptorBufferInfo info{};
+            info.buffer = m_matProgramBuffer.buffer;
+            info.offset = 0;
+            info.range = VK_WHOLE_SIZE;
+            VkWriteDescriptorSet w{};
+            w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.dstSet = m_rtDescriptorSet;
+            w.dstBinding = 23;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w.descriptorCount = 1;
+            w.pBufferInfo = &info;
+            vkUpdateDescriptorSets(m_device, 1, &w, 0, nullptr);
+        }
+    }
+    uploadBuffer(m_matProgramBuffer, data, size);
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -5888,743 +6053,6 @@ std::unique_ptr<VulkanDevice> createVulkanDevice(bool preferHardwareRT, bool val
 
 
 // ============================================================================
-// Backend::VulkanBackendAdapter Implementation
-// ============================================================================
-
-
-
-bool VulkanDevice::createSkinningPipeline(const std::vector<uint32_t>& computeSPV) {
-    if (computeSPV.empty()) return false;
-
-    // Recreate-safe: free previous skinning resources first.
-    // Existing per-BLAS descriptor sets are allocated from the old pool/layout.
-    // Invalidate all cached handles so dispatchSkinning reallocates safely.
-    for (auto& blas : m_blasList) {
-        blas.skinningDescSet = VK_NULL_HANDLE;
-    }
-    if (m_skinningPipeline) { vkDestroyPipeline(m_device, m_skinningPipeline, nullptr); m_skinningPipeline = VK_NULL_HANDLE; }
-    if (m_skinningPipelineLayout) { vkDestroyPipelineLayout(m_device, m_skinningPipelineLayout, nullptr); m_skinningPipelineLayout = VK_NULL_HANDLE; }
-    if (m_skinningDescLayout) { vkDestroyDescriptorSetLayout(m_device, m_skinningDescLayout, nullptr); m_skinningDescLayout = VK_NULL_HANDLE; }
-    if (m_skinningDescPool) { vkDestroyDescriptorPool(m_device, m_skinningDescPool, nullptr); m_skinningDescPool = VK_NULL_HANDLE; }
-    
-    // Create descriptor pool — one persistent set per skinned BLAS, no upper bound known at
-    // pipeline-creation time so we use a generous cap.  Pool is never reset; sets are
-    // allocated once per BLAS and reused every frame (FREE_DESCRIPTOR_SET_BIT not needed).
-    // 64 skinned meshes × 7 bindings = 448 descriptors max.
-    const uint32_t kMaxSkinnedMeshes = 64;
-    VkDescriptorPoolSize poolSizes[] = { {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxSkinnedMeshes * 7} };
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = poolSizes;
-    poolInfo.maxSets = kMaxSkinnedMeshes;
-    poolInfo.flags = 0; // no free needed — persistent sets
-    if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_skinningDescPool) != VK_SUCCESS) return false;
-
-    // Create descriptor set layout (7 storage bindings)
-    std::vector<VkDescriptorSetLayoutBinding> bindings(7);
-    for(int i=0; i<7; ++i){
-        bindings[i].binding = i;
-        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 7;
-    layoutInfo.pBindings = bindings.data();
-    if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_skinningDescLayout) != VK_SUCCESS) {
-        vkDestroyDescriptorPool(m_device, m_skinningDescPool, nullptr);
-        m_skinningDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    // Create Pipeline Layout
-    VkPushConstantRange pc{};
-    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pc.offset = 0;
-    pc.size = 8; // 2 uints: vertexCount + boneCount
-
-    VkPipelineLayoutCreateInfo plInfo{};
-    plInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    plInfo.setLayoutCount = 1;
-    plInfo.pSetLayouts = &m_skinningDescLayout;
-    plInfo.pushConstantRangeCount = 1;
-    plInfo.pPushConstantRanges = &pc;
-    if (vkCreatePipelineLayout(m_device, &plInfo, nullptr, &m_skinningPipelineLayout) != VK_SUCCESS) {
-        vkDestroyDescriptorSetLayout(m_device, m_skinningDescLayout, nullptr);
-        m_skinningDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_skinningDescPool, nullptr);
-        m_skinningDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    // Create shader module
-    VkShaderModuleCreateInfo smInfo{};
-    smInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    smInfo.codeSize = computeSPV.size() * sizeof(uint32_t);
-    smInfo.pCode = computeSPV.data();
-    VkShaderModule compModule;
-    if (vkCreateShaderModule(m_device, &smInfo, nullptr, &compModule) != VK_SUCCESS) {
-        vkDestroyPipelineLayout(m_device, m_skinningPipelineLayout, nullptr);
-        m_skinningPipelineLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorSetLayout(m_device, m_skinningDescLayout, nullptr);
-        m_skinningDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_skinningDescPool, nullptr);
-        m_skinningDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    VkComputePipelineCreateInfo cpInfo{};
-    cpInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    cpInfo.layout = m_skinningPipelineLayout;
-    cpInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    cpInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    cpInfo.stage.module = compModule;
-    cpInfo.stage.pName = "main";
-    
-    if (vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpInfo, nullptr, &m_skinningPipeline) != VK_SUCCESS) {
-        vkDestroyShaderModule(m_device, compModule, nullptr);
-        vkDestroyPipelineLayout(m_device, m_skinningPipelineLayout, nullptr);
-        m_skinningPipelineLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorSetLayout(m_device, m_skinningDescLayout, nullptr);
-        m_skinningDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_skinningDescPool, nullptr);
-        m_skinningDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    vkDestroyShaderModule(m_device, compModule, nullptr);
-    return true;
-}
-
-bool VulkanDevice::createSculptPipeline(const std::vector<uint32_t>& computeSPV) {
-    if (computeSPV.empty()) return false;
-
-    if (m_sculptPipeline) { vkDestroyPipeline(m_device, m_sculptPipeline, nullptr); m_sculptPipeline = VK_NULL_HANDLE; }
-    if (m_sculptPipelineLayout) { vkDestroyPipelineLayout(m_device, m_sculptPipelineLayout, nullptr); m_sculptPipelineLayout = VK_NULL_HANDLE; }
-    if (m_sculptDescLayout) { vkDestroyDescriptorSetLayout(m_device, m_sculptDescLayout, nullptr); m_sculptDescLayout = VK_NULL_HANDLE; }
-    if (m_sculptDescPool) { vkDestroyDescriptorPool(m_device, m_sculptDescPool, nullptr); m_sculptDescPool = VK_NULL_HANDLE; }
-
-    // Descriptor pool: allow up to 64 sets, 3 storage buffers each
-    const uint32_t kMaxSculptSets = 64;
-    VkDescriptorPoolSize poolSizes[] = { {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxSculptSets * 3} };
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = poolSizes;
-    poolInfo.maxSets = kMaxSculptSets;
-    poolInfo.flags = 0;
-    if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_sculptDescPool) != VK_SUCCESS) return false;
-
-    // Descriptor layout: 3 storage buffers (positions, normals, weights)
-    std::vector<VkDescriptorSetLayoutBinding> bindings(3);
-    for (int i = 0; i < 3; ++i) {
-        bindings[i].binding = i;
-        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = (uint32_t)bindings.size();
-    layoutInfo.pBindings = bindings.data();
-    if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_sculptDescLayout) != VK_SUCCESS) {
-        vkDestroyDescriptorPool(m_device, m_sculptDescPool, nullptr);
-        m_sculptDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    // Pipeline layout with optional push constants (up to 64 bytes)
-    VkPushConstantRange pc{};
-    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pc.offset = 0;
-    pc.size = 64;
-
-    VkPipelineLayoutCreateInfo plInfo{};
-    plInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    plInfo.setLayoutCount = 1;
-    plInfo.pSetLayouts = &m_sculptDescLayout;
-    plInfo.pushConstantRangeCount = 1;
-    plInfo.pPushConstantRanges = &pc;
-    if (vkCreatePipelineLayout(m_device, &plInfo, nullptr, &m_sculptPipelineLayout) != VK_SUCCESS) {
-        vkDestroyDescriptorSetLayout(m_device, m_sculptDescLayout, nullptr);
-        m_sculptDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_sculptDescPool, nullptr);
-        m_sculptDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    // Create shader module
-    VkShaderModuleCreateInfo smInfo{};
-    smInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    smInfo.codeSize = computeSPV.size() * sizeof(uint32_t);
-    smInfo.pCode = computeSPV.data();
-    VkShaderModule compModule;
-    if (vkCreateShaderModule(m_device, &smInfo, nullptr, &compModule) != VK_SUCCESS) {
-        vkDestroyPipelineLayout(m_device, m_sculptPipelineLayout, nullptr);
-        m_sculptPipelineLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorSetLayout(m_device, m_sculptDescLayout, nullptr);
-        m_sculptDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_sculptDescPool, nullptr);
-        m_sculptDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    VkComputePipelineCreateInfo cpInfo{};
-    cpInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    cpInfo.layout = m_sculptPipelineLayout;
-    cpInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    cpInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    cpInfo.stage.module = compModule;
-    cpInfo.stage.pName = "main";
-
-    if (vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpInfo, nullptr, &m_sculptPipeline) != VK_SUCCESS) {
-        vkDestroyShaderModule(m_device, compModule, nullptr);
-        vkDestroyPipelineLayout(m_device, m_sculptPipelineLayout, nullptr);
-        m_sculptPipelineLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorSetLayout(m_device, m_sculptDescLayout, nullptr);
-        m_sculptDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_sculptDescPool, nullptr);
-        m_sculptDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    vkDestroyShaderModule(m_device, compModule, nullptr);
-    return true;
-}
-
-bool VulkanDevice::createTonemapPipeline(const std::vector<uint32_t>& computeSPV) {
-    if (computeSPV.empty()) return false;
-
-    if (m_tonemapPipeline)       { vkDestroyPipeline(m_device, m_tonemapPipeline, nullptr); m_tonemapPipeline = VK_NULL_HANDLE; }
-    if (m_tonemapPipelineLayout) { vkDestroyPipelineLayout(m_device, m_tonemapPipelineLayout, nullptr); m_tonemapPipelineLayout = VK_NULL_HANDLE; }
-    if (m_tonemapDescLayout)     { vkDestroyDescriptorSetLayout(m_device, m_tonemapDescLayout, nullptr); m_tonemapDescLayout = VK_NULL_HANDLE; }
-    if (m_tonemapDescPool)       { vkDestroyDescriptorPool(m_device, m_tonemapDescPool, nullptr); m_tonemapDescPool = VK_NULL_HANDLE; }
-    m_tonemapDescSet = VK_NULL_HANDLE;
-
-    // Pool sized for a single persistent set. Aşama 2 binds the same set from both
-    // frame slots — images don't change frame-to-frame, only on resize (at which point
-    // fences are drained before updateTonemapDescriptors rewrites it).
-    const uint32_t kMaxSets = 1;
-    VkDescriptorPoolSize poolSizes[] = { {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxSets * 6} };
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = poolSizes;
-    poolInfo.maxSets = kMaxSets;
-    if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_tonemapDescPool) != VK_SUCCESS) return false;
-
-    // Layout: 0 = HDR input, 1 = LDR output, 2-5 = Debug Visualizer AOVs
-    // (albedo / normal / position / path-stats), all storage images.
-    VkDescriptorSetLayoutBinding bindings[6]{};
-    for (uint32_t i = 0; i < 6; ++i) {
-        bindings[i].binding = i;
-        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 6;
-    layoutInfo.pBindings = bindings;
-    if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_tonemapDescLayout) != VK_SUCCESS) {
-        vkDestroyDescriptorPool(m_device, m_tonemapDescPool, nullptr);
-        m_tonemapDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    VkPushConstantRange pc{};
-    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pc.offset = 0;
-    pc.size = 40; // w,h,view + exposure,heatScale,bounceScale,overlay + camXYZ
-
-    VkPipelineLayoutCreateInfo plInfo{};
-    plInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    plInfo.setLayoutCount = 1;
-    plInfo.pSetLayouts = &m_tonemapDescLayout;
-    plInfo.pushConstantRangeCount = 1;
-    plInfo.pPushConstantRanges = &pc;
-    if (vkCreatePipelineLayout(m_device, &plInfo, nullptr, &m_tonemapPipelineLayout) != VK_SUCCESS) {
-        vkDestroyDescriptorSetLayout(m_device, m_tonemapDescLayout, nullptr); m_tonemapDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_tonemapDescPool, nullptr); m_tonemapDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    VkShaderModuleCreateInfo smInfo{};
-    smInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    smInfo.codeSize = computeSPV.size() * sizeof(uint32_t);
-    smInfo.pCode = computeSPV.data();
-    VkShaderModule compModule;
-    if (vkCreateShaderModule(m_device, &smInfo, nullptr, &compModule) != VK_SUCCESS) {
-        vkDestroyPipelineLayout(m_device, m_tonemapPipelineLayout, nullptr); m_tonemapPipelineLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorSetLayout(m_device, m_tonemapDescLayout, nullptr); m_tonemapDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_tonemapDescPool, nullptr); m_tonemapDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    VkComputePipelineCreateInfo cpInfo{};
-    cpInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    cpInfo.layout = m_tonemapPipelineLayout;
-    cpInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    cpInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    cpInfo.stage.module = compModule;
-    cpInfo.stage.pName = "main";
-
-    if (vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpInfo, nullptr, &m_tonemapPipeline) != VK_SUCCESS) {
-        vkDestroyShaderModule(m_device, compModule, nullptr);
-        vkDestroyPipelineLayout(m_device, m_tonemapPipelineLayout, nullptr); m_tonemapPipelineLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorSetLayout(m_device, m_tonemapDescLayout, nullptr); m_tonemapDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_tonemapDescPool, nullptr); m_tonemapDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    vkDestroyShaderModule(m_device, compModule, nullptr);
-
-    // Pre-allocate the persistent descriptor set. Image views aren't known yet;
-    // updateTonemapDescriptors() will populate them once the adapter has its targets.
-    {
-        VkDescriptorSetAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = m_tonemapDescPool;
-        allocInfo.descriptorSetCount = 1;
-        allocInfo.pSetLayouts = &m_tonemapDescLayout;
-        if (vkAllocateDescriptorSets(m_device, &allocInfo, &m_tonemapDescSet) != VK_SUCCESS) {
-            VK_ERROR() << "[VulkanDevice] Failed to allocate persistent tonemap descriptor set." << std::endl;
-            // Tear down the pipeline objects so hasTonemapPipeline() reports false.
-            vkDestroyPipeline(m_device, m_tonemapPipeline, nullptr); m_tonemapPipeline = VK_NULL_HANDLE;
-            vkDestroyPipelineLayout(m_device, m_tonemapPipelineLayout, nullptr); m_tonemapPipelineLayout = VK_NULL_HANDLE;
-            vkDestroyDescriptorSetLayout(m_device, m_tonemapDescLayout, nullptr); m_tonemapDescLayout = VK_NULL_HANDLE;
-            vkDestroyDescriptorPool(m_device, m_tonemapDescPool, nullptr); m_tonemapDescPool = VK_NULL_HANDLE;
-            return false;
-        }
-    }
-    return true;
-}
-
-bool VulkanDevice::updateTonemapDescriptors(const VulkanRT::ImageHandle& hdrImage, const VulkanRT::ImageHandle& ldrImage,
-                                            const VulkanRT::ImageHandle* aovAlbedo,
-                                            const VulkanRT::ImageHandle* aovNormal,
-                                            const VulkanRT::ImageHandle* aovPosition,
-                                            const VulkanRT::ImageHandle* aovStats) {
-    if (m_tonemapDescSet == VK_NULL_HANDLE) return false;
-    if (!hdrImage.view || !ldrImage.view) return false;
-
-    // 6 bindings: 0=HDR in, 1=LDR out, 2=albedo AOV, 3=normal AOV,
-    // 4=position AOV, 5=path-stats AOV. AOVs fall back to the HDR view so
-    // every layout binding is always valid (they're only read in debug views).
-    VkDescriptorImageInfo infos[6]{};
-    infos[0].imageView = hdrImage.view;
-    infos[1].imageView = ldrImage.view;
-    infos[2].imageView = (aovAlbedo   && aovAlbedo->view)   ? aovAlbedo->view   : hdrImage.view;
-    infos[3].imageView = (aovNormal   && aovNormal->view)   ? aovNormal->view   : hdrImage.view;
-    infos[4].imageView = (aovPosition && aovPosition->view) ? aovPosition->view : hdrImage.view;
-    infos[5].imageView = (aovStats    && aovStats->view)    ? aovStats->view    : hdrImage.view;
-
-    VkWriteDescriptorSet writes[6]{};
-    for (uint32_t i = 0; i < 6; ++i) {
-        infos[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[i].dstSet = m_tonemapDescSet;
-        writes[i].dstBinding = i;
-        writes[i].descriptorCount = 1;
-        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[i].pImageInfo = &infos[i];
-    }
-    vkUpdateDescriptorSets(m_device, 6, writes, 0, nullptr);
-    return true;
-}
-
-bool VulkanDevice::createStylizePipeline(const std::vector<uint32_t>& computeSPV) {
-    if (computeSPV.empty()) return false;
-
-    if (m_stylizePipeline)       { vkDestroyPipeline(m_device, m_stylizePipeline, nullptr); m_stylizePipeline = VK_NULL_HANDLE; }
-    if (m_stylizePipelineLayout) { vkDestroyPipelineLayout(m_device, m_stylizePipelineLayout, nullptr); m_stylizePipelineLayout = VK_NULL_HANDLE; }
-    if (m_stylizeDescLayout)     { vkDestroyDescriptorSetLayout(m_device, m_stylizeDescLayout, nullptr); m_stylizeDescLayout = VK_NULL_HANDLE; }
-    if (m_stylizeDescPool)       { vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE; }
-    m_stylizeDescSet = VK_NULL_HANDLE;
-
-    // Pool: one persistent set with 2 storage buffers (color + params) and 3 storage images (AOVs).
-    const uint32_t kMaxSets = 1;
-    VkDescriptorPoolSize poolSizes[] = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxSets * 2 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  kMaxSets * 3 },
-    };
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = 2;
-    poolInfo.pPoolSizes = poolSizes;
-    poolInfo.maxSets = kMaxSets;
-    if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_stylizeDescPool) != VK_SUCCESS) return false;
-
-    // Layout: 0=color SSBO, 1=position img, 2=albedo img, 3=normal img, 4=params SSBO.
-    VkDescriptorSetLayoutBinding bindings[5]{};
-    auto setBinding = [](VkDescriptorSetLayoutBinding& b, uint32_t idx, VkDescriptorType type) {
-        b.binding = idx; b.descriptorType = type; b.descriptorCount = 1;
-        b.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    };
-    setBinding(bindings[0], 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-    setBinding(bindings[1], 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-    setBinding(bindings[2], 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-    setBinding(bindings[3], 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
-    setBinding(bindings[4], 4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 5;
-    layoutInfo.pBindings = bindings;
-    if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_stylizeDescLayout) != VK_SUCCESS) {
-        vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    VkPipelineLayoutCreateInfo plInfo{};
-    plInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    plInfo.setLayoutCount = 1;
-    plInfo.pSetLayouts = &m_stylizeDescLayout;
-    if (vkCreatePipelineLayout(m_device, &plInfo, nullptr, &m_stylizePipelineLayout) != VK_SUCCESS) {
-        vkDestroyDescriptorSetLayout(m_device, m_stylizeDescLayout, nullptr); m_stylizeDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    VkShaderModuleCreateInfo smInfo{};
-    smInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    smInfo.codeSize = computeSPV.size() * sizeof(uint32_t);
-    smInfo.pCode = computeSPV.data();
-    VkShaderModule compModule;
-    if (vkCreateShaderModule(m_device, &smInfo, nullptr, &compModule) != VK_SUCCESS) {
-        vkDestroyPipelineLayout(m_device, m_stylizePipelineLayout, nullptr); m_stylizePipelineLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorSetLayout(m_device, m_stylizeDescLayout, nullptr); m_stylizeDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    VkComputePipelineCreateInfo cpInfo{};
-    cpInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    cpInfo.layout = m_stylizePipelineLayout;
-    cpInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    cpInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    cpInfo.stage.module = compModule;
-    cpInfo.stage.pName = "main";
-    if (vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpInfo, nullptr, &m_stylizePipeline) != VK_SUCCESS) {
-        vkDestroyShaderModule(m_device, compModule, nullptr);
-        vkDestroyPipelineLayout(m_device, m_stylizePipelineLayout, nullptr); m_stylizePipelineLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorSetLayout(m_device, m_stylizeDescLayout, nullptr); m_stylizeDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-    vkDestroyShaderModule(m_device, compModule, nullptr);
-
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = m_stylizeDescPool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &m_stylizeDescLayout;
-    if (vkAllocateDescriptorSets(m_device, &allocInfo, &m_stylizeDescSet) != VK_SUCCESS) {
-        vkDestroyPipeline(m_device, m_stylizePipeline, nullptr); m_stylizePipeline = VK_NULL_HANDLE;
-        vkDestroyPipelineLayout(m_device, m_stylizePipelineLayout, nullptr); m_stylizePipelineLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorSetLayout(m_device, m_stylizeDescLayout, nullptr); m_stylizeDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_stylizeDescPool, nullptr); m_stylizeDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-    return true;
-}
-
-bool VulkanDevice::updateStylizeDescriptors(const VulkanRT::BufferHandle& colorBuf,
-                                            const VulkanRT::BufferHandle& paramsBuf,
-                                            VkImageView posView, VkImageView albView, VkImageView nrmView) {
-    if (m_stylizeDescSet == VK_NULL_HANDLE) return false;
-    if (!colorBuf.buffer || !paramsBuf.buffer || !posView || !albView || !nrmView) return false;
-
-    VkDescriptorBufferInfo colorInfo{ colorBuf.buffer, 0, VK_WHOLE_SIZE };
-    VkDescriptorBufferInfo paramsInfo{ paramsBuf.buffer, 0, VK_WHOLE_SIZE };
-    VkDescriptorImageInfo posInfo{}; posInfo.imageView = posView; posInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkDescriptorImageInfo albInfo{}; albInfo.imageView = albView; albInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkDescriptorImageInfo nrmInfo{}; nrmInfo.imageView = nrmView; nrmInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-    VkWriteDescriptorSet w[5]{};
-    for (int i = 0; i < 5; ++i) {
-        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w[i].dstSet = m_stylizeDescSet;
-        w[i].dstBinding = (uint32_t)i;
-        w[i].descriptorCount = 1;
-    }
-    w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[0].pBufferInfo = &colorInfo;
-    w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;  w[1].pImageInfo  = &posInfo;
-    w[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;  w[2].pImageInfo  = &albInfo;
-    w[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;  w[3].pImageInfo  = &nrmInfo;
-    w[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[4].pBufferInfo = &paramsInfo;
-    vkUpdateDescriptorSets(m_device, 5, w, 0, nullptr);
-    return true;
-}
-
-bool VulkanDevice::dispatchStylizeCompute(uint32_t w, uint32_t h, VkImage posImg, VkImage albImg, VkImage nrmImg) {
-    if (m_stylizePipeline == VK_NULL_HANDLE || m_stylizeDescSet == VK_NULL_HANDLE) return false;
-
-    VkCommandBuffer cmd = beginSingleTimeCommands();
-    if (cmd == VK_NULL_HANDLE) return false;
-
-    // Make the RT-frame AOV writes available to the compute read. Images stay in
-    // GENERAL (they are storage images written by raygen). Coarse but safe.
-    VkImageMemoryBarrier barriers[3]{};
-    VkImage imgs[3] = { posImg, albImg, nrmImg };
-    uint32_t bcount = 0;
-    for (int i = 0; i < 3; ++i) {
-        if (!imgs[i]) continue;
-        VkImageMemoryBarrier& b = barriers[bcount++];
-        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        b.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-        b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        b.image = imgs[i];
-        b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        b.subresourceRange.levelCount = 1;
-        b.subresourceRange.layerCount = 1;
-        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    }
-    if (bcount > 0) {
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 0, nullptr, 0, nullptr, bcount, barriers);
-    }
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_stylizePipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-        m_stylizePipelineLayout, 0, 1, &m_stylizeDescSet, 0, nullptr);
-    const uint32_t gx = (w + 7) / 8;
-    const uint32_t gy = (h + 7) / 8;
-    vkCmdDispatch(cmd, gx, gy, 1);
-
-    endSingleTimeCommands(cmd);   // submits + waits
-    return true;
-}
-
-bool VulkanDevice::createAtmosphereLUTPipeline(const std::vector<uint32_t>& computeSPV) {
-    if (computeSPV.empty()) return false;
-
-    if (m_atmosphereLutPipeline)       { vkDestroyPipeline(m_device, m_atmosphereLutPipeline, nullptr); m_atmosphereLutPipeline = VK_NULL_HANDLE; }
-    if (m_atmosphereLutPipelineLayout) { vkDestroyPipelineLayout(m_device, m_atmosphereLutPipelineLayout, nullptr); m_atmosphereLutPipelineLayout = VK_NULL_HANDLE; }
-    if (m_atmosphereLutDescLayout)     { vkDestroyDescriptorSetLayout(m_device, m_atmosphereLutDescLayout, nullptr); m_atmosphereLutDescLayout = VK_NULL_HANDLE; }
-    if (m_atmosphereLutDescPool)       { vkDestroyDescriptorPool(m_device, m_atmosphereLutDescPool, nullptr); m_atmosphereLutDescPool = VK_NULL_HANDLE; }
-    m_atmosphereLutDescSet = VK_NULL_HANDLE;
-
-    VkDescriptorPoolSize poolSizes[2] = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}
-    };
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = 2;
-    poolInfo.pPoolSizes = poolSizes;
-    poolInfo.maxSets = 1;
-    if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_atmosphereLutDescPool) != VK_SUCCESS) return false;
-
-    VkDescriptorSetLayoutBinding bindings[4]{};
-    for (uint32_t i = 0; i < 3; ++i) {
-        bindings[i].binding = i;
-        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        bindings[i].descriptorCount = 1;
-        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-    bindings[3].binding = 3;
-    bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    bindings[3].descriptorCount = 1;
-    bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 4;
-    layoutInfo.pBindings = bindings;
-    if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_atmosphereLutDescLayout) != VK_SUCCESS) {
-        vkDestroyDescriptorPool(m_device, m_atmosphereLutDescPool, nullptr);
-        m_atmosphereLutDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    VkPushConstantRange pc{};
-    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pc.offset = 0;
-    pc.size = 16; // phase, width, height, pad
-
-    VkPipelineLayoutCreateInfo plInfo{};
-    plInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    plInfo.setLayoutCount = 1;
-    plInfo.pSetLayouts = &m_atmosphereLutDescLayout;
-    plInfo.pushConstantRangeCount = 1;
-    plInfo.pPushConstantRanges = &pc;
-    if (vkCreatePipelineLayout(m_device, &plInfo, nullptr, &m_atmosphereLutPipelineLayout) != VK_SUCCESS) {
-        vkDestroyDescriptorSetLayout(m_device, m_atmosphereLutDescLayout, nullptr); m_atmosphereLutDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_atmosphereLutDescPool, nullptr); m_atmosphereLutDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    VkShaderModuleCreateInfo smInfo{};
-    smInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    smInfo.codeSize = computeSPV.size() * sizeof(uint32_t);
-    smInfo.pCode = computeSPV.data();
-    VkShaderModule compModule = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(m_device, &smInfo, nullptr, &compModule) != VK_SUCCESS) {
-        vkDestroyPipelineLayout(m_device, m_atmosphereLutPipelineLayout, nullptr); m_atmosphereLutPipelineLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorSetLayout(m_device, m_atmosphereLutDescLayout, nullptr); m_atmosphereLutDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_atmosphereLutDescPool, nullptr); m_atmosphereLutDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-
-    VkComputePipelineCreateInfo cpInfo{};
-    cpInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    cpInfo.layout = m_atmosphereLutPipelineLayout;
-    cpInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    cpInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    cpInfo.stage.module = compModule;
-    cpInfo.stage.pName = "main";
-
-    if (vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpInfo, nullptr, &m_atmosphereLutPipeline) != VK_SUCCESS) {
-        vkDestroyShaderModule(m_device, compModule, nullptr);
-        vkDestroyPipelineLayout(m_device, m_atmosphereLutPipelineLayout, nullptr); m_atmosphereLutPipelineLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorSetLayout(m_device, m_atmosphereLutDescLayout, nullptr); m_atmosphereLutDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_atmosphereLutDescPool, nullptr); m_atmosphereLutDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-    vkDestroyShaderModule(m_device, compModule, nullptr);
-
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = m_atmosphereLutDescPool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &m_atmosphereLutDescLayout;
-    if (vkAllocateDescriptorSets(m_device, &allocInfo, &m_atmosphereLutDescSet) != VK_SUCCESS) {
-        vkDestroyPipeline(m_device, m_atmosphereLutPipeline, nullptr); m_atmosphereLutPipeline = VK_NULL_HANDLE;
-        vkDestroyPipelineLayout(m_device, m_atmosphereLutPipelineLayout, nullptr); m_atmosphereLutPipelineLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorSetLayout(m_device, m_atmosphereLutDescLayout, nullptr); m_atmosphereLutDescLayout = VK_NULL_HANDLE;
-        vkDestroyDescriptorPool(m_device, m_atmosphereLutDescPool, nullptr); m_atmosphereLutDescPool = VK_NULL_HANDLE;
-        return false;
-    }
-    return true;
-}
-
-bool VulkanDevice::updateAtmosphereLUTComputeDescriptors(const ImageHandle* lutImages) {
-    if (m_atmosphereLutDescSet == VK_NULL_HANDLE || !lutImages) return false;
-    if (!lutImages[0].view || !lutImages[1].view || !lutImages[2].view || !m_atmosphereLutParamsBuffer.buffer) return false;
-
-    VkDescriptorImageInfo imageInfos[3]{};
-    for (uint32_t i = 0; i < 3; ++i) {
-        imageInfos[i].imageView = lutImages[i].view;
-        imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    }
-    VkDescriptorBufferInfo paramInfo{};
-    paramInfo.buffer = m_atmosphereLutParamsBuffer.buffer;
-    paramInfo.offset = 0;
-    paramInfo.range = sizeof(AtmosphereLUTParamsGPU);
-
-    VkWriteDescriptorSet writes[4]{};
-    for (uint32_t i = 0; i < 3; ++i) {
-        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[i].dstSet = m_atmosphereLutDescSet;
-        writes[i].dstBinding = i;
-        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[i].descriptorCount = 1;
-        writes[i].pImageInfo = &imageInfos[i];
-    }
-    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[3].dstSet = m_atmosphereLutDescSet;
-    writes[3].dstBinding = 3;
-    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[3].descriptorCount = 1;
-    writes[3].pBufferInfo = &paramInfo;
-    vkUpdateDescriptorSets(m_device, 4, writes, 0, nullptr);
-    return true;
-}
-
-bool VulkanDevice::generateAtmosphereLUTGPU(const WorldData& world) {
-    if (m_atmosphereLutPipeline == VK_NULL_HANDLE || m_atmosphereLutDescSet == VK_NULL_HANDLE) return false;
-
-    waitIdle();
-
-    const AtmosphereLUTParamsGPU params = makeAtmosphereLUTParamsGPU(world);
-    if (m_atmosphereLutParamsBuffer.size < sizeof(params)) {
-        if (m_atmosphereLutParamsBuffer.buffer) destroyBuffer(m_atmosphereLutParamsBuffer);
-        BufferCreateInfo ci{};
-        ci.size = sizeof(params);
-        ci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
-        ci.location = MemoryLocation::CPU_TO_GPU;
-        m_atmosphereLutParamsBuffer = createBuffer(ci);
-    }
-    if (!m_atmosphereLutParamsBuffer.buffer) return false;
-    uploadBuffer(m_atmosphereLutParamsBuffer, &params, sizeof(params));
-
-    for (int i = 0; i < 4; ++i) {
-        if (m_lutImages[i].image) {
-            destroyImage(m_lutImages[i]);
-            m_lutImages[i] = {};
-        }
-    }
-
-    constexpr VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    ImageHandle lutImgs[4]{};
-    lutImgs[0] = createImage2D(TRANSMITTANCE_LUT_W, TRANSMITTANCE_LUT_H, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
-    lutImgs[1] = createImage2D(SKYVIEW_LUT_W, SKYVIEW_LUT_H, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
-    lutImgs[2] = createImage2D(MULTI_SCATTER_LUT_RES, MULTI_SCATTER_LUT_RES, VK_FORMAT_R32G32B32A32_SFLOAT, usage);
-    if (!lutImgs[0].image || !lutImgs[1].image || !lutImgs[2].image) {
-        for (auto& img : lutImgs) if (img.image) destroyImage(img);
-        return false;
-    }
-
-    auto createSampler = [&](ImageHandle& img, bool wrapU) {
-        VkSamplerCreateInfo sInfo{};
-        sInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        sInfo.magFilter = VK_FILTER_LINEAR;
-        sInfo.minFilter = VK_FILTER_LINEAR;
-        sInfo.addressModeU = wrapU ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sInfo.anisotropyEnable = VK_FALSE;
-        sInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-        sInfo.unnormalizedCoordinates = VK_FALSE;
-        vkCreateSampler(m_device, &sInfo, nullptr, &img.sampler);
-    };
-    createSampler(lutImgs[0], false);
-    createSampler(lutImgs[1], true);
-    createSampler(lutImgs[2], false);
-
-    if (!updateAtmosphereLUTComputeDescriptors(lutImgs)) {
-        for (auto& img : lutImgs) if (img.image) destroyImage(img);
-        return false;
-    }
-
-    VkCommandBuffer cmd = beginSingleTimeCommands();
-    if (cmd == VK_NULL_HANDLE) {
-        for (auto& img : lutImgs) if (img.image) destroyImage(img);
-        return false;
-    }
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_atmosphereLutPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_atmosphereLutPipelineLayout, 0, 1, &m_atmosphereLutDescSet, 0, nullptr);
-
-    struct PushConstants { uint32_t phase; uint32_t width; uint32_t height; uint32_t pad; } pc{};
-    auto dispatchPhase = [&](uint32_t phase, uint32_t w, uint32_t h) {
-        pc.phase = phase;
-        pc.width = w;
-        pc.height = h;
-        vkCmdPushConstants(cmd, m_atmosphereLutPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1);
-    };
-    dispatchPhase(0, TRANSMITTANCE_LUT_W, TRANSMITTANCE_LUT_H);
-    dispatchPhase(1, SKYVIEW_LUT_W, SKYVIEW_LUT_H);
-    dispatchPhase(2, MULTI_SCATTER_LUT_RES, MULTI_SCATTER_LUT_RES);
-
-    for (int i = 0; i < 3; ++i) {
-        transitionImageLayout(cmd, lutImgs[i].image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    }
-    endSingleTimeCommands(cmd);
-
-    updateAtmosphereLUTs(lutImgs);
-    return true;
-}
-
 bool VulkanDevice::ensureFrameSlotsCreated() {
     if (m_frameSlots[0].cmd != VK_NULL_HANDLE) return true;
     if (!m_device || !m_computeQueue) return false;
@@ -7179,15 +6607,21 @@ void VulkanDevice::dispatchSkinning(uint32_t blasIndex, const std::vector<Matrix
         triangles.vertexData.deviceAddress = blas.vertexBuffer.deviceAddress;
         triangles.vertexStride = 12;
         triangles.maxVertex = blas.vertexCount - 1;
-        triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
+        // MODE_UPDATE must reproduce the geometry description used by the
+        // original BLAS build. Flat skinned TriangleMesh BLASes are indexed;
+        // treating them as a non-indexed soup changes both indexType and the
+        // primitive count, which is invalid and can reset the Vulkan driver.
+        const bool hasIndices = blas.indexCount > 0 && blas.indexBuffer.deviceAddress != 0;
+        triangles.indexType = hasIndices ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_NONE_KHR;
+        triangles.indexData.deviceAddress = hasIndices ? blas.indexBuffer.deviceAddress : 0;
 
         VkAccelerationStructureGeometryKHR geometry{};
         geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
         geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        geometry.flags = 0;
+        geometry.flags = blas.geometryFlags;
         geometry.geometry.triangles = triangles;
 
-        uint32_t primitiveCount = blas.vertexCount / 3;
+        const uint32_t primitiveCount = hasIndices ? (blas.indexCount / 3) : (blas.vertexCount / 3);
 
         VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
         buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
@@ -7204,8 +6638,19 @@ void VulkanDevice::dispatchSkinning(uint32_t blasIndex, const std::vector<Matrix
         fpGetAccelerationStructureBuildSizesKHR(m_device,
             VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &primitiveCount, &sizeInfo);
 
+        // MODE_UPDATE uses updateScratchSize (not buildScratchSize) and the
+        // scratch device address must satisfy the RT alignment requirement.
+        const uint64_t scratchAlignment =
+            m_capabilities.minScratchAlignment > 0 ? m_capabilities.minScratchAlignment : 128;
+        const uint64_t alignedScratchSize =
+            (sizeInfo.updateScratchSize + scratchAlignment - 1) & ~(scratchAlignment - 1);
+        if (alignedScratchSize == 0) {
+            endSingleTimeCommands(cmd);
+            return;
+        }
+
         BufferCreateInfo scratchBufInfo;
-        scratchBufInfo.size = sizeInfo.buildScratchSize;
+        scratchBufInfo.size = alignedScratchSize;
         scratchBufInfo.usage = BufferUsage::STORAGE;
         scratchBufInfo.location = MemoryLocation::GPU_ONLY;
         auto scratchBuffer = createBuffer(scratchBufInfo);
@@ -7557,117 +7002,12 @@ void VulkanBackendAdapter::shutdown() {
         m_pathStatsImage = {};
     }
     if (m_denoiserColorStagingBuffer.buffer) {
-        m_device->destroyBuffer(m_denoiserColorStagingBuffer);
-    }
-    if (m_denoiserAlbedoStagingBuffer.buffer) {
-        m_device->destroyBuffer(m_denoiserAlbedoStagingBuffer);
-    }
-    if (m_denoiserNormalStagingBuffer.buffer) {
-        m_device->destroyBuffer(m_denoiserNormalStagingBuffer);
-    }
-    if (m_denoiserPositionStagingBuffer.buffer) {
-        m_device->destroyBuffer(m_denoiserPositionStagingBuffer);
-    }
 
-    // GPU-direct OIDN interop: destroy CUDA imports + prep buffers BEFORE
-    // freeing the underlying exportable VkDeviceMemory.
-    // Drain the async denoiser copy fence first; same rationale as the resize
-    // path — in-flight copy would target soon-to-be-freed staging.
-    m_device->drainDenoiserCopy();
-    destroyGpuDenoiserInterop();
-    if (m_denoiserColorSharedStaging.buffer)  m_device->destroyBuffer(m_denoiserColorSharedStaging);
-    if (m_denoiserAlbedoSharedStaging.buffer) m_device->destroyBuffer(m_denoiserAlbedoSharedStaging);
-    if (m_denoiserNormalSharedStaging.buffer) m_device->destroyBuffer(m_denoiserNormalSharedStaging);
-    m_denoiserColorSharedStaging = {};
-    m_denoiserAlbedoSharedStaging = {};
-    m_denoiserNormalSharedStaging = {};
-    m_denoiserColorSharedHandle = nullptr;
-    m_denoiserAlbedoSharedHandle = nullptr;
-    m_denoiserNormalSharedHandle = nullptr;
-    m_denoiserColorSharedAllocSize = 0;
-    m_denoiserAlbedoSharedAllocSize = 0;
-    m_denoiserNormalSharedAllocSize = 0;
-
-    // Adapter-owned uploaded texture/image cache.
-    purgeUploadedTextureCacheLocked();
-
-    // Adapter-owned NanoVDB buffers.
-    for (auto& [id, buf] : m_vdbBuffers) {
-        (void)id;
-        if (buf.buffer) {
-            m_device->destroyBuffer(buf);
-        }
+        m_denoiserColorStagingBuffer = {};
+        m_denoiserAlbedoStagingBuffer = {};
+        m_denoiserNormalStagingBuffer = {};
+        m_denoiserPositionStagingBuffer = {};
     }
-    m_vdbBuffers.clear();
-
-    for (auto& [id, buf] : m_vdbTempBuffers) {
-        (void)id;
-        if (buf.buffer) {
-            m_device->destroyBuffer(buf);
-        }
-    }
-    m_vdbTempBuffers.clear();
-
-    // Reset adapter caches/state.
-    // Phase 3d: free device-resident CC geometry buffers (BLASes are being torn down in
-    // this shutdown; the shared compute backend still owns the same VkDevice here).
-    for (auto& e : m_deviceResidentMeshes) {
-        MeshModifiers::CCDeviceGeometry g; g.bufferId = e.bufferId;
-        MeshModifiers::releaseCCDeviceGeometry(g);
-    }
-    m_deviceResidentMeshes.clear();
-    for (uint64_t bufId : m_deviceResidentReleaseQueue) {
-        MeshModifiers::CCDeviceGeometry g; g.bufferId = bufId;
-        MeshModifiers::releaseCCDeviceGeometry(g);
-    }
-    m_deviceResidentReleaseQueue.clear();
-
-    m_orderedVDBInstances.clear();
-    m_meshRegistry.clear();
-    m_blasMaterialBounds.clear();
-    m_blasBuiltNonOpaque.clear();
-    m_blasMaterialIds.clear();
-    m_vkInstances.clear();
-    m_lastObjects.clear();
-    m_instanceSources.clear();
-    m_instance_sync_cache.clear();
-    m_hairVkInstances.clear();
-    m_hairGroomRegistry.clear();
-    m_meshBlasCount = 0;
-    m_volumeBlasIndex = UINT32_MAX;
-    m_topology_dirty = true;
-    m_cachedLights.clear();
-    m_cachedWorld = WorldData{};
-    m_envTexID = 0;
-    m_atmosphereLutReady = false;
-    m_lastCameraHash = 0;
-    m_prevViewDir = Vec3(0.0f);
-    m_hasPrevView = false;
-    m_forceClearOnNextPresent = false;
-    m_hasPresentedRenderedFrame = false;
-    m_currentSamples = 0;
-    m_testInitialized = false;
-    m_hdrPixels.clear();
-    m_denoiserColorPixels.clear();
-    m_denoiserAlbedoPixels.clear();
-    m_denoiserNormalPixels.clear();
-    m_denoiserPositionPixels.clear();
-    m_outputImage = {};
-    m_varianceImage = {};
-    m_stagingBuffer = {};
-    m_tonemappedImage = {};
-    for (auto& s : m_tonemappedStagings) s = {};
-        m_tonemappedSlotInFlight[0] = m_tonemappedSlotInFlight[1] = false;
-        m_tonemappedFrameSlot = 0;
-    m_denoiserColorImage = {};
-    m_denoiserAlbedoImage = {};
-    m_denoiserNormalImage = {};
-    m_denoiserPositionImage = {};
-    m_denoiserColorStagingBuffer = {};
-    m_denoiserAlbedoStagingBuffer = {};
-    m_denoiserNormalStagingBuffer = {};
-    m_denoiserPositionStagingBuffer = {};
-
     // Destroy the device object once. VulkanDevice destructor calls shutdown(),
     // so reset the unique_ptr to release all remaining VulkanDevice-owned resources.
     m_device.reset();
@@ -7718,7 +7058,8 @@ GpuMemoryStats VulkanBackendAdapter::getMemoryStats() const {
 }
 
 // Geometry implementation
-uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName) {
+uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName,
+                                               const std::vector<float>* cornerAttribs) {
     if (!m_device || !m_device->isInitialized() || triangles.empty()) return UINT32_MAX;
     if (!m_device->hasHardwareRT()) return UINT32_MAX;
 
@@ -7816,6 +7157,34 @@ uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& 
         }
     }
 
+    // Geometry-node Pointiness (MeshPointiness.h). This is an UNWELDED soup (3 verts per
+    // face); computePointiness welds by position internally, so the values match the
+    // indexed path and the CPU oracle instead of reading "everything is flat".
+    std::vector<float> pointiness;
+    if (MeshAttr::anyMaterialUsesPointiness()) {
+        MeshAttr::computePointiness(positions.data(), normals.data(),
+                                    triangles.size() * 3, nullptr, 0, pointiness);
+        m_geometryBuiltWithPointiness = true;
+    }
+
+    // Attribute node's named channels. Unlike pointiness these are NOT derivable from the
+    // geometry — they are authored data keyed by SoA vertex id, and a TriangleData soup has
+    // thrown that link away. So the CALLER supplies them (it still holds the source facades);
+    // a soup with no source link uploads nothing and reads 0 = unpainted, which is what the
+    // CPU reads for the same triangles (their parentMesh is null too). Sized/validated here
+    // so a caller mismatch degrades to "unpainted" instead of reading past the buffer.
+    const size_t expectedAttribFloats = triangles.size() * 3u * MaterialNodesV2::kMatAttribSlots;
+    const bool haveCornerAttribs = cornerAttribs && cornerAttribs->size() == expectedAttribFloats;
+    if (cornerAttribs && !haveCornerAttribs) {
+        VK_ERROR() << "[VulkanBackend] uploadTriangles: cornerAttribs size " << cornerAttribs->size()
+                   << " != expected " << expectedAttribFloats << " — attribute block skipped for "
+                   << meshName << std::endl;
+    }
+    // As in the indexed path: mark the geometry as built under the live attribute regime even
+    // when this particular soup carries no channels (scatter sources never do), or the
+    // editor's one-time re-upload gate would never close.
+    if (MeshAttr::anyMaterialUsesAttributes()) m_geometryBuiltWithAttributes = true;
+
     // Photon caustics: BLAS-local AABB per MATERIAL (which materials are caustic
     // casters is decided per frame against the live MaterialManager — deciding
     // here at upload time missed project loads where materials resolve later).
@@ -7847,8 +7216,10 @@ uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& 
     blasInfo.vertexStride = 12; // 3 * float
     blasInfo.materialIndexData = materialIndices.data();
     blasInfo.materialIndexCount = (uint32_t)materialIndices.size();
+    blasInfo.pointinessData = pointiness.empty() ? nullptr : pointiness.data();
+    blasInfo.attribData = haveCornerAttribs ? cornerAttribs->data() : nullptr;
     blasInfo.opaqueGeometry = opaqueGeometry;
-    
+
     blasInfo.hasSkinning = hasSkinning;
     const bool allowDynamicUpdate =
         hasSkinning ||
@@ -7941,9 +7312,107 @@ uint32_t VulkanBackendAdapter::uploadTriangleMeshIndexed(const TriangleMesh* mes
         materialIndices[t] = static_cast<uint32_t>(mId);
     }
 
+    // Flat skinned meshes keep their influences on unique SoA vertices. Feed
+    // those directly to the existing compute-skinning BLAS path instead of
+    // expanding the mesh back into per-corner Triangle facades.
+    const bool hasSkinning = mesh->hasSkinWeights();
+    std::vector<int32_t> boneIndices;
+    std::vector<float> boneWeights;
+    if (hasSkinning) {
+        boneIndices.assign(vCount * 4, -1);
+        boneWeights.assign(vCount * 4, 0.0f);
+        for (size_t vertex = 0; vertex < vCount && vertex < geom.skin_weights.size(); ++vertex) {
+            const auto& influences = geom.skin_weights[vertex];
+            for (size_t influence = 0; influence < 4 && influence < influences.size(); ++influence) {
+                boneIndices[vertex * 4 + influence] = influences[influence].first;
+                boneWeights[vertex * 4 + influence] = influences[influence].second;
+            }
+        }
+    }
+
     bool opaqueGeometry = true;
     for (uint32_t materialIndex : materialIndices) {
         if (!materialCanUseOpaqueFastPath(materialIndex)) { opaqueGeometry = false; break; }
+    }
+
+    // Geometry-node Pointiness (MeshPointiness.h). GPU vertex ids ARE the SoA vertex ids
+    // here, so the CPU render's cache (built in Renderer::rebuildBVH) transfers straight
+    // across — the two backends then interpolate bit-identical per-vertex values. Only
+    // recompute when that cache is absent (Vulkan-only session, no BVH pass yet).
+    std::vector<float> pointinessScratch;
+    const float* pointinessData = nullptr;
+    if (MeshAttr::anyMaterialUsesPointiness()) {
+        if (mesh->pointiness.size() == vCount) {
+            pointinessData = mesh->pointiness.data();
+        } else {
+            MeshAttr::computePointiness(positions.data(), srcN ? normals.data() : nullptr, vCount,
+                                        indices.data(), indices.size(), pointinessScratch);
+            pointinessData = pointinessScratch.data();
+        }
+        m_geometryBuiltWithPointiness = true;
+    }
+
+    // Attribute node's named channels. GPU vertex ids ARE the SoA vertex ids on this path,
+    // so the mesh's interleaved block (built in Renderer::rebuildBVH out of GeometryDetail's
+    // custom map) uploads verbatim — CPU and GPU then interpolate the identical floats with
+    // the identical barycentrics. Rebuilt here when that cache is absent (Vulkan-only
+    // session that has not run a BVH pass yet), same as pointiness above.
+    std::vector<float> attribScratch;
+    const float* attribData = nullptr;
+    if (MeshAttr::anyMaterialUsesAttributes()) {
+        const size_t want = vCount * static_cast<size_t>(MaterialNodesV2::kMatAttribSlots);
+        if (mesh->material_attribs.size() == want) {
+            attribData = mesh->material_attribs.data();
+        } else if (mesh->geometry) {
+            // No CPU cache yet (Vulkan-only session that has not run a BVH pass). The mesh is
+            // const here, so build the block into a local scratch rather than back-filling it.
+            MeshAttr::computeMaterialAttributes(*mesh->geometry, attribScratch);
+            if (attribScratch.size() == want) attribData = attribScratch.data();
+            // Still empty => this mesh carries none of the interned channels. Leave the
+            // block out entirely: the shader reads 0 (unpainted), matching the CPU.
+        }
+        // Flag the GEOMETRY as built under the current attribute regime, NOT "a block was
+        // attached". A scene can legitimately read an attribute no mesh carries yet; if the
+        // flag only flipped on a real upload, geometryHasAttributes() would stay false and
+        // the editor's one-time re-upload gate would fire on every single edit.
+        m_geometryBuiltWithAttributes = true;
+    }
+
+    // Dedicated hydrology stream. This is independent from the four material
+    // Attribute-node slots: water fields are geometry truth and must reach the
+    // RT shader even when no material graph happens to request them.
+    std::vector<float> waterScratch;
+    const float* waterData = nullptr;
+    if (mesh->geometry) {
+        const Vec3* flow = mesh->geometry->get_attribute_data<Vec3>("river_flow_direction");
+        const float* depth = mesh->geometry->get_attribute_data<float>("water_depth");
+        const float* shore = mesh->geometry->get_attribute_data<float>("shore_factor");
+        const float* speed = mesh->geometry->get_attribute_data<float>("river_flow_speed");
+        const float* discharge = mesh->geometry->get_attribute_data<float>("river_discharge");
+        const float* froude = mesh->geometry->get_attribute_data<float>("river_froude");
+        const float* foam = mesh->geometry->get_attribute_data<float>("river_foam_potential");
+        const float* riverS = mesh->geometry->get_attribute_data<float>("river_s");
+        const float* riverT = mesh->geometry->get_attribute_data<float>("river_t");
+        const float* riverWidth = mesh->geometry->get_attribute_data<float>("river_width");
+        if (flow || depth || shore || speed || discharge || froude || foam ||
+            riverS || riverT || riverWidth) {
+            waterScratch.assign(vCount * 12u, 0.0f);
+            for (size_t v = 0; v < vCount; ++v) {
+                float* dst = waterScratch.data() + v * 12u;
+                if (flow) { dst[0] = flow[v].x; dst[1] = flow[v].z; }
+                dst[2] = depth ? (std::max)(depth[v], 0.0f) : 0.0f;
+                dst[3] = shore ? std::clamp(shore[v], 0.0f, 1.0f) : 0.0f;
+                dst[4] = speed ? (std::max)(speed[v], 0.0f) : 0.0f;
+                dst[5] = discharge ? (std::max)(discharge[v], 0.0f) : 0.0f;
+                dst[6] = froude ? (std::max)(froude[v], 0.0f) : 0.0f;
+                dst[7] = foam ? std::clamp(foam[v], 0.0f, 1.0f) : 0.0f;
+                dst[8] = riverS ? (std::max)(riverS[v], 0.0f) : 0.0f;
+                dst[9] = riverT ? std::clamp(riverT[v], 0.0f, 1.0f) : 0.5f;
+                dst[10] = riverWidth ? (std::max)(riverWidth[v], 0.0f) : 0.0f;
+                dst[11] = 0.0f;
+            }
+            waterData = waterScratch.data();
+        }
     }
 
     // Photon caustics: BLAS-local AABB per MATERIAL (caster decision is per frame
@@ -7973,8 +7442,13 @@ uint32_t VulkanBackendAdapter::uploadTriangleMeshIndexed(const TriangleMesh* mes
     blasInfo.indexCount = (uint32_t)idxCount;
     blasInfo.materialIndexData = materialIndices.data();
     blasInfo.materialIndexCount = (uint32_t)triCount;
+    blasInfo.pointinessData = pointinessData;
+    blasInfo.attribData = attribData;
+    blasInfo.waterData = waterData;
     blasInfo.opaqueGeometry = opaqueGeometry;
-    blasInfo.hasSkinning = false; // skinned meshes are routed to uploadTriangles()
+    blasInfo.hasSkinning = hasSkinning;
+    blasInfo.boneIndicesData = hasSkinning ? boneIndices.data() : nullptr;
+    blasInfo.boneWeightsData = hasSkinning ? boneWeights.data() : nullptr;
     blasInfo.allowUpdate = true;  // solo meshes are editable (sculpt/deform refit)
 
     uint32_t blasIndex = m_device->createBLAS(blasInfo);
@@ -7991,6 +7465,141 @@ uint32_t VulkanBackendAdapter::uploadTriangleMeshIndexed(const TriangleMesh* mes
         auto& entries = m_blasMaterialBounds[blasIndex];
         entries.assign(causticMatBounds.begin(), causticMatBounds.end());
     }
+
+    // Reset geometry data buffer because a new BLAS was added.
+    if (m_device->m_geometryDataBuffer.buffer) {
+        m_device->destroyBuffer(m_device->m_geometryDataBuffer);
+    }
+    return blasIndex;
+}
+
+// Welded INDEXED upload — see the header comment. Weld key is the raw bytes of
+// (position, normal, uv): the instanced-source facades this serves were cloned
+// from shared source verts through IDENTICAL transforms, so shared corners are
+// bitwise-equal and the weld is exact (no epsilon, no false merges).
+uint32_t VulkanBackendAdapter::uploadWeldedTriangles(const std::vector<TriangleData>& triangles,
+                                                     const std::string& meshName) {
+    auto itReg = m_meshRegistry.find(meshName);
+    if (itReg != m_meshRegistry.end()) return itReg->second;
+    if (triangles.empty()) return UINT32_MAX;
+
+    struct CornerKey {
+        uint32_t w[8];
+        bool operator==(const CornerKey& o) const { return std::memcmp(w, o.w, sizeof(w)) == 0; }
+    };
+    struct CornerKeyHash {
+        size_t operator()(const CornerKey& k) const {
+            uint64_t h = 1469598103934665603ull;
+            for (uint32_t v : k.w) { h ^= v; h *= 1099511628211ull; }
+            return static_cast<size_t>(h);
+        }
+    };
+
+    const size_t triCount = triangles.size();
+    std::vector<float> positions, normals, uvs;
+    positions.reserve(triCount * 3);
+    normals.reserve(triCount * 3);
+    uvs.reserve(triCount * 2);
+    std::vector<uint32_t> indices(triCount * 3);
+    std::vector<uint32_t> materialIndices(triCount);
+    std::unordered_map<CornerKey, uint32_t, CornerKeyHash> weld;
+    weld.reserve(triCount * 2);
+
+    auto addCorner = [&](const Vec3& p, const Vec3& n, const Vec2& uv) -> uint32_t {
+        CornerKey k;
+        std::memcpy(&k.w[0], &p.x, 3 * sizeof(float));
+        std::memcpy(&k.w[3], &n.x, 3 * sizeof(float));
+        std::memcpy(&k.w[6], &uv.x, 2 * sizeof(float));
+        auto ins = weld.emplace(k, static_cast<uint32_t>(positions.size() / 3));
+        if (ins.second) {
+            positions.push_back(p.x); positions.push_back(p.y); positions.push_back(p.z);
+            normals.push_back(n.x);   normals.push_back(n.y);   normals.push_back(n.z);
+            uvs.push_back(uv.x);      uvs.push_back(uv.y);
+        }
+        return ins.first->second;
+    };
+
+    for (size_t t = 0; t < triCount; ++t) {
+        const TriangleData& d = triangles[t];
+        if (d.hasSkinData) return UINT32_MAX;   // deforming — the soup path owns skinning
+        indices[t * 3 + 0] = addCorner(d.v0, d.n0, d.uv0);
+        indices[t * 3 + 1] = addCorner(d.v1, d.n1, d.uv1);
+        indices[t * 3 + 2] = addCorner(d.v2, d.n2, d.uv2);
+        uint16_t mId = d.materialID;
+        if (mId == MaterialManager::INVALID_MATERIAL_ID) mId = 0;
+        materialIndices[t] = mId;
+    }
+    const size_t vCount = positions.size() / 3;
+    // No corner sharing at all — indexed buys nothing over the soup.
+    if (vCount >= triCount * 3) return UINT32_MAX;
+
+    bool opaqueGeometry = true;
+    for (uint32_t materialIndex : materialIndices) {
+        if (!materialCanUseOpaqueFastPath(materialIndex)) { opaqueGeometry = false; break; }
+    }
+
+    // Geometry-node Pointiness: computed on the welded arrays (computePointiness
+    // welds by position internally), so values match the soup path's.
+    std::vector<float> pointinessScratch;
+    const float* pointinessData = nullptr;
+    if (MeshAttr::anyMaterialUsesPointiness()) {
+        MeshAttr::computePointiness(positions.data(), normals.data(), vCount,
+                                    indices.data(), indices.size(), pointinessScratch);
+        pointinessData = pointinessScratch.data();
+        m_geometryBuiltWithPointiness = true;
+    }
+    // Attribute channels: these facades have no parentMesh, so there is nothing to
+    // read — the soup path uploaded no block for them either (shader reads 0 =
+    // unpainted, matching the CPU).
+
+    // Photon caustics: BLAS-local AABB per material, same as the SoA-indexed path.
+    std::unordered_map<uint32_t, CausticBounds> causticMatBounds;
+    for (size_t t = 0; t < triCount; ++t) {
+        auto ins = causticMatBounds.try_emplace(materialIndices[t],
+            CausticBounds{ 1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f });
+        CausticBounds& mb = ins.first->second;
+        for (size_t c = 0; c < 3; ++c) {
+            const size_t vi = static_cast<size_t>(indices[t * 3 + c]) * 3;
+            mb.minX = std::min(mb.minX, positions[vi + 0]); mb.maxX = std::max(mb.maxX, positions[vi + 0]);
+            mb.minY = std::min(mb.minY, positions[vi + 1]); mb.maxY = std::max(mb.maxY, positions[vi + 1]);
+            mb.minZ = std::min(mb.minZ, positions[vi + 2]); mb.maxZ = std::max(mb.maxZ, positions[vi + 2]);
+        }
+    }
+
+    VulkanRT::BLASCreateInfo blasInfo;
+    blasInfo.vertexData = positions.data();
+    blasInfo.normalData = normals.data();
+    blasInfo.uvData = uvs.data();
+    blasInfo.vertexCount = (uint32_t)vCount;
+    blasInfo.vertexStride = 12; // 3 * float
+    blasInfo.indexData = indices.data();
+    blasInfo.indexCount = (uint32_t)indices.size();
+    blasInfo.materialIndexData = materialIndices.data();
+    blasInfo.materialIndexCount = (uint32_t)triCount;
+    blasInfo.pointinessData = pointinessData;
+    blasInfo.attribData = nullptr;
+    blasInfo.opaqueGeometry = opaqueGeometry;
+    blasInfo.hasSkinning = false;
+    blasInfo.allowUpdate = false; // static instanced source: edits re-key + re-upload, never refit
+
+    uint32_t blasIndex = m_device->createBLAS(blasInfo);
+    if (blasIndex == UINT32_MAX) {
+        SCENE_LOG_ERROR("[Vulkan] Failed to create welded indexed BLAS for mesh: " + meshName);
+        return UINT32_MAX;
+    }
+
+    SCENE_LOG_INFO("[Vulkan] Welded indexed BLAS '" + meshName + "': " +
+                   std::to_string(triCount) + " tris, " + std::to_string(triCount * 3) +
+                   " corners -> " + std::to_string(vCount) + " unique verts");
+
+    m_meshRegistry[meshName] = blasIndex;
+    m_blasMaterialIds[blasIndex] = std::move(materialIndices);
+    m_blasBuiltNonOpaque[blasIndex] = !opaqueGeometry;
+    {
+        auto& entries = m_blasMaterialBounds[blasIndex];
+        entries.assign(causticMatBounds.begin(), causticMatBounds.end());
+    }
+    // Deliberately NOT in m_soloBlasIndexedMesh: there is no backing SoA to refit from.
 
     // Reset geometry data buffer because a new BLAS was added.
     if (m_device->m_geometryDataBuffer.buffer) {
@@ -8056,7 +7665,14 @@ bool VulkanBackendAdapter::refitIndexedSoloBLAS(uint32_t blasIndex) {
         }
     }
 
-    m_device->updateBLAS(blasIndex, positions.data(), normals.data());
+    // Positions + normals only. The pointiness block in the combined buffer keeps its
+    // pre-edit values through a refit — recomputing it means a full weld + 1-ring pass over
+    // the mesh, which is far too expensive per sculpt dab. It refreshes on the next full
+    // geometry rebuild, which is also when the CPU caches (rebuildBVH) refresh.
+    if (!m_device->updateBLAS(blasIndex, positions.data(), normals.data())) {
+        SCENE_LOG_WARN("[refitIndexedSoloBLAS] Vulkan BLAS update failed");
+        return false;
+    }
 
     // Refresh the TLAS instance transform from the live handle (mirrors the non-indexed refit),
     // so a scale/rotate since the last full rebuild renders at the correct world-space pose.
@@ -8240,7 +7856,16 @@ bool VulkanBackendAdapter::drainDeviceResidentCCRefits() {
         h.materialIndexBuffer.deviceAddress = req.newGeomBase + vertSize + normSize + uvSize;
 
         // MODE_UPDATE refit reads positions from the (now-updated) vertexBuffer.deviceAddress.
-        m_device->updateBLAS(blasIndex, nullptr, nullptr);
+        if (!m_device->updateBLAS(blasIndex, nullptr, nullptr)) {
+            allOk = false;
+            // Preserve the freshly generated buffer for the caller's full-rebuild
+            // fallback, but do not refit the TLAS over a failed BLAS update.
+            if (entry->bufferId != 0 && entry->bufferId != req.newBufferId)
+                m_deviceResidentReleaseQueue.push_back(entry->bufferId);
+            entry->bufferId = req.newBufferId;
+            entry->deviceAddress = req.newGeomBase;
+            continue;
+        }
 
         // Adopt the new buffer into the entry; queue the old one for release after GPU idle.
         if (entry->bufferId != 0 && entry->bufferId != req.newBufferId)
@@ -8466,7 +8091,9 @@ bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, co
         return false;
     }
 
-    m_device->updateBLAS(targetBlasIndex, positions.data(), normals.data());
+    if (!m_device->updateBLAS(targetBlasIndex, positions.data(), normals.data())) {
+        return false;
+    }
 
     // Refresh the TLAS instance transform from the live transform handle so that
     // objects scaled/rotated since the last full rebuild are rendered at the
@@ -8739,7 +8366,9 @@ int64_t VulkanBackendAdapter::updateMeshBLASPartial(
 
     // Trigger local refit/update of the bottom-level acceleration structure (BLAS)
     // with vertices/normals arrays set to nullptr (to skip full buffers upload)
-    m_device->updateBLAS(targetBlasIndex, nullptr, nullptr);
+    if (!m_device->updateBLAS(targetBlasIndex, nullptr, nullptr)) {
+        return -1;
+    }
 
     // Refresh the TLAS instance transforms
     for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
@@ -9007,6 +8636,8 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
     m_rasterGeometryDirty = true;
     destroyAllRasterMeshes();
     m_rasterBuiltGeometryGeneration = 0; // Invalidate raster cache
+    m_geometryBuiltWithPointiness = false; // BLAS pointiness blocks die with the BLAS list below
+    m_geometryBuiltWithAttributes = false; // ...and so do the named-attribute blocks
     m_envTexID = 0;
     m_atmosphereLutReady = false;
     
@@ -9029,6 +8660,9 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
             blas.uvBuffer            = {};
             blas.indexBuffer         = {};
             blas.materialIndexBuffer = {};
+            blas.pointinessBuffer    = {};
+            blas.attribBuffer        = {};
+            blas.waterBuffer         = {};
             m_device->destroyBuffer(blas.buffer);       // dedicated AS backing buffer
             m_device->destroyBuffer(blas.vertexBuffer); // single combined geometry buffer
             m_device->destroyBuffer(blas.baseVertexBuffer);
@@ -9474,6 +9108,31 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         if (!drm.cageNodeName.empty()) deviceResidentCageNodes.insert(drm.cageNodeName);
     }
 
+    // Shared INDEXED-BLAS attempt for instanced sources (world HittableInstance
+    // sources and scatter InstanceManager sources). These are static, local-space
+    // geometry shared by MANY TLAS instances — unique verts + index buffer instead
+    // of the 3N expanded soup is ≈3× less vertex/normal/UV VRAM and per-hit fetch
+    // traffic, multiplied across every instance hit. Eligibility mirrors the solo
+    // path: every facade from ONE non-skinned SoA mesh, covering it entirely. The
+    // soup builders read getOriginalVertexPosition (P_orig), so useOriginalSpace=true
+    // is bit-identical, just deduplicated. Returns the BLAS index (registered under
+    // meshKey) or UINT32_MAX — caller falls back to the proven 3N soup.
+    auto tryUploadInstanceSourceIndexed =
+        [this](const std::vector<std::shared_ptr<Triangle>>& tris,
+               const std::string& meshKey) -> uint32_t {
+        const TriangleMesh* srcMesh = nullptr;
+        for (const auto& t : tris) {
+            TriangleMesh* pm = t ? t->parentMesh.get() : nullptr;
+            if (!pm || (srcMesh && pm != srcMesh) || triangleHasEffectiveSkinData(*t))
+                return UINT32_MAX;
+            srcMesh = pm;
+        }
+        if (!srcMesh || !srcMesh->geometry || srcMesh->geometry->indices.empty() ||
+            tris.size() != srcMesh->num_triangles())
+            return UINT32_MAX;
+        return uploadTriangleMeshIndexed(srcMesh, meshKey, /*useOriginalSpace=*/true);
+    };
+
     // Helper to find and upload all unique meshes recursively
     std::function<void(const std::shared_ptr<Hittable>&)> processObj;
     processObj = [&](const std::shared_ptr<Hittable>& obj) {
@@ -9491,11 +9150,16 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
                 std::string meshKey = "[InstSource]-" + std::to_string(srcPtrValue) +
                                       "-tris-" + std::to_string(inst->source_triangles->size());
                 
-                // If this mesh hasn't been uploaded to Vulkan yet, do it now
+                // If this mesh hasn't been uploaded to Vulkan yet, do it now.
+                // Indexed fast path first (registers meshKey on success — see
+                // tryUploadInstanceSourceIndexed above), soup as fallback.
+                if (m_meshRegistry.find(meshKey) == m_meshRegistry.end()) {
+                    tryUploadInstanceSourceIndexed(*inst->source_triangles, meshKey);
+                }
                 if (m_meshRegistry.find(meshKey) == m_meshRegistry.end()) {
                     std::vector<TriangleData> triData;
                     triData.reserve(inst->source_triangles->size());
-                    
+
                     for (const auto& t : *inst->source_triangles) {
                         TriangleData d;
                         // IMPORTANT:
@@ -9532,9 +9196,12 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
                         
                         triData.push_back(d);
                     }
-                    uploadTriangles(triData, meshKey);
+                    // Byte-exact weld first (registers meshKey on success), soup fallback.
+                    if (uploadWeldedTriangles(triData, meshKey) == UINT32_MAX) {
+                        uploadTriangles(triData, meshKey);
+                    }
                 }
-                
+
                 auto it = m_meshRegistry.find(meshKey);
                 if (it != m_meshRegistry.end()) {
                     VulkanRT::TLASInstance vi;
@@ -9809,7 +9476,38 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
             if (indexedOk) {
                 soloBlasIndex = uploadTriangleMeshIndexed(group.idxMesh, meshKey, group.idxLocalSpace);
             } else {
-                soloBlasIndex = uploadTriangles(group.triangles, meshKey);
+                // Non-indexed soup: TriangleData has thrown away the link back to the SoA, so
+                // the Attribute node's channels have to be gathered HERE, from the facades this
+                // group still holds, or the GPU would read 0 for a mesh whose CPU hit reads the
+                // painted value — a silent per-backend split exactly where a mask matters most
+                // (skinned / partially-visible meshes take this path).
+                std::vector<float> cornerAttribs;
+                if (MeshAttr::anyMaterialUsesAttributes() &&
+                    group.trianglePtrs.size() == group.triangles.size()) {
+                    constexpr int K = MaterialNodesV2::kMatAttribSlots;
+                    cornerAttribs.assign(group.triangles.size() * 3u * K, 0.0f);
+                    bool anyPainted = false;
+                    for (size_t t = 0; t < group.trianglePtrs.size(); ++t) {
+                        const auto& tri = group.trianglePtrs[t];
+                        if (!tri) continue;
+                        TriangleMesh* pm = tri->parentMesh.get();
+                        if (!pm || !pm->geometry || pm->material_attribs.empty()) continue;
+                        const auto& idx = pm->geometry->indices;
+                        const size_t base = static_cast<size_t>(tri->faceIndex) * 3u;
+                        if (base + 2u >= idx.size()) continue;
+                        for (int c = 0; c < 3; ++c) {
+                            const size_t vid = idx[base + static_cast<size_t>(c)];
+                            const size_t src = vid * K;
+                            if (src + K > pm->material_attribs.size()) continue;
+                            const size_t dst = (t * 3u + static_cast<size_t>(c)) * K;
+                            for (int s = 0; s < K; ++s) cornerAttribs[dst + s] = pm->material_attribs[src + s];
+                        }
+                        anyPainted = true;
+                    }
+                    if (!anyPainted) cornerAttribs.clear();   // nothing to say: leave the block out
+                }
+                soloBlasIndex = uploadTriangles(group.triangles, meshKey,
+                                                cornerAttribs.empty() ? nullptr : &cornerAttribs);
 
                 // Record build-order triangle pointers so the interactive refit can
                 // re-upload positions into the exact BLAS slots (mesh_cache order may
@@ -9919,13 +9617,22 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
             if (registryIt != m_meshRegistry.end()) {
                 blasIndex = registryIt->second;
             } else {
-                std::vector<TriangleData> triData;
-                triData.reserve(triangles->size());
-                for (const auto& tri : *triangles) {
-                    if (tri) triData.push_back(makeTriangleData(*tri));
-                }
-                if (!triData.empty()) {
-                    blasIndex = uploadTriangles(triData, meshKey);
+                // Indexed fast paths first: SoA-backed (shares the CPU pointiness/attrib
+                // caches), then the byte-exact weld (scatter's centered copies are
+                // standalone facades with no SoA). 3N soup is the last resort.
+                blasIndex = tryUploadInstanceSourceIndexed(*triangles, meshKey);
+                if (blasIndex == UINT32_MAX) {
+                    std::vector<TriangleData> triData;
+                    triData.reserve(triangles->size());
+                    for (const auto& tri : *triangles) {
+                        if (tri) triData.push_back(makeTriangleData(*tri));
+                    }
+                    if (!triData.empty()) {
+                        blasIndex = uploadWeldedTriangles(triData, meshKey);
+                        if (blasIndex == UINT32_MAX) {
+                            blasIndex = uploadTriangles(triData, meshKey);
+                        }
+                    }
                 }
             }
             if (blasIndex == UINT32_MAX) continue;
@@ -10436,405 +10143,9 @@ bool VulkanBackendAdapter::tryAppendGeometryIncremental(const std::vector<std::s
 }
 
 // Materials & Textures
-void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& materials) {
-    if (!m_device || !m_device->isInitialized()) return;
-    std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    m_device->waitIdle();
+uint32_t VulkanBackendAdapter::resolveTextureHandle(int64_t key, int textureTypeInt, bool forceLinear, bool preferSingleChannel) {
+    TextureType textureType = static_cast<TextureType>(textureTypeInt);
 
-    // Bake hot-reload eviction: the UI sets g_texture_pool_dirty instead of calling
-    // destroyAllVulkanBackingForOwner directly, because that would destroy VkImageViews
-    // while the GPU still references them in the previous frame's command buffer.
-    // We call purgeUploadedTextureCacheLocked here (not bare destroyAllVulkanBackingForOwner)
-    // because it also clears RT descriptor bindings before destroying — skipping that step
-    // causes a Vulkan validation __debugbreak when the sampler is still bound to a slot.
-    // DDS-backed textures registered with createdByPool=true have no destroyFn and are
-    // only cleaned up by purge's fallback loop, so the full purge path is required.
-    // g_texture_pool_dirty is cleared by Main.cpp after BOTH backends have purged.
-    if (g_texture_pool_dirty) {
-        purgeUploadedTextureCacheLocked(); // waitIdle + clearDescriptors + destroy + clear containers
-    }
-
-    // Descriptor slot exhaustion guard.
-    if (m_nextTextureID >= VULKAN_TEXTURE_PURGE_THRESHOLD ||
-        static_cast<int32_t>(m_uploadedImages.size()) >= VULKAN_TEXTURE_PURGE_THRESHOLD) {
-        SCENE_LOG_WARN("[Vulkan] Texture cache near descriptor capacity (" +
-                       std::to_string(VULKAN_TEXTURE_CAPACITY) + " slots); purging and re-uploading active textures.");
-        purgeUploadedTextureCacheLocked();
-    }
-
-    // VRAM byte-pressure check: warn at 70%, trigger LRU trim at 85%.
-    if (m_sceneTextureManager) {
-        const uint64_t dedicatedVRAM = m_device->getCapabilities().dedicatedVRAM;
-        if (dedicatedVRAM > 0) {
-            // Use GPU-resident bytes only — totalEstimatedTextureBytes() also
-            // counts CPU-side ghost records (DDS cache, paint history, records
-            // whose backings have been torn down), which used to inflate the
-            // estimate ~4x and triggered false-positive LRU eviction during
-          // mesh paint, evicting freshly uploaded paint textures before
-            // raster (and the active RT backend) could pick them up.
-            checkAndTrimVRAMThreshold();
-            const uint64_t textureBytes = m_sceneTextureManager->totalResidentTextureBytes();
-            const uint64_t warnThreshold = dedicatedVRAM * 7 / 10;
-            const uint64_t usedMB  = textureBytes / (1024 * 1024);
-            const uint64_t totalMB = dedicatedVRAM / (1024 * 1024);
-            if (textureBytes > warnThreshold && textureBytes <= dedicatedVRAM * 85 / 100) {
-                const std::string msg = "VRAM pressure: ~" + std::to_string(usedMB) +
-                                        " MB texture / " + std::to_string(totalMB) + " MB.";
-                SCENE_LOG_WARN("[Vulkan] " + msg);
-                if (m_statusCallback) m_statusCallback(msg, 1); // sari
-            }
-        }
-    }
-
-    m_textureUploadBytes = 0;
-    m_textureUploadCount = 0;
-    m_textureUploadBC4Count = 0;
-    m_textureUploadBC5Count = 0;
-    m_textureUploadBC7Count = 0;
-    m_textureUploadR8Count = 0;
-    m_textureUploadRGBA8Count = 0;
-    m_textureUploadFloatCount = 0;
-    m_textureUploadRG8Count = 0;
-    m_textureUploadSummaryDirty = false;
-
-    std::vector<VulkanRT::VkGpuMaterial> gpuMats;
-    gpuMats.reserve(materials.size());
-
-    // ── Parallel pixel staging + batched GPU upload ───────────────────────────
-    // Phase 1: collect unique textures not yet uploaded and not dirty
-    const bool limitMaterialPreviewTextures = isViewportTextureOwner(sceneTextureOwnerScope());
-    struct TexPrepReq {
-        uint64_t    cacheKey;
-        Texture*    tex;
-        TextureType texType;
-        bool        forceLinear;
-        bool        preferSingleChannel;
-        TextureHandle sceneHandle;
-        std::string sceneKey;
-    };
-    std::vector<TexPrepReq> freshUploads;
-    {
-        std::unordered_set<uint64_t> seen;
-        auto maybeQueue = [&](int64_t key, TextureType tt, bool fl, bool psc) {
-            if (!key) return;
-            if (key > 0 && static_cast<uint64_t>(key) < (1ull << 32)) return;
-            const uint64_t ck = (static_cast<uint64_t>(key) << 2) |
-                                (fl  ? 1ull : 0ull) |
-                                (psc ? 2ull : 0ull);
-            if (m_uploadedImageIDs.count(ck) || seen.count(ck)) return;
-            Texture* t = reinterpret_cast<Texture*>(key);
-            if (!t || !t->is_loaded() || t->vulkan_dirty) return;
-            TextureHandle sceneHandle{};
-            std::string sceneKey;
-            if (m_sceneTextureManager) {
-                sceneKey = buildSceneTextureKey(t, tt, fl, psc);
-                sceneHandle = registerSceneTexture(
-                    m_sceneTextureManager.get(),
-                    t,
-                    tt,
-                    fl,
-                    psc,
-                    TextureConsumer::RasterPreview | TextureConsumer::VulkanRT);
-                int64_t existingSceneTextureId = 0;
-                VulkanRT::ImageHandle existingSceneImage{};
-                if (sceneHandle.isValid() &&
-                    m_sceneTextureManager->tryGetVulkanTextureId(sceneHandle, sceneTextureOwnerScope(), existingSceneTextureId) &&
-                    existingSceneTextureId != 0 &&
-                    tryGetUploadedImageHandle(existingSceneTextureId, existingSceneImage)) {
-                    uint32_t desiredW = static_cast<uint32_t>(t->width);
-                    uint32_t desiredH = static_cast<uint32_t>(t->height);
-                    if (limitMaterialPreviewTextures) {
-                        fitWithinMaxDimension(desiredW, desiredH, kMaterialPreviewTextureMaxDimension, desiredW, desiredH);
-                    }
-                    if (existingSceneImage.width == desiredW && existingSceneImage.height == desiredH) {
-                        m_uploadedImageIDs[ck] = existingSceneTextureId;
-                        m_textureIdToCacheKey[existingSceneTextureId] = ck;
-                        return;
-                    }
-                }
-            }
-            seen.insert(ck);
-            freshUploads.push_back({ck, t, tt, fl, psc, sceneHandle, sceneKey});
-        };
-        for (const auto& m : materials) {
-            maybeQueue(m.albedoTexture,       TextureType::Albedo,       false, false);
-            maybeQueue(m.normalTexture,       TextureType::Normal,       true,  false);
-            maybeQueue(m.roughnessTexture,    TextureType::Roughness,    true,  false);
-            maybeQueue(m.metallicTexture,     TextureType::Metallic,     true,  false);
-            maybeQueue(m.specularTexture,     TextureType::Specular,     true,  true);
-            maybeQueue(m.emissionTexture,     TextureType::Emission,     false, false);
-            maybeQueue(m.transmissionTexture, TextureType::Transmission, true,  true);
-            maybeQueue(m.opacityTexture,      TextureType::Opacity,      true,  true);
-            maybeQueue(m.heightTexture,       TextureType::Unknown,      true,  false);
-        }
-    }
-
-    // Phase 2: parallel CPU decode — pure pixel packing, no Vulkan calls
-    struct StagedTexData {
-        uint64_t         cacheKey       = 0;
-        std::vector<uint8_t> bytes;        // raw bytes to upload (LDR or HDR cast)
-        uint32_t         width          = 0;
-        uint32_t         height         = 0;
-        uint32_t         uploadChannels = 4;
-        bool             useSrgb        = false;
-        bool             isHdr          = false;
-        TextureType      texType        = TextureType::Unknown;
-        bool             preferSingle   = false;
-    };
-    std::vector<StagedTexData> staged(freshUploads.size());
-    if (!freshUploads.empty()) {
-        std::vector<std::future<void>> futs;
-        futs.reserve(freshUploads.size());
-        for (size_t i = 0; i < freshUploads.size(); ++i) {
-            futs.push_back(std::async(std::launch::async, [&, i]() {
-                const auto& req  = freshUploads[i];
-                auto&       s    = staged[i];
-                const Texture*   tex = req.tex;
-                s.cacheKey       = req.cacheKey;
-                s.width          = (uint32_t)tex->width;
-                s.height         = (uint32_t)tex->height;
-                s.isHdr          = tex->is_hdr;
-                s.useSrgb        = req.forceLinear ? false : tex->is_srgb;
-                s.texType        = req.texType;
-                s.preferSingle   = req.preferSingleChannel;
-
-                if (tex->is_hdr) {
-                    const auto& fp = tex->float_pixels;
-                    if (fp.empty()) return;
-                    const size_t byteCount = fp.size() * sizeof(fp[0]);
-                    s.bytes.resize(byteCount);
-                    memcpy(s.bytes.data(), fp.data(), byteCount);
-                    s.uploadChannels = 4;
-                    return;
-                }
-
-                const TextureCompressionPlan plan = buildTextureCompressionPlan(tex, req.texType);
-                const bool canSingle = (req.preferSingleChannel || plan.preferSingleChannelFallback)
-                    && !s.useSrgb && tex->is_gray_scale && !tex->has_alpha;
-                s.uploadChannels = canSingle ? 1u : 4u;
-                const auto& px   = tex->pixels;
-                s.bytes.resize((size_t)tex->width * tex->height * s.uploadChannels);
-                if (canSingle) {
-                    for (size_t j = 0; j < px.size(); ++j) s.bytes[j] = px[j].r;
-                } else {
-                    for (size_t j = 0; j < px.size(); ++j) {
-                        s.bytes[j*4+0] = px[j].r; s.bytes[j*4+1] = px[j].g;
-                        s.bytes[j*4+2] = px[j].b; s.bytes[j*4+3] = px[j].a;
-                    }
-                }
-                if (limitMaterialPreviewTextures) {
-                    uint32_t dstW = s.width;
-                    uint32_t dstH = s.height;
-                    fitWithinMaxDimension(s.width, s.height, kMaterialPreviewTextureMaxDimension, dstW, dstH);
-                    if (dstW != s.width || dstH != s.height) {
-                        s.bytes = resizeLdrBilinear(s.bytes, s.width, s.height, dstW, dstH, s.uploadChannels);
-                        s.width = dstW;
-                        s.height = dstH;
-                    }
-                }
-            }));
-        }
-        for (auto& f : futs) f.get();
-    }
-
-    // Phase 3: batched GPU upload — single command buffer per chunk (caps staging RAM)
-    if (!staged.empty()) {
-        const auto& caps             = m_device->getCapabilities();
-        // Flush the batch every ~256 MB of accumulated staging to cap host memory usage.
-        const uint64_t FLUSH_BYTES   = 256ull << 20;
-        uint64_t batchStagingBytes   = 0;
-
-        beginBatchedTextureUpload();
-        for (size_t i = 0; i < staged.size(); ++i) {
-            auto& s = staged[i];
-            if (s.bytes.empty()) continue;
-
-            auto uploadStagedTexture = [&]() -> int64_t {
-                if (s.isHdr) {
-                    return uploadTexture2D(s.bytes.data(), s.width, s.height, 4, false, true);
-                }
-
-                const Texture* texPtr = freshUploads[i].tex;
-                const TextureCompressionPlan plan = buildTextureCompressionPlan(texPtr, s.texType);
-                const bool supportsComp =
-                    (plan.preferredTarget == TextureCompressionTarget::BC4 && caps.supportsBC4) ||
-                    (plan.preferredTarget == TextureCompressionTarget::BC5 && caps.supportsBC5) ||
-                    (plan.preferredTarget == TextureCompressionTarget::BC7 && caps.supportsBC7);
-                if (supportsComp && !texPtr->name.empty()) {
-                    if (auto cand = findCompressedTextureCacheCandidate(*texPtr, s.texType, s.useSrgb)) {
-                        DDSCompressedPayload payload{};
-                        if (loadCompressedDDSFile(cand->ddsPath, cand->target, s.useSrgb, payload) &&
-                            payload.width == s.width && payload.height == s.height) {
-                            int64_t compressedId = uploadCompressedTexture2D(payload.bytes.data(), payload.bytes.size(),
-                                                                              s.width, s.height, payload.format);
-                            if (compressedId) {
-                                return compressedId;
-                            }
-                        }
-                    }
-                }
-                return uploadTexture2D(s.bytes.data(), s.width, s.height,
-                                       s.uploadChannels, s.useSrgb, false);
-            };
-
-            int64_t id = 0;
-            VulkanBackingRecord resolvedBacking{};
-            bool resolvedThroughPool = false;
-            bool createdByPool = false;
-            const auto& req = freshUploads[i];
-            if (m_sceneTextureManager && !req.sceneKey.empty()) {
-                resolvedThroughPool = m_sceneTextureManager->resolveOrCreateVulkanBacking(
-                    req.sceneKey,
-                    sceneTextureOwnerScope(),
-                    TextureConsumer::RasterPreview | TextureConsumer::VulkanRT,
-                    s.width,
-                    s.height,
-                    estimateSceneTextureBytes(req.tex, s.uploadChannels),
-                    [&](TextureHandle, VulkanBackingRecord& outBacking) -> bool {
-                        const int64_t uploadedId = uploadStagedTexture();
-                        if (!uploadedId) {
-                            return false;
-                        }
-                        return buildVulkanBackingRecord(uploadedId, outBacking);
-                    },
-                    resolvedBacking,
-                    &createdByPool);
-
-                if (resolvedThroughPool && resolvedBacking.textureId != 0) {
-                    VulkanRT::ImageHandle localImage{};
-                    if (tryGetUploadedImageHandle(resolvedBacking.textureId, localImage)) {
-                        if (localImage.width == s.width && localImage.height == s.height) {
-                            id = resolvedBacking.textureId;
-                        } else {
-                            m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), resolvedBacking.textureId);
-                            resolvedThroughPool = false;
-                            createdByPool = false;
-                        }
-                    } else {
-                        m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), resolvedBacking.textureId);
-                        resolvedThroughPool = false;
-                    }
-                }
-            }
-
-            if (!id) {
-                id = uploadStagedTexture();
-            }
-
-            if (id) {
-                m_uploadedImageIDs[s.cacheKey] = id;
-                m_textureIdToCacheKey[id] = s.cacheKey;
-                if (!resolvedThroughPool || !createdByPool) {
-                    registerSceneTextureUpload(req.sceneHandle, id);
-                }
-            }
-
-            batchStagingBytes += (uint64_t)s.width * s.height * s.uploadChannels;
-            if (batchStagingBytes >= FLUSH_BYTES && i + 1 < staged.size()) {
-                endBatchedTextureUpload();
-                beginBatchedTextureUpload();
-                batchStagingBytes = 0;
-            }
-        }
-        endBatchedTextureUpload();
-    }
-    // ─────────────────────────────────────────────────────────────────────────
-
-    for (const auto& m : materials) {
-        VulkanRT::VkGpuMaterial gm{};
-        gm.albedo_r = m.albedo.x; gm.albedo_g = m.albedo.y; gm.albedo_b = m.albedo.z; gm.opacity = m.opacity;
-        // ... (remaining fields)
-        gm.roughness = m.roughness;
-        gm.metallic = m.metallic;
-        gm.specular = m.specular;
-        gm.ior = m.ior;
-        gm.transmission = m.transmission;
-        gm.emission_r = m.emission.x; gm.emission_g = m.emission.y; gm.emission_b = m.emission.z;
-        gm.emission_strength = m.emissionStrength;
-        gm.subsurface_r = m.subsurfaceColor.x; gm.subsurface_g = m.subsurfaceColor.y; gm.subsurface_b = m.subsurfaceColor.z;
-        gm.subsurface_amount = m.subsurface;
-        gm.subsurface_radius_r = m.subsurfaceRadius.x; gm.subsurface_radius_g = m.subsurfaceRadius.y; gm.subsurface_radius_b = m.subsurfaceRadius.z;
-        gm.subsurface_scale = m.subsurfaceScale;
-        gm.subsurface_ior = m.subsurfaceIOR;
-        gm.normal_strength = m.normalStrength;
-        // SSS control flags (match VkGpuMaterial layout Block 12)
-       
-        gm.clearcoat = m.clearcoat;
-        gm.clearcoat_roughness = m.clearcoatRoughness;
-        gm.translucent = m.translucent;
-        gm.subsurface_anisotropy = m.subsurfaceAnisotropy;
-        gm.anisotropic = m.anisotropic;
-        gm.sheen = m.sheen;
-        gm.sheen_tint = m.sheenTint;
-        gm.flags = (uint32_t)m.flags;
-        gm.bubble_ior = m.bubble_ior;
-        gm.bubble_film = m.bubble_film;
-        gm.clearcoat_iridescence = m.clearcoat_iridescence;
-        gm.clearcoat_film_thickness = m.clearcoat_film_thickness;
-        if (m.is_bubble) gm.flags |= VulkanRT::VK_MAT_FLAG_BUBBLE;
-        gm.resin_color_r = static_cast<float>(m.resin_color.x);
-        gm.resin_color_g = static_cast<float>(m.resin_color.y);
-        gm.resin_color_b = static_cast<float>(m.resin_color.z);
-        gm.transmission_density = m.transmission_density;
-        gm.resin_roughness = m.resin_roughness;
-        gm.dispersion = m.dispersion;
-        gm.resin_inclusion = m.resin_inclusion;
-        gm.resin_dirt = m.resin_dirt;
-        gm.resin_inclusion_scale = m.resin_inclusion_scale;
-        gm.resin_dirt_color_r = static_cast<float>(m.resin_dirt_color.x);
-        gm.resin_dirt_color_g = static_cast<float>(m.resin_dirt_color.y);
-        gm.resin_dirt_color_b = static_cast<float>(m.resin_dirt_color.z);
-        gm.resin_shard = m.resin_shard;
-        gm.resin_shard_hue = m.resin_shard_hue;
-        gm.dust_color_a_r = static_cast<float>(m.dust_color_a.x);
-        gm.dust_color_a_g = static_cast<float>(m.dust_color_a.y);
-        gm.dust_color_a_b = static_cast<float>(m.dust_color_a.z);
-        gm.dust_style = static_cast<float>(m.dust_style);
-        gm.dust_color_b_r = static_cast<float>(m.dust_color_b.x);
-        gm.dust_color_b_g = static_cast<float>(m.dust_color_b.y);
-        gm.dust_color_b_b = static_cast<float>(m.dust_color_b.z);
-        gm.shard_shape = static_cast<float>(m.shard_shape);
-        if (m.resin_object_space) gm.flags |= VulkanRT::VK_MAT_FLAG_RESIN_OBJ_SPACE;
-        if (m.glass_marble_volume) gm.flags |= VulkanRT::VK_MAT_FLAG_MARBLE_VOLUME;
-        gm.uv_scale_x = static_cast<float>(m.uvScale.x);
-        gm.uv_scale_y = static_cast<float>(m.uvScale.y);
-        gm.uv_offset_x = static_cast<float>(m.uvOffset.x);
-        gm.uv_offset_y = static_cast<float>(m.uvOffset.y);
-        gm.uv_rotation_degrees = m.uvRotationDegrees;
-        gm.uv_tiling_x = static_cast<float>(m.uvTiling.x);
-        gm.uv_tiling_y = static_cast<float>(m.uvTiling.y);
-        gm.uv_wrap_mode = m.uvWrapMode;
-        // If this is a terrain material, embed the terrain layer buffer index
-        if (m.flags & Backend::IBackend::MAT_FLAG_TERRAIN) {
-            gm._terrain_layer_idx = m.terrainLayerIdx;
-        }
-        // Procedural detail params
-        gm.micro_detail_strength = m.micro_detail_strength;
-        gm.micro_detail_scale    = m.micro_detail_scale;
-        gm.tile_break_strength   = m.tile_break_strength;
-        // Water-specific params → VkGpuMaterial Block 8 & Block 9
-        gm.fft_amplitude         = m.fft_amplitude;
-        gm.fft_time_scale        = m.fft_time_scale;
-        gm.foam_threshold        = m.foam_threshold;
-        gm.fft_ocean_size        = m.fft_ocean_size;
-        gm.fft_choppiness        = m.fft_choppiness;
-        gm.fft_wind_speed        = m.fft_wind_speed;
-        gm.fft_wind_direction    = m.fft_wind_direction;
-        gm.micro_anim_speed      = m.micro_anim_speed;
-        gm.micro_morph_speed     = m.micro_morph_speed;
-        gm.foam_noise_scale      = m.foam_noise_scale;
-        // Backend-owned texture handles (e.g. FFT ocean height/normal returned by
-        // uploadTexture2D) are small integer ids, NOT host Texture* pointers. The
-        // flag blocks below need a host Texture* to inspect cache/format state, so
-        // filter handles out instead of dereferencing them as pointers.
-        auto resolveHostTexture = [](int64_t key) -> Texture* {
-            if (!key) return nullptr;
-            if (key > 0 && static_cast<uint64_t>(key) < (1ull << 32)) return nullptr;
-            return reinterpret_cast<Texture*>(key);
-        };
-
-        // ... getTexID mapping (cast to uint32_t for GLSL compatibility)
-        auto getTexID = [this](int64_t key, TextureType textureType, bool forceLinear = false, bool preferSingleChannel = false) -> uint32_t {
             if (!key) return 0;
             VulkanRT::ImageHandle existingUploaded{};
             if (tryGetUploadedImageHandle(key, existingUploaded)) {
@@ -10846,10 +10157,10 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
             if (key > 0 && static_cast<uint64_t>(key) < (1ull << 32)) {
                 return 0;
             }
-            uint64_t cacheKey = (static_cast<uint64_t>(key) << 2) |
+            Texture* texCheck = reinterpret_cast<Texture*>(key);
+            uint64_t cacheKey = (static_cast<uint64_t>(texCheck ? texCheck->m_uid : 0) << 2) |
                                 (forceLinear ? 1ull : 0ull) |
                                 (preferSingleChannel ? 2ull : 0ull);
-            Texture* texCheck = reinterpret_cast<Texture*>(key);
             const bool needsDirtyRefresh = (texCheck && texCheck->vulkan_dirty);
             TextureHandle sceneHandle{};
             if (texCheck && texCheck->is_loaded() && m_sceneTextureManager && !needsDirtyRefresh) {
@@ -11164,7 +10475,412 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                 return (uint32_t)id;
             }
             return 0;
+}
+
+
+
+void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& materials) {
+    if (!m_device || !m_device->isInitialized()) return;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_device->waitIdle();
+
+    // Bake hot-reload eviction: the UI sets g_texture_pool_dirty instead of calling
+    // destroyAllVulkanBackingForOwner directly, because that would destroy VkImageViews
+    // while the GPU still references them in the previous frame's command buffer.
+    // We call purgeUploadedTextureCacheLocked here (not bare destroyAllVulkanBackingForOwner)
+    // because it also clears RT descriptor bindings before destroying — skipping that step
+    // causes a Vulkan validation __debugbreak when the sampler is still bound to a slot.
+    // DDS-backed textures registered with createdByPool=true have no destroyFn and are
+    // only cleaned up by purge's fallback loop, so the full purge path is required.
+    // g_texture_pool_dirty is cleared by Main.cpp after BOTH backends have purged.
+    if (g_texture_pool_dirty) {
+        purgeUploadedTextureCacheLocked(); // waitIdle + clearDescriptors + destroy + clear containers
+    }
+
+    // Descriptor slot exhaustion guard.
+    if (m_nextTextureID >= VULKAN_TEXTURE_PURGE_THRESHOLD ||
+        static_cast<int32_t>(m_uploadedImages.size()) >= VULKAN_TEXTURE_PURGE_THRESHOLD) {
+        SCENE_LOG_WARN("[Vulkan] Texture cache near descriptor capacity (" +
+                       std::to_string(VULKAN_TEXTURE_CAPACITY) + " slots); purging and re-uploading active textures.");
+        purgeUploadedTextureCacheLocked();
+    }
+
+    // VRAM byte-pressure check: warn at 70%, trigger LRU trim at 85%.
+    if (m_sceneTextureManager) {
+        const uint64_t dedicatedVRAM = m_device->getCapabilities().dedicatedVRAM;
+        if (dedicatedVRAM > 0) {
+            // Use GPU-resident bytes only — totalEstimatedTextureBytes() also
+            // counts CPU-side ghost records (DDS cache, paint history, records
+            // whose backings have been torn down), which used to inflate the
+            // estimate ~4x and triggered false-positive LRU eviction during
+          // mesh paint, evicting freshly uploaded paint textures before
+            // raster (and the active RT backend) could pick them up.
+            checkAndTrimVRAMThreshold();
+            const uint64_t textureBytes = m_sceneTextureManager->totalResidentTextureBytes();
+            const uint64_t warnThreshold = dedicatedVRAM * 7 / 10;
+            const uint64_t usedMB  = textureBytes / (1024 * 1024);
+            const uint64_t totalMB = dedicatedVRAM / (1024 * 1024);
+            if (textureBytes > warnThreshold && textureBytes <= dedicatedVRAM * 85 / 100) {
+                const std::string msg = "VRAM pressure: ~" + std::to_string(usedMB) +
+                                        " MB texture / " + std::to_string(totalMB) + " MB.";
+                SCENE_LOG_WARN("[Vulkan] " + msg);
+                if (m_statusCallback) m_statusCallback(msg, 1); // sari
+            }
+        }
+    }
+
+    m_textureUploadBytes = 0;
+    m_textureUploadCount = 0;
+    m_textureUploadBC4Count = 0;
+    m_textureUploadBC5Count = 0;
+    m_textureUploadBC7Count = 0;
+    m_textureUploadR8Count = 0;
+    m_textureUploadRGBA8Count = 0;
+    m_textureUploadFloatCount = 0;
+    m_textureUploadRG8Count = 0;
+    m_textureUploadSummaryDirty = false;
+
+    std::vector<VulkanRT::VkGpuMaterial> gpuMats;
+    gpuMats.reserve(materials.size());
+
+    // ── Parallel pixel staging + batched GPU upload ───────────────────────────
+    // Phase 1: collect unique textures not yet uploaded and not dirty
+    const bool limitMaterialPreviewTextures = isViewportTextureOwner(sceneTextureOwnerScope());
+    struct TexPrepReq {
+        uint64_t    cacheKey;
+        Texture*    tex;
+        TextureType texType;
+        bool        forceLinear;
+        bool        preferSingleChannel;
+        TextureHandle sceneHandle;
+        std::string sceneKey;
+    };
+    std::vector<TexPrepReq> freshUploads;
+    {
+        std::unordered_set<uint64_t> seen;
+        auto maybeQueue = [&](int64_t key, TextureType tt, bool fl, bool psc) {
+            if (!key) return;
+            if (key > 0 && static_cast<uint64_t>(key) < (1ull << 32)) return;
+            Texture* t = reinterpret_cast<Texture*>(key);
+            if (!t || !t->is_loaded() || t->vulkan_dirty) return;
+            const uint64_t ck = (static_cast<uint64_t>(t->m_uid) << 2) |
+                                (fl  ? 1ull : 0ull) |
+                                (psc ? 2ull : 0ull);
+            if (m_uploadedImageIDs.count(ck) || seen.count(ck)) return;
+            TextureHandle sceneHandle{};
+            std::string sceneKey;
+            if (m_sceneTextureManager) {
+                sceneKey = buildSceneTextureKey(t, tt, fl, psc);
+                sceneHandle = registerSceneTexture(
+                    m_sceneTextureManager.get(),
+                    t,
+                    tt,
+                    fl,
+                    psc,
+                    TextureConsumer::RasterPreview | TextureConsumer::VulkanRT);
+                int64_t existingSceneTextureId = 0;
+                VulkanRT::ImageHandle existingSceneImage{};
+                if (sceneHandle.isValid() &&
+                    m_sceneTextureManager->tryGetVulkanTextureId(sceneHandle, sceneTextureOwnerScope(), existingSceneTextureId) &&
+                    existingSceneTextureId != 0 &&
+                    tryGetUploadedImageHandle(existingSceneTextureId, existingSceneImage)) {
+                    uint32_t desiredW = static_cast<uint32_t>(t->width);
+                    uint32_t desiredH = static_cast<uint32_t>(t->height);
+                    if (limitMaterialPreviewTextures) {
+                        fitWithinMaxDimension(desiredW, desiredH, kMaterialPreviewTextureMaxDimension, desiredW, desiredH);
+                    }
+                    if (existingSceneImage.width == desiredW && existingSceneImage.height == desiredH) {
+                        m_uploadedImageIDs[ck] = existingSceneTextureId;
+                        m_textureIdToCacheKey[existingSceneTextureId] = ck;
+                        return;
+                    }
+                }
+            }
+            seen.insert(ck);
+            freshUploads.push_back({ck, t, tt, fl, psc, sceneHandle, sceneKey});
         };
+        for (const auto& m : materials) {
+            maybeQueue(m.albedoTexture,       TextureType::Albedo,       false, false);
+            maybeQueue(m.normalTexture,       TextureType::Normal,       true,  false);
+            maybeQueue(m.roughnessTexture,    TextureType::Roughness,    true,  false);
+            maybeQueue(m.metallicTexture,     TextureType::Metallic,     true,  false);
+            maybeQueue(m.specularTexture,     TextureType::Specular,     true,  true);
+            maybeQueue(m.emissionTexture,     TextureType::Emission,     false, false);
+            maybeQueue(m.transmissionTexture, TextureType::Transmission, true,  true);
+            maybeQueue(m.opacityTexture,      TextureType::Opacity,      true,  true);
+            maybeQueue(m.heightTexture,       TextureType::Unknown,      true,  false);
+        }
+    }
+
+    // Phase 2: parallel CPU decode — pure pixel packing, no Vulkan calls
+    struct StagedTexData {
+        uint64_t         cacheKey       = 0;
+        std::vector<uint8_t> bytes;        // raw bytes to upload (LDR or HDR cast)
+        uint32_t         width          = 0;
+        uint32_t         height         = 0;
+        uint32_t         uploadChannels = 4;
+        bool             useSrgb        = false;
+        bool             isHdr          = false;
+        TextureType      texType        = TextureType::Unknown;
+        bool             preferSingle   = false;
+    };
+    std::vector<StagedTexData> staged(freshUploads.size());
+    if (!freshUploads.empty()) {
+        std::vector<std::future<void>> futs;
+        futs.reserve(freshUploads.size());
+        for (size_t i = 0; i < freshUploads.size(); ++i) {
+            futs.push_back(std::async(std::launch::async, [&, i]() {
+                const auto& req  = freshUploads[i];
+                auto&       s    = staged[i];
+                const Texture*   tex = req.tex;
+                s.cacheKey       = req.cacheKey;
+                s.width          = (uint32_t)tex->width;
+                s.height         = (uint32_t)tex->height;
+                s.isHdr          = tex->is_hdr;
+                s.useSrgb        = req.forceLinear ? false : tex->is_srgb;
+                s.texType        = req.texType;
+                s.preferSingle   = req.preferSingleChannel;
+
+                if (tex->is_hdr) {
+                    const auto& fp = tex->float_pixels;
+                    if (fp.empty()) return;
+                    const size_t byteCount = fp.size() * sizeof(fp[0]);
+                    s.bytes.resize(byteCount);
+                    memcpy(s.bytes.data(), fp.data(), byteCount);
+                    s.uploadChannels = 4;
+                    return;
+                }
+
+                const TextureCompressionPlan plan = buildTextureCompressionPlan(tex, req.texType);
+                const bool canSingle = (req.preferSingleChannel || plan.preferSingleChannelFallback)
+                    && !s.useSrgb && tex->is_gray_scale && !tex->has_alpha;
+                s.uploadChannels = canSingle ? 1u : 4u;
+                const auto& px   = tex->pixels;
+                s.bytes.resize((size_t)tex->width * tex->height * s.uploadChannels);
+                if (canSingle) {
+                    for (size_t j = 0; j < px.size(); ++j) s.bytes[j] = px[j].r;
+                } else {
+                    for (size_t j = 0; j < px.size(); ++j) {
+                        s.bytes[j*4+0] = px[j].r; s.bytes[j*4+1] = px[j].g;
+                        s.bytes[j*4+2] = px[j].b; s.bytes[j*4+3] = px[j].a;
+                    }
+                }
+                if (limitMaterialPreviewTextures) {
+                    uint32_t dstW = s.width;
+                    uint32_t dstH = s.height;
+                    fitWithinMaxDimension(s.width, s.height, kMaterialPreviewTextureMaxDimension, dstW, dstH);
+                    if (dstW != s.width || dstH != s.height) {
+                        s.bytes = resizeLdrBilinear(s.bytes, s.width, s.height, dstW, dstH, s.uploadChannels);
+                        s.width = dstW;
+                        s.height = dstH;
+                    }
+                }
+            }));
+        }
+        for (auto& f : futs) f.get();
+    }
+
+    // Phase 3: batched GPU upload — single command buffer per chunk (caps staging RAM)
+    if (!staged.empty()) {
+        const auto& caps             = m_device->getCapabilities();
+        // Flush the batch every ~256 MB of accumulated staging to cap host memory usage.
+        const uint64_t FLUSH_BYTES   = 256ull << 20;
+        uint64_t batchStagingBytes   = 0;
+
+        beginBatchedTextureUpload();
+        for (size_t i = 0; i < staged.size(); ++i) {
+            auto& s = staged[i];
+            if (s.bytes.empty()) continue;
+
+            auto uploadStagedTexture = [&]() -> int64_t {
+                if (s.isHdr) {
+                    return uploadTexture2D(s.bytes.data(), s.width, s.height, 4, false, true);
+                }
+
+                const Texture* texPtr = freshUploads[i].tex;
+                const TextureCompressionPlan plan = buildTextureCompressionPlan(texPtr, s.texType);
+                const bool supportsComp =
+                    (plan.preferredTarget == TextureCompressionTarget::BC4 && caps.supportsBC4) ||
+                    (plan.preferredTarget == TextureCompressionTarget::BC5 && caps.supportsBC5) ||
+                    (plan.preferredTarget == TextureCompressionTarget::BC7 && caps.supportsBC7);
+                if (supportsComp && !texPtr->name.empty()) {
+                    if (auto cand = findCompressedTextureCacheCandidate(*texPtr, s.texType, s.useSrgb)) {
+                        DDSCompressedPayload payload{};
+                        if (loadCompressedDDSFile(cand->ddsPath, cand->target, s.useSrgb, payload) &&
+                            payload.width == s.width && payload.height == s.height) {
+                            int64_t compressedId = uploadCompressedTexture2D(payload.bytes.data(), payload.bytes.size(),
+                                                                              s.width, s.height, payload.format);
+                            if (compressedId) {
+                                return compressedId;
+                            }
+                        }
+                    }
+                }
+                return uploadTexture2D(s.bytes.data(), s.width, s.height,
+                                       s.uploadChannels, s.useSrgb, false);
+            };
+
+            int64_t id = 0;
+            VulkanBackingRecord resolvedBacking{};
+            bool resolvedThroughPool = false;
+            bool createdByPool = false;
+            const auto& req = freshUploads[i];
+            if (m_sceneTextureManager && !req.sceneKey.empty()) {
+                resolvedThroughPool = m_sceneTextureManager->resolveOrCreateVulkanBacking(
+                    req.sceneKey,
+                    sceneTextureOwnerScope(),
+                    TextureConsumer::RasterPreview | TextureConsumer::VulkanRT,
+                    s.width,
+                    s.height,
+                    estimateSceneTextureBytes(req.tex, s.uploadChannels),
+                    [&](TextureHandle, VulkanBackingRecord& outBacking) -> bool {
+                        const int64_t uploadedId = uploadStagedTexture();
+                        if (!uploadedId) {
+                            return false;
+                        }
+                        return buildVulkanBackingRecord(uploadedId, outBacking);
+                    },
+                    resolvedBacking,
+                    &createdByPool);
+
+                if (resolvedThroughPool && resolvedBacking.textureId != 0) {
+                    VulkanRT::ImageHandle localImage{};
+                    if (tryGetUploadedImageHandle(resolvedBacking.textureId, localImage)) {
+                        if (localImage.width == s.width && localImage.height == s.height) {
+                            id = resolvedBacking.textureId;
+                        } else {
+                            m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), resolvedBacking.textureId);
+                            resolvedThroughPool = false;
+                            createdByPool = false;
+                        }
+                    } else {
+                        m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), resolvedBacking.textureId);
+                        resolvedThroughPool = false;
+                    }
+                }
+            }
+
+            if (!id) {
+                id = uploadStagedTexture();
+            }
+
+            if (id) {
+                m_uploadedImageIDs[s.cacheKey] = id;
+                m_textureIdToCacheKey[id] = s.cacheKey;
+                if (!resolvedThroughPool || !createdByPool) {
+                    registerSceneTextureUpload(req.sceneHandle, id);
+                }
+            }
+
+            batchStagingBytes += (uint64_t)s.width * s.height * s.uploadChannels;
+            if (batchStagingBytes >= FLUSH_BYTES && i + 1 < staged.size()) {
+                endBatchedTextureUpload();
+                beginBatchedTextureUpload();
+                batchStagingBytes = 0;
+            }
+        }
+        endBatchedTextureUpload();
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    for (const auto& m : materials) {
+        VulkanRT::VkGpuMaterial gm{};
+        gm.albedo_r = m.albedo.x; gm.albedo_g = m.albedo.y; gm.albedo_b = m.albedo.z; gm.opacity = m.opacity;
+        // ... (remaining fields)
+        gm.roughness = m.roughness;
+        gm.metallic = m.metallic;
+        gm.specular = m.specular;
+        gm.ior = m.ior;
+        gm.transmission = m.transmission;
+        gm.emission_r = m.emission.x; gm.emission_g = m.emission.y; gm.emission_b = m.emission.z;
+        gm.emission_strength = m.emissionStrength;
+        gm.subsurface_r = m.subsurfaceColor.x; gm.subsurface_g = m.subsurfaceColor.y; gm.subsurface_b = m.subsurfaceColor.z;
+        gm.subsurface_amount = m.subsurface;
+        gm.subsurface_radius_r = m.subsurfaceRadius.x; gm.subsurface_radius_g = m.subsurfaceRadius.y; gm.subsurface_radius_b = m.subsurfaceRadius.z;
+        gm.subsurface_scale = m.subsurfaceScale;
+        gm.subsurface_ior = m.subsurfaceIOR;
+        gm.normal_strength = m.normalStrength;
+        // SSS control flags (match VkGpuMaterial layout Block 12)
+       
+        gm.clearcoat = m.clearcoat;
+        gm.clearcoat_roughness = m.clearcoatRoughness;
+        gm.translucent = m.translucent;
+        gm.subsurface_anisotropy = m.subsurfaceAnisotropy;
+        gm.anisotropic = m.anisotropic;
+        gm.sheen = m.sheen;
+        gm.sheen_tint = m.sheenTint;
+        gm.flags = (uint32_t)m.flags;
+        gm.bubble_ior = m.bubble_ior;
+        gm.bubble_film = m.bubble_film;
+        gm.clearcoat_iridescence = m.clearcoat_iridescence;
+        gm.clearcoat_film_thickness = m.clearcoat_film_thickness;
+        if (m.is_bubble) gm.flags |= VulkanRT::VK_MAT_FLAG_BUBBLE;
+        gm.resin_color_r = static_cast<float>(m.resin_color.x);
+        gm.resin_color_g = static_cast<float>(m.resin_color.y);
+        gm.resin_color_b = static_cast<float>(m.resin_color.z);
+        gm.transmission_density = m.transmission_density;
+        gm.resin_roughness = m.resin_roughness;
+        gm.dispersion = m.dispersion;
+        gm.resin_inclusion = m.resin_inclusion;
+        gm.resin_dirt = m.resin_dirt;
+        gm.resin_inclusion_scale = m.resin_inclusion_scale;
+        gm.resin_dirt_color_r = static_cast<float>(m.resin_dirt_color.x);
+        gm.resin_dirt_color_g = static_cast<float>(m.resin_dirt_color.y);
+        gm.resin_dirt_color_b = static_cast<float>(m.resin_dirt_color.z);
+        gm.resin_shard = m.resin_shard;
+        gm.resin_shard_hue = m.resin_shard_hue;
+        gm.dust_color_a_r = static_cast<float>(m.dust_color_a.x);
+        gm.dust_color_a_g = static_cast<float>(m.dust_color_a.y);
+        gm.dust_color_a_b = static_cast<float>(m.dust_color_a.z);
+        gm.dust_style = static_cast<float>(m.dust_style);
+        gm.dust_color_b_r = static_cast<float>(m.dust_color_b.x);
+        gm.dust_color_b_g = static_cast<float>(m.dust_color_b.y);
+        gm.dust_color_b_b = static_cast<float>(m.dust_color_b.z);
+        gm.shard_shape = static_cast<float>(m.shard_shape);
+        if (m.resin_object_space) gm.flags |= VulkanRT::VK_MAT_FLAG_RESIN_OBJ_SPACE;
+        if (m.glass_marble_volume) gm.flags |= VulkanRT::VK_MAT_FLAG_MARBLE_VOLUME;
+        gm.uv_scale_x = static_cast<float>(m.uvScale.x);
+        gm.uv_scale_y = static_cast<float>(m.uvScale.y);
+        gm.uv_offset_x = static_cast<float>(m.uvOffset.x);
+        gm.uv_offset_y = static_cast<float>(m.uvOffset.y);
+        gm.uv_rotation_degrees = m.uvRotationDegrees;
+        gm.uv_tiling_x = static_cast<float>(m.uvTiling.x);
+        gm.uv_tiling_y = static_cast<float>(m.uvTiling.y);
+        gm.uv_wrap_mode = m.uvWrapMode;
+        // If this is a terrain material, embed the terrain layer buffer index
+        if (m.flags & Backend::IBackend::MAT_FLAG_TERRAIN) {
+            gm._terrain_layer_idx = m.terrainLayerIdx;
+        }
+        // Procedural detail params
+        gm.micro_detail_strength = m.micro_detail_strength;
+        gm.micro_detail_scale    = m.micro_detail_scale;
+        gm.tile_break_strength   = m.tile_break_strength;
+        // Water-specific params → VkGpuMaterial Block 8 & Block 9
+        gm.fft_amplitude         = m.fft_amplitude;
+        gm.fft_time_scale        = m.fft_time_scale;
+        gm.foam_threshold        = m.foam_threshold;
+        gm.fft_ocean_size        = m.fft_ocean_size;
+        gm.fft_choppiness        = m.fft_choppiness;
+        gm.fft_wind_speed        = m.fft_wind_speed;
+        gm.fft_wind_direction    = m.fft_wind_direction;
+        gm.micro_anim_speed      = m.micro_anim_speed;
+        gm.micro_morph_speed     = m.micro_morph_speed;
+        gm.foam_noise_scale      = m.foam_noise_scale;
+        // Backend-owned texture handles (e.g. FFT ocean height/normal returned by
+        // uploadTexture2D) are small integer ids, NOT host Texture* pointers. The
+        // flag blocks below need a host Texture* to inspect cache/format state, so
+        // filter handles out instead of dereferencing them as pointers.
+        auto resolveHostTexture = [](int64_t key) -> Texture* {
+            if (!key) return nullptr;
+            if (key > 0 && static_cast<uint64_t>(key) < (1ull << 32)) return nullptr;
+            return reinterpret_cast<Texture*>(key);
+        };
+
+        // ... getTexID mapping (cast to uint32_t for GLSL compatibility)
+        auto getTexID = [this](int64_t key, TextureType textureType, bool forceLinear = false, bool preferSingleChannel = false) -> uint32_t {
+            return this->resolveTextureHandle(key, static_cast<int>(textureType), forceLinear, preferSingleChannel);
+        };
+
 
         gm.albedo_tex = getTexID(m.albedoTexture, TextureType::Albedo, false);
         gm.normal_tex = getTexID(m.normalTexture, TextureType::Normal, true);
@@ -11265,24 +10981,46 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
     }
 
     m_cachedGpuMaterials = gpuMats;
-    m_device->updateMaterialBuffer(gpuMats.data(), gpuMats.size() * sizeof(::VulkanRT::VkGpuMaterial), (uint32_t)gpuMats.size());
+    // Split the authoring records into the two GPU buffers: hot core (binding 2,
+    // read every hit) + cold ext (binding 24, feature-gated). See vulkan_material_types.h.
+    {
+        std::vector<VulkanRT::VkGpuMaterialCore> coreMats(gpuMats.size());
+        std::vector<VulkanRT::VkGpuMaterialExt>  extMats(gpuMats.size());
+        for (size_t i = 0; i < gpuMats.size(); ++i) {
+            VulkanRT::splitGpuMaterial(gpuMats[i], coreMats[i], extMats[i]);
+        }
+        m_device->updateMaterialBuffer(
+            coreMats.data(), coreMats.size() * sizeof(VulkanRT::VkGpuMaterialCore),
+            extMats.data(),  extMats.size()  * sizeof(VulkanRT::VkGpuMaterialExt),
+            (uint32_t)gpuMats.size());
+    }
 
-    // Update material preview descriptor set when material buffer changes
+    // Update material preview descriptor set when material buffers change
+    // (binding 0 = core, binding 4 = ext in the preview's own set layout).
     if (m_interactiveViewport.materialPreviewDescSet != VK_NULL_HANDLE &&
         m_device->m_materialBuffer.buffer != VK_NULL_HANDLE) {
         VkDescriptorBufferInfo matBufInfo{};
         matBufInfo.buffer = m_device->m_materialBuffer.buffer;
         matBufInfo.offset = 0;
         matBufInfo.range = VK_WHOLE_SIZE;
+        VkDescriptorBufferInfo matExtBufInfo{};
+        matExtBufInfo.buffer = m_device->m_materialExtBuffer.buffer
+                             ? m_device->m_materialExtBuffer.buffer
+                             : m_device->m_materialBuffer.buffer;
+        matExtBufInfo.offset = 0;
+        matExtBufInfo.range = VK_WHOLE_SIZE;
 
-        VkWriteDescriptorSet mpWds{};
-        mpWds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        mpWds.dstSet = m_interactiveViewport.materialPreviewDescSet;
-        mpWds.dstBinding = 0;
-        mpWds.descriptorCount = 1;
-        mpWds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        mpWds.pBufferInfo = &matBufInfo;
-        vkUpdateDescriptorSets(m_device->getDevice(), 1, &mpWds, 0, nullptr);
+        VkWriteDescriptorSet mpWds[2]{};
+        mpWds[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        mpWds[0].dstSet = m_interactiveViewport.materialPreviewDescSet;
+        mpWds[0].dstBinding = 0;
+        mpWds[0].descriptorCount = 1;
+        mpWds[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        mpWds[0].pBufferInfo = &matBufInfo;
+        mpWds[1] = mpWds[0];
+        mpWds[1].dstBinding = 4;
+        mpWds[1].pBufferInfo = &matExtBufInfo;
+        vkUpdateDescriptorSets(m_device->getDevice(), 2, mpWds, 0, nullptr);
     }
 
     // Re-upload per-vertex matId buffers from the CPU shadow so that any material
@@ -11362,7 +11100,9 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
 
     if (!m_device->m_materialBuffer.buffer ||
         materialIndex >= m_cachedGpuMaterials.size() ||
-        (uint64_t)(materialIndex + 1) * sizeof(VulkanRT::VkGpuMaterial) > m_device->m_materialBuffer.size) {
+        (uint64_t)(materialIndex + 1) * sizeof(VulkanRT::VkGpuMaterialCore) > m_device->m_materialBuffer.size ||
+        !m_device->m_materialExtBuffer.buffer ||
+        (uint64_t)(materialIndex + 1) * sizeof(VulkanRT::VkGpuMaterialExt) > m_device->m_materialExtBuffer.size) {
         return false;
     }
 
@@ -11388,20 +11128,27 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
             return true;
         }
 
-        const uint64_t cacheKey = (static_cast<uint64_t>(hostHandle) << 2) |
+        const uint64_t cacheKey = (static_cast<uint64_t>(tex->m_uid) << 2) |
                                   (forceLinear ? 1ull : 0ull) |
                                   (preferSingleChannel ? 2ull : 0ull);
         auto cacheIt = m_uploadedImageIDs.find(cacheKey);
         if (cacheIt != m_uploadedImageIDs.end() && cacheIt->second != 0) {
             gpuTextureId = static_cast<uint32_t>(cacheIt->second);
-        } else if (tex->vulkan_dirty) {
-            // The material now references a host Texture* that this Vulkan
-            // backend has not uploaded yet. This happens on the first mesh-paint
-            // dab after bindTextureSetToMaterial() swaps the material from its
-            // source texture to the generated paint texture. Falling through to
-            // the old cached GPU slot would update the wrong image; force the
-            // caller to rebuild the material table so getTexID() uploads and
-            // binds the new pointer.
+        } else {
+            // No verified (host handle, cacheKey) -> GPU-id mapping for the texture
+            // the material now references, so the gpuTextureId still sitting in this
+            // slot belongs to the PREVIOUS texture (or none). Two ways to get here:
+            //   (a) a freshly loaded texture never uploaded to this backend yet
+            //       (vulkan_dirty) — e.g. the first mesh-paint dab after
+            //       bindTextureSetToMaterial() swaps in the generated paint texture;
+            //   (b) an ALREADY-RESIDENT session texture picked in the node editor /
+            //       material panel that was uploaded under a DIFFERENT slot's cacheKey
+            //       (not vulkan_dirty) — the old code kept the stale id and returned
+            //       true here, so the swap never showed on screen.
+            // Either way we cannot trust the current slot id: force the caller to
+            // rebuild the material table so getTexID() resolves+registers the correct
+            // id. Self-healing — the rebuild populates m_uploadedImageIDs[cacheKey],
+            // so the next frame is a cache hit (no per-frame rebuild in steady state).
             return false;
         }
 
@@ -11675,12 +11422,35 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
         }
     }
 
-    const uint64_t offset = (uint64_t)materialIndex * sizeof(VulkanRT::VkGpuMaterial);
-    m_device->uploadBuffer(m_device->m_materialBuffer, &gm, sizeof(VulkanRT::VkGpuMaterial), offset);
+    // Patch BOTH halves of the split record at their own strides.
+    VulkanRT::VkGpuMaterialCore gmCore{};
+    VulkanRT::VkGpuMaterialExt  gmExt{};
+    VulkanRT::splitGpuMaterial(gm, gmCore, gmExt);
+    m_device->uploadBuffer(m_device->m_materialBuffer, &gmCore, sizeof(gmCore),
+                           (uint64_t)materialIndex * sizeof(VulkanRT::VkGpuMaterialCore));
+    m_device->uploadBuffer(m_device->m_materialExtBuffer, &gmExt, sizeof(gmExt),
+                           (uint64_t)materialIndex * sizeof(VulkanRT::VkGpuMaterialExt));
     m_cachedGpuMaterials[materialIndex] = gm;
     m_interactiveViewport.dirty = true;
     resetAccumulation();
     return true;
+}
+
+void VulkanBackendAdapter::uploadMaterialPrograms(const std::vector<uint32_t>& words) {
+    if (!m_device) return;
+    // Serialize against renderProgressiveImpl — it holds m_mutex for the whole
+    // trace, so taking it here guarantees no trace is mid-flight while the
+    // program buffer is (re)written. Without it, a trace submitted between
+    // uploadMaterials() releasing the lock and this call could still be reading
+    // the buffer that updateMatProgramBuffer destroys on growth.
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // Empty stream still needs a valid buffer (materialCount=0 => all lookups NONE).
+    if (words.empty()) {
+        const uint32_t emptyProg = 0u;
+        m_device->updateMatProgramBuffer(&emptyProg, sizeof(uint32_t));
+        return;
+    }
+    m_device->updateMatProgramBuffer(words.data(), words.size() * sizeof(uint32_t));
 }
 
 void VulkanBackendAdapter::uploadHairMaterials(const std::vector<HairMaterialData>& materials) {
@@ -14314,6 +14084,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
         std::vector<float> normals;
         std::vector<float> uvs;       // interleaved u,v per vertex
         std::vector<uint32_t> matIds; // per-vertex material ID
+        std::shared_ptr<TriangleMesh> mesh;
         Matrix4x4 transform;
         uint8_t mask = 0xFF;
     };
@@ -14400,6 +14171,41 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
             grp.uvs.push_back(uv0.x); grp.uvs.push_back(uv0.y);
             grp.uvs.push_back(uv1.x); grp.uvs.push_back(uv1.y);
             grp.uvs.push_back(uv2.x); grp.uvs.push_back(uv2.y);
+        } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (!mesh->visible || !mesh->geometry || mesh->geometry->indices.empty()) return;
+            const DNA::GeometryDetail& geom = *mesh->geometry;
+            const Vec3* positions = geom.get_positions_orig();
+            const Vec3* normals = geom.get_normals_orig();
+            if (!positions) positions = geom.get_positions();
+            if (!normals) normals = geom.get_normals();
+            if (!positions) return;
+            const Vec2* uvs = geom.get_uvs();
+            const uint16_t* materialIds = geom.get_material_ids();
+
+            const std::string nodeName = mesh->nodeName.empty()
+                ? ("[Solo-" + std::to_string(groups.size()) + "]")
+                : mesh->nodeName;
+            const std::string groupKey = nodeName + "#mesh=" +
+                std::to_string(reinterpret_cast<uintptr_t>(mesh.get()));
+            RasterTriGroup group;
+            group.meshKey = "[Raster-Solo]-" + groupKey;
+            group.nodeName = nodeName;
+            group.transform = mesh->transform ? mesh->transform->getFinal() : Matrix4x4::identity();
+            group.mesh = mesh;
+            group.positions.reserve(geom.indices.size() * 3);
+            group.normals.reserve(geom.indices.size() * 3);
+            group.uvs.reserve(geom.indices.size() * 2);
+            group.matIds.reserve(geom.indices.size());
+            for (uint32_t vertexIndex : geom.indices) {
+                const Vec3& position = positions[vertexIndex];
+                const Vec3 normal = normals ? normals[vertexIndex] : Vec3(0.0f, 1.0f, 0.0f);
+                const Vec2 uv = uvs ? uvs[vertexIndex] : Vec2(0.0f, 0.0f);
+                group.positions.insert(group.positions.end(), {position.x, position.y, position.z});
+                group.normals.insert(group.normals.end(), {normal.x, normal.y, normal.z});
+                group.uvs.insert(group.uvs.end(), {uv.x, uv.y});
+                group.matIds.push_back(materialIds ? static_cast<uint32_t>(materialIds[vertexIndex]) : 0u);
+            }
+            groups.push_back(std::move(group));
         }
         // VDB/Gas volumes are not rasterized in solid mode
     };
@@ -14789,6 +14595,7 @@ void VulkanBackendAdapter::syncRasterSkinnedVerticesImpl(
     struct SkinnedGroup {
         std::string meshKey;
         std::vector<std::shared_ptr<Triangle>> triangles;
+        std::shared_ptr<TriangleMesh> mesh;
     };
     std::unordered_map<void*, SkinnedGroup> skinnedGroups;
 
@@ -14820,6 +14627,13 @@ void VulkanBackendAdapter::syncRasterSkinnedVerticesImpl(
                 }
             }
             grp.triangles.push_back(tri);
+        } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (!mesh->visible || !mesh->hasSkinWeights()) return;
+            void* groupKey = mesh->transform ? static_cast<void*>(mesh->transform.get()) : static_cast<void*>(mesh.get());
+            auto& grp = skinnedGroups[groupKey];
+            auto it = nodeToMeshKey.find(mesh->nodeName);
+            if (it != nodeToMeshKey.end()) grp.meshKey = it->second;
+            grp.mesh = mesh;
         }
     };
     for (const auto& obj : objects) collectSkinned(obj);
@@ -14828,12 +14642,14 @@ void VulkanBackendAdapter::syncRasterSkinnedVerticesImpl(
 
     // For each skinned group, compute skinned positions/normals and upload
     for (auto& [key, grp] : skinnedGroups) {
-        if (grp.meshKey.empty() || grp.triangles.empty()) continue;
+        if (grp.meshKey.empty() || (grp.triangles.empty() && !grp.mesh)) continue;
         auto meshIt = m_rasterMeshes.find(grp.meshKey);
         if (meshIt == m_rasterMeshes.end()) continue;
 
         auto& rmb = meshIt->second;
-        const size_t vertCount = grp.triangles.size() * 3;
+        const size_t vertCount = grp.mesh && grp.mesh->geometry
+            ? grp.mesh->geometry->indices.size()
+            : grp.triangles.size() * 3;
         const size_t floatCount = vertCount * 3;
         if (rmb.vertexCount != (uint32_t)vertCount) continue; // topology mismatch
 
@@ -14841,17 +14657,29 @@ void VulkanBackendAdapter::syncRasterSkinnedVerticesImpl(
         std::vector<float> newNormals(floatCount);
         size_t idx = 0;
 
-        for (const auto& tri : grp.triangles) {
-            for (int v = 0; v < 3; ++v) {
-                // Compute bone-skinned position (local space, no root transform)
-                Vec3 p = tri->apply_bone_to_vertex(v, boneMatrices);
-                Vec3 n = tri->apply_bone_to_normal(
-                    tri->getOriginalVertexNormal(v),
-                    tri->getSkinBoneWeights(v),
-                    boneMatrices);
-                newPositions[idx]   = p.x; newPositions[idx+1] = p.y; newPositions[idx+2] = p.z;
-                newNormals[idx]     = n.x; newNormals[idx+1]   = n.y; newNormals[idx+2]   = n.z;
+        if (grp.mesh && grp.mesh->geometry) {
+            grp.mesh->applySkinning(boneMatrices);
+            const Vec3* positions = grp.mesh->geometry->get_positions();
+            const Vec3* normals = grp.mesh->geometry->get_normals();
+            for (uint32_t vertexIndex : grp.mesh->geometry->indices) {
+                const Vec3 position = positions ? positions[vertexIndex] : Vec3(0.0f);
+                const Vec3 normal = normals ? normals[vertexIndex] : Vec3(0.0f, 1.0f, 0.0f);
+                newPositions[idx] = position.x; newPositions[idx + 1] = position.y; newPositions[idx + 2] = position.z;
+                newNormals[idx] = normal.x; newNormals[idx + 1] = normal.y; newNormals[idx + 2] = normal.z;
                 idx += 3;
+            }
+        } else {
+            for (const auto& tri : grp.triangles) {
+                for (int v = 0; v < 3; ++v) {
+                    Vec3 p = tri->apply_bone_to_vertex(v, boneMatrices);
+                    Vec3 n = tri->apply_bone_to_normal(
+                        tri->getOriginalVertexNormal(v),
+                        tri->getSkinBoneWeights(v),
+                        boneMatrices);
+                    newPositions[idx] = p.x; newPositions[idx + 1] = p.y; newPositions[idx + 2] = p.z;
+                    newNormals[idx] = n.x; newNormals[idx + 1] = n.y; newNormals[idx + 2] = n.z;
+                    idx += 3;
+                }
             }
         }
 
@@ -15801,7 +15629,7 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                         : 1u;
                     m_interactiveViewport.materialPreviewTextureArrayLen = mpTextureArrayLen;
 
-                    VkDescriptorSetLayoutBinding mpDslBindings[4]{};
+                    VkDescriptorSetLayoutBinding mpDslBindings[5]{};
                     mpDslBindings[0].binding = 0;
                     mpDslBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[0].descriptorCount = 1;
@@ -15818,6 +15646,11 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     mpDslBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[3].descriptorCount = 1;
                     mpDslBindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    // binding 4: cold MaterialExt half of the split material record
+                    mpDslBindings[4].binding = 4;
+                    mpDslBindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[4].descriptorCount = 1;
+                    mpDslBindings[4].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
                     // Guard: check device push-constant limit before touching descriptor/pipeline layout.
                     // Some older drivers crash inside vkCreateDescriptorSetLayout or vkCreatePipelineLayout
@@ -15833,17 +15666,18 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
 
                     VkDescriptorSetLayoutCreateInfo mpDslci{};
                     mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                    mpDslci.bindingCount = 4;
+                    mpDslci.bindingCount = 5;
                     mpDslci.pBindings = mpDslBindings;
-                    VkDescriptorBindingFlags mpBindingFlags[4] = {
+                    VkDescriptorBindingFlags mpBindingFlags[5] = {
                         0,
                         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,
+                        0,
                         0,
                         0
                     };
                     VkDescriptorSetLayoutBindingFlagsCreateInfo mpBindingFlagsCI{};
                     mpBindingFlagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-                    mpBindingFlagsCI.bindingCount = 4;
+                    mpBindingFlagsCI.bindingCount = 5;
                     mpBindingFlagsCI.pBindingFlags = mpBindingFlags;
                     mpDslci.pNext = &mpBindingFlagsCI;
                     if (mpPushOk) {
@@ -15854,7 +15688,7 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     // Descriptor pool
                     VkDescriptorPoolSize mpPoolSizes[2]{};
                     mpPoolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                    mpPoolSizes[0].descriptorCount = 2;
+                    mpPoolSizes[0].descriptorCount = 3;
                     mpPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                     mpPoolSizes[1].descriptorCount = mpTextureArrayLen + 2u;
                     VkDescriptorPoolCreateInfo mpDpci{};
@@ -16005,14 +15839,24 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                             matBufInfo.offset = 0;
                             matBufInfo.range = VK_WHOLE_SIZE;
 
-                            VkWriteDescriptorSet mpWds{};
-                            mpWds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                            mpWds.dstSet = m_interactiveViewport.materialPreviewDescSet;
-                            mpWds.dstBinding = 0;
-                            mpWds.descriptorCount = 1;
-                            mpWds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                            mpWds.pBufferInfo = &matBufInfo;
-                            vkUpdateDescriptorSets(vkDevice, 1, &mpWds, 0, nullptr);
+                            VkDescriptorBufferInfo matExtBufInfo{};
+                            matExtBufInfo.buffer = m_device->m_materialExtBuffer.buffer
+                                                 ? m_device->m_materialExtBuffer.buffer
+                                                 : m_device->m_materialBuffer.buffer;
+                            matExtBufInfo.offset = 0;
+                            matExtBufInfo.range = VK_WHOLE_SIZE;
+
+                            VkWriteDescriptorSet mpWds[2]{};
+                            mpWds[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                            mpWds[0].dstSet = m_interactiveViewport.materialPreviewDescSet;
+                            mpWds[0].dstBinding = 0;
+                            mpWds[0].descriptorCount = 1;
+                            mpWds[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                            mpWds[0].pBufferInfo = &matBufInfo;
+                            mpWds[1] = mpWds[0];
+                            mpWds[1].dstBinding = 4;
+                            mpWds[1].pBufferInfo = &matExtBufInfo;
+                            vkUpdateDescriptorSets(vkDevice, 2, mpWds, 0, nullptr);
 
                             const VkBuffer terrainOrDummyBuffer = m_device->m_terrainLayerBuffer.buffer
                                 ? m_device->m_terrainLayerBuffer.buffer
@@ -16933,7 +16777,17 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         return;
     }
 
+    // Idle re-present dedupe state (see the converged branch below). Function-
+    // static like the diag counters — there is one live backend adapter.
+    static int      s_idlePresentW = -1, s_idlePresentH = -1;
+    static uint32_t s_idlePresentSamples = 0;
+    static bool     s_idlePresentValid = false;
+
     if (shouldUseInteractiveViewport()) {
+        // Raster/solid modes draw into the same output texture — the cached
+        // Rendered-mode image on screen is gone, so the next converged frame
+        // must re-present instead of taking the idle fast path.
+        s_idlePresentValid = false;
         const ViewportMode requestedMode = m_viewportMode;
         renderInteractiveViewport(s, width, height, fb, tex);
         m_viewportMode = requestedMode;
@@ -16952,6 +16806,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     }
     
     if (this->m_currentSamples >= this->m_targetSamples) {
+        bool tonemapRefreshed = false;
         // ── TONEMAP-ONLY PRESENTATION REFRESH ────────────────────────────────
         // The sample-heatmap view (14) resolves at tonemap time; toggling it
         // while accumulation is complete changes nothing on screen unless we
@@ -16962,6 +16817,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         // (fence reuse is safe — submit waits the slot fence internally).
         if (m_tonemapRefreshPending) {
             m_tonemapRefreshPending = false;
+            tonemapRefreshed = true;   // fb may change below — force a re-present
             const bool canRefresh = m_device->hasTonemapPipeline()
                                  && m_outputImage.image && m_tonemappedImage.image
                                  && m_tonemappedStagings[0].buffer && m_tonemappedStagings[1].buffer;
@@ -16982,10 +16838,22 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             }
         }
         // [FIX] Even when done accumulating, re-present the last valid frame
-        // so original_surface always has valid pixel data for display blit.
-        rePresentCachedFrame();
+        // so original_surface always has valid pixel data for display blit —
+        // but only ONCE per converged state: fb, surface and texture are
+        // unchanged after that, and the unconditional re-present burned a
+        // ~8 MB memcpy + SDL_UpdateTexture on every idle frame.
+        if (tonemapRefreshed || !s_idlePresentValid ||
+            s_idlePresentW != width || s_idlePresentH != height ||
+            s_idlePresentSamples != m_currentSamples) {
+            rePresentCachedFrame();
+            s_idlePresentW = width;
+            s_idlePresentH = height;
+            s_idlePresentSamples = m_currentSamples;
+            s_idlePresentValid = true;
+        }
         return;
     }
+    s_idlePresentValid = false;      // actively accumulating — every frame repaints
     m_tonemapRefreshPending = false; // still accumulating: normal frames repaint anyway
 
     auto presentBackgroundOnly = [&]() {
@@ -17106,19 +16974,26 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         m_forceClearOnNextPresent = false;
     }
 
-    // Use robust shader dir detection — try several common locations
-    std::string shaderDir = "shaders";
-    if (!std::filesystem::exists(shaderDir + "/raygen.spv"))
-        shaderDir = "source/shaders"; // VS dev layout: run from raytrac_sdl2/
-    if (!std::filesystem::exists(shaderDir + "/raygen.spv"))
-        shaderDir = "../shaders"; // Exe inside x64/Release, shaders at project/shaders
-    if (!std::filesystem::exists(shaderDir + "/raygen.spv")) {
-        // Try exe-relative path
-        char exePath[MAX_PATH] = {};
-        GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-        std::string exeDir = std::filesystem::path(exePath).parent_path().string();
-        shaderDir = exeDir + "/shaders";
+    // Use robust shader dir detection — try several common locations.
+    // Cached after the first resolve: this probing ran 2-4 std::filesystem::exists
+    // syscalls on EVERY frame of the render loop for a path that never changes.
+    static std::string s_cachedShaderDir;
+    if (s_cachedShaderDir.empty()) {
+        std::string probe = "shaders";
+        if (!std::filesystem::exists(probe + "/raygen.spv"))
+            probe = "source/shaders"; // VS dev layout: run from raytrac_sdl2/
+        if (!std::filesystem::exists(probe + "/raygen.spv"))
+            probe = "../shaders"; // Exe inside x64/Release, shaders at project/shaders
+        if (!std::filesystem::exists(probe + "/raygen.spv")) {
+            // Try exe-relative path
+            char exePath[MAX_PATH] = {};
+            GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+            std::string exeDir = std::filesystem::path(exePath).parent_path().string();
+            probe = exeDir + "/shaders";
+        }
+        s_cachedShaderDir = probe;
     }
+    std::string shaderDir = s_cachedShaderDir;
 
     // 1. Recreate output image if size changed
     if (m_imageWidth != width || m_imageHeight != height) {

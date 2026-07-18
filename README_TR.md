@@ -47,8 +47,8 @@ Bu bir render-farm eklentisi ya da kütüphane değil. Modern dock'lu bir arayü
 | **GPU çekirdek & shader dosyası** | 56 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
 | **UI kontrol noktası** | 1.278+ |
 | **Render backendleri** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
-| **Düğüm sistemleri** | Arazi (36+), Animasyon (14+), Materyal (11+) |
-| **Son doğrulama** | 2026-06-02 |
+| **Düğüm sistemleri** | Arazi (66), Animasyon (14+), Materyal (11+) |
+| **Son doğrulama** | 2026-07-18 |
 <!-- STATS_END -->
 
 Sayımlar `raytrac_sdl2/source` kapsamındadır ve tek dosyalık dış kütüphaneleri (`simdjson`, `stb`, `json.hpp`, `tinyexr`) hariç tutar.
@@ -67,8 +67,8 @@ RayTrophi Studio, hepsi aynı canlı sahne üzerinde çalışan, göreve odaklı
 | **Modelleme** | Poligon düzenleme (extrude, inset, bevel, loop cut, weld, merge, UV unwrap), modifier yığını |
 | **Sculpt** | Mesh ve arazide fırça tabanlı yüzey heykeltıraşlığı (PBVH hızlandırmalı) |
 | **Boyama** | Mesh üzerine doğrudan katmanlı PBR doku boyama (çok kanallı, blend modları) |
-| **Arazi** | Sculpt + düğüm-grafiği arazi, hidrolik/termal erozyon, heightmap I/O |
-| **Bitki / Scatter** | Kural tabanlı ve elle boyanan çim/ağaç/kaya instancing |
+| **Arazi** | Sculpt + tahribatsız arazi/biome grafiği, erozyon, hidroloji, kar/buzul, adlandırılmış alanlar, heightmap I/O |
+| **Bitki / Scatter** | Biome duyarlı node katmanları, Asset Library + sahne kaynakları, kural tabanlı ve elle boyanan GPU instancing |
 | **Saç** | Tüy/saç groom, tara, kes/uzat, simüle et ve render et |
 | **Simülasyon** | Sıvı (APIC/FLIP), gaz/duman/ateş, whitewater, rigid + soft body & cloth (Jolt), mesh/primitif collider, kuvvet alanları, emitter |
 | **Animasyon** | Çok-track zaman çizelgesi, kanal bazlı keyframe, iskelet animasyonu, animasyon grafiği |
@@ -205,17 +205,28 @@ Hapsolmuş hava ve dalga tepesi potansiyellerinden üretilen ikincil **sprey** (
 
 ## 🛠️ Prosedürel & oluşturma araçları
 
-### 🏔️ Arazi
-- Gerçek zamanlı sculpt fırçaları (yükselt, alçalt, yumuşat, düzleştir, stamp)
-- Doğal yatak/vadi/sediman taşınımı için **hidrolik & termal erozyon** (GPU çekirdekleri)
-- Gürültü, filtre ve maskeleri birleştiren **düğüm tabanlı, tahribatsız iş akışı** (36+ arazi düğümü)
-- 16-bit heightmap içe/dışa aktarım (World Machine / Gaea iş akışları)
+### 🏔️ Arazi, biome & hidroloji grafiği
 
-### 🌿 Bitki örtüsü & scatter
-- Donanım hızlandırmasıyla ölçekli GPU-instanced çim, ağaç, kaya
-- Çakışma önlemeli kural tabanlı yerleşim (eğim, yükseklik, doku maskesi)
-- Elle yerleştirme için boyama modu
-- Küresel dinamik rüzgâr (şiddet, yön, gust)
+- Gerçek zamanlı sculpt fırçaları (yükselt, alçalt, yumuşat, düzleştir, stamp) ve World Machine / Gaea iş akışları için 16-bit heightmap içe/dışa aktarımı
+- **Terrain Nodes V2** — 66 kayıtlı node, canlı property düzenleme, önizleme, gruplama, tekrar kullanılabilir kurulumlar ve Apply ile sahneye çıktı sunan, serileştirilen tahribatsız grafik
+- **Üretim & şekillendirme** — heightmap/hardness girdileri; prosedürel noise, fault, mesa, shear, terrace, smooth, normalize, resample, remap, blend, math, clamp, overlay ve screen işlemleri
+- **Erozyon & jeoloji** — hidrolik, termal, fluvial ve rüzgâr erozyonu; sediman birikimi, alüvyon yelpazesi, delta, ıslaklık, toprak derinliği, litoloji ve katman sentezi
+- **Arazi analizi & adlandırılmış alanlar** — eğim, yükseklik, eğrilik, akış, exposure, watershed, concavity, convexity, valley ve wetness verileri bir kez üretilip yüzey, biome ve foliage node'larında yeniden kullanılabilir
+- **Biome Composer** — Temperate Mixed, Lush Valleys, Alpine Tundra, Arid Highlands ve Boreal Mountains preset'leri normalize Forest / Grass / Rock / Alpine maskeleri ile paketlenmiş biome splat haritası üretir
+- **Hidroloji** — watershed analizi, nehir ağları ve hidroliği, nehir yatağı oyma, spline çıktısı, göl havzası algılama, göl yüzeyleri, kanal, kıyı ve köpük maskeleri
+- **İklim & kar** — climate, snowfall, settling, melt/freeze, bağıl kar çizgisi, buzul akışı ve kar/yüzey birleştirme node'ları
+- **Hızlı kurulum işlemleri** — düzenli biome-field ve biome-foliage grafik kollarını otomatik kurar; oluşturulan tüm node'lar düzenlenebilir kalır
+
+### 🌿 Node tabanlı biome foliage & scatter
+
+- **Foliage Layer → Foliage Set / Biome → Foliage Output** her bitki sınıfını bağımsız bir kural olarak korur, set düzeyinde tahribatsız density/seed kontrolü ekler ve arazi grafiği Apply edildiğinde bağlı katmanların tamamını dağıtabilir
+- Yerleştirme kuralları hedef adet, seed, minimum aralık, eğim ve yükseklik aralıklarının yanında; ayarlanabilir eşik/etkiye sahip adlandırılmış density, exclusion ve scale alanlarını kapsar
+- Her katman **Recommended**, **Asset Library** veya **Scene Objects** kaynaklarından ağırlıklı birden fazla obje alabilir; arama, biome/tip filtresi, tekrar önleme, thumbnail, hover önizleme ve kompakt kaynak düzenleme hem Terrain UI hem node properties içinde ortaktır
+- Asset Library önce model metadata'sını tarar, geometriyi ihtiyaç anında ortak cache'e yükler. `RayTrophiStudio/assets` altına eklenen kullanıcı bitki ve kaya asset'leri aynı kataloğa ve öneri akışına otomatik katılır
+- Kütüphane asset'leri taşınabilir göreli referanslar kullanır, eksik dosyaları bildirir, mesh tabanından araziye oturur ve kaynak bounding box'ından hesaplanan varyasyonla gerçek-dünya hedef yüksekliğine ölçeklenebilir
+- Bitkiler varsayılan olarak **World Y-Up** kullanır; çim, kaya veya özellikle araziye hizalanması istenen asset'lerde kaynak başına **Follow Slope** ve normal influence kullanılabilir
+- Terrain UI ile foliage node'ları aynı `InstanceGroup` verisinin senkron görünümleridir: ekleme, silme, ağırlık, scale/yükseklik, yönelim ve katman-kuralı değişiklikleri iki yöne yayılır; silinen kaynaklar eski grafik verisinden geri gelmez
+- Mevcut scatter iş akışları korunur: GPU-instanced çim/ağaç/kaya, çakışma duyarlı prosedürel yerleşim, elle detay boyama ve küresel dinamik rüzgâr (şiddet, yön, gust)
 
 ### 💇 Saç & tüy
 - GPU simüle ve render; Vulkan'da analitik LSS kesişim

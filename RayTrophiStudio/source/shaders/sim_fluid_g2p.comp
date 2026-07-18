@@ -15,6 +15,7 @@ layout(push_constant) uniform PC {
     float max_velocity;
     float dt;
     int   has_flip_snapshot;
+    int   use_solid_flip_limiter; // 1 = damp FLIP impulse next to solid collider cells
     float affine_damping;
     float max_affine;
 } pc;
@@ -29,6 +30,15 @@ layout(set = 0, binding = 5) readonly buffer VelZPost   { float vel_z_post[]; };
 layout(set = 0, binding = 6) readonly buffer VelXPre    { float vel_x_pre[];  };
 layout(set = 0, binding = 7) readonly buffer VelYPre    { float vel_y_pre[];  };
 layout(set = 0, binding = 8) readonly buffer VelZPre    { float vel_z_pre[];  };
+layout(set = 0, binding = 9) readonly buffer FluidMask  { float fluid_mask[]; };
+
+// mask semantics: < -0.5 solid, [-0.5, 0.5] air, > 0.5 fluid (particle count).
+// Out-of-grid = solid (mirrors CUDA fluid_g2p_mask_at).
+float g2p_mask_at(int i, int j, int k) {
+    if (i < 0 || i >= pc.nx || j < 0 || j >= pc.ny || k < 0 || k >= pc.nz) return -1.0;
+    return fluid_mask[i + j*pc.nx + k*pc.nx*pc.ny];
+}
+bool g2p_mask_is_solid(int i, int j, int k) { return g2p_mask_at(i, j, k) < -0.5; }
 
 void quadratic_weights(float fx, out int base, out float w[3]) {
     base = int(floor(fx - 0.5));
@@ -108,12 +118,31 @@ void main() {
         else                { v_new.z = v_acc; v_pre_g.z = vp_acc; C0.z = c_acc.x*D_inv; C1.z = c_acc.y*D_inv; C2.z = c_acc.z*D_inv; }
     }
 
-    // FLIP/PIC blend
+    // FLIP/PIC blend. CUDA parity: a collider-adjacent limiter damps the FLIP
+    // impulse only on the axis that sees the wall (fluid_g2p_gather_kernel).
     float flip = (pc.has_flip_snapshot != 0) ? pc.flip_blend : 0.0;
+    float flip_x = flip, flip_y = flip, flip_z = flip;
+    if (flip > 0.0 && pc.use_solid_flip_limiter != 0) {
+        int ci = int(floor((p.x - pc.origin_x) * invH));
+        int cj = int(floor((p.y - pc.origin_y) * invH));
+        int ck = int(floor((p.z - pc.origin_z) * invH));
+        if (ci >= 0 && ci < pc.nx && cj >= 0 && cj < pc.ny && ck >= 0 && ck < pc.nz) {
+            if (g2p_mask_at(ci, cj, ck) < -0.5) {
+                flip_x = 0.0; flip_y = 0.0; flip_z = 0.0;
+            } else {
+                const float wall_axis_scale = 0.65;
+                if (g2p_mask_is_solid(ci - 1, cj, ck) || g2p_mask_is_solid(ci + 1, cj, ck)) flip_x *= wall_axis_scale;
+                if (g2p_mask_is_solid(ci, cj - 1, ck) || g2p_mask_is_solid(ci, cj + 1, ck)) flip_y *= wall_axis_scale;
+                if (g2p_mask_is_solid(ci, cj, ck - 1) || g2p_mask_is_solid(ci, cj, ck + 1)) flip_z *= wall_axis_scale;
+            }
+        }
+    }
     vec3 v_out = v_new;
-    if (flip > 0.0) {
+    if (flip_x > 0.0 || flip_y > 0.0 || flip_z > 0.0) {
         vec3 v_old = vec3(vel_data[id*3], vel_data[id*3+1], vel_data[id*3+2]);
-        v_out += flip * (v_old - v_pre_g);
+        v_out.x += flip_x * (v_old.x - v_pre_g.x);
+        v_out.y += flip_y * (v_old.y - v_pre_g.y);
+        v_out.z += flip_z * (v_old.z - v_pre_g.z);
     }
 
     // Internal friction

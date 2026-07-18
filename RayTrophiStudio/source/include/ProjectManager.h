@@ -162,8 +162,12 @@ private:
     nlohmann::json serializeVDBVolumes(const std::vector<std::shared_ptr<VDBVolume>>& vdb_volumes);
     void deserializeVDBVolumes(const nlohmann::json& j, SceneData& scene);
 
-    // Serialize textures (with embed option)
-    nlohmann::json serializeTextures(std::ofstream& bin_out, bool embed_textures);
+    // Serialize textures (with embed option). `extra_textures` carries textures that no
+    // material slot references — today the material node graphs' Image Texture nodes,
+    // whose texture only reaches a slot through a manipulation node and would otherwise
+    // never be written into the project at all.
+    nlohmann::json serializeTextures(std::ofstream& bin_out, bool embed_textures,
+                                     const std::vector<std::shared_ptr<Texture>>& extra_textures = {});
     void deserializeTextures(const nlohmann::json& j, std::ifstream& bin_in, const std::string& project_dir);
 
     // Serialize Gas Volumes

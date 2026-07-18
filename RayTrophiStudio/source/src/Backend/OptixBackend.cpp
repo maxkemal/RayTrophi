@@ -269,8 +269,10 @@ GpuMemoryStats OptixBackend::getMemoryStats() const {
     return stats;
 }
 
-uint32_t OptixBackend::uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName) {
-    return 0; 
+uint32_t OptixBackend::uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName,
+                                       const std::vector<float>* cornerAttribs) {
+    (void)cornerAttribs;   // OptiX is frozen; it keeps the folded average (no Attribute node)
+    return 0;
 }
 
 uint32_t OptixBackend::uploadHairStrands(const std::vector<HairStrandData>& strands, const std::string& groomName) {

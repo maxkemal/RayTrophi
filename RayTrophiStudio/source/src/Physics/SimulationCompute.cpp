@@ -221,6 +221,14 @@ void SimulationComputeContext::synchronize() {
     backend_->synchronize();
 }
 
+void SimulationComputeContext::beginTransferBatch() {
+    backend_->beginTransferBatch();
+}
+
+bool SimulationComputeContext::endTransferBatch() {
+    return backend_->endTransferBatch();
+}
+
 void* SimulationComputeContext::nativeBufferPtr(ComputeBufferHandle handle) const {
     return backend_->nativeBufferPtr(handle);
 }

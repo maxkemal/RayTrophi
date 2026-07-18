@@ -1,0 +1,334 @@
+uint32_t VulkanBackendAdapter::resolveTextureHandle(int64_t key, int textureTypeInt, bool forceLinear, bool preferSingleChannel) {
+    TextureType textureType = static_cast<TextureType>(textureTypeInt);
+
+            if (!key) return 0;
+            VulkanRT::ImageHandle existingUploaded{};
+            if (tryGetUploadedImageHandle(key, existingUploaded)) {
+                return static_cast<uint32_t>(key);
+            }
+            // Runtime backend-owned texture handles are small integer ids, not real Texture* pointers.
+            // If such a handle is stale/missing from the uploaded-image table, fail safely instead of
+            // treating it as a host pointer and dereferencing invalid memory.
+            if (key > 0 && static_cast<uint64_t>(key) < (1ull << 32)) {
+                return 0;
+            }
+            uint64_t cacheKey = (static_cast<uint64_t>(key) << 2) |
+                                (forceLinear ? 1ull : 0ull) |
+                                (preferSingleChannel ? 2ull : 0ull);
+            Texture* texCheck = reinterpret_cast<Texture*>(key);
+            const bool needsDirtyRefresh = (texCheck && texCheck->vulkan_dirty);
+            TextureHandle sceneHandle{};
+            if (texCheck && texCheck->is_loaded() && m_sceneTextureManager && !needsDirtyRefresh) {
+                sceneHandle = registerSceneTexture(
+                    m_sceneTextureManager.get(),
+                    texCheck,
+                    textureType,
+                    forceLinear,
+                    preferSingleChannel,
+                    TextureConsumer::RasterPreview | TextureConsumer::VulkanRT);
+                int64_t existingSceneTextureId = 0;
+                if (sceneHandle.isValid() &&
+                    m_sceneTextureManager->tryGetVulkanTextureId(sceneHandle, sceneTextureOwnerScope(), existingSceneTextureId) &&
+                    existingSceneTextureId != 0 &&
+                    tryGetUploadedImageHandle(existingSceneTextureId, existingUploaded)) {
+                    uint32_t desiredW = static_cast<uint32_t>(std::max(0, texCheck->width));
+                    uint32_t desiredH = static_cast<uint32_t>(std::max(0, texCheck->height));
+                    if (isViewportTextureOwner(sceneTextureOwnerScope())) {
+                        fitWithinMaxDimension(desiredW, desiredH,
+                                              kMaterialPreviewTextureMaxDimension,
+                                              desiredW, desiredH);
+                    }
+                    if (existingUploaded.width == desiredW && existingUploaded.height == desiredH) {
+                        m_uploadedImageIDs[cacheKey] = existingSceneTextureId;
+                        m_textureIdToCacheKey[existingSceneTextureId] = cacheKey;
+                        return static_cast<uint32_t>(existingSceneTextureId);
+                    }
+                }
+            }
+            // [FIX] vulkan_dirty: texture content was updated in-place (paint stroke,
+            // autoMask, paintSplatMap, etc.). Prefer updateTexture2DRegion when the
+            // texture tracked exactly which pixels changed (brush dab) — only the
+            // dirty rect is staged + copied, avoiding the fullWidth*fullHeight*bpp
+            // temp buffer that dominated paint cost at 2K/4K. Fall back to
+            // updateTexture2DInPlace (full image, same VkImage slot) when no rect
+            // is tracked or the partial path can't be used. Only fall back to
+            // destroy+upload when in-place fails too.
+            if (texCheck && texCheck->is_loaded() && !texCheck->is_hdr && needsDirtyRefresh) {
+                auto oldIt = m_uploadedImageIDs.find(cacheKey);
+                if (oldIt != m_uploadedImageIDs.end()) {
+                    const int64_t existingId = oldIt->second;
+                    const std::vector<CompactVec4>& dpx = texCheck->pixels;
+                    if (existingId > 0 && !dpx.empty()) {
+                        const bool dUseSrgb = forceLinear ? false : texCheck->is_srgb;
+                        const TextureCompressionPlan dPlan = buildTextureCompressionPlan(texCheck, textureType);
+                        const bool dCanUseSingleChannel =
+                            (preferSingleChannel || dPlan.preferSingleChannelFallback) &&
+                            !dUseSrgb && texCheck->is_gray_scale && !texCheck->has_alpha;
+                        const bool dCanUseTwoChannels = (textureType == TextureType::Normal) && !texCheck->is_hdr;
+                        const uint32_t dUploadChannels = dCanUseSingleChannel ? 1u : (dCanUseTwoChannels ? 2u : 4u);
+
+                        // Try the partial-region fast path when a rect is known.
+                        int rx = 0, ry = 0, rw = 0, rh = 0;
+                        bool rfull = true;
+                        const bool haveRect = texCheck->getVulkanDirtyRegion(rx, ry, rw, rh, rfull);
+                        if (haveRect && !rfull && rw > 0 && rh > 0) {
+                            std::vector<uint8_t> region(static_cast<size_t>(rw) *
+                                                        static_cast<size_t>(rh) *
+                                                        dUploadChannels);
+                            const int srcW = texCheck->width;
+                            if (dCanUseSingleChannel) {
+                                for (int j = 0; j < rh; ++j) {
+                                    const size_t srcRow = static_cast<size_t>(ry + j) * static_cast<size_t>(srcW);
+                                    const size_t dstRow = static_cast<size_t>(j) * static_cast<size_t>(rw);
+                                    for (int i = 0; i < rw; ++i) {
+                                        region[dstRow + i] = dpx[srcRow + (rx + i)].r;
+                                    }
+                                }
+                            } else if (dCanUseTwoChannels) {
+                                for (int j = 0; j < rh; ++j) {
+                                    const size_t srcRow = static_cast<size_t>(ry + j) * static_cast<size_t>(srcW);
+                                    const size_t dstRow = static_cast<size_t>(j) * static_cast<size_t>(rw) * 2;
+                                    for (int i = 0; i < rw; ++i) {
+                                        const auto& p = dpx[srcRow + (rx + i)];
+                                        const size_t o = dstRow + static_cast<size_t>(i) * 2;
+                                        region[o + 0] = p.r;
+                                        region[o + 1] = p.g;
+                                    }
+                                }
+                            } else {
+                                for (int j = 0; j < rh; ++j) {
+                                    const size_t srcRow = static_cast<size_t>(ry + j) * static_cast<size_t>(srcW);
+                                    const size_t dstRow = static_cast<size_t>(j) * static_cast<size_t>(rw) * 4;
+                                    for (int i = 0; i < rw; ++i) {
+                                        const auto& p = dpx[srcRow + (rx + i)];
+                                        const size_t o = dstRow + static_cast<size_t>(i) * 4;
+                                        region[o + 0] = p.r;
+                                        region[o + 1] = p.g;
+                                        region[o + 2] = p.b;
+                                        region[o + 3] = p.a;
+                                    }
+                                }
+                            }
+                            if (this->updateTexture2DRegion(existingId, region.data(),
+                                                            texCheck->width, texCheck->height,
+                                                            dUploadChannels, dUseSrgb,
+                                                            rx, ry,
+                                                            static_cast<uint32_t>(rw),
+                                                            static_cast<uint32_t>(rh))) {
+                                texCheck->clearVulkanDirty();
+                                return (uint32_t)existingId;
+                            }
+                            // Region path failed (slot mismatch, format diverged).
+                            // Fall through to the full in-place path below.
+                        }
+
+                        std::vector<uint8_t> dtmp((size_t)texCheck->width * texCheck->height * dUploadChannels);
+                        if (dCanUseSingleChannel) {
+                            for (size_t i = 0; i < dpx.size(); ++i) dtmp[i] = dpx[i].r;
+                        } else if (dCanUseTwoChannels) {
+                            for (size_t i = 0; i < dpx.size(); ++i) {
+                                dtmp[i*2+0] = dpx[i].r; dtmp[i*2+1] = dpx[i].g;
+                            }
+                        } else {
+                            for (size_t i = 0; i < dpx.size(); ++i) {
+                                dtmp[i*4+0] = dpx[i].r; dtmp[i*4+1] = dpx[i].g;
+                                dtmp[i*4+2] = dpx[i].b; dtmp[i*4+3] = dpx[i].a;
+                            }
+                        }
+                        if (this->updateTexture2DInPlace(existingId, dtmp.data(),
+                                                         texCheck->width, texCheck->height,
+                                                         dUploadChannels, dUseSrgb, false)) {
+                            texCheck->clearVulkanDirty();
+                            return (uint32_t)existingId;
+                        }
+                    }
+                }
+                // In-place didn't apply (missing slot, dim change, compressed-only
+                // cache entry…). Evict and continue to the destroy+upload path.
+                auto evictIt = m_uploadedImageIDs.find(cacheKey);
+                if (evictIt != m_uploadedImageIDs.end()) {
+                    int64_t oldId = evictIt->second;
+                    if (oldId) this->destroyTexture(oldId);
+                }
+                texCheck->clearVulkanDirty();
+            }
+            if (texCheck && texCheck->is_loaded() && m_sceneTextureManager && !sceneHandle.isValid()) {
+                sceneHandle = registerSceneTexture(
+                    m_sceneTextureManager.get(),
+                    texCheck,
+                    textureType,
+                    forceLinear,
+                    preferSingleChannel,
+                    TextureConsumer::RasterPreview | TextureConsumer::VulkanRT);
+            }
+            auto it = m_uploadedImageIDs.find(cacheKey);
+            if (it != m_uploadedImageIDs.end()) return (uint32_t)it->second;
+            Texture* tex = texCheck;
+            if (!tex || !tex->is_loaded()) return 0;
+            const bool useSrgb = forceLinear ? false : tex->is_srgb;
+            const TextureCompressionPlan compressionPlan = buildTextureCompressionPlan(tex, textureType);
+            const bool limitThisTextureForPreview = isViewportTextureOwner(sceneTextureOwnerScope());
+            uint32_t uploadWidth = static_cast<uint32_t>(std::max(0, tex->width));
+            uint32_t uploadHeight = static_cast<uint32_t>(std::max(0, tex->height));
+            if (limitThisTextureForPreview) {
+                fitWithinMaxDimension(uploadWidth, uploadHeight,
+                                      kMaterialPreviewTextureMaxDimension,
+                                      uploadWidth, uploadHeight);
+            }
+            auto uploadTextureNow = [&]() -> int64_t {
+                if (tex->is_hdr) {
+                    // HDR path: no in-place fast path yet (rarely painted in practice).
+                    // vulkan_dirty HDR textures simply re-upload here after the eviction
+                    // above cleared the stale cache entry.
+                    const std::vector<float4>& fp = tex->float_pixels;
+                    if (fp.empty()) return 0;
+                    return this->uploadTexture2D(fp.data(), tex->width, tex->height, 4, false, true);
+                }
+
+                // Use the dirty snapshot captured at function entry
+                // (`needsDirtyRefresh`, line 7113) — by the time we reach this
+                // lambda the in-place fast path above has already called
+                // clearVulkanDirty() at line 7222 when it failed (which is
+                // exactly the BC/DDS-backed case we care about), so reading
+                // tex->vulkan_dirty here would always see false.
+                // If the user just painted on this texture, `pixels` holds the
+                // new content and any on-disk DDS cache is stale (it was
+                // written before the stroke). Skipping the cache forces
+                // re-encoding from `pixels`, which is what makes paint visible
+                // in raster + Vulkan-RT. CPU/OptiX worked already because
+                // they never consult the cache.
+                const bool hasPendingPaintEdits = needsDirtyRefresh;
+                if (tex->vulkan_dirty) tex->clearVulkanDirty();
+
+                // Wipe the stale managed DDS cache for this texture on the
+                // first dirty transition. Without this, closing and reopening
+                // the project would replay the pre-paint compressed bytes,
+                // silently reverting the stroke. Idempotent: subsequent
+                // strokes hit the in-place fast path and never reach this
+                // lambda, so file I/O stays one-shot per painted texture.
+                // Adjacent user-supplied DDS files are not touched.
+                if (hasPendingPaintEdits && !tex->name.empty()) {
+                    const size_t removed = invalidateManagedTextureCacheForTexture(*tex);
+                    if (removed > 0) {
+                        SCENE_LOG_INFO("[Vulkan] Invalidated " + std::to_string(removed) +
+                                       " stale DDS cache file(s) for painted texture: " + tex->name);
+                    }
+                }
+                const std::vector<CompactVec4>& px = tex->pixels;
+                if (px.empty()) return 0;
+
+                const bool supportsPreferredCompression =
+                    (compressionPlan.preferredTarget == TextureCompressionTarget::BC4 && m_device->getCapabilities().supportsBC4) ||
+                    (compressionPlan.preferredTarget == TextureCompressionTarget::BC5 && m_device->getCapabilities().supportsBC5) ||
+                    (compressionPlan.preferredTarget == TextureCompressionTarget::BC7 && m_device->getCapabilities().supportsBC7);
+                if (supportsPreferredCompression && !tex->name.empty() && !hasPendingPaintEdits &&
+                    !limitThisTextureForPreview) {
+                    DDSCompressedPayload payload{};
+                    if (auto cacheCandidate = findCompressedTextureCacheCandidate(*tex, textureType, useSrgb)) {
+                        if (loadCompressedDDSFile(cacheCandidate->ddsPath, cacheCandidate->target, useSrgb, payload) &&
+                            payload.width == static_cast<uint32_t>(tex->width) &&
+                            payload.height == static_cast<uint32_t>(tex->height)) {
+                            int64_t compressedId = this->uploadCompressedTexture2D(
+                                payload.bytes.data(),
+                                payload.bytes.size(),
+                                payload.width,
+                                payload.height,
+                                payload.format);
+                            if (compressedId) {
+                                return compressedId;
+                            }
+                        }
+                    }
+                }
+
+                const bool canUseSingleChannel =
+                    (preferSingleChannel || compressionPlan.preferSingleChannelFallback) &&
+                    !useSrgb && tex->is_gray_scale && !tex->has_alpha;
+                const bool canUseTwoChannels = (textureType == TextureType::Normal) && !tex->is_hdr;
+                std::vector<uint8_t> tmp;
+                const uint32_t uploadChannels = canUseSingleChannel ? 1u : (canUseTwoChannels ? 2u : 4u);
+                tmp.resize((size_t)tex->width * tex->height * uploadChannels);
+                if (canUseSingleChannel) {
+                    for (size_t i = 0; i < px.size(); ++i) {
+                        tmp[i] = px[i].r;
+                    }
+                } else if (canUseTwoChannels) {
+                    for (size_t i = 0; i < px.size(); ++i) {
+                        tmp[i*2 + 0] = px[i].r; tmp[i*2 + 1] = px[i].g;
+                    }
+                } else {
+                    for (size_t i = 0; i < px.size(); ++i) {
+                        tmp[i*4 + 0] = px[i].r; tmp[i*4 + 1] = px[i].g; tmp[i*4 + 2] = px[i].b; tmp[i*4 + 3] = px[i].a;
+                    }
+                }
+                if (uploadWidth != static_cast<uint32_t>(tex->width) ||
+                    uploadHeight != static_cast<uint32_t>(tex->height)) {
+                    tmp = resizeLdrBilinear(tmp,
+                                           static_cast<uint32_t>(tex->width),
+                                           static_cast<uint32_t>(tex->height),
+                                           uploadWidth,
+                                           uploadHeight,
+                                           uploadChannels);
+                }
+                return this->uploadTexture2D(tmp.data(), uploadWidth, uploadHeight, uploadChannels, useSrgb, false);
+            };
+
+            const bool canUseSingleChannel =
+                (preferSingleChannel || compressionPlan.preferSingleChannelFallback) &&
+                !useSrgb && tex->is_gray_scale && !tex->has_alpha;
+            const uint32_t estimatedUploadChannels = tex->is_hdr ? 4u : (canUseSingleChannel ? 1u : 4u);
+            int64_t id = 0;
+            bool resolvedThroughPool = false;
+            bool createdByPool = false;
+            if (m_sceneTextureManager && sceneHandle.isValid()) {
+                VulkanBackingRecord resolvedBacking{};
+                resolvedThroughPool = m_sceneTextureManager->resolveOrCreateVulkanBacking(
+                    buildSceneTextureKey(tex, textureType, forceLinear, preferSingleChannel),
+                    sceneTextureOwnerScope(),
+                    TextureConsumer::RasterPreview | TextureConsumer::VulkanRT,
+                    uploadWidth,
+                    uploadHeight,
+                    tex->is_hdr
+                        ? estimateSceneTextureBytes(tex, estimatedUploadChannels)
+                        : static_cast<uint64_t>(uploadWidth) * uploadHeight * estimatedUploadChannels,
+                    [&](TextureHandle, VulkanBackingRecord& outBacking) -> bool {
+                        const int64_t uploadedId = uploadTextureNow();
+                        if (!uploadedId) {
+                            return false;
+                        }
+                        return buildVulkanBackingRecord(uploadedId, outBacking);
+                    },
+                    resolvedBacking,
+                    &createdByPool);
+
+                if (resolvedThroughPool && resolvedBacking.textureId != 0) {
+                    VulkanRT::ImageHandle localImage{};
+                    if (tryGetUploadedImageHandle(resolvedBacking.textureId, localImage)) {
+                        if (localImage.width == uploadWidth && localImage.height == uploadHeight) {
+                            id = resolvedBacking.textureId;
+                        } else {
+                            m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), resolvedBacking.textureId);
+                            resolvedThroughPool = false;
+                            createdByPool = false;
+                        }
+                    } else {
+                        m_sceneTextureManager->clearVulkanBacking(sceneTextureOwnerScope(), resolvedBacking.textureId);
+                        resolvedThroughPool = false;
+                    }
+                }
+            }
+
+            if (!id) {
+                id = uploadTextureNow();
+            }
+            if (id) {
+                m_uploadedImageIDs[cacheKey] = id;
+                m_textureIdToCacheKey[id] = cacheKey;
+                if (!resolvedThroughPool || !createdByPool) {
+                    registerSceneTextureUpload(sceneHandle, id);
+                }
+                return (uint32_t)id;
+            }
+            return 0;
+}
+

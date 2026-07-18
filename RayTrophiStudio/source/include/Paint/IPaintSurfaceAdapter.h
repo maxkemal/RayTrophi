@@ -49,7 +49,12 @@ enum class BrushTool : unsigned char {
     Stamp,
     Fill,
     Clone,
-    Spray
+    Spray,
+    Smudge,
+    Dodge,
+    Burn,
+    Sharpen,
+    Eyedropper
 };
 
 enum class StampPlacementMode : unsigned char {

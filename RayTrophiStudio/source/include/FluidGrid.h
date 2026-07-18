@@ -114,6 +114,10 @@ public:
     // SCALAR FIELDS (Cell-centered)
     // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     std::vector<float> density;      // Smoke/gas density
+    // Combustion channels — only allocated when allocate_gas_channels is true
+    // (gas domains). Liquid domains leave them EMPTY; all consumers must (and
+    // do) guard with .empty()/size checks.
+    bool allocate_gas_channels = true;
     std::vector<float> temperature;  // Temperature field
     std::vector<float> fuel;         // Fuel field (for combustion/fire)
     std::vector<float> interaction;  // Reaction/Flame intensity field
@@ -193,17 +197,26 @@ public:
     
     void allocate() {
         size_t cell_count = static_cast<size_t>(nx) * ny * nz;
-        
+
         // Staggered velocity grids
         vel_x.resize((nx + 1) * ny * nz, 0.0f);
         vel_y.resize(nx * (ny + 1) * nz, 0.0f);
         vel_z.resize(nx * ny * (nz + 1), 0.0f);
-        
+
         // Cell-centered scalars
         density.resize(cell_count, 0.0f);
-        temperature.resize(cell_count, 0.0f);
-        fuel.resize(cell_count, 0.0f);
-        interaction.resize(cell_count, 0.0f);
+        if (allocate_gas_channels) {
+            temperature.resize(cell_count, 0.0f);
+            fuel.resize(cell_count, 0.0f);
+            interaction.resize(cell_count, 0.0f);
+        } else {
+            // Liquid (APIC) domains never touch the combustion channels — every
+            // gas-side consumer already guards with .empty()/size checks. Release
+            // (not just clear) so a 512-res liquid doesn't pay 3 floats/cell.
+            std::vector<float>().swap(temperature);
+            std::vector<float>().swap(fuel);
+            std::vector<float>().swap(interaction);
+        }
         pressure.resize(cell_count, 0.0f);
         divergence.resize(cell_count, 0.0f);
         solid.resize(cell_count, 0);

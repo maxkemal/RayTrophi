@@ -18,7 +18,9 @@
 #include <memory>
 
 class Triangle;
+class TriangleMesh;
 class Hittable; // Forward declaration
+struct TerrainObject;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INSTANCE GROUP - Represents a group of instanced objects (e.g., grass, trees)
@@ -46,7 +48,14 @@ struct InstanceTransform {
 
 struct ScatterSource {
     std::string name;                               // Source name (mesh node name)
-    std::vector<std::shared_ptr<Triangle>> triangles;  // Source triangles
+    // Optional portable Asset Library identity. Empty means this source came
+    // from a scene object (legacy/current manual scatter workflow).
+    std::string asset_id;
+    std::string asset_relative_path;
+    // Canonical source geometry. Flat scene objects stay O(mesh-count) here;
+    // `triangles` is retained only for legacy triangle-soup projects.
+    std::vector<std::shared_ptr<TriangleMesh>> flat_meshes;
+    std::vector<std::shared_ptr<Triangle>> triangles;
     Vec3 mesh_center;                               // Pre-computed center
     float weight = 1.0f;                            // Selection probability weight (0.0 - 1.0)
     
@@ -76,8 +85,10 @@ struct ScatterSource {
 
     ScatterSource() = default;
     ScatterSource(const std::string& n, const std::vector<std::shared_ptr<Triangle>>& tris);
+    ScatterSource(const std::string& n, const std::vector<std::shared_ptr<TriangleMesh>>& meshes);
 
     void computeCenter();                           // Calculate mesh center from triangles
+    size_t sourceTriangleCount() const;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -228,6 +239,7 @@ struct InstanceGroup {
         // behavior change from before these fields existed). Sampled barycentrically at
         // the brush hit point in paintInstances.
         std::string density_mask_attribute;     // empty = off; gates whether an instance is placed
+        std::string exclusion_mask_attribute;   // empty = off; values >= exclusion_threshold reject placement
         std::string scale_mask_attribute;        // empty = off; independent of density_mask_attribute
         float scale_mask_influence = 1.0f;       // 0 = scale mask ignored; 1 = scale fully follows it
     };
@@ -274,7 +286,7 @@ struct InstanceGroup {
                 if (source.centered_triangles_ptr) {
                     total += source.centered_triangles_ptr->size();
                 } else {
-                    total += source.triangles.size();
+                    total += source.sourceTriangleCount();
                 }
             }
             return total;
@@ -298,6 +310,12 @@ struct InstanceGroup {
     // Geo-DAG/sculpt-exported mask behaves identically whether painted by hand or filled by this
     // button. Does NOT clear existing instances first (caller's choice). Returns spawned count.
     int scatterFillMesh(const std::vector<std::shared_ptr<Triangle>>& surfaceTriangles);
+
+    // Procedural whole-terrain fill for terrain foliage nodes. Mirrors the
+    // proven legacy Scatter UI contract: named fields, splat/exclusion masks,
+    // slope/height/curvature rules and deterministic seed contract.
+    // Does NOT clear existing instances first (caller's choice).
+    int scatterFillTerrain(TerrainObject* terrain);
 
     // Generate random transform based on brush settings
     InstanceTransform generateRandomTransform(const Vec3& position, const Vec3& normal) const;

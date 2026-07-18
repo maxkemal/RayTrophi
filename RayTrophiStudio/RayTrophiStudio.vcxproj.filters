@@ -279,7 +279,19 @@
     <ClInclude Include="source\include\MaterialManager.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\MaterialNodesV2.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MaterialProceduralMath.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MaterialProgram.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\MeshModifiers.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeshPointiness.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Paint\IPaintSurfaceAdapter.h">
@@ -393,7 +405,7 @@
     <ClInclude Include="source\src\UI\scene_ui_terrain.hpp">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
-    <ClInclude Include="source\src\UI\scene_ui_water.hpp">
+    <ClInclude Include="source\src\UI\scene_ui_water_v2.hpp">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\src\UI\scene_ui_river.hpp">
@@ -415,6 +427,9 @@
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\AssetRegistry.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\FoliageAssetLibrary.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\FoliageWindSystem.h">
@@ -491,6 +506,9 @@
       <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
     <None Include="source\shaders\closesthit.rchit">
+      <Filter>Kaynak Dosyalar\shader</Filter>
+    </None>
+    <None Include="source\shaders\water_v3.glsl">
       <Filter>Kaynak Dosyalar\shader</Filter>
     </None>
     <None Include="source\shaders\miss.rmiss">
@@ -817,6 +835,9 @@
     <ClCompile Include="source\src\Scene\MaterialManager.cpp">
       <Filter>Kaynak Dosyalar\Scene</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Scene\MaterialNodesV2.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Animation\AnimationController.cpp">
       <Filter>Kaynak Dosyalar\Animation</Filter>
     </ClCompile>
@@ -886,6 +907,9 @@
     <ClCompile Include="source\src\Backend\SceneTextureManager.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanDevicePipelines.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
@@ -893,6 +917,9 @@
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Scene\AssetRegistry.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\FoliageAssetLibrary.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Render\FoliageWindSystem.cpp">

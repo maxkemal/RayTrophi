@@ -32,28 +32,9 @@ layout(push_constant) uniform CameraPC {
 } cam;
 
 // ============================================================
-// Payload — raygen v3 + closesthit v2 ile tam eşleşme
-// Alan sırası ve tipleri birebir aynı olmalı
+// Payload — shared ABI, single source of truth
 // ============================================================
-struct RayPayload {
-    vec3  radiance;
-    vec3  attenuation;
-    vec3  scatterOrigin;
-    vec3  scatterDir;
-    uint  seed;
-    bool  scattered;
-    bool  hitEmissive;
-    uint  occluded;
-    bool  skipAABBs;
-    vec3  primaryAlbedo;
-    vec3  primaryNormal;
-    uint  primaryHit;
-    float primaryTransmission;
-    float primaryMetallic;
-    uint  bounceType;
-    uint  primaryMaterialId;   // Stylize AOV: real material index of the primary hit
-    float dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
-};
+#include "rt_payload.glsl"
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
 
@@ -427,8 +408,6 @@ void main() {
     payload.scatterOrigin = vec3(0.0);
     payload.scatterDir    = vec3(0.0);
     payload.scattered     = false;        // Bounce durur
-    payload.hitEmissive   = false;
-    payload.occluded      = 0u;
 
     // ----------------------------------------------------------
     // Sky radiance — raygen: radiance += throughput * payload.radiance

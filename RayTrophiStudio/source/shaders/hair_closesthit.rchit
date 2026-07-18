@@ -42,26 +42,8 @@ layout(push_constant) uniform CameraPC {
     float exposure_factor;
 } cam;
 
-// ─── Payload ─────────────────────────────────────────────────────────────────
-struct RayPayload {
-    vec3  radiance;
-    vec3  attenuation;
-    vec3  scatterOrigin;
-    vec3  scatterDir;
-    uint  seed;
-    bool  scattered;
-    bool  hitEmissive;
-    uint  occluded;
-    bool  skipAABBs;    // set by volume_closesthit when a solid surface is found inside
-    vec3  primaryAlbedo;
-    vec3  primaryNormal;
-    uint  primaryHit;
-    float primaryTransmission;
-    float primaryMetallic;
-    uint  bounceType;
-    uint  primaryMaterialId;   // Stylize AOV: real material index of the primary hit
-    float dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
-};
+// ─── Payload (shared ABI, single source of truth) ────────────────────────────
+#include "rt_payload.glsl"
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
 // Shadow payload: rgb = transmissive tint, w = reached-light flag (0 = occluded).
@@ -519,8 +501,6 @@ void main()
         payload.scatterOrigin = hitPoint;
         payload.scatterDir    = normalize(gl_WorldRayDirectionEXT);
         payload.scattered     = false;
-        payload.hitEmissive   = false;
-        payload.occluded      = 0u;
         payload.skipAABBs     = false;
         return;
     }
@@ -533,8 +513,6 @@ void main()
         payload.scatterOrigin = hitPoint;
         payload.scatterDir    = normalize(gl_WorldRayDirectionEXT);
         payload.scattered     = false;
-        payload.hitEmissive   = false;
-        payload.occluded      = 0u;
         payload.skipAABBs     = false;
         return;
     }
@@ -677,10 +655,14 @@ void main()
     // Exposure
     radiance *= cam.exposure_factor;
 
-    if (payload.primaryHit == 0u) {
-        payload.primaryAlbedo = hairColor;
-        payload.primaryNormal = normal;
-        payload.primaryHit = 1u;
+    if ((payload.primaryMeta & PL_PRIMARY_DONE) == 0u) {
+        payload.primaryARG  = packHalf2x16(hairColor.rg);
+        payload.primaryABT  = packHalf2x16(vec2(hairColor.b, 0.0));
+        payload.primaryNrm  = plPackNormal(normal);
+        // Material id stays 0xFFFF: hair has no scene material index (stylize
+        // AOV encodes it as "hit with unknown material").
+        payload.primaryMeta = (payload.primaryMeta & PL_DISP_MASK)
+                            | PL_PRIMARY_DONE | PL_MATID_MASK;
     }
 
     // Payload
@@ -689,7 +671,5 @@ void main()
     payload.scatterOrigin = offset_ray(hitPoint, normal);
     payload.scatterDir    = normalize(gl_WorldRayDirectionEXT);
     payload.scattered   = false;
-    payload.hitEmissive = false;
-    payload.occluded    = 0u;
     payload.skipAABBs   = false;
 }

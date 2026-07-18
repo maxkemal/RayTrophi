@@ -150,9 +150,33 @@ public:
     virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered, bool& is_specular) const = 0;
     
     virtual float get_metallic() const { return metallicProperty.intensity; }
-    virtual Vec3 getEmission(const Vec2& uv, const Vec3& p) const {
+    // `pointiness` is the Geometry node's per-vertex convexity at the shading point
+    // (0.5 = flat); `objectOrigin` is the Object Info node's world-space object origin;
+    // `attribs` are the Attribute node's named per-vertex channels (kMatAttribSlots floats,
+    // null = all unpainted). Only PrincipledBSDF's per-pixel program reads them; every other
+    // material ignores them. Callers holding a HitRecord should pass rec.pointiness /
+    // rec.object_origin / rec.mat_attrib — without them an Emission slot driven by any of
+    // the three would shade differently on CPU than in the Vulkan RT closesthit, which
+    // supplies all three.
+    //
+    // `shadingNormal` (rec.normal) and `viewDir` (rec.view_dir) complete the context. The
+    // GPU evaluates emission from the SAME full-context program call as the surface, so a
+    // normal- or view-driven emission chain (Layer Weight -> Emission = rim glow) diverged
+    // on CPU while this entry point was handing the VM a null normal and no ray.
+    virtual Vec3 getEmission(const Vec2& uv, const Vec3& p, float pointiness = 0.5f,
+                             const Vec3& objectOrigin = Vec3(),
+                             const float* attribs = nullptr,
+                             const float* objectPos = nullptr,
+                             const Vec3* shadingNormal = nullptr,
+                             const Vec3& viewDir = Vec3()) const {
         (void)uv;
         (void)p;
+        (void)pointiness;
+        (void)objectOrigin;
+        (void)attribs;
+        (void)objectPos;
+        (void)shadingNormal;
+        (void)viewDir;
         return emissionProperty.color * emissionProperty.intensity;
     }
     virtual bool isEmissive() const { return false; }

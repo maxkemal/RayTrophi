@@ -382,6 +382,20 @@ namespace DNA {
             return custom_base.find(name) != custom_base.end();
         }
 
+        // Removes only a named/custom attribute; canonical P/N/uv/etc. cannot
+        // be removed through this API. Used by derived field publishers when an
+        // output pin is disconnected so foliage never samples stale data.
+        bool remove_custom_attribute(const std::string& name) {
+            if (core_attr_index(name) >= 0) return false;
+            const bool removed = custom_base.erase(name) > 0;
+            custom_active.erase(name);
+            if (removed) {
+                active_state_dirty = true;
+                cached_pointers_dirty = true;
+            }
+            return removed;
+        }
+
         /**
          * @brief Names of all custom/named attributes (paint layers, masks, groups) —
          * add_attribute() always writes custom_base directly regardless of delta_stack

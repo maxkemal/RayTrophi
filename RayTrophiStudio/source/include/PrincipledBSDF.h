@@ -15,6 +15,7 @@
 #include "Vec2.h"
 #include "Ray.h"
 #include "Hittable.h"
+#include "MaterialProgram.h"
 #include <memory>
 
 class PrincipledBSDF : public Material {
@@ -144,15 +145,66 @@ public:
     virtual float get_opacity(const Vec2& uv) const override;
     virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered, bool& is_specular) const override;
     float pdf(const HitRecord& rec, const Vec3& incoming, const Vec3& outgoing) const override;
+
+    /**
+     * @brief Apply the per-pixel material program (Faz 2a) on top of the folded slots.
+     *
+     * THE choke point for CPU shading. Every site that reads albedo/roughness/metallic/
+     * specular/transmission off this material MUST run it — the graph's folded slots are
+     * only a 5-UV-sample AVERAGE of a spatially varying chain (a texture behind a
+     * Bright/Contrast, a Noise, a ColorRamp), so a site that skips this shades a flat
+     * blob while Vulkan RT's closesthit shades the same material per pixel.
+     *
+     * Null pointers are skipped; a slot the program does not drive is left untouched.
+     * Free (a single branch) when the material has no active program.
+     */
+    void applyProgramSurface(const HitRecord& rec,
+                             Vec3* albedo, float* roughness, float* metallic,
+                             float* specular, float* transmission) const;
     float get_scattering_factor() const override {
         // Example formula incorporating reflectivity and roughness
         return 0.01f;
     }
-    Vec3 getEmission(const Vec2& uv, const Vec3& p) const {
+    Vec3 getEmission(const Vec2& uv, const Vec3& p, float pointiness = 0.5f,
+                     const Vec3& objectOrigin = Vec3(),
+                     const float* attribs = nullptr,
+                     const float* objectPos = nullptr,
+                     const Vec3* shadingNormal = nullptr,
+                     const Vec3& viewDir = Vec3()) const override {
         (void)p;
         // Vulkan: payload.radiance = emColor * emStrength
         // OptiX:  gpuMat.emission = color * intensity (pre-multiplied at upload)
         // CPU must match: return color * intensity
+        // Faz 2a: a procedurally-driven emission slot shades per pixel here.
+        if (proceduralProgram && proceduralProgram->active &&
+            (proceduralProgram->drivenSlots &
+             ((1u << static_cast<uint32_t>(MaterialNodesV2::MatSlot::EmissionColor)) |
+              (1u << static_cast<uint32_t>(MaterialNodesV2::MatSlot::EmissionStrength))))) {
+            const float pp[3] = { static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z) };
+            const float po3[3] = { objectOrigin.x, objectOrigin.y, objectOrigin.z };
+            // The normal used to be hard-nulled here, so a normal-driven emission chain
+            // (Geometry > Normal, Layer Weight, Fresnel) shaded flat on CPU while the GPU —
+            // which fills emission from the SAME full-context program call as the surface —
+            // shaded it correctly. Callers with a HitRecord pass rec.normal / rec.view_dir.
+            const float pn[3] = { shadingNormal ? static_cast<float>(shadingNormal->x) : 0.0f,
+                                  shadingNormal ? static_cast<float>(shadingNormal->y) : 0.0f,
+                                  shadingNormal ? static_cast<float>(shadingNormal->z) : 1.0f };
+            const float pv[3] = { viewDir.x, viewDir.y, viewDir.z };
+            const bool hasView = (viewDir.length_squared() > 1e-8f);
+            const MaterialNodesV2::MatProgramOutputs po =
+                MaterialNodesV2::evalMaterialProgram(*proceduralProgram,
+                                                     static_cast<float>(uv.u), static_cast<float>(uv.v), pp,
+                                                     shadingNormal ? pn : nullptr,
+                                                     pointiness, po3, attribs, objectPos,
+                                                     hasView ? pv : nullptr);
+            Vec3  col = emissionProperty.color;
+            float str = emissionProperty.intensity;
+            if (po.has(MaterialNodesV2::MatSlot::EmissionColor))
+                col = Vec3(po.emissionColor[0], po.emissionColor[1], po.emissionColor[2]);
+            if (po.has(MaterialNodesV2::MatSlot::EmissionStrength))
+                str = po.emissionStrength;
+            return col * str;
+        }
         Vec2 sampleUv = applyTextureTransform(uv.u, uv.v);
         if (emissionProperty.texture) {
             return emissionProperty.texture->get_color_bilinear(sampleUv.u, sampleUv.v) * emissionProperty.intensity;
@@ -315,6 +367,13 @@ public:
     float micro_detail_strength = 0.0f;  // 0 = disabled
     float micro_detail_scale    = 2.0f;  // World-space frequency
     float tile_break_strength   = 0.0f;  // UV tile-break
+
+    // Faz 2a: per-pixel material-graph program (SVM-lite). Non-null + .active
+    // means scatter/emission sample it at (u,v) for the driven slots instead of
+    // the folded constant. Null (default) = zero cost, unchanged behaviour. Set
+    // by the material node editor's applyGraph; compiled by compileMaterialProgram.
+    std::shared_ptr<MaterialNodesV2::MaterialProgram> proceduralProgram;
+
     Vec3 sampleGGXVNDF(const Vec3& N, const Vec3& V, float roughness, float u1, float u2) const;
 private:
   

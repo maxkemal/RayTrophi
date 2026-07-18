@@ -1,132 +1,617 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RayTrophi Studio - Manual</title>
+    <title>RayTrophi Studio - Professional DCC Engine Manual & Technical Reference</title>
     <link rel="stylesheet" href="style.css">
 </head>
+<body class="lang-en">
 
-<body>
+    <div id="app-layout">
+        <!-- Sidebar Navigation -->
+        <div id="sidebar">
+            <div class="brand-area">
+                <div class="brand-title">
+                    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                        <polyline points="2 17 12 22 22 17"></polyline>
+                        <polyline points="2 12 12 17 22 12"></polyline>
+                    </svg>
+                    RayTrophi
+                </div>
+                <div class="brand-tag" data-i18n="tag">OptiX & Vulkan RT DCC Engine</div>
+            </div>
 
-    <div id="sidebar">
-        <h2>RayTrophi</h2>
-        <a href="index.html" class="nav-link active">Home / Overview</a>
-        <a href="world.html" class="nav-link">World & Sky</a>
-        <a href="water.html" class="nav-link">Water System</a>
-        <a href="nodes.html" class="nav-link">Terrain Nodes</a>
-        <a href="terrain.html" class="nav-link">Terrain System</a>
-        <a href="edit-mesh.html" class="nav-link">Edit Mesh</a>
-        <a href="sculpt.html" class="nav-link">Sculpt</a>
-        <a href="mesh-paint.html" class="nav-link">Mesh Paint</a>
-        <a href="hair.html" class="nav-link">Hair & Fur</a>
-        <a href="animation.html" class="nav-link">Animation</a>
-        <a href="render.html" class="nav-link">Render Settings</a>
-        <a href="camera.html" class="nav-link">Pro Camera</a>
-        <a href="system.html" class="nav-link">System & File</a>
-    </div>
+            <div class="search-area">
+                <div class="search-wrapper">
+                    <svg class="search-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <circle cx="11" cy="11" r="8" stroke-width="2.5"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65" stroke-width="2.5"></line>
+                    </svg>
+                    <input type="text" class="search-input" placeholder="Search Manual...">
+                </div>
+            </div>
 
-    <div id="content">
-        <div class="container">
+            <div class="nav-menu">
+                <div class="nav-section-title" data-i18n="chapters">Chapters</div>
+                
+                <a href="#home" class="nav-link active">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+                    <span class="lang-en">Overview</span>
+                    <span class="lang-tr">Genel Bakış</span>
+                </a>
+                
+                <a href="#world" class="nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path><circle cx="12" cy="12" r="4"></circle></svg>
+                    <span class="lang-en">World & Sky</span>
+                    <span class="lang-tr">Dünya & Çevre</span>
+                </a>
 
-            <div class="hero">
-                <div class="screenshot-area" style="margin-bottom: 40px;">
-                    <img src="images/index_header.jpg" alt="RayTrophi Cinematic"
-                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        ⭐ Please save a Header Render as <code>docs/images/index_header.jpg</code>
+                <a href="#water" class="nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.53c-.26-.81-1-1.4-1.9-1.4h-1v-3c0-.55-.45-1-1-1h-6v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.4z"></path></svg>
+                    <span class="lang-en">Water System</span>
+                    <span class="lang-tr">Su & Okyanus</span>
+                </a>
+
+                <a href="#nodes" class="nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
+                    <span class="lang-en">Terrain Nodes</span>
+                    <span class="lang-tr">Arazi Grafiği</span>
+                </a>
+
+                <a href="#terrain" class="nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+                    <span class="lang-en">Terrain & Foliage</span>
+                    <span class="lang-tr">Arazi ve Foliage</span>
+                </a>
+
+                <a href="#edit-mesh" class="nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 16 12 12 8 16"></polyline><line x1="12" y1="12" x2="12" y2="21"></line><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"></path></svg>
+                    <span class="lang-en">Edit Mesh</span>
+                    <span class="lang-tr">Mesh Düzenleme</span>
+                </a>
+
+                <a href="#sculpt" class="nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                    <span class="lang-en">Sculpt</span>
+                    <span class="lang-tr">Heykel</span>
+                </a>
+
+                <a href="#mesh-paint" class="nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"></path></svg>
+                    <span class="lang-en">Mesh Paint</span>
+                    <span class="lang-tr">Mesh Boyama</span>
+                </a>
+
+                <a href="#hair" class="nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 22V4c0-.5.2-1 .6-1.4C5 2.2 5.5 2 6 2h12c.5 0 1 .2 1.4.6.4.4.6.9.6 1.4v18l-8-4-8 4z"></path></svg>
+                    <span class="lang-en">Hair & Fur</span>
+                    <span class="lang-tr">Saç & Kürk</span>
+                </a>
+
+                <a href="#animation" class="nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect><line x1="7" y1="2" x2="7" y2="22"></line><line x1="17" y1="2" x2="17" y2="22"></line><line x1="2" y1="12" x2="22" y2="12"></line></svg>
+                    <span class="lang-en">Animation</span>
+                    <span class="lang-tr">Animasyon</span>
+                </a>
+
+                <a href="#render" class="nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                    <span class="lang-en">Render Settings</span>
+                    <span class="lang-tr">Render Ayarları</span>
+                </a>
+
+                <a href="#camera" class="nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                    <span class="lang-en">Pro Camera</span>
+                    <span class="lang-tr">Kamera & Vizör</span>
+                </a>
+
+                <a href="#system" class="nav-link">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                    <span class="lang-en">System & File</span>
+                    <span class="lang-tr">Sistem & Kısayol</span>
+                </a>
+            </div>
+        </div>
+
+        <!-- Master Viewport Container -->
+        <div id="main-viewport">
+            <header id="main-header">
+                <div class="header-status">
+                    <span class="status-badge" data-i18n="status">Active Development</span>
+                    <span class="header-meta">Powered by <strong>OptiX 7</strong> &amp; <strong>Vulkan RT</strong></span>
+                </div>
+                <div class="header-controls">
+                    <div class="lang-toggle">
+                        <button class="lang-btn active" data-lang="en">EN</button>
+                        <button class="lang-btn" data-lang="tr">TR</button>
+                    </div>
+                </div>
+            </header>
+
+            <div id="content-scroller">
+                <div class="container" style="margin-bottom: 24px;">
+                    <!-- Interactive Path Tracer Canvas Demo -->
+                    <div class="canvas-wrapper">
+                        <div class="canvas-overlay-text">
+                            <span class="pulse-dot"></span>
+                            <span class="lang-en" id="viewport-title-en">Live Viewport Simulator (Move mouse to interact)</span>
+                            <span class="lang-tr" id="viewport-title-tr">Canlı Viewport Simülatörü (Etkileşim için fareyi oynatın)</span>
+                        </div>
+                        <canvas id="raytracer-canvas"></canvas>
+                        <div class="canvas-hud">
+                            SPP: <span id="accum-samples">0</span> | 
+                            <span class="lang-en">Mode: <span id="viewport-mode-en">Default (Overview)</span></span>
+                            <span class="lang-tr">Mod: <span id="viewport-mode-tr">Varsayılan (Genel Bakış)</span></span><br>
+                            Resolution: 320x240 | Backend: CPU Web Path Tracer
+                        </div>
                     </div>
                 </div>
 
-                <h1>RayTrophi Studio</h1>
-                <p style="font-size: 1.5em; max-width: 700px; margin: 0 auto;">
-                    The Ultimate Platform for <strong>Procedural World Building</strong> and <strong>Physical
-                        Simulation</strong>.
-                </p>
+                <div class="container">
+
+                    <!-- ========================================== -->
+                    <!-- OVERVIEW (HOME) SECTION -->
+                    <!-- ========================================== -->
+                    <section class="doc-section active" id="home">
+                        <div class="hero">
+                            <h1 class="lang-en">RayTrophi Studio</h1>
+                            <h1 class="lang-tr">RayTrophi Studio</h1>
+                            <p class="lang-en">Next-Generation <strong>Procedural World Generator</strong> &amp; <strong>Spectral Path Tracing DCC</strong>.</p>
+                            <p class="lang-tr">Yeni Nesil <strong>Prosedürel Dünya Oluşturucu</strong> ve <strong>Spektral Işın İzlemeli DCC Motoru</strong>.</p>
+                        </div>
+
+                        <div class="lang-en">
+                            <p class="mt-40"><strong>RayTrophi Studio</strong> is a professional digital content creation (DCC) software featuring procedurally generated virtual landscapes, physical fluid simulations, and high-performance skeletal animations. Engineered entirely in modern C++20, RayTrophi hosts a triple path tracing rendering core supporting **NVIDIA OptiX (CUDA)**, **Vulkan Ray Tracing (Vulkan RT)**, and parallel CPU acceleration via **Intel Embree**.</p>
+                            
+                            <div class="card">
+                                <h3>Engine Statistics &amp; Code Architecture</h3>
+                                <p>RayTrophi is built with modularity and bare-metal performance in mind, ensuring memory layout alignments match SSE/AVX vectors.</p>
+                                <table class="param-table">
+                                    <tr><th>Architecture Layer</th><th>Details</th></tr>
+                                    <tr><td>Procedural Heightfields</td><td>Erosion algorithms processed entirely on GPU compute shaders.</td></tr>
+                                    <tr><td>Acceleration Structures</td><td>Direct OptiX IAS/GAS hierarchies with dynamic bottom-level BVH refitting.</td></tr>
+                                    <tr><td>Immediate GUI Interface</td><td>ImGui framework styled with dark-space glassmorphism widgets.</td></tr>
+                                    <tr><td>Dynamic Grooming</td><td>Linear Swept Sphere (LSS) intersections with Marschner BSDF shading.</td></tr>
+                                </table>
+                            </div>
+
+                            <h2>Core System Specifications</h2>
+                            <div class="feature-grid">
+                                <div class="feature-card" onclick="window.location.hash='#world'">
+                                    <div class="feature-icon">🌤️</div>
+                                    <h3>Atmosphere &amp; Clouds</h3>
+                                    <p>Spectral Nishita scattering, Ozone absorption bands, volumetric Henyey-Greenstein clouds, and NanoVDB gas flow simulations.</p>
+                                    <span class="feature-tag">NanoVDB</span>
+                                </div>
+                                <div class="feature-card" onclick="window.location.hash='#water'">
+                                    <div class="feature-icon">🌊</div>
+                                    <h3>FFT Hydrodynamics</h3>
+                                    <p>Tessendorf FFT waves, Phillips wind spectrums, volumetric light shafts, and auto-carving Bezier splines.</p>
+                                    <span class="feature-tag">FFT Ocean</span>
+                                </div>
+                                <div class="feature-card" onclick="window.location.hash='#terrain'">
+                                    <div class="feature-icon">⛰️</div>
+                                    <h3>Procedural Terrain</h3>
+                                    <p>Thermal/hydraulic erosion compute solvers, splat map generators, and brush-based instanced foliage scattering.</p>
+                                    <span class="feature-tag">Compute Shader</span>
+                                </div>
+                                <div class="feature-card" onclick="window.location.hash='#sculpt'">
+                                    <div class="feature-icon">🪨</div>
+                                    <h3>PBVH Sculpting</h3>
+                                    <p>Deformation of high-poly meshes using brush templates, alphas, and interactive falloff graphs.</p>
+                                    <span class="feature-tag">PBVH / DynTopo</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="lang-tr">
+                            <p class="mt-40"><strong>RayTrophi Studio</strong>; prosedürel sanal araziler, fiziksel akışkan simülasyonları ve yüksek performanslı iskelet animasyonları sunan profesyonel bir dijital içerik oluşturma (DCC) yazılımıdır. Tamamen modern C++20 ile sıfırdan geliştirilen RayTrophi, **NVIDIA OptiX (CUDA)**, **Vulkan Ray Tracing (Vulkan RT)** ve **Intel Embree** platformlarını destekleyen üçlü bir ışın izleme (path tracing) çekirdeğine sahiptir.</p>
+                            
+                            <div class="card">
+                                <h3>Motor İstatistikleri ve Kod Mimarisi</h3>
+                                <p>RayTrophi, bellek hizalamalarının SSE/AVX vektörleriyle tam eşleşmesini sağlayan, düşük seviyeli performans odaklı modüler bir yapıya sahiptir.</p>
+                                <table class="param-table">
+                                    <tr><th>Mimari Katman</th><th>Detaylar</th></tr>
+                                    <tr><td>Prosedürel Yükseklik Alanları</td><td>Tamamen GPU compute shader'ları üzerinde işlenen erozyon çözücüler.</td></tr>
+                                    <tr><td>Hızlandırma Yapıları (BVH)</td><td>Dinamik bottom-level BVH refit içeren doğrudan OptiX IAS/GAS hiyerarşileri.</td></tr>
+                                    <tr><td>Arayüz Arayüzü</td><td>Karanlık uzay cam temasıyla özelleştirilmiş ImGui kontrolleri.</td></tr>
+                                    <tr><td>Dinamik Saç Tasarımı</td><td>Marschner BSDF gölgelendirmeli Linear Swept Sphere (LSS) saç kesişimleri.</td></tr>
+                                </table>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- ========================================== -->
+                    <!-- WORLD & SKY SECTION -->
+                    <!-- ========================================== -->
+                    <section class="doc-section" id="world">
+                        <div class="screenshot-area hero-shot">
+                            <img src="images/world_header.jpg" alt="Atmosphere" onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                            <div class="missing-img">🌤️ Atmosphere Render</div>
+                        </div>
+
+                        <div class="lang-en">
+                            <h1>World &amp; Atmospheric Simulations</h1>
+                            <p>The World module manages global environment lighting, spectral sky models, volumetric cloud coverage, and sparse NanoVDB fluid grids.</p>
+                            
+                            <div class="card">
+                                <h3>Nishita Atmospheric Scattering</h3>
+                                <p>Instead of low-fidelity texture skyboxes, RayTrophi simulates light transport inside a multi-layered atmospheric dome using <strong>Rayleigh scattering</strong> (simulating small nitrogen/oxygen particles) and <strong>Mie scattering</strong> (dust and water particles). It also solves the Chappuis absorption bands for Ozone, producing deep blues during golden hours.</p>
+                                
+                                <div class="code-header"><span class="code-lang">C++ Struct</span></div>
+                                <pre><code>struct NishitaSkySettings {
+    float sun_elevation;     // Sun position above horizon (-10 to 90 degrees)
+    float air_density;       // Rayleigh scattering coefficient scale
+    float dust_density;      // Mie scattering coefficient scale
+    float ozone_density;     // Ozone absorption scaling (Chappuis bands)
+    bool sync_sun_light;     // Synchronize sun direction with directional lights
+};</code></pre>
+                            </div>
+
+                            <h2>Volumetric Cloud Layers</h2>
+                            <p>RayTrophi utilizes ray-marched volumetric clouds computed in screen-space with Henyey-Greenstein phase functions. Quality presets allow artists to define cloud shapes without complex simulation structures:</p>
+                            <table class="param-table">
+                                <tr><th>Preset Mode</th><th>Altitudes</th><th>Visual Characteristics &amp; Ray-March Steps</th></tr>
+                                <tr><td>Cirrus</td><td>8,000m - 10,000m</td><td>Wispy, thin ice crystals. Low absorption, 16 steps.</td></tr>
+                                <tr><td>Cumulus</td><td>1,000m - 3,500m</td><td>Dense puff banks, high scattering, 64 steps.</td></tr>
+                                <tr><td>Cumulonimbus</td><td>800m - 12,000m</td><td>Towering storm clouds with high absorption coefficients, 128 steps.</td></tr>
+                            </table>
+                        </div>
+
+                        <div class="lang-tr">
+                            <h1>Dünya ve Atmosfer Simülasyonları</h1>
+                            <p>Dünya modülü; küresel ortam ışıklandırmasını, spektral gökyüzü modellerini, hacimsel bulut yoğunluğunu ve seyrekleştirilmiş NanoVDB akışkan ızgaralarını yönetir.</p>
+
+                            <div class="card">
+                                <h3>Nishita Atmosferik Saçılımı</h3>
+                                <p>RayTrophi, arka plan resimleri (skybox) kullanmak yerine, Rayleigh saçılımı ve Mie saçılımını kullanarak atmosferik ışık geçişlerini fiziksel olarak simüle eder. Ayrıca Ozon tabakasının mavi saatlerdeki Chappuis emilim bantlarını çözer.</p>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- ========================================== -->
+                    <!-- WATER SYSTEM SECTION -->
+                    <!-- ========================================== -->
+                    <section class="doc-section" id="water">
+                        <div class="screenshot-area hero-shot">
+                            <img src="images/water_header.jpg" alt="Ocean" onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                            <div class="missing-img">🌊 Ocean Render</div>
+                        </div>
+
+                        <div class="lang-en">
+                            <h1>FFT Ocean &amp; River Splines</h1>
+                            <p>The hydrodynamics engine combines Tessendorf FFT frequency spectra for deep oceans and Bezier-spline geometry for carving running rivers directly into heights.</p>
+                            
+                            <div class="card">
+                                <h3>FFT Ocean (Tessendorf's Algorithm)</h3>
+                                <p>Deep ocean waves are computed by resolving the Phillips wind spectrum inside frequency space using GPU FFTs. The generated heightfield deforms the ocean mesh, while a displacement Jacobian calculates local foam accumulation based on wave crest convergence.</p>
+                                
+                                <div class="code-header"><span class="code-lang">C++ Struct</span></div>
+                                <pre><code>struct FFTOceanSettings {
+    int fft_resolution;      // Resolution grid size (64, 128, 256, 512)
+    float wind_speed;        // Wind speed affecting Phillips spectrum amplitude
+    float wind_dir_angle;    // Direction angle (radians)
+    float choppiness;        // Horizontal displacement Jacobian factor
+    float wave_amplitude;    // Amplitude scaling for height mapping
+};</code></pre>
+                            </div>
+
+                            <h2>River Splines &amp; Carving</h2>
+                            <p>Rivers are defined using 3D Bezier splines. Control points expose width, depth, and banking options. The engine automatically carves the underlying terrain heightfield along the spline path and spawns physical rapids particles based on slope gradient gravity.</p>
+                        </div>
+
+                        <div class="lang-tr">
+                            <h1>FFT Okyanus ve Nehir Spline'ları</h1>
+                            <p>Hidrodinamik motoru; derin okyanuslar için Tessendorf FFT dalga spektrumunu ve akarsular oluşturmak için arazileri oyan Bezier-spline nehir geometrilerini birleştirir.</p>
+
+                            <div class="card">
+                                <h3>FFT Okyanusu (Tessendorf Algoritması)</h3>
+                                <p>Derin deniz dalgaları, GPU FFT yardımıyla frekans uzayında Phillips rüzgar spektrumu çözülerek hesaplanır. Oluşturulan deplasman haritası okyanus mesh'ini bükerken, dalga tepelerindeki köpük birikimini Jacobian matrisi hesaplar.</p>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- ========================================== -->
+                    <!-- TERRAIN NODES SECTION -->
+                    <!-- ========================================== -->
+                    <section class="doc-section" id="nodes">
+                        <div class="screenshot-area hero-shot">
+                            <img src="images/terrain_header.jpg" alt="Node Graph" onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                            <div class="missing-img">⛰️ Terrain Nodes</div>
+                        </div>
+
+                        <div class="lang-en">
+                            <h1>Terrain Docks Node Graph Reference</h1>
+                            <p>RayTrophi contains a non-destructive node compiler that maps noise fields, mathematical filters, and erosion compute blocks to generate physical landscapes.</p>
+                            
+                            <div class="card">
+                                <h3>Procedural Generators</h3>
+                                <table class="param-table">
+                                    <tr><th>Node Name</th><th>Parameters</th><th>Mathematics</th></tr>
+                                    <tr><td>Perlin Noise</td><td>Scale, Octaves, Lacunarity, Persistence</td><td>Fractional Brownian Motion (fBm) interpolation</td></tr>
+                                    <tr><td>Worley Noise</td><td>Scale, Distance Function (Euclidean, Manhattan)</td><td>Voronoi cell distance computation for cellular structures</td></tr>
+                                    <tr><td>Hydraulic Erosion</td><td>Rainfall, Soil Solubility, Gravity Constant</td><td>Simulates water drop sediment transport on heights</td></tr>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="lang-tr">
+                            <h1>Arazi Düğüm Kütüphanesi Dökümantasyonu</h1>
+                            <p>RayTrophi, prosedürel araziler oluşturmak için gürültü alanlarını, matematiksel filtreleri ve erozyon düğümlerini işleyen tahribatsız bir görsel düğüm derleyicisi içerir.</p>
+                        </div>
+                    </section>
+
+                    <!-- ========================================== -->
+                    <!-- TERRAIN & FOLIAGE SECTION -->
+                    <!-- ========================================== -->
+                    <section class="doc-section" id="terrain">
+                        <div class="screenshot-area hero-shot">
+                            <img src="images/terrain_foliage_header.jpg" alt="Foliage" onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                            <div class="missing-img">⛰️ Foliage Render</div>
+                        </div>
+
+                        <div class="lang-en">
+                            <h1>Instanced Foliage &amp; Erosion Solver</h1>
+                            <p>Solve massive landscape details via compute shaders. RayTrophi processes hydraulic erosion on 2K heightfield textures at 60fps.</p>
+                            
+                            <div class="card">
+                                <h3>Thermal &amp; Hydraulic Solvers</h3>
+                                <p>Thermal erosion calculates slope collapse by moving soil to neighboring cells if the local slope angle exceeds the Talus angle limit. Hydraulic erosion simulates water droplets carrying soil sediment down slope paths, carving drainage basins over iterations.</p>
+                            </div>
+
+                            <h2>Foliage Painting &amp; Placement</h2>
+                            <p>Instanced trees and rocks are placed using brush tools. The engine outputs instance coordinate vectors to directly update the Vulkan TLAS (Top-Level Acceleration Structure) inside the raytracer backend, allowing real-time camera orbits without BVH reconstruction delays.</p>
+                        </div>
+
+                        <div class="lang-tr">
+                            <h1>Arazi Detayları ve Vejetasyon</h1>
+                            <p>Yüksek çözünürlüklü arazileri GPU compute shader'ları ile çözün. RayTrophi, 2K çözünürlükteki hidrolik erozyonu saniyede 60 kare hızında işler.</p>
+                        </div>
+                    </section>
+
+                    <!-- ========================================== -->
+                    <!-- EDIT MESH SECTION -->
+                    <!-- ========================================== -->
+                    <section class="doc-section" id="edit-mesh">
+                        <div class="screenshot-area hero-shot">
+                            <img src="images/edit_mesh_header.jpg" alt="Edit Mesh" onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                            <div class="missing-img">🧱 Edit Mesh Workspace</div>
+                        </div>
+
+                        <div class="lang-en">
+                            <h1>Topology Edit Mode</h1>
+                            <p>Non-destructive polygon geometry modifier system to model clean polygon meshes inside the viewport.</p>
+                            
+                            <div class="card">
+                                <h3>Modeling Operations</h3>
+                                <table class="param-table">
+                                    <tr><th>Operation</th><th>C++ Implementation Backend</th></tr>
+                                    <tr><td>Extrude</td><td>Inserts new faces and projects vertices along face normals.</td></tr>
+                                    <tr><td>Loop Cut</td><td>Subdivides edge ring paths, inserting a complete coplanar loop.</td></tr>
+                                    <tr><td>Weld by Distance</td><td>Merges adjacent vertices sharing coordinates within distance threshold.</td></tr>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="lang-tr">
+                            <h1>Topoloji Düzenleme Modu</h1>
+                            <p>Düzgün poligon yapıları oluşturmak için doğrudan düzenleyici yığınında çalışan tahribatsız mesh düzenleme sistemi.</p>
+                        </div>
+                    </section>
+
+                    <!-- ========================================== -->
+                    <!-- SCULPT SECTION -->
+                    <!-- ========================================== -->
+                    <section class="doc-section" id="sculpt">
+                        <div class="screenshot-area hero-shot">
+                            <img src="images/sculpt_header.jpg" alt="Sculpting" onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                            <div class="missing-img">🪨 Sculpting Workspace</div>
+                        </div>
+
+                        <div class="lang-en">
+                            <h1>PBVH Sculpting &amp; Brush Curves</h1>
+                            <p>Sculpt millions of polygons interactively. Mesh deformation is accelerated by partitioning geometry into a local Partitioned BVH (PBVH).</p>
+                            
+                            <div class="card">
+                                <h3>Interactive Brush Falloff Editor</h3>
+                                <p>Modify the brush profile curve. The lookup table adjusts the displacement strength of vertices depending on distance from brush center.</p>
+                                <div class="split-layout">
+                                    <div class="slider-group">
+                                        <p>Select lookup presets or draw custom curves in the graph box.</p>
+                                        <button class="copy-btn" id="preset-smooth" style="margin-top:10px;">Smooth Preset</button>
+                                        <button class="copy-btn" id="preset-linear" style="margin-top:4px;">Linear Preset</button>
+                                    </div>
+                                    <div class="falloff-editor-box">
+                                        <canvas id="falloff-editor" style="width:100%; height:100%;"></canvas>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="lang-tr">
+                            <h1>PBVH Heykel ve Şekillendirme</h1>
+                            <p>Milyonlarca poligonu akıcı bir şekilde yontun. Geometri deformasyonu, verileri lokal bir PBVH yapısında bölerek hızlandırılır.</p>
+                        </div>
+                    </section>
+
+                    <!-- ========================================== -->
+                    <!-- MESH PAINT SECTION -->
+                    <!-- ========================================== -->
+                    <section class="doc-section" id="mesh-paint">
+                        <div class="screenshot-area hero-shot">
+                            <img src="images/mesh_paint_header.jpg" alt="Paint Mode" onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                            <div class="missing-img">🎨 Mesh Paint Workspace</div>
+                        </div>
+
+                        <div class="lang-en">
+                            <h1>Layer-Based PBR Painting</h1>
+                            <p>Paint Base Color, Roughness, Metallic, and Height channels directly in 3D space with high-performance texture maps.</p>
+                            
+                            <div class="card">
+                                <h3>Wet Oil Smudge Modeling</h3>
+                                <p>The paint engine simulates fluid paint transport on vertices, allowing active brush strokes to smudge and mix with underlying wet color layers based on viscosity and pigment accumulation settings.</p>
+                            </div>
+                        </div>
+
+                        <div class="lang-tr">
+                            <h1>Katman Tabanlı PBR Boyama</h1>
+                            <p>Düşük gecikmeli doku eşlemeleri kullanarak Base Color, Roughness, Metallic ve Yükseklik kanallarını doğrudan 3D alanda boyayın.</p>
+                        </div>
+                    </section>
+
+                    <!-- ========================================== -->
+                    <!-- HAIR & FUR SECTION -->
+                    <!-- ========================================== -->
+                    <section class="doc-section" id="hair">
+                        <div class="screenshot-area hero-shot">
+                            <img src="images/hair_header.jpg" alt="Hair Groom" onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                            <div class="missing-img">🦁 Hair Groom Render</div>
+                        </div>
+
+                        <div class="lang-en">
+                            <h1>Marschner Hair Scattering</h1>
+                            <p>Physically based rendering of hair curves utilizing Linear Swept Spheres (LSS) intersections and anisotropic scattering model.</p>
+                            
+                            <div class="card">
+                                <h3>Marschner BSDF Theory</h3>
+                                <p>Instead of simple shading, RayTrophi simulates light refracting through translucent cylinder fibers. The shader computes the **R (reflection)** lobe, **TT (transmission-transmission)** lobe, and the **TRT (transmission-reflection-transmission)** lobe to render realistic secondary highlights.</p>
+                                
+                                <div class="code-header"><span class="code-lang">C++ Struct</span></div>
+                                <pre><code>struct MarschnerHairMaterial {
+    float melanin_concentration; // Melanin pigment level (0.0 to 1.0)
+    float hair_roughness;       // Specular highlights width
+    float specular_shift;       // Highlights offset angle (scales offset)
+    float hair_ior;              // Refractive Index (Default: 1.55)
+};</code></pre>
+                            </div>
+                        </div>
+
+                        <div class="lang-tr">
+                            <h1>Marschner Saç Saçılımı</h1>
+                            <p>Linear Swept Sphere (LSS) ışın kesişimleri ve anizotropik saçılım modeli kullanan fiziksel saç ve kürk motoru.</p>
+                        </div>
+                    </section>
+
+                    <!-- ========================================== -->
+                    <!-- ANIMATION SECTION -->
+                    <!-- ========================================== -->
+                    <section class="doc-section" id="animation">
+                        <div class="screenshot-area hero-shot">
+                            <img src="images/anim_header.jpg" alt="Animation UI" onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                            <div class="missing-img">🎬 Skeletal Animation Workspace</div>
+                        </div>
+
+                        <div class="lang-en">
+                            <h1>Skeletal Animation &amp; AnimGraph</h1>
+                            <p>RayTrophi utilizes skeletal bone skinning pipelines, supporting Ozz-animation and legacy mesh sampling controllers.</p>
+                            
+                            <div class="card">
+                                <h3>AnimGraph State Machines</h3>
+                                <p>Skeletal joint transforms are calculated by evaluating a visual state machine graph. Nodes blend animation clips using speed sliders or boolean states, outputting skeletal bone transformations.</p>
+                            </div>
+                        </div>
+
+                        <div class="lang-tr">
+                            <h1>İskelet Animasyonu ve AnimGraph</h1>
+                            <p>RayTrophi, skeletal mesh kemik deformasyon işlemlerini yüksek performanslı Ozz-animation kütüphanesi entegrasyonuyla yönetir.</p>
+                        </div>
+                    </section>
+
+                    <!-- ========================================== -->
+                    <!-- RENDER SETTINGS SECTION -->
+                    <!-- ========================================== -->
+                    <section class="doc-section" id="render">
+                        <div class="screenshot-area hero-shot">
+                            <img src="images/render_header.jpg" alt="Render Engine" onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                            <div class="missing-img">🚀 Path Tracer Settings</div>
+                        </div>
+
+                        <div class="lang-en">
+                            <h1>Triple-Backend Ray Tracing Core</h1>
+                            <p>The raytracing architecture enables cross-platform performance by supporting Vulkan, OptiX, and Embree pipelines.</p>
+                            
+                            <div class="card">
+                                <h3>Hardware Raytracing Platforms</h3>
+                                <p><strong>NVIDIA OptiX (GPU)</strong>: Leverages NVIDIA RT Cores for BVH traversal and ray intersection. Integrates CUDA denoisers for high quality.</p>
+                                <p><strong>Vulkan Ray Tracing (GPU)</strong>: Uses cross-vendor hardware pipelines with dynamic Top-Level Acceleration Structures (TLAS) updates for dynamic scene objects.</p>
+                                <p><strong>Intel Embree (CPU)</strong>: SSE/AVX vector-aligned CPU ray-traversal for systems without dedicated GPU ray-tracing cards.</p>
+                            </div>
+                        </div>
+
+                        <div class="lang-tr">
+                            <h1>Üçlü Işın İzleme (Path Tracing) Motoru</h1>
+                            <p>Aydınlatma motoru, sahne verilerini Vulkan, OptiX veya Embree alt yapılarından geçirerek çalışır.</p>
+                        </div>
+                    </section>
+
+                    <!-- ========================================== -->
+                    <!-- PRO CAMERA SECTION -->
+                    <!-- ========================================== -->
+                    <section class="doc-section" id="camera">
+                        <div class="screenshot-area hero-shot">
+                            <img src="images/camera_header.jpg" alt="Pro Camera" onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                            <div class="missing-img">📸 Camera Viewfinder HUD</div>
+                        </div>
+
+                        <div class="lang-en">
+                            <h1>Professional Camera HUD &amp; Optics</h1>
+                            <p>Simulate realistic physical lenses with viewport overlays mapping color values and edge focus thresholds.</p>
+                            
+                            <div class="card">
+                                <h3>HUD Diagnostics Overlay</h3>
+                                <p>Real-time analytics computed directly from the converged frame buffer:</p>
+                                <table class="param-table">
+                                    <tr><th>HUD Utility</th><th>Mathematics &amp; Shader Logic</th></tr>
+                                    <tr><td>Focus Peaking</td><td>Sobel edge filter highlights pixel groups matching focal depth in green.</td></tr>
+                                    <tr><td>Zebra Stripes</td><td>Displays moving stripes over pixel coordinates where HDR brightness exceeds threshold.</td></tr>
+                                    <tr><td>Autofocus (AF-C)</td><td>Performs real-time ray-probes against the active BVH bounds under crosshairs.</td></tr>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="lang-tr">
+                            <h1>Profesyonel Vizör HUD ve Optikler</h1>
+                            <p>Netlik sınırı ve renk dağılımını gösteren vizör araçlarıyla donatılmış fiziksel objektif simülatörü.</p>
+                        </div>
+                    </section>
+
+                    <!-- ========================================== -->
+                    <!-- SYSTEM & SHORTCUTS SECTION -->
+                    <!-- ========================================== -->
+                    <section class="doc-section" id="system">
+                        <div class="lang-en">
+                            <h1>System Serialization &amp; Shortcuts</h1>
+                            <p>Serialization format structures and keyboard shortcuts mapped in RayTrophi Studio.</p>
+                            
+                            <div class="card">
+                                <h3>Shortcuts Reference</h3>
+                                <table class="param-table">
+                                    <tr><th>Key Map</th><th>Engine Action</th></tr>
+                                    <tr><td>Ctrl + N</td><td>Clears active BVH and allocates new empty scene context.</td></tr>
+                                    <tr><td>Ctrl + O / S</td><td>Deserializes or serializes `.rtp` (RayTrophi Project) JSON files.</td></tr>
+                                    <tr><td>F12</td><td>Spawns path tracing thread to render image to output directory.</td></tr>
+                                    <tr><td>N</td><td>Toggles properties inspector GUI visibility.</td></tr>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="lang-tr">
+                            <h1>Sistem Serileştirme ve Kısayollar</h1>
+                            <p>RayTrophi Studio içinde kullanılan serileştirme dosya yapıları ve klavye kısayolları dökümantasyonu.</p>
+                        </div>
+                    </section>
+
+                </div>
             </div>
-
-            <div class="feature-grid">
-                <div class="feature-box" onclick="location.href='world.html'">
-                    <div class="feature-icon">🌤️</div>
-                    <h3>Atmosphere & Gas</h3>
-                    <p>Spectral Sky, Volumetric Clouds, <strong>Gas Simulation</strong>, and <strong>Force
-                            Fields</strong>.</p>
-                    <div class="tag">VDB Sim</div>
-                </div>
-
-                <div class="feature-box" onclick="location.href='water.html'">
-                    <div class="feature-icon">🌊</div>
-                    <h3>Hydrodynamics</h3>
-                    <p>FFT Oceans, Caustics, and Procedural Rivers with Flow Maps.</p>
-                    <div class="tag">Fluid Physics</div>
-                </div>
-
-                <div class="feature-box" onclick="location.href='terrain.html'">
-                    <div class="feature-icon">⛰️</div>
-                    <h3>Terrain Sculpting</h3>
-                    <p>Hydraulic Erosion, Heightmap Nodes, and the new <strong>Foliage System</strong>.</p>
-                    <div class="tag">Erosion</div>
-                </div>
-
-                <div class="feature-box" onclick="location.href='edit-mesh.html'">
-                    <div class="feature-icon">🧱</div>
-                    <h3>Edit Mesh</h3>
-                    <p>Non-destructive mesh edit layers, vertex-edge-face selection, topology tools, and shading controls.</p>
-                    <div class="tag">Topology</div>
-                </div>
-
-                <div class="feature-box" onclick="location.href='sculpt.html'">
-                    <div class="feature-icon">🪨</div>
-                    <h3>Sculpt</h3>
-                    <p>Shared terrain and mesh sculpt workflow with brush docks, alpha control, falloff, and symmetry.</p>
-                    <div class="tag">Brush Form</div>
-                </div>
-
-                <div class="feature-box" onclick="location.href='mesh-paint.html'">
-                    <div class="feature-icon">🎨</div>
-                    <h3>Mesh Paint</h3>
-                    <p>Layer-based texture painting with slot binding, channel textures, wet behavior, and a dedicated brush dock.</p>
-                    <div class="tag">PBR Paint</div>
-                </div>
-
-                <div class="feature-box" onclick="location.href='animation.html'">
-                    <div class="feature-icon">🎬</div>
-                    <h3>Life & Motion</h3>
-                    <p>Timeline keyframing and the powerful <strong>Animation Graph</strong> for characters.</p>
-                    <div class="tag">Anim Graph</div>
-                </div>
-
-                <div class="feature-box" onclick="location.href='camera.html'">
-                    <div class="feature-icon">🎥</div>
-                    <h3>Physical Camera</h3>
-                    <p>Realistic optics with Depth of Field, ISO, and Shutter control.</p>
-                    <div class="tag">Optics</div>
-                </div>
-
-                <div class="feature-box" onclick="location.href='hair.html'">
-                    <div class="feature-icon">🦁</div>
-                    <h3>Hair & Fur</h3>
-                    <p>Physically accurate <strong>Marschner Shading</strong> and interactive <strong>Interactive
-                            Grooming</strong> brushes.</p>
-                    <div class="tag">Styling</div>
-                </div>
-
-                <div class="feature-box" onclick="location.href='render.html'">
-                    <div class="feature-icon">🚀</div>
-                    <h3>Path Tracing</h3>
-                    <p>Hardware accelerated ray tracing with OptiX 7, Vulkan RT and OIDN Denoising.</p>
-                    <div class="tag">RTX On</div>
-                </div>
-            </div>
-
-            <div style="margin-top: 80px; text-align: center; color: #666; font-size: 0.9em;">
-                &copy; 2026 RayTrophi Studio. Powered by OptiX 7 & C++20.
-            </div>
-
         </div>
     </div>
 
-</body>
+    <!-- Toast Notification element -->
+    <div id="toast"></div>
 
+    <script src="main.js"></script>
+</body>
 </html>

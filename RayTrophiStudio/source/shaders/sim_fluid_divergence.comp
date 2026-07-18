@@ -1,0 +1,68 @@
+// sim_fluid_divergence.comp
+// Free-surface divergence with fluid-mask handling. 1:1 port of the CUDA
+// fluid_divergence_kernel (SimulationComputeCuda.cu), NON-variational branch:
+// air cells get divergence 0, solid-adjacent faces contribute 0 flux.
+// mask semantics: < -0.5 solid, [-0.5, 0.5] air, > 0.5 fluid (particle count).
+// Out-of-grid neighbour: open wall (pc.boundary==0) => air, else solid.
+#version 450
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   boundary;
+    float voxel_size;
+    float dt;
+    float sor_omega;
+    int   iterations;
+    int   parity;
+    float density_correction;
+    int   particles_per_cell;
+    int   variational;
+    int   gfm_active;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer VelX { float vel_x[]; };
+layout(set = 0, binding = 1) readonly buffer VelY { float vel_y[]; };
+layout(set = 0, binding = 2) readonly buffer VelZ { float vel_z[]; };
+layout(set = 0, binding = 3) readonly buffer Mask { float fluid_mask[]; };
+layout(set = 0, binding = 4) buffer Divergence    { float divergence[]; };
+
+int  cell_id(int i, int j, int k) { return i + j*pc.nx + k*pc.nx*pc.ny; }
+int  vx_idx(int i, int j, int k)  { return i + j*(pc.nx+1) + k*(pc.nx+1)*pc.ny; }
+int  vy_idx(int i, int j, int k)  { return i + j*pc.nx + k*pc.nx*(pc.ny+1); }
+int  vz_idx(int i, int j, int k)  { return i + j*pc.nx + k*pc.nx*pc.ny; }
+
+float mask_at(int i, int j, int k) {
+    if (i < 0 || i >= pc.nx || j < 0 || j >= pc.ny || k < 0 || k >= pc.nz)
+        return (pc.boundary == 0) ? 0.0 : -1.0;
+    return fluid_mask[cell_id(i, j, k)];
+}
+bool is_solid(int i, int j, int k) { return mask_at(i, j, k) < -0.5; }
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= pc.nx * pc.ny * pc.nz) return;
+
+    if (fluid_mask[id] < 0.5) { divergence[id] = 0.0; return; }
+
+    int i = id % pc.nx;
+    int j = (id / pc.nx) % pc.ny;
+    int k = id / (pc.nx * pc.ny);
+    float inv_h = pc.voxel_size > 1e-6 ? 1.0 / pc.voxel_size : 1.0;
+
+    float vx_lo = vel_x[vx_idx(i,     j, k)];
+    float vx_hi = vel_x[vx_idx(i + 1, j, k)];
+    float vy_lo = vel_y[vy_idx(i, j,     k)];
+    float vy_hi = vel_y[vy_idx(i, j + 1, k)];
+    float vz_lo = vel_z[vz_idx(i, j, k    )];
+    float vz_hi = vel_z[vz_idx(i, j, k + 1)];
+
+    if (is_solid(i - 1, j,     k    )) vx_lo = 0.0;
+    if (is_solid(i + 1, j,     k    )) vx_hi = 0.0;
+    if (is_solid(i,     j - 1, k    )) vy_lo = 0.0;
+    if (is_solid(i,     j + 1, k    )) vy_hi = 0.0;
+    if (is_solid(i,     j,     k - 1)) vz_lo = 0.0;
+    if (is_solid(i,     j,     k + 1)) vz_hi = 0.0;
+
+    divergence[id] = ((vx_hi - vx_lo) + (vy_hi - vy_lo) + (vz_hi - vz_lo)) * inv_h;
+}

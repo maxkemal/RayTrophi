@@ -47,8 +47,8 @@ It is not a render farm plugin or a library. It is an interactive editor with a 
 | **GPU kernel & shader files** | 56 (CUDA, OptiX PTX, Vulkan GLSL/RT, compute) |
 | **UI control points** | 1,278+ |
 | **Render backends** | CPU (Embree) · NVIDIA OptiX · Vulkan RT |
-| **Node systems** | Terrain (36+), Animation (14+), Material (11+) |
-| **Last verified** | 2026-06-02 |
+| **Node systems** | Terrain (66), Animation (14+), Material (11+) |
+| **Last verified** | 2026-07-18 |
 <!-- STATS_END -->
 
 Counts cover `raytrac_sdl2/source` and exclude vendored single-file libraries (`simdjson`, `stb`, `json.hpp`, `tinyexr`).
@@ -67,8 +67,8 @@ RayTrophi Studio is organized into task-focused workspaces that all operate on t
 | **Modeling** | Polygon editing (extrude, inset, bevel, loop cut, weld, merge, UV unwrap), modifier stack |
 | **Sculpt** | Brush-based surface sculpting on meshes and terrain (PBVH-accelerated) |
 | **Paint** | Layered PBR texture painting directly on the mesh (multi-channel, blend modes) |
-| **Terrain** | Sculpt + node-graph terrain, hydraulic/thermal erosion, heightmap I/O |
-| **Foliage / Scatter** | Rule-based and hand-painted instancing of grass, trees, rocks |
+| **Terrain** | Sculpt + non-destructive terrain/biome graph, erosion, hydrology, snow/glaciers, named fields, heightmap I/O |
+| **Foliage / Scatter** | Biome-aware node layers, Asset Library + scene sources, rule-based and hand-painted GPU instancing |
 | **Hair** | Groom, comb, cut/grow, simulate, and render hair & fur |
 | **Simulation** | Liquid (APIC/FLIP), gas/smoke/fire, whitewater, rigid + soft bodies & cloth (Jolt), mesh/primitive colliders, force fields, emitters |
 | **Animation** | Multi-track timeline, per-channel keyframing, skeletal animation, animation graph |
@@ -205,17 +205,28 @@ Secondary **spray** (airborne), **foam** (surface), and **bubbles** (submerged) 
 
 ## 🛠️ Procedural & authoring tools
 
-### 🏔️ Terrain
-- Real-time sculpting brushes (raise, lower, smooth, flatten, stamp)
-- **Hydraulic & thermal erosion** (GPU kernels) for natural riverbeds, valleys, and sediment transport
-- **Node-based, non-destructive workflow** (36+ terrain nodes) combining noise, filters, and masks
-- 16-bit heightmap import/export (World Machine / Gaea workflows)
+### 🏔️ Terrain, biome & hydrology graph
 
-### 🌿 Vegetation & scatter
-- GPU-instanced grass, trees, and rocks at scale via hardware acceleration
-- Rule-based placement (slope, height, texture mask) with collision avoidance
-- Paint mode for hand-placed detail
-- Global dynamic wind (strength, direction, gust)
+- Real-time sculpting brushes (raise, lower, smooth, flatten, stamp) plus 16-bit heightmap import/export for World Machine / Gaea workflows
+- **Terrain Nodes V2** — a serialized, non-destructive graph with 66 registered nodes, live property editing, previews, grouping, reusable setups, and Apply-to-scene output
+- **Generation & shaping** — heightmap/hardness inputs, procedural noise, fault, mesa, shear, terrace, smooth, normalize, resample, remap, blend, math, clamp, overlay, and screen operations
+- **Erosion & geology** — hydraulic, thermal, fluvial, and wind erosion; sediment deposition, alluvial fans, deltas, wetness, soil depth, lithology, and strata synthesis
+- **Terrain analysis & named fields** — slope, height, curvature, flow, exposure, watershed, concavity, convexity, valley, and wetness data can be published once and reused by downstream surface, biome, and foliage nodes
+- **Biome Composer** — Temperate Mixed, Lush Valleys, Alpine Tundra, Arid Highlands, and Boreal Mountains presets generate normalized Forest / Grass / Rock / Alpine masks and a packed biome splat map
+- **Hydrology** — watershed analysis, river networks and hydraulics, river-bed carving, spline output, lake-basin detection, lake surfaces, channels, shoreline, and foam masks
+- **Climate & snow** — climate, snowfall, settling, melt/freeze, relative snow line, glacier flow, and snow/surface composition nodes
+- **Fast setup actions** — build organized biome-field and biome-foliage graph branches automatically, while keeping every generated node editable
+
+### 🌿 Node-based biome foliage & scatter
+
+- **Foliage Layer → Foliage Set / Biome → Foliage Output** keeps every vegetation class as an independent rule, adds non-destructive set-level density/seed controls, and can scatter all connected layers when the terrain graph is applied
+- Placement rules include target count, seed, minimum spacing, slope and elevation ranges, plus named density, exclusion, and scale fields with adjustable thresholds/influence
+- Each layer accepts weighted multiple sources from **Recommended**, **Asset Library**, or **Scene Objects**; search, biome/type filtering, duplicate protection, thumbnails, hover previews, and compact per-source editing are shared by the Terrain UI and node properties
+- The Asset Library scans model metadata first and loads geometry lazily into a shared cache. User vegetation and rock assets added under `RayTrophiStudio/assets` automatically join the same catalog and recommendation workflow
+- Library assets use portable relative references, report missing files, are planted from their mesh base, and can target a real-world height with per-source variation calculated from the source bounding box
+- Vegetation defaults to **World Y-Up**; **Follow Slope** and normal influence remain available per source for grass, rocks, or intentionally terrain-aligned assets
+- The Terrain UI and foliage nodes are synchronized views of the same `InstanceGroup` data: add, remove, weight, scale/height, orientation, and layer-rule edits propagate both ways without deleted sources being restored by stale graph data
+- Existing scatter workflows remain available: GPU-instanced grass/trees/rocks, collision-aware procedural placement, hand-painted detail, and global dynamic wind (strength, direction, gust)
 
 ### 💇 Hair & fur
 - GPU simulated and rendered; analytical LSS intersection on Vulkan

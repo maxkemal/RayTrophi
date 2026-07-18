@@ -18,26 +18,8 @@
 #extension GL_EXT_ray_tracing        : require
 #extension GL_EXT_scalar_block_layout : require
 
-// ── Payload — must match raygen.rgen / closesthit.rchit EXACTLY (shared ABI) ──
-struct RayPayload {
-    vec3     radiance;
-    vec3     attenuation;
-    vec3     scatterOrigin;
-    vec3     scatterDir;
-    uint     seed;
-    bool     scattered;
-    bool     hitEmissive;
-    uint     occluded;
-    bool     skipAABBs;
-    vec3     primaryAlbedo;
-    vec3     primaryNormal;
-    uint     primaryHit;
-    float    primaryTransmission;
-    float    primaryMetallic;
-    uint     bounceType;
-    uint     primaryMaterialId;
-    float    dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
-};
+// ── Payload — shared ABI, single source of truth ──────────────────────────────
+#include "rt_payload.glsl"
 layout(location = 0) rayPayloadEXT RayPayload payload;
 
 const uint BOUNCE_SPECULAR     = 0u;
@@ -209,7 +191,9 @@ void main() {
     bool crossedGlass = false;
     bool insideGlass  = false;   // interface-crossing parity — see deposit gate
 
-    payload.dispersionChannel = 0.0;   // per-path hero channel (reset like raygen)
+    // per-path hero channel cleared (like raygen); PRIMARY_DONE pre-set so
+    // closesthit skips the primary-AOV work for photon paths.
+    payload.primaryMeta = plMetaReset(0u) | PL_PRIMARY_DONE;
     payload.skipAABBs = false;
 
     for (int bounce = 0; bounce < 8; ++bounce) {
@@ -219,20 +203,20 @@ void main() {
         payload.scatterDir    = vec3(0.0);
         payload.seed          = seed;
         payload.scattered     = false;
-        payload.hitEmissive   = false;
         payload.skipAABBs     = false;
-        payload.primaryAlbedo = vec3(0.0);
-        payload.primaryNormal = vec3(0.0);
-        payload.primaryHit    = 1u;   // pretend past-primary so closesthit skips AOV work
-        payload.primaryTransmission = 0.0;
-        payload.primaryMetallic     = 0.0;
+        payload.primaryARG    = 0u;
+        payload.primaryABT    = 0u;
+        payload.primaryNrm    = 0u;
+        // keep dispersion bits, keep "past-primary" flag
+        payload.primaryMeta   = plMetaReset(payload.primaryMeta) | PL_PRIMARY_DONE;
         payload.bounceType    = BOUNCE_SPECULAR;
-        payload.primaryMaterialId = 0xFFFFFFFFu;
 
         // mask 0x01 = triangles only (volumes invisible to photons in Dilim 1);
-        // OpaqueEXT = photons skip alpha-cutout any-hit (stochastic cutout is
-        // handled by closesthit's opacity path instead).
-        traceRayEXT(topLevelAS, gl_RayFlagsOpaqueEXT, 0x01,
+        // NO OpaqueEXT: alpha cutout now lives in the any-hit's camera-mode
+        // branch (shadow_anyhit.rahit) — closesthit's opacity pass-through is
+        // gone, so photons must take the same any-hit path as camera rays or
+        // foliage would turn photon-opaque.
+        traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, 0x01,
                     0, 0, 0, org, 1e-3, dir, 1e8, 0);
 
         seed = payload.seed;

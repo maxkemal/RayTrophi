@@ -242,7 +242,20 @@ struct BLASCreateInfo {
     // Optional per-primitive material indices (one entry per triangle)
     const uint32_t* materialIndexData = nullptr;
     uint32_t materialIndexCount = 0;
-    
+    // Optional per-VERTEX pointiness (one float per vertex, MeshPointiness.h). Only
+    // supplied when a live material graph reads the Geometry node's Pointiness output;
+    // null leaves pointinessAddr at 0 and the shader falls back to the flat value.
+    const float* pointinessData = nullptr;
+    // Optional per-VERTEX named attributes (Attribute node): INTERLEAVED kMatAttribSlots
+    // floats per vertex, i.e. vertexCount * kMatAttribSlots floats total. Null leaves
+    // attribAddr at 0 and the shader reads every channel as 0 (unpainted), which is what
+    // the CPU does for a mesh with no block.
+    const float* attribData = nullptr;
+    // Optional river/lake hydrology, 12 floats per vertex:
+    // flowXZ, depth, shore | speed, discharge, Froude, foam potential |
+    // along-channel metres, normalized cross coordinate, local width, reserved.
+    const float* waterData = nullptr;
+
     // Or curve geometry (for hair)
     bool isCurve = false;
     const float* curveControlPoints = nullptr;
@@ -270,7 +283,16 @@ struct VkGeometryData {
     uint64_t uvAddr;
     uint64_t indexAddr;
     uint64_t materialAddr; // optional device address of per-primitive material index array
+    uint64_t pointinessAddr; // optional device address of the per-vertex pointiness array (0 = absent)
+    uint64_t attribAddr;     // optional device address of the per-vertex named-attribute block
+                             // (interleaved kMatAttribSlots floats per vertex; 0 = absent).
+                             // Appended at the END: this struct is read at binding 4 by
+                             // closesthit + raygen + shadow_anyhit and must stay byte-identical
+                             // in all three (see project_rt_payload_shared_abi).
+    uint64_t waterAddr;      // optional 12-float hydrology record per vertex
 };
+static_assert(sizeof(VkGeometryData) == sizeof(uint64_t) * 8,
+              "VkGeometryData must remain byte-identical to the Vulkan RT shader ABI");
 
 struct TLASInstance {
     uint32_t blasIndex = 0;
@@ -342,6 +364,13 @@ struct AccelStructHandle {
     BufferHandle uvBuffer;
     BufferHandle indexBuffer;
     BufferHandle materialIndexBuffer;
+    // Per-vertex pointiness block; like the others, an ALIAS view into the single combined
+    // geometry buffer (never a separate allocation — cleanup must not destroy it twice).
+    BufferHandle pointinessBuffer;
+    // Per-vertex named-attribute block; same deal — an ALIAS into the combined buffer.
+    BufferHandle attribBuffer;
+    // Per-vertex hydrology block; ALIAS into the combined geometry buffer.
+    BufferHandle waterBuffer;
     VkDeviceAddress deviceAddress = 0;
 
     // Phase 3d: geometry buffer is owned elsewhere (device-resident CC output); the
@@ -351,6 +380,9 @@ struct AccelStructHandle {
     // Skinning
     bool hasSkinning = false;
     bool allowUpdate = false;
+    // MODE_UPDATE must reproduce the geometry flags from the original BLAS build
+    // exactly (notably VK_GEOMETRY_OPAQUE_BIT_KHR).
+    VkGeometryFlagsKHR geometryFlags = 0;
     uint32_t vertexCount = 0;
     uint32_t indexCount = 0;
     BufferHandle baseVertexBuffer;
@@ -531,7 +563,7 @@ public:
     /**
      * @brief Update existing BLAS (for animation)
      */
-    void updateBLAS(uint32_t blasIndex, const float* newVertices, const float* newNormals = nullptr);
+    bool updateBLAS(uint32_t blasIndex, const float* newVertices, const float* newNormals = nullptr);
     
     /**
      * @brief Rebuild TLAS with new transforms
@@ -743,18 +775,23 @@ public:
     uint32_t getComputeQueueFamily() const { return m_computeQueueFamily; }
     bool supportsGraphicsQueue() const { return m_queueSupportsGraphics; }
     // SSBO Update helpers
-    void updateMaterialBuffer(const void* data, uint64_t size, uint32_t count);
+    // Uploads the SPLIT material arrays: core -> binding 2, ext -> binding 24.
+    // Sizes are in bytes; count is the material count (same for both arrays).
+    void updateMaterialBuffer(const void* coreData, uint64_t coreSize,
+                              const void* extData, uint64_t extSize, uint32_t count);
     void updateLightBuffer(const void* data, uint64_t size, uint32_t count);
     void updateWorldBuffer(const void* data, uint64_t size, uint32_t count);
     void updateVolumeBuffer(const void* data, uint64_t size, uint32_t count);
     void updateTerrainLayerBuffer(const void* data, uint64_t size, uint32_t count);
+    void updateMatProgramBuffer(const void* data, uint64_t size);  // Faz 2b material-program SSBO (binding 23)
     void updateAtmosphereLUTs(const ImageHandle* lutImages);  // uint256_t array of 4 LUT textures
     bool generateAtmosphereLUTGPU(const WorldData& world);
     void clearPendingRTTextureDescriptors();
     void removePendingRTTextureDescriptor(const ImageHandle& image);
     
     // RT Resources (SSBOs)
-    VulkanRT::BufferHandle m_materialBuffer;
+    VulkanRT::BufferHandle m_materialBuffer;      // binding 2: hot VkGpuMaterialCore records
+    VulkanRT::BufferHandle m_materialExtBuffer;   // binding 24: cold VkGpuMaterialExt records
     VulkanRT::BufferHandle m_lightBuffer;
     VulkanRT::BufferHandle m_geometryDataBuffer; // SSBO containing VkGeometryData for each BLAS
     VulkanRT::BufferHandle m_instanceDataBuffer; // SSBO containing VkInstanceData for each TLAS instance
@@ -763,6 +800,7 @@ public:
     VulkanRT::BufferHandle m_worldBuffer; // SSBO containing complete Nishita parameters
     VulkanRT::BufferHandle m_volumeBuffer; // SSBO containing VkVolumeInstance array (binding 9)
     VulkanRT::BufferHandle m_terrainLayerBuffer; // SSBO containing VkTerrainLayerData array (binding 12)
+    VulkanRT::BufferHandle m_matProgramBuffer;   // SSBO: flattened material-program VM stream (binding 23, Faz 2b)
     uint32_t m_volumeCount = 0;
     uint32_t m_terrainLayerCount = 0;
     
@@ -1158,7 +1196,8 @@ public:
     // ========================================================================
     // IBackend - Geometry Upload
     // ========================================================================
-    uint32_t uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName) override;
+    uint32_t uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName,
+                             const std::vector<float>* cornerAttribs = nullptr) override;
 
     // INDEXED upload for a single facade mesh: reads the shared SoA (DNA::GeometryDetail)
     // directly and builds an INDEXED BLAS (unique verts + index buffer) instead of the 3N
@@ -1171,6 +1210,17 @@ public:
     uint32_t uploadTriangleMeshIndexed(const TriangleMesh* mesh,
                                        const std::string& meshName,
                                        bool useOriginalSpace);
+
+    // Welded INDEXED upload for instanced sources whose facades have no SoA backing
+    // (e.g. scatter's centered copies — standalone Triangles cloned from shared
+    // source verts through identical transforms, so shared corners are bitwise-equal
+    // floats and a byte-exact weld recovers the true indexed mesh). Unique verts +
+    // index buffer instead of the 3N soup: ≈3× less vertex/normal/UV VRAM and
+    // per-hit fetch traffic, multiplied across every TLAS instance sharing the BLAS.
+    // Static geometry only — returns UINT32_MAX for skinned data or when welding
+    // finds no sharing; the caller then falls back to uploadTriangles().
+    uint32_t uploadWeldedTriangles(const std::vector<TriangleData>& triangles,
+                                   const std::string& meshName);
 
     // Phase 3d: register a BLAS for a DEVICE-RESIDENT CC mesh whose geometry already
     // lives in a GPU buffer (combined non-indexed layout written by the CC compute
@@ -1314,16 +1364,18 @@ public:
     // IBackend - Materials & Textures
     // ========================================================================
     void uploadMaterials(const std::vector<MaterialData>& materials) override;
+    void uploadMaterialPrograms(const std::vector<uint32_t>& words) override;
     bool updateMaterial(uint32_t materialIndex, const MaterialData& material) override;
     void uploadHairMaterials(const std::vector<HairMaterialData>& materials) override;
     void uploadTerrainLayerMaterials(const std::vector<TerrainLayerData>& layers) override;
     int64_t uploadTexture2D(const void* data, uint32_t width, uint32_t height, uint32_t channels, bool sRGB, bool isFloat = false) override;
     int64_t uploadTexture3D(const void* data, uint32_t width, uint32_t height, uint32_t depth, uint32_t channels, bool isFloat = false) override;
     void destroyTexture(int64_t textureHandle) override;
+    uint32_t resolveTextureHandle(int64_t texturePtr, int textureType = 0, bool forceLinear = false, bool preferSingleChannel = false) override;
     void releaseInactiveViewportTextureCache();
     virtual const char* sceneTextureOwnerScope() const { return "VulkanBackendAdapter"; }
     bool tryGetUploadedImageHandle(int64_t textureHandle, VulkanRT::ImageHandle& outImage) const;
-    uint64_t textureCacheGeneration() const { return m_textureCacheGeneration; }
+    uint64_t textureCacheGeneration() const override { return m_textureCacheGeneration; }
     bool buildVulkanBackingRecord(int64_t textureHandle, VulkanBackingRecord& outBacking) const;
     void checkAndTrimVRAMThreshold();
     void registerSceneTextureUpload(TextureHandle sceneHandle, int64_t textureHandle);
@@ -1412,6 +1464,8 @@ public:
     bool hasValidRasterCache(uint64_t sceneGeometryGeneration) const override {
         return !m_rasterMeshes.empty() && m_rasterBuiltGeometryGeneration == sceneGeometryGeneration;
     }
+    bool geometryHasPointiness() const override { return m_geometryBuiltWithPointiness; }
+    bool geometryHasAttributes() const override { return m_geometryBuiltWithAttributes; }
     void renderProgressive(void* outSurface, void* outWindow, void* outRenderer,
                            int width, int height, void* outFramebuffer, void* outTexture) override;
     void downloadImage(void* outPixels) override;
@@ -1976,6 +2030,14 @@ protected:
     // raster geometry was built.  Allows skipping redundant rebuilds on
     // Rendered→Solid transitions when scene geometry hasn't changed.
     uint64_t m_rasterBuiltGeometryGeneration = 0;
+
+    // True once a BLAS has been uploaded WITH the per-vertex pointiness block. The node
+    // editor reads it back (geometryHasPointiness) to decide whether a graph that newly
+    // reads Pointiness needs a one-time geometry re-upload — without it, every slider
+    // tweak in the editor would trigger a full rebuild.
+    bool m_geometryBuiltWithPointiness = false;
+    // Same gate for the Attribute node's per-vertex block (geometryHasAttributes).
+    bool m_geometryBuiltWithAttributes = false;
 
     // Frustum culling for solid viewport
     struct FrustumPlane {

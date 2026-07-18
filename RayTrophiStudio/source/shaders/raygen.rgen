@@ -53,6 +53,10 @@ struct VkGeometryData {
     uint64_t uvAddr;
     uint64_t indexAddr;
     uint64_t materialAddr;
+    uint64_t pointinessAddr;  // unused here; the struct must stay byte-identical across
+                              // every shader that reads the geometry SSBO (binding 4)
+    uint64_t attribAddr;      // ditto (per-vertex named attributes, read in closesthit)
+    uint64_t waterAddr;       // ditto (per-vertex hydrology, read in closesthit)
 };
 
 struct VkInstanceData {
@@ -307,25 +311,7 @@ const uint BOUNCE_MARBLE = 5u; // glass marble full-volume entry → integrate i
 const uint BOUNCE_GLASS_REFLECT = 6u; // glass mirror lobe (no interface crossing) — spends the transmission budget like before
 const uint MAT_FLAG_MARBLE_VOLUME = (1u << 20);
 
-struct RayPayload {
-    vec3  radiance;
-    vec3  attenuation;
-    vec3  scatterOrigin;
-    vec3  scatterDir;
-    uint  seed;
-    bool  scattered;
-    bool  hitEmissive;
-    uint  occluded;
-    bool  skipAABBs;    // set by volume_closesthit when a solid surface is found inside
-    vec3  primaryAlbedo;
-    vec3  primaryNormal;
-    uint  primaryHit;
-    float primaryTransmission;
-    float primaryMetallic;
-    uint  bounceType;
-    uint  primaryMaterialId;   // Stylize AOV: real material index of the primary hit
-    float dispersionChannel;   // Spectral dispersion hero channel: 0 = unset, 1/2/3 = R/G/B (persists across bounces)
-};
+#include "rt_payload.glsl"
 
 layout(location = 0) rayPayloadEXT RayPayload payload;
 
@@ -650,47 +636,52 @@ vec3 computePrimaryGodRays(vec3 rayOrigin, vec3 rayDir, float maxDistance, inout
     if (sunDir.y < -0.05) return vec3(0.0);
 
     float marchDistance = min(min(maxDistance, worldData.w.fogDistance), 5000.0);
-    int numSteps = (sunDot > 0.98) ? worldData.w.godRaysSamples : (worldData.w.godRaysSamples / 2);
-    numSteps = clamp(numSteps, 8, 48);
-    if (marchDistance <= 1e-4 || numSteps <= 0) return vec3(0.0);
+    if (marchDistance <= 1e-4) return vec3(0.0);
 
-    float stepSize = marchDistance / float(numSteps);
+    // ── Monte-Carlo single-scatter estimator ────────────────────────────────
+    // Replaces the old 8-48 step march that fired one occlusion TRACE PER STEP
+    // per pixel per sample. The medium is fully analytic (exponential height
+    // profile), so the camera-side transmittance T(t) has a closed form —
+    // only the sun occlusion needs rays. K stratified samples, one shadow ray
+    // each; the progressive accumulation averages passes, so the converged
+    // shafts match the full march at a fraction of the per-frame trace count.
+    // (The closed-form optical depth drops the old max(0, h) clamp — below
+    // the altitude-0 plane the density keeps growing instead of saturating;
+    // irrelevant for above-ground cameras.)
+    int K = clamp(worldData.w.godRaysSamples / 8, 2, 6);
+    if (sunDot <= 0.98) K = max(K / 2, 1);   // keep the old halved-effort-off-axis behavior
+
     float phase = godRaysMiePhase(sunDot, worldData.w.mieAnisotropy);
     float solarCoreFade = godRaysSolarCoreFade(sunDot, worldData.w.sunSize);
     float mediaDensity = worldData.w.godRaysDensity * 0.02;
     vec3 sunRadianceBase = vec3(1.0, 0.98, 0.95) * worldData.w.sunIntensity * 0.15;
     sunRadianceBase *= sampleGodRaysSunTransmittance(sunDir);
 
+    const float kH = 0.0002;   // medium height falloff (matches the old per-step exp)
+    float hf0 = exp(-kH * max(0.0, rayOrigin.y + worldData.w.altitude));
+    float b   = kH * rayDir.y;
+
     vec3 godRayColor = vec3(0.0);
-    float transmittance = 1.0;
-    float t = rnd(seed) * stepSize;
-
-    for (int i = 0; i < numSteps; ++i) {
-        if (t > marchDistance) break;
-
+    for (int i = 0; i < K; ++i) {
+        float t = (float(i) + rnd(seed)) / float(K) * marchDistance;
         float nearFade = clamp((t - 0.05) * 8.0, 0.0, 1.0);
-        if (nearFade > 0.001) {
-            vec3 samplePos = rayOrigin + rayDir * t;
-            float h = max(0.0, samplePos.y + worldData.w.altitude);
-            float heightFactor = exp(-h * 0.0002);
-            float sigmaS = mediaDensity * heightFactor;
-            float sigmaT = sigmaS;
-            float stepTrans = exp(-sigmaT * stepSize);
-
-            if (sigmaT > 1e-6) {
-                float occlusion = traceGodRaysSunOcclusion(samplePos + sunDir * 0.001, sunDir, 100000.0);
-                if (occlusion > 0.001) {
-                    vec3 inscatter = sunRadianceBase * phase * occlusion * (sigmaS / sigmaT) * nearFade * solarCoreFade;
-                    godRayColor += transmittance * inscatter * (1.0 - stepTrans);
-                }
-            }
-
-            transmittance *= stepTrans;
-        }
-
-        if (transmittance < 0.01) break;
-        t += stepSize;
+        if (nearFade <= 0.001) continue;
+        float h = max(0.0, rayOrigin.y + rayDir.y * t + worldData.w.altitude);
+        float sigmaS = mediaDensity * exp(-kH * h);
+        if (sigmaS <= 1e-7) continue;
+        // Closed-form optical depth of the camera segment [0, t]
+        float tau = (abs(b) < 1e-7)
+            ? mediaDensity * hf0 * t
+            : mediaDensity * hf0 * (1.0 - exp(-b * t)) / b;
+        float trans = exp(-tau);
+        if (trans < 0.005) continue;
+        vec3 samplePos = rayOrigin + rayDir * t;
+        float occlusion = traceGodRaysSunOcclusion(samplePos + sunDir * 0.001, sunDir, 100000.0);
+        if (occlusion <= 0.001) continue;
+        godRayColor += (trans * sigmaS * phase * occlusion * nearFade * solarCoreFade) * sunRadianceBase;
     }
+    // Estimator: (marchDistance / K) * Σ f(t_i)  — uniform pdf over the segment
+    godRayColor *= marchDistance / float(K);
 
     return godRayColor * worldData.w.godRaysIntensity;
 }
@@ -916,10 +907,9 @@ void main() {
     vec3 primaryRayDir    = rayDir;
     vec3 primaryAlbedo    = vec3(0.0);
     vec3 primaryNormal    = vec3(0.0);
-    uint primaryMaterialId = 0xFFFFFFFFu;
+    uint primaryMaterialId = PL_MATID_MASK;   // 16-bit id space; 0xFFFF = none
     bool primaryHitValid  = false;
     float firstHitTransmission = 0.0;
-    float firstHitMetallic = 0.0;
 
     // PRIMARY HIT POSITION — saved at bounce 0 for aerial perspective & fog
     // (payload.scatterOrigin is overwritten each bounce, so we capture it once)
@@ -929,7 +919,8 @@ void main() {
     payload.skipAABBs = false;
     // Dispersion hero channel: reset once per PATH (not per bounce) so the exit
     // interface of a dispersive glass refracts with the same channel as the entry.
-    payload.dispersionChannel = 0.0;
+    // plMetaReset(0u) = no material, no primary hit, dispersion channel cleared.
+    payload.primaryMeta = plMetaReset(0u);
 
     int effectiveBounces = int(cam.maxBounces); // her zaman UI'dan gelir, C++ tarafı min 1 garantiliyor
     int effectiveDiffuseBounces = int(cam.diffuseBounces);
@@ -957,21 +948,22 @@ void main() {
         payload.scatterDir    = vec3(0.0);
         payload.seed          = seed;
         payload.scattered     = false;
-        payload.hitEmissive   = false;
         payload.skipAABBs     = false;
-        payload.primaryAlbedo = vec3(0.0);
-        payload.primaryNormal = vec3(0.0);
-        payload.primaryHit    = 0u;
-        payload.primaryTransmission = 0.0;
-        payload.primaryMetallic = 0.0;
+        payload.primaryARG    = 0u;
+        payload.primaryABT    = 0u;
+        payload.primaryNrm    = 0u;
+        payload.primaryMeta   = plMetaReset(payload.primaryMeta); // keeps dispersion bits
         payload.bounceType = BOUNCE_SPECULAR;
-        payload.primaryMaterialId = 0xFFFFFFFFu;
 
         // When the previous bounce was a volume that detected a solid surface inside,
         // skip AABB (procedural) geometry so the solid triangle is hit directly.
+        // NO OpaqueEXT: alpha-cutout materials resolve in the any-hit during
+        // traversal (shadow_anyhit.rahit camera-mode branch) — forcing opaque
+        // here would bring back the old transparent-pass re-trace per foliage
+        // layer. Opaque BLASes still skip the any-hit via their geometry flag.
         uint traceFlags = useSkipAABBs
-            ? (gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipAABBEXT)
-            :  gl_RayFlagsOpaqueEXT;
+            ? gl_RayFlagsSkipAABBEXT
+            : gl_RayFlagsNoneEXT;
 
         traceRayEXT(
             topLevelAS,
@@ -991,12 +983,13 @@ void main() {
         // camera-angle dependent and the interior dust/dirt never read as intended. Inclusion
         // glass now uses the closesthit shell march. BOUNCE_MARBLE is no longer emitted.)
 
-        if (bounce == 0 && !primaryHitValid && payload.primaryHit != 0u) {
-            primaryAlbedo = payload.primaryAlbedo;
-            primaryNormal = payload.primaryNormal;
-            primaryMaterialId = payload.primaryMaterialId;
-            firstHitTransmission = payload.primaryTransmission;
-            firstHitMetallic = payload.primaryMetallic;
+        if (bounce == 0 && !primaryHitValid && (payload.primaryMeta & PL_PRIMARY_DONE) != 0u) {
+            vec2 aRG = unpackHalf2x16(payload.primaryARG);
+            vec2 aBT = unpackHalf2x16(payload.primaryABT);
+            primaryAlbedo = vec3(aRG, aBT.x);
+            primaryNormal = plUnpackNormal(payload.primaryNrm);
+            primaryMaterialId = payload.primaryMeta & PL_MATID_MASK;
+            firstHitTransmission = aBT.y;
             primaryHitValid = true;
         }
 
@@ -1385,7 +1378,7 @@ void main() {
     // linear depth from world position + camera origin, so no separate depth channel needed.
     // Last-wins is fine — geometry/material are stable across accumulation passes.
     if (firstHitValid) {
-        float matEncoded = (primaryHitValid && primaryMaterialId != 0xFFFFFFFFu)
+        float matEncoded = (primaryHitValid && primaryMaterialId != PL_MATID_MASK)
             ? float(primaryMaterialId + 2u)
             : 1.0;
         imageStore(denoiserPositionImage, ivec2(pixel), vec4(firstHitPos, matEncoded));

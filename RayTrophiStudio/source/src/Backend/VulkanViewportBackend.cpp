@@ -398,7 +398,7 @@ void VulkanViewportBackend::setExternalMaterialBuffer(VkBuffer buffer, VkDeviceS
     m_externalMaterialBuffer = buffer;
     m_externalMaterialBufferSize = size;
     m_externalMaterialCount = static_cast<uint32_t>(
-        (size > 0) ? (size / sizeof(VulkanRT::VkGpuMaterial)) : 0);
+        (size > 0) ? (size / sizeof(VulkanRT::VkGpuMaterialCore)) : 0);
     m_interactiveViewport.dirty = true;
     if (!m_device) return;
 
@@ -411,16 +411,28 @@ void VulkanViewportBackend::setExternalMaterialBuffer(VkBuffer buffer, VkDeviceS
         matBufInfo.offset = 0;
         matBufInfo.range = (m_externalMaterialBufferSize > 0) ? m_externalMaterialBufferSize : VK_WHOLE_SIZE;
 
-        VkWriteDescriptorSet mpWds{};
-        mpWds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        mpWds.dstSet = m_interactiveViewport.materialPreviewDescSet;
-        mpWds.dstBinding = 0;
-        mpWds.dstArrayElement = 0;
-        mpWds.descriptorCount = 1;
-        mpWds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        mpWds.pBufferInfo = &matBufInfo;
+        // binding 4 (cold MaterialExt): external callers hand over only the core
+        // buffer — fall back to it so the binding is never left unwritten.
+        VkDescriptorBufferInfo matExtBufInfo{};
+        matExtBufInfo.buffer = m_device->m_materialExtBuffer.buffer
+                             ? m_device->m_materialExtBuffer.buffer
+                             : m_externalMaterialBuffer;
+        matExtBufInfo.offset = 0;
+        matExtBufInfo.range = VK_WHOLE_SIZE;
 
-        vkUpdateDescriptorSets(vkDevice, 1, &mpWds, 0, nullptr);
+        VkWriteDescriptorSet mpWds[2]{};
+        mpWds[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        mpWds[0].dstSet = m_interactiveViewport.materialPreviewDescSet;
+        mpWds[0].dstBinding = 0;
+        mpWds[0].dstArrayElement = 0;
+        mpWds[0].descriptorCount = 1;
+        mpWds[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        mpWds[0].pBufferInfo = &matBufInfo;
+        mpWds[1] = mpWds[0];
+        mpWds[1].dstBinding = 4;
+        mpWds[1].pBufferInfo = &matExtBufInfo;
+
+        vkUpdateDescriptorSets(vkDevice, 2, mpWds, 0, nullptr);
         SCENE_LOG_INFO("[VulkanViewportBackend] External material buffer bound to viewport descriptor set.");
     }
 }
@@ -1058,7 +1070,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     }
                     m_interactiveViewport.materialPreviewTextureArrayLen = mpTextureArrayLen;
 
-                    VkDescriptorSetLayoutBinding mpDslBindings[4]{};
+                    VkDescriptorSetLayoutBinding mpDslBindings[5]{};
                     mpDslBindings[0].binding = 0;
                     mpDslBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[0].descriptorCount = 1;
@@ -1075,10 +1087,16 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     mpDslBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[3].descriptorCount = 1;
                     mpDslBindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    // binding 4: cold MaterialExt half of the split material record —
+                    // material_preview_frag.spv statically uses it (micro-detail/sheen/SSS).
+                    mpDslBindings[4].binding = 4;
+                    mpDslBindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpDslBindings[4].descriptorCount = 1;
+                    mpDslBindings[4].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
                     VkDescriptorSetLayoutCreateInfo mpDslci{};
                     mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                    mpDslci.bindingCount = 4;
+                    mpDslci.bindingCount = 5;
                     mpDslci.pBindings = mpDslBindings;
 
                     // Binding 1 is a sparse sampler2D array: only the slots whose texture IDs
@@ -1087,15 +1105,16 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     // ICDs observed crashing in vkCmdBindDescriptorSets/first draw) dereference
                     // them unconditionally. PARTIALLY_BOUND is core in Vulkan 1.2 and only
                     // requires VK_EXT_descriptor_indexing — already gated by `hasDescIdx`.
-                    VkDescriptorBindingFlags mpBindingFlags[4] = {
+                    VkDescriptorBindingFlags mpBindingFlags[5] = {
                         0,
                         hasDescIdx ? VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT : VkDescriptorBindingFlags{0},
+                        0,
                         0,
                         0
                     };
                     VkDescriptorSetLayoutBindingFlagsCreateInfo mpBindingFlagsCI{};
                     mpBindingFlagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-                    mpBindingFlagsCI.bindingCount = 4;
+                    mpBindingFlagsCI.bindingCount = 5;
                     mpBindingFlagsCI.pBindingFlags = mpBindingFlags;
                     if (hasDescIdx) {
                         mpDslci.pNext = &mpBindingFlagsCI;
@@ -1106,7 +1125,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     if (m_interactiveViewport.materialPreviewDescLayout != VK_NULL_HANDLE) {
                     VkDescriptorPoolSize mpPoolSizes[2]{};
                     mpPoolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                    mpPoolSizes[0].descriptorCount = 2; // binding 0 (materials) + binding 3 (terrain)
+                    mpPoolSizes[0].descriptorCount = 3; // binding 0 (materials) + binding 3 (terrain) + binding 4 (material ext)
                     mpPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                     // +2 for the 2 env map slots at binding 2
                     mpPoolSizes[1].descriptorCount = (hasDescIdx ? mpTextureArrayLen : 1u) + 2u;
@@ -1288,14 +1307,24 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                             matBufInfo.offset = 0;
                             matBufInfo.range = materialRange;
 
-                            VkWriteDescriptorSet mpWds{};
-                            mpWds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                            mpWds.dstSet = m_interactiveViewport.materialPreviewDescSet;
-                            mpWds.dstBinding = 0;
-                            mpWds.descriptorCount = 1;
-                            mpWds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                            mpWds.pBufferInfo = &matBufInfo;
-                            vkUpdateDescriptorSets(vkDevice, 1, &mpWds, 0, nullptr);
+                            VkDescriptorBufferInfo matExtBufInfo{};
+                            matExtBufInfo.buffer = m_device->m_materialExtBuffer.buffer
+                                                 ? m_device->m_materialExtBuffer.buffer
+                                                 : materialBuffer;
+                            matExtBufInfo.offset = 0;
+                            matExtBufInfo.range = VK_WHOLE_SIZE;
+
+                            VkWriteDescriptorSet mpWds[2]{};
+                            mpWds[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                            mpWds[0].dstSet = m_interactiveViewport.materialPreviewDescSet;
+                            mpWds[0].dstBinding = 0;
+                            mpWds[0].descriptorCount = 1;
+                            mpWds[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                            mpWds[0].pBufferInfo = &matBufInfo;
+                            mpWds[1] = mpWds[0];
+                            mpWds[1].dstBinding = 4;
+                            mpWds[1].pBufferInfo = &matExtBufInfo;
+                            vkUpdateDescriptorSets(vkDevice, 2, mpWds, 0, nullptr);
 
                             if (!m_interactiveViewport.matcapImage.image) {
                                 std::vector<uint8_t> white(4 * 2 * 2, 255);
@@ -4742,6 +4771,8 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
         std::vector<float> uvs;
         std::vector<uint32_t> matIds;
         std::vector<std::shared_ptr<Triangle>> triangles;
+        std::vector<int32_t> boneIndices;
+        std::vector<float> boneWeights;
         Matrix4x4 transform;
         uint8_t mask = 0xFF;
     };
@@ -4872,6 +4903,11 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
             grp.normals.reserve(grp.normals.size() + triCount * 9);
             grp.uvs.reserve(grp.uvs.size() + triCount * 6);
             grp.matIds.reserve(grp.matIds.size() + triCount * 3);
+            const bool meshHasSkinning = mesh->hasSkinWeights();
+            if (meshHasSkinning) {
+                grp.boneIndices.reserve(grp.boneIndices.size() + triCount * 12);
+                grp.boneWeights.reserve(grp.boneWeights.size() + triCount * 12);
+            }
             for (size_t f = 0; f < triCount; ++f) {
                 for (int c = 0; c < 3; ++c) {
                     const uint32_t vi = idx[f * 3 + c];
@@ -4882,6 +4918,13 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
                     grp.normals.push_back(n.x); grp.normals.push_back(n.y); grp.normals.push_back(n.z);
                     grp.uvs.push_back(uv.x); grp.uvs.push_back(uv.y);
                     grp.matIds.push_back(M ? static_cast<uint32_t>(M[vi]) : 0u);
+                    if (meshHasSkinning) {
+                        const auto* influences = vi < geom->skin_weights.size() ? &geom->skin_weights[vi] : nullptr;
+                        for (size_t influence = 0; influence < 4; ++influence) {
+                            grp.boneIndices.push_back(influences && influence < influences->size() ? (*influences)[influence].first : -1);
+                            grp.boneWeights.push_back(influences && influence < influences->size() ? (*influences)[influence].second : 0.0f);
+                        }
+                    }
                 }
             }
         }
@@ -4951,7 +4994,7 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
             m_device->uploadBuffer(rmb.matIdBuffer, grp.matIds.data(), grp.matIds.size() * sizeof(uint32_t), 0);
         }
 
-        bool hasSkinning = false;
+        bool hasSkinning = !grp.boneIndices.empty();
         for (const auto& tri : grp.triangles) {
             if (tri && tri->hasSkinData()) {
                 hasSkinning = true;
@@ -4959,14 +5002,16 @@ void VulkanViewportBackend::buildRasterGeometry(const std::vector<std::shared_pt
             }
         }
         if (hasSkinning) {
-            std::vector<int32_t> boneIndices;
-            std::vector<float> boneWeights;
-            std::vector<const Triangle*> validSkinTriangles;
-            validSkinTriangles.reserve(grp.triangles.size());
-            for (const auto& tri : grp.triangles) {
-                if (tri) validSkinTriangles.push_back(tri.get());
+            std::vector<int32_t> boneIndices = std::move(grp.boneIndices);
+            std::vector<float> boneWeights = std::move(grp.boneWeights);
+            if (boneIndices.empty()) {
+                std::vector<const Triangle*> validSkinTriangles;
+                validSkinTriangles.reserve(grp.triangles.size());
+                for (const auto& tri : grp.triangles) {
+                    if (tri) validSkinTriangles.push_back(tri.get());
+                }
+                buildSkinBuffersForTrianglePtrs(validSkinTriangles, rmb.vertexCount, boneIndices, boneWeights);
             }
-            buildSkinBuffersForTrianglePtrs(validSkinTriangles, rmb.vertexCount, boneIndices, boneWeights);
 
             VulkanRT::BufferCreateInfo sci{};
             sci.usage = VulkanRT::BufferUsage::STORAGE | VulkanRT::BufferUsage::TRANSFER_DST;
@@ -5381,6 +5426,7 @@ void VulkanViewportBackend::syncRasterSkinnedVertices(
     struct SkinnedGroup {
         std::string meshKey;
         std::vector<std::shared_ptr<Triangle>> triangles;
+        std::shared_ptr<TriangleMesh> mesh;
     };
     std::unordered_map<void*, SkinnedGroup> skinnedGroups;
 
@@ -5410,6 +5456,13 @@ void VulkanViewportBackend::syncRasterSkinnedVertices(
                 }
             }
             grp.triangles.push_back(tri);
+        } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+            if (!mesh->visible || !mesh->hasSkinWeights()) return;
+            void* groupKey = mesh->transform ? static_cast<void*>(mesh->transform.get()) : static_cast<void*>(mesh.get());
+            auto& grp = skinnedGroups[groupKey];
+            auto it = nodeToMeshKey.find(mesh->nodeName);
+            if (it != nodeToMeshKey.end()) grp.meshKey = it->second;
+            grp.mesh = mesh;
         }
     };
     for (const auto& obj : objects) collectSkinned(obj);
@@ -5417,12 +5470,14 @@ void VulkanViewportBackend::syncRasterSkinnedVertices(
     if (skinnedGroups.empty()) return;
 
     for (auto& [key, grp] : skinnedGroups) {
-        if (grp.meshKey.empty() || grp.triangles.empty()) continue;
+        if (grp.meshKey.empty() || (grp.triangles.empty() && !grp.mesh)) continue;
         auto meshIt = m_rasterMeshes.find(grp.meshKey);
         if (meshIt == m_rasterMeshes.end()) continue;
 
         auto& rmb = meshIt->second;
-        const size_t vertCount = grp.triangles.size() * 3;
+        const size_t vertCount = grp.mesh && grp.mesh->geometry
+            ? grp.mesh->geometry->indices.size()
+            : grp.triangles.size() * 3;
         const size_t floatCount = vertCount * 3;
         if (rmb.vertexCount != static_cast<uint32_t>(vertCount)) continue;
 
@@ -5430,16 +5485,29 @@ void VulkanViewportBackend::syncRasterSkinnedVertices(
         std::vector<float> newNormals(floatCount);
         size_t idx = 0;
 
-        for (const auto& tri : grp.triangles) {
-            for (int v = 0; v < 3; ++v) {
-                Vec3 p = tri->apply_bone_to_vertex(v, boneMatrices);
-                Vec3 n = tri->apply_bone_to_normal(
-                    tri->getOriginalVertexNormal(v),
-                    tri->getSkinBoneWeights(v),
-                    boneMatrices);
-                newPositions[idx]   = p.x; newPositions[idx + 1] = p.y; newPositions[idx + 2] = p.z;
-                newNormals[idx]     = n.x; newNormals[idx + 1]   = n.y; newNormals[idx + 2]   = n.z;
+        if (grp.mesh && grp.mesh->geometry) {
+            grp.mesh->applySkinning(boneMatrices);
+            const Vec3* positions = grp.mesh->geometry->get_positions();
+            const Vec3* normals = grp.mesh->geometry->get_normals();
+            for (uint32_t vertexIndex : grp.mesh->geometry->indices) {
+                const Vec3 position = positions ? positions[vertexIndex] : Vec3(0.0f);
+                const Vec3 normal = normals ? normals[vertexIndex] : Vec3(0.0f, 1.0f, 0.0f);
+                newPositions[idx] = position.x; newPositions[idx + 1] = position.y; newPositions[idx + 2] = position.z;
+                newNormals[idx] = normal.x; newNormals[idx + 1] = normal.y; newNormals[idx + 2] = normal.z;
                 idx += 3;
+            }
+        } else {
+            for (const auto& tri : grp.triangles) {
+                for (int v = 0; v < 3; ++v) {
+                    Vec3 p = tri->apply_bone_to_vertex(v, boneMatrices);
+                    Vec3 n = tri->apply_bone_to_normal(
+                        tri->getOriginalVertexNormal(v),
+                        tri->getSkinBoneWeights(v),
+                        boneMatrices);
+                    newPositions[idx] = p.x; newPositions[idx + 1] = p.y; newPositions[idx + 2] = p.z;
+                    newNormals[idx] = n.x; newNormals[idx + 1] = n.y; newNormals[idx + 2] = n.z;
+                    idx += 3;
+                }
             }
         }
 

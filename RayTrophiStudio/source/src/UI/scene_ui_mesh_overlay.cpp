@@ -12,6 +12,7 @@
 #include "HittableInstance.h"
 #include "GeometryNodesV2.h"   // sculpt-mask <-> Field attribute bridge (PositionValueLookup)
 #include "ProjectManager.h"    // g_ProjectManager.markModified()
+#include "WaterSystem.h"
 #include "ImGuizmo.h"
 #include "imgui.h"
 
@@ -6290,6 +6291,19 @@ bool SceneUI::refreshEditableDisplayMeshFromBase(UIContext& ctx, const std::stri
         if (tri) {
             objects.push_back(tri);
         }
+    }
+
+    const bool hasWaterModifier = std::any_of(
+        stack.modifiers.begin(), stack.modifiers.end(),
+        [](const MeshModifiers::ModifierData& modifier) {
+            return modifier.enabled &&
+                   modifier.type == MeshModifiers::ModifierType::WaterSurface;
+        });
+    if (hasWaterModifier && !displayMesh.empty() && displayMesh.front() &&
+        displayMesh.front()->parentMesh) {
+        displayMesh.front()->parentMesh->nodeName = objectName;
+        WaterManager::getInstance().bindExistingWaterMesh(
+            displayMesh.front()->parentMesh, WaterSurface::Type::Plane);
     }
 
     if (!displayMesh.empty() &&

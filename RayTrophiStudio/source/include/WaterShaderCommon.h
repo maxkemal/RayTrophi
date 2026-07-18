@@ -2,10 +2,18 @@
 
 #include "Vec3.h"
 #include <algorithm>
+#include <cstdint>
 
 namespace WaterShader {
 
+enum class SurfaceProfile : uint8_t {
+    Ocean = 0,
+    Lake = 1,
+    River = 2
+};
+
 struct SurfaceParams {
+    SurfaceProfile profile = SurfaceProfile::Ocean;
     float wave_speed = 1.0f;
     float wave_strength = 0.5f;
     float wave_frequency = 1.0f;
